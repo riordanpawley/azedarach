@@ -250,6 +250,49 @@ func TestBuildTaskSnapshotExportBody_ProjectScopedSessionPrefixMatchesIssue(t *t
 	}
 }
 
+func TestBuildBoardSnapshotPayloadOmitsDetailFields(t *testing.T) {
+	payload := buildBoardSnapshotPayload(
+		"proj-board",
+		12,
+		time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC),
+		protocol.TaskListFreshnessFresh,
+		[]domain.Task{{
+			ID:          "az-board",
+			Title:       "Board task",
+			Description: "large description",
+			Notes:       "large notes",
+			Design:      "large design",
+			Acceptance:  "large acceptance",
+			Status:      domain.StatusInProgress,
+			Priority:    domain.P1,
+			Type:        domain.TypeTask,
+		}},
+	)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal board payload: %v", err)
+	}
+	for _, field := range []string{"description", "notes", "design", "acceptance"} {
+		if bytes.Contains(body, []byte(field)) {
+			t.Fatalf("board payload contains %q field: %s", field, string(body))
+		}
+	}
+
+	decoded, err := protocol.DecodeBoardSnapshotPayload(body)
+	if err != nil {
+		t.Fatalf("decode board payload: %v", err)
+	}
+	if got, want := decoded.SchemaVersion, uint16(protocol.BoardSnapshotSchemaVersion); got != want {
+		t.Fatalf("schema version = %d, want %d", got, want)
+	}
+	if got, want := len(decoded.Tasks), 1; got != want {
+		t.Fatalf("task count = %d, want %d", got, want)
+	}
+	if got, want := decoded.Tasks[0].Title, "Board task"; got != want {
+		t.Fatalf("title = %q, want %q", got, want)
+	}
+}
+
 func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -1266,6 +1309,37 @@ func TestHandleTaskListIncludesDependenciesOnlyWhenRequested(t *testing.T) {
 	}
 	if len(fullTask.Dependencies) != 1 || fullTask.Dependencies[0].ID.String() != blockerID {
 		t.Fatalf("full dependencies = %+v, want blocker %s", fullTask.Dependencies, blockerID)
+	}
+
+	boardResp, err := d.handleBoardFetch(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-list-deps-board",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "board.fetch",
+	})
+	if err != nil {
+		t.Fatalf("handle board.fetch error: %v", err)
+	}
+	if !boardResp.OK {
+		t.Fatalf("board.fetch response = %+v", boardResp.Error)
+	}
+	boardPayload, err := protocol.DecodeBoardSnapshotPayload(boardResp.Body)
+	if err != nil {
+		t.Fatalf("decode board body: %v", err)
+	}
+	foundChild := false
+	for _, task := range boardPayload.Tasks {
+		if task.ID.String() != childID {
+			continue
+		}
+		foundChild = true
+		if len(task.Dependencies) != 0 {
+			t.Fatalf("board child dependencies = %+v, want none", task.Dependencies)
+		}
+	}
+	if !foundChild {
+		t.Fatalf("board payload missing child %s: %+v", childID, boardPayload.Tasks)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
@@ -514,6 +515,619 @@ func TestUpdate_AttachmentActionDeletedAddsToast(t *testing.T) {
 	if got := next.runtimeEvents[len(next.runtimeEvents)-1].Event; got != "ui.toast" {
 		t.Fatalf("last runtime event = %q, want %q", got, "ui.toast")
 	}
+	next.width = 100
+	next.height = 24
+	next.loading = false
+	view := next.View()
+	lines := strings.Split(view, "\n")
+	footer := lines[len(lines)-1]
+	if strings.Contains(footer, "Attachment deleted") {
+		t.Fatalf("toast event should not populate footer text, footer=%q", footer)
+	}
+	if !strings.Contains(footer, "1 notice (N)") {
+		t.Fatalf("footer should route through notification indicator, footer=%q", footer)
+	}
+}
+
+func TestNotificationHistoryRetainsOverflowAndDismissalState(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	m.height = 24
+	m.loading = false
+	expires := time.Now().Add(time.Hour)
+	for _, message := range []string{"first notice for ctk", "second notice for ctk", "third notice for ctk", "fourth notice for ctk"} {
+		m.addToast(Toast{
+			Level:   ToastError,
+			Message: message,
+			Expires: expires,
+		})
+	}
+
+	if got, want := len(m.notificationHistory), 4; got != want {
+		t.Fatalf("notification history len = %d, want %d", got, want)
+	}
+	if got, want := m.notificationHistoryIndicator(), "4 errors (N)"; got != want {
+		t.Fatalf("notification history indicator = %q, want %q", got, want)
+	}
+	view := m.View()
+	if strings.Contains(view, "first notice for ctk") {
+		t.Fatalf("oldest notice should be hidden from floating stack, view=%q", view)
+	}
+	if !strings.Contains(view, "4 errors (N)") {
+		t.Fatalf("footer should route to history with compact error count, view=%q", view)
+	}
+
+	updated, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlG})
+	if cmd != nil {
+		t.Fatalf("dismiss latest toast cmd = %T, want nil", cmd)
+	}
+	next := updated.(Model)
+	if len(next.toasts) != 3 {
+		t.Fatalf("active toasts len = %d, want 3", len(next.toasts))
+	}
+	if len(next.notificationHistory) != 4 {
+		t.Fatalf("notification history len after dismiss = %d, want 4", len(next.notificationHistory))
+	}
+	if !next.notificationHistory[len(next.notificationHistory)-1].Dismissed {
+		t.Fatalf("latest history entry should be marked dismissed")
+	}
+}
+
+func TestNotificationHistoryDrawerMarksEntriesRead(t *testing.T) {
+	m := newTestModel()
+	m.addToast(Toast{
+		Level:   ToastWarning,
+		Message: "mutation warning for az-1",
+		Expires: time.Now().Add(time.Hour),
+	})
+
+	updated, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("N")})
+	if cmd == nil {
+		t.Fatal("expected command to open notification history overlay")
+	}
+	m = updated.(Model)
+	if _, ok := m.overlayStack.Current().(*overlay.NotificationHistoryOverlay); !ok {
+		t.Fatalf("current overlay = %T, want notification history overlay", m.overlayStack.Current())
+	}
+	if got := m.notificationHistoryIndicator(); got != "" {
+		t.Fatalf("notification history indicator after opening = %q, want empty", got)
+	}
+	for _, entry := range m.notificationHistory {
+		if !entry.Read {
+			t.Fatalf("notification history entry not marked read: %+v", entry)
+		}
+	}
+}
+
+func TestNotificationHistoryRetainsExpiredToasts(t *testing.T) {
+	m := newTestModel()
+	m.addToast(Toast{
+		Level:   ToastError,
+		Message: "expired failure for az-1",
+		Expires: time.Now().Add(-time.Minute),
+	})
+
+	m.expireToasts()
+
+	if len(m.toasts) != 0 {
+		t.Fatalf("active toasts len = %d, want 0", len(m.toasts))
+	}
+	if len(m.notificationHistory) != 1 {
+		t.Fatalf("notification history len = %d, want 1", len(m.notificationHistory))
+	}
+	if got := m.notificationHistory[0].Message; got != "expired failure for az-1" {
+		t.Fatalf("history message = %q, want expired toast message", got)
+	}
+	if got := m.notificationHistoryIndicator(); got != "1 error (N)" {
+		t.Fatalf("notification history indicator = %q, want 1 error (N)", got)
+	}
+}
+
+func TestSpinnerTickExpiresToastsWithoutIssueRefreshTick(t *testing.T) {
+	m := newTestModel()
+	m.addToast(Toast{
+		Level:   ToastWarning,
+		Message: "short lived notice for az-1",
+		Expires: time.Now().Add(-time.Second),
+	})
+	if len(m.toasts) != 0 {
+		t.Fatalf("expired toast should not materialize initially, got %+v", m.toasts)
+	}
+
+	m.addToast(Toast{
+		Level:   ToastWarning,
+		Message: "expires before next issue refresh",
+		Expires: time.Now().Add(time.Hour),
+	})
+	if len(m.toasts) != 1 {
+		t.Fatalf("active toasts len = %d, want 1", len(m.toasts))
+	}
+	m.feedback.localNotices[len(m.feedback.localNotices)-1].Toast.Expires = time.Now().Add(-time.Second)
+
+	updated, _ := m.Update(spinner.TickMsg{})
+	next := updated.(Model)
+	if len(next.toasts) != 0 {
+		t.Fatalf("active toasts after spinner tick = %+v, want none", next.toasts)
+	}
+	if len(next.notificationHistory) == 0 {
+		t.Fatal("expected expired toast retained in notification history")
+	}
+}
+
+func TestDaemonNoticeProjectionFeedsFeedbackSurfaces(t *testing.T) {
+	now := time.Now().UTC()
+	m := newTestModel()
+	notice := protocol.NoticeRecord{
+		NoticeID:  "notice-op-close",
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		Scope:     protocol.NoticeScope{Type: "task", ID: "az-4"},
+		Source: &protocol.NoticeSource{
+			OperationID:    naming.OperationID("op-close"),
+			OperationKind:  daemonclient.CommandTaskClose,
+			OperationState: protocol.OperationStateFailed,
+		},
+		Severity:          protocol.NoticeSeverityError,
+		Category:          "operation_failed",
+		State:             protocol.NoticeStateActive,
+		Title:             "Close failed",
+		Summary:           "Could not move az-4 to Done",
+		Detail:            "Resolve child blockers, then retry",
+		Cause:             &protocol.NoticeCause{Code: "operation_failed", Message: "child issues remain unresolved"},
+		OccurrenceCount:   1,
+		FirstOccurrenceAt: now,
+		LastOccurrenceAt:  now,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+		RetentionClass:    protocol.NoticeRetentionError,
+	}
+
+	m.applyFeedbackNoticeSnapshot([]protocol.NoticeRecord{notice})
+
+	if got := m.notificationHistoryIndicator(); got != "1 error (N)" {
+		t.Fatalf("notification indicator = %q, want daemon notice error count", got)
+	}
+	if len(m.notificationHistory) != 1 || m.notificationHistory[0].DaemonNoticeID != "notice-op-close" {
+		t.Fatalf("notification history = %+v, want daemon notice row", m.notificationHistory)
+	}
+	if len(m.toasts) != 1 || m.toasts[0].Message != "Could not move az-4 to Done" {
+		t.Fatalf("toasts = %+v, want daemon notice toast", m.toasts)
+	}
+	signals := m.runtimeSignalsForBoard()
+	if got := signals["az-4"]; got.PendingOperationID != "op-close" || got.PendingOperationState != string(protocol.OperationStateFailed) {
+		t.Fatalf("board signal = %+v, want failed daemon notice signal", got)
+	}
+	progress := m.pendingMutationForTask("az-4")
+	if progress == nil {
+		t.Fatal("expected daemon notice failure in workspace mutation progress")
+	}
+	if progress.OperationID != "op-close" ||
+		progress.ProgressMessage != "Could not move az-4 to Done" ||
+		progress.FailureReason != "child issues remain unresolved" ||
+		progress.FailureRecovery != "Resolve child blockers, then retry" ||
+		progress.CurrentStatus != domain.StatusInReview {
+		t.Fatalf("workspace mutation progress = %+v, want daemon notice failure detail", progress)
+	}
+
+	refreshedTask := domain.Task{ID: "az-4", Title: "Task 4", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask}
+	if _, ok := m.applyTaskRefresh("az-4", refreshedTask, true); !ok {
+		t.Fatal("expected task refresh to apply")
+	}
+	progress = m.pendingMutationForTask("az-4")
+	if progress == nil || progress.CurrentStatus != domain.StatusOpen {
+		t.Fatalf("workspace mutation progress after task refresh = %+v, want refreshed Open status", progress)
+	}
+}
+
+func TestDaemonNoticeEventDismissalClearsProjectedTaskFailure(t *testing.T) {
+	now := time.Now().UTC()
+	m := newTestModel()
+	notice := protocol.NoticeRecord{
+		NoticeID:          "notice-op-start",
+		ProjectID:         naming.ProjectID(m.daemonProjectID()),
+		Scope:             protocol.NoticeScope{Type: "issue", ID: "az-1"},
+		Source:            &protocol.NoticeSource{OperationID: naming.OperationID("op-start"), OperationKind: daemonclient.CommandSessionStart, OperationState: protocol.OperationStateFailed},
+		Severity:          protocol.NoticeSeverityError,
+		Category:          "operation_failed",
+		State:             protocol.NoticeStateActive,
+		Title:             "Session start failed",
+		Summary:           "Could not start az-1",
+		Cause:             &protocol.NoticeCause{Message: "tmux unavailable"},
+		OccurrenceCount:   1,
+		FirstOccurrenceAt: now,
+		LastOccurrenceAt:  now,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+		RetentionClass:    protocol.NoticeRetentionError,
+	}
+	m.applyFeedbackNoticeSnapshot([]protocol.NoticeRecord{notice})
+	if progress := m.pendingMutationForTask("az-1"); progress == nil || progress.OperationID != "op-start" {
+		t.Fatalf("initial progress = %+v, want daemon notice failure", progress)
+	}
+
+	dismissed := notice
+	dismissed.State = protocol.NoticeStateDismissed
+	dismissed.Read = true
+	body, err := json.Marshal(protocol.NoticeEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		Revision:  1,
+		NoticeID:  dismissed.NoticeID,
+		State:     protocol.NoticeStateDismissed,
+		Notice:    &dismissed,
+		UpdatedAt: now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("marshal notice event: %v", err)
+	}
+
+	m.applyDaemonStreamEvent(protocol.EventEnvelope{
+		Revision:  1,
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		Event:     protocol.EventNoticeUpdated,
+		Body:      body,
+	}, false)
+
+	if got := m.notificationHistoryIndicator(); got != "" {
+		t.Fatalf("notification indicator after dismiss = %q, want empty", got)
+	}
+	if progress := m.pendingMutationForTask("az-1"); progress != nil {
+		t.Fatalf("progress after dismiss = %+v, want nil", progress)
+	}
+	if len(m.toasts) != 0 {
+		t.Fatalf("toasts after dismiss = %+v, want none", m.toasts)
+	}
+}
+
+func TestDaemonNoticeProjectionOrdersFloatingToastsByOccurrence(t *testing.T) {
+	now := time.Now().UTC()
+	m := newTestModel()
+	makeNotice := func(id, summary string, offset time.Duration) protocol.NoticeRecord {
+		created := now.Add(offset)
+		return protocol.NoticeRecord{
+			NoticeID:          id,
+			ProjectID:         naming.ProjectID(m.daemonProjectID()),
+			Scope:             protocol.NoticeScope{Type: "issue", ID: "az-1"},
+			Severity:          protocol.NoticeSeverityWarning,
+			Category:          "operation_failed",
+			State:             protocol.NoticeStateActive,
+			Title:             summary,
+			Summary:           summary,
+			OccurrenceCount:   1,
+			FirstOccurrenceAt: created,
+			LastOccurrenceAt:  created,
+			CreatedAt:         created,
+			UpdatedAt:         created,
+			RetentionClass:    protocol.NoticeRetentionError,
+		}
+	}
+
+	m.applyFeedbackNoticeSnapshot([]protocol.NoticeRecord{
+		makeNotice("notice-3", "third daemon notice", 3*time.Second),
+		makeNotice("notice-1", "first daemon notice", time.Second),
+		makeNotice("notice-4", "fourth daemon notice", 4*time.Second),
+		makeNotice("notice-2", "second daemon notice", 2*time.Second),
+	})
+
+	if got, want := len(m.toasts), 3; got != want {
+		t.Fatalf("toasts len = %d, want %d", got, want)
+	}
+	gotMessages := []string{m.toasts[0].Message, m.toasts[1].Message, m.toasts[2].Message}
+	wantMessages := []string{"second daemon notice", "third daemon notice", "fourth daemon notice"}
+	if !reflect.DeepEqual(gotMessages, wantMessages) {
+		t.Fatalf("toast messages = %v, want latest three in occurrence order %v", gotMessages, wantMessages)
+	}
+}
+
+func TestDaemonNoticeSnapshotSurvivesTUIRestartMultipleClientsAndViewports(t *testing.T) {
+	now := time.Now().UTC()
+	base := newTestModel()
+	notices := []protocol.NoticeRecord{
+		testDaemonNotice(base, "notice-1", "az-1", protocol.NoticeSeverityInfo, "operation_info", "first durable notice", now),
+		testDaemonNotice(base, "notice-2", "az-2", protocol.NoticeSeverityWarning, "operation_warning", "second durable notice", now.Add(time.Second)),
+		testDaemonNotice(base, "notice-3", "az-3", protocol.NoticeSeverityInfo, "operation_info", "third durable notice", now.Add(2*time.Second)),
+		testDaemonNotice(base, "notice-4", "az-4", protocol.NoticeSeverityError, "operation_failed", "failed to close az-4", now.Add(3*time.Second)),
+	}
+	notices[3].Title = "Close failed"
+	notices[3].Detail = "Resolve blockers, then retry"
+	notices[3].Cause = &protocol.NoticeCause{Code: "operation_failed", Message: "child blockers remain"}
+	notices[3].Source = &protocol.NoticeSource{
+		OperationID:    naming.OperationID("op-close-4"),
+		OperationKind:  daemonclient.CommandTaskClose,
+		OperationState: protocol.OperationStateFailed,
+		Producer:       "daemon.operation",
+	}
+
+	firstClient := newTestModel()
+	firstClient.width = 100
+	firstClient.height = 24
+	firstClient.loading = false
+	firstClient.applyFeedbackNoticeSnapshot(notices)
+
+	restartedClient := newTestModel()
+	restartedClient.width = 100
+	restartedClient.height = 24
+	restartedClient.loading = false
+	restartedClient.applyFeedbackNoticeSnapshot(notices)
+
+	secondClient := newTestModel()
+	secondClient.width = 48
+	secondClient.height = 16
+	secondClient.loading = false
+	secondClient.applyFeedbackNoticeSnapshot(notices)
+
+	for name, model := range map[string]Model{
+		"first client":     firstClient,
+		"restarted client": restartedClient,
+		"second client":    secondClient,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, want := len(model.notificationHistory), 4; got != want {
+				t.Fatalf("notification history len = %d, want %d", got, want)
+			}
+			if got := model.notificationHistoryIndicator(); got != "1 error / 3 notices (N)" {
+				t.Fatalf("notification indicator = %q, want durable snapshot counts", got)
+			}
+			if got, want := len(model.toasts), 3; got != want {
+				t.Fatalf("floating toasts len = %d, want bounded latest three", got)
+			}
+			if strings.Contains(toastMessages(model.toasts), "first durable notice") {
+				t.Fatalf("oldest notice should be retained in history but hidden from floating stack: %+v", model.toasts)
+			}
+			progress := model.pendingMutationForTask("az-4")
+			if progress == nil {
+				t.Fatal("expected daemon notice to project task failure detail")
+			}
+			if progress.OperationID != "op-close-4" ||
+				progress.ProgressMessage != "failed to close az-4" ||
+				progress.FailureReason != "child blockers remain" ||
+				progress.FailureRecovery != "Resolve blockers, then retry" ||
+				progress.CurrentStatus != domain.StatusInReview {
+				t.Fatalf("projected mutation progress = %+v, want durable failure detail", progress)
+			}
+		})
+	}
+
+	defaultView := firstClient.View()
+	defaultLines := strings.Split(strings.TrimRight(defaultView, "\n"), "\n")
+	if len(defaultLines) > firstClient.height {
+		t.Fatalf("default viewport rendered %d lines, want <= %d", len(defaultLines), firstClient.height)
+	}
+	if !strings.Contains(defaultView, "failed to close az-4") || !strings.Contains(defaultView, "1 error / 3 notices (N)") {
+		t.Fatalf("default viewport omitted durable notice surfaces; view=%q", defaultView)
+	}
+	if strings.Contains(defaultLines[len(defaultLines)-1], "failed to close az-4") {
+		t.Fatalf("default footer contains full notice text: %q", defaultLines[len(defaultLines)-1])
+	}
+
+	narrowView := secondClient.View()
+	narrowLines := strings.Split(strings.TrimRight(narrowView, "\n"), "\n")
+	if len(narrowLines) > secondClient.height {
+		t.Fatalf("narrow viewport rendered %d lines, want <= %d", len(narrowLines), secondClient.height)
+	}
+	if !strings.Contains(narrowView, "failed to close") {
+		t.Fatalf("narrow viewport omitted wrapped durable notice; view=%q", narrowView)
+	}
+	if !strings.Contains(narrowLines[len(narrowLines)-1], "N!") && !strings.Contains(narrowLines[len(narrowLines)-1], "(N)") {
+		t.Fatalf("narrow footer omitted compact notice route indicator: %q", narrowLines[len(narrowLines)-1])
+	}
+	for i, line := range narrowLines {
+		if width := ansi.StringWidth(line); width > secondClient.width {
+			t.Fatalf("narrow line %d width = %d, want <= %d: %q", i, width, secondClient.width, line)
+		}
+	}
+}
+
+func TestNotificationActionCenterMarkReadUsesDaemonNoticeUpdate(t *testing.T) {
+	m := newTestModel()
+	var gotBody protocol.NoticeUpdateRequestBody
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandNoticeUpdate {
+				t.Fatalf("command = %q, want notice.update", req.Command)
+			}
+			if err := json.Unmarshal(req.Body, &gotBody); err != nil {
+				t.Fatalf("unmarshal notice update request: %v", err)
+			}
+			respBody, err := json.Marshal(protocol.NoticeUpdateResponseBody{
+				Notice: protocol.NoticeRecord{
+					NoticeID:  gotBody.NoticeID,
+					ProjectID: naming.ProjectID(m.daemonProjectID()),
+					State:     protocol.NoticeStateActive,
+					Read:      gotBody.Read != nil && *gotBody.Read,
+				},
+			})
+			if err != nil {
+				return protocol.ResponseEnvelope{}, err
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport).WithProjectID(m.daemonProjectID())
+
+	_, cmd := m.handleNotificationActionCenterSelection(overlay.SelectionMsg{
+		Key: "notification_mark_read",
+		Value: overlay.NotificationActionCenterMsg{
+			DaemonNoticeID: "notice-1",
+			Read:           true,
+		},
+	})
+	if cmd == nil {
+		t.Fatal("expected notice update command")
+	}
+	msg, ok := cmd().(noticeUpdateResultMsg)
+	if !ok || msg.err != nil {
+		t.Fatalf("message = %T/%+v, want successful noticeUpdateResultMsg", msg, msg)
+	}
+	if gotBody.NoticeID != "notice-1" || gotBody.Read == nil || !*gotBody.Read || gotBody.State != "" {
+		t.Fatalf("notice update body = %+v, want read-only update", gotBody)
+	}
+	if msg.label != "Marked read" {
+		t.Fatalf("notice update label = %q, want Marked read", msg.label)
+	}
+}
+
+func TestNotificationActionCenterNoticeUpdateFailureShowsToast(t *testing.T) {
+	m := newTestModel()
+
+	updatedAny, _ := m.Update(noticeUpdateResultMsg{
+		projectID: m.daemonProjectID(),
+		label:     "Marked read",
+		err:       errors.New("daemon unavailable"),
+	})
+	updated := updatedAny.(Model)
+	if len(updated.toasts) == 0 {
+		t.Fatal("expected notice update failure toast")
+	}
+	if got := updated.toasts[len(updated.toasts)-1].Message; !strings.Contains(got, "Marked read failed") || !strings.Contains(got, "daemon unavailable") {
+		t.Fatalf("toast = %q, want labeled notice update failure", got)
+	}
+}
+
+func TestNotificationActionCenterRunsDaemonNoticeAction(t *testing.T) {
+	m := newTestModel()
+	var gotBody protocol.NoticeActionRequestBody
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandNoticeAction {
+				t.Fatalf("command = %q, want notice.action", req.Command)
+			}
+			if err := json.Unmarshal(req.Body, &gotBody); err != nil {
+				t.Fatalf("unmarshal notice action request: %v", err)
+			}
+			respBody, err := json.Marshal(protocol.NoticeActionResponseBody{
+				Notice: protocol.NoticeRecord{
+					NoticeID:  gotBody.NoticeID,
+					ProjectID: naming.ProjectID(m.daemonProjectID()),
+					State:     protocol.NoticeStateDismissed,
+					Read:      true,
+				},
+			})
+			if err != nil {
+				return protocol.ResponseEnvelope{}, err
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport).WithProjectID(m.daemonProjectID())
+
+	_, cmd := m.handleNotificationActionCenterSelection(overlay.SelectionMsg{
+		Key: "notification_action",
+		Value: overlay.NotificationActionCenterMsg{
+			DaemonNoticeID: "notice-1",
+			ActionID:       "dismiss",
+			Kind:           "dismiss",
+			Label:          "Dismiss",
+		},
+	})
+	if cmd == nil {
+		t.Fatal("expected notice action command")
+	}
+	msg, ok := cmd().(noticeActionResultMsg)
+	if !ok || msg.err != nil {
+		t.Fatalf("message = %T/%+v, want successful noticeActionResultMsg", msg, msg)
+	}
+	if gotBody.NoticeID != "notice-1" || gotBody.ActionID != "dismiss" {
+		t.Fatalf("notice action body = %+v, want dismiss action", gotBody)
+	}
+}
+
+func TestNotificationActionCenterLocalCopyDetailsUsesClipboardHelper(t *testing.T) {
+	m := newTestModel()
+	old := writeNotificationClipboardText
+	var copied string
+	writeNotificationClipboardText = func(_ context.Context, text string) error {
+		copied = text
+		return nil
+	}
+	defer func() { writeNotificationClipboardText = old }()
+
+	_, cmd := m.handleNotificationActionCenterSelection(overlay.SelectionMsg{
+		Key: "notification_action",
+		Value: overlay.NotificationActionCenterMsg{
+			ActionID: "copy_details",
+			Kind:     "client.copy_details",
+			Details:  "failure details\noperation: op-1",
+		},
+	})
+	if cmd == nil {
+		t.Fatal("expected copy details command")
+	}
+	msg, ok := cmd().(notificationCopyDetailsResultMsg)
+	if !ok || msg.err != nil {
+		t.Fatalf("message = %T/%+v, want successful notificationCopyDetailsResultMsg", msg, msg)
+	}
+	if copied != "failure details\noperation: op-1" {
+		t.Fatalf("copied = %q, want notice details", copied)
+	}
+}
+
+func TestNotificationActionCenterOpenTaskRoutesUseExistingWorkspaceRoute(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		actionID string
+		kind     string
+		scope    string
+	}{
+		{name: "open task", actionID: "open_task", kind: "client.open_task", scope: "task"},
+		{name: "open workspace", actionID: "open_workspace", kind: "client.open_workspace", scope: "task"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel()
+			m.overlayStack.Push(overlay.NewNotificationHistoryOverlay(nil))
+
+			updatedAny, _ := m.handleNotificationActionCenterSelection(overlay.SelectionMsg{
+				Key: "notification_action",
+				Value: overlay.NotificationActionCenterMsg{
+					ActionID:  tt.actionID,
+					Kind:      tt.kind,
+					ScopeType: tt.scope,
+					ScopeID:   "az-1",
+				},
+			})
+			updated := updatedAny.(Model)
+			if _, ok := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+				t.Fatalf("current overlay = %T, want TaskWorkspaceOverlay", updated.overlayStack.Current())
+			}
+		})
+	}
+}
+
+func testDaemonNotice(m Model, id, taskID string, severity protocol.NoticeSeverity, category, summary string, occurredAt time.Time) protocol.NoticeRecord {
+	return protocol.NoticeRecord{
+		NoticeID:          id,
+		ProjectID:         naming.ProjectID(m.daemonProjectID()),
+		Scope:             protocol.NoticeScope{Type: "issue", ID: taskID},
+		Severity:          severity,
+		Category:          category,
+		State:             protocol.NoticeStateActive,
+		Title:             summary,
+		Summary:           summary,
+		OccurrenceCount:   1,
+		FirstOccurrenceAt: occurredAt,
+		LastOccurrenceAt:  occurredAt,
+		CreatedAt:         occurredAt,
+		UpdatedAt:         occurredAt,
+		RetentionClass:    protocol.NoticeRetentionError,
+	}
+}
+
+func toastMessages(toasts []Toast) string {
+	messages := make([]string, 0, len(toasts))
+	for _, toast := range toasts {
+		messages = append(messages, toast.Message)
+	}
+	return strings.Join(messages, "\n")
 }
 
 func TestUpdate_AttachmentActionStagedAddsToast(t *testing.T) {
@@ -536,6 +1150,45 @@ func TestUpdate_AttachmentActionStagedAddsToast(t *testing.T) {
 	last := next.toasts[len(next.toasts)-1]
 	if !strings.Contains(last.Message, "Attachment staged for new task") {
 		t.Fatalf("unexpected toast message: %q", last.Message)
+	}
+}
+
+func TestCtrlGDismissesLatestToastWithoutOverlay(t *testing.T) {
+	m := newTestModel()
+	expires := time.Now().Add(time.Hour)
+	m.toasts = []Toast{
+		{Message: "first", Expires: expires},
+		{Message: "second", Expires: expires},
+	}
+
+	updated, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlG})
+	if cmd != nil {
+		t.Fatalf("expected no command when dismissing toast, got %T", cmd)
+	}
+	next := updated.(Model)
+	if len(next.toasts) != 1 {
+		t.Fatalf("toasts len = %d, want 1", len(next.toasts))
+	}
+	if got := next.toasts[0].Message; got != "first" {
+		t.Fatalf("remaining toast = %q, want first", got)
+	}
+}
+
+func TestCtrlGClosesOverlayBeforeDismissingToast(t *testing.T) {
+	m := newTestModel()
+	m.overlayStack.Push(overlay.NewHelpOverlay())
+	m.toasts = []Toast{{Message: "background notice", Expires: time.Now().Add(time.Hour)}}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	if cmd == nil {
+		t.Fatal("expected ctrl+g to emit close-all command")
+	}
+	next := updated.(Model)
+	if len(next.toasts) != 1 {
+		t.Fatalf("toasts len = %d, want 1", len(next.toasts))
+	}
+	if _, ok := cmd().(overlay.CloseAllOverlaysMsg); !ok {
+		t.Fatalf("ctrl+g command emitted %T, want overlay.CloseAllOverlaysMsg", cmd())
 	}
 }
 
@@ -1369,8 +2022,65 @@ func TestTaskWorkspacePreservesDetailsAcrossSummaryRefresh(t *testing.T) {
 	if !strings.Contains(view, "Long description stays visible") || !strings.Contains(view, "Detailed notes stay visible") {
 		t.Fatalf("workspace lost full details after summary refresh:\n%s", view)
 	}
-	if updated.tasks[0].Description != "Long description stays visible" || updated.tasks[0].Notes != "Detailed notes stay visible" {
-		t.Fatalf("model task details after summary refresh = %+v", updated.tasks[0])
+	if updated.tasks[0].Description != "" || updated.tasks[0].Notes != "" {
+		t.Fatalf("model task details after summary refresh = %+v, want board summary without long details", updated.tasks[0])
+	}
+}
+
+func TestTaskWorkspaceFullRefreshAllowsClearedDetails(t *testing.T) {
+	m := newTestModel()
+	task := domain.Task{
+		ID:          "az-1",
+		Title:       "Workspace task",
+		Description: "Long description should clear",
+		Design:      "Design should clear",
+		Notes:       "Notes should clear",
+		Acceptance:  "Acceptance should clear",
+		Status:      domain.StatusInProgress,
+		Priority:    domain.P2,
+		Type:        domain.TypeTask,
+	}
+	m.tasks = []domain.Task{task}
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(task, m.tasks, nil, 120, 30))
+
+	cleared := domain.Task{
+		ID:       "az-1",
+		Title:    "Workspace task after full refresh",
+		Status:   domain.StatusInReview,
+		Priority: domain.P1,
+		Type:     domain.TypeTask,
+	}
+	result, _ := m.Update(refreshTaskWorkspaceResultMsg{
+		projectID: m.daemonProjectID(),
+		revision:  1,
+		taskID:    "az-1",
+		hasTask:   true,
+		task:      cleared,
+		tasks:     []domain.Task{cleared},
+	})
+	updated := result.(Model)
+
+	workspace, ok := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("current overlay = %T, want TaskWorkspaceOverlay", updated.overlayStack.Current())
+	}
+	view := workspace.View()
+	if !strings.Contains(view, "Workspace task after full refresh") {
+		t.Fatalf("workspace did not pick up full refresh title:\n%s", view)
+	}
+	for _, stale := range []string{
+		"Long description should clear",
+		"Design should clear",
+		"Notes should clear",
+		"Acceptance should clear",
+	} {
+		if strings.Contains(view, stale) {
+			t.Fatalf("workspace retained cleared full-detail field %q:\n%s", stale, view)
+		}
+	}
+	if updated.tasks[0].Description != "" || updated.tasks[0].Notes != "" ||
+		updated.tasks[0].Design != "" || updated.tasks[0].Acceptance != "" {
+		t.Fatalf("model task details after full refresh = %+v, want cleared details", updated.tasks[0])
 	}
 }
 
@@ -6852,8 +7562,58 @@ func TestDaemonOperationFailureEventRemainsVisibleWithReason(t *testing.T) {
 	if progress == nil {
 		t.Fatal("expected failed operation in workspace mutation progress")
 	}
-	if progress.ProgressMessage != "merge failed: dirty worktree" {
-		t.Fatalf("progress message = %q, want failure reason", progress.ProgressMessage)
+	want := "Could not merge az-1. It stayed In Progress. Reason: close cleanup is blocked by local worktree changes. Next: commit, discard, or merge the worktree changes, then retry"
+	if progress.ProgressMessage != want {
+		t.Fatalf("progress message = %q, want %q", progress.ProgressMessage, want)
+	}
+	if progress.CurrentStatus != domain.StatusInProgress || progress.PreviousStatus != domain.StatusInProgress {
+		t.Fatalf("progress status context = previous %q current %q, want trusted In Progress", progress.PreviousStatus, progress.CurrentStatus)
+	}
+	if progress.FailureReason != "close cleanup is blocked by local worktree changes" ||
+		progress.FailureRecovery != "commit, discard, or merge the worktree changes, then retry" {
+		t.Fatalf("progress failure details = reason %q recovery %q", progress.FailureReason, progress.FailureRecovery)
+	}
+}
+
+func TestDaemonOperationFailureEventNormalizesProgressOnlyFailure(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	body, err := json.Marshal(protocol.OperationEventBody{
+		Operation: protocol.OperationRecord{
+			OperationID: "op-close",
+			IssueID:     naming.IssueID("az-1"),
+			Kind:        daemonclient.CommandTaskClose,
+			State:       protocol.OperationStateFailed,
+			Progress: &protocol.OperationProgress{
+				Message: "cannot close issue az-1: child issues remain unresolved: az-child",
+				Percent: 40,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal failure body: %v", err)
+	}
+
+	m.applyOperationProgressEvent(protocol.EventEnvelope{
+		Event: protocol.EventOperationFailed,
+		Body:  body,
+	})
+
+	progress := m.pendingMutationForTask("az-1")
+	want := "Could not move az-1 to Done. It stayed In Review. Reason: Done is blocked by unresolved child issues. Next: press C to close clean children too, or resolve child issues and retry"
+	if progress == nil || progress.ProgressMessage != want {
+		t.Fatalf("progress = %+v, want %q", progress, want)
+	}
+	if progress.PreviousStatus != domain.StatusInReview ||
+		progress.CurrentStatus != domain.StatusInReview ||
+		progress.TargetStatus != domain.StatusDone {
+		t.Fatalf("progress status context = previous %q current %q target %q, want In Review/In Review/Done", progress.PreviousStatus, progress.CurrentStatus, progress.TargetStatus)
+	}
+	if progress.FailureReason != "Done is blocked by unresolved child issues" ||
+		progress.FailureRecovery != "press C to close clean children too, or resolve child issues and retry" {
+		t.Fatalf("progress failure details = reason %q recovery %q", progress.FailureReason, progress.FailureRecovery)
 	}
 }
 
@@ -6894,12 +7654,16 @@ func TestDaemonSessionStartFailureEventRemainsVisibleOnTask(t *testing.T) {
 	if progress == nil {
 		t.Fatal("expected failed session start in task-local mutation progress")
 	}
-	if len(m.toasts) != 0 {
-		t.Fatalf("toasts = %+v, want task-local error surface only", m.toasts)
+	if len(m.toasts) == 0 {
+		t.Fatal("expected floating failure toast")
 	}
+	toast := m.toasts[len(m.toasts)-1].Message
 	for _, want := range []string{"git worktree add", "hook failed", "rolled back worktree /tmp/az-1"} {
 		if !strings.Contains(progress.ProgressMessage, want) {
 			t.Fatalf("progress message = %q, want substring %q", progress.ProgressMessage, want)
+		}
+		if !strings.Contains(toast, want) {
+			t.Fatalf("toast message = %q, want substring %q", toast, want)
 		}
 	}
 }
@@ -6938,8 +7702,9 @@ func TestApplyOperationRecordsLoadsQueuedAndRecentFailedOperations(t *testing.T)
 		t.Fatalf("az-2 pending = %+v, want failed op-failed", got)
 	}
 	progress := m.pendingMutationForTask("az-2")
-	if progress == nil || progress.ProgressMessage != "conflict while merging" {
-		t.Fatalf("az-2 progress = %+v, want failure message", progress)
+	want := "Could not merge az-2. It stayed Open. Reason: the change conflicts with current daemon state. Next: refresh the task, resolve the reported blocker, then retry"
+	if progress == nil || progress.ProgressMessage != want {
+		t.Fatalf("az-2 progress = %+v, want %q", progress, want)
 	}
 }
 

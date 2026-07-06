@@ -6580,7 +6580,7 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "Worker integration evidence should be a structured JSON `worker_evidence.v1` packet") {
 		t.Fatalf("prompt = %q, want structured evidence guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Trust hook-backed `activity=busy|idle` for worker idleness checks") {
+	if !strings.Contains(prompt, "Trust hook-backed `activity=busy|idle|waiting` for worker idleness checks") {
 		t.Fatalf("prompt = %q, want bounded tmux observation guidance", prompt)
 	}
 	if !strings.Contains(prompt, "treat `activity=no-agent` as an intentional session-only shell") {

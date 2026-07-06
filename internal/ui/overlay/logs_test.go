@@ -158,6 +158,30 @@ func TestEventLogOverlay_Update_NavigationAndClose(t *testing.T) {
 		t.Fatalf("scroll after k = %d, want 0", overlay.scroll)
 	}
 
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyDown})
+	overlay = model.(*EventLogOverlay)
+	if overlay.scroll != 1 {
+		t.Fatalf("scroll after down arrow = %d, want 1", overlay.scroll)
+	}
+
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyUp})
+	overlay = model.(*EventLogOverlay)
+	if overlay.scroll != 0 {
+		t.Fatalf("scroll after up arrow = %d, want 0", overlay.scroll)
+	}
+
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyDown, Alt: true})
+	overlay = model.(*EventLogOverlay)
+	if overlay.scroll != 1 {
+		t.Fatalf("scroll after modified down arrow = %d, want 1", overlay.scroll)
+	}
+
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	overlay = model.(*EventLogOverlay)
+	if overlay.scroll != 0 {
+		t.Fatalf("scroll after modified up arrow = %d, want 0", overlay.scroll)
+	}
+
 	overlay.scroll = overlay.maxScroll
 	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
 	overlay = model.(*EventLogOverlay)

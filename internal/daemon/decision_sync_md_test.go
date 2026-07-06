@@ -108,6 +108,12 @@ func TestRenderDecisionMarkdownContainsAllSections(t *testing.T) {
 			t.Errorf("rendered markdown missing %q\n---\n%s", want, body)
 		}
 	}
+	if !strings.HasSuffix(body, "\n") {
+		t.Fatalf("rendered markdown must end with one newline")
+	}
+	if strings.HasSuffix(body, "\n\n") {
+		t.Fatalf("rendered markdown has blank line at EOF")
+	}
 }
 
 func TestRenderDecisionMarkdownIncludesRevisedByHeader(t *testing.T) {

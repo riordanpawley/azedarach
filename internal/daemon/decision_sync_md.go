@@ -179,7 +179,7 @@ func renderDecisionMarkdown(d issues.Decision, outgoing, incoming []issues.Decis
 		b.WriteString("\n")
 	}
 
-	return b.Bytes()
+	return []byte(strings.TrimRight(b.String(), "\n") + "\n")
 }
 
 func decisionRevisedBy(incoming []issues.DecisionLink) string {

@@ -1,0 +1,27 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────╮
+│CLOSE BLOCKED                                                                                 │
+│──────────────────────────────────────────────────────────────────────────────────────────────│
+││                                                              Actions                        │
+││ Issue: az-321                                                ───────────────────────────────│
+││                                                              > r Retry close                │
+││ The issue was not closed.                                      Run the close again after …  │
+││                                                                a AI merge                   │
+││                                                                Launch an agent to resolve…  │
+││ Problem                                                        f Force cleanup              │
+││ cannot close issue az-321: unresolved child issues remain:     Retry and allow worktree r…  │
+││ az-400 (open). Next: close or clean up the listed child        c Close clean children       │
+││ issues first, then retry                                       Retry and include unresolv…  │
+││                                                                esc Cancel                   │
+││                                                                Leave the issue in its pre…  │
+││ Next steps                                                                                  │
+││ - Fix the blocker described above, then retry.                                              │
+││ - AI merge starts an agent when integration recovery need…                                  │
+││ - Force cleanup discards modified or untracked worktree f…                                  │
+││ - Close clean children only affects descendants without s…                                  │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯

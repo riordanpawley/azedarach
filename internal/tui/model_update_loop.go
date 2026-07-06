@@ -46,6 +46,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
+		if len(m.toasts) > 0 {
+			m.expireToasts()
+		}
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
 
@@ -79,6 +82,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case overlay.SelectionMsg:
+		if strings.HasPrefix(msg.Key, "notification_") {
+			return m.handleNotificationActionCenterSelection(msg)
+		}
 		if msg.Key == "async_recovery_recover" {
 			id, _ := msg.Value.(string)
 			notification, ok := m.asyncRecoveryNotificationByID(id)
@@ -178,9 +184,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case issuesLoadedMsg:
 		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
+			if msg.eventsCancel != nil {
+				msg.eventsCancel()
+			}
 			return m, nil
 		}
 		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
+			if msg.eventsCancel != nil {
+				msg.eventsCancel()
+			}
 			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
 		}
 		if msg.daemonClient != nil {
@@ -220,6 +232,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Batch(cmds...)
 		}
+		m.reconcilePendingTaskDetailsFromHydrated(msg.tasks)
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
 		for i := range m.tasks {
@@ -231,6 +244,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reconcilePendingTaskDetails()
 		m.applyPendingTaskDetailOverlays()
 		m.reconcilePendingOperations()
+		m.reconcilePendingMutationFailures()
+		m.refreshFeedbackProjectionOutputs(time.Now())
 		m.editor.ReconcileSelection(m.tasks)
 		m.applyPendingCreatedTaskSelection()
 		m.taskSnapshotCheckedAt = msg.lastCheckedAt
@@ -266,7 +281,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, tickEvery(2*time.Second))
 		}
 		if msg.events != nil {
-			m.daemonEvents = msg.events
+			m.replaceDaemonEventStream(msg.events, msg.eventsCancel)
 			cmds = append(cmds, m.waitForDaemonEventCmd())
 		}
 		if m.openSessionSelectorOnLoad {
@@ -275,11 +290,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if replayCmd := m.finishIssuesRefreshCmd(msg.refreshSeq); replayCmd != nil {
 			cmds = append(cmds, replayCmd)
-		} else if opCmd := m.loadOperationsCmd(); opCmd != nil {
-			cmds = append(cmds, opCmd)
-			cmds = append(cmds, m.loadOrchestrationOverviewCmd())
 		} else {
-			cmds = append(cmds, m.loadOrchestrationOverviewCmd())
+			 if opCmd := m.loadOperationsCmd(); opCmd != nil {
+				cmds = append(cmds, opCmd)
+				cmds = append(cmds, m.loadOrchestrationOverviewCmd())
+			} else {
+				cmds = append(cmds, m.loadOrchestrationOverviewCmd())
+			}
+			if noticeCmd := m.loadFeedbackProjectionCmd(); noticeCmd != nil {
+				cmds = append(cmds, noticeCmd)
+			}
 		}
 		if len(cmds) == 0 {
 			return m, nil
@@ -314,7 +334,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logStreamReconnectQueued = true
 			return m, m.queueLogStreamReconnectCmd(delay)
 		}
-		m.logStreamEvents = msg.stream
+		m.replaceLogStream(msg.stream, msg.cancel)
 		m.lastLogStreamReattachAt = time.Time{}
 		m.logStreamReconnectQueued = false
 		return m, m.waitForLogStreamEventCmd()
@@ -409,6 +429,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.scheduleIssuesRefreshCmd()
 		}
 		m.clearPendingTaskStatus(msg.issueID)
+		m.clearTaskMutationFailure(msg.issueID)
 		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastSuccess,
@@ -429,6 +450,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.scheduleIssuesRefreshCmd()
 		}
 		m.clearPendingTaskStatus(msg.issueID)
+		m.clearTaskMutationFailure(msg.issueID)
 		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastSuccess,
@@ -560,7 +582,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.stream != nil && msg.stream != m.daemonEvents {
 			return m, nil
 		}
-		m.daemonEvents = nil
+		m.clearDaemonEventStream()
 		return m, m.attachDaemonCmd()
 
 	case logStreamEventMsg:
@@ -593,7 +615,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.stream != nil && msg.stream != m.logStreamEvents {
 			return m, nil
 		}
-		m.logStreamEvents = nil
+		m.clearLogStream()
 		interval := reconnect.DefaultReconciliationPolicy().ReattachRetryInterval
 		if interval <= 0 {
 			interval = 5 * time.Second
@@ -829,7 +851,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !ok || taskIDKey(currentWorkspace.TaskID()) != taskIDKey(msg.taskID) {
 			return m, nil
 		}
-		task, ok := m.applySingleTaskWorkspaceRefresh(msg.taskID, msg.task)
+		boardTask, ok := m.applySingleTaskWorkspaceRefresh(msg.taskID, msg.task)
 		if !ok {
 			return m, nil
 		}
@@ -839,7 +861,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			currentWorkspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
 		}
-		currentWorkspace.SyncTask(task, m.tasks, m.pendingMutationForTask(msg.taskID))
+		currentWorkspace.SyncFullTask(msg.task, m.tasks, m.pendingMutationForTask(boardTask.ID.String()))
 		if msg.decisionErr != nil {
 			if m.logger != nil {
 				m.logger.Debug("task workspace decision link refresh failed", "task_id", msg.taskID, "error", msg.decisionErr)
@@ -974,6 +996,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case projectSwitchResultMsg:
 		if msg.switchSeq != 0 && msg.switchSeq != m.projectSwitchSeq {
+			if msg.eventsCancel != nil {
+				msg.eventsCancel()
+			}
 			return m, nil
 		}
 		if msg.err != nil {
@@ -998,6 +1023,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clearDrillDown()
 
 		// Reuse the normal loaded-state reducer path.
+		m.reconcilePendingTaskDetailsFromHydrated(msg.tasks)
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
 		for i := range m.tasks {
@@ -1006,6 +1032,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncProjectionIndexesFromTasks()
 		m.reconcilePendingTaskDetails()
 		m.applyPendingTaskDetailOverlays()
+		m.refreshFeedbackProjectionOutputs(time.Now())
 		m.editor.ReconcileSelection(tasks)
 		m.applyPendingCreatedTaskSelection()
 		m.taskSnapshotCheckedAt = msg.lastCheckedAt
@@ -1017,7 +1044,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.boardRefreshing = false
 		m.projectSwitchInFlight = false
 		m.lastRefresh = time.Now()
-		m.daemonEvents = msg.events
+		m.replaceDaemonEventStream(msg.events, msg.eventsCancel)
 
 		m.addToast(Toast{
 			Level:   ToastSuccess,
@@ -1027,6 +1054,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds := []tea.Cmd{m.waitForDaemonEventCmd(), m.loadOrchestrationOverviewCmd()}
 		if opCmd := m.loadOperationsCmd(); opCmd != nil {
 			cmds = append(cmds, opCmd)
+		}
+		if noticeCmd := m.loadFeedbackProjectionCmd(); noticeCmd != nil {
+			cmds = append(cmds, noticeCmd)
 		}
 		if taskID := strings.TrimSpace(m.pendingUIOpenTaskID); taskID != "" {
 			m.pendingUIOpenTaskID = ""
@@ -1075,6 +1105,93 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.applyOperationRecords(msg.records)
+		return m, nil
+
+	case noticeRecordsLoadedMsg:
+		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
+			return m, nil
+		}
+		if msg.err != nil {
+			if m.logger != nil {
+				m.logger.Debug("daemon notice list failed", "error", msg.err)
+			}
+			return m, nil
+		}
+		m.applyFeedbackNoticeSnapshot(msg.notices)
+		return m, nil
+
+	case noticeUpdateResultMsg:
+		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
+			return m, nil
+		}
+		if msg.err != nil {
+			if m.logger != nil {
+				m.logger.Debug("daemon notice update failed", "error", msg.err)
+			}
+			if strings.TrimSpace(msg.label) != "" {
+				m.addToast(Toast{
+					Level:   ToastError,
+					Message: fmt.Sprintf("%s failed: %v", msg.label, msg.err),
+					Expires: time.Now().Add(5 * time.Second),
+				})
+			}
+			return m, nil
+		}
+		if strings.TrimSpace(msg.notice.NoticeID) != "" {
+			m.applyFeedbackNoticeSnapshot(append(m.feedbackNotices(), msg.notice))
+		}
+		if strings.TrimSpace(msg.label) != "" {
+			m.addToast(Toast{
+				Level:   ToastSuccess,
+				Message: msg.label,
+				Expires: time.Now().Add(3 * time.Second),
+			})
+		}
+		return m, nil
+
+	case noticeActionResultMsg:
+		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
+			return m, nil
+		}
+		if msg.err != nil {
+			if m.logger != nil {
+				m.logger.Debug("daemon notice action failed", "error", msg.err)
+			}
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Notice action failed: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		if strings.TrimSpace(msg.notice.NoticeID) != "" {
+			m.applyFeedbackNoticeSnapshot(append(m.feedbackNotices(), msg.notice))
+		}
+		label := strings.TrimSpace(msg.label)
+		if label == "" {
+			label = "Notice action"
+		}
+		m.addToast(Toast{
+			Level:   ToastSuccess,
+			Message: label + " applied",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+
+	case notificationCopyDetailsResultMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Copy details failed: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		m.addToast(Toast{
+			Level:   ToastSuccess,
+			Message: "Notification details copied",
+			Expires: time.Now().Add(3 * time.Second),
+		})
 		return m, nil
 
 	case overlay.TaskCreatedMsg:
@@ -1503,6 +1620,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.scheduleIssuesRefreshCmd()
 			}
 			m.rollbackTaskStatus(msg.taskID, msg.previousStatus)
+			failure := statusMutationFailureDetails(msg.taskID, msg.previousStatus, msg.newStatus, msg.err)
+			userMessage := failure.Message
+			if m.logger != nil {
+				m.logger.Warn("task status mutation failed",
+					"task_id", msg.taskID,
+					"target_status", msg.newStatus,
+					"current_status", msg.previousStatus,
+					"error", msg.err,
+					"user_message", userMessage,
+				)
+			}
+			m.markTaskMutationFailure(failure)
 			m.syncTaskWorkspaceOverlay()
 			expires := time.Now().Add(3 * time.Second)
 			if msg.newStatus == domain.StatusDone {
@@ -1510,14 +1639,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.addToast(Toast{
 				Level:   ToastError,
-				Message: fmt.Sprintf("Failed to update task: %v", msg.err),
+				Message: userMessage,
 				Expires: expires,
 			})
+			if dialogCmd := m.closeFailureDialogCmd(msg); dialogCmd != nil {
+				return m, dialogCmd
+			}
 			return m, nil
 		}
 		if msg.newStatus != domain.StatusDone {
 			m.clearPendingTaskStatus(msg.taskID)
 		}
+		m.clearTaskMutationFailure(msg.taskID)
 		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastSuccess,
@@ -1654,7 +1787,10 @@ type daemonStreamEventResult struct {
 	rehydrate bool
 }
 
-const daemonStreamCommandIssuesRefresh = "issues-refresh"
+const (
+	daemonStreamCommandIssuesRefresh = "issues-refresh"
+	daemonStreamCommandNoticeRefresh = "notice-refresh"
+)
 
 func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectionApply bool) daemonStreamEventResult {
 	if projectID := strings.TrimSpace(evt.ProjectID.String()); projectID != "" && projectID != m.daemonProjectID() {
@@ -1673,12 +1809,37 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		return daemonStreamEventResult{cmd: cmd}
 	}
 	m.applyOperationProgressEvent(evt)
-	if isTaskMutationEvent(evt.Event) && len(evt.Body) > 0 {
+	if isNoticeEvent(evt.Event) {
 		switch cursor.Decide(evt) {
 		case protocol.StreamProjectionDecisionIgnore:
 			return daemonStreamEventResult{}
 		case protocol.StreamProjectionDecisionResync:
 			m.daemonEvents = nil
+			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
+		}
+		var body protocol.NoticeEventBody
+		if err := json.Unmarshal(evt.Body, &body); err != nil {
+			return daemonStreamEventResult{key: daemonStreamCommandNoticeRefresh, cmd: m.loadFeedbackProjectionCmd()}
+		}
+		m.applyFeedbackNoticeEvent(body)
+		m.daemonRevision = cursor.Advance(evt).Revision
+		return daemonStreamEventResult{}
+	}
+	if evt.Event == protocol.EventOperationFailed {
+		if message := m.operationFailureUserMessage(evt); message != "" {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: message,
+				Expires: time.Now().Add(8 * time.Second),
+			})
+		}
+	}
+	if isTaskMutationEvent(evt.Event) && len(evt.Body) > 0 {
+		switch cursor.Decide(evt) {
+		case protocol.StreamProjectionDecisionIgnore:
+			return daemonStreamEventResult{}
+		case protocol.StreamProjectionDecisionResync:
+			m.clearDaemonEventStream()
 			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 		}
 		if m.applyTaskEvent(evt) {
@@ -1691,7 +1852,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		case protocol.StreamProjectionDecisionIgnore:
 			return daemonStreamEventResult{}
 		case protocol.StreamProjectionDecisionResync:
-			m.daemonEvents = nil
+			m.clearDaemonEventStream()
 			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 		}
 		m.applySessionProjectionEvent(evt)
@@ -1703,7 +1864,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		case protocol.StreamProjectionDecisionIgnore:
 			return daemonStreamEventResult{}
 		case protocol.StreamProjectionDecisionResync:
-			m.daemonEvents = nil
+			m.clearDaemonEventStream()
 			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 		}
 		if skipProjectionApply {
@@ -1724,7 +1885,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		case protocol.StreamProjectionDecisionIgnore:
 			return daemonStreamEventResult{}
 		case protocol.StreamProjectionDecisionResync:
-			m.daemonEvents = nil
+			m.clearDaemonEventStream()
 			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 		}
 		cmd := m.applyUICommandEvent(evt)
@@ -1739,7 +1900,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		m.daemonRevision = cursor.Advance(evt).Revision
 		return daemonStreamEventResult{key: daemonStreamCommandIssuesRefresh}
 	case daemonEventRehydrate:
-		m.daemonEvents = nil
+		m.clearDaemonEventStream()
 		return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 	default:
 		return daemonStreamEventResult{}
@@ -1760,6 +1921,18 @@ func coalescedRuntimeProjectionIndexes(events []protocol.EventEnvelope) map[int]
 		latestByIssue[issueID] = i
 	}
 	return coalesced
+}
+
+func isNoticeEvent(event string) bool {
+	switch event {
+	case protocol.EventNoticeCreated,
+		protocol.EventNoticeUpdated,
+		protocol.EventNoticeExpired,
+		protocol.EventNoticeDeleted:
+		return true
+	default:
+		return false
+	}
 }
 
 func coalescibleRuntimeProjectionIssueID(evt protocol.EventEnvelope) (string, bool) {

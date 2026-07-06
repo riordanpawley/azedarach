@@ -18,6 +18,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 	"github.com/riordanpawley/azedarach/internal/ui/statusbar"
+	"github.com/riordanpawley/azedarach/internal/ui/toast"
 )
 
 func (m Model) View() string {
@@ -53,14 +54,11 @@ func (m Model) View() string {
 		Render(mainView)
 
 	sb := statusbar.New(m.statusBarMode(), m.width, m.styles)
-	if currentOverlay != nil || m.viewMode != ViewModeOverview {
-		sb.SetEventTicker(m.eventTicker)
-	}
 	sb.SetCurrentProject(m.currentProject)
 	sb.SetSelectionSummary(m.selectionSummary())
 	sb.SetFilterSummary(m.filterSummary())
 	sb.SetSortSummary(m.sortSummary())
-	sb.SetAlertIndicator(m.recoveryNotificationIndicator())
+	sb.SetAlertIndicator(m.alertIndicator())
 	if m.boardRefreshing {
 		sb.SetModeSuffix(m.spinner.View())
 	}
@@ -97,6 +95,7 @@ func (m Model) View() string {
 				Height(contentHeight).
 				MaxHeight(contentHeight).
 				Render(overlayView)
+			contentView = m.layerNotificationStack(contentView, m.width, contentHeight)
 			return lipgloss.JoinVertical(lipgloss.Left, contentView, statusBarView)
 		}
 
@@ -135,6 +134,7 @@ func (m Model) View() string {
 		}
 	}
 
+	contentView = m.layerNotificationStack(contentView, m.width, contentHeight)
 	return lipgloss.JoinVertical(lipgloss.Left, contentView, statusBarView)
 }
 
@@ -148,6 +148,66 @@ func orchestrationOverviewStatusBindings() []keybinds.Binding {
 		{Key: "/", Description: "search"},
 		{Key: "f", Description: "filter"},
 	}
+}
+
+func (m Model) layerNotificationStack(contentView string, width, height int) string {
+	if width < 1 || height < 1 || len(m.toasts) == 0 {
+		return contentView
+	}
+
+	stack := toast.New(m.styles).Render(m.toasts, width)
+	if strings.TrimSpace(ansi.Strip(stack)) == "" {
+		return contentView
+	}
+
+	stackWidth, stackHeight := renderedBlockSize(stack)
+	if stackWidth > width {
+		stackWidth = width
+	}
+	if stackHeight > height {
+		stackHeight = height
+	}
+
+	x := width - stackWidth
+	if x < 0 {
+		x = 0
+	}
+	y := height - stackHeight
+	if y < 0 {
+		y = 0
+	}
+
+	stackLines := strings.Split(lipgloss.NewStyle().
+		Width(stackWidth).
+		MaxWidth(stackWidth).
+		Height(stackHeight).
+		MaxHeight(stackHeight).
+		Render(stack), "\n")
+	contentLines := strings.Split(lipgloss.NewStyle().
+		Width(width).
+		MaxWidth(width).
+		Height(height).
+		MaxHeight(height).
+		Render(contentView), "\n")
+	if len(contentLines) < height {
+		for len(contentLines) < height {
+			contentLines = append(contentLines, lipgloss.NewStyle().Width(width).Render(""))
+		}
+	}
+	for i, line := range stackLines {
+		row := y + i
+		if row < 0 || row >= height || row >= len(contentLines) {
+			continue
+		}
+		base := contentLines[row]
+		stackSlice := lipgloss.NewStyle().
+			Width(stackWidth).
+			MaxWidth(stackWidth).
+			Render(ansi.Cut(line, 0, stackWidth))
+		contentLines[row] = ansi.Cut(base, 0, x) + stackSlice + ansi.Cut(base, x+stackWidth, width)
+	}
+
+	return strings.Join(contentLines[:height], "\n")
 }
 
 func (m Model) renderModalBackdrop(contentHeight int) string {
@@ -716,11 +776,11 @@ func (m Model) renderBoardView() string {
 
 func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
 	activeDescendantSessionByTask := buildActiveDescendantSessionByTask(m.tasks)
-	if len(m.pendingStatuses) == 0 && len(m.pendingOpsByTask) == 0 && len(activeDescendantSessionByTask) == 0 && len(m.tasks) == 0 {
+	if len(m.pendingStatuses) == 0 && len(m.pendingOpsByTask) == 0 && len(m.pendingFailures) == 0 && len(activeDescendantSessionByTask) == 0 && len(m.tasks) == 0 {
 		return nil
 	}
 
-	signalsByTask := make(map[string]board.RuntimeSignals, len(m.tasks)+len(m.pendingStatuses)+len(m.pendingOpsByTask)+len(activeDescendantSessionByTask))
+	signalsByTask := make(map[string]board.RuntimeSignals, len(m.tasks)+len(m.pendingStatuses)+len(m.pendingOpsByTask)+len(m.pendingFailures)+len(activeDescendantSessionByTask))
 	for i := range m.tasks {
 		task := m.tasks[i]
 		signals := board.RuntimeSignals{
@@ -767,6 +827,19 @@ func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
 		signals.PendingOperationState = string(pending.state)
 		signals.PendingOperationID = pending.operationID
 		signals.PendingOperationPercent = pending.percent
+		signalsByTask[taskID] = signals
+	}
+	for i := range m.tasks {
+		task := m.tasks[i]
+		taskID := task.ID.String()
+		failure, ok := m.pendingFailures[taskIDKey(taskID)]
+		if !ok {
+			continue
+		}
+		signals := signalsByTask[taskID]
+		signals.PendingOperationState = string(protocol.OperationStateFailed)
+		signals.PendingOperationID = failure.operationID
+		signals.PendingOperationPercent = 0
 		signalsByTask[taskID] = signals
 	}
 	for taskID := range activeDescendantSessionByTask {

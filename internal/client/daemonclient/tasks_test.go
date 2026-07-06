@@ -101,6 +101,23 @@ func mustMarshalTaskSnapshotPayload(t *testing.T, protocolVersion protocol.Versi
 	return body
 }
 
+func mustMarshalBoardSnapshotPayload(t *testing.T, protocolVersion protocol.Version, projectID string, revision uint64, tasks []domain.Task) []byte {
+	t.Helper()
+	body, err := json.Marshal(protocol.BoardSnapshotPayload{
+		SchemaVersion:    protocol.BoardSnapshotSchemaVersion,
+		ProtocolVersion:  protocolVersion,
+		SnapshotRevision: revision,
+		ProjectID:        naming.ProjectID(projectID),
+		LastCheckedAt:    mustTaskSnapshotCheckedAt(),
+		Freshness:        protocol.TaskListFreshnessFresh,
+		Tasks:            protocol.BoardTaskSummariesFromDomain(tasks),
+	})
+	if err != nil {
+		t.Fatalf("marshal board snapshot payload: %v", err)
+	}
+	return body
+}
+
 func mustTaskSnapshotCheckedAt() time.Time {
 	return time.Date(2026, time.April, 2, 10, 31, 45, 0, time.UTC)
 }
@@ -307,6 +324,55 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 		if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].ID != "az-9" {
 			t.Fatalf("snapshot tasks = %+v", snapshot.Tasks)
+		}
+	})
+
+	t.Run("board snapshot", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if req.Command != CommandBoardFetch {
+					t.Fatalf("command = %q, want %q", req.Command, CommandBoardFetch)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Revision:        18,
+					OK:              true,
+					Body: mustMarshalBoardSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 18, []domain.Task{{
+						ID:          "az-board",
+						Title:       "Board task",
+						Description: "description must not cross board payload",
+						Notes:       "notes must not cross board payload",
+						Status:      domain.StatusInProgress,
+						Priority:    domain.P1,
+						Type:        domain.TypeTask,
+					}}),
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		snapshot, err := client.BoardSnapshot(context.Background())
+		if err != nil {
+			t.Fatalf("BoardSnapshot error: %v", err)
+		}
+		if snapshot.Revision != 18 {
+			t.Fatalf("revision = %d, want 18", snapshot.Revision)
+		}
+		if !snapshot.SummariesOnly {
+			t.Fatal("summaries_only = false, want true")
+		}
+		if len(snapshot.Tasks) != 1 {
+			t.Fatalf("task count = %d, want 1", len(snapshot.Tasks))
+		}
+		task := snapshot.Tasks[0]
+		if task.ID != "az-board" || task.Title != "Board task" || task.Status != domain.StatusInProgress {
+			t.Fatalf("task = %+v", task)
+		}
+		if task.Description != "" || task.Notes != "" || task.Design != "" || task.Acceptance != "" {
+			t.Fatalf("board snapshot decoded detail fields: description=%q notes=%q design=%q acceptance=%q", task.Description, task.Notes, task.Design, task.Acceptance)
 		}
 	})
 

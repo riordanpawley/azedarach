@@ -349,7 +349,7 @@ func GitHooksNotifyCommand(deps *Dependencies, opts GitHooksNotifyOptions) error
 }
 
 func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
-	projectDir, err := resolveProjectDir(opts.ProjectDir, deps)
+	projectDir, err := resolveGitHookProjectDir(opts.ProjectDir, deps)
 	if err != nil {
 		return err
 	}
@@ -369,6 +369,7 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 	}
 
 	preCommitMergeInProgress := false
+	skipPreCommitDecisionSync := hookName == "pre-commit" && gitHookEnvFlagEnabled("AZEDARACH_SKIP_DECISION_SYNC")
 	if hookName == "pre-commit" {
 		mergeInProgress, mergeErr := gitMergeInProgress(projectDir)
 		if mergeErr != nil && opts.Verbose {
@@ -378,6 +379,9 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 		if preCommitMergeInProgress && opts.Verbose {
 			fmt.Fprintln(os.Stderr, "githooks pre-commit: merge in progress; skipping built-in decision sync")
 		}
+		if skipPreCommitDecisionSync && opts.Verbose {
+			fmt.Fprintln(os.Stderr, "githooks pre-commit: skipping built-in decision sync (AZEDARACH_SKIP_DECISION_SYNC=1)")
+		}
 	}
 
 	// Built-in decision sync commands fire before user-configured commands so
@@ -385,7 +389,10 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 	// (lint, formatter, etc.) inspect the tree. Built-ins are best-effort and
 	// silent unless --verbose: the daemon may not be running on a fresh clone,
 	// and a missing decision feature must not block a commit.
-	allCommands := append([]string{}, builtInDecisionCommandsForHook(hookName, projectDir, preCommitMergeInProgress)...)
+	allCommands := []string{}
+	if !skipPreCommitDecisionSync {
+		allCommands = append(allCommands, builtInDecisionCommandsForHook(hookName, projectDir, preCommitMergeInProgress)...)
+	}
 	allCommands = append(allCommands, configuredCommandsForHook(cfg, hookName)...)
 
 	for _, command := range allCommands {
@@ -409,7 +416,7 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 	// transactional merge path.
 	restageEnabled := cfg.GitHooks.Restage.Enabled
 	restagePaths := append([]string{}, cfg.GitHooks.Restage.Paths...)
-	if hookName == "pre-commit" && !preCommitMergeInProgress {
+	if hookName == "pre-commit" && !preCommitMergeInProgress && !skipPreCommitDecisionSync {
 		restageEnabled = true
 		restagePaths = append(restagePaths, "docs/decisions")
 	}
@@ -432,6 +439,15 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 	}
 
 	return reconcileDaemonGitState(reconcileDir, deps, hookName, opts.Verbose)
+}
+
+func gitHookEnvFlagEnabled(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func loadConfigForHook(projectDir string, deps *Dependencies) (*config.Config, error) {
@@ -1333,6 +1349,22 @@ func PrintSpecUsage() {
 	fmt.Println("  az spec parity --fail-on-out")
 }
 
+func PrintLearnUsage() {
+	fmt.Println("Usage: az learn <add|recall|show|review|stale|demote|promote|retire|relate|supersede|doctor|gc> [arguments]")
+	fmt.Println("  add      Capture an evidence-backed candidate learning")
+	fmt.Println("  recall   Search accepted/promoted learning summaries")
+	fmt.Println("  show     Show a learning with full evidence")
+	fmt.Println("  review   List review queues or bulk update selected learnings")
+	fmt.Println("  stale    Mark a learning stale with an audit note")
+	fmt.Println("  demote   Move a learning back to candidate review")
+	fmt.Println("  promote  Mark a learning promoted toward curated guidance")
+	fmt.Println("  retire   Retire an Az-managed promoted guidance block")
+	fmt.Println("  relate   Record supersession or conflict between learnings")
+	fmt.Println("  supersede Record that a newer learning supersedes an older one")
+	fmt.Println("  doctor   Report learning lifecycle maintenance problems without mutation")
+	fmt.Println("  gc       Dry-run or confirm bounded cleanup of inactive learnings")
+}
+
 func PrintSpecReqUsage() {
 	fmt.Println("Usage: az spec req <list|get|create|update|delete> [arguments]")
 	fmt.Println("  list    List requirements")
@@ -1554,6 +1586,25 @@ func resolveProjectDir(projectDir string, deps *Dependencies) (string, error) {
 	return resolved, nil
 }
 
+func resolveGitHookProjectDir(projectDir string, deps *Dependencies) (string, error) {
+	resolved := strings.TrimSpace(projectDir)
+	if resolved != "" {
+		return resolved, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		if deps != nil && strings.TrimSpace(deps.RepoDir) != "" {
+			return strings.TrimSpace(deps.RepoDir), nil
+		}
+		return "", fmt.Errorf("resolve git hook project directory: %w", err)
+	}
+	worktreeRoot, err := config.ResolveWorktreeRoot(cwd)
+	if err == nil && strings.TrimSpace(worktreeRoot) != "" {
+		return worktreeRoot, nil
+	}
+	return cwd, nil
+}
+
 func readCodexGuardState(path string) codexGuardState {
 	state := codexGuardState{Threads: map[string]codexGuardThreadState{}}
 	data, err := os.ReadFile(path)
@@ -1661,7 +1712,7 @@ func codexGuardValueHasPrimeEvidence(value any) bool {
 func runShellCommand(projectDir, command string) error {
 	cmd := exec.Command("/bin/sh", "-lc", command)
 	cmd.Dir = projectDir
-	cmd.Env = gitExecEnvWithoutRoutingVars()
+	cmd.Env = gitExecEnvForHookShellCommand()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

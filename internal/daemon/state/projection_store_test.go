@@ -258,6 +258,193 @@ func TestRuntimeStateStoreSeparatesSessionIntentAndObservations(t *testing.T) {
 	}
 }
 
+func TestRuntimeStateStoreKeepsHookObservationSeparateFromCanonicalSession(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	ctx := context.Background()
+	now := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
+	started := now
+	if err := store.UpsertSessionState(ctx, "proj-a", Session{
+		ID:             "az-bja",
+		IssueID:        "bja",
+		State:          SessionStateRunning,
+		ObservedState:  SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "session",
+		StartedAt:      &started,
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatalf("UpsertSessionState parent: %v", err)
+	}
+	if err := store.UpsertSessionState(ctx, "proj-a", Session{
+		ID:             "az-bja.pane-535",
+		IssueID:        "bja",
+		State:          SessionStatePaused,
+		ObservedState:  SessionStatePaused,
+		Activity:       "idle",
+		ActivitySource: "hooks",
+		StartedAt:      &started,
+		UpdatedAt:      now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("UpsertSessionState pane: %v", err)
+	}
+
+	session, found, err := store.GetSessionState(ctx, "proj-a", "az-bja")
+	if err != nil {
+		t.Fatalf("GetSessionState parent: %v", err)
+	}
+	if !found {
+		t.Fatal("expected canonical parent session")
+	}
+	if session.State != SessionStateRunning {
+		t.Fatalf("parent state = %s, want existing lifecycle state preserved", session.State)
+	}
+	if session.Activity != "busy" || session.ActivitySource != "session" {
+		t.Fatalf("parent activity = %s/%s, want busy/session", session.Activity, session.ActivitySource)
+	}
+}
+
+func TestRuntimeStateStoreSessionActivityEvidenceRoundTrip(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	ctx := context.Background()
+	older := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
+	newer := older.Add(time.Minute)
+	if err := store.UpsertSessionActivityEvidence(ctx, SessionActivityEvidence{
+		ProjectID:       "proj-a",
+		SessionID:       "az-bja",
+		IssueID:         "bja",
+		Activity:        "idle",
+		ActivitySource:  "hooks",
+		SourceSessionID: "az-bja.pane-535",
+		Agent:           "codex",
+		Hook:            "permission_request",
+		Event:           "permission_request",
+		ObservedAt:      newer,
+		UpdatedAt:       newer,
+	}); err != nil {
+		t.Fatalf("UpsertSessionActivityEvidence newer: %v", err)
+	}
+	if err := store.UpsertSessionActivityEvidence(ctx, SessionActivityEvidence{
+		ProjectID:       "proj-a",
+		SessionID:       "az-bja",
+		IssueID:         "bja",
+		Activity:        "busy",
+		ActivitySource:  "hooks",
+		SourceSessionID: "az-bja.pane-122",
+		ObservedAt:      older,
+		UpdatedAt:       older,
+	}); err != nil {
+		t.Fatalf("UpsertSessionActivityEvidence older: %v", err)
+	}
+
+	evidence, found, err := store.GetSessionActivityEvidence(ctx, "proj-a", "az-bja")
+	if err != nil {
+		t.Fatalf("GetSessionActivityEvidence: %v", err)
+	}
+	if !found {
+		t.Fatal("expected session activity evidence")
+	}
+	if evidence.Activity != "idle" ||
+		evidence.ActivitySource != "hooks" ||
+		evidence.SourceSessionID != "az-bja.pane-535" ||
+		!evidence.ObservedAt.Equal(newer) {
+		t.Fatalf("evidence = %+v, want newer idle hook evidence", evidence)
+	}
+
+	listed, err := store.ListSessionActivityEvidence(ctx, "proj-a", []string{"bja"})
+	if err != nil {
+		t.Fatalf("ListSessionActivityEvidence: %v", err)
+	}
+	if got, want := len(listed), 1; got != want {
+		t.Fatalf("listed evidence = %d, want %d: %+v", got, want, listed)
+	}
+}
+
+func TestRuntimeStateStoreMigratesLegacyHookPaneObservationsToActivityEvidence(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE daemon_session_projections (
+			project_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			issue_id TEXT NOT NULL,
+			state TEXT NOT NULL,
+			observed_state TEXT,
+			activity TEXT,
+			activity_source TEXT,
+			tmux_attached_count INTEGER NOT NULL DEFAULT 0,
+			started_at TEXT,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, session_id)
+		);
+		CREATE TABLE daemon_session_observations (
+			project_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			issue_id TEXT NOT NULL,
+			state TEXT NOT NULL,
+			observed_state TEXT,
+			activity TEXT,
+			activity_source TEXT,
+			tmux_attached_count INTEGER NOT NULL DEFAULT 0,
+			started_at TEXT,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, session_id)
+		);
+		INSERT INTO daemon_session_observations (
+			project_id, session_id, issue_id, state, observed_state, activity, activity_source, tmux_attached_count, started_at, updated_at
+		) VALUES
+			('proj-a', 'az-bja.pane-111', 'bja', 'running', 'running', 'busy', 'hooks', 0, '2026-04-01T08:00:00Z', '2026-04-01T08:00:00Z'),
+			('proj-a', 'az-bja.pane-535', 'bja', 'paused', 'paused', 'idle', 'hooks', 0, '2026-04-01T08:00:01Z', '2026-04-01T08:00:01Z'),
+			('proj-a', 'az-bjc.pane-222', 'bjc', 'paused', 'paused', '', 'hooks', 0, '2026-04-01T08:00:02Z', '2026-04-01T08:00:02Z'),
+			('proj-a', 'az-bjd.pane-333', 'bjd', 'paused', 'paused', 'idle', 'runtime', 0, '2026-04-01T08:00:03Z', '2026-04-01T08:00:03Z');
+	`)
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("seed legacy observations: %v", err)
+	}
+	_ = db.Close()
+
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+	ctx := context.Background()
+	evidence, found, err := store.GetSessionActivityEvidence(ctx, "proj-a", "az-bja")
+	if err != nil {
+		t.Fatalf("GetSessionActivityEvidence bja: %v", err)
+	}
+	if !found {
+		t.Fatal("expected migrated bja evidence")
+	}
+	if evidence.Activity != "idle" ||
+		evidence.SourceSessionID != "az-bja.pane-535" ||
+		evidence.ObservedAt.Format(time.RFC3339) != "2026-04-01T08:00:01Z" {
+		t.Fatalf("bja evidence = %+v, want newest idle pane", evidence)
+	}
+	evidence, found, err = store.GetSessionActivityEvidence(ctx, "proj-a", "az-bjc")
+	if err != nil {
+		t.Fatalf("GetSessionActivityEvidence bjc: %v", err)
+	}
+	if !found || evidence.Activity != "idle" {
+		t.Fatalf("bjc evidence = %+v, found=%v, want idle fallback from paused state", evidence, found)
+	}
+	if _, found, err = store.GetSessionActivityEvidence(ctx, "proj-a", "az-bjd"); err != nil {
+		t.Fatalf("GetSessionActivityEvidence bjd: %v", err)
+	} else if found {
+		t.Fatal("did not expect runtime-sourced pane observation to migrate as hook evidence")
+	}
+}
+
 func TestRuntimeStateStoreMigratesLegacyPaneRowsToObservations(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
 	db, err := sql.Open("sqlite", dbPath)

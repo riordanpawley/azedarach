@@ -39,7 +39,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/diff"
-	"github.com/riordanpawley/azedarach/internal/ui/eventticker"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
@@ -58,8 +57,8 @@ const (
 
 const (
 	diffPreviewMaxCharacters       = 200
-	eventTickerCapacity            = 64
 	eventLogCapacity               = 256
+	notificationHistoryCapacity    = 100
 	eventSummaryMaxRunes           = 140
 	taskCloseMutationTimeout       = 10 * time.Minute
 	worktreeCleanupMutationTimeout = 2 * time.Minute
@@ -148,13 +147,30 @@ type editTaskDetailLoadedMsg struct {
 }
 
 type pendingOperationProgress struct {
-	operationID  string
-	kind         string
-	state        protocol.OperationState
-	percent      int
-	message      string
-	errorMessage string
-	updatedAt    time.Time
+	operationID   string
+	kind          string
+	state         protocol.OperationState
+	percent       int
+	message       string
+	errorMessage  string
+	action        string
+	reason        string
+	recovery      string
+	currentStatus domain.Status
+	targetStatus  domain.Status
+	updatedAt     time.Time
+}
+
+type taskMutationFailure struct {
+	operationID    string
+	action         string
+	message        string
+	reason         string
+	recovery       string
+	previousStatus domain.Status
+	currentStatus  domain.Status
+	targetStatus   domain.Status
+	updatedAt      time.Time
 }
 
 type daemonStreamMetrics struct {
@@ -163,6 +179,24 @@ type daemonStreamMetrics struct {
 	RuntimeProjectionsCoalesced uint64
 	Rehydrates                  uint64
 	MaxBatchSize                int
+}
+
+type notificationHistoryEntry struct {
+	ID             string
+	DaemonNoticeID string
+	CreatedAt      time.Time
+	Level          ToastLevel
+	Category       string
+	State          protocol.NoticeState
+	Reference      string
+	ScopeType      string
+	ScopeID        string
+	OperationID    string
+	Message        string
+	Detail         string
+	Read           bool
+	Dismissed      bool
+	Actions        []protocol.NoticeAction
 }
 
 // Model is the main application state
@@ -175,6 +209,7 @@ type Model struct {
 	pendingDetails       map[string]pendingTaskDetails
 	operationTaskID      map[string]string
 	pendingOpsByTask     map[string]pendingOperationProgress
+	pendingFailures      map[string]taskMutationFailure
 	pendingCleanupOps    map[string]pendingWorktreeCleanupConfirmation
 	pendingCleanup       *pendingWorktreeCleanupConfirmation
 	pendingBulkCleanup   *pendingBulkCleanupConfirmation
@@ -228,13 +263,16 @@ type Model struct {
 	logFilePath          string
 
 	// Toasts
-	toasts []Toast
+	toasts                []Toast
+	activeToastHistoryIDs []string
+	notificationHistory   []notificationHistoryEntry
+	notificationSeq       uint64
+	feedback              feedbackProjection
 	// Recoverable async failures surfaced in notifications/recovery overlay.
 	recoveryNotifications   []asyncRecoveryNotification
 	recoveryNotificationSeq uint64
 
-	// Runtime event stream (status ticker + event-log overlay source)
-	eventTicker   *eventticker.Ring
+	// Runtime event stream backing the event-log overlay.
 	runtimeEvents []protocol.EventEnvelope
 
 	// Terminal size
@@ -266,6 +304,8 @@ type Model struct {
 	daemonSocketPath          string
 	daemonEvents              <-chan protocol.EventEnvelope
 	logStreamEvents           <-chan protocol.EventEnvelope
+	daemonEventsCancel        context.CancelFunc
+	logStreamEventsCancel     context.CancelFunc
 	daemonRevision            uint64
 	daemonStreamMetrics       daemonStreamMetrics
 	lastDaemonReattachAttempt time.Time
@@ -348,6 +388,7 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 		pendingDetails:              make(map[string]pendingTaskDetails),
 		operationTaskID:             make(map[string]string),
 		pendingOpsByTask:            make(map[string]pendingOperationProgress),
+		pendingFailures:             make(map[string]taskMutationFailure),
 		pendingCleanupOps:           make(map[string]pendingWorktreeCleanupConfirmation),
 		nav:                         navigation.NewService(),
 		editor:                      editor.NewService(),
@@ -357,8 +398,10 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 		runtimeSignalWorktreeByTask: make(map[string]string),
 		runtimeSignalBranchByTask:   make(map[string]string),
 		toasts:                      []Toast{},
+		activeToastHistoryIDs:       []string{},
+		notificationHistory:         []notificationHistoryEntry{},
+		feedback:                    newFeedbackProjection(),
 		recoveryNotifications:       []asyncRecoveryNotification{},
-		eventTicker:                 eventticker.NewRing(eventTickerCapacity),
 		runtimeEvents:               []protocol.EventEnvelope{},
 		styles:                      styles.New(),
 		config:                      cfg,
@@ -582,6 +625,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+l":
 		// Force redraw
 		return m, tea.ClearScreen
+	case "ctrl+g":
+		if m.overlayStack.IsEmpty() && m.dismissLatestToast() {
+			return m, nil
+		}
 	}
 
 	if next, cmd, handled := m.routeTransientMode(msg); handled {
@@ -780,6 +827,10 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keybinds.ActionOpenRecovery:
 		return m, m.openRecoveryOverlayCmd()
+
+	case keybinds.ActionOpenNotificationHistory:
+		cmd := (&m).openNotificationHistoryOverlayCmd()
+		return m, cmd
 
 	case keybinds.ActionToggleView: // Toggle view mode
 		switch m.viewMode {
@@ -1079,6 +1130,7 @@ type issuesLoadedMsg struct {
 	lastCheckedAt time.Time
 	freshness     protocol.TaskListFreshness
 	events        <-chan protocol.EventEnvelope
+	eventsCancel  context.CancelFunc
 	daemonClient  *daemonclient.Client
 	daemonSocket  string
 	stale         bool
@@ -1101,6 +1153,7 @@ type projectSwitchResultMsg struct {
 	lastCheckedAt time.Time
 	freshness     protocol.TaskListFreshness
 	events        <-chan protocol.EventEnvelope
+	eventsCancel  context.CancelFunc
 	daemonClient  *daemonclient.Client
 	daemonSocket  string
 	err           error
@@ -1124,6 +1177,7 @@ type daemonStreamClosedMsg struct {
 
 type logStreamAttachedMsg struct {
 	stream <-chan protocol.EventEnvelope
+	cancel context.CancelFunc
 	err    error
 }
 
@@ -1142,6 +1196,30 @@ type operationRecordsLoadedMsg struct {
 	projectID string
 	records   []protocol.OperationRecord
 	err       error
+}
+
+type noticeRecordsLoadedMsg struct {
+	projectID string
+	notices   []protocol.NoticeRecord
+	err       error
+}
+
+type noticeUpdateResultMsg struct {
+	projectID string
+	notice    protocol.NoticeRecord
+	label     string
+	err       error
+}
+
+type noticeActionResultMsg struct {
+	projectID string
+	notice    protocol.NoticeRecord
+	label     string
+	err       error
+}
+
+type notificationCopyDetailsResultMsg struct {
+	err error
 }
 
 type uiViewModeLoadedMsg struct {
@@ -1276,6 +1354,7 @@ func (m *Model) applyOperationRecord(record protocol.OperationRecord, now time.T
 	if state == protocol.OperationStateDone {
 		delete(m.pendingOpsByTask, taskIDKey(taskID))
 		delete(m.operationTaskID, operationID)
+		m.clearTaskMutationFailure(taskID)
 		if m.keepPendingStatusUntilCloseProjection(taskID, operationID, record.Kind, now) {
 			return
 		}
@@ -1285,6 +1364,7 @@ func (m *Model) applyOperationRecord(record protocol.OperationRecord, now time.T
 	if operationStateTerminal(state) && !operationRecordRecentlyTerminal(record, now) {
 		delete(m.pendingOpsByTask, taskIDKey(taskID))
 		delete(m.operationTaskID, operationID)
+		m.clearTaskMutationFailure(taskID)
 		m.clearPendingTaskStatusForOperation(taskID, operationID)
 		return
 	}
@@ -1300,6 +1380,27 @@ func (m *Model) applyOperationRecord(record protocol.OperationRecord, now time.T
 	errorMessage := ""
 	if record.Error != nil {
 		errorMessage = strings.TrimSpace(record.Error.Message)
+	}
+	if state == protocol.OperationStateFailed && (errorMessage != "" || message != "") {
+		if status, ok := m.taskStatusByID(taskID); ok {
+			failure := operationMutationFailureDetails(taskID, status, record)
+			errorMessage = failure.Message
+			m.pendingOpsByTask[taskIDKey(taskID)] = pendingOperationProgress{
+				operationID:   operationID,
+				kind:          strings.TrimSpace(record.Kind),
+				state:         state,
+				percent:       percent,
+				message:       errorMessage,
+				errorMessage:  errorMessage,
+				action:        failure.Action,
+				reason:        failure.Reason,
+				recovery:      failure.Recovery,
+				currentStatus: failure.CurrentStatus,
+				targetStatus:  failure.TargetStatus,
+				updatedAt:     now,
+			}
+			return
+		}
 	}
 	if errorMessage != "" {
 		message = errorMessage
@@ -1903,7 +2004,7 @@ func (m Model) readTaskSnapshot(ctx context.Context, client *daemonclient.Client
 	if client == nil {
 		return daemonclient.TaskSnapshot{}, fmt.Errorf("daemon client unavailable")
 	}
-	return client.ListTasksSnapshotWithMode(ctx, daemonclient.ReadWaitModeExplicit)
+	return client.BoardSnapshotWithMode(ctx, daemonclient.ReadWaitModeExplicit)
 }
 
 func (m Model) loadOperationsCmd() tea.Cmd {
@@ -1925,6 +2026,50 @@ func (m Model) loadOperationsCmd() tea.Cmd {
 			Limit: 100,
 		})
 		return operationRecordsLoadedMsg{projectID: projectID, records: records, err: err}
+	}
+}
+
+func (m Model) loadFeedbackProjectionCmd() tea.Cmd {
+	client := m.daemonClient
+	projectID := m.daemonProjectID()
+	if client == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		notices, err := client.ListNotices(ctx, daemonclient.NoticeListOptions{
+			States: []protocol.NoticeState{
+				protocol.NoticeStateActive,
+				protocol.NoticeStateResolved,
+				protocol.NoticeStateDismissed,
+			},
+			Limit: notificationHistoryCapacity,
+		})
+		return noticeRecordsLoadedMsg{projectID: projectID, notices: notices, err: err}
+	}
+}
+
+func (m Model) markDaemonNoticesReadCmd(noticeIDs []string) tea.Cmd {
+	client := m.daemonClient
+	projectID := m.daemonProjectID()
+	if client == nil || len(noticeIDs) == 0 {
+		return nil
+	}
+	ids := append([]string(nil), noticeIDs...)
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		read := true
+		var last protocol.NoticeRecord
+		for _, id := range ids {
+			notice, err := client.UpdateNotice(ctx, id, &read, "")
+			if err != nil {
+				return noticeUpdateResultMsg{projectID: projectID, err: err}
+			}
+			last = notice
+		}
+		return noticeUpdateResultMsg{projectID: projectID, notice: last}
 	}
 }
 
@@ -1979,8 +2124,10 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 				err:       err,
 			}
 		}
-		events, err := daemonClient.Subscribe(context.Background(), projectRouteID.String(), snapshot.Revision)
+		streamCtx, streamCancel := context.WithCancel(context.Background())
+		events, err := daemonClient.Subscribe(streamCtx, projectRouteID.String(), snapshot.Revision)
 		if err != nil {
+			streamCancel()
 			if m.logger != nil {
 				m.logger.Warn("project switch subscribe failed", "to_project", project.Name, "to_project_route", projectRouteID.String(), "revision", snapshot.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
 			}
@@ -2003,6 +2150,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 			lastCheckedAt: snapshot.LastCheckedAt,
 			freshness:     snapshot.Freshness,
 			events:        events,
+			eventsCancel:  streamCancel,
 			daemonClient:  daemonClient,
 			daemonSocket:  socketPath,
 		}
@@ -2058,8 +2206,10 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 			}
 			return issuesErrorMsg{projectID: projectID, err: err}
 		}
-		events, err := daemonClient.Subscribe(context.Background(), projectID, snapshot.Revision)
+		streamCtx, streamCancel := context.WithCancel(context.Background())
+		events, err := daemonClient.Subscribe(streamCtx, projectID, snapshot.Revision)
 		if err != nil {
+			streamCancel()
 			if m.logger != nil {
 				m.logger.Warn("daemon attach subscribe failed", "project_id", projectID, "revision", snapshot.Revision, "error", err)
 			}
@@ -2076,6 +2226,7 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 			lastCheckedAt: snapshot.LastCheckedAt,
 			freshness:     snapshot.Freshness,
 			events:        events,
+			eventsCancel:  streamCancel,
 			daemonClient:  daemonClient,
 			daemonSocket:  socketPath,
 		}
@@ -2160,12 +2311,46 @@ func (m Model) attachLogStreamCmd() tea.Cmd {
 		if m.daemonClient == nil {
 			return logStreamAttachedMsg{err: fmt.Errorf("daemon client unavailable")}
 		}
-		events, err := m.daemonClient.Subscribe(context.Background(), protocol.GlobalEventStreamProjectID, noCatchupRevision)
+		streamCtx, streamCancel := context.WithCancel(context.Background())
+		events, err := m.daemonClient.Subscribe(streamCtx, protocol.GlobalEventStreamProjectID, noCatchupRevision)
 		if err != nil {
+			streamCancel()
 			return logStreamAttachedMsg{err: err}
 		}
-		return logStreamAttachedMsg{stream: events}
+		return logStreamAttachedMsg{stream: events, cancel: streamCancel}
 	}
+}
+
+func (m *Model) replaceDaemonEventStream(stream <-chan protocol.EventEnvelope, cancel context.CancelFunc) {
+	if m.daemonEventsCancel != nil && m.daemonEvents != stream {
+		m.daemonEventsCancel()
+	}
+	m.daemonEvents = stream
+	m.daemonEventsCancel = cancel
+}
+
+func (m *Model) clearDaemonEventStream() {
+	if m.daemonEventsCancel != nil {
+		m.daemonEventsCancel()
+	}
+	m.daemonEvents = nil
+	m.daemonEventsCancel = nil
+}
+
+func (m *Model) replaceLogStream(stream <-chan protocol.EventEnvelope, cancel context.CancelFunc) {
+	if m.logStreamEventsCancel != nil && m.logStreamEvents != stream {
+		m.logStreamEventsCancel()
+	}
+	m.logStreamEvents = stream
+	m.logStreamEventsCancel = cancel
+}
+
+func (m *Model) clearLogStream() {
+	if m.logStreamEventsCancel != nil {
+		m.logStreamEventsCancel()
+	}
+	m.logStreamEvents = nil
+	m.logStreamEventsCancel = nil
 }
 
 func (m Model) queueLogStreamReconnectCmd(delay time.Duration) tea.Cmd {
@@ -2206,6 +2391,7 @@ func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
 	m.applyRuntimeProjectionFromSessionEvent(body)
 	m.reconcilePendingStatuses()
 	m.reconcilePendingOperations()
+	m.reconcilePendingMutationFailures()
 }
 
 func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision {
@@ -3795,7 +3981,11 @@ func (m Model) renderLoading() string {
 
 // addToast adds a toast notification to the list
 func (m *Model) addToast(toast Toast) {
-	m.toasts = append(m.toasts, toast)
+	now := time.Now().UTC()
+	historyID := m.recordNotificationHistory(toast, now)
+	if historyID == "" {
+		return
+	}
 	kind := protocol.EnvelopeKind("info")
 	switch toast.Level {
 	case ToastSuccess:
@@ -3811,7 +4001,7 @@ func (m *Model) addToast(toast Toast) {
 		Event:     "ui.toast",
 		Kind:      kind,
 		Body:      []byte(toast.Message),
-		EmittedAt: time.Now().UTC(),
+		EmittedAt: now,
 	})
 }
 
@@ -3825,12 +4015,6 @@ func (m *Model) recordRuntimeEvent(evt protocol.EventEnvelope) {
 	m.runtimeEvents = append(m.runtimeEvents, evt)
 	if len(m.runtimeEvents) > eventLogCapacity {
 		m.runtimeEvents = append([]protocol.EventEnvelope(nil), m.runtimeEvents[len(m.runtimeEvents)-eventLogCapacity:]...)
-	}
-	if m.eventTicker != nil {
-		summary := runtimeEventSummary(evt)
-		if summary != "" {
-			m.eventTicker.Push(summary)
-		}
 	}
 }
 
@@ -3916,15 +4100,27 @@ func truncateSummary(value string) string {
 // expireToasts removes expired toasts from the list
 func (m *Model) expireToasts() {
 	now := time.Now()
-	filtered := make([]Toast, 0, len(m.toasts))
+	m.feedback.expireLocalToasts(now)
+	m.refreshFeedbackProjectionOutputs(now)
+}
 
-	for _, toast := range m.toasts {
-		if toast.Expires.After(now) {
-			filtered = append(filtered, toast)
-		}
+func (m *Model) dismissLatestToast() bool {
+	if len(m.toasts) == 0 {
+		return false
 	}
-
-	m.toasts = filtered
+	if len(m.activeToastHistoryIDs) == 0 {
+		m.toasts = m.toasts[:len(m.toasts)-1]
+		return true
+	}
+	if len(m.activeToastHistoryIDs) == len(m.toasts) {
+		m.markNotificationDismissed(m.activeToastHistoryIDs[len(m.activeToastHistoryIDs)-1])
+	} else if len(m.activeToastHistoryIDs) > len(m.toasts) {
+		m.activeToastHistoryIDs = m.activeToastHistoryIDs[:len(m.toasts)-1]
+		m.refreshFeedbackProjectionOutputs(time.Now())
+	} else {
+		m.toasts = m.toasts[:len(m.toasts)-1]
+	}
+	return true
 }
 
 // Git operation commands
@@ -4464,6 +4660,7 @@ type taskStatusResultMsg struct {
 	taskID         string
 	previousStatus domain.Status
 	newStatus      domain.Status
+	opts           daemonclient.TaskStatusOptions
 	err            error
 }
 
@@ -4480,6 +4677,7 @@ func (m Model) moveTaskStatusCmdWithOptions(taskID string, previousStatus, newSt
 				taskID:         taskID,
 				previousStatus: previousStatus,
 				newStatus:      newStatus,
+				opts:           opts,
 				err:            err,
 			}
 		}
@@ -4488,18 +4686,21 @@ func (m Model) moveTaskStatusCmdWithOptions(taskID string, previousStatus, newSt
 			taskID:         taskID,
 			previousStatus: previousStatus,
 			newStatus:      newStatus,
+			opts:           opts,
 		}
 	}
 }
 
 func (m Model) moveTaskStatusCascadeChildrenCmd(taskID string, previousStatus, newStatus domain.Status) tea.Cmd {
 	return func() tea.Msg {
-		err := m.updateTaskStatusWithTimeoutOptions(taskID, newStatus, 5*time.Second, daemonclient.TaskStatusOptions{CascadeChildren: true})
+		opts := daemonclient.TaskStatusOptions{CascadeChildren: true}
+		err := m.updateTaskStatusWithTimeoutOptions(taskID, newStatus, 5*time.Second, opts)
 		if err != nil {
 			return taskStatusResultMsg{
 				taskID:         taskID,
 				previousStatus: previousStatus,
 				newStatus:      newStatus,
+				opts:           opts,
 				err:            err,
 			}
 		}
@@ -4508,6 +4709,7 @@ func (m Model) moveTaskStatusCascadeChildrenCmd(taskID string, previousStatus, n
 			taskID:         taskID,
 			previousStatus: previousStatus,
 			newStatus:      newStatus,
+			opts:           opts,
 		}
 	}
 }
@@ -4669,6 +4871,46 @@ func taskStatusOptionsForStatus(status domain.Status) daemonclient.TaskStatusOpt
 		return daemonclient.TaskStatusOptions{}
 	}
 	return daemonclient.TaskStatusOptions{IntegrateBeforeClose: true}
+}
+
+func (m Model) closeFailureDialogCmd(msg taskStatusResultMsg) tea.Cmd {
+	if msg.err == nil || msg.newStatus != domain.StatusDone {
+		return nil
+	}
+	options := overlay.CloseFailureDialogOptions{
+		PreviousStatus:          msg.previousStatus.String(),
+		TargetStatus:            msg.newStatus.String(),
+		ForceWorktree:           msg.opts.ForceWorktree,
+		CloseCleanChildren:      msg.opts.CloseCleanChildren,
+		AllowAIMerge:            true,
+		AllowForceWorktree:      closeFailureSupportsForceWorktree(msg.err),
+		AllowCloseCleanChildren: closeFailureSupportsCloseCleanChildren(msg.err),
+	}
+	return m.openOverlay(overlay.NewCloseFailureDialog(msg.taskID, msg.err.Error(), options))
+}
+
+func closeFailureSupportsForceWorktree(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return isDirtyWorktreeRemovalError(err) ||
+		strings.Contains(message, "dirty worktree") ||
+		strings.Contains(message, "worktree has local changes") ||
+		strings.Contains(message, "modified or untracked") ||
+		strings.Contains(message, "force worktree") ||
+		strings.Contains(message, "--force-worktree")
+}
+
+func closeFailureSupportsCloseCleanChildren(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "unresolved child issues remain") ||
+		strings.Contains(message, "close clean child") ||
+		strings.Contains(message, "close-clean-children") ||
+		strings.Contains(message, "clean unresolved child")
 }
 
 func (m Model) bulkMoveNeedsCloseCleanupConfirmation(taskIDs []string, delta int) bool {
@@ -5069,6 +5311,7 @@ func (m *Model) markTaskStatusPending(taskID string, previousStatus, targetStatu
 	if m.pendingStatuses == nil {
 		m.pendingStatuses = make(map[string]pendingTaskStatus)
 	}
+	m.clearTaskMutationFailure(taskID)
 	m.pendingStatuses[taskIDKey(taskID)] = pendingTaskStatus{
 		previousStatus: previousStatus,
 		targetStatus:   targetStatus,
@@ -5090,6 +5333,10 @@ func (m *Model) markTaskOperationPending(taskID, action, operationID string, sta
 		m.pendingStatuses = make(map[string]pendingTaskStatus)
 	}
 	key := taskIDKey(taskID)
+	if key == "" {
+		return
+	}
+	m.clearTaskMutationFailure(taskID)
 	current := m.pendingStatuses[key]
 	if action == "session_start" && current.targetStatus == "" {
 		if status, ok := m.taskStatusByID(taskID); ok && status != domain.StatusDone {
@@ -5124,6 +5371,7 @@ func (m *Model) markTaskGitOperationPending(taskID, kind, operationID string, st
 	if key == "" {
 		return
 	}
+	m.clearTaskMutationFailure(taskID)
 	if m.pendingOpsByTask == nil {
 		m.pendingOpsByTask = make(map[string]pendingOperationProgress)
 	}
@@ -5156,6 +5404,7 @@ func (m *Model) markTaskGitOperationPreparing(taskID, message string) {
 	if key == "" {
 		return
 	}
+	m.clearTaskMutationFailure(taskID)
 	if m.pendingOpsByTask == nil {
 		m.pendingOpsByTask = make(map[string]pendingOperationProgress)
 	}
@@ -5165,6 +5414,45 @@ func (m *Model) markTaskGitOperationPreparing(taskID, message string) {
 		message:   strings.TrimSpace(message),
 		updatedAt: time.Now(),
 	}
+}
+
+func (m *Model) markTaskMutationFailed(taskID, action, message string) {
+	m.markTaskStatusMutationFailed(taskID, action, "", "", message)
+}
+
+func (m *Model) markTaskStatusMutationFailed(taskID, action string, previousStatus, targetStatus domain.Status, message string) {
+	m.markTaskMutationFailure(mutationFailureDetails{
+		TaskID:         strings.TrimSpace(taskID),
+		Action:         strings.TrimSpace(action),
+		PreviousStatus: previousStatus,
+		CurrentStatus:  previousStatus,
+		TargetStatus:   targetStatus,
+		Message:        strings.TrimSpace(message),
+	})
+}
+
+func (m *Model) markTaskMutationFailure(details mutationFailureDetails) {
+	taskID := strings.TrimSpace(details.TaskID)
+	key := taskIDKey(taskID)
+	if key == "" {
+		return
+	}
+	if m.pendingFailures == nil {
+		m.pendingFailures = make(map[string]taskMutationFailure)
+	}
+	delete(m.pendingOpsByTask, key)
+	failure := taskMutationFailure{
+		action:         strings.TrimSpace(details.Action),
+		message:        strings.TrimSpace(details.Message),
+		reason:         strings.TrimSpace(details.Reason),
+		recovery:       strings.TrimSpace(details.Recovery),
+		previousStatus: details.PreviousStatus,
+		currentStatus:  details.CurrentStatus,
+		targetStatus:   details.TargetStatus,
+		updatedAt:      time.Now(),
+	}
+	m.feedback.setLocalFailure(key, failure)
+	m.refreshFeedbackProjectionOutputs(time.Now())
 }
 
 func (m *Model) markMergeOperationPending(sourceID, targetID, operationID string, state protocol.OperationState) {
@@ -5240,6 +5528,11 @@ func (m *Model) clearPendingTaskStatus(taskID string) {
 	delete(m.pendingStatuses, taskIDKey(taskID))
 }
 
+func (m *Model) clearTaskMutationFailure(taskID string) {
+	m.feedback.clearLocalFailure(taskID)
+	m.refreshFeedbackProjectionOutputs(time.Now())
+}
+
 func (m *Model) clearPendingTaskStatusForOperation(taskID, operationID string) {
 	key := taskIDKey(taskID)
 	if key == "" || len(m.pendingStatuses) == 0 {
@@ -5271,9 +5564,32 @@ func (m Model) pendingMutationForTask(taskID string) *overlay.TaskMutationProgre
 		progress.State = string(op.state)
 		progress.ProgressPercent = op.percent
 		progress.ProgressMessage = op.message
+		progress.FailureAction = op.action
+		progress.FailureReason = op.reason
+		progress.FailureRecovery = op.recovery
+		progress.CurrentStatus = op.currentStatus
+		if progress.PreviousStatus == "" {
+			progress.PreviousStatus = op.currentStatus
+		}
+		if op.targetStatus != "" {
+			progress.TargetStatus = op.targetStatus
+		}
 		if strings.TrimSpace(op.errorMessage) != "" {
 			progress.ProgressMessage = op.errorMessage
 		}
+	}
+	if failure, ok := m.pendingFailures[key]; ok {
+		if progress.OperationID == "" {
+			progress.OperationID = failure.operationID
+		}
+		progress.State = string(protocol.OperationStateFailed)
+		progress.ProgressMessage = strings.TrimSpace(failure.message)
+		progress.PreviousStatus = failure.previousStatus
+		progress.CurrentStatus = failure.currentStatus
+		progress.TargetStatus = failure.targetStatus
+		progress.FailureAction = failure.action
+		progress.FailureReason = failure.reason
+		progress.FailureRecovery = failure.recovery
 	}
 	if runtime, ok := m.runtimeSignalsByTask[key]; ok {
 		if progress.OperationID == "" {
@@ -5355,10 +5671,14 @@ func (m *Model) syncTaskWorkspaceOverlay() {
 }
 
 func (m *Model) applySingleTaskWorkspaceRefresh(taskID string, refreshed domain.Task) (domain.Task, bool) {
+	m.reconcilePendingStatuses()
+	m.reconcilePendingMutationFailures()
 	return m.applyTaskRefresh(taskID, refreshed, true)
 }
 
 func (m *Model) applyTaskRefreshes(refreshed []domain.Task) {
+	m.reconcilePendingStatuses()
+	m.reconcilePendingMutationFailures()
 	updated := false
 	for _, task := range refreshed {
 		if _, ok := m.applyTaskRefresh(task.ID.String(), task, false); ok {
@@ -5367,6 +5687,7 @@ func (m *Model) applyTaskRefreshes(refreshed []domain.Task) {
 	}
 	if updated {
 		m.syncProjectionIndexesFromTasks()
+		m.refreshFeedbackProjectionOutputs(time.Now())
 		m.reconcileCursorAfterIssuesRefresh()
 	}
 }
@@ -5380,8 +5701,11 @@ func (m *Model) applyTaskRefresh(taskID string, refreshed domain.Task, syncAfter
 		if taskIDKey(m.tasks[i].ID.String()) != key {
 			continue
 		}
+		refreshed = m.applyPendingStatusOverlayToTask(refreshed)
 		m.tasks[i] = refreshed
 		m.tasks[i].Session = cloneSession(m.tasks[i].Session)
+		m.reconcilePendingMutationFailures()
+		m.refreshFeedbackProjectionOutputs(time.Now())
 		if syncAfter {
 			m.syncProjectionIndexesFromTasks()
 			m.reconcileCursorAfterIssuesRefresh()
@@ -5391,26 +5715,31 @@ func (m *Model) applyTaskRefresh(taskID string, refreshed domain.Task, syncAfter
 	return domain.Task{}, false
 }
 
+func (m *Model) applyPendingStatusOverlayToTask(task domain.Task) domain.Task {
+	key := taskIDKey(task.ID.String())
+	if key == "" || len(m.pendingStatuses) == 0 {
+		return task
+	}
+	pending, ok := m.pendingStatuses[key]
+	if !ok || pending.targetStatus == "" {
+		return task
+	}
+	if task.Status == pending.targetStatus {
+		if pending.action != "session_start" {
+			delete(m.pendingStatuses, key)
+		}
+		return task
+	}
+	task.Status = pending.targetStatus
+	return task
+}
+
 func (m *Model) applyPendingStatusOverlays() {
 	if len(m.pendingStatuses) == 0 {
 		return
 	}
 	for i := range m.tasks {
-		key := taskIDKey(m.tasks[i].ID.String())
-		pending, ok := m.pendingStatuses[key]
-		if !ok {
-			continue
-		}
-		if pending.targetStatus == "" {
-			continue
-		}
-		if m.tasks[i].Status == pending.targetStatus {
-			if pending.action != "session_start" {
-				delete(m.pendingStatuses, key)
-			}
-			continue
-		}
-		m.tasks[i].Status = pending.targetStatus
+		m.tasks[i] = m.applyPendingStatusOverlayToTask(m.tasks[i])
 	}
 }
 
@@ -5473,6 +5802,22 @@ func (m *Model) reconcilePendingTaskDetails() {
 			continue
 		}
 		if !pending.updatedAt.IsZero() && now.Sub(pending.updatedAt) > stalePendingTTL {
+			delete(m.pendingDetails, key)
+		}
+	}
+}
+
+func (m *Model) reconcilePendingTaskDetailsFromHydrated(tasks []domain.Task) {
+	if len(m.pendingDetails) == 0 || len(tasks) == 0 {
+		return
+	}
+	for _, task := range tasks {
+		key := taskIDKey(task.ID.String())
+		pending, ok := m.pendingDetails[key]
+		if !ok {
+			continue
+		}
+		if taskDetailsMatchPending(task, pending) {
 			delete(m.pendingDetails, key)
 		}
 	}
@@ -5579,6 +5924,40 @@ func (m *Model) reconcilePendingOperations() {
 			}
 		}
 	}
+}
+
+func (m *Model) reconcilePendingMutationFailures() {
+	if len(m.feedback.localFailures) == 0 {
+		return
+	}
+
+	taskByID := make(map[string]domain.Task, len(m.tasks))
+	for _, task := range m.tasks {
+		taskByID[taskIDKey(task.ID.String())] = task
+	}
+
+	const staleFailureTTL = visibleTerminalOperationTTL
+	now := time.Now()
+
+	for key, failure := range m.feedback.localFailures {
+		task, ok := taskByID[key]
+		if !ok {
+			delete(m.feedback.localFailures, key)
+			continue
+		}
+		if !failure.updatedAt.IsZero() && now.Sub(failure.updatedAt) > staleFailureTTL {
+			delete(m.feedback.localFailures, key)
+			continue
+		}
+		if failure.targetStatus != "" && task.Status == failure.targetStatus {
+			delete(m.feedback.localFailures, key)
+			continue
+		}
+		if failure.previousStatus != "" && task.Status != failure.previousStatus {
+			delete(m.feedback.localFailures, key)
+		}
+	}
+	m.refreshFeedbackProjectionOutputs(now)
 }
 
 // Phase 6 helper methods

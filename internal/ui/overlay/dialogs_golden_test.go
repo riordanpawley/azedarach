@@ -25,6 +25,7 @@ func TestDialogs_View_Golden(t *testing.T) {
 		{name: "conflict", view: goldenConflictView},
 		{name: "cleanup", view: goldenCleanupView},
 		{name: "cleanup_confirm", view: goldenCleanupConfirmView},
+		{name: "close_failure", view: goldenCloseFailureView},
 		{name: "confirm", view: goldenConfirmView},
 		{name: "gitpull", view: goldenGitPullView},
 		{name: "mergechoice", view: goldenMergeChoiceView},
@@ -65,6 +66,7 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 		{name: "gitpull_small", view: goldenGitPullSmallView},
 		{name: "conflict_small", view: goldenConflictSmallView},
 		{name: "cleanup_small", view: goldenCleanupSmallView},
+		{name: "close_failure_small", view: goldenCloseFailureSmallView},
 		{name: "mergechoice_small", view: goldenMergeChoiceSmallView},
 		{name: "imageattach_list_small", view: goldenImageAttachListSmallView},
 		{name: "merge_upstream_small", view: goldenMergeUpstreamSmallView},
@@ -180,6 +182,39 @@ func goldenCleanupSmallView(t *testing.T) string {
 	overlay.categories[2].Selected = true
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	return model.(*BulkCleanupOverlay).View()
+}
+
+func goldenCloseFailureView(t *testing.T) string {
+	t.Helper()
+	dialog := NewCloseFailureDialog(
+		"az-321",
+		"cannot close issue az-321: unresolved child issues remain: az-400 (open). Next: close or clean up the listed child issues first, then retry",
+		CloseFailureDialogOptions{
+			PreviousStatus:          "in_review",
+			TargetStatus:            "closed",
+			AllowAIMerge:            true,
+			AllowForceWorktree:      true,
+			AllowCloseCleanChildren: true,
+		},
+	)
+	model, _ := dialog.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*CloseFailureDialog).View()
+}
+
+func goldenCloseFailureSmallView(t *testing.T) string {
+	t.Helper()
+	dialog := NewCloseFailureDialog(
+		"az-321",
+		"cannot close issue az-321: worktree has local changes: main.go. Next: commit, discard, or merge the worktree changes first, then retry",
+		CloseFailureDialogOptions{
+			PreviousStatus:     "in_review",
+			TargetStatus:       "closed",
+			AllowAIMerge:       true,
+			AllowForceWorktree: true,
+		},
+	)
+	model, _ := dialog.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	return model.(*CloseFailureDialog).View()
 }
 
 func goldenGitPullView(t *testing.T) string {

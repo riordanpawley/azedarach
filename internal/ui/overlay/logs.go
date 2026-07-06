@@ -116,6 +116,12 @@ func (o *EventLogOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.Type {
+		case tea.KeyDown:
+			o.scrollDown()
+			return o, nil
+		case tea.KeyUp:
+			o.scrollUp()
+			return o, nil
 		case tea.KeyCtrlD:
 			o.scroll = min(o.maxScroll, o.scroll+o.halfPageStep())
 			return o, nil
@@ -139,14 +145,10 @@ func (o *EventLogOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			o.toggleTopVisibleEvent()
 			return o, nil
 		case "j", "down":
-			if o.scroll < o.maxScroll {
-				o.scroll++
-			}
+			o.scrollDown()
 			return o, nil
 		case "k", "up":
-			if o.scroll > 0 {
-				o.scroll--
-			}
+			o.scrollUp()
 			return o, nil
 		case "g":
 			o.scroll = 0
@@ -456,7 +458,7 @@ func (o *EventLogOverlay) actionBindings(scrollable bool) []keybinds.Binding {
 	bindings = append(bindings, keybinds.Binding{Key: "Enter/Space", Description: "expand"})
 	if scrollable {
 		bindings = append(bindings,
-			keybinds.Binding{Key: "j/k", Description: "scroll"},
+			keybinds.Binding{Key: "j/k/up/down", Description: "scroll"},
 			keybinds.Binding{Key: "ctrl+u/d", Description: "half-page"},
 			keybinds.Binding{Key: "g/G", Description: "top/bottom"},
 		)
@@ -603,6 +605,18 @@ func (o *EventLogOverlay) eventRowsStartLine() int {
 		lines++
 	}
 	return lines
+}
+
+func (o *EventLogOverlay) scrollDown() {
+	if o.scroll < o.maxScroll {
+		o.scroll++
+	}
+}
+
+func (o *EventLogOverlay) scrollUp() {
+	if o.scroll > 0 {
+		o.scroll--
+	}
 }
 
 func (o *EventLogOverlay) renderCategory(evt protocol.EventEnvelope) string {

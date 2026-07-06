@@ -137,7 +137,8 @@ func shouldRetryReadCommandResponse(command string, resp protocol.ResponseEnvelo
 
 func isDaemonReadCommand(command string) bool {
 	switch command {
-	case CommandTaskList,
+	case CommandBoardFetch,
+		CommandTaskList,
 		CommandTaskGet,
 		CommandTaskGetMany,
 		CommandTaskEvents,
@@ -162,12 +163,16 @@ func isDaemonReadCommand(command string) bool {
 		CommandDecisionList,
 		CommandDecisionGet,
 		CommandDecisionLinkList,
+		protocol.CommandLearnRecall,
+		protocol.CommandLearnShow,
 		CommandGitBranchBehind,
 		CommandGitDiffStat,
 		CommandGitStatus,
 		CommandGitRuntimeSignals,
 		CommandGitMergePreflight,
 		CommandGitWorktreeForBranch,
+		protocol.CommandNoticeList,
+		protocol.CommandNoticeGet,
 		protocol.CommandScheduledScriptsStatus,
 		protocol.CommandMailList,
 		protocol.CommandMailWatch:

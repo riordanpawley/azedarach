@@ -18,6 +18,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
+	daemonnotices "github.com/riordanpawley/azedarach/internal/daemon/notices"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
@@ -143,6 +144,7 @@ type Daemon struct {
 	worktreeGitProbeThrottle           *reconcileThrottle
 	queueMu                            sync.Mutex
 	operationRuntime                   *operationRuntime
+	noticeService                      *daemonnotices.Service
 	runtimeProjectionCoalescer         *runtimeProjectionEventCoalescer
 	scheduledScripts                   *scheduledScriptManager
 	sessionStopMu                      sync.Mutex
@@ -308,6 +310,7 @@ func New(cfg Config) *Daemon {
 	specService.daemon = d
 	specHandler := daemonhandlers.NewSpecHandler(specService)
 	decisionHandler := daemonhandlers.NewDecisionHandler(issueDecisionService{daemon: d})
+	learnHandler := daemonhandlers.NewLearnHandler(issueLearnService{daemon: d})
 	d.syncBootstrapFn = d.defaultSyncBootstrap
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
 	d.runtimeProjectionCoalescer = newRuntimeProjectionEventCoalescer(d, defaultRuntimeProjectionCoalesceWindow)
@@ -335,6 +338,12 @@ func New(cfg Config) *Daemon {
 	gitService.onStatusUpdate = func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) {
 		d.runtimeProjectionStateWriter().PublishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status)
 	}
+	noticeService := daemonnotices.NewService(daemonnotices.ServiceConfig{
+		Repository:   daemonnotices.New(cfg.RepoDir, cfg.Logger),
+		Hub:          d.hub,
+		NextRevision: d.nextRevision,
+		Logger:       cfg.Logger,
+	})
 	runtime := newOperationRuntime(operationRuntimeConfig{
 		repoDir:                cfg.RepoDir,
 		logger:                 cfg.Logger,
@@ -344,6 +353,7 @@ func New(cfg Config) *Daemon {
 		sessionStop:            d.handleSessionStopDirect,
 		sessionResolveConflict: d.handleSessionResolveConflictDirect,
 		recoverInterrupted:     d.recoverInterruptedOperation,
+		noticeService:          noticeService,
 	})
 	commandExecutor := operationCommandExecutor{runtime: runtime}
 	sessionExecutor := sessionOperationExecutor{runtime: runtime}
@@ -395,6 +405,7 @@ func New(cfg Config) *Daemon {
 	d.gitHandler = gitHandler
 	d.worktreeHandler = worktreeHandler
 	d.operationRuntime = runtime
+	d.noticeService = noticeService
 	d.sessionLongRunning = sessionExecutor
 	d.runtimeReconciler = newRuntimeReconcileService(d)
 	d.router = daemonhandlers.NewDispatcher(
@@ -405,6 +416,7 @@ func New(cfg Config) *Daemon {
 		prHandler,
 		specHandler,
 		decisionHandler,
+		learnHandler,
 		runtime,
 	)
 	d.apply = daemonhandlers.NewApplyHandler(d, applyRevisionAdapter{daemon: d})
@@ -463,6 +475,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if d.operationRuntime != nil {
 			if closeErr := d.operationRuntime.Close(); closeErr != nil {
 				d.cfg.Logger.Warn("failed to close operation runtime", "error", closeErr)
+			}
+		}
+		if d.noticeService != nil {
+			if closeErr := d.noticeService.Close(); closeErr != nil {
+				d.cfg.Logger.Warn("failed to close notice service", "error", closeErr)
 			}
 		}
 		if d.runtimeProjectionCoalescer != nil {
@@ -655,6 +672,16 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleUIStateSet(ctx, req)
 	case protocol.CommandProjectCleanup:
 		return d.handleProjectCleanup(ctx, req)
+	case protocol.CommandNoticeList:
+		return d.handleNoticeList(ctx, req), nil
+	case protocol.CommandNoticeGet:
+		return d.handleNoticeGet(ctx, req), nil
+	case protocol.CommandNoticeUpdate:
+		return d.handleNoticeUpdate(ctx, req), nil
+	case protocol.CommandNoticeAction:
+		return d.handleNoticeAction(ctx, req), nil
+	case protocol.CommandBoardFetch:
+		return d.handleBoardFetch(ctx, req)
 	case protocol.CommandScheduledScriptsStatus:
 		return d.handleScheduledScriptsStatus(ctx, req)
 	case "task.list":

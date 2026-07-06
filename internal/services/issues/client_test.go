@@ -15,6 +15,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -712,6 +713,81 @@ func TestClient_ListWithRuntimeReadsSessionObservations(t *testing.T) {
 	assert.Equal(t, "busy", tasks[0].Session.Activity)
 	assert.Equal(t, "runtime", tasks[0].Session.ActivitySource)
 	assert.True(t, tasks[0].HasTmuxSession)
+}
+
+func TestClient_ListWithRuntimeReadsCanonicalHookActivityProjection(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-hook-pane-activity"
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Hook pane activity task",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	require.NoError(t, err)
+
+	startedAt := time.Date(2026, time.April, 4, 12, 30, 0, 0, time.UTC)
+	hookUpdatedAt := startedAt.Add(5 * time.Minute)
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(client.dbPath, slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStore.Close()
+	})
+	started := startedAt
+	err = runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:             "az-" + taskID,
+		IssueID:        taskID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "idle",
+		ActivitySource: "hooks",
+		StartedAt:      &started,
+		UpdatedAt:      hookUpdatedAt,
+	})
+	require.NoError(t, err)
+	err = runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:             "az-" + taskID + ".pane-19",
+		IssueID:        taskID,
+		State:          daemonstate.SessionStatePaused,
+		ObservedState:  daemonstate.SessionStatePaused,
+		Activity:       "idle",
+		ActivitySource: "hooks",
+		StartedAt:      &started,
+		UpdatedAt:      hookUpdatedAt,
+	})
+	require.NoError(t, err)
+
+	tasks, err := client.ListWithRuntime(ctx, projectID)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.NotNil(t, tasks[0].Session)
+	assert.Equal(t, "idle", tasks[0].Session.Activity)
+	assert.Equal(t, "hooks", tasks[0].Session.ActivitySource)
+	assert.Equal(t, "idle", tasks[0].Session.DisplayLabel())
+
+	got, err := client.GetWithRuntime(ctx, projectID, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, got.Session)
+	assert.Equal(t, "idle", got.Session.Activity)
+	assert.Equal(t, "hooks", got.Session.ActivitySource)
+	assert.Equal(t, "idle", got.Session.DisplayLabel())
+
+	summaries, err := client.ListSummariesWithRuntime(ctx, projectID)
+	require.NoError(t, err)
+	require.Len(t, summaries, 1)
+	require.NotNil(t, summaries[0].Session)
+	assert.Equal(t, "idle", summaries[0].Session.Activity)
+	assert.Equal(t, "hooks", summaries[0].Session.ActivitySource)
+	assert.Equal(t, "idle", summaries[0].Session.DisplayLabel())
+
+	metadata, err := client.GetManyMetadataWithRuntime(ctx, projectID, []string{taskID})
+	require.NoError(t, err)
+	require.Len(t, metadata, 1)
+	require.NotNil(t, metadata[0].Session)
+	assert.Equal(t, "idle", metadata[0].Session.Activity)
+	assert.Equal(t, "hooks", metadata[0].Session.ActivitySource)
+	assert.Equal(t, "idle", metadata[0].Session.DisplayLabel())
 }
 
 func TestClient_ListSummariesWithRuntimeKeepsParentAndRuntimeProjection(t *testing.T) {
@@ -3051,8 +3127,141 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0016_issue_search_fts",
 		"0017_spec_requirement_search_fts",
 		"0018_issue_graph_closure",
+		"0019_agent_learnings",
 		"0019_issue_observation_events",
+		"0020_agent_learning_lifecycle",
+		"0021_agent_learning_metadata",
+		"0021_agent_learning_relations",
+		"0021_agent_learning_target_state",
+		"0025_agent_learning_privacy",
 	}, got)
+}
+
+func TestClient_ReplaysAgentLearningPrivacyMigrationWhenColumnAlreadyExists(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+
+	client := NewClientAtPath(dbPath, slog.Default())
+	_, err := client.Create(ctx, CreateTaskParams{
+		Title:    "seed migrated schema",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.CloseDB())
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	_, err = db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE id = '0025_agent_learning_privacy'`)
+	require.NoError(t, err)
+
+	client = NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, client.CloseDB())
+	})
+	_, err = client.List(ctx)
+	require.NoError(t, err)
+
+	var applied bool
+	err = db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM schema_migrations WHERE id = '0025_agent_learning_privacy'
+		)
+	`).Scan(&applied)
+	require.NoError(t, err)
+	assert.True(t, applied)
+
+	var indexed bool
+	err = db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM sqlite_master
+			WHERE type = 'index' AND name = 'idx_agent_learnings_active_privacy'
+		)
+	`).Scan(&indexed)
+	require.NoError(t, err)
+	assert.True(t, indexed)
+}
+
+func TestClient_RepairsAppliedAgentLearningMigrationMissingReviewColumns(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		seedLearning bool
+	}{
+		{name: "with learnings", seedLearning: true},
+		{name: "without learnings", seedLearning: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+
+			client := NewClientAtPath(dbPath, slog.Default())
+			_, err := client.List(ctx)
+			require.NoError(t, err)
+			var created Learning
+			if tc.seedLearning {
+				issueID, err := client.Create(ctx, CreateTaskParams{
+					Title:    "learning schema repair",
+					Type:     domain.TypeTask,
+					Priority: domain.P3,
+				})
+				require.NoError(t, err)
+				created, err = client.CreateLearning(ctx, CreateLearningParams{
+					ProjectID: "proj",
+					IssueID:   &issueID,
+					Summary:   "Keep migration repair idempotent",
+					Evidence:  "Affected databases have 0019 marked applied but are missing review columns.",
+					Tags:      []string{"migration"},
+				})
+				require.NoError(t, err)
+			}
+			require.NoError(t, client.CloseDB())
+
+			db, err := sql.Open("sqlite", "file:"+dbPath)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = db.Close() })
+			for _, column := range []string{"review_note", "reviewed_at"} {
+				_, err = db.ExecContext(ctx, "ALTER TABLE agent_learnings DROP COLUMN "+column)
+				require.NoError(t, err)
+			}
+
+			var applied bool
+			err = db.QueryRowContext(ctx, `
+				SELECT EXISTS(
+					SELECT 1 FROM schema_migrations WHERE id = '0019_agent_learnings'
+				)
+			`).Scan(&applied)
+			require.NoError(t, err)
+			require.True(t, applied)
+
+			client = NewClientAtPath(dbPath, slog.Default())
+			t.Cleanup(func() {
+				require.NoError(t, client.CloseDB())
+			})
+			rows, err := client.ListLearnings(ctx, LearningFilter{
+				ProjectID: "proj",
+				Query:     "idempotent",
+				Limit:     5,
+			})
+			require.NoError(t, err)
+			if !tc.seedLearning {
+				assert.Empty(t, rows)
+			} else {
+				require.Len(t, rows, 1)
+				assert.Equal(t, created.LocalID, rows[0].LocalID)
+				assert.Empty(t, rows[0].ReviewNote)
+				assert.Nil(t, rows[0].ReviewedAt)
+			}
+
+			columns, err := tableColumns(db, "agent_learnings")
+			require.NoError(t, err)
+			for _, column := range []string{"review_note", "reviewed_at"} {
+				_, exists := columns[column]
+				assert.True(t, exists)
+			}
+		})
+	}
 }
 
 func TestClient_MigratesClosedRuntimeInvariantViolationsToInReview(t *testing.T) {

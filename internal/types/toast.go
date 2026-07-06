@@ -4,9 +4,10 @@ import "time"
 
 // Toast represents a notification message
 type Toast struct {
-	Level   ToastLevel
-	Message string
-	Expires time.Time
+	Level     ToastLevel
+	Message   string
+	CreatedAt time.Time
+	Expires   time.Time
 }
 
 // ToastLevel indicates the severity of a toast

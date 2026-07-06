@@ -77,6 +77,40 @@ func TestIssueSpecServiceReadResolvesExternalCodeSelector(t *testing.T) {
 	}
 }
 
+func TestMapLearningToProtocolIncludesPromotedTargetState(t *testing.T) {
+	retiredAt := time.Date(2026, 7, 2, 5, 0, 0, 0, time.UTC)
+	driftedAt := retiredAt.Add(time.Minute)
+	learning := issues.Learning{
+		LocalID:         "learn-1",
+		ProjectID:       "proj",
+		Summary:         "Promoted target state",
+		Evidence:        "Evidence.",
+		Status:          issues.LearningStatusPromoted,
+		TargetState:     issues.LearningTargetStateDrifted,
+		TargetHash:      "sha256:target",
+		TargetMetadata:  map[string]string{"path": "docs/target.md"},
+		TargetRetiredAt: &retiredAt,
+		TargetDriftedAt: &driftedAt,
+		CreatedAt:       retiredAt,
+		UpdatedAt:       driftedAt,
+	}
+
+	out := mapLearningToProtocol(learning, true)
+
+	if out.TargetState != protocol.LearningTargetStateDrifted {
+		t.Fatalf("target state = %q, want drifted", out.TargetState)
+	}
+	if out.TargetHash != "sha256:target" {
+		t.Fatalf("target hash = %q", out.TargetHash)
+	}
+	if out.TargetMetadata["path"] != "docs/target.md" {
+		t.Fatalf("target metadata = %+v", out.TargetMetadata)
+	}
+	if out.TargetRetiredAt == "" || out.TargetDriftedAt == "" {
+		t.Fatalf("target timestamps missing: %+v", out)
+	}
+}
+
 func TestIssueSpecServiceReadIssueScopeIncludesLinkedRequirementsWithoutIssueID(t *testing.T) {
 	ctx := context.Background()
 	client, repoDir := newTestIssueClient(t)
@@ -365,6 +399,409 @@ func TestIssueSpecServiceLintDoesNotFailOnOverlappingLocalAndExternalCodes(t *te
 	}
 }
 
+func TestIssueLearnServiceOmitEvidenceFromReviewAndPromoteResponses(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	service := newTestIssueLearnService(client, repoDir)
+
+	added, err := service.Add(ctx, protocol.LearnAddRequestBody{
+		Summary:  "Private credential handling",
+		Evidence: "Sensitive placeholder evidence",
+		Private:  true,
+	})
+	if err != nil {
+		t.Fatalf("add learning: %v", err)
+	}
+	if added.Learning.Evidence == "" || !added.Learning.EvidencePrivate {
+		t.Fatalf("add response should echo explicit capture evidence and private flag: %+v", added.Learning)
+	}
+
+	reviewed, err := service.Review(ctx, protocol.LearnReviewRequestBody{
+		ID:     added.Learning.ID,
+		Status: protocol.LearningStatusAccepted,
+		Note:   "Reviewed private row.",
+	})
+	if err != nil {
+		t.Fatalf("review learning: %v", err)
+	}
+	if reviewed.Updated == nil {
+		t.Fatal("review response missing updated learning")
+	}
+	if reviewed.Updated.Evidence != "" || !reviewed.Updated.EvidencePrivate {
+		t.Fatalf("review response evidence/private = %q/%v, want no evidence and private marker", reviewed.Updated.Evidence, reviewed.Updated.EvidencePrivate)
+	}
+
+	decision, err := client.RecordDecision(ctx, issues.RecordDecisionParams{
+		Title:     "Private evidence target",
+		Rationale: "Decision exists so promotion can validate target ownership.",
+	})
+	if err != nil {
+		t.Fatalf("record decision: %v", err)
+	}
+	promoted, err := service.Promote(ctx, protocol.LearnPromoteRequestBody{
+		ID:       added.Learning.ID,
+		Target:   protocol.LearningPromotionTargetDecision,
+		TargetID: decision.LocalID,
+	})
+	if err != nil {
+		t.Fatalf("promote learning: %v", err)
+	}
+	if promoted.Learning.Evidence != "" || !promoted.Learning.EvidencePrivate {
+		t.Fatalf("promote response evidence/private = %q/%v, want no evidence and private marker", promoted.Learning.Evidence, promoted.Learning.EvidencePrivate)
+	}
+}
+
+func TestIssueLearnServiceReviewQueuesAndBulkSelectedReview(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	service := newTestIssueLearnService(client, repoDir)
+
+	first, err := service.Add(ctx, protocol.LearnAddRequestBody{
+		Summary:  "First queue candidate",
+		Evidence: "First queue candidate evidence.",
+		Tags:     []string{"triage"},
+		Files:    []string{"internal/daemon/learn.go"},
+	})
+	if err != nil {
+		t.Fatalf("add first learning: %v", err)
+	}
+	second, err := service.Add(ctx, protocol.LearnAddRequestBody{
+		Summary:  "Second queue candidate",
+		Evidence: "Second queue candidate evidence.",
+		Tags:     []string{"triage"},
+		Files:    []string{"internal/daemon/learn.go"},
+	})
+	if err != nil {
+		t.Fatalf("add second learning: %v", err)
+	}
+	unmatched, err := service.Add(ctx, protocol.LearnAddRequestBody{
+		Summary:  "Unmatched queue candidate",
+		Evidence: "Unmatched queue candidate evidence.",
+		Tags:     []string{"other"},
+	})
+	if err != nil {
+		t.Fatalf("add unmatched learning: %v", err)
+	}
+
+	queue, err := service.Review(ctx, protocol.LearnReviewRequestBody{
+		QueueStatuses: []protocol.LearningStatus{protocol.LearningStatusCandidate},
+		Tags:          []string{"triage"},
+		Files:         []string{"internal/daemon/learn.go"},
+		Limit:         10,
+	})
+	if err != nil {
+		t.Fatalf("list review queue: %v", err)
+	}
+	if len(queue.Learnings) != 2 || queue.Learnings[0].Evidence != "" {
+		t.Fatalf("queue learnings = %+v, want two rows without evidence", queue.Learnings)
+	}
+
+	updated, err := service.Review(ctx, protocol.LearnReviewRequestBody{
+		IDs:    []string{first.Learning.ID, second.Learning.ID, first.Learning.ID},
+		Status: protocol.LearningStatusRejected,
+		Note:   "Reviewed together as duplicate guidance.",
+	})
+	if err != nil {
+		t.Fatalf("bulk review: %v", err)
+	}
+	if len(updated.UpdatedLearnings) != 2 || updated.Updated != nil {
+		t.Fatalf("updated response = %+v, want bulk rows without single compatibility pointer", updated)
+	}
+	for _, row := range updated.UpdatedLearnings {
+		if row.Status != protocol.LearningStatusRejected || row.ReviewNote != "Reviewed together as duplicate guidance." || row.Evidence != "" {
+			t.Fatalf("updated row = %+v, want rejected without evidence", row)
+		}
+	}
+	stillCandidate, err := service.Show(ctx, protocol.LearnShowRequestBody{ID: unmatched.Learning.ID})
+	if err != nil {
+		t.Fatalf("show unmatched learning: %v", err)
+	}
+	if stillCandidate.Learning.Status != protocol.LearningStatusCandidate {
+		t.Fatalf("unmatched status = %s, want candidate", stillCandidate.Learning.Status)
+	}
+}
+
+func TestIssueLearnServicePromoteAndRetireManagedGuidanceFile(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	service := newTestIssueLearnService(client, repoDir)
+
+	added, err := service.Add(ctx, protocol.LearnAddRequestBody{
+		Summary:  "Prefer daemon-owned managed guidance blocks",
+		Evidence: "Validated against managed block requirement.",
+	})
+	if err != nil {
+		t.Fatalf("add learning: %v", err)
+	}
+	if _, err := service.Review(ctx, protocol.LearnReviewRequestBody{
+		ID:     added.Learning.ID,
+		Status: protocol.LearningStatusAccepted,
+		Note:   "Reviewed.",
+	}); err != nil {
+		t.Fatalf("review learning: %v", err)
+	}
+
+	targetPath := filepath.Join(repoDir, "AGENTS.md")
+	if err := os.WriteFile(targetPath, []byte("# Existing guidance\n\nKeep humans safe.\n"), 0o644); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	promoted, err := service.Promote(ctx, protocol.LearnPromoteRequestBody{
+		ID:       added.Learning.ID,
+		Target:   protocol.LearningPromotionTargetAgents,
+		TargetID: "AGENTS.md",
+		Note:     "Promote to root instructions.",
+	})
+	if err != nil {
+		t.Fatalf("promote learning: %v", err)
+	}
+	if promoted.Learning.TargetHash == "" || promoted.Learning.TargetMetadata["path"] != "AGENTS.md" || promoted.Learning.TargetMetadata["managed_block"] != managedGuidanceBlockKind {
+		t.Fatalf("promoted metadata/hash missing: %+v", promoted.Learning)
+	}
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "# Existing guidance") || !strings.Contains(content, "Source learning: "+added.Learning.ID) {
+		t.Fatalf("target content missing human or managed guidance:\n%s", content)
+	}
+
+	duplicate, err := service.Promote(ctx, protocol.LearnPromoteRequestBody{
+		ID:       added.Learning.ID,
+		Target:   protocol.LearningPromotionTargetAgents,
+		TargetID: "AGENTS.md",
+		Note:     "Promote to root instructions.",
+	})
+	if err != nil {
+		t.Fatalf("duplicate promote learning: %v", err)
+	}
+	if duplicate.Learning.TargetHash != promoted.Learning.TargetHash {
+		t.Fatalf("duplicate target hash = %q, want %q", duplicate.Learning.TargetHash, promoted.Learning.TargetHash)
+	}
+	afterDuplicate, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read duplicate target: %v", err)
+	}
+	if string(afterDuplicate) != content {
+		t.Fatalf("duplicate promotion changed content:\n%s", string(afterDuplicate))
+	}
+
+	retired, err := service.Retire(ctx, protocol.LearnRetireRequestBody{ID: added.Learning.ID, Note: "Remove managed block."})
+	if err != nil {
+		t.Fatalf("retire learning: %v", err)
+	}
+	if retired.Learning.TargetState != protocol.LearningTargetStateRetired || retired.Learning.TargetRetiredAt == "" {
+		t.Fatalf("retired learning missing retired state/time: %+v", retired.Learning)
+	}
+	if retired.Learning.TargetNote != "Remove managed block." {
+		t.Fatalf("retired target note = %q, want audit note", retired.Learning.TargetNote)
+	}
+	retiredData, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read retired target: %v", err)
+	}
+	retiredContent := string(retiredData)
+	if !strings.Contains(retiredContent, "# Existing guidance") || strings.Contains(retiredContent, "Source learning: "+added.Learning.ID) {
+		t.Fatalf("retire should remove only managed block:\n%s", retiredContent)
+	}
+	doctor, err := service.Doctor(ctx, protocol.LearnDoctorRequestBody{Limit: 10})
+	if err != nil {
+		t.Fatalf("doctor after retire: %v", err)
+	}
+	for _, finding := range doctor.Findings {
+		if finding.LearningID == added.Learning.ID && finding.Type == "missing_target" {
+			t.Fatalf("doctor reported retired managed block as missing: %+v", doctor.Findings)
+		}
+	}
+}
+
+func TestIssueLearnServiceRetireStructuredSpecTargetUsesStoreLifecycle(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	service := newTestIssueLearnService(client, repoDir)
+
+	req, err := client.CreateRequirement(ctx, issues.CreateRequirementParams{
+		LocalID: "learn-retire-req",
+		Title:   "Learning-owned requirement",
+		Status:  issues.RequirementStatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create requirement: %v", err)
+	}
+	added, err := service.Add(ctx, protocol.LearnAddRequestBody{
+		Summary:  "Structured spec guidance",
+		Evidence: "Validated requirement guidance.",
+	})
+	if err != nil {
+		t.Fatalf("add learning: %v", err)
+	}
+	if _, err := service.Review(ctx, protocol.LearnReviewRequestBody{
+		ID:     added.Learning.ID,
+		Status: protocol.LearningStatusAccepted,
+		Note:   "Reviewed.",
+	}); err != nil {
+		t.Fatalf("review learning: %v", err)
+	}
+	if _, err := service.Promote(ctx, protocol.LearnPromoteRequestBody{
+		ID:       added.Learning.ID,
+		Target:   protocol.LearningPromotionTargetSpec,
+		TargetID: req.LocalID,
+		Note:     "Promote to structured requirement.",
+	}); err != nil {
+		t.Fatalf("promote learning: %v", err)
+	}
+
+	retired, err := service.Retire(ctx, protocol.LearnRetireRequestBody{
+		ID:   added.Learning.ID,
+		Note: "Structured target is obsolete.",
+	})
+	if err != nil {
+		t.Fatalf("retire learning: %v", err)
+	}
+	if retired.Learning.TargetState != protocol.LearningTargetStateRetired || retired.Learning.TargetNote != "Structured target is obsolete." {
+		t.Fatalf("retired learning = %+v, want retired state and note", retired.Learning)
+	}
+	storedReq, err := client.GetRequirement(ctx, req.LocalID)
+	if err != nil {
+		t.Fatalf("get requirement: %v", err)
+	}
+	if storedReq.Status != issues.RequirementStatusSuperseded {
+		t.Fatalf("requirement status = %s, want superseded", storedReq.Status)
+	}
+}
+
+func TestIssueLearnServiceRefusesDriftedManagedGuidanceFile(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	service := newTestIssueLearnService(client, repoDir)
+
+	added, err := service.Add(ctx, protocol.LearnAddRequestBody{
+		Summary:  "Original file guidance",
+		Evidence: "Evidence.",
+	})
+	if err != nil {
+		t.Fatalf("add learning: %v", err)
+	}
+	if _, err := service.Review(ctx, protocol.LearnReviewRequestBody{
+		ID:     added.Learning.ID,
+		Status: protocol.LearningStatusAccepted,
+		Note:   "Reviewed.",
+	}); err != nil {
+		t.Fatalf("review learning: %v", err)
+	}
+	promoted, err := service.Promote(ctx, protocol.LearnPromoteRequestBody{
+		ID:       added.Learning.ID,
+		Target:   protocol.LearningPromotionTargetAgents,
+		TargetID: "AGENTS.md",
+	})
+	if err != nil {
+		t.Fatalf("promote learning: %v", err)
+	}
+	targetPath := filepath.Join(repoDir, "AGENTS.md")
+	raw, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	drifted := strings.Replace(string(raw), "Original file guidance", "Human edited file guidance", 1)
+	if err := os.WriteFile(targetPath, []byte(drifted), 0o644); err != nil {
+		t.Fatalf("write drifted target: %v", err)
+	}
+
+	_, err = service.Promote(ctx, protocol.LearnPromoteRequestBody{
+		ID:       added.Learning.ID,
+		Target:   protocol.LearningPromotionTargetAgents,
+		TargetID: "AGENTS.md",
+		Note:     "Try update after drift.",
+	})
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("promote drift error = %v, want conflict", err)
+	}
+	stored, err := client.GetLearning(ctx, added.Learning.ID)
+	if err != nil {
+		t.Fatalf("get learning: %v", err)
+	}
+	if stored.TargetState != issues.LearningTargetStateDrifted || stored.TargetDriftedAt == nil {
+		t.Fatalf("stored target state = %s drifted_at=%v, want drifted timestamp", stored.TargetState, stored.TargetDriftedAt)
+	}
+	if stored.TargetHash != promoted.Learning.TargetHash {
+		t.Fatalf("drift refusal should preserve recorded hash = %q, want %q", stored.TargetHash, promoted.Learning.TargetHash)
+	}
+	after, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read after drift refusal: %v", err)
+	}
+	if string(after) != drifted {
+		t.Fatalf("drift refusal changed file:\n%s", string(after))
+	}
+}
+
+func TestIssueLearnServiceDoctorReportsManagedGuidanceDriftWithoutMutation(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	service := newTestIssueLearnService(client, repoDir)
+
+	added, err := service.Add(ctx, protocol.LearnAddRequestBody{
+		Summary:  "Doctor should find drifted file guidance",
+		Evidence: "Evidence.",
+	})
+	if err != nil {
+		t.Fatalf("add learning: %v", err)
+	}
+	if _, err := service.Review(ctx, protocol.LearnReviewRequestBody{
+		ID:     added.Learning.ID,
+		Status: protocol.LearningStatusAccepted,
+		Note:   "Reviewed.",
+	}); err != nil {
+		t.Fatalf("review learning: %v", err)
+	}
+	promoted, err := service.Promote(ctx, protocol.LearnPromoteRequestBody{
+		ID:       added.Learning.ID,
+		Target:   protocol.LearningPromotionTargetAgents,
+		TargetID: "AGENTS.md",
+	})
+	if err != nil {
+		t.Fatalf("promote learning: %v", err)
+	}
+	targetPath := filepath.Join(repoDir, "AGENTS.md")
+	raw, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	drifted := strings.Replace(string(raw), "Doctor should find drifted file guidance", "Human edited file guidance", 1)
+	if err := os.WriteFile(targetPath, []byte(drifted), 0o644); err != nil {
+		t.Fatalf("write drifted target: %v", err)
+	}
+
+	report, err := service.Doctor(ctx, protocol.LearnDoctorRequestBody{Limit: 10})
+	if err != nil {
+		t.Fatalf("doctor: %v", err)
+	}
+	found := false
+	for _, finding := range report.Findings {
+		if finding.LearningID == added.Learning.ID && finding.Type == "drifted_managed_block" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("doctor findings = %+v, want drifted managed block", report.Findings)
+	}
+	stored, err := client.GetLearning(ctx, added.Learning.ID)
+	if err != nil {
+		t.Fatalf("get learning: %v", err)
+	}
+	if stored.TargetState != issues.LearningTargetStateActive || stored.TargetHash != promoted.Learning.TargetHash {
+		t.Fatalf("doctor mutated lifecycle state: %+v", stored)
+	}
+	after, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read after doctor: %v", err)
+	}
+	if string(after) != drifted {
+		t.Fatalf("doctor changed target file:\n%s", string(after))
+	}
+}
+
 func newTestIssueSpecService(client *issues.Client, repoDir string) issueSpecService {
 	d := &Daemon{
 		cfg: Config{
@@ -379,6 +816,22 @@ func newTestIssueSpecService(client *issues.Client, repoDir string) issueSpecSer
 		},
 	}
 	return issueSpecService{daemon: d}
+}
+
+func newTestIssueLearnService(client *issues.Client, repoDir string) issueLearnService {
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: repoDir,
+		},
+		issues: client,
+		issueClientsByProject: map[string]*issues.Client{
+			protocol.DefaultProjectID: client,
+		},
+		issueClientsByRoot: map[string]*issues.Client{
+			repoDir: client,
+		},
+	}
+	return issueLearnService{daemon: d}
 }
 
 func newTestIssueClient(t *testing.T) (*issues.Client, string) {
