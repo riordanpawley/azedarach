@@ -1167,9 +1167,12 @@ func (m Model) renderOverviewObservationLines(project orchestrationProjectOvervi
 	if budget == 2 {
 		return lines
 	}
-	signal := overviewObservationSignal(task)
-	if signal == "" {
-		signal = overviewObservationLastEventSignal(observation)
+	signal := overviewObservationLastEventSignal(observation)
+	taskSignal := overviewObservationSignal(task)
+	if signal != "" && taskSignal != "" {
+		signal += " | " + taskSignal
+	} else if signal == "" {
+		signal = taskSignal
 	}
 	if signal != "" {
 		signalLine := "  signal: " + signal

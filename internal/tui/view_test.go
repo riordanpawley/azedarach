@@ -508,9 +508,10 @@ func TestView_OrchestrationOverviewGroupsObservationRowsByActionability(t *testi
 				State:   domain.WorkerObservationWaitingHuman,
 				Reason:  "active session is waiting for input",
 				LastEvent: &domain.WorkerObservationEventSummary{
-					Kind: "issue_event",
-					Type: "human.input_requested",
-					At:   observedAt,
+					Kind:    "issue_event",
+					Type:    "human.input_requested",
+					At:      observedAt,
+					Summary: "worker asks which backend to trust",
 				},
 				EvidenceSummary: []string{"session waiting prompt"},
 				NextActions:     []string{"answer worker prompt"},
@@ -543,7 +544,7 @@ func TestView_OrchestrationOverviewGroupsObservationRowsByActionability(t *testi
 	for _, want := range []string{
 		"ctn waiting_human age 2h0m0s evidence last,issue,evidence,action",
 		"reason: active session is waiting for input | action: answer worker prompt",
-		"signal: session waiting git dirty +4/-1 | Render observation-driven TUI overview",
+		"signal: issue_event human.input_requested worker asks which backend to trust | session waiting git dirty +4/-1",
 		"ctp review_ready age unknown evidence evidence,action",
 		"reason: worker submitted integration evidence | action: validate evidence",
 	} {

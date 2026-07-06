@@ -6511,6 +6511,9 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 	if !strings.Contains(prompt, "worker-ready and worker-complete are accepted only as legacy aliases for worker-integration-ready") {
 		t.Fatalf("prompt = %q, want legacy worker-ready/worker-complete alias guidance", prompt)
 	}
+	if !strings.Contains(prompt, "Keep issue status current; report progress, blockers, risks, and readiness through mailbox/worker evidence, with notes as terse human audit scratchpad only.") {
+		t.Fatalf("prompt = %q, want worker evidence-first status guidance", prompt)
+	}
 	if !strings.Contains(prompt, "Use `in_progress` while actively working and `in_review` when complete and ready for orchestrator integration") {
 		t.Fatalf("prompt = %q, want worker status semantics", prompt)
 	}
@@ -6530,10 +6533,13 @@ func TestBuildStartWorkPromptOmitsMailboxGuidanceForStandaloneTask(t *testing.T)
 	if strings.Contains(prompt, "worker-progress") || strings.Contains(prompt, "worker-blocked") || strings.Contains(prompt, "worker-integration-ready") || strings.Contains(prompt, "worker-ready") || strings.Contains(prompt, "worker-complete") {
 		t.Fatalf("prompt = %q, want mailbox worker event types omitted", prompt)
 	}
+	if !strings.Contains(prompt, "Keep issue status current; record validation, blockers, review facts, and risks through observation/evidence paths when available, with notes as terse human audit scratchpad only.") {
+		t.Fatalf("prompt = %q, want contributor evidence-first status guidance", prompt)
+	}
 	if !strings.Contains(prompt, "Use `in_progress` while actively working, `in_review` when complete and awaiting review/integration") {
 		t.Fatalf("prompt = %q, want contributor status semantics", prompt)
 	}
-	if !strings.Contains(prompt, "Represent blocked work with dependency edges and notes, not by using `in_review`") {
+	if !strings.Contains(prompt, "Represent blocked work with dependency edges and evidence notes, not by using `in_review`") {
 		t.Fatalf("prompt = %q, want contributor blocked-as-graph guidance", prompt)
 	}
 }
