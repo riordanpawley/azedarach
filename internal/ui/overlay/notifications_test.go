@@ -145,10 +145,13 @@ func TestNotificationActionCenterSpaceExpandsDetailsAndEnterUsesPrimaryAction(t 
 		{
 			ID:             "notice-1",
 			DaemonNoticeID: "notice-1",
+			State:          "active",
+			Reference:      "az-1",
 			ScopeType:      "issue",
 			ScopeID:        "az-1",
+			OperationID:    "op-1",
 			Message:        "Task az-1 needs attention from the notification center operator before continuing.",
-			Detail:         "First hidden diagnostic line. Second hidden diagnostic line. Third hidden diagnostic line. Fourth hidden diagnostic line. Fifth hidden diagnostic line.",
+			Detail:         "First hidden diagnostic line. Second hidden diagnostic line. Third hidden diagnostic line. Fourth hidden diagnostic line. Fifth hidden diagnostic line. Sixth hidden diagnostic line. Seventh hidden diagnostic line. Eighth hidden diagnostic line. Ninth hidden diagnostic line. Tenth hidden diagnostic line.",
 			Actions: []protocol.NoticeAction{
 				{ActionID: "copy_details", Kind: "client.copy_details", Label: "Copy details", Enabled: true},
 				{ActionID: "open_task", Kind: "client.open_task", Label: "Open task", Enabled: true},
@@ -159,19 +162,45 @@ func TestNotificationActionCenterSpaceExpandsDetailsAndEnterUsesPrimaryAction(t 
 	overlay = model.(*NotificationHistoryOverlay)
 
 	collapsed := overlay.View()
-	if strings.Contains(collapsed, "Fifth hidden diagnostic line.") {
-		t.Fatalf("collapsed view should hide later detail lines:\n%s", collapsed)
+	for _, hidden := range []string{"Fifth hidden diagnostic line.", "Context:", "operation: op-1"} {
+		if strings.Contains(collapsed, hidden) {
+			t.Fatalf("collapsed view should hide %q:\n%s", hidden, collapsed)
+		}
 	}
 
-	model, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
 	if cmd != nil {
-		t.Fatalf("space should expand details without emitting an action, got %T", cmd())
+		t.Fatalf("space rune should expand details without emitting an action, got %T", cmd())
 	}
 	overlay = model.(*NotificationHistoryOverlay)
 	expanded := overlay.View()
-	if !strings.Contains(expanded, "Fifth hidden diagnostic line.") {
-		t.Fatalf("expanded view missing later detail lines:\n%s", expanded)
+	for _, want := range []string{
+		"Fifth hidden diagnostic line.",
+		"Tenth hidden diagnostic line.",
+		"Context:",
+		"operation: op-1",
+		"scope: issue:az-1",
+		"actions:",
+		"Copy details,",
+		"Open task",
+	} {
+		if !strings.Contains(expanded, want) {
+			t.Fatalf("expanded view missing %q:\n%s", want, expanded)
+		}
 	}
+
+	model, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if cmd != nil {
+		t.Fatalf("key space should collapse details without emitting an action, got %T", cmd())
+	}
+	overlay = model.(*NotificationHistoryOverlay)
+	recollapsed := overlay.View()
+	if strings.Contains(recollapsed, "Tenth hidden diagnostic line.") {
+		t.Fatalf("collapsed view should hide later detail lines:\n%s", collapsed)
+	}
+
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeySpace})
+	overlay = model.(*NotificationHistoryOverlay)
 
 	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
