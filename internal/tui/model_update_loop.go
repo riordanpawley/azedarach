@@ -45,6 +45,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
+		if len(m.toasts) > 0 {
+			m.expireToasts()
+		}
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
 

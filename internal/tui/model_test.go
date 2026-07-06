@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
@@ -619,6 +620,37 @@ func TestNotificationHistoryRetainsExpiredToasts(t *testing.T) {
 	}
 	if got := m.notificationHistoryIndicator(); got != "1 error (N)" {
 		t.Fatalf("notification history indicator = %q, want 1 error (N)", got)
+	}
+}
+
+func TestSpinnerTickExpiresToastsWithoutIssueRefreshTick(t *testing.T) {
+	m := newTestModel()
+	m.addToast(Toast{
+		Level:   ToastWarning,
+		Message: "short lived notice for az-1",
+		Expires: time.Now().Add(-time.Second),
+	})
+	if len(m.toasts) != 0 {
+		t.Fatalf("expired toast should not materialize initially, got %+v", m.toasts)
+	}
+
+	m.addToast(Toast{
+		Level:   ToastWarning,
+		Message: "expires before next issue refresh",
+		Expires: time.Now().Add(time.Hour),
+	})
+	if len(m.toasts) != 1 {
+		t.Fatalf("active toasts len = %d, want 1", len(m.toasts))
+	}
+	m.feedback.localNotices[len(m.feedback.localNotices)-1].Toast.Expires = time.Now().Add(-time.Second)
+
+	updated, _ := m.Update(spinner.TickMsg{})
+	next := updated.(Model)
+	if len(next.toasts) != 0 {
+		t.Fatalf("active toasts after spinner tick = %+v, want none", next.toasts)
+	}
+	if len(next.notificationHistory) == 0 {
+		t.Fatal("expected expired toast retained in notification history")
 	}
 }
 

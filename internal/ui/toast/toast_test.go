@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 	"github.com/stretchr/testify/assert"
@@ -105,6 +107,31 @@ func TestToastRenderer_Render_WrapsLongMessagesAtNarrowWidth(t *testing.T) {
 	for _, line := range lines {
 		assert.LessOrEqual(t, lipgloss.Width(line), 30, "Toast line should fit viewport width")
 	}
+}
+
+func TestToastRenderer_Render_NarrowWidthKeepsWordsAndBorderInsideViewport(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	renderer := New(styles.New())
+	now := time.Now()
+	toasts := []types.Toast{{
+		Level:     types.ToastInfo,
+		Message:   "Session start queued for cug operation",
+		CreatedAt: now,
+		Expires:   now.Add(5 * time.Second),
+	}}
+
+	result := renderer.RenderAt(toasts, 28, now)
+	later := renderer.RenderAt(toasts, 28, now.Add(4*time.Second))
+
+	assert.NotEqual(t, result, later, "Toast border should change as expiry approaches")
+	assert.Equal(t, ansi.Strip(result), ansi.Strip(later), "Countdown should not add text noise")
+	for _, line := range strings.Split(result, "\n") {
+		assert.LessOrEqual(t, lipgloss.Width(line), 28, "Toast line should fit viewport width")
+	}
+	assert.NotContains(t, ansi.Strip(result), "queu\ned", "Normal-width words should not be hard-split")
 }
 
 func TestToastRenderer_Render_DifferentLevels(t *testing.T) {

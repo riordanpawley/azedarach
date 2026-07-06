@@ -23,4 +23,3 @@ Daemon protocol/store/event compatibility expands; TUI becomes a projection rend
 - applies-to requirement:async-notice-durable-store
 - applies-to requirement:async-notice-tui-projection
 - applies-to requirement:async-notice-validation
-

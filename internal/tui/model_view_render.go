@@ -79,7 +79,6 @@ func (m Model) View() string {
 		Height(contentHeight).
 		MaxHeight(contentHeight).
 		Render(mainView)
-	contentView = m.layerNotificationStack(contentView, m.width, contentHeight)
 
 	if currentOverlay != nil {
 		current := currentOverlay
@@ -91,6 +90,7 @@ func (m Model) View() string {
 				Height(contentHeight).
 				MaxHeight(contentHeight).
 				Render(overlayView)
+			contentView = m.layerNotificationStack(contentView, m.width, contentHeight)
 			return lipgloss.JoinVertical(lipgloss.Left, contentView, statusBarView)
 		}
 
@@ -129,6 +129,7 @@ func (m Model) View() string {
 		}
 	}
 
+	contentView = m.layerNotificationStack(contentView, m.width, contentHeight)
 	return lipgloss.JoinVertical(lipgloss.Left, contentView, statusBarView)
 }
 
@@ -159,30 +160,37 @@ func (m Model) layerNotificationStack(contentView string, width, height int) str
 		y = 0
 	}
 
-	prefix := lipgloss.NewStyle().Width(x).Render("")
-	blankLine := lipgloss.NewStyle().Width(width).Render("")
 	stackLines := strings.Split(lipgloss.NewStyle().
 		Width(stackWidth).
 		MaxWidth(stackWidth).
 		Height(stackHeight).
 		MaxHeight(stackHeight).
 		Render(stack), "\n")
-	overlayLines := make([]string, height)
-	for i := range overlayLines {
-		overlayLines[i] = blankLine
+	contentLines := strings.Split(lipgloss.NewStyle().
+		Width(width).
+		MaxWidth(width).
+		Height(height).
+		MaxHeight(height).
+		Render(contentView), "\n")
+	if len(contentLines) < height {
+		for len(contentLines) < height {
+			contentLines = append(contentLines, lipgloss.NewStyle().Width(width).Render(""))
+		}
 	}
 	for i, line := range stackLines {
 		row := y + i
-		if row < 0 || row >= height {
+		if row < 0 || row >= height || row >= len(contentLines) {
 			continue
 		}
-		overlayLines[row] = prefix + lipgloss.NewStyle().
+		base := contentLines[row]
+		stackSlice := lipgloss.NewStyle().
 			Width(stackWidth).
 			MaxWidth(stackWidth).
 			Render(ansi.Cut(line, 0, stackWidth))
+		contentLines[row] = ansi.Cut(base, 0, x) + stackSlice + ansi.Cut(base, x+stackWidth, width)
 	}
 
-	return m.layerWithinHeightTransparent(contentView, strings.Join(overlayLines, "\n"), height)
+	return strings.Join(contentLines[:height], "\n")
 }
 
 func (m Model) renderModalBackdrop(contentHeight int) string {

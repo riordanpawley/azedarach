@@ -19,4 +19,3 @@ Implementation must introduce task-local failure state separate from optimistic 
 
 - applies-to issue:csy
 - applies-to issue:ctg
-

@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
@@ -139,6 +140,54 @@ func TestViewWithToastFitsNarrowViewport(t *testing.T) {
 	}
 	if !strings.Contains(view, "mutation failed") {
 		t.Fatalf("expected wrapped floating notification in narrow viewport; view=%q", view)
+	}
+}
+
+func TestToastLayerIsOpaqueWithinToastRectangle(t *testing.T) {
+	m := newTestModel()
+	m.width = 36
+	m.height = 8
+	m.loading = false
+	m.toasts = []types.Toast{{
+		Level:   types.ToastInfo,
+		Message: "queued for cug",
+		Expires: time.Now().Add(time.Hour),
+	}}
+
+	content := strings.Join([]string{
+		strings.Repeat("x", m.width),
+		strings.Repeat("x", m.width),
+		strings.Repeat("x", m.width),
+		strings.Repeat("x", m.width),
+		strings.Repeat("x", m.width),
+		strings.Repeat("x", m.width),
+		strings.Repeat("x", m.width),
+		strings.Repeat("x", m.width),
+	}, "\n")
+
+	rendered := m.layerNotificationStack(content, m.width, m.height)
+	for _, line := range strings.Split(ansi.Strip(rendered), "\n") {
+		if strings.Contains(line, "queuedxfor") || strings.Contains(line, "forxcug") {
+			t.Fatalf("toast interior leaked underlying content through spaces: %q", line)
+		}
+	}
+}
+
+func TestViewWithOverlayRendersToastAboveOverlay(t *testing.T) {
+	m := newTestModel()
+	m.width = 40
+	m.height = 12
+	m.loading = false
+	m.overlayStack.Push(&testOverlay{})
+	m.addToast(types.Toast{
+		Level:   types.ToastInfo,
+		Message: "toast over overlay",
+		Expires: time.Now().Add(time.Hour),
+	})
+
+	view := m.View()
+	if !strings.Contains(view, "toast over overlay") {
+		t.Fatalf("expected toast to render above overlay; view=%q", view)
 	}
 }
 

@@ -20,4 +20,3 @@ csk implementation should expose learning statuses and recall, keep evidence out
 - applies-to issue:csk
 - applies-to issue:nf
 - applies-to requirement:csk-req-learning-loop
-

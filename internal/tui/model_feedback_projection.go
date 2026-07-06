@@ -102,9 +102,10 @@ func (p *feedbackProjection) addLocalToast(toast Toast, createdAt time.Time) str
 		ID:        id,
 		CreatedAt: createdAt,
 		Toast: Toast{
-			Level:   toast.Level,
-			Message: message,
-			Expires: toast.Expires,
+			Level:     toast.Level,
+			Message:   message,
+			CreatedAt: createdAt,
+			Expires:   toast.Expires,
 		},
 	})
 	if len(p.localNotices) > notificationHistoryCapacity {
@@ -254,9 +255,10 @@ func (p *feedbackProjection) materialize(tasks []domain.Task, now time.Time) fee
 					ID:        entry.ID,
 					CreatedAt: entry.CreatedAt,
 					Toast: Toast{
-						Level:   entry.Level,
-						Message: entry.Message,
-						Expires: noticeToastExpires(notice, now),
+						Level:     entry.Level,
+						Message:   entry.Message,
+						CreatedAt: entry.CreatedAt,
+						Expires:   noticeToastExpires(notice, now),
 					},
 				})
 			}
