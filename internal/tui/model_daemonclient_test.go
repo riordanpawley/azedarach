@@ -614,7 +614,7 @@ func TestEditedTaskDetailsStayVisibleAcrossStaleHydration(t *testing.T) {
 		t.Fatalf("description after stale hydration = %q, want edited description", got)
 	}
 
-	confirmedAny, _ := stale.Update(issuesLoadedMsg{
+	snapshotAny, _ := stale.Update(issuesLoadedMsg{
 		tasks: []domain.Task{{
 			ID:          "az-1",
 			Title:       "Original title",
@@ -625,12 +625,114 @@ func TestEditedTaskDetailsStayVisibleAcrossStaleHydration(t *testing.T) {
 		}},
 		revision: 43,
 	})
-	confirmed := confirmedAny.(Model)
-	if got := confirmed.tasks[0].Description; got != "Edited description from workspace form" {
-		t.Fatalf("description after confirmed hydration = %q, want edited description", got)
+	snapshot := snapshotAny.(Model)
+	if got := snapshot.tasks[0].Description; got != "Edited description from workspace form" {
+		t.Fatalf("description after snapshot hydration = %q, want edited description", got)
 	}
-	if _, ok := confirmed.pendingDetails[taskIDKey("az-1")]; ok {
-		t.Fatal("expected pending detail overlay to clear after confirmed hydration")
+	if _, ok := snapshot.pendingDetails[taskIDKey("az-1")]; !ok {
+		t.Fatal("summary snapshot should not clear pending detail overlay")
+	}
+
+	snapshot.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(snapshot.tasks[0], snapshot.tasks, nil, 120, 30))
+	fullAny, _ := snapshot.Update(refreshTaskWorkspaceResultMsg{
+		projectID: snapshot.daemonProjectID(),
+		revision:  44,
+		taskID:    "az-1",
+		hasTask:   true,
+		task: domain.Task{
+			ID:          "az-1",
+			Title:       "Original title",
+			Description: "Edited description from workspace form",
+			Type:        domain.TypeTask,
+			Priority:    domain.P2,
+			Status:      domain.StatusOpen,
+		},
+	})
+	full := fullAny.(Model)
+	if _, ok := full.pendingDetails[taskIDKey("az-1")]; ok {
+		t.Fatal("expected pending detail overlay to clear after full detail refresh")
+	}
+}
+
+func TestClearedTaskDescriptionPendingSurvivesSummarySnapshotUntilFullRefresh(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskUpdate {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskUpdate)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				Meta:            req.Meta,
+				OK:              true,
+				CompletedAt:     req.SentAt,
+			}, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{
+		ID:          "az-1",
+		Title:       "Original title",
+		Description: "Original description",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+	}}
+
+	submitted, saveCmd := m.Update(overlay.TaskCreatedMsg{
+		ID:          "az-1",
+		Title:       "Original title",
+		Description: "",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+	})
+	if saveCmd == nil {
+		t.Fatal("expected save command")
+	}
+	result := saveCmd()
+	updatedAny, _ := submitted.Update(result)
+	updated := updatedAny.(Model)
+	if got := updated.tasks[0].Description; got != "" {
+		t.Fatalf("description after save result = %q, want cleared", got)
+	}
+
+	summaryAny, _ := updated.Update(issuesLoadedMsg{
+		tasks: []domain.Task{{
+			ID:       "az-1",
+			Title:    "Original title",
+			Type:     domain.TypeTask,
+			Priority: domain.P2,
+			Status:   domain.StatusOpen,
+		}},
+		revision: 42,
+	})
+	summary := summaryAny.(Model)
+	if got := summary.tasks[0].Description; got != "" {
+		t.Fatalf("description after summary snapshot = %q, want optimistic clear", got)
+	}
+	if _, ok := summary.pendingDetails[taskIDKey("az-1")]; !ok {
+		t.Fatal("summary snapshot with omitted description should not confirm cleared description")
+	}
+
+	summary.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(summary.tasks[0], summary.tasks, nil, 120, 30))
+	fullAny, _ := summary.Update(refreshTaskWorkspaceResultMsg{
+		projectID: summary.daemonProjectID(),
+		revision:  43,
+		taskID:    "az-1",
+		hasTask:   true,
+		task: domain.Task{
+			ID:          "az-1",
+			Title:       "Original title",
+			Description: "",
+			Type:        domain.TypeTask,
+			Priority:    domain.P2,
+			Status:      domain.StatusOpen,
+		},
+	})
+	full := fullAny.(Model)
+	if _, ok := full.pendingDetails[taskIDKey("az-1")]; ok {
+		t.Fatal("full detail refresh should confirm cleared description")
 	}
 }
 

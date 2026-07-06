@@ -232,7 +232,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Batch(cmds...)
 		}
-		m.reconcilePendingTaskDetailsFromHydrated(msg.tasks)
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
 		for i := range m.tasks {
@@ -291,7 +290,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if replayCmd := m.finishIssuesRefreshCmd(msg.refreshSeq); replayCmd != nil {
 			cmds = append(cmds, replayCmd)
 		} else {
-			 if opCmd := m.loadOperationsCmd(); opCmd != nil {
+			if opCmd := m.loadOperationsCmd(); opCmd != nil {
 				cmds = append(cmds, opCmd)
 				cmds = append(cmds, m.loadOrchestrationOverviewCmd())
 			} else {
@@ -1023,7 +1022,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clearDrillDown()
 
 		// Reuse the normal loaded-state reducer path.
-		m.reconcilePendingTaskDetailsFromHydrated(msg.tasks)
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
 		for i := range m.tasks {
