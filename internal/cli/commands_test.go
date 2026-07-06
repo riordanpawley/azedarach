@@ -10560,6 +10560,15 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Keep notes terse and evidence-oriented: final commands run, key outputs/assertions, files changed, AC pass/fail, blockers, and remaining scope only.") {
 		t.Fatalf("prime output missing terse notes guidance: %q", output)
 	}
+	if !strings.Contains(output, "Use observation/evidence paths for progress, validation, risks, blockers, and review facts: `az observe`, `az issue events <issue-id>`, and mailbox `worker_evidence.v1` packets.") {
+		t.Fatalf("prime output missing observation/evidence guidance: %q", output)
+	}
+	if !strings.Contains(output, "`az issue events <issue-id> [--type <event-type>] [--limit <n>] [--json]` shows durable observation/evidence events") {
+		t.Fatalf("prime output missing issue events command map guidance: %q", output)
+	}
+	if !strings.Contains(output, "Treat notes as a human scratchpad/audit trail, not as the automation source of truth or routine progress feed.") {
+		t.Fatalf("prime output missing notes source-of-truth guidance: %q", output)
+	}
 	if !strings.Contains(output, "Do not append raw logs, exploratory transcripts, routine progress narration, duplicate primer context, or speculative scratch work to notes.") {
 		t.Fatalf("prime output missing notes anti-bloat guidance: %q", output)
 	}
@@ -10620,11 +10629,74 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
 	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
 	parentID := naming.IssueID("az-parent")
+	task := domain.Task{
+		ID:              "az-1",
+		Title:           "Prime issue",
+		Description:     "Structured description survives prime context.",
+		Notes:           "private scratch notes should stay hidden",
+		Design:          "Daemon projection supplies evidence.",
+		Acceptance:      "Prime shows acceptance criteria.",
+		Status:          domain.StatusOpen,
+		Priority:        domain.P2,
+		Type:            domain.TypeTask,
+		ParentID:        &parentID,
+		Implementations: []string{"go-bubbletea"},
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		Dependencies: []domain.Dependency{
+			{ID: "az-2", Type: domain.DependencyBlocks},
+		},
+	}
 
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command != daemonclient.CommandTaskList {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{task})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskGet:
+					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
+						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+						ProtocolVersion:  protocol.CurrentVersion,
+						SnapshotRevision: 0,
+						ProjectID:        naming.ProjectID(protocol.DefaultProjectID),
+						LastCheckedAt:    now,
+						Freshness:        protocol.TaskListFreshnessFresh,
+						Tasks:            []domain.Task{task},
+					}), nil
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: "az-1",
+						Runnable:    []string{"az-1"},
+						Blocked:     map[string]string{},
+						WorkerObservations: []domain.WorkerObservation{{
+							IssueID:         "az-1",
+							State:           domain.WorkerObservationRunnable,
+							Reason:          "ready to start",
+							EvidenceSummary: []string{"last worker evidence was clean"},
+							Risks:           []string{"missing final validation"},
+							NextActions:     []string{"run az orchestrate start --root az-1 --issue az-1"},
+							LastEvent: &domain.WorkerObservationEventSummary{
+								Kind:    "mailbox",
+								Type:    "worker-integration-ready",
+								Summary: "structured evidence packet accepted",
+								Seq:     7,
+							},
+						}},
+					}), nil
+				default:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -10634,32 +10706,6 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 						CompletedAt:     req.SentAt,
 					}, nil
 				}
-				body, err := marshalTaskListBody([]domain.Task{{
-					ID:              "az-1",
-					Title:           "Prime issue",
-					Status:          domain.StatusOpen,
-					Priority:        domain.P2,
-					Type:            domain.TypeTask,
-					ParentID:        &parentID,
-					Implementations: []string{"go-bubbletea"},
-					CreatedAt:       now,
-					UpdatedAt:       now,
-					Dependencies: []domain.Dependency{
-						{ID: "az-2", Type: domain.DependencyBlocks},
-					},
-				}})
-				if err != nil {
-					t.Fatalf("marshal task list: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					Meta:            req.Meta,
-					OK:              true,
-					CompletedAt:     req.SentAt,
-					Body:            body,
-				}, nil
 			},
 		}),
 		ProjectID: "proj",
@@ -10688,6 +10734,30 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Parent: az-parent") {
 		t.Fatalf("prime output missing active issue parent: %q", output)
 	}
+	if !strings.Contains(output, "Description: Structured description survives prime context.") {
+		t.Fatalf("prime output missing structured description: %q", output)
+	}
+	if !strings.Contains(output, "Acceptance: Prime shows acceptance criteria.") {
+		t.Fatalf("prime output missing acceptance context: %q", output)
+	}
+	if !strings.Contains(output, "Design: Daemon projection supplies evidence.") {
+		t.Fatalf("prime output missing design context: %q", output)
+	}
+	if strings.Contains(output, "private scratch notes should stay hidden") {
+		t.Fatalf("prime output should not include generic issue notes: %q", output)
+	}
+	if !strings.Contains(output, "Observation/evidence projection:") {
+		t.Fatalf("prime output missing observation projection: %q", output)
+	}
+	if !strings.Contains(output, "az-1: runnable - ready to start") {
+		t.Fatalf("prime output missing observation state/reason: %q", output)
+	}
+	if !strings.Contains(output, "Last event: worker-integration-ready - structured evidence packet accepted") {
+		t.Fatalf("prime output missing observation event summary: %q", output)
+	}
+	if !strings.Contains(output, "Evidence: last worker evidence was clean") {
+		t.Fatalf("prime output missing evidence summary: %q", output)
+	}
 	if !strings.Contains(output, "Worker mailbox: receive orchestrator messages with `az mail list --parent az-parent --since 0 --json`") {
 		t.Fatalf("prime output missing worker mailbox receive guidance: %q", output)
 	}
@@ -10696,6 +10766,174 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	}
 	if strings.Contains(output, "Parent-context recommendation:") {
 		t.Fatalf("prime output should not show parent-context recommendation for task without children: %q", output)
+	}
+	if strings.Contains(output, "Orchestrator Exit Contract") {
+		t.Fatalf("prime output should not show root exit contract for a leaf worker: %q", output)
+	}
+}
+
+func TestPrimeCommandShowsRootExitContractForAzOrchestrationRoot(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-root")
+	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+	rootID := naming.IssueID("az-root")
+	root := domain.Task{
+		ID:          rootID,
+		Title:       "Root issue",
+		Notes:       "notes are not the exit contract source",
+		Status:      domain.StatusInProgress,
+		Priority:    domain.P2,
+		Type:        domain.TypeEpic,
+		Description: "Root description",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	child := domain.Task{
+		ID:        "az-child",
+		Title:     "Child worker",
+		Status:    domain.StatusInReview,
+		Priority:  domain.P2,
+		Type:      domain.TypeTask,
+		ParentID:  &rootID,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{root, child})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return responseWithBody(req, body), nil
+				case daemonclient.CommandTaskGet:
+					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
+						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+						ProtocolVersion:  protocol.CurrentVersion,
+						SnapshotRevision: 0,
+						ProjectID:        naming.ProjectID(protocol.DefaultProjectID),
+						LastCheckedAt:    now,
+						Freshness:        protocol.TaskListFreshnessFresh,
+						Tasks:            []domain.Task{root, child},
+					}), nil
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: "az-root",
+						Blocked:     map[string]string{},
+						WorkerObservations: []domain.WorkerObservation{{
+							IssueID:         "az-child",
+							State:           domain.WorkerObservationReviewReady,
+							Reason:          "worker reported integration-ready evidence",
+							EvidenceSummary: []string{"commands_run and key_assertions present"},
+							NextActions:     []string{"inspect evidence and close accepted worker"},
+						}},
+					}), nil
+				default:
+					return responseWithJSON(req, map[string]any{}), nil
+				}
+			},
+		}),
+		ProjectID: "proj",
+		Config:    &config.Config{Spec: config.SpecConfig{Enabled: true}},
+	}
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(deps)
+	})
+
+	contractIndex := strings.Index(output, "Orchestrator Exit Contract (root az-root):")
+	if contractIndex < 0 {
+		t.Fatalf("prime output missing root exit contract: %q", output)
+	}
+	firstCommandsIndex := strings.Index(output, "- First 3 commands for this session:")
+	if firstCommandsIndex < 0 || contractIndex > firstCommandsIndex {
+		t.Fatalf("root exit contract should appear before first-command guidance: %q", output)
+	}
+	for _, want := range []string{
+		"az orchestrate complete-check --root az-root",
+		"Treat `worker-integration-ready` and `in_review` as evidence to inspect and validate",
+		"run `az issue close --id <worker>` instead of handing off to the user",
+		"final assistant response only after root completion, a named hard blocker, or an explicit user pause",
+		"az-child: review_ready - worker reported integration-ready evidence",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("prime output missing %q: %q", want, output)
+		}
+	}
+	if strings.Contains(output, "notes are not the exit contract source") {
+		t.Fatalf("prime output should not source root contract from notes: %q", output)
+	}
+}
+
+func TestPrimeCommandShowsRootExitContractForTaskRootWithActiveReadiness(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-root")
+	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+	root := domain.Task{
+		ID:          "az-root",
+		Title:       "Task root",
+		Status:      domain.StatusInProgress,
+		Priority:    domain.P2,
+		Type:        domain.TypeTask,
+		Description: "Root description",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{root})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return responseWithBody(req, body), nil
+				case daemonclient.CommandTaskGet:
+					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
+						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+						ProtocolVersion:  protocol.CurrentVersion,
+						SnapshotRevision: 0,
+						ProjectID:        naming.ProjectID(protocol.DefaultProjectID),
+						LastCheckedAt:    now,
+						Freshness:        protocol.TaskListFreshnessFresh,
+						Tasks:            []domain.Task{root},
+					}), nil
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: "az-root",
+						Active:      []string{"az-child"},
+						ActiveSessions: []daemonclient.TaskActiveSession{{
+							IssueID:        "az-child",
+							Activity:       "busy",
+							ActivitySource: "hooks",
+							State:          "busy",
+							Status:         "active",
+						}},
+						Blocked: map[string]string{},
+					}), nil
+				default:
+					return responseWithJSON(req, map[string]any{}), nil
+				}
+			},
+		}),
+		ProjectID: "proj",
+		Config:    &config.Config{Spec: config.SpecConfig{Enabled: true}},
+	}
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(deps)
+	})
+
+	contractIndex := strings.Index(output, "Orchestrator Exit Contract (root az-root):")
+	if contractIndex < 0 {
+		t.Fatalf("prime output missing root exit contract for task root with active readiness: %q", output)
+	}
+	firstCommandsIndex := strings.Index(output, "- First 3 commands for this session:")
+	if firstCommandsIndex < 0 || contractIndex > firstCommandsIndex {
+		t.Fatalf("root exit contract should appear before first-command guidance: %q", output)
 	}
 }
 
