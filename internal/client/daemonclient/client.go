@@ -54,6 +54,17 @@ func (c *Client) WithProjectRouteID(projectID naming.ProjectID) *Client {
 	return c
 }
 
+// ForProjectRouteID returns a shallow client copy scoped to projectID without
+// mutating the receiver's default project route.
+func (c *Client) ForProjectRouteID(projectID naming.ProjectID) *Client {
+	if c == nil {
+		return nil
+	}
+	next := *c
+	next.projectID = normalizeRouteProjectID(projectID.String())
+	return &next
+}
+
 // WithReconnectPolicy overrides reconnect policy settings.
 func (c *Client) WithReconnectPolicy(policy reconnect.Policy) *Client {
 	c.policy = policy

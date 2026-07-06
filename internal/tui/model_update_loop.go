@@ -713,6 +713,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Title:    fmt.Sprintf("Merge failed: %s -> %s", msg.sourceID, msg.targetID),
 				Message:  msg.err.Error(),
 				Action:   asyncRecoveryActionRetryMerge,
+				Project:  msg.project,
 				SourceID: msg.sourceID,
 				TargetID: msg.targetID,
 			})
@@ -892,6 +893,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Title:    fmt.Sprintf("Update failed: %s", msg.issueID),
 				Message:  msg.err.Error(),
 				Action:   asyncRecoveryActionRetryUpdate,
+				Project:  msg.project,
 			})
 			m.clearLocalTaskGitOperationPending(msg.issueID)
 			m.syncTaskWorkspaceOverlay()

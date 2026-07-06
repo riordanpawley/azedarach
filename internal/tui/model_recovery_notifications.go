@@ -6,7 +6,10 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
@@ -25,16 +28,42 @@ type asyncRecoveryNotification struct {
 	Title     string
 	Message   string
 	Action    asyncRecoveryAction
+	Project   asyncRecoveryProjectContext
 	Worktree  string
 	SourceID  string
 	TargetID  string
 	CreatedAt time.Time
 }
 
+type asyncRecoveryProjectContext struct {
+	ProjectID   string
+	ProjectPath string
+	BaseBranch  string
+}
+
+func (c asyncRecoveryProjectContext) normalized() asyncRecoveryProjectContext {
+	c.ProjectID = strings.TrimSpace(c.ProjectID)
+	if c.ProjectID != "" {
+		c.ProjectID = strings.TrimSpace(protocol.NormalizeProjectID(c.ProjectID))
+	}
+	c.ProjectPath = strings.TrimSpace(c.ProjectPath)
+	c.BaseBranch = strings.TrimSpace(c.BaseBranch)
+	return c
+}
+
+func (m Model) asyncRecoveryProjectContext() asyncRecoveryProjectContext {
+	return asyncRecoveryProjectContext{
+		ProjectID:   m.daemonProjectID(),
+		ProjectPath: m.activeProjectPath(),
+		BaseBranch:  m.resolveBaseBranch(),
+	}.normalized()
+}
+
 func (m *Model) enqueueAsyncRecoveryNotification(notification asyncRecoveryNotification) {
 	notification.IssueID = strings.TrimSpace(notification.IssueID)
 	notification.Title = strings.TrimSpace(notification.Title)
 	notification.Message = compactSummaryText(notification.Message)
+	notification.Project = notification.Project.normalized()
 	notification.Worktree = strings.TrimSpace(notification.Worktree)
 	notification.SourceID = strings.TrimSpace(notification.SourceID)
 	notification.TargetID = strings.TrimSpace(notification.TargetID)
@@ -48,6 +77,9 @@ func (m *Model) enqueueAsyncRecoveryNotification(notification asyncRecoveryNotif
 			continue
 		}
 		if existing.IssueID != notification.IssueID || existing.SourceID != notification.SourceID || existing.TargetID != notification.TargetID {
+			continue
+		}
+		if existing.Project.normalized() != notification.Project {
 			continue
 		}
 		if existing.Message != notification.Message {
@@ -152,23 +184,52 @@ func (m *Model) openRecoveryOverlayCmd() tea.Cmd {
 }
 
 func (m Model) recoverAsyncFailureCmd(notification asyncRecoveryNotification) tea.Cmd {
+	recoveryModel := m.withAsyncRecoveryProject(notification.Project)
 	switch notification.Action {
 	case asyncRecoveryActionRetryUpdate:
 		if notification.IssueID == "" {
 			return nil
 		}
-		return m.updateFromBaseCmd(notification.IssueID, notification.Worktree, false)
+		return recoveryModel.updateFromBaseCmd(notification.IssueID, notification.Worktree, false)
 	case asyncRecoveryActionRetryMerge:
 		if notification.SourceID == "" {
 			return nil
 		}
-		if notification.TargetID == "" || notification.TargetID == "main" {
-			return m.resolveMergeToBaseCmd(notification.SourceID, true)
+		if notification.TargetID == "" || notification.TargetID == "main" || notification.TargetID == mergeBaseTargetID {
+			return recoveryModel.resolveMergeToBaseCmd(notification.SourceID, true)
 		}
-		return m.resolveFollowOnMergeCmd(notification.SourceID, notification.TargetID, domain.SessionIdle, false, true)
+		return recoveryModel.resolveFollowOnMergeCmd(notification.SourceID, notification.TargetID, domain.SessionIdle, false, true)
 	default:
 		return nil
 	}
+}
+
+func (m Model) withAsyncRecoveryProject(project asyncRecoveryProjectContext) Model {
+	project = project.normalized()
+	if project.ProjectID == "" && project.ProjectPath == "" && project.BaseBranch == "" {
+		return m
+	}
+	scoped := m
+	if project.ProjectPath != "" {
+		scoped.repoDir = project.ProjectPath
+		scoped.currentProject = ""
+	}
+	if project.BaseBranch != "" {
+		if scoped.config == nil {
+			scoped.config = &config.Config{}
+		} else {
+			cfg := *scoped.config
+			scoped.config = &cfg
+		}
+		scoped.config.Git.BaseBranch = project.BaseBranch
+	}
+	if project.ProjectID != "" && scoped.daemonClient != nil {
+		if routeID, err := naming.ParseProjectID(project.ProjectID); err == nil {
+			scoped.daemonProjectRouteID = routeID
+			scoped.daemonClient = scoped.daemonClient.ForProjectRouteID(routeID)
+		}
+	}
+	return scoped
 }
 
 func (m Model) asyncRecoveryNotificationByID(id string) (asyncRecoveryNotification, bool) {

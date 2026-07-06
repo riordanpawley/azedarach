@@ -4132,6 +4132,7 @@ func (m *Model) dismissLatestToast() bool {
 type fetchAndMergeResultMsg struct {
 	worktree    string
 	issueID     string
+	project     asyncRecoveryProjectContext
 	attachAfter bool
 	result      *daemonclient.MergeResult
 	stage       string
@@ -6251,6 +6252,7 @@ func (m Model) updateFromBaseCmd(issueID, worktreeHint string, attachAfter bool)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
+		project := m.asyncRecoveryProjectContext()
 
 		resolvedWorktree := strings.TrimSpace(worktreeHint)
 		var err error
@@ -6260,6 +6262,7 @@ func (m Model) updateFromBaseCmd(issueID, worktreeHint string, attachAfter bool)
 		if resolvedWorktree == "" {
 			return fetchAndMergeResultMsg{
 				issueID:     issueID,
+				project:     project,
 				attachAfter: attachAfter,
 				err:         fmt.Errorf("no active session/worktree - start session first"),
 			}
@@ -6267,6 +6270,7 @@ func (m Model) updateFromBaseCmd(issueID, worktreeHint string, attachAfter bool)
 		if err != nil {
 			return fetchAndMergeResultMsg{
 				issueID:     issueID,
+				project:     project,
 				attachAfter: attachAfter,
 				err:         fmt.Errorf("no active session/worktree - start session first"),
 			}
