@@ -6405,6 +6405,7 @@ type primeTemplateData struct {
 	OrchestrationViaAz       bool
 	OrchestrationViaNative   bool
 	TmuxAvailable            bool
+	OrchestratorExitContract string
 	IssueSection             string
 	ActiveIssueClosedWarning string
 	ContextGuardrail         string
@@ -6426,6 +6427,7 @@ func PrimeCommand(deps *Dependencies) error {
 	activeIssueClosedWarning := ""
 	specGuardrails := ""
 	questionFirstGuardrails := ""
+	orchestratorExitContract := ""
 	implementationSection := ""
 	implementationGuardrails := "- Implementation guardrails: `--impl` assigns implementation/spec variants only; it is not graph/root membership or parent selection. To parent new work under the active issue, run `az issue create \"Child task\"` from the correct `AZEDARACH_ISSUE_ID` context; for another parent/root, add an explicit `parent-child` edge. In multi-implementation repos, include explicit `--impl <impl>` only on implementation-specific new issue writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status/title/notes updates do not require it."
 	specEnabled := deps != nil && deps.Config != nil && deps.Config.Spec.Enabled
@@ -6478,13 +6480,21 @@ func PrimeCommand(deps *Dependencies) error {
 		} else {
 			guardrail = fmt.Sprintf("- `AZEDARACH_ISSUE_ID` is set to `%s`; use it as the default issue scope and refresh stale context with `az issue get %s`.", issueID, issueID)
 		}
+		readiness, hasReadiness := loadPrimeTaskGraphReadiness(context.Background(), deps, issueID)
+		if orchestrationViaAz && hasReadiness && primeTaskGraphReadinessHasGraphState(issueID, readiness) {
+			orchestratorExitContract = renderPrimeOrchestratorExitContract(issueID)
+		}
 		if !snapshotLoaded {
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nCould not load issue details automatically; run `az issue get %s`.\n", issueID, issueID)
 		} else if task, ok := findTaskByID(snapshot.Tasks, issueID); ok {
 			if detailTask, err := loadIssueDetailTask(context.Background(), deps, issueID); err == nil {
 				task = detailTask
 			}
-			issueSection = renderPrimeIssueSection(issueID, task, snapshot.Tasks, tmuxAvailable)
+			observations := readiness.WorkerObservations
+			if orchestratorExitContract == "" && primeIssueIsAzOrchestrationRoot(task, snapshot.Tasks, orchestrationViaAz) {
+				orchestratorExitContract = renderPrimeOrchestratorExitContract(issueID)
+			}
+			issueSection = renderPrimeIssueSection(issueID, task, snapshot.Tasks, observations, tmuxAvailable)
 			if task.Status == domain.StatusDone {
 				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `closed`; start by picking/opening actionable work (for example `az issue list --limit 20` or `az issue create \"Next task\"`). Use `--deferred` only for standalone backlog work.", task.ID)
 			}
@@ -6501,6 +6511,7 @@ func PrimeCommand(deps *Dependencies) error {
 		OrchestrationViaAz:       orchestrationViaAz,
 		OrchestrationViaNative:   orchestrationViaNative,
 		TmuxAvailable:            tmuxAvailable,
+		OrchestratorExitContract: orchestratorExitContract,
 		IssueSection:             issueSection,
 		ActiveIssueClosedWarning: activeIssueClosedWarning,
 		ContextGuardrail:         guardrail,
@@ -6598,6 +6609,17 @@ func loadIssueDetailTask(ctx context.Context, deps *Dependencies, issueID string
 	return task, nil
 }
 
+func loadPrimeTaskGraphReadiness(ctx context.Context, deps *Dependencies, issueID string) (daemonclient.TaskGraphReadiness, bool) {
+	if deps == nil || deps.DaemonClient == nil || strings.TrimSpace(issueID) == "" {
+		return daemonclient.TaskGraphReadiness{}, false
+	}
+	ready, err := deps.DaemonClient.TaskGraphReadiness(ctx, issueID)
+	if err != nil {
+		return daemonclient.TaskGraphReadiness{}, false
+	}
+	return ready, true
+}
+
 func primeTmuxAvailable() bool {
 	_, err := primeLookPath("tmux")
 	return err == nil
@@ -6634,11 +6656,8 @@ func renderPrimeImplementationSection(implementations []string) string {
 		strings.Join(quoted, ", "), exampleImpl)
 }
 
-func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Task, tmuxAvailable bool) string {
-	description := ""
-	if strings.TrimSpace(task.Description) != "" {
-		description = fmt.Sprintf("\nDescription: %s", summarizePrimeDescription(issueID, task.Description))
-	}
+func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Task, observations []domain.WorkerObservation, tmuxAvailable bool) string {
+	structuredContext := renderPrimeStructuredIssueContext(issueID, task)
 	implementations := formatPrimeImplementations(task.Implementations)
 	parent := ""
 	mailbox := ""
@@ -6648,8 +6667,9 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 		mailbox = fmt.Sprintf("- Worker mailbox: receive orchestrator messages with `az mail list --parent %s --since 0 --json`; use `az mail watch --parent %s --since <seq> --jsonl` only when explicitly asked to monitor continuously. Send `worker-integration-ready` with a complete JSON `worker_evidence.v1` body containing `summary`, `commands_run`, `key_assertions`, `files_changed`, `review`, `risks`, and optional `artifact_links`.\n", parentID, parentID)
 	}
 	childWorkRecommendation := renderPrimeChildWorkRecommendation(task, tasks, tmuxAvailable)
+	observationSection := renderPrimeWorkerObservationSection(observations)
 	return fmt.Sprintf(
-		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s impl=%s]%s%s\nDependencies:\n%s\n```\n%s%s",
+		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s impl=%s]%s%s\nDependencies:\n%s\n```\n%s%s%s",
 		issueID,
 		issueID,
 		task.ID,
@@ -6659,11 +6679,157 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 		task.Type,
 		implementations,
 		parent,
-		description,
+		structuredContext,
 		formatPrimeDependencyLines(task.Dependencies),
+		observationSection,
 		childWorkRecommendation,
 		mailbox,
 	)
+}
+
+func renderPrimeOrchestratorExitContract(rootIssueID string) string {
+	return fmt.Sprintf(`Orchestrator Exit Contract (root %s):
+- Keep running the status/start/watch/integrate/close loop until `+"`az orchestrate complete-check --root %s`"+` passes, then run final validation and close the root.
+- Treat `+"`worker-integration-ready`"+` and `+"`in_review`"+` as evidence to inspect and validate; if accepted, run `+"`az issue close --id <worker>`"+` instead of handing off to the user.
+- Send the final assistant response only after root completion, a named hard blocker, or an explicit user pause.
+`, rootIssueID, rootIssueID)
+}
+
+func primeIssueIsAzOrchestrationRoot(task domain.Task, tasks []domain.Task, orchestrationViaAz bool) bool {
+	if !orchestrationViaAz {
+		return false
+	}
+	return task.Type == domain.TypeEpic || issueHasChildren(task.ID, tasks)
+}
+
+func primeTaskGraphReadinessHasGraphState(rootIssueID string, ready daemonclient.TaskGraphReadiness) bool {
+	if primeAnyIssueOtherThanRoot(rootIssueID, ready.Runnable) || primeAnyIssueOtherThanRoot(rootIssueID, ready.Active) {
+		return true
+	}
+	for _, pending := range ready.Pending {
+		if primeIssueDiffersFromRoot(rootIssueID, pending.IssueID) {
+			return true
+		}
+	}
+	for _, session := range ready.ActiveSessions {
+		if primeIssueDiffersFromRoot(rootIssueID, session.IssueID) {
+			return true
+		}
+	}
+	for _, progress := range ready.SessionStartProgress {
+		if primeIssueDiffersFromRoot(rootIssueID, progress.IssueID) {
+			return true
+		}
+	}
+	for _, candidate := range ready.StaleCloseableChildren {
+		if primeIssueDiffersFromRoot(rootIssueID, candidate.IssueID) {
+			return true
+		}
+	}
+	for issueID := range ready.Blocked {
+		if primeIssueDiffersFromRoot(rootIssueID, issueID) {
+			return true
+		}
+	}
+	return false
+}
+
+func primeAnyIssueOtherThanRoot(rootIssueID string, issueIDs []string) bool {
+	for _, issueID := range issueIDs {
+		if primeIssueDiffersFromRoot(rootIssueID, issueID) {
+			return true
+		}
+	}
+	return false
+}
+
+func primeIssueDiffersFromRoot(rootIssueID, issueID string) bool {
+	rootIssueID = strings.TrimSpace(rootIssueID)
+	issueID = strings.TrimSpace(issueID)
+	return issueID != "" && !strings.EqualFold(issueID, rootIssueID)
+}
+
+func renderPrimeStructuredIssueContext(issueID string, task domain.Task) string {
+	var b strings.Builder
+	if strings.TrimSpace(task.Description) != "" {
+		fmt.Fprintf(&b, "\nDescription: %s", summarizePrimeDescription(issueID, task.Description))
+	}
+	if strings.TrimSpace(task.Acceptance) != "" {
+		fmt.Fprintf(&b, "\nAcceptance: %s", summarizePrimeDescription(issueID, task.Acceptance))
+	}
+	if strings.TrimSpace(task.Design) != "" {
+		fmt.Fprintf(&b, "\nDesign: %s", summarizePrimeDescription(issueID, task.Design))
+	}
+	return b.String()
+}
+
+func renderPrimeWorkerObservationSection(observations []domain.WorkerObservation) string {
+	if len(observations) == 0 {
+		return ""
+	}
+	sorted := append([]domain.WorkerObservation(nil), observations...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].IssueID < sorted[j].IssueID
+	})
+	if len(sorted) > 5 {
+		sorted = sorted[:5]
+	}
+	var b strings.Builder
+	b.WriteString("- Observation/evidence projection:\n")
+	for _, observation := range sorted {
+		issueID := strings.TrimSpace(observation.IssueID)
+		if issueID == "" {
+			issueID = "(unknown)"
+		}
+		reason := strings.TrimSpace(observation.Reason)
+		if reason == "" {
+			reason = "no daemon reason reported"
+		}
+		fmt.Fprintf(&b, "  - %s: %s - %s\n", issueID, observation.State, reason)
+		if observation.LastEvent != nil {
+			event := observation.LastEvent
+			eventType := strings.TrimSpace(event.Type)
+			if eventType == "" {
+				eventType = strings.TrimSpace(event.Kind)
+			}
+			if eventType != "" {
+				fmt.Fprintf(&b, "    Last event: %s", eventType)
+				if strings.TrimSpace(event.Summary) != "" {
+					fmt.Fprintf(&b, " - %s", strings.TrimSpace(event.Summary))
+				}
+				b.WriteString("\n")
+			}
+		}
+		writePrimeObservationList(&b, "Evidence", observation.EvidenceSummary, 2)
+		writePrimeObservationList(&b, "Risks", observation.Risks, 2)
+		writePrimeObservationList(&b, "Next", observation.NextActions, 2)
+	}
+	if len(observations) > len(sorted) {
+		fmt.Fprintf(&b, "  - ... %d more observations omitted; run `az orchestrate observe --root <root>` for full projection.\n", len(observations)-len(sorted))
+	}
+	return b.String()
+}
+
+func writePrimeObservationList(b *strings.Builder, label string, values []string, limit int) {
+	values = nonEmptyStrings(values)
+	if len(values) == 0 {
+		return
+	}
+	if limit > 0 && len(values) > limit {
+		values = values[:limit]
+	}
+	fmt.Fprintf(b, "    %s: %s\n", label, strings.Join(values, "; "))
+}
+
+func nonEmptyStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func renderPrimeChildWorkRecommendation(task domain.Task, tasks []domain.Task, tmuxAvailable bool) string {

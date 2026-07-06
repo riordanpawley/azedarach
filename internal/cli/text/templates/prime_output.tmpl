@@ -4,6 +4,8 @@ Primer evidence key: `{{ .PrimeEvidenceKey }}`
 {{ if .ActiveIssueID }}
 Active issue ID: `{{ .ActiveIssueID }}`
 {{ end }}
+{{ if .OrchestratorExitContract }}{{ .OrchestratorExitContract }}
+{{ end }}
 
 - First 3 commands for this session:
   - {{ if .ActiveIssueID }}`az issue get {{ .ActiveIssueID }}`{{ else }}`az issue get <issue-id>`{{ end }}
@@ -19,6 +21,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Status semantics: use `open` for not-yet-active work, `in_progress` while actively working, `in_review` when implementation is complete and waiting for human/orchestrator review or integration, and `closed` only after acceptance/integration is complete.
   - Blocked is not an issue status. Represent blocked work with dependency edges (`az issue dep add <blocked-issue> <blocker-issue> --type blocks`) and record blocker evidence in issue notes or mailbox events.
   - `az issue bulk-create --input issues.json --json` (create many issues, epics, or nested `children` trees from JSON when shaping a graph up front), `az issue bulk-update --input updates.json --json`, `az issue update <issue-id> --design "..."`, `az issue update <issue-id> --notes "..."`, `az issue update <issue-id> --append-notes "..."`
+  - `az issue events <issue-id> [--type <event-type>] [--limit <n>] [--json]` shows durable observation/evidence events for audit and agent context without relying on free-form notes.
   - Reports and attachments:
   - `az issue document add <issue-id> <file>`, `az issue document list <issue-id>`, `az issue document remove <issue-id> <attachment-id>`
   - Markdown attachments render in the TUI; other file types can be opened externally.
@@ -136,7 +139,9 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Missing fields (for example description/notes) are valid. Treat absent or empty fields as intentional and continue execution.
 {{ if .ImplementationGuardrails }}{{ .ImplementationGuardrails }}
 {{ end }}- Keep issue context current as you work:
+  - Use observation/evidence paths for progress, validation, risks, blockers, and review facts: `az observe`, `az issue events <issue-id>`, and mailbox `worker_evidence.v1` packets.
   - Keep notes terse and evidence-oriented: final commands run, key outputs/assertions, files changed, AC pass/fail, blockers, and remaining scope only.
+  - Treat notes as a human scratchpad/audit trail, not as the automation source of truth or routine progress feed.
   - Do not append raw logs, exploratory transcripts, routine progress narration, duplicate primer context, or speculative scratch work to notes.
   - Update the active issue's design/notes as decisions change; capture subtask-level detail on the relevant child issue instead of bloating a parent/epic description.
   - `az issue get` hides historical notes in text output by default; use `az issue get <issue-id> --with-notes` only when full note history is needed.
