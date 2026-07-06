@@ -273,6 +273,47 @@ func (r *scriptedRuntimeReconciler) snapshot() (order []string, callCount map[st
 	return append([]string(nil), r.startOrder...), outCounts, r.maxConcurrent
 }
 
+type dedupedTimeoutRuntimeReconciler struct {
+	mu      sync.Mutex
+	started chan struct{}
+	calls   int
+	result  protocol.RuntimeReconcileResponseBody
+}
+
+func (r *dedupedTimeoutRuntimeReconciler) Reconcile(ctx context.Context, projectID string) (protocol.RuntimeReconcileResponseBody, error) {
+	r.mu.Lock()
+	r.calls++
+	call := r.calls
+	started := r.started
+	result := r.result
+	if result.ProjectID == "" {
+		result.ProjectID = naming.ProjectID(projectID)
+	}
+	r.mu.Unlock()
+
+	if call == 1 {
+		if started != nil {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+		}
+		<-ctx.Done()
+		return protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}, ctx.Err()
+	}
+	return result, nil
+}
+
+func (r *dedupedTimeoutRuntimeReconciler) ReconcileIssues(ctx context.Context, projectID string, _ []string) (protocol.RuntimeReconcileResponseBody, error) {
+	return r.Reconcile(ctx, projectID)
+}
+
+func (r *dedupedTimeoutRuntimeReconciler) snapshot() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
 type runtimeReconcileTestServer struct {
 	served chan struct{}
 }
@@ -686,6 +727,86 @@ func TestCommandRuntimeReconcileReprioritizesPendingQueuedProject(t *testing.T) 
 		if got := callCounts[projectID]; got != 1 {
 			t.Fatalf("reconcile calls for %s = %d, want 1", projectID, got)
 		}
+	}
+}
+
+func TestCommandRuntimeReconcileRetriesQueuedWhenDedupedBackgroundTimesOut(t *testing.T) {
+	recorder := &dedupedTimeoutRuntimeReconciler{
+		started: make(chan struct{}, 1),
+		result: protocol.RuntimeReconcileResponseBody{
+			ProjectID:             "proj-runtime",
+			WorktreesRefreshed:    4,
+			RecreatedTmuxSessions: 1,
+			AlignedDaemonSessions: 2,
+		},
+	}
+	queue := newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
+		Name:    "runtime_reconcile_test",
+		Workers: 1,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	t.Cleanup(func() {
+		_ = queue.Close()
+	})
+
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeReconciler:     recorder,
+		runtimeReconcileQueue: queue,
+	}
+
+	backgroundCtx, backgroundCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer backgroundCancel()
+	background, err := d.queueRuntimeReconcile(backgroundCtx, "proj-runtime", reconcilePriorityBackground, "periodic")
+	if err != nil {
+		t.Fatalf("queue background reconcile: %v", err)
+	}
+	select {
+	case <-recorder.started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for background reconcile to start")
+	}
+	if snapshot := queue.snapshot(); len(snapshot.Running) != 1 || snapshot.Running[0] != "proj-runtime" {
+		t.Fatalf("queue running = %v, want [proj-runtime]", snapshot.Running)
+	}
+
+	commandCtx, commandCancel := context.WithTimeout(context.Background(), time.Second)
+	defer commandCancel()
+	resp, err := d.command(commandCtx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-runtime-reconcile-manual",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandRuntimeReconcile,
+		Meta:            protocol.Metadata{ProjectID: "proj-runtime"},
+		Body:            mustJSONBody(t, protocol.RuntimeReconcileRequestBody{ProjectID: "proj-runtime"}),
+	})
+	if err != nil {
+		t.Fatalf("command returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("runtime.reconcile response not OK: %+v", resp.Error)
+	}
+	var out protocol.RuntimeReconcileResponseBody
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
+		t.Fatalf("unmarshal command response: %v", err)
+	}
+	if out.ProjectID != "proj-runtime" || out.WorktreesRefreshed != 4 || out.RecreatedTmuxSessions != 1 || out.AlignedDaemonSessions != 2 {
+		t.Fatalf("runtime reconcile body = %+v", out)
+	}
+	if got := recorder.snapshot(); got != 2 {
+		t.Fatalf("runtime reconcile calls = %d, want 2", got)
+	}
+	if counters := queue.snapshot().Counters; counters.Deduped != 1 {
+		t.Fatalf("queue counters = %+v, want one deduped manual waiter", counters)
+	} else if counters.Enqueued != 2 {
+		t.Fatalf("queue counters = %+v, want background and retry jobs enqueued", counters)
+	}
+	outcome, waitErr := background.Wait(context.Background())
+	if waitErr != nil {
+		t.Fatalf("background wait: %v", waitErr)
+	}
+	if !errors.Is(outcome.Err, context.DeadlineExceeded) {
+		t.Fatalf("background outcome error = %v, want context deadline exceeded", outcome.Err)
 	}
 }
 
