@@ -5673,6 +5673,7 @@ func (m *Model) syncTaskWorkspaceOverlay() {
 func (m *Model) applySingleTaskWorkspaceRefresh(taskID string, refreshed domain.Task) (domain.Task, bool) {
 	m.reconcilePendingStatuses()
 	m.reconcilePendingMutationFailures()
+	m.reconcilePendingTaskDetailsFromFullTasks([]domain.Task{refreshed})
 	return m.applyTaskRefresh(taskID, refreshed, true)
 }
 
@@ -5768,10 +5769,6 @@ func (m *Model) applyPendingTaskDetailOverlays() {
 		if !ok {
 			continue
 		}
-		if taskDetailsMatchPending(m.tasks[i], pending) {
-			delete(m.pendingDetails, key)
-			continue
-		}
 		m.tasks[i].Title = pending.title
 		m.tasks[i].Description = pending.description
 		m.tasks[i].Type = pending.taskType
@@ -5792,12 +5789,8 @@ func (m *Model) reconcilePendingTaskDetails() {
 	const stalePendingTTL = 2 * time.Minute
 	now := time.Now()
 	for key, pending := range m.pendingDetails {
-		task, ok := taskByID[string(key)]
+		_, ok := taskByID[string(key)]
 		if !ok {
-			delete(m.pendingDetails, key)
-			continue
-		}
-		if taskDetailsMatchPending(task, pending) {
 			delete(m.pendingDetails, key)
 			continue
 		}
@@ -5807,7 +5800,7 @@ func (m *Model) reconcilePendingTaskDetails() {
 	}
 }
 
-func (m *Model) reconcilePendingTaskDetailsFromHydrated(tasks []domain.Task) {
+func (m *Model) reconcilePendingTaskDetailsFromFullTasks(tasks []domain.Task) {
 	if len(m.pendingDetails) == 0 || len(tasks) == 0 {
 		return
 	}
