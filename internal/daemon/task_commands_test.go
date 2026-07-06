@@ -2869,6 +2869,265 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-integrate-cleanup-fail-retry"
+	repoDir := t.TempDir()
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Integrated cleanup retry",
+		Type:     domain.TypeBug,
+		Priority: domain.P1,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
+	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
+		t.Fatalf("mkdir source worktree: %v", err)
+	}
+	sourceBranch := "riordan/" + taskID + "/integrated-cleanup-retry"
+	projectionDB, err := sql.Open("sqlite", issuesDBPath)
+	if err != nil {
+		t.Fatalf("open projection db: %v", err)
+	}
+	defer projectionDB.Close()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := projectionDB.ExecContext(ctx, `
+		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, projectID, taskID, sourceWorktree, sourceBranch, now); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+	preflightTasks, err := issuesClient.ListParentChildSubtreeWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("precondition list runtime subtree: %v", err)
+	}
+	if len(preflightTasks) != 1 || !preflightTasks[0].HasWorktree {
+		t.Fatalf("precondition task runtime = %+v, want worktree projection", preflightTasks)
+	}
+
+	commands := make([]string, 0, 32)
+	var scratchWorktree string
+	sourceUniqueReads := 0
+	removeAttempts := 0
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		joined := strings.Join(args, " ")
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			if removeAttempts >= 2 {
+				return fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\n", repoDir), nil
+			}
+			return fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\nworktree %s\nbranch refs/heads/%s\n\n", repoDir, sourceWorktree, sourceBranch), nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
+			return filepath.Join(repoDir, ".git"), nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
+			return "target-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
+			return "merged-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
+			return "base-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff" && slices.Contains(args, "--name-status"):
+			return "M\tmain.go\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-list" && args[3] == "--count" && args[4] == "main.."+sourceBranch:
+			sourceUniqueReads++
+			if sourceUniqueReads == 1 {
+				return "1", nil
+			}
+			return "0", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "rev-list":
+			return "0", nil
+		case len(args) >= 6 && args[0] == "-C" && args[2] == "merge-tree":
+			return "tree-sha", nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "fetch":
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "checkout":
+			return "", nil
+		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "worktree" && args[3] == "add":
+			scratchWorktree = args[5]
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge":
+			return "merge complete", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "reset" && args[3] == "--hard":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "worktree" && args[3] == "remove":
+			removedPath := args[len(args)-1]
+			if removedPath == scratchWorktree {
+				return "", nil
+			}
+			if removedPath != sourceWorktree {
+				return "", fmt.Errorf("unexpected worktree remove path: %s", removedPath)
+			}
+			removeAttempts++
+			if removeAttempts == 1 {
+				return "fatal: '" + sourceWorktree + "' contains modified or untracked files, use --force to delete it", fmt.Errorf("worktree remove blocked by local changes")
+			}
+			if err := os.RemoveAll(sourceWorktree); err != nil {
+				return "", err
+			}
+			return "", nil
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "remove":
+			removedPath := args[len(args)-1]
+			if removedPath != sourceWorktree {
+				return "", fmt.Errorf("unexpected worktree remove path: %s", removedPath)
+			}
+			removeAttempts++
+			if removeAttempts == 1 {
+				return "fatal: '" + sourceWorktree + "' contains modified or untracked files, use --force to delete it", fmt.Errorf("worktree remove blocked by local changes")
+			}
+			if err := os.RemoveAll(sourceWorktree); err != nil {
+				return "", err
+			}
+			return "", nil
+		case len(args) >= 3 && args[0] == "branch" && args[1] == "-D":
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected git args: %s", joined)
+		}
+	}}
+
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		git:      git.NewClient(runner, logger),
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.gitStatusAdapter = &gitServiceAdapter{
+		client:            git.NewClient(runner, logger),
+		runtimeStateStore: runtimeStore,
+		logger:            logger,
+		baseBranch:        "main",
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
+		logger:                  logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	body, err := json.Marshal(taskCloseRequest{
+		TaskID:               taskID,
+		IntegrateBeforeClose: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal task close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-integrated-cleanup-fail",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose first error: %v", err)
+	}
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("first handleTaskClose response = %+v, want cleanup failure", resp)
+	}
+	for _, want := range []string{"Integration already completed", sourceBranch, "landed on main", "cleanup/status remains", "Next:"} {
+		if !strings.Contains(resp.Error.Message, want) {
+			t.Fatalf("first close error = %q, missing %q", resp.Error.Message, want)
+		}
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task after failed close: %v", err)
+	}
+	if task.Status != domain.StatusInReview {
+		t.Fatalf("task status after failed close = %s, want %s", task.Status, domain.StatusInReview)
+	}
+
+	resp, err = d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-integrated-cleanup-retry",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose retry error: %v", err)
+	}
+	if !resp.OK {
+		if resp.Error != nil {
+			t.Fatalf("retry handleTaskClose error = %s\ncommands:\n%s", resp.Error.Message, strings.Join(commands, "\n"))
+		}
+		t.Fatalf("retry handleTaskClose response = %+v", resp)
+	}
+	var result taskCloseResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal retry close result: %v", err)
+	}
+	if !result.IntegrationRequested || result.Integrated || !result.WorktreeRemoved {
+		t.Fatalf("retry close result = %+v, want no-op integration plus worktree cleanup", result)
+	}
+	closed, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task after retry close: %v", err)
+	}
+	if closed.Status != domain.StatusDone {
+		t.Fatalf("task status after retry = %s, want %s", closed.Status, domain.StatusDone)
+	}
+	joined := strings.Join(commands, "\n")
+	if got := strings.Count(joined, "merge --no-edit "+sourceBranch); got != 1 {
+		t.Fatalf("merge count = %d, want one initial merge only:\n%s", got, joined)
+	}
+	if sourceUniqueReads != 2 {
+		t.Fatalf("main..source containment reads = %d, want first merge check plus retry no-op check", sourceUniqueReads)
+	}
+	if removeAttempts != 2 {
+		t.Fatalf("worktree remove attempts = %d, want failed first cleanup and successful retry", removeAttempts)
+	}
+}
+
+func TestTaskClosePostIntegrationPhaseErrorTreatsNoChangesAsIntegratedEvidence(t *testing.T) {
+	err := taskClosePostIntegrationPhaseError("az-1", "status_write", taskCloseIntegrationResult{
+		Requested:    true,
+		NoChanges:    true,
+		SourceBranch: "riordan/az-1/already-landed",
+		TargetBranch: "main",
+	}, fmt.Errorf("status write failed"))
+
+	for _, want := range []string{"Integration already completed", "riordan/az-1/already-landed", "landed on main", "retry close"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, missing %q", err.Error(), want)
+		}
+	}
+}
+
 func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchValidation(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
