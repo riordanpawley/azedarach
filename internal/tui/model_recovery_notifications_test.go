@@ -49,3 +49,18 @@ func TestAsyncRecoveryRecoverKeepsNotificationWhenActionUnavailable(t *testing.T
 		t.Fatalf("remaining recovery notification id = %q, want recovery-1", next.recoveryNotifications[0].ID)
 	}
 }
+
+func TestAsyncRecoveryProjectContextPreservesEmptyProjectID(t *testing.T) {
+	project := asyncRecoveryProjectContext{
+		ProjectID:   "  ",
+		ProjectPath: " /repo/project ",
+		BaseBranch:  " main ",
+	}.normalized()
+
+	if project.ProjectID != "" {
+		t.Fatalf("project id = %q, want empty fallback", project.ProjectID)
+	}
+	if project.ProjectPath != "/repo/project" || project.BaseBranch != "main" {
+		t.Fatalf("project context = %+v, want trimmed path/base", project)
+	}
+}

@@ -21,6 +21,7 @@ func (m Model) fetchAndMergeCmd(worktree, branch, issueID string, attachAfter bo
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
+		project := m.asyncRecoveryProjectContext()
 		if branch == "" {
 			branch = "main"
 		}
@@ -29,6 +30,7 @@ func (m Model) fetchAndMergeCmd(worktree, branch, issueID string, attachAfter bo
 			return fetchAndMergeResultMsg{
 				worktree:    worktree,
 				issueID:     issueID,
+				project:     project,
 				attachAfter: attachAfter,
 				err:         fmt.Errorf("daemon client unavailable"),
 			}
@@ -40,6 +42,7 @@ func (m Model) fetchAndMergeCmd(worktree, branch, issueID string, attachAfter bo
 				return fetchAndMergeResultMsg{
 					worktree:    worktree,
 					issueID:     issueID,
+					project:     project,
 					attachAfter: attachAfter,
 					stage:       "fetch",
 					operationID: pending.OperationID,
@@ -49,6 +52,7 @@ func (m Model) fetchAndMergeCmd(worktree, branch, issueID string, attachAfter bo
 			return fetchAndMergeResultMsg{
 				worktree:    worktree,
 				issueID:     issueID,
+				project:     project,
 				attachAfter: attachAfter,
 				err:         fmt.Errorf("fetch failed: %w", err),
 			}
@@ -66,6 +70,7 @@ func (m Model) fetchAndMergeCmd(worktree, branch, issueID string, attachAfter bo
 			return fetchAndMergeResultMsg{
 				worktree:    worktree,
 				issueID:     issueID,
+				project:     project,
 				attachAfter: attachAfter,
 				stage:       "merge",
 				operationID: pending.OperationID,
@@ -75,6 +80,7 @@ func (m Model) fetchAndMergeCmd(worktree, branch, issueID string, attachAfter bo
 		return fetchAndMergeResultMsg{
 			worktree:    worktree,
 			issueID:     issueID,
+			project:     project,
 			attachAfter: attachAfter,
 			stage:       "merge",
 			result:      &result.Result,
@@ -390,6 +396,7 @@ func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, refresh
 type mergeResultMsg struct {
 	sourceID    string
 	targetID    string
+	project     asyncRecoveryProjectContext
 	result      *daemonclient.MergeResult
 	stage       string
 	state       protocol.OperationState
@@ -495,9 +502,10 @@ func (m Model) mergeToBaseCmd(sourceWorktree, sourceID string, refreshStatus boo
 func (m Model) mergeToBaseCmdWithOptions(sourceWorktree, sourceID string, refreshStatus bool, opts mergePreflightOptions) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
+		project := m.asyncRecoveryProjectContext()
 		target, err := m.resolveMergeBaseTarget(ctx, sourceID)
 		if err != nil {
-			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, err: err}
+			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, project: project, err: err}
 		}
 		baseBranch := target.targetBranch
 		targetID := target.targetID
@@ -511,7 +519,7 @@ func (m Model) mergeToBaseCmdWithOptions(sourceWorktree, sourceID string, refres
 
 		branch, err := m.resolveWorktreeBranch(ctx, sourceWorktree, sourceID)
 		if err != nil {
-			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, err: err}
+			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, project: project, err: err}
 		}
 
 		m.logger.Info("merging upstream source into base branch",
@@ -521,7 +529,7 @@ func (m Model) mergeToBaseCmdWithOptions(sourceWorktree, sourceID string, refres
 		)
 
 		if m.daemonClient == nil {
-			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, err: fmt.Errorf("daemon client unavailable")}
+			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, project: project, err: fmt.Errorf("daemon client unavailable")}
 		}
 
 		if preflight := m.checkMergePreflight(ctx, sourceID, targetID, sourceWorktree, baseWorktree, baseBranch, branch, refreshStatus, opts.ignoreSourceDirty); preflight != nil {
@@ -533,12 +541,13 @@ func (m Model) mergeToBaseCmdWithOptions(sourceWorktree, sourceID string, refres
 				return mergeResultMsg{
 					sourceID:    sourceID,
 					targetID:    mergeBaseTargetID,
+					project:     project,
 					stage:       "fetch",
 					state:       pending.State,
 					operationID: pending.OperationID,
 				}
 			}
-			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, err: err}
+			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, project: project, err: err}
 		}
 
 		if _, err := m.daemonClient.GitCheckout(ctx, baseWorktree, baseBranch); err != nil {
@@ -546,12 +555,13 @@ func (m Model) mergeToBaseCmdWithOptions(sourceWorktree, sourceID string, refres
 				return mergeResultMsg{
 					sourceID:    sourceID,
 					targetID:    mergeBaseTargetID,
+					project:     project,
 					stage:       "checkout",
 					state:       pending.State,
 					operationID: pending.OperationID,
 				}
 			}
-			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, err: err}
+			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, project: project, err: err}
 		}
 
 		result, err := m.daemonClient.GitMerge(ctx, baseWorktree, branch)
@@ -559,6 +569,7 @@ func (m Model) mergeToBaseCmdWithOptions(sourceWorktree, sourceID string, refres
 			return mergeResultMsg{
 				sourceID:    sourceID,
 				targetID:    mergeBaseTargetID,
+				project:     project,
 				stage:       "merge",
 				state:       pending.State,
 				operationID: pending.OperationID,
@@ -567,7 +578,7 @@ func (m Model) mergeToBaseCmdWithOptions(sourceWorktree, sourceID string, refres
 		if err == nil && result.Result.Success {
 			_, _ = m.daemonClient.GitStatusRefresh(ctx, sourceWorktree)
 		}
-		return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, result: &result.Result, err: err}
+		return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, project: project, result: &result.Result, err: err}
 	}
 }
 
@@ -578,10 +589,11 @@ func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, source
 func (m Model) mergeFeatureIntoFeatureCmdWithOptions(sourceWorktree, targetWorktree, sourceID, targetID string, refreshStatus bool, opts mergePreflightOptions) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
+		project := m.asyncRecoveryProjectContext()
 
 		sourceBranch, err := m.resolveWorktreeBranch(ctx, sourceWorktree, sourceID)
 		if err != nil {
-			return mergeResultMsg{sourceID: sourceID, targetID: targetID, err: err}
+			return mergeResultMsg{sourceID: sourceID, targetID: targetID, project: project, err: err}
 		}
 
 		m.logger.Info("merging upstream source into target issue branch",
@@ -592,7 +604,7 @@ func (m Model) mergeFeatureIntoFeatureCmdWithOptions(sourceWorktree, targetWorkt
 		)
 
 		if m.daemonClient == nil {
-			return mergeResultMsg{sourceID: sourceID, targetID: targetID, err: fmt.Errorf("daemon client unavailable")}
+			return mergeResultMsg{sourceID: sourceID, targetID: targetID, project: project, err: fmt.Errorf("daemon client unavailable")}
 		}
 
 		if preflight := m.checkMergePreflight(ctx, sourceID, targetID, sourceWorktree, targetWorktree, "HEAD", sourceBranch, refreshStatus, opts.ignoreSourceDirty); preflight != nil {
@@ -609,6 +621,7 @@ func (m Model) mergeFeatureIntoFeatureCmdWithOptions(sourceWorktree, targetWorkt
 					return mergeResultMsg{
 						sourceID:    sourceID,
 						targetID:    targetID,
+						project:     project,
 						stage:       "stop_session",
 						state:       pending.State,
 						operationID: pending.OperationID,
@@ -617,6 +630,7 @@ func (m Model) mergeFeatureIntoFeatureCmdWithOptions(sourceWorktree, targetWorkt
 				return mergeResultMsg{
 					sourceID: sourceID,
 					targetID: targetID,
+					project:  project,
 					err:      fmt.Errorf("stop target session %s before merge: %w", targetID, err),
 				}
 			}
@@ -627,12 +641,13 @@ func (m Model) mergeFeatureIntoFeatureCmdWithOptions(sourceWorktree, targetWorkt
 			return mergeResultMsg{
 				sourceID:    sourceID,
 				targetID:    targetID,
+				project:     project,
 				stage:       "merge",
 				state:       pending.State,
 				operationID: pending.OperationID,
 			}
 		}
-		return mergeResultMsg{sourceID: sourceID, targetID: targetID, result: &result.Result, err: err}
+		return mergeResultMsg{sourceID: sourceID, targetID: targetID, project: project, result: &result.Result, err: err}
 	}
 }
 
@@ -941,12 +956,14 @@ func (m Model) resolveMergeToBaseCmd(sourceID string, refreshStatus bool) tea.Cm
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
+		project := m.asyncRecoveryProjectContext()
 
 		sourceWorktree, err := m.resolveIssueWorktreePath(ctx, sourceID)
 		if err != nil || sourceWorktree == "" {
 			return mergeResultMsg{
 				sourceID: sourceID,
 				targetID: mergeBaseTargetID,
+				project:  project,
 				err:      fmt.Errorf("no active session/worktree - start session first"),
 			}
 		}
@@ -1019,12 +1036,14 @@ func (m Model) resolveFollowOnMergeCmd(sourceID, targetID string, targetState do
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
+		project := m.asyncRecoveryProjectContext()
 
 		sourceWorktree, err := m.resolveIssueWorktreePath(ctx, sourceID)
 		if err != nil || sourceWorktree == "" {
 			return mergeResultMsg{
 				sourceID: sourceID,
 				targetID: targetID,
+				project:  project,
 				err:      fmt.Errorf("selected upstream source has no active worktree"),
 			}
 		}
@@ -1034,6 +1053,7 @@ func (m Model) resolveFollowOnMergeCmd(sourceID, targetID string, targetState do
 			return mergeResultMsg{
 				sourceID: sourceID,
 				targetID: targetID,
+				project:  project,
 				err:      fmt.Errorf("no active session/worktree - start session first"),
 			}
 		}
@@ -1045,6 +1065,7 @@ func (m Model) resolveFollowOnMergeCmd(sourceID, targetID string, targetState do
 				return mergeResultMsg{
 					sourceID: sourceID,
 					targetID: targetID,
+					project:  project,
 					err:      fmt.Errorf("resolve target session state for %s: %w", targetID, err),
 				}
 			}
@@ -1052,6 +1073,7 @@ func (m Model) resolveFollowOnMergeCmd(sourceID, targetID string, targetState do
 				return mergeResultMsg{
 					sourceID: sourceID,
 					targetID: targetID,
+					project:  project,
 					err:      fmt.Errorf("target session state unavailable for %s; refresh and retry", targetID),
 				}
 			}

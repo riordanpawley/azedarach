@@ -15,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/client/reconnect"
+	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -8354,6 +8355,270 @@ func TestHandleSelectionUpdateFromMainUsesLocalBaseBranchInLocalWorkflowMode(t *
 	}
 	if result.err != nil {
 		t.Fatalf("fetch-and-merge err = %v", result.err)
+	}
+}
+
+func TestAsyncRecoveryRetryUpdateUsesFailedOperationProject(t *testing.T) {
+	var requestProjects []string
+	var fetchBody daemonclient.GitCommandRequest
+	var mergeBody daemonclient.GitCommandRequest
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			requestProjects = append(requestProjects, req.Meta.ProjectID.String())
+			switch req.Command {
+			case daemonclient.CommandGitFetch:
+				if err := json.Unmarshal(req.Body, &fetchBody); err != nil {
+					t.Fatalf("unmarshal fetch request: %v", err)
+				}
+				respBody, err := json.Marshal(daemonclient.GitCommandResponse{
+					Worktree: fetchBody.Worktree,
+					Remote:   fetchBody.Remote,
+				})
+				if err != nil {
+					t.Fatalf("marshal fetch response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitMerge:
+				if err := json.Unmarshal(req.Body, &mergeBody); err != nil {
+					t.Fatalf("unmarshal merge request: %v", err)
+				}
+				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
+					Worktree: mergeBody.Worktree,
+					Branch:   mergeBody.Branch,
+					Result:   git.MergeResult{Success: true},
+				})
+				if err != nil {
+					t.Fatalf("marshal merge response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.daemonClient.WithProjectID("proj-b")
+	m.repoDir = "/repo/project-b"
+	m.currentProject = "project-b"
+	m.projectRegistry = &config.ProjectsRegistry{
+		Projects: []config.Project{
+			{Name: "project-a", Path: "/repo/project-a"},
+			{Name: "project-b", Path: "/repo/project-b"},
+		},
+	}
+	m.config.Git.BaseBranch = "main"
+
+	updated, cmd := m.Update(fetchAndMergeResultMsg{
+		worktree: "/repo/project-a/.az/worktrees/az-1",
+		issueID:  "az-1",
+		project: asyncRecoveryProjectContext{
+			ProjectID:   "proj-a",
+			ProjectPath: "/repo/project-a",
+			BaseBranch:  "develop",
+		},
+		err: errors.New("merge failed"),
+	})
+	if cmd != nil {
+		t.Fatalf("failed update result command = %v, want nil", cmd)
+	}
+	next := updated.(Model)
+	if len(next.recoveryNotifications) != 1 {
+		t.Fatalf("recovery notifications len = %d, want 1", len(next.recoveryNotifications))
+	}
+	notification := next.recoveryNotifications[0]
+	if notification.Project.ProjectID != "proj-a" || notification.Project.ProjectPath != "/repo/project-a" || notification.Project.BaseBranch != "develop" {
+		t.Fatalf("notification project = %+v, want failed operation project", notification.Project)
+	}
+
+	retry := next.recoverAsyncFailureCmd(notification)
+	if retry == nil {
+		t.Fatal("expected retry command")
+	}
+	msg := retry()
+	result, ok := msg.(fetchAndMergeResultMsg)
+	if !ok {
+		t.Fatalf("retry message type = %T, want fetchAndMergeResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("retry result err = %v", result.err)
+	}
+	if got, want := requestProjects, []string{"proj-a", "proj-a"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("request projects = %v, want %v", got, want)
+	}
+	if fetchBody.Worktree != "/repo/project-a/.az/worktrees/az-1" || fetchBody.Remote != "origin" {
+		t.Fatalf("fetch body = %+v, want project A worktree/origin", fetchBody)
+	}
+	if mergeBody.Worktree != "/repo/project-a/.az/worktrees/az-1" || mergeBody.Branch != "origin/develop" {
+		t.Fatalf("merge body = %+v, want project A worktree and base branch", mergeBody)
+	}
+}
+
+func TestAsyncRecoveryRetryMergeUsesFailedOperationProject(t *testing.T) {
+	const (
+		projectRoot    = "/repo/project-a"
+		sourceWorktree = "/repo/project-a/.az/worktrees/az-1"
+	)
+	var requestProjects []string
+	var preflightBody daemonclient.GitMergePreflightRequest
+	var fetchBody daemonclient.GitCommandRequest
+	var checkoutBody daemonclient.GitCommandRequest
+	var mergeBody daemonclient.GitCommandRequest
+	jsonResponse := func(req protocol.RequestEnvelope, body any) (protocol.ResponseEnvelope, error) {
+		respBody, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal response for %s: %v", req.Command, err)
+		}
+		return protocol.ResponseEnvelope{
+			ProtocolVersion: req.ProtocolVersion,
+			RequestID:       req.RequestID,
+			Kind:            protocol.EnvelopeKindResponse,
+			OK:              true,
+			Body:            respBody,
+		}, nil
+	}
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			requestProjects = append(requestProjects, req.Meta.ProjectID.String())
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				return jsonResponse(req, struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "proj-a",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: sourceWorktree, Branch: "az/az-1", IssueID: "az-1"},
+					},
+				})
+			case daemonclient.CommandTaskMergeBaseTarget:
+				return jsonResponse(req, daemonclient.TaskMergeBaseTarget{
+					IssueID:  "az-1",
+					TargetID: mergeBaseTargetID,
+					Branch:   "develop",
+				})
+			case daemonclient.CommandRuntimeReconcileIssue:
+				return jsonResponse(req, daemonclient.RuntimeReconcileResult{ProjectID: "proj-a"})
+			case daemonclient.CommandGitStatus:
+				return jsonResponse(req, struct {
+					Status git.GitStatus `json:"status"`
+				}{Status: git.GitStatus{HasChanges: false}})
+			case daemonclient.CommandGitMergePreflight:
+				if err := json.Unmarshal(req.Body, &preflightBody); err != nil {
+					t.Fatalf("unmarshal preflight request: %v", err)
+				}
+				return jsonResponse(req, daemonclient.GitMergePreflightResponse{
+					SourceID:       "az-1",
+					SourceWorktree: sourceWorktree,
+					TargetID:       mergeBaseTargetID,
+					TargetWorktree: projectRoot,
+					Clean:          true,
+				})
+			case daemonclient.CommandGitFetch:
+				if err := json.Unmarshal(req.Body, &fetchBody); err != nil {
+					t.Fatalf("unmarshal fetch request: %v", err)
+				}
+				return jsonResponse(req, daemonclient.GitCommandResponse{Worktree: fetchBody.Worktree, Remote: fetchBody.Remote})
+			case daemonclient.CommandGitCheckout:
+				if err := json.Unmarshal(req.Body, &checkoutBody); err != nil {
+					t.Fatalf("unmarshal checkout request: %v", err)
+				}
+				return jsonResponse(req, daemonclient.GitCommandResponse{Worktree: checkoutBody.Worktree, Branch: checkoutBody.Branch})
+			case daemonclient.CommandGitMerge:
+				if err := json.Unmarshal(req.Body, &mergeBody); err != nil {
+					t.Fatalf("unmarshal merge request: %v", err)
+				}
+				return jsonResponse(req, daemonclient.GitMergeCommandResponse{
+					Worktree: mergeBody.Worktree,
+					Branch:   mergeBody.Branch,
+					Result:   git.MergeResult{Success: true},
+				})
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.daemonClient.WithProjectID("proj-b")
+	m.repoDir = "/repo/project-b"
+	m.currentProject = "project-b"
+	m.projectRegistry = &config.ProjectsRegistry{
+		Projects: []config.Project{
+			{Name: "project-a", Path: projectRoot},
+			{Name: "project-b", Path: "/repo/project-b"},
+		},
+	}
+	m.config.Git.BaseBranch = "main"
+
+	updated, cmd := m.Update(mergeResultMsg{
+		sourceID: "az-1",
+		targetID: mergeBaseTargetID,
+		project: asyncRecoveryProjectContext{
+			ProjectID:   "proj-a",
+			ProjectPath: projectRoot,
+			BaseBranch:  "develop",
+		},
+		err: errors.New("merge failed"),
+	})
+	if cmd != nil {
+		t.Fatalf("failed merge result command = %v, want nil", cmd)
+	}
+	next := updated.(Model)
+	if len(next.recoveryNotifications) != 1 {
+		t.Fatalf("recovery notifications len = %d, want 1", len(next.recoveryNotifications))
+	}
+
+	retry := next.recoverAsyncFailureCmd(next.recoveryNotifications[0])
+	if retry == nil {
+		t.Fatal("expected retry command")
+	}
+	msg := retry()
+	result, ok := msg.(mergeResultMsg)
+	if !ok {
+		t.Fatalf("retry message type = %T, want mergeResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("retry result err = %v", result.err)
+	}
+	for i, projectID := range requestProjects {
+		if projectID != "proj-a" {
+			t.Fatalf("request %d project = %q, want proj-a; all projects=%v", i, projectID, requestProjects)
+		}
+	}
+	if preflightBody.SourceWorktree != sourceWorktree || preflightBody.TargetWorktree != projectRoot || preflightBody.TargetRef != "develop" {
+		t.Fatalf("preflight body = %+v, want project A source/root/base", preflightBody)
+	}
+	if fetchBody.Worktree != projectRoot || fetchBody.Remote != "origin" {
+		t.Fatalf("fetch body = %+v, want project A root/origin", fetchBody)
+	}
+	if checkoutBody.Worktree != projectRoot || checkoutBody.Branch != "develop" {
+		t.Fatalf("checkout body = %+v, want project A root/base", checkoutBody)
+	}
+	if mergeBody.Worktree != projectRoot || mergeBody.Branch != "az/az-1" {
+		t.Fatalf("merge body = %+v, want project A root/source branch", mergeBody)
 	}
 }
 
