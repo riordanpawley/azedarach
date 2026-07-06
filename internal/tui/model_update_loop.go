@@ -758,6 +758,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.sourceBranch,
 			msg.stopTargetBeforeMerge,
 			strings.TrimSpace(msg.targetWorktree) != "",
+			overlay.WithMergePreflightProjectContext(msg.context),
 		))
 
 	case mergePreflightActionResultMsg:

@@ -398,6 +398,7 @@ type mergeResultMsg struct {
 }
 
 type mergePreflightFailureMsg struct {
+	context               overlay.ProjectActionContext
 	sourceID              string
 	sourceWorktree        string
 	targetID              string
