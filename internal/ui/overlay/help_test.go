@@ -55,7 +55,7 @@ func TestHelpOverlay_View_ContainsKeyBindings(t *testing.T) {
 	view := collectScrolledViews(help)
 
 	// Check that view contains expected category names
-	expectedCategories := []string{"Card Header Legend", "Navigation", "Workspace", "Modes", "Selection", "Task Actions", "Other"}
+	expectedCategories := []string{"Card Header Legend", "Panes", "Navigation", "Workspace", "Modes", "Selection", "Task Actions", "Other"}
 	for _, category := range expectedCategories {
 		if !strings.Contains(view, category) {
 			t.Errorf("view should contain category '%s'", category)
@@ -67,6 +67,12 @@ func TestHelpOverlay_View_ContainsKeyBindings(t *testing.T) {
 		"P0/P1/P2/...",             // Card header legend
 		"T / Td / ✓",               // Card header legend
 		"[1/3]",                    // Card header legend
+		"Open operation queue",     // Panes
+		"Open event log",           // Panes
+		"Open notification action", // Panes
+		"Open tmux sessions",       // Panes
+		"Open system diagnostics",  // Panes
+		"Open project selector",    // Panes
 		"h/l",                      // Navigation
 		"j/k",                      // Navigation
 		"Open task workspace",      // Workspace
@@ -89,6 +95,44 @@ func TestHelpOverlay_View_ContainsKeyBindings(t *testing.T) {
 		if !strings.Contains(view, binding) {
 			t.Errorf("view should contain binding '%s'", binding)
 		}
+	}
+}
+
+func TestHelpOverlay_SmallViewportShowsPaneOpenersFirst(t *testing.T) {
+	help := NewHelpOverlay()
+	model, _ := help.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	help = model.(*HelpOverlay)
+
+	view := help.View()
+	expected := []string{
+		"Panes:",
+		"Open this help reference",
+		"Open operation queue",
+		"Open event log",
+		"Open notification action center",
+	}
+	for _, text := range expected {
+		if !strings.Contains(view, text) {
+			t.Fatalf("small help view should show pane opener %q before scrolling:\n%s", text, view)
+		}
+	}
+
+	if strings.Contains(view, "Card Header Legend:") {
+		t.Fatalf("small help view should prioritize pane openers before the card legend:\n%s", view)
+	}
+}
+
+func TestHelpOverlay_ViewClampsScrollWithinContent(t *testing.T) {
+	help := NewHelpOverlay()
+	help.scroll = 999
+
+	view := help.View()
+
+	if view == "" {
+		t.Fatal("view should render when stale scroll exceeds content")
+	}
+	if help.scroll > help.maxScroll {
+		t.Fatalf("scroll should be clamped to maxScroll, got scroll=%d maxScroll=%d", help.scroll, help.maxScroll)
 	}
 }
 

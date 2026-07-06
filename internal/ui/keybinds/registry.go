@@ -152,6 +152,23 @@ var registry = []ActionSpec{
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "Esc/q"}}, Hint: "cancel"},
 
 	// Help catalog (canonical board-focused reference).
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "?", Help: "Open this help reference"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "Space", Help: "Open task workspace"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "Q", Help: "Open operation queue"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "L", Help: "Open event log"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "N", Help: "Open notification action center"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "O", Help: "Open tmux sessions"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "D", Help: "Open system diagnostics"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "n", Help: "Open async failure recovery"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "s", Help: "Open settings"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "c", Help: "Open create task form"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "X", Help: "Open bulk cleanup"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "f", Help: "Open filter menu"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: ",", Help: "Open sort menu"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "/", Help: "Open search"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "g then p", Help: "Open project selector"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "g then s", Help: "Open spec workspace"},
+
 	{Mode: types.ModeNormal, Category: "Navigation", HelpKey: "h/l", Help: "Move between columns"},
 	{Mode: types.ModeNormal, Category: "Navigation", HelpKey: "j/k", Help: "Move up/down in column"},
 	{Mode: types.ModeNormal, Category: "Navigation", HelpKey: "ctrl+u / ctrl+d", Help: "Half-page scroll"},
