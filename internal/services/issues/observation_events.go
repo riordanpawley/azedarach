@@ -108,17 +108,17 @@ func (c *Client) ListIssueObservationEvents(ctx context.Context, issueID string,
 		filterSQL = " AND event_type IN (" + strings.TrimSuffix(strings.Repeat("?,", len(typeFilters)), ",") + ")"
 	}
 	args = append(args, limit)
-	orderBy := "ASC"
+	orderBy := "id ASC"
 	if opts.NewestFirst {
-		orderBy = "DESC"
+		orderBy = "observed_at DESC, id DESC"
 	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
-		FROM issue_observation_events
-		WHERE issue_id = ?`+filterSQL+`
-		ORDER BY id `+orderBy+`
-		LIMIT ?
-	`, args...)
+        SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+        FROM issue_observation_events
+        WHERE issue_id = ?`+filterSQL+`
+        ORDER BY `+orderBy+`
+        LIMIT ?
+    `, args...)
 	if err != nil {
 		return nil, c.wrapError("list-observation-events", issueID, err)
 	}

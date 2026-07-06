@@ -16,3 +16,6 @@ CREATE INDEX IF NOT EXISTS idx_issue_observation_events_issue_id_id
 
 CREATE INDEX IF NOT EXISTS idx_issue_observation_events_issue_type_id
 	ON issue_observation_events(issue_id, event_type, id);
+
+CREATE INDEX IF NOT EXISTS idx_issue_observation_events_issue_observed_id
+	ON issue_observation_events(issue_id, observed_at DESC, id DESC);

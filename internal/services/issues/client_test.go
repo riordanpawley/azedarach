@@ -1819,15 +1819,27 @@ func TestClient_ListIssueObservationEventsNewestFirst(t *testing.T) {
 		Source:     "test",
 	})
 	require.NoError(t, err)
+	olderInsertedLast, err := client.AppendIssueObservationEvent(ctx, taskID, IssueObservationEventParams{
+		Type:       domain.IssueEventReviewCompleted,
+		ObservedAt: time.Date(2026, 7, 6, 0, 30, 0, 0, time.UTC),
+		Source:     "test",
+	})
+	require.NoError(t, err)
 
 	events, err := client.ListIssueObservationEvents(ctx, taskID, IssueObservationEventListOptions{
-		Limit:       2,
+		Types: []domain.IssueObservationEventType{
+			domain.IssueEventValidationPassed,
+			domain.IssueEventEvidenceSubmitted,
+			domain.IssueEventReviewCompleted,
+		},
+		Limit:       3,
 		NewestFirst: true,
 	})
 	require.NoError(t, err)
-	require.Len(t, events, 2)
+	require.Len(t, events, 3)
 	assert.Equal(t, second.ID, events[0].ID)
 	assert.Equal(t, first.ID, events[1].ID)
+	assert.Equal(t, olderInsertedLast.ID, events[2].ID)
 }
 
 func TestClient_IssueObservationEventsSurviveHardDelete(t *testing.T) {
