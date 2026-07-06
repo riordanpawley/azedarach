@@ -10488,6 +10488,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Worker completion flow: workers should leave their issue `in_review`") {
 		t.Fatalf("prime output missing in-review worker completion guidance: %q", output)
 	}
+	if !strings.Contains(output, "before accepting closeout, run `az issue context-risk <worker-issue> --since 14d`") {
+		t.Fatalf("prime output missing context-risk closeout guidance: %q", output)
+	}
+	if !strings.Contains(output, "treat `none`/`fyi` as advisory, ask the bounded prompts for `medium`, and require diagnosis or structured risk notes for `high`") {
+		t.Fatalf("prime output missing context-risk level guidance: %q", output)
+	}
 	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
 		t.Fatalf("prime output missing mail send command example: %q", output)
 	}
@@ -10571,6 +10577,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "`az issue events <issue-id> [--type <event-type>] [--limit <n>] [--json]` shows durable observation/evidence events") {
 		t.Fatalf("prime output missing issue events command map guidance: %q", output)
+	}
+	if !strings.Contains(output, "`az issue context-risk <issue-id> --since 14d [--json]` shows repeated local failure risk") {
+		t.Fatalf("prime output missing issue context-risk command map guidance: %q", output)
+	}
+	if !strings.Contains(output, "use it before accepting worker closeout, not as a blanket root-level gate") {
+		t.Fatalf("prime output missing context-risk gate guidance: %q", output)
 	}
 	if !strings.Contains(output, "Treat notes as a human scratchpad/audit trail, not as the automation source of truth or routine progress feed.") {
 		t.Fatalf("prime output missing notes source-of-truth guidance: %q", output)
