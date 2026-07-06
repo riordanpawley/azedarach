@@ -77,6 +77,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandOperationSubmit:        {Command: protocol.CommandOperationSubmit, DispatchTarget: CommandDispatchOperation, RequiresProjectID: true},
 	protocol.CommandOperationGet:           {Command: protocol.CommandOperationGet, DispatchTarget: CommandDispatchOperation, RequiresProjectID: true},
 	protocol.CommandOperationList:          {Command: protocol.CommandOperationList, DispatchTarget: CommandDispatchOperation, RequiresProjectID: true},
+	protocol.CommandOperationQueue:         {Command: protocol.CommandOperationQueue, DispatchTarget: CommandDispatchOperation, RequiresProjectID: true},
 	protocol.CommandOperationCancel:        {Command: protocol.CommandOperationCancel, DispatchTarget: CommandDispatchOperation, RequiresProjectID: true},
 	CommandPRCreate:                        {Command: CommandPRCreate, DispatchTarget: CommandDispatchPR, RequiresProjectID: true},
 	CommandGitBranchBehind:                 {Command: CommandGitBranchBehind, DispatchTarget: CommandDispatchPR, RequiresProjectID: true},

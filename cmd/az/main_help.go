@@ -72,11 +72,13 @@ func printHelpForPath(path []string) bool {
 	case "worktree create":
 		fmt.Println("Usage: az worktree create [--project <project-id>] [--base <branch>] [--json] <issue-id>")
 	case "operation":
-		fmt.Println("Usage: az operation <get|list|logs|cancel> [arguments]")
+		fmt.Println("Usage: az operation <get|list|queue|logs|cancel> [arguments]")
 	case "operation get":
 		fmt.Println("Usage: az operation get --id <operation-id> [--wait]")
 	case "operation list":
 		fmt.Println("Usage: az operation list [--issue-id <issue-id>] [--state <state>] [--kind <kind>] [--limit N]")
+	case "operation queue":
+		fmt.Println("Usage: az operation queue [--issue <issue-id>] [--state <state>] [--kind <kind>] [--limit N] [--tree] [--json]")
 	case "operation logs":
 		fmt.Println("Usage: az operation logs --id <operation-id>")
 	case "operation cancel":

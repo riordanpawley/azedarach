@@ -48,6 +48,19 @@ type Query struct {
 	Limit     int
 }
 
+type QueueEntry struct {
+	Record               Record
+	QueueIndex           int
+	BlockingOperationIDs []string
+	BlockedResourceKeys  []string
+}
+
+type QueueSnapshot struct {
+	ProjectID string
+	Running   []QueueEntry
+	Queued    []QueueEntry
+}
+
 type UpdateParams struct {
 	ID            string
 	ToState       State

@@ -64,6 +64,34 @@ func TestOperationCommandsRouteThroughDaemon(t *testing.T) {
 					OK:              true,
 					Body:            respBody,
 				}, nil
+			case protocol.CommandOperationQueue:
+				var body protocol.OperationQueueRequestBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal queue body: %v", err)
+				}
+				if body.ProjectID != naming.ProjectID("proj-a") || body.IssueID != naming.IssueID("az-1") || body.Kind != "session.start" || body.Limit != 5 {
+					t.Fatalf("queue body = %+v", body)
+				}
+				respBody, _ := json.Marshal(protocol.OperationQueueResponseBody{
+					ProjectID: naming.ProjectID("proj-a"),
+					Queued: []protocol.OperationQueueEntry{{
+						Operation: protocol.OperationRecord{
+							OperationID: "op-2",
+							ProjectID:   naming.ProjectID("proj-a"),
+							Kind:        "session.start",
+							State:       protocol.OperationStateQueued,
+						},
+						BlockingOperationIDs: []naming.OperationID{"op-1"},
+						BlockedResourceKeys:  []string{"issue:proj-a:az-1"},
+					}},
+				})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
 			case protocol.CommandOperationCancel:
 				var body protocol.OperationCancelRequestBody
 				if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -116,6 +144,19 @@ func TestOperationCommandsRouteThroughDaemon(t *testing.T) {
 	}
 	if len(records) != 1 || records[0].OperationID != "op-1" {
 		t.Fatalf("ListOperations records = %+v", records)
+	}
+
+	queue, err := client.OperationQueue(context.Background(), OperationListOptions{
+		IssueID: "az-1",
+		Kind:    "session.start",
+		States:  []protocol.OperationState{protocol.OperationStateQueued},
+		Limit:   5,
+	})
+	if err != nil {
+		t.Fatalf("OperationQueue error: %v", err)
+	}
+	if len(queue.Queued) != 1 || queue.Queued[0].Operation.OperationID != "op-2" || len(queue.Queued[0].BlockingOperationIDs) != 1 {
+		t.Fatalf("OperationQueue response = %+v", queue)
 	}
 
 	record, err = client.CancelOperation(context.Background(), "op-1", "user request")

@@ -207,6 +207,75 @@ func TestOperationRuntimeGitMergePublishesLifecycleEvents(t *testing.T) {
 	}
 }
 
+func TestOperationRuntimeQueueReportsBlockedDependencies(t *testing.T) {
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir()})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	if _, err := runtime.manager.Submit(context.Background(), daemonops.SubmitRequest{
+		ID:           "op-running",
+		ProjectID:    "proj-1",
+		IssueID:      "az-1",
+		Kind:         "git.merge",
+		ResourceKeys: []string{"worktree:/tmp/wt"},
+	}, func(context.Context) ([]byte, error) {
+		close(started)
+		<-release
+		return nil, nil
+	}); err != nil {
+		t.Fatalf("submit running operation: %v", err)
+	}
+	<-started
+	queuedStarted := make(chan struct{}, 1)
+	if _, err := runtime.manager.Submit(context.Background(), daemonops.SubmitRequest{
+		ID:           "op-queued",
+		ProjectID:    "proj-1",
+		IssueID:      "az-2",
+		Kind:         "worktree.cleanup",
+		ResourceKeys: []string{"worktree:/tmp/wt"},
+	}, func(context.Context) ([]byte, error) {
+		queuedStarted <- struct{}{}
+		return nil, nil
+	}); err != nil {
+		t.Fatalf("submit queued operation: %v", err)
+	}
+	select {
+	case <-queuedStarted:
+		t.Fatal("queued operation started before snapshot")
+	default:
+	}
+
+	resp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationQueue, protocol.OperationQueueRequestBody{ProjectID: "proj-1"}))
+	if !resp.OK {
+		t.Fatalf("queue response = %+v", resp)
+	}
+	var body protocol.OperationQueueResponseBody
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("unmarshal queue body: %v", err)
+	}
+	if len(body.Running) != 1 || body.Running[0].Operation.OperationID != "op-running" {
+		t.Fatalf("running entries = %+v, want op-running", body.Running)
+	}
+	if len(body.Queued) != 1 || body.Queued[0].Operation.OperationID != "op-queued" {
+		t.Fatalf("queued entries = %+v, want op-queued", body.Queued)
+	}
+	if len(body.Queued[0].BlockingOperationIDs) != 1 || body.Queued[0].BlockingOperationIDs[0] != "op-running" {
+		t.Fatalf("blocking ids = %+v, want op-running", body.Queued[0].BlockingOperationIDs)
+	}
+	if len(body.Queued[0].BlockedResourceKeys) != 1 || body.Queued[0].BlockedResourceKeys[0] != "worktree:/tmp/wt" {
+		t.Fatalf("blocked resources = %+v, want worktree", body.Queued[0].BlockedResourceKeys)
+	}
+	select {
+	case <-queuedStarted:
+		t.Fatal("queued operation started before running operation released")
+	default:
+	}
+
+	close(release)
+	if err := runtime.manager.Drain(context.Background()); err != nil {
+		t.Fatalf("drain error: %v", err)
+	}
+}
+
 func TestOperationRuntimeSessionStartPersistsRunningProgress(t *testing.T) {
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), hub: publish.NewHub(32, 16, nil), nextRevision: sequentialRevision()})
 	started := make(chan struct{})

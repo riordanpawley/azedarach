@@ -267,6 +267,10 @@ func containsStringAttr(value any, want string) bool {
 	if !ok {
 		return false
 	}
+	return containsString(values, want)
+}
+
+func containsString(values []string, want string) bool {
 	for _, got := range values {
 		if got == want {
 			return true
@@ -374,6 +378,75 @@ func TestSubmitSerializesConflictingResources(t *testing.T) {
 		t.Fatal("second operation did not start after conflict cleared")
 	}
 
+	if err := mgr.Drain(context.Background()); err != nil {
+		t.Fatalf("drain error: %v", err)
+	}
+}
+
+func TestQueueSnapshotShowsBlockedOperationDependencies(t *testing.T) {
+	store := newMemoryStore()
+	mgr := New(store, Config{})
+
+	firstRunning := make(chan struct{})
+	firstRelease := make(chan struct{})
+	if _, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{
+		ID:           "op-running",
+		ProjectID:    "p1",
+		IssueID:      "az-1",
+		Kind:         "git.merge",
+		ResourceKeys: []string{"worktree:/tmp/az-1"},
+	}, func(context.Context) ([]byte, error) {
+		close(firstRunning)
+		<-firstRelease
+		return nil, nil
+	}); err != nil {
+		t.Fatalf("submit running operation: %v", err)
+	}
+	<-firstRunning
+
+	queuedStarted := make(chan struct{}, 1)
+	if _, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{
+		ID:           "op-queued",
+		ProjectID:    "p1",
+		IssueID:      "az-2",
+		Kind:         "worktree.cleanup",
+		ResourceKeys: []string{"worktree:/tmp/az-1"},
+	}, func(context.Context) ([]byte, error) {
+		queuedStarted <- struct{}{}
+		return nil, nil
+	}); err != nil {
+		t.Fatalf("submit queued operation: %v", err)
+	}
+	select {
+	case <-queuedStarted:
+		t.Fatal("blocked operation started before snapshot")
+	default:
+	}
+
+	snapshot := mgr.Queue(daemonops.Query{ProjectID: "p1"})
+	if len(snapshot.Running) != 1 || snapshot.Running[0].Record.ID != "op-running" {
+		t.Fatalf("running snapshot = %+v, want op-running", snapshot.Running)
+	}
+	if len(snapshot.Queued) != 1 {
+		t.Fatalf("queued snapshot len = %d, want 1", len(snapshot.Queued))
+	}
+	queued := snapshot.Queued[0]
+	if queued.Record.ID != "op-queued" || queued.QueueIndex != 1 {
+		t.Fatalf("queued entry = %+v, want op-queued index 1", queued)
+	}
+	if !containsString(queued.BlockingOperationIDs, "op-running") {
+		t.Fatalf("blocking operation ids = %+v, want op-running", queued.BlockingOperationIDs)
+	}
+	if !containsString(queued.BlockedResourceKeys, "worktree:/tmp/az-1") {
+		t.Fatalf("blocked resources = %+v, want worktree", queued.BlockedResourceKeys)
+	}
+	select {
+	case <-queuedStarted:
+		t.Fatal("blocked operation started before running operation released")
+	default:
+	}
+
+	close(firstRelease)
 	if err := mgr.Drain(context.Background()); err != nil {
 		t.Fatalf("drain error: %v", err)
 	}

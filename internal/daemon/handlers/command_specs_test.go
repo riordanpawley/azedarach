@@ -13,7 +13,7 @@ func TestCommandSpecRegistryProjectIDPolicy(t *testing.T) {
 		want    bool
 	}{
 		{command: CommandGitFetch, want: true},
-		{command: protocol.CommandOperationList, want: true},
+		{command: protocol.CommandOperationQueue, want: true},
 		{command: CommandSessionStart, want: true},
 		{command: CommandSessionMessage, want: true},
 		{command: protocol.CommandRuntimeReconcile, want: true},
@@ -42,7 +42,7 @@ func TestCommandSpecRegistryDispatcherTargets(t *testing.T) {
 	}{
 		{command: CommandSessionStart, want: CommandDispatchSession, ok: true},
 		{command: CommandSessionMessage, want: CommandDispatchSession, ok: true},
-		{command: protocol.CommandOperationGet, want: CommandDispatchOperation, ok: true},
+		{command: protocol.CommandOperationQueue, want: CommandDispatchOperation, ok: true},
 		{command: CommandPRCreate, want: CommandDispatchPR, ok: true},
 		{command: CommandGitBranchBehind, want: CommandDispatchPR, ok: true},
 		{command: protocol.CommandSpecRead, want: CommandDispatchSpec, ok: true},
@@ -72,7 +72,7 @@ func TestCommandSpecRegistryDaemonDispatchOwnership(t *testing.T) {
 		want    bool
 	}{
 		{command: CommandGitFetch, want: true},
-		{command: protocol.CommandOperationCancel, want: true},
+		{command: protocol.CommandOperationQueue, want: true},
 		{command: protocol.CommandSpecRead, want: true},
 		{command: protocol.CommandLearnRetire, want: true},
 		{command: protocol.CommandLearnSupersede, want: true},
@@ -107,6 +107,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		protocol.CommandOperationSubmit,
 		protocol.CommandOperationGet,
 		protocol.CommandOperationList,
+		protocol.CommandOperationQueue,
 		protocol.CommandOperationCancel,
 		CommandPRCreate,
 		CommandGitBranchBehind,
