@@ -371,6 +371,84 @@ func TestView_OrchestrationOverviewShowsProgressAndGitWithoutDumpingEverything(t
 	}
 }
 
+func TestView_OrchestrationOverviewGroupsObservationRowsByActionability(t *testing.T) {
+	m := newTestModel()
+	m.width = 140
+	m.height = 34
+	m.loading = false
+	m.viewMode = ViewModeOverview
+	observedAt := time.Date(2026, time.July, 6, 1, 0, 0, 0, time.UTC)
+	m.orchestrationOverviewLoadedAt = observedAt.Add(2 * time.Hour)
+
+	waiting := domain.Task{
+		ID:                    naming.IssueID("ctn"),
+		Title:                 "Render observation-driven TUI overview",
+		Status:                domain.StatusInProgress,
+		Session:               &domain.Session{IssueID: naming.IssueID("ctn"), State: domain.SessionWaiting, Activity: "waiting"},
+		HasTmuxSession:        true,
+		HasUncommittedChanges: true,
+		GitAdditions:          4,
+		GitDeletions:          1,
+	}
+	review := domain.Task{
+		ID:     naming.IssueID("ctp"),
+		Title:  "Worker observation projection",
+		Status: domain.StatusInReview,
+	}
+	m.orchestrationOverview = []orchestrationProjectOverview{{
+		Name:  "azedarach",
+		Tasks: []domain.Task{waiting, review},
+		Observations: []domain.WorkerObservation{
+			{
+				IssueID: "ctn",
+				State:   domain.WorkerObservationWaitingHuman,
+				Reason:  "active session is waiting for input",
+				LastEvent: &domain.WorkerObservationEventSummary{
+					Kind: "issue_event",
+					Type: "human.input_requested",
+					At:   observedAt,
+				},
+				EvidenceSummary: []string{"session waiting prompt"},
+				NextActions:     []string{"answer worker prompt"},
+			},
+			{
+				IssueID:         "ctp",
+				State:           domain.WorkerObservationReviewReady,
+				Reason:          "worker submitted integration evidence",
+				EvidenceSummary: []string{"structured worker_evidence.v1"},
+				NextActions:     []string{"validate evidence"},
+			},
+			{IssueID: "ctf", State: domain.WorkerObservationBlocked, Reason: "dependency is unresolved", NextActions: []string{"inspect blocker"}},
+			{IssueID: "ctw", State: domain.WorkerObservationWorking, Reason: "session is busy", NextActions: []string{"monitor worker"}},
+			{IssueID: "ctx", State: domain.WorkerObservationCleanupPending, Reason: "worker closed and session remains", NextActions: []string{"cleanup session"}},
+		},
+	}}
+
+	view := ansi.Strip(m.View())
+	needsIdx := strings.Index(view, "Needs You")
+	reviewIdx := strings.Index(view, "Review Ready")
+	blockedIdx := strings.Index(view, "Blocked/Failed/Stale")
+	workingIdx := strings.Index(view, "Working")
+	cleanupIdx := strings.Index(view, "Cleanup")
+	if needsIdx < 0 || reviewIdx < 0 || blockedIdx < 0 || workingIdx < 0 || cleanupIdx < 0 {
+		t.Fatalf("overview missing observation groups:\n%s", view)
+	}
+	if !(needsIdx < reviewIdx && reviewIdx < blockedIdx && blockedIdx < workingIdx && workingIdx < cleanupIdx) {
+		t.Fatalf("overview groups out of order:\n%s", view)
+	}
+	for _, want := range []string{
+		"ctn waiting_human age 2h0m0s evidence last,issue,evidence,action",
+		"reason: active session is waiting for input | action: answer worker prompt",
+		"signal: session waiting git dirty +4/-1 | Render observation-driven TUI overview",
+		"ctp review_ready age unknown evidence evidence,action",
+		"reason: worker submitted integration evidence | action: validate evidence",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("overview missing observation row detail %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestOverviewMailParentsPrefersActiveIssueParent(t *testing.T) {
 	parent := naming.IssueID("parent-1")
 	tasks := []domain.Task{
@@ -743,6 +821,54 @@ func TestView_OrchestrationOverviewFitsDefaultAndNarrowViewports(t *testing.T) {
 				t.Fatalf("overview missing complete bottom border:\n%s", view)
 			}
 		})
+	}
+}
+
+func TestView_OrchestrationOverviewObservationRowsFitNarrowViewport(t *testing.T) {
+	m := newTestModel()
+	m.width = 52
+	m.height = 18
+	m.loading = false
+	m.viewMode = ViewModeOverview
+	observedAt := time.Date(2026, time.July, 6, 4, 0, 0, 0, time.UTC)
+	m.orchestrationOverviewLoadedAt = observedAt.Add(15 * time.Minute)
+	m.orchestrationOverview = []orchestrationProjectOverview{{
+		Name: "alpha",
+		Tasks: []domain.Task{{
+			ID:             naming.IssueID("ctn"),
+			Title:          "Render overview",
+			Status:         domain.StatusInProgress,
+			Session:        &domain.Session{IssueID: naming.IssueID("ctn"), State: domain.SessionWaiting, Activity: "waiting"},
+			HasTmuxSession: true,
+		}},
+		Observations: []domain.WorkerObservation{{
+			IssueID: "ctn",
+			State:   domain.WorkerObservationWaitingHuman,
+			Reason:  "needs input",
+			LastEvent: &domain.WorkerObservationEventSummary{
+				Kind: "mailbox",
+				Type: "worker-blocked",
+				At:   observedAt,
+			},
+			NextActions: []string{"answer prompt"},
+		}},
+	}}
+
+	view := m.View()
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) > m.height {
+		t.Fatalf("overview rendered %d lines, want <= %d\n%s", len(lines), m.height, view)
+	}
+	for i, line := range lines {
+		if got := lipgloss.Width(line); got > m.width {
+			t.Fatalf("line %d width = %d, want <= %d: %q", i, got, m.width, line)
+		}
+	}
+	stripped := ansi.Strip(view)
+	for _, want := range []string{"Needs You", "age 15m0s", "action: answer prompt", "NORMAL"} {
+		if !strings.Contains(stripped, want) {
+			t.Fatalf("narrow overview missing %q:\n%s", want, stripped)
+		}
 	}
 }
 

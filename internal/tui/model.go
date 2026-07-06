@@ -104,16 +104,18 @@ const (
 )
 
 type orchestrationProjectOverview struct {
-	Name          string
-	Path          string
-	ProjectID     string
-	Tasks         []domain.Task
-	MailByTask    map[string]protocol.MailEvent
-	Err           error
-	Fallback      string
-	Revision      uint64
-	LastCheckedAt time.Time
-	Freshness     protocol.TaskListFreshness
+	Name            string
+	Path            string
+	ProjectID       string
+	Tasks           []domain.Task
+	Observations    []domain.WorkerObservation
+	ObservationErrs []string
+	MailByTask      map[string]protocol.MailEvent
+	Err             error
+	Fallback        string
+	Revision        uint64
+	LastCheckedAt   time.Time
+	Freshness       protocol.TaskListFreshness
 }
 
 type drillDownContext struct {

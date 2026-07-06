@@ -72,8 +72,15 @@ func (m Model) loadOrchestrationOverviewCmd() tea.Cmd {
 			if err == nil {
 				var entryHiddenTasks int
 				entry.Tasks, entryHiddenTasks = sessionOverviewTasks(snapshot.Tasks)
-				hiddenTasks += entryHiddenTasks
 				entry.MailByTask = overviewLatestMailByTask(ctx, client, project.path, snapshot.Tasks)
+				entry.Observations, entry.ObservationErrs = overviewWorkerObservations(ctx, client, snapshot.Tasks)
+				visibleBeforeObservations := len(entry.Tasks)
+				entry.Tasks = overviewMergeObservationTasks(entry.Tasks, snapshot.Tasks, entry.Observations)
+				visibleFromObservations := len(entry.Tasks) - visibleBeforeObservations
+				if visibleFromObservations > 0 {
+					entryHiddenTasks = max(0, entryHiddenTasks-visibleFromObservations)
+				}
+				hiddenTasks += entryHiddenTasks
 				entry.Revision = snapshot.Revision
 				entry.LastCheckedAt = snapshot.LastCheckedAt
 				entry.Freshness = snapshot.Freshness
@@ -255,6 +262,186 @@ func sessionOverviewTasks(tasks []domain.Task) ([]domain.Task, int) {
 		return strings.ToLower(active[i].ID.String()) < strings.ToLower(active[j].ID.String())
 	})
 	return active, hidden
+}
+
+func overviewWorkerObservations(ctx context.Context, client *daemonclient.Client, tasks []domain.Task) ([]domain.WorkerObservation, []string) {
+	candidates := overviewObservationIssueIDs(tasks)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	byIssue := make(map[string]domain.WorkerObservation)
+	warnings := make([]string, 0)
+	for _, issueID := range candidates {
+		ready, err := client.TaskGraphReadiness(ctx, issueID)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: %s", issueID, overviewDegradedReason(err)))
+			continue
+		}
+		for _, observation := range ready.WorkerObservations {
+			key := strings.TrimSpace(observation.IssueID)
+			if key == "" {
+				continue
+			}
+			if _, exists := byIssue[key]; exists {
+				continue
+			}
+			byIssue[key] = observation
+		}
+	}
+	if len(byIssue) == 0 {
+		return nil, warnings
+	}
+	observations := make([]domain.WorkerObservation, 0, len(byIssue))
+	for _, observation := range byIssue {
+		observations = append(observations, observation)
+	}
+	sort.SliceStable(observations, func(i, j int) bool {
+		left := overviewObservationGroupRank(overviewObservationGroup(observations[i].State))
+		right := overviewObservationGroupRank(overviewObservationGroup(observations[j].State))
+		if left != right {
+			return left < right
+		}
+		leftAge, leftOK := overviewObservationEventTime(observations[i])
+		rightAge, rightOK := overviewObservationEventTime(observations[j])
+		if leftOK && rightOK && !leftAge.Equal(rightAge) {
+			return leftAge.Before(rightAge)
+		}
+		if leftOK != rightOK {
+			return leftOK
+		}
+		return strings.ToLower(observations[i].IssueID) < strings.ToLower(observations[j].IssueID)
+	})
+	return observations, warnings
+}
+
+func overviewObservationIssueIDs(tasks []domain.Task) []string {
+	ids := make([]string, 0, len(tasks))
+	seen := map[string]struct{}{}
+	for _, task := range tasks {
+		if task.ID.IsZero() || !overviewObservationCandidate(task) {
+			continue
+		}
+		id := task.ID.String()
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func overviewObservationCandidate(task domain.Task) bool {
+	if task.HasTmuxSession || task.HasWorktree {
+		return true
+	}
+	switch task.Status {
+	case domain.StatusInProgress, domain.StatusInReview:
+		return true
+	default:
+		return false
+	}
+}
+
+func overviewMergeObservationTasks(active, source []domain.Task, observations []domain.WorkerObservation) []domain.Task {
+	if len(observations) == 0 {
+		return active
+	}
+	byID := make(map[string]domain.Task, len(source))
+	for _, task := range source {
+		if task.ID.IsZero() {
+			continue
+		}
+		byID[task.ID.String()] = task
+	}
+	seen := make(map[string]struct{}, len(active)+len(observations))
+	for _, task := range active {
+		if !task.ID.IsZero() {
+			seen[task.ID.String()] = struct{}{}
+		}
+	}
+	merged := append([]domain.Task(nil), active...)
+	for _, observation := range observations {
+		issueID := strings.TrimSpace(observation.IssueID)
+		if issueID == "" {
+			continue
+		}
+		if _, ok := seen[issueID]; ok {
+			continue
+		}
+		if task, ok := byID[issueID]; ok {
+			merged = append(merged, task)
+		} else if parsed, err := naming.ParseIssueID(issueID); err == nil {
+			merged = append(merged, domain.Task{
+				ID:       parsed,
+				Title:    issueID,
+				Status:   overviewStatusFromObservation(observation.State),
+				Priority: domain.P2,
+				Type:     domain.TypeTask,
+			})
+		}
+		seen[issueID] = struct{}{}
+	}
+	return merged
+}
+
+func overviewStatusFromObservation(state domain.WorkerObservationState) domain.Status {
+	switch state {
+	case domain.WorkerObservationReviewReady:
+		return domain.StatusInReview
+	case domain.WorkerObservationDone, domain.WorkerObservationCleanupPending:
+		return domain.StatusDone
+	case domain.WorkerObservationRunnable:
+		return domain.StatusOpen
+	default:
+		return domain.StatusInProgress
+	}
+}
+
+func overviewObservationGroup(state domain.WorkerObservationState) string {
+	switch state {
+	case domain.WorkerObservationWaitingHuman:
+		return "needs_you"
+	case domain.WorkerObservationReviewReady:
+		return "review_ready"
+	case domain.WorkerObservationBlocked, domain.WorkerObservationFailed, domain.WorkerObservationStale:
+		return "blocked_failed_stale"
+	case domain.WorkerObservationCleanupPending, domain.WorkerObservationDone:
+		return "cleanup"
+	default:
+		return "working"
+	}
+}
+
+func overviewObservationGroupRank(group string) int {
+	for i, spec := range overviewObservationGroupOrder {
+		if spec.name == group {
+			return i
+		}
+	}
+	return len(overviewObservationGroupOrder)
+}
+
+func overviewObservationsInGroup(observations []domain.WorkerObservation, group string) []domain.WorkerObservation {
+	out := make([]domain.WorkerObservation, 0)
+	for _, observation := range observations {
+		if overviewObservationGroup(observation.State) == group {
+			out = append(out, observation)
+		}
+	}
+	return out
+}
+
+var overviewObservationGroupOrder = []struct {
+	name  string
+	title string
+}{
+	{name: "needs_you", title: "Needs You"},
+	{name: "review_ready", title: "Review Ready"},
+	{name: "blocked_failed_stale", title: "Blocked/Failed/Stale"},
+	{name: "working", title: "Working"},
+	{name: "cleanup", title: "Cleanup"},
 }
 
 func overviewTasksFromSessionStatus(ctx context.Context, client *daemonclient.Client) ([]domain.Task, error) {
@@ -504,6 +691,18 @@ func orchestrationOverviewTaskRefs(projects []orchestrationProjectOverview) []or
 	count := orchestrationOverviewTaskCount(projects)
 	taskRefs := make([]orchestrationOverviewTaskRef, 0, count)
 	for _, project := range projects {
+		if len(project.Observations) > 0 {
+			taskByID := overviewTasksByID(project.Tasks)
+			for _, group := range overviewObservationGroupOrder {
+				for _, observation := range overviewObservationsInGroup(project.Observations, group.name) {
+					taskRefs = append(taskRefs, orchestrationOverviewTaskRef{
+						Project: project,
+						Task:    taskByID[strings.TrimSpace(observation.IssueID)],
+					})
+				}
+			}
+			continue
+		}
 		for _, task := range project.Tasks {
 			taskRefs = append(taskRefs, orchestrationOverviewTaskRef{
 				Project: project,
@@ -517,6 +716,10 @@ func orchestrationOverviewTaskRefs(projects []orchestrationProjectOverview) []or
 func orchestrationOverviewTaskCount(projects []orchestrationProjectOverview) int {
 	count := 0
 	for _, project := range projects {
+		if len(project.Observations) > 0 {
+			count += len(project.Observations)
+			continue
+		}
 		count += len(project.Tasks)
 	}
 	return count
@@ -833,22 +1036,54 @@ func (m Model) renderOverviewProjectCard(project orchestrationProjectOverview, w
 		lipgloss.NewStyle().Foreground(uistyles.Text).Bold(true).Render(titleLine),
 		m.styles.StatusHint.Render(ansi.Truncate(meta, innerWidth, "...")),
 	}
-	if project.Err == nil && len(project.Tasks) == 0 {
+	if project.Err == nil && len(project.Tasks) == 0 && len(project.Observations) == 0 {
 		lines = append(lines, m.styles.StatusHint.Render("No active sessions"))
 	}
 	remaining := innerHeight - len(lines)
-	for _, task := range project.Tasks {
-		if remaining <= 0 {
-			break
-		}
-		selected := false
-		if cursor != nil {
-			selected = *cursor == m.orchestrationOverviewCursor
-			*cursor = *cursor + 1
-		}
-		taskLines := m.renderOverviewTaskLines(project, task, innerWidth, remaining, selected)
-		lines = append(lines, taskLines...)
+	if len(project.ObservationErrs) > 0 && remaining > 0 {
+		warning := "observations degraded: " + strings.Join(project.ObservationErrs, "; ")
+		lines = append(lines, m.styles.StatusHint.Render(ansi.Truncate(warning, innerWidth, "...")))
 		remaining = innerHeight - len(lines)
+	}
+	if len(project.Observations) > 0 {
+		taskByID := overviewTasksByID(project.Tasks)
+		for _, group := range overviewObservationGroupOrder {
+			groupObservations := overviewObservationsInGroup(project.Observations, group.name)
+			if len(groupObservations) == 0 || remaining <= 0 {
+				continue
+			}
+			groupLine := lipgloss.NewStyle().Foreground(uistyles.Overlay1).Bold(true).Render(group.title)
+			lines = append(lines, ansi.Truncate(groupLine, innerWidth, "..."))
+			remaining = innerHeight - len(lines)
+			for _, observation := range groupObservations {
+				if remaining <= 0 {
+					break
+				}
+				selected := false
+				if cursor != nil {
+					selected = *cursor == m.orchestrationOverviewCursor
+					*cursor = *cursor + 1
+				}
+				task := taskByID[strings.TrimSpace(observation.IssueID)]
+				taskLines := m.renderOverviewObservationLines(project, task, observation, innerWidth, remaining, selected)
+				lines = append(lines, taskLines...)
+				remaining = innerHeight - len(lines)
+			}
+		}
+	} else {
+		for _, task := range project.Tasks {
+			if remaining <= 0 {
+				break
+			}
+			selected := false
+			if cursor != nil {
+				selected = *cursor == m.orchestrationOverviewCursor
+				*cursor = *cursor + 1
+			}
+			taskLines := m.renderOverviewTaskLines(project, task, innerWidth, remaining, selected)
+			lines = append(lines, taskLines...)
+			remaining = innerHeight - len(lines)
+		}
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 	return lipgloss.NewStyle().
@@ -861,6 +1096,17 @@ func (m Model) renderOverviewProjectCard(project orchestrationProjectOverview, w
 		Render(content)
 }
 
+func overviewTasksByID(tasks []domain.Task) map[string]domain.Task {
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		if task.ID.IsZero() {
+			continue
+		}
+		byID[task.ID.String()] = task
+	}
+	return byID
+}
+
 func overviewProjectSessionCount(project orchestrationProjectOverview) int {
 	count := 0
 	for _, task := range project.Tasks {
@@ -869,6 +1115,182 @@ func overviewProjectSessionCount(project orchestrationProjectOverview) int {
 		}
 	}
 	return count
+}
+
+func (m Model) renderOverviewObservationLines(project orchestrationProjectOverview, task domain.Task, observation domain.WorkerObservation, width, budget int, selected bool) []string {
+	if budget <= 0 {
+		return nil
+	}
+	issueID := strings.TrimSpace(observation.IssueID)
+	if issueID == "" && !task.ID.IsZero() {
+		issueID = task.ID.String()
+	}
+	state := strings.TrimSpace(string(observation.State))
+	if state == "" {
+		state = "unknown"
+	}
+	age := m.overviewObservationAge(observation)
+	flags := overviewObservationEvidenceFlags(observation)
+	headParts := []string{
+		issueID,
+		state,
+		"age " + age,
+	}
+	if len(flags) > 0 {
+		headParts = append(headParts, "evidence "+strings.Join(flags, ","))
+	}
+	lineStyle := lipgloss.NewStyle()
+	prefix := "  "
+	if selected {
+		prefix = "> "
+		lineStyle = lineStyle.Background(uistyles.Surface0).Width(width).MaxWidth(width)
+	}
+	lines := []string{lineStyle.Render(ansi.Truncate(prefix+strings.Join(headParts, " "), width, "..."))}
+	if budget == 1 {
+		return lines
+	}
+	reason := strings.TrimSpace(observation.Reason)
+	if reason == "" {
+		reason = "no observation reason"
+	}
+	action := overviewObservationPrimaryAction(observation)
+	reasonLine := "  reason: " + reason
+	if action != "" {
+		reasonLine += " | action: " + action
+	}
+	if selected {
+		reasonLine = lipgloss.NewStyle().Background(uistyles.Surface0).Width(width).MaxWidth(width).Render(ansi.Truncate(reasonLine, width, "..."))
+	} else {
+		reasonLine = ansi.Truncate(reasonLine, width, "...")
+	}
+	lines = append(lines, reasonLine)
+	if budget == 2 {
+		return lines
+	}
+	signal := overviewObservationSignal(task)
+	if signal == "" {
+		signal = overviewObservationLastEventSignal(observation)
+	}
+	if signal != "" {
+		signalLine := "  signal: " + signal
+		if title := strings.TrimSpace(task.Title); title != "" && title != issueID {
+			signalLine += " | " + title
+		}
+		if selected {
+			signalLine = lipgloss.NewStyle().Background(uistyles.Surface0).Width(width).MaxWidth(width).Render(ansi.Truncate(signalLine, width, "..."))
+		} else {
+			signalLine = ansi.Truncate(signalLine, width, "...")
+		}
+		lines = append(lines, signalLine)
+	}
+	return lines
+}
+
+func (m Model) overviewObservationAge(observation domain.WorkerObservation) string {
+	eventAt, ok := overviewObservationEventTime(observation)
+	if !ok {
+		return "unknown"
+	}
+	now := m.orchestrationOverviewLoadedAt
+	if now.IsZero() {
+		now = time.Now()
+	}
+	age := now.Sub(eventAt)
+	if age < 0 {
+		age = 0
+	}
+	return age.Round(time.Second).String()
+}
+
+func overviewObservationEventTime(observation domain.WorkerObservation) (time.Time, bool) {
+	if observation.LastEvent == nil || observation.LastEvent.At.IsZero() {
+		return time.Time{}, false
+	}
+	return observation.LastEvent.At, true
+}
+
+func overviewObservationPrimaryAction(observation domain.WorkerObservation) string {
+	for _, action := range observation.NextActions {
+		if trimmed := strings.TrimSpace(action); trimmed != "" {
+			return trimmed
+		}
+	}
+	switch observation.State {
+	case domain.WorkerObservationWaitingHuman:
+		return "inspect worker prompt"
+	case domain.WorkerObservationReviewReady:
+		return "validate evidence"
+	case domain.WorkerObservationBlocked, domain.WorkerObservationFailed:
+		return "inspect blocker"
+	case domain.WorkerObservationCleanupPending, domain.WorkerObservationDone:
+		return "cleanup integrated worker"
+	case domain.WorkerObservationRunnable:
+		return "start worker"
+	default:
+		return "monitor worker"
+	}
+}
+
+func overviewObservationEvidenceFlags(observation domain.WorkerObservation) []string {
+	flags := make([]string, 0, 6)
+	if observation.LastEvent != nil {
+		flags = append(flags, "last")
+		switch strings.TrimSpace(observation.LastEvent.Kind) {
+		case "mailbox":
+			flags = append(flags, "mail")
+		case "issue_event":
+			flags = append(flags, "issue")
+		}
+	}
+	if len(observation.EvidenceSummary) > 0 {
+		flags = append(flags, "evidence")
+	}
+	if len(observation.Risks) > 0 {
+		flags = append(flags, "risk")
+	}
+	if len(observation.NextActions) > 0 {
+		flags = append(flags, "action")
+	}
+	return flags
+}
+
+func overviewObservationSignal(task domain.Task) string {
+	parts := make([]string, 0, 3)
+	if task.Session != nil {
+		label := strings.TrimSpace(task.Session.DisplayLabel())
+		if label == "" {
+			label = string(task.Session.State)
+		}
+		if label != "" {
+			parts = append(parts, "session "+label)
+		}
+	} else if task.HasTmuxSession {
+		parts = append(parts, "session")
+	}
+	if git := overviewGitSummary(task); git != "" {
+		parts = append(parts, "git "+git)
+	}
+	if len(parts) == 0 && task.Status != "" {
+		parts = append(parts, "status "+task.Status.String())
+	}
+	return strings.Join(parts, " ")
+}
+
+func overviewObservationLastEventSignal(observation domain.WorkerObservation) string {
+	if observation.LastEvent == nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if kind := strings.TrimSpace(observation.LastEvent.Kind); kind != "" {
+		parts = append(parts, kind)
+	}
+	if typ := strings.TrimSpace(observation.LastEvent.Type); typ != "" {
+		parts = append(parts, typ)
+	}
+	if summary := strings.TrimSpace(observation.LastEvent.Summary); summary != "" {
+		parts = append(parts, summary)
+	}
+	return strings.Join(parts, " ")
 }
 
 func (m Model) renderOverviewTaskLines(project orchestrationProjectOverview, task domain.Task, width, budget int, selected bool) []string {
