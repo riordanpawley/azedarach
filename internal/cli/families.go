@@ -369,6 +369,7 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 	}
 
 	preCommitMergeInProgress := false
+	skipPreCommitDecisionSync := hookName == "pre-commit" && gitHookEnvFlagEnabled("AZEDARACH_SKIP_DECISION_SYNC")
 	if hookName == "pre-commit" {
 		mergeInProgress, mergeErr := gitMergeInProgress(projectDir)
 		if mergeErr != nil && opts.Verbose {
@@ -378,6 +379,9 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 		if preCommitMergeInProgress && opts.Verbose {
 			fmt.Fprintln(os.Stderr, "githooks pre-commit: merge in progress; skipping built-in decision sync")
 		}
+		if skipPreCommitDecisionSync && opts.Verbose {
+			fmt.Fprintln(os.Stderr, "githooks pre-commit: skipping built-in decision sync (AZEDARACH_SKIP_DECISION_SYNC=1)")
+		}
 	}
 
 	// Built-in decision sync commands fire before user-configured commands so
@@ -385,7 +389,10 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 	// (lint, formatter, etc.) inspect the tree. Built-ins are best-effort and
 	// silent unless --verbose: the daemon may not be running on a fresh clone,
 	// and a missing decision feature must not block a commit.
-	allCommands := append([]string{}, builtInDecisionCommandsForHook(hookName, projectDir, preCommitMergeInProgress)...)
+	allCommands := []string{}
+	if !skipPreCommitDecisionSync {
+		allCommands = append(allCommands, builtInDecisionCommandsForHook(hookName, projectDir, preCommitMergeInProgress)...)
+	}
 	allCommands = append(allCommands, configuredCommandsForHook(cfg, hookName)...)
 
 	for _, command := range allCommands {
@@ -409,7 +416,7 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 	// transactional merge path.
 	restageEnabled := cfg.GitHooks.Restage.Enabled
 	restagePaths := append([]string{}, cfg.GitHooks.Restage.Paths...)
-	if hookName == "pre-commit" && !preCommitMergeInProgress {
+	if hookName == "pre-commit" && !preCommitMergeInProgress && !skipPreCommitDecisionSync {
 		restageEnabled = true
 		restagePaths = append(restagePaths, "docs/decisions")
 	}
@@ -432,6 +439,15 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 	}
 
 	return reconcileDaemonGitState(reconcileDir, deps, hookName, opts.Verbose)
+}
+
+func gitHookEnvFlagEnabled(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func loadConfigForHook(projectDir string, deps *Dependencies) (*config.Config, error) {

@@ -69,6 +69,72 @@ func TestGitHooksRunCommandRunsBuiltInDecisionSyncAndRestageOutsideMerge(t *test
 	}
 }
 
+func TestGitHooksRunCommandSkipsBuiltInDecisionSyncAndRestageWhenEnvSet(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+
+	fakeBin := t.TempDir()
+	fakeAz := filepath.Join(fakeBin, "az")
+	if err := os.WriteFile(fakeAz, []byte("#!/bin/sh\nif [ \"$1\" = decision ] && [ \"$2\" = sync ]; then mkdir -p docs/decisions && printf synced > docs/decisions/generated.md; fi\n"), 0o755); err != nil {
+		t.Fatalf("write fake az: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AZEDARACH_SKIP_DECISION_SYNC", "1")
+
+	decisionPath := filepath.Join(projectDir, "docs", "decisions", "existing.md")
+	if err := os.MkdirAll(filepath.Dir(decisionPath), 0o755); err != nil {
+		t.Fatalf("mkdir decisions: %v", err)
+	}
+	if err := os.WriteFile(decisionPath, []byte("existing\n"), 0o644); err != nil {
+		t.Fatalf("write existing decision: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	if err := GitHooksRunCommand(&Dependencies{RepoDir: projectDir, Config: cfg}, GitHooksRunOptions{ProjectDir: projectDir}); err != nil {
+		t.Fatalf("GitHooksRunCommand error: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(projectDir, "docs", "decisions", "generated.md")); !os.IsNotExist(err) {
+		t.Fatalf("generated decision err = %v, want not exist", err)
+	}
+
+	statusCmd := exec.Command("git", "-C", projectDir, "status", "--porcelain", "--", "docs/decisions/existing.md")
+	statusCmd.Env = gitExecEnvWithoutRoutingVars()
+	out, err := statusCmd.Output()
+	if err != nil {
+		t.Fatalf("git status existing decision: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "?? docs/decisions/existing.md" {
+		t.Fatalf("existing decision git status = %q, want untracked", got)
+	}
+}
+
+func TestGitHooksHookCommandDecisionSyncSkipDoesNotDisableImportHooks(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+
+	fakeBin := t.TempDir()
+	fakeAz := filepath.Join(fakeBin, "az")
+	if err := os.WriteFile(fakeAz, []byte("#!/bin/sh\nif [ \"$1\" = decision ] && [ \"$2\" = import ]; then printf imported > .decision-import-ran; fi\n"), 0o755); err != nil {
+		t.Fatalf("write fake az: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AZEDARACH_SKIP_DECISION_SYNC", "1")
+
+	cfg := config.DefaultConfig()
+	if err := GitHooksHookCommand(&Dependencies{RepoDir: projectDir, Config: cfg}, GitHooksHookOptions{ProjectDir: projectDir, Hook: "post-merge"}); err != nil {
+		t.Fatalf("GitHooksHookCommand error: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(projectDir, ".decision-import-ran")); err != nil {
+		t.Fatalf("decision import hook did not run: %v", err)
+	}
+}
+
 func TestGitHooksRunCommandRestagesDecisionsIntoHookIndex(t *testing.T) {
 	projectDir := t.TempDir()
 	if err := runGitCommandIsolated(projectDir, "init"); err != nil {

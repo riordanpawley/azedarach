@@ -10419,6 +10419,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az decision sync [--check] [--project-dir <dir>] [--json]` writes `docs/decisions/*.md` from the store; `az decision import [--check] [--force] [--project-dir <dir>] [--json]` reads markdown back into the store.") {
 		t.Fatalf("prime output missing decision sync/import guidance: %q", output)
 	}
+	if !strings.Contains(output, "Installed `az` pre-commit hooks run `az decision sync` and stage `docs/decisions`, so generated decision markdown can enter a commit even when your manual `git add` named only code files.") {
+		t.Fatalf("prime output missing decision commit hook guidance: %q", output)
+	}
+	if !strings.Contains(output, "`AZEDARACH_SKIP_DECISION_SYNC=1 git commit ...`") {
+		t.Fatalf("prime output missing decision sync skip guidance: %q", output)
+	}
 	if !strings.Contains(output, "`az session status [issue-id]`, `az worktree create <issue-id>`") {
 		t.Fatalf("prime output missing session/runtime command examples: %q", output)
 	}
