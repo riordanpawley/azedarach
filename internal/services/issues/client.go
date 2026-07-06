@@ -2824,7 +2824,11 @@ func (c *Client) countUndeletedParentChildDescendants(ctx context.Context, query
 type UpdateTaskParams struct {
 	Title           string
 	Description     string
+	Design          *string
 	Notes           *string
+	Acceptance      *string
+	Estimate        *int
+	EstimateSet     bool
 	Type            domain.TaskType
 	Priority        domain.Priority
 	Implementations []string
@@ -2921,13 +2925,14 @@ func (c *Client) updateDetailsLocked(ctx context.Context, id string, params Upda
 			_ = tx.Rollback()
 		}
 	}()
-	var oldTitle, oldDescription, oldNotes, oldType, oldImplementations string
+	var oldTitle, oldDescription, oldDesign, oldNotes, oldAcceptance, oldType, oldImplementations string
 	var oldPriority int
+	var oldEstimate sql.NullInt64
 	if err := tx.QueryRowContext(ctx, `
-		SELECT title, COALESCE(description, ''), COALESCE(notes, ''), issue_type, priority, COALESCE(implementations_json, '[]')
+		SELECT title, COALESCE(description, ''), COALESCE(design, ''), COALESCE(notes, ''), COALESCE(acceptance, ''), estimate, issue_type, priority, COALESCE(implementations_json, '[]')
 		FROM issues
 		WHERE id = ? AND deleted_at IS NULL
-	`, id).Scan(&oldTitle, &oldDescription, &oldNotes, &oldType, &oldPriority, &oldImplementations); err != nil {
+	`, id).Scan(&oldTitle, &oldDescription, &oldDesign, &oldNotes, &oldAcceptance, &oldEstimate, &oldType, &oldPriority, &oldImplementations); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.wrapError("update-details", id, domain.ErrNotFound)
 		}
@@ -2949,18 +2954,41 @@ func (c *Client) updateDetailsLocked(ctx context.Context, id string, params Upda
 		noteSet = 1
 		noteValue = *params.Notes
 	}
+	designSet := 0
+	designValue := ""
+	if params.Design != nil {
+		designSet = 1
+		designValue = *params.Design
+	}
+	acceptanceSet := 0
+	acceptanceValue := ""
+	if params.Acceptance != nil {
+		acceptanceSet = 1
+		acceptanceValue = *params.Acceptance
+	}
+	estimateSet := 0
+	var estimateValue any
+	if params.EstimateSet {
+		estimateSet = 1
+		if params.Estimate != nil {
+			estimateValue = *params.Estimate
+		}
+	}
 	res, err := tx.ExecContext(ctx, `
 		UPDATE issues
 		SET
 			title = ?,
 			description = ?,
+			design = CASE WHEN ? = 1 THEN ? ELSE design END,
 			notes = CASE WHEN ? = 1 THEN ? ELSE notes END,
+			acceptance = CASE WHEN ? = 1 THEN ? ELSE acceptance END,
+			estimate = CASE WHEN ? = 1 THEN ? ELSE estimate END,
 			issue_type = ?,
 			priority = ?,
 			implementations_json = CASE WHEN ? = 1 THEN ? ELSE implementations_json END,
 			updated_at = ?
 		WHERE id = ? AND deleted_at IS NULL
-	`, params.Title, nullableString(params.Description), noteSet, nullableString(noteValue), string(params.Type), int(params.Priority), implSet, implementationsJSON, now, id)
+	`, params.Title, nullableString(params.Description), designSet, nullableString(designValue), noteSet, nullableString(noteValue), acceptanceSet, nullableString(acceptanceValue), estimateSet, estimateValue, string(params.Type), int(params.Priority), implSet, implementationsJSON, now, id)
 	if err != nil {
 		return c.wrapError("update-details", id, err)
 	}
@@ -2975,8 +3003,17 @@ func (c *Client) updateDetailsLocked(ctx context.Context, id string, params Upda
 	if oldDescription != params.Description {
 		changedFields = append(changedFields, "description")
 	}
+	if params.Design != nil && oldDesign != designValue {
+		changedFields = append(changedFields, "design")
+	}
 	if params.Notes != nil && oldNotes != noteValue {
 		changedFields = append(changedFields, "notes")
+	}
+	if params.Acceptance != nil && oldAcceptance != acceptanceValue {
+		changedFields = append(changedFields, "acceptance")
+	}
+	if params.EstimateSet && estimateChanged(oldEstimate, params.Estimate) {
+		changedFields = append(changedFields, "estimate")
 	}
 	if oldType != string(params.Type) {
 		changedFields = append(changedFields, "issue_type")
@@ -2999,6 +3036,13 @@ func (c *Client) updateDetailsLocked(ctx context.Context, id string, params Upda
 	}
 	tx = nil
 	return nil
+}
+
+func estimateChanged(old sql.NullInt64, next *int) bool {
+	if next == nil {
+		return old.Valid
+	}
+	return !old.Valid || old.Int64 != int64(*next)
 }
 
 // UpdateDetailsWithRuntime updates issue metadata and returns the changed issue.

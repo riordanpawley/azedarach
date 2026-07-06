@@ -134,6 +134,10 @@ type pendingTaskStatus struct {
 type pendingTaskDetails struct {
 	title           string
 	description     string
+	design          string
+	notes           string
+	acceptance      string
+	estimate        *int
 	taskType        domain.TaskType
 	priority        domain.Priority
 	implementations []string
@@ -4593,6 +4597,10 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			details := pendingTaskDetails{
 				title:           msg.Title,
 				description:     msg.Description,
+				design:          msg.Design,
+				notes:           msg.Notes,
+				acceptance:      msg.Acceptance,
+				estimate:        cloneIntPtr(msg.Estimate),
 				taskType:        msg.Type,
 				priority:        msg.Priority,
 				implementations: append([]string(nil), msg.Implementations...),
@@ -4601,9 +4609,17 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			if m.daemonClient == nil {
 				return taskCreatedResultMsg{taskID: msg.ID, err: fmt.Errorf("daemon client unavailable"), isUpdate: true}
 			}
+			design := msg.Design
+			notes := msg.Notes
+			acceptance := msg.Acceptance
 			err := m.daemonClient.UpdateTaskDetails(ctx, msg.ID, daemonclient.TaskUpdateParams{
 				Title:           msg.Title,
 				Description:     msg.Description,
+				Design:          &design,
+				Notes:           &notes,
+				Acceptance:      &acceptance,
+				Estimate:        msg.Estimate,
+				EstimateSet:     true,
 				Type:            msg.Type,
 				Priority:        msg.Priority,
 				Implementations: msg.Implementations,
@@ -5755,6 +5771,7 @@ func (m *Model) markPendingTaskDetails(taskID string, details pendingTaskDetails
 		details.updatedAt = time.Now()
 	}
 	details.implementations = append([]string(nil), details.implementations...)
+	details.estimate = cloneIntPtr(details.estimate)
 	m.pendingDetails[taskIDKey(taskID)] = details
 }
 
@@ -5774,6 +5791,10 @@ func (m *Model) applyPendingTaskDetailOverlays() {
 		}
 		m.tasks[i].Title = pending.title
 		m.tasks[i].Description = pending.description
+		m.tasks[i].Design = pending.design
+		m.tasks[i].Notes = pending.notes
+		m.tasks[i].Acceptance = pending.acceptance
+		m.tasks[i].Estimate = cloneIntPtr(pending.estimate)
 		m.tasks[i].Type = pending.taskType
 		m.tasks[i].Priority = pending.priority
 		m.tasks[i].Implementations = append([]string(nil), pending.implementations...)
@@ -5826,9 +5847,28 @@ func (m *Model) reconcilePendingTaskDetailsFromHydrated(tasks []domain.Task) {
 func taskDetailsMatchPending(task domain.Task, pending pendingTaskDetails) bool {
 	return task.Title == pending.title &&
 		task.Description == pending.description &&
+		task.Design == pending.design &&
+		task.Notes == pending.notes &&
+		task.Acceptance == pending.acceptance &&
+		intPtrEqual(task.Estimate, pending.estimate) &&
 		task.Type == pending.taskType &&
 		task.Priority == pending.priority &&
 		stringSlicesEqual(task.Implementations, pending.implementations)
+}
+
+func cloneIntPtr(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func intPtrEqual(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 func stringSlicesEqual(a, b []string) bool {

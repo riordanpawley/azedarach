@@ -33,7 +33,11 @@ type applyTaskUpdateBody struct {
 	TaskID      string  `json:"task_id"`
 	Title       string  `json:"title"`
 	Description string  `json:"description"`
+	Design      *string `json:"design,omitempty"`
 	Notes       *string `json:"notes,omitempty"`
+	Acceptance  *string `json:"acceptance,omitempty"`
+	Estimate    *int    `json:"estimate,omitempty"`
+	EstimateSet bool    `json:"estimate_set,omitempty"`
 	Type        string  `json:"type"`
 	Priority    string  `json:"priority"`
 }

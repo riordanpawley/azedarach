@@ -4331,7 +4331,11 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 		TaskID          string          `json:"task_id"`
 		Title           string          `json:"title"`
 		Description     string          `json:"description"`
+		Design          *string         `json:"design,omitempty"`
 		Notes           *string         `json:"notes,omitempty"`
+		Acceptance      *string         `json:"acceptance,omitempty"`
+		Estimate        *int            `json:"estimate,omitempty"`
+		EstimateSet     bool            `json:"estimate_set,omitempty"`
 		Type            domain.TaskType `json:"type"`
 		Priority        domain.Priority `json:"priority"`
 		Implementations []string        `json:"implementations,omitempty"`
@@ -4345,7 +4349,11 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 	task, err := issueClient.UpdateDetailsWithRuntime(ctx, projectID, cmd.TaskID, issues.UpdateTaskParams{
 		Title:           cmd.Title,
 		Description:     cmd.Description,
+		Design:          cmd.Design,
 		Notes:           cmd.Notes,
+		Acceptance:      cmd.Acceptance,
+		Estimate:        cmd.Estimate,
+		EstimateSet:     cmd.EstimateSet,
 		Type:            cmd.Type,
 		Priority:        cmd.Priority,
 		Implementations: cmd.Implementations,

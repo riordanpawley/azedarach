@@ -466,11 +466,16 @@ func TestSaveTaskCmdUpdatesEditedDescriptionThroughDaemon(t *testing.T) {
 		},
 	}
 	m := newDaemonTestModel(transport)
+	estimate := 13
 
 	cmd := m.saveTaskCmd(overlay.TaskCreatedMsg{
 		ID:          "az-1",
 		Title:       "Edited title",
 		Description: "Edited description from TUI",
+		Design:      "Edited design",
+		Notes:       "Edited notes",
+		Acceptance:  "Edited acceptance",
+		Estimate:    &estimate,
 		Type:        domain.TypeTask,
 		Priority:    domain.P2,
 	})
@@ -491,9 +496,62 @@ func TestSaveTaskCmdUpdatesEditedDescriptionThroughDaemon(t *testing.T) {
 	if updateBody.TaskID != "az-1" ||
 		updateBody.Title != "Edited title" ||
 		updateBody.Description != "Edited description from TUI" ||
+		updateBody.Design == nil || *updateBody.Design != "Edited design" ||
+		updateBody.Notes == nil || *updateBody.Notes != "Edited notes" ||
+		updateBody.Acceptance == nil || *updateBody.Acceptance != "Edited acceptance" ||
+		updateBody.Estimate == nil || *updateBody.Estimate != 13 ||
+		!updateBody.EstimateSet ||
 		updateBody.Type != domain.TypeTask ||
 		updateBody.Priority != domain.P2 {
 		t.Fatalf("update body = %+v, want edited TUI fields", updateBody)
+	}
+}
+
+func TestSaveTaskCmdCanClearEditedEstimateThroughDaemon(t *testing.T) {
+	var updateBody struct {
+		TaskID string `json:"task_id"`
+		daemonclient.TaskUpdateParams
+	}
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskUpdate {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskUpdate)
+			}
+			if err := json.Unmarshal(req.Body, &updateBody); err != nil {
+				t.Fatalf("unmarshal update body: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				Meta:            req.Meta,
+				OK:              true,
+				CompletedAt:     req.SentAt,
+			}, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+
+	cmd := m.saveTaskCmd(overlay.TaskCreatedMsg{
+		ID:       "az-1",
+		Title:    "Edited title",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Estimate: nil,
+	})
+	if cmd == nil {
+		t.Fatal("saveTaskCmd returned nil")
+	}
+	msg := cmd()
+	result, ok := msg.(taskCreatedResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want taskCreatedResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("saveTaskCmd error = %v", result.err)
+	}
+	if !updateBody.EstimateSet || updateBody.Estimate != nil {
+		t.Fatalf("update estimate = %v estimate_set=%v, want explicit clear", updateBody.Estimate, updateBody.EstimateSet)
 	}
 }
 
@@ -656,13 +714,25 @@ func TestEditTaskActionLoadsFullDetailsBeforeSubmit(t *testing.T) {
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
 			case daemonclient.CommandTaskGet:
+				estimate := 5
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
 					Body: mustMarshalFullTaskSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
-						{ID: naming.IssueID(issueID), Title: "Full title", Description: "stored description", Type: domain.TypeTask, Priority: domain.P2, Status: domain.StatusOpen},
+						{
+							ID:          naming.IssueID(issueID),
+							Title:       "Full title",
+							Description: "stored description",
+							Design:      "stored design",
+							Notes:       "stored notes",
+							Acceptance:  "stored acceptance",
+							Estimate:    &estimate,
+							Type:        domain.TypeTask,
+							Priority:    domain.P2,
+							Status:      domain.StatusOpen,
+						},
 					}),
 				}, nil
 			case daemonclient.CommandTaskUpdate:
@@ -725,7 +795,14 @@ func TestEditTaskActionLoadsFullDetailsBeforeSubmit(t *testing.T) {
 	savedAny, _ := saving.Update(saveCmd())
 	saved := savedAny.(Model)
 
-	if updateBody.TaskID != issueID || updateBody.Title != "Full title" || updateBody.Description != "stored description" {
+	if updateBody.TaskID != issueID ||
+		updateBody.Title != "Full title" ||
+		updateBody.Description != "stored description" ||
+		updateBody.Design == nil || *updateBody.Design != "stored design" ||
+		updateBody.Notes == nil || *updateBody.Notes != "stored notes" ||
+		updateBody.Acceptance == nil || *updateBody.Acceptance != "stored acceptance" ||
+		updateBody.Estimate == nil || *updateBody.Estimate != 5 ||
+		!updateBody.EstimateSet {
 		t.Fatalf("update body = %+v, want full detail fields preserved", updateBody)
 	}
 	if got := saved.tasks[0].Description; got != "stored description" {
