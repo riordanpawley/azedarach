@@ -80,7 +80,7 @@ func TestNotificationActionCenterFiltersAndEmitsActions(t *testing.T) {
 	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
 	overlay = model.(*NotificationHistoryOverlay)
 	view := overlay.View()
-	if !strings.Contains(view, "Unread: 1") || strings.Contains(view, "Local notice") {
+	if !strings.Contains(view, "[Unread]") || !strings.Contains(view, "Unread: 1") || strings.Contains(view, "Local notice") {
 		t.Fatalf("filtered view =\n%s", view)
 	}
 
@@ -98,6 +98,162 @@ func TestNotificationActionCenterFiltersAndEmitsActions(t *testing.T) {
 	}
 	if action.DaemonNoticeID != "notice-1" || action.Kind != "client.copy_details" || action.ScopeID != "az-1" || action.OperationID != "op-1" {
 		t.Fatalf("action = %+v, want daemon-backed copy action with scope", action)
+	}
+}
+
+func TestNotificationActionCenterActionableFilterRequiresMeaningfulAction(t *testing.T) {
+	overlay := NewNotificationHistoryOverlay([]NotificationHistoryItem{
+		{
+			ID:      "notice-action",
+			Message: "retryable failure",
+			Read:    true,
+			Actions: []protocol.NoticeAction{
+				{ActionID: "retry_operation", Kind: "retry.operation", Label: "Retry", Enabled: true},
+			},
+		},
+		{
+			ID:        "notice-target",
+			ScopeType: "issue",
+			ScopeID:   "az-1",
+			Message:   "targeted notification",
+			Read:      true,
+		},
+		{
+			ID:      "notice-passive",
+			Message: "passive FYI",
+			Read:    true,
+		},
+	})
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
+	overlay = model.(*NotificationHistoryOverlay)
+
+	for range 3 {
+		model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
+		overlay = model.(*NotificationHistoryOverlay)
+	}
+	view := overlay.View()
+	if !strings.Contains(view, "[Actionable]") || !strings.Contains(view, "Actionable: 2") {
+		t.Fatalf("actionable view missing selected tab/count:\n%s", view)
+	}
+	if strings.Contains(view, "passive FYI") {
+		t.Fatalf("actionable view should hide passive notices:\n%s", view)
+	}
+}
+
+func TestNotificationActionCenterSpaceExpandsDetailsAndEnterUsesPrimaryAction(t *testing.T) {
+	overlay := NewNotificationHistoryOverlay([]NotificationHistoryItem{
+		{
+			ID:             "notice-1",
+			DaemonNoticeID: "notice-1",
+			ScopeType:      "issue",
+			ScopeID:        "az-1",
+			Message:        "Task az-1 needs attention from the notification center operator before continuing.",
+			Detail:         "First hidden diagnostic line. Second hidden diagnostic line. Third hidden diagnostic line. Fourth hidden diagnostic line. Fifth hidden diagnostic line.",
+			Actions: []protocol.NoticeAction{
+				{ActionID: "copy_details", Kind: "client.copy_details", Label: "Copy details", Enabled: true},
+				{ActionID: "open_task", Kind: "client.open_task", Label: "Open task", Enabled: true},
+			},
+		},
+	})
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
+	overlay = model.(*NotificationHistoryOverlay)
+
+	collapsed := overlay.View()
+	if strings.Contains(collapsed, "Fifth hidden diagnostic line.") {
+		t.Fatalf("collapsed view should hide later detail lines:\n%s", collapsed)
+	}
+
+	model, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if cmd != nil {
+		t.Fatalf("space should expand details without emitting an action, got %T", cmd())
+	}
+	overlay = model.(*NotificationHistoryOverlay)
+	expanded := overlay.View()
+	if !strings.Contains(expanded, "Fifth hidden diagnostic line.") {
+		t.Fatalf("expanded view missing later detail lines:\n%s", expanded)
+	}
+
+	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected enter to emit primary action")
+	}
+	msg, ok := cmd().(SelectionMsg)
+	if !ok || msg.Key != "notification_action" {
+		t.Fatalf("message = %T/%+v, want notification_action SelectionMsg", cmd(), cmd())
+	}
+	action, ok := msg.Value.(NotificationActionCenterMsg)
+	if !ok {
+		t.Fatalf("selection value = %T, want NotificationActionCenterMsg", msg.Value)
+	}
+	if action.ActionID != "open_task" || action.Kind != "client.open_task" || action.ScopeID != "az-1" {
+		t.Fatalf("action = %+v, want open_task primary action", action)
+	}
+
+	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if cmd != nil {
+		t.Fatalf("a should not duplicate enter primary action, got %T", cmd())
+	}
+}
+
+func TestNotificationActionCenterSingleOpenShortcut(t *testing.T) {
+	overlay := NewNotificationHistoryOverlay([]NotificationHistoryItem{
+		{
+			ID:        "notice-1",
+			ScopeType: "issue",
+			ScopeID:   "az-1",
+			Message:   "openable notice",
+		},
+	})
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
+	overlay = model.(*NotificationHistoryOverlay)
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("w")})
+	if cmd != nil {
+		t.Fatalf("w should not duplicate open shortcut, got %T", cmd())
+	}
+	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")})
+	if cmd == nil {
+		t.Fatal("expected o to emit open action")
+	}
+	msg, ok := cmd().(SelectionMsg)
+	if !ok || msg.Key != "notification_action" {
+		t.Fatalf("message = %T/%+v, want notification_action SelectionMsg", cmd(), cmd())
+	}
+	action, ok := msg.Value.(NotificationActionCenterMsg)
+	if !ok {
+		t.Fatalf("selection value = %T, want NotificationActionCenterMsg", msg.Value)
+	}
+	if action.Kind != "client.open_task" || action.ScopeID != "az-1" {
+		t.Fatalf("action = %+v, want synthesized open task action", action)
+	}
+}
+
+func TestNotificationActionCenterReadAndDismissUpdateVisibleRows(t *testing.T) {
+	overlay := NewNotificationHistoryOverlay([]NotificationHistoryItem{
+		{ID: "notice-1", Message: "first", Read: false},
+		{ID: "notice-2", Message: "second", Read: false},
+	})
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
+	overlay = model.(*NotificationHistoryOverlay)
+
+	model, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	if cmd == nil {
+		t.Fatal("expected mark-read command")
+	}
+	overlay = model.(*NotificationHistoryOverlay)
+	view := overlay.View()
+	if !strings.Contains(view, "read") {
+		t.Fatalf("view should show optimistic read state:\n%s", view)
+	}
+
+	model, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	if cmd == nil {
+		t.Fatal("expected dismiss command")
+	}
+	overlay = model.(*NotificationHistoryOverlay)
+	view = overlay.View()
+	if !strings.Contains(view, "dismissed") {
+		t.Fatalf("view should show optimistic dismissed state:\n%s", view)
 	}
 }
 

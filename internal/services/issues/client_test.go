@@ -82,13 +82,24 @@ func TestClient_CRUDLifecycle(t *testing.T) {
 	assert.Equal(t, domain.StatusInProgress, tasks[0].Status)
 	assert.Equal(t, "Create native sqlite issue store", tasks[0].Title)
 	assert.Equal(t, domain.P0, tasks[0].Priority)
+	assert.Equal(t, "Use sqlite-backed issue store", tasks[0].Design)
 	assert.Equal(t, "Initial note", tasks[0].Notes)
+	assert.Equal(t, "CRUD works", tasks[0].Acceptance)
+	require.NotNil(t, tasks[0].Estimate)
+	assert.Equal(t, 5, *tasks[0].Estimate)
 
+	replacementDesign := "Replacement design"
 	replacementNotes := "Replacement note"
+	replacementAcceptance := "Replacement acceptance"
+	replacementEstimate := 8
 	err = client.UpdateDetails(ctx, createdID, UpdateTaskParams{
 		Title:       "Create native sqlite issue store",
 		Description: "No bd shell calls",
+		Design:      &replacementDesign,
 		Notes:       &replacementNotes,
+		Acceptance:  &replacementAcceptance,
+		Estimate:    &replacementEstimate,
+		EstimateSet: true,
 		Type:        domain.TypeTask,
 		Priority:    domain.P0,
 	})
@@ -97,13 +108,22 @@ func TestClient_CRUDLifecycle(t *testing.T) {
 	tasks, err = client.Search(ctx, createdID)
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
+	assert.Equal(t, "Replacement design", tasks[0].Design)
 	assert.Equal(t, "Replacement note", tasks[0].Notes)
+	assert.Equal(t, "Replacement acceptance", tasks[0].Acceptance)
+	require.NotNil(t, tasks[0].Estimate)
+	assert.Equal(t, 8, *tasks[0].Estimate)
 
+	clearDesign := ""
 	clearNotes := ""
+	clearAcceptance := ""
 	err = client.UpdateDetails(ctx, createdID, UpdateTaskParams{
 		Title:       "Create native sqlite issue store",
 		Description: "No bd shell calls",
+		Design:      &clearDesign,
 		Notes:       &clearNotes,
+		Acceptance:  &clearAcceptance,
+		EstimateSet: true,
 		Type:        domain.TypeTask,
 		Priority:    domain.P0,
 	})
@@ -112,7 +132,10 @@ func TestClient_CRUDLifecycle(t *testing.T) {
 	tasks, err = client.Search(ctx, createdID)
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
+	assert.Equal(t, "", tasks[0].Design)
 	assert.Equal(t, "", tasks[0].Notes)
+	assert.Equal(t, "", tasks[0].Acceptance)
+	assert.Nil(t, tasks[0].Estimate)
 
 	err = client.Close(ctx, createdID, "done")
 	require.NoError(t, err)

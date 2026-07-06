@@ -150,7 +150,7 @@ func NewEditTaskOverlayWithImplOptionsAndAttachmentService(task domain.Task, imp
 	ta.SetHeight(4)
 
 	acceptance := textarea.New()
-	acceptance.SetValue("")
+	acceptance.SetValue(task.Acceptance)
 	acceptance.CharLimit = taskAcceptanceCharLimit
 	acceptance.SetWidth(56)
 	acceptance.SetHeight(3)
@@ -165,6 +165,10 @@ func NewEditTaskOverlayWithImplOptionsAndAttachmentService(task domain.Task, imp
 		priority:        task.Priority,
 		status:          task.Status,
 		impls:           task.Implementations,
+		design:          task.Design,
+		notes:           task.Notes,
+		acceptance:      task.Acceptance,
+		estimate:        task.Estimate,
 		parentID:        issueIDPtrToStringPtr(task.ParentID),
 		focusIndex:      focusTitle,
 		styles:          New(),
@@ -175,6 +179,10 @@ func NewEditTaskOverlayWithImplOptionsAndAttachmentService(task domain.Task, imp
 			priority:    task.Priority,
 			status:      task.Status,
 			impls:       append([]string(nil), task.Implementations...),
+			design:      task.Design,
+			notes:       task.Notes,
+			acceptance:  task.Acceptance,
+			estimate:    task.Estimate,
 		},
 		attachmentSvc: attachmentSvc,
 	}

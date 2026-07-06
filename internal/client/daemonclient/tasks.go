@@ -60,7 +60,11 @@ type TaskCreateParams struct {
 type TaskUpdateParams struct {
 	Title           string          `json:"title"`
 	Description     string          `json:"description"`
+	Design          *string         `json:"design,omitempty"`
 	Notes           *string         `json:"notes,omitempty"`
+	Acceptance      *string         `json:"acceptance,omitempty"`
+	Estimate        *int            `json:"estimate,omitempty"`
+	EstimateSet     bool            `json:"estimate_set,omitempty"`
 	Type            domain.TaskType `json:"type"`
 	Priority        domain.Priority `json:"priority"`
 	Implementations []string        `json:"implementations"`

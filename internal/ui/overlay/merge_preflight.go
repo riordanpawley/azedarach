@@ -12,6 +12,7 @@ import (
 type MergePreflightOverlay struct {
 	twoPaneDialogChrome
 	dialogViewportState
+	context         ProjectActionContext
 	sourceID        string
 	targetID        string
 	sourceWorktree  string
@@ -27,9 +28,20 @@ type MergePreflightOverlay struct {
 	styles          *Styles
 }
 
+// ProjectActionContext carries project routing needed when an overlay action
+// may outlive the project selection that produced it.
+type ProjectActionContext struct {
+	ProjectID    string
+	ProjectName  string
+	ProjectPath  string
+	DaemonSocket string
+	BaseBranch   string
+}
+
 // MergePreflightRefreshSelection carries context required to recompute
 // merge preconditions after an explicit refresh action.
 type MergePreflightRefreshSelection struct {
+	Context               ProjectActionContext
 	SourceID              string
 	TargetID              string
 	SourceWorktree        string
@@ -43,6 +55,7 @@ type MergePreflightRefreshSelection struct {
 // MergePreflightAgentSelection carries context required to launch an agent
 // against a merge-preflight conflict without first dirtying the target tree.
 type MergePreflightAgentSelection struct {
+	Context        ProjectActionContext
 	SourceID       string
 	TargetID       string
 	SourceWorktree string
@@ -52,14 +65,38 @@ type MergePreflightAgentSelection struct {
 	ConflictFiles  []string
 }
 
+type MergePreflightWorktreeSelection struct {
+	Context  ProjectActionContext
+	Worktree string
+}
+
+type MergePreflightOption func(*MergePreflightOverlay)
+
+func WithMergePreflightProjectContext(context ProjectActionContext) MergePreflightOption {
+	return func(m *MergePreflightOverlay) {
+		m.context = trimProjectActionContext(context)
+	}
+}
+
+func trimProjectActionContext(context ProjectActionContext) ProjectActionContext {
+	return ProjectActionContext{
+		ProjectID:    strings.TrimSpace(context.ProjectID),
+		ProjectName:  strings.TrimSpace(context.ProjectName),
+		ProjectPath:  strings.TrimSpace(context.ProjectPath),
+		DaemonSocket: strings.TrimSpace(context.DaemonSocket),
+		BaseBranch:   strings.TrimSpace(context.BaseBranch),
+	}
+}
+
 func NewMergePreflightOverlay(
 	sourceID, targetID, sourceWorktree, targetWorktree string,
 	reasons, sourceFiles, targetFiles, conflictFiles []string,
 	targetRef, sourceBranch string,
 	stopTargetBeforeMerge bool,
 	canAbortTarget bool,
+	opts ...MergePreflightOption,
 ) *MergePreflightOverlay {
-	return &MergePreflightOverlay{
+	overlay := &MergePreflightOverlay{
 		sourceID:        sourceID,
 		targetID:        targetID,
 		sourceWorktree:  sourceWorktree,
@@ -74,6 +111,12 @@ func NewMergePreflightOverlay(
 		canAbortTarget:  canAbortTarget,
 		styles:          New(),
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(overlay)
+		}
+	}
+	return overlay
 }
 
 func (m *MergePreflightOverlay) Init() tea.Cmd {
@@ -92,6 +135,7 @@ func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return SelectionMsg{
 					Key: "merge_preflight_refresh",
 					Value: MergePreflightRefreshSelection{
+						Context:               m.context,
 						SourceID:              m.sourceID,
 						TargetID:              m.targetID,
 						SourceWorktree:        m.sourceWorktree,
@@ -110,6 +154,7 @@ func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return SelectionMsg{
 					Key: "merge_preflight_ignore_source_dirty",
 					Value: MergePreflightRefreshSelection{
+						Context:               m.context,
 						SourceID:              m.sourceID,
 						TargetID:              m.targetID,
 						SourceWorktree:        m.sourceWorktree,
@@ -129,6 +174,7 @@ func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return SelectionMsg{
 					Key: "merge_preflight_agent",
 					Value: MergePreflightAgentSelection{
+						Context:        m.context,
 						SourceID:       m.sourceID,
 						TargetID:       m.targetID,
 						SourceWorktree: m.sourceWorktree,
@@ -145,8 +191,11 @@ func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, func() tea.Msg {
 				return SelectionMsg{
-					Key:   "merge_preflight_abort",
-					Value: m.targetWorktree,
+					Key: "merge_preflight_abort",
+					Value: MergePreflightWorktreeSelection{
+						Context:  m.context,
+						Worktree: m.targetWorktree,
+					},
 				}
 			}
 		case "c":
@@ -155,8 +204,11 @@ func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, func() tea.Msg {
 				return SelectionMsg{
-					Key:   "merge_preflight_commit_source",
-					Value: m.sourceWorktree,
+					Key: "merge_preflight_commit_source",
+					Value: MergePreflightWorktreeSelection{
+						Context:  m.context,
+						Worktree: m.sourceWorktree,
+					},
 				}
 			}
 		case "d":
@@ -165,8 +217,11 @@ func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, func() tea.Msg {
 				return SelectionMsg{
-					Key:   "merge_preflight_discard_source",
-					Value: m.sourceWorktree,
+					Key: "merge_preflight_discard_source",
+					Value: MergePreflightWorktreeSelection{
+						Context:  m.context,
+						Worktree: m.sourceWorktree,
+					},
 				}
 			}
 		case "C":
@@ -175,8 +230,11 @@ func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, func() tea.Msg {
 				return SelectionMsg{
-					Key:   "merge_preflight_commit_target",
-					Value: m.targetWorktree,
+					Key: "merge_preflight_commit_target",
+					Value: MergePreflightWorktreeSelection{
+						Context:  m.context,
+						Worktree: m.targetWorktree,
+					},
 				}
 			}
 		case "D":
@@ -185,8 +243,11 @@ func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, func() tea.Msg {
 				return SelectionMsg{
-					Key:   "merge_preflight_discard_target",
-					Value: m.targetWorktree,
+					Key: "merge_preflight_discard_target",
+					Value: MergePreflightWorktreeSelection{
+						Context:  m.context,
+						Worktree: m.targetWorktree,
+					},
 				}
 			}
 		case "esc", "q", "enter":

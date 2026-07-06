@@ -37,8 +37,12 @@ func TestMergePreflightOverlayAbortSelection(t *testing.T) {
 	if selection.Key != "merge_preflight_abort" {
 		t.Fatalf("selection key = %q, want merge_preflight_abort", selection.Key)
 	}
-	if wt, ok := selection.Value.(string); !ok || wt != "." {
-		t.Fatalf("selection value = %#v, want \".\"", selection.Value)
+	value, ok := selection.Value.(MergePreflightWorktreeSelection)
+	if !ok {
+		t.Fatalf("selection value = %T, want MergePreflightWorktreeSelection", selection.Value)
+	}
+	if value.Worktree != "." {
+		t.Fatalf("selection worktree = %q, want \".\"", value.Worktree)
 	}
 }
 
@@ -165,5 +169,50 @@ func TestMergePreflightOverlayAgentSelection(t *testing.T) {
 	}
 	if len(value.ConflictFiles) != 1 || value.ConflictFiles[0] != "conflict.go" {
 		t.Fatalf("conflict files = %+v, want conflict.go", value.ConflictFiles)
+	}
+}
+
+func TestMergePreflightOverlayPropagatesProjectContext(t *testing.T) {
+	context := ProjectActionContext{
+		ProjectID:    "project-a",
+		ProjectName:  "Project A",
+		ProjectPath:  "/repo-a",
+		DaemonSocket: "/tmp/az.sock",
+		BaseBranch:   "main",
+	}
+	o := NewMergePreflightOverlay(
+		"az-1",
+		"base",
+		"/tmp/az-1",
+		".",
+		nil,
+		nil,
+		nil,
+		[]string{"conflict.go"},
+		"main",
+		"az/az-1",
+		false,
+		true,
+		WithMergePreflightProjectContext(context),
+	)
+
+	_, refreshCmd := o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	refreshMsg := refreshCmd().(SelectionMsg)
+	refresh, ok := refreshMsg.Value.(MergePreflightRefreshSelection)
+	if !ok {
+		t.Fatalf("refresh value = %T, want MergePreflightRefreshSelection", refreshMsg.Value)
+	}
+	if refresh.Context != context {
+		t.Fatalf("refresh context = %+v, want %+v", refresh.Context, context)
+	}
+
+	_, agentCmd := o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	agentMsg := agentCmd().(SelectionMsg)
+	agent, ok := agentMsg.Value.(MergePreflightAgentSelection)
+	if !ok {
+		t.Fatalf("agent value = %T, want MergePreflightAgentSelection", agentMsg.Value)
+	}
+	if agent.Context != context {
+		t.Fatalf("agent context = %+v, want %+v", agent.Context, context)
 	}
 }

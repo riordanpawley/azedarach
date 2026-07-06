@@ -54,6 +54,37 @@ func (c *Client) WithProjectRouteID(projectID naming.ProjectID) *Client {
 	return c
 }
 
+// ScopedProjectID returns a shallow client copy with a different project route.
+// The original client is left unchanged so transient cross-project actions do
+// not retarget the active project stream.
+func (c *Client) ScopedProjectID(projectID string) *Client {
+	if c == nil {
+		return nil
+	}
+	clone := *c
+	clone.projectID = normalizeRouteProjectID(projectID)
+	return &clone
+}
+
+// ScopedProjectRouteID returns a shallow client copy with a typed project route.
+func (c *Client) ScopedProjectRouteID(projectID naming.ProjectID) *Client {
+	if c == nil {
+		return nil
+	}
+	return c.ScopedProjectID(projectID.String())
+}
+
+// ForProjectRouteID returns a shallow client copy scoped to projectID without
+// mutating the receiver's default project route.
+func (c *Client) ForProjectRouteID(projectID naming.ProjectID) *Client {
+	if c == nil {
+		return nil
+	}
+	next := *c
+	next.projectID = normalizeRouteProjectID(projectID.String())
+	return &next
+}
+
 // WithReconnectPolicy overrides reconnect policy settings.
 func (c *Client) WithReconnectPolicy(policy reconnect.Policy) *Client {
 	c.policy = policy

@@ -2110,9 +2110,9 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("checkout target branch before close integration: %w", err)
 		}
 	}
-	merge, err := d.git.MergeCleanlyTransactional(ctx, targetWorktree, source.Branch)
+	merge, err := d.mergeTaskBranchBeforeClose(ctx, projectID, taskID, targetWorktree, targetBranch, source.Branch)
 	if err != nil {
-		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s: %w", source.Branch, targetBranch, err)
+		return taskCloseIntegrationResult{Requested: true}, err
 	}
 	if merge == nil {
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s returned no result", source.Branch, targetBranch)
@@ -2134,6 +2134,34 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		TargetBranch: targetBranch,
 	}
 	return integration, nil
+}
+
+func (d *Daemon) mergeTaskBranchBeforeClose(ctx context.Context, projectID, taskID, targetWorktree, targetBranch, sourceBranch string) (*git.MergeResult, error) {
+	for attempt := 1; ; attempt++ {
+		result, err := d.git.MergeCleanlyTransactional(ctx, targetWorktree, sourceBranch)
+		if err != nil {
+			return nil, fmt.Errorf("merge %s into %s: %w", sourceBranch, targetBranch, err)
+		}
+		if result == nil {
+			return nil, fmt.Errorf("merge %s into %s returned no result", sourceBranch, targetBranch)
+		}
+		if result.Success || !git.IsTransactionalMergeStaleTarget(result) {
+			return result, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("merge %s into %s retry stopped after target HEAD moved during scratch validation: %w", sourceBranch, targetBranch, err)
+		}
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Info("retrying close integration after target HEAD moved during scratch validation",
+				"project_id", projectID,
+				"task_id", taskID,
+				"target_worktree", targetWorktree,
+				"target_branch", targetBranch,
+				"source_branch", sourceBranch,
+				"attempt", attempt,
+			)
+		}
+	}
 }
 
 func daemonWorktreeForIssue(worktrees []git.Worktree, issueID string) (git.Worktree, bool) {
@@ -4348,7 +4376,11 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 		TaskID          string          `json:"task_id"`
 		Title           string          `json:"title"`
 		Description     string          `json:"description"`
+		Design          *string         `json:"design,omitempty"`
 		Notes           *string         `json:"notes,omitempty"`
+		Acceptance      *string         `json:"acceptance,omitempty"`
+		Estimate        *int            `json:"estimate,omitempty"`
+		EstimateSet     bool            `json:"estimate_set,omitempty"`
 		Type            domain.TaskType `json:"type"`
 		Priority        domain.Priority `json:"priority"`
 		Implementations []string        `json:"implementations,omitempty"`
@@ -4362,7 +4394,11 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 	task, err := issueClient.UpdateDetailsWithRuntime(ctx, projectID, cmd.TaskID, issues.UpdateTaskParams{
 		Title:           cmd.Title,
 		Description:     cmd.Description,
+		Design:          cmd.Design,
 		Notes:           cmd.Notes,
+		Acceptance:      cmd.Acceptance,
+		Estimate:        cmd.Estimate,
+		EstimateSet:     cmd.EstimateSet,
 		Type:            cmd.Type,
 		Priority:        cmd.Priority,
 		Implementations: cmd.Implementations,

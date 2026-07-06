@@ -10011,6 +10011,177 @@ func TestIssueBulkCommandsUseApplyCommand(t *testing.T) {
 	}
 }
 
+func TestIssueBulkUpdateCommandDescriptionPresenceControlsApplyPayload(t *testing.T) {
+	tempDir := t.TempDir()
+	bulkUpdatePath := filepath.Join(tempDir, "bulk-update-description.json")
+	if err := os.WriteFile(
+		bulkUpdatePath,
+		[]byte(`[{"task_id":"az-clear","description":""},{"task_id":"az-preserve","title":"Retitled"}]`),
+		0o644,
+	); err != nil {
+		t.Fatalf("write bulk-update file: %v", err)
+	}
+
+	var applyReq *protocol.RequestEnvelope
+	var taskGetIDs []string
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:              "az-clear",
+							Title:           "Clear",
+							Type:            domain.TypeTask,
+							Priority:        domain.P2,
+							Status:          domain.StatusOpen,
+							Implementations: []string{"go-bubbletea"},
+						},
+						{
+							ID:              "az-preserve",
+							Title:           "Preserve",
+							Type:            domain.TypeTask,
+							Priority:        domain.P2,
+							Status:          domain.StatusOpen,
+							Implementations: []string{"go-bubbletea"},
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskGet:
+					var body daemonclient.TaskIDRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal task.get body: %v", err)
+					}
+					taskGetIDs = append(taskGetIDs, body.TaskID.String())
+					task := domain.Task{
+						ID:              body.TaskID,
+						Title:           "Preserve",
+						Description:     "Existing description",
+						Type:            domain.TypeTask,
+						Priority:        domain.P2,
+						Status:          domain.StatusOpen,
+						Implementations: []string{"go-bubbletea"},
+					}
+					if body.TaskID.String() == "az-clear" {
+						task.Title = "Clear"
+					}
+					responseBody, err := marshalTaskListBody([]domain.Task{task})
+					if err != nil {
+						t.Fatalf("marshal get response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            responseBody,
+					}, nil
+				case protocol.CommandTaskBulkApply:
+					applyReq = &req
+					body, err := json.Marshal(applyExecutionResultBody{
+						Summary: applyExecutionSummaryBody{Total: 2, Succeeded: 2, Failed: 0},
+					})
+					if err != nil {
+						t.Fatalf("marshal apply response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            body,
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	_ = captureStdout(t, func() error {
+		return IssueBulkUpdateCommand(deps, IssueBulkUpdateOptions{
+			Implementation: "go-bubbletea",
+			InputPath:      bulkUpdatePath,
+			DryRun:         true,
+		})
+	})
+
+	if !reflect.DeepEqual(taskGetIDs, []string{"az-clear", "az-preserve"}) {
+		t.Fatalf("task.get ids = %v, want clear then preserve", taskGetIDs)
+	}
+	if applyReq == nil {
+		t.Fatalf("expected bulk apply command")
+	}
+	var applyBody protocol.ApplyRequestBody
+	if err := json.Unmarshal(applyReq.Body, &applyBody); err != nil {
+		t.Fatalf("unmarshal apply body: %v", err)
+	}
+	if !applyBody.DryRun {
+		t.Fatalf("dry_run = false, want true")
+	}
+	if len(applyBody.Operations) != 2 {
+		t.Fatalf("operation count = %d, want 2", len(applyBody.Operations))
+	}
+
+	updatesByID := make(map[string]struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Priority    string `json:"priority"`
+	})
+	for _, op := range applyBody.Operations {
+		if op.Command != daemonclient.CommandTaskUpdate {
+			t.Fatalf("operation command = %q, want %q", op.Command, daemonclient.CommandTaskUpdate)
+		}
+		var update struct {
+			TaskID      string `json:"task_id"`
+			Title       string `json:"title"`
+			Description string `json:"description"`
+			Priority    string `json:"priority"`
+		}
+		if err := json.Unmarshal(op.Body, &update); err != nil {
+			t.Fatalf("unmarshal update operation body: %v", err)
+		}
+		updatesByID[update.TaskID] = struct {
+			Title       string `json:"title"`
+			Description string `json:"description"`
+			Priority    string `json:"priority"`
+		}{
+			Title:       update.Title,
+			Description: update.Description,
+			Priority:    update.Priority,
+		}
+	}
+
+	if got := updatesByID["az-clear"]; got.Title != "Clear" || got.Description != "" || got.Priority != "P2" {
+		t.Fatalf("clear update = %+v, want existing title/P2 with empty description", got)
+	}
+	if got := updatesByID["az-preserve"]; got.Title != "Retitled" || got.Description != "Existing description" || got.Priority != "P2" {
+		t.Fatalf("preserve update = %+v, want retitled with existing description/P2", got)
+	}
+}
+
 func TestCompileBulkCreateItemRejectsDuplicateRefs(t *testing.T) {
 	input := issueBulkCreateInputItem{
 		Title:       "Epic",
@@ -10537,6 +10708,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Status semantics: use `open` for not-yet-active work, `in_progress` while actively working, `in_review` when implementation is complete") {
 		t.Fatalf("prime output missing status semantics guidance: %q", output)
 	}
+	if !strings.Contains(output, "before starting or resuming implementation, review, re-review, or follow-up fixes, move the issue to `in_progress` even if it was `in_review`") {
+		t.Fatalf("prime output missing agent-active status transition guidance: %q", output)
+	}
+	if !strings.Contains(output, "reserve `in_review` for the waiting-for-human/orchestrator handoff") {
+		t.Fatalf("prime output missing in-review handoff guidance: %q", output)
+	}
 	if !strings.Contains(output, "Blocked is not an issue status. Represent blocked work with dependency edges") {
 		t.Fatalf("prime output missing blocked-as-graph guidance: %q", output)
 	}
@@ -10671,6 +10848,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "`az issue get` hides historical notes in text output by default; use `az issue get <issue-id> --with-notes` only when full note history is needed.") {
 		t.Fatalf("prime output missing tiered notes retrieval guidance: %q", output)
+	}
+	if !strings.Contains(output, "Status update rule: move your active issue to `in_progress` when starting or resuming agent work, including agent-led review or re-review") {
+		t.Fatalf("prime output missing agent review status update rule: %q", output)
 	}
 	if !strings.Contains(output, "Atomic-merge test before using `--deferred`") {
 		t.Fatalf("prime output missing atomic-merge test heading in parent/child scope section: %q", output)

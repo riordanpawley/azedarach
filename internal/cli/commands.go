@@ -5628,12 +5628,12 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 		return fmt.Errorf("read bulk-update input %s: %w", opts.InputPath, err)
 	}
 	var input []struct {
-		TaskID              string `json:"task_id,omitempty"`
-		ID                  string `json:"id,omitempty"`
-		Title               string `json:"title,omitempty"`
-		Description         string `json:"description,omitempty"`
-		Type                string `json:"type,omitempty"`
-		Priority            string `json:"priority,omitempty"`
+		TaskID              string  `json:"task_id,omitempty"`
+		ID                  string  `json:"id,omitempty"`
+		Title               string  `json:"title,omitempty"`
+		Description         *string `json:"description,omitempty"`
+		Type                string  `json:"type,omitempty"`
+		Priority            string  `json:"priority,omitempty"`
 		DependencyRetargets []struct {
 			FromID string `json:"from_id"`
 			ToID   string `json:"to_id"`
@@ -5678,7 +5678,7 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 		if item.Title != "" {
 			needsUpdate = true
 		}
-		if item.Description != "" {
+		if item.Description != nil {
 			needsUpdate = true
 		}
 		if item.Type != "" {
@@ -5707,8 +5707,8 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 			if item.Title != "" {
 				update.Title = item.Title
 			}
-			if item.Description != "" {
-				update.Description = item.Description
+			if item.Description != nil {
+				update.Description = *item.Description
 			}
 			if item.Type != "" {
 				taskType, err := parseTaskType(item.Type)

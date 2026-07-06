@@ -232,7 +232,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Batch(cmds...)
 		}
-		m.reconcilePendingTaskDetailsFromHydrated(msg.tasks)
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
 		for i := range m.tasks {
@@ -291,7 +290,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if replayCmd := m.finishIssuesRefreshCmd(msg.refreshSeq); replayCmd != nil {
 			cmds = append(cmds, replayCmd)
 		} else {
-			 if opCmd := m.loadOperationsCmd(); opCmd != nil {
+			if opCmd := m.loadOperationsCmd(); opCmd != nil {
 				cmds = append(cmds, opCmd)
 				cmds = append(cmds, m.loadOrchestrationOverviewCmd())
 			} else {
@@ -714,6 +713,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Title:    fmt.Sprintf("Merge failed: %s -> %s", msg.sourceID, msg.targetID),
 				Message:  msg.err.Error(),
 				Action:   asyncRecoveryActionRetryMerge,
+				Project:  msg.project,
 				SourceID: msg.sourceID,
 				TargetID: msg.targetID,
 			})
@@ -759,6 +759,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.sourceBranch,
 			msg.stopTargetBeforeMerge,
 			strings.TrimSpace(msg.targetWorktree) != "",
+			overlay.WithMergePreflightProjectContext(msg.context),
 		))
 
 	case mergePreflightActionResultMsg:
@@ -893,6 +894,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Title:    fmt.Sprintf("Update failed: %s", msg.issueID),
 				Message:  msg.err.Error(),
 				Action:   asyncRecoveryActionRetryUpdate,
+				Project:  msg.project,
 			})
 			m.clearLocalTaskGitOperationPending(msg.issueID)
 			m.syncTaskWorkspaceOverlay()
@@ -1023,7 +1025,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clearDrillDown()
 
 		// Reuse the normal loaded-state reducer path.
-		m.reconcilePendingTaskDetailsFromHydrated(msg.tasks)
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
 		for i := range m.tasks {

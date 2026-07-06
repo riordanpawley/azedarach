@@ -60,6 +60,42 @@ func TestEditTaskOverlayTitleAndSubmitLabel(t *testing.T) {
 	assert.NotContains(t, overlay.View(), "Create Task")
 }
 
+func TestEditTaskOverlaySeedsAndSubmitsFullDetailFields(t *testing.T) {
+	estimate := 8
+	overlay := NewEditTaskOverlay(domain.Task{
+		ID:          "az-1",
+		Title:       "Existing task",
+		Description: "Existing description",
+		Design:      "Existing design",
+		Notes:       "Existing notes",
+		Acceptance:  "Existing acceptance",
+		Estimate:    &estimate,
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+	})
+
+	assert.Equal(t, "Existing description", overlay.description.Value())
+	assert.Equal(t, "Existing design", overlay.design)
+	assert.Equal(t, "Existing notes", overlay.notes)
+	assert.Equal(t, "Existing acceptance", overlay.acceptanceInput.Value())
+	require.NotNil(t, overlay.estimate)
+	assert.Equal(t, 8, *overlay.estimate)
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	require.NotNil(t, cmd)
+
+	msgs := batchToSlice(cmd())
+	require.Len(t, msgs, 1)
+	taskMsg, ok := msgs[0].(TaskCreatedMsg)
+	require.True(t, ok)
+	assert.Equal(t, "Existing design", taskMsg.Design)
+	assert.Equal(t, "Existing notes", taskMsg.Notes)
+	assert.Equal(t, "Existing acceptance", taskMsg.Acceptance)
+	require.NotNil(t, taskMsg.Estimate)
+	assert.Equal(t, 8, *taskMsg.Estimate)
+}
+
 func TestCreateTaskOverlaySize(t *testing.T) {
 	overlay := NewCreateTaskOverlay()
 	width, height := overlay.Size()

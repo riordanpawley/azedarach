@@ -100,15 +100,9 @@ func (m Model) alertIndicator() string {
 }
 
 func (m *Model) openNotificationHistoryOverlayCmd() tea.Cmd {
-	daemonNoticeIDs := make([]string, 0, len(m.notificationHistory))
 	items := make([]overlay.NotificationHistoryItem, 0, len(m.notificationHistory))
 	for i := len(m.notificationHistory) - 1; i >= 0; i-- {
 		entry := m.notificationHistory[i]
-		_ = m.feedback.markRead(entry.ID)
-		if strings.TrimSpace(entry.DaemonNoticeID) != "" && !entry.Read {
-			daemonNoticeIDs = append(daemonNoticeIDs, entry.DaemonNoticeID)
-		}
-		entry.Read = true
 		items = append(items, overlay.NotificationHistoryItem{
 			ID:             entry.ID,
 			DaemonNoticeID: strings.TrimSpace(entry.DaemonNoticeID),
@@ -127,11 +121,7 @@ func (m *Model) openNotificationHistoryOverlayCmd() tea.Cmd {
 			Actions:        cloneOverlayNoticeActions(entry.Actions),
 		})
 	}
-	m.refreshFeedbackProjectionOutputs(time.Now())
-	return tea.Batch(
-		m.openOverlay(overlay.NewNotificationHistoryOverlay(items)),
-		m.markDaemonNoticesReadCmd(daemonNoticeIDs),
-	)
+	return m.openOverlay(overlay.NewNotificationHistoryOverlay(items))
 }
 
 func notificationLevelLabel(level ToastLevel) string {

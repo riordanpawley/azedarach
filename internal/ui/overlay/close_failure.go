@@ -21,6 +21,13 @@ const (
 
 type CloseFailureActionMsg struct {
 	TaskID             string
+	ProjectID          string
+	ProjectName        string
+	ProjectPath        string
+	DaemonSocket       string
+	BaseBranch         string
+	ParentID           string
+	SourceWorktree     string
 	PreviousStatus     string
 	TargetStatus       string
 	Action             CloseFailureAction
@@ -29,6 +36,13 @@ type CloseFailureActionMsg struct {
 }
 
 type CloseFailureDialogOptions struct {
+	ProjectID               string
+	ProjectName             string
+	ProjectPath             string
+	DaemonSocket            string
+	BaseBranch              string
+	ParentID                string
+	SourceWorktree          string
 	PreviousStatus          string
 	TargetStatus            string
 	ForceWorktree           bool
@@ -251,6 +265,13 @@ func (c *CloseFailureDialog) selectionCmd(item closeFailureActionItem) tea.Cmd {
 			Key: "close_failure_action",
 			Value: CloseFailureActionMsg{
 				TaskID:             c.taskID,
+				ProjectID:          strings.TrimSpace(c.options.ProjectID),
+				ProjectName:        strings.TrimSpace(c.options.ProjectName),
+				ProjectPath:        strings.TrimSpace(c.options.ProjectPath),
+				DaemonSocket:       strings.TrimSpace(c.options.DaemonSocket),
+				BaseBranch:         strings.TrimSpace(c.options.BaseBranch),
+				ParentID:           strings.TrimSpace(c.options.ParentID),
+				SourceWorktree:     strings.TrimSpace(c.options.SourceWorktree),
 				PreviousStatus:     strings.TrimSpace(c.options.PreviousStatus),
 				TargetStatus:       strings.TrimSpace(c.options.TargetStatus),
 				Action:             item.action,

@@ -1313,7 +1313,13 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal request: %v", err)
 				}
-				if body.TaskID != "az-4" || body.Title != "Updated" || body.Notes == nil || *body.Notes != "Replacement notes" {
+				if body.TaskID != "az-4" ||
+					body.Title != "Updated" ||
+					body.Design == nil || *body.Design != "Replacement design" ||
+					body.Notes == nil || *body.Notes != "Replacement notes" ||
+					body.Acceptance == nil || *body.Acceptance != "Replacement acceptance" ||
+					body.Estimate == nil || *body.Estimate != 3 ||
+					!body.EstimateSet {
 					t.Fatalf("request body = %+v", body)
 				}
 				return protocol.ResponseEnvelope{
@@ -1326,12 +1332,19 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
+		design := "Replacement design"
 		notes := "Replacement notes"
+		acceptance := "Replacement acceptance"
+		estimate := 3
 		if err := client.UpdateTaskDetails(context.Background(), "az-4", TaskUpdateParams{
-			Title:    "Updated",
-			Notes:    &notes,
-			Type:     domain.TypeBug,
-			Priority: domain.P0,
+			Title:       "Updated",
+			Design:      &design,
+			Notes:       &notes,
+			Acceptance:  &acceptance,
+			Estimate:    &estimate,
+			EstimateSet: true,
+			Type:        domain.TypeBug,
+			Priority:    domain.P0,
 		}); err != nil {
 			t.Fatalf("UpdateTaskDetails error: %v", err)
 		}

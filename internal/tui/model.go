@@ -134,6 +134,10 @@ type pendingTaskStatus struct {
 type pendingTaskDetails struct {
 	title           string
 	description     string
+	design          string
+	notes           string
+	acceptance      string
+	estimate        *int
 	taskType        domain.TaskType
 	priority        domain.Priority
 	implementations []string
@@ -1991,6 +1995,23 @@ func (m Model) daemonClientForSocket(socketPath, projectID string) *daemonclient
 	if m.daemonClient != nil {
 		if strings.TrimSpace(m.daemonSocketPath) == "" || m.daemonSocketPath == socketPath {
 			return m.daemonClient.WithProjectRouteID(routeID)
+		}
+	}
+	readWaitPolicy := daemonclient.DefaultReadWaitPolicy()
+	if m.daemonClient != nil {
+		readWaitPolicy = m.daemonClient.ReadWaitPolicy()
+	}
+	return newScopedDaemonClient(socketPath, routeID.String(), readWaitPolicy)
+}
+
+func (m Model) scopedDaemonClientForSocket(socketPath, projectID string) *daemonclient.Client {
+	routeID := naming.ProjectID(protocol.NormalizeProjectID(projectID))
+	if parsed, err := naming.ParseProjectID(routeID.String()); err == nil {
+		routeID = parsed
+	}
+	if m.daemonClient != nil {
+		if strings.TrimSpace(socketPath) == "" || (strings.TrimSpace(m.daemonSocketPath) != "" && m.daemonSocketPath == socketPath) {
+			return m.daemonClient.ScopedProjectRouteID(routeID)
 		}
 	}
 	readWaitPolicy := daemonclient.DefaultReadWaitPolicy()
@@ -4128,6 +4149,7 @@ func (m *Model) dismissLatestToast() bool {
 type fetchAndMergeResultMsg struct {
 	worktree    string
 	issueID     string
+	project     asyncRecoveryProjectContext
 	attachAfter bool
 	result      *daemonclient.MergeResult
 	stage       string
@@ -4593,6 +4615,10 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			details := pendingTaskDetails{
 				title:           msg.Title,
 				description:     msg.Description,
+				design:          msg.Design,
+				notes:           msg.Notes,
+				acceptance:      msg.Acceptance,
+				estimate:        cloneIntPtr(msg.Estimate),
 				taskType:        msg.Type,
 				priority:        msg.Priority,
 				implementations: append([]string(nil), msg.Implementations...),
@@ -4601,9 +4627,17 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			if m.daemonClient == nil {
 				return taskCreatedResultMsg{taskID: msg.ID, err: fmt.Errorf("daemon client unavailable"), isUpdate: true}
 			}
+			design := msg.Design
+			notes := msg.Notes
+			acceptance := msg.Acceptance
 			err := m.daemonClient.UpdateTaskDetails(ctx, msg.ID, daemonclient.TaskUpdateParams{
 				Title:           msg.Title,
 				Description:     msg.Description,
+				Design:          &design,
+				Notes:           &notes,
+				Acceptance:      &acceptance,
+				Estimate:        msg.Estimate,
+				EstimateSet:     true,
 				Type:            msg.Type,
 				Priority:        msg.Priority,
 				Implementations: msg.Implementations,
@@ -4658,10 +4692,21 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 // Single task status result
 type taskStatusResultMsg struct {
 	taskID         string
+	closeContext   closeFailureOperationContext
 	previousStatus domain.Status
 	newStatus      domain.Status
 	opts           daemonclient.TaskStatusOptions
 	err            error
+}
+
+type closeFailureOperationContext struct {
+	projectID      string
+	projectName    string
+	projectPath    string
+	daemonSocket   string
+	baseBranch     string
+	parentID       string
+	sourceWorktree string
 }
 
 // moveTaskStatusCmd updates a single task's status.
@@ -4670,11 +4715,13 @@ func (m Model) moveTaskStatusCmd(taskID string, previousStatus, newStatus domain
 }
 
 func (m Model) moveTaskStatusCmdWithOptions(taskID string, previousStatus, newStatus domain.Status, opts daemonclient.TaskStatusOptions) tea.Cmd {
+	closeContext := m.closeFailureOperationContext(taskID)
 	return func() tea.Msg {
 		err := m.updateTaskStatusWithTimeoutOptions(taskID, newStatus, 5*time.Second, opts)
 		if err != nil {
 			return taskStatusResultMsg{
 				taskID:         taskID,
+				closeContext:   closeContext,
 				previousStatus: previousStatus,
 				newStatus:      newStatus,
 				opts:           opts,
@@ -4684,6 +4731,7 @@ func (m Model) moveTaskStatusCmdWithOptions(taskID string, previousStatus, newSt
 
 		return taskStatusResultMsg{
 			taskID:         taskID,
+			closeContext:   closeContext,
 			previousStatus: previousStatus,
 			newStatus:      newStatus,
 			opts:           opts,
@@ -4873,11 +4921,54 @@ func taskStatusOptionsForStatus(status domain.Status) daemonclient.TaskStatusOpt
 	return daemonclient.TaskStatusOptions{IntegrateBeforeClose: true}
 }
 
+func (m Model) closeFailureOperationContext(taskID string) closeFailureOperationContext {
+	ctx := closeFailureOperationContext{
+		projectID:    m.daemonProjectID(),
+		projectName:  strings.TrimSpace(m.currentProject),
+		projectPath:  strings.TrimSpace(m.activeProjectPath()),
+		daemonSocket: strings.TrimSpace(m.daemonSocketPath),
+		baseBranch:   strings.TrimSpace(m.resolveBaseBranch()),
+	}
+	if task, session, ok := m.taskAndSessionByID(taskID); ok {
+		if task.ParentID != nil {
+			ctx.parentID = strings.TrimSpace(task.ParentID.String())
+		}
+		if session != nil {
+			ctx.sourceWorktree = strings.TrimSpace(session.Worktree)
+		}
+		if ctx.sourceWorktree == "" && task.Session != nil {
+			ctx.sourceWorktree = strings.TrimSpace(task.Session.Worktree)
+		}
+	}
+	return ctx
+}
+
+func (m Model) projectActionContext() overlay.ProjectActionContext {
+	return overlay.ProjectActionContext{
+		ProjectID:    m.daemonProjectID(),
+		ProjectName:  strings.TrimSpace(m.currentProject),
+		ProjectPath:  strings.TrimSpace(m.activeProjectPath()),
+		DaemonSocket: strings.TrimSpace(m.daemonSocketPath),
+		BaseBranch:   strings.TrimSpace(m.resolveBaseBranch()),
+	}
+}
+
 func (m Model) closeFailureDialogCmd(msg taskStatusResultMsg) tea.Cmd {
 	if msg.err == nil || msg.newStatus != domain.StatusDone {
 		return nil
 	}
+	closeContext := msg.closeContext
+	if strings.TrimSpace(closeContext.projectID) == "" {
+		closeContext = m.closeFailureOperationContext(msg.taskID)
+	}
 	options := overlay.CloseFailureDialogOptions{
+		ProjectID:               closeContext.projectID,
+		ProjectName:             closeContext.projectName,
+		ProjectPath:             closeContext.projectPath,
+		DaemonSocket:            closeContext.daemonSocket,
+		BaseBranch:              closeContext.baseBranch,
+		ParentID:                closeContext.parentID,
+		SourceWorktree:          closeContext.sourceWorktree,
 		PreviousStatus:          msg.previousStatus.String(),
 		TargetStatus:            msg.newStatus.String(),
 		ForceWorktree:           msg.opts.ForceWorktree,
@@ -5673,6 +5764,7 @@ func (m *Model) syncTaskWorkspaceOverlay() {
 func (m *Model) applySingleTaskWorkspaceRefresh(taskID string, refreshed domain.Task) (domain.Task, bool) {
 	m.reconcilePendingStatuses()
 	m.reconcilePendingMutationFailures()
+	m.reconcilePendingTaskDetailsFromFullTasks([]domain.Task{refreshed})
 	return m.applyTaskRefresh(taskID, refreshed, true)
 }
 
@@ -5755,6 +5847,7 @@ func (m *Model) markPendingTaskDetails(taskID string, details pendingTaskDetails
 		details.updatedAt = time.Now()
 	}
 	details.implementations = append([]string(nil), details.implementations...)
+	details.estimate = cloneIntPtr(details.estimate)
 	m.pendingDetails[taskIDKey(taskID)] = details
 }
 
@@ -5768,12 +5861,12 @@ func (m *Model) applyPendingTaskDetailOverlays() {
 		if !ok {
 			continue
 		}
-		if taskDetailsMatchPending(m.tasks[i], pending) {
-			delete(m.pendingDetails, key)
-			continue
-		}
 		m.tasks[i].Title = pending.title
 		m.tasks[i].Description = pending.description
+		m.tasks[i].Design = pending.design
+		m.tasks[i].Notes = pending.notes
+		m.tasks[i].Acceptance = pending.acceptance
+		m.tasks[i].Estimate = cloneIntPtr(pending.estimate)
 		m.tasks[i].Type = pending.taskType
 		m.tasks[i].Priority = pending.priority
 		m.tasks[i].Implementations = append([]string(nil), pending.implementations...)
@@ -5792,12 +5885,8 @@ func (m *Model) reconcilePendingTaskDetails() {
 	const stalePendingTTL = 2 * time.Minute
 	now := time.Now()
 	for key, pending := range m.pendingDetails {
-		task, ok := taskByID[string(key)]
+		_, ok := taskByID[string(key)]
 		if !ok {
-			delete(m.pendingDetails, key)
-			continue
-		}
-		if taskDetailsMatchPending(task, pending) {
 			delete(m.pendingDetails, key)
 			continue
 		}
@@ -5807,7 +5896,7 @@ func (m *Model) reconcilePendingTaskDetails() {
 	}
 }
 
-func (m *Model) reconcilePendingTaskDetailsFromHydrated(tasks []domain.Task) {
+func (m *Model) reconcilePendingTaskDetailsFromFullTasks(tasks []domain.Task) {
 	if len(m.pendingDetails) == 0 || len(tasks) == 0 {
 		return
 	}
@@ -5826,9 +5915,28 @@ func (m *Model) reconcilePendingTaskDetailsFromHydrated(tasks []domain.Task) {
 func taskDetailsMatchPending(task domain.Task, pending pendingTaskDetails) bool {
 	return task.Title == pending.title &&
 		task.Description == pending.description &&
+		task.Design == pending.design &&
+		task.Notes == pending.notes &&
+		task.Acceptance == pending.acceptance &&
+		intPtrEqual(task.Estimate, pending.estimate) &&
 		task.Type == pending.taskType &&
 		task.Priority == pending.priority &&
 		stringSlicesEqual(task.Implementations, pending.implementations)
+}
+
+func cloneIntPtr(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func intPtrEqual(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 func stringSlicesEqual(a, b []string) bool {
@@ -6218,6 +6326,7 @@ func (m Model) updateFromBaseCmd(issueID, worktreeHint string, attachAfter bool)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
+		project := m.asyncRecoveryProjectContext()
 
 		resolvedWorktree := strings.TrimSpace(worktreeHint)
 		var err error
@@ -6227,6 +6336,7 @@ func (m Model) updateFromBaseCmd(issueID, worktreeHint string, attachAfter bool)
 		if resolvedWorktree == "" {
 			return fetchAndMergeResultMsg{
 				issueID:     issueID,
+				project:     project,
 				attachAfter: attachAfter,
 				err:         fmt.Errorf("no active session/worktree - start session first"),
 			}
@@ -6234,6 +6344,7 @@ func (m Model) updateFromBaseCmd(issueID, worktreeHint string, attachAfter bool)
 		if err != nil {
 			return fetchAndMergeResultMsg{
 				issueID:     issueID,
+				project:     project,
 				attachAfter: attachAfter,
 				err:         fmt.Errorf("no active session/worktree - start session first"),
 			}
@@ -6519,6 +6630,7 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 		return nil
 	}
 	return &mergePreflightFailureMsg{
+		context:        m.projectActionContext(),
 		sourceID:       sourceID,
 		sourceWorktree: sourceWorktree,
 		targetID:       targetID,
