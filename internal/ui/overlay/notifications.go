@@ -121,7 +121,7 @@ func (o *NotificationHistoryOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				o.scroll = o.maxScroll()
 			}
 			return o, nil
-		case "enter", "a":
+		case "enter":
 			if action, ok := o.primaryAction(); ok {
 				return o, func() tea.Msg { return action }
 			}
@@ -130,7 +130,8 @@ func (o *NotificationHistoryOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			o.toggleCurrentDetails()
 			return o, nil
 		case "m":
-			if item, ok := o.current(); ok {
+			if idx := o.currentItemIndex(); idx >= 0 {
+				item := o.items[idx]
 				action := o.actionMsg(item, "mark_read", "mark_read", "Mark read")
 				action.Read = true
 				if item.Read {
@@ -139,24 +140,27 @@ func (o *NotificationHistoryOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					action.Label = "Mark unread"
 					action.Read = false
 				}
+				o.items[idx].Read = action.Read
 				return o, func() tea.Msg { return overlaySelection("notification_mark_read", action) }
 			}
 			return o, nil
 		case "d":
-			if item, ok := o.current(); ok {
+			if idx := o.currentItemIndex(); idx >= 0 {
+				item := o.items[idx]
+				o.items[idx].Dismissed = true
 				return o, func() tea.Msg {
 					return overlaySelection("notification_dismiss", o.actionMsg(item, "dismiss", "dismiss", "Dismiss"))
 				}
 			}
 			return o, nil
 		case "D":
-			return o, func() tea.Msg { return overlaySelection("notification_dismiss_all", o.dismissAllMsg()) }
+			actions := o.dismissAllMsg()
+			o.dismissAllVisible()
+			return o, func() tea.Msg { return overlaySelection("notification_dismiss_all", actions) }
 		case "o":
-			return o.emitLocalAction("open_task", "client.open_task", "Open task")
-		case "w":
-			return o.emitLocalAction("open_workspace", "client.open_workspace", "Open workspace")
+			return o.emitOpenAction()
 		case "l":
-			return o.emitLocalAction("open_logs", "client.open_logs", "Open logs")
+			return o.emitLocalAction("open_logs", "client.open_logs", "Open event log")
 		case "c":
 			return o.emitLocalAction("copy_details", "client.copy_details", "Copy details")
 		case "r":
@@ -319,9 +323,10 @@ func (o *NotificationHistoryOverlay) actionBindings() []keybinds.Binding {
 		{Key: "m", Description: "read/unread"},
 		{Key: "d/D", Description: "dismiss"},
 		{Key: "Space", Description: "details"},
-		{Key: "Enter/a", Description: "action"},
-		{Key: "o/w", Description: "open"},
-		{Key: "l/c", Description: "logs/copy"},
+		{Key: "Enter", Description: "action"},
+		{Key: "o", Description: "open"},
+		{Key: "l", Description: "event log"},
+		{Key: "c", Description: "copy"},
 		{Key: "Esc/q", Description: "close"},
 	}
 	if item, ok := o.current(); ok {
@@ -334,9 +339,6 @@ func (o *NotificationHistoryOverlay) actionBindings() []keybinds.Binding {
 				continue
 			}
 			key := actionKeyHint(action)
-			if key == "" {
-				key = "a"
-			}
 			if !action.Enabled && strings.TrimSpace(action.DisabledReason) != "" {
 				label += " unavailable"
 			}
@@ -358,6 +360,20 @@ func (o *NotificationHistoryOverlay) current() (NotificationHistoryItem, bool) {
 		o.selected = len(filtered) - 1
 	}
 	return filtered[o.selected], true
+}
+
+func (o *NotificationHistoryOverlay) currentItemIndex() int {
+	seen := 0
+	for i, item := range o.items {
+		if !notificationItemMatchesFilter(item, o.filter) {
+			continue
+		}
+		if seen == o.selected {
+			return i
+		}
+		seen++
+	}
+	return -1
 }
 
 func (o *NotificationHistoryOverlay) toggleCurrentDetails() {
@@ -429,25 +445,9 @@ func (o *NotificationHistoryOverlay) halfPageStep() int {
 func (o *NotificationHistoryOverlay) filteredItems() []NotificationHistoryItem {
 	out := make([]NotificationHistoryItem, 0, len(o.items))
 	for _, item := range o.items {
-		switch o.filter {
-		case notificationActionFilterUnread:
-			if item.Read || item.Dismissed {
-				continue
-			}
-		case notificationActionFilterErrors:
-			if strings.TrimSpace(strings.ToLower(item.Level)) != "error" {
-				continue
-			}
-		case notificationActionFilterActionable:
-			if !notificationItemActionable(item) {
-				continue
-			}
-		case notificationActionFilterDismissed:
-			if !item.Dismissed {
-				continue
-			}
+		if notificationItemMatchesFilter(item, o.filter) {
+			out = append(out, item)
 		}
-		out = append(out, item)
 	}
 	return out
 }
@@ -481,7 +481,7 @@ func (o *NotificationHistoryOverlay) primaryAction() (tea.Msg, bool) {
 	if action, ok := o.actionByKind("retry"); ok {
 		return action, true
 	}
-	for _, kind := range []string{"client.open_workspace", "client.open_task", "client.open_logs", "client.copy_details"} {
+	for _, kind := range []string{"client.open_task", "client.open_workspace", "client.open_logs", "client.copy_details"} {
 		if action, ok := o.actionByKind(kind); ok {
 			return action, true
 		}
@@ -496,6 +496,20 @@ func (o *NotificationHistoryOverlay) primaryAction() (tea.Msg, bool) {
 		}
 	}
 	return nil, false
+}
+
+func (o *NotificationHistoryOverlay) emitOpenAction() (tea.Model, tea.Cmd) {
+	for _, kind := range []string{"client.open_task", "client.open_workspace"} {
+		if action, ok := o.actionByKind(kind); ok {
+			return o, func() tea.Msg { return action }
+		}
+	}
+	if item, ok := o.current(); ok && notificationItemHasOpenTarget(item) {
+		return o, func() tea.Msg {
+			return overlaySelection("notification_action", o.actionMsg(item, "open_task", "client.open_task", "Open"))
+		}
+	}
+	return o, nil
 }
 
 func (o *NotificationHistoryOverlay) actionByKind(kind string) (tea.Msg, bool) {
@@ -557,20 +571,54 @@ func (o *NotificationHistoryOverlay) dismissAllMsg() []NotificationActionCenterM
 	return out
 }
 
+func (o *NotificationHistoryOverlay) dismissAllVisible() {
+	for i, item := range o.items {
+		if item.Dismissed || !notificationItemMatchesFilter(item, o.filter) {
+			continue
+		}
+		o.items[i].Dismissed = true
+	}
+}
+
 func overlaySelection(key string, value any) SelectionMsg {
 	return SelectionMsg{Key: key, Value: value}
 }
 
 func notificationItemActionable(item NotificationHistoryItem) bool {
-	if !item.Dismissed {
-		return true
-	}
 	for _, action := range item.Actions {
 		if action.Enabled {
 			return true
 		}
 	}
-	return false
+	return notificationItemHasOpenTarget(item)
+}
+
+func notificationItemMatchesFilter(item NotificationHistoryItem, filter notificationActionCenterFilter) bool {
+	switch filter {
+	case notificationActionFilterUnread:
+		return !item.Read && !item.Dismissed
+	case notificationActionFilterErrors:
+		return strings.TrimSpace(strings.ToLower(item.Level)) == "error"
+	case notificationActionFilterActionable:
+		return notificationItemActionable(item)
+	case notificationActionFilterDismissed:
+		return item.Dismissed
+	default:
+		return true
+	}
+}
+
+func notificationItemHasOpenTarget(item NotificationHistoryItem) bool {
+	return notificationScopeTargetsTask(item.ScopeType) && strings.TrimSpace(item.ScopeID) != ""
+}
+
+func notificationScopeTargetsTask(scopeType string) bool {
+	switch strings.TrimSpace(scopeType) {
+	case "issue", "task":
+		return true
+	default:
+		return false
+	}
 }
 
 func notificationExpansionKey(item NotificationHistoryItem) string {
@@ -612,7 +660,7 @@ func actionKeyHint(action protocol.NoticeAction) string {
 	case "open_task":
 		return "o"
 	case "open_workspace":
-		return "w"
+		return "o"
 	case "open_logs":
 		return "l"
 	case "retry":
