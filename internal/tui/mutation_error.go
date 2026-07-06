@@ -142,6 +142,8 @@ func normalizeMutationFailureReason(code protocol.ErrorCode, action, reason stri
 		return "the daemon did not finish before the timeout"
 	case strings.Contains(lower, "unresolved child") || strings.Contains(lower, "child issues remain unresolved") || strings.Contains(lower, "target-only close is blocked"):
 		return "Done is blocked by unresolved child issues"
+	case strings.Contains(lower, "integration already completed") && (strings.Contains(lower, "dirty") || strings.Contains(lower, "uncommitted") || strings.Contains(lower, "modified or untracked")):
+		return "code already landed; close cleanup is blocked by local worktree changes"
 	case strings.Contains(lower, "dirty") || strings.Contains(lower, "uncommitted") || strings.Contains(lower, "modified or untracked"):
 		if strings.Contains(strings.ToLower(action), "cleanup") {
 			return "worktree cleanup is blocked by local changes"

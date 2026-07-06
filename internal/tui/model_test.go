@@ -7575,6 +7575,46 @@ func TestDaemonOperationFailureEventRemainsVisibleWithReason(t *testing.T) {
 	}
 }
 
+func TestDaemonOperationFailureEventReportsIntegratedCleanupBlocked(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeBug},
+	}
+	body, err := json.Marshal(protocol.OperationEventBody{
+		Operation: protocol.OperationRecord{
+			OperationID: "op-close",
+			IssueID:     naming.IssueID("az-1"),
+			Kind:        daemonclient.CommandTaskClose,
+			State:       protocol.OperationStateFailed,
+			Error: &protocol.OperationError{
+				Code:      protocol.ErrorCodeInternal,
+				Message:   "phase worktree_cleanup for issue az-1: fatal: contains modified or untracked files. Integration already completed: branch riordan/az-1/fix landed on main; cleanup/status remains. Next: repair the reported cleanup blocker, then retry close; retry will skip merge when the source is already reachable",
+				Retryable: false,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal failure body: %v", err)
+	}
+
+	m.applyOperationProgressEvent(protocol.EventEnvelope{
+		Event: protocol.EventOperationFailed,
+		Body:  body,
+	})
+
+	progress := m.pendingMutationForTask("az-1")
+	if progress == nil {
+		t.Fatal("expected failed operation in workspace mutation progress")
+	}
+	want := "Could not move az-1 to Done. It stayed In Review. Reason: code already landed; close cleanup is blocked by local worktree changes. Next: repair the reported cleanup blocker, then retry close; retry will skip merge when the source is already reachable"
+	if progress.ProgressMessage != want {
+		t.Fatalf("progress message = %q, want %q", progress.ProgressMessage, want)
+	}
+	if progress.FailureReason != "code already landed; close cleanup is blocked by local worktree changes" {
+		t.Fatalf("failure reason = %q, want landed cleanup blocker", progress.FailureReason)
+	}
+}
+
 func TestDaemonOperationFailureEventNormalizesProgressOnlyFailure(t *testing.T) {
 	m := newTestModel()
 	m.tasks = []domain.Task{

@@ -1600,7 +1600,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	if !deferWorktreeCleanup {
 		if err := d.cleanupTaskIssueResourcesForClose(ctx, projectID, taskID, guard.Worktree); err != nil {
 			recordPhase("issue_resource_cleanup", phaseStartedAt, false)
-			return result, fmt.Errorf("phase issue_resource_cleanup for issue %s: %w", taskID, err)
+			return result, taskClosePostIntegrationPhaseError(taskID, "issue_resource_cleanup", integration, err)
 		}
 	}
 	recordPhase("issue_resource_cleanup", phaseStartedAt, deferWorktreeCleanup)
@@ -1609,7 +1609,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	if daemonCloseGuardTaskHasSession(guard.Task) {
 		if err := d.stopTaskSessionForClose(ctx, req, projectID, taskID); err != nil {
 			recordPhase("session_cleanup", phaseStartedAt, false)
-			return result, fmt.Errorf("phase session_cleanup for issue %s: %w", taskID, err)
+			return result, taskClosePostIntegrationPhaseError(taskID, "session_cleanup", integration, err)
 		}
 		result.SessionStopped = true
 	}
@@ -1619,20 +1619,20 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	if daemonCloseGuardTaskHasWorktree(guard.Task) {
 		if d.worktreeAdapter == nil {
 			recordPhase("worktree_cleanup", phaseStartedAt, false)
-			return result, fmt.Errorf("phase worktree_cleanup for issue %s: worktree cleanup unavailable", taskID)
+			return result, taskClosePostIntegrationPhaseError(taskID, "worktree_cleanup", integration, fmt.Errorf("worktree cleanup unavailable"))
 		}
 		if deferWorktreeCleanup {
 			plan, err := d.deferTaskWorktreeCleanupForClose(ctx, projectID, taskID)
 			if err != nil {
 				recordPhase("worktree_cleanup", phaseStartedAt, false)
-				return result, fmt.Errorf("phase worktree_cleanup for issue %s: %w", taskID, err)
+				return result, taskClosePostIntegrationPhaseError(taskID, "worktree_cleanup", integration, err)
 			}
 			result.WorktreeCleanupDeferred = true
 			deferredCleanupPlan = plan
 		} else {
 			if err := d.worktreeAdapter.Delete(ctx, projectID, taskID, cmd.ForceWorktree); err != nil {
 				recordPhase("worktree_cleanup", phaseStartedAt, false)
-				return result, fmt.Errorf("phase worktree_cleanup for issue %s: %w", taskID, err)
+				return result, taskClosePostIntegrationPhaseError(taskID, "worktree_cleanup", integration, err)
 			}
 			result.WorktreeRemoved = true
 		}
@@ -1642,7 +1642,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	phaseStartedAt = time.Now()
 	if err := d.repairStaleRuntimeProjections(ctx, projectID, taskID); err != nil {
 		recordPhase("runtime_projection_repair", phaseStartedAt, false)
-		return result, fmt.Errorf("phase runtime_projection_repair for issue %s: %w", taskID, err)
+		return result, taskClosePostIntegrationPhaseError(taskID, "runtime_projection_repair", integration, err)
 	}
 	recordPhase("runtime_projection_repair", phaseStartedAt, false)
 
@@ -1650,7 +1650,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	task, err := issueClient.UpdateWithRuntime(ctx, projectID, taskID, domain.StatusDone)
 	if err != nil {
 		recordPhase("status_write", phaseStartedAt, false)
-		return result, fmt.Errorf("phase status_write for issue %s: %w", taskID, err)
+		return result, taskClosePostIntegrationPhaseError(taskID, "status_write", integration, err)
 	}
 	recordPhase("status_write", phaseStartedAt, false)
 	rev := d.nextRevision(projectID)
@@ -1756,6 +1756,23 @@ func daemonShouldDeferWorktreeCleanupForClose(cmd taskCloseRequest, integration 
 		integration.NoChanges &&
 		daemonCloseGuardTaskHasWorktree(guard.Task) &&
 		!daemonCloseGuardTaskHasSession(guard.Task)
+}
+
+func taskClosePostIntegrationPhaseError(taskID, phase string, integration taskCloseIntegrationResult, err error) error {
+	base := fmt.Errorf("phase %s for issue %s: %w", phase, taskID, err)
+	if !integration.Integrated && !(integration.Requested && integration.NoChanges) {
+		return base
+	}
+	source := strings.TrimSpace(integration.SourceBranch)
+	target := strings.TrimSpace(integration.TargetBranch)
+	switch {
+	case source != "" && target != "":
+		return fmt.Errorf("%w. Integration already completed: branch %s landed on %s; cleanup/status remains. Next: repair the reported cleanup blocker, then retry close; retry will skip merge when the source is already reachable", base, source, target)
+	case source != "":
+		return fmt.Errorf("%w. Integration already completed: branch %s landed; cleanup/status remains. Next: repair the reported cleanup blocker, then retry close; retry will skip merge when the source is already reachable", base, source)
+	default:
+		return fmt.Errorf("%w. Integration already completed; cleanup/status remains. Next: repair the reported cleanup blocker, then retry close; retry will skip merge when the source is already reachable", base)
+	}
 }
 
 func (d *Daemon) deferTaskWorktreeCleanupForClose(ctx context.Context, projectID, taskID string) (deferredTaskWorktreeCleanupPlan, error) {
