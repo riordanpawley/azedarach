@@ -71,20 +71,25 @@ type SessionRestartAllRequestBody struct {
 }
 
 type SessionRestartAllItem struct {
-	IssueID   naming.IssueID   `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
-	SessionID naming.SessionID `json:"session_id" msgpack:"session_id"`
-	Activity  string           `json:"activity" msgpack:"activity"`
-	Restarted bool             `json:"restarted" msgpack:"restarted"`
-	Skipped   bool             `json:"skipped,omitempty" msgpack:"skipped,omitempty"`
-	Reason    string           `json:"reason,omitempty" msgpack:"reason,omitempty"`
-	Error     string           `json:"error,omitempty" msgpack:"error,omitempty"`
+	ProjectID      naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	IssueID        naming.IssueID   `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
+	SessionID      naming.SessionID `json:"session_id" msgpack:"session_id"`
+	Activity       string           `json:"activity" msgpack:"activity"`
+	ActivitySource string           `json:"activity_source,omitempty" msgpack:"activity_source,omitempty"`
+	TmuxReady      bool             `json:"tmux_ready" msgpack:"tmux_ready"`
+	ActiveIntent   bool             `json:"active_intent" msgpack:"active_intent"`
+	Restarted      bool             `json:"restarted" msgpack:"restarted"`
+	Skipped        bool             `json:"skipped,omitempty" msgpack:"skipped,omitempty"`
+	Reason         string           `json:"reason,omitempty" msgpack:"reason,omitempty"`
+	Error          string           `json:"error,omitempty" msgpack:"error,omitempty"`
 }
 
 type SessionRestartAllResponseBody struct {
-	ProjectID naming.ProjectID        `json:"project_id" msgpack:"project_id"`
-	ForceBusy bool                    `json:"force_busy" msgpack:"force_busy"`
-	Restarted int                     `json:"restarted" msgpack:"restarted"`
-	Skipped   int                     `json:"skipped" msgpack:"skipped"`
-	Failed    int                     `json:"failed" msgpack:"failed"`
-	Sessions  []SessionRestartAllItem `json:"sessions" msgpack:"sessions"`
+	ProjectID  naming.ProjectID        `json:"project_id" msgpack:"project_id"`
+	ProjectIDs []naming.ProjectID      `json:"project_ids,omitempty" msgpack:"project_ids,omitempty"`
+	ForceBusy  bool                    `json:"force_busy" msgpack:"force_busy"`
+	Restarted  int                     `json:"restarted" msgpack:"restarted"`
+	Skipped    int                     `json:"skipped" msgpack:"skipped"`
+	Failed     int                     `json:"failed" msgpack:"failed"`
+	Sessions   []SessionRestartAllItem `json:"sessions" msgpack:"sessions"`
 }

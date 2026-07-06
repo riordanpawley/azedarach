@@ -1351,43 +1351,98 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "tmux client unavailable"), nil
 	}
 
-	sessionNames, err := d.listTmuxSessionsLiveForProject(ctx, projectID)
+	projectIDs := d.sessionRestartAllProjectIDs(projectID)
+	liveSessions, err := d.tmux.ListSessions(ctx)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	activityByIssueKey := d.sessionDisplayActivityByIssueKey(ctx, projectID)
-	namingScope := d.sessionNamingScope(projectID)
+	livePaneSessions, err := d.sessionRestartAllLivePaneSessions(ctx)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	typedProjectIDs := make([]naming.ProjectID, 0, len(projectIDs))
+	for _, targetProjectID := range projectIDs {
+		typedProjectIDs = append(typedProjectIDs, naming.ProjectID(targetProjectID))
+	}
 	result := protocol.SessionRestartAllResponseBody{
-		ProjectID: naming.ProjectID(projectID),
-		ForceBusy: body.ForceBusy,
-		Sessions:  make([]protocol.SessionRestartAllItem, 0, len(sessionNames)),
+		ProjectID:  naming.ProjectID(projectID),
+		ProjectIDs: typedProjectIDs,
+		ForceBusy:  body.ForceBusy,
+		Sessions:   make([]protocol.SessionRestartAllItem, 0, len(liveSessions)),
 	}
 
-	for _, sessionID := range sessionNames {
-		item := protocol.SessionRestartAllItem{
-			SessionID: naming.SessionID(sessionID),
-			Activity:  "unknown",
-		}
-		issueID, ok := naming.ParseIssueIDFromSessionName(sessionID, namingScope)
-		if ok {
-			item.IssueID = naming.IssueID(issueID)
-		}
-		issueKey := sessionKey(issueID)
-		if display, found := activityByIssueKey[issueKey]; found && strings.TrimSpace(display.Activity) != "" {
-			item.Activity = display.Activity
-		}
-		if !body.ForceBusy && !sessionRestartActivityAllowed(item.Activity) {
-			item.Skipped = true
-			item.Reason = "busy"
-			if item.Activity != "busy" {
-				item.Reason = "activity_" + item.Activity
+	restartTargetsBySession := make(map[string]sessionRestartAllTarget, len(liveSessions))
+	for _, targetProjectID := range projectIDs {
+		activityByIssueKey := d.sessionDisplayActivityByIssueKey(ctx, targetProjectID)
+		projectedSessions := d.sessionRestartAllProjectedSessionIDs(ctx, targetProjectID)
+		namingScope := d.sessionNamingScope(targetProjectID)
+		for _, sessionID := range liveSessions {
+			sessionID = strings.TrimSpace(sessionID)
+			if sessionID == "" {
+				continue
 			}
+			if !strings.HasPrefix(sessionID, naming.ProjectSessionPrefix(namingScope)+"-") {
+				continue
+			}
+			issueID, ok := naming.ParseIssueIDFromSessionName(sessionID, namingScope)
+			if !ok {
+				continue
+			}
+			activity := "unknown"
+			if display, found := activityByIssueKey[sessionKey(issueID)]; found && strings.TrimSpace(display.Activity) != "" {
+				activity = display.Activity
+			}
+			target := sessionRestartAllTarget{
+				ProjectID: targetProjectID,
+				SessionID: sessionID,
+				IssueID:   issueID,
+				Activity:  activity,
+			}
+			if display, found := activityByIssueKey[sessionKey(issueID)]; found {
+				target.ActivitySource = display.Source
+			}
+			if _, projected := projectedSessions[sessionID]; projected {
+				target.Projected = true
+			}
+			if _, tmuxReady := livePaneSessions[sessionID]; tmuxReady {
+				target.TmuxReady = true
+			}
+			target.ActiveIntent = sessionRestartActiveIntent(target.Activity)
+			if existing, found := restartTargetsBySession[sessionID]; !found || sessionRestartAllTargetPreferred(target, existing) {
+				restartTargetsBySession[sessionID] = target
+			}
+		}
+	}
+	restartTargets := make([]sessionRestartAllTarget, 0, len(restartTargetsBySession))
+	for _, target := range restartTargetsBySession {
+		restartTargets = append(restartTargets, target)
+	}
+	sort.Slice(restartTargets, func(i, j int) bool {
+		if restartTargets[i].ProjectID != restartTargets[j].ProjectID {
+			return restartTargets[i].ProjectID < restartTargets[j].ProjectID
+		}
+		return restartTargets[i].SessionID < restartTargets[j].SessionID
+	})
+
+	for _, target := range restartTargets {
+		item := protocol.SessionRestartAllItem{
+			ProjectID:      naming.ProjectID(target.ProjectID),
+			SessionID:      naming.SessionID(target.SessionID),
+			IssueID:        naming.IssueID(target.IssueID),
+			Activity:       target.Activity,
+			ActivitySource: target.ActivitySource,
+			TmuxReady:      target.TmuxReady,
+			ActiveIntent:   target.ActiveIntent,
+		}
+		if !item.TmuxReady {
+			item.Skipped = true
+			item.Reason = "no_tmux_pane"
 			result.Skipped++
 			result.Sessions = append(result.Sessions, item)
 			continue
 		}
 
-		if err := d.tmux.SendKey(ctx, sessionID, "C-c"); err != nil {
+		if err := d.tmux.SendKey(ctx, target.SessionID, "C-c"); err != nil {
 			item.Error = err.Error()
 			result.Failed++
 			result.Sessions = append(result.Sessions, item)
@@ -1399,21 +1454,21 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 			result.Sessions = append(result.Sessions, item)
 			continue
 		}
-		resumeCommand := d.buildSessionResumeCommand(projectID, issueID, sessionID, body.Yolo, body.ImagePaths)
-		if err := d.tmux.SendKeys(ctx, sessionID, resumeCommand); err != nil {
+		resumeCommand := d.buildSessionResumeCommand(target.ProjectID, target.IssueID, target.SessionID, body.Yolo, body.ImagePaths)
+		if err := d.tmux.SendKeys(ctx, target.SessionID, resumeCommand); err != nil {
 			item.Error = err.Error()
 			result.Failed++
 			result.Sessions = append(result.Sessions, item)
 			continue
 		}
-		if d.sessionRestartNeedsPostLaunchPrompt(projectID) {
+		if item.ActiveIntent && d.sessionRestartNeedsPostLaunchPrompt(target.ProjectID) {
 			if err := waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
 				item.Error = err.Error()
 				result.Failed++
 				result.Sessions = append(result.Sessions, item)
 				continue
 			}
-			if err := d.tmux.PasteTextAndSubmit(ctx, sessionID, sessionRestartContinuePrompt); err != nil {
+			if err := d.tmux.PasteTextAndSubmit(ctx, target.SessionID, sessionRestartContinuePrompt); err != nil {
 				item.Error = err.Error()
 				result.Failed++
 				result.Sessions = append(result.Sessions, item)
@@ -1422,8 +1477,8 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 		}
 		item.Restarted = true
 		result.Restarted++
-		if issueID != "" {
-			d.persistRestartedSessionProjection(ctx, projectID, sessionID, issueID)
+		if target.IssueID != "" {
+			d.persistRestartedSessionProjection(ctx, target.ProjectID, target.SessionID, target.IssueID)
 		}
 		result.Sessions = append(result.Sessions, item)
 	}
@@ -1445,13 +1500,129 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 	return resp, nil
 }
 
-func sessionRestartActivityAllowed(activity string) bool {
+type sessionRestartAllTarget struct {
+	ProjectID      string
+	SessionID      string
+	IssueID        string
+	Activity       string
+	ActivitySource string
+	Projected      bool
+	TmuxReady      bool
+	ActiveIntent   bool
+}
+
+func sessionRestartAllTargetPreferred(candidate, existing sessionRestartAllTarget) bool {
+	if candidate.Projected != existing.Projected {
+		return candidate.Projected
+	}
+	if candidate.ProjectID != existing.ProjectID {
+		return candidate.ProjectID < existing.ProjectID
+	}
+	return candidate.SessionID < existing.SessionID
+}
+
+func (d *Daemon) sessionRestartAllLivePaneSessions(ctx context.Context) (map[string]struct{}, error) {
+	if d == nil || d.tmux == nil {
+		return nil, nil
+	}
+	panes, err := d.tmux.ListPaneInfos(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sessions := make(map[string]struct{}, len(panes))
+	for _, pane := range panes {
+		sessionName := strings.TrimSpace(pane.SessionName)
+		if sessionName == "" {
+			continue
+		}
+		sessions[sessionName] = struct{}{}
+	}
+	return sessions, nil
+}
+
+func sessionRestartActiveIntent(activity string) bool {
 	switch strings.ToLower(strings.TrimSpace(activity)) {
-	case "idle", "waiting", "paused":
+	case "busy", "starting", "working":
 		return true
 	default:
 		return false
 	}
+}
+
+func (d *Daemon) sessionRestartAllProjectedSessionIDs(ctx context.Context, projectID string) map[string]struct{} {
+	projectID = d.canonicalProjectID(projectID)
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return nil
+	}
+	sessions, err := store.ListSessionStates(ctx, projectID)
+	if err != nil {
+		if d != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("load restart-all session projections failed", "project_id", projectID, "error", err)
+		}
+		return nil
+	}
+	ids := make(map[string]struct{}, len(sessions))
+	for _, session := range sessions {
+		sessionID := strings.TrimSpace(session.ID)
+		if sessionID == "" {
+			continue
+		}
+		ids[sessionID] = struct{}{}
+	}
+	return ids
+}
+
+func (d *Daemon) sessionRestartAllProjectIDs(requestProjectID string) []string {
+	seen := map[string]struct{}{}
+	var projectIDs []string
+	addProjectID := func(projectID string) {
+		projectID = d.canonicalProjectID(projectID)
+		if strings.TrimSpace(projectID) == "" {
+			return
+		}
+		if _, exists := seen[projectID]; exists {
+			return
+		}
+		seen[projectID] = struct{}{}
+		projectIDs = append(projectIDs, projectID)
+	}
+	addProjectID(requestProjectID)
+	if repoDir := strings.TrimSpace(d.cfg.RepoDir); repoDir != "" {
+		if baseProjectID, err := appconfig.ProjectIDForRoot(repoDir); err == nil {
+			addProjectID(baseProjectID)
+		}
+	}
+	var runtimeProjectIDs []string
+	d.runtimeStoresMu.Lock()
+	for projectID := range d.runtimeStoresByProject {
+		runtimeProjectIDs = append(runtimeProjectIDs, projectID)
+	}
+	d.runtimeStoresMu.Unlock()
+	for _, projectID := range runtimeProjectIDs {
+		addProjectID(projectID)
+	}
+	if d.sessionStore != nil {
+		for _, projectID := range d.sessionStore.ProjectIDs() {
+			addProjectID(projectID)
+		}
+	}
+	if registry, err := appconfig.LoadProjectsRegistry(); err == nil && registry != nil {
+		for _, project := range registry.Projects {
+			repoDir := strings.TrimSpace(project.Path)
+			if repoDir != "" {
+				if projectID, hashErr := appconfig.ProjectIDForRoot(repoDir); hashErr == nil {
+					addProjectID(projectID)
+					continue
+				}
+			}
+			if strings.TrimSpace(project.Name) != "" {
+				addProjectID(project.Name)
+			}
+		}
+	}
+	sort.Strings(projectIDs)
+	return projectIDs
 }
 
 func waitBeforeSessionResume(ctx context.Context, delay time.Duration) error {
