@@ -414,7 +414,7 @@ func ParseSessionRestartAllArgs(args []string) (SessionRestartAllOptions, error)
 	opts := SessionRestartAllOptions{}
 	fs := flag.NewFlagSet("session restart-all", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.BoolVar(&opts.ForceBusy, "force-busy", false, "restart busy sessions too")
+	fs.BoolVar(&opts.ForceBusy, "force-busy", false, "accepted for compatibility; busy sessions restart by default")
 	fs.BoolVar(&opts.Yolo, "yolo", false, "resume sessions with dangerous bypass enabled")
 	fs.BoolVar(&opts.JSON, "json", false, "print JSON output")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
@@ -823,6 +823,9 @@ func printSessionRestartAllResult(result protocol.SessionRestartAllResponseBody)
 	if result.Skipped > 0 || result.Failed > 0 {
 		fmt.Printf(" (%d skipped, %d failed)", result.Skipped, result.Failed)
 	}
+	if projectCount := sessionRestartAllProjectCount(result); projectCount > 0 {
+		fmt.Printf(" across %d project(s)", projectCount)
+	}
 	fmt.Println()
 	for _, session := range result.Sessions {
 		issueID := strings.TrimSpace(session.IssueID.String())
@@ -836,8 +839,41 @@ func printSessionRestartAllResult(result protocol.SessionRestartAllResponseBody)
 		if strings.TrimSpace(session.Error) != "" {
 			status = "failed: " + strings.TrimSpace(session.Error)
 		}
-		fmt.Printf("- %s (%s, activity=%s): %s\n", issueID, session.SessionID, session.Activity, status)
+		projectID := strings.TrimSpace(session.ProjectID.String())
+		if projectID == "" {
+			projectID = strings.TrimSpace(result.ProjectID.String())
+		}
+		if projectID != "" {
+			fmt.Printf("- %s (project=%s, session=%s, activity=%s, source=%s, tmux_ready=%t, active_intent=%t): %s\n", issueID, projectID, session.SessionID, session.Activity, session.ActivitySource, session.TmuxReady, session.ActiveIntent, status)
+			continue
+		}
+		fmt.Printf("- %s (session=%s, activity=%s, source=%s, tmux_ready=%t, active_intent=%t): %s\n", issueID, session.SessionID, session.Activity, session.ActivitySource, session.TmuxReady, session.ActiveIntent, status)
 	}
+}
+
+func sessionRestartAllProjectCount(result protocol.SessionRestartAllResponseBody) int {
+	seen := map[string]struct{}{}
+	for _, projectID := range result.ProjectIDs {
+		projectID := strings.TrimSpace(projectID.String())
+		if projectID == "" {
+			continue
+		}
+		seen[projectID] = struct{}{}
+	}
+	for _, session := range result.Sessions {
+		projectID := strings.TrimSpace(session.ProjectID.String())
+		if projectID == "" {
+			continue
+		}
+		seen[projectID] = struct{}{}
+	}
+	if len(seen) > 0 {
+		return len(seen)
+	}
+	if strings.TrimSpace(result.ProjectID.String()) != "" {
+		return 1
+	}
+	return 0
 }
 
 func resolveSessionStatusTarget(deps *Dependencies, issueID string) (sessionIssueTarget, error) {
