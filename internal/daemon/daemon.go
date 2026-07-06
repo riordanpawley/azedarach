@@ -706,6 +706,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskCompleteCheck(ctx, req)
 	case "task.integration_readiness":
 		return d.handleTaskIntegrationReadiness(ctx, req)
+	case "task.context_risk":
+		return d.handleTaskContextRisk(ctx, req)
 	case "task.merge_base_target":
 		return d.handleTaskMergeBaseTarget(ctx, req)
 	case "task.follow_on_merge_candidates":

@@ -27,6 +27,7 @@ const (
 	daemonInvariantTaskGraphReadiness  daemonInvariantID = "task.graph_readiness"
 	daemonInvariantTaskCompleteCheck   daemonInvariantID = "task.complete_check"
 	daemonInvariantTaskIntegration     daemonInvariantID = "task.integration_readiness"
+	daemonInvariantTaskContextRisk     daemonInvariantID = "task.context_risk_closeout"
 	daemonInvariantTaskMergeBaseTarget daemonInvariantID = "task.merge_base_target"
 	daemonInvariantTaskFollowOnMerge   daemonInvariantID = "task.follow_on_merge_candidates"
 	daemonInvariantWorkerObservation   daemonInvariantID = "worker.observation_projection"
@@ -49,6 +50,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantTaskGraphReadiness:     daemonInvariantSourceHybrid,
 	daemonInvariantTaskCompleteCheck:      daemonInvariantSourceHybrid,
 	daemonInvariantTaskIntegration:        daemonInvariantSourceProjection,
+	daemonInvariantTaskContextRisk:        daemonInvariantSourceProjection,
 	daemonInvariantTaskMergeBaseTarget:    daemonInvariantSourceProjection,
 	daemonInvariantTaskFollowOnMerge:      daemonInvariantSourceProjection,
 	daemonInvariantWorkerObservation:      daemonInvariantSourceHybrid,

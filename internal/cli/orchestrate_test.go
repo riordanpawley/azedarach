@@ -1970,6 +1970,56 @@ func TestOrchestrateIntegrateCommandPrintsGuidance(t *testing.T) {
 	}
 }
 
+func TestOrchestrateIntegrateCommandBlocksCloseForHighContextRisk(t *testing.T) {
+	child := naming.IssueID("az-2")
+	parent := naming.IssueID("az-1")
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": child.String(), "path": "/repo-az-2", "branch": "user/az-2/worker"},
+						},
+					}), nil
+				case daemonclient.CommandTaskIntegrationReady:
+					return responseWithJSON(req, daemonclient.TaskIntegrationReadiness{
+						IssueID:       child.String(),
+						ParentIssueID: parent.String(),
+						Ready:         true,
+						ContextRisk: &domain.IssueContextRiskPacket{
+							IssueID:    child.String(),
+							Level:      domain.IssueContextRiskHigh,
+							Confidence: 75,
+							Signals:    []string{`file overlap "internal/daemon/task_commands.go" with az-3`},
+							Evidence: []domain.IssueContextRiskEvidence{
+								{IssueID: child.String(), Files: []string{"internal/daemon/task_commands.go"}},
+								{IssueID: "az-3", Files: []string{"internal/daemon/task_commands.go"}, RiskNotes: []string{"same failure repeated"}},
+							},
+						},
+					}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+	output := captureStdout(t, func() error {
+		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: child.String()})
+	})
+	if !strings.Contains(output, "Context risk: high confidence=75") || !strings.Contains(output, "Closeout guidance: BLOCKED") {
+		t.Fatalf("output missing context-risk block:\n%s", output)
+	}
+	if strings.Contains(output, "az issue close --id az-2") {
+		t.Fatalf("output unexpectedly suggests close under high context risk:\n%s", output)
+	}
+}
+
 func TestOrchestrateIntegrateCommandBlocksMergeWithoutCompletionEvidence(t *testing.T) {
 	child := naming.IssueID("az-2")
 	parent := naming.IssueID("az-1")

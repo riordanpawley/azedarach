@@ -18,6 +18,7 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantTaskGraphReadiness:     daemonInvariantSourceHybrid,
 		daemonInvariantTaskCompleteCheck:      daemonInvariantSourceHybrid,
 		daemonInvariantTaskIntegration:        daemonInvariantSourceProjection,
+		daemonInvariantTaskContextRisk:        daemonInvariantSourceProjection,
 		daemonInvariantTaskMergeBaseTarget:    daemonInvariantSourceProjection,
 		daemonInvariantTaskFollowOnMerge:      daemonInvariantSourceProjection,
 		daemonInvariantWorkerObservation:      daemonInvariantSourceHybrid,

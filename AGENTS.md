@@ -145,7 +145,7 @@ fd "filename" -t f internal cmd
    - `session.start`/`session.attach`/`session.pause`/`session.resume`/`session.stop` runtime-presence checks -> `tmux`
    - session recovery/reconcile -> `hybrid`
    - `task.close`/`task.close_preflight`/`task.delete`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle and orchestration checks -> `hybrid`
-   - `task.integration_readiness` worker evidence gate -> `projection` (durable issue projection + mailbox evidence)
+   - `task.integration_readiness` worker evidence gate and `task.context_risk_closeout` repeated-local-failure gate -> `projection` (durable issue projection + mailbox/observation evidence)
    - `task.merge_base_target` branch integration target gate -> `projection` (durable issue graph + worktree projection)
    - `task.follow_on_merge_candidates` follow-on merge source gate -> `projection` (durable issue graph + worktree projection)
    - `issue_resources.lifecycle` issue resource desired-state gate -> `projection` (durable issue status + runtime attachment projection)

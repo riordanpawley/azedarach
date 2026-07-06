@@ -121,20 +121,21 @@ type taskDeleteRequest struct {
 }
 
 type taskCloseResult struct {
-	TaskID                     string                 `json:"task_id"`
-	Status                     string                 `json:"status"`
-	IntegrationRequested       bool                   `json:"integration_requested,omitempty"`
-	Integrated                 bool                   `json:"integrated,omitempty"`
-	IntegratedSourceBranch     string                 `json:"integrated_source_branch,omitempty"`
-	IntegratedTargetBranch     string                 `json:"integrated_target_branch,omitempty"`
-	SessionStopped             bool                   `json:"session_stopped,omitempty"`
-	WorktreeRemoved            bool                   `json:"worktree_removed,omitempty"`
-	WorktreeForced             bool                   `json:"worktree_forced,omitempty"`
-	Revision                   uint64                 `json:"revision,omitempty"`
-	Phases                     []taskClosePhaseTiming `json:"phases,omitempty"`
-	AutoClosedChildren         []string               `json:"auto_closed_children,omitempty"`
-	WorktreeCleanupDeferred    bool                   `json:"worktree_cleanup_deferred,omitempty"`
-	WorktreeCleanupOperationID string                 `json:"worktree_cleanup_operation_id,omitempty"`
+	TaskID                     string                         `json:"task_id"`
+	Status                     string                         `json:"status"`
+	ContextRisk                *domain.IssueContextRiskPacket `json:"context_risk,omitempty"`
+	IntegrationRequested       bool                           `json:"integration_requested,omitempty"`
+	Integrated                 bool                           `json:"integrated,omitempty"`
+	IntegratedSourceBranch     string                         `json:"integrated_source_branch,omitempty"`
+	IntegratedTargetBranch     string                         `json:"integrated_target_branch,omitempty"`
+	SessionStopped             bool                           `json:"session_stopped,omitempty"`
+	WorktreeRemoved            bool                           `json:"worktree_removed,omitempty"`
+	WorktreeForced             bool                           `json:"worktree_forced,omitempty"`
+	Revision                   uint64                         `json:"revision,omitempty"`
+	Phases                     []taskClosePhaseTiming         `json:"phases,omitempty"`
+	AutoClosedChildren         []string                       `json:"auto_closed_children,omitempty"`
+	WorktreeCleanupDeferred    bool                           `json:"worktree_cleanup_deferred,omitempty"`
+	WorktreeCleanupOperationID string                         `json:"worktree_cleanup_operation_id,omitempty"`
 }
 
 type deferredTaskWorktreeCleanupResult struct {
@@ -233,15 +234,16 @@ type taskStaleCloseableCandidate struct {
 }
 
 type taskIntegrationReadinessResult struct {
-	IssueID                string                       `json:"issue_id"`
-	ParentIssueID          string                       `json:"parent_issue_id,omitempty"`
-	Ready                  bool                         `json:"ready"`
-	Reasons                []string                     `json:"reasons,omitempty"`
-	EvidenceEventSeq       int64                        `json:"evidence_event_seq,omitempty"`
-	EvidencePacket         *domain.WorkerEvidencePacket `json:"evidence_packet,omitempty"`
-	EvidenceIncomplete     bool                         `json:"evidence_incomplete,omitempty"`
-	EvidenceMissingFields  []string                     `json:"evidence_missing_fields,omitempty"`
-	EvidenceInvalidReasons []string                     `json:"evidence_invalid_reasons,omitempty"`
+	IssueID                string                         `json:"issue_id"`
+	ParentIssueID          string                         `json:"parent_issue_id,omitempty"`
+	Ready                  bool                           `json:"ready"`
+	ContextRisk            *domain.IssueContextRiskPacket `json:"context_risk,omitempty"`
+	Reasons                []string                       `json:"reasons,omitempty"`
+	EvidenceEventSeq       int64                          `json:"evidence_event_seq,omitempty"`
+	EvidencePacket         *domain.WorkerEvidencePacket   `json:"evidence_packet,omitempty"`
+	EvidenceIncomplete     bool                           `json:"evidence_incomplete,omitempty"`
+	EvidenceMissingFields  []string                       `json:"evidence_missing_fields,omitempty"`
+	EvidenceInvalidReasons []string                       `json:"evidence_invalid_reasons,omitempty"`
 }
 
 type taskMergeBaseTargetResult struct {
@@ -1500,6 +1502,11 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 	if cmd.Status != domain.StatusDone {
 		restoreDeferredWorktree = d.cancelDeferredTaskWorktreeCleanup(ctx, projectID, cmd.TaskID, "issue status changed before deferred worktree cleanup completed")
 	}
+	if cmd.Status == domain.StatusInReview {
+		if risk := d.taskContextRiskForCloseout(ctx, projectID, cmd.TaskID, d.cfg.RepoDir); risk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*risk) {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("context risk is high for issue %s: record root_cause, invariant, regression_validation, or a structured risk note before marking in_review", cmd.TaskID)), nil
+		}
+	}
 	task, updatedTasks, err := d.updateTaskStatusExcludingClose(ctx, projectID, cmd.TaskID, cmd.Status, cmd.CascadeChildren)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -1552,6 +1559,10 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		TaskID:         taskID,
 		Status:         string(domain.StatusDone),
 		WorktreeForced: cmd.ForceWorktree,
+	}
+	result.ContextRisk = d.taskContextRiskForCloseout(ctx, projectID, taskID, d.cfg.RepoDir)
+	if result.ContextRisk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*result.ContextRisk) {
+		return result, fmt.Errorf("context risk is high for issue %s: record root_cause, invariant, regression_validation, or a structured risk note before closeout", taskID)
 	}
 	recordPhase := func(name string, startedAt time.Time, skipped bool) {
 		result.Phases = append(result.Phases, taskClosePhaseTiming{
@@ -3012,6 +3023,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 			Reasons: []string{fmt.Sprintf("issue %s not found in daemon task projection", strings.TrimSpace(issueID))},
 		}, nil
 	}
+	contextRisk := d.taskContextRiskForCloseout(ctx, projectID, task.ID.String(), repoDir)
 	parentIssueID := task.ID.String()
 	if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
 		parentIssueID = strings.TrimSpace(task.ParentID.String())
@@ -3021,6 +3033,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 			IssueID:       task.ID.String(),
 			ParentIssueID: parentIssueID,
 			Ready:         true,
+			ContextRisk:   contextRisk,
 		}, nil
 	}
 
@@ -3030,6 +3043,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 			IssueID:       task.ID.String(),
 			ParentIssueID: parentIssueID,
 			Ready:         false,
+			ContextRisk:   contextRisk,
 			Reasons: []string{
 				fmt.Sprintf("issue %s is not closed", task.ID.String()),
 				"repo_dir is required to inspect worker-integration-ready mailbox evidence",
@@ -3049,6 +3063,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 					IssueID:          task.ID.String(),
 					ParentIssueID:    parentIssueID,
 					Ready:            true,
+					ContextRisk:      contextRisk,
 					EvidenceEventSeq: evt.Seq,
 					EvidencePacket:   &packet,
 				}, nil
@@ -3064,6 +3079,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 				IssueID:                task.ID.String(),
 				ParentIssueID:          parentIssueID,
 				Ready:                  false,
+				ContextRisk:            contextRisk,
 				Reasons:                reasons,
 				EvidenceEventSeq:       evt.Seq,
 				EvidenceIncomplete:     true,
@@ -3076,6 +3092,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 		IssueID:       task.ID.String(),
 		ParentIssueID: parentIssueID,
 		Ready:         false,
+		ContextRisk:   contextRisk,
 		Reasons: []string{
 			fmt.Sprintf("issue %s is not closed", task.ID.String()),
 			fmt.Sprintf("no worker-integration-ready mailbox event found under parent %s for %s", parentIssueID, task.ID.String()),

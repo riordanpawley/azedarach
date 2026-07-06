@@ -27,6 +27,7 @@ This directory primarily contains **developer/internal documentation**.
 - [16-scheduled-project-scripts.md](16-scheduled-project-scripts.md)
 - [17-sqlite-query-plan-guardrails.md](17-sqlite-query-plan-guardrails.md)
 - [18-async-notice-architecture.md](18-async-notice-architecture.md)
+- [19-issue-context-risk.md](19-issue-context-risk.md)
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 - [adr/2-daemon-owned-async-notices.md](adr/2-daemon-owned-async-notices.md)
 
@@ -44,7 +45,7 @@ This directory primarily contains **developer/internal documentation**.
 - `session.start` conflict / `session.attach` target / `session.pause` and `session.resume` lifecycle targets / `session.stop` targets: `tmux`.
 - `session.recover` reconciliation: `hybrid` (projection intent + tmux runtime).
 - `task.close`, `task.close_preflight`, `task.delete`, `task.delete_preflight`, `task.graph_readiness`, and `task.complete_check`: `hybrid` (durable issue graph/projection + live runtime attachment state).
-- `task.integration_readiness`: `projection` (durable issue projection + mailbox evidence).
+- `task.integration_readiness` and `task.context_risk_closeout`: `projection` (durable issue projection + mailbox/observation evidence).
 - `task.merge_base_target`: `projection` (durable issue graph + worktree projection).
 - `task.follow_on_merge_candidates`: `projection` (durable issue graph + worktree projection).
 - `issue_resources.lifecycle`: `projection` (durable issue status + runtime attachment projection).

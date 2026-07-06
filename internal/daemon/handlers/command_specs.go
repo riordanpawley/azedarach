@@ -43,6 +43,7 @@ const (
 	commandTaskGraphReadiness    = "task.graph_readiness"
 	commandTaskCompleteCheck     = "task.complete_check"
 	commandTaskIntegrationReady  = "task.integration_readiness"
+	commandTaskContextRisk       = "task.context_risk"
 	commandTaskMergeBaseTarget   = "task.merge_base_target"
 	commandTaskFollowOnMerge     = "task.follow_on_merge_candidates"
 	commandTaskUpdateStatus      = "task.update_status"
@@ -166,6 +167,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	commandTaskGraphReadiness:              {Command: commandTaskGraphReadiness, RequiresProjectID: true},
 	commandTaskCompleteCheck:               {Command: commandTaskCompleteCheck, RequiresProjectID: true},
 	commandTaskIntegrationReady:            {Command: commandTaskIntegrationReady, RequiresProjectID: true},
+	commandTaskContextRisk:                 {Command: commandTaskContextRisk, RequiresProjectID: true},
 	commandTaskMergeBaseTarget:             {Command: commandTaskMergeBaseTarget, RequiresProjectID: true},
 	commandTaskFollowOnMerge:               {Command: commandTaskFollowOnMerge, RequiresProjectID: true},
 	commandTaskUpdateStatus:                {Command: commandTaskUpdateStatus, RequiresProjectID: true},

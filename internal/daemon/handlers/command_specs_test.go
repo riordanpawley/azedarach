@@ -196,6 +196,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		commandTaskGraphReadiness,
 		commandTaskCompleteCheck,
 		commandTaskIntegrationReady,
+		commandTaskContextRisk,
 		commandTaskMergeBaseTarget,
 		commandTaskFollowOnMerge,
 		commandTaskUpdateStatus,
