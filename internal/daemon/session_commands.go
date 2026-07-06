@@ -4283,18 +4283,35 @@ func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo 
 		}
 	}
 	if initialPrompt != "" {
-		escapedPrompt := escapeForShellDoubleQuotes(initialPrompt)
+		promptAssignment := initialPromptShellAssignment(initialPrompt)
+		promptArg := `"$` + initialPromptShellVariable + `"`
 		switch strings.ToLower(tool) {
 		case "opencode":
-			parts = append(parts, fmt.Sprintf(`--prompt "%s"`, escapedPrompt))
+			parts = append(parts, "--prompt", promptArg)
 		case "codex":
-			parts = append(parts, "--", fmt.Sprintf(`"%s"`, escapedPrompt))
+			parts = append(parts, "--", promptArg)
 		default:
-			parts = append(parts, fmt.Sprintf(`"%s"`, escapedPrompt))
+			parts = append(parts, promptArg)
 		}
+		return promptAssignment + "; " + strings.Join(parts, " ")
 	}
 
 	return strings.Join(parts, " ")
+}
+
+const initialPromptShellVariable = "__AZEDARACH_INITIAL_PROMPT"
+
+func initialPromptShellAssignment(prompt string) string {
+	return initialPromptShellVariable + "=$(printf '%b' " + singleQuoteForShell(shellPrintfPercentBBytes(prompt)) + ")"
+}
+
+func shellPrintfPercentBBytes(value string) string {
+	var b strings.Builder
+	b.Grow(len(value) * 5)
+	for i := 0; i < len(value); i++ {
+		fmt.Fprintf(&b, `\0%03o`, value[i])
+	}
+	return b.String()
 }
 
 func escapeForShellDoubleQuotes(value string) string {

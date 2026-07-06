@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -2715,12 +2716,16 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 	if !foundPaste {
 		t.Fatalf("missing paste-buffer command %v in tmux commands: %+v", wantPaste, tmuxRunner.commands)
 	}
-	if !strings.Contains(launchCommand, "Resolve merge conflicts for issue "+issueID) ||
+	if strings.Contains(launchCommand, "Resolve merge conflicts for issue "+issueID) ||
+		strings.Contains(launchCommand, "README.md") ||
+		strings.Contains(launchCommand, "main.go") {
+		t.Fatalf("launch command contains raw conflict prompt text: %s", launchCommand)
+	}
+	if !strings.Contains(launchCommand, `__AZEDARACH_INITIAL_PROMPT=$(printf`) ||
 		!strings.Contains(launchCommand, `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) ||
-		!strings.Contains(launchCommand, "README.md") ||
-		!strings.Contains(launchCommand, "main.go") ||
+		!strings.Contains(launchCommand, `-- "$__AZEDARACH_INITIAL_PROMPT"`) ||
 		!strings.Contains(launchCommand, "--dangerously-bypass-approvals-and-sandbox") {
-		t.Fatalf("launch command missing conflict prompt or yolo flag: %s", launchCommand)
+		t.Fatalf("launch command missing encoded conflict prompt transport or yolo flag: %s", launchCommand)
 	}
 
 	snapshot := store.ReadSnapshot(projectID)
@@ -6638,8 +6643,9 @@ func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) 
 	if !strings.Contains(command, `AZEDARACH_ISSUE_ID="axt-123" claude`) {
 		t.Fatalf("command = %q, want AZEDARACH_ISSUE_ID env injection", command)
 	}
-	if !strings.Contains(command, `"work on issue axt-123 (task): Verify startup behavior"`) {
-		t.Fatalf("command = %q, want initial prompt argument", command)
+	if !strings.Contains(command, `__AZEDARACH_INITIAL_PROMPT=$(printf`) ||
+		!strings.Contains(command, `claude "$__AZEDARACH_INITIAL_PROMPT"`) {
+		t.Fatalf("command = %q, want encoded initial prompt argument", command)
 	}
 }
 
@@ -6803,12 +6809,12 @@ func TestBuildSessionLaunchCommandDoesNotInjectCodexHookOverrides(t *testing.T) 
 	if !strings.Contains(command, `--image "/tmp/with space/image.png"`) {
 		t.Fatalf("command = %q, want codex image argument for spaced path", command)
 	}
-	if !strings.Contains(command, `-- "work on issue axt-123 (task): Verify startup behavior"`) {
-		t.Fatalf("command = %q, want codex prompt with option terminator", command)
+	if !strings.Contains(command, `-- "$__AZEDARACH_INITIAL_PROMPT"`) {
+		t.Fatalf("command = %q, want codex prompt variable with option terminator", command)
 	}
 }
 
-func TestBuildSessionLaunchCommandEscapesPromptCommandSubstitutionForCodex(t *testing.T) {
+func TestBuildSessionLaunchCommandEncodesMultilinePromptForCodex(t *testing.T) {
 	d := &Daemon{
 		cfg: Config{
 			CLITool:      "codex",
@@ -6826,10 +6832,33 @@ func TestBuildSessionLaunchCommandEscapesPromptCommandSubstitutionForCodex(t *te
 	)
 
 	if strings.Contains(command, "`az orchestrate status --root <issue-id>`") {
-		t.Fatalf("command = %q, want backticks escaped in prompt to avoid shell command substitution", command)
+		t.Fatalf("command = %q, want backticks encoded in prompt to avoid shell command substitution", command)
 	}
-	if !strings.Contains(command, "\\`az orchestrate status --root <issue-id>\\`") {
-		t.Fatalf("command = %q, want escaped backticks in prompt", command)
+	if strings.Contains(command, "\n") {
+		t.Fatalf("command = %q, want tmux-submitted launch command without raw newlines", command)
+	}
+	if strings.Contains(command, "Start by running") {
+		t.Fatalf("command = %q, want multiline prompt text encoded out of the shell command", command)
+	}
+	if !strings.Contains(command, `__AZEDARACH_INITIAL_PROMPT=$(printf`) ||
+		!strings.Contains(command, `codex -- "$__AZEDARACH_INITIAL_PROMPT"`) {
+		t.Fatalf("command = %q, want encoded prompt assignment and codex prompt variable", command)
+	}
+}
+
+func TestInitialPromptShellAssignmentPreservesSpecialPromptBytes(t *testing.T) {
+	prompt := "work $ `\n' \" \\ ! \t"
+	command := initialPromptShellAssignment(prompt) + `; printf '<%s>' "$__AZEDARACH_INITIAL_PROMPT"`
+
+	out, err := exec.Command("sh", "-c", command).Output()
+	if err != nil {
+		t.Fatalf("run assignment command: %v", err)
+	}
+	if got, want := string(out), "<"+prompt+">"; got != want {
+		t.Fatalf("decoded prompt = %q, want %q", got, want)
+	}
+	if strings.Contains(command, "\n") || strings.Contains(command, prompt) {
+		t.Fatalf("command = %q, want encoded prompt without raw multiline text", command)
 	}
 }
 
