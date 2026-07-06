@@ -3219,7 +3219,7 @@ func TestClient_ReplaysAgentLearningPrivacyMigrationWhenColumnAlreadyExists(t *t
 	assert.True(t, indexed)
 }
 
-func TestClient_RepairsAppliedAgentLearningMigrationMissingReviewColumns(t *testing.T) {
+func TestClient_RepairsAppliedAgentLearningMigrationMissingBaseColumns(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		seedLearning bool
@@ -3256,7 +3256,34 @@ func TestClient_RepairsAppliedAgentLearningMigrationMissingReviewColumns(t *test
 			db, err := sql.Open("sqlite", "file:"+dbPath)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = db.Close() })
-			for _, column := range []string{"review_note", "reviewed_at"} {
+			for _, index := range []string{
+				"idx_agent_learnings_active_policy",
+				"idx_agent_learnings_target_state",
+				"idx_agent_learnings_active_privacy",
+			} {
+				_, err = db.ExecContext(ctx, "DROP INDEX IF EXISTS "+index)
+				require.NoError(t, err)
+			}
+			repairedColumns := []string{
+				"evidence_private",
+				"promotion_target",
+				"promotion_target_id",
+				"promotion_note",
+				"promoted_at",
+				"review_note",
+				"reviewed_at",
+				"expires_at",
+				"stale_at",
+				"last_recalled_at",
+				"recall_count",
+				"superseded_at",
+				"target_retired_at",
+				"target_state",
+				"target_hash",
+				"target_metadata_json",
+				"target_drifted_at",
+			}
+			for _, column := range repairedColumns {
 				_, err = db.ExecContext(ctx, "ALTER TABLE agent_learnings DROP COLUMN "+column)
 				require.NoError(t, err)
 			}
@@ -3291,7 +3318,7 @@ func TestClient_RepairsAppliedAgentLearningMigrationMissingReviewColumns(t *test
 
 			columns, err := tableColumns(db, "agent_learnings")
 			require.NoError(t, err)
-			for _, column := range []string{"review_note", "reviewed_at"} {
+			for _, column := range repairedColumns {
 				_, exists := columns[column]
 				assert.True(t, exists)
 			}

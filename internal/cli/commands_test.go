@@ -11205,6 +11205,9 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 		t.Fatalf("learn recall statuses = %#v", learnReq.Statuses)
 	}
 	if !strings.Contains(output, "Relevant accepted/promoted learnings:") ||
+		!strings.Contains(output, "Learning capture:") ||
+		!strings.Contains(output, "az learn add --issue az-1 --tag <tag> --evidence") ||
+		!strings.Contains(output, "Before handoff, review, or context switch") ||
 		!strings.Contains(output, "- learn-1 [accepted]: Keep durable choices in decisions (why: issue=az-1; query)") ||
 		!strings.Contains(output, "Use `az learn show <learning-id>` for evidence; long evidence is not injected by default.") {
 		t.Fatalf("prime output missing learning section: %q", output)
@@ -11214,6 +11217,57 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 	}
 	if strings.Contains(output, "Private local handling detail") || strings.Contains(output, "private raw evidence should not be injected") {
 		t.Fatalf("prime output injected private learning: %q", output)
+	}
+}
+
+func TestPrimeCommandShowsLearningCaptureGuidanceWithoutRecallRows(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
+	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{{
+						ID:        "az-1",
+						Title:     "Prime issue",
+						Status:    domain.StatusOpen,
+						Priority:  domain.P2,
+						Type:      domain.TypeTask,
+						CreatedAt: now,
+						UpdatedAt: now,
+					}})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt, Body: body}, nil
+				case protocol.CommandLearnRecall:
+					body, err := json.Marshal(protocol.LearnRecallResponseBody{})
+					if err != nil {
+						t.Fatalf("marshal learn recall response: %v", err)
+					}
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt, Body: body}, nil
+				default:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		ProjectID: "proj",
+		Config:    &config.Config{Spec: config.SpecConfig{Enabled: true}},
+	}
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(deps)
+	})
+
+	if !strings.Contains(output, "Learning capture:") ||
+		!strings.Contains(output, "az learn add --issue az-1 --tag <tag> --evidence") ||
+		!strings.Contains(output, "Before handoff, review, or context switch") {
+		t.Fatalf("prime output missing no-row learning capture guidance: %q", output)
+	}
+	if strings.Contains(output, "Relevant accepted/promoted learnings:") {
+		t.Fatalf("prime output should not show recalled-learning heading without rows: %q", output)
 	}
 }
 

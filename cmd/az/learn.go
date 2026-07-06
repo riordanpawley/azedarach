@@ -552,7 +552,11 @@ func printLearningMaintenanceFindings(findings []protocol.LearnMaintenanceFindin
 		return
 	}
 	for _, finding := range findings {
-		fmt.Printf("%s [%s] %s: %s\n", finding.LearningID, finding.Severity, finding.Type, finding.Message)
+		learningID := strings.TrimSpace(finding.LearningID)
+		if learningID == "" {
+			learningID = "project"
+		}
+		fmt.Printf("%s [%s] %s: %s\n", learningID, finding.Severity, finding.Type, finding.Message)
 		if summary := strings.TrimSpace(finding.Learning.Summary); summary != "" {
 			fmt.Printf("  summary: %s\n", summary)
 		}

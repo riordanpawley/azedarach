@@ -262,8 +262,23 @@ func repairAgentLearningBaseSchema(ctx context.Context, db *sql.DB) error {
 		name string
 		ddl  string
 	}{
+		{name: "evidence_private", ddl: "INTEGER NOT NULL DEFAULT 0"},
+		{name: "promotion_target", ddl: "TEXT"},
+		{name: "promotion_target_id", ddl: "TEXT"},
+		{name: "promotion_note", ddl: "TEXT"},
+		{name: "promoted_at", ddl: "TEXT"},
 		{name: "review_note", ddl: "TEXT"},
 		{name: "reviewed_at", ddl: "TEXT"},
+		{name: "expires_at", ddl: "TEXT"},
+		{name: "stale_at", ddl: "TEXT"},
+		{name: "last_recalled_at", ddl: "TEXT"},
+		{name: "recall_count", ddl: "INTEGER NOT NULL DEFAULT 0"},
+		{name: "superseded_at", ddl: "TEXT"},
+		{name: "target_retired_at", ddl: "TEXT"},
+		{name: "target_state", ddl: "TEXT"},
+		{name: "target_hash", ddl: "TEXT"},
+		{name: "target_metadata_json", ddl: "TEXT NOT NULL DEFAULT '{}'"},
+		{name: "target_drifted_at", ddl: "TEXT"},
 	} {
 		exists, err := txColumnExists(ctx, tx, "agent_learnings", column.name)
 		if err != nil {

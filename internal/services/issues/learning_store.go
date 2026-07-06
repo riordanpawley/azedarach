@@ -502,6 +502,14 @@ func (c *Client) DoctorLearnings(ctx context.Context, params LearningMaintenance
 	}
 	now := time.Now().UTC()
 	findings := make([]LearningMaintenanceFinding, 0)
+	if len(records) == 0 {
+		findings = append(findings, LearningMaintenanceFinding{
+			Type:     "adoption_empty",
+			Severity: "info",
+			Message:  "no agent learnings recorded for this project",
+			Action:   "capture reusable session discoveries with az learn add before handoff, review, or context switch",
+		})
+	}
 	for _, record := range records {
 		findings = append(findings, learningMaintenanceFindings(record.Learning, params, now)...)
 		if params.Limit > 0 && len(findings) >= params.Limit {

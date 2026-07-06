@@ -6534,8 +6534,17 @@ func PrimeCommand(deps *Dependencies) error {
 }
 
 func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID string) string {
-	if deps == nil || deps.DaemonClient == nil || strings.TrimSpace(issueID) == "" {
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
 		return ""
+	}
+	lines := []string{
+		"Learning capture:",
+		fmt.Sprintf("- Before handoff, review, or context switch, capture reusable evidence-backed discoveries with `az learn add --issue %s --tag <tag> --evidence \"<observation + command/file evidence>\"`.", issueID),
+		"- Use `--private` for sensitive local details; promote durable guidance later with `az learn review` and `az learn promote`.",
+	}
+	if deps == nil || deps.DaemonClient == nil {
+		return strings.Join(lines, "\n")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
@@ -6545,7 +6554,7 @@ func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID
 		Limit:          3,
 	})
 	if err != nil {
-		return ""
+		return strings.Join(lines, "\n")
 	}
 	resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -6557,13 +6566,13 @@ func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(deps.ProjectID)},
 	})
 	if err != nil || !resp.OK || len(resp.Body) == 0 {
-		return ""
+		return strings.Join(lines, "\n")
 	}
 	var out protocol.LearnRecallResponseBody
 	if err := json.Unmarshal(resp.Body, &out); err != nil || len(out.Learnings) == 0 {
-		return ""
+		return strings.Join(lines, "\n")
 	}
-	lines := []string{"Relevant accepted/promoted learnings:"}
+	lines = append(lines, "", "Relevant accepted/promoted learnings:")
 	for _, learning := range out.Learnings {
 		reason := strings.TrimSpace(learning.RecallReason)
 		if reason != "" {

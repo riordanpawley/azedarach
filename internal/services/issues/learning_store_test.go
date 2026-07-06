@@ -891,6 +891,19 @@ func TestClient_LearningMaintenanceDoctorReportsWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestClient_LearningMaintenanceDoctorReportsEmptyAdoption(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	report, err := client.DoctorLearnings(ctx, LearningMaintenanceParams{ProjectID: "proj-empty"})
+	require.NoError(t, err)
+	require.Len(t, report.Findings, 1)
+	assert.Equal(t, "adoption_empty", report.Findings[0].Type)
+	assert.Equal(t, "info", report.Findings[0].Severity)
+	assert.Empty(t, report.Findings[0].LearningID)
+	assert.Contains(t, report.Findings[0].Action, "az learn add")
+}
+
 func TestClient_LearningGCIsBoundedAndRequiresConfirmation(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
