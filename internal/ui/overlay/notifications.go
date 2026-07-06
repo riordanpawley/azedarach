@@ -119,7 +119,7 @@ func (o *NotificationHistoryOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				o.scroll = o.maxScroll()
 			}
 			return o, nil
-		case "enter", "a":
+		case "enter", "a", " ", "space":
 			if action, ok := o.primaryAction(); ok {
 				return o, func() tea.Msg { return action }
 			}
@@ -190,17 +190,20 @@ func (o *NotificationHistoryOverlay) View() string {
 
 func (o *NotificationHistoryOverlay) renderItems(width, height int) string {
 	filtered := o.filteredItems()
+	var b strings.Builder
+	b.WriteString(o.renderFilterTabs(width))
+	b.WriteString("\n")
 	if len(filtered) == 0 {
-		return o.styles.MenuItemDisabled.Render("No notifications yet")
+		b.WriteString(o.styles.MenuItemDisabled.Render("No notifications yet"))
+		return b.String()
 	}
 
 	detailLines := o.renderSelectedDetails(width)
-	visibleRows := max(1, height-5-len(detailLines))
+	visibleRows := max(1, height-6-len(detailLines))
 	o.ensureSelectionVisible(visibleRows)
 	start := o.scroll
 	end := min(len(filtered), start+visibleRows)
 
-	var b strings.Builder
 	b.WriteString(o.styles.MenuItem.Render(fmt.Sprintf("%s: %d", o.filterLabel(), len(filtered))))
 	b.WriteString("\n\n")
 	lastGroup := ""
@@ -251,6 +254,19 @@ func (o *NotificationHistoryOverlay) renderItems(width, height int) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+func (o *NotificationHistoryOverlay) renderFilterTabs(width int) string {
+	labels := []string{"All", "Unread", "Errors", "Actionable", "Dismissed"}
+	tabs := make([]string, 0, len(labels))
+	for i, label := range labels {
+		if notificationActionCenterFilter(i) == o.filter {
+			tabs = append(tabs, o.styles.MenuItemActive.Render("["+label+"]"))
+			continue
+		}
+		tabs = append(tabs, o.styles.MenuItemDisabled.Render(label))
+	}
+	return ansi.Truncate("Filters: "+strings.Join(tabs, " "), max(8, width), "...")
+}
+
 func (o *NotificationHistoryOverlay) renderSelectedDetails(width int) []string {
 	item, ok := o.current()
 	if !ok {
@@ -292,7 +308,7 @@ func (o *NotificationHistoryOverlay) actionBindings() []keybinds.Binding {
 		{Key: "g/G", Description: "top/bottom"},
 		{Key: "m", Description: "read/unread"},
 		{Key: "d/D", Description: "dismiss"},
-		{Key: "Enter/a", Description: "action"},
+		{Key: "Space/Enter/a", Description: "action"},
 		{Key: "o/w", Description: "open"},
 		{Key: "l/c", Description: "logs/copy"},
 		{Key: "Esc/q", Description: "close"},

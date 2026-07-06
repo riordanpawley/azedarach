@@ -80,7 +80,7 @@ func TestNotificationActionCenterFiltersAndEmitsActions(t *testing.T) {
 	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
 	overlay = model.(*NotificationHistoryOverlay)
 	view := overlay.View()
-	if !strings.Contains(view, "Unread: 1") || strings.Contains(view, "Local notice") {
+	if !strings.Contains(view, "[Unread]") || !strings.Contains(view, "Unread: 1") || strings.Contains(view, "Local notice") {
 		t.Fatalf("filtered view =\n%s", view)
 	}
 
@@ -98,6 +98,40 @@ func TestNotificationActionCenterFiltersAndEmitsActions(t *testing.T) {
 	}
 	if action.DaemonNoticeID != "notice-1" || action.Kind != "client.copy_details" || action.ScopeID != "az-1" || action.OperationID != "op-1" {
 		t.Fatalf("action = %+v, want daemon-backed copy action with scope", action)
+	}
+}
+
+func TestNotificationActionCenterSpaceUsesPrimaryAction(t *testing.T) {
+	overlay := NewNotificationHistoryOverlay([]NotificationHistoryItem{
+		{
+			ID:             "notice-1",
+			DaemonNoticeID: "notice-1",
+			ScopeType:      "issue",
+			ScopeID:        "az-1",
+			Message:        "Task az-1 needs attention",
+			Actions: []protocol.NoticeAction{
+				{ActionID: "copy_details", Kind: "client.copy_details", Label: "Copy details", Enabled: true},
+				{ActionID: "open_task", Kind: "client.open_task", Label: "Open task", Enabled: true},
+			},
+		},
+	})
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
+	overlay = model.(*NotificationHistoryOverlay)
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if cmd == nil {
+		t.Fatal("expected space to emit primary action")
+	}
+	msg, ok := cmd().(SelectionMsg)
+	if !ok || msg.Key != "notification_action" {
+		t.Fatalf("message = %T/%+v, want notification_action SelectionMsg", cmd(), cmd())
+	}
+	action, ok := msg.Value.(NotificationActionCenterMsg)
+	if !ok {
+		t.Fatalf("selection value = %T, want NotificationActionCenterMsg", msg.Value)
+	}
+	if action.ActionID != "open_task" || action.Kind != "client.open_task" || action.ScopeID != "az-1" {
+		t.Fatalf("action = %+v, want open_task primary action", action)
 	}
 }
 
