@@ -56,6 +56,28 @@ func (c *Client) ListOperations(ctx context.Context, opts OperationListOptions) 
 	return out.Operations, nil
 }
 
+func (c *Client) OperationQueue(ctx context.Context, opts OperationListOptions) (protocol.OperationQueueResponseBody, error) {
+	var issueID naming.IssueID
+	if trimmed := strings.TrimSpace(opts.IssueID); trimmed != "" {
+		parsedIssueID, err := naming.ParseIssueID(trimmed)
+		if err != nil {
+			return protocol.OperationQueueResponseBody{}, fmt.Errorf("invalid issue id: %w", err)
+		}
+		issueID = parsedIssueID
+	}
+	var out protocol.OperationQueueResponseBody
+	if err := c.commandJSON(ctx, protocol.CommandOperationQueue, protocol.OperationQueueRequestBody{
+		ProjectID: c.projectID,
+		IssueID:   issueID,
+		Kind:      opts.Kind,
+		States:    opts.States,
+		Limit:     opts.Limit,
+	}, &out); err != nil {
+		return protocol.OperationQueueResponseBody{}, err
+	}
+	return out, nil
+}
+
 func (c *Client) CancelOperation(ctx context.Context, operationID, reason string) (protocol.OperationRecord, error) {
 	parsedOperationID, err := naming.ParseOperationID(operationID)
 	if err != nil {

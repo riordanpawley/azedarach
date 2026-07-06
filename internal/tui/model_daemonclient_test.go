@@ -1095,6 +1095,77 @@ func teaBatchMessages(msg tea.Msg) []tea.Msg {
 	}
 }
 
+func TestOperationQueueHotkeyOpensDaemonBackedOverlay(t *testing.T) {
+	var gotQueueBody protocol.OperationQueueRequestBody
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandOperationQueue {
+				t.Fatalf("command = %q, want %q", req.Command, protocol.CommandOperationQueue)
+			}
+			if err := json.Unmarshal(req.Body, &gotQueueBody); err != nil {
+				t.Fatalf("unmarshal queue body: %v", err)
+			}
+			respBody, err := json.Marshal(protocol.OperationQueueResponseBody{
+				ProjectID: "proj-a",
+				Running: []protocol.OperationQueueEntry{{
+					Operation: protocol.OperationRecord{
+						OperationID:  "op-running",
+						ProjectID:    "proj-a",
+						Kind:         "git.merge",
+						IssueID:      "az-1",
+						ResourceKeys: []string{"worktree:/tmp/wt"},
+						State:        protocol.OperationStateRunning,
+					},
+				}},
+				Queued: []protocol.OperationQueueEntry{{
+					Operation: protocol.OperationRecord{
+						OperationID: "op-queued",
+						ProjectID:   "proj-a",
+						Kind:        "worktree.cleanup",
+						IssueID:     "az-2",
+						State:       protocol.OperationStateQueued,
+					},
+					BlockingOperationIDs: []naming.OperationID{"op-running"},
+					BlockedResourceKeys:  []string{"worktree:/tmp/wt"},
+				}},
+			})
+			if err != nil {
+				return protocol.ResponseEnvelope{}, err
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m := newTestModel()
+	m.loading = false
+	m.daemonClient = daemonclient.New(transport).WithProjectID("proj-a")
+
+	updatedAny, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Q'}})
+	updated := updatedAny.(Model)
+	if _, ok := updated.overlayStack.Current().(*overlay.OperationQueueOverlay); !ok {
+		t.Fatalf("overlay = %T, want OperationQueueOverlay", updated.overlayStack.Current())
+	}
+	if cmd == nil {
+		t.Fatal("expected queue load command")
+	}
+	for _, msg := range teaBatchMessages(cmd()) {
+		nextAny, _ := updated.Update(msg)
+		updated = nextAny.(Model)
+	}
+	if gotQueueBody.ProjectID != "proj-a" {
+		t.Fatalf("queue project id = %q, want proj-a", gotQueueBody.ProjectID)
+	}
+	view := updated.overlayStack.Current().(*overlay.OperationQueueOverlay).View()
+	if !strings.Contains(view, "op-running running git.merge az-1") || !strings.Contains(view, "`- op-queued queued by=op-running") {
+		t.Fatalf("queue overlay view missing dependency tree:\n%s", view)
+	}
+}
+
 func mustMarshalBoardSnapshot(t *testing.T, protocolVersion protocol.Version, revision uint64, projectID string, tasks []domain.Task) []byte {
 	t.Helper()
 	body, err := json.Marshal(protocol.BoardSnapshotPayload{

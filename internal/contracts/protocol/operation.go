@@ -11,6 +11,7 @@ const (
 	CommandOperationSubmit = "operation.submit"
 	CommandOperationGet    = "operation.get"
 	CommandOperationList   = "operation.list"
+	CommandOperationQueue  = "operation.queue"
 	CommandOperationCancel = "operation.cancel"
 )
 
@@ -99,6 +100,27 @@ type OperationListRequestBody struct {
 type OperationListResponseBody struct {
 	ProjectID  naming.ProjectID  `json:"project_id" msgpack:"project_id"`
 	Operations []OperationRecord `json:"operations" msgpack:"operations"`
+}
+
+type OperationQueueRequestBody struct {
+	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	IssueID   naming.IssueID   `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
+	Kind      string           `json:"kind,omitempty" msgpack:"kind,omitempty"`
+	States    []OperationState `json:"states,omitempty" msgpack:"states,omitempty"`
+	Limit     int              `json:"limit,omitempty" msgpack:"limit,omitempty"`
+}
+
+type OperationQueueEntry struct {
+	Operation            OperationRecord      `json:"operation" msgpack:"operation"`
+	QueueIndex           int                  `json:"queue_index,omitempty" msgpack:"queue_index,omitempty"`
+	BlockingOperationIDs []naming.OperationID `json:"blocking_operation_ids,omitempty" msgpack:"blocking_operation_ids,omitempty"`
+	BlockedResourceKeys  []string             `json:"blocked_resource_keys,omitempty" msgpack:"blocked_resource_keys,omitempty"`
+}
+
+type OperationQueueResponseBody struct {
+	ProjectID naming.ProjectID      `json:"project_id" msgpack:"project_id"`
+	Running   []OperationQueueEntry `json:"running" msgpack:"running"`
+	Queued    []OperationQueueEntry `json:"queued" msgpack:"queued"`
 }
 
 type OperationCancelRequestBody struct {

@@ -273,6 +273,8 @@ func (r *operationRuntime) Handle(ctx context.Context, req protocol.RequestEnvel
 		return r.handleOperationGet(ctx, req)
 	case protocol.CommandOperationList:
 		return r.handleOperationList(ctx, req)
+	case protocol.CommandOperationQueue:
+		return r.handleOperationQueue(ctx, req)
 	case protocol.CommandOperationCancel:
 		return r.handleOperationCancel(ctx, req)
 	default:
@@ -525,6 +527,47 @@ func (r *operationRuntime) handleOperationList(ctx context.Context, req protocol
 	resp.Body = encoded
 	if r.logger != nil {
 		r.logger.Info("daemon operation list completed", "project_id", projectID, "result_count", len(operations))
+	}
+	return resp
+}
+
+func (r *operationRuntime) handleOperationQueue(_ context.Context, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	var body protocol.OperationQueueRequestBody
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err))
+	}
+	projectID := r.coalesceProjectID(body.ProjectID.String(), req.Meta.ProjectID.String())
+	if r.logger != nil {
+		r.logger.Info("daemon operation queue requested",
+			"project_id", projectID,
+			"issue_id", strings.TrimSpace(body.IssueID.String()),
+			"kind", strings.TrimSpace(body.Kind),
+			"limit", body.Limit,
+		)
+	}
+	snapshot := r.manager.Queue(daemonops.Query{
+		ProjectID: projectID,
+		IssueID:   strings.TrimSpace(body.IssueID.String()),
+		Kind:      strings.TrimSpace(body.Kind),
+		States:    mapOperationStates(body.States),
+		Limit:     body.Limit,
+	})
+	resp := r.successResponse(req)
+	encoded, err := json.Marshal(protocol.OperationQueueResponseBody{
+		ProjectID: naming.ProjectID(projectID),
+		Running:   r.toProtocolQueueEntries(snapshot.Running),
+		Queued:    r.toProtocolQueueEntries(snapshot.Queued),
+	})
+	if err != nil {
+		return r.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal operation queue response: %v", err))
+	}
+	resp.Body = encoded
+	if r.logger != nil {
+		r.logger.Info("daemon operation queue completed",
+			"project_id", projectID,
+			"running_count", len(snapshot.Running),
+			"queued_count", len(snapshot.Queued),
+		)
 	}
 	return resp
 }
@@ -885,6 +928,19 @@ func (r *operationRuntime) toProtocolRecord(record daemonops.Record) protocol.Op
 			Message:   record.ErrorMessage,
 			Retryable: mapOperationRecordErrorCode(record).Retryable(),
 		}
+	}
+	return out
+}
+
+func (r *operationRuntime) toProtocolQueueEntries(entries []daemonops.QueueEntry) []protocol.OperationQueueEntry {
+	out := make([]protocol.OperationQueueEntry, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, protocol.OperationQueueEntry{
+			Operation:            r.toProtocolRecord(entry.Record),
+			QueueIndex:           entry.QueueIndex,
+			BlockingOperationIDs: parseOperationIDs(entry.BlockingOperationIDs),
+			BlockedResourceKeys:  append([]string(nil), entry.BlockedResourceKeys...),
+		})
 	}
 	return out
 }
@@ -1425,6 +1481,18 @@ func parseOperationIDOrZero(raw string) naming.OperationID {
 		return ""
 	}
 	return parsed
+}
+
+func parseOperationIDs(raw []string) []naming.OperationID {
+	out := make([]naming.OperationID, 0, len(raw))
+	for _, value := range raw {
+		parsed := parseOperationIDOrZero(value)
+		if parsed == "" {
+			continue
+		}
+		out = append(out, parsed)
+	}
+	return out
 }
 
 func fromStoreRecord(record opstore.Record) daemonops.Record {

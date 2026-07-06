@@ -136,6 +136,57 @@ func (m *Manager) List(ctx context.Context, query daemonops.Query) ([]daemonops.
 	return m.store.List(ctx, query)
 }
 
+func (m *Manager) Queue(query daemonops.Query) daemonops.QueueSnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	snapshot := daemonops.QueueSnapshot{ProjectID: query.ProjectID}
+	remaining := query.Limit
+	appendIfAllowed := func(entry daemonops.QueueEntry, target *[]daemonops.QueueEntry) {
+		if query.Limit > 0 && remaining == 0 {
+			return
+		}
+		if !matchesQueueQuery(entry.Record, query) {
+			return
+		}
+		*target = append(*target, entry)
+		if query.Limit > 0 {
+			remaining--
+		}
+	}
+
+	running := make([]*managedOp, 0, len(m.running))
+	for _, op := range m.running {
+		running = append(running, op)
+	}
+	sort.SliceStable(running, func(i, j int) bool {
+		left := running[i].record
+		right := running[j].record
+		if !left.CreatedAt.Equal(right.CreatedAt) {
+			return left.CreatedAt.Before(right.CreatedAt)
+		}
+		return left.ID < right.ID
+	})
+	for _, op := range running {
+		record := cloneOperationRecord(op.record)
+		record.State = daemonops.StateRunning
+		appendIfAllowed(daemonops.QueueEntry{Record: record}, &snapshot.Running)
+	}
+
+	for idx, op := range m.pending {
+		blocked := m.blockedResourcesLocked(op.record.ResourceKeys)
+		record := cloneOperationRecord(op.record)
+		record.State = daemonops.StateQueued
+		appendIfAllowed(daemonops.QueueEntry{
+			Record:               record,
+			QueueIndex:           idx + 1,
+			BlockingOperationIDs: sortedMapValues(blocked),
+			BlockedResourceKeys:  sortedMapKeys(blocked),
+		}, &snapshot.Queued)
+	}
+	return snapshot
+}
+
 func (m *Manager) Cancel(ctx context.Context, operationID, reason string) (daemonops.Record, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -173,7 +224,7 @@ func (m *Manager) Cancel(ctx context.Context, operationID, reason string) (daemo
 	if cancel != nil {
 		cancel()
 	}
-	return op.record, nil
+	return cloneOperationRecord(op.record), nil
 }
 
 func (m *Manager) StopIntake() error {
@@ -191,22 +242,25 @@ func (m *Manager) CancelQueued(ctx context.Context, reason string) error {
 
 	var firstErr error
 	for _, op := range pending {
+		record := m.recordForOp(op)
 		finished := m.now().UTC()
 		msg := reason
 		if msg == "" {
 			msg = "cancelled"
 		}
 		updated, err := m.store.Update(ctx, daemonops.UpdateParams{
-			ID:           op.record.ID,
+			ID:           record.ID,
 			ToState:      daemonops.StateCancelled,
 			FinishedAt:   &finished,
 			ErrorMessage: &msg,
 		})
-		if err != nil && firstErr == nil {
-			firstErr = err
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
-		op.record = updated
+		m.setRecordForOp(op, updated)
 		m.mu.Lock()
 		m.clearDedupeLocked(op)
 		m.mu.Unlock()
@@ -257,6 +311,49 @@ func normalizeResourceKeys(keys []string) []string {
 	}
 	sort.Strings(normalized)
 	return normalized
+}
+
+func cloneOperationRecord(record daemonops.Record) daemonops.Record {
+	record.ResourceKeys = append([]string(nil), record.ResourceKeys...)
+	record.ResultPayload = append([]byte(nil), record.ResultPayload...)
+	if record.Progress != nil {
+		progress := *record.Progress
+		record.Progress = &progress
+	}
+	return record
+}
+
+func (m *Manager) recordForOp(op *managedOp) daemonops.Record {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return cloneOperationRecord(op.record)
+}
+
+func (m *Manager) setRecordForOp(op *managedOp, record daemonops.Record) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	op.record = cloneOperationRecord(record)
+}
+
+func matchesQueueQuery(record daemonops.Record, query daemonops.Query) bool {
+	if query.ProjectID != "" && record.ProjectID != query.ProjectID {
+		return false
+	}
+	if query.IssueID != "" && record.IssueID != query.IssueID {
+		return false
+	}
+	if query.Kind != "" && record.Kind != query.Kind {
+		return false
+	}
+	if len(query.States) > 0 {
+		for _, state := range query.States {
+			if record.State == state {
+				return true
+			}
+		}
+		return false
+	}
+	return true
 }
 
 func (m *Manager) lookupDedupeLocked(ctx context.Context, req daemonops.SubmitRequest) (daemonops.Record, bool, error) {
@@ -321,9 +418,10 @@ func (m *Manager) startLocked(op *managedOp) {
 func (m *Manager) execute(ctx context.Context, op *managedOp) {
 	defer m.wg.Done()
 
+	operationID := m.recordForOp(op).ID
 	started := m.now().UTC()
 	updated, err := m.store.Update(context.Background(), daemonops.UpdateParams{
-		ID:        op.record.ID,
+		ID:        operationID,
 		ToState:   daemonops.StateRunning,
 		StartedAt: &started,
 	})
@@ -331,25 +429,28 @@ func (m *Manager) execute(ctx context.Context, op *managedOp) {
 		msg := err.Error()
 		finished := m.now().UTC()
 		updated, _ = m.store.Update(context.Background(), daemonops.UpdateParams{
-			ID:           op.record.ID,
+			ID:           operationID,
 			ToState:      daemonops.StateFailed,
 			FinishedAt:   &finished,
 			ErrorMessage: &msg,
 		})
-		op.record = updated
+		if updated.ID != "" {
+			m.setRecordForOp(op, updated)
+		}
 		m.finish(op)
 		return
 	}
-	op.record = updated
+	m.setRecordForOp(op, updated)
 	ctx = daemonops.WithProgressReporter(ctx, func(_ context.Context, progress daemonops.Progress) error {
 		progressCopy := progress
+		record := m.recordForOp(op)
 		updated, err := m.store.Update(context.Background(), daemonops.UpdateParams{
-			ID:       op.record.ID,
-			ToState:  op.record.State,
+			ID:       record.ID,
+			ToState:  record.State,
 			Progress: &progressCopy,
 		})
 		if err == nil {
-			op.record = updated
+			m.setRecordForOp(op, updated)
 		}
 		return err
 	})
@@ -361,14 +462,14 @@ func (m *Manager) execute(ctx context.Context, op *managedOp) {
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				runErr = fmt.Errorf("operation %s panicked: %v\n%s", op.record.ID, r, debug.Stack())
+				runErr = fmt.Errorf("operation %s panicked: %v\n%s", operationID, r, debug.Stack())
 			}
 		}()
 		payload, runErr = op.runner(ctx)
 	}()
 	finished := m.now().UTC()
 	params := daemonops.UpdateParams{
-		ID:            op.record.ID,
+		ID:            operationID,
 		FinishedAt:    &finished,
 		ResultPayload: payload,
 	}
@@ -393,9 +494,9 @@ func (m *Manager) execute(ctx context.Context, op *managedOp) {
 
 	updated, err = m.store.Update(context.Background(), params)
 	if err == nil {
-		op.record = updated
+		m.setRecordForOp(op, updated)
 	}
-	m.logOperationFinished(op, finished.Sub(started))
+	m.logOperationFinished(m.recordForOp(op), finished.Sub(started))
 	m.finish(op)
 }
 
@@ -478,19 +579,19 @@ func (m *Manager) logOperationStartLocked(op *managedOp) {
 	)
 }
 
-func (m *Manager) logOperationFinished(op *managedOp, runDuration time.Duration) {
+func (m *Manager) logOperationFinished(record daemonops.Record, runDuration time.Duration) {
 	if m.log == nil {
 		return
 	}
 	m.log.Info("daemon operation finished",
-		"operation_id", op.record.ID,
-		"project_id", op.record.ProjectID,
-		"issue_id", op.record.IssueID,
-		"kind", op.record.Kind,
-		"state", op.record.State,
-		"resource_keys", append([]string(nil), op.record.ResourceKeys...),
+		"operation_id", record.ID,
+		"project_id", record.ProjectID,
+		"issue_id", record.IssueID,
+		"kind", record.Kind,
+		"state", record.State,
+		"resource_keys", append([]string(nil), record.ResourceKeys...),
 		"run_ms", durationMillis(runDuration),
-		"total_ms", durationMillis(m.now().UTC().Sub(op.record.CreatedAt)),
+		"total_ms", durationMillis(m.now().UTC().Sub(record.CreatedAt)),
 	)
 }
 

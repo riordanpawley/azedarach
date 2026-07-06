@@ -1,0 +1,27 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────╮
+│Operation Queue                                                                               │
+│──────────────────────────────────────────────────────────────────────────────────────────────│
+││ Project proj  running 1  queued 2  mode tree                 Keys                           │
+││ op-running running git.merge az-1 40% res=worktre...         ───────────────────────────────│
+││ `- op-queued queued by=op-running worktree.cleanu...          r refresh                     │
+││ queued: op-free queued notice.sync az-3 res=notic...          t/Tab tree/table              │
+││                                                               Esc/q/backspace close         │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯

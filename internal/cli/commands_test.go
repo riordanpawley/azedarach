@@ -3191,6 +3191,14 @@ func TestOperationCommandsParseAndRender(t *testing.T) {
 		t.Fatalf("list opts = %+v", listOpts)
 	}
 
+	queueOpts, err := ParseOperationQueueArgs([]string{"--issue", "az-1", "--kind", "session.start", "--state", "queued", "--limit", "3", "--tree"})
+	if err != nil {
+		t.Fatalf("ParseOperationQueueArgs error: %v", err)
+	}
+	if queueOpts.IssueID != "az-1" || queueOpts.Kind != "session.start" || queueOpts.Limit != 3 || len(queueOpts.States) != 1 || !queueOpts.Tree {
+		t.Fatalf("queue opts = %+v", queueOpts)
+	}
+
 	cancelOpts, err := ParseOperationCancelArgs([]string{"--reason", "user request", "op-1"})
 	if err != nil {
 		t.Fatalf("ParseOperationCancelArgs error: %v", err)
@@ -3266,6 +3274,30 @@ func TestOperationCommandsUseDaemonClient(t *testing.T) {
 							},
 						},
 					}), nil
+				case protocol.CommandOperationQueue:
+					return responseWithJSON(req, protocol.OperationQueueResponseBody{
+						ProjectID: "proj",
+						Running: []protocol.OperationQueueEntry{{
+							Operation: protocol.OperationRecord{
+								OperationID: "op-running",
+								ProjectID:   "proj",
+								Kind:        "git.merge",
+								IssueID:     "az-1",
+								State:       protocol.OperationStateRunning,
+							},
+						}},
+						Queued: []protocol.OperationQueueEntry{{
+							Operation: protocol.OperationRecord{
+								OperationID: "op-queued",
+								ProjectID:   "proj",
+								Kind:        "worktree.cleanup",
+								IssueID:     "az-2",
+								State:       protocol.OperationStateQueued,
+							},
+							BlockingOperationIDs: []naming.OperationID{"op-running"},
+							BlockedResourceKeys:  []string{"worktree:/tmp/wt"},
+						}},
+					}), nil
 				case protocol.CommandOperationCancel:
 					return responseWithJSON(req, protocol.OperationCancelResponseBody{
 						Cancelled: true,
@@ -3296,10 +3328,13 @@ func TestOperationCommandsUseDaemonClient(t *testing.T) {
 		if err := OperationListCommand(deps, OperationListOptions{IssueID: "az-1", Limit: 5}); err != nil {
 			return err
 		}
+		if err := OperationQueueCommand(deps, OperationQueueOptions{OperationListOptions: OperationListOptions{IssueID: "az-1", Limit: 5}, Tree: true}); err != nil {
+			return err
+		}
 		return OperationCancelCommand(deps, OperationCancelOptions{OperationID: "op-1"})
 	})
 
-	for _, needle := range []string{"ID", "STATE", "KIND", "op-1", "failed", "queued", "cancelled", "Payload:", "Result (raw JSON):", "tmux attach failed: exited 1"} {
+	for _, needle := range []string{"ID", "STATE", "KIND", "op-1", "failed", "queued", "cancelled", "Payload:", "Result (raw JSON):", "tmux attach failed: exited 1", "op-running running git.merge az-1", "`- op-queued queued worktree.cleanup az-2 blocked=worktree:/tmp/wt"} {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("output = %q, want %q", output, needle)
 		}

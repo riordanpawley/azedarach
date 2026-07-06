@@ -35,6 +35,7 @@ func TestDialogs_View_Golden(t *testing.T) {
 		{name: "settings_default", view: goldenSettingsDefaultView},
 		{name: "diagnostics_overview", view: goldenDiagnosticsOverviewView},
 		{name: "event_log_default", view: goldenEventLogView},
+		{name: "operation_queue_default", view: goldenOperationQueueView},
 		{name: "help_default", view: goldenHelpView},
 		{name: "spec_workspace_default", view: goldenSpecWorkspaceView},
 		{name: "imageattach_list", view: goldenImageAttachListView},
@@ -77,6 +78,7 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 		{name: "settings_default_small", view: goldenSettingsDefaultSmallView},
 		{name: "diagnostics_overview_small", view: goldenDiagnosticsOverviewSmallView},
 		{name: "event_log_small", view: goldenEventLogSmallView},
+		{name: "operation_queue_small", view: goldenOperationQueueSmallView},
 		{name: "help_small", view: goldenHelpSmallView},
 		{name: "spec_workspace_small", view: goldenSpecWorkspaceSmallView},
 		{name: "orchestration_small", view: goldenOrchestrationSmallView},
@@ -372,6 +374,20 @@ func goldenEventLogSmallView(t *testing.T) string {
 	})
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	return model.(*EventLogOverlay).View()
+}
+
+func goldenOperationQueueView(t *testing.T) string {
+	t.Helper()
+	overlay := NewOperationQueueOverlay(testOperationQueueSnapshot())
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*OperationQueueOverlay).View()
+}
+
+func goldenOperationQueueSmallView(t *testing.T) string {
+	t.Helper()
+	overlay := NewOperationQueueOverlay(testOperationQueueSnapshot())
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	return model.(*OperationQueueOverlay).View()
 }
 
 func goldenHelpView(t *testing.T) string {

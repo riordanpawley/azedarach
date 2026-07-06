@@ -479,6 +479,11 @@ type OperationListOptions struct {
 	Limit   int
 }
 
+type OperationQueueOptions struct {
+	OperationListOptions
+	Tree bool
+}
+
 type OperationCancelOptions struct {
 	OperationID  string
 	Reason       string
@@ -1822,6 +1827,32 @@ func OperationListCommand(deps *Dependencies, opts OperationListOptions) error {
 	return printOperationList(records, opts.JSON)
 }
 
+func OperationQueueCommand(deps *Dependencies, opts OperationQueueOptions) error {
+	ctx := context.Background()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	var issueID string
+	if trimmed := strings.TrimSpace(opts.IssueID); trimmed != "" {
+		typedIssueID, err := naming.ParseIssueID(trimmed)
+		if err != nil {
+			return fmt.Errorf("invalid issue id: %w", err)
+		}
+		issueID = typedIssueID.String()
+	}
+	snapshot, err := deps.DaemonClient.OperationQueue(ctx, daemonclient.OperationListOptions{
+		IssueID: issueID,
+		Kind:    opts.Kind,
+		States:  opts.States,
+		Limit:   opts.Limit,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to inspect operation queue: %w", err)
+	}
+	return printOperationQueue(snapshot, opts.JSON, opts.Tree)
+}
+
 func OperationCancelCommand(deps *Dependencies, opts OperationCancelOptions) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
@@ -2213,6 +2244,44 @@ func ParseOperationListArgs(args []string) (OperationListOptions, error) {
 	states, err := parseOperationStates(stateInputs)
 	if err != nil {
 		return OperationListOptions{}, err
+	}
+	opts.States = states
+	return opts, nil
+}
+
+func ParseOperationQueueArgs(args []string) (OperationQueueOptions, error) {
+	opts := OperationQueueOptions{
+		OperationListOptions: OperationListOptions{Limit: defaultOperationListLimit},
+	}
+	stateInputs := make([]string, 0, 4)
+	statesCSV := ""
+	fs := flag.NewFlagSet("operation queue", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "output operation queue as JSON")
+	fs.BoolVar(&opts.Tree, "tree", false, "render queued operations under their blocking operations")
+	fs.StringVar(&opts.IssueID, "issue", "", "filter by issue id")
+	fs.StringVar(&opts.Kind, "kind", "", "filter by operation kind")
+	fs.IntVar(&opts.Limit, "limit", defaultOperationListLimit, "maximum operations to return")
+	fs.Func("state", "restrict to a specific operation state (repeatable)", func(v string) error {
+		stateInputs = append(stateInputs, v)
+		return nil
+	})
+	fs.StringVar(&statesCSV, "states", "", "comma-separated operation states")
+	if err := fs.Parse(args); err != nil {
+		return OperationQueueOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return OperationQueueOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	if opts.Limit < 1 {
+		return OperationQueueOptions{}, fmt.Errorf("limit must be >= 1")
+	}
+	if strings.TrimSpace(statesCSV) != "" {
+		stateInputs = append(stateInputs, strings.Split(statesCSV, ",")...)
+	}
+	states, err := parseOperationStates(stateInputs)
+	if err != nil {
+		return OperationQueueOptions{}, err
 	}
 	opts.States = states
 	return opts, nil
@@ -7334,6 +7403,105 @@ func printOperationList(records []protocol.OperationRecord, asJSON bool) error {
 		}
 	}
 	return nil
+}
+
+func printOperationQueue(snapshot protocol.OperationQueueResponseBody, asJSON, asTree bool) error {
+	if asJSON {
+		return printJSON(snapshot)
+	}
+	if asTree {
+		return printOperationQueueTree(snapshot)
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tSTATE\tKIND\tISSUE\tBLOCKED_BY\tRESOURCES")
+	for _, entry := range appendOperationQueueEntries(snapshot.Running, snapshot.Queued) {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			entry.Operation.OperationID,
+			entry.Operation.State,
+			entry.Operation.Kind,
+			entry.Operation.IssueID,
+			joinOperationIDs(entry.BlockingOperationIDs),
+			strings.Join(entry.BlockedResourceKeys, ","),
+		)
+	}
+	return w.Flush()
+}
+
+func printOperationQueueTree(snapshot protocol.OperationQueueResponseBody) error {
+	waitingByBlocker := make(map[string][]protocol.OperationQueueEntry)
+	var unblockedQueued []protocol.OperationQueueEntry
+	for _, entry := range snapshot.Queued {
+		if len(entry.BlockingOperationIDs) == 0 {
+			unblockedQueued = append(unblockedQueued, entry)
+			continue
+		}
+		for _, blocker := range entry.BlockingOperationIDs {
+			waitingByBlocker[blocker.String()] = append(waitingByBlocker[blocker.String()], entry)
+		}
+	}
+	for _, entry := range snapshot.Running {
+		fmt.Println(operationQueueLine(entry))
+		children := waitingByBlocker[entry.Operation.OperationID.String()]
+		for idx, child := range children {
+			connector := "`- "
+			if idx < len(children)-1 {
+				connector = "|- "
+			}
+			fmt.Println(connector + operationQueueLine(child))
+		}
+		delete(waitingByBlocker, entry.Operation.OperationID.String())
+	}
+	for _, entry := range unblockedQueued {
+		fmt.Println(operationQueueLine(entry))
+	}
+	blockerIDs := make([]string, 0, len(waitingByBlocker))
+	for blockerID := range waitingByBlocker {
+		blockerIDs = append(blockerIDs, blockerID)
+	}
+	sort.Strings(blockerIDs)
+	for _, blockerID := range blockerIDs {
+		entries := waitingByBlocker[blockerID]
+		for _, entry := range entries {
+			fmt.Println(operationQueueLine(entry))
+		}
+	}
+	if len(snapshot.Running) == 0 && len(snapshot.Queued) == 0 {
+		fmt.Println("No running or queued operations.")
+	}
+	return nil
+}
+
+func appendOperationQueueEntries(running, queued []protocol.OperationQueueEntry) []protocol.OperationQueueEntry {
+	out := make([]protocol.OperationQueueEntry, 0, len(running)+len(queued))
+	out = append(out, running...)
+	out = append(out, queued...)
+	return out
+}
+
+func operationQueueLine(entry protocol.OperationQueueEntry) string {
+	parts := []string{
+		entry.Operation.OperationID.String(),
+		string(entry.Operation.State),
+		entry.Operation.Kind,
+	}
+	if entry.Operation.IssueID != "" {
+		parts = append(parts, entry.Operation.IssueID.String())
+	}
+	if len(entry.BlockedResourceKeys) > 0 {
+		parts = append(parts, "blocked="+strings.Join(entry.BlockedResourceKeys, ","))
+	}
+	return strings.Join(parts, " ")
+}
+
+func joinOperationIDs(ids []naming.OperationID) string {
+	values := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		values = append(values, id.String())
+	}
+	return strings.Join(values, ",")
 }
 
 func printJSON(v any) error {

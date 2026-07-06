@@ -109,29 +109,34 @@ func (h *HelpOverlay) renderScrollableContent(contentHeight int) string {
 	lines := strings.Split(content, "\n")
 	totalLines := len(lines)
 	h.viewHeight = max(1, contentHeight)
-	h.maxScroll = max(0, totalLines-h.viewHeight)
+	visibleHeight := h.viewHeight
+	if totalLines > visibleHeight {
+		visibleHeight = max(1, visibleHeight-2)
+	}
+	h.maxScroll = max(0, totalLines-visibleHeight)
+	h.scroll = min(max(0, h.scroll), h.maxScroll)
 
 	// Apply scroll offset
 	start := h.scroll
-	end := min(h.scroll+h.viewHeight, totalLines)
+	end := min(h.scroll+visibleHeight, totalLines)
 
 	visibleLines := lines[start:end]
 	result := strings.Join(visibleLines, "\n")
 
 	// Add scroll indicator if needed
 	if h.maxScroll > 0 {
-		scrollInfo := h.styles.Footer.Render(
-				lipgloss.JoinHorizontal(
-					lipgloss.Left,
-					"[",
-					lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Render("j/k"),
-					"/",
-					lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Render("ctrl+u/d"),
-					" to scroll, ",
-					lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Render("g/G"),
-					" to jump]",
-				),
-			)
+		scrollInfo := h.styles.Footer.MarginTop(0).Render(
+			lipgloss.JoinHorizontal(
+				lipgloss.Left,
+				"[",
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Render("j/k"),
+				"/",
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Render("ctrl+u/d"),
+				" to scroll, ",
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Render("g/G"),
+				" to jump]",
+			),
+		)
 		result += "\n\n" + scrollInfo
 	}
 
@@ -152,8 +157,8 @@ func (h *HelpOverlay) Size() (width, height int) {
 // getCategories returns all keybinding categories
 func (h *HelpOverlay) getCategories() []keybinds.Category {
 	categories := make([]keybinds.Category, 0, 1+len(keybinds.HelpCategories()))
-	categories = append(categories, cardHeaderLegendCategory())
 	categories = append(categories, keybinds.HelpCategories()...)
+	categories = append(categories, cardHeaderLegendCategory())
 	return categories
 }
 

@@ -1,0 +1,20 @@
+╭────────────────────────────────────────────────────────────────────╮
+│Operation Queue                                                     │
+│────────────────────────────────────────────────────────────────────│
+│Project proj  running 1  queued 2  mode tree                        │
+│op-running running git.merge az-1 40% res=worktree:/tmp/wt          │
+│`- op-queued queued by=op-running worktree.cleanup az-2 r...        │
+│queued: op-free queued notice.sync az-3 res=notice:proj             │
+│                                                                    │
+│                                                                    │
+│                                                                    │
+│                                                                    │
+│Keys                                                                │
+│────────────────────────────────────────────────────────────────────│
+│ r refresh                                                          │
+│ t/Tab tree/table                                                   │
+│ Esc/q/backspace close                                              │
+│                                                                    │
+│                                                                    │
+│                                                                    │
+╰────────────────────────────────────────────────────────────────────╯
