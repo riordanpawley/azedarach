@@ -9,7 +9,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/ui/diff"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
@@ -95,6 +98,87 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 	return m, nil
 }
 
+func (m Model) modelForCloseFailureAction(action overlay.CloseFailureActionMsg) Model {
+	scoped := m.modelForProjectActionContext(overlay.ProjectActionContext{
+		ProjectID:    action.ProjectID,
+		ProjectName:  action.ProjectName,
+		ProjectPath:  action.ProjectPath,
+		DaemonSocket: action.DaemonSocket,
+		BaseBranch:   action.BaseBranch,
+	})
+	if worktree := strings.TrimSpace(action.SourceWorktree); worktree != "" {
+		sessions := make(map[string]*domain.Session, len(scoped.sessions)+1)
+		for issueID, session := range scoped.sessions {
+			sessions[issueID] = cloneSession(session)
+		}
+		scoped.sessions = sessions
+		scoped.sessions[taskIDKey(action.TaskID)] = &domain.Session{
+			IssueID:  naming.IssueID(strings.TrimSpace(action.TaskID)),
+			State:    domain.SessionIdle,
+			Worktree: worktree,
+		}
+	}
+	return scoped
+}
+
+func (m Model) modelForProjectActionContext(context overlay.ProjectActionContext) Model {
+	scoped := m
+	if projectID := strings.TrimSpace(context.ProjectID); projectID != "" {
+		scoped.daemonClient = m.scopedDaemonClientForSocket(strings.TrimSpace(context.DaemonSocket), projectID)
+		scoped.daemonProjectRouteID = naming.ProjectID(protocol.NormalizeProjectID(projectID))
+	}
+	if projectName := strings.TrimSpace(context.ProjectName); projectName != "" {
+		scoped.currentProject = projectName
+	}
+	if projectPath := strings.TrimSpace(context.ProjectPath); projectPath != "" {
+		scoped.repoDir = projectPath
+	}
+	if baseBranch := strings.TrimSpace(context.BaseBranch); baseBranch != "" {
+		cfg := config.DefaultConfig()
+		if scoped.config != nil {
+			clone := *scoped.config
+			cfg = &clone
+		}
+		cfg.Git.BaseBranch = baseBranch
+		scoped.config = cfg
+	}
+	return scoped
+}
+
+func taskFromCloseFailureAction(action overlay.CloseFailureActionMsg) *domain.Task {
+	taskID := strings.TrimSpace(action.TaskID)
+	if taskID == "" {
+		return nil
+	}
+	task := &domain.Task{ID: naming.IssueID(taskID)}
+	if parentID := strings.TrimSpace(action.ParentID); parentID != "" {
+		parent := naming.IssueID(parentID)
+		task.ParentID = &parent
+	}
+	if worktree := strings.TrimSpace(action.SourceWorktree); worktree != "" {
+		task.Session = &domain.Session{
+			IssueID:  naming.IssueID(taskID),
+			State:    domain.SessionIdle,
+			Worktree: worktree,
+		}
+		task.HasWorktree = true
+	}
+	return task
+}
+
+func mergePreflightWorktreeSelection(value any) (overlay.MergePreflightWorktreeSelection, bool) {
+	switch selection := value.(type) {
+	case overlay.MergePreflightWorktreeSelection:
+		selection.Worktree = strings.TrimSpace(selection.Worktree)
+		return selection, selection.Worktree != ""
+	case string:
+		worktree := strings.TrimSpace(selection)
+		return overlay.MergePreflightWorktreeSelection{Worktree: worktree}, worktree != ""
+	default:
+		return overlay.MergePreflightWorktreeSelection{}, false
+	}
+}
+
 // handleSelection handles overlay selection messages
 func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	selectionTaskID := ""
@@ -127,58 +211,65 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m.mergeCurrentIssueIntoDefaultTarget(task)
 	case "merge_preflight_abort":
 		m.overlayStack.Pop()
-		worktree, ok := msg.Value.(string)
-		if !ok || strings.TrimSpace(worktree) == "" {
+		selection, ok := mergePreflightWorktreeSelection(msg.Value)
+		if !ok {
 			return m, nil
 		}
+		actionModel := m.modelForProjectActionContext(selection.Context)
 		m.beginMutationFeedback("Abort merge queued")
-		return m, m.abortMergeCmd(worktree)
+		return m, actionModel.abortMergeCmd(selection.Worktree)
 	case "merge_preflight_discard_source":
 		m.overlayStack.Pop()
-		worktree, ok := msg.Value.(string)
-		if !ok || strings.TrimSpace(worktree) == "" {
+		selection, ok := mergePreflightWorktreeSelection(msg.Value)
+		if !ok {
 			return m, nil
 		}
+		actionModel := m.modelForProjectActionContext(selection.Context)
 		m.beginMutationFeedback("Discard source changes queued")
-		return m, m.discardChangesCmd("source", worktree)
+		return m, actionModel.discardChangesCmd("source", selection.Worktree)
 	case "merge_preflight_discard_target":
 		m.overlayStack.Pop()
-		worktree, ok := msg.Value.(string)
-		if !ok || strings.TrimSpace(worktree) == "" {
+		selection, ok := mergePreflightWorktreeSelection(msg.Value)
+		if !ok {
 			return m, nil
 		}
+		actionModel := m.modelForProjectActionContext(selection.Context)
 		m.beginMutationFeedback("Discard target changes queued")
-		return m, m.discardChangesCmd("target", worktree)
+		return m, actionModel.discardChangesCmd("target", selection.Worktree)
 	case "merge_preflight_commit_source":
 		m.overlayStack.Pop()
-		worktree, ok := msg.Value.(string)
-		if !ok || strings.TrimSpace(worktree) == "" {
+		selection, ok := mergePreflightWorktreeSelection(msg.Value)
+		if !ok {
 			return m, nil
 		}
+		actionModel := m.modelForProjectActionContext(selection.Context)
 		m.beginMutationFeedback("Commit source changes queued")
-		return m, m.commitChangesCmd("source", worktree)
+		return m, actionModel.commitChangesCmd("source", selection.Worktree)
 	case "merge_preflight_commit_target":
 		m.overlayStack.Pop()
-		worktree, ok := msg.Value.(string)
-		if !ok || strings.TrimSpace(worktree) == "" {
+		selection, ok := mergePreflightWorktreeSelection(msg.Value)
+		if !ok {
 			return m, nil
 		}
+		actionModel := m.modelForProjectActionContext(selection.Context)
 		m.beginMutationFeedback("Commit target changes queued")
-		return m, m.commitChangesCmd("target", worktree)
+		return m, actionModel.commitChangesCmd("target", selection.Worktree)
 	case "merge_preflight_agent":
 		m.overlayStack.Pop()
 		selection, ok := msg.Value.(overlay.MergePreflightAgentSelection)
 		if !ok {
 			return m, nil
 		}
+		actionModel := m.modelForProjectActionContext(selection.Context)
 		m.beginMutationFeedback(fmt.Sprintf("Agent merge queued for %s -> %s", selection.SourceID, selection.TargetID))
-		return m, m.resolveMergePreflightWithAgentCmd(selection)
+		return m, actionModel.resolveMergePreflightWithAgentCmd(selection)
 	case "merge_preflight_ignore_source_dirty":
 		m.overlayStack.Pop()
 		selection, ok := msg.Value.(overlay.MergePreflightRefreshSelection)
 		if !ok {
 			return m, nil
 		}
+		actionModel := m.modelForProjectActionContext(selection.Context)
 		opts := mergePreflightOptions{
 			ignoreSourceDirty:     true,
 			stopTargetBeforeMerge: selection.StopTargetBeforeMerge,
@@ -186,9 +277,9 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		m.beginMutationFeedback(fmt.Sprintf("Merge queued for %s -> %s ignoring source dirty files", selection.SourceID, selection.TargetID))
 		if strings.TrimSpace(selection.TargetID) == mergeBaseTargetID {
-			return m, m.mergeToBaseCmdWithOptions(strings.TrimSpace(selection.SourceWorktree), strings.TrimSpace(selection.SourceID), true, opts)
+			return m, actionModel.mergeToBaseCmdWithOptions(strings.TrimSpace(selection.SourceWorktree), strings.TrimSpace(selection.SourceID), true, opts)
 		}
-		return m, m.mergeFeatureIntoFeatureCmdWithOptions(
+		return m, actionModel.mergeFeatureIntoFeatureCmdWithOptions(
 			strings.TrimSpace(selection.SourceWorktree),
 			strings.TrimSpace(selection.TargetWorktree),
 			strings.TrimSpace(selection.SourceID),
@@ -203,8 +294,9 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			m.beginMutationFeedback("Refreshing merge preflight")
 			return m, m.scheduleIssuesRefreshAfterRuntimeReconcileCmd()
 		}
+		actionModel := m.modelForProjectActionContext(selection.Context)
 		m.beginMutationFeedback("Refreshing merge preflight")
-		return m, m.refreshMergePreflightCmd(selection)
+		return m, actionModel.refreshMergePreflightCmd(selection)
 	case "projects":
 		// Settings -> Manage projects
 		m.overlayStack.Pop() // Close settings
@@ -256,9 +348,13 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
+		actionModel := m.modelForCloseFailureAction(action)
 		if action.Action == overlay.CloseFailureActionAIMerge {
-			task, _, ok := m.taskAndSessionByID(action.TaskID)
+			task, _, ok := actionModel.taskAndSessionByID(action.TaskID)
 			if !ok {
+				task = taskFromCloseFailureAction(action)
+			}
+			if task == nil {
 				m.addToast(Toast{
 					Level:   ToastWarning,
 					Message: fmt.Sprintf("Issue %s is unavailable for AI merge", action.TaskID),
@@ -267,7 +363,8 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.beginMutationFeedback(fmt.Sprintf("Checking AI merge readiness for %s", action.TaskID))
-			return m.agentMergeCurrentIssueIntoDefaultTarget(task)
+			_, cmd := actionModel.agentMergeCurrentIssueIntoDefaultTarget(task)
+			return m, cmd
 		}
 		previousStatus := domain.Status(strings.TrimSpace(action.PreviousStatus))
 		targetStatus := domain.Status(strings.TrimSpace(action.TargetStatus))
@@ -290,7 +387,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		default:
 			m.addToast(Toast{Level: ToastInfo, Message: fmt.Sprintf("Retrying close for %s", action.TaskID), Expires: time.Now().Add(3 * time.Second)})
 		}
-		return m, m.moveTaskStatusCmdWithOptions(action.TaskID, previousStatus, targetStatus, opts)
+		return m, actionModel.moveTaskStatusCmdWithOptions(action.TaskID, previousStatus, targetStatus, opts)
 	case "editor-error":
 		// Editor open error
 		m.overlayStack.Pop()

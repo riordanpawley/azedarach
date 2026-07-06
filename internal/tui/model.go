@@ -2004,6 +2004,23 @@ func (m Model) daemonClientForSocket(socketPath, projectID string) *daemonclient
 	return newScopedDaemonClient(socketPath, routeID.String(), readWaitPolicy)
 }
 
+func (m Model) scopedDaemonClientForSocket(socketPath, projectID string) *daemonclient.Client {
+	routeID := naming.ProjectID(protocol.NormalizeProjectID(projectID))
+	if parsed, err := naming.ParseProjectID(routeID.String()); err == nil {
+		routeID = parsed
+	}
+	if m.daemonClient != nil {
+		if strings.TrimSpace(socketPath) == "" || (strings.TrimSpace(m.daemonSocketPath) != "" && m.daemonSocketPath == socketPath) {
+			return m.daemonClient.ScopedProjectRouteID(routeID)
+		}
+	}
+	readWaitPolicy := daemonclient.DefaultReadWaitPolicy()
+	if m.daemonClient != nil {
+		readWaitPolicy = m.daemonClient.ReadWaitPolicy()
+	}
+	return newScopedDaemonClient(socketPath, routeID.String(), readWaitPolicy)
+}
+
 func (m Model) readTaskSnapshot(ctx context.Context, client *daemonclient.Client) (daemonclient.TaskSnapshot, error) {
 	if client == nil {
 		return daemonclient.TaskSnapshot{}, fmt.Errorf("daemon client unavailable")
@@ -4674,10 +4691,21 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 // Single task status result
 type taskStatusResultMsg struct {
 	taskID         string
+	closeContext   closeFailureOperationContext
 	previousStatus domain.Status
 	newStatus      domain.Status
 	opts           daemonclient.TaskStatusOptions
 	err            error
+}
+
+type closeFailureOperationContext struct {
+	projectID      string
+	projectName    string
+	projectPath    string
+	daemonSocket   string
+	baseBranch     string
+	parentID       string
+	sourceWorktree string
 }
 
 // moveTaskStatusCmd updates a single task's status.
@@ -4686,11 +4714,13 @@ func (m Model) moveTaskStatusCmd(taskID string, previousStatus, newStatus domain
 }
 
 func (m Model) moveTaskStatusCmdWithOptions(taskID string, previousStatus, newStatus domain.Status, opts daemonclient.TaskStatusOptions) tea.Cmd {
+	closeContext := m.closeFailureOperationContext(taskID)
 	return func() tea.Msg {
 		err := m.updateTaskStatusWithTimeoutOptions(taskID, newStatus, 5*time.Second, opts)
 		if err != nil {
 			return taskStatusResultMsg{
 				taskID:         taskID,
+				closeContext:   closeContext,
 				previousStatus: previousStatus,
 				newStatus:      newStatus,
 				opts:           opts,
@@ -4700,6 +4730,7 @@ func (m Model) moveTaskStatusCmdWithOptions(taskID string, previousStatus, newSt
 
 		return taskStatusResultMsg{
 			taskID:         taskID,
+			closeContext:   closeContext,
 			previousStatus: previousStatus,
 			newStatus:      newStatus,
 			opts:           opts,
@@ -4889,11 +4920,54 @@ func taskStatusOptionsForStatus(status domain.Status) daemonclient.TaskStatusOpt
 	return daemonclient.TaskStatusOptions{IntegrateBeforeClose: true}
 }
 
+func (m Model) closeFailureOperationContext(taskID string) closeFailureOperationContext {
+	ctx := closeFailureOperationContext{
+		projectID:    m.daemonProjectID(),
+		projectName:  strings.TrimSpace(m.currentProject),
+		projectPath:  strings.TrimSpace(m.activeProjectPath()),
+		daemonSocket: strings.TrimSpace(m.daemonSocketPath),
+		baseBranch:   strings.TrimSpace(m.resolveBaseBranch()),
+	}
+	if task, session, ok := m.taskAndSessionByID(taskID); ok {
+		if task.ParentID != nil {
+			ctx.parentID = strings.TrimSpace(task.ParentID.String())
+		}
+		if session != nil {
+			ctx.sourceWorktree = strings.TrimSpace(session.Worktree)
+		}
+		if ctx.sourceWorktree == "" && task.Session != nil {
+			ctx.sourceWorktree = strings.TrimSpace(task.Session.Worktree)
+		}
+	}
+	return ctx
+}
+
+func (m Model) projectActionContext() overlay.ProjectActionContext {
+	return overlay.ProjectActionContext{
+		ProjectID:    m.daemonProjectID(),
+		ProjectName:  strings.TrimSpace(m.currentProject),
+		ProjectPath:  strings.TrimSpace(m.activeProjectPath()),
+		DaemonSocket: strings.TrimSpace(m.daemonSocketPath),
+		BaseBranch:   strings.TrimSpace(m.resolveBaseBranch()),
+	}
+}
+
 func (m Model) closeFailureDialogCmd(msg taskStatusResultMsg) tea.Cmd {
 	if msg.err == nil || msg.newStatus != domain.StatusDone {
 		return nil
 	}
+	closeContext := msg.closeContext
+	if strings.TrimSpace(closeContext.projectID) == "" {
+		closeContext = m.closeFailureOperationContext(msg.taskID)
+	}
 	options := overlay.CloseFailureDialogOptions{
+		ProjectID:               closeContext.projectID,
+		ProjectName:             closeContext.projectName,
+		ProjectPath:             closeContext.projectPath,
+		DaemonSocket:            closeContext.daemonSocket,
+		BaseBranch:              closeContext.baseBranch,
+		ParentID:                closeContext.parentID,
+		SourceWorktree:          closeContext.sourceWorktree,
 		PreviousStatus:          msg.previousStatus.String(),
 		TargetStatus:            msg.newStatus.String(),
 		ForceWorktree:           msg.opts.ForceWorktree,
@@ -6552,6 +6626,7 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 		return nil
 	}
 	return &mergePreflightFailureMsg{
+		context:        m.projectActionContext(),
 		sourceID:       sourceID,
 		sourceWorktree: sourceWorktree,
 		targetID:       targetID,

@@ -2332,6 +2332,353 @@ func TestTaskStatusDoneFailureShowsRecoveryDialogWithRetryActions(t *testing.T) 
 	}
 }
 
+func TestCloseFailureRetryUsesFailedOperationProjectAfterProjectSwitch(t *testing.T) {
+	var closeProjects []string
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskClose {
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			closeProjects = append(closeProjects, req.Meta.ProjectID.String())
+			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
+				TaskID: "az-4",
+				Status: string(domain.StatusDone),
+			})
+			if err != nil {
+				t.Fatalf("marshal close response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.daemonClient.WithProjectID("project-a")
+	m.currentProject = "project-a"
+	m.tasks = []domain.Task{{ID: "az-4", Status: domain.StatusInReview}}
+	dialogCmd := m.closeFailureDialogCmd(taskStatusResultMsg{
+		taskID:         "az-4",
+		previousStatus: domain.StatusInReview,
+		newStatus:      domain.StatusDone,
+		err:            errors.New("cannot close issue az-4: worktree has local changes: main.go"),
+	})
+	if dialogCmd == nil {
+		t.Fatal("expected close failure dialog command")
+	}
+	openedAny, _ := m.Update(dialogCmd())
+	opened := openedAny.(Model)
+
+	opened.daemonClient.WithProjectID("project-b")
+	opened.currentProject = "project-b"
+	opened.tasks = []domain.Task{{ID: "az-other", Status: domain.StatusOpen}}
+
+	afterKeyAny, selectionCmd := opened.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if selectionCmd == nil {
+		t.Fatal("expected retry selection command")
+	}
+	selection, ok := selectionCmd().(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("selection = %T, want SelectionMsg", selectionCmd())
+	}
+	_, retryCmd := afterKeyAny.(Model).Update(selection)
+	if retryCmd == nil {
+		t.Fatal("expected retry close command")
+	}
+	msg := retryCmd()
+	result, ok := msg.(taskStatusResultMsg)
+	if !ok {
+		t.Fatalf("retry result = %T, want taskStatusResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("retry err = %v", result.err)
+	}
+	if got, want := closeProjects, []string{"project-a"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("close projects = %v, want %v", got, want)
+	}
+}
+
+func TestCloseFailureAIMergeUsesFailedOperationProjectAfterProjectSwitch(t *testing.T) {
+	var requestProjects []string
+	var preflightBody daemonclient.GitMergePreflightRequest
+	var resolveBody protocol.SessionResolveConflictRequestBody
+	jsonResponse := func(req protocol.RequestEnvelope, body any) (protocol.ResponseEnvelope, error) {
+		respBody, err := json.Marshal(body)
+		if err != nil {
+			return protocol.ResponseEnvelope{}, err
+		}
+		return protocol.ResponseEnvelope{
+			ProtocolVersion: req.ProtocolVersion,
+			RequestID:       req.RequestID,
+			Kind:            protocol.EnvelopeKindResponse,
+			OK:              true,
+			Body:            respBody,
+		}, nil
+	}
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			requestProjects = append(requestProjects, req.Meta.ProjectID.String())
+			switch req.Command {
+			case daemonclient.CommandTaskMergeBaseTarget:
+				return jsonResponse(req, daemonclient.TaskMergeBaseTarget{
+					IssueID:  "az-4",
+					TargetID: mergeBaseTargetID,
+					Branch:   "main",
+				})
+			case daemonclient.CommandWorktreeList:
+				return jsonResponse(req, struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "project-a",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: "/tmp/az-4", Branch: "az/az-4", IssueID: "az-4"},
+					},
+				})
+			case daemonclient.CommandRuntimeReconcileIssue:
+				return jsonResponse(req, daemonclient.RuntimeReconcileResult{ProjectID: "project-a"})
+			case daemonclient.CommandGitStatus:
+				return jsonResponse(req, struct {
+					Status git.GitStatus `json:"status"`
+				}{Status: git.GitStatus{HasChanges: false}})
+			case daemonclient.CommandGitMergePreflight:
+				if err := json.Unmarshal(req.Body, &preflightBody); err != nil {
+					t.Fatalf("unmarshal preflight request: %v", err)
+				}
+				return jsonResponse(req, daemonclient.GitMergePreflightResponse{
+					SourceID:       "az-4",
+					SourceWorktree: "/tmp/az-4",
+					TargetID:       mergeBaseTargetID,
+					TargetWorktree: "/repo-a",
+					Clean:          false,
+					ConflictFiles:  []string{"main.go"},
+				})
+			case daemonclient.CommandSessionResolveConflict:
+				if err := json.Unmarshal(req.Body, &resolveBody); err != nil {
+					t.Fatalf("unmarshal resolve request: %v", err)
+				}
+				return jsonResponse(req, protocol.SessionResolveConflictResponseBody{
+					ProjectID:     "project-a",
+					IssueID:       "az-4",
+					SessionID:     "project-a-az-4",
+					Worktree:      "/tmp/az-4",
+					WindowName:    "resolve-conflict",
+					ConflictFiles: []string{"main.go"},
+				})
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.daemonClient.WithProjectID("project-a")
+	m.currentProject = "project-a"
+	m.repoDir = "/repo-a"
+	m.tasks = []domain.Task{{
+		ID:     "az-4",
+		Status: domain.StatusInReview,
+		Session: &domain.Session{
+			IssueID:  "az-4",
+			State:    domain.SessionIdle,
+			Worktree: "/tmp/az-4",
+		},
+	}}
+	dialogCmd := m.closeFailureDialogCmd(taskStatusResultMsg{
+		taskID:         "az-4",
+		previousStatus: domain.StatusInReview,
+		newStatus:      domain.StatusDone,
+		err:            errors.New("cannot close issue az-4: merge preflight would conflict in main.go"),
+	})
+	if dialogCmd == nil {
+		t.Fatal("expected close failure dialog command")
+	}
+	openedAny, _ := m.Update(dialogCmd())
+	opened := openedAny.(Model)
+
+	opened.daemonClient.WithProjectID("project-b")
+	opened.currentProject = "project-b"
+	opened.repoDir = "/repo-b"
+	opened.tasks = []domain.Task{{ID: "az-other", Status: domain.StatusOpen}}
+
+	afterKeyAny, selectionCmd := opened.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if selectionCmd == nil {
+		t.Fatal("expected AI merge selection command")
+	}
+	selection, ok := selectionCmd().(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("selection = %T, want SelectionMsg", selectionCmd())
+	}
+	_, launchCmd := afterKeyAny.(Model).Update(selection)
+	if launchCmd == nil {
+		t.Fatal("expected AI merge launch command")
+	}
+	msg := launchCmd()
+	result, ok := msg.(conflictResolveAgentResultMsg)
+	if !ok {
+		t.Fatalf("AI merge result = %T, want conflictResolveAgentResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("AI merge err = %v", result.err)
+	}
+	if preflightBody.TargetWorktree != "/repo-a" {
+		t.Fatalf("preflight target worktree = %q, want /repo-a", preflightBody.TargetWorktree)
+	}
+	if resolveBody.ProjectID != "project-a" || resolveBody.IssueID != "az-4" {
+		t.Fatalf("resolve body = %+v, want project-a az-4", resolveBody)
+	}
+	for _, got := range requestProjects {
+		if got != "project-a" {
+			t.Fatalf("request projects = %v, want all project-a", requestProjects)
+		}
+	}
+}
+
+func TestCloseFailureAIMergePreflightRefreshUsesFailedOperationProjectAfterProjectSwitch(t *testing.T) {
+	var requestProjects []string
+	jsonResponse := func(req protocol.RequestEnvelope, body any) (protocol.ResponseEnvelope, error) {
+		respBody, err := json.Marshal(body)
+		if err != nil {
+			return protocol.ResponseEnvelope{}, err
+		}
+		return protocol.ResponseEnvelope{
+			ProtocolVersion: req.ProtocolVersion,
+			RequestID:       req.RequestID,
+			Kind:            protocol.EnvelopeKindResponse,
+			OK:              true,
+			Body:            respBody,
+		}, nil
+	}
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			requestProjects = append(requestProjects, req.Meta.ProjectID.String())
+			switch req.Command {
+			case daemonclient.CommandTaskMergeBaseTarget:
+				return jsonResponse(req, daemonclient.TaskMergeBaseTarget{
+					IssueID:  "az-4",
+					TargetID: mergeBaseTargetID,
+					Branch:   "main",
+				})
+			case daemonclient.CommandWorktreeList:
+				return jsonResponse(req, struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "project-a",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: "/tmp/az-4", Branch: "az/az-4", IssueID: "az-4"},
+					},
+				})
+			case daemonclient.CommandRuntimeReconcileIssue:
+				return jsonResponse(req, daemonclient.RuntimeReconcileResult{ProjectID: "project-a"})
+			case daemonclient.CommandGitStatus:
+				var body daemonclient.GitCommandRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal status request: %v", err)
+				}
+				status := git.GitStatus{HasChanges: false}
+				if body.Worktree == "/repo-a" {
+					status = git.GitStatus{HasChanges: true, Modified: []string{"README.md"}}
+				}
+				return jsonResponse(req, struct {
+					Status git.GitStatus `json:"status"`
+				}{Status: status})
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.daemonClient.WithProjectID("project-a")
+	m.currentProject = "project-a"
+	m.repoDir = "/repo-a"
+	m.tasks = []domain.Task{{
+		ID:     "az-4",
+		Status: domain.StatusInReview,
+		Session: &domain.Session{
+			IssueID:  "az-4",
+			State:    domain.SessionIdle,
+			Worktree: "/tmp/az-4",
+		},
+	}}
+	dialogCmd := m.closeFailureDialogCmd(taskStatusResultMsg{
+		taskID:         "az-4",
+		previousStatus: domain.StatusInReview,
+		newStatus:      domain.StatusDone,
+		err:            errors.New("cannot close issue az-4: base worktree has local changes: README.md"),
+	})
+	if dialogCmd == nil {
+		t.Fatal("expected close failure dialog command")
+	}
+	openedAny, _ := m.Update(dialogCmd())
+	opened := openedAny.(Model)
+	opened.daemonClient.WithProjectID("project-b")
+	opened.currentProject = "project-b"
+	opened.repoDir = "/repo-b"
+	opened.tasks = []domain.Task{{ID: "az-other", Status: domain.StatusOpen}}
+
+	afterKeyAny, selectionCmd := opened.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if selectionCmd == nil {
+		t.Fatal("expected AI merge selection command")
+	}
+	selection := selectionCmd().(overlay.SelectionMsg)
+	queuedAny, launchCmd := afterKeyAny.(Model).Update(selection)
+	if launchCmd == nil {
+		t.Fatal("expected AI merge preflight command")
+	}
+	preflightMsg := launchCmd()
+	if _, ok := preflightMsg.(mergePreflightFailureMsg); !ok {
+		t.Fatalf("AI merge result = %T, want mergePreflightFailureMsg", preflightMsg)
+	}
+	preflightAny, cmd := queuedAny.(Model).Update(preflightMsg)
+	if cmd != nil {
+		t.Fatal("unexpected command while opening preflight overlay")
+	}
+	preflightModel := preflightAny.(Model)
+	if _, ok := preflightModel.overlayStack.Current().(*overlay.MergePreflightOverlay); !ok {
+		t.Fatalf("overlay = %T, want MergePreflightOverlay", preflightModel.overlayStack.Current())
+	}
+
+	afterRefreshKeyAny, refreshSelectionCmd := preflightModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if refreshSelectionCmd == nil {
+		t.Fatal("expected preflight refresh selection")
+	}
+	refreshSelection := refreshSelectionCmd().(overlay.SelectionMsg)
+	_, refreshCmd := afterRefreshKeyAny.(Model).Update(refreshSelection)
+	if refreshCmd == nil {
+		t.Fatal("expected preflight refresh command")
+	}
+	_ = refreshCmd()
+	for _, got := range requestProjects {
+		if got != "project-a" {
+			t.Fatalf("request projects = %v, want all project-a", requestProjects)
+		}
+	}
+}
+
 func TestCloseFailureAIMergeActionLaunchesAgentMerge(t *testing.T) {
 	var preflightBody daemonclient.GitMergePreflightRequest
 	var resolveBody protocol.SessionResolveConflictRequestBody
