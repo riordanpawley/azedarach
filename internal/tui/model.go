@@ -725,6 +725,8 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			)),
 			m.loadHookLogEventsCmd(),
 		)
+	case overlay.OperationQueueHotkey:
+		return m.openOperationQueueOverlay()
 	case "O": // Orchestration overlay
 		return m, m.openOrchestrationOverlay()
 	case "X": // Bulk cleanup (Shift+X)
@@ -835,6 +837,9 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keybinds.ActionOpenNotificationHistory:
 		cmd := (&m).openNotificationHistoryOverlayCmd()
 		return m, cmd
+
+	case keybinds.ActionOpenOperationQueue:
+		return m.openOperationQueueOverlay()
 
 	case keybinds.ActionToggleView: // Toggle view mode
 		switch m.viewMode {
@@ -1199,6 +1204,12 @@ type logStreamReconnectMsg struct{}
 type operationRecordsLoadedMsg struct {
 	projectID string
 	records   []protocol.OperationRecord
+	err       error
+}
+
+type operationQueueLoadedMsg struct {
+	projectID string
+	snapshot  protocol.OperationQueueResponseBody
 	err       error
 }
 
@@ -2047,6 +2058,27 @@ func (m Model) loadOperationsCmd() tea.Cmd {
 			Limit: 100,
 		})
 		return operationRecordsLoadedMsg{projectID: projectID, records: records, err: err}
+	}
+}
+
+func (m Model) openOperationQueueOverlay() (tea.Model, tea.Cmd) {
+	overlayModel := overlay.NewLoadingOperationQueueOverlay(m.daemonProjectID())
+	return m, tea.Batch(m.openOverlay(overlayModel), m.loadOperationQueueCmd())
+}
+
+func (m Model) loadOperationQueueCmd() tea.Cmd {
+	client := m.daemonClient
+	projectID := m.daemonProjectID()
+	if client == nil {
+		return func() tea.Msg {
+			return operationQueueLoadedMsg{projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
+		}
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		snapshot, err := client.OperationQueue(ctx, daemonclient.OperationListOptions{})
+		return operationQueueLoadedMsg{projectID: projectID, snapshot: snapshot, err: err}
 	}
 }
 

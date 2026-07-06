@@ -82,6 +82,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case overlay.SelectionMsg:
+		if msg.Key == "operation_queue_refresh" {
+			return m, m.loadOperationQueueCmd()
+		}
 		if strings.HasPrefix(msg.Key, "notification_") {
 			return m.handleNotificationActionCenterSelection(msg)
 		}
@@ -1106,6 +1109,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.applyOperationRecords(msg.records)
+		return m, nil
+
+	case operationQueueLoadedMsg:
+		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
+			return m, nil
+		}
+		current, ok := m.overlayStack.Current().(*overlay.OperationQueueOverlay)
+		if !ok {
+			if msg.err != nil && m.logger != nil {
+				m.logger.Debug("daemon operation queue failed", "error", msg.err)
+			}
+			return m, nil
+		}
+		if msg.err != nil {
+			current.SetError(msg.err)
+			return m, nil
+		}
+		current.SetSnapshot(msg.snapshot)
 		return m, nil
 
 	case noticeRecordsLoadedMsg:
