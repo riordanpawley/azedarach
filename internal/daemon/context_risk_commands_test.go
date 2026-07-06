@@ -2,12 +2,16 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
@@ -143,6 +147,127 @@ func TestTaskContextRiskReadsTopLevelRelatedMailboxEvidence(t *testing.T) {
 	}
 	if len(packet.Clusters) != 1 || packet.Clusters[0].Issues[0] != relatedID {
 		t.Fatalf("clusters = %+v, want related issue cluster", packet.Clusters)
+	}
+}
+
+func TestTaskUpdateStatusRejectsInReviewForHighContextRiskWithoutCloseoutEvidence(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-context-risk-review-block"
+	repoDir := t.TempDir()
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	targetID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Target child", Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	firstID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Prior child one", Type: domain.TypeTask, Status: domain.StatusDone, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create first sibling: %v", err)
+	}
+	secondID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Prior child two", Type: domain.TypeTask, Status: domain.StatusDone, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create second sibling: %v", err)
+	}
+	now := time.Now().UTC()
+	sharedFile := "internal/daemon/task_commands.go"
+	for _, issueID := range []string{targetID, firstID, secondID} {
+		payload := map[string]any{"files_changed": []string{sharedFile}}
+		if issueID != targetID {
+			payload["summary"] = "same failure repeated"
+		}
+		eventType := domain.IssueEventEvidenceSubmitted
+		if issueID != targetID {
+			eventType = domain.IssueEventRiskRecorded
+		}
+		if _, err := issuesClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+			Type:       eventType,
+			ObservedAt: now,
+			Payload:    payload,
+		}); err != nil {
+			t.Fatalf("append observation for %s: %v", issueID, err)
+		}
+	}
+
+	d := newContextRiskTestDaemon(projectID, repoDir, issuesClient)
+	body, err := json.Marshal(map[string]any{"task_id": targetID, "status": domain.StatusInReview})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	resp, err := d.handleTaskUpdateStatus(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-review-risk",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.update_status",
+		Body:            body,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+	})
+	if err != nil {
+		t.Fatalf("handleTaskUpdateStatus error: %v", err)
+	}
+	if resp.OK || !strings.Contains(resp.Error.Message, "context risk is high") {
+		t.Fatalf("response = %+v, want context risk rejection", resp)
+	}
+}
+
+func TestCloseTaskRejectsHighContextRiskWithoutCloseoutEvidence(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-context-risk-close-block"
+	repoDir := t.TempDir()
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	targetID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Target child", Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	firstPriorID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Prior child one", Type: domain.TypeTask, Status: domain.StatusDone, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create first prior sibling: %v", err)
+	}
+	secondPriorID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Prior child two", Type: domain.TypeTask, Status: domain.StatusDone, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create second prior sibling: %v", err)
+	}
+	now := time.Now().UTC()
+	sharedFile := "internal/daemon/task_commands.go"
+	for _, issueID := range []string{targetID, firstPriorID, secondPriorID} {
+		payload := map[string]any{"files_changed": []string{sharedFile}}
+		eventType := domain.IssueEventEvidenceSubmitted
+		if issueID != targetID {
+			payload["summary"] = "same failure repeated"
+			eventType = domain.IssueEventRiskRecorded
+		}
+		if _, err := issuesClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+			Type:       eventType,
+			ObservedAt: now,
+			Payload:    payload,
+		}); err != nil {
+			t.Fatalf("append observation for %s: %v", issueID, err)
+		}
+	}
+
+	d := newContextRiskTestDaemon(projectID, repoDir, issuesClient)
+	result, err := d.closeTask(ctx, projectID, taskCloseRequest{TaskID: targetID}, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-risk",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.close",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+	})
+	if err == nil || !strings.Contains(err.Error(), "context risk is high") {
+		t.Fatalf("closeTask error = %v, want context risk rejection", err)
+	}
+	if result.ContextRisk == nil || !domain.IssueContextRiskRequiresStructuredCloseout(*result.ContextRisk) {
+		t.Fatalf("result.ContextRisk = %+v, want blocking context risk packet", result.ContextRisk)
 	}
 }
 

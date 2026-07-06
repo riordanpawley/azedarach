@@ -106,20 +106,21 @@ type taskDeleteRequest struct {
 }
 
 type TaskCloseResult struct {
-	TaskID                     string                 `json:"task_id"`
-	Status                     string                 `json:"status"`
-	IntegrationRequested       bool                   `json:"integration_requested,omitempty"`
-	Integrated                 bool                   `json:"integrated,omitempty"`
-	IntegratedSourceBranch     string                 `json:"integrated_source_branch,omitempty"`
-	IntegratedTargetBranch     string                 `json:"integrated_target_branch,omitempty"`
-	SessionStopped             bool                   `json:"session_stopped,omitempty"`
-	WorktreeRemoved            bool                   `json:"worktree_removed,omitempty"`
-	WorktreeCleanupDeferred    bool                   `json:"worktree_cleanup_deferred,omitempty"`
-	WorktreeCleanupOperationID string                 `json:"worktree_cleanup_operation_id,omitempty"`
-	WorktreeForced             bool                   `json:"worktree_forced,omitempty"`
-	Revision                   uint64                 `json:"revision,omitempty"`
-	Phases                     []TaskClosePhaseTiming `json:"phases,omitempty"`
-	AutoClosedChildren         []string               `json:"auto_closed_children,omitempty"`
+	TaskID                     string                         `json:"task_id"`
+	Status                     string                         `json:"status"`
+	ContextRisk                *domain.IssueContextRiskPacket `json:"context_risk,omitempty"`
+	IntegrationRequested       bool                           `json:"integration_requested,omitempty"`
+	Integrated                 bool                           `json:"integrated,omitempty"`
+	IntegratedSourceBranch     string                         `json:"integrated_source_branch,omitempty"`
+	IntegratedTargetBranch     string                         `json:"integrated_target_branch,omitempty"`
+	SessionStopped             bool                           `json:"session_stopped,omitempty"`
+	WorktreeRemoved            bool                           `json:"worktree_removed,omitempty"`
+	WorktreeCleanupDeferred    bool                           `json:"worktree_cleanup_deferred,omitempty"`
+	WorktreeCleanupOperationID string                         `json:"worktree_cleanup_operation_id,omitempty"`
+	WorktreeForced             bool                           `json:"worktree_forced,omitempty"`
+	Revision                   uint64                         `json:"revision,omitempty"`
+	Phases                     []TaskClosePhaseTiming         `json:"phases,omitempty"`
+	AutoClosedChildren         []string                       `json:"auto_closed_children,omitempty"`
 }
 
 type TaskClosePhaseTiming struct {
@@ -207,15 +208,16 @@ type TaskCompleteCheckResult struct {
 
 // TaskIntegrationReadiness is the daemon-owned worker integration evidence gate.
 type TaskIntegrationReadiness struct {
-	IssueID                string                       `json:"issue_id"`
-	ParentIssueID          string                       `json:"parent_issue_id,omitempty"`
-	Ready                  bool                         `json:"ready"`
-	Reasons                []string                     `json:"reasons,omitempty"`
-	EvidenceEventSeq       int64                        `json:"evidence_event_seq,omitempty"`
-	EvidencePacket         *domain.WorkerEvidencePacket `json:"evidence_packet,omitempty"`
-	EvidenceIncomplete     bool                         `json:"evidence_incomplete,omitempty"`
-	EvidenceMissingFields  []string                     `json:"evidence_missing_fields,omitempty"`
-	EvidenceInvalidReasons []string                     `json:"evidence_invalid_reasons,omitempty"`
+	IssueID                string                         `json:"issue_id"`
+	ParentIssueID          string                         `json:"parent_issue_id,omitempty"`
+	Ready                  bool                           `json:"ready"`
+	ContextRisk            *domain.IssueContextRiskPacket `json:"context_risk,omitempty"`
+	Reasons                []string                       `json:"reasons,omitempty"`
+	EvidenceEventSeq       int64                          `json:"evidence_event_seq,omitempty"`
+	EvidencePacket         *domain.WorkerEvidencePacket   `json:"evidence_packet,omitempty"`
+	EvidenceIncomplete     bool                           `json:"evidence_incomplete,omitempty"`
+	EvidenceMissingFields  []string                       `json:"evidence_missing_fields,omitempty"`
+	EvidenceInvalidReasons []string                       `json:"evidence_invalid_reasons,omitempty"`
 }
 
 type taskIntegrationReadinessRequest struct {

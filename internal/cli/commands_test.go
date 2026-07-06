@@ -8916,6 +8916,11 @@ func TestIssueUpdateCommandPassesCascadeChildrenForInReviewStatus(t *testing.T) 
 					}, nil
 				case daemonclient.CommandTaskUpdateStatus:
 					gotStatusReq = req
+				case daemonclient.CommandTaskContextRisk:
+					return responseWithJSON(req, domain.IssueContextRiskPacket{
+						IssueID: "az-1",
+						Level:   domain.IssueContextRiskNone,
+					}), nil
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -8931,8 +8936,11 @@ func TestIssueUpdateCommandPassesCascadeChildrenForInReviewStatus(t *testing.T) 
 		ProjectID: "proj",
 	}
 	status := domain.StatusInReview
-	if err := IssueUpdateCommand(deps, IssueUpdateOptions{IssueID: "az-1", Status: &status, CascadeChildren: true}); err != nil {
-		t.Fatalf("IssueUpdateCommand() error = %v", err)
+	output := captureStdout(t, func() error {
+		return IssueUpdateCommand(deps, IssueUpdateOptions{IssueID: "az-1", Status: &status, CascadeChildren: true})
+	})
+	if strings.Contains(output, "Context risk:") {
+		t.Fatalf("output = %q, did not expect context-risk text for none risk", output)
 	}
 	if gotStatusReq.Command != daemonclient.CommandTaskUpdateStatus {
 		t.Fatalf("status command = %q, want %q", gotStatusReq.Command, daemonclient.CommandTaskUpdateStatus)
@@ -8943,6 +8951,77 @@ func TestIssueUpdateCommandPassesCascadeChildrenForInReviewStatus(t *testing.T) 
 	}
 	if body.TaskID.String() != "az-1" || body.Status != domain.StatusInReview || !body.CascadeChildren {
 		t.Fatalf("status body = %+v, want cascade in_review for az-1", body)
+	}
+}
+
+func TestIssueUpdateCommandBlocksInReviewForHighContextRiskBeforeMutating(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	var commands []string
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskGet:
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:        "az-1",
+							Title:     "Repeated local failure",
+							Type:      domain.TypeTask,
+							Priority:  domain.P2,
+							Status:    domain.StatusInProgress,
+							CreatedAt: now,
+							UpdatedAt: now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskContextRisk:
+					return responseWithJSON(req, domain.IssueContextRiskPacket{
+						IssueID:    "az-1",
+						Level:      domain.IssueContextRiskHigh,
+						Confidence: 75,
+						Evidence: []domain.IssueContextRiskEvidence{
+							{IssueID: "az-1", Files: []string{"internal/daemon/task_commands.go"}},
+							{IssueID: "az-2", Files: []string{"internal/daemon/task_commands.go"}, RiskNotes: []string{"same failure repeated"}},
+						},
+					}), nil
+				default:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+	status := domain.StatusInReview
+	err := IssueUpdateCommand(deps, IssueUpdateOptions{IssueID: "az-1", Status: &status, Title: "Should not mutate"})
+	if err == nil || !strings.Contains(err.Error(), "context risk is high") {
+		t.Fatalf("IssueUpdateCommand() error = %v, want context risk block", err)
+	}
+	for _, forbidden := range []string{daemonclient.CommandTaskUpdate, daemonclient.CommandTaskUpdateStatus} {
+		if containsString(commands, forbidden) {
+			t.Fatalf("commands = %v, did not expect %s after context risk block", commands, forbidden)
+		}
 	}
 }
 

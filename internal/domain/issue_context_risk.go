@@ -293,6 +293,19 @@ func issueContextRiskPrompts(level IssueContextRiskLevel) []string {
 	}
 }
 
+func IssueContextRiskRequiresStructuredCloseout(packet IssueContextRiskPacket) bool {
+	if packet.Level != IssueContextRiskHigh {
+		return false
+	}
+	for _, evidence := range packet.Evidence {
+		if !naming.IssueIDsEqual(evidence.IssueID, packet.IssueID) {
+			continue
+		}
+		return evidence.RootCause == "" && evidence.Invariant == "" && evidence.Validation == "" && len(evidence.RiskNotes) == 0
+	}
+	return true
+}
+
 func issueContextRiskEvidenceForClusters(target IssueContextRiskEvidence, candidates []IssueContextRiskEvidence, clusters []IssueContextRiskCluster) []IssueContextRiskEvidence {
 	include := map[string]bool{target.IssueID: true}
 	for _, cluster := range clusters {

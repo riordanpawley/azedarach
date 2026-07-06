@@ -12,6 +12,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
+const issueContextRiskDefaultWindow = 14 * 24 * time.Hour
+
 func (d *Daemon) handleTaskContextRisk(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
 	var cmd struct {
@@ -34,6 +36,17 @@ func (d *Daemon) handleTaskContextRisk(ctx context.Context, req protocol.Request
 	resp.Body = body
 	resp.Revision = d.currentRevision(projectID)
 	return resp, nil
+}
+
+func (d *Daemon) taskContextRiskForCloseout(ctx context.Context, projectID, issueID, repoDir string) *domain.IssueContextRiskPacket {
+	packet, err := d.taskContextRisk(ctx, projectID, issueID, repoDir, time.Now().UTC().Add(-issueContextRiskDefaultWindow))
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("context risk closeout read failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		}
+		return nil
+	}
+	return &packet
 }
 
 func (d *Daemon) taskContextRisk(ctx context.Context, projectID, issueID, repoDir string, since time.Time) (domain.IssueContextRiskPacket, error) {

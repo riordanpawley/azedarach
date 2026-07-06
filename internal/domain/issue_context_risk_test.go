@@ -68,3 +68,38 @@ func TestBuildIssueContextRiskReportsNarrowRepeatedFileCluster(t *testing.T) {
 		t.Fatal("CloseoutPrompts empty, want bounded prompts")
 	}
 }
+
+func TestIssueContextRiskRequiresStructuredCloseout(t *testing.T) {
+	packet := BuildIssueContextRisk(IssueContextRiskInput{
+		Target: IssueContextRiskEvidence{
+			IssueID: "az-target",
+			Files:   []string{"internal/daemon/task_commands.go"},
+		},
+		Candidates: []IssueContextRiskEvidence{
+			{
+				IssueID:       "az-prev-1",
+				Relationship:  "sibling",
+				Files:         []string{"internal/daemon/task_commands.go"},
+				RiskNotes:     []string{"same failure recurred"},
+				EvidenceKinds: []string{"risk.recorded"},
+			},
+			{
+				IssueID:       "az-prev-2",
+				Relationship:  "sibling",
+				Files:         []string{"internal/daemon/task_commands.go"},
+				EvidenceKinds: []string{"validation.failed"},
+			},
+		},
+	})
+	if packet.Level != IssueContextRiskHigh {
+		t.Fatalf("Level = %s, want high", packet.Level)
+	}
+	if !IssueContextRiskRequiresStructuredCloseout(packet) {
+		t.Fatal("IssueContextRiskRequiresStructuredCloseout = false, want true without target evidence")
+	}
+
+	packet.Evidence[0].Validation = "regression test covers repeated closeout failure"
+	if IssueContextRiskRequiresStructuredCloseout(packet) {
+		t.Fatal("IssueContextRiskRequiresStructuredCloseout = true, want false with target validation")
+	}
+}

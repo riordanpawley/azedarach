@@ -247,16 +247,18 @@ type orchestratePromptResult struct {
 }
 
 type orchestrateIntegrateResult struct {
-	IssueID      string                     `json:"issue_id"`
-	WorktreePath string                     `json:"worktree_path,omitempty"`
-	Branch       string                     `json:"branch,omitempty"`
-	MergeReady   bool                       `json:"merge_ready"`
-	Apply        bool                       `json:"apply"`
-	Applied      bool                       `json:"applied"`
-	Reasons      []string                   `json:"reasons,omitempty"`
-	Commands     []string                   `json:"commands"`
-	Steps        []orchestrateIntegrateStep `json:"steps,omitempty"`
-	Recovery     []string                   `json:"recovery,omitempty"`
+	IssueID       string                         `json:"issue_id"`
+	WorktreePath  string                         `json:"worktree_path,omitempty"`
+	Branch        string                         `json:"branch,omitempty"`
+	MergeReady    bool                           `json:"merge_ready"`
+	CloseoutReady bool                           `json:"closeout_ready"`
+	ContextRisk   *domain.IssueContextRiskPacket `json:"context_risk,omitempty"`
+	Apply         bool                           `json:"apply"`
+	Applied       bool                           `json:"applied"`
+	Reasons       []string                       `json:"reasons,omitempty"`
+	Commands      []string                       `json:"commands"`
+	Steps         []orchestrateIntegrateStep     `json:"steps,omitempty"`
+	Recovery      []string                       `json:"recovery,omitempty"`
 }
 
 type orchestrateIntegrateStep struct {
@@ -1630,13 +1632,20 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 		return err
 	}
 	mergeReady := readiness.Ready
-	commands := orchestrateIntegrationCommands(opts.IssueID, wt, found, mergeReady)
+	contextRiskBlocked := readiness.ContextRisk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*readiness.ContextRisk)
+	closeoutReady := mergeReady && !contextRiskBlocked
+	commands := orchestrateIntegrationCommands(opts.IssueID, wt, found, closeoutReady)
 	result := orchestrateIntegrateResult{
-		IssueID:    opts.IssueID,
-		MergeReady: mergeReady,
-		Apply:      opts.Apply,
-		Reasons:    readiness.Reasons,
-		Commands:   commands,
+		IssueID:       opts.IssueID,
+		MergeReady:    mergeReady,
+		CloseoutReady: closeoutReady,
+		ContextRisk:   readiness.ContextRisk,
+		Apply:         opts.Apply,
+		Reasons:       readiness.Reasons,
+		Commands:      commands,
+	}
+	if contextRiskBlocked {
+		result.Reasons = append(result.Reasons, issueContextRiskCloseoutBlockMessage(opts.IssueID))
 	}
 	if found {
 		result.WorktreePath = wt.Path
@@ -1669,6 +1678,13 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 			fmt.Printf("- %s\n", reason)
 		}
 	}
+	printIssueContextRiskCloseout(result.ContextRisk)
+	if mergeReady && !closeoutReady {
+		fmt.Println("Closeout guidance: BLOCKED (high context risk needs structured closeout evidence)")
+		for _, reason := range result.Reasons {
+			fmt.Printf("- %s\n", reason)
+		}
+	}
 	if found {
 		fmt.Printf("Worktree: %s\n", wt.Path)
 		fmt.Printf("Branch: %s\n", wt.Branch)
@@ -1693,6 +1709,16 @@ func applyOrchestrateIntegration(deps *Dependencies, issueID string, mergeReady 
 		return fmt.Errorf("cannot apply integration for %s: missing completion evidence", issueID)
 	}
 	result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "completion_evidence", Status: "success"})
+	if result.ContextRisk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*result.ContextRisk) {
+		result.Steps = append(result.Steps, orchestrateIntegrateStep{
+			Name:   "context_risk",
+			Status: "failed",
+			Error:  issueContextRiskCloseoutBlockMessage(issueID),
+		})
+		result.Recovery = append(result.Recovery, "record root_cause, invariant, regression_validation, or a structured risk note, then retry integration")
+		return fmt.Errorf("cannot apply integration for %s: %s", issueID, issueContextRiskCloseoutBlockMessage(issueID))
+	}
+	result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "context_risk", Status: "success"})
 
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), issueCloseCleanupTimeout)
 	defer cancel()

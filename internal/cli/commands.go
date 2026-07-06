@@ -4291,6 +4291,49 @@ func renderIssueContextRisk(packet domain.IssueContextRiskPacket) {
 	}
 }
 
+func issueContextRiskCloseoutSince() time.Time {
+	return time.Now().UTC().Add(-time.Duration(defaultIssueContextRiskDays) * 24 * time.Hour)
+}
+
+func loadIssueContextRiskForCloseout(ctx context.Context, deps *Dependencies, issueID string) (*domain.IssueContextRiskPacket, error) {
+	if deps == nil || deps.DaemonClient == nil {
+		return nil, nil
+	}
+	packet, err := deps.DaemonClient.TaskContextRisk(ctx, issueID, deps.RepoDir, issueContextRiskCloseoutSince())
+	if err != nil {
+		return nil, fmt.Errorf("inspect context risk before closeout: %w", err)
+	}
+	return &packet, nil
+}
+
+func issueContextRiskCloseoutBlockMessage(issueID string) string {
+	return fmt.Sprintf("context risk is high for issue %s: record root_cause, invariant, regression_validation, or a structured risk note before closeout", issueID)
+}
+
+func printIssueContextRiskCloseout(packet *domain.IssueContextRiskPacket) {
+	if packet == nil || packet.Level == domain.IssueContextRiskNone {
+		return
+	}
+	fmt.Printf("- Context risk: %s", packet.Level)
+	if packet.Confidence > 0 {
+		fmt.Printf(" confidence=%d", packet.Confidence)
+	}
+	fmt.Println()
+	for _, signal := range packet.Signals {
+		fmt.Printf("  - %s\n", signal)
+	}
+	for _, cluster := range packet.Clusters {
+		fmt.Printf("  - %s %s: %s\n", cluster.Kind, cluster.Value, strings.Join(cluster.Issues, ", "))
+	}
+	if domain.IssueContextRiskRequiresStructuredCloseout(*packet) {
+		fmt.Println("  - Required before closeout: record root_cause, invariant, regression_validation, or a structured risk note.")
+		return
+	}
+	for _, prompt := range packet.CloseoutPrompts {
+		fmt.Printf("  - %s\n", prompt)
+	}
+}
+
 // issueDecisionSummary is the per-decision payload embedded in `az issue get`
 // output (text + JSON). It merges link-level fields (relation, note) with the
 // linked decision's identity (slug, title) so a single row is self-describing.
@@ -4688,6 +4731,21 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 
 	result, err := deps.DaemonClient.CloseTask(ctx, opts.IssueID, cleanupCloseTaskStatusOptions(opts.ForceWorktree, opts.CloseCleanChildren))
 	if err != nil {
+		if strings.Contains(err.Error(), "context risk is high") {
+			if contextRisk, riskErr := loadIssueContextRiskForCloseout(ctx, deps, opts.IssueID); riskErr == nil && contextRisk != nil {
+				if opts.JSON {
+					_ = printJSON(map[string]any{
+						"issue_id":     opts.IssueID,
+						"closed":       false,
+						"context_risk": contextRisk,
+						"blocked":      true,
+						"reason":       issueContextRiskCloseoutBlockMessage(opts.IssueID),
+					})
+				} else {
+					printIssueContextRiskCloseout(contextRisk)
+				}
+			}
+		}
 		return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
 	}
 
@@ -4703,9 +4761,11 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 			"auto_closed_children":      result.AutoClosedChildren,
 			"worktree_cleanup_deferred": result.WorktreeCleanupDeferred,
 			"phases":                    taskClosePhaseJSON(result.Phases),
+			"context_risk":              result.ContextRisk,
 		})
 	}
 	fmt.Printf("Closed issue: %s\n", opts.IssueID)
+	printIssueContextRiskCloseout(result.ContextRisk)
 	if result.IntegrationRequested {
 		fmt.Println("- Integration requested")
 	}
@@ -4868,6 +4928,30 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		update.Implementations = impls
 	}
 
+	var updateContextRisk *domain.IssueContextRiskPacket
+	if opts.Status != nil && *opts.Status == domain.StatusInReview {
+		var err error
+		updateContextRisk, err = loadIssueContextRiskForCloseout(ctx, deps, opts.IssueID)
+		if err != nil {
+			return err
+		}
+		if updateContextRisk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*updateContextRisk) {
+			if opts.JSON {
+				_ = printJSON(map[string]any{
+					"issue_id":     opts.IssueID,
+					"updated":      false,
+					"status_set":   false,
+					"context_risk": updateContextRisk,
+					"blocked":      true,
+					"reason":       issueContextRiskCloseoutBlockMessage(opts.IssueID),
+				})
+			} else {
+				printIssueContextRiskCloseout(updateContextRisk)
+			}
+			return fmt.Errorf("%s", issueContextRiskCloseoutBlockMessage(opts.IssueID))
+		}
+	}
+
 	if err := deps.DaemonClient.UpdateTaskDetails(ctx, opts.IssueID, update); err != nil {
 		return fmt.Errorf("failed to update issue %s: %w", opts.IssueID, err)
 	}
@@ -4882,6 +4966,9 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, *opts.Status, statusOptions); err != nil {
 			return fmt.Errorf("failed to set status for issue %s: %w", opts.IssueID, err)
 		}
+		if updateContextRisk != nil && !opts.JSON {
+			printIssueContextRiskCloseout(updateContextRisk)
+		}
 	}
 	if opts.AppendNotes != "" {
 		if err := deps.DaemonClient.AppendTaskNotes(ctx, opts.IssueID, opts.AppendNotes); err != nil {
@@ -4895,6 +4982,7 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 			"status_set":     opts.Status != nil,
 			"notes_replaced": opts.Notes != nil,
 			"notes_appended": opts.AppendNotes != "",
+			"context_risk":   updateContextRisk,
 		})
 	}
 	fmt.Printf("Updated issue: %s\n", opts.IssueID)
