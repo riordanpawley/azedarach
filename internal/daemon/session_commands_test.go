@@ -1773,6 +1773,46 @@ func TestSessionStartIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
 	}
 }
 
+func TestSessionStartRejectsForeignPrefixedLiveIssueSession(t *testing.T) {
+	ctx := context.Background()
+	const (
+		projectID = "proj"
+		issueID   = "frp"
+		liveName  = "ch-frp"
+	)
+
+	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.sessions[liveName] = true
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  slog.Default(),
+		},
+		tmux: tmux.NewClient(tmuxRunner, slog.Default()),
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-foreign-prefixed-live",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionStart,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: marshalJSON(map[string]any{
+			"project_id": projectID,
+			"session_id": issueID,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeConflict {
+		t.Fatalf("session start response = %+v, want conflict", resp)
+	}
+	if tmuxRunner.sessions[naming.CanonicalSessionID(projectID, issueID)] {
+		t.Fatalf("canonical session %q was created despite foreign-prefixed live session", naming.CanonicalSessionID(projectID, issueID))
+	}
+}
+
 func TestSessionStartReportsFailedStartCleanupFailures(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -3269,6 +3309,29 @@ func TestHandleSessionStopDirectKillsForeignPrefixedIssueSession(t *testing.T) {
 	}
 	if row.State != daemonstate.SessionStateStopped || row.ObservedState != daemonstate.SessionStateStopped {
 		t.Fatalf("runtime session state = desired %s observed %s, want stopped/stopped", row.State, row.ObservedState)
+	}
+}
+
+func TestTmuxSessionNamesForIssueMatchesForeignPrefixedSession(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "frp"
+		liveName  = "ch-frp"
+	)
+
+	tmuxRunner := newTestTmuxRunner(liveName)
+	close(tmuxRunner.killRelease)
+	daemon := &Daemon{
+		cfg:  Config{RepoDir: ".", Logger: slog.Default()},
+		tmux: tmux.NewClient(tmuxRunner, slog.Default()),
+	}
+
+	names, err := daemon.tmuxSessionNamesForIssue(context.Background(), projectID, issueID, naming.CanonicalSessionID(projectID, issueID), daemonInvariantSourceTmux)
+	if err != nil {
+		t.Fatalf("tmuxSessionNamesForIssue error: %v", err)
+	}
+	if len(names) != 1 || names[0] != liveName {
+		t.Fatalf("tmux session names = %+v, want [%s]", names, liveName)
 	}
 }
 
@@ -8493,6 +8556,101 @@ func TestSessionActivityLabelForDisplayUsesStartupGraceOnlyForFreshUnknownActivi
 	})
 	if label != "busy" || source != "hooks" {
 		t.Fatalf("hook-backed activity = %s/%s, want busy/hooks", label, source)
+	}
+}
+
+func TestEnrichTasksWithSessionStateDoesNotTreatLaunchBusyAsHookActivity(t *testing.T) {
+	ctx := context.Background()
+	const (
+		projectID = "proj-launch-activity"
+		issueID   = "bii"
+	)
+
+	now := time.Date(2026, time.June, 17, 8, 0, 0, 0, time.UTC)
+	previousNow := timeNow
+	timeNow = func() time.Time { return now }
+	t.Cleanup(func() { timeNow = previousNow })
+
+	oldStart := now.Add(-2 * time.Minute)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:             sessionID,
+		IssueID:        issueID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "session",
+		StartedAt:      &oldStart,
+		UpdatedAt:      oldStart,
+	}); err != nil {
+		t.Fatalf("seed runtime state: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+	}
+
+	tasks := d.enrichTasksWithSessionState(ctx, projectID, []domain.Task{{
+		ID:     naming.IssueID(issueID),
+		Title:  "Launch-only worker",
+		Status: domain.StatusInProgress,
+	}})
+	if len(tasks) != 1 || tasks[0].Session == nil {
+		t.Fatalf("tasks = %+v, want enriched session", tasks)
+	}
+	if tasks[0].Session.Activity != "unknown" || tasks[0].Session.ActivitySource != "none" {
+		t.Fatalf("session activity = %s/%s, want unknown/none", tasks[0].Session.Activity, tasks[0].Session.ActivitySource)
+	}
+}
+
+func TestEnrichTasksWithSessionStateKeepsNoAgentActivity(t *testing.T) {
+	ctx := context.Background()
+	const (
+		projectID = "proj-no-agent-display"
+		issueID   = "bij"
+	)
+
+	startedAt := time.Date(2026, time.June, 17, 8, 0, 0, 0, time.UTC)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:             sessionID,
+		IssueID:        issueID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "no-agent",
+		ActivitySource: "session",
+		StartedAt:      &startedAt,
+		UpdatedAt:      startedAt,
+	}); err != nil {
+		t.Fatalf("seed runtime state: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+	}
+
+	tasks := d.enrichTasksWithSessionState(ctx, projectID, []domain.Task{{
+		ID:     naming.IssueID(issueID),
+		Title:  "Shell session",
+		Status: domain.StatusInProgress,
+	}})
+	if len(tasks) != 1 || tasks[0].Session == nil {
+		t.Fatalf("tasks = %+v, want enriched session", tasks)
+	}
+	if tasks[0].Session.Activity != "no-agent" || tasks[0].Session.ActivitySource != "session" {
+		t.Fatalf("session activity = %s/%s, want no-agent/session", tasks[0].Session.Activity, tasks[0].Session.ActivitySource)
 	}
 }
 

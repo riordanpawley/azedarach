@@ -598,6 +598,10 @@ func (d *Daemon) tmuxSessionNamesForIssue(ctx context.Context, projectID, issueI
 			projectedIssueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
 			if ok && naming.IssueIDsEqual(projectedIssueID, typedIssueID.String()) {
 				names[name] = struct{}{}
+				continue
+			}
+			if sessionNameHasIssueSuffix(name, typedIssueID.String()) {
+				names[name] = struct{}{}
 			}
 		}
 	}
@@ -627,6 +631,14 @@ func (d *Daemon) sessionExistsForInvariant(ctx context.Context, projectID, issue
 		}
 	}
 	return false, nil
+}
+
+func (d *Daemon) issueSessionExistsForInvariant(ctx context.Context, projectID, issueID, canonicalSessionID string, source daemonInvariantSource) (bool, error) {
+	names, err := d.tmuxSessionNamesForIssue(ctx, projectID, issueID, canonicalSessionID, source)
+	if err != nil {
+		return false, err
+	}
+	return len(names) > 0, nil
 }
 
 func (d *Daemon) sessionLifecycleTargetExists(ctx context.Context, projectID, issueID, sessionID string) (bool, error) {
@@ -712,7 +724,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		}
 	}
 	startConflictSource := d.sourceForSessionInvariant(sessionInvariantSessionStartConflict)
-	exists, err := d.sessionExistsForInvariant(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, startConflictSource)
+	exists, err := d.issueSessionExistsForInvariant(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, startConflictSource)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -1389,7 +1401,7 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 
 	restartTargetsBySession := make(map[string]sessionRestartAllTarget, len(liveSessions))
 	for _, targetProjectID := range projectIDs {
-		activityByIssueKey := d.sessionDisplayActivityByIssueKey(ctx, targetProjectID)
+		activityByIssueKey := d.sessionRestartActivityByIssueKey(ctx, targetProjectID)
 		projectedSessions := d.sessionRestartAllProjectedSessionIDs(ctx, targetProjectID)
 		namingScope := d.sessionNamingScope(targetProjectID)
 		for _, sessionID := range liveSessions {
@@ -2362,7 +2374,11 @@ func normalizeSessionActivitySource(source, fallback string) string {
 	return strings.ToLower(strings.TrimSpace(fallback))
 }
 
-func explicitSessionActivity(session daemonstate.Session) (sessionDisplayActivity, bool) {
+type sessionDisplayActivityOptions struct {
+	includeSessionSourcedBusy bool
+}
+
+func explicitSessionActivity(session daemonstate.Session, opts sessionDisplayActivityOptions) (sessionDisplayActivity, bool) {
 	if isAgentScopedSessionID(session.ID) {
 		return sessionDisplayActivity{}, false
 	}
@@ -2378,16 +2394,21 @@ func explicitSessionActivity(session daemonstate.Session) (sessionDisplayActivit
 	if activity == "" {
 		return sessionDisplayActivity{}, false
 	}
-	return sessionDisplayActivity{
-		Activity: activity,
-		Source:   normalizeSessionActivitySource(session.ActivitySource, "session"),
-	}, true
+	source := normalizeSessionActivitySource(session.ActivitySource, "session")
+	if activity == "busy" && source == "session" && !opts.includeSessionSourcedBusy {
+		return sessionDisplayActivity{}, false
+	}
+	return sessionDisplayActivity{Activity: activity, Source: source}, true
 }
 
 func sessionDisplayActivityByIssueKeyFromSessions(sessions []daemonstate.Session, namingScope string) map[string]sessionDisplayActivity {
+	return sessionDisplayActivityByIssueKeyFromSessionsWithOptions(sessions, namingScope, sessionDisplayActivityOptions{})
+}
+
+func sessionDisplayActivityByIssueKeyFromSessionsWithOptions(sessions []daemonstate.Session, namingScope string, opts sessionDisplayActivityOptions) map[string]sessionDisplayActivity {
 	out := make(map[string]sessionDisplayActivity)
 	for key, session := range sessionProjectionAggregateByIssueKey(sessions, namingScope) {
-		display, ok := explicitSessionActivity(session)
+		display, ok := explicitSessionActivity(session, opts)
 		if !ok {
 			continue
 		}
@@ -2407,6 +2428,14 @@ func sessionDisplayActivityByIssueKeyFromSessions(sessions []daemonstate.Session
 }
 
 func (d *Daemon) sessionDisplayActivityByIssueKey(ctx context.Context, projectID string) map[string]sessionDisplayActivity {
+	return d.sessionActivityByIssueKey(ctx, projectID, sessionDisplayActivityOptions{})
+}
+
+func (d *Daemon) sessionRestartActivityByIssueKey(ctx context.Context, projectID string) map[string]sessionDisplayActivity {
+	return d.sessionActivityByIssueKey(ctx, projectID, sessionDisplayActivityOptions{includeSessionSourcedBusy: true})
+}
+
+func (d *Daemon) sessionActivityByIssueKey(ctx context.Context, projectID string, opts sessionDisplayActivityOptions) map[string]sessionDisplayActivity {
 	projectID = d.canonicalProjectID(projectID)
 	namingScope := d.sessionNamingScope(projectID)
 	sessions := []daemonstate.Session{}
@@ -2425,7 +2454,7 @@ func (d *Daemon) sessionDisplayActivityByIssueKey(ctx context.Context, projectID
 			sessions = append(sessions, session)
 		}
 	}
-	return sessionDisplayActivityByIssueKeyFromSessions(sessions, namingScope)
+	return sessionDisplayActivityByIssueKeyFromSessionsWithOptions(sessions, namingScope, opts)
 }
 
 func unknownActivityAdvice(issueID string) string {
