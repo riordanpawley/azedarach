@@ -99,8 +99,7 @@ Examples:
   az issue update --id az-123 --status in_review  # ready for review/integration, not blocked
   az issue update --id az-123 --status closed
   az issue update --id az-123 --update-impl go-bubbletea
-  az issue update --id az-123 --append-notes "Follow-up detail"
-  az issue update --id az-123 --notes "Replacement notes"
+  # Agent progress, validation, review facts, and worker closeout belong in mail/observation evidence, not issue notes.
   az issue close --id az-123        # integrates, cleans, then closes
   az issue close --id az-123 --force-worktree  # force worktree removal after integration
   az issue delete az-123 --confirm --cleanup
@@ -121,6 +120,7 @@ Examples:
   az mail send --parent az-123 --type dependency-ready --body "contract merged"
   az observe --json
   az observe --root az-123
+  az issue events az-123 --json
   az orchestrate observe --root az-123 --json
   az mail send --parent az-123 --issue az-456 --type worker-integration-ready --body '{"schema":"worker_evidence.v1",...}'
   az mail list --parent az-123 --since 40 --json

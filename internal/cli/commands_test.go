@@ -10451,6 +10451,9 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue update [--project <project-id>] [--id <id>] [--json] [<id>]") {
 		t.Fatalf("usage missing issue update command: %q", output)
 	}
+	if strings.Contains(output, "az issue update --id az-123 --append-notes") || strings.Contains(output, "az issue update --id az-123 --notes") {
+		t.Fatalf("usage should not include note update examples: %q", output)
+	}
 	if strings.Contains(output, "issue status --impl <implementation>") {
 		t.Fatalf("usage should not include issue status command: %q", output)
 	}
@@ -10552,6 +10555,12 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	}
 	if !strings.Contains(output, "only assigns implementation metadata; still not parentage") {
 		t.Fatalf("usage missing impl-not-graph example clarification: %q", output)
+	}
+	if !strings.Contains(output, "Agent progress, validation, review facts, and worker closeout belong in mail/observation evidence, not issue notes.") {
+		t.Fatalf("usage missing evidence-first agent guidance: %q", output)
+	}
+	if !strings.Contains(output, "az issue events az-123 --json") {
+		t.Fatalf("usage missing issue events evidence example: %q", output)
 	}
 	if strings.Contains(output, "issue close --impl") || strings.Contains(output, "issue delete --impl") || strings.Contains(output, "issue dep add --impl") {
 		t.Fatalf("usage should not include --impl for existing-issue commands: %q", output)
@@ -10803,7 +10812,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "before accepting closeout, run `az issue context-risk <worker-issue> --since 14d`") {
 		t.Fatalf("prime output missing context-risk closeout guidance: %q", output)
 	}
-	if !strings.Contains(output, "treat `none`/`fyi` as advisory, ask the bounded prompts for `medium`, and require diagnosis or structured risk notes for `high`") {
+	if !strings.Contains(output, "treat `none`/`fyi` as advisory, ask the bounded prompts for `medium`, and require diagnosis or structured risk evidence for `high`") {
 		t.Fatalf("prime output missing context-risk level guidance: %q", output)
 	}
 	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
@@ -10896,6 +10905,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Use observation/evidence paths for progress, validation, risks, blockers, and review facts: `az observe`, `az issue events <issue-id>`, and mailbox `worker_evidence.v1` packets.") {
 		t.Fatalf("prime output missing observation/evidence guidance: %q", output)
 	}
+	if !strings.Contains(output, "Do not use `az issue update --notes` or `az issue update --append-notes` for routine agent progress, validation, review facts, or worker closeout; use mailbox/observation evidence instead.") {
+		t.Fatalf("prime output missing notes write deprecation guidance: %q", output)
+	}
+	if strings.Contains(output, "`az issue update <issue-id> --notes \"...\"`") || strings.Contains(output, "`az issue update <issue-id> --append-notes \"...\"`") {
+		t.Fatalf("prime output should not include copyable note update commands: %q", output)
+	}
 	if !strings.Contains(output, "`az issue events <issue-id> [--type <event-type>] [--limit <n>] [--json]` shows durable observation/evidence events") {
 		t.Fatalf("prime output missing issue events command map guidance: %q", output)
 	}
@@ -10944,7 +10959,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Close the issue only when the issue scope and acceptance criteria are fully complete") {
 		t.Fatalf("prime output missing close-only-when-fully-complete guardrail: %q", output)
 	}
-	if !strings.Contains(output, "If work is partial, keep status `in_progress`, append notes with remaining scope, and create child issues for unfinished required work.") {
+	if !strings.Contains(output, "If work is partial, keep status `in_progress`, record remaining scope through evidence/audit scratchpad, and create child issues for unfinished required work.") {
 		t.Fatalf("prime output missing partial-work guardrail: %q", output)
 	}
 	if !strings.Contains(output, "Child work should target the closest ancestor with an active worktree branch.") {
