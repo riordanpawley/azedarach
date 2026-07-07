@@ -24,7 +24,7 @@ import (
 const commandTaskClosePreflight = "task.close_preflight"
 
 func TestParseOrchestrateStatusArgs(t *testing.T) {
-	opts, err := ParseOrchestrateStatusArgs([]string{"--root", "az-123", "--since", "10", "--limit", "25", "--json"})
+	opts, err := ParseOrchestrateStatusArgs([]string{"--root", "az-123", "--since", "10", "--limit", "25", "--json", "--summary"})
 	if err != nil {
 		t.Fatalf("ParseOrchestrateStatusArgs error = %v", err)
 	}
@@ -39,6 +39,15 @@ func TestParseOrchestrateStatusArgs(t *testing.T) {
 	}
 	if !opts.JSON {
 		t.Fatal("JSON = false, want true")
+	}
+	if !opts.Summary {
+		t.Fatal("Summary = false, want true")
+	}
+}
+
+func TestParseOrchestrateStatusArgsRejectsSummaryFull(t *testing.T) {
+	if _, err := ParseOrchestrateStatusArgs([]string{"--root", "az-123", "--summary", "--full"}); err == nil {
+		t.Fatal("ParseOrchestrateStatusArgs succeeded, want --summary/--full conflict")
 	}
 }
 
@@ -113,11 +122,27 @@ func TestParseOrchestrateWatchArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseOrchestrateWatchArgs error = %v", err)
 	}
-	if opts.RootIssueID != "az-1" || opts.SinceSeq != 12 || !opts.Once {
+	if opts.RootIssueID != "az-1" || opts.SinceSeq != 12 || !opts.Once || !opts.Compact {
 		t.Fatalf("opts = %+v", opts)
 	}
 	if !opts.JSONL {
 		t.Fatalf("JSONL = false, want true")
+	}
+}
+
+func TestParseOrchestrateWatchArgsVerboseSelectsFullFrame(t *testing.T) {
+	opts, err := ParseOrchestrateWatchArgs([]string{"--root", "az-1", "--verbose"})
+	if err != nil {
+		t.Fatalf("ParseOrchestrateWatchArgs error = %v", err)
+	}
+	if opts.Compact || !opts.Full || !opts.Verbose {
+		t.Fatalf("opts = %+v, want verbose full-frame output", opts)
+	}
+}
+
+func TestParseOrchestrateWatchArgsRejectsExplicitCompactFull(t *testing.T) {
+	if _, err := ParseOrchestrateWatchArgs([]string{"--root", "az-1", "--compact", "--full"}); err == nil {
+		t.Fatal("ParseOrchestrateWatchArgs succeeded, want --compact/--full conflict")
 	}
 }
 
@@ -1008,7 +1033,7 @@ func TestEmitOrchestrateWatchFramePrintsSessionStartProgress(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() error {
-		return emitOrchestrateWatchFrame(frame, false)
+		return emitOrchestrateWatchFrame(frame, false, false)
 	})
 	for _, want := range []string{
 		"start: state=running phase=init_commands progress=90% configured init commands likely running before agent hooks",
@@ -1018,6 +1043,71 @@ func TestEmitOrchestrateWatchFramePrintsSessionStartProgress(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("watch output missing %q:\n%s", want, output)
 		}
+	}
+}
+
+func TestEmitOrchestrateWatchFrameCompactSummarizesWorkerEvidence(t *testing.T) {
+	frame := orchestrateWatchFrame{
+		RootIssueID: "az-1",
+		SinceSeq:    40,
+		NextSince:   41,
+		Runnable:    []string{"az-3"},
+		ActiveSessions: []orchestrateActiveSession{
+			{IssueID: "az-2", Status: "active", Activity: "busy", ActivitySource: "hooks"},
+		},
+		Blocked: map[string]string{"az-4": "blocked by az-5"},
+		Events: []mailEvent{
+			{
+				Seq:     41,
+				IssueID: "az-2",
+				Type:    "worker-integration-ready",
+				Body: `{
+					"schema": "worker_evidence.v1",
+					"summary": "Ready for integration after focused validation.",
+					"commands_run": ["go test ./internal/cli"],
+					"key_assertions": ["compact output omits full evidence body"],
+					"files_changed": ["internal/cli/orchestrate.go"],
+					"review": {"status": "clean", "findings": []},
+					"risks": ["none"]
+				}`,
+			},
+		},
+	}
+
+	output := captureStdout(t, func() error {
+		return emitOrchestrateWatchFrame(frame, true, true)
+	})
+	if strings.Contains(output, "commands_run") || strings.Contains(output, "key_assertions") || strings.Contains(output, "files_changed") {
+		t.Fatalf("compact output leaked full evidence body:\n%s", output)
+	}
+	var compact orchestrateCompactFrame
+	if err := json.Unmarshal([]byte(output), &compact); err != nil {
+		t.Fatalf("decode compact watch output: %v\n%s", err, output)
+	}
+	if compact.Capacity.Runnable != 1 || compact.Capacity.Active != 1 || compact.Capacity.Blocked != 1 {
+		t.Fatalf("capacity = %+v", compact.Capacity)
+	}
+	if len(compact.Events) != 1 || compact.Events[0].WorkerEvidence == nil {
+		t.Fatalf("events = %+v, want worker evidence summary", compact.Events)
+	}
+	evidence := compact.Events[0].WorkerEvidence
+	if evidence.ValidationStatus != "complete" || evidence.Summary != "Ready for integration after focused validation." || evidence.ReviewStatus != "clean" || !slices.Contains(evidence.Risks, "none") {
+		t.Fatalf("worker evidence = %+v", evidence)
+	}
+}
+
+func TestCompactFrameFromStatusResultKeepsDefaultCompactWatchAdvice(t *testing.T) {
+	result := orchestrateStatusResult{
+		RootIssueID: "az-1",
+		Blocked:     map[string]string{},
+		Advice: map[string]interface{}{
+			"watch": "az orchestrate watch --root az-1 --since 41 --jsonl",
+		},
+	}
+
+	compact := compactFrameFromStatusResult(result, 40, 41)
+	if got, _ := compact.Advice["watch"].(string); got != "az orchestrate watch --root az-1 --since 41 --jsonl" {
+		t.Fatalf("watch advice = %q", got)
 	}
 }
 
