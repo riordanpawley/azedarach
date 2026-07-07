@@ -61,6 +61,28 @@ func TestParseOrchestrateStartArgs_DefaultLimitAndIssues(t *testing.T) {
 	}
 }
 
+func TestParseOrchestrateGroupArgs(t *testing.T) {
+	opts, err := ParseOrchestrateGroupArgs([]string{"--root", "az-1", "--nested", "az-2", "--issue", "az-4", "--issue", "az-3", "--issue", "az-4", "--json"})
+	if err != nil {
+		t.Fatalf("ParseOrchestrateGroupArgs error = %v", err)
+	}
+	if opts.RootIssueID != "az-1" || opts.NestedIssueID != "az-2" || !opts.JSON {
+		t.Fatalf("opts = %+v", opts)
+	}
+	if len(opts.IssueIDs) != 2 || opts.IssueIDs[0] != "az-3" || opts.IssueIDs[1] != "az-4" {
+		t.Fatalf("IssueIDs = %+v, want [az-3 az-4]", opts.IssueIDs)
+	}
+}
+
+func TestParseOrchestrateGroupArgs_RequiresNestedAndIssue(t *testing.T) {
+	if _, err := ParseOrchestrateGroupArgs([]string{"--root", "az-1", "--issue", "az-3"}); err == nil {
+		t.Fatal("expected error for missing --nested")
+	}
+	if _, err := ParseOrchestrateGroupArgs([]string{"--root", "az-1", "--nested", "az-2"}); err == nil {
+		t.Fatal("expected error for missing --issue")
+	}
+}
+
 func TestExpensiveSessionSyncInitCommandsDetectsKnownPatterns(t *testing.T) {
 	commands := []string{
 		"direnv allow",
@@ -315,13 +337,20 @@ func TestOrchestrateStatusCommandIncludesNestedRoots(t *testing.T) {
 				case daemonclient.CommandTaskGraphReadiness:
 					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
 						RootIssueID: root.String(),
-						Runnable:    []string{"az-3"},
+						Capacity: daemonclient.TaskCapacitySummary{
+							DirectRunnableCount:        1,
+							NestedStartableCount:       1,
+							TotalCountingCapacityCount: 0,
+						},
+						Runnable: []string{"az-3"},
 						NestedRoots: []daemonclient.TaskNestedRoot{{
-							IssueID:    nested.String(),
-							Status:     string(domain.StatusOpen),
-							Type:       string(domain.TypeTask),
-							ChildCount: 2,
-							Advice:     "start nested root orchestrator: az session start az-2",
+							IssueID:        nested.String(),
+							Status:         "startable",
+							IssueStatus:    string(domain.StatusOpen),
+							Type:           string(domain.TypeTask),
+							ChildCount:     2,
+							FallbackPolicy: "start_nested_root",
+							Advice:         "start nested root orchestrator: az session start az-2",
 						}},
 						Blocked: map[string]string{},
 					}), nil
@@ -351,8 +380,11 @@ func TestOrchestrateStatusCommandIncludesNestedRoots(t *testing.T) {
 		t.Fatalf("nested_roots = %+v, want one nested root", result.NestedRoots)
 	}
 	got := result.NestedRoots[0]
-	if got.IssueID != nested.String() || got.ChildCount != 2 || !strings.Contains(got.Advice, "az session start az-2") {
+	if got.IssueID != nested.String() || got.Status != "startable" || got.IssueStatus != string(domain.StatusOpen) || got.ChildCount != 2 || !strings.Contains(got.Advice, "az session start az-2") {
 		t.Fatalf("nested root = %+v", got)
+	}
+	if result.Capacity.DirectRunnableCount != 1 || result.Capacity.NestedStartableCount != 1 {
+		t.Fatalf("capacity = %+v", result.Capacity)
 	}
 }
 
@@ -368,13 +400,18 @@ func TestOrchestrateStatusCommandShowsNestedRoots(t *testing.T) {
 				case daemonclient.CommandTaskGraphReadiness:
 					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
 						RootIssueID: root.String(),
-						Runnable:    []string{},
+						Capacity: daemonclient.TaskCapacitySummary{
+							NestedStartableCount: 1,
+						},
+						Runnable: []string{},
 						NestedRoots: []daemonclient.TaskNestedRoot{{
-							IssueID:    nested.String(),
-							Status:     string(domain.StatusOpen),
-							Type:       string(domain.TypeTask),
-							ChildCount: 1,
-							Advice:     "start its orchestrator session with `az session start az-2`",
+							IssueID:        nested.String(),
+							Status:         "startable",
+							IssueStatus:    string(domain.StatusOpen),
+							Type:           string(domain.TypeTask),
+							ChildCount:     1,
+							FallbackPolicy: "start_nested_root",
+							Advice:         "start its orchestrator session with `az session start az-2`",
 						}},
 						Blocked: map[string]string{},
 					}), nil
@@ -397,13 +434,243 @@ func TestOrchestrateStatusCommandShowsNestedRoots(t *testing.T) {
 		return OrchestrateStatusCommand(deps, OrchestrateStatusOptions{RootIssueID: root.String()})
 	})
 	for _, want := range []string{
+		"Capacity:",
+		"nested startable=1 active=0 blocked_start_failed=0 not_counting=0 total_counting=0",
 		"Nested roots:",
-		"- az-2 status=open type=task children=1",
+		"- az-2 status=startable issue_status=open type=task children=1 fallback=start_nested_root",
 		"next: start its orchestrator session with `az session start az-2`",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
+	}
+}
+
+func TestOrchestrateGroupCommandMovesChildUnderNestedRoot(t *testing.T) {
+	root := naming.IssueID("az-1")
+	nested := naming.IssueID("az-2")
+	child := naming.IssueID("az-3")
+	taskBody, err := marshalTaskListBody([]domain.Task{
+		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{ID: child, Title: "Worker", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	var requests []protocol.RequestEnvelope
+	var addReq daemonclient.TaskDependencyParams
+	readinessCalls := 0
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				requests = append(requests, req)
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					var body daemonclient.TaskIDRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode graph readiness request: %v", err)
+					}
+					if body.TaskID != root {
+						t.Fatalf("graph readiness task id = %s, want %s", body.TaskID, root)
+					}
+					readinessCalls++
+					childCount := 1
+					if readinessCalls > 1 {
+						childCount = 2
+					}
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						NestedRoots: []daemonclient.TaskNestedRoot{{
+							IssueID:        nested.String(),
+							Status:         "startable",
+							IssueStatus:    string(domain.StatusOpen),
+							Type:           string(domain.TypeEpic),
+							ChildCount:     childCount,
+							FallbackPolicy: "start_nested_root",
+							Advice:         "start nested root orchestrator: az session start az-2",
+						}},
+						Blocked: map[string]string{},
+					}), nil
+				case daemonclient.CommandTaskGet:
+					var body daemonclient.TaskIDRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode task.get request: %v", err)
+					}
+					if body.TaskID != child {
+						t.Fatalf("task.get id = %s, want %s", body.TaskID, child)
+					}
+					return responseWithBody(req, taskBody), nil
+				case daemonclient.CommandTaskDependencyAdd:
+					if err := json.Unmarshal(req.Body, &addReq); err != nil {
+						t.Fatalf("decode dependency add request: %v", err)
+					}
+					return responseWithJSON(req, map[string]any{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateGroupCommand(deps, OrchestrateGroupOptions{
+			RootIssueID:   root.String(),
+			NestedIssueID: nested.String(),
+			IssueIDs:      []string{child.String()},
+			JSON:          true,
+		})
+	})
+	if got, want := commandNames(requests), []string{
+		daemonclient.CommandTaskGraphReadiness,
+		daemonclient.CommandTaskGet,
+		daemonclient.CommandTaskDependencyAdd,
+		daemonclient.CommandTaskGraphReadiness,
+	}; !slices.Equal(got, want) {
+		t.Fatalf("commands = %+v, want %+v", got, want)
+	}
+	if addReq.TaskID != child || addReq.DependsOnID != nested || addReq.Type != string(domain.DependencyParentChild) || !addReq.ForceParentChange {
+		t.Fatalf("dependency add request = %+v", addReq)
+	}
+
+	var result orchestrateGroupResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if result.RootIssueID != root.String() || result.NestedIssueID != nested.String() || result.NestedRoot == nil {
+		t.Fatalf("result = %+v", result)
+	}
+	if result.NestedRoot.ChildCount != 2 || result.NestedRoot.Status != "startable" {
+		t.Fatalf("nested root = %+v", result.NestedRoot)
+	}
+	if len(result.Grouped) != 1 || result.Grouped[0].IssueID != child.String() || result.Grouped[0].PreviousParentID != root.String() || result.Grouped[0].NewParentID != nested.String() || !result.Grouped[0].Changed {
+		t.Fatalf("grouped = %+v", result.Grouped)
+	}
+	if !slices.Contains(result.Advice, "inspect updated root: az orchestrate status --root az-1 --json") {
+		t.Fatalf("advice = %+v", result.Advice)
+	}
+}
+
+func TestOrchestrateGroupCommandRejectsRuntimeBackedChild(t *testing.T) {
+	root := naming.IssueID("az-1")
+	nested := naming.IssueID("az-2")
+	child := naming.IssueID("az-3")
+	taskBody, err := marshalTaskListBody([]domain.Task{
+		{ID: child, Title: "Worker", Status: domain.StatusInProgress, Type: domain.TypeTask, ParentID: &root, HasTmuxSession: true},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	var commands []string
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						NestedRoots: []daemonclient.TaskNestedRoot{{
+							IssueID:        nested.String(),
+							Status:         "startable",
+							IssueStatus:    string(domain.StatusOpen),
+							Type:           string(domain.TypeEpic),
+							ChildCount:     1,
+							FallbackPolicy: "start_nested_root",
+						}},
+						Blocked: map[string]string{},
+					}), nil
+				case daemonclient.CommandTaskGet:
+					return responseWithBody(req, taskBody), nil
+				case daemonclient.CommandTaskDependencyAdd:
+					t.Fatalf("unexpected dependency add for runtime-backed child")
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	_, err = captureStdoutAllowError(t, func() error {
+		return OrchestrateGroupCommand(deps, OrchestrateGroupOptions{
+			RootIssueID:   root.String(),
+			NestedIssueID: nested.String(),
+			IssueIDs:      []string{child.String()},
+			JSON:          true,
+		})
+	})
+	if err == nil || !strings.Contains(err.Error(), "has runtime/worktree state") {
+		t.Fatalf("error = %v, want runtime/worktree rejection", err)
+	}
+	if !slices.Equal(commands, []string{daemonclient.CommandTaskGraphReadiness, daemonclient.CommandTaskGet}) {
+		t.Fatalf("commands = %+v", commands)
+	}
+}
+
+func TestOrchestrateGroupCommandRejectsUnparentedIssue(t *testing.T) {
+	root := naming.IssueID("az-1")
+	nested := naming.IssueID("az-2")
+	child := naming.IssueID("az-3")
+	taskBody, err := marshalTaskListBody([]domain.Task{
+		{ID: child, Title: "Standalone", Status: domain.StatusOpen, Type: domain.TypeTask},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	var commands []string
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						NestedRoots: []daemonclient.TaskNestedRoot{{
+							IssueID:        nested.String(),
+							Status:         "startable",
+							IssueStatus:    string(domain.StatusOpen),
+							Type:           string(domain.TypeEpic),
+							ChildCount:     1,
+							FallbackPolicy: "start_nested_root",
+						}},
+						Blocked: map[string]string{},
+					}), nil
+				case daemonclient.CommandTaskGet:
+					return responseWithBody(req, taskBody), nil
+				case daemonclient.CommandTaskDependencyAdd:
+					t.Fatalf("unexpected dependency add for unparented issue")
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	_, err = captureStdoutAllowError(t, func() error {
+		return OrchestrateGroupCommand(deps, OrchestrateGroupOptions{
+			RootIssueID:   root.String(),
+			NestedIssueID: nested.String(),
+			IssueIDs:      []string{child.String()},
+			JSON:          true,
+		})
+	})
+	if err == nil || !strings.Contains(err.Error(), "is not parented under root") {
+		t.Fatalf("error = %v, want unparented rejection", err)
+	}
+	if !slices.Equal(commands, []string{daemonclient.CommandTaskGraphReadiness, daemonclient.CommandTaskGet}) {
+		t.Fatalf("commands = %+v", commands)
 	}
 }
 

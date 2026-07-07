@@ -10656,6 +10656,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az orchestrate start --root <issue-id> [--limit <n>] [--issue <issue-id> ...] [--json]`") {
 		t.Fatalf("prime output missing orchestrate start command example: %q", output)
 	}
+	if !strings.Contains(output, "`az orchestrate group --root <issue-id> --nested <nested-root-id> --issue <child-id> ... [--json]`") {
+		t.Fatalf("prime output missing orchestrate group command example: %q", output)
+	}
 	if !strings.Contains(output, "`az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\" [--json]`") {
 		t.Fatalf("prime output missing orchestrate message command example: %q", output)
 	}
@@ -10689,7 +10692,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Launch child workers only from that orchestrator context: `az orchestrate start --root <root> ...`.") {
 		t.Fatalf("prime output missing parent start checklist step: %q", output)
 	}
-	if !strings.Contains(output, "Nested epic/root rule: if the user asks the current session to start another epic/root issue, start that epic's own orchestrator session with `az session start <nested-root>`") {
+	if !strings.Contains(output, "Nested epic/root rule: if the user asks the current session to start another epic/root issue, use `az orchestrate group --root <root> --nested <nested-root> --issue <child> ...` when child ownership needs to move under that nested root, then start that epic's own orchestrator session with `az session start <nested-root>`") {
 		t.Fatalf("prime output missing nested root session ownership guidance: %q", output)
 	}
 	if !strings.Contains(output, "Do not launch the nested root's child workers from the current/root session unless the user explicitly asks to flatten orchestration.") {

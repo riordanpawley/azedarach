@@ -156,6 +156,7 @@ type TaskDeleteResult struct {
 // TaskGraphReadiness describes daemon-owned runnable-leaf policy for a root issue graph.
 type TaskGraphReadiness struct {
 	RootIssueID            string                        `json:"root_issue_id"`
+	Capacity               TaskCapacitySummary           `json:"capacity"`
 	Runnable               []string                      `json:"runnable"`
 	NestedRoots            []TaskNestedRoot              `json:"nested_roots,omitempty"`
 	Pending                []TaskPendingStart            `json:"pending,omitempty"`
@@ -167,15 +168,35 @@ type TaskGraphReadiness struct {
 	Blocked                map[string]string             `json:"blocked"`
 }
 
+type TaskCapacitySummary struct {
+	DirectRunnableCount        int `json:"direct_runnable_count"`
+	DirectActiveCount          int `json:"direct_active_count"`
+	NestedStartableCount       int `json:"nested_startable_count"`
+	NestedActiveCount          int `json:"nested_active_count"`
+	PendingStartsCount         int `json:"pending_starts_count"`
+	BlockedNestedRootsCount    int `json:"blocked_nested_roots_count"`
+	NotCountingCapacityCount   int `json:"not_counting_capacity_count"`
+	TotalCountingCapacityCount int `json:"total_counting_capacity_count"`
+}
+
 // TaskNestedRoot describes a nested orchestration root that must be started
 // from its own parent session instead of flattened into the current root.
 type TaskNestedRoot struct {
-	IssueID       string             `json:"issue_id"`
-	Status        string             `json:"status"`
-	Type          string             `json:"type"`
-	ChildCount    int                `json:"child_count"`
-	ActiveSession *TaskActiveSession `json:"active_session,omitempty"`
-	Advice        string             `json:"advice,omitempty"`
+	IssueID        string             `json:"issue_id"`
+	Status         string             `json:"status"`
+	IssueStatus    string             `json:"issue_status,omitempty"`
+	Type           string             `json:"type"`
+	ChildCount     int                `json:"child_count"`
+	ActiveSession  *TaskActiveSession `json:"active_session,omitempty"`
+	StartFailure   *TaskStartFailure  `json:"start_failure,omitempty"`
+	FallbackPolicy string             `json:"fallback_policy,omitempty"`
+	Advice         string             `json:"advice,omitempty"`
+}
+
+type TaskStartFailure struct {
+	OperationID    string `json:"operation_id,omitempty"`
+	OperationState string `json:"operation_state,omitempty"`
+	Message        string `json:"message,omitempty"`
 }
 
 // TaskPendingStart contains durable operation state for submitted session starts.

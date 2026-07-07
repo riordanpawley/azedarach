@@ -5128,6 +5128,12 @@ func TestTaskGraphReadinessStopsAtNestedRoots(t *testing.T) {
 	if len(result.NestedRoots) != 1 || result.NestedRoots[0].IssueID != nested.String() {
 		t.Fatalf("nested roots = %v, want %s", result.NestedRoots, nested.String())
 	}
+	if result.NestedRoots[0].Status != "startable" || result.NestedRoots[0].IssueStatus != string(domain.StatusOpen) {
+		t.Fatalf("nested root status = %+v, want startable with issue_status=open", result.NestedRoots[0])
+	}
+	if result.Capacity.DirectRunnableCount != 1 || result.Capacity.NestedStartableCount != 1 {
+		t.Fatalf("capacity = %+v, want direct runnable and nested startable counts", result.Capacity)
+	}
 	if slices.Contains(result.Runnable, grandchild.String()) {
 		t.Fatalf("runnable = %v, must not flatten nested root descendant %s", result.Runnable, grandchild.String())
 	}
@@ -5517,6 +5523,21 @@ func TestTaskCompletionAdviceIncludesDomainNextSteps(t *testing.T) {
 	}
 }
 
+func TestTaskGraphCapacitySummaryDedupesNestedStartProgress(t *testing.T) {
+	ready := taskGraphReadinessResult{
+		Active:               []string{"az-direct"},
+		SessionStartProgress: []taskGraphSessionStartProgress{{IssueID: "az-nested", OperationID: "op-1"}},
+		NestedRoots:          []taskGraphNestedRoot{{IssueID: "az-nested", Status: "active"}},
+	}
+	capacity := daemonTaskGraphCapacitySummary(ready)
+	if capacity.DirectActiveCount != 1 || capacity.PendingStartsCount != 1 || capacity.NestedActiveCount != 1 {
+		t.Fatalf("capacity counts = %+v, want direct/pending/nested each reported separately", capacity)
+	}
+	if capacity.TotalCountingCapacityCount != 2 {
+		t.Fatalf("total counting capacity = %d, want unique issue count 2", capacity.TotalCountingCapacityCount)
+	}
+}
+
 func TestTaskGraphReadinessSurfacesStaleCloseableChild(t *testing.T) {
 	root := naming.IssueID("az-root")
 	child := naming.IssueID("az-child")
@@ -5652,8 +5673,11 @@ func TestTaskGraphReadinessReportsNestedTrackerRootInsteadOfFlatteningDescendant
 		t.Fatalf("nested_roots = %+v, want one nested tracker", ready.NestedRoots)
 	}
 	nested := ready.NestedRoots[0]
-	if nested.IssueID != trackerID || nested.Status != string(domain.StatusOpen) || nested.Type != string(domain.TypeTask) || nested.ChildCount != 1 {
+	if nested.IssueID != trackerID || nested.Status != "startable" || nested.IssueStatus != string(domain.StatusOpen) || nested.Type != string(domain.TypeTask) || nested.ChildCount != 1 {
 		t.Fatalf("nested root = %+v, want tracker %s", nested, trackerID)
+	}
+	if ready.Capacity.DirectRunnableCount != 1 || ready.Capacity.NestedStartableCount != 1 || ready.Capacity.TotalCountingCapacityCount != 0 {
+		t.Fatalf("capacity = %+v, want direct runnable and nested startable outside active capacity", ready.Capacity)
 	}
 	if !strings.Contains(nested.Advice, "az session start "+trackerID) {
 		t.Fatalf("nested advice = %q, want session start guidance", nested.Advice)
@@ -5662,6 +5686,104 @@ func TestTaskGraphReadinessReportsNestedTrackerRootInsteadOfFlatteningDescendant
 		if observation.IssueID == grandchildID {
 			t.Fatalf("worker observations included nested child under outer root: %+v", ready.WorkerObservations)
 		}
+	}
+}
+
+func TestTaskGraphReadinessMarksFailedNestedRootStartAsBlockedCapacity(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	projectID := "proj-nested-start-failed"
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Outer root",
+		Type:   domain.TypeEpic,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	nestedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Nested root",
+		Type:     domain.TypeEpic,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create nested root: %v", err)
+	}
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Nested child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		ParentID: &nestedID,
+	}); err != nil {
+		t.Fatalf("create nested child: %v", err)
+	}
+
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, nextRevision: sequentialRevision()})
+	if _, err := runtime.manager.Submit(ctx, daemonops.SubmitRequest{
+		ID:           "op-nested-start",
+		ProjectID:    projectID,
+		IssueID:      nestedID,
+		Kind:         daemonhandlers.CommandSessionStart,
+		ResourceKeys: []string{"issue:" + projectID + ":" + nestedID},
+	}, func(context.Context) ([]byte, error) {
+		return nil, errors.New("worktree setup failed")
+	}); err != nil {
+		t.Fatalf("submit failed session start operation: %v", err)
+	}
+	_ = waitForRuntimeState(t, runtime, "op-nested-start", daemonops.StateFailed)
+
+	d := &Daemon{
+		cfg:              Config{RepoDir: repoDir, Logger: logger},
+		operationRuntime: runtime,
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskGraphReadiness error: %v", err)
+	}
+	if len(ready.NestedRoots) != 1 {
+		t.Fatalf("nested_roots = %+v, want one nested root", ready.NestedRoots)
+	}
+	nested := ready.NestedRoots[0]
+	if nested.Status != "blocked_start_failed" || nested.StartFailure == nil || nested.StartFailure.OperationID != "op-nested-start" {
+		t.Fatalf("nested root = %+v, want blocked_start_failed with operation", nested)
+	}
+	if nested.FallbackPolicy != "keep_children_blocked_or_create_replacement_direct_work" {
+		t.Fatalf("fallback policy = %q", nested.FallbackPolicy)
+	}
+	if !strings.Contains(nested.Advice, "retry `az session start "+nestedID+"`") || !strings.Contains(nested.Advice, "replacement direct work") {
+		t.Fatalf("advice = %q, want retry and replacement guidance", nested.Advice)
+	}
+	if ready.Capacity.BlockedNestedRootsCount != 1 || ready.Capacity.NestedStartableCount != 0 {
+		t.Fatalf("capacity = %+v, want blocked nested root count", ready.Capacity)
+	}
+
+	if _, err := runtime.manager.Submit(ctx, daemonops.SubmitRequest{
+		ID:           "op-nested-start-retry",
+		ProjectID:    projectID,
+		IssueID:      nestedID,
+		Kind:         daemonhandlers.CommandSessionStart,
+		ResourceKeys: []string{"issue:" + projectID + ":" + nestedID},
+	}, func(context.Context) ([]byte, error) {
+		return []byte(`{"ok":true}`), nil
+	}); err != nil {
+		t.Fatalf("submit successful retry session start operation: %v", err)
+	}
+	_ = waitForRuntimeState(t, runtime, "op-nested-start-retry", daemonops.StateDone)
+	ready, err = d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskGraphReadiness after retry error: %v", err)
+	}
+	nested = ready.NestedRoots[0]
+	if nested.Status != "startable" || nested.StartFailure != nil {
+		t.Fatalf("nested root after successful retry = %+v, want startable without stale failure", nested)
 	}
 }
 

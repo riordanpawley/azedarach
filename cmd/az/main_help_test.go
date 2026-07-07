@@ -41,6 +41,7 @@ func TestMaybePrintCommandHelpUsesSpecificUsage(t *testing.T) {
 		{name: "mail leaf", args: []string{"mail", "watch", "--help"}, want: mailWatchUsage},
 		{name: "observe leaf", args: []string{"observe", "--help"}, want: observeUsage},
 		{name: "orchestrate leaf", args: []string{"orchestrate", "complete-check", "--help"}, want: orchestrateCompleteCheckUsage},
+		{name: "orchestrate group leaf", args: []string{"orchestrate", "group", "--help"}, want: orchestrateGroupUsage},
 		{name: "orchestrate observe leaf", args: []string{"orchestrate", "observe", "--help"}, want: orchestrateObserveUsage},
 		{name: "daemon leaf", args: []string{"daemon", "restart", "--help"}, want: "Usage: az daemon restart"},
 	}
@@ -223,6 +224,7 @@ func TestMaybePrintCommandHelpCoversRoutedCommandSurface(t *testing.T) {
 		{"orchestrate"},
 		{"orchestrate", "status"},
 		{"orchestrate", "start"},
+		{"orchestrate", "group"},
 		{"orchestrate", "watch"},
 		{"orchestrate", "observe"},
 		{"orchestrate", "prompt"},
