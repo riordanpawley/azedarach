@@ -11084,6 +11084,50 @@ func TestLoadIssuesAfterIssueReconcileCmd_ReconcilesSelectedIssuesBeforeSnapshot
 	}
 }
 
+func TestLoadIssuesAfterIssueReconcileCmdSkipsBroadIssueReconcile(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandBoardFetch:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 19, "azedarach-bte", []domain.Task{
+						{ID: "az-parent", Title: "Parent", Status: domain.StatusOpen},
+					}),
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+
+	issueIDs := make([]string, 0, issueScopedRuntimeReconcileLimit+1)
+	for i := 0; i <= issueScopedRuntimeReconcileLimit; i++ {
+		issueIDs = append(issueIDs, fmt.Sprintf("az-%d", i+1))
+	}
+	m := newDaemonTestModel(transport)
+	m.issueRefreshSeq = 8
+	cmd := m.loadIssuesAfterIssueReconcileCmd(issueIDs)
+	if cmd == nil {
+		t.Fatal("expected command")
+	}
+	msg := cmd()
+	loaded, ok := msg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+	}
+	if loaded.refreshSeq != 8 {
+		t.Fatalf("refresh seq = %d, want 8", loaded.refreshSeq)
+	}
+	if got := transport.requests; len(got) != 1 || got[0] != daemonclient.CommandBoardFetch {
+		t.Fatalf("commands = %v, want only board.fetch", got)
+	}
+}
+
 func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 	t.Run("bulk status delete archive", func(t *testing.T) {
 		transport := &recordingDaemonTransport{

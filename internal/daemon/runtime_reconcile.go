@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	defaultRuntimeReconcileInterval = 30 * time.Second
-	defaultRuntimeReconcileTimeout  = 5 * time.Second
-	scopedRuntimeReconcileTimeout   = 20 * time.Second
+	defaultRuntimeReconcileInterval  = 30 * time.Second
+	defaultRuntimeReconcileTimeout   = 5 * time.Second
+	scopedRuntimeReconcileTimeout    = 20 * time.Second
+	runtimeReconcileIssueRepairLimit = 64
 )
 
 type runtimeReconciler interface {
@@ -124,14 +125,20 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 		}
 	}
 	if d.tmux != nil && d.sessionStore != nil && d.sessionRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil {
-		for _, issueID := range issueIDs {
-			sessionResult, err := d.reconcileTmuxAndDaemonSessions(ctx, result.ProjectID.String(), issueID)
-			if err != nil {
-				errs = append(errs, fmt.Errorf("reconcile issue session %s: %w", issueID, err))
-				continue
+		if len(issueIDs) > runtimeReconcileIssueRepairLimit {
+			if err := d.refreshIssueSessionRuntimeState(ctx, result.ProjectID.String(), issueIDs); err != nil {
+				errs = append(errs, fmt.Errorf("refresh issue session runtime state: %w", err))
 			}
-			result.RecreatedTmuxSessions += sessionResult.RecreatedTmuxSessions
-			result.AlignedDaemonSessions += sessionResult.AlignedDaemonSessions
+		} else {
+			for _, issueID := range issueIDs {
+				sessionResult, err := d.reconcileTmuxAndDaemonSessions(ctx, result.ProjectID.String(), issueID)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("reconcile issue session %s: %w", issueID, err))
+					continue
+				}
+				result.RecreatedTmuxSessions += sessionResult.RecreatedTmuxSessions
+				result.AlignedDaemonSessions += sessionResult.AlignedDaemonSessions
+			}
 		}
 	}
 	if err := d.materializeSessionActivityEvidence(ctx, protocol.Metadata{ProjectID: result.ProjectID}, result.ProjectID.String(), issueIDs); err != nil {

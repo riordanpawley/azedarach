@@ -56,13 +56,14 @@ const (
 )
 
 const (
-	diffPreviewMaxCharacters       = 200
-	eventLogCapacity               = 256
-	notificationHistoryCapacity    = 100
-	eventSummaryMaxRunes           = 140
-	taskCloseMutationTimeout       = 10 * time.Minute
-	worktreeCleanupMutationTimeout = 2 * time.Minute
-	orphanedWorktreeCleanupTimeout = 2 * time.Minute
+	diffPreviewMaxCharacters         = 200
+	eventLogCapacity                 = 256
+	notificationHistoryCapacity      = 100
+	eventSummaryMaxRunes             = 140
+	taskCloseMutationTimeout         = 10 * time.Minute
+	worktreeCleanupMutationTimeout   = 2 * time.Minute
+	orphanedWorktreeCleanupTimeout   = 2 * time.Minute
+	issueScopedRuntimeReconcileLimit = 64
 )
 
 var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
@@ -1854,6 +1855,9 @@ func (m Model) loadIssuesAfterIssueReconcileCmd(issueIDs []string) tea.Cmd {
 		}
 		seen[normalized] = struct{}{}
 		selected = append(selected, normalized)
+	}
+	if len(selected) > issueScopedRuntimeReconcileLimit {
+		selected = nil
 	}
 	return func() tea.Msg {
 		if m.daemonClient == nil {

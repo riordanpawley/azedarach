@@ -3081,23 +3081,38 @@ func daemonTaskDeleteRuntimeBlockers(task domain.Task) []string {
 
 func (d *Daemon) handleTaskGraphReadiness(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
+	startedAt := time.Now()
 	var cmd struct {
 		TaskID string `json:"task_id"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
+	evalStartedAt := time.Now()
 	result, err := d.taskGraphReadiness(ctx, projectID, cmd.TaskID)
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.evaluate", evalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "root_issue_id", cmd.TaskID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
+	marshalStartedAt := time.Now()
 	body, err := json.Marshal(result)
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.marshal_result", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "root_issue_id", cmd.TaskID, "runnable_count", len(result.Runnable), "active_count", len(result.Active))
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp := d.successResponse(req)
 	resp.Body = body
 	resp.Revision = d.currentRevision(projectID)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task graph readiness completed",
+			"project_id", projectID,
+			"root_issue_id", strings.TrimSpace(cmd.TaskID),
+			"runnable_count", len(result.Runnable),
+			"active_count", len(result.Active),
+			"nested_root_count", len(result.NestedRoots),
+			"elapsed_ms", time.Since(startedAt).Milliseconds(),
+		)
+	}
 	return resp, nil
 }
 
@@ -3595,19 +3610,26 @@ func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectI
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
 	}
+	loadStartedAt := time.Now()
 	tasks, err := issueClient.ListGraphReadinessWithRuntime(ctx, projectID, rootIssueID)
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.issue_store_list_graph_readiness_with_runtime", loadStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "task_count", len(tasks))
 	if err != nil {
 		return nil, err
 	}
 	contextTaskIDs := taskIDsFromTasks(tasks)
 	canRefreshSessionRuntime := d != nil && d.tmux != nil && d.sessionRuntimeStateStoreIfConfigured(projectID) != nil
 	if canRefreshSessionRuntime && len(contextTaskIDs) > 0 {
+		refreshStartedAt := time.Now()
 		if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil {
+			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.scoped_session_runtime_refresh", refreshStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs), "error", err)
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("task graph scoped session runtime refresh failed", "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs), "error", err)
 			}
 		} else {
+			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.scoped_session_runtime_refresh", refreshStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs))
+			reloadStartedAt := time.Now()
 			tasks, err = issueClient.ListGraphReadinessWithRuntime(ctx, projectID, rootIssueID)
+			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.issue_store_reload_after_runtime_refresh", reloadStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "task_count", len(tasks))
 			if err != nil {
 				return nil, err
 			}
@@ -3620,7 +3642,10 @@ func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectI
 			"task_count", len(tasks),
 		)
 	}
-	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
+	enrichStartedAt := time.Now()
+	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.enrich_session_state", enrichStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "task_count", len(tasks))
+	return tasks, nil
 }
 
 func (result *taskGraphReadinessResult) removeRunnableSessionStarts(progressByIssue map[string]taskGraphSessionStartProgress) {

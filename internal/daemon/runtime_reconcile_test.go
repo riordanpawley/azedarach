@@ -1284,6 +1284,61 @@ func TestEnsureFreshRuntimeForIssueMutationUsesIssueScopedReconcile(t *testing.T
 	}
 }
 
+func TestRuntimeReconcileIssuesUsesBatchedSessionRefreshForLargeIssueSets(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-large-issue-reconcile"
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	issueIDs := make([]string, 0, runtimeReconcileIssueRepairLimit+1)
+	for i := 0; i <= runtimeReconcileIssueRepairLimit; i++ {
+		issueID := fmt.Sprintf("az-%d", i+1)
+		issueIDs = append(issueIDs, issueID)
+		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			ID:            naming.CanonicalSessionID(projectID, issueID),
+			IssueID:       issueID,
+			State:         daemonstate.SessionStateRunning,
+			ObservedState: daemonstate.SessionStateRunning,
+			UpdatedAt:     time.Now().UTC().Add(-time.Minute),
+		}); err != nil {
+			t.Fatalf("seed session projection %s: %v", issueID, err)
+		}
+	}
+
+	tmuxRunner := &testTmuxRunner{
+		sessions:    map[string]bool{},
+		panes:       map[string][]string{},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	if _, err := newRuntimeReconcileService(d).ReconcileIssues(ctx, projectID, issueIDs); err != nil {
+		t.Fatalf("ReconcileIssues returned error: %v", err)
+	}
+
+	if got := tmuxRunner.listSessionCallCount(); got != 1 {
+		t.Fatalf("tmux list-sessions calls = %d, want one batched liveness refresh", got)
+	}
+	row, found, err := runtimeStateStore.GetSessionState(ctx, projectID, naming.CanonicalSessionID(projectID, issueIDs[0]))
+	if err != nil {
+		t.Fatalf("get refreshed session projection: %v", err)
+	}
+	if !found {
+		t.Fatal("refreshed session projection not found")
+	}
+	if row.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("observed state = %s, want %s", row.ObservedState, daemonstate.SessionStateStopped)
+	}
+}
+
 func TestRefreshRuntimeForIssueMutationAsyncReturnsBeforeReconcileCompletes(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
