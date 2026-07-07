@@ -870,6 +870,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare session init marker: %v%s", markerErr, cleanupNote)), nil
 		}
 	}
+	postLaunchPrompt := ""
 	if cmd.StartWork {
 		d.startSessionAsyncInitCommands(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path)
 		initialPrompt := strings.TrimSpace(cmd.Prompt)
@@ -880,7 +881,12 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			}
 			initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title, parentIssueID != "", parentIssueID)
 		}
-		launchCommand := d.buildSessionLaunchCommandWithInitReadyPath(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt, sessionInitMarker.RelativePath)
+		launchPrompt := initialPrompt
+		if d.sessionLaunchNeedsPostLaunchPrompt(cmd.ProjectID) {
+			launchPrompt = ""
+			postLaunchPrompt = initialPrompt
+		}
+		launchCommand := d.buildSessionLaunchCommandWithInitReadyPath(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, launchPrompt, sessionInitMarker.RelativePath)
 		if len(d.runtimeConfigForProject(cmd.ProjectID).SessionSyncInitCommands) > 0 {
 			reportSessionStartProgress(ctx, "init_commands", "launch sent; configured init commands likely running before agent hooks", 90)
 		} else {
@@ -917,6 +923,16 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if cmd.StartWork && sessionInitMarker.AbsolutePath != "" {
 		if err := d.waitForSessionInitReady(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, sessionInitMarker); err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+	}
+	if cmd.StartWork && strings.TrimSpace(postLaunchPrompt) != "" {
+		reportSessionStartProgress(ctx, "agent_prompt", "agent launched; delivering initial prompt", 95)
+		if err := waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		if err := d.tmux.PasteTextAndSubmit(ctx, cmd.SessionID, postLaunchPrompt); err != nil {
+			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
 		}
 	}
 	if updateErr := issueClient.Update(ctx, cmd.IssueID, domain.StatusInProgress); updateErr != nil && d.cfg.Logger != nil {
@@ -1716,11 +1732,25 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 	if prompt == "" {
 		prompt = buildConflictResolutionPrompt(issueIDString, conflictFiles)
 	}
-	launchCommand := d.buildSessionLaunchCommand(projectID, issueIDString, canonicalSessionID, body.Yolo, body.ImagePaths, prompt)
-	if err := d.tmux.PasteTextAndSubmit(ctx, sessionName+":"+sessionConflictWindowName, launchCommand); err != nil {
+	launchPrompt := prompt
+	postLaunchPrompt := ""
+	if d.sessionLaunchNeedsPostLaunchPrompt(projectID) {
+		launchPrompt = ""
+		postLaunchPrompt = prompt
+	}
+	targetPane := sessionName + ":" + sessionConflictWindowName
+	launchCommand := d.buildSessionLaunchCommand(projectID, issueIDString, canonicalSessionID, body.Yolo, body.ImagePaths, launchPrompt)
+	if err := d.tmux.PasteTextAndSubmit(ctx, targetPane, launchCommand); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-
+	if strings.TrimSpace(postLaunchPrompt) != "" {
+		if err := waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		if err := d.tmux.PasteTextAndSubmit(ctx, targetPane, postLaunchPrompt); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+	}
 	resp := d.successResponse(req)
 	out := protocol.SessionResolveConflictResponseBody{
 		ProjectID:     naming.ProjectID(projectID),
@@ -3607,6 +3637,10 @@ func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string,
 }
 
 func (d *Daemon) sessionRestartNeedsPostLaunchPrompt(projectID string) bool {
+	return d.sessionLaunchNeedsPostLaunchPrompt(projectID)
+}
+
+func (d *Daemon) sessionLaunchNeedsPostLaunchPrompt(projectID string) bool {
 	tool := strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
 	return strings.EqualFold(tool, "codex")
 }
@@ -4283,13 +4317,15 @@ func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo 
 		}
 	}
 	if initialPrompt != "" {
+		switch strings.ToLower(tool) {
+		case "codex":
+			return strings.Join(parts, " ")
+		}
 		promptAssignment := initialPromptShellAssignment(initialPrompt)
 		promptArg := `"$` + initialPromptShellVariable + `"`
 		switch strings.ToLower(tool) {
 		case "opencode":
 			parts = append(parts, "--prompt", promptArg)
-		case "codex":
-			parts = append(parts, "--", promptArg)
 		default:
 			parts = append(parts, promptArg)
 		}

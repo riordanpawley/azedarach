@@ -15,6 +15,11 @@ type CommandRunner interface {
 	Run(ctx context.Context, args ...string) (string, error)
 }
 
+// InputCommandRunner executes commands that need stdin payloads.
+type InputCommandRunner interface {
+	RunWithInput(ctx context.Context, input string, args ...string) (string, error)
+}
+
 // ExecRunner runs real tmux commands using os/exec
 type ExecRunner struct{}
 
@@ -32,6 +37,24 @@ func (r *ExecRunner) Run(ctx context.Context, args ...string) (string, error) {
 	}
 
 	cmd := exec.CommandContext(ctx, "tmux", args...)
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+// RunWithInput executes a tmux command with a 5-second timeout and stdin.
+func (r *ExecRunner) RunWithInput(ctx context.Context, input string, args ...string) (string, error) {
+	if refuseUnsafeTmuxCommandFromGoTest(args) {
+		return "", fmt.Errorf("refusing to run tmux command %q from go test; use a fake tmux runner or set AZEDARACH_ALLOW_REAL_TMUX_IN_TESTS=1", args[0])
+	}
+
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+	}
+
+	cmd := exec.CommandContext(ctx, "tmux", args...)
+	cmd.Stdin = strings.NewReader(input)
 	out, err := cmd.Output()
 	return string(out), err
 }
