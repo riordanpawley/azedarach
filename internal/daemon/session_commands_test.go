@@ -1066,6 +1066,22 @@ func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
 	}
 }
 
+func requireNewSessionLaunchCommand(t *testing.T, runner *sessionStartTmuxRunner, sessionID string) string {
+	t.Helper()
+	for _, command := range runner.commands {
+		if len(command) < 7 || command[0] != "new-session" {
+			continue
+		}
+		for i := 0; i+1 < len(command); i++ {
+			if command[i] == "-s" && command[i+1] == sessionID {
+				return command[len(command)-1]
+			}
+		}
+	}
+	t.Fatalf("new-session launch command for %q not found in commands: %+v", sessionID, runner.commands)
+	return ""
+}
+
 func (r *sessionStartTmuxRunner) RunWithInput(_ context.Context, input string, args ...string) (string, error) {
 	r.commands = append(r.commands, append([]string(nil), args...))
 	r.inputPayloads = append(r.inputPayloads, input)
@@ -1843,11 +1859,10 @@ func TestSessionStartReportsFailedStartCleanupFailures(t *testing.T) {
 			wantPrimary:       "export issue resource env",
 		},
 		{
-			name:              "launch failure",
-			startWork:         true,
-			sendKeysErr:       errors.New("launch failed"),
-			sendKeysErrOnCall: 3,
-			wantPrimary:       "launch failed",
+			name:          "launch failure",
+			startWork:     true,
+			newSessionErr: errors.New("launch failed"),
+			wantPrimary:   "launch failed",
 		},
 	}
 
@@ -2156,15 +2171,9 @@ func TestSessionStartWaitsForInitReadyMarkerBeforeCompleting(t *testing.T) {
 	if !strings.Contains(payload.Output, "Session init commands finished: 1 command(s)") {
 		t.Fatalf("output = %q, want init command completion line", payload.Output)
 	}
-	foundMarkerPath := false
-	for _, payload := range tmuxRunner.sendKeysPayloads {
-		if strings.Contains(payload, filepath.ToSlash(sessionInitReadyMarkerPath(issueID, sessionID))) {
-			foundMarkerPath = true
-			break
-		}
-	}
-	if !foundMarkerPath {
-		t.Fatalf("sendKeysPayloads = %+v, want init marker path", tmuxRunner.sendKeysPayloads)
+	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, sessionID)
+	if !strings.Contains(launchCommand, filepath.ToSlash(sessionInitReadyMarkerPath(issueID, sessionID))) {
+		t.Fatalf("launch command = %q, want init marker path", launchCommand)
 	}
 }
 
@@ -2357,19 +2366,10 @@ func TestSessionStartDefaultsAgentActivityToBusy(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("session start response not OK: %+v", resp)
 	}
-	if tmuxRunner.sendKeysCalls == 0 {
-		t.Fatal("send-keys calls = 0, want AI launch")
+	if tmuxRunner.sendKeysCalls != 0 {
+		t.Fatalf("send-keys calls = %d, want no typed launch command for agent startup", tmuxRunner.sendKeysCalls)
 	}
-	launchCommand := ""
-	for _, payload := range tmuxRunner.sendKeysPayloads {
-		if strings.Contains(payload, " codex") {
-			launchCommand = payload
-			break
-		}
-	}
-	if launchCommand == "" {
-		t.Fatalf("send keys payloads = %+v, want codex launch command", tmuxRunner.sendKeysPayloads)
-	}
+	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID))
 	if !strings.Contains(launchCommand, `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) {
 		t.Fatalf("launch command = %q, want codex launch", launchCommand)
 	}
@@ -2474,16 +2474,7 @@ func TestSessionStartLargeCodexPromptUsesPostLaunchPaste(t *testing.T) {
 		t.Fatalf("session start response not OK: %+v", resp)
 	}
 
-	launchCommand := ""
-	for _, payload := range tmuxRunner.sendKeysPayloads {
-		if strings.Contains(payload, " codex") {
-			launchCommand = payload
-			break
-		}
-	}
-	if launchCommand == "" {
-		t.Fatalf("send keys payloads = %+v, want codex launch command", tmuxRunner.sendKeysPayloads)
-	}
+	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID))
 	if strings.Contains(launchCommand, "large prompt line") || strings.Contains(launchCommand, initialPromptShellVariable) {
 		t.Fatalf("launch command contains large prompt payload or prompt variable")
 	}

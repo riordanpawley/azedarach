@@ -861,19 +861,6 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		)
 	}
 	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
-	reportSessionStartProgress(ctx, "tmux_launch", "creating tmux session", 70)
-	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
-		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
-	}
-	if err := d.exportSessionContextEnv(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
-		cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
-		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export session context env: %v%s", err, cleanupNote)), nil
-	}
-	if err := d.exportIssueResourceSessionEnv(ctx, cmd.ProjectID, resourceCtx); err != nil {
-		cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
-		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export issue resource env: %v%s", err, cleanupNote)), nil
-	}
 	sessionInitMarker := sessionInitReadyMarker{}
 	if cmd.StartWork {
 		var markerErr error
@@ -884,8 +871,9 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		}
 	}
 	postLaunchPrompt := ""
+	launchCommand := ""
+	initialPromptBytes := 0
 	if cmd.StartWork {
-		d.startSessionAsyncInitCommands(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path)
 		initialPrompt := strings.TrimSpace(cmd.Prompt)
 		if initialPrompt == "" {
 			parentIssueID := ""
@@ -894,30 +882,55 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			}
 			initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title, parentIssueID != "", parentIssueID)
 		}
+		initialPromptBytes = len(initialPrompt)
 		launchPrompt := initialPrompt
 		if d.sessionLaunchNeedsPostLaunchPrompt(cmd.ProjectID, initialPrompt) {
 			launchPrompt = ""
 			postLaunchPrompt = initialPrompt
 		}
-		launchCommand := d.buildSessionLaunchCommandWithInitReadyPath(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, launchPrompt, sessionInitMarker.RelativePath)
+		launchCommand = d.buildSessionLaunchCommandWithInitReadyPathAndEnv(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, launchPrompt, sessionInitMarker.RelativePath, sessionLaunchStartupExportCommands(d.runtimeConfigForProject(cmd.ProjectID), resourceCtx))
+	}
+	reportSessionStartProgress(ctx, "tmux_launch", "creating tmux session", 70)
+	if cmd.StartWork {
+		if err := d.tmux.NewSessionWithCommand(ctx, cmd.SessionID, worktree.Path, launchCommand); err != nil {
+			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
+		}
+		if err := d.setSessionContextEnv(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
+			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set session context env: %v%s", err, cleanupNote)), nil
+		}
+		if err := d.setIssueResourceSessionEnv(ctx, cmd.ProjectID, resourceCtx); err != nil {
+			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set issue resource env: %v%s", err, cleanupNote)), nil
+		}
+		d.startSessionAsyncInitCommands(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path)
 		if len(d.runtimeConfigForProject(cmd.ProjectID).SessionSyncInitCommands) > 0 {
 			reportSessionStartProgress(ctx, "init_commands", "launch sent; configured init commands likely running before agent hooks", 90)
 		} else {
 			reportSessionStartProgress(ctx, "agent_launch", "launch sent; waiting for agent activity", 90)
 		}
-		if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
-			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
-		}
 		if d.cfg.Logger != nil {
-			d.cfg.Logger.Info("daemon session start launch command sent",
+			d.cfg.Logger.Info("daemon session start launch command installed",
 				"project_id", cmd.ProjectID,
 				"issue_id", cmd.IssueID,
 				"session_id", cmd.SessionID,
-				"prompt_bytes", len(initialPrompt),
+				"prompt_bytes", initialPromptBytes,
 			)
 		}
 	} else {
+		if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
+			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
+		}
+		if err := d.exportSessionContextEnv(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
+			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export session context env: %v%s", err, cleanupNote)), nil
+		}
+		if err := d.exportIssueResourceSessionEnv(ctx, cmd.ProjectID, resourceCtx); err != nil {
+			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export issue resource env: %v%s", err, cleanupNote)), nil
+		}
 		reportSessionStartProgress(ctx, "tmux_launch", "tmux session created without agent launch", 90)
 	}
 	initialActivity, initialActivitySource := initialSessionStartActivity(cmd.StartWork)
@@ -3701,9 +3714,19 @@ func (d *Daemon) buildClaudeContinueCommand(projectID, issueID string, yolo bool
 }
 
 func (d *Daemon) buildSessionLaunchCommandWithInitReadyPath(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string) string {
+	return d.buildSessionLaunchCommandWithInitReadyPathAndEnv(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, initReadyPath, nil)
+}
+
+func (d *Daemon) buildSessionLaunchCommandWithInitReadyPathAndEnv(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string, startupEnvCommands []string) string {
 	projectCfg := d.runtimeConfigForProject(projectID)
 	toolCommand := d.buildCLIToolCommand(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt)
-	commands := make([]string, 0, len(projectCfg.SessionSyncInitCommands)+2)
+	commands := make([]string, 0, len(startupEnvCommands)+len(projectCfg.SessionSyncInitCommands)+3)
+	for _, envCommand := range startupEnvCommands {
+		trimmed := strings.TrimSpace(envCommand)
+		if trimmed != "" {
+			commands = append(commands, trimmed)
+		}
+	}
 	if trapCommand := sessionInitReadyTrapCommand(initReadyPath); trapCommand != "" {
 		commands = append(commands, trapCommand)
 	}
@@ -3916,6 +3939,14 @@ func sessionLaunchContextExportCommand(projectID, issueID, sessionID string) str
 	return "export " + strings.Join(assignments, " ")
 }
 
+func sessionLaunchStartupExportCommands(projectCfg daemonProjectRuntimeConfig, resourceCtx issueResourceLifecycleContext) []string {
+	assignments := issueResourceShellExports(projectCfg.IssueResources, resourceCtx)
+	if len(assignments) == 0 {
+		return nil
+	}
+	return []string{"export " + strings.Join(assignments, " ")}
+}
+
 func buildSessionAsyncInitCommands(asyncInitCommands []string, issueID, sessionID string) []string {
 	if len(asyncInitCommands) == 0 {
 		return nil
@@ -4090,24 +4121,48 @@ func (d *Daemon) exportIssueResourceSessionEnv(ctx context.Context, projectID st
 	if !issueResourcesConfigured(projectCfg.IssueResources) {
 		return nil
 	}
-	assignments := d.issueResourceShellExports(projectCfg.IssueResources, resourceCtx)
+	assignments := issueResourceShellExports(projectCfg.IssueResources, resourceCtx)
 	if len(assignments) == 0 {
 		return nil
 	}
 	return d.tmux.SendKeys(ctx, resourceCtx.SessionID, "export "+strings.Join(assignments, " "))
 }
 
+func (d *Daemon) setIssueResourceSessionEnv(ctx context.Context, projectID string, resourceCtx issueResourceLifecycleContext) error {
+	projectCfg := d.runtimeConfigForProject(projectID)
+	if !issueResourcesConfigured(projectCfg.IssueResources) {
+		return nil
+	}
+	for _, pair := range d.issueResourceEnv(projectCfg.IssueResources, resourceCtx) {
+		key, value, ok := strings.Cut(pair, "=")
+		if !ok || !validShellEnvName(key) {
+			continue
+		}
+		if err := d.tmux.SetEnvironment(ctx, resourceCtx.SessionID, key, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (d *Daemon) exportSessionContextEnv(ctx context.Context, projectID, issueID, sessionID string) error {
+	if err := d.setSessionContextEnv(ctx, projectID, issueID, sessionID); err != nil {
+		return err
+	}
+	if exportCommand := sessionLaunchContextExportCommand(projectID, issueID, sessionID); exportCommand != "" {
+		if err := d.tmux.SendKeys(ctx, sessionID, exportCommand); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *Daemon) setSessionContextEnv(ctx context.Context, projectID, issueID, sessionID string) error {
 	for _, assignment := range sessionLaunchContextEnvAssignments(projectID, issueID, sessionID) {
 		if assignment.Value == "" {
 			continue
 		}
 		if err := d.tmux.SetEnvironment(ctx, sessionID, assignment.Key, assignment.Value); err != nil {
-			return err
-		}
-	}
-	if exportCommand := sessionLaunchContextExportCommand(projectID, issueID, sessionID); exportCommand != "" {
-		if err := d.tmux.SendKeys(ctx, sessionID, exportCommand); err != nil {
 			return err
 		}
 	}
@@ -4123,6 +4178,10 @@ func issueResourcesConfigured(cfg appconfig.IssueResourcesConfig) bool {
 }
 
 func (d *Daemon) issueResourceEnv(cfg appconfig.IssueResourcesConfig, resourceCtx issueResourceLifecycleContext) []string {
+	return issueResourceEnv(cfg, resourceCtx)
+}
+
+func issueResourceEnv(cfg appconfig.IssueResourcesConfig, resourceCtx issueResourceLifecycleContext) []string {
 	values := issueResourceContextValues(resourceCtx)
 	for key, value := range cfg.Env {
 		key = strings.TrimSpace(key)
@@ -4150,8 +4209,8 @@ func (d *Daemon) issueResourceEnv(cfg appconfig.IssueResourcesConfig, resourceCt
 	return env
 }
 
-func (d *Daemon) issueResourceShellExports(cfg appconfig.IssueResourcesConfig, resourceCtx issueResourceLifecycleContext) []string {
-	env := d.issueResourceEnv(cfg, resourceCtx)
+func issueResourceShellExports(cfg appconfig.IssueResourcesConfig, resourceCtx issueResourceLifecycleContext) []string {
+	env := issueResourceEnv(cfg, resourceCtx)
 	assignments := make([]string, 0, len(env))
 	for _, pair := range env {
 		key, value, ok := strings.Cut(pair, "=")
@@ -4160,6 +4219,7 @@ func (d *Daemon) issueResourceShellExports(cfg appconfig.IssueResourcesConfig, r
 		}
 		assignments = append(assignments, key+"="+singleQuoteForShell(value))
 	}
+	sort.Strings(assignments)
 	return assignments
 }
 
