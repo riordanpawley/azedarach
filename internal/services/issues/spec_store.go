@@ -773,6 +773,34 @@ func (c *Client) ListSpecAuditEntries(ctx context.Context, filter SpecAuditFilte
 		return nil, err
 	}
 
+	query, args := specAuditEntriesQuery(filter)
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, c.wrapError("list-spec-audit", "", err)
+	}
+	defer rows.Close()
+
+	entries := make([]SpecAuditEntry, 0, 16)
+	for rows.Next() {
+		var entry SpecAuditEntry
+		var beforeRaw string
+		var afterRaw string
+		var createdRaw string
+		if err := rows.Scan(&entry.ID, &entry.EntityType, &entry.EntityID, &entry.Operation, &entry.ActorSource, &beforeRaw, &afterRaw, &createdRaw); err != nil {
+			return nil, c.wrapError("list-spec-audit", "", err)
+		}
+		entry.BeforeJSON = json.RawMessage(beforeRaw)
+		entry.AfterJSON = json.RawMessage(afterRaw)
+		entry.CreatedAt = parseTimestamp(createdRaw)
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-spec-audit", "", err)
+	}
+	return entries, nil
+}
+
+func specAuditEntriesQuery(filter SpecAuditFilter) (string, []any) {
 	query := strings.Builder{}
 	query.WriteString(`
 		SELECT
@@ -812,30 +840,7 @@ func (c *Client) ListSpecAuditEntries(ctx context.Context, filter SpecAuditFilte
 		args = append(args, filter.Limit)
 	}
 
-	rows, err := db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, c.wrapError("list-spec-audit", "", err)
-	}
-	defer rows.Close()
-
-	entries := make([]SpecAuditEntry, 0, 16)
-	for rows.Next() {
-		var entry SpecAuditEntry
-		var beforeRaw string
-		var afterRaw string
-		var createdRaw string
-		if err := rows.Scan(&entry.ID, &entry.EntityType, &entry.EntityID, &entry.Operation, &entry.ActorSource, &beforeRaw, &afterRaw, &createdRaw); err != nil {
-			return nil, c.wrapError("list-spec-audit", "", err)
-		}
-		entry.BeforeJSON = json.RawMessage(beforeRaw)
-		entry.AfterJSON = json.RawMessage(afterRaw)
-		entry.CreatedAt = parseTimestamp(createdRaw)
-		entries = append(entries, entry)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, c.wrapError("list-spec-audit", "", err)
-	}
-	return entries, nil
+	return query.String(), args
 }
 
 func (c *Client) insertSpecAuditRow(ctx context.Context, execer sqlRequirementExecer, entityType, entityID, operation string, before, after any) error {
