@@ -24,6 +24,7 @@ import (
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
@@ -2401,6 +2402,107 @@ func TestSessionStartDefaultsAgentActivityToBusy(t *testing.T) {
 	}
 	if session.Activity != "busy" || session.ActivitySource != "session" {
 		t.Fatalf("session activity = %s/%s, want busy/session", session.Activity, session.ActivitySource)
+	}
+}
+
+func TestSessionStartInjectsIssueImageAttachments(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj-image-start"
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	t.Setenv("AZEDARACH_DB_PATH", dbPath)
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Use screenshot",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	sourceImage := filepath.Join(t.TempDir(), "screen shot.png")
+	if err := os.WriteFile(sourceImage, []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}, 0o644); err != nil {
+		t.Fatalf("write source image: %v", err)
+	}
+	attached, err := attachment.NewService(filepath.Join(repoDir, ".azedarach"), slog.Default()).Attach(ctx, issueID, sourceImage)
+	if err != nil {
+		t.Fatalf("attach image: %v", err)
+	}
+
+	branch := "testuser/" + issueID + "/use-screenshot"
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	worktreeRunner := &worktreeCreateRunner{
+		worktreePath: worktreePath,
+		branchName:   branch,
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-image-worker",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]any{
+			"project_id":  projectID,
+			"session_id":  issueID,
+			"image_paths": []string{attached.Path},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session start response not OK: %+v", resp)
+	}
+
+	worktreeImagePath := filepath.Join(worktreePath, filepath.FromSlash(attached.Relative))
+	if _, err := os.Stat(worktreeImagePath); err != nil {
+		t.Fatalf("expected worktree-local image attachment at %s: %v", worktreeImagePath, err)
+	}
+	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID))
+	if !strings.Contains(launchCommand, `--image "`+worktreeImagePath+`"`) {
+		t.Fatalf("launch command = %q, want worktree-local codex image argument %q", launchCommand, worktreeImagePath)
+	}
+	if strings.Contains(launchCommand, attached.Path) {
+		t.Fatalf("launch command = %q, must not use shared attachment store path %q", launchCommand, attached.Path)
+	}
+	if !strings.Contains(launchCommand, `codex --image "`) || !strings.Contains(launchCommand, `-- "$`+initialPromptShellVariable+`"`) {
+		t.Fatalf("launch command = %q, want image args before positional prompt", launchCommand)
 	}
 }
 

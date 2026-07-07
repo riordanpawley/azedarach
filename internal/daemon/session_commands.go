@@ -20,6 +20,7 @@ import (
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
@@ -847,6 +848,13 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue resource reconcile present failed for %s: %v%s%s", cmd.IssueID, err, cleanupNote, worktreeCleanupNote)), nil
 	}
+	imagePaths, imageErr := d.prepareSessionStartImagePaths(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, cmd.ImagePaths)
+	if imageErr != nil {
+		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare session images failed for %s: %v%s%s", cmd.IssueID, imageErr, cleanupNote, worktreeCleanupNote)), nil
+	}
+	cmd.ImagePaths = imagePaths
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session start worktree prepared",
 			"project_id", cmd.ProjectID,
@@ -858,6 +866,13 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"base_branch_ancestor_issue_id", baseBranchAncestorIssueID,
 			"reused_worktree", reusedWorktree,
 			"worktree_create_error", worktreeCreateError,
+		)
+		d.cfg.Logger.Info("daemon session start images prepared",
+			"project_id", cmd.ProjectID,
+			"issue_id", cmd.IssueID,
+			"session_id", cmd.SessionID,
+			"image_count", len(cmd.ImagePaths),
+			"image_paths", cmd.ImagePaths,
 		)
 	}
 	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
@@ -4026,6 +4041,118 @@ func (d *Daemon) issueResourceLifecycleContext(projectID, issueID, sessionID, wo
 		RootPath:     rootPath,
 		Branch:       strings.TrimSpace(branch),
 	}
+}
+
+func (d *Daemon) prepareSessionStartImagePaths(ctx context.Context, projectID, issueID, worktreePath string, explicitPaths []string) ([]string, error) {
+	explicitPaths = dedupeSessionStartImagePaths(explicitPaths)
+	rootPath := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
+	if rootPath == "" {
+		rootPath = strings.TrimSpace(d.resolveRepoDirForProject(projectID))
+	}
+	if rootPath == "" {
+		rootPath = strings.TrimSpace(d.cfg.RepoDir)
+	}
+	worktreePath = strings.TrimSpace(worktreePath)
+	if rootPath == "" || worktreePath == "" {
+		return explicitPaths, nil
+	}
+
+	service := attachment.NewUnifiedService(filepath.Join(rootPath, ".azedarach"), d.cfg.Logger)
+	attachments, err := service.List(ctx, issueID)
+	if err != nil {
+		return nil, fmt.Errorf("list issue attachments: %w", err)
+	}
+	materializedPaths := make([]string, 0, len(attachments))
+	issueImageSourcePaths := map[string]struct{}{}
+	for _, att := range attachments {
+		if !attachment.IsImage(att) {
+			continue
+		}
+		sourcePath := strings.TrimSpace(att.Path)
+		if sourcePath == "" {
+			sourcePath = filepath.Join(rootPath, filepath.FromSlash(strings.TrimSpace(att.Relative)))
+		}
+		if sourcePath != "" {
+			issueImageSourcePaths[filepath.Clean(sourcePath)] = struct{}{}
+		}
+		destPath, err := sessionAttachmentWorktreePath(worktreePath, att)
+		if err != nil {
+			return nil, err
+		}
+		if err := copySessionAttachmentToWorktree(sourcePath, destPath); err != nil {
+			return nil, err
+		}
+		materializedPaths = append(materializedPaths, destPath)
+	}
+
+	paths := make([]string, 0, len(explicitPaths)+len(materializedPaths))
+	for _, path := range explicitPaths {
+		if _, isIssueAttachmentSource := issueImageSourcePaths[filepath.Clean(path)]; isIssueAttachmentSource {
+			continue
+		}
+		paths = append(paths, path)
+	}
+	paths = append(paths, materializedPaths...)
+	return dedupeSessionStartImagePaths(paths), nil
+}
+
+func sessionAttachmentWorktreePath(worktreePath string, att attachment.Attachment) (string, error) {
+	rel := filepath.ToSlash(strings.TrimSpace(att.Relative))
+	if rel == "" {
+		rel = filepath.ToSlash(filepath.Join(".azedarach", "attachments", strings.TrimSpace(att.Filename)))
+	}
+	if rel == "" || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("invalid attachment relative path %q", att.Relative)
+	}
+	dest := filepath.Clean(filepath.Join(worktreePath, filepath.FromSlash(rel)))
+	root := filepath.Clean(worktreePath)
+	if dest != root && !strings.HasPrefix(dest, root+string(os.PathSeparator)) {
+		return "", fmt.Errorf("attachment path escapes worktree: %s", rel)
+	}
+	return dest, nil
+}
+
+func copySessionAttachmentToWorktree(sourcePath, destPath string) error {
+	sourcePath = strings.TrimSpace(sourcePath)
+	destPath = strings.TrimSpace(destPath)
+	if sourcePath == "" || destPath == "" {
+		return fmt.Errorf("missing attachment source or destination path")
+	}
+	if filepath.Clean(sourcePath) == filepath.Clean(destPath) {
+		if _, err := os.Stat(sourcePath); err != nil {
+			return fmt.Errorf("stat attachment %s: %w", sourcePath, err)
+		}
+		return nil
+	}
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return fmt.Errorf("read attachment %s: %w", sourcePath, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return fmt.Errorf("create worktree attachment dir: %w", err)
+	}
+	if err := os.WriteFile(destPath, data, 0o644); err != nil {
+		return fmt.Errorf("write worktree attachment %s: %w", destPath, err)
+	}
+	return nil
+}
+
+func dedupeSessionStartImagePaths(paths []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		trimmed := strings.TrimSpace(path)
+		if trimmed == "" {
+			continue
+		}
+		key := filepath.Clean(trimmed)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 func (d *Daemon) issueWorktreeContext(ctx context.Context, projectID, issueID string) (path, branch string) {
