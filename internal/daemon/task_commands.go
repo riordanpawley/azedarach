@@ -304,7 +304,7 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	startedAt := time.Now()
 	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, query, listReq.IncludeDependencies)
 	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		return d.errorResponse(req, projectIssueStoreHealthErrorCode(err), err.Error()), nil
 	}
 	payload := buildTaskListSnapshotPayload(projectID, result.Revision, result.LastCheckedAt, result.Freshness, result.Tasks, result.SummariesOnly)
 	marshalStartedAt := time.Now()
@@ -324,6 +324,9 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	resp := d.successResponse(req)
 	projectID := d.projectID(req.Meta)
+	if err, unhealthy := d.projectIssueStoreHealthError(projectID); unhealthy {
+		return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+	}
 	startedAt := time.Now()
 	cacheStartedAt := time.Now()
 	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok {
@@ -351,7 +354,7 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 	latencytrace.LogPhase(d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false)
 	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, "", false)
 	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		return d.errorResponse(req, projectIssueStoreHealthErrorCode(err), err.Error()), nil
 	}
 	payload := buildBoardSnapshotPayload(projectID, result.Revision, result.LastCheckedAt, result.Freshness, result.Tasks)
 	marshalStartedAt := time.Now()
@@ -423,6 +426,9 @@ func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestE
 }
 
 func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string, includeDependencies bool) (taskListSnapshotLoadResult, error) {
+	if err, unhealthy := d.projectIssueStoreHealthError(projectID); unhealthy {
+		return taskListSnapshotLoadResult{}, err
+	}
 	query = strings.TrimSpace(query)
 	refreshStartedAt := time.Now()
 	runtimeAt, runtimeRefreshed, refreshErr := d.refreshTaskListSessionRuntimeState(ctx, projectID)
@@ -456,8 +462,9 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 		tasks, err = issueClient.SearchWithRuntime(ctx, projectID, query)
 	}
 	if err != nil {
-		return taskListSnapshotLoadResult{}, err
+		return taskListSnapshotLoadResult{}, d.recordProjectIssueStoreFailure(projectID, err)
 	}
+	d.clearProjectIssueStoreHealth(projectID)
 	if query != "" {
 		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_search_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(tasks))
 	}

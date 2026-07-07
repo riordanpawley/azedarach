@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -123,6 +124,198 @@ func TestBuildTaskSnapshotExportBodyIsDeterministic(t *testing.T) {
 
 	if _, err := json.Marshal(body); err != nil {
 		t.Fatalf("marshal snapshot body: %v", err)
+	}
+}
+
+func TestProjectIssueStoreMigrationFailureSuppressesRepeatedPolls(t *testing.T) {
+	originalNow := timeNow
+	now := time.Date(2026, 7, 7, 6, 0, 0, 0, time.UTC)
+	timeNow = func() time.Time {
+		return now
+	}
+	t.Cleanup(func() {
+		timeNow = originalNow
+	})
+
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	seedIssueStoreMissingImplementationsJSON(t, dbPath)
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	issuesClient := issues.NewClientAtPath(dbPath, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	tmuxRunner := &testTmuxRunner{
+		sessions:    map[string]bool{},
+		panes:       map[string][]string{},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: repoDir,
+			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		tmux:   tmux.NewClient(tmuxRunner, slog.New(slog.NewTextHandler(io.Discard, nil))),
+		issues: issuesClient,
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		issueClientsByRoot: map[string]*issues.Client{
+			daemonStoreRootKey(repoDir): issuesClient,
+		},
+		projectIssueStoreHealthByProject: map[string]projectIssueStoreHealthState{},
+		revision:                         map[string]uint64{projectID: 1},
+	}
+
+	first, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-broken-task-list",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.list",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+	})
+	if err != nil {
+		t.Fatalf("handleTaskList returned error: %v", err)
+	}
+	if first.OK || first.Error == nil {
+		t.Fatalf("first task.list response OK = %v, error = %+v; want migration error", first.OK, first.Error)
+	}
+	if got := first.Error.Message; !strings.Contains(got, "apply migration 0016_issue_search_fts") || !strings.Contains(got, "implementations_json") {
+		t.Fatalf("first task.list error = %q, want migration/implementations_json context", got)
+	}
+
+	removeSQLiteFiles(t, dbPath)
+	board, err := d.handleBoardFetch(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-cached-board-fetch",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandBoardFetch,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+	})
+	if err != nil {
+		t.Fatalf("handleBoardFetch returned error: %v", err)
+	}
+	if board.OK || board.Error == nil {
+		t.Fatalf("cached board.fetch response OK = %v, error = %+v; want cached health error", board.OK, board.Error)
+	}
+	if got := board.Error.Message; !strings.Contains(got, "project issue store unhealthy (cached)") {
+		t.Fatalf("cached board.fetch error = %q, want cached health message", got)
+	}
+
+	second, err := d.handleSessionStatus(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-cached-session-status",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.status",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            marshalJSON(map[string]string{"project_id": projectID}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStatus returned error: %v", err)
+	}
+	if second.OK || second.Error == nil {
+		t.Fatalf("cached session.status response OK = %v, error = %+v; want cached health error", second.OK, second.Error)
+	}
+	if got := second.Error.Message; !strings.Contains(got, "project issue store unhealthy (cached)") || !strings.Contains(got, "suppressing repeated polling") {
+		t.Fatalf("cached session.status error = %q, want cached health message", got)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 0 {
+		t.Fatalf("tmux list-sessions calls after cached health = %d, want 0", got)
+	}
+
+	now = now.Add(projectIssueStoreHealthBackoff + time.Second)
+	third, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-retry-after-backoff",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.list",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+	})
+	if err != nil {
+		t.Fatalf("retry task.list returned error: %v", err)
+	}
+	if !third.OK {
+		t.Fatalf("retry task.list response error = %+v, want success after backoff expiry", third.Error)
+	}
+}
+
+func seedIssueStoreMissingImplementationsJSON(t *testing.T, dbPath string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		t.Fatalf("mkdir db dir: %v", err)
+	}
+	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s", filepath.ToSlash(dbPath)))
+	if err != nil {
+		t.Fatalf("open sqlite fixture: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`
+		CREATE TABLE schema_migrations (
+			id TEXT PRIMARY KEY,
+			applied_at TEXT NOT NULL
+		);
+		CREATE TABLE issues (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			description TEXT,
+			notes TEXT,
+			design TEXT,
+			acceptance TEXT,
+			assignee TEXT,
+			labels_json TEXT,
+			status TEXT NOT NULL,
+			priority INTEGER NOT NULL,
+			issue_type TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			deleted_at TEXT
+		);
+	`); err != nil {
+		t.Fatalf("create legacy issue store fixture: %v", err)
+	}
+	applied := []string{
+		"0001_bootstrap_tables",
+		"0002_dependency_foreign_keys",
+		"0003_issue_indexes",
+		"0004_spec_tables",
+		"0005_spec_audit_log",
+		"0006_external_issue_sync",
+		"0006_issue_external_refs",
+		"0007_external_issue_sync_payload",
+		"0008_decision_tables",
+		"0009_decision_audit_log",
+		"0010_decisions_refresh",
+		"0011_decisions_consequences",
+		"0012_blocked_status_to_open",
+		"0013_closed_runtime_invariants",
+		"0014_linear_sync_external_refs_backfill",
+		"0015_issue_attachments",
+	}
+	for _, id := range applied {
+		if _, err := db.Exec(`INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, id, "2026-07-07T00:00:00Z"); err != nil {
+			t.Fatalf("seed migration %s: %v", id, err)
+		}
+	}
+	if _, err := db.Exec(`
+		INSERT INTO issues (
+			id, title, description, notes, design, acceptance, assignee, labels_json,
+			status, priority, issue_type, created_at, updated_at
+		)
+		VALUES ('cvn-fixture', 'Broken migration fixture', '', '', '', '', '', '[]', 'open', 1, 'bug', '2026-07-07T00:00:00Z', '2026-07-07T00:00:00Z')
+	`); err != nil {
+		t.Fatalf("seed legacy issue row: %v", err)
+	}
+}
+
+func removeSQLiteFiles(t *testing.T, dbPath string) {
+	t.Helper()
+	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("remove %s: %v", path, err)
+		}
 	}
 }
 
