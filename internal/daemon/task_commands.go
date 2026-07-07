@@ -179,6 +179,7 @@ type taskDeletePreflightResult struct {
 type taskGraphReadinessResult struct {
 	RootIssueID            string                          `json:"root_issue_id"`
 	Runnable               []string                        `json:"runnable"`
+	NestedRoots            []string                        `json:"nested_roots,omitempty"`
 	Pending                []taskGraphPendingStart         `json:"pending,omitempty"`
 	Active                 []string                        `json:"active,omitempty"`
 	ActiveSessions         []taskGraphActiveSession        `json:"active_sessions,omitempty"`
@@ -3517,24 +3518,34 @@ func daemonTaskGraphIndexes(rootIssueID string, tasks []domain.Task) (naming.Iss
 }
 
 func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) (taskGraphReadinessResult, error) {
-	leafIDs := daemonTaskGraphLeafIDs(rootID, byID, children)
-	leaves := make([]string, 0, len(leafIDs))
-	for _, id := range leafIDs {
-		task := byID[id]
-		if task.Type == domain.TypeEpic {
-			continue
-		}
-		leaves = append(leaves, id.String())
-	}
-	sort.Strings(leaves)
+	candidates, nestedRoots := daemonTaskGraphRunnableCandidates(rootID, byID, children)
+	sort.Strings(candidates)
+	sort.Strings(nestedRoots)
 	result := taskGraphReadinessResult{
 		RootIssueID: rootID.String(),
-		Runnable:    make([]string, 0, len(leaves)),
+		Runnable:    make([]string, 0, len(candidates)),
+		NestedRoots: make([]string, 0, len(nestedRoots)),
 		Active:      make([]string, 0),
 		Blocked:     make(map[string]string),
 	}
 	result.StaleCloseableChildren = daemonTaskGraphStaleCloseableCandidates(rootID, byID, children)
-	for _, idRaw := range leaves {
+	for _, idRaw := range nestedRoots {
+		id, parseErr := naming.ParseIssueID(idRaw)
+		if parseErr != nil {
+			continue
+		}
+		task := byID[id]
+		if task.Status == domain.StatusDone {
+			continue
+		}
+		blockers := daemonTaskGraphUnresolvedBlockers(task, byID)
+		if len(blockers) > 0 {
+			result.Blocked[idRaw] = "waiting on " + strings.Join(blockers, ",")
+			continue
+		}
+		result.NestedRoots = append(result.NestedRoots, idRaw)
+	}
+	for _, idRaw := range candidates {
 		id, parseErr := naming.ParseIssueID(idRaw)
 		if parseErr != nil {
 			continue
@@ -3558,6 +3569,30 @@ func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.
 		result.Runnable = append(result.Runnable, idRaw)
 	}
 	return result, nil
+}
+
+func daemonTaskGraphRunnableCandidates(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) ([]string, []string) {
+	directChildren := children[rootID]
+	if len(directChildren) == 0 {
+		if task := byID[rootID]; !task.ID.IsZero() && task.Type != domain.TypeEpic {
+			return []string{rootID.String()}, nil
+		}
+		return nil, nil
+	}
+	runnable := make([]string, 0, len(directChildren))
+	nestedRoots := make([]string, 0)
+	for _, id := range directChildren {
+		task := byID[id]
+		if task.ID.IsZero() {
+			continue
+		}
+		if task.Type == domain.TypeEpic || len(children[id]) > 0 {
+			nestedRoots = append(nestedRoots, id.String())
+			continue
+		}
+		runnable = append(runnable, id.String())
+	}
+	return runnable, nestedRoots
 }
 
 func daemonTaskGraphStaleCloseableCandidates(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) []taskStaleCloseableCandidate {
@@ -3621,7 +3656,15 @@ func (d *Daemon) daemonTaskGraphWorkerObservations(
 	children map[naming.IssueID][]naming.IssueID,
 	ready taskGraphReadinessResult,
 ) []domain.WorkerObservation {
-	leafIDs := daemonTaskGraphLeafIDs(rootID, byID, children)
+	candidateIDs, _ := daemonTaskGraphRunnableCandidates(rootID, byID, children)
+	leafIDs := make([]naming.IssueID, 0, len(candidateIDs))
+	for _, idRaw := range candidateIDs {
+		id, err := naming.ParseIssueID(idRaw)
+		if err != nil {
+			continue
+		}
+		leafIDs = append(leafIDs, id)
+	}
 	if len(leafIDs) == 0 {
 		return nil
 	}

@@ -217,6 +217,7 @@ func TestTaskGraphReadinessDecodesWorkerObservations(t *testing.T) {
 			return responseWithJSON(t, req, TaskGraphReadiness{
 				RootIssueID: "az-root",
 				Runnable:    []string{"az-1"},
+				NestedRoots: []string{"az-nested"},
 				Blocked:     map[string]string{},
 				WorkerObservations: []domain.WorkerObservation{{
 					IssueID: "az-1",
@@ -241,6 +242,9 @@ func TestTaskGraphReadinessDecodesWorkerObservations(t *testing.T) {
 	}
 	if len(ready.WorkerObservations) != 1 {
 		t.Fatalf("worker observations = %+v", ready.WorkerObservations)
+	}
+	if len(ready.NestedRoots) != 1 || ready.NestedRoots[0] != "az-nested" {
+		t.Fatalf("nested roots = %+v", ready.NestedRoots)
 	}
 	observation := ready.WorkerObservations[0]
 	if observation.IssueID != "az-1" || observation.State != domain.WorkerObservationRunnable || observation.SourceTruthPolicy.SessionRuntime != "hybrid" {

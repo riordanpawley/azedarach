@@ -4734,6 +4734,53 @@ func TestTaskGraphReadinessReportsMissingDependencyAndActiveSession(t *testing.T
 	}
 }
 
+func TestTaskGraphReadinessStopsAtNestedRoots(t *testing.T) {
+	root := naming.IssueID("az-root")
+	nested := naming.IssueID("az-nested")
+	grandchild := naming.IssueID("az-grandchild")
+	direct := naming.IssueID("az-direct")
+	nestedParent := root
+	grandchildParent := nested
+	directParent := root
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
+		{ID: nested, Type: domain.TypeEpic, Status: domain.StatusOpen, ParentID: &nestedParent},
+		{ID: grandchild, Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &grandchildParent},
+		{ID: direct, Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &directParent},
+	}
+
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), tasks)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphIndexes error: %v", err)
+	}
+	result, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphReadinessFromIndexes error: %v", err)
+	}
+	if len(result.Runnable) != 1 || result.Runnable[0] != direct.String() {
+		t.Fatalf("runnable = %v, want direct child only %s", result.Runnable, direct.String())
+	}
+	if len(result.NestedRoots) != 1 || result.NestedRoots[0] != nested.String() {
+		t.Fatalf("nested roots = %v, want %s", result.NestedRoots, nested.String())
+	}
+	if slices.Contains(result.Runnable, grandchild.String()) {
+		t.Fatalf("runnable = %v, must not flatten nested root descendant %s", result.Runnable, grandchild.String())
+	}
+	observations := (&Daemon{}).daemonTaskGraphWorkerObservations(context.Background(), "proj", rootID, byID, children, result)
+	observedDirect := false
+	for _, observation := range observations {
+		if observation.IssueID == direct.String() {
+			observedDirect = true
+		}
+		if observation.IssueID == grandchild.String() {
+			t.Fatalf("worker observations included nested root descendant: %+v", observations)
+		}
+	}
+	if !observedDirect {
+		t.Fatalf("worker observations = %+v, want direct child %s", observations, direct.String())
+	}
+}
+
 func TestTaskGraphReadinessLoadsRootScopedTasksWithLargeUnrelatedProject(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-root-scoped-readiness"

@@ -303,6 +303,50 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	}
 }
 
+func TestOrchestrateStatusCommandShowsNestedRoots(t *testing.T) {
+	root := naming.IssueID("az-1")
+	nested := naming.IssueID("az-2")
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{},
+						NestedRoots: []string{nested.String()},
+						Blocked:     map[string]string{},
+					}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees":  []map[string]string{},
+					}), nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateStatusCommand(deps, OrchestrateStatusOptions{RootIssueID: root.String()})
+	})
+	for _, want := range []string{
+		"Nested roots:",
+		"- az-2: start its orchestrator session with `az session start az-2`",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestOrchestrateStatusCommandIncludesWorkerObservations(t *testing.T) {
 	root := naming.IssueID("az-1")
 	review := naming.IssueID("az-2")
@@ -1525,6 +1569,62 @@ func TestOrchestrateStartReportsSubmittedOperationWithoutWaiting(t *testing.T) {
 	launch := result.Launched[0]
 	if launch.IssueID != child.String() || launch.OperationID != "op-1" || launch.OperationState != string(protocol.OperationStateQueued) {
 		t.Fatalf("launch = %+v", launch)
+	}
+}
+
+func TestOrchestrateStartSkipsNestedRootWithSessionStartAdvice(t *testing.T) {
+	root := naming.IssueID("az-1")
+	nested := naming.IssueID("az-2")
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{},
+						NestedRoots: []string{nested.String()},
+						Blocked:     map[string]string{},
+					}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": root.String(), "path": "/repo-az-1", "branch": "user/az-1/root"},
+						},
+					}), nil
+				case protocol.CommandOperationSubmit:
+					t.Fatal("orchestrate start must not submit session starts for nested roots from the parent root")
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	result, err := orchestrateStart(deps, OrchestrateStartOptions{RootIssueID: root.String(), IssueIDs: []string{nested.String()}, Limit: 4})
+	if err != nil {
+		t.Fatalf("orchestrateStart error = %v", err)
+	}
+	if len(result.Started) != 0 || len(result.Launched) != 0 {
+		t.Fatalf("started=%+v launched=%+v, want no nested root launch", result.Started, result.Launched)
+	}
+	if !slices.Equal(result.NestedRoots, []string{nested.String()}) {
+		t.Fatalf("nested roots = %+v, want %s", result.NestedRoots, nested.String())
+	}
+	if got := result.Skipped[nested.String()]; !strings.Contains(got, "nested-root-start-orchestrator-session") || !strings.Contains(got, "az session start "+nested.String()) {
+		t.Fatalf("skipped[%s] = %q, want session start advice", nested.String(), got)
+	}
+
+	defaultResult, err := orchestrateStart(deps, OrchestrateStartOptions{RootIssueID: root.String(), Limit: 4})
+	if err != nil {
+		t.Fatalf("orchestrateStart default error = %v", err)
+	}
+	if len(defaultResult.Started) != 0 || !slices.Equal(defaultResult.NestedRoots, []string{nested.String()}) {
+		t.Fatalf("default started=%+v nested=%+v, want nested root advice without launches", defaultResult.Started, defaultResult.NestedRoots)
 	}
 }
 

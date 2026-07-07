@@ -153,6 +153,7 @@ type TaskDeleteResult struct {
 type TaskGraphReadiness struct {
 	RootIssueID            string                        `json:"root_issue_id"`
 	Runnable               []string                      `json:"runnable"`
+	NestedRoots            []string                      `json:"nested_roots,omitempty"`
 	Pending                []TaskPendingStart            `json:"pending,omitempty"`
 	Active                 []string                      `json:"active,omitempty"`
 	ActiveSessions         []TaskActiveSession           `json:"active_sessions,omitempty"`
