@@ -111,6 +111,76 @@ func TestTaskContextRiskReportsRepeatedSiblingFileCluster(t *testing.T) {
 	}
 }
 
+func TestTaskContextRiskCompactResponseBoundsReturnedEvidence(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-context-risk-compact"
+	repoDir := t.TempDir()
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	targetID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Target child", Type: domain.TypeTask, Status: domain.StatusInReview, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	now := time.Now().UTC()
+	sharedFile := "internal/daemon/task_commands.go"
+	appendContextRiskEvidence(t, repoDir, parentID, targetID, 1, now, []string{sharedFile}, "none")
+	for i := 0; i < 6; i++ {
+		childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+			Title:    fmt.Sprintf("Prior child %d", i),
+			Type:     domain.TypeTask,
+			Status:   domain.StatusDone,
+			ParentID: &parentID,
+		})
+		if err != nil {
+			t.Fatalf("create prior child %d: %v", i, err)
+		}
+		appendContextRiskEvidence(t, repoDir, parentID, childID, int64(i+2), now.Add(time.Duration(i)*time.Minute), []string{sharedFile}, "same failure repeated")
+	}
+
+	d := newContextRiskTestDaemon(projectID, repoDir, issuesClient)
+	body, err := json.Marshal(map[string]any{
+		"task_id":  targetID,
+		"repo_dir": repoDir,
+		"since":    now.Add(-14 * 24 * time.Hour),
+		"compact":  true,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	resp, err := d.handleTaskContextRisk(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-context-risk-compact",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.context_risk",
+		Body:            body,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+	})
+	if err != nil {
+		t.Fatalf("handleTaskContextRisk error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("response = %+v, want OK", resp)
+	}
+	var packet domain.IssueContextRiskPacket
+	if err := json.Unmarshal(resp.Body, &packet); err != nil {
+		t.Fatalf("unmarshal packet: %v", err)
+	}
+	if len(packet.Evidence) != 3 || !packet.EvidenceTruncated {
+		t.Fatalf("evidence len=%d truncated=%t, want compact truncated packet", len(packet.Evidence), packet.EvidenceTruncated)
+	}
+	if len(packet.RelatedIssueIDs) != 6 {
+		t.Fatalf("related ids = %+v, want all six overlap issue ids", packet.RelatedIssueIDs)
+	}
+	if len(packet.Evidence) == 0 || packet.Evidence[0].IssueID != targetID {
+		t.Fatalf("compact evidence = %+v, want target evidence preserved first", packet.Evidence)
+	}
+}
+
 func TestTaskContextRiskReadsTopLevelRelatedMailboxEvidence(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-context-risk-top-level"

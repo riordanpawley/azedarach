@@ -20,6 +20,7 @@ func (d *Daemon) handleTaskContextRisk(ctx context.Context, req protocol.Request
 		TaskID  string    `json:"task_id"`
 		RepoDir string    `json:"repo_dir,omitempty"`
 		Since   time.Time `json:"since,omitempty"`
+		Compact bool      `json:"compact,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -27,6 +28,9 @@ func (d *Daemon) handleTaskContextRisk(ctx context.Context, req protocol.Request
 	result, err := d.taskContextRisk(ctx, projectID, cmd.TaskID, cmd.RepoDir, cmd.Since)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if cmd.Compact {
+		result = domain.CompactIssueContextRisk(result)
 	}
 	body, err := json.Marshal(result)
 	if err != nil {
@@ -46,6 +50,7 @@ func (d *Daemon) taskContextRiskForCloseout(ctx context.Context, projectID, issu
 		}
 		return nil
 	}
+	packet = domain.CompactIssueContextRisk(packet)
 	return &packet
 }
 
@@ -56,6 +61,9 @@ func (d *Daemon) taskContextRisk(ctx context.Context, projectID, issueID, repoDi
 	}
 	contextTasks, err := issueClient.GetWithDependencyContextRuntime(ctx, projectID, strings.TrimSpace(issueID))
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return degradedIssueContextRiskPacket(issueID, "", since, ctxErr), nil
+		}
 		return domain.IssueContextRiskPacket{}, fmt.Errorf("load issue dependency context: %w", err)
 	}
 	target, ok := findDaemonTaskByID(contextTasks, issueID)
@@ -75,6 +83,9 @@ func (d *Daemon) taskContextRisk(ctx context.Context, projectID, issueID, repoDi
 	if parentID != "" {
 		subtree, err := issueClient.ListParentChildSubtreeWithRuntime(ctx, projectID, parentID)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return degradedIssueContextRiskPacket(target.ID.String(), parentID, since, ctxErr), nil
+			}
 			return domain.IssueContextRiskPacket{}, fmt.Errorf("load sibling context for %s: %w", parentID, err)
 		}
 		for _, task := range subtree {
@@ -97,22 +108,56 @@ func (d *Daemon) taskContextRisk(ctx context.Context, projectID, issueID, repoDi
 		repoDir = strings.TrimSpace(d.cfg.RepoDir)
 	}
 	targetEvidence := d.issueContextRiskEvidence(ctx, issueClient, target, "target", repoDir, since, targetMailboxParentID)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return d.buildIssueContextRiskPacket(targetEvidence, parentID, nil, since, ctxErr), nil
+	}
 	candidateEvidence := make([]domain.IssueContextRiskEvidence, 0, len(candidates))
 	for _, candidate := range candidates {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return d.buildIssueContextRiskPacket(targetEvidence, parentID, candidateEvidence, since, ctxErr), nil
+		}
 		relationship := "related"
 		if candidate.ParentID != nil && parentID != "" && strings.EqualFold(strings.TrimSpace(candidate.ParentID.String()), parentID) {
 			relationship = "sibling"
 		}
 		evidence := d.issueContextRiskEvidence(ctx, issueClient, candidate, relationship, repoDir, since, issueContextRiskMailboxParent(candidate, parentID))
 		candidateEvidence = append(candidateEvidence, evidence)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return d.buildIssueContextRiskPacket(targetEvidence, parentID, candidateEvidence, since, ctxErr), nil
+		}
 	}
-	return domain.BuildIssueContextRisk(domain.IssueContextRiskInput{
+	return d.buildIssueContextRiskPacket(targetEvidence, parentID, candidateEvidence, since, nil), nil
+}
+
+func (d *Daemon) buildIssueContextRiskPacket(targetEvidence domain.IssueContextRiskEvidence, parentID string, candidateEvidence []domain.IssueContextRiskEvidence, since time.Time, ctxErr error) domain.IssueContextRiskPacket {
+	packet := domain.BuildIssueContextRisk(domain.IssueContextRiskInput{
 		Target:        targetEvidence,
 		ParentIssueID: parentID,
 		Candidates:    candidateEvidence,
 		Since:         since,
 		GeneratedAt:   time.Now().UTC(),
-	}), nil
+	})
+	if ctxErr != nil {
+		packet.Degraded = true
+		packet.Timeout = ctxErr == context.DeadlineExceeded
+		packet.DegradedReason = ctxErr.Error()
+	}
+	return packet
+}
+
+func degradedIssueContextRiskPacket(issueID, parentID string, since time.Time, ctxErr error) domain.IssueContextRiskPacket {
+	packet := domain.BuildIssueContextRisk(domain.IssueContextRiskInput{
+		Target: domain.IssueContextRiskEvidence{
+			IssueID: strings.TrimSpace(issueID),
+		},
+		ParentIssueID: strings.TrimSpace(parentID),
+		Since:         since,
+		GeneratedAt:   time.Now().UTC(),
+	})
+	packet.Degraded = true
+	packet.Timeout = ctxErr == context.DeadlineExceeded
+	packet.DegradedReason = ctxErr.Error()
+	return packet
 }
 
 func issueContextRiskRelated(target, candidate domain.Task) bool {

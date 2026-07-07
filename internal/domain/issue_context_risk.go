@@ -49,10 +49,15 @@ type IssueContextRiskPacket struct {
 	GeneratedAt       time.Time                  `json:"generated_at,omitempty,omitzero"`
 	CandidateCount    int                        `json:"candidate_count"`
 	OverlapIssueCount int                        `json:"overlap_issue_count"`
+	RelatedIssueIDs   []string                   `json:"related_issue_ids,omitempty"`
 	Clusters          []IssueContextRiskCluster  `json:"clusters,omitempty"`
 	Signals           []string                   `json:"signals,omitempty"`
 	CloseoutPrompts   []string                   `json:"closeout_prompts,omitempty"`
 	HandoffFields     IssueContextHandoffFields  `json:"handoff_fields"`
+	Degraded          bool                       `json:"degraded,omitempty"`
+	Timeout           bool                       `json:"timeout,omitempty"`
+	DegradedReason    string                     `json:"degraded_reason,omitempty"`
+	EvidenceTruncated bool                       `json:"evidence_truncated,omitempty"`
 	Evidence          []IssueContextRiskEvidence `json:"evidence,omitempty"`
 }
 
@@ -66,6 +71,31 @@ type IssueContextHandoffFields struct {
 	StructuredFields []string `json:"structured_fields"`
 	Present          []string `json:"present,omitempty"`
 	Missing          []string `json:"missing,omitempty"`
+}
+
+type IssueContextRiskSummary struct {
+	IssueID           string                    `json:"issue_id"`
+	ParentIssueID     string                    `json:"parent_issue_id,omitempty"`
+	Level             IssueContextRiskLevel     `json:"level"`
+	Confidence        int                       `json:"confidence"`
+	Since             time.Time                 `json:"since,omitempty,omitzero"`
+	GeneratedAt       time.Time                 `json:"generated_at,omitempty,omitzero"`
+	CandidateCount    int                       `json:"candidate_count"`
+	OverlapIssueCount int                       `json:"overlap_issue_count"`
+	RelatedIssueIDs   []string                  `json:"related_issue_ids,omitempty"`
+	Signals           []string                  `json:"signals,omitempty"`
+	CloseoutPrompts   []string                  `json:"closeout_prompts,omitempty"`
+	HandoffFields     IssueContextHandoffFields `json:"handoff_fields"`
+	EvidenceSnippets  []IssueContextRiskSnippet `json:"evidence_snippets,omitempty"`
+	Degraded          bool                      `json:"degraded,omitempty"`
+	Timeout           bool                      `json:"timeout,omitempty"`
+	DegradedReason    string                    `json:"degraded_reason,omitempty"`
+}
+
+type IssueContextRiskSnippet struct {
+	IssueID      string   `json:"issue_id"`
+	Relationship string   `json:"relationship,omitempty"`
+	Signals      []string `json:"signals,omitempty"`
 }
 
 func BuildIssueContextRisk(input IssueContextRiskInput) IssueContextRiskPacket {
@@ -99,6 +129,7 @@ func BuildIssueContextRisk(input IssueContextRiskInput) IssueContextRiskPacket {
 	clusters = append(clusters, issueContextRiskClusters("test", target.Tests, candidates)...)
 	packet.Clusters = clusters
 	packet.OverlapIssueCount = countClusterIssues(clusters)
+	packet.RelatedIssueIDs = issueContextRiskRelatedIssueIDs(clusters)
 
 	if len(clusters) == 0 {
 		if len(target.Files)+len(target.Symbols)+len(target.Tests) == 0 {
@@ -116,6 +147,37 @@ func BuildIssueContextRisk(input IssueContextRiskInput) IssueContextRiskPacket {
 	packet.Level = issueContextRiskLevelForScore(score)
 	packet.Signals = issueContextRiskSignals(clusters, packet.Evidence)
 	packet.CloseoutPrompts = issueContextRiskPrompts(packet.Level)
+	return packet
+}
+
+func SummarizeIssueContextRisk(packet IssueContextRiskPacket) IssueContextRiskSummary {
+	return IssueContextRiskSummary{
+		IssueID:           packet.IssueID,
+		ParentIssueID:     packet.ParentIssueID,
+		Level:             packet.Level,
+		Confidence:        packet.Confidence,
+		Since:             packet.Since,
+		GeneratedAt:       packet.GeneratedAt,
+		CandidateCount:    packet.CandidateCount,
+		OverlapIssueCount: packet.OverlapIssueCount,
+		RelatedIssueIDs:   limitStrings(packet.RelatedIssueIDs, 25),
+		Signals:           limitStrings(packet.Signals, 5),
+		CloseoutPrompts:   append([]string(nil), packet.CloseoutPrompts...),
+		HandoffFields:     packet.HandoffFields,
+		EvidenceSnippets:  issueContextRiskSnippets(packet.Evidence, 3),
+		Degraded:          packet.Degraded,
+		Timeout:           packet.Timeout,
+		DegradedReason:    strings.TrimSpace(packet.DegradedReason),
+	}
+}
+
+func CompactIssueContextRisk(packet IssueContextRiskPacket) IssueContextRiskPacket {
+	packet.Signals = limitStrings(packet.Signals, 5)
+	packet.RelatedIssueIDs = limitStrings(packet.RelatedIssueIDs, 25)
+	packet.Clusters = compactIssueContextRiskClusters(packet.Clusters, 3)
+	compactEvidence := compactIssueContextRiskEvidence(packet.Evidence, 3, packet.IssueID)
+	packet.EvidenceTruncated = packet.EvidenceTruncated || len(compactEvidence) < len(packet.Evidence)
+	packet.Evidence = compactEvidence
 	return packet
 }
 
@@ -329,6 +391,103 @@ func issueContextRiskEvidenceForClusters(target IssueContextRiskEvidence, candid
 	return out
 }
 
+func issueContextRiskRelatedIssueIDs(clusters []IssueContextRiskCluster) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, cluster := range clusters {
+		for _, issueID := range cluster.Issues {
+			if _, ok := seen[issueID]; ok {
+				continue
+			}
+			seen[issueID] = struct{}{}
+			out = append(out, issueID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func compactIssueContextRiskClusters(clusters []IssueContextRiskCluster, limit int) []IssueContextRiskCluster {
+	if limit <= 0 || len(clusters) <= limit {
+		return append([]IssueContextRiskCluster(nil), clusters...)
+	}
+	return append([]IssueContextRiskCluster(nil), clusters[:limit]...)
+}
+
+func compactIssueContextRiskEvidence(evidence []IssueContextRiskEvidence, limit int, targetIssueID string) []IssueContextRiskEvidence {
+	if limit <= 0 || len(evidence) <= limit {
+		return append([]IssueContextRiskEvidence(nil), evidence...)
+	}
+	out := make([]IssueContextRiskEvidence, 0, limit)
+	for _, item := range evidence {
+		if naming.IssueIDsEqual(item.IssueID, targetIssueID) {
+			out = append(out, item)
+			break
+		}
+	}
+	for _, item := range evidence {
+		if len(out) >= limit {
+			break
+		}
+		if naming.IssueIDsEqual(item.IssueID, targetIssueID) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func issueContextRiskSnippets(evidence []IssueContextRiskEvidence, limit int) []IssueContextRiskSnippet {
+	if limit <= 0 {
+		return nil
+	}
+	snippets := make([]IssueContextRiskSnippet, 0, min(limit, len(evidence)))
+	for _, item := range evidence {
+		if len(snippets) >= limit {
+			break
+		}
+		signals := issueContextRiskEvidenceSignals(item)
+		if len(signals) == 0 {
+			continue
+		}
+		snippets = append(snippets, IssueContextRiskSnippet{
+			IssueID:      item.IssueID,
+			Relationship: item.Relationship,
+			Signals:      signals,
+		})
+	}
+	return snippets
+}
+
+func issueContextRiskEvidenceSignals(evidence IssueContextRiskEvidence) []string {
+	var signals []string
+	if len(evidence.Files) > 0 {
+		signals = append(signals, fmt.Sprintf("files: %s", strings.Join(limitStrings(evidence.Files, 3), ", ")))
+	}
+	if len(evidence.Symbols) > 0 {
+		signals = append(signals, fmt.Sprintf("symbols: %s", strings.Join(limitStrings(evidence.Symbols, 3), ", ")))
+	}
+	if len(evidence.Tests) > 0 {
+		signals = append(signals, fmt.Sprintf("tests: %s", strings.Join(limitStrings(evidence.Tests, 3), ", ")))
+	}
+	if evidence.RootCause != "" {
+		signals = append(signals, "root cause recorded")
+	}
+	if evidence.Invariant != "" {
+		signals = append(signals, "invariant recorded")
+	}
+	if evidence.Validation != "" {
+		signals = append(signals, "validation recorded")
+	}
+	if len(evidence.RiskNotes) > 0 {
+		signals = append(signals, fmt.Sprintf("risk: %s", strings.Join(limitStrings(evidence.RiskNotes, 2), "; ")))
+	}
+	if len(evidence.EvidenceKinds) > 0 {
+		signals = append(signals, fmt.Sprintf("evidence: %s", strings.Join(limitStrings(evidence.EvidenceKinds, 3), ", ")))
+	}
+	return limitStrings(signals, 4)
+}
+
 func countClusterIssues(clusters []IssueContextRiskCluster) int {
 	seen := map[string]struct{}{}
 	for _, cluster := range clusters {
@@ -337,6 +496,16 @@ func countClusterIssues(clusters []IssueContextRiskCluster) int {
 		}
 	}
 	return len(seen)
+}
+
+func limitStrings(values []string, limit int) []string {
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	if len(values) <= limit {
+		return append([]string(nil), values...)
+	}
+	return append([]string(nil), values[:limit]...)
 }
 
 func normalizeEvidenceValues(values []string) []string {

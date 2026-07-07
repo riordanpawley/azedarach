@@ -1,8 +1,10 @@
 # Issue Context Risk
 
-`az issue context-risk <issue-id>` emits a compact read-only packet for repeated local failure risk before worker closeout.
+`az issue context-risk <issue-id>` emits a compact read-only summary for repeated local failure risk before worker closeout.
 
 The command is advisory by default. It is meant to make narrow repeated failures visible without gating every child under a large root.
+
+Use `--summary` for the bounded closeout-oriented payload explicitly. Summary output is also the default and includes level, confidence, top signals, closeout prompts, handoff fields, related issue IDs/counts, at most three evidence snippets, and degraded/timeout metadata when a scan cannot complete. Use `--full` only when you need the raw evidence packet.
 
 ## Evidence Model
 
@@ -45,7 +47,7 @@ These fields can live in `worker_evidence.v1` where supported or in issue observ
 
 ## Orchestrator Use
 
-Run `az issue context-risk <worker-issue> --since 14d` when a worker is approaching `in_review` or when a repeated local failure is suspected.
+Run `az issue context-risk <worker-issue> --since 14d --summary --json` when a worker is approaching `in_review` or when a repeated local failure is suspected. Add `--full` only for deliberate evidence expansion.
 
 Use the result as local context:
 
@@ -63,6 +65,8 @@ Context risk is part of closeout, not only a manual inspection command.
 - `az orchestrate integrate --issue <issue-id>` includes context risk in integration guidance and withholds close commands when high risk lacks closeout evidence.
 - `az orchestrate integrate --issue <issue-id> --apply` fails before merge/close when high risk lacks closeout evidence.
 - `az issue close <issue-id>` evaluates context risk before daemon-owned integration and cleanup.
+
+The closeout paths use the same daemon-owned risk calculation as standalone `context-risk`; they request compact packets so JSON closeout responses do not carry unbounded related evidence.
 
 High risk does not always block. It blocks only when the target issue has no target-side closeout evidence: `root_cause`, `invariant`, `regression_validation`, or a structured risk note. This keeps the gate focused on repeated local failures with no diagnosis, while allowing workers that already supplied structured evidence to proceed.
 
