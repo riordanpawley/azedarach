@@ -3341,6 +3341,94 @@ func TestOperationCommandsUseDaemonClient(t *testing.T) {
 	}
 }
 
+func TestSessionDiagnoseCommandPrintsBoundedDiagnostics(t *testing.T) {
+	repoDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Session.LogDir = filepath.Join(t.TempDir(), "logs")
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "az-1", Title: "Diagnose session", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+	deps := &Dependencies{
+		Config: cfg,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGetMany:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case commandSessionStatus:
+					return responseWithJSON(req, commandOutputBody{Output: "no active session found for issue: az-1\n"}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": "proj",
+						"worktrees": []map[string]string{{
+							"path":     filepath.Join(repoDir, "../repo-az-1"),
+							"branch":   "user/az-1/diagnose-session",
+							"issue_id": "az-1",
+						}},
+					}), nil
+				case protocol.CommandOperationList:
+					return responseWithJSON(req, protocol.OperationListResponseBody{
+						ProjectID: "proj",
+						Operations: []protocol.OperationRecord{{
+							OperationID: "op-start",
+							ProjectID:   "proj",
+							Kind:        commandSessionStart,
+							IssueID:     "az-1",
+							State:       protocol.OperationStateFailed,
+							Progress: &protocol.OperationProgress{
+								Phase:   "tmux_launch",
+								Message: "creating tmux session",
+								Percent: 70,
+							},
+							Error: &protocol.OperationError{
+								Code:    protocol.ErrorCodeInternal,
+								Message: "session start failed during tmux_launch\ncause=tmux new-session [az-1]: exit status 1",
+							},
+						}},
+					}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   repoDir,
+	}
+
+	output := captureStdout(t, func() error {
+		return SessionDiagnoseCommand(deps, "az-1")
+	})
+
+	for _, needle := range []string{
+		"Session diagnose: az-1",
+		"Session status:",
+		"no active session found for issue: az-1",
+		"Worktree:",
+		"user/az-1/diagnose-session",
+		"Recent session.start operations:",
+		"op-start failed phase=tmux_launch",
+		"session start failed during tmux_launch cause=tmux new-session",
+		"AI hook status:",
+		"Logs:",
+		filepath.Join(cfg.Session.LogDir, logging.DaemonLogFileName),
+	} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("output = %q, missing %q", output, needle)
+		}
+	}
+}
+
 func TestLogCommandPrintsSourcePrefixedPrettyLines(t *testing.T) {
 	repoDir := t.TempDir()
 	cfg := config.DefaultConfig()

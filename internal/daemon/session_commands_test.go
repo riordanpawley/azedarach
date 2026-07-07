@@ -3059,6 +3059,97 @@ func TestSessionStartDoesNotPersistTransitionWhenTmuxCreateFails(t *testing.T) {
 	}
 }
 
+func TestSessionStartTmuxCreateFailureIncludesDiagnostics(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Diagnose tmux create failure",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	worktreeRunner := &worktreeCreateRunner{
+		worktreePath: worktreePath,
+		branchName:   "testuser/" + issueID + "/diagnose-tmux-create",
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.newSessionErr = errors.New("server exited unexpectedly: /tmp/tmux-501/default")
+	store := daemonstate.NewStore()
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-tmux-diagnostics",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": issueID,
+		}),
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, req)
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("expected failed response with diagnostics, got %+v", resp)
+	}
+	message := resp.Error.Message
+	sessionID := naming.CanonicalSessionIDForIssue(projectID, naming.IssueID(issueID)).String()
+	if len(message) > 2000 {
+		t.Fatalf("error message length = %d, want bounded diagnostic under 2000 bytes: %q", len(message), message)
+	}
+	for _, want := range []string{
+		"session start failed during tmux_launch",
+		"issue_id=" + issueID,
+		"session_id=" + sessionID,
+		"cwd=" + worktreePath,
+		"tmux new-session -d -s " + sessionID + " -c " + worktreePath,
+		"[truncated, bytes=",
+		"server exited unexpectedly",
+		"Worktree exists but tmux session is not active; retry with `az session start " + issueID + "`",
+		"Diagnostics: az session diagnose " + issueID,
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error message = %q, missing %q", message, want)
+		}
+	}
+}
+
 func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -8074,6 +8165,12 @@ func TestSessionStartInitFailureCleansUpNewWorktree(t *testing.T) {
 	message := resp.Error.Message
 	if !strings.Contains(message, "worktree init failed") {
 		t.Fatalf("error message = %q, want init failure context", message)
+	}
+	if !strings.Contains(message, "definitely-missing-command-xyz") || !strings.Contains(message, "no such file or directory") {
+		t.Fatalf("error message = %q, want failing init command output", message)
+	}
+	if strings.Contains(message, "tmux new-session") {
+		t.Fatalf("error message = %q, init failure should not be reported as tmux launch failure", message)
 	}
 	if !strings.Contains(message, "cleaned up worktree") {
 		t.Fatalf("error message = %q, want cleanup context", message)
