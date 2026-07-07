@@ -47,6 +47,7 @@ var orderedMigrations = []migration{
 	{id: "0021_agent_learning_relations", path: "migrations/0021_agent_learning_relations.sql"},
 	{id: "0021_agent_learning_target_state", path: "migrations/0021_agent_learning_target_state.sql"},
 	{id: "0025_agent_learning_privacy", path: "migrations/0025_agent_learning_privacy.sql", apply: applyAgentLearningPrivacyMigration},
+	{id: "0026_decision_search_fts", path: "migrations/0026_decision_search_fts.sql", apply: applyDecisionSearchFTSMigration},
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
@@ -352,6 +353,18 @@ func (c *Client) applyMigration(ctx context.Context, db *sql.DB, id, sqlText str
 	}
 
 	return nil
+}
+
+func applyDecisionSearchFTSMigration(ctx context.Context, db *sql.DB, id string) error {
+	var c Client
+	if err := c.ensureDecisionSchema(db); err != nil {
+		return fmt.Errorf("repair decision schema before migration %s: %w", id, err)
+	}
+	sqlText, err := loadMigrationSQL("migrations/0026_decision_search_fts.sql")
+	if err != nil {
+		return fmt.Errorf("load migration %s: %w", id, err)
+	}
+	return c.applyMigration(ctx, db, id, sqlText)
 }
 
 func applyAgentLearningPrivacyMigration(ctx context.Context, db *sql.DB, id string) error {
