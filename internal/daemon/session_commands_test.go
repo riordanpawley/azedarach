@@ -7063,6 +7063,15 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "az orchestrate complete-check --root <issue-id>") {
 		t.Fatalf("prompt = %q, want complete-check instruction", prompt)
 	}
+	if !strings.Contains(prompt, "Start this root's direct runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`") {
+		t.Fatalf("prompt = %q, want direct leaf start guidance", prompt)
+	}
+	if !strings.Contains(prompt, "Nested epic/root rule: if a runnable child is itself an epic/root that should self-orchestrate, start that child's own orchestrator session with `az session start <child-root>`") {
+		t.Fatalf("prompt = %q, want nested root session guidance", prompt)
+	}
+	if !strings.Contains(prompt, "do not launch the child root's descendants from this session unless the user explicitly asks to flatten orchestration") {
+		t.Fatalf("prompt = %q, want no-flattening guidance", prompt)
+	}
 	if !strings.Contains(prompt, "az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"") {
 		t.Fatalf("prompt = %q, want active worker message instruction", prompt)
 	}
@@ -7101,6 +7110,9 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "close accepted worker issues with `az issue close --id <issue-id>`") {
 		t.Fatalf("prompt = %q, want issue close completion guidance", prompt)
+	}
+	if !strings.Contains(prompt, "Keep orchestration centralized inside each root session; delegate explicit nested epic/root issues to their own orchestrator sessions rather than flattening their children into this session.") {
+		t.Fatalf("prompt = %q, want per-root centralization guidance", prompt)
 	}
 }
 

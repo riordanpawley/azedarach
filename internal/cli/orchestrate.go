@@ -110,6 +110,7 @@ var (
 type orchestrateStatusResult struct {
 	RootIssueID            string                               `json:"root_issue_id"`
 	Runnable               []string                             `json:"runnable"`
+	NestedRoots            []string                             `json:"nested_roots,omitempty"`
 	Pending                []orchestratePendingStart            `json:"pending,omitempty"`
 	Active                 []string                             `json:"active,omitempty"`
 	ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
@@ -157,6 +158,7 @@ type orchestrateStartResult struct {
 	RootIssueID string                    `json:"root_issue_id"`
 	Limit       int                       `json:"limit"`
 	Requested   []string                  `json:"requested"`
+	NestedRoots []string                  `json:"nested_roots,omitempty"`
 	Started     []string                  `json:"started"`
 	Launched    []orchestrateStartLaunch  `json:"launched,omitempty"`
 	Pending     []orchestrateStartPending `json:"pending,omitempty"`
@@ -197,6 +199,7 @@ type orchestrateWatchFrame struct {
 	SinceSeq               int64                                `json:"since_seq"`
 	NextSince              int64                                `json:"next_since"`
 	Runnable               []string                             `json:"runnable"`
+	NestedRoots            []string                             `json:"nested_roots,omitempty"`
 	Pending                []orchestratePendingStart            `json:"pending,omitempty"`
 	Active                 []string                             `json:"active,omitempty"`
 	ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
@@ -561,6 +564,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 	result := orchestrateStatusResult{
 		RootIssueID:            ready.RootIssueID,
 		Runnable:               ready.Runnable,
+		NestedRoots:            ready.NestedRoots,
 		Pending:                orchestratePendingStartsFromDaemon(ready.Pending),
 		Active:                 ready.Active,
 		ActiveSessions:         orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
@@ -595,7 +599,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		}
 	}
 	if len(result.Blocked) > 0 {
-		fmt.Println("Blocked leaves:")
+		fmt.Println("Blocked leaves/roots:")
 		ids := make([]string, 0, len(result.Blocked))
 		for id := range result.Blocked {
 			ids = append(ids, id)
@@ -604,6 +608,12 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		for _, id := range ids {
 			reason := result.Blocked[id]
 			fmt.Printf("- %s: %s\n", id, reason)
+		}
+	}
+	if len(result.NestedRoots) > 0 {
+		fmt.Println("Nested roots:")
+		for _, id := range result.NestedRoots {
+			fmt.Printf("- %s: start its orchestrator session with `az session start %s`\n", id, id)
 		}
 	}
 	if len(result.ActiveSessions) > 0 {
@@ -738,6 +748,10 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	for _, id := range ready.Runnable {
 		runnableSet[id] = struct{}{}
 	}
+	nestedRootSet := make(map[string]struct{}, len(ready.NestedRoots))
+	for _, id := range ready.NestedRoots {
+		nestedRootSet[id] = struct{}{}
+	}
 	activeSet := make(map[string]struct{}, len(ready.Active))
 	for _, id := range ready.Active {
 		activeSet[id] = struct{}{}
@@ -750,6 +764,10 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	} else {
 		for _, id := range opts.IssueIDs {
 			if _, ok := runnableSet[id]; !ok {
+				if _, nested := nestedRootSet[id]; nested {
+					skipped[id] = fmt.Sprintf("nested-root-start-orchestrator-session: az session start %s", id)
+					continue
+				}
 				if _, active := activeSet[id]; active {
 					skipped[id] = "session-already-running"
 					continue
@@ -765,6 +783,7 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		RootIssueID: opts.RootIssueID,
 		Limit:       opts.Limit,
 		Requested:   append([]string(nil), requested...),
+		NestedRoots: append([]string(nil), ready.NestedRoots...),
 		Started:     make([]string, 0, len(requested)),
 		Launched:    make([]orchestrateStartLaunch, 0, len(requested)),
 		Skipped:     skipped,
@@ -1314,6 +1333,12 @@ func printOrchestrateStartResult(result orchestrateStartResult) {
 			fmt.Printf("- %s: %s\n", id, result.Skipped[id])
 		}
 	}
+	if len(result.NestedRoots) > 0 {
+		fmt.Println("Nested roots:")
+		for _, id := range result.NestedRoots {
+			fmt.Printf("- %s: start its orchestrator session with `az session start %s`\n", id, id)
+		}
+	}
 	if len(result.Launched) > 0 {
 		fmt.Println("Launch details:")
 		for _, launch := range result.Launched {
@@ -1519,6 +1544,7 @@ func orchestrateWatchFrameFromReadiness(ready daemonclient.TaskGraphReadiness, e
 		SinceSeq:               since,
 		NextSince:              nextSince,
 		Runnable:               ready.Runnable,
+		NestedRoots:            ready.NestedRoots,
 		Pending:                orchestratePendingStartsFromDaemon(ready.Pending),
 		Active:                 ready.Active,
 		ActiveSessions:         orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
@@ -1532,6 +1558,7 @@ func orchestrateWatchFrameFromReadiness(ready daemonclient.TaskGraphReadiness, e
 func orchestrateWatchFrameSnapshotKey(frame orchestrateWatchFrame) string {
 	type snapshot struct {
 		Runnable               []string                             `json:"runnable"`
+		NestedRoots            []string                             `json:"nested_roots,omitempty"`
 		Pending                []orchestratePendingStart            `json:"pending,omitempty"`
 		Active                 []string                             `json:"active,omitempty"`
 		ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
@@ -1553,6 +1580,7 @@ func orchestrateWatchFrameSnapshotKey(frame orchestrateWatchFrame) string {
 	}
 	encoded, err := json.Marshal(snapshot{
 		Runnable:               frame.Runnable,
+		NestedRoots:            frame.NestedRoots,
 		Pending:                frame.Pending,
 		Active:                 frame.Active,
 		ActiveSessions:         activeSessions,
@@ -2000,6 +2028,12 @@ func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool) error {
 			fmt.Printf("- %s: %s\n", id, frame.Blocked[id])
 		}
 	}
+	if len(frame.NestedRoots) > 0 {
+		fmt.Println("nested roots:")
+		for _, id := range frame.NestedRoots {
+			fmt.Printf("- %s: az session start %s\n", id, id)
+		}
+	}
 	if len(frame.Pending) > 0 {
 		fmt.Println("pending:")
 		for _, pending := range frame.Pending {
@@ -2283,7 +2317,7 @@ func orchestrateRootWorktreeWarningsFromReadiness(ctx context.Context, deps *Dep
 	if rootIssueID == "" || deps == nil || deps.DaemonClient == nil {
 		return nil
 	}
-	if len(ready.Runnable)+len(ready.Pending)+len(ready.Active)+len(ready.Blocked)+len(ready.ActiveSessions)+len(ready.SessionStartProgress) == 0 {
+	if len(ready.Runnable)+len(ready.NestedRoots)+len(ready.Pending)+len(ready.Active)+len(ready.Blocked)+len(ready.ActiveSessions)+len(ready.SessionStartProgress) == 0 {
 		return nil
 	}
 	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
