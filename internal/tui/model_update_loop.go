@@ -875,6 +875,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case taskOwnershipResultMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Ownership update failed: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		m.applySingleTaskWorkspaceRefresh(msg.taskID, msg.task)
+		m.syncTaskWorkspaceOverlay()
+		action := "Updated ownership"
+		switch msg.action {
+		case "claim":
+			action = "Claimed ownership"
+		case "release":
+			action = "Released ownership"
+		}
+		m.addToast(Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("%s for %s", action, msg.taskID),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+
 	case fetchAndMergeResultMsg:
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {
 			action := "Merge"

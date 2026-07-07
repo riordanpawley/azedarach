@@ -3,6 +3,7 @@ package overlay
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -132,6 +133,37 @@ func TestActionMenu_RefreshAndDevServerKeys(t *testing.T) {
 	}
 	if actions["V"] != "Dev servers" {
 		t.Fatalf("V action = %q, want Dev servers", actions["V"])
+	}
+}
+
+func TestActionMenu_IssueOwnershipActions(t *testing.T) {
+	unowned := NewActionMenu(domain.Task{ID: "az-123", Status: domain.StatusOpen}, nil)
+	if cmd := unowned.selectByKey("o"); cmd == nil {
+		t.Fatal("expected unowned issue to expose claim ownership action")
+	}
+	if cmd := unowned.selectByKey("y"); cmd != nil {
+		t.Fatal("did not expect unowned issue to expose release ownership action")
+	}
+
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	owned := NewActionMenu(domain.Task{
+		ID:     "az-123",
+		Status: domain.StatusOpen,
+		Ownership: &domain.IssueOwnership{
+			OwnerID:   "agent-a",
+			OwnerKind: "agent",
+			ClaimedAt: time.Now().UTC(),
+			ExpiresAt: &expiresAt,
+		},
+	}, nil)
+	if cmd := owned.selectByKey("y"); cmd == nil {
+		t.Fatal("expected owned issue to expose release ownership action")
+	}
+	if cmd := owned.selectByKey("U"); cmd == nil {
+		t.Fatal("expected owned issue to expose takeover ownership action")
+	}
+	if cmd := owned.selectByKey("o"); cmd != nil {
+		t.Fatal("did not expect actively owned issue to expose claim ownership action")
 	}
 }
 

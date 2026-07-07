@@ -1720,6 +1720,8 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 							{"issue_id": "az-2", "path": "/repo-az-2", "branch": "user/az-2/worker"},
 						},
 					}), nil
+				case daemonclient.CommandTaskClaimOwnership:
+					return responseWithTaskOwnershipMutation(t, req), nil
 				case protocol.CommandOperationSubmit:
 					if err := json.Unmarshal(req.Body, &submitted); err != nil {
 						t.Fatalf("decode submit body: %v", err)
@@ -1800,6 +1802,105 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	}
 }
 
+func TestOrchestrateStartSkipsForeignOwnedIssue(t *testing.T) {
+	root := naming.IssueID("az-1")
+	child := naming.IssueID("az-2")
+	var readinessBody struct {
+		TaskID  naming.IssueID `json:"task_id"`
+		ActorID string         `json:"actor_id,omitempty"`
+	}
+	deps := &Dependencies{
+		ProjectID: protocol.DefaultProjectID,
+		RepoDir:   "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					if err := json.Unmarshal(req.Body, &readinessBody); err != nil {
+						t.Fatalf("decode readiness request: %v", err)
+					}
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{},
+						Blocked:     map[string]string{child.String(): "owned by agent-a"},
+					}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{"project_id": protocol.DefaultProjectID, "worktrees": []map[string]string{}}), nil
+				case protocol.CommandOperationSubmit:
+					t.Fatal("orchestrate start should not submit a session for a foreign-owned issue")
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	t.Setenv("AZEDARACH_AUDIT_ACTOR", "agent-b")
+	result, err := orchestrateStart(deps, OrchestrateStartOptions{RootIssueID: root.String(), IssueIDs: []string{child.String()}, Limit: 4})
+	if err != nil {
+		t.Fatalf("orchestrateStart error = %v", err)
+	}
+	if readinessBody.ActorID != "agent-b" {
+		t.Fatalf("readiness actor_id = %q, want agent-b", readinessBody.ActorID)
+	}
+	if got := result.Skipped[child.String()]; got != "owned by agent-a" {
+		t.Fatalf("skipped[%s] = %q, want ownership blocker", child, got)
+	}
+	if len(result.Started) != 0 || len(result.Launched) != 0 {
+		t.Fatalf("started=%+v launched=%+v, want no launches", result.Started, result.Launched)
+	}
+}
+
+func TestOrchestrateStartSkipsWhenOwnershipClaimConflictsAfterReadiness(t *testing.T) {
+	root := naming.IssueID("az-1")
+	child := naming.IssueID("az-2")
+	deps := &Dependencies{
+		ProjectID: protocol.DefaultProjectID,
+		RepoDir:   "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{child.String()},
+						Blocked:     map[string]string{},
+					}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{"project_id": protocol.DefaultProjectID, "worktrees": []map[string]string{}}), nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{}}), nil
+				case daemonclient.CommandTaskClaimOwnership:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              false,
+						Error:           &protocol.ErrorEnvelope{Code: protocol.ErrorCodeConflict, Message: "owned by agent-a"},
+					}, nil
+				case protocol.CommandOperationSubmit:
+					t.Fatal("orchestrate start must not submit after ownership claim conflict")
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	result, err := orchestrateStart(deps, OrchestrateStartOptions{RootIssueID: root.String(), Limit: 4})
+	if err != nil {
+		t.Fatalf("orchestrateStart error = %v", err)
+	}
+	if got := result.Skipped[child.String()]; got != "owned by agent-a" {
+		t.Fatalf("skipped[%s] = %q, want ownership conflict", child, got)
+	}
+	if len(result.Started) != 0 || len(result.Launched) != 0 || len(result.Failed) != 0 {
+		t.Fatalf("started=%+v launched=%+v failed=%+v, want no launch or failure", result.Started, result.Launched, result.Failed)
+	}
+}
+
 func TestOrchestrateStartWarnsOnExpensiveSessionSyncInitCommandsDuringFanout(t *testing.T) {
 	root := naming.IssueID("az-1")
 	childA := naming.IssueID("az-2")
@@ -1852,6 +1953,8 @@ func TestOrchestrateStartWarnsOnExpensiveSessionSyncInitCommandsDuringFanout(t *
 							{"issue_id": childB.String(), "path": "/repo-az-3", "branch": "user/az-3/worker-b"},
 						},
 					}), nil
+				case daemonclient.CommandTaskClaimOwnership:
+					return responseWithTaskOwnershipMutation(t, req), nil
 				case protocol.CommandOperationSubmit:
 					var body protocol.OperationSubmitRequestBody
 					if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -1955,6 +2058,8 @@ func TestOrchestrateStartWaitsForAllOperationsBeforeReturning(t *testing.T) {
 					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{IssueID: body.TaskID, TargetID: "base", Branch: "main"}), nil
 				case daemonclient.CommandGitStatus:
 					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{}}), nil
+				case daemonclient.CommandTaskClaimOwnership:
+					return responseWithTaskOwnershipMutation(t, req), nil
 				case protocol.CommandOperationSubmit:
 					var body protocol.OperationSubmitRequestBody
 					if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -2063,6 +2168,8 @@ func TestOrchestrateStartReportsPendingOperationWhenChildIsNotReadyBeforeDeadlin
 							{"issue_id": root.String(), "path": "/repo-az-1", "branch": "user/az-1/root"},
 						},
 					}), nil
+				case daemonclient.CommandTaskClaimOwnership:
+					return responseWithTaskOwnershipMutation(t, req), nil
 				case protocol.CommandOperationSubmit:
 					return responseWithJSON(req, protocol.OperationSubmitResponseBody{
 						Created: true,
@@ -2217,6 +2324,8 @@ func TestOrchestrateStartPreservesSubmitFailure(t *testing.T) {
 							{"issue_id": root.String(), "path": "/repo-az-1", "branch": "user/az-1/root"},
 						},
 					}), nil
+				case daemonclient.CommandTaskClaimOwnership:
+					return responseWithTaskOwnershipMutation(t, req), nil
 				case protocol.CommandOperationSubmit:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -2225,6 +2334,8 @@ func TestOrchestrateStartPreservesSubmitFailure(t *testing.T) {
 						OK:              false,
 						Error:           &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInternal, Message: "tmux launch failed"},
 					}, nil
+				case daemonclient.CommandTaskReleaseOwnership:
+					return responseWithTaskOwnershipMutation(t, req), nil
 				case protocol.CommandOperationGet:
 					t.Fatal("orchestrate start should not poll submitted operations")
 				case protocol.CommandMailSend:
@@ -2980,6 +3091,28 @@ func TestNextMailboxSeq(t *testing.T) {
 	if got := nextMailboxSeq(nil, 10); got != 10 {
 		t.Fatalf("nextMailboxSeq(nil) = %d, want 10", got)
 	}
+}
+
+func responseWithTaskOwnershipMutation(t *testing.T, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	t.Helper()
+	var body daemonclient.TaskOwnershipRequest
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		t.Fatalf("decode ownership body: %v", err)
+	}
+	if body.TaskID == "" {
+		t.Fatal("ownership body missing task_id")
+	}
+	if strings.TrimSpace(body.OwnerID) == "" {
+		t.Fatal("ownership body missing owner_id")
+	}
+	task := domain.Task{
+		ID: body.TaskID,
+		Ownership: &domain.IssueOwnership{
+			OwnerID:   body.OwnerID,
+			OwnerKind: body.OwnerKind,
+		},
+	}
+	return responseWithJSON(req, task)
 }
 
 func containsString(values []string, want string) bool {

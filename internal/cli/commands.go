@@ -157,10 +157,21 @@ type IssueGetOptions struct {
 	IncludeNotes bool
 }
 
+type IssueOwnershipOptions struct {
+	Project   string
+	IssueID   string
+	OwnerID   string
+	OwnerKind string
+	TTL       string
+	Force     bool
+	JSON      bool
+}
+
 type IssueEventsOptions struct {
 	Project    string
 	IssueID    string
 	JSON       bool
+	JQHelp     bool
 	EventTypes []string
 	Limit      int
 }
@@ -2751,6 +2762,40 @@ func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 	return opts, nil
 }
 
+func ParseIssueOwnershipArgs(args []string, command string) (IssueOwnershipOptions, error) {
+	opts := IssueOwnershipOptions{}
+	issueIDFlag := ""
+	fs := flag.NewFlagSet("issue "+command, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.BoolVar(&opts.JSON, "json", false, "output updated issue as JSON")
+	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&opts.OwnerID, "owner", "", "owner id; defaults to current actor")
+	fs.StringVar(&opts.OwnerKind, "kind", "agent", "owner kind: human, agent, or orchestrator")
+	fs.StringVar(&opts.TTL, "ttl", "", "optional lease duration, for example 2h")
+	fs.BoolVar(&opts.Force, "force", false, "take over or release another active owner")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueOwnershipOptions{}, err
+	}
+	if fs.NArg() > 1 {
+		return IssueOwnershipOptions{}, fmt.Errorf("usage: az issue %s [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<issue-id>]", command)
+	}
+	if fs.NArg() == 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return IssueOwnershipOptions{}, fmt.Errorf("usage: az issue %s [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<issue-id>]", command)
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	opts.OwnerID = strings.TrimSpace(opts.OwnerID)
+	opts.OwnerKind = strings.TrimSpace(opts.OwnerKind)
+	opts.TTL = strings.TrimSpace(opts.TTL)
+	return opts, nil
+}
+
 func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
 	opts := IssueEventsOptions{}
 	issueIDFlag := ""
@@ -2760,6 +2805,7 @@ func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.BoolVar(&opts.JSON, "json", false, "output issue events as JSON")
+	fs.BoolVar(&opts.JQHelp, "jq-help", false, "print jq examples for issue event JSON")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.Var(&typeFlags, "type", "filter by event type; may be repeated")
 	fs.StringVar(&typesCSV, "types", "", "comma-separated event types")
@@ -2768,7 +2814,7 @@ func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
 		return IssueEventsOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueEventsOptions{}, fmt.Errorf("usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]")
+		return IssueEventsOptions{}, fmt.Errorf("usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -2776,8 +2822,8 @@ func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
 	if strings.TrimSpace(issueIDFlag) != "" {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
-	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueEventsOptions{}, fmt.Errorf("usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]")
+	if strings.TrimSpace(opts.IssueID) == "" && !opts.JQHelp {
+		return IssueEventsOptions{}, fmt.Errorf("usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]")
 	}
 	if opts.Limit < 0 {
 		return IssueEventsOptions{}, fmt.Errorf("--limit must be non-negative")
@@ -4186,9 +4232,9 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
 	if opts.Deps {
-		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tASSIGNEE\tEST\tIMPL\tDEPS\tTITLE")
+		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tASSIGNEE\tOWNER\tEST\tIMPL\tDEPS\tTITLE")
 	} else {
-		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tASSIGNEE\tEST\tIMPL\tTITLE")
+		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tASSIGNEE\tOWNER\tEST\tIMPL\tTITLE")
 	}
 	for _, task := range tasks {
 		assigneeSummary := "-"
@@ -4199,16 +4245,18 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		if task.Estimate != nil {
 			estimateSummary = strconv.Itoa(*task.Estimate)
 		}
+		ownerSummary := renderIssueOwnershipListCell(task.Ownership)
 		implSummary := formatIssueImplementationSummary(task.Implementations)
 		if opts.Deps {
 			fmt.Fprintf(
 				w,
-				"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				task.ID,
 				task.Status,
 				task.Priority.String(),
 				task.Type,
 				assigneeSummary,
+				ownerSummary,
 				estimateSummary,
 				implSummary,
 				formatDependencySummary(task.Dependencies),
@@ -4216,7 +4264,7 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 			)
 			continue
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", task.ID, task.Status, task.Priority.String(), task.Type, assigneeSummary, estimateSummary, implSummary, task.Title)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", task.ID, task.Status, task.Priority.String(), task.Type, assigneeSummary, ownerSummary, estimateSummary, implSummary, task.Title)
 	}
 	if err := w.Flush(); err != nil {
 		return err
@@ -4398,6 +4446,9 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	if runtimeSummary := renderIssueRuntimeSummary(task); runtimeSummary != "" {
 		fmt.Printf("Runtime: %s\n", runtimeSummary)
 	}
+	if ownershipSummary := renderIssueOwnershipSummary(task.Ownership); ownershipSummary != "" {
+		fmt.Printf("Owner: %s\n", ownershipSummary)
+	}
 	if gitSummary := renderIssueGitSummary(task); gitSummary != "" {
 		fmt.Printf("Git: %s\n", gitSummary)
 	}
@@ -4427,7 +4478,78 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	return nil
 }
 
+func IssueClaimCommand(deps *Dependencies, opts IssueOwnershipOptions) error {
+	return issueOwnershipCommand(deps, opts, true)
+}
+
+func IssueReleaseCommand(deps *Dependencies, opts IssueOwnershipOptions) error {
+	return issueOwnershipCommand(deps, opts, false)
+}
+
+func issueOwnershipCommand(deps *Dependencies, opts IssueOwnershipOptions, claim bool) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ownerID := strings.TrimSpace(opts.OwnerID)
+	if ownerID == "" {
+		ownerID = defaultIssueOwnerID()
+	}
+	if ownerID == "" {
+		return fmt.Errorf("--owner is required when current actor cannot be inferred")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	req := daemonclient.TaskOwnershipRequest{
+		OwnerID:   ownerID,
+		OwnerKind: opts.OwnerKind,
+		TTL:       opts.TTL,
+		Force:     opts.Force,
+	}
+	var (
+		task domain.Task
+		err  error
+	)
+	if claim {
+		task, err = deps.DaemonClient.ClaimTaskOwnership(ctx, opts.IssueID, req)
+	} else {
+		task, err = deps.DaemonClient.ReleaseTaskOwnership(ctx, opts.IssueID, req)
+	}
+	if err != nil {
+		return err
+	}
+	if opts.JSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(task)
+	}
+	if claim {
+		fmt.Printf("Claimed issue %s: %s\n", task.ID, renderIssueOwnershipSummary(task.Ownership))
+		return nil
+	}
+	fmt.Printf("Released issue %s ownership\n", task.ID)
+	return nil
+}
+
+func defaultIssueOwnerID() string {
+	for _, name := range []string{"AZEDARACH_AUDIT_ACTOR", "USER", "LOGNAME"} {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func IssueEventsCommand(deps *Dependencies, opts IssueEventsOptions) error {
+	if opts.JQHelp {
+		printIssueEventsJQHelp(os.Stdout)
+		return nil
+	}
+
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
@@ -4448,12 +4570,10 @@ func IssueEventsCommand(deps *Dependencies, opts IssueEventsOptions) error {
 	if opts.JSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(struct {
-			IssueID string                         `json:"issue_id"`
-			Events  []domain.IssueObservationEvent `json:"events"`
-		}{
-			IssueID: opts.IssueID,
-			Events:  events,
+		return enc.Encode(issueEventsJSONOutput{
+			SchemaVersion: "issue_events.v1",
+			IssueID:       opts.IssueID,
+			Events:        issueEventsJSON(events),
 		})
 	}
 
@@ -4488,6 +4608,86 @@ func IssueEventsCommand(deps *Dependencies, opts IssueEventsOptions) error {
 		fmt.Println()
 	}
 	return nil
+}
+
+type issueEventsJSONOutput struct {
+	SchemaVersion string           `json:"schema_version"`
+	IssueID       string           `json:"issue_id"`
+	Events        []issueEventJSON `json:"events"`
+}
+
+type issueEventJSON struct {
+	ID            int64          `json:"id"`
+	IssueID       string         `json:"issue_id"`
+	Type          string         `json:"type"`
+	EventType     string         `json:"event_type"`
+	CreatedAt     time.Time      `json:"created_at"`
+	ObservedAt    time.Time      `json:"observed_at"`
+	Source        string         `json:"source"`
+	SourceCommand string         `json:"source_command"`
+	OperationID   string         `json:"operation_id"`
+	SessionID     string         `json:"session_id"`
+	WorktreePath  string         `json:"worktree_path"`
+	Body          string         `json:"body"`
+	Notes         string         `json:"notes"`
+	Data          map[string]any `json:"data"`
+	Payload       map[string]any `json:"payload"`
+}
+
+func issueEventsJSON(events []domain.IssueObservationEvent) []issueEventJSON {
+	out := make([]issueEventJSON, 0, len(events))
+	for _, event := range events {
+		out = append(out, issueEventJSONFromDomain(event))
+	}
+	return out
+}
+
+func issueEventJSONFromDomain(event domain.IssueObservationEvent) issueEventJSON {
+	data := map[string]any{}
+	if event.Payload != nil {
+		data = event.Payload
+	}
+	body := firstStringPayloadValue(data, "body", "message", "summary", "line", "evidence")
+	notes := firstStringPayloadValue(data, "notes", "note", "line")
+	eventType := string(event.Type)
+	return issueEventJSON{
+		ID:            event.ID,
+		IssueID:       event.IssueID.String(),
+		Type:          eventType,
+		EventType:     eventType,
+		CreatedAt:     event.ObservedAt,
+		ObservedAt:    event.ObservedAt,
+		Source:        event.Source,
+		SourceCommand: event.SourceCommand,
+		OperationID:   event.OperationID,
+		SessionID:     event.SessionID,
+		WorktreePath:  event.WorktreePath,
+		Body:          body,
+		Notes:         notes,
+		Data:          data,
+		Payload:       data,
+	}
+}
+
+func firstStringPayloadValue(data map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := data[key].(string); ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func printIssueEventsJQHelp(w io.Writer) {
+	fmt.Fprintln(w, "Stable JSON schema: issue_events.v1")
+	fmt.Fprintln(w, "Primary fields: id, issue_id, type, created_at, source, source_command, operation_id, session_id, worktree_path, body, notes, data")
+	fmt.Fprintln(w, "Compatibility aliases: event_type == type, observed_at == created_at, payload == data")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Examples:")
+	fmt.Fprintln(w, "  az issue events az-123 --json | jq '.events[0]'")
+	fmt.Fprintln(w, "  az issue events az-123 --json | jq '[.events[] | {type, created_at, source, data}]'")
+	fmt.Fprintln(w, "  az issue events az-123 --json | jq '.events[] | select(.type == \"issue.status_changed\")'")
+	fmt.Fprintln(w, "  az issue events az-123 --type validation.passed --json | jq '.events[] | {created_at, body, data}'")
 }
 
 func IssueContextRiskCommand(deps *Dependencies, opts IssueContextRiskOptions) error {
@@ -6668,6 +6868,36 @@ func renderIssueRuntimeSummary(task domain.Task) string {
 		parts = append(parts, "worktree=yes")
 	}
 	return strings.Join(parts, ", ")
+}
+
+func renderIssueOwnershipSummary(ownership *domain.IssueOwnership) string {
+	if ownership == nil || strings.TrimSpace(ownership.OwnerID) == "" {
+		return ""
+	}
+	kind := strings.TrimSpace(ownership.OwnerKind)
+	if kind == "" {
+		kind = "owner"
+	}
+	parts := []string{fmt.Sprintf("%s:%s", kind, strings.TrimSpace(ownership.OwnerID))}
+	if !ownership.ClaimedAt.IsZero() {
+		parts = append(parts, "claimed "+ownership.ClaimedAt.UTC().Format(time.RFC3339))
+	}
+	if ownership.ExpiresAt != nil && !ownership.ExpiresAt.IsZero() {
+		parts = append(parts, "expires "+ownership.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func renderIssueOwnershipListCell(ownership *domain.IssueOwnership) string {
+	if ownership == nil || strings.TrimSpace(ownership.OwnerID) == "" {
+		return "-"
+	}
+	ownerID := strings.TrimSpace(ownership.OwnerID)
+	kind := strings.TrimSpace(ownership.OwnerKind)
+	if kind == "" {
+		return ownerID
+	}
+	return kind + ":" + ownerID
 }
 
 func renderIssueGitSummary(task domain.Task) string {

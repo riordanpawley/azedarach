@@ -4735,6 +4735,13 @@ type taskStatusResultMsg struct {
 	err            error
 }
 
+type taskOwnershipResultMsg struct {
+	taskID string
+	action string
+	task   domain.Task
+	err    error
+}
+
 type closeFailureOperationContext struct {
 	projectID      string
 	projectName    string
@@ -4743,6 +4750,45 @@ type closeFailureOperationContext struct {
 	baseBranch     string
 	parentID       string
 	sourceWorktree string
+}
+
+func (m Model) issueOwnershipCmd(taskID string, action string, force bool) tea.Cmd {
+	taskID = strings.TrimSpace(taskID)
+	action = strings.TrimSpace(action)
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return taskOwnershipResultMsg{taskID: taskID, action: action, err: fmt.Errorf("daemon client unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		req := daemonclient.TaskOwnershipRequest{
+			OwnerID:   tuiIssueOwnerID(),
+			OwnerKind: "human",
+			Force:     force,
+		}
+		var (
+			task domain.Task
+			err  error
+		)
+		switch action {
+		case "claim":
+			task, err = m.daemonClient.ClaimTaskOwnership(ctx, taskID, req)
+		case "release":
+			task, err = m.daemonClient.ReleaseTaskOwnership(ctx, taskID, req)
+		default:
+			err = fmt.Errorf("unknown ownership action %q", action)
+		}
+		return taskOwnershipResultMsg{taskID: taskID, action: action, task: task, err: err}
+	}
+}
+
+func tuiIssueOwnerID() string {
+	for _, key := range []string{"AZEDARACH_AUDIT_ACTOR", "USER", "LOGNAME"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return "tui"
 }
 
 // moveTaskStatusCmd updates a single task's status.
@@ -4813,6 +4859,7 @@ func (m Model) updateTaskStatusWithTimeoutOptions(taskID string, status domain.S
 		closeOpts.ForceWorktree = opts.ForceWorktree
 		closeOpts.IgnoreAhead = opts.IgnoreAhead
 		closeOpts.CloseCleanChildren = opts.CloseCleanChildren
+		closeOpts.AllowActiveSession = opts.AllowActiveSession
 		return m.closeTaskWithIntegrationAndCleanup(ctx, taskID, closeOpts)
 	}
 	return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, status, opts)
@@ -5009,8 +5056,10 @@ func (m Model) closeFailureDialogCmd(msg taskStatusResultMsg) tea.Cmd {
 		TargetStatus:            msg.newStatus.String(),
 		ForceWorktree:           msg.opts.ForceWorktree,
 		CloseCleanChildren:      msg.opts.CloseCleanChildren,
+		AllowActiveSession:      msg.opts.AllowActiveSession,
 		AllowAIMerge:            true,
 		AllowForceWorktree:      closeFailureSupportsForceWorktree(msg.err),
+		AllowActiveSessionRetry: closeFailureSupportsActiveSessionRetry(msg.err),
 		AllowCloseCleanChildren: closeFailureSupportsCloseCleanChildren(msg.err),
 	}
 	return m.openOverlay(overlay.NewCloseFailureDialog(msg.taskID, msg.err.Error(), options))
@@ -5027,6 +5076,15 @@ func closeFailureSupportsForceWorktree(err error) bool {
 		strings.Contains(message, "modified or untracked") ||
 		strings.Contains(message, "force worktree") ||
 		strings.Contains(message, "--force-worktree")
+}
+
+func closeFailureSupportsActiveSessionRetry(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "session activity is ") &&
+		strings.Contains(message, "session projection to report idle/done/terminal activity")
 }
 
 func closeFailureSupportsCloseCleanChildren(err error) bool {

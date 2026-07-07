@@ -726,6 +726,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskMergeBaseTarget(ctx, req)
 	case "task.follow_on_merge_candidates":
 		return d.handleTaskFollowOnMergeCandidates(ctx, req)
+	case "task.ownership.claim":
+		return d.handleTaskOwnershipClaim(ctx, req)
+	case "task.ownership.release":
+		return d.handleTaskOwnershipRelease(ctx, req)
 	case "task.update_status":
 		return d.handleTaskUpdateStatus(ctx, req)
 	case "task.update_details":

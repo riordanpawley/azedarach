@@ -4890,6 +4890,14 @@ func TestParseIssueEventsArgs(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "--limit must be non-negative") {
 		t.Fatalf("expected negative limit error, got %v", err)
 	}
+
+	got, err = ParseIssueEventsArgs([]string{"--jq-help"})
+	if err != nil {
+		t.Fatalf("ParseIssueEventsArgs(jq help) error = %v", err)
+	}
+	if !got.JQHelp || got.IssueID != "" {
+		t.Fatalf("ParseIssueEventsArgs(jq help) = %+v", got)
+	}
 }
 
 func TestParseIssueContextRiskArgsSummaryAndFull(t *testing.T) {
@@ -4913,6 +4921,7 @@ func TestParseIssueContextRiskArgsSummaryAndFull(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatalf("expected summary/full conflict, got %v", err)
 	}
+
 }
 
 func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
@@ -6471,6 +6480,11 @@ func TestIssueEventsCommandJSON(t *testing.T) {
 							"from_status": "open",
 							"to_status":   "in_progress",
 						},
+					}, {
+						ID:         8,
+						IssueID:    "az-5",
+						Type:       domain.IssueEventEvidenceSubmitted,
+						ObservedAt: observedAt.Add(time.Second),
 					}},
 				})
 				if err != nil {
@@ -6500,8 +6514,73 @@ func TestIssueEventsCommandJSON(t *testing.T) {
 			Limit:      10,
 		})
 	})
-	if !strings.Contains(output, "\"issue_id\": \"az-5\"") || !strings.Contains(output, "\"event_type\": \"issue.status_changed\"") {
-		t.Fatalf("output missing event json fields: %q", output)
+
+	var got struct {
+		SchemaVersion string `json:"schema_version"`
+		IssueID       string `json:"issue_id"`
+		Events        []struct {
+			ID         int64          `json:"id"`
+			IssueID    string         `json:"issue_id"`
+			Type       string         `json:"type"`
+			EventType  string         `json:"event_type"`
+			CreatedAt  time.Time      `json:"created_at"`
+			ObservedAt time.Time      `json:"observed_at"`
+			Source     string         `json:"source"`
+			Body       *string        `json:"body"`
+			Notes      *string        `json:"notes"`
+			Data       map[string]any `json:"data"`
+			Payload    map[string]any `json:"payload"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatalf("unmarshal issue events json: %v\n%s", err, output)
+	}
+	if got.SchemaVersion != "issue_events.v1" || got.IssueID != "az-5" || len(got.Events) != 2 {
+		t.Fatalf("issue events json header = %+v", got)
+	}
+	event := got.Events[0]
+	if event.ID != 7 || event.IssueID != "az-5" {
+		t.Fatalf("event identity = %+v", event)
+	}
+	if event.Type != "issue.status_changed" || event.EventType != event.Type {
+		t.Fatalf("event type fields = type %q event_type %q", event.Type, event.EventType)
+	}
+	if !event.CreatedAt.Equal(observedAt) || !event.ObservedAt.Equal(observedAt) {
+		t.Fatalf("event timestamp fields = created_at %s observed_at %s, want %s", event.CreatedAt, event.ObservedAt, observedAt)
+	}
+	if event.Source != "issue-store" {
+		t.Fatalf("event source = %q", event.Source)
+	}
+	if event.Body == nil || event.Notes == nil {
+		t.Fatalf("event body/notes fields missing: body=%v notes=%v", event.Body, event.Notes)
+	}
+	if event.Data["to_status"] != "in_progress" || event.Payload["to_status"] != "in_progress" {
+		t.Fatalf("event data aliases = data %+v payload %+v", event.Data, event.Payload)
+	}
+	emptyPayloadEvent := got.Events[1]
+	if emptyPayloadEvent.Type != "evidence.submitted" {
+		t.Fatalf("empty payload event type = %q", emptyPayloadEvent.Type)
+	}
+	if emptyPayloadEvent.Body == nil || emptyPayloadEvent.Notes == nil {
+		t.Fatalf("empty payload event body/notes fields missing: body=%v notes=%v", emptyPayloadEvent.Body, emptyPayloadEvent.Notes)
+	}
+	if emptyPayloadEvent.Data == nil || emptyPayloadEvent.Payload == nil || len(emptyPayloadEvent.Data) != 0 || len(emptyPayloadEvent.Payload) != 0 {
+		t.Fatalf("empty payload aliases = data %+v payload %+v, want empty objects", emptyPayloadEvent.Data, emptyPayloadEvent.Payload)
+	}
+}
+
+func TestIssueEventsCommandJQHelp(t *testing.T) {
+	output := captureStdout(t, func() error {
+		return IssueEventsCommand(&Dependencies{}, IssueEventsOptions{JQHelp: true})
+	})
+	for _, want := range []string{
+		"az issue events az-123 --json | jq '.events[0]'",
+		"jq '[.events[] | {type, created_at, source, data}]'",
+		"jq '.events[] | select(.type == \"issue.status_changed\")'",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("jq help missing %q in:\n%s", want, output)
+		}
 	}
 }
 
@@ -8474,6 +8553,8 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 						BranchAttached: true,
 						AncestorChain:  []string{root.String()},
 					}), nil
+				case daemonclient.CommandTaskClaimOwnership:
+					return responseWithTaskOwnershipMutation(t, req), nil
 				case protocol.CommandOperationSubmit:
 					if err := json.Unmarshal(req.Body, &submitted); err != nil {
 						t.Fatalf("decode operation submit: %v", err)

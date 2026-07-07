@@ -491,7 +491,7 @@ func main() {
 
 	case "issue":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|events|context-risk|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|claim|takeover|release|events|context-risk|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]\n")
 			os.Exit(1)
 		}
 		issueCommand := commandArgs[0]
@@ -548,10 +548,41 @@ func main() {
 				os.Exit(1)
 			}
 
+		case "claim", "takeover":
+			opts, err := cli.ParseIssueOwnershipArgs(issueArgs, issueCommand)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az issue %s [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<issue-id>]\n", issueCommand)
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if issueCommand == "takeover" {
+				opts.Force = true
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.IssueClaimCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+		case "release":
+			opts, err := cli.ParseIssueOwnershipArgs(issueArgs, issueCommand)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az issue release [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--force] [--json] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.IssueReleaseCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
 		case "events":
 			opts, err := cli.ParseIssueEventsArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -931,7 +962,7 @@ func main() {
 
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown issue command: %s\n", issueCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|events|context-risk|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|claim|takeover|release|events|context-risk|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]\n")
 			os.Exit(1)
 		}
 

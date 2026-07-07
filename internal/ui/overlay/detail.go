@@ -452,6 +452,7 @@ func (d *DetailPanel) renderIssueMetadataLines(labelStyle, valueStyle lipgloss.S
 		b.WriteString("\n")
 	}
 	write("Assignee", d.task.Assignee)
+	write("Owner", formatIssueOwnershipSummary(d.task.Ownership, time.Now().UTC()))
 	if d.task.Estimate != nil {
 		write("Estimate", fmt.Sprintf("%d", *d.task.Estimate))
 	}
@@ -462,6 +463,24 @@ func (d *DetailPanel) renderIssueMetadataLines(labelStyle, valueStyle lipgloss.S
 		write("Impls", strings.Join(d.task.Implementations, ", "))
 	}
 	return b.String()
+}
+
+func formatIssueOwnershipSummary(ownership *domain.IssueOwnership, now time.Time) string {
+	if ownership == nil || strings.TrimSpace(ownership.OwnerID) == "" {
+		return ""
+	}
+	owner := strings.TrimSpace(ownership.OwnerID)
+	if kind := strings.TrimSpace(ownership.OwnerKind); kind != "" {
+		owner = fmt.Sprintf("%s (%s)", owner, kind)
+	}
+	if ownership.ExpiresAt != nil && !ownership.ExpiresAt.IsZero() {
+		expires := ownership.ExpiresAt.UTC().Format(time.RFC3339)
+		if ownership.IsExpired(now) {
+			return fmt.Sprintf("%s, expired %s", owner, expires)
+		}
+		return fmt.Sprintf("%s, expires %s", owner, expires)
+	}
+	return owner
 }
 
 func (d *DetailPanel) addTextSectionLines(lines *[]string, headerStyle, valueStyle lipgloss.Style, title, text string) {

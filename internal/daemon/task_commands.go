@@ -102,6 +102,7 @@ type taskListSnapshotLoadResult struct {
 
 type taskClosePreflightOptions struct {
 	AllowTargetSession  bool `json:"allow_target_session,omitempty"`
+	AllowActiveSession  bool `json:"allow_active_session,omitempty"`
 	AllowTargetWorktree bool `json:"allow_target_worktree,omitempty"`
 	ForceWorktree       bool `json:"force_worktree,omitempty"`
 	IgnoreAhead         bool `json:"ignore_ahead,omitempty"`
@@ -119,6 +120,7 @@ type taskCloseRequest struct {
 	IgnoreAhead          bool   `json:"ignore_ahead,omitempty"`
 	IntegrateBeforeClose bool   `json:"integrate_before_close,omitempty"`
 	CloseCleanChildren   bool   `json:"close_clean_children,omitempty"`
+	AllowActiveSession   bool   `json:"allow_active_session,omitempty"`
 }
 
 type taskDeleteRequest struct {
@@ -586,7 +588,8 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	projectID := d.projectID(req.Meta)
 	startedAt := time.Now()
 	var cmd struct {
-		TaskID string `json:"task_id"`
+		TaskID  string `json:"task_id"`
+		ActorID string `json:"actor_id,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -1713,6 +1716,98 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 	return resp, nil
 }
 
+type taskOwnershipRequest struct {
+	TaskID    string `json:"task_id"`
+	OwnerID   string `json:"owner_id,omitempty"`
+	OwnerKind string `json:"owner_kind,omitempty"`
+	TTL       string `json:"ttl,omitempty"`
+	Force     bool   `json:"force,omitempty"`
+}
+
+func (d *Daemon) handleTaskOwnershipClaim(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	var cmd taskOwnershipRequest
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	ttl, err := parseTaskOwnershipTTL(cmd.TTL)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
+	task, err := issueClient.ClaimOwnershipWithRuntime(ctx, projectID, cmd.TaskID, issues.OwnershipClaimParams{
+		OwnerID:   cmd.OwnerID,
+		OwnerKind: cmd.OwnerKind,
+		TTL:       ttl,
+		Force:     cmd.Force,
+	})
+	if err != nil {
+		return d.errorResponse(req, taskOwnershipErrorCode(err), err.Error()), nil
+	}
+	return d.taskOwnershipMutationResponse(req, projectID, task)
+}
+
+func (d *Daemon) handleTaskOwnershipRelease(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	var cmd taskOwnershipRequest
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
+	task, err := issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, cmd.TaskID, issues.OwnershipClaimParams{
+		OwnerID: cmd.OwnerID,
+		Force:   cmd.Force,
+	})
+	if err != nil {
+		return d.errorResponse(req, taskOwnershipErrorCode(err), err.Error()), nil
+	}
+	return d.taskOwnershipMutationResponse(req, projectID, task)
+}
+
+func taskOwnershipErrorCode(err error) protocol.ErrorCode {
+	switch {
+	case errors.Is(err, domain.ErrConflict):
+		return protocol.ErrorCodeConflict
+	case errors.Is(err, domain.ErrNotFound):
+		return protocol.ErrorCodeInvalidRequest
+	default:
+		return protocol.ErrorCodeInternal
+	}
+}
+
+func (d *Daemon) taskOwnershipMutationResponse(req protocol.RequestEnvelope, projectID string, task domain.Task) (protocol.ResponseEnvelope, error) {
+	resp := d.successResponse(req)
+	body, err := json.Marshal(task)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp.Body = body
+	resp.Revision = d.nextRevision(projectID)
+	d.publishTaskEvent(req, protocol.EventTaskUpdated, resp.Revision, taskEventBodyFromTask(projectID, task))
+	return resp, nil
+}
+
+func parseTaskOwnershipTTL(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	ttl, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid ownership ttl: %w", err)
+	}
+	if ttl <= 0 {
+		return 0, fmt.Errorf("ownership ttl must be positive")
+	}
+	return ttl, nil
+}
+
 func (d *Daemon) handleTaskClose(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
 	var cmd taskCloseRequest
@@ -1784,6 +1879,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	phaseStartedAt = time.Now()
 	guard, err := d.validateTaskClosePreflight(ctx, projectID, taskID, taskClosePreflightOptions{
 		AllowTargetSession:  true,
+		AllowActiveSession:  cmd.AllowActiveSession,
 		AllowTargetWorktree: true,
 		ForceWorktree:       cmd.ForceWorktree,
 		IgnoreAhead:         cmd.IgnoreAhead || integration.Integrated || integration.NoChanges,
@@ -3020,8 +3116,10 @@ func daemonCloseGuardRuntimeBlockers(task domain.Task, opts taskClosePreflightOp
 	if daemonCloseGuardTaskHasSession(task) {
 		if !opts.AllowTargetSession {
 			reasons = append(reasons, "issue still has a session")
-		} else if reason := daemonCloseGuardActiveSessionActivityReason(task); reason != "" {
-			reasons = append(reasons, reason)
+		} else if !opts.AllowActiveSession {
+			if reason := daemonCloseGuardActiveSessionActivityReason(task); reason != "" {
+				reasons = append(reasons, reason)
+			}
 		}
 	}
 	if !opts.AllowTargetWorktree && daemonCloseGuardTaskHasWorktree(task) {
@@ -3275,7 +3373,8 @@ func daemonCloseGuardTaskWorktree(task domain.Task) string {
 func (d *Daemon) handleTaskDeletePreflight(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
 	var cmd struct {
-		TaskID string `json:"task_id"`
+		TaskID  string `json:"task_id"`
+		ActorID string `json:"actor_id,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -3321,13 +3420,18 @@ func (d *Daemon) handleTaskGraphReadiness(ctx context.Context, req protocol.Requ
 	projectID := d.projectID(req.Meta)
 	startedAt := time.Now()
 	var cmd struct {
-		TaskID string `json:"task_id"`
+		TaskID  string `json:"task_id"`
+		ActorID string `json:"actor_id,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
 	evalStartedAt := time.Now()
-	result, err := d.taskGraphReadiness(ctx, projectID, cmd.TaskID)
+	actorID := strings.TrimSpace(cmd.ActorID)
+	if actorID == "" {
+		actorID = strings.TrimSpace(req.Meta.ClientActor)
+	}
+	result, err := d.taskGraphReadinessForActor(ctx, projectID, cmd.TaskID, actorID)
 	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.evaluate", evalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "root_issue_id", cmd.TaskID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -3814,6 +3918,10 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 }
 
 func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID string) (taskGraphReadinessResult, error) {
+	return d.taskGraphReadinessForActor(ctx, projectID, rootIssueID, "")
+}
+
+func (d *Daemon) taskGraphReadinessForActor(ctx context.Context, projectID, rootIssueID, actorID string) (taskGraphReadinessResult, error) {
 	tasks, err := d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootIssueID)
 	if err != nil {
 		return taskGraphReadinessResult{}, fmt.Errorf("inspect issue graph readiness: %w", err)
@@ -3822,7 +3930,7 @@ func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID 
 	if err != nil {
 		return taskGraphReadinessResult{}, err
 	}
-	ready, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	ready, err := daemonTaskGraphReadinessFromIndexesForActor(rootID, byID, children, actorID, time.Now().UTC())
 	if err != nil {
 		return taskGraphReadinessResult{}, err
 	}
@@ -3950,6 +4058,10 @@ func daemonTaskGraphIndexes(rootIssueID string, tasks []domain.Task) (naming.Iss
 }
 
 func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) (taskGraphReadinessResult, error) {
+	return daemonTaskGraphReadinessFromIndexesForActor(rootID, byID, children, "", time.Now().UTC())
+}
+
+func daemonTaskGraphReadinessFromIndexesForActor(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID, actorID string, now time.Time) (taskGraphReadinessResult, error) {
 	leafIDs := daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children)
 	leaves := make([]string, 0, len(leafIDs))
 	for _, id := range leafIDs {
@@ -3981,6 +4093,10 @@ func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.
 			result.Active = append(result.Active, idRaw)
 			continue
 		}
+		if reason := daemonTaskOwnershipBlockReason(task, actorID, now); reason != "" {
+			result.Blocked[idRaw] = reason
+			continue
+		}
 		blockers := daemonTaskGraphUnresolvedBlockers(task, byID)
 		if len(blockers) > 0 {
 			result.Blocked[idRaw] = "waiting on " + strings.Join(blockers, ",")
@@ -3993,6 +4109,23 @@ func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.
 	}
 	result.Capacity = daemonTaskGraphCapacitySummary(result)
 	return result, nil
+}
+
+func daemonTaskOwnershipBlockReason(task domain.Task, actorID string, now time.Time) string {
+	if task.Ownership == nil || !task.Ownership.IsActive(now) {
+		return ""
+	}
+	if strings.TrimSpace(actorID) != "" && task.Ownership.OwnedBy(actorID, now) {
+		return ""
+	}
+	owner := strings.TrimSpace(task.Ownership.OwnerID)
+	if owner == "" {
+		return ""
+	}
+	if task.Ownership.ExpiresAt != nil && !task.Ownership.ExpiresAt.IsZero() {
+		return fmt.Sprintf("owned by %s until %s", owner, task.Ownership.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	return "owned by " + owner
 }
 
 func daemonTaskGraphRunnableCandidates(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) ([]string, []string) {
