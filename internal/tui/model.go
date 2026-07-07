@@ -6137,6 +6137,7 @@ func (m Model) attachStagedAttachments(ctx context.Context, issueID string, path
 	}
 
 	failed := make([]string, 0)
+	noteFailures := make([]string, 0)
 	for _, rawPath := range paths {
 		path := strings.TrimSpace(rawPath)
 		if path == "" {
@@ -6146,22 +6147,37 @@ func (m Model) attachStagedAttachments(ctx context.Context, issueID string, path
 		attached, err := m.attachmentService.Attach(ctx, issueID, path)
 		if err != nil {
 			failed = append(failed, filepath.Base(path))
+			if m.logger != nil {
+				m.logger.Warn("staged attachment attach failed", "issue_id", issueID, "source_path", path, "error", err)
+			}
 			continue
 		}
 
 		if attached != nil && m.daemonClient != nil {
 			if line := formatAttachmentNoteLine(attached); strings.TrimSpace(line) != "" {
-				_ = m.daemonClient.AppendTaskNotes(ctx, issueID, line)
+				if err := m.daemonClient.AppendTaskNotes(ctx, issueID, line); err != nil {
+					noteFailures = append(noteFailures, filepath.Base(path)+": "+compactErrorMessage(err))
+					if m.logger != nil {
+						m.logger.Warn("staged attachment note append failed", "issue_id", issueID, "source_path", path, "attachment_id", attached.ID, "error", err)
+					}
+				}
 			}
 		}
 
 		_ = os.Remove(path)
 	}
 
-	if len(failed) == 0 {
+	if len(failed) == 0 && len(noteFailures) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("Task created, but %d attachment(s) failed: %s", len(failed), strings.Join(failed, ", "))
+	warnings := make([]string, 0, 2)
+	if len(failed) > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d attachment(s) failed: %s", len(failed), strings.Join(failed, ", ")))
+	}
+	if len(noteFailures) > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d attachment note update(s) failed: %s", len(noteFailures), strings.Join(noteFailures, ", ")))
+	}
+	return "Task created, but " + strings.Join(warnings, "; ")
 }
 
 func (m Model) createTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {

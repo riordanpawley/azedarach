@@ -89,6 +89,26 @@ func (testCreateOverlayAttachmentService) Delete(context.Context, string, string
 	return nil
 }
 
+type testStagedAttachmentService struct {
+	attached *attachment.Attachment
+}
+
+func (s testStagedAttachmentService) List(context.Context, string) ([]attachment.Attachment, error) {
+	return nil, nil
+}
+
+func (s testStagedAttachmentService) Attach(context.Context, string, string) (*attachment.Attachment, error) {
+	return s.attached, nil
+}
+
+func (s testStagedAttachmentService) AttachFromClipboard(context.Context, string) (*attachment.Attachment, error) {
+	return nil, nil
+}
+
+func (s testStagedAttachmentService) Delete(context.Context, string, string) error {
+	return nil
+}
+
 func (s *recordingGitSyncService) FetchAndCheck() tea.Cmd {
 	s.fetchCalls++
 	return nil
@@ -1150,6 +1170,44 @@ func TestUpdate_AttachmentActionStagedAddsToast(t *testing.T) {
 	last := next.toasts[len(next.toasts)-1]
 	if !strings.Contains(last.Message, "Attachment staged for new task") {
 		t.Fatalf("unexpected toast message: %q", last.Message)
+	}
+}
+
+func TestAttachStagedAttachmentsReportsNoteAppendFailure(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskAppendNotes {
+				return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command %q", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, errors.New("append denied")
+		},
+	}
+	m := newTestModel()
+	m.daemonClient = daemonclient.New(transport)
+	m.attachmentService = testStagedAttachmentService{
+		attached: &attachment.Attachment{
+			ID:       "att-1",
+			IssueID:  "az-123",
+			Filename: "clip.png",
+			Path:     filepath.Join(t.TempDir(), "attached.png"),
+			Relative: ".azedarach/attachments/att-1-clip.png",
+			MimeType: "image/png",
+			Size:     4,
+			Created:  time.Now(),
+		},
+	}
+
+	sourcePath := filepath.Join(t.TempDir(), "clip.png")
+	if err := os.WriteFile(sourcePath, []byte{0x89, 0x50, 0x4e, 0x47}, 0o644); err != nil {
+		t.Fatalf("write staged source: %v", err)
+	}
+
+	warning := m.attachStagedAttachments(context.Background(), "az-123", []string{sourcePath})
+	if !strings.Contains(warning, "attachment note update(s) failed") {
+		t.Fatalf("warning = %q, want note update failure", warning)
+	}
+	if !strings.Contains(warning, "append denied") {
+		t.Fatalf("warning = %q, want append error detail", warning)
 	}
 }
 
