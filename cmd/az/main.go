@@ -565,7 +565,7 @@ func main() {
 		case "context-risk":
 			opts, err := cli.ParseIssueContextRiskArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--json] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--summary|--full] [--json] [<issue-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

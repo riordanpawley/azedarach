@@ -288,6 +288,11 @@ type taskContextRiskRequest struct {
 	TaskID  naming.IssueID `json:"task_id"`
 	RepoDir string         `json:"repo_dir,omitempty"`
 	Since   time.Time      `json:"since,omitempty,omitzero"`
+	Compact bool           `json:"compact,omitempty"`
+}
+
+type TaskContextRiskOptions struct {
+	Compact bool
 }
 
 // TaskMergeBaseTarget is the daemon-owned task graph/worktree merge target decision.
@@ -986,17 +991,22 @@ func (c *Client) TaskIntegrationReadiness(ctx context.Context, issueID, repoDir 
 	return out, nil
 }
 
-// TaskContextRisk returns a compact daemon-owned risk packet for repeated local issue overlap.
-func (c *Client) TaskContextRisk(ctx context.Context, issueID, repoDir string, since time.Time) (domain.IssueContextRiskPacket, error) {
+// TaskContextRisk returns a daemon-owned risk packet for repeated local issue overlap.
+func (c *Client) TaskContextRisk(ctx context.Context, issueID, repoDir string, since time.Time, opts ...TaskContextRiskOptions) (domain.IssueContextRiskPacket, error) {
 	parsedIssueID, err := naming.ParseIssueID(issueID)
 	if err != nil {
 		return domain.IssueContextRiskPacket{}, fmt.Errorf("invalid issue id: %w", err)
+	}
+	var opt TaskContextRiskOptions
+	if len(opts) > 0 {
+		opt = opts[0]
 	}
 	var out domain.IssueContextRiskPacket
 	if err := c.commandJSON(ctx, CommandTaskContextRisk, taskContextRiskRequest{
 		TaskID:  parsedIssueID,
 		RepoDir: strings.TrimSpace(repoDir),
 		Since:   since,
+		Compact: opt.Compact,
 	}, &out); err != nil {
 		return domain.IssueContextRiskPacket{}, err
 	}

@@ -23,7 +23,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Blocked is not an issue status. Represent blocked work with dependency edges (`az issue dep add <blocked-issue> <blocker-issue> --type blocks`) and record blocker evidence through mailbox/observation events.
   - `az issue bulk-create --input issues.json --json` (create many issues, epics, or nested `children` trees from JSON when shaping a graph up front), `az issue bulk-update --input updates.json --json`, `az issue update <issue-id> --design "..."`
   - `az issue events <issue-id> [--type <event-type>] [--limit <n>] [--json]` shows durable observation/evidence events for audit and agent context without relying on free-form notes.
-  - `az issue context-risk <issue-id> --since 14d [--json]` shows repeated local failure risk from recent sibling/related overlap evidence; use it before accepting worker closeout, not as a blanket root-level gate.
+  - `az issue context-risk <issue-id> --since 14d [--summary|--full] [--json]` shows repeated local failure risk from recent sibling/related overlap evidence; default/`--summary` output is bounded for closeout, and `--full` expands raw evidence; use it before accepting worker closeout, not as a blanket root-level gate.
   - Reports and attachments:
   - `az issue document add <issue-id> <file>`, `az issue document list <issue-id>`, `az issue document remove <issue-id> <attachment-id>`
   - Markdown attachments render in the TUI; other file types can be opened externally.

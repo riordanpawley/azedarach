@@ -169,6 +169,8 @@ type IssueContextRiskOptions struct {
 	Project string
 	IssueID string
 	JSON    bool
+	Summary bool
+	Full    bool
 	Since   time.Time
 }
 
@@ -2666,13 +2668,18 @@ func ParseIssueContextRiskArgs(args []string) (IssueContextRiskOptions, error) {
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.BoolVar(&opts.JSON, "json", false, "output context risk packet as JSON")
+	fs.BoolVar(&opts.Summary, "summary", false, "output bounded closeout summary")
+	fs.BoolVar(&opts.Full, "full", false, "output full context risk packet including all evidence")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.StringVar(&sinceRaw, "since", sinceRaw, "recent window (for example 14d, 2w, 72h)")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueContextRiskOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueContextRiskOptions{}, fmt.Errorf("usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--json] [<issue-id>]")
+		return IssueContextRiskOptions{}, fmt.Errorf("usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--summary|--full] [--json] [<issue-id>]")
+	}
+	if opts.Summary && opts.Full {
+		return IssueContextRiskOptions{}, fmt.Errorf("--summary and --full are mutually exclusive")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -2681,7 +2688,7 @@ func ParseIssueContextRiskArgs(args []string) (IssueContextRiskOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueContextRiskOptions{}, fmt.Errorf("usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--json] [<issue-id>]")
+		return IssueContextRiskOptions{}, fmt.Errorf("usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--summary|--full] [--json] [<issue-id>]")
 	}
 	duration, err := parseIssueContextRiskWindow(sinceRaw)
 	if err != nil {
@@ -4362,56 +4369,146 @@ func IssueContextRiskCommand(deps *Dependencies, opts IssueContextRiskOptions) e
 		return err
 	}
 
-	packet, err := deps.DaemonClient.TaskContextRisk(ctx, opts.IssueID, deps.RepoDir, opts.Since)
+	packet, err := deps.DaemonClient.TaskContextRisk(ctx, opts.IssueID, deps.RepoDir, opts.Since, daemonclient.TaskContextRiskOptions{Compact: !opts.Full})
 	if err != nil {
 		if strings.Contains(err.Error(), fmt.Sprintf("issue not found: %s", opts.IssueID)) {
 			return fmt.Errorf("issue not found: %s", opts.IssueID)
 		}
-		return fmt.Errorf("failed to build context risk for %s: %w", opts.IssueID, err)
+		if issueContextRiskTimedOut(err) {
+			packet = issueContextRiskDegradedPacket(opts.IssueID, opts.Since, err)
+		} else {
+			return fmt.Errorf("failed to build context risk for %s: %w", opts.IssueID, err)
+		}
 	}
 	if opts.JSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(packet)
+		if opts.Full {
+			return enc.Encode(packet)
+		}
+		return enc.Encode(domain.SummarizeIssueContextRisk(packet))
 	}
-	renderIssueContextRisk(packet)
+	if opts.Full {
+		renderIssueContextRiskFull(packet)
+		return nil
+	}
+	renderIssueContextRisk(domain.SummarizeIssueContextRisk(packet))
 	return nil
 }
 
-func renderIssueContextRisk(packet domain.IssueContextRiskPacket) {
-	fmt.Printf("Issue context risk: %s\n", packet.IssueID)
-	if packet.ParentIssueID != "" {
-		fmt.Printf("Parent/local scope: %s\n", packet.ParentIssueID)
+func issueContextRiskTimedOut(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), context.DeadlineExceeded.Error())
+}
+
+func issueContextRiskDegradedPacket(issueID string, since time.Time, err error) domain.IssueContextRiskPacket {
+	return domain.IssueContextRiskPacket{
+		IssueID:        strings.TrimSpace(issueID),
+		Level:          domain.IssueContextRiskNone,
+		Since:          since,
+		GeneratedAt:    time.Now().UTC(),
+		Degraded:       true,
+		Timeout:        true,
+		DegradedReason: strings.TrimSpace(err.Error()),
+		CloseoutPrompts: []string{
+			"Context-risk scan timed out; retry with --summary or record explicit risk evidence before closeout if local overlap is suspected.",
+		},
 	}
-	fmt.Printf("Level: %s", packet.Level)
-	if packet.Confidence > 0 {
-		fmt.Printf(" confidence=%d", packet.Confidence)
+}
+
+func renderIssueContextRisk(summary domain.IssueContextRiskSummary) {
+	fmt.Printf("Issue context risk: %s\n", summary.IssueID)
+	if summary.ParentIssueID != "" {
+		fmt.Printf("Parent/local scope: %s\n", summary.ParentIssueID)
+	}
+	fmt.Printf("Level: %s", summary.Level)
+	if summary.Confidence > 0 {
+		fmt.Printf(" confidence=%d", summary.Confidence)
+	}
+	if summary.Degraded {
+		fmt.Print(" degraded=true")
+	}
+	if summary.Timeout {
+		fmt.Print(" timeout=true")
 	}
 	fmt.Println()
-	if !packet.Since.IsZero() {
-		fmt.Printf("Window since: %s\n", packet.Since.UTC().Format(time.RFC3339))
+	if strings.TrimSpace(summary.DegradedReason) != "" {
+		fmt.Printf("Degraded reason: %s\n", summary.DegradedReason)
 	}
-	fmt.Printf("Candidates checked: %d; overlapping issues: %d\n", packet.CandidateCount, packet.OverlapIssueCount)
-	if len(packet.Signals) > 0 {
+	if !summary.Since.IsZero() {
+		fmt.Printf("Window since: %s\n", summary.Since.UTC().Format(time.RFC3339))
+	}
+	fmt.Printf("Candidates checked: %d; overlapping issues: %d\n", summary.CandidateCount, summary.OverlapIssueCount)
+	if len(summary.RelatedIssueIDs) > 0 {
+		fmt.Printf("Related issues: %s\n", strings.Join(summary.RelatedIssueIDs, ", "))
+	}
+	if len(summary.Signals) > 0 {
 		fmt.Println("Signals:")
-		for _, signal := range packet.Signals {
+		for _, signal := range summary.Signals {
 			fmt.Printf("- %s\n", signal)
 		}
 	}
+	if len(summary.EvidenceSnippets) > 0 {
+		fmt.Println("Evidence snippets:")
+		for _, snippet := range summary.EvidenceSnippets {
+			label := snippet.IssueID
+			if snippet.Relationship != "" {
+				label += " " + snippet.Relationship
+			}
+			fmt.Printf("- %s: %s\n", label, strings.Join(snippet.Signals, "; "))
+		}
+	}
+	if len(summary.CloseoutPrompts) > 0 {
+		fmt.Println("Closeout prompts:")
+		for _, prompt := range summary.CloseoutPrompts {
+			fmt.Printf("- %s\n", prompt)
+		}
+	}
+	if len(summary.HandoffFields.StructuredFields) > 0 {
+		fmt.Printf("Structured handoff fields: %s\n", strings.Join(summary.HandoffFields.StructuredFields, ", "))
+	}
+}
+
+func renderIssueContextRiskFull(packet domain.IssueContextRiskPacket) {
+	renderIssueContextRisk(domain.SummarizeIssueContextRisk(packet))
 	if len(packet.Clusters) > 0 {
 		fmt.Println("Clusters:")
 		for _, cluster := range packet.Clusters {
 			fmt.Printf("- %s %s: %s\n", cluster.Kind, cluster.Value, strings.Join(cluster.Issues, ", "))
 		}
 	}
-	if len(packet.CloseoutPrompts) > 0 {
-		fmt.Println("Closeout prompts:")
-		for _, prompt := range packet.CloseoutPrompts {
-			fmt.Printf("- %s\n", prompt)
+	if len(packet.Evidence) > 0 {
+		fmt.Println("Evidence:")
+		for _, evidence := range packet.Evidence {
+			parts := []string{evidence.IssueID}
+			if evidence.Relationship != "" {
+				parts = append(parts, evidence.Relationship)
+			}
+			if len(evidence.Files) > 0 {
+				parts = append(parts, "files="+strings.Join(evidence.Files, ","))
+			}
+			if len(evidence.Symbols) > 0 {
+				parts = append(parts, "symbols="+strings.Join(evidence.Symbols, ","))
+			}
+			if len(evidence.Tests) > 0 {
+				parts = append(parts, "tests="+strings.Join(evidence.Tests, ","))
+			}
+			if evidence.RootCause != "" {
+				parts = append(parts, "root_cause="+evidence.RootCause)
+			}
+			if evidence.Invariant != "" {
+				parts = append(parts, "invariant="+evidence.Invariant)
+			}
+			if evidence.Validation != "" {
+				parts = append(parts, "validation="+evidence.Validation)
+			}
+			if len(evidence.RiskNotes) > 0 {
+				parts = append(parts, "risk_notes="+strings.Join(evidence.RiskNotes, ";"))
+			}
+			if len(evidence.EvidenceKinds) > 0 {
+				parts = append(parts, "evidence_kinds="+strings.Join(evidence.EvidenceKinds, ","))
+			}
+			fmt.Printf("- %s\n", strings.Join(parts, " "))
 		}
-	}
-	if len(packet.HandoffFields.StructuredFields) > 0 {
-		fmt.Printf("Structured handoff fields: %s\n", strings.Join(packet.HandoffFields.StructuredFields, ", "))
 	}
 }
 
@@ -4423,8 +4520,13 @@ func loadIssueContextRiskForCloseout(ctx context.Context, deps *Dependencies, is
 	if deps == nil || deps.DaemonClient == nil {
 		return nil, nil
 	}
-	packet, err := deps.DaemonClient.TaskContextRisk(ctx, issueID, deps.RepoDir, issueContextRiskCloseoutSince())
+	since := issueContextRiskCloseoutSince()
+	packet, err := deps.DaemonClient.TaskContextRisk(ctx, issueID, deps.RepoDir, since, daemonclient.TaskContextRiskOptions{Compact: true})
 	if err != nil {
+		if issueContextRiskTimedOut(err) {
+			packet := issueContextRiskDegradedPacket(issueID, since, err)
+			return &packet, nil
+		}
 		return nil, fmt.Errorf("inspect context risk before closeout: %w", err)
 	}
 	return &packet, nil
@@ -4438,22 +4540,29 @@ func printIssueContextRiskCloseout(packet *domain.IssueContextRiskPacket) {
 	if packet == nil || packet.Level == domain.IssueContextRiskNone {
 		return
 	}
-	fmt.Printf("- Context risk: %s", packet.Level)
-	if packet.Confidence > 0 {
-		fmt.Printf(" confidence=%d", packet.Confidence)
+	summary := domain.SummarizeIssueContextRisk(*packet)
+	fmt.Printf("- Context risk: %s", summary.Level)
+	if summary.Confidence > 0 {
+		fmt.Printf(" confidence=%d", summary.Confidence)
+	}
+	if summary.Degraded {
+		fmt.Print(" degraded=true")
+	}
+	if summary.Timeout {
+		fmt.Print(" timeout=true")
 	}
 	fmt.Println()
-	for _, signal := range packet.Signals {
+	for _, signal := range summary.Signals {
 		fmt.Printf("  - %s\n", signal)
 	}
-	for _, cluster := range packet.Clusters {
-		fmt.Printf("  - %s %s: %s\n", cluster.Kind, cluster.Value, strings.Join(cluster.Issues, ", "))
+	if len(summary.RelatedIssueIDs) > 0 {
+		fmt.Printf("  - Related issues: %s\n", strings.Join(summary.RelatedIssueIDs, ", "))
 	}
 	if domain.IssueContextRiskRequiresStructuredCloseout(*packet) {
 		fmt.Println("  - Required before closeout: record root_cause, invariant, regression_validation, or a structured risk note.")
 		return
 	}
-	for _, prompt := range packet.CloseoutPrompts {
+	for _, prompt := range summary.CloseoutPrompts {
 		fmt.Printf("  - %s\n", prompt)
 	}
 }

@@ -103,3 +103,64 @@ func TestIssueContextRiskRequiresStructuredCloseout(t *testing.T) {
 		t.Fatal("IssueContextRiskRequiresStructuredCloseout = true, want false with target validation")
 	}
 }
+
+func TestSummarizeIssueContextRiskBoundsEvidenceAndSignals(t *testing.T) {
+	candidates := make([]IssueContextRiskEvidence, 0, 8)
+	for i := 0; i < 8; i++ {
+		candidates = append(candidates, IssueContextRiskEvidence{
+			IssueID:      fmt.Sprintf("az-prev-%d", i),
+			Relationship: "sibling",
+			Files:        []string{"internal/daemon/task_commands.go", fmt.Sprintf("internal/other/%d.go", i)},
+			Symbols:      []string{"closeTask"},
+			RiskNotes:    []string{fmt.Sprintf("risk note %d", i)},
+		})
+	}
+	packet := BuildIssueContextRisk(IssueContextRiskInput{
+		Target: IssueContextRiskEvidence{
+			IssueID: "az-target",
+			Files:   []string{"internal/daemon/task_commands.go"},
+			Symbols: []string{"closeTask"},
+		},
+		Candidates: candidates,
+	})
+
+	summary := SummarizeIssueContextRisk(packet)
+	if len(summary.Signals) > 5 {
+		t.Fatalf("signals = %d, want bounded to 5", len(summary.Signals))
+	}
+	if len(summary.EvidenceSnippets) != 3 {
+		t.Fatalf("evidence snippets = %d, want 3", len(summary.EvidenceSnippets))
+	}
+	if len(summary.RelatedIssueIDs) != 8 {
+		t.Fatalf("related issue ids = %+v, want all 8 related ids", summary.RelatedIssueIDs)
+	}
+}
+
+func TestCompactIssueContextRiskKeepsTargetEvidenceForCloseoutGate(t *testing.T) {
+	packet := BuildIssueContextRisk(IssueContextRiskInput{
+		Target: IssueContextRiskEvidence{
+			IssueID: "az-target",
+			Files:   []string{"internal/daemon/task_commands.go"},
+		},
+		Candidates: []IssueContextRiskEvidence{
+			{IssueID: "az-prev-1", Files: []string{"internal/daemon/task_commands.go"}, RiskNotes: []string{"same failure"}},
+			{IssueID: "az-prev-2", Files: []string{"internal/daemon/task_commands.go"}, RiskNotes: []string{"same failure"}},
+			{IssueID: "az-prev-3", Files: []string{"internal/daemon/task_commands.go"}, RiskNotes: []string{"same failure"}},
+			{IssueID: "az-prev-4", Files: []string{"internal/daemon/task_commands.go"}, RiskNotes: []string{"same failure"}},
+		},
+	})
+
+	compact := CompactIssueContextRisk(packet)
+	if len(compact.Evidence) != 3 {
+		t.Fatalf("compact evidence = %d, want 3", len(compact.Evidence))
+	}
+	if compact.Evidence[0].IssueID != "az-target" {
+		t.Fatalf("first compact evidence = %+v, want target evidence preserved", compact.Evidence[0])
+	}
+	if !compact.EvidenceTruncated {
+		t.Fatal("EvidenceTruncated = false, want true")
+	}
+	if !IssueContextRiskRequiresStructuredCloseout(compact) {
+		t.Fatal("compact packet no longer blocks high risk without target evidence")
+	}
+}
