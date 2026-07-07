@@ -191,6 +191,7 @@ type taskDeletePreflightResult struct {
 
 type taskGraphReadinessResult struct {
 	RootIssueID            string                          `json:"root_issue_id"`
+	Capacity               taskGraphCapacitySummary        `json:"capacity"`
 	Runnable               []string                        `json:"runnable"`
 	NestedRoots            []taskGraphNestedRoot           `json:"nested_roots,omitempty"`
 	Pending                []taskGraphPendingStart         `json:"pending,omitempty"`
@@ -202,13 +203,33 @@ type taskGraphReadinessResult struct {
 	Blocked                map[string]string               `json:"blocked"`
 }
 
+type taskGraphCapacitySummary struct {
+	DirectRunnableCount        int `json:"direct_runnable_count"`
+	DirectActiveCount          int `json:"direct_active_count"`
+	NestedStartableCount       int `json:"nested_startable_count"`
+	NestedActiveCount          int `json:"nested_active_count"`
+	PendingStartsCount         int `json:"pending_starts_count"`
+	BlockedNestedRootsCount    int `json:"blocked_nested_roots_count"`
+	NotCountingCapacityCount   int `json:"not_counting_capacity_count"`
+	TotalCountingCapacityCount int `json:"total_counting_capacity_count"`
+}
+
 type taskGraphNestedRoot struct {
-	IssueID       string                  `json:"issue_id"`
-	Status        string                  `json:"status"`
-	Type          string                  `json:"type"`
-	ChildCount    int                     `json:"child_count"`
-	ActiveSession *taskGraphActiveSession `json:"active_session,omitempty"`
-	Advice        string                  `json:"advice,omitempty"`
+	IssueID        string                  `json:"issue_id"`
+	Status         string                  `json:"status"`
+	IssueStatus    string                  `json:"issue_status,omitempty"`
+	Type           string                  `json:"type"`
+	ChildCount     int                     `json:"child_count"`
+	ActiveSession  *taskGraphActiveSession `json:"active_session,omitempty"`
+	StartFailure   *taskGraphStartFailure  `json:"start_failure,omitempty"`
+	FallbackPolicy string                  `json:"fallback_policy,omitempty"`
+	Advice         string                  `json:"advice,omitempty"`
+}
+
+type taskGraphStartFailure struct {
+	OperationID    string `json:"operation_id,omitempty"`
+	OperationState string `json:"operation_state,omitempty"`
+	Message        string `json:"message,omitempty"`
 }
 
 type taskGraphPendingStart struct {
@@ -3689,12 +3710,14 @@ func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID 
 		ready = daemonTaskGraphApplyPendingStarts(ready, pendingStarts)
 	}
 	startProgressByIssue := d.sessionStartProgressByIssue(ctx, projectID)
+	failedStartsByIssue := d.failedSessionStartByIssue(ctx, projectID)
 	ready.applySessionStartProgress(startProgressByIssue)
-	ready.NestedRoots = d.daemonTaskGraphNestedRoots(ctx, projectID, ready.NestedRoots, byID, startProgressByIssue)
+	ready.NestedRoots = d.daemonTaskGraphNestedRoots(ctx, projectID, ready.NestedRoots, byID, startProgressByIssue, failedStartsByIssue)
 	ready.ActiveSessions = d.daemonTaskGraphActiveSessions(ctx, projectID, ready.Active, byID, startProgressByIssue)
 	ready.ActiveSessions = append(ready.ActiveSessions, daemonTaskGraphCleanupPendingSessions(rootID, byID, children)...)
 	ready.SessionStartProgress = daemonTaskGraphSessionStartProgressList(rootID, children, startProgressByIssue)
 	ready.WorkerObservations = d.daemonTaskGraphWorkerObservations(ctx, projectID, rootID, byID, children, ready)
+	ready.Capacity = daemonTaskGraphCapacitySummary(ready)
 	return ready, nil
 }
 
@@ -3843,6 +3866,7 @@ func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.
 		}
 		result.Runnable = append(result.Runnable, idRaw)
 	}
+	result.Capacity = daemonTaskGraphCapacitySummary(result)
 	return result, nil
 }
 
@@ -3929,6 +3953,7 @@ func (d *Daemon) daemonTaskGraphNestedRoots(
 	nested []taskGraphNestedRoot,
 	byID map[naming.IssueID]domain.Task,
 	startProgressByIssue map[string]taskGraphSessionStartProgress,
+	failedStartsByIssue map[string]taskGraphStartFailure,
 ) []taskGraphNestedRoot {
 	if len(nested) == 0 {
 		return nil
@@ -3944,10 +3969,36 @@ func (d *Daemon) daemonTaskGraphNestedRoots(
 	activeByIssue := daemonTaskGraphActiveSessionsByIssue(d.daemonTaskGraphActiveSessions(ctx, projectID, activeIDs, byID, startProgressByIssue))
 	out := make([]taskGraphNestedRoot, 0, len(nested))
 	for _, item := range nested {
+		taskID, parseErr := naming.ParseIssueID(item.IssueID)
+		task := byID[taskID]
+		if parseErr == nil && !task.ID.IsZero() {
+			item.IssueStatus = string(task.Status)
+		}
 		if active := activeByIssue[item.IssueID]; active != nil {
 			copyActive := *active
 			item.ActiveSession = &copyActive
+			item.Status = "active"
+			item.FallbackPolicy = "watch_nested_root"
 			item.Advice = fmt.Sprintf("watch nested root orchestrator: az orchestrate status --root %s --json", item.IssueID)
+		}
+		if item.ActiveSession == nil {
+			if failure, failed := failedStartsByIssue[item.IssueID]; failed {
+				copyFailure := failure
+				item.StartFailure = &copyFailure
+				item.Status = "blocked_start_failed"
+				item.FallbackPolicy = "keep_children_blocked_or_create_replacement_direct_work"
+				item.Advice = fmt.Sprintf("nested root session start failed; inspect operation %s, retry `az session start %s`, or create replacement direct work under the parent without flattening %s descendants", failure.OperationID, item.IssueID, item.IssueID)
+			}
+		}
+		if item.Status == "" || item.Status == "startable" || item.Status == string(domain.StatusOpen) || item.Status == string(domain.StatusInProgress) || item.Status == string(domain.StatusInReview) {
+			if item.IssueStatus == string(domain.StatusDone) {
+				item.Status = "not_counting_capacity"
+				item.FallbackPolicy = "repair_or_close_remaining_descendants"
+				item.Advice = fmt.Sprintf("nested root %s is closed; repair or close remaining descendants before parent completion", item.IssueID)
+			} else if item.Status == "" || item.Status == "startable" || item.Status == item.IssueStatus {
+				item.Status = "startable"
+				item.FallbackPolicy = "start_nested_root"
+			}
 		}
 		if strings.TrimSpace(item.Advice) == "" {
 			item.Advice = fmt.Sprintf("start nested root orchestrator: az session start %s", item.IssueID)
@@ -3955,6 +4006,100 @@ func (d *Daemon) daemonTaskGraphNestedRoots(
 		out = append(out, item)
 	}
 	return out
+}
+
+func (d *Daemon) failedSessionStartByIssue(ctx context.Context, projectID string) map[string]taskGraphStartFailure {
+	if d == nil || d.operationRuntime == nil || d.operationRuntime.manager == nil {
+		return nil
+	}
+	projectID = d.canonicalProjectID(projectID)
+	records, err := d.operationRuntime.manager.List(ctx, daemonops.Query{
+		ProjectID: projectID,
+		Kind:      daemonhandlers.CommandSessionStart,
+		States:    []daemonops.State{daemonops.StateDone, daemonops.StateFailed, daemonops.StateCancelled},
+		Limit:     500,
+	})
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("list failed session start operations for graph readiness failed", "project_id", projectID, "error", err)
+		}
+		return nil
+	}
+	out := make(map[string]taskGraphStartFailure, len(records))
+	newest := make(map[string]time.Time, len(records))
+	for _, record := range records {
+		issueID := strings.TrimSpace(record.IssueID)
+		if issueID == "" {
+			continue
+		}
+		if latest, ok := newest[issueID]; ok && record.UpdatedAt.Before(latest) {
+			continue
+		}
+		newest[issueID] = record.UpdatedAt
+		if record.State != daemonops.StateFailed {
+			delete(out, issueID)
+			continue
+		}
+		out[issueID] = taskGraphStartFailure{
+			OperationID:    strings.TrimSpace(record.ID),
+			OperationState: string(record.State),
+			Message:        strings.TrimSpace(record.ErrorMessage),
+		}
+	}
+	return out
+}
+
+func daemonTaskGraphCapacitySummary(ready taskGraphReadinessResult) taskGraphCapacitySummary {
+	summary := taskGraphCapacitySummary{
+		DirectRunnableCount: len(ready.Runnable),
+		DirectActiveCount:   len(ready.Active),
+		PendingStartsCount:  len(ready.SessionStartProgress),
+	}
+	countingCapacity := make(map[string]struct{}, len(ready.Active)+len(ready.SessionStartProgress)+len(ready.Pending)+len(ready.NestedRoots))
+	for _, issueID := range ready.Active {
+		issueID = strings.TrimSpace(issueID)
+		if issueID != "" {
+			countingCapacity[issueID] = struct{}{}
+		}
+	}
+	pendingSeen := make(map[string]struct{}, len(ready.SessionStartProgress)+len(ready.Pending))
+	for _, progress := range ready.SessionStartProgress {
+		issueID := strings.TrimSpace(progress.IssueID)
+		if issueID != "" {
+			pendingSeen[issueID] = struct{}{}
+			countingCapacity[issueID] = struct{}{}
+		}
+	}
+	for _, pending := range ready.Pending {
+		issueID := strings.TrimSpace(pending.IssueID)
+		if issueID == "" {
+			continue
+		}
+		countingCapacity[issueID] = struct{}{}
+		if _, seen := pendingSeen[issueID]; seen {
+			continue
+		}
+		pendingSeen[issueID] = struct{}{}
+		summary.PendingStartsCount++
+	}
+	for _, nested := range ready.NestedRoots {
+		switch strings.TrimSpace(nested.Status) {
+		case "active":
+			summary.NestedActiveCount++
+			issueID := strings.TrimSpace(nested.IssueID)
+			if issueID != "" {
+				countingCapacity[issueID] = struct{}{}
+			}
+		case "blocked_start_failed":
+			summary.BlockedNestedRootsCount++
+		case "not_counting_capacity":
+			summary.NotCountingCapacityCount++
+		default:
+			summary.NestedStartableCount++
+		}
+	}
+	summary.TotalCountingCapacityCount = len(countingCapacity)
+	return summary
 }
 
 func hasTaskGraphSessionStartProgress(issueID string, progressByIssue map[string]taskGraphSessionStartProgress) bool {
@@ -4613,11 +4758,12 @@ func daemonTaskGraphNestedRootSummaries(root naming.IssueID, byID map[naming.Iss
 			}
 			seenRoots[id] = struct{}{}
 			out = append(out, taskGraphNestedRoot{
-				IssueID:    id.String(),
-				Status:     string(task.Status),
-				Type:       string(task.Type),
-				ChildCount: len(daemonTaskGraphDescendants(id, children)),
-				Advice:     fmt.Sprintf("start nested root orchestrator: az session start %s", id.String()),
+				IssueID:     id.String(),
+				Status:      "startable",
+				IssueStatus: string(task.Status),
+				Type:        string(task.Type),
+				ChildCount:  len(daemonTaskGraphDescendants(id, children)),
+				Advice:      fmt.Sprintf("start nested root orchestrator: az session start %s", id.String()),
 			})
 			return
 		}

@@ -328,11 +328,13 @@ func printHelpForPath(path []string) bool {
 	case "observe":
 		fmt.Println(observeUsage)
 	case "orchestrate":
-		fmt.Println("Usage: az orchestrate <status|start|watch|observe|prompt|message|complete-check|integrate|close-session> [arguments]")
+		fmt.Println("Usage: az orchestrate <status|start|group|watch|observe|prompt|message|complete-check|integrate|close-session> [arguments]")
 	case "orchestrate status":
 		fmt.Println(orchestrateStatusUsage)
 	case "orchestrate start":
 		fmt.Println(orchestrateStartUsage)
+	case "orchestrate group":
+		fmt.Println(orchestrateGroupUsage)
 	case "orchestrate watch":
 		fmt.Println(orchestrateWatchUsage)
 	case "orchestrate observe":
@@ -421,6 +423,7 @@ const (
 	observeUsage                  = "Usage: az observe [--root <issue-id>] [--project <project-id>] [--json]"
 	orchestrateStatusUsage        = "Usage: az orchestrate status --root <issue-id> [--project <project-id>] [--since <seq>] [--limit <n>] [--json] [--summary|--full]"
 	orchestrateStartUsage         = "Usage: az orchestrate start --root <issue-id> [--project <project-id>] [--limit <n>] [--issue <issue-id> ...] [--json]"
+	orchestrateGroupUsage         = "Usage: az orchestrate group --root <issue-id> --nested <issue-id> --issue <issue-id> ... [--project <project-id>] [--json]"
 	orchestrateWatchUsage         = "Usage: az orchestrate watch --root <issue-id> [--project <project-id>] [--since <seq>] [--jsonl] [--once] [--verbose|--full]"
 	orchestrateObserveUsage       = "Usage: az orchestrate observe --root <issue-id> [--project <project-id>] [--json]"
 	orchestratePromptUsage        = "Usage: az orchestrate prompt --issue <issue-id> [--root <issue-id>] [--coordination native|mailbox] [--project <project-id>] [--json]"

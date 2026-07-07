@@ -38,6 +38,14 @@ type OrchestrateStartOptions struct {
 	BaseBranchOverride string
 }
 
+type OrchestrateGroupOptions struct {
+	Project       string
+	RootIssueID   string
+	NestedIssueID string
+	IssueIDs      []string
+	JSON          bool
+}
+
 type OrchestrateWatchOptions struct {
 	Project      string
 	RootIssueID  string
@@ -114,6 +122,7 @@ var (
 
 type orchestrateStatusResult struct {
 	RootIssueID            string                               `json:"root_issue_id"`
+	Capacity               orchestrateCapacitySummary           `json:"capacity"`
 	Runnable               []string                             `json:"runnable"`
 	NestedRoots            []orchestrateNestedRoot              `json:"nested_roots,omitempty"`
 	Pending                []orchestratePendingStart            `json:"pending,omitempty"`
@@ -126,6 +135,17 @@ type orchestrateStatusResult struct {
 	MailboxEvents          []protocol.MailEvent                 `json:"mailbox_events"`
 	Warnings               []string                             `json:"warnings,omitempty"`
 	Advice                 map[string]interface{}               `json:"advice,omitempty"`
+}
+
+type orchestrateCapacitySummary struct {
+	DirectRunnableCount        int `json:"direct_runnable_count"`
+	DirectActiveCount          int `json:"direct_active_count"`
+	NestedStartableCount       int `json:"nested_startable_count"`
+	NestedActiveCount          int `json:"nested_active_count"`
+	PendingStartsCount         int `json:"pending_starts_count"`
+	BlockedNestedRootsCount    int `json:"blocked_nested_roots_count"`
+	NotCountingCapacityCount   int `json:"not_counting_capacity_count"`
+	TotalCountingCapacityCount int `json:"total_counting_capacity_count"`
 }
 
 type orchestrateObserveResult struct {
@@ -173,6 +193,21 @@ type orchestrateStartResult struct {
 	Advice      orchestrateStartAdvice    `json:"advice,omitempty"`
 }
 
+type orchestrateGroupResult struct {
+	RootIssueID   string                 `json:"root_issue_id"`
+	NestedIssueID string                 `json:"nested_issue_id"`
+	Grouped       []orchestrateGroupItem `json:"grouped"`
+	NestedRoot    *orchestrateNestedRoot `json:"nested_root,omitempty"`
+	Advice        []string               `json:"advice,omitempty"`
+}
+
+type orchestrateGroupItem struct {
+	IssueID          string `json:"issue_id"`
+	PreviousParentID string `json:"previous_parent_id,omitempty"`
+	NewParentID      string `json:"new_parent_id"`
+	Changed          bool   `json:"changed"`
+}
+
 type orchestrateStartLaunch struct {
 	IssueID        string `json:"issue_id"`
 	SessionID      string `json:"session_id"`
@@ -203,6 +238,7 @@ type orchestrateWatchFrame struct {
 	RootIssueID            string                               `json:"root_issue_id"`
 	SinceSeq               int64                                `json:"since_seq"`
 	NextSince              int64                                `json:"next_since"`
+	Capacity               orchestrateCapacitySummary           `json:"capacity"`
 	Runnable               []string                             `json:"runnable"`
 	NestedRoots            []orchestrateNestedRoot              `json:"nested_roots,omitempty"`
 	Pending                []orchestratePendingStart            `json:"pending,omitempty"`
@@ -286,12 +322,21 @@ type orchestrateWorkerEvidenceSummary struct {
 }
 
 type orchestrateNestedRoot struct {
-	IssueID       string                    `json:"issue_id"`
-	Status        string                    `json:"status"`
-	Type          string                    `json:"type"`
-	ChildCount    int                       `json:"child_count"`
-	ActiveSession *orchestrateActiveSession `json:"active_session,omitempty"`
-	Advice        string                    `json:"advice,omitempty"`
+	IssueID        string                    `json:"issue_id"`
+	Status         string                    `json:"status"`
+	IssueStatus    string                    `json:"issue_status,omitempty"`
+	Type           string                    `json:"type"`
+	ChildCount     int                       `json:"child_count"`
+	ActiveSession  *orchestrateActiveSession `json:"active_session,omitempty"`
+	StartFailure   *orchestrateStartFailure  `json:"start_failure,omitempty"`
+	FallbackPolicy string                    `json:"fallback_policy,omitempty"`
+	Advice         string                    `json:"advice,omitempty"`
+}
+
+type orchestrateStartFailure struct {
+	OperationID    string `json:"operation_id,omitempty"`
+	OperationState string `json:"operation_state,omitempty"`
+	Message        string `json:"message,omitempty"`
 }
 
 type orchestratePendingStart struct {
@@ -433,6 +478,42 @@ func ParseOrchestrateStartArgs(args []string) (OrchestrateStartOptions, error) {
 	}
 	if opts.Limit < 1 {
 		return OrchestrateStartOptions{}, fmt.Errorf("limit must be >= 1")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	opts.IssueIDs = dedupeSortedStrings(opts.IssueIDs)
+	return opts, nil
+}
+
+func ParseOrchestrateGroupArgs(args []string) (OrchestrateGroupOptions, error) {
+	opts := OrchestrateGroupOptions{}
+	fs := flag.NewFlagSet("orchestrate group", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&opts.RootIssueID, "root", "", "root issue id")
+	fs.StringVar(&opts.NestedIssueID, "nested", "", "nested epic/root issue id")
+	fs.Func("issue", "direct child issue id to move under the nested root (repeatable)", func(value string) error {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return fmt.Errorf("issue id cannot be empty")
+		}
+		opts.IssueIDs = append(opts.IssueIDs, trimmed)
+		return nil
+	})
+	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
+	if err := fs.Parse(args); err != nil {
+		return OrchestrateGroupOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return OrchestrateGroupOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	if strings.TrimSpace(opts.RootIssueID) == "" {
+		return OrchestrateGroupOptions{}, fmt.Errorf("missing required flag: --root")
+	}
+	if strings.TrimSpace(opts.NestedIssueID) == "" {
+		return OrchestrateGroupOptions{}, fmt.Errorf("missing required flag: --nested")
+	}
+	if len(opts.IssueIDs) == 0 {
+		return OrchestrateGroupOptions{}, fmt.Errorf("at least one --issue is required")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	opts.IssueIDs = dedupeSortedStrings(opts.IssueIDs)
@@ -667,6 +748,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 
 	result := orchestrateStatusResult{
 		RootIssueID:            ready.RootIssueID,
+		Capacity:               orchestrateCapacityFromDaemon(ready.Capacity),
 		Runnable:               ready.Runnable,
 		NestedRoots:            orchestrateNestedRootsFromDaemon(ready.NestedRoots),
 		Pending:                orchestratePendingStartsFromDaemon(ready.Pending),
@@ -696,6 +778,9 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 	}
 
 	fmt.Printf("Root issue: %s\n", result.RootIssueID)
+	fmt.Println("Capacity:")
+	fmt.Printf("- direct runnable=%d active=%d pending_starts=%d\n", result.Capacity.DirectRunnableCount, result.Capacity.DirectActiveCount, result.Capacity.PendingStartsCount)
+	fmt.Printf("- nested startable=%d active=%d blocked_start_failed=%d not_counting=%d total_counting=%d\n", result.Capacity.NestedStartableCount, result.Capacity.NestedActiveCount, result.Capacity.BlockedNestedRootsCount, result.Capacity.NotCountingCapacityCount, result.Capacity.TotalCountingCapacityCount)
 	fmt.Println("Runnable leaves:")
 	if len(result.Runnable) == 0 {
 		fmt.Println("- (none)")
@@ -713,7 +798,11 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 	if len(result.NestedRoots) > 0 {
 		fmt.Println("Nested roots:")
 		for _, nested := range result.NestedRoots {
-			fmt.Printf("- %s status=%s type=%s children=%d\n", nested.IssueID, nested.Status, nested.Type, nested.ChildCount)
+			fmt.Printf("- %s status=%s issue_status=%s type=%s children=%d", nested.IssueID, nested.Status, nested.IssueStatus, nested.Type, nested.ChildCount)
+			if nested.FallbackPolicy != "" {
+				fmt.Printf(" fallback=%s", nested.FallbackPolicy)
+			}
+			fmt.Println()
 			if nested.ActiveSession != nil {
 				active := nested.ActiveSession
 				status := strings.TrimSpace(active.Status)
@@ -721,6 +810,13 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 					status = "active"
 				}
 				fmt.Printf("  session: status=%s activity=%s source=%s\n", status, active.Activity, active.ActivitySource)
+			}
+			if nested.StartFailure != nil {
+				fmt.Printf("  start failure: operation=%s state=%s", nested.StartFailure.OperationID, nested.StartFailure.OperationState)
+				if nested.StartFailure.Message != "" {
+					fmt.Printf(" message=%s", nested.StartFailure.Message)
+				}
+				fmt.Println()
 			}
 			if nested.Advice != "" {
 				fmt.Printf("  next: %s\n", nested.Advice)
@@ -849,11 +945,166 @@ func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) e
 	return orchestrateStartResultError(result)
 }
 
+func OrchestrateGroupCommand(deps *Dependencies, opts OrchestrateGroupOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	result, err := orchestrateGroup(deps, opts)
+	if err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(result)
+	}
+	fmt.Printf("Grouped %d issue(s) under nested root %s for root %s\n", len(result.Grouped), result.NestedIssueID, result.RootIssueID)
+	for _, item := range result.Grouped {
+		changed := "unchanged"
+		if item.Changed {
+			changed = "moved"
+		}
+		if item.PreviousParentID != "" {
+			fmt.Printf("- %s: %s parent %s -> %s\n", item.IssueID, changed, item.PreviousParentID, item.NewParentID)
+		} else {
+			fmt.Printf("- %s: %s parent -> %s\n", item.IssueID, changed, item.NewParentID)
+		}
+	}
+	if result.NestedRoot != nil {
+		nested := result.NestedRoot
+		fmt.Printf("Nested root: %s status=%s issue_status=%s children=%d fallback=%s\n", nested.IssueID, nested.Status, nested.IssueStatus, nested.ChildCount, nested.FallbackPolicy)
+		if nested.Advice != "" {
+			fmt.Printf("Next: %s\n", nested.Advice)
+		}
+	}
+	for _, advice := range result.Advice {
+		fmt.Printf("Next: %s\n", advice)
+	}
+	return nil
+}
+
 func orchestrateStartResultError(result orchestrateStartResult) error {
 	if len(result.Failed) > 0 {
 		return fmt.Errorf("orchestrate start completed with failures")
 	}
 	return nil
+}
+
+func orchestrateGroup(deps *Dependencies, opts OrchestrateGroupOptions) (orchestrateGroupResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return orchestrateGroupResult{}, err
+	}
+	rootID, err := naming.ParseIssueID(strings.TrimSpace(opts.RootIssueID))
+	if err != nil {
+		return orchestrateGroupResult{}, fmt.Errorf("invalid root issue id: %w", err)
+	}
+	nestedID, err := naming.ParseIssueID(strings.TrimSpace(opts.NestedIssueID))
+	if err != nil {
+		return orchestrateGroupResult{}, fmt.Errorf("invalid nested issue id: %w", err)
+	}
+	if rootID == nestedID {
+		return orchestrateGroupResult{}, fmt.Errorf("nested issue must differ from root issue")
+	}
+
+	before, err := deps.DaemonClient.TaskGraphReadiness(ctx, rootID.String())
+	if err != nil {
+		return orchestrateGroupResult{}, err
+	}
+	nestedBefore, nestedKnown := findOrchestrateDaemonNestedRoot(before.NestedRoots, nestedID.String())
+	if !nestedKnown {
+		return orchestrateGroupResult{}, fmt.Errorf("nested issue %s is not a nested root under %s; create/link it under the root first", nestedID, rootID)
+	}
+
+	grouped := make([]orchestrateGroupItem, 0, len(opts.IssueIDs))
+	toMove := make([]naming.IssueID, 0, len(opts.IssueIDs))
+	for _, rawIssueID := range opts.IssueIDs {
+		issueID, err := naming.ParseIssueID(strings.TrimSpace(rawIssueID))
+		if err != nil {
+			return orchestrateGroupResult{}, fmt.Errorf("invalid issue id %q: %w", rawIssueID, err)
+		}
+		if issueID == rootID || issueID == nestedID {
+			return orchestrateGroupResult{}, fmt.Errorf("cannot group root or nested root issue %s under %s", issueID, nestedID)
+		}
+		snapshot, err := deps.DaemonClient.GetTaskSnapshot(ctx, issueID.String())
+		if err != nil {
+			return orchestrateGroupResult{}, fmt.Errorf("inspect issue %s before grouping: %w", issueID, err)
+		}
+		if len(snapshot.Tasks) == 0 {
+			return orchestrateGroupResult{}, fmt.Errorf("issue not found before grouping: %s", issueID)
+		}
+		task, ok := findTaskByID(snapshot.Tasks, issueID.String())
+		if !ok {
+			return orchestrateGroupResult{}, fmt.Errorf("issue not found before grouping: %s", issueID)
+		}
+		previousParent := ""
+		if task.ParentID != nil {
+			previousParent = strings.TrimSpace(task.ParentID.String())
+		}
+		if previousParent == "" {
+			return orchestrateGroupResult{}, fmt.Errorf("issue %s is not parented under root %s; attach it to the root before nested grouping", issueID, rootID)
+		}
+		if !naming.IssueIDsEqual(previousParent, rootID.String()) && !naming.IssueIDsEqual(previousParent, nestedID.String()) {
+			return orchestrateGroupResult{}, fmt.Errorf("issue %s is parented under %s, not root %s; refusing nested grouping from another parent", issueID, previousParent, rootID)
+		}
+		changed := !naming.IssueIDsEqual(previousParent, nestedID.String())
+		if changed && (task.HasTmuxSession || task.HasWorktree) {
+			return orchestrateGroupResult{}, fmt.Errorf("issue %s has runtime/worktree state; stop or supersede it before grouping under nested root %s", issueID, nestedID)
+		}
+		if changed {
+			toMove = append(toMove, issueID)
+		}
+		grouped = append(grouped, orchestrateGroupItem{
+			IssueID:          issueID.String(),
+			PreviousParentID: previousParent,
+			NewParentID:      nestedID.String(),
+			Changed:          changed,
+		})
+	}
+	for _, issueID := range toMove {
+		if err := deps.DaemonClient.AddTaskDependency(ctx, daemonclient.TaskDependencyParams{
+			TaskID:            issueID,
+			DependsOnID:       nestedID,
+			Type:              string(domain.DependencyParentChild),
+			ForceParentChange: true,
+		}); err != nil {
+			return orchestrateGroupResult{}, fmt.Errorf("group issue %s under nested root %s: %w", issueID, nestedID, err)
+		}
+	}
+
+	after, err := deps.DaemonClient.TaskGraphReadiness(ctx, rootID.String())
+	if err != nil {
+		return orchestrateGroupResult{}, err
+	}
+	nestedAfter, _ := findOrchestrateDaemonNestedRoot(after.NestedRoots, nestedID.String())
+	nested := orchestrateNestedRootsFromDaemon([]daemonclient.TaskNestedRoot{nestedAfter})
+	result := orchestrateGroupResult{
+		RootIssueID:   rootID.String(),
+		NestedIssueID: nestedID.String(),
+		Grouped:       grouped,
+		Advice: []string{
+			fmt.Sprintf("inspect updated root: az orchestrate status --root %s --json", rootID.String()),
+			fmt.Sprintf("start nested root orchestrator when ready: az session start %s", nestedID.String()),
+		},
+	}
+	if len(nested) > 0 && nestedAfter.IssueID != "" {
+		result.NestedRoot = &nested[0]
+	}
+	if result.NestedRoot == nil {
+		converted := orchestrateNestedRootsFromDaemon([]daemonclient.TaskNestedRoot{nestedBefore})
+		if len(converted) > 0 {
+			result.NestedRoot = &converted[0]
+		}
+	}
+	return result, nil
+}
+
+func findOrchestrateDaemonNestedRoot(nested []daemonclient.TaskNestedRoot, issueID string) (daemonclient.TaskNestedRoot, bool) {
+	for _, item := range nested {
+		if naming.IssueIDsEqual(item.IssueID, issueID) {
+			return item, true
+		}
+	}
+	return daemonclient.TaskNestedRoot{}, false
 }
 
 func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchestrateStartResult, error) {
@@ -1049,6 +1300,19 @@ func orchestratePendingStartsFromDaemon(pending []daemonclient.TaskPendingStart)
 	return out
 }
 
+func orchestrateCapacityFromDaemon(capacity daemonclient.TaskCapacitySummary) orchestrateCapacitySummary {
+	return orchestrateCapacitySummary{
+		DirectRunnableCount:        capacity.DirectRunnableCount,
+		DirectActiveCount:          capacity.DirectActiveCount,
+		NestedStartableCount:       capacity.NestedStartableCount,
+		NestedActiveCount:          capacity.NestedActiveCount,
+		PendingStartsCount:         capacity.PendingStartsCount,
+		BlockedNestedRootsCount:    capacity.BlockedNestedRootsCount,
+		NotCountingCapacityCount:   capacity.NotCountingCapacityCount,
+		TotalCountingCapacityCount: capacity.TotalCountingCapacityCount,
+	}
+}
+
 func orchestrateNestedRootsFromDaemon(nested []daemonclient.TaskNestedRoot) []orchestrateNestedRoot {
 	if len(nested) == 0 {
 		return nil
@@ -1062,13 +1326,24 @@ func orchestrateNestedRootsFromDaemon(nested []daemonclient.TaskNestedRoot) []or
 				active = &converted[0]
 			}
 		}
+		var failure *orchestrateStartFailure
+		if item.StartFailure != nil {
+			failure = &orchestrateStartFailure{
+				OperationID:    item.StartFailure.OperationID,
+				OperationState: item.StartFailure.OperationState,
+				Message:        item.StartFailure.Message,
+			}
+		}
 		out = append(out, orchestrateNestedRoot{
-			IssueID:       item.IssueID,
-			Status:        item.Status,
-			Type:          item.Type,
-			ChildCount:    item.ChildCount,
-			ActiveSession: active,
-			Advice:        item.Advice,
+			IssueID:        item.IssueID,
+			Status:         item.Status,
+			IssueStatus:    item.IssueStatus,
+			Type:           item.Type,
+			ChildCount:     item.ChildCount,
+			ActiveSession:  active,
+			StartFailure:   failure,
+			FallbackPolicy: item.FallbackPolicy,
+			Advice:         item.Advice,
 		})
 	}
 	return out
@@ -1693,6 +1968,7 @@ func orchestrateWatchFrameFromReadiness(ready daemonclient.TaskGraphReadiness, e
 		RootIssueID:            ready.RootIssueID,
 		SinceSeq:               since,
 		NextSince:              nextSince,
+		Capacity:               orchestrateCapacityFromDaemon(ready.Capacity),
 		Runnable:               ready.Runnable,
 		NestedRoots:            orchestrateNestedRootsFromDaemon(ready.NestedRoots),
 		Pending:                orchestratePendingStartsFromDaemon(ready.Pending),
@@ -1707,6 +1983,7 @@ func orchestrateWatchFrameFromReadiness(ready daemonclient.TaskGraphReadiness, e
 
 func orchestrateWatchFrameSnapshotKey(frame orchestrateWatchFrame) string {
 	type snapshot struct {
+		Capacity               orchestrateCapacitySummary           `json:"capacity"`
 		Runnable               []string                             `json:"runnable"`
 		NestedRoots            []orchestrateNestedRoot              `json:"nested_roots,omitempty"`
 		Pending                []orchestratePendingStart            `json:"pending,omitempty"`
@@ -1730,6 +2007,7 @@ func orchestrateWatchFrameSnapshotKey(frame orchestrateWatchFrame) string {
 		sessionStartProgress[i].ElapsedMS = 0
 	}
 	encoded, err := json.Marshal(snapshot{
+		Capacity:               frame.Capacity,
 		Runnable:               frame.Runnable,
 		NestedRoots:            nestedRoots,
 		Pending:                frame.Pending,
@@ -2439,6 +2717,16 @@ func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool, compact 
 		return nil
 	}
 	fmt.Printf("root=%s since=%d next=%d\n", frame.RootIssueID, frame.SinceSeq, frame.NextSince)
+	fmt.Printf("capacity: direct_runnable=%d direct_active=%d pending_starts=%d nested_startable=%d nested_active=%d blocked_nested_roots=%d not_counting=%d total_counting=%d\n",
+		frame.Capacity.DirectRunnableCount,
+		frame.Capacity.DirectActiveCount,
+		frame.Capacity.PendingStartsCount,
+		frame.Capacity.NestedStartableCount,
+		frame.Capacity.NestedActiveCount,
+		frame.Capacity.BlockedNestedRootsCount,
+		frame.Capacity.NotCountingCapacityCount,
+		frame.Capacity.TotalCountingCapacityCount,
+	)
 	fmt.Println("runnable:")
 	if len(frame.Runnable) == 0 {
 		fmt.Println("- (none)")
@@ -2456,7 +2744,14 @@ func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool, compact 
 	if len(frame.NestedRoots) > 0 {
 		fmt.Println("nested roots:")
 		for _, nested := range frame.NestedRoots {
-			fmt.Printf("- %s status=%s type=%s children=%d\n", nested.IssueID, nested.Status, nested.Type, nested.ChildCount)
+			fmt.Printf("- %s status=%s issue_status=%s type=%s children=%d", nested.IssueID, nested.Status, nested.IssueStatus, nested.Type, nested.ChildCount)
+			if nested.FallbackPolicy != "" {
+				fmt.Printf(" fallback=%s", nested.FallbackPolicy)
+			}
+			fmt.Println()
+			if nested.StartFailure != nil {
+				fmt.Printf("  start failure: operation=%s state=%s\n", nested.StartFailure.OperationID, nested.StartFailure.OperationState)
+			}
 			if nested.Advice != "" {
 				fmt.Printf("  next: %s\n", nested.Advice)
 			}
