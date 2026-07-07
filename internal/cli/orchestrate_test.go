@@ -1968,11 +1968,12 @@ func TestOrchestratePromptCommandMailboxCoordinationOptIn(t *testing.T) {
 		"Use mailbox events for hybrid coordination",
 		"Check inbound orchestrator messages with `az mail list --parent az-1 --since 0 --json` before declaring yourself blocked or idle",
 		"Report to parent `az-1` with `az mail send --parent az-1 --issue az-2 --type <worker-progress|worker-blocked|worker-integration-ready> --body \"<evidence>\"`; do not use `az orchestrate message` for your own status",
-		"Evidence bodies should be JSON `worker_evidence.v1` packets with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, `risks`, and optional `artifact_links`",
+		"Evidence bodies should be JSON `worker_evidence.v1` packets with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`",
+		"Omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array",
 		"az mail list --parent az-1 --since 0 --json",
 		"`worker-ready` and `worker-complete` are accepted only as legacy aliases for `worker-integration-ready`",
 		"az mail send --parent az-1 --issue az-2 --type worker-integration-ready",
-		`--body '{"schema":"worker_evidence.v1",...}'`,
+		`"schema":"worker_evidence.v1","summary":"Ready for integration."`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)

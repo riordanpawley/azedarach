@@ -163,6 +163,54 @@ func TestMailListAnnotatesStructuredWorkerEvidencePayload(t *testing.T) {
 	}
 }
 
+func TestMailSendRejectsInvalidWorkerEvidenceBeforePersisting(t *testing.T) {
+	repoDir := t.TempDir()
+	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-send-invalid-evidence",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: "proj-mail"},
+		Command:         protocol.CommandMailSend,
+		Body: mustMarshal(t, protocol.MailSendCommandBody{
+			RepoDir:     repoDir,
+			ParentIssue: "az-parent",
+			IssueID:     naming.IssueID("az-child"),
+			Type:        "worker-integration-ready",
+			Body: `{
+				"schema": "worker_evidence.v1",
+				"summary": "Ready for integration.",
+				"commands_run": ["go test ./internal/daemon"],
+				"key_assertions": ["mailbox rejects invalid evidence"],
+				"files_changed": ["internal/daemon/mail_commands.go"],
+				"review": {"status": "clean", "findings": []},
+				"risks": ["none"],
+				"artifact_links": ["https://example.test/run/1"]
+			}`,
+		}),
+	}
+
+	resp, err := d.command(context.Background(), req)
+	if err != nil {
+		t.Fatalf("mail.send command error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("response = %+v, want invalid_request", resp)
+	}
+	for _, want := range []string{"invalid worker_evidence.v1 packet", "artifact_links[0] must be an object", "Omit artifact_links unless links are needed", "not a string array"} {
+		if !strings.Contains(resp.Error.Message, want) {
+			t.Fatalf("error = %q, missing %q", resp.Error.Message, want)
+		}
+	}
+	events, err := readMailboxEvents(repoDir, "az-parent")
+	if err != nil {
+		t.Fatalf("readMailboxEvents error: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events = %+v, want none persisted", events)
+	}
+}
+
 func TestMailSendSerializesSequenceNumbers(t *testing.T) {
 	repoDir := t.TempDir()
 	d := New(Config{

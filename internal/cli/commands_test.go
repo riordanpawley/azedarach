@@ -10803,6 +10803,15 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
 		t.Fatalf("prime output missing mail send command example: %q", output)
 	}
+	if !strings.Contains(output, `"schema":"worker_evidence.v1","summary":"Ready for integration."`) {
+		t.Fatalf("prime output missing copy-safe worker evidence packet example: %q", output)
+	}
+	if !strings.Contains(output, "Worker integration evidence should be a structured JSON `worker_evidence.v1` packet in the `worker-integration-ready` mailbox body with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`; omit `artifact_links` unless links are needed") {
+		t.Fatalf("prime output missing worker evidence summary artifact_links guidance: %q", output)
+	}
+	if !strings.Contains(output, "For `worker_evidence.v1`, omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array.") {
+		t.Fatalf("prime output missing artifact_links object-shape guidance: %q", output)
+	}
 	if !strings.Contains(output, "Use `az orchestrate message --root <parent-issue> --issue <worker-issue> --body \"...\"` only for evidence-backed orchestrator-to-running-worker nudges when the intervention threshold is met") {
 		t.Fatalf("prime output missing active worker nudge guidance: %q", output)
 	}

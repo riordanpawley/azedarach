@@ -69,6 +69,10 @@ func ParseWorkerEvidencePacketBody(body string) (WorkerEvidencePacket, WorkerEvi
 			return WorkerEvidencePacket{}, result
 		}
 	}
+	if invalid := validateWorkerEvidenceRawShape(envelope); len(invalid) > 0 {
+		result.Invalid = append(result.Invalid, invalid...)
+		return WorkerEvidencePacket{}, result
+	}
 
 	var packet WorkerEvidencePacket
 	if err := json.Unmarshal(raw, &packet); err != nil {
@@ -140,6 +144,24 @@ func validateWorkerEvidencePacket(packet WorkerEvidencePacket, fields map[string
 	}
 	sort.Strings(missing)
 	return missing, invalid
+}
+
+func validateWorkerEvidenceRawShape(fields map[string]json.RawMessage) []string {
+	rawLinks, ok := fields["artifact_links"]
+	if !ok || strings.TrimSpace(string(rawLinks)) == "null" {
+		return nil
+	}
+	var links []json.RawMessage
+	if err := json.Unmarshal(rawLinks, &links); err != nil {
+		return []string{"artifact_links must be an array of objects with label and url fields; omit artifact_links unless needed, or use [{\"label\":\"...\",\"url\":\"https://...\"}], not a string array"}
+	}
+	for i, raw := range links {
+		trimmed := strings.TrimSpace(string(raw))
+		if !strings.HasPrefix(trimmed, "{") {
+			return []string{fmt.Sprintf("artifact_links[%d] must be an object with label and url fields; omit artifact_links unless needed, or use [{\"label\":\"...\",\"url\":\"https://...\"}], not a string array", i)}
+		}
+	}
+	return nil
 }
 
 func workerEvidenceJSONCandidate(body string) ([]byte, bool) {
