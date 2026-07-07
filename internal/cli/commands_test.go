@@ -10647,10 +10647,10 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Worker fanout/session launch: `az issue split --parent <issue-id> \"Child task\"` can create the child and start orchestration/session work; use `az issue split` only when you intentionally want isolated worker fanout.") {
 		t.Fatalf("prime output missing split/session launch warning: %q", output)
 	}
-	if !strings.Contains(output, "`az orchestrate status --root <issue-id> [--since <seq>] [--limit <n>] [--json]`") {
+	if !strings.Contains(output, "`az orchestrate status --root <issue-id> [--since <seq>] [--limit <n>] [--json] [--summary|--full]`") {
 		t.Fatalf("prime output missing orchestrate status command example: %q", output)
 	}
-	if !strings.Contains(output, "`az orchestrate watch --root <issue-id> --since <seq> [--jsonl]` (start in another pane/session and leave running while workers are active; reserve `--once` for diagnostic single polls only)") {
+	if !strings.Contains(output, "`az orchestrate watch --root <issue-id> --since <seq> [--jsonl] [--verbose|--full]` (start in another pane/session and leave running while workers are active; default output is compact for agent decision loops and `--verbose`/`--full` emits the full frame; reserve `--once` for diagnostic single polls only)") {
 		t.Fatalf("prime output missing continuous watch command guidance: %q", output)
 	}
 	if !strings.Contains(output, "`az orchestrate start --root <issue-id> [--limit <n>] [--issue <issue-id> ...] [--json]`") {
@@ -11920,7 +11920,7 @@ func TestPrimeCommandNativeFanoutGuidance(t *testing.T) {
 	if !strings.Contains(output, "Shorthand: `single-window fanout (native)`") {
 		t.Fatalf("prime output missing native single-window shorthand: %q", output)
 	}
-	if strings.Contains(output, "`az orchestrate status --root <issue-id> [--since <seq>] [--limit <n>] [--json]`") {
+	if strings.Contains(output, "`az orchestrate status --root <issue-id> [--since <seq>] [--limit <n>] [--json] [--summary|--full]`") {
 		t.Fatalf("prime output should avoid az orchestrate command map in native mode: %q", output)
 	}
 	if strings.Contains(output, "Shorthand: `single-window fanout` means split until each child is ready for one subagent, then fan out one subagent per child.") {
