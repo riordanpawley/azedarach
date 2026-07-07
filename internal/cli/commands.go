@@ -802,6 +802,137 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 	return printCommandOutput(resp)
 }
 
+func SessionDiagnoseCommand(deps *Dependencies, issueID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	target, err := resolveSessionStatusTarget(deps, issueID)
+	if err != nil {
+		return err
+	}
+	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
+	defer restoreProject()
+
+	fmt.Printf("Session diagnose: %s\n", target.IssueID)
+	fmt.Printf("Project: %s\n", target.ProjectID)
+	fmt.Printf("Repo: %s\n\n", target.RepoDir)
+
+	fmt.Println("Session status:")
+	statusResp, statusErr := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStatus, target.ProjectID, target.IssueID, ""))
+	if statusErr != nil {
+		fmt.Printf("  unavailable: %v\n", statusErr)
+	} else if statusResp.Error != nil {
+		fmt.Printf("  %s\n", statusResp.Error.Message)
+	} else if err := printCommandOutput(statusResp); err != nil {
+		fmt.Printf("  decode failed: %v\n", err)
+	}
+
+	fmt.Println("\nWorktree:")
+	printSessionDiagnoseWorktree(ctx, deps, target.IssueID)
+
+	fmt.Println("\nRecent session.start operations:")
+	printSessionDiagnoseOperations(ctx, deps, target.IssueID)
+
+	fmt.Println("\nAI hook status:")
+	printSessionDiagnoseAIStatus(deps, target.RepoDir)
+
+	fmt.Println("\nLogs:")
+	logDir := resolveSessionLogDirFor(deps.Config, target.RepoDir)
+	fmt.Printf("  daemon: %s\n", filepath.Join(logDir, logging.DaemonLogFileName))
+	fmt.Printf("  cli: %s\n", filepath.Join(logDir, logging.CLILogFileName))
+	return nil
+}
+
+func printSessionDiagnoseWorktree(ctx context.Context, deps *Dependencies, issueID string) {
+	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
+	if err != nil {
+		fmt.Printf("  unavailable: %v\n", err)
+		return
+	}
+	for _, worktree := range worktrees {
+		if naming.IssueIDsEqual(worktree.IssueID, issueID) {
+			fmt.Printf("  path: %s\n", worktree.Path)
+			fmt.Printf("  branch: %s\n", worktree.Branch)
+			return
+		}
+	}
+	fmt.Println("  not found")
+}
+
+func printSessionDiagnoseOperations(ctx context.Context, deps *Dependencies, issueID string) {
+	records, err := deps.DaemonClient.ListOperations(ctx, daemonclient.OperationListOptions{
+		IssueID: issueID,
+		Kind:    commandSessionStart,
+		Limit:   5,
+	})
+	if err != nil {
+		fmt.Printf("  unavailable: %v\n", err)
+		return
+	}
+	if len(records) == 0 {
+		fmt.Println("  none")
+		return
+	}
+	for _, record := range records {
+		line := fmt.Sprintf("  %s %s", record.OperationID, record.State)
+		if record.Progress != nil {
+			if phase := strings.TrimSpace(record.Progress.Phase); phase != "" {
+				line += " phase=" + phase
+			}
+			if message := strings.TrimSpace(record.Progress.Message); message != "" {
+				line += " progress=" + message
+			}
+		}
+		fmt.Println(line)
+		if record.Error != nil && strings.TrimSpace(record.Error.Message) != "" {
+			fmt.Printf("    error: %s\n", compactSingleLine(record.Error.Message, 500))
+		}
+	}
+}
+
+func printSessionDiagnoseAIStatus(deps *Dependencies, repoDir string) {
+	result, err := AIStatus(deps, AIStatusOptions{
+		Targets:    []AgentInstallTarget{AgentInstallTargetAuto},
+		ProjectDir: repoDir,
+	})
+	if err != nil {
+		fmt.Printf("  unavailable: %v\n", err)
+		return
+	}
+	if len(result.Targets) == 0 {
+		fmt.Println("  no hook targets detected")
+		return
+	}
+	for _, target := range result.Targets {
+		state := "missing"
+		if target.Installed {
+			state = "installed"
+		}
+		fmt.Printf("  %s: %s", target.Target, state)
+		if target.Path != "" {
+			fmt.Printf(" (%s)", target.Path)
+		}
+		fmt.Println()
+		if target.Reason != "" {
+			fmt.Printf("    reason: %s\n", target.Reason)
+		}
+	}
+}
+
+func compactSingleLine(value string, limit int) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	if limit <= 3 {
+		return value[:limit]
+	}
+	return value[:limit-3] + "..."
+}
+
 func SessionRestartAllCommand(deps *Dependencies, opts SessionRestartAllOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
