@@ -34,6 +34,9 @@ Commands:
   issue list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c]  List issues from daemon-backed store
   issue search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)  Search title, description, notes, design, acceptance, labels, and implementations
   issue get [--project <project-id>] [--id <id>] [--json] [--with-notes] [<id>]  Show a single issue from daemon-backed store
+  issue claim [--project <project-id>] [--id <id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<id>]  Claim an issue ownership lease
+  issue takeover [--project <project-id>] [--id <id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--json] [<id>]  Force-claim an issue ownership lease
+  issue release [--project <project-id>] [--id <id>] [--owner <owner-id>] [--force] [--json] [<id>]  Release an issue ownership lease
   issue get-many [--project <project-id>] --id <id> [--id <id> ...] [--ids a,b,c] [--json] [--with-notes]  Fetch many issues in requested order
   issue check [--project <project-id>] [--id <id>] [--json] [<id>]  Alias for issue get
   issue doctor [--project <project-id>] [--id <id>] [--json] [<id>]  Run integrity checks for one issue

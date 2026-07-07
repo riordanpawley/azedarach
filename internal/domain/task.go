@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -53,8 +54,33 @@ type Task struct {
 	GitDeletions          int             `json:"git_deletions,omitempty"`
 	Origin                string          `json:"origin,omitempty"`
 	RuntimeUpdatedAt      time.Time       `json:"runtime_updated_at,omitempty,omitzero"`
+	Ownership             *IssueOwnership `json:"ownership,omitempty"`
 	CreatedAt             time.Time       `json:"created_at"`
 	UpdatedAt             time.Time       `json:"updated_at"`
+}
+
+// IssueOwnership is a durable issue claim used to prevent duplicate agent pickup.
+type IssueOwnership struct {
+	OwnerID   string     `json:"owner_id"`
+	OwnerKind string     `json:"owner_kind"`
+	ClaimedAt time.Time  `json:"claimed_at"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+func (o IssueOwnership) IsExpired(now time.Time) bool {
+	return o.ExpiresAt != nil && !o.ExpiresAt.IsZero() && !now.Before(*o.ExpiresAt)
+}
+
+func (o IssueOwnership) IsActive(now time.Time) bool {
+	return strings.TrimSpace(o.OwnerID) != "" && !o.IsExpired(now)
+}
+
+func (o IssueOwnership) OwnedBy(ownerID string, now time.Time) bool {
+	return o.IsActive(now) && strings.EqualFold(strings.TrimSpace(o.OwnerID), strings.TrimSpace(ownerID))
+}
+
+func (o IssueOwnership) BlocksActor(ownerID string, now time.Time) bool {
+	return o.IsActive(now) && !strings.EqualFold(strings.TrimSpace(o.OwnerID), strings.TrimSpace(ownerID))
 }
 
 // Status represents task status

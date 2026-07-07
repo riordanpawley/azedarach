@@ -47,6 +47,8 @@ var orderedMigrations = []migration{
 	{id: "0021_agent_learning_relations", path: "migrations/0021_agent_learning_relations.sql"},
 	{id: "0021_agent_learning_target_state", path: "migrations/0021_agent_learning_target_state.sql"},
 	{id: "0025_agent_learning_privacy", path: "migrations/0025_agent_learning_privacy.sql", apply: applyAgentLearningPrivacyMigration},
+	{id: "0026_issue_ownership", path: "migrations/0026_issue_ownership.sql", apply: applyIssueOwnershipMigration},
+	{id: "0026_decision_search_fts", path: "migrations/0026_decision_search_fts.sql", apply: applyDecisionSearchFTSMigration},
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
@@ -354,6 +356,18 @@ func (c *Client) applyMigration(ctx context.Context, db *sql.DB, id, sqlText str
 	return nil
 }
 
+func applyDecisionSearchFTSMigration(ctx context.Context, db *sql.DB, id string) error {
+	var c Client
+	if err := c.ensureDecisionSchema(db); err != nil {
+		return fmt.Errorf("repair decision schema before migration %s: %w", id, err)
+	}
+	sqlText, err := loadMigrationSQL("migrations/0026_decision_search_fts.sql")
+	if err != nil {
+		return fmt.Errorf("load migration %s: %w", id, err)
+	}
+	return c.applyMigration(ctx, db, id, sqlText)
+}
+
 func applyAgentLearningPrivacyMigration(ctx context.Context, db *sql.DB, id string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -381,6 +395,60 @@ func applyAgentLearningPrivacyMigration(ctx context.Context, db *sql.DB, id stri
 			WHERE deleted_at IS NULL
 	`); err != nil {
 		return fmt.Errorf("apply migration %s: create privacy index: %w", id, err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO schema_migrations (id, applied_at)
+		VALUES (?, ?)
+	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	tx = nil
+	return nil
+}
+
+func applyIssueOwnershipMigration(ctx context.Context, db *sql.DB, id string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	for _, column := range []struct {
+		name string
+		ddl  string
+	}{
+		{name: "owner_id", ddl: "TEXT"},
+		{name: "owner_kind", ddl: "TEXT"},
+		{name: "owner_claimed_at", ddl: "TEXT"},
+		{name: "owner_expires_at", ddl: "TEXT"},
+	} {
+		exists, err := txColumnExists(ctx, tx, "issues", column.name)
+		if err != nil {
+			return fmt.Errorf("inspect migration %s column %s: %w", id, column.name, err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE issues ADD COLUMN %s %s`, column.name, column.ddl)); err != nil {
+			return fmt.Errorf("apply migration %s: add %s: %w", id, column.name, err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_issues_owner_active
+			ON issues (owner_id, owner_expires_at)
+			WHERE deleted_at IS NULL AND owner_id IS NOT NULL
+	`); err != nil {
+		return fmt.Errorf("apply migration %s: create ownership index: %w", id, err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `

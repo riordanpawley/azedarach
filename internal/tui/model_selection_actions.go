@@ -377,11 +377,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		opts := daemonclient.TaskStatusOptions{
 			ForceWorktree:      action.ForceWorktree,
 			CloseCleanChildren: action.CloseCleanChildren,
+			AllowActiveSession: action.AllowActiveSession,
 		}
 		m.beginTaskStatusMoveFeedback(action.TaskID, previousStatus, targetStatus)
 		switch action.Action {
 		case overlay.CloseFailureActionForceWorktree:
 			m.addToast(Toast{Level: ToastWarning, Message: fmt.Sprintf("Retrying close for %s with forced worktree cleanup", action.TaskID), Expires: time.Now().Add(5 * time.Second)})
+		case overlay.CloseFailureActionAllowActiveSession:
+			m.addToast(Toast{Level: ToastWarning, Message: fmt.Sprintf("Retrying close for %s and allowing active session cleanup", action.TaskID), Expires: time.Now().Add(5 * time.Second)})
 		case overlay.CloseFailureActionCloseCleanChildren:
 			m.addToast(Toast{Level: ToastInfo, Message: fmt.Sprintf("Retrying close for %s and clean child issues", action.TaskID), Expires: time.Now().Add(5 * time.Second)})
 		default:
@@ -478,7 +481,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	// Keep task workspace open for actions that should layer over it or return
 	// to it without forcing users to reopen the details.
 	keepWorkspaceOpen := isTaskWorkspaceOverlay(m.overlayStack.Current()) &&
-		(msg.Key == "a" || msg.Key == "c" || msg.Key == "r" || msg.Key == "w" || msg.Key == "W" || msg.Key == "x")
+		(msg.Key == "a" || msg.Key == "c" || msg.Key == "o" || msg.Key == "U" || msg.Key == "y" || msg.Key == "r" || msg.Key == "w" || msg.Key == "W" || msg.Key == "x")
 	if !keepWorkspaceOpen {
 		m.overlayStack.Pop()
 	}
@@ -740,6 +743,15 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.beginMutationFeedback(fmt.Sprintf("Refreshing %s", task.ID))
 		return m, m.refreshTaskWorkspaceInBackgroundCmd(task.ID.String())
+	case "o":
+		m.beginMutationFeedback(fmt.Sprintf("Claiming ownership for %s", task.ID))
+		return m, m.issueOwnershipCmd(task.ID.String(), "claim", false)
+	case "U":
+		m.beginMutationFeedback(fmt.Sprintf("Taking ownership for %s", task.ID))
+		return m, m.issueOwnershipCmd(task.ID.String(), "claim", true)
+	case "y":
+		m.beginMutationFeedback(fmt.Sprintf("Releasing ownership for %s", task.ID))
+		return m, m.issueOwnershipCmd(task.ID.String(), "release", false)
 
 	case "V":
 		// Dev server menu

@@ -28,6 +28,8 @@ const (
 	CommandTaskContextRisk      = "task.context_risk"
 	CommandTaskMergeBaseTarget  = "task.merge_base_target"
 	CommandTaskFollowOnMerge    = "task.follow_on_merge_candidates"
+	CommandTaskClaimOwnership   = "task.ownership.claim"
+	CommandTaskReleaseOwnership = "task.ownership.release"
 	CommandTaskUpdateStatus     = "task.update_status"
 	CommandTaskUpdate           = "task.update_details"
 	CommandTaskAppendNotes      = "task.append_notes"
@@ -77,6 +79,14 @@ type TaskStatusRequest struct {
 	CascadeChildren bool           `json:"cascade_children,omitempty"`
 }
 
+type TaskOwnershipRequest struct {
+	TaskID    naming.IssueID `json:"task_id"`
+	OwnerID   string         `json:"owner_id,omitempty"`
+	OwnerKind string         `json:"owner_kind,omitempty"`
+	TTL       string         `json:"ttl,omitempty"`
+	Force     bool           `json:"force,omitempty"`
+}
+
 // TaskStatusOptions controls client-side status transition behavior.
 type TaskStatusOptions struct {
 	ForceWorktree        bool
@@ -84,6 +94,7 @@ type TaskStatusOptions struct {
 	IntegrateBeforeClose bool
 	CloseCleanChildren   bool
 	CascadeChildren      bool
+	AllowActiveSession   bool
 }
 
 type TaskDeleteOptions struct {
@@ -99,6 +110,7 @@ type taskCloseRequest struct {
 	IgnoreAhead          bool           `json:"ignore_ahead,omitempty"`
 	IntegrateBeforeClose bool           `json:"integrate_before_close,omitempty"`
 	CloseCleanChildren   bool           `json:"close_clean_children,omitempty"`
+	AllowActiveSession   bool           `json:"allow_active_session,omitempty"`
 }
 
 type taskDeleteRequest struct {
@@ -282,6 +294,11 @@ type TaskIntegrationReadiness struct {
 type taskIntegrationReadinessRequest struct {
 	TaskID  naming.IssueID `json:"task_id"`
 	RepoDir string         `json:"repo_dir,omitempty"`
+}
+
+type taskGraphReadinessRequest struct {
+	TaskID  naming.IssueID `json:"task_id"`
+	ActorID string         `json:"actor_id,omitempty"`
 }
 
 type taskContextRiskRequest struct {
@@ -882,8 +899,35 @@ func (c *Client) CloseTask(ctx context.Context, taskID string, opts TaskStatusOp
 		IgnoreAhead:          opts.IgnoreAhead,
 		IntegrateBeforeClose: opts.IntegrateBeforeClose,
 		CloseCleanChildren:   opts.CloseCleanChildren,
+		AllowActiveSession:   opts.AllowActiveSession,
 	}, &out); err != nil {
 		return TaskCloseResult{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) ClaimTaskOwnership(ctx context.Context, taskID string, params TaskOwnershipRequest) (domain.Task, error) {
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("invalid task id: %w", err)
+	}
+	params.TaskID = parsedTaskID
+	var out domain.Task
+	if err := c.commandJSON(ctx, CommandTaskClaimOwnership, params, &out); err != nil {
+		return domain.Task{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) ReleaseTaskOwnership(ctx context.Context, taskID string, params TaskOwnershipRequest) (domain.Task, error) {
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("invalid task id: %w", err)
+	}
+	params.TaskID = parsedTaskID
+	var out domain.Task
+	if err := c.commandJSON(ctx, CommandTaskReleaseOwnership, params, &out); err != nil {
+		return domain.Task{}, err
 	}
 	return out, nil
 }
@@ -951,12 +995,21 @@ func (c *Client) ArchiveTask(ctx context.Context, taskID string) error {
 
 // TaskGraphReadiness returns daemon-owned runnable-leaf policy for a root issue.
 func (c *Client) TaskGraphReadiness(ctx context.Context, rootIssueID string) (TaskGraphReadiness, error) {
+	return c.TaskGraphReadinessForActor(ctx, rootIssueID, "")
+}
+
+// TaskGraphReadinessForActor returns daemon-owned runnable-leaf policy for a root issue
+// from a specific actor's ownership perspective.
+func (c *Client) TaskGraphReadinessForActor(ctx context.Context, rootIssueID string, actorID string) (TaskGraphReadiness, error) {
 	parsedRootID, err := naming.ParseIssueID(rootIssueID)
 	if err != nil {
 		return TaskGraphReadiness{}, fmt.Errorf("invalid root issue id: %w", err)
 	}
 	var out TaskGraphReadiness
-	if err := c.commandJSON(ctx, CommandTaskGraphReadiness, TaskIDRequest{TaskID: parsedRootID}, &out); err != nil {
+	if err := c.commandJSON(ctx, CommandTaskGraphReadiness, taskGraphReadinessRequest{
+		TaskID:  parsedRootID,
+		ActorID: strings.TrimSpace(actorID),
+	}, &out); err != nil {
 		return TaskGraphReadiness{}, err
 	}
 	return out, nil

@@ -259,6 +259,10 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		return nil, c.wrapError("open-db", "", err)
 	}
 	migrationsDoneAt := time.Now()
+	if err := c.ensureIssueOwnershipSchema(db); err != nil {
+		_ = db.Close()
+		return nil, c.wrapError("open-db", "", err)
+	}
 	if err := c.normalizeDependencyEnumRows(db); err != nil {
 		_ = db.Close()
 		return nil, c.wrapError("open-db", "", err)
@@ -306,6 +310,28 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		)
 	}
 	return c.db, nil
+}
+
+func (c *Client) ensureIssueOwnershipSchema(db *sql.DB) error {
+	for _, column := range []struct {
+		name string
+		ddl  string
+	}{
+		{"owner_id", "TEXT"},
+		{"owner_kind", "TEXT"},
+		{"owner_claimed_at", "TEXT"},
+		{"owner_expires_at", "TEXT"},
+	} {
+		if err := ensureSQLiteColumn(db, "issues", column.name, column.ddl); err != nil {
+			return fmt.Errorf("ensure issue ownership schema: %w", err)
+		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_issues_owner_active
+		ON issues (owner_id, owner_expires_at)
+		WHERE deleted_at IS NULL AND owner_id IS NOT NULL`); err != nil {
+		return fmt.Errorf("ensure issue ownership schema: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
@@ -1787,6 +1813,172 @@ func (c *Client) UpdateWithRuntime(ctx context.Context, projectID, id string, st
 	return c.GetWithRuntime(ctx, projectID, id)
 }
 
+type OwnershipClaimParams struct {
+	OwnerID    string
+	OwnerKind  string
+	TTL        time.Duration
+	Force      bool
+	ReleasedBy string
+}
+
+func (c *Client) ClaimOwnershipWithRuntime(ctx context.Context, projectID, issueID string, params OwnershipClaimParams) (domain.Task, error) {
+	if err := c.claimOwnership(ctx, issueID, params); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, issueID)
+}
+
+func (c *Client) ReleaseOwnershipWithRuntime(ctx context.Context, projectID, issueID string, params OwnershipClaimParams) (domain.Task, error) {
+	if err := c.releaseOwnership(ctx, issueID, params); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, issueID)
+}
+
+func (c *Client) claimOwnership(ctx context.Context, issueID string, params OwnershipClaimParams) error {
+	issueID = strings.TrimSpace(issueID)
+	ownerID := strings.TrimSpace(params.OwnerID)
+	ownerKind := strings.TrimSpace(params.OwnerKind)
+	if ownerID == "" {
+		return c.wrapError("claim-ownership", issueID, errors.New("owner id is required"))
+	}
+	if ownerKind == "" {
+		ownerKind = "agent"
+	}
+	return c.withMutationLock(ctx, func(ctx context.Context) error {
+		return sqliteutil.WithWriteLock(c.dbPath, func() error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return c.wrapError("claim-ownership", issueID, err)
+			}
+			defer func() {
+				if tx != nil {
+					_ = tx.Rollback()
+				}
+			}()
+
+			task, err := c.issueOwnershipForUpdate(ctx, tx, issueID)
+			if err != nil {
+				return c.wrapError("claim-ownership", issueID, err)
+			}
+			now := time.Now().UTC()
+			if task.Ownership != nil && task.Ownership.BlocksActor(ownerID, now) && !params.Force {
+				return c.wrapError("claim-ownership", issueID, fmt.Errorf("%w: issue owned by %s", domain.ErrConflict, task.Ownership.OwnerID))
+			}
+			var expiresAt any
+			var expiresPayload any
+			if params.TTL > 0 {
+				expires := now.Add(params.TTL).UTC()
+				expiresAt = expires.Format(time.RFC3339Nano)
+				expiresPayload = expiresAt
+			}
+			nowRaw := now.Format(time.RFC3339Nano)
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE issues
+				SET owner_id = ?, owner_kind = ?, owner_claimed_at = ?, owner_expires_at = ?, updated_at = ?
+				WHERE id = ? AND deleted_at IS NULL
+			`, ownerID, ownerKind, nowRaw, expiresAt, nowRaw, issueID); err != nil {
+				return c.wrapError("claim-ownership", issueID, err)
+			}
+			if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, map[string]any{
+				"action":           "claimed",
+				"owner_id":         ownerID,
+				"owner_kind":       ownerKind,
+				"owner_expires_at": expiresPayload,
+				"forced":           params.Force,
+			}); err != nil {
+				return c.wrapError("claim-ownership", issueID, err)
+			}
+			if err := tx.Commit(); err != nil {
+				return c.wrapError("claim-ownership", issueID, err)
+			}
+			tx = nil
+			return nil
+		})
+	})
+}
+
+func (c *Client) releaseOwnership(ctx context.Context, issueID string, params OwnershipClaimParams) error {
+	issueID = strings.TrimSpace(issueID)
+	actorID := strings.TrimSpace(params.OwnerID)
+	if actorID == "" {
+		actorID = strings.TrimSpace(params.ReleasedBy)
+	}
+	return c.withMutationLock(ctx, func(ctx context.Context) error {
+		return sqliteutil.WithWriteLock(c.dbPath, func() error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return c.wrapError("release-ownership", issueID, err)
+			}
+			defer func() {
+				if tx != nil {
+					_ = tx.Rollback()
+				}
+			}()
+
+			task, err := c.issueOwnershipForUpdate(ctx, tx, issueID)
+			if err != nil {
+				return c.wrapError("release-ownership", issueID, err)
+			}
+			now := time.Now().UTC()
+			if task.Ownership != nil && task.Ownership.BlocksActor(actorID, now) && !params.Force {
+				return c.wrapError("release-ownership", issueID, fmt.Errorf("%w: issue owned by %s", domain.ErrConflict, task.Ownership.OwnerID))
+			}
+			nowRaw := now.Format(time.RFC3339Nano)
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE issues
+				SET owner_id = NULL, owner_kind = NULL, owner_claimed_at = NULL, owner_expires_at = NULL, updated_at = ?
+				WHERE id = ? AND deleted_at IS NULL
+			`, nowRaw, issueID); err != nil {
+				return c.wrapError("release-ownership", issueID, err)
+			}
+			if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, map[string]any{
+				"action":      "released",
+				"released_by": actorID,
+				"forced":      params.Force,
+			}); err != nil {
+				return c.wrapError("release-ownership", issueID, err)
+			}
+			if err := tx.Commit(); err != nil {
+				return c.wrapError("release-ownership", issueID, err)
+			}
+			tx = nil
+			return nil
+		})
+	})
+}
+
+func (c *Client) issueOwnershipForUpdate(ctx context.Context, tx *sql.Tx, issueID string) (domain.Task, error) {
+	var (
+		task            domain.Task
+		ownerIDRaw      string
+		ownerKindRaw    string
+		ownerClaimedRaw string
+		ownerExpiresRaw string
+	)
+	err := tx.QueryRowContext(ctx, `
+		SELECT id, COALESCE(owner_id, ''), COALESCE(owner_kind, ''), COALESCE(owner_claimed_at, ''), COALESCE(owner_expires_at, '')
+		FROM issues
+		WHERE id = ? AND deleted_at IS NULL
+	`, issueID).Scan(&task.ID, &ownerIDRaw, &ownerKindRaw, &ownerClaimedRaw, &ownerExpiresRaw)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Task{}, domain.ErrNotFound
+		}
+		return domain.Task{}, err
+	}
+	task.Ownership = parseIssueOwnership(ownerIDRaw, ownerKindRaw, ownerClaimedRaw, ownerExpiresRaw)
+	return task, nil
+}
+
 func (c *Client) countOpenChildren(ctx context.Context, db sqlIssueQueryer, parentID string) (int, error) {
 	var count int
 	err := db.QueryRowContext(ctx, `
@@ -3208,6 +3400,10 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 			gitStatusRaw       string
 			worktreeUpdatedRaw string
 			gitUpdatedRaw      string
+			ownerIDRaw         string
+			ownerKindRaw       string
+			ownerClaimedRaw    string
+			ownerExpiresRaw    string
 			parentIDRaw        string
 		)
 		if err := rows.Scan(
@@ -3228,6 +3424,10 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 			&gitStatusRaw,
 			&worktreeUpdatedRaw,
 			&gitUpdatedRaw,
+			&ownerIDRaw,
+			&ownerKindRaw,
+			&ownerClaimedRaw,
+			&ownerExpiresRaw,
 			&parentIDRaw,
 		); err != nil {
 			c.logSQLiteRead(ctx, "issue.metadata_runtime_projection", startedAt, len(tasks), err, "issue_count", len(ids))
@@ -3248,6 +3448,7 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 		task.UpdatedAt = parseTimestamp(updatedRaw)
 		task.RuntimeUpdatedAt = newestParsedTimestamp(task.UpdatedAt, gitUpdatedRaw)
 		task.Origin = "local"
+		task.Ownership = parseIssueOwnership(ownerIDRaw, ownerKindRaw, ownerClaimedRaw, ownerExpiresRaw)
 		if parentID, err := naming.ParseIssueID(parentIDRaw); err == nil {
 			task.ParentID = &parentID
 		}
@@ -3343,6 +3544,10 @@ func taskMetadataRuntimeProjectionQuery(projectID string, issueIDs ...string) (s
 			COALESCE(w.git_status_json, ''),
 			COALESCE(w.updated_at, ''),
 			COALESCE(w.git_status_updated_at, ''),
+			COALESCE(i.owner_id, ''),
+			COALESCE(i.owner_kind, ''),
+			COALESCE(i.owner_claimed_at, ''),
+			COALESCE(i.owner_expires_at, ''),
 			COALESCE(parent.depends_on_id, '')
 		FROM issues i
 		LEFT JOIN session_pick sp ON sp.issue_id = i.id
@@ -3412,6 +3617,10 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 			worktreeUpdatedRaw string
 			gitUpdatedRaw      string
 			originProvider     string
+			ownerIDRaw         string
+			ownerKindRaw       string
+			ownerClaimedRaw    string
+			ownerExpiresRaw    string
 		)
 		if err := rows.Scan(
 			&task.ID,
@@ -3440,6 +3649,10 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 			&worktreeUpdatedRaw,
 			&gitUpdatedRaw,
 			&originProvider,
+			&ownerIDRaw,
+			&ownerKindRaw,
+			&ownerClaimedRaw,
+			&ownerExpiresRaw,
 		); err != nil {
 			c.logSQLiteRead(ctx, "issue.runtime_projection", startedAt, len(tasks), err, "include_details", includeDetails, "issue_count", issueCount)
 			return nil, err
@@ -3458,6 +3671,7 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 		task.RuntimeUpdatedAt = newestParsedTimestamp(task.UpdatedAt, gitUpdatedRaw)
 		task.Assignee = strings.TrimSpace(assigneeRaw)
 		task.Labels = decodeStringSliceJSON(labelsRaw)
+		task.Ownership = parseIssueOwnership(ownerIDRaw, ownerKindRaw, ownerClaimedRaw, ownerExpiresRaw)
 		if estimateRaw.Valid {
 			estimateValue := int(estimateRaw.Int64)
 			task.Estimate = &estimateValue
@@ -3574,6 +3788,7 @@ func applyRuntimeOverlay(task *domain.Task, runtime domain.Task) {
 	task.GitAdditions = runtime.GitAdditions
 	task.GitDeletions = runtime.GitDeletions
 	task.RuntimeUpdatedAt = runtime.RuntimeUpdatedAt
+	task.Ownership = cloneIssueOwnership(runtime.Ownership)
 	if strings.TrimSpace(runtime.Origin) != "" {
 		task.Origin = runtime.Origin
 	}
@@ -3581,6 +3796,7 @@ func applyRuntimeOverlay(task *domain.Task, runtime domain.Task) {
 
 func cloneTaskForRuntimeOverlay(task domain.Task) domain.Task {
 	task.Session = cloneDomainSession(task.Session)
+	task.Ownership = cloneIssueOwnership(task.Ownership)
 	task.Dependencies = append([]domain.Dependency(nil), task.Dependencies...)
 	task.Implementations = append([]string(nil), task.Implementations...)
 	task.Labels = append([]string(nil), task.Labels...)
@@ -3594,6 +3810,36 @@ func cloneDomainSession(session *domain.Session) *domain.Session {
 	}
 	cloned := *session
 	return &cloned
+}
+
+func cloneIssueOwnership(ownership *domain.IssueOwnership) *domain.IssueOwnership {
+	if ownership == nil {
+		return nil
+	}
+	cloned := *ownership
+	if ownership.ExpiresAt != nil {
+		expiresAt := *ownership.ExpiresAt
+		cloned.ExpiresAt = &expiresAt
+	}
+	return &cloned
+}
+
+func parseIssueOwnership(ownerIDRaw, ownerKindRaw, claimedRaw, expiresRaw string) *domain.IssueOwnership {
+	ownerID := strings.TrimSpace(ownerIDRaw)
+	if ownerID == "" {
+		return nil
+	}
+	claimedAt := parseTimestamp(claimedRaw)
+	ownership := &domain.IssueOwnership{
+		OwnerID:   ownerID,
+		OwnerKind: strings.TrimSpace(ownerKindRaw),
+		ClaimedAt: claimedAt,
+		ExpiresAt: parseOptionalTimestamp(expiresRaw),
+	}
+	if ownership.OwnerKind == "" {
+		ownership.OwnerKind = "agent"
+	}
+	return ownership
 }
 
 func taskRuntimeProjectionQuery(projectID string, includeDetails bool, issueIDs ...string) (string, []any) {
@@ -3699,7 +3945,11 @@ func taskRuntimeProjectionQuery(projectID string, includeDetails bool, issueIDs 
 			COALESCE(w.git_status_json, ''),
 			COALESCE(w.updated_at, ''),
 			COALESCE(w.git_status_updated_at, ''),
-			COALESCE(o.provider, '')
+			COALESCE(o.provider, ''),
+			COALESCE(i.owner_id, ''),
+			COALESCE(i.owner_kind, ''),
+			COALESCE(i.owner_claimed_at, ''),
+			COALESCE(i.owner_expires_at, '')
 		FROM issues i
 		LEFT JOIN session_pick sp ON sp.issue_id = i.id
 		LEFT JOIN daemon_worktree_projections w

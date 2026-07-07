@@ -2252,6 +2252,86 @@ func TestTaskCloseBlocksActiveSessionActivity(t *testing.T) {
 	}
 }
 
+func TestTaskCloseAllowsExplicitActiveSessionOverride(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-active-override"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Close active session with override",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	sessionID := naming.CanonicalSessionID(projectID, taskID)
+	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:             sessionID,
+		IssueID:        taskID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed session projection: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: logger},
+		sessionStore: daemonstate.NewStore(),
+		tmux:         tmux.NewClient(&testTmuxRunner{sessions: map[string]bool{}}, logger),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+
+	body, err := json.Marshal(taskCloseRequest{TaskID: taskID, AllowActiveSession: true})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-active-session-override",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.close response = %+v, want success", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get closed issue: %v", err)
+	}
+	if task.Status != domain.StatusDone {
+		t.Fatalf("task status = %s, want %s", task.Status, domain.StatusDone)
+	}
+	session, found, err := runtimeStore.GetSessionState(ctx, projectID, sessionID)
+	if err != nil {
+		t.Fatalf("get session projection: %v", err)
+	}
+	if !found || session.State != daemonstate.SessionStateStopped || session.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("session projection = %+v found=%t, want stopped row", session, found)
+	}
+}
+
 func TestTaskCloseAllowsTerminalOrIdleSessionActivity(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -5651,6 +5731,109 @@ func TestTaskGraphReadinessDependencyGating(t *testing.T) {
 	}
 	if len(gotAfter.Runnable) != 1 || gotAfter.Runnable[0] != b.String() {
 		t.Fatalf("after runnable = %v, want [%s]", gotAfter.Runnable, b.String())
+	}
+}
+
+func TestTaskGraphReadinessSkipsForeignOwnedRunnableIssues(t *testing.T) {
+	root := naming.IssueID("az-root")
+	leaf := naming.IssueID("az-owned")
+	leafParent := root
+	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(time.Hour)
+
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
+		{
+			ID:       leaf,
+			Type:     domain.TypeTask,
+			Status:   domain.StatusOpen,
+			ParentID: &leafParent,
+			Ownership: &domain.IssueOwnership{
+				OwnerID:   "agent-a",
+				OwnerKind: "agent",
+				ClaimedAt: now.Add(-time.Minute),
+				ExpiresAt: &expiresAt,
+			},
+		},
+	}
+
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), tasks)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphIndexes error: %v", err)
+	}
+	foreignActor, err := daemonTaskGraphReadinessFromIndexesForActor(rootID, byID, children, "agent-b", now)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphReadinessFromIndexesForActor foreign actor error: %v", err)
+	}
+	if len(foreignActor.Runnable) != 0 {
+		t.Fatalf("foreign actor runnable = %v, want empty", foreignActor.Runnable)
+	}
+	if got := foreignActor.Blocked[leaf.String()]; !strings.Contains(got, "owned by agent-a") {
+		t.Fatalf("foreign actor blocked[%s] = %q, want ownership blocker", leaf.String(), got)
+	}
+
+	ownerActor, err := daemonTaskGraphReadinessFromIndexesForActor(rootID, byID, children, "agent-a", now)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphReadinessFromIndexesForActor owner actor error: %v", err)
+	}
+	if len(ownerActor.Runnable) != 1 || ownerActor.Runnable[0] != leaf.String() {
+		t.Fatalf("owner actor runnable = %v, want [%s]", ownerActor.Runnable, leaf.String())
+	}
+
+	expiredActor, err := daemonTaskGraphReadinessFromIndexesForActor(rootID, byID, children, "agent-b", expiresAt.Add(time.Second))
+	if err != nil {
+		t.Fatalf("daemonTaskGraphReadinessFromIndexesForActor expired actor error: %v", err)
+	}
+	if len(expiredActor.Runnable) != 1 || expiredActor.Runnable[0] != leaf.String() {
+		t.Fatalf("expired actor runnable = %v, want [%s]", expiredActor.Runnable, leaf.String())
+	}
+}
+
+func TestTaskOwnershipClaimConflictReturnsProtocolConflict(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-ownership-conflict"
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Owned worker",
+		Type:   domain.TypeTask,
+		Status: domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{OwnerID: "agent-a"}); err != nil {
+		t.Fatalf("seed ownership: %v", err)
+	}
+	d := &Daemon{
+		cfg: Config{Logger: slog.Default()},
+		hub: publish.NewHub(16, 8, slog.Default()),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{},
+	}
+	body, err := json.Marshal(taskOwnershipRequest{TaskID: taskID, OwnerID: "agent-b"})
+	if err != nil {
+		t.Fatalf("marshal ownership request: %v", err)
+	}
+
+	resp, err := d.handleTaskOwnershipClaim(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-ownership-conflict",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.ownership.claim",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskOwnershipClaim error: %v", err)
+	}
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("handleTaskOwnershipClaim response = %+v, want conflict error", resp)
+	}
+	if resp.Error.Code != protocol.ErrorCodeConflict {
+		t.Fatalf("error code = %s, want %s", resp.Error.Code, protocol.ErrorCodeConflict)
 	}
 }
 

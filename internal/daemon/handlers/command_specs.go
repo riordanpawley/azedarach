@@ -46,6 +46,8 @@ const (
 	commandTaskContextRisk       = "task.context_risk"
 	commandTaskMergeBaseTarget   = "task.merge_base_target"
 	commandTaskFollowOnMerge     = "task.follow_on_merge_candidates"
+	commandTaskClaimOwnership    = "task.ownership.claim"
+	commandTaskReleaseOwnership  = "task.ownership.release"
 	commandTaskUpdateStatus      = "task.update_status"
 	commandTaskUpdateDetails     = "task.update_details"
 	commandTaskAppendNotes       = "task.append_notes"
@@ -170,6 +172,8 @@ var commandSpecRegistry = map[string]CommandSpec{
 	commandTaskContextRisk:                 {Command: commandTaskContextRisk, RequiresProjectID: true},
 	commandTaskMergeBaseTarget:             {Command: commandTaskMergeBaseTarget, RequiresProjectID: true},
 	commandTaskFollowOnMerge:               {Command: commandTaskFollowOnMerge, RequiresProjectID: true},
+	commandTaskClaimOwnership:              {Command: commandTaskClaimOwnership, RequiresProjectID: true},
+	commandTaskReleaseOwnership:            {Command: commandTaskReleaseOwnership, RequiresProjectID: true},
 	commandTaskUpdateStatus:                {Command: commandTaskUpdateStatus, RequiresProjectID: true},
 	commandTaskUpdateDetails:               {Command: commandTaskUpdateDetails, RequiresProjectID: true},
 	commandTaskAppendNotes:                 {Command: commandTaskAppendNotes, RequiresProjectID: true},
