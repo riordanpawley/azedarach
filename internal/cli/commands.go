@@ -197,6 +197,7 @@ type IssueCreateOptions struct {
 	Implementations        []string
 	AutoParentFromIssueID  *string
 	AutoCreatedFromIssueID *string
+	ExplicitParent         bool
 	ProjectQualifiedOutput bool
 }
 
@@ -2765,6 +2766,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	var priorityRaw string
 	var typeRaw string
 	var titleFlag string
+	var parentFlag string
 	impls := make([]string, 0, 2)
 	fs := flag.NewFlagSet("issue create", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -2777,6 +2779,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 		impls = append(impls, trimmed)
 		return nil
 	})
+	fs.StringVar(&parentFlag, "parent", "", "parent issue id for explicit parent-child creation")
 	fs.StringVar(&titleFlag, "title", "", "issue title")
 	fs.StringVar(&opts.Description, "description", "", "issue description")
 	fs.StringVar(&priorityRaw, "priority", "", "issue priority (P0-P4)")
@@ -2795,7 +2798,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	case fs.NArg() == 1 && titleFlag != "":
 		return IssueCreateOptions{}, fmt.Errorf("provide title either as --title or as a positional argument, not both")
 	default:
-		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
+		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
 	}
 
 	taskType, err := parseTaskType(typeRaw)
@@ -2816,7 +2819,18 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	}
 	opts.Type = taskType
 	opts.Implementations = dedupeOrderedIDs(impls)
-	if issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID")); issueID != "" {
+	parentFlag = strings.TrimSpace(parentFlag)
+	if parentFlag != "" {
+		if opts.Deferred {
+			return IssueCreateOptions{}, fmt.Errorf("--parent cannot be used with --deferred; deferred issues are standalone backlog work")
+		}
+		if _, err := naming.ParseIssueID(parentFlag); err != nil {
+			return IssueCreateOptions{}, fmt.Errorf("invalid parent issue id %q: %w", parentFlag, err)
+		}
+		opts.AutoParentFromIssueID = &parentFlag
+		opts.AutoCreatedFromIssueID = &parentFlag
+		opts.ExplicitParent = true
+	} else if issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID")); issueID != "" {
 		opts.AutoCreatedFromIssueID = &issueID
 		if !opts.Deferred {
 			opts.AutoParentFromIssueID = &issueID
@@ -3491,13 +3505,13 @@ func resolveIssueWriteImplementation(ctx context.Context, deps *Dependencies, pr
 	}
 
 	if err != nil {
-		return "", fmt.Errorf("missing required flag: --impl (unable to infer implementation automatically: %v). Specify --impl <implementation>", err)
+		return "", fmt.Errorf("missing required flag: --impl (implementation inference unavailable: %v). Specify --impl <implementation>; --impl selects implementation metadata, not parent/root membership", err)
 	}
 	switch len(impls) {
 	case 1:
 		return impls[0], nil
 	default:
-		return "", fmt.Errorf("missing required flag: --impl (multiple implementations configured: %s)", strings.Join(impls, ", "))
+		return "", fmt.Errorf("missing required flag: --impl (implementation is ambiguous; valid --impl values: %s)", strings.Join(impls, ", "))
 	}
 }
 
@@ -3520,6 +3534,11 @@ func resolveIssueWriteImplementations(ctx context.Context, deps *Dependencies, p
 		}
 	}
 	return normalized, nil
+}
+
+func issueWriteImplementationValidationTimedOut(err error) bool {
+	var timeoutErr *daemonclient.ReadWaitTimeoutError
+	return errors.As(err, &timeoutErr)
 }
 
 func issueWriteImplementationOptions(ctx context.Context, deps *Dependencies) ([]string, error) {
@@ -3549,7 +3568,7 @@ func implementationOptionExists(options []string, impl string) bool {
 }
 
 func unknownIssueWriteImplementationError(impl string, known []string) error {
-	return fmt.Errorf("unknown implementation %q (known implementations: %s). Run `az impl list` to inspect implementation assignments. If you meant to parent work under %q, omit --impl in the correct AZEDARACH_ISSUE_ID context or add a parent-child edge instead", impl, strings.Join(known, ", "), impl)
+	return fmt.Errorf("unknown implementation %q (valid --impl values: %s). Run `az impl list` to inspect implementation assignments. If you meant to parent work under %q, use `--parent %s` or run from the correct AZEDARACH_ISSUE_ID context without --impl", impl, strings.Join(known, ", "), impl, impl)
 }
 
 func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
@@ -4655,7 +4674,7 @@ func mixedIssueResourceLifecycleHooksConfigured(deps *Dependencies) bool {
 }
 
 func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
-	if isDifferentExplicitIssueProject(deps.ProjectID, opts.Project) {
+	if isDifferentExplicitIssueProject(deps.ProjectID, opts.Project) && !opts.ExplicitParent {
 		opts.AutoParentFromIssueID = nil
 		opts.AutoCreatedFromIssueID = nil
 	}
@@ -4723,6 +4742,7 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 	var err error
 	var parentID *naming.IssueID
 	implementations := append([]string{}, opts.Implementations...)
+	inheritedImplementations := false
 	if !opts.Deferred && opts.AutoParentFromIssueID != nil && strings.TrimSpace(*opts.AutoParentFromIssueID) != "" {
 		parentIssueID := strings.TrimSpace(*opts.AutoParentFromIssueID)
 		parentTask, _, ok, err := loadIssueMetadataTaskWithDaemonAutostartRetry(ctx, deps, parentIssueID)
@@ -4735,11 +4755,22 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 		parentID = &parentTask.ID
 		if len(implementations) == 0 {
 			implementations = append([]string{}, parentTask.Implementations...)
+			inheritedImplementations = len(implementations) > 0
 		}
 	}
+	candidateImplementations := dedupeTrimmed(implementations)
 	implementations, err = resolveIssueWriteImplementations(ctx, deps, implementations)
 	if err != nil {
-		return issueCreateResult{}, err
+		if inheritedImplementations && issueWriteImplementationValidationTimedOut(err) {
+			implementationFallback := candidateImplementations
+			if len(implementationFallback) == 1 {
+				implementations = implementationFallback
+			} else {
+				return issueCreateResult{}, fmt.Errorf("missing required flag: --impl (implementation is ambiguous after task snapshot timeout; valid inherited --impl values: %s)", strings.Join(implementationFallback, ", "))
+			}
+		} else {
+			return issueCreateResult{}, err
+		}
 	}
 
 	taskID, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (string, error) {
@@ -4806,7 +4837,11 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 	parentIDValue := ""
 	if parentID != nil && strings.TrimSpace(parentID.String()) != "" {
 		parentIDValue = strings.TrimSpace(parentID.String())
-		message = fmt.Sprintf("%s (parent: %s, auto-parent from AZEDARACH_ISSUE_ID)", message, parentIDValue)
+		parentSource := "auto-parent from AZEDARACH_ISSUE_ID"
+		if opts.ExplicitParent {
+			parentSource = "explicit --parent"
+		}
+		message = fmt.Sprintf("%s (parent: %s, %s)", message, parentIDValue, parentSource)
 	}
 	if createdFromIDValue != "" {
 		message = fmt.Sprintf("%s [created-from: %s]", message, createdFromIDValue)
@@ -7059,9 +7094,9 @@ func renderPrimeImplementationSection(implementations []string) string {
 		"  - Available implementations: %s\n"+
 		"  - Use `az impl list` to refresh the available options.\n"+
 		"  - If you mean \"make this a child of the active issue\", run `az issue create \"Child task\"`; auto-parenting uses `AZEDARACH_ISSUE_ID`, not `--impl`.\n"+
-		"  - If you mean \"attach this to another parent/root\", create the issue and add `az issue dep add <child-id> <parent-id> --type parent-child`.\n"+
+		"  - If you mean \"attach this to another parent/root\", run `az issue create --parent <issue-id> \"Child task\"`.\n"+
 		"  - `--impl` selects implementation/spec variant assignment only; it does not attach an issue to a parent/root graph.\n"+
-		"  - New issue writes for a specific implementation must choose one, for example `az issue create --impl %s \"Implementation-specific task\"`; this still relies on auto-parenting or parent-child edges for graph membership.\n"+
+		"  - New issue writes for a specific implementation must choose one, for example `az issue create --impl %s \"Implementation-specific task\"`; this still relies on auto-parenting, `--parent`, or parent-child edges for graph membership.\n"+
 		"  - Repeat `--impl` only for intentionally shared implementation work. Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.\n",
 		strings.Join(quoted, ", "), exampleImpl)
 }

@@ -29,7 +29,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Markdown attachments render in the TUI; other file types can be opened externally.
   - Child issue creation without worker launch:
   - Batch planning/catalog fanout: `az issue bulk-create --input issues.json --json` with `parent_id` or nested `children` creates parented child issues without starting sessions or orchestration.
-  - Single tracking-only child: `az issue create "Child task" [--json]` auto-parents under `AZEDARACH_ISSUE_ID`; for another parent, create the issue and attach it with `az issue dep add <child-id> <parent-id> --type parent-child`.
+  - Single tracking-only child: `az issue create "Child task" [--json]` auto-parents under `AZEDARACH_ISSUE_ID`; for another parent, pass `--parent <issue-id>`.
   - Worker fanout/session launch: `az issue split --parent <issue-id> "Child task"` can create the child and start orchestration/session work; use `az issue split` only when you intentionally want isolated worker fanout.
   - Issue dependency graph:
   - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from|created-in] [--json]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--json]`
