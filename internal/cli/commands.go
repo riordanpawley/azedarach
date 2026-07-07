@@ -161,6 +161,7 @@ type IssueEventsOptions struct {
 	Project    string
 	IssueID    string
 	JSON       bool
+	JQHelp     bool
 	EventTypes []string
 	Limit      int
 }
@@ -2627,6 +2628,7 @@ func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.BoolVar(&opts.JSON, "json", false, "output issue events as JSON")
+	fs.BoolVar(&opts.JQHelp, "jq-help", false, "print jq examples for issue event JSON")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.Var(&typeFlags, "type", "filter by event type; may be repeated")
 	fs.StringVar(&typesCSV, "types", "", "comma-separated event types")
@@ -2635,7 +2637,7 @@ func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
 		return IssueEventsOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueEventsOptions{}, fmt.Errorf("usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]")
+		return IssueEventsOptions{}, fmt.Errorf("usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -2643,8 +2645,8 @@ func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
 	if strings.TrimSpace(issueIDFlag) != "" {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
-	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueEventsOptions{}, fmt.Errorf("usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]")
+	if strings.TrimSpace(opts.IssueID) == "" && !opts.JQHelp {
+		return IssueEventsOptions{}, fmt.Errorf("usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]")
 	}
 	if opts.Limit < 0 {
 		return IssueEventsOptions{}, fmt.Errorf("--limit must be non-negative")
@@ -4290,6 +4292,11 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 }
 
 func IssueEventsCommand(deps *Dependencies, opts IssueEventsOptions) error {
+	if opts.JQHelp {
+		printIssueEventsJQHelp(os.Stdout)
+		return nil
+	}
+
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
@@ -4310,12 +4317,10 @@ func IssueEventsCommand(deps *Dependencies, opts IssueEventsOptions) error {
 	if opts.JSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(struct {
-			IssueID string                         `json:"issue_id"`
-			Events  []domain.IssueObservationEvent `json:"events"`
-		}{
-			IssueID: opts.IssueID,
-			Events:  events,
+		return enc.Encode(issueEventsJSONOutput{
+			SchemaVersion: "issue_events.v1",
+			IssueID:       opts.IssueID,
+			Events:        issueEventsJSON(events),
 		})
 	}
 
@@ -4350,6 +4355,86 @@ func IssueEventsCommand(deps *Dependencies, opts IssueEventsOptions) error {
 		fmt.Println()
 	}
 	return nil
+}
+
+type issueEventsJSONOutput struct {
+	SchemaVersion string           `json:"schema_version"`
+	IssueID       string           `json:"issue_id"`
+	Events        []issueEventJSON `json:"events"`
+}
+
+type issueEventJSON struct {
+	ID            int64          `json:"id"`
+	IssueID       string         `json:"issue_id"`
+	Type          string         `json:"type"`
+	EventType     string         `json:"event_type"`
+	CreatedAt     time.Time      `json:"created_at"`
+	ObservedAt    time.Time      `json:"observed_at"`
+	Source        string         `json:"source"`
+	SourceCommand string         `json:"source_command"`
+	OperationID   string         `json:"operation_id"`
+	SessionID     string         `json:"session_id"`
+	WorktreePath  string         `json:"worktree_path"`
+	Body          string         `json:"body"`
+	Notes         string         `json:"notes"`
+	Data          map[string]any `json:"data"`
+	Payload       map[string]any `json:"payload"`
+}
+
+func issueEventsJSON(events []domain.IssueObservationEvent) []issueEventJSON {
+	out := make([]issueEventJSON, 0, len(events))
+	for _, event := range events {
+		out = append(out, issueEventJSONFromDomain(event))
+	}
+	return out
+}
+
+func issueEventJSONFromDomain(event domain.IssueObservationEvent) issueEventJSON {
+	data := map[string]any{}
+	if event.Payload != nil {
+		data = event.Payload
+	}
+	body := firstStringPayloadValue(data, "body", "message", "summary", "line", "evidence")
+	notes := firstStringPayloadValue(data, "notes", "note", "line")
+	eventType := string(event.Type)
+	return issueEventJSON{
+		ID:            event.ID,
+		IssueID:       event.IssueID.String(),
+		Type:          eventType,
+		EventType:     eventType,
+		CreatedAt:     event.ObservedAt,
+		ObservedAt:    event.ObservedAt,
+		Source:        event.Source,
+		SourceCommand: event.SourceCommand,
+		OperationID:   event.OperationID,
+		SessionID:     event.SessionID,
+		WorktreePath:  event.WorktreePath,
+		Body:          body,
+		Notes:         notes,
+		Data:          data,
+		Payload:       data,
+	}
+}
+
+func firstStringPayloadValue(data map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := data[key].(string); ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func printIssueEventsJQHelp(w io.Writer) {
+	fmt.Fprintln(w, "Stable JSON schema: issue_events.v1")
+	fmt.Fprintln(w, "Primary fields: id, issue_id, type, created_at, source, source_command, operation_id, session_id, worktree_path, body, notes, data")
+	fmt.Fprintln(w, "Compatibility aliases: event_type == type, observed_at == created_at, payload == data")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Examples:")
+	fmt.Fprintln(w, "  az issue events az-123 --json | jq '.events[0]'")
+	fmt.Fprintln(w, "  az issue events az-123 --json | jq '[.events[] | {type, created_at, source, data}]'")
+	fmt.Fprintln(w, "  az issue events az-123 --json | jq '.events[] | select(.type == \"issue.status_changed\")'")
+	fmt.Fprintln(w, "  az issue events az-123 --type validation.passed --json | jq '.events[] | {created_at, body, data}'")
 }
 
 func IssueContextRiskCommand(deps *Dependencies, opts IssueContextRiskOptions) error {
