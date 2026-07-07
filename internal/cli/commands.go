@@ -4734,7 +4734,7 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 		}
 		parentID = &parentTask.ID
 		if len(implementations) == 0 {
-			implementations = append([]string{}, parentTask.Implementations...)
+			implementations = dedupeTrimmed(parentTask.Implementations)
 		}
 	}
 	implementations, err = resolveIssueWriteImplementations(ctx, deps, implementations)

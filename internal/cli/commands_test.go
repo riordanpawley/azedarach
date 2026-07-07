@@ -8345,6 +8345,150 @@ func TestIssueCreateCommandAutoDefaultsImplWhenSingleConfigured(t *testing.T) {
 	}
 }
 
+func TestIssueCreateCommandAutoParentEmptyImplFallsBackToGlobalInference(t *testing.T) {
+	tests := []struct {
+		name         string
+		tasks        []domain.Task
+		wantCreate   bool
+		errSubstring string
+	}{
+		{
+			name:       "default only",
+			tasks:      []domain.Task{{ID: "az-1", Implementations: []string{"default"}}},
+			wantCreate: true,
+		},
+		{
+			name: "multiple configured implementations",
+			tasks: []domain.Task{
+				{ID: "az-1", Implementations: []string{"default"}},
+				{ID: "az-2", Implementations: []string{"go-bubbletea"}},
+			},
+			errSubstring: "missing required flag: --impl (multiple implementations configured: default, go-bubbletea)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var createReq daemonclient.TaskCreateParams
+			createCalled := false
+			parentID := "az-parent"
+			deps := &Dependencies{
+				Config: config.DefaultConfig(),
+				DaemonClient: daemonclient.New(&fakeDaemonTransport{
+					commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+						switch req.Command {
+						case daemonclient.CommandTaskGetMany:
+							assertMetadataOnlyTaskGetManyRequest(t, req, parentID)
+							body, err := marshalTaskListBody([]domain.Task{
+								{
+									ID:       "az-parent",
+									Title:    "Implicit default parent",
+									Status:   domain.StatusInProgress,
+									Priority: domain.P2,
+									Type:     domain.TypeTask,
+									Implementations: []string{
+										" ",
+									},
+								},
+							})
+							if err != nil {
+								t.Fatalf("marshal parent response: %v", err)
+							}
+							return protocol.ResponseEnvelope{
+								ProtocolVersion: req.ProtocolVersion,
+								RequestID:       req.RequestID,
+								Kind:            protocol.EnvelopeKindResponse,
+								Meta:            req.Meta,
+								OK:              true,
+								CompletedAt:     req.SentAt,
+								Revision:        1,
+								Body:            body,
+							}, nil
+						case daemonclient.CommandTaskList:
+							body, err := marshalTaskListBody(tt.tasks)
+							if err != nil {
+								t.Fatalf("marshal list response: %v", err)
+							}
+							return protocol.ResponseEnvelope{
+								ProtocolVersion: req.ProtocolVersion,
+								RequestID:       req.RequestID,
+								Kind:            protocol.EnvelopeKindResponse,
+								Meta:            req.Meta,
+								OK:              true,
+								CompletedAt:     req.SentAt,
+								Revision:        1,
+								Body:            body,
+							}, nil
+						case daemonclient.CommandTaskCreate:
+							createCalled = true
+							if err := json.Unmarshal(req.Body, &createReq); err != nil {
+								t.Fatalf("unmarshal create request: %v", err)
+							}
+							body, err := json.Marshal(map[string]string{"task_id": "az-child"})
+							if err != nil {
+								t.Fatalf("marshal create response: %v", err)
+							}
+							return protocol.ResponseEnvelope{
+								ProtocolVersion: req.ProtocolVersion,
+								RequestID:       req.RequestID,
+								Kind:            protocol.EnvelopeKindResponse,
+								Meta:            req.Meta,
+								OK:              true,
+								CompletedAt:     req.SentAt,
+								Body:            body,
+							}, nil
+						case daemonclient.CommandTaskDependencyAdd:
+							return protocol.ResponseEnvelope{
+								ProtocolVersion: req.ProtocolVersion,
+								RequestID:       req.RequestID,
+								Kind:            protocol.EnvelopeKindResponse,
+								Meta:            req.Meta,
+								OK:              true,
+								CompletedAt:     req.SentAt,
+								Body:            []byte(`{}`),
+							}, nil
+						default:
+							t.Fatalf("unexpected command: %s", req.Command)
+						}
+						return protocol.ResponseEnvelope{}, nil
+					},
+				}),
+				Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+				ProjectID: "proj",
+			}
+
+			err := IssueCreateCommand(deps, IssueCreateOptions{
+				Title:                  "Child issue",
+				Type:                   domain.TypeTask,
+				Priority:               domain.P2,
+				AutoParentFromIssueID:  &parentID,
+				AutoCreatedFromIssueID: &parentID,
+			})
+			if tt.errSubstring != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errSubstring) {
+					t.Fatalf("IssueCreateCommand() error = %v, want substring %q", err, tt.errSubstring)
+				}
+				if createCalled {
+					t.Fatal("task.create should not be called when implementation selection is ambiguous")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("IssueCreateCommand() error = %v", err)
+			}
+			if !tt.wantCreate || !createCalled {
+				t.Fatalf("createCalled = %v, want %v", createCalled, tt.wantCreate)
+			}
+			if createReq.ParentID == nil || createReq.ParentID.String() != parentID {
+				t.Fatalf("create parent = %+v, want %s", createReq.ParentID, parentID)
+			}
+			if !reflect.DeepEqual(createReq.Implementations, []string{"default"}) {
+				t.Fatalf("create implementations = %+v, want [default]", createReq.Implementations)
+			}
+		})
+	}
+}
+
 func TestIssueCreateCommandRejectsUnknownExplicitImplementation(t *testing.T) {
 	createCalled := false
 	deps := &Dependencies{
