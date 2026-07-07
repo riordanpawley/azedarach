@@ -3645,7 +3645,7 @@ func resolveIssueWriteImplementation(ctx context.Context, deps *Dependencies, pr
 	}
 
 	if err != nil {
-		return "", fmt.Errorf("missing required flag: --impl (implementation inference unavailable: %v). Specify --impl <implementation>; --impl selects implementation metadata, not parent/root membership", err)
+		return "", fmt.Errorf("missing required flag: --impl (implementation inference unavailable: %w). Specify --impl <implementation>; --impl selects implementation metadata, not parent/root membership", err)
 	}
 	switch len(impls) {
 	case 1:
@@ -5067,7 +5067,6 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 	var err error
 	var parentID *naming.IssueID
 	implementations := append([]string{}, opts.Implementations...)
-	inheritedImplementations := false
 	if !opts.Deferred && opts.AutoParentFromIssueID != nil && strings.TrimSpace(*opts.AutoParentFromIssueID) != "" {
 		parentIssueID := strings.TrimSpace(*opts.AutoParentFromIssueID)
 		parentTask, _, ok, err := loadIssueMetadataTaskWithDaemonAutostartRetry(ctx, deps, parentIssueID)
@@ -5080,19 +5079,16 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 		parentID = &parentTask.ID
 		if len(implementations) == 0 {
 			implementations = dedupeTrimmed(parentTask.Implementations)
-			inheritedImplementations = len(implementations) > 0
 		}
 	}
 	candidateImplementations := dedupeTrimmed(implementations)
 	implementations, err = resolveIssueWriteImplementations(ctx, deps, implementations)
 	if err != nil {
-		if inheritedImplementations && issueWriteImplementationValidationTimedOut(err) {
-			implementationFallback := candidateImplementations
-			if len(implementationFallback) == 1 {
-				implementations = implementationFallback
-			} else {
-				return issueCreateResult{}, fmt.Errorf("missing required flag: --impl (implementation is ambiguous after task snapshot timeout; valid inherited --impl values: %s)", strings.Join(implementationFallback, ", "))
-			}
+		if issueWriteImplementationValidationTimedOut(err) {
+			// A freshness timeout cannot safely prove implementation ambiguity.
+			// Preserve explicit/inherited metadata when present; otherwise omit it
+			// and let the daemon/default create path handle the issue.
+			implementations = candidateImplementations
 		} else {
 			return issueCreateResult{}, err
 		}

@@ -7920,7 +7920,7 @@ func TestIssueCreateCommandAutoParentsAndInheritsImplsFromActiveIssue(t *testing
 	}
 }
 
-func TestIssueCreateCommandUsesInheritedImplWhenTaskSnapshotTimesOut(t *testing.T) {
+func TestIssueCreateCommandUsesInheritedImplsWhenTaskSnapshotTimesOut(t *testing.T) {
 	var requests []protocol.RequestEnvelope
 	var createReq daemonclient.TaskCreateParams
 	deps := &Dependencies{
@@ -7944,7 +7944,7 @@ func TestIssueCreateCommandUsesInheritedImplWhenTaskSnapshotTimesOut(t *testing.
 							Status:          domain.StatusInProgress,
 							Priority:        domain.P1,
 							Type:            domain.TypeTask,
-							Implementations: []string{"default"},
+							Implementations: []string{"default", "go-bubbletea"},
 						}},
 					}), nil
 				case daemonclient.CommandTaskList:
@@ -7990,8 +7990,83 @@ func TestIssueCreateCommandUsesInheritedImplWhenTaskSnapshotTimesOut(t *testing.
 	if createReq.ParentID == nil || *createReq.ParentID != "az-parent" {
 		t.Fatalf("create parent = %+v, want az-parent", createReq.ParentID)
 	}
-	if !reflect.DeepEqual(createReq.Implementations, []string{"default"}) {
-		t.Fatalf("create implementations = %+v, want [default]", createReq.Implementations)
+	if !reflect.DeepEqual(createReq.Implementations, []string{"default", "go-bubbletea"}) {
+		t.Fatalf("create implementations = %+v, want inherited implementations", createReq.Implementations)
+	}
+}
+
+func TestIssueCreateCommandOmitsImplWhenTaskSnapshotTimesOutWithoutInferenceSignal(t *testing.T) {
+	var requests []protocol.RequestEnvelope
+	var createReq daemonclient.TaskCreateParams
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				requests = append(requests, req)
+				switch req.Command {
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-parent")
+					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
+						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+						ProtocolVersion:  protocol.CurrentVersion,
+						SnapshotRevision: 1,
+						ProjectID:        "proj",
+						LastCheckedAt:    time.Now().UTC(),
+						Freshness:        protocol.TaskListFreshnessFresh,
+						Tasks: []domain.Task{{
+							ID:       "az-parent",
+							Title:    "Parent",
+							Status:   domain.StatusInProgress,
+							Priority: domain.P1,
+							Type:     domain.TypeTask,
+						}},
+					}), nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{}, &daemonclient.ReadWaitTimeoutError{
+						Mode:   daemonclient.ReadWaitModeDefault,
+						Budget: 2 * time.Second,
+						Hint:   "Task snapshot read timed out after 2s; keeping current local view",
+						Err:    context.DeadlineExceeded,
+					}
+				case daemonclient.CommandTaskCreate:
+					if err := json.Unmarshal(req.Body, &createReq); err != nil {
+						t.Fatalf("unmarshal create request: %v", err)
+					}
+					return responseWithJSON(req, map[string]string{"task_id": "az-child"}), nil
+				case daemonclient.CommandTaskDependencyAdd:
+					return responseWithJSON(req, map[string]any{}), nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	parentID := "az-parent"
+	err := IssueCreateCommand(deps, IssueCreateOptions{
+		Title:                  "Child issue",
+		Type:                   domain.TypeTask,
+		Priority:               domain.P2,
+		AutoParentFromIssueID:  &parentID,
+		AutoCreatedFromIssueID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("IssueCreateCommand() error = %v", err)
+	}
+	commands := commandNames(requests)
+	if len(commands) < 4 || commands[0] != daemonclient.CommandTaskGetMany || commands[1] != daemonclient.CommandTaskList {
+		t.Fatalf("commands = %+v, want parent lookup followed by implementation validation", commands)
+	}
+	if commands[len(commands)-2] != daemonclient.CommandTaskCreate || commands[len(commands)-1] != daemonclient.CommandTaskDependencyAdd {
+		t.Fatalf("commands = %+v, want create and created-in edge after snapshot timeout fallback", commands)
+	}
+	if createReq.ParentID == nil || *createReq.ParentID != "az-parent" {
+		t.Fatalf("create parent = %+v, want az-parent", createReq.ParentID)
+	}
+	if len(createReq.Implementations) != 0 {
+		t.Fatalf("create implementations = %+v, want omitted after timeout without inference signal", createReq.Implementations)
 	}
 }
 
