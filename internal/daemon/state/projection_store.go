@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -321,6 +322,10 @@ func (s *RuntimeStateStore) upsertSessionActivityEvidenceLocked(ctx context.Cont
 	if updatedAt.IsZero() {
 		updatedAt = observedAt
 	}
+	sourceSessionID := strings.TrimSpace(evidence.SourceSessionID)
+	if sourceSessionID == "" {
+		sourceSessionID = sessionID
+	}
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO `+sessionActivityTable+` (
 			project_id,
@@ -335,11 +340,10 @@ func (s *RuntimeStateStore) upsertSessionActivityEvidenceLocked(ctx context.Cont
 			observed_at,
 			updated_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(project_id, session_id) DO UPDATE SET
+		ON CONFLICT(project_id, session_id, source_session_id) DO UPDATE SET
 			issue_id = excluded.issue_id,
 			activity = excluded.activity,
 			activity_source = excluded.activity_source,
-			source_session_id = excluded.source_session_id,
 			agent = excluded.agent,
 			hook = excluded.hook,
 			event = excluded.event,
@@ -352,7 +356,7 @@ func (s *RuntimeStateStore) upsertSessionActivityEvidenceLocked(ctx context.Cont
 		issueID,
 		activity,
 		activitySource,
-		strings.TrimSpace(evidence.SourceSessionID),
+		sourceSessionID,
 		strings.TrimSpace(evidence.Agent),
 		strings.TrimSpace(evidence.Hook),
 		strings.TrimSpace(evidence.Event),
@@ -375,7 +379,7 @@ func (s *RuntimeStateStore) GetSessionActivityEvidence(ctx context.Context, proj
 	if sessionID == "" {
 		return SessionActivityEvidence{}, false, nil
 	}
-	row := db.QueryRowContext(ctx, `
+	rows, err := db.QueryContext(ctx, `
 		SELECT
 			project_id,
 			session_id,
@@ -390,15 +394,97 @@ func (s *RuntimeStateStore) GetSessionActivityEvidence(ctx context.Context, proj
 			updated_at
 		FROM `+sessionActivityTable+`
 		WHERE project_id = ? AND session_id = ?
+		ORDER BY observed_at DESC, source_session_id ASC
 	`, projectID, sessionID)
-	evidence, err := scanSessionActivityEvidence(row)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return SessionActivityEvidence{}, false, nil
-		}
 		return SessionActivityEvidence{}, false, err
 	}
-	return evidence, true, nil
+	defer rows.Close()
+	evidenceRows := make([]SessionActivityEvidence, 0)
+	for rows.Next() {
+		evidence, err := scanSessionActivityEvidence(rows)
+		if err != nil {
+			return SessionActivityEvidence{}, false, err
+		}
+		evidenceRows = append(evidenceRows, evidence)
+	}
+	if err := rows.Err(); err != nil {
+		return SessionActivityEvidence{}, false, err
+	}
+	evidenceRows = AggregateSessionActivityEvidence(evidenceRows)
+	if len(evidenceRows) == 0 {
+		return SessionActivityEvidence{}, false, nil
+	}
+	return evidenceRows[0], true, nil
+}
+
+func AggregateSessionActivityEvidence(evidenceRows []SessionActivityEvidence) []SessionActivityEvidence {
+	type aggregate struct {
+		latest         SessionActivityEvidence
+		latestDecisive SessionActivityEvidence
+		rank           int
+	}
+	bySession := make(map[string]aggregate, len(evidenceRows))
+	for _, evidence := range evidenceRows {
+		projectID := normalizedProjectID(evidence.ProjectID)
+		sessionID := strings.TrimSpace(evidence.SessionID)
+		if projectID == "" || sessionID == "" {
+			continue
+		}
+		evidence.ProjectID = projectID
+		evidence.SessionID = sessionID
+		evidence.Activity = strings.ToLower(strings.TrimSpace(evidence.Activity))
+		if evidence.Activity == "" {
+			continue
+		}
+		key := projectID + "\x00" + sessionID
+		next := bySession[key]
+		if next.latest.SessionID == "" || evidence.ObservedAt.After(next.latest.ObservedAt) || (evidence.ObservedAt.Equal(next.latest.ObservedAt) && strings.TrimSpace(evidence.SourceSessionID) < strings.TrimSpace(next.latest.SourceSessionID)) {
+			next.latest = evidence
+		}
+		rank := sessionActivityEvidenceRank(evidence.Activity)
+		if rank > next.rank || (rank == next.rank && (next.latestDecisive.SessionID == "" || evidence.ObservedAt.After(next.latestDecisive.ObservedAt))) {
+			next.rank = rank
+			next.latestDecisive = evidence
+		}
+		bySession[key] = next
+	}
+	out := make([]SessionActivityEvidence, 0, len(bySession))
+	for _, item := range bySession {
+		evidence := item.latest
+		if item.latestDecisive.SessionID != "" {
+			evidence.Activity = item.latestDecisive.Activity
+			evidence.ActivitySource = item.latestDecisive.ActivitySource
+			evidence.SourceSessionID = item.latestDecisive.SourceSessionID
+			evidence.Agent = item.latestDecisive.Agent
+			evidence.Hook = item.latestDecisive.Hook
+			evidence.Event = item.latestDecisive.Event
+		}
+		out = append(out, evidence)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].ObservedAt.Equal(out[j].ObservedAt) {
+			return out[i].ObservedAt.After(out[j].ObservedAt)
+		}
+		if out[i].SessionID != out[j].SessionID {
+			return out[i].SessionID < out[j].SessionID
+		}
+		return out[i].SourceSessionID < out[j].SourceSessionID
+	})
+	return out
+}
+
+func sessionActivityEvidenceRank(activity string) int {
+	switch strings.ToLower(strings.TrimSpace(activity)) {
+	case "busy", "starting", "working":
+		return 3
+	case "waiting":
+		return 2
+	case "idle", "paused":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func (s *RuntimeStateStore) ListSessionActivityEvidence(ctx context.Context, projectID string, issueIDs []string) ([]SessionActivityEvidence, error) {
@@ -1428,13 +1514,13 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 			issue_id TEXT NOT NULL,
 			activity TEXT NOT NULL,
 			activity_source TEXT NOT NULL,
-			source_session_id TEXT,
+			source_session_id TEXT NOT NULL,
 			agent TEXT,
 			hook TEXT,
 			event TEXT,
 			observed_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
-			PRIMARY KEY (project_id, session_id)
+			PRIMARY KEY (project_id, session_id, source_session_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_session_activity_evidence_project_issue
 			ON ` + sessionActivityTable + ` (project_id, issue_id)`,
@@ -1489,6 +1575,9 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 	if err := migrateSessionObservations(ctx, db); err != nil {
 		return err
 	}
+	if err := ensureSessionActivityEvidenceSourceKey(ctx, db); err != nil {
+		return err
+	}
 	if err := migrateSessionActivityEvidence(ctx, db); err != nil {
 		return err
 	}
@@ -1498,6 +1587,114 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 	if err := ensureColumn(ctx, db, worktreeStateTable, "git_status_updated_at", "TEXT"); err != nil {
 		return err
 	}
+	return nil
+}
+
+func ensureSessionActivityEvidenceSourceKey(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+sessionActivityTable+`)`)
+	if err != nil {
+		return fmt.Errorf("inspect session activity evidence schema: %w", err)
+	}
+	defer rows.Close()
+
+	type pkColumn struct {
+		name string
+		rank int
+	}
+	pkColumns := make([]pkColumn, 0, 3)
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return fmt.Errorf("scan session activity evidence schema: %w", err)
+		}
+		if pk > 0 {
+			pkColumns = append(pkColumns, pkColumn{name: name, rank: pk})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read session activity evidence schema: %w", err)
+	}
+	sort.Slice(pkColumns, func(i, j int) bool { return pkColumns[i].rank < pkColumns[j].rank })
+	if len(pkColumns) == 3 &&
+		pkColumns[0].name == "project_id" &&
+		pkColumns[1].name == "session_id" &&
+		pkColumns[2].name == "source_session_id" {
+		return nil
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin session activity evidence migration: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	oldTable := fmt.Sprintf("%s_old_%d", sessionActivityTable, time.Now().UTC().UnixNano())
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE `+sessionActivityTable+` RENAME TO `+oldTable); err != nil {
+		return fmt.Errorf("rename session activity evidence table: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE `+sessionActivityTable+` (
+		project_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		issue_id TEXT NOT NULL,
+		activity TEXT NOT NULL,
+		activity_source TEXT NOT NULL,
+		source_session_id TEXT NOT NULL,
+		agent TEXT,
+		hook TEXT,
+		event TEXT,
+		observed_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		PRIMARY KEY (project_id, session_id, source_session_id)
+	)`); err != nil {
+		return fmt.Errorf("create session activity evidence source-key table: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO `+sessionActivityTable+` (
+		project_id,
+		session_id,
+		issue_id,
+		activity,
+		activity_source,
+		source_session_id,
+		agent,
+		hook,
+		event,
+		observed_at,
+		updated_at
+	)
+	SELECT
+		project_id,
+		session_id,
+		issue_id,
+		activity,
+		activity_source,
+		COALESCE(NULLIF(trim(source_session_id), ''), session_id),
+		agent,
+		hook,
+		event,
+		observed_at,
+		updated_at
+	FROM `+oldTable); err != nil {
+		return fmt.Errorf("copy session activity evidence rows: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE `+oldTable); err != nil {
+		return fmt.Errorf("drop migrated session activity evidence table: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_daemon_session_activity_evidence_project_issue
+		ON `+sessionActivityTable+` (project_id, issue_id)`); err != nil {
+		return fmt.Errorf("create session activity evidence issue index: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit session activity evidence migration: %w", err)
+	}
+	committed = true
 	return nil
 }
 
@@ -1536,6 +1733,7 @@ func migrateSessionActivityEvidence(ctx context.Context, db *sql.DB) error {
 				issue_id,
 				CASE lower(trim(COALESCE(activity, '')))
 					WHEN 'busy' THEN 'busy'
+					WHEN 'waiting' THEN 'waiting'
 					WHEN 'idle' THEN 'idle'
 					ELSE CASE lower(trim(COALESCE(state, '')))
 						WHEN 'running' THEN 'busy'
@@ -1543,25 +1741,19 @@ func migrateSessionActivityEvidence(ctx context.Context, db *sql.DB) error {
 						ELSE ''
 					END
 				END AS activity,
-				updated_at,
-				row_number() OVER (
-					PARTITION BY project_id, substr(session_id, 1, instr(session_id, '.pane-') - 1)
-					ORDER BY updated_at DESC, session_id ASC
-				) AS row_rank
+				updated_at
 			FROM `+sessionObservationTable+`
 			WHERE instr(session_id, '.pane-') > 0
 				AND lower(trim(COALESCE(activity_source, ''))) = 'hooks'
 				AND trim(COALESCE(issue_id, '')) <> ''
 				AND trim(COALESCE(updated_at, '')) <> ''
 		)
-		WHERE row_rank = 1
-			AND parent_session_id <> ''
+		WHERE parent_session_id <> ''
 			AND activity <> ''
-		ON CONFLICT(project_id, session_id) DO UPDATE SET
+		ON CONFLICT(project_id, session_id, source_session_id) DO UPDATE SET
 			issue_id = excluded.issue_id,
 			activity = excluded.activity,
 			activity_source = excluded.activity_source,
-			source_session_id = excluded.source_session_id,
 			agent = excluded.agent,
 			hook = excluded.hook,
 			event = excluded.event,

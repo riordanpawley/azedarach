@@ -158,6 +158,7 @@ type orchestrateStartResult struct {
 	RootIssueID string                    `json:"root_issue_id"`
 	Limit       int                       `json:"limit"`
 	Requested   []string                  `json:"requested"`
+	NestedRoots []string                  `json:"nested_roots,omitempty"`
 	Started     []string                  `json:"started"`
 	Launched    []orchestrateStartLaunch  `json:"launched,omitempty"`
 	Pending     []orchestrateStartPending `json:"pending,omitempty"`
@@ -624,7 +625,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		}
 	}
 	if len(result.Blocked) > 0 {
-		fmt.Println("Blocked leaves:")
+		fmt.Println("Blocked leaves/roots:")
 		ids := make([]string, 0, len(result.Blocked))
 		for id := range result.Blocked {
 			ids = append(ids, id)
@@ -767,6 +768,12 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	for _, id := range ready.Runnable {
 		runnableSet[id] = struct{}{}
 	}
+	nestedRootSet := make(map[string]struct{}, len(ready.NestedRoots))
+	nestedRootIDs := make([]string, 0, len(ready.NestedRoots))
+	for _, nested := range ready.NestedRoots {
+		nestedRootSet[nested.IssueID] = struct{}{}
+		nestedRootIDs = append(nestedRootIDs, nested.IssueID)
+	}
 	activeSet := make(map[string]struct{}, len(ready.Active))
 	for _, id := range ready.Active {
 		activeSet[id] = struct{}{}
@@ -779,6 +786,10 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	} else {
 		for _, id := range opts.IssueIDs {
 			if _, ok := runnableSet[id]; !ok {
+				if _, nested := nestedRootSet[id]; nested {
+					skipped[id] = fmt.Sprintf("nested-root-start-orchestrator-session: az session start %s", id)
+					continue
+				}
 				if _, active := activeSet[id]; active {
 					skipped[id] = "session-already-running"
 					continue
@@ -794,6 +805,7 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		RootIssueID: opts.RootIssueID,
 		Limit:       opts.Limit,
 		Requested:   append([]string(nil), requested...),
+		NestedRoots: nestedRootIDs,
 		Started:     make([]string, 0, len(requested)),
 		Launched:    make([]orchestrateStartLaunch, 0, len(requested)),
 		Skipped:     skipped,
@@ -1366,6 +1378,12 @@ func printOrchestrateStartResult(result orchestrateStartResult) {
 		fmt.Println("Skipped:")
 		for _, id := range sortedKeys(result.Skipped) {
 			fmt.Printf("- %s: %s\n", id, result.Skipped[id])
+		}
+	}
+	if len(result.NestedRoots) > 0 {
+		fmt.Println("Nested roots:")
+		for _, id := range result.NestedRoots {
+			fmt.Printf("- %s: start its orchestrator session with `az session start %s`\n", id, id)
 		}
 	}
 	if len(result.Launched) > 0 {
@@ -2370,7 +2388,7 @@ func orchestrateRootWorktreeWarningsFromReadiness(ctx context.Context, deps *Dep
 	if rootIssueID == "" || deps == nil || deps.DaemonClient == nil {
 		return nil
 	}
-	if len(ready.Runnable)+len(ready.Pending)+len(ready.Active)+len(ready.Blocked)+len(ready.ActiveSessions)+len(ready.SessionStartProgress) == 0 {
+	if len(ready.Runnable)+len(ready.NestedRoots)+len(ready.Pending)+len(ready.Active)+len(ready.Blocked)+len(ready.ActiveSessions)+len(ready.SessionStartProgress) == 0 {
 		return nil
 	}
 	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)

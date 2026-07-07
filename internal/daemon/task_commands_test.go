@@ -5072,6 +5072,53 @@ func TestTaskGraphReadinessReportsMissingDependencyAndActiveSession(t *testing.T
 	}
 }
 
+func TestTaskGraphReadinessStopsAtNestedRoots(t *testing.T) {
+	root := naming.IssueID("az-root")
+	nested := naming.IssueID("az-nested")
+	grandchild := naming.IssueID("az-grandchild")
+	direct := naming.IssueID("az-direct")
+	nestedParent := root
+	grandchildParent := nested
+	directParent := root
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
+		{ID: nested, Type: domain.TypeEpic, Status: domain.StatusOpen, ParentID: &nestedParent},
+		{ID: grandchild, Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &grandchildParent},
+		{ID: direct, Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &directParent},
+	}
+
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), tasks)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphIndexes error: %v", err)
+	}
+	result, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphReadinessFromIndexes error: %v", err)
+	}
+	if len(result.Runnable) != 1 || result.Runnable[0] != direct.String() {
+		t.Fatalf("runnable = %v, want direct child only %s", result.Runnable, direct.String())
+	}
+	if len(result.NestedRoots) != 1 || result.NestedRoots[0].IssueID != nested.String() {
+		t.Fatalf("nested roots = %v, want %s", result.NestedRoots, nested.String())
+	}
+	if slices.Contains(result.Runnable, grandchild.String()) {
+		t.Fatalf("runnable = %v, must not flatten nested root descendant %s", result.Runnable, grandchild.String())
+	}
+	observations := (&Daemon{}).daemonTaskGraphWorkerObservations(context.Background(), "proj", rootID, byID, children, result)
+	observedDirect := false
+	for _, observation := range observations {
+		if observation.IssueID == direct.String() {
+			observedDirect = true
+		}
+		if observation.IssueID == grandchild.String() {
+			t.Fatalf("worker observations included nested root descendant: %+v", observations)
+		}
+	}
+	if !observedDirect {
+		t.Fatalf("worker observations = %+v, want direct child %s", observations, direct.String())
+	}
+}
+
 func TestTaskGraphReadinessLoadsRootScopedTasksWithLargeUnrelatedProject(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-root-scoped-readiness"
@@ -5766,6 +5813,38 @@ func TestWorkerObservationStateDerivationPrecedence(t *testing.T) {
 	}
 }
 
+func TestLatestWorkerObservationIssueEventFiltersStructuralDependencies(t *testing.T) {
+	blocking := domain.IssueObservationEvent{
+		ID:         1,
+		Type:       domain.IssueEventIssueDependencyAdded,
+		ObservedAt: time.Date(2026, time.June, 17, 8, 0, 0, 0, time.UTC),
+		Source:     "issue-store",
+		Payload:    map[string]any{"dependency_type": string(domain.DependencyBlocks)},
+	}
+	events := []domain.IssueObservationEvent{
+		blocking,
+		{
+			ID:         2,
+			Type:       domain.IssueEventIssueDependencyAdded,
+			ObservedAt: blocking.ObservedAt.Add(time.Minute),
+			Source:     "issue-store",
+			Payload:    map[string]any{"dependency_type": string(domain.DependencyParentChild)},
+		},
+		{
+			ID:         3,
+			Type:       domain.IssueEventIssueDependencyAdded,
+			ObservedAt: blocking.ObservedAt.Add(2 * time.Minute),
+			Source:     "issue-store",
+			Payload:    map[string]any{"dependency_type": string(domain.DependencyCreatedIn)},
+		},
+	}
+
+	got := latestWorkerObservationIssueEvent(events)
+	if got == nil || got.ID != blocking.ID {
+		t.Fatalf("latestWorkerObservationIssueEvent() = %+v, want blocking dependency event", got)
+	}
+}
+
 func TestTaskGraphReadinessWorkerObservationsIncludeEvidenceAndMissingProjectionStates(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -5890,6 +5969,8 @@ func TestTaskGraphReadinessWorkerObservationsIncludeEvidenceAndMissingProjection
 	}
 	if got := strings.Join(observations[reviewID].EvidenceSummary, "\n"); !strings.Contains(got, "worker-integration-ready") || !strings.Contains(got, "evidence.submitted") {
 		t.Fatalf("review evidence = %q", got)
+	} else if strings.Contains(got, "issue.dependency_added") || strings.Contains(got, "parent-child") {
+		t.Fatalf("review evidence includes structural dependency event: %q", got)
 	}
 	if got := observations[closedID]; got.State != domain.WorkerObservationCleanupPending {
 		t.Fatalf("closed observation = %+v", got)

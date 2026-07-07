@@ -10683,6 +10683,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Launch child workers only from that orchestrator context: `az orchestrate start --root <root> ...`.") {
 		t.Fatalf("prime output missing parent start checklist step: %q", output)
 	}
+	if !strings.Contains(output, "Nested epic/root rule: if the user asks the current session to start another epic/root issue, start that epic's own orchestrator session with `az session start <nested-root>`") {
+		t.Fatalf("prime output missing nested root session ownership guidance: %q", output)
+	}
+	if !strings.Contains(output, "Do not launch the nested root's child workers from the current/root session unless the user explicitly asks to flatten orchestration.") {
+		t.Fatalf("prime output missing nested root no-flattening guidance: %q", output)
+	}
 	if strings.Contains(output, "az worktree create <root>") {
 		t.Fatalf("prime parent orchestrator checklist should not mention manual worktree creation: %q", output)
 	}
@@ -10713,7 +10719,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`orchestration.via=az` means do not spawn harness-native subagents yourself.") {
 		t.Fatalf("prime output missing follow-up native subagent prohibition: %q", output)
 	}
-	if !strings.Contains(output, "Then run the az orchestration loop: `status` to identify runnable leaves and active worker activity") {
+	if !strings.Contains(output, "Then run the az orchestration loop for the active root: `status` to identify direct runnable leaves and active worker activity") {
 		t.Fatalf("prime output missing az orchestration workflow guidance: %q", output)
 	}
 	if !strings.Contains(output, "use `az orchestrate message --root <parent> --issue <worker> --body \"...\"` only for evidence-backed worker nudges when the intervention threshold is met") {
@@ -10733,6 +10739,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "Large graph: 10+ leaves or multiple dependency phases") {
 		t.Fatalf("prime output missing large graph orchestration guidance: %q", output)
+	}
+	if !strings.Contains(output, "start explicit nested epic/root sessions rather than flattening their workers into the current root") {
+		t.Fatalf("prime output missing large graph nested root guidance: %q", output)
 	}
 	if !strings.Contains(output, "Repeat status -> start -> watch until `az orchestrate complete-check --root <issue-id>` passes") {
 		t.Fatalf("prime output missing completion loop guidance: %q", output)

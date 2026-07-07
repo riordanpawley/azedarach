@@ -189,6 +189,79 @@ func TestRuntimeSignalIngestAgentHookPersistsActivityAndHookLog(t *testing.T) {
 	}
 }
 
+func TestRuntimeSignalIngestKeepsCanonicalBusyWhenAnotherPaneWaits(t *testing.T) {
+	repoDir := initRuntimeSignalGitRepo(t)
+	d := New(Config{
+		RepoDir: repoDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	projectID := "proj-signals"
+	issueID := "az-42"
+	parentSessionID := "pr-az-42"
+	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
+	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:             parentSessionID,
+		IssueID:        issueID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "session",
+		StartedAt:      &startedAt,
+		UpdatedAt:      startedAt,
+	}); err != nil {
+		t.Fatalf("seed canonical session projection: %v", err)
+	}
+
+	for _, signal := range []protocol.RuntimeSignalIngestCommandBody{
+		{
+			Source:    protocol.RuntimeSignalSourceAgentHook,
+			Kind:      protocol.RuntimeSignalKindAgentActivityChanged,
+			IssueID:   issueID,
+			SessionID: parentSessionID + ".pane-34",
+			Worktree:  repoDir,
+			Agent:     "codex",
+			Hook:      "pre_tool_use",
+			Event:     "pre_tool_use",
+		},
+		{
+			Source:    protocol.RuntimeSignalSourceAgentHook,
+			Kind:      protocol.RuntimeSignalKindAgentActivityChanged,
+			IssueID:   issueID,
+			SessionID: parentSessionID + ".pane-12",
+			Worktree:  repoDir,
+			Agent:     "codex",
+			Hook:      "permission_request",
+			Event:     "permission_request",
+		},
+	} {
+		resp, err := d.command(context.Background(), protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       naming.RequestID("runtime-signal-agent-" + signal.Hook),
+			Kind:            protocol.EnvelopeKindCommand,
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			Command:         protocol.CommandRuntimeSignalIngest,
+			Body:            mustMarshal(t, signal),
+		})
+		if err != nil {
+			t.Fatalf("runtime.signal.ingest command error: %v", err)
+		}
+		if !resp.OK {
+			t.Fatalf("runtime.signal.ingest response not ok: %+v", resp.Error)
+		}
+	}
+
+	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, parentSessionID)
+	if err != nil {
+		t.Fatalf("GetSessionState canonical: %v", err)
+	}
+	if !found {
+		t.Fatal("expected canonical session projection")
+	}
+	if canonical.Activity != "busy" || canonical.ActivitySource != "hooks" {
+		t.Fatalf("canonical session projection = %+v, want busy/hooks", canonical)
+	}
+}
+
 func TestRuntimeSignalIngestAgentHookCreatesRunningCanonicalProjection(t *testing.T) {
 	repoDir := initRuntimeSignalGitRepo(t)
 	d := New(Config{
@@ -338,6 +411,69 @@ func TestRuntimeSignalMaterializesStoredActivityEvidenceToCanonical(t *testing.T
 		canonical.Activity != "idle" ||
 		canonical.ActivitySource != "hooks" {
 		t.Fatalf("canonical session projection = %+v", canonical)
+	}
+}
+
+func TestRuntimeSignalMaterializesBusyWhenAnyPaneEvidenceBusy(t *testing.T) {
+	repoDir := initRuntimeSignalGitRepo(t)
+	d := New(Config{
+		RepoDir: repoDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	projectID := "proj-signals"
+	issueID := "az-42"
+	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
+	store := d.sessionRuntimeStateStore(projectID)
+	if err := store.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:             "pr-az-42",
+		IssueID:        issueID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "idle",
+		ActivitySource: "hooks",
+		StartedAt:      &startedAt,
+		UpdatedAt:      startedAt,
+	}); err != nil {
+		t.Fatalf("seed canonical session projection: %v", err)
+	}
+	if err := store.UpsertSessionActivityEvidence(context.Background(), daemonstate.SessionActivityEvidence{
+		ProjectID:       projectID,
+		SessionID:       "pr-az-42",
+		IssueID:         issueID,
+		Activity:        "idle",
+		ActivitySource:  "hooks",
+		SourceSessionID: "pr-az-42.pane-12",
+		ObservedAt:      startedAt.Add(2 * time.Second),
+		UpdatedAt:       startedAt.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("seed idle activity evidence: %v", err)
+	}
+	if err := store.UpsertSessionActivityEvidence(context.Background(), daemonstate.SessionActivityEvidence{
+		ProjectID:       projectID,
+		SessionID:       "pr-az-42",
+		IssueID:         issueID,
+		Activity:        "busy",
+		ActivitySource:  "hooks",
+		SourceSessionID: "pr-az-42.pane-34",
+		ObservedAt:      startedAt.Add(time.Second),
+		UpdatedAt:       startedAt.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("seed busy activity evidence: %v", err)
+	}
+
+	if err := d.materializeSessionActivityEvidence(context.Background(), protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, []string{issueID}); err != nil {
+		t.Fatalf("materializeSessionActivityEvidence: %v", err)
+	}
+
+	canonical, found, err := store.GetSessionState(context.Background(), projectID, "pr-az-42")
+	if err != nil {
+		t.Fatalf("GetSessionState canonical: %v", err)
+	}
+	if !found {
+		t.Fatal("expected canonical session projection")
+	}
+	if canonical.Activity != "busy" || canonical.ActivitySource != "hooks" {
+		t.Fatalf("canonical session projection = %+v, want busy/hooks", canonical)
 	}
 }
 

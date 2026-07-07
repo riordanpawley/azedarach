@@ -13,8 +13,8 @@
 │────────────────────────────────────────────────────────────────────│
 │> r Retry close                                                     │
 │  Run the close again after fixing the blocker.                     │
-│  a AI merge                                                        │
-│  Launch an agent to resolve the blocked integration.               │
 │  f Force cleanup                                                   │
 │  Retry and allow worktree removal to discard local files.          │
+│  esc Cancel                                                        │
+│  Leave the issue in its previous status.                           │
 ╰────────────────────────────────────────────────────────────────────╯

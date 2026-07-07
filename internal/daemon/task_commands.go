@@ -332,7 +332,6 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 			latencytrace.LogPhase(d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_hydrate", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false, "error", hydrateErr)
 		} else {
 			cached.Tasks = hydrated
-			cached.LastCheckedAt, cached.Freshness = d.taskListSnapshotFreshness(ctx, projectID)
 			latencytrace.LogPhase(d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", true)
 			payload := buildBoardSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks)
 			marshalStartedAt := time.Now()
@@ -3717,6 +3716,30 @@ func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.
 	return result, nil
 }
 
+func daemonTaskGraphRunnableCandidates(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) ([]string, []string) {
+	directChildren := children[rootID]
+	if len(directChildren) == 0 {
+		if task := byID[rootID]; !task.ID.IsZero() && task.Type != domain.TypeEpic {
+			return []string{rootID.String()}, nil
+		}
+		return nil, nil
+	}
+	runnable := make([]string, 0, len(directChildren))
+	nestedRoots := make([]string, 0)
+	for _, id := range directChildren {
+		task := byID[id]
+		if task.ID.IsZero() {
+			continue
+		}
+		if task.Type == domain.TypeEpic || len(children[id]) > 0 {
+			nestedRoots = append(nestedRoots, id.String())
+			continue
+		}
+		runnable = append(runnable, id.String())
+	}
+	return runnable, nestedRoots
+}
+
 func daemonTaskGraphStaleCloseableCandidates(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) []taskStaleCloseableCandidate {
 	out := make([]taskStaleCloseableCandidate, 0)
 	for _, id := range daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children) {
@@ -3979,7 +4002,7 @@ func daemonWorkerObservationEvidenceSummary(in workerObservationInputs) []string
 	if evt := latestWorkerMailEvent(in.MailEvents); evt != nil {
 		evidence = append(evidence, fmt.Sprintf("mailbox %s: %s", strings.TrimSpace(evt.Type), truncateObservationSummary(evt.Body)))
 	}
-	if evt := latestIssueObservationEvent(in.IssueEvents); evt != nil {
+	if evt := latestWorkerObservationIssueEvent(in.IssueEvents); evt != nil {
 		evidence = append(evidence, fmt.Sprintf("event %s from %s", evt.Type, strings.TrimSpace(evt.Source)))
 	}
 	for _, evt := range workerObservationEvidenceEvents(in.IssueEvents) {
@@ -4053,7 +4076,7 @@ func daemonWorkerObservationNextActions(rootIssueID string, observation domain.W
 
 func daemonWorkerObservationLastEvent(issueEvents []domain.IssueObservationEvent, mailEvents []daemonMailEvent) *domain.WorkerObservationEventSummary {
 	var last *domain.WorkerObservationEventSummary
-	if evt := latestIssueObservationEvent(issueEvents); evt != nil {
+	if evt := latestWorkerObservationIssueEvent(issueEvents); evt != nil {
 		last = &domain.WorkerObservationEventSummary{
 			Kind:      "issue_event",
 			Type:      string(evt.Type),
@@ -4080,6 +4103,55 @@ func daemonWorkerObservationLastEvent(issueEvents []domain.IssueObservationEvent
 	return last
 }
 
+func latestWorkerObservationIssueEvent(events []domain.IssueObservationEvent) *domain.IssueObservationEvent {
+	var latest *domain.IssueObservationEvent
+	for i := range events {
+		if !workerObservationIssueEventMeaningful(events[i]) {
+			continue
+		}
+		if latest == nil ||
+			(!events[i].ObservedAt.IsZero() && events[i].ObservedAt.After(latest.ObservedAt)) ||
+			(events[i].ObservedAt.Equal(latest.ObservedAt) && events[i].ID > latest.ID) {
+			latest = &events[i]
+		}
+	}
+	return latest
+}
+
+func workerObservationIssueEventMeaningful(evt domain.IssueObservationEvent) bool {
+	switch evt.Type {
+	case domain.IssueEventIssueStatusChanged,
+		domain.IssueEventSessionLifecycleChanged,
+		domain.IssueEventAgentActivityChanged,
+		domain.IssueEventWorktreeGitChanged,
+		domain.IssueEventCommandStarted,
+		domain.IssueEventCommandFinished,
+		domain.IssueEventValidationPassed,
+		domain.IssueEventValidationFailed,
+		domain.IssueEventEvidenceSubmitted,
+		domain.IssueEventReviewCompleted,
+		domain.IssueEventRiskRecorded,
+		domain.IssueEventBlockerReported,
+		domain.IssueEventHumanInputRequested,
+		domain.IssueEventHumanInputProvided:
+		return true
+	case domain.IssueEventIssueDependencyAdded, domain.IssueEventIssueDependencyRemoved:
+		return workerObservationDependencyEventMeaningful(evt)
+	default:
+		return false
+	}
+}
+
+func workerObservationDependencyEventMeaningful(evt domain.IssueObservationEvent) bool {
+	dependencyType := strings.TrimSpace(fmt.Sprint(evt.Payload["dependency_type"]))
+	switch domain.DependencyType(dependencyType) {
+	case domain.DependencyBlocks, domain.DependencyBlockedBy:
+		return true
+	default:
+		return false
+	}
+}
+
 func issueObservationEventSummary(evt domain.IssueObservationEvent) string {
 	if len(evt.Payload) == 0 {
 		return ""
@@ -4093,21 +4165,6 @@ func issueObservationEventSummary(evt domain.IssueObservationEvent) string {
 		}
 	}
 	return ""
-}
-
-func latestIssueObservationEvent(events []domain.IssueObservationEvent) *domain.IssueObservationEvent {
-	var latest *domain.IssueObservationEvent
-	for i := range events {
-		if strings.TrimSpace(string(events[i].Type)) == "" {
-			continue
-		}
-		if latest == nil ||
-			(!events[i].ObservedAt.IsZero() && events[i].ObservedAt.After(latest.ObservedAt)) ||
-			(events[i].ObservedAt.Equal(latest.ObservedAt) && events[i].ID > latest.ID) {
-			latest = &events[i]
-		}
-	}
-	return latest
 }
 
 func latestWorkerMailEvent(events []daemonMailEvent) *daemonMailEvent {

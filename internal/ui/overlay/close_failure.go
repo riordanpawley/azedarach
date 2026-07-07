@@ -157,7 +157,7 @@ func (c *CloseFailureDialog) StatusBindings() []keybinds.Binding {
 		{Key: "j/k", Description: "navigate"},
 		{Key: "r", Description: "retry"},
 	}
-	if c.options.AllowAIMerge {
+	if c.allowAIMerge() {
 		bindings = append(bindings, keybinds.Binding{Key: "a", Description: "AI merge"})
 	}
 	if c.options.AllowForceWorktree {
@@ -291,7 +291,7 @@ func (c *CloseFailureDialog) closeFailureActions() []closeFailureActionItem {
 		force:       c.options.ForceWorktree,
 		cleanKids:   c.options.CloseCleanChildren,
 	}}
-	if c.options.AllowAIMerge {
+	if c.allowAIMerge() {
 		actions = append(actions, closeFailureActionItem{
 			key:         "a",
 			label:       "AI merge",
@@ -339,7 +339,7 @@ func (c *CloseFailureDialog) reasonOrFallback() string {
 
 func (c *CloseFailureDialog) nextStepLines() []string {
 	lines := []string{"- Fix the blocker described above, then retry."}
-	if c.options.AllowAIMerge {
+	if c.allowAIMerge() {
 		lines = append(lines, "- AI merge starts an agent when integration recovery needs help.")
 	}
 	if c.options.AllowForceWorktree {
@@ -349,4 +349,19 @@ func (c *CloseFailureDialog) nextStepLines() []string {
 		lines = append(lines, "- Close clean children only affects descendants without sessions, dirt, conflicts, or branch diff.")
 	}
 	return lines
+}
+
+func (c *CloseFailureDialog) allowAIMerge() bool {
+	return c.options.AllowAIMerge && closeFailureReasonSupportsAIMerge(c.reasonOrFallback())
+}
+
+func closeFailureReasonSupportsAIMerge(reason string) bool {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	return strings.Contains(reason, "merge preflight would conflict") ||
+		strings.Contains(reason, "predicted conflict") ||
+		strings.Contains(reason, "merge would conflict") ||
+		strings.Contains(reason, "merge conflict") ||
+		strings.Contains(reason, "automatic merge failed") ||
+		strings.Contains(reason, "conflict while merging") ||
+		strings.Contains(reason, "conflicts:")
 }
