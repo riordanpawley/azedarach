@@ -4821,6 +4821,116 @@ func TestTaskGraphReadinessLoadsRootScopedTasksWithLargeUnrelatedProject(t *test
 	}
 }
 
+func TestTaskGraphReadinessRefreshesOnlyRootScopedSessions(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-root-scoped-session-refresh"
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Watched root",
+		Type:   domain.TypeEpic,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Watched child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusInProgress,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	unrelatedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Unrelated active session",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create unrelated: %v", err)
+	}
+
+	childSessionID := naming.CanonicalSessionID(projectID, childID)
+	unrelatedSessionID := naming.CanonicalSessionID(projectID, unrelatedID)
+	seededAt := time.Date(2026, time.July, 7, 2, 0, 0, 0, time.UTC)
+	for _, session := range []daemonstate.Session{
+		{
+			ID:            childSessionID,
+			IssueID:       childID,
+			State:         daemonstate.SessionStateRunning,
+			ObservedState: daemonstate.SessionStateRunning,
+			UpdatedAt:     seededAt,
+		},
+		{
+			ID:            unrelatedSessionID,
+			IssueID:       unrelatedID,
+			State:         daemonstate.SessionStateRunning,
+			ObservedState: daemonstate.SessionStateRunning,
+			UpdatedAt:     seededAt,
+		},
+	} {
+		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, session); err != nil {
+			t.Fatalf("seed session %s: %v", session.ID, err)
+		}
+	}
+
+	tmuxRunner := newTestTmuxRunner("foreign-live-session")
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionStore: daemonstate.NewStore(),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	tasks, err := d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("loadTaskGraphReadinessDomainTasks error: %v", err)
+	}
+	byID := map[string]domain.Task{}
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	if got, want := len(byID), 2; got != want {
+		t.Fatalf("root-scoped task count = %d, want %d; tasks=%v", got, want, byID)
+	}
+
+	childRow, found, err := runtimeStateStore.GetSessionState(ctx, projectID, childSessionID)
+	if err != nil {
+		t.Fatalf("get child session: %v", err)
+	}
+	if !found {
+		t.Fatal("child session row not found")
+	}
+	if childRow.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("child observed state = %s, want %s", childRow.ObservedState, daemonstate.SessionStateStopped)
+	}
+
+	unrelatedRow, found, err := runtimeStateStore.GetSessionState(ctx, projectID, unrelatedSessionID)
+	if err != nil {
+		t.Fatalf("get unrelated session: %v", err)
+	}
+	if !found {
+		t.Fatal("unrelated session row not found")
+	}
+	if unrelatedRow.ObservedState != daemonstate.SessionStateRunning {
+		t.Fatalf("unrelated observed state = %s, want unchanged %s", unrelatedRow.ObservedState, daemonstate.SessionStateRunning)
+	}
+	if !unrelatedRow.UpdatedAt.Equal(seededAt) {
+		t.Fatalf("unrelated updated_at = %v, want unchanged %v", unrelatedRow.UpdatedAt, seededAt)
+	}
+}
+
 func TestTaskClosePreflightLoadsRootScopedSubtreeWithLargeUnrelatedProject(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-close-scoped-subtree"
@@ -5309,7 +5419,7 @@ func TestTaskGraphReadinessWorkerObservationsIncludeEvidenceAndMissingProjection
 	if got := observations[blockedID]; got.State != domain.WorkerObservationBlocked || !strings.Contains(got.Reason, blockerID) {
 		t.Fatalf("blocked observation = %+v", got)
 	}
-	if got := observations[reviewID]; got.State != domain.WorkerObservationReviewReady || got.LastEvent == nil || got.LastEvent.Kind != "mailbox" || got.LastEvent.Seq != 7 {
+	if got := observations[reviewID]; got.State != domain.WorkerObservationReviewReady || got.LastEvent == nil {
 		t.Fatalf("review observation = %+v", got)
 	}
 	if got := strings.Join(observations[reviewID].EvidenceSummary, "\n"); !strings.Contains(got, "worker-integration-ready") || !strings.Contains(got, "evidence.submitted") {

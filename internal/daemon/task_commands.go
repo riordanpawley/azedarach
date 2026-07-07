@@ -3447,9 +3447,6 @@ func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID 
 }
 
 func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectID, rootIssueID string) ([]domain.Task, error) {
-	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("task graph session runtime refresh failed", "project_id", projectID, "root_issue_id", rootIssueID, "error", err)
-	}
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
@@ -3457,6 +3454,20 @@ func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectI
 	tasks, err := issueClient.ListGraphReadinessWithRuntime(ctx, projectID, rootIssueID)
 	if err != nil {
 		return nil, err
+	}
+	contextTaskIDs := taskIDsFromTasks(tasks)
+	canRefreshSessionRuntime := d != nil && d.tmux != nil && d.sessionRuntimeStateStoreIfConfigured(projectID) != nil
+	if canRefreshSessionRuntime && len(contextTaskIDs) > 0 {
+		if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("task graph scoped session runtime refresh failed", "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs), "error", err)
+			}
+		} else {
+			tasks, err = issueClient.ListGraphReadinessWithRuntime(ctx, projectID, rootIssueID)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Debug("task graph readiness loaded root-scoped tasks",
