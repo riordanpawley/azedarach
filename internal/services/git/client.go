@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -16,7 +17,12 @@ var (
 	diffStatDeletionsPattern  = regexp.MustCompile(`(\d+)\s+deletion(?:s)?\(-\)`)
 )
 
-const mergeCleanupTimeout = 15 * time.Second
+const (
+	mergeCleanupTimeout           = 15 * time.Second
+	diffStatFallbackTimeout       = 1500 * time.Millisecond
+	diffStatFailureBackoff        = 5 * time.Minute
+	maxDiffStatBackoffReasonRunes = 180
+)
 
 // Client provides high-level git operations.
 type Client struct {
@@ -24,6 +30,37 @@ type Client struct {
 	logger          *slog.Logger
 	worktreeLocksMu sync.Mutex
 	worktreeLocks   map[string]*worktreeLock
+	diffStatMu      sync.Mutex
+	diffStatBackoff map[string]diffStatBackoffState
+	now             func() time.Time
+}
+
+type diffStatBackoffState struct {
+	Until  time.Time
+	Reason string
+}
+
+type diffStatBackoffError struct {
+	Operation  string
+	BaseBranch string
+	Until      time.Time
+	Reason     string
+}
+
+func (e diffStatBackoffError) Error() string {
+	operation := strings.TrimSpace(e.Operation)
+	if operation == "" {
+		operation = "git diff stat"
+	}
+	baseBranch := strings.TrimSpace(e.BaseBranch)
+	if baseBranch == "" {
+		baseBranch = "working tree"
+	}
+	reason := strings.TrimSpace(e.Reason)
+	if reason == "" {
+		reason = "previous failure"
+	}
+	return fmt.Sprintf("%s backoff active for %s until %s: %s", operation, baseBranch, e.Until.UTC().Format(time.RFC3339), reason)
 }
 
 // GitStatus represents the status of a git repository.
@@ -460,32 +497,113 @@ func (c *Client) DiffStat(ctx context.Context, worktree, baseBranch string) (str
 // base-ref preference for local or origin-oriented workflows.
 func (c *Client) DiffStatWithBasePreference(ctx context.Context, worktree, baseBranch string, preferRemote bool) (string, error) {
 	c.logger.Debug("getting diff stat", "worktree", worktree)
+	baseBranch = strings.TrimSpace(baseBranch)
 
-	mergeBase, err := c.mergeBase(ctx, worktree, baseBranch, preferRemote)
-	if err == nil {
-		output, diffErr := c.runInWorktree(ctx, worktree, "diff", "--shortstat", mergeBase, "HEAD", "--", ":^.azedarach")
-		if diffErr == nil {
-			return strings.TrimSpace(output), nil
+	if baseBranch != "" {
+		mergeBase, err := c.mergeBaseForDiffStat(ctx, worktree, baseBranch, preferRemote)
+		if err == nil {
+			output, diffErr := c.baseDiffStat(ctx, worktree, baseBranch, mergeBase)
+			if diffErr == nil {
+				return strings.TrimSpace(output), nil
+			}
+			if _, ok := diffStatBackoffErr(diffErr); ok {
+				c.logBaseDiffStatBackoff(baseBranch, diffErr)
+				return "", diffErr
+			}
+			c.logger.Warn("base diff stat failed; falling back to local staged/unstaged aggregation",
+				"baseBranch", baseBranch,
+				"error", diffErr,
+			)
+		} else {
+			c.logBaseDiffStatResolutionFailure(baseBranch, err)
+			if _, ok := diffStatBackoffErr(err); ok {
+				return "", err
+			}
 		}
-		c.logger.Warn("base diff stat failed; falling back to local staged/unstaged aggregation",
-			"baseBranch", strings.TrimSpace(baseBranch),
-			"error", diffErr,
-		)
-	} else if strings.TrimSpace(baseBranch) != "" {
-		c.logger.Warn("base diff stat failed; falling back to local staged/unstaged aggregation",
-			"baseBranch", strings.TrimSpace(baseBranch),
-			"error", err,
-		)
+	}
+
+	return c.localDiffStat(ctx, worktree, baseBranch, baseBranch != "")
+}
+
+func (c *Client) mergeBaseForDiffStat(ctx context.Context, worktree, baseBranch string, preferRemote bool) (string, error) {
+	key := c.diffStatBackoffKey("merge-base", worktree, baseBranch, boolKey(preferRemote))
+	if state, ok := c.diffStatBackoffActive(key); ok {
+		return "", diffStatBackoffError{
+			Operation:  "merge-base resolution",
+			BaseBranch: baseBranch,
+			Until:      state.Until,
+			Reason:     state.Reason,
+		}
+	}
+	mergeBase, err := c.mergeBase(ctx, worktree, baseBranch, preferRemote)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr == nil {
+			c.recordDiffStatBackoff(key, err)
+		}
+		return "", err
+	}
+	c.clearDiffStatBackoff(key)
+	return mergeBase, nil
+}
+
+func (c *Client) baseDiffStat(ctx context.Context, worktree, baseBranch, mergeBase string) (string, error) {
+	key := c.diffStatBackoffKey("base-shortstat", worktree, baseBranch, mergeBase)
+	if state, ok := c.diffStatBackoffActive(key); ok {
+		return "", diffStatBackoffError{
+			Operation:  "base diff shortstat",
+			BaseBranch: baseBranch,
+			Until:      state.Until,
+			Reason:     state.Reason,
+		}
+	}
+	runCtx, cancel := context.WithTimeout(ctx, diffStatFallbackTimeout)
+	defer cancel()
+	output, err := c.runInWorktree(runCtx, worktree, "diff", "--shortstat", mergeBase, "HEAD", "--", ":^.azedarach")
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr == nil {
+			c.recordDiffStatBackoff(key, err)
+		}
+		return "", err
+	}
+	c.clearDiffStatBackoff(key)
+	return output, nil
+}
+
+func (c *Client) localDiffStat(ctx context.Context, worktree, baseBranch string, budgeted bool) (string, error) {
+	key := c.diffStatBackoffKey("local-shortstat", worktree, baseBranch)
+	if budgeted {
+		if state, ok := c.diffStatBackoffActive(key); ok {
+			return "", diffStatBackoffError{
+				Operation:  "fallback diff shortstat",
+				BaseBranch: baseBranch,
+				Until:      state.Until,
+				Reason:     state.Reason,
+			}
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, diffStatFallbackTimeout)
+		defer cancel()
 	}
 
 	unstagedOutput, err := c.runInWorktree(ctx, worktree, "diff", "--shortstat")
 	if err != nil {
-		return "", fmt.Errorf("failed to get unstaged diff stat: %w", err)
+		wrapped := fmt.Errorf("fallback diff stat state=failed operation=unstaged: %w", err)
+		if budgeted {
+			c.recordDiffStatBackoff(key, wrapped)
+		}
+		return "", wrapped
 	}
 
 	stagedOutput, err := c.runInWorktree(ctx, worktree, "diff", "--cached", "--shortstat")
 	if err != nil {
-		return "", fmt.Errorf("failed to get staged diff stat: %w", err)
+		wrapped := fmt.Errorf("fallback diff stat state=failed operation=staged: %w", err)
+		if budgeted {
+			c.recordDiffStatBackoff(key, wrapped)
+		}
+		return "", wrapped
+	}
+	if budgeted {
+		c.clearDiffStatBackoff(key)
 	}
 
 	unstagedOutput = strings.TrimSpace(unstagedOutput)
@@ -498,6 +616,43 @@ func (c *Client) DiffStatWithBasePreference(ctx context.Context, worktree, baseB
 	default:
 		return stagedOutput, nil
 	}
+}
+
+func (c *Client) logBaseDiffStatResolutionFailure(baseBranch string, err error) {
+	if backoffErr, ok := diffStatBackoffErr(err); ok {
+		c.logger.Debug("base diff stat skipped; unresolved base branch backoff active",
+			"baseBranch", baseBranch,
+			"state", "backoff_active",
+			"until", backoffErr.Until,
+			"reason", backoffErr.Reason,
+		)
+		return
+	}
+	c.logger.Warn("base diff stat failed; falling back to local staged/unstaged aggregation",
+		"baseBranch", baseBranch,
+		"error", err,
+	)
+}
+
+func (c *Client) logBaseDiffStatBackoff(baseBranch string, err error) {
+	backoffErr, ok := diffStatBackoffErr(err)
+	if !ok {
+		return
+	}
+	c.logger.Debug("base diff stat skipped; shortstat backoff active",
+		"baseBranch", baseBranch,
+		"state", "backoff_active",
+		"until", backoffErr.Until,
+		"reason", backoffErr.Reason,
+	)
+}
+
+func diffStatBackoffErr(err error) (diffStatBackoffError, bool) {
+	var backoffErr diffStatBackoffError
+	if errors.As(err, &backoffErr) {
+		return backoffErr, true
+	}
+	return diffStatBackoffError{}, false
 }
 
 // DiffStatTotals parses additions and deletions from DiffStat output.
@@ -825,6 +980,95 @@ func (c *Client) runInWorktree(ctx context.Context, worktree string, args ...str
 	prefixed = append(prefixed, "-C", worktree)
 	prefixed = append(prefixed, args...)
 	return c.runner.Run(ctx, prefixed...)
+}
+
+func (c *Client) diffStatBackoffKey(parts ...string) string {
+	normalized := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			part = "-"
+		}
+		normalized = append(normalized, part)
+	}
+	return strings.Join(normalized, "|")
+}
+
+func (c *Client) diffStatBackoffActive(key string) (diffStatBackoffState, bool) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return diffStatBackoffState{}, false
+	}
+	now := c.currentTime().UTC()
+	c.diffStatMu.Lock()
+	defer c.diffStatMu.Unlock()
+	state, ok := c.diffStatBackoff[key]
+	if !ok {
+		return diffStatBackoffState{}, false
+	}
+	if state.Until.IsZero() || !now.Before(state.Until) {
+		delete(c.diffStatBackoff, key)
+		return diffStatBackoffState{}, false
+	}
+	return state, true
+}
+
+func (c *Client) recordDiffStatBackoff(key string, err error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	until := c.currentTime().UTC().Add(diffStatFailureBackoff)
+	state := diffStatBackoffState{
+		Until:  until,
+		Reason: compactDiffStatBackoffReason(err),
+	}
+	c.diffStatMu.Lock()
+	if c.diffStatBackoff == nil {
+		c.diffStatBackoff = make(map[string]diffStatBackoffState)
+	}
+	c.diffStatBackoff[key] = state
+	c.diffStatMu.Unlock()
+}
+
+func (c *Client) clearDiffStatBackoff(key string) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	c.diffStatMu.Lock()
+	delete(c.diffStatBackoff, key)
+	c.diffStatMu.Unlock()
+}
+
+func (c *Client) currentTime() time.Time {
+	if c != nil && c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+func boolKey(v bool) string {
+	if v {
+		return "true"
+	}
+	return "false"
+}
+
+func compactDiffStatBackoffReason(err error) string {
+	if err == nil {
+		return "previous failure"
+	}
+	reason := strings.TrimSpace(err.Error())
+	if reason == "" {
+		return "previous failure"
+	}
+	reason = strings.Join(strings.Fields(reason), " ")
+	runes := []rune(reason)
+	if len(runes) <= maxDiffStatBackoffReasonRunes {
+		return reason
+	}
+	return string(runes[:maxDiffStatBackoffReasonRunes]) + "..."
 }
 
 // Pull pulls updates from the remote repository.
