@@ -343,6 +343,18 @@ func TestRuntimeStateStoreSessionActivityEvidenceRoundTrip(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertSessionActivityEvidence older: %v", err)
 	}
+	if err := store.UpsertSessionActivityEvidence(ctx, SessionActivityEvidence{
+		ProjectID:       "proj-a",
+		SessionID:       "az-bja",
+		IssueID:         "bja",
+		Activity:        "idle",
+		ActivitySource:  "hooks",
+		SourceSessionID: "az-bja.pane-122",
+		ObservedAt:      older.Add(-time.Minute),
+		UpdatedAt:       older.Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("UpsertSessionActivityEvidence same-source older: %v", err)
+	}
 
 	evidence, found, err := store.GetSessionActivityEvidence(ctx, "proj-a", "az-bja")
 	if err != nil {
@@ -351,18 +363,18 @@ func TestRuntimeStateStoreSessionActivityEvidenceRoundTrip(t *testing.T) {
 	if !found {
 		t.Fatal("expected session activity evidence")
 	}
-	if evidence.Activity != "idle" ||
+	if evidence.Activity != "busy" ||
 		evidence.ActivitySource != "hooks" ||
-		evidence.SourceSessionID != "az-bja.pane-535" ||
+		evidence.SourceSessionID != "az-bja.pane-122" ||
 		!evidence.ObservedAt.Equal(newer) {
-		t.Fatalf("evidence = %+v, want newer idle hook evidence", evidence)
+		t.Fatalf("evidence = %+v, want busy aggregate with newest observed timestamp", evidence)
 	}
 
 	listed, err := store.ListSessionActivityEvidence(ctx, "proj-a", []string{"bja"})
 	if err != nil {
 		t.Fatalf("ListSessionActivityEvidence: %v", err)
 	}
-	if got, want := len(listed), 1; got != want {
+	if got, want := len(listed), 2; got != want {
 		t.Fatalf("listed evidence = %d, want %d: %+v", got, want, listed)
 	}
 }
@@ -426,10 +438,17 @@ func TestRuntimeStateStoreMigratesLegacyHookPaneObservationsToActivityEvidence(t
 	if !found {
 		t.Fatal("expected migrated bja evidence")
 	}
-	if evidence.Activity != "idle" ||
-		evidence.SourceSessionID != "az-bja.pane-535" ||
+	if evidence.Activity != "busy" ||
+		evidence.SourceSessionID != "az-bja.pane-111" ||
 		evidence.ObservedAt.Format(time.RFC3339) != "2026-04-01T08:00:01Z" {
-		t.Fatalf("bja evidence = %+v, want newest idle pane", evidence)
+		t.Fatalf("bja evidence = %+v, want busy aggregate from migrated pane evidence", evidence)
+	}
+	listed, err := store.ListSessionActivityEvidence(ctx, "proj-a", []string{"bja"})
+	if err != nil {
+		t.Fatalf("ListSessionActivityEvidence bja: %v", err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("bja migrated evidence rows = %d, want 2: %+v", len(listed), listed)
 	}
 	evidence, found, err = store.GetSessionActivityEvidence(ctx, "proj-a", "az-bjc")
 	if err != nil {
@@ -442,6 +461,73 @@ func TestRuntimeStateStoreMigratesLegacyHookPaneObservationsToActivityEvidence(t
 		t.Fatalf("GetSessionActivityEvidence bjd: %v", err)
 	} else if found {
 		t.Fatal("did not expect runtime-sourced pane observation to migrate as hook evidence")
+	}
+}
+
+func TestRuntimeStateStoreMigratesActivityEvidencePrimaryKeyToSourceSession(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE daemon_session_activity_evidence (
+			project_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			issue_id TEXT NOT NULL,
+			activity TEXT NOT NULL,
+			activity_source TEXT NOT NULL,
+			source_session_id TEXT,
+			agent TEXT,
+			hook TEXT,
+			event TEXT,
+			observed_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, session_id)
+		);
+		INSERT INTO daemon_session_activity_evidence (
+			project_id, session_id, issue_id, activity, activity_source, source_session_id, agent, hook, event, observed_at, updated_at
+		) VALUES (
+			'proj-a', 'az-bja', 'bja', 'idle', 'hooks', 'az-bja.pane-535', 'codex', 'permission_request', 'permission_request', '2026-04-01T08:00:01Z', '2026-04-01T08:00:01Z'
+		);
+	`)
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("seed old activity evidence schema: %v", err)
+	}
+	_ = db.Close()
+
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+	ctx := context.Background()
+	if err := store.UpsertSessionActivityEvidence(ctx, SessionActivityEvidence{
+		ProjectID:       "proj-a",
+		SessionID:       "az-bja",
+		IssueID:         "bja",
+		Activity:        "busy",
+		ActivitySource:  "hooks",
+		SourceSessionID: "az-bja.pane-122",
+		ObservedAt:      time.Date(2026, time.April, 1, 8, 0, 0, 0, time.UTC),
+		UpdatedAt:       time.Date(2026, time.April, 1, 8, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("upsert second source activity evidence: %v", err)
+	}
+
+	listed, err := store.ListSessionActivityEvidence(ctx, "proj-a", []string{"bja"})
+	if err != nil {
+		t.Fatalf("ListSessionActivityEvidence: %v", err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("activity evidence rows = %d, want 2: %+v", len(listed), listed)
+	}
+	evidence, found, err := store.GetSessionActivityEvidence(ctx, "proj-a", "az-bja")
+	if err != nil {
+		t.Fatalf("GetSessionActivityEvidence: %v", err)
+	}
+	if !found || evidence.Activity != "busy" || evidence.SourceSessionID != "az-bja.pane-122" {
+		t.Fatalf("aggregate evidence = %+v, found=%v, want busy from second source", evidence, found)
 	}
 }
 

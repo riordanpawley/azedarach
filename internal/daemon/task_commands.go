@@ -322,7 +322,6 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 			latencytrace.LogPhase(d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_hydrate", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false, "error", hydrateErr)
 		} else {
 			cached.Tasks = hydrated
-			cached.LastCheckedAt, cached.Freshness = d.taskListSnapshotFreshness(ctx, projectID)
 			latencytrace.LogPhase(d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", true)
 			payload := buildBoardSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks)
 			marshalStartedAt := time.Now()
