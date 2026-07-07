@@ -96,6 +96,8 @@ type Daemon struct {
 	issueClientsMu                     sync.Mutex
 	issueClientsByProject              map[string]*issues.Client
 	issueClientsByRoot                 map[string]*issues.Client
+	projectIssueStoreHealthMu          sync.Mutex
+	projectIssueStoreHealthByProject   map[string]projectIssueStoreHealthState
 	projectConfigMu                    sync.Mutex
 	baseBranchByProject                map[string]string
 	baseBranchByRoot                   map[string]string
@@ -255,6 +257,7 @@ func New(cfg Config) *Daemon {
 		issues:                             issuesClient,
 		issueClientsByProject:              map[string]*issues.Client{},
 		issueClientsByRoot:                 map[string]*issues.Client{},
+		projectIssueStoreHealthByProject:   map[string]projectIssueStoreHealthState{},
 		baseBranchByProject:                map[string]string{},
 		baseBranchByRoot:                   map[string]string{},
 		workflowModeByProject:              map[string]string{},
@@ -623,7 +626,13 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		case err != nil:
 			d.cfg.Logger.Error("daemon command transport failed", append(attrs, "error", err)...)
 		case resp.Error != nil:
-			d.cfg.Logger.Warn(
+			logLevel := slog.LevelWarn
+			if isCachedProjectIssueStoreHealthErrorMessage(resp.Error.Message) {
+				logLevel = slog.LevelDebug
+			}
+			d.cfg.Logger.Log(
+				ctx,
+				logLevel,
 				"daemon command failed",
 				append(attrs, "error_code", resp.Error.Code, "error", resp.Error.Message)...,
 			)

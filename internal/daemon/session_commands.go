@@ -2108,6 +2108,9 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
 	}
+	if err, unhealthy := d.projectIssueStoreHealthError(cmd.ProjectID); unhealthy {
+		return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+	}
 	tmuxSessions, err := d.listTmuxSessionsLiveForProject(ctx, cmd.ProjectID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -2118,8 +2121,10 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	}
 	tasks, err := issueClient.List(ctx)
 	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		err = d.recordProjectIssueStoreFailure(cmd.ProjectID, err)
+		return d.errorResponse(req, projectIssueStoreHealthErrorCode(err), err.Error()), nil
 	}
+	d.clearProjectIssueStoreHealth(cmd.ProjectID)
 	taskMap := make(map[naming.IssueID]domain.Task, len(tasks))
 	for _, task := range tasks {
 		taskMap[task.ID] = task
