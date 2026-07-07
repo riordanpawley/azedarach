@@ -2834,10 +2834,14 @@ func daemonCloseGuardAppendRepairSummary(message string, repairs []daemonCloseGu
 func daemonCloseGuardRecoveryHint(taskID string, reasons []string) string {
 	hasGitState := false
 	hasRuntime := false
+	hasActiveSession := false
 	hasChildren := false
 	for _, reason := range reasons {
 		if strings.Contains(reason, "local changes") || strings.Contains(reason, "conflicts") || strings.Contains(reason, "ahead") {
 			hasGitState = true
+		}
+		if strings.HasPrefix(reason, "session activity") {
+			hasActiveSession = true
 		}
 		if strings.HasPrefix(reason, "issue still has a ") || strings.HasPrefix(reason, "worktree is projected") {
 			hasRuntime = true
@@ -2854,6 +2858,9 @@ func daemonCloseGuardRecoveryHint(taskID string, reasons []string) string {
 	if hasChildren {
 		steps = append(steps, "close or clean up the listed child issues first")
 	}
+	if hasActiveSession {
+		steps = append(steps, "wait for the session projection to report idle/done/terminal activity or intentionally stop the session")
+	}
 	if hasRuntime {
 		steps = append(steps, fmt.Sprintf("run `az issue close --id %s` or stop sessions/remove worktrees manually", taskID))
 	}
@@ -2865,13 +2872,49 @@ func daemonCloseGuardRecoveryHint(taskID string, reasons []string) string {
 
 func daemonCloseGuardRuntimeBlockers(task domain.Task, opts taskClosePreflightOptions) []string {
 	reasons := make([]string, 0, 2)
-	if !opts.AllowTargetSession && daemonCloseGuardTaskHasSession(task) {
-		reasons = append(reasons, "issue still has a session")
+	if daemonCloseGuardTaskHasSession(task) {
+		if !opts.AllowTargetSession {
+			reasons = append(reasons, "issue still has a session")
+		} else if reason := daemonCloseGuardActiveSessionActivityReason(task); reason != "" {
+			reasons = append(reasons, reason)
+		}
 	}
 	if !opts.AllowTargetWorktree && daemonCloseGuardTaskHasWorktree(task) {
 		reasons = append(reasons, "issue still has a worktree")
 	}
 	return reasons
+}
+
+func daemonCloseGuardActiveSessionActivityReason(task domain.Task) string {
+	if task.Session == nil {
+		if task.HasTmuxSession {
+			return "session activity is unknown"
+		}
+		return ""
+	}
+	activity := task.Session.DisplayActivity()
+	if activity == "" {
+		activity = strings.ToLower(strings.TrimSpace(string(task.Session.State)))
+	}
+	if daemonCloseGuardSessionActivityAllowsClose(activity) {
+		return ""
+	}
+	if activity == "" {
+		activity = "unknown"
+	}
+	if source := strings.TrimSpace(task.Session.ActivitySource); source != "" {
+		return fmt.Sprintf("session activity is %s (source: %s)", activity, source)
+	}
+	return fmt.Sprintf("session activity is %s", activity)
+}
+
+func daemonCloseGuardSessionActivityAllowsClose(activity string) bool {
+	switch strings.ToLower(strings.TrimSpace(activity)) {
+	case string(domain.SessionIdle), string(domain.SessionDone), string(domain.SessionError), string(domain.SessionPaused), "ended":
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *Daemon) resolveTaskCloseWorktreePath(ctx context.Context, projectID, taskID string, task domain.Task, opts taskClosePreflightOptions) (string, error) {

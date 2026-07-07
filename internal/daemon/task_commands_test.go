@@ -2135,6 +2135,207 @@ func TestTaskClosePreflightBlocksDirtyWorktreeInDaemonPolicy(t *testing.T) {
 	}
 }
 
+func TestTaskCloseBlocksActiveSessionActivity(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+
+	tests := []struct {
+		name           string
+		activity       string
+		activitySource string
+		wantActivity   string
+	}{
+		{name: "busy", activity: "busy", activitySource: "hooks", wantActivity: "busy"},
+		{name: "waiting", activity: "waiting", activitySource: "hooks", wantActivity: "waiting"},
+		{name: "working", activity: "working", activitySource: "hooks", wantActivity: "working"},
+		{name: "unknown", activity: "unknown", activitySource: "none", wantActivity: "unknown"},
+		{name: "no agent", activity: "no-agent", activitySource: "session", wantActivity: "no-agent"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projectID := "proj-close-active-" + strings.ReplaceAll(tt.name, " ", "-")
+			issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+			issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+			t.Cleanup(func() { _ = issuesClient.CloseDB() })
+			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+			t.Cleanup(func() { _ = runtimeStore.Close() })
+
+			taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+				Title:    "Close active session",
+				Type:     domain.TypeTask,
+				Priority: domain.P2,
+				Status:   domain.StatusInReview,
+			})
+			if err != nil {
+				t.Fatalf("create issue: %v", err)
+			}
+			sessionID := naming.CanonicalSessionID(projectID, taskID)
+			if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+				ID:             sessionID,
+				IssueID:        taskID,
+				State:          daemonstate.SessionStateRunning,
+				ObservedState:  daemonstate.SessionStateRunning,
+				Activity:       tt.activity,
+				ActivitySource: tt.activitySource,
+				UpdatedAt:      time.Now().UTC(),
+			}); err != nil {
+				t.Fatalf("seed session projection: %v", err)
+			}
+
+			d := &Daemon{
+				cfg:          Config{RepoDir: ".", Logger: logger},
+				sessionStore: daemonstate.NewStore(),
+				issueClientsByProject: map[string]*issues.Client{
+					projectID: issuesClient,
+				},
+				runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+					projectID: runtimeStore,
+				},
+				revision: map[string]uint64{projectID: 1},
+				hub:      publish.NewHub(16, 8, logger),
+			}
+
+			body, err := json.Marshal(taskCloseRequest{TaskID: taskID})
+			if err != nil {
+				t.Fatalf("marshal close request: %v", err)
+			}
+			resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				RequestID:       "req-close-active-session",
+				Kind:            protocol.EnvelopeKindCommand,
+				Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+				Command:         "task.close",
+				Body:            body,
+			})
+			if err != nil {
+				t.Fatalf("handleTaskClose error: %v", err)
+			}
+			if resp.OK || resp.Error == nil {
+				t.Fatalf("task.close response = %+v, want session activity guard", resp)
+			}
+			for _, want := range []string{
+				"session activity is " + tt.wantActivity,
+				"wait for the session projection to report idle/done/terminal activity or intentionally stop the session",
+			} {
+				if !strings.Contains(resp.Error.Message, want) {
+					t.Fatalf("task.close error = %q, want %q", resp.Error.Message, want)
+				}
+			}
+			task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+			if err != nil {
+				t.Fatalf("get issue after blocked close: %v", err)
+			}
+			if task.Status != domain.StatusInReview {
+				t.Fatalf("task status = %s, want %s", task.Status, domain.StatusInReview)
+			}
+			session, found, err := runtimeStore.GetSessionState(ctx, projectID, sessionID)
+			if err != nil {
+				t.Fatalf("get session projection: %v", err)
+			}
+			if !found || session.State != daemonstate.SessionStateRunning {
+				t.Fatalf("session projection = %+v found=%t, want running row preserved", session, found)
+			}
+		})
+	}
+}
+
+func TestTaskCloseAllowsTerminalOrIdleSessionActivity(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+
+	tests := []struct {
+		name           string
+		activity       string
+		activitySource string
+	}{
+		{name: "idle", activity: "idle", activitySource: "hooks"},
+		{name: "done", activity: "done", activitySource: "hooks"},
+		{name: "error", activity: "error", activitySource: "hooks"},
+		{name: "paused", activity: "paused", activitySource: "session"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projectID := "proj-close-inactive-" + tt.name
+			issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+			issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+			t.Cleanup(func() { _ = issuesClient.CloseDB() })
+			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+			t.Cleanup(func() { _ = runtimeStore.Close() })
+
+			taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+				Title:    "Close inactive session",
+				Type:     domain.TypeTask,
+				Priority: domain.P2,
+				Status:   domain.StatusInReview,
+			})
+			if err != nil {
+				t.Fatalf("create issue: %v", err)
+			}
+			sessionID := naming.CanonicalSessionID(projectID, taskID)
+			if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+				ID:             sessionID,
+				IssueID:        taskID,
+				State:          daemonstate.SessionStateRunning,
+				ObservedState:  daemonstate.SessionStateRunning,
+				Activity:       tt.activity,
+				ActivitySource: tt.activitySource,
+				UpdatedAt:      time.Now().UTC(),
+			}); err != nil {
+				t.Fatalf("seed session projection: %v", err)
+			}
+
+			d := &Daemon{
+				cfg:          Config{RepoDir: ".", Logger: logger},
+				sessionStore: daemonstate.NewStore(),
+				tmux:         tmux.NewClient(&testTmuxRunner{sessions: map[string]bool{}}, logger),
+				issueClientsByProject: map[string]*issues.Client{
+					projectID: issuesClient,
+				},
+				runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+					projectID: runtimeStore,
+				},
+				revision: map[string]uint64{projectID: 1},
+				hub:      publish.NewHub(16, 8, logger),
+			}
+
+			body, err := json.Marshal(taskCloseRequest{TaskID: taskID})
+			if err != nil {
+				t.Fatalf("marshal close request: %v", err)
+			}
+			resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				RequestID:       "req-close-inactive-session",
+				Kind:            protocol.EnvelopeKindCommand,
+				Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+				Command:         "task.close",
+				Body:            body,
+			})
+			if err != nil {
+				t.Fatalf("handleTaskClose error: %v", err)
+			}
+			if !resp.OK {
+				t.Fatalf("task.close response = %+v, want success", resp)
+			}
+			task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+			if err != nil {
+				t.Fatalf("get closed issue: %v", err)
+			}
+			if task.Status != domain.StatusDone {
+				t.Fatalf("task status = %s, want %s", task.Status, domain.StatusDone)
+			}
+			session, found, err := runtimeStore.GetSessionState(ctx, projectID, sessionID)
+			if err != nil {
+				t.Fatalf("get session projection: %v", err)
+			}
+			if !found || session.State != daemonstate.SessionStateStopped || session.ObservedState != daemonstate.SessionStateStopped {
+				t.Fatalf("session projection = %+v found=%t, want stopped row", session, found)
+			}
+		})
+	}
+}
+
 func TestTaskCloseCommandUpdatesStatusThroughDaemon(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-task-close"
@@ -2909,11 +3110,13 @@ func TestTaskCloseRunsIssueResourceCleanupWithSessionBeforeWorktreeRemoval(t *te
 	}
 	sessionID := naming.CanonicalSessionID(projectID, taskID)
 	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
-		ID:            sessionID,
-		IssueID:       taskID,
-		State:         daemonstate.SessionStateAttached,
-		ObservedState: daemonstate.SessionStateAttached,
-		UpdatedAt:     time.Now().UTC(),
+		ID:             sessionID,
+		IssueID:        taskID,
+		State:          daemonstate.SessionStateAttached,
+		ObservedState:  daemonstate.SessionStateAttached,
+		Activity:       "idle",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seed session projection: %v", err)
 	}
