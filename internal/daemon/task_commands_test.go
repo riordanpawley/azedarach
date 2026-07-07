@@ -5898,6 +5898,163 @@ func TestTaskGraphReadinessSurfacesPendingSessionStartProgress(t *testing.T) {
 	}
 }
 
+func TestTaskGraphReadinessPendingStartOverridesStaleCloseableProjection(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-pending-start-overrides-stale"
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(dbPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Root",
+		Type:   domain.TypeEpic,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Starting child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := runtimeStateStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   childID,
+		Path:      filepath.Join(t.TempDir(), "repo-"+childID),
+		Branch:    "riordan/" + childID + "/task",
+		UpdatedAt: time.Date(2026, time.July, 7, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("seed stale worktree projection: %v", err)
+	}
+
+	runtime := newOperationRuntime(operationRuntimeConfig{
+		repoDir: filepath.Dir(dbPath),
+		logger:  logger,
+		hub:     publish.NewHub(16, 8, logger),
+	})
+	t.Cleanup(func() { _ = runtime.Close() })
+	if _, err := runtime.store.Create(ctx, opstore.CreateParams{
+		OperationID:  "op-session-start",
+		ProjectID:    projectID,
+		IssueID:      childID,
+		Kind:         daemonhandlers.CommandSessionStart,
+		DedupeKey:    "session.start:" + childID,
+		ResourceKeys: []string{"issue:" + projectID + ":" + childID},
+		State:        opstore.StateRunning,
+		SubmittedAt:  time.Date(2026, time.July, 7, 9, 1, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("seed running session.start operation: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:              Config{RepoDir: ".", Logger: logger},
+		operationRuntime: runtime,
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskGraphReadiness error: %v", err)
+	}
+	if slices.Contains(ready.Runnable, childID) {
+		t.Fatalf("pending child still runnable: %+v", ready)
+	}
+	if len(ready.StaleCloseableChildren) != 0 {
+		t.Fatalf("stale closeable children = %+v, want none while start is running", ready.StaleCloseableChildren)
+	}
+	if len(ready.Pending) != 1 || ready.Pending[0].IssueID != childID || ready.Pending[0].OperationID != "op-session-start" {
+		t.Fatalf("pending = %+v, want running start for %s", ready.Pending, childID)
+	}
+}
+
+func TestTaskGraphReadinessStoppedProjectionSuppressesNewerSnapshotAfterClose(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-stopped-projection-wins"
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(dbPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Root",
+		Type:   domain.TypeEpic,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Closed child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusDone,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create closed child: %v", err)
+	}
+
+	sessionID := naming.CanonicalSessionID(projectID, childID)
+	stoppedAt := time.Date(2026, time.July, 7, 9, 0, 0, 0, time.UTC)
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            sessionID,
+		IssueID:       childID,
+		State:         daemonstate.SessionStateStopped,
+		ObservedState: daemonstate.SessionStateStopped,
+		UpdatedAt:     stoppedAt,
+	}); err != nil {
+		t.Fatalf("seed stopped projection: %v", err)
+	}
+
+	sessionStore := daemonstate.NewStore()
+	if _, err := sessionStore.UpsertSession(projectID, sessionID, childID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed in-memory session: %v", err)
+	}
+	snapshot := sessionStore.ReadSnapshot(projectID)
+	session := snapshot.Sessions[sessionID]
+	session.UpdatedAt = stoppedAt.Add(time.Minute)
+	sessionStore.ReplaceProjectSessions(projectID, []daemonstate.Session{session})
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: logger},
+		sessionStore: sessionStore,
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskGraphReadiness error: %v", err)
+	}
+	if len(ready.Runnable) != 0 {
+		t.Fatalf("runnable = %+v, want none for closed child", ready.Runnable)
+	}
+	if len(ready.Active) != 0 || len(ready.ActiveSessions) != 0 {
+		t.Fatalf("closed child resurrected as active: active=%+v active_sessions=%+v", ready.Active, ready.ActiveSessions)
+	}
+	if len(ready.StaleCloseableChildren) != 0 {
+		t.Fatalf("stale closeable children = %+v, want none for closed child", ready.StaleCloseableChildren)
+	}
+}
+
 func TestTaskCompletionAdviceIncludesDomainNextSteps(t *testing.T) {
 	advice := daemonTaskCompletionAdvice("az-1", []string{"az-2"}, []taskGraphNestedRoot{{IssueID: "az-5"}}, []string{"az-3"}, []string{"az-4"}, nil)
 	joined := strings.Join(advice, "\n")
