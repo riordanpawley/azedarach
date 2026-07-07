@@ -250,6 +250,13 @@ func (d *Daemon) recordAgentHookActivityEvidenceAndMaterialize(ctx context.Conte
 	if err := store.UpsertSessionActivityEvidence(ctx, evidence); err != nil {
 		return 0, err
 	}
+	aggregate, found, err := store.GetSessionActivityEvidence(ctx, projectID, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	if found {
+		evidence = aggregate
+	}
 	return d.applySessionActivityEvidenceToCanonicalSession(ctx, meta, evidence)
 }
 
@@ -343,7 +350,7 @@ func (d *Daemon) materializeSessionActivityEvidence(ctx context.Context, meta pr
 	if err != nil {
 		return fmt.Errorf("load session activity evidence: %w", err)
 	}
-	for _, evidence := range evidenceRows {
+	for _, evidence := range daemonstate.AggregateSessionActivityEvidence(evidenceRows) {
 		if _, err := d.applySessionActivityEvidenceToCanonicalSession(ctx, meta, evidence); err != nil {
 			return fmt.Errorf("materialize session activity evidence %s/%s: %w", projectID, evidence.SessionID, err)
 		}
