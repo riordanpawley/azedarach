@@ -4535,6 +4535,192 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 	}
 }
 
+func TestTaskCloseCommandDirtyChildTargetNamesPathsAndRecovery(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-child-dirty-target"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Parent integration target",
+		Type:     domain.TypeFeature,
+		Priority: domain.P2,
+		Status:   domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create parent task: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Child ready to close",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child task: %v", err)
+	}
+
+	parentWorktree := filepath.Join(repoDir, "wt-"+parentID)
+	childWorktree := filepath.Join(repoDir, "wt-"+childID)
+	parentBranch := "riordan/" + parentID + "/parent"
+	childBranch := "riordan/" + childID + "/child"
+	for _, state := range []daemonstate.WorktreeState{
+		{
+			ProjectID: projectID,
+			IssueID:   parentID,
+			Path:      parentWorktree,
+			Branch:    parentBranch,
+			UpdatedAt: time.Now().UTC(),
+		},
+		{
+			ProjectID: projectID,
+			IssueID:   childID,
+			Path:      childWorktree,
+			Branch:    childBranch,
+			UpdatedAt: time.Now().UTC(),
+		},
+	} {
+		if err := runtimeStore.UpsertWorktreeState(ctx, state); err != nil {
+			t.Fatalf("seed worktree projection: %v", err)
+		}
+	}
+
+	worktreeListOutput := strings.Join([]string{
+		fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n", parentWorktree, parentBranch),
+		fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n", childWorktree, childBranch),
+	}, "\n")
+	commands := make([]string, 0, 12)
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		joined := strings.Join(args, " ")
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return worktreeListOutput, nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == parentWorktree && args[2] == "rev-list" && args[4] == parentBranch+".."+childBranch:
+			return "1", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == childWorktree && args[2] == "status":
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == parentWorktree && args[2] == "status":
+			return "A  staged-target.go\n M modified-target.go\n?? scratch-target.log\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == childWorktree && args[2] == "merge-base":
+			return "base-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == childWorktree && args[2] == "diff" && slices.Contains(args, "--name-status"):
+			return "M\tchild-change.go\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == childWorktree && args[2] == "diff":
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected git args: %s", joined)
+		}
+	}}
+
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		git:      git.NewClient(runner, logger),
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		logger: logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	body, err := json.Marshal(taskCloseRequest{
+		TaskID:               childID,
+		IntegrateBeforeClose: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal task close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-child-dirty-target",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("handleTaskClose response = %+v, want dirty target failure", resp)
+	}
+	message := resp.Error.Message
+	for _, want := range []string{
+		"target branch worktree is not clean",
+		"1 staged, 1 modified, 1 untracked",
+		"staged: staged-target.go",
+		"modified: modified-target.go",
+		"untracked: scratch-target.log",
+		"target-side dirt, not source worker dirt",
+		"child " + childID + " evidence may still be valid",
+		"git -C " + fmt.Sprintf("%q", parentWorktree) + " status --short",
+		"stash push -u -m \"az issue close target drift before " + childID + "\"",
+		"commit it intentionally",
+		"abort and leave the child open/in_review",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("handleTaskClose error = %q, missing %q", message, want)
+		}
+	}
+	if strings.Contains(strings.Join(commands, "\n"), "merge --no-edit") {
+		t.Fatalf("dirty target preflight should block before merge, commands:\n%s", strings.Join(commands, "\n"))
+	}
+}
+
+func TestGitStatusSummaryWithDetailsBoundsPathOutput(t *testing.T) {
+	modified := make([]string, 0, gitStatusDetailPathLimit+2)
+	for i := 0; i < gitStatusDetailPathLimit+2; i++ {
+		modified = append(modified, fmt.Sprintf("file-%02d.go", i))
+	}
+
+	got := gitStatusSummaryWithDetails(&git.GitStatus{
+		HasChanges: true,
+		Modified:   modified,
+	})
+
+	if !strings.Contains(got, fmt.Sprintf("%d modified", gitStatusDetailPathLimit+2)) {
+		t.Fatalf("summary = %q, want total modified count", got)
+	}
+	if !strings.Contains(got, "file-11.go") {
+		t.Fatalf("summary = %q, want last in-bounds path", got)
+	}
+	if strings.Contains(got, "file-12.go") || strings.Contains(got, "file-13.go") {
+		t.Fatalf("summary = %q, want paths beyond bounded output omitted", got)
+	}
+	if !strings.Contains(got, "2 more omitted") {
+		t.Fatalf("summary = %q, want omitted count", got)
+	}
+}
+
 func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

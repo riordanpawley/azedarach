@@ -2414,16 +2414,18 @@ func (d *Daemon) ensureMergeToBaseClean(ctx context.Context, source git.Worktree
 
 	reasons := make([]string, 0, 2)
 	if gitStatusHasDirtyFiles(sourceStatus) {
-		reasons = append(reasons, fmt.Sprintf("source %s is not clean: %s", source.IssueID, gitStatusSummary(sourceStatus)))
+		reasons = append(reasons, fmt.Sprintf("source worker %s is not clean: %s", source.IssueID, gitStatusSummaryWithDetails(sourceStatus)))
 	}
 	if gitStatusHasDirtyFiles(targetStatus) && hasChangesToIntegrate {
-		reasons = append(reasons, fmt.Sprintf("target branch is not clean: %s", gitStatusSummary(targetStatus)))
+		reasons = append(reasons, formatDirtyTargetPreflightReason(source.IssueID, targetWorktree, targetStatus))
 	}
 	if len(reasons) > 0 {
 		return false, errors.New(strings.Join(reasons, "; "))
 	}
 	return hasChangesToIntegrate, nil
 }
+
+const gitStatusDetailPathLimit = 12
 
 func gitStatusHasDirtyFiles(status *git.GitStatus) bool {
 	if status == nil {
@@ -2466,6 +2468,110 @@ func gitStatusSummary(status *git.GitStatus) string {
 		return "dirty"
 	}
 	return strings.Join(parts, ", ")
+}
+
+func gitStatusSummaryWithDetails(status *git.GitStatus) string {
+	groups := gitStatusDetailGroups(status)
+	summaryParts := make([]string, 0, len(groups))
+	for _, group := range groups {
+		if len(group.files) == 0 {
+			continue
+		}
+		summaryParts = append(summaryParts, fmt.Sprintf("%d %s", len(group.files), group.label))
+	}
+	summary := strings.Join(summaryParts, ", ")
+	if summary == "" {
+		summary = gitStatusSummary(status)
+	}
+	details := gitStatusDetails(status, gitStatusDetailPathLimit)
+	if details == "" {
+		return summary
+	}
+	return fmt.Sprintf("%s; %s", summary, details)
+}
+
+type gitStatusDetailGroup struct {
+	label string
+	files []string
+}
+
+func gitStatusDetailGroups(status *git.GitStatus) []gitStatusDetailGroup {
+	if status == nil {
+		return nil
+	}
+	staged := uniqueNonEmpty(status.Staged)
+	stagedSet := make(map[string]struct{}, len(staged))
+	for _, file := range staged {
+		stagedSet[file] = struct{}{}
+	}
+	unstagedOnly := func(files []string) []string {
+		out := uniqueNonEmpty(files)
+		if len(out) == 0 || len(stagedSet) == 0 {
+			return out
+		}
+		filtered := out[:0]
+		for _, file := range out {
+			if _, ok := stagedSet[file]; ok {
+				continue
+			}
+			filtered = append(filtered, file)
+		}
+		return filtered
+	}
+	return []gitStatusDetailGroup{
+		{label: "staged", files: staged},
+		{label: "modified", files: unstagedOnly(status.Modified)},
+		{label: "added", files: unstagedOnly(status.Added)},
+		{label: "deleted", files: unstagedOnly(status.Deleted)},
+		{label: "untracked", files: uniqueNonEmpty(status.Untracked)},
+		{label: "conflicted", files: uniqueNonEmpty(status.Conflicted)},
+	}
+}
+
+func gitStatusDetails(status *git.GitStatus, limit int) string {
+	if status == nil {
+		return ""
+	}
+	if limit <= 0 {
+		limit = gitStatusDetailPathLimit
+	}
+
+	remaining := limit
+	omitted := 0
+	groups := gitStatusDetailGroups(status)
+	parts := make([]string, 0, len(groups))
+	for _, group := range groups {
+		files := group.files
+		if len(files) == 0 {
+			continue
+		}
+		if remaining <= 0 {
+			omitted += len(files)
+			continue
+		}
+		shown := files
+		if len(shown) > remaining {
+			shown = shown[:remaining]
+			omitted += len(files) - len(shown)
+		}
+		parts = append(parts, fmt.Sprintf("%s: %s", group.label, strings.Join(shown, ", ")))
+		remaining -= len(shown)
+	}
+	if omitted > 0 {
+		parts = append(parts, fmt.Sprintf("%d more omitted", omitted))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func formatDirtyTargetPreflightReason(sourceIssueID, targetWorktree string, status *git.GitStatus) string {
+	return fmt.Sprintf(
+		"target branch worktree is not clean: %s. This is target-side dirt, not source worker dirt; child %s evidence may still be valid, but clean the target branch separately before retrying. Next: inspect with `git -C %q status --short`; stash target drift with `git -C %q stash push -u -m \"az issue close target drift before %s\"`; commit it intentionally; or abort and leave the child open/in_review",
+		gitStatusSummaryWithDetails(status),
+		sourceIssueID,
+		targetWorktree,
+		targetWorktree,
+		sourceIssueID,
+	)
 }
 
 func uniqueNonEmpty(values []string) []string {
