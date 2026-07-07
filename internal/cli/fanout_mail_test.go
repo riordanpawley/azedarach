@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
 func TestFlattenFanoutAndPlan(t *testing.T) {
@@ -538,5 +540,70 @@ func TestMailWatchCommandSkipsPreflightDaemonAttachWhenReadSucceeds(t *testing.T
 	}
 	if !strings.Contains(output, `"seq":1`) {
 		t.Fatalf("output = %q, want watched event", output)
+	}
+}
+
+func TestEvidenceValidateCommandJSONReportsPointers(t *testing.T) {
+	body := `{
+		"schema": "worker_evidence.v1",
+		"summary": "Ready for integration.",
+		"commands_run": ["just test"],
+		"key_assertions": ["validation passed"],
+		"files_changed": ["internal/cli/fanout_mail.go"],
+		"review": {"status": "shipit", "findings": []},
+		"risks": ["none"]
+	}`
+
+	output, err := captureStdoutAllowError(t, func() error {
+		return EvidenceValidateCommand(nil, EvidenceValidateOptions{Body: body, JSON: true})
+	})
+	if err == nil {
+		t.Fatal("EvidenceValidateCommand unexpectedly succeeded")
+	}
+	var result domain.WorkerEvidenceValidationResult
+	if decodeErr := json.Unmarshal([]byte(strings.TrimSpace(output)), &result); decodeErr != nil {
+		t.Fatalf("decode validation result: %v\noutput=%s", decodeErr, output)
+	}
+	if result.Complete {
+		t.Fatalf("result = %+v, want incomplete", result)
+	}
+	var found bool
+	for _, diagnostic := range result.Diagnostics {
+		if diagnostic.Path == "/review/status" && slices.Contains(diagnostic.AllowedValues, "clean") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("diagnostics = %+v, want review.status pointer with allowed values", result.Diagnostics)
+	}
+}
+
+func TestEvidenceValidateCommandFixPrintsCanonicalPacket(t *testing.T) {
+	body := `{
+		"schema": "worker_evidence.v1",
+		"summary": "Ready for integration.",
+		"commands_run": [{"command": "just test", "result": "passed"}],
+		"key_assertions": ["validation passed"],
+		"files_changed": ["internal/cli/fanout_mail.go"],
+		"review": {"status": "pass"},
+		"risks": ["none"],
+		"artifact_links": ["https://example.test/run/1"]
+	}`
+
+	output := captureStdout(t, func() error {
+		return EvidenceValidateCommand(nil, EvidenceValidateOptions{Body: body, Fix: true})
+	})
+	var packet domain.WorkerEvidencePacket
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &packet); err != nil {
+		t.Fatalf("decode fixed packet: %v\noutput=%s", err, output)
+	}
+	if packet.Review.Status != "clean" || len(packet.Review.Findings) != 0 {
+		t.Fatalf("review = %+v, want clean with empty findings", packet.Review)
+	}
+	if len(packet.CommandsRun) != 1 || packet.CommandsRun[0] != "just test (passed)" {
+		t.Fatalf("commands_run = %+v, want normalized command", packet.CommandsRun)
+	}
+	if len(packet.ArtifactLinks) != 1 || packet.ArtifactLinks[0].Label != "artifact 1" {
+		t.Fatalf("artifact_links = %+v, want generated object link", packet.ArtifactLinks)
 	}
 }

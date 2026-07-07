@@ -53,6 +53,27 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := ensureMigrationTable(ctx, db); err != nil {
 		return err
 	}
+	if err := repairIssueBaseSchema(db); err != nil {
+		return fmt.Errorf("repair issue base schema: %w", err)
+	}
+	if err := repairIssueDependencySchema(db); err != nil {
+		return fmt.Errorf("repair issue dependency schema: %w", err)
+	}
+	if err := repairMetaSchema(db); err != nil {
+		return fmt.Errorf("repair meta schema: %w", err)
+	}
+	externalRefsMigrationApplied, err := isMigrationApplied(ctx, db, "0006_issue_external_refs")
+	if err != nil {
+		return fmt.Errorf("check migration 0006_issue_external_refs before repair: %w", err)
+	}
+	if externalRefsMigrationApplied {
+		if err := repairIssueExternalRefsSchema(db); err != nil {
+			return fmt.Errorf("repair issue external refs schema: %w", err)
+		}
+	}
+	if err := c.ensureSpecSchema(db); err != nil {
+		return fmt.Errorf("repair spec schema: %w", err)
+	}
 
 	for _, m := range orderedMigrations {
 		applied, err := isMigrationApplied(ctx, db, m.id)
@@ -95,6 +116,147 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 
 	if err := repairAgentLearningBaseSchema(ctx, db); err != nil {
 		return fmt.Errorf("repair agent learning base schema: %w", err)
+	}
+
+	return nil
+}
+
+func repairIssueBaseSchema(db *sql.DB) error {
+	exists, err := tableExists(db, "issues")
+	if err != nil {
+		return fmt.Errorf("inspect issues table: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+
+	return ensureTableColumns(db, "issues", []sqliteColumnSpec{
+		{name: "description", ddl: "TEXT"},
+		{name: "status", ddl: "TEXT NOT NULL DEFAULT 'open'"},
+		{name: "priority", ddl: "INTEGER NOT NULL DEFAULT 2"},
+		{name: "issue_type", ddl: "TEXT NOT NULL DEFAULT 'task'"},
+		{name: "created_at", ddl: "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'"},
+		{name: "updated_at", ddl: "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'"},
+		{name: "closed_at", ddl: "TEXT"},
+		{name: "assignee", ddl: "TEXT"},
+		{name: "labels_json", ddl: "TEXT"},
+		{name: "implementations_json", ddl: "TEXT"},
+		{name: "design", ddl: "TEXT"},
+		{name: "notes", ddl: "TEXT"},
+		{name: "acceptance", ddl: "TEXT"},
+		{name: "estimate", ddl: "INTEGER"},
+		{name: "deleted_at", ddl: "TEXT"},
+	})
+}
+
+func repairIssueDependencySchema(db *sql.DB) error {
+	issuesExists, err := tableExists(db, "issues")
+	if err != nil {
+		return fmt.Errorf("inspect issues table: %w", err)
+	}
+	if !issuesExists {
+		return nil
+	}
+
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS issue_dependencies (
+			issue_id TEXT NOT NULL,
+			depends_on_id TEXT NOT NULL,
+			dependency_type TEXT NOT NULL,
+			tombstoned_at TEXT,
+			PRIMARY KEY (issue_id, depends_on_id, dependency_type)
+		)
+	`); err != nil {
+		return fmt.Errorf("ensure issue_dependencies table: %w", err)
+	}
+	if err := ensureTableColumns(db, "issue_dependencies", []sqliteColumnSpec{
+		{name: "issue_id", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "depends_on_id", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "dependency_type", ddl: "TEXT NOT NULL DEFAULT 'blocks'"},
+		{name: "tombstoned_at", ddl: "TEXT"},
+	}); err != nil {
+		return err
+	}
+
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_dependencies_issue_active_type ON issue_dependencies(issue_id, tombstoned_at, dependency_type)`,
+		`CREATE INDEX IF NOT EXISTS idx_dependencies_depends_on_active_type ON issue_dependencies(depends_on_id, tombstoned_at, dependency_type)`,
+		`CREATE INDEX IF NOT EXISTS idx_dependencies_depends_on ON issue_dependencies(depends_on_id, dependency_type, tombstoned_at)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("ensure issue dependency index: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func repairMetaSchema(db *sql.DB) error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("ensure meta table: %w", err)
+	}
+	return nil
+}
+
+func repairIssueExternalRefsSchema(db *sql.DB) error {
+	issuesExists, err := tableExists(db, "issues")
+	if err != nil {
+		return fmt.Errorf("inspect issues table: %w", err)
+	}
+	if !issuesExists {
+		return nil
+	}
+
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS issue_external_refs (
+			issue_id TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			provider_scope TEXT NOT NULL DEFAULT '',
+			remote_key TEXT NOT NULL,
+			display_key TEXT,
+			url TEXT,
+			metadata_json TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			deleted_at TEXT,
+			PRIMARY KEY (issue_id, provider, provider_scope, remote_key),
+			FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+		)
+	`); err != nil {
+		return fmt.Errorf("ensure issue_external_refs table: %w", err)
+	}
+	if err := ensureTableColumns(db, "issue_external_refs", []sqliteColumnSpec{
+		{name: "issue_id", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "provider", ddl: "TEXT NOT NULL DEFAULT 'linear'"},
+		{name: "provider_scope", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "remote_key", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "display_key", ddl: "TEXT"},
+		{name: "url", ddl: "TEXT"},
+		{name: "metadata_json", ddl: "TEXT"},
+		{name: "created_at", ddl: "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'"},
+		{name: "updated_at", ddl: "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'"},
+		{name: "deleted_at", ddl: "TEXT"},
+	}); err != nil {
+		return err
+	}
+
+	for _, stmt := range []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_external_refs_active_remote
+			ON issue_external_refs(provider, provider_scope, remote_key)
+			WHERE deleted_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_issue_external_refs_issue_active
+			ON issue_external_refs(issue_id, provider, provider_scope, updated_at DESC)
+			WHERE deleted_at IS NULL`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("ensure issue external refs index: %w", err)
+		}
 	}
 
 	return nil

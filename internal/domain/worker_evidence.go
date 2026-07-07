@@ -32,12 +32,35 @@ type WorkerEvidenceArtifactLink struct {
 	URL   string `json:"url"`
 }
 
+type WorkerEvidenceDiagnostic struct {
+	Path          string   `json:"path"`
+	Message       string   `json:"message"`
+	AllowedValues []string `json:"allowed_values,omitempty"`
+	Suggestion    string   `json:"suggestion,omitempty"`
+}
+
 type WorkerEvidenceParseResult struct {
-	Found    bool     `json:"found"`
-	Complete bool     `json:"complete"`
-	Missing  []string `json:"missing,omitempty"`
-	Invalid  []string `json:"invalid,omitempty"`
-	Storage  string   `json:"storage"`
+	Found       bool                       `json:"found"`
+	Complete    bool                       `json:"complete"`
+	Missing     []string                   `json:"missing,omitempty"`
+	Invalid     []string                   `json:"invalid,omitempty"`
+	Diagnostics []WorkerEvidenceDiagnostic `json:"diagnostics,omitempty"`
+	Normalized  []string                   `json:"normalized,omitempty"`
+	Storage     string                     `json:"storage"`
+}
+
+type WorkerEvidenceValidationResult struct {
+	Found       bool                       `json:"found"`
+	Complete    bool                       `json:"complete"`
+	Missing     []string                   `json:"missing,omitempty"`
+	Invalid     []string                   `json:"invalid,omitempty"`
+	Diagnostics []WorkerEvidenceDiagnostic `json:"diagnostics,omitempty"`
+	Normalized  []string                   `json:"normalized,omitempty"`
+	Packet      *WorkerEvidencePacket      `json:"packet,omitempty"`
+	Fixed       bool                       `json:"fixed"`
+	FixedBody   string                     `json:"fixed_body,omitempty"`
+	Template    WorkerEvidencePacket       `json:"template"`
+	Storage     string                     `json:"storage"`
 }
 
 func (r WorkerEvidenceParseResult) Problems() []string {
@@ -66,22 +89,107 @@ func ParseWorkerEvidencePacketBody(body string) (WorkerEvidencePacket, WorkerEvi
 		raw = nested
 		if err := json.Unmarshal(raw, &envelope); err != nil {
 			result.Invalid = append(result.Invalid, fmt.Sprintf("invalid worker_evidence object: %v", err))
+			result.Diagnostics = append(result.Diagnostics, WorkerEvidenceDiagnostic{
+				Path:       "/worker_evidence",
+				Message:    fmt.Sprintf("invalid worker_evidence object: %v", err),
+				Suggestion: "send a JSON object matching worker_evidence.v1",
+			})
+			return WorkerEvidencePacket{}, result
+		}
+	}
+	envelope, result.Diagnostics, result.Normalized = normalizeWorkerEvidenceFields(envelope, workerEvidenceNormalizeMode{
+		ReviewStatusAliases: true,
+		CommandRecords:      true,
+	})
+	if len(result.Normalized) > 0 {
+		var err error
+		raw, err = json.Marshal(envelope)
+		if err != nil {
+			result.Invalid = append(result.Invalid, fmt.Sprintf("invalid worker evidence packet: %v", err))
+			result.Diagnostics = append(result.Diagnostics, WorkerEvidenceDiagnostic{Path: "", Message: err.Error()})
 			return WorkerEvidencePacket{}, result
 		}
 	}
 	if invalid := validateWorkerEvidenceRawShape(envelope); len(invalid) > 0 {
 		result.Invalid = append(result.Invalid, invalid...)
+		result.Diagnostics = append(result.Diagnostics, diagnosticsForInvalidWorkerEvidence(invalid)...)
 		return WorkerEvidencePacket{}, result
 	}
 
 	var packet WorkerEvidencePacket
 	if err := json.Unmarshal(raw, &packet); err != nil {
 		result.Invalid = append(result.Invalid, fmt.Sprintf("invalid worker evidence packet: %v", err))
+		result.Diagnostics = append(result.Diagnostics, WorkerEvidenceDiagnostic{
+			Path:       "",
+			Message:    fmt.Sprintf("invalid worker evidence packet: %v", err),
+			Suggestion: "run `az mail validate-evidence --fix` to preview a canonical packet when the mismatch is repairable",
+		})
 		return WorkerEvidencePacket{}, result
 	}
 	result.Missing, result.Invalid = validateWorkerEvidencePacket(packet, envelope)
+	result.Diagnostics = append(result.Diagnostics, diagnosticsForMissingWorkerEvidence(result.Missing)...)
+	result.Diagnostics = append(result.Diagnostics, diagnosticsForInvalidWorkerEvidence(result.Invalid)...)
 	result.Complete = len(result.Missing) == 0 && len(result.Invalid) == 0
 	return packet, result
+}
+
+func ValidateWorkerEvidencePacketBody(body string, fix bool) WorkerEvidenceValidationResult {
+	packet, parsed := ParseWorkerEvidencePacketBody(body)
+	result := WorkerEvidenceValidationResult{
+		Found:       parsed.Found,
+		Complete:    parsed.Complete,
+		Missing:     append([]string(nil), parsed.Missing...),
+		Invalid:     append([]string(nil), parsed.Invalid...),
+		Diagnostics: append([]WorkerEvidenceDiagnostic(nil), parsed.Diagnostics...),
+		Normalized:  append([]string(nil), parsed.Normalized...),
+		Template:    WorkerEvidencePacketTemplate(),
+		Storage:     parsed.Storage,
+	}
+	if parsed.Complete {
+		result.Packet = &packet
+		if fix && len(parsed.Normalized) > 0 {
+			if data, err := json.MarshalIndent(packet, "", "  "); err == nil {
+				result.Fixed = true
+				result.FixedBody = string(data)
+			}
+		}
+		return result
+	}
+	if !fix {
+		return result
+	}
+	fixedBody, fixed, fixDiagnostics := repairWorkerEvidencePacketBody(body)
+	result.Diagnostics = append(result.Diagnostics, fixDiagnostics...)
+	if !fixed {
+		return result
+	}
+	fixedPacket, fixedParsed := ParseWorkerEvidencePacketBody(fixedBody)
+	result.Fixed = fixedParsed.Complete
+	result.FixedBody = fixedBody
+	result.Complete = fixedParsed.Complete
+	result.Missing = append([]string(nil), fixedParsed.Missing...)
+	result.Invalid = append([]string(nil), fixedParsed.Invalid...)
+	result.Normalized = append(result.Normalized, fixedParsed.Normalized...)
+	result.Diagnostics = append(result.Diagnostics, fixedParsed.Diagnostics...)
+	if fixedParsed.Complete {
+		result.Packet = &fixedPacket
+	}
+	return result
+}
+
+func WorkerEvidencePacketTemplate() WorkerEvidencePacket {
+	return WorkerEvidencePacket{
+		Schema:        WorkerEvidenceSchemaV1,
+		Summary:       "Ready for integration.",
+		CommandsRun:   []string{"just test"},
+		KeyAssertions: []string{"validation passed"},
+		FilesChanged:  []string{"internal/daemon/mail_commands.go"},
+		Review: WorkerEvidenceReview{
+			Status:   "clean",
+			Findings: []string{},
+		},
+		Risks: []string{"none"},
+	}
 }
 
 func validateWorkerEvidencePacket(packet WorkerEvidencePacket, fields map[string]json.RawMessage) ([]string, []string) {
@@ -200,6 +308,321 @@ func validWorkerEvidenceReviewStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func allowedWorkerEvidenceReviewStatuses() []string {
+	return []string{"clean", "findings", "not_run", "blocked"}
+}
+
+type workerEvidenceNormalizeMode struct {
+	ReviewStatusAliases bool
+	CommandRecords      bool
+	ArtifactStringLinks bool
+	FillReviewFindings  bool
+}
+
+func normalizeWorkerEvidenceFields(fields map[string]json.RawMessage, mode workerEvidenceNormalizeMode) (map[string]json.RawMessage, []WorkerEvidenceDiagnostic, []string) {
+	out := make(map[string]json.RawMessage, len(fields))
+	for key, value := range fields {
+		out[key] = append(json.RawMessage(nil), value...)
+	}
+	var diagnostics []WorkerEvidenceDiagnostic
+	var normalized []string
+
+	if rawReview, ok := out["review"]; ok {
+		reviewFields := map[string]json.RawMessage{}
+		if err := json.Unmarshal(rawReview, &reviewFields); err == nil {
+			if rawStatus, ok := reviewFields["status"]; ok {
+				var status string
+				if err := json.Unmarshal(rawStatus, &status); err == nil {
+					if canonical, ok := workerEvidenceReviewStatusAlias(status); ok {
+						diagnostics = append(diagnostics, WorkerEvidenceDiagnostic{
+							Path:          "/review/status",
+							Message:       fmt.Sprintf("review.status %q is an alias for %q", strings.TrimSpace(status), canonical),
+							AllowedValues: allowedWorkerEvidenceReviewStatuses(),
+							Suggestion:    fmt.Sprintf("use %q", canonical),
+						})
+						if mode.ReviewStatusAliases {
+							reviewFields["status"] = mustWorkerEvidenceJSONRaw(canonical)
+							normalized = append(normalized, "/review/status")
+						}
+					}
+				}
+			}
+			if mode.FillReviewFindings {
+				if _, ok := reviewFields["findings"]; !ok {
+					if statusRaw, ok := reviewFields["status"]; ok {
+						var status string
+						if err := json.Unmarshal(statusRaw, &status); err == nil && !strings.EqualFold(strings.TrimSpace(status), "findings") {
+							reviewFields["findings"] = mustWorkerEvidenceJSONRaw([]string{})
+							normalized = append(normalized, "/review/findings")
+							diagnostics = append(diagnostics, WorkerEvidenceDiagnostic{
+								Path:       "/review/findings",
+								Message:    "review.findings is required even when there are no findings",
+								Suggestion: "use an empty array for clean, not_run, or blocked reviews",
+							})
+						}
+					}
+				}
+			}
+			if data, err := json.Marshal(reviewFields); err == nil {
+				out["review"] = data
+			}
+		}
+	}
+
+	if rawCommands, ok := out["commands_run"]; ok {
+		commands, changed, commandDiagnostics := normalizeWorkerEvidenceCommands(rawCommands, mode.CommandRecords)
+		diagnostics = append(diagnostics, commandDiagnostics...)
+		if changed {
+			out["commands_run"] = mustWorkerEvidenceJSONRaw(commands)
+			normalized = append(normalized, "/commands_run")
+		}
+	}
+
+	if rawLinks, ok := out["artifact_links"]; ok {
+		links, changed, linkDiagnostics := normalizeWorkerEvidenceArtifactLinks(rawLinks, mode.ArtifactStringLinks)
+		diagnostics = append(diagnostics, linkDiagnostics...)
+		if changed {
+			out["artifact_links"] = mustWorkerEvidenceJSONRaw(links)
+			normalized = append(normalized, "/artifact_links")
+		}
+	}
+
+	return out, diagnostics, normalized
+}
+
+func workerEvidenceReviewStatusAlias(status string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "pass", "passed":
+		return "clean", true
+	default:
+		return "", false
+	}
+}
+
+func normalizeWorkerEvidenceCommands(raw json.RawMessage, fix bool) ([]string, bool, []WorkerEvidenceDiagnostic) {
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, false, []WorkerEvidenceDiagnostic{{
+			Path:       "/commands_run",
+			Message:    "commands_run must be an array",
+			Suggestion: "use an array of command strings, or run with --fix for supported structured command records",
+		}}
+	}
+	out := make([]string, 0, len(items))
+	changed := false
+	unrepairable := false
+	var diagnostics []WorkerEvidenceDiagnostic
+	for i, item := range items {
+		path := fmt.Sprintf("/commands_run/%d", i)
+		var command string
+		if err := json.Unmarshal(item, &command); err == nil {
+			out = append(out, command)
+			continue
+		}
+		var record struct {
+			Command string `json:"command"`
+			Result  string `json:"result"`
+		}
+		if err := json.Unmarshal(item, &record); err == nil && strings.TrimSpace(record.Command) != "" {
+			value := strings.TrimSpace(record.Command)
+			if result := strings.TrimSpace(record.Result); result != "" {
+				value += " (" + result + ")"
+			}
+			diagnostics = append(diagnostics, WorkerEvidenceDiagnostic{
+				Path:       path,
+				Message:    "commands_run structured records are normalized to command strings",
+				Suggestion: `use "command" strings in the canonical packet, for example "just test"`,
+			})
+			if fix {
+				out = append(out, value)
+				changed = true
+			}
+			continue
+		}
+		diagnostics = append(diagnostics, WorkerEvidenceDiagnostic{
+			Path:       path,
+			Message:    "commands_run entries must be strings or objects with a non-empty command field",
+			Suggestion: `use "just test" or {"command":"just test","result":"passed"}`,
+		})
+		unrepairable = true
+	}
+	if unrepairable {
+		return nil, false, diagnostics
+	}
+	return out, changed, diagnostics
+}
+
+func normalizeWorkerEvidenceArtifactLinks(raw json.RawMessage, fix bool) ([]WorkerEvidenceArtifactLink, bool, []WorkerEvidenceDiagnostic) {
+	if strings.TrimSpace(string(raw)) == "null" {
+		return nil, false, nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, false, []WorkerEvidenceDiagnostic{{
+			Path:       "/artifact_links",
+			Message:    "artifact_links must be an array of objects with label and url fields",
+			Suggestion: `omit artifact_links unless needed, or use [{"label":"CI","url":"https://example.test/run"}]`,
+		}}
+	}
+	out := make([]WorkerEvidenceArtifactLink, 0, len(items))
+	changed := false
+	var diagnostics []WorkerEvidenceDiagnostic
+	for i, item := range items {
+		path := fmt.Sprintf("/artifact_links/%d", i)
+		var link WorkerEvidenceArtifactLink
+		if err := json.Unmarshal(item, &link); err == nil && strings.HasPrefix(strings.TrimSpace(string(item)), "{") {
+			out = append(out, link)
+			continue
+		}
+		var urlValue string
+		if err := json.Unmarshal(item, &urlValue); err == nil && strings.TrimSpace(urlValue) != "" {
+			diagnostics = append(diagnostics, WorkerEvidenceDiagnostic{
+				Path:       path,
+				Message:    "artifact_links entries must be objects with label and url fields",
+				Suggestion: `use {"label":"artifact 1","url":"` + strings.TrimSpace(urlValue) + `"}`,
+			})
+			if fix {
+				out = append(out, WorkerEvidenceArtifactLink{
+					Label: fmt.Sprintf("artifact %d", i+1),
+					URL:   strings.TrimSpace(urlValue),
+				})
+				changed = true
+			}
+			continue
+		}
+		diagnostics = append(diagnostics, WorkerEvidenceDiagnostic{
+			Path:       path,
+			Message:    "artifact_links entries must be objects with label and url fields",
+			Suggestion: `omit artifact_links unless needed, or use [{"label":"CI","url":"https://example.test/run"}]`,
+		})
+	}
+	return out, changed, diagnostics
+}
+
+func repairWorkerEvidencePacketBody(body string) (string, bool, []WorkerEvidenceDiagnostic) {
+	raw, ok := workerEvidenceJSONCandidate(body)
+	if !ok {
+		return "", false, []WorkerEvidenceDiagnostic{{
+			Path:       "",
+			Message:    "body is not a JSON worker_evidence.v1 packet",
+			Suggestion: "provide a JSON packet or run with --template for the canonical schema",
+		}}
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return "", false, []WorkerEvidenceDiagnostic{{Path: "", Message: fmt.Sprintf("invalid JSON: %v", err)}}
+	}
+	nested := false
+	if nestedRaw, ok := envelope["worker_evidence"]; ok {
+		nested = true
+		raw = nestedRaw
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			return "", false, []WorkerEvidenceDiagnostic{{Path: "/worker_evidence", Message: fmt.Sprintf("invalid worker_evidence object: %v", err)}}
+		}
+	}
+	normalized, diagnostics, changedFields := normalizeWorkerEvidenceFields(envelope, workerEvidenceNormalizeMode{
+		ReviewStatusAliases: true,
+		CommandRecords:      true,
+		ArtifactStringLinks: true,
+		FillReviewFindings:  true,
+	})
+	if len(changedFields) == 0 {
+		return "", false, diagnostics
+	}
+	var fixed any = normalized
+	if nested {
+		fixed = map[string]any{"worker_evidence": normalized}
+	}
+	data, err := json.MarshalIndent(fixed, "", "  ")
+	if err != nil {
+		return "", false, append(diagnostics, WorkerEvidenceDiagnostic{Path: "", Message: err.Error()})
+	}
+	return string(data), true, diagnostics
+}
+
+func diagnosticsForMissingWorkerEvidence(missing []string) []WorkerEvidenceDiagnostic {
+	diagnostics := make([]WorkerEvidenceDiagnostic, 0, len(missing))
+	for _, field := range missing {
+		diagnostics = append(diagnostics, WorkerEvidenceDiagnostic{
+			Path:       workerEvidenceJSONPointer(field),
+			Message:    "required field is missing or empty",
+			Suggestion: workerEvidenceSuggestionForField(field),
+		})
+	}
+	return diagnostics
+}
+
+func diagnosticsForInvalidWorkerEvidence(invalid []string) []WorkerEvidenceDiagnostic {
+	diagnostics := make([]WorkerEvidenceDiagnostic, 0, len(invalid))
+	for _, reason := range invalid {
+		diagnostic := WorkerEvidenceDiagnostic{
+			Path:       "",
+			Message:    reason,
+			Suggestion: "run `az mail validate-evidence --fix` to preview a canonical packet when the mismatch is repairable",
+		}
+		switch {
+		case strings.Contains(reason, "review.status"):
+			diagnostic.Path = "/review/status"
+			diagnostic.AllowedValues = allowedWorkerEvidenceReviewStatuses()
+			diagnostic.Suggestion = "use one of clean, findings, not_run, or blocked; pass is normalized to clean"
+		case strings.Contains(reason, "artifact_links["):
+			diagnostic.Path = workerEvidenceJSONPointer(strings.TrimSpace(strings.Split(reason, " ")[0]))
+			diagnostic.Suggestion = `omit artifact_links unless needed, or use [{"label":"CI","url":"https://example.test/run"}]`
+		case strings.Contains(reason, "artifact_links"):
+			diagnostic.Path = "/artifact_links"
+			diagnostic.Suggestion = `omit artifact_links unless needed, or use [{"label":"CI","url":"https://example.test/run"}]`
+		case strings.Contains(reason, "schema"):
+			diagnostic.Path = "/schema"
+			diagnostic.AllowedValues = []string{WorkerEvidenceSchemaV1}
+			diagnostic.Suggestion = fmt.Sprintf("set schema to %q", WorkerEvidenceSchemaV1)
+		}
+		diagnostics = append(diagnostics, diagnostic)
+	}
+	return diagnostics
+}
+
+func workerEvidenceJSONPointer(field string) string {
+	field = strings.TrimSpace(field)
+	field = strings.ReplaceAll(field, ".", "/")
+	field = strings.ReplaceAll(field, "[", "/")
+	field = strings.ReplaceAll(field, "]", "")
+	if field == "" {
+		return ""
+	}
+	return "/" + field
+}
+
+func workerEvidenceSuggestionForField(field string) string {
+	switch field {
+	case "schema":
+		return fmt.Sprintf("set schema to %q", WorkerEvidenceSchemaV1)
+	case "commands_run":
+		return `use an array of command strings, for example ["just test"]`
+	case "key_assertions":
+		return `use an array of concise validation assertions, for example ["validation passed"]`
+	case "files_changed":
+		return `use an array of changed file paths`
+	case "review.status":
+		return "use one of clean, findings, not_run, or blocked"
+	case "review.findings":
+		return "use an empty array when there are no review findings"
+	case "risks":
+		return `use ["none"] when there are no known risks`
+	case "summary":
+		return "include a concise closeout summary"
+	default:
+		return "fill the required worker_evidence.v1 field"
+	}
+}
+
+func mustWorkerEvidenceJSONRaw(value any) json.RawMessage {
+	data, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return data
 }
 
 func nonEmptyStrings(values []string) []string {

@@ -937,7 +937,7 @@ func main() {
 
 	case "mail":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az mail <send|list|watch> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az mail <send|list|watch|validate-evidence> [arguments]\n")
 			os.Exit(1)
 		}
 		switch commandArgs[0] {
@@ -980,9 +980,46 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
+		case "validate-evidence":
+			opts, err := cli.ParseEvidenceValidateArgs(commandArgs[1:])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az mail validate-evidence [--body <json>|--file <path>] [--fix] [--template] [--json]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.EvidenceValidateCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown mail command: %s\n", commandArgs[0])
-			fmt.Fprintf(os.Stderr, "Usage: az mail <send|list|watch> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az mail <send|list|watch|validate-evidence> [arguments]\n")
+			os.Exit(1)
+		}
+	case "evidence":
+		if len(commandArgs) == 0 {
+			fmt.Fprintf(os.Stderr, "Usage: az evidence <validate> [arguments]\n")
+			os.Exit(1)
+		}
+		switch commandArgs[0] {
+		case "validate":
+			opts, err := cli.ParseEvidenceValidateArgs(commandArgs[1:])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az evidence validate [--body <json>|--file <path>] [--fix] [--template] [--json]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.EvidenceValidateCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown evidence command: %s\n", commandArgs[0])
+			fmt.Fprintf(os.Stderr, "Usage: az evidence <validate> [arguments]\n")
 			os.Exit(1)
 		}
 	case "observe":
@@ -1315,8 +1352,8 @@ func printWorktreeUsage() {
 }
 
 func printIssueCreateUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: az issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
-	fmt.Fprintln(w, "Note: `az issue create \"Child task\"` auto-parents to AZEDARACH_ISSUE_ID when set; use `az issue dep add <child-id> <parent-id> --type parent-child` for another parent/root.")
+	fmt.Fprintln(w, "Usage: az issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
+	fmt.Fprintln(w, "Note: `az issue create \"Child task\"` auto-parents to AZEDARACH_ISSUE_ID when set; use `--parent <issue-id>` for another parent/root.")
 	fmt.Fprintln(w, "Note: --impl only assigns implementation/spec variant metadata; it is not parent/root selection.")
 }
 
