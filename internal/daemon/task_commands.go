@@ -1886,7 +1886,7 @@ func (d *Daemon) repairStaleRuntimeProjections(ctx context.Context, projectID, t
 			return err
 		}
 		for _, session := range sessions {
-			if !naming.IssueIDsEqual(session.IssueID, taskID) || closeSessionProjectionStopped(session) {
+			if !naming.IssueIDsEqual(session.IssueID, taskID) || daemonSessionProjectionStopped(session) {
 				continue
 			}
 			if sessionsLoaded {
@@ -2149,7 +2149,7 @@ func normalizeWorktreeProjectionPath(path string) string {
 	return filepath.Clean(path)
 }
 
-func closeSessionProjectionStopped(session daemonstate.Session) bool {
+func daemonSessionProjectionStopped(session daemonstate.Session) bool {
 	state := daemonstate.NormalizeSessionState(session.State)
 	observed := daemonstate.NormalizeSessionState(session.ObservedState)
 	return state == daemonstate.SessionStateStopped && (observed == "" || observed == daemonstate.SessionStateStopped)
@@ -3689,7 +3689,7 @@ func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID 
 		ready = daemonTaskGraphApplyPendingStarts(ready, pendingStarts)
 	}
 	startProgressByIssue := d.sessionStartProgressByIssue(ctx, projectID)
-	ready.removeRunnableSessionStarts(startProgressByIssue)
+	ready.applySessionStartProgress(startProgressByIssue)
 	ready.NestedRoots = d.daemonTaskGraphNestedRoots(ctx, projectID, ready.NestedRoots, byID, startProgressByIssue)
 	ready.ActiveSessions = d.daemonTaskGraphActiveSessions(ctx, projectID, ready.Active, byID, startProgressByIssue)
 	ready.ActiveSessions = append(ready.ActiveSessions, daemonTaskGraphCleanupPendingSessions(rootID, byID, children)...)
@@ -3741,18 +3741,30 @@ func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectI
 	return tasks, nil
 }
 
-func (result *taskGraphReadinessResult) removeRunnableSessionStarts(progressByIssue map[string]taskGraphSessionStartProgress) {
-	if result == nil || len(result.Runnable) == 0 || len(progressByIssue) == 0 {
+func (result *taskGraphReadinessResult) applySessionStartProgress(progressByIssue map[string]taskGraphSessionStartProgress) {
+	if result == nil || len(progressByIssue) == 0 {
 		return
 	}
-	runnable := result.Runnable[:0]
-	for _, issueID := range result.Runnable {
-		if _, launching := progressByIssue[sessionKey(issueID)]; launching {
-			continue
+	if len(result.Runnable) > 0 {
+		runnable := result.Runnable[:0]
+		for _, issueID := range result.Runnable {
+			if _, launching := progressByIssue[sessionKey(issueID)]; launching {
+				continue
+			}
+			runnable = append(runnable, issueID)
 		}
-		runnable = append(runnable, issueID)
+		result.Runnable = runnable
 	}
-	result.Runnable = runnable
+	if len(result.StaleCloseableChildren) > 0 {
+		stale := result.StaleCloseableChildren[:0]
+		for _, candidate := range result.StaleCloseableChildren {
+			if _, launching := progressByIssue[sessionKey(candidate.IssueID)]; launching {
+				continue
+			}
+			stale = append(stale, candidate)
+		}
+		result.StaleCloseableChildren = stale
+	}
 }
 
 func (d *Daemon) loadTaskGraphDomainTasks(ctx context.Context, projectID string) ([]domain.Task, error) {
@@ -4470,15 +4482,34 @@ func daemonTaskGraphApplyPendingStarts(result taskGraphReadinessResult, pending 
 	if len(pending) == 0 {
 		return result
 	}
+	addPending := func(start taskGraphPendingStart) {
+		for _, existing := range result.Pending {
+			if strings.EqualFold(existing.IssueID, start.IssueID) {
+				return
+			}
+		}
+		result.Pending = append(result.Pending, start)
+	}
 	runnable := make([]string, 0, len(result.Runnable))
 	for _, issueID := range result.Runnable {
 		if start, ok := pending[issueID]; ok {
-			result.Pending = append(result.Pending, start)
+			addPending(start)
 			continue
 		}
 		runnable = append(runnable, issueID)
 	}
 	result.Runnable = runnable
+	if len(result.StaleCloseableChildren) > 0 {
+		stale := result.StaleCloseableChildren[:0]
+		for _, candidate := range result.StaleCloseableChildren {
+			if start, ok := pending[candidate.IssueID]; ok {
+				addPending(start)
+				continue
+			}
+			stale = append(stale, candidate)
+		}
+		result.StaleCloseableChildren = stale
+	}
 	sort.Slice(result.Pending, func(i, j int) bool {
 		return result.Pending[i].IssueID < result.Pending[j].IssueID
 	})

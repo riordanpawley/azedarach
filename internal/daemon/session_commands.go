@@ -370,6 +370,10 @@ func sessionProjectionForTaskDisplayByIssueKey(snapshotByIssueKey, projectionByI
 		byIssueKey[key] = session
 	}
 	for key, session := range projectionByIssueKey {
+		if daemonSessionProjectionStopped(session) {
+			byIssueKey[key] = session
+			continue
+		}
 		existing, exists := byIssueKey[key]
 		if !exists || shouldReplaceSessionProjection(existing, session) {
 			byIssueKey[key] = session
