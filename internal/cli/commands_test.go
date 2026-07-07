@@ -8531,7 +8531,7 @@ func TestIssueCreateCommandAutoParentEmptyImplFallsBackToGlobalInference(t *test
 				{ID: "az-1", Implementations: []string{"default"}},
 				{ID: "az-2", Implementations: []string{"go-bubbletea"}},
 			},
-			errSubstring: "missing required flag: --impl (multiple implementations configured: default, go-bubbletea)",
+			errSubstring: "missing required flag: --impl (implementation is ambiguous; valid --impl values: default, go-bubbletea)",
 		},
 	}
 
