@@ -68,6 +68,8 @@ const (
 
 var primeLookPath = exec.LookPath
 
+var primeDaemonReadTimeout = 8 * time.Second
+
 type Dependencies struct {
 	Config         *config.Config
 	DaemonClient   *daemonclient.Client
@@ -7271,6 +7273,7 @@ type primeTemplateData struct {
 }
 
 func PrimeCommand(deps *Dependencies) error {
+	commandStartedAt := time.Now()
 	issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID"))
 	issueIDSource := ""
 	if issueID != "" {
@@ -7316,7 +7319,11 @@ func PrimeCommand(deps *Dependencies) error {
 	var snapshot daemonclient.TaskSnapshot
 	snapshotLoaded := false
 	if deps != nil && deps.DaemonClient != nil {
-		loaded, err := deps.DaemonClient.ListTasksSnapshotWithDependencies(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), primeDaemonReadTimeout)
+		finish := primePhase(deps, "task_snapshot", "loading daemon issue snapshot")
+		loaded, err := deps.DaemonClient.ListTasksSnapshotWithDependencies(ctx)
+		cancel()
+		finish(err)
 		if err == nil {
 			snapshot = loaded
 			snapshotLoaded = true
@@ -7343,7 +7350,7 @@ func PrimeCommand(deps *Dependencies) error {
 		if !snapshotLoaded {
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nCould not load issue details automatically; run `az issue get %s`.\n", issueID, issueID)
 		} else if task, ok := findTaskByID(snapshot.Tasks, issueID); ok {
-			if detailTask, err := loadIssueDetailTask(context.Background(), deps, issueID); err == nil {
+			if detailTask, err := loadPrimeIssueDetailTask(context.Background(), deps, issueID); err == nil {
 				task = detailTask
 			}
 			observations := readiness.WorkerObservations
@@ -7368,6 +7375,7 @@ func PrimeCommand(deps *Dependencies) error {
 		learningSection = renderPrimeLearningSection(context.Background(), deps, issueID)
 	}
 
+	finishRender := primePhase(deps, "render", "rendering primer output")
 	output, err := clitext.Render("prime_output", primeTemplateData{
 		ActiveIssueID:            issueID,
 		SpecEnabled:              specEnabled,
@@ -7386,11 +7394,37 @@ func PrimeCommand(deps *Dependencies) error {
 		LearningSection:          learningSection,
 		SpecGuardrails:           specGuardrails,
 	})
+	finishRender(err)
 	if err != nil {
 		return fmt.Errorf("render prime output: %w", err)
 	}
 	fmt.Print(output)
+	latencytrace.LogPhase(primeLogger(deps), "cli", "prime.total", commandStartedAt, "issue_id", issueID)
 	return nil
+}
+
+func primePhase(deps *Dependencies, phase, message string) func(error) {
+	startedAt := time.Now()
+	if strings.TrimSpace(message) != "" {
+		fmt.Fprintf(os.Stderr, "az prime: %s...\n", message)
+	}
+	return func(err error) {
+		attrs := []any{"phase", phase}
+		if err != nil {
+			attrs = append(attrs, "error", err)
+			fmt.Fprintf(os.Stderr, "az prime: %s unavailable after %s: %v\n", phase, time.Since(startedAt).Round(time.Millisecond), err)
+		} else {
+			fmt.Fprintf(os.Stderr, "az prime: %s ready in %s\n", phase, time.Since(startedAt).Round(time.Millisecond))
+		}
+		latencytrace.LogPhase(primeLogger(deps), "cli", "prime."+phase, startedAt, attrs...)
+	}
+}
+
+func primeLogger(deps *Dependencies) *slog.Logger {
+	if deps == nil {
+		return nil
+	}
+	return deps.Logger
 }
 
 func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID string) string {
@@ -7416,6 +7450,7 @@ func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID
 	if err != nil {
 		return strings.Join(lines, "\n")
 	}
+	finish := primePhase(deps, "learning_recall", fmt.Sprintf("loading learning recall for %s", issueID))
 	resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       naming.RequestID(fmt.Sprintf("prime-learn-%d", time.Now().UnixNano())),
@@ -7425,6 +7460,7 @@ func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID
 		Body:            payload,
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(deps.ProjectID)},
 	})
+	finish(err)
 	if err != nil || !resp.OK || len(resp.Body) == 0 {
 		return strings.Join(lines, "\n")
 	}
@@ -7526,11 +7562,24 @@ func loadIssueDetailTask(ctx context.Context, deps *Dependencies, issueID string
 	return task, nil
 }
 
+func loadPrimeIssueDetailTask(ctx context.Context, deps *Dependencies, issueID string) (domain.Task, error) {
+	ctx, cancel := context.WithTimeout(ctx, primeDaemonReadTimeout)
+	finish := primePhase(deps, "issue_detail", fmt.Sprintf("loading issue detail for %s", issueID))
+	task, err := loadIssueDetailTask(ctx, deps, issueID)
+	cancel()
+	finish(err)
+	return task, err
+}
+
 func loadPrimeTaskGraphReadiness(ctx context.Context, deps *Dependencies, issueID string) (daemonclient.TaskGraphReadiness, bool) {
 	if deps == nil || deps.DaemonClient == nil || strings.TrimSpace(issueID) == "" {
 		return daemonclient.TaskGraphReadiness{}, false
 	}
+	ctx, cancel := context.WithTimeout(ctx, primeDaemonReadTimeout)
+	finish := primePhase(deps, "graph_readiness", fmt.Sprintf("loading graph readiness for %s", issueID))
 	ready, err := deps.DaemonClient.TaskGraphReadiness(ctx, issueID)
+	cancel()
+	finish(err)
 	if err != nil {
 		return daemonclient.TaskGraphReadiness{}, false
 	}
