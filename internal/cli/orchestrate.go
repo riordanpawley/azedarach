@@ -25,6 +25,8 @@ type OrchestrateStatusOptions struct {
 	SinceSeq    int64
 	Limit       int
 	JSON        bool
+	Summary     bool
+	Full        bool
 }
 
 type OrchestrateStartOptions struct {
@@ -42,6 +44,9 @@ type OrchestrateWatchOptions struct {
 	SinceSeq     int64
 	JSONL        bool
 	Once         bool
+	Compact      bool
+	Full         bool
+	Verbose      bool
 	PollInterval time.Duration
 }
 
@@ -209,6 +214,77 @@ type orchestrateWatchFrame struct {
 	Events                 []mailEvent                          `json:"events"`
 }
 
+type orchestrateCompactFrame struct {
+	RootIssueID string                      `json:"root_issue_id"`
+	SinceSeq    int64                       `json:"since_seq"`
+	NextSince   int64                       `json:"next_since"`
+	Capacity    orchestrateCompactCapacity  `json:"capacity"`
+	Readiness   orchestrateCompactReadiness `json:"readiness"`
+	Events      []orchestrateCompactEvent   `json:"events,omitempty"`
+	EventCount  int                         `json:"event_count"`
+	Warnings    []string                    `json:"warnings,omitempty"`
+	Advice      map[string]interface{}      `json:"advice,omitempty"`
+}
+
+type orchestrateCompactCapacity struct {
+	Runnable int            `json:"runnable"`
+	Active   int            `json:"active"`
+	Blocked  int            `json:"blocked"`
+	Pending  int            `json:"pending"`
+	Activity map[string]int `json:"activity,omitempty"`
+}
+
+type orchestrateCompactReadiness struct {
+	Runnable               []string                             `json:"runnable,omitempty"`
+	Active                 []orchestrateCompactActiveSession    `json:"active,omitempty"`
+	Blocked                map[string]string                    `json:"blocked,omitempty"`
+	Pending                []orchestratePendingStart            `json:"pending,omitempty"`
+	NestedRoots            []orchestrateCompactNestedRoot       `json:"nested_roots,omitempty"`
+	SessionStartProgress   []orchestrateCompactSessionProgress  `json:"session_start_progress,omitempty"`
+	StaleCloseableChildren []orchestrateStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
+}
+
+type orchestrateCompactActiveSession struct {
+	IssueID        string `json:"issue_id"`
+	Status         string `json:"status,omitempty"`
+	Activity       string `json:"activity"`
+	ActivitySource string `json:"activity_source,omitempty"`
+}
+
+type orchestrateCompactNestedRoot struct {
+	IssueID  string `json:"issue_id"`
+	Status   string `json:"status"`
+	Type     string `json:"type"`
+	Children int    `json:"children"`
+	Activity string `json:"activity,omitempty"`
+}
+
+type orchestrateCompactSessionProgress struct {
+	IssueID        string `json:"issue_id"`
+	OperationState string `json:"operation_state"`
+	Phase          string `json:"phase,omitempty"`
+	Percent        int    `json:"percent,omitempty"`
+	Message        string `json:"message,omitempty"`
+}
+
+type orchestrateCompactEvent struct {
+	Seq            int64                             `json:"seq"`
+	IssueID        string                            `json:"issue_id,omitempty"`
+	Type           string                            `json:"type"`
+	From           string                            `json:"from,omitempty"`
+	To             string                            `json:"to,omitempty"`
+	CreatedAt      time.Time                         `json:"created_at,omitempty"`
+	WorkerEvidence *orchestrateWorkerEvidenceSummary `json:"worker_evidence,omitempty"`
+}
+
+type orchestrateWorkerEvidenceSummary struct {
+	ValidationStatus string   `json:"validation_status"`
+	Summary          string   `json:"summary,omitempty"`
+	ReviewStatus     string   `json:"review_status,omitempty"`
+	Risks            []string `json:"risks,omitempty"`
+	Problems         []string `json:"problems,omitempty"`
+}
+
 type orchestrateNestedRoot struct {
 	IssueID       string                    `json:"issue_id"`
 	Status        string                    `json:"status"`
@@ -309,6 +385,8 @@ func ParseOrchestrateStatusArgs(args []string) (OrchestrateStatusOptions, error)
 	fs.Int64Var(&opts.SinceSeq, "since", 0, "mailbox sequence lower bound")
 	fs.IntVar(&opts.Limit, "limit", 50, "maximum mailbox events to include")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
+	fs.BoolVar(&opts.Summary, "summary", false, "emit concise readiness and event summaries")
+	fs.BoolVar(&opts.Full, "full", false, "emit full readiness and mailbox event payloads")
 	if err := fs.Parse(args); err != nil {
 		return OrchestrateStatusOptions{}, err
 	}
@@ -320,6 +398,9 @@ func ParseOrchestrateStatusArgs(args []string) (OrchestrateStatusOptions, error)
 	}
 	if opts.Limit < 1 {
 		return OrchestrateStatusOptions{}, fmt.Errorf("limit must be >= 1")
+	}
+	if opts.Summary && opts.Full {
+		return OrchestrateStatusOptions{}, fmt.Errorf("--summary and --full cannot be combined")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -359,7 +440,7 @@ func ParseOrchestrateStartArgs(args []string) (OrchestrateStartOptions, error) {
 }
 
 func ParseOrchestrateWatchArgs(args []string) (OrchestrateWatchOptions, error) {
-	opts := OrchestrateWatchOptions{JSONL: true, PollInterval: 250 * time.Millisecond}
+	opts := OrchestrateWatchOptions{JSONL: true, Compact: true, PollInterval: 250 * time.Millisecond}
 	fs := flag.NewFlagSet("orchestrate watch", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
@@ -367,14 +448,28 @@ func ParseOrchestrateWatchArgs(args []string) (OrchestrateWatchOptions, error) {
 	fs.Int64Var(&opts.SinceSeq, "since", 0, "mailbox sequence lower bound")
 	fs.BoolVar(&opts.JSONL, "jsonl", true, "emit JSON lines")
 	fs.BoolVar(&opts.Once, "once", false, "print one frame then exit")
+	fs.BoolVar(&opts.Compact, "compact", true, "emit concise readiness and event summaries")
+	fs.BoolVar(&opts.Verbose, "verbose", false, "emit full readiness and mailbox event payloads")
+	fs.BoolVar(&opts.Full, "full", false, "alias for --verbose")
 	if err := fs.Parse(args); err != nil {
 		return OrchestrateWatchOptions{}, err
 	}
+	explicitFlags := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) {
+		explicitFlags[f.Name] = true
+	})
 	if fs.NArg() != 0 {
 		return OrchestrateWatchOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
 	if strings.TrimSpace(opts.RootIssueID) == "" {
 		return OrchestrateWatchOptions{}, fmt.Errorf("missing required flag: --root")
+	}
+	if explicitFlags["compact"] && opts.Compact && (opts.Full || opts.Verbose) {
+		return OrchestrateWatchOptions{}, fmt.Errorf("--compact cannot be combined with --verbose or --full")
+	}
+	if opts.Full || opts.Verbose {
+		opts.Compact = false
+		opts.Full = true
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -587,6 +682,14 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 			"watch":             fmt.Sprintf("az orchestrate watch --root %s --since %d --jsonl", ready.RootIssueID, nextMailboxSeq(events, opts.SinceSeq)),
 			"watch_instruction": "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
 		},
+	}
+	if opts.Summary {
+		compact := compactFrameFromStatusResult(result, opts.SinceSeq, nextMailboxSeq(events, opts.SinceSeq))
+		if opts.JSON {
+			return printJSON(compact)
+		}
+		printCompactOrchestrateFrame(compact)
+		return nil
 	}
 	if opts.JSON {
 		return printJSON(result)
@@ -1452,7 +1555,7 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 		)
 	}
 	if len(frame.Events) > 0 || len(frame.Pending) > 0 || len(frame.SessionStartProgress) > 0 || len(frame.ActiveSessions) > 0 || opts.Once {
-		if err := emitOrchestrateWatchFrame(frame, opts.JSONL); err != nil {
+		if err := emitOrchestrateWatchFrame(frame, opts.JSONL, opts.Compact); err != nil {
 			return err
 		}
 	}
@@ -1512,7 +1615,7 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 		if len(events) == 0 && snapshotKey == lastSnapshotKey {
 			continue
 		}
-		if err := emitOrchestrateWatchFrame(frame, opts.JSONL); err != nil {
+		if err := emitOrchestrateWatchFrame(frame, opts.JSONL, opts.Compact); err != nil {
 			return err
 		}
 		lastSnapshotKey = snapshotKey
@@ -2072,7 +2175,261 @@ func buildOrchestrateWatchFrame(deps *Dependencies, rootIssueID string, since in
 	return orchestrateWatchFrameFromReadiness(ready, watchEvents, since, nextMailboxSeq(events, since)), nil
 }
 
-func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool) error {
+func compactFrameFromStatusResult(result orchestrateStatusResult, since, nextSince int64) orchestrateCompactFrame {
+	events := make([]mailEvent, 0, len(result.MailboxEvents))
+	for _, event := range result.MailboxEvents {
+		events = append(events, protocolToLocalMailEvent(event))
+	}
+	frame := orchestrateWatchFrame{
+		RootIssueID:            result.RootIssueID,
+		SinceSeq:               since,
+		NextSince:              nextSince,
+		Runnable:               result.Runnable,
+		NestedRoots:            result.NestedRoots,
+		Pending:                result.Pending,
+		Active:                 result.Active,
+		ActiveSessions:         result.ActiveSessions,
+		SessionStartProgress:   result.SessionStartProgress,
+		StaleCloseableChildren: result.StaleCloseableChildren,
+		Blocked:                result.Blocked,
+		Events:                 events,
+	}
+	compact := compactFrameFromWatchFrame(frame)
+	compact.Warnings = result.Warnings
+	compact.Advice = copyAdvice(result.Advice)
+	return compact
+}
+
+func copyAdvice(advice map[string]interface{}) map[string]interface{} {
+	if len(advice) == 0 {
+		return nil
+	}
+	out := make(map[string]interface{}, len(advice))
+	for key, value := range advice {
+		out[key] = value
+	}
+	return out
+}
+
+func compactFrameFromWatchFrame(frame orchestrateWatchFrame) orchestrateCompactFrame {
+	return orchestrateCompactFrame{
+		RootIssueID: frame.RootIssueID,
+		SinceSeq:    frame.SinceSeq,
+		NextSince:   frame.NextSince,
+		Capacity: orchestrateCompactCapacity{
+			Runnable: len(frame.Runnable),
+			Active:   len(frame.ActiveSessions),
+			Blocked:  len(frame.Blocked),
+			Pending:  len(frame.Pending),
+			Activity: compactActivityCounts(frame.ActiveSessions),
+		},
+		Readiness: orchestrateCompactReadiness{
+			Runnable:               append([]string(nil), frame.Runnable...),
+			Active:                 compactActiveSessions(frame.ActiveSessions),
+			Blocked:                compactBlocked(frame.Blocked),
+			Pending:                append([]orchestratePendingStart(nil), frame.Pending...),
+			NestedRoots:            compactNestedRoots(frame.NestedRoots),
+			SessionStartProgress:   compactSessionStartProgress(frame.SessionStartProgress),
+			StaleCloseableChildren: append([]orchestrateStaleCloseableCandidate(nil), frame.StaleCloseableChildren...),
+		},
+		Events:     compactEvents(frame.Events),
+		EventCount: len(frame.Events),
+	}
+}
+
+func compactActivityCounts(activeSessions []orchestrateActiveSession) map[string]int {
+	counts := make(map[string]int)
+	for _, active := range activeSessions {
+		activity := strings.TrimSpace(active.Activity)
+		if activity == "" {
+			activity = "unknown"
+		}
+		counts[activity]++
+	}
+	if len(counts) == 0 {
+		return nil
+	}
+	return counts
+}
+
+func compactActiveSessions(activeSessions []orchestrateActiveSession) []orchestrateCompactActiveSession {
+	out := make([]orchestrateCompactActiveSession, 0, len(activeSessions))
+	for _, active := range activeSessions {
+		out = append(out, orchestrateCompactActiveSession{
+			IssueID:        active.IssueID,
+			Status:         active.Status,
+			Activity:       active.Activity,
+			ActivitySource: active.ActivitySource,
+		})
+	}
+	return out
+}
+
+func compactBlocked(blocked map[string]string) map[string]string {
+	if len(blocked) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(blocked))
+	for id, reason := range blocked {
+		out[id] = reason
+	}
+	return out
+}
+
+func compactNestedRoots(nestedRoots []orchestrateNestedRoot) []orchestrateCompactNestedRoot {
+	out := make([]orchestrateCompactNestedRoot, 0, len(nestedRoots))
+	for _, nested := range nestedRoots {
+		compact := orchestrateCompactNestedRoot{
+			IssueID:  nested.IssueID,
+			Status:   nested.Status,
+			Type:     nested.Type,
+			Children: nested.ChildCount,
+		}
+		if nested.ActiveSession != nil {
+			compact.Activity = nested.ActiveSession.Activity
+		}
+		out = append(out, compact)
+	}
+	return out
+}
+
+func compactSessionStartProgress(progress []orchestrateSessionStartProgress) []orchestrateCompactSessionProgress {
+	out := make([]orchestrateCompactSessionProgress, 0, len(progress))
+	for _, item := range progress {
+		out = append(out, orchestrateCompactSessionProgress{
+			IssueID:        item.IssueID,
+			OperationState: item.OperationState,
+			Phase:          item.Phase,
+			Percent:        item.Percent,
+			Message:        item.Message,
+		})
+	}
+	return out
+}
+
+func compactEvents(events []mailEvent) []orchestrateCompactEvent {
+	out := make([]orchestrateCompactEvent, 0, len(events))
+	for _, event := range events {
+		out = append(out, orchestrateCompactEvent{
+			Seq:            event.Seq,
+			IssueID:        event.IssueID,
+			Type:           event.Type,
+			From:           event.From,
+			To:             event.To,
+			CreatedAt:      event.CreatedAt,
+			WorkerEvidence: compactWorkerEvidenceSummary(event),
+		})
+	}
+	return out
+}
+
+func compactWorkerEvidenceSummary(event mailEvent) *orchestrateWorkerEvidenceSummary {
+	if payloadSummary := compactWorkerEvidenceSummaryFromPayload(event.Payload); payloadSummary != nil {
+		return payloadSummary
+	}
+	packet, validation := domain.ParseWorkerEvidencePacketBody(event.Body)
+	if !validation.Found {
+		return nil
+	}
+	status := "incomplete"
+	if validation.Complete {
+		status = "complete"
+	}
+	return &orchestrateWorkerEvidenceSummary{
+		ValidationStatus: status,
+		Summary:          packet.Summary,
+		ReviewStatus:     packet.Review.Status,
+		Risks:            nonEmptyStringCopy(packet.Risks),
+		Problems:         validation.Problems(),
+	}
+}
+
+func compactWorkerEvidenceSummaryFromPayload(payload map[string]interface{}) *orchestrateWorkerEvidenceSummary {
+	validationMap, _ := payload["worker_evidence_validation"].(map[string]interface{})
+	if len(validationMap) == 0 {
+		return nil
+	}
+	status := "incomplete"
+	if compactBoolValue(validationMap["complete"]) {
+		status = "complete"
+	}
+	if !compactBoolValue(validationMap["found"]) {
+		status = "missing"
+	}
+	packetMap, _ := payload["worker_evidence"].(map[string]interface{})
+	return &orchestrateWorkerEvidenceSummary{
+		ValidationStatus: status,
+		Summary:          compactStringValue(packetMap["summary"]),
+		ReviewStatus:     workerEvidenceReviewStatus(packetMap),
+		Risks:            compactStringSliceValue(packetMap["risks"]),
+		Problems:         workerEvidenceValidationProblems(validationMap),
+	}
+}
+
+func workerEvidenceReviewStatus(packet map[string]interface{}) string {
+	review, _ := packet["review"].(map[string]interface{})
+	return compactStringValue(review["status"])
+}
+
+func workerEvidenceValidationProblems(validation map[string]interface{}) []string {
+	var problems []string
+	for _, field := range compactStringSliceValue(validation["missing"]) {
+		problems = append(problems, "missing "+field)
+	}
+	problems = append(problems, compactStringSliceValue(validation["invalid"])...)
+	return problems
+}
+
+func compactBoolValue(value interface{}) bool {
+	got, _ := value.(bool)
+	return got
+}
+
+func compactStringValue(value interface{}) string {
+	got, _ := value.(string)
+	return strings.TrimSpace(got)
+}
+
+func compactStringSliceValue(value interface{}) []string {
+	raw, ok := value.([]interface{})
+	if !ok {
+		if stringsValue, ok := value.([]string); ok {
+			return nonEmptyStringCopy(stringsValue)
+		}
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if s := compactStringValue(item); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func nonEmptyStringCopy(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func formatCompactActivity(counts map[string]int) string {
+	activities := sortedKeys(counts)
+	parts := make([]string, 0, len(activities))
+	for _, activity := range activities {
+		parts = append(parts, fmt.Sprintf("%s=%d", activity, counts[activity]))
+	}
+	return strings.Join(parts, " ")
+}
+
+func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool, compact bool) error {
+	if compact {
+		return emitCompactOrchestrateFrame(compactFrameFromWatchFrame(frame), jsonl)
+	}
 	if jsonl {
 		encoded, err := json.Marshal(frame)
 		if err != nil {
@@ -2142,6 +2499,109 @@ func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool) error {
 		}
 	}
 	return nil
+}
+
+func emitCompactOrchestrateFrame(frame orchestrateCompactFrame, jsonl bool) error {
+	if jsonl {
+		encoded, err := json.Marshal(frame)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(encoded))
+		return nil
+	}
+	printCompactOrchestrateFrame(frame)
+	return nil
+}
+
+func printCompactOrchestrateFrame(frame orchestrateCompactFrame) {
+	fmt.Printf("root=%s since=%d next=%d events=%d runnable=%d active=%d blocked=%d pending=%d\n",
+		frame.RootIssueID,
+		frame.SinceSeq,
+		frame.NextSince,
+		frame.EventCount,
+		frame.Capacity.Runnable,
+		frame.Capacity.Active,
+		frame.Capacity.Blocked,
+		frame.Capacity.Pending,
+	)
+	if len(frame.Capacity.Activity) > 0 {
+		fmt.Printf("activity: %s\n", formatCompactActivity(frame.Capacity.Activity))
+	}
+	if len(frame.Readiness.Runnable) > 0 {
+		fmt.Printf("runnable: %s\n", strings.Join(frame.Readiness.Runnable, ", "))
+	}
+	if len(frame.Readiness.Blocked) > 0 {
+		fmt.Println("blocked:")
+		for _, id := range sortedKeys(frame.Readiness.Blocked) {
+			fmt.Printf("- %s: %s\n", id, frame.Readiness.Blocked[id])
+		}
+	}
+	if len(frame.Readiness.Active) > 0 {
+		fmt.Println("active:")
+		for _, active := range frame.Readiness.Active {
+			status := strings.TrimSpace(active.Status)
+			if status == "" {
+				status = "active"
+			}
+			fmt.Printf("- %s status=%s activity=%s\n", active.IssueID, status, active.Activity)
+		}
+	}
+	if len(frame.Readiness.Pending) > 0 {
+		fmt.Println("pending:")
+		for _, pending := range frame.Readiness.Pending {
+			fmt.Printf("- %s state=%s operation=%s\n", pending.IssueID, pending.OperationState, pending.OperationID)
+		}
+	}
+	if len(frame.Readiness.NestedRoots) > 0 {
+		fmt.Println("nested roots:")
+		for _, nested := range frame.Readiness.NestedRoots {
+			if nested.Activity != "" {
+				fmt.Printf("- %s status=%s type=%s children=%d activity=%s\n", nested.IssueID, nested.Status, nested.Type, nested.Children, nested.Activity)
+			} else {
+				fmt.Printf("- %s status=%s type=%s children=%d\n", nested.IssueID, nested.Status, nested.Type, nested.Children)
+			}
+		}
+	}
+	if len(frame.Readiness.SessionStartProgress) > 0 {
+		fmt.Println("session start progress:")
+		for _, progress := range frame.Readiness.SessionStartProgress {
+			fmt.Printf("- %s state=%s phase=%s progress=%d%% %s\n", progress.IssueID, progress.OperationState, progress.Phase, progress.Percent, progress.Message)
+		}
+	}
+	if len(frame.Events) > 0 {
+		fmt.Println("events:")
+		for _, evt := range frame.Events {
+			if evt.WorkerEvidence != nil {
+				evidence := evt.WorkerEvidence
+				extra := strings.TrimSpace(evidence.Summary)
+				if len(evidence.Risks) > 0 {
+					extra = strings.TrimSpace(extra + " risks=" + strings.Join(evidence.Risks, ", "))
+				}
+				if len(evidence.Problems) > 0 {
+					extra = strings.TrimSpace(extra + " problems=" + strings.Join(evidence.Problems, "; "))
+				}
+				if extra != "" {
+					fmt.Printf("- seq=%d issue=%s type=%s evidence=%s review=%s %s\n", evt.Seq, evt.IssueID, evt.Type, evidence.ValidationStatus, evidence.ReviewStatus, extra)
+				} else {
+					fmt.Printf("- seq=%d issue=%s type=%s evidence=%s review=%s\n", evt.Seq, evt.IssueID, evt.Type, evidence.ValidationStatus, evidence.ReviewStatus)
+				}
+				continue
+			}
+			fmt.Printf("- seq=%d issue=%s type=%s\n", evt.Seq, evt.IssueID, evt.Type)
+		}
+	}
+	if len(frame.Warnings) > 0 {
+		fmt.Println("warnings:")
+		for _, warning := range frame.Warnings {
+			fmt.Printf("- %s\n", warning)
+		}
+	}
+	if frame.Advice != nil {
+		if watch, ok := frame.Advice["watch"].(string); ok && watch != "" {
+			fmt.Printf("watch: %s\n", watch)
+		}
+	}
 }
 
 func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain.Task, coordination string) orchestratePromptResult {
