@@ -3329,8 +3329,8 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0021_agent_learning_relations",
 		"0021_agent_learning_target_state",
 		"0025_agent_learning_privacy",
-		"0026_issue_ownership",
 		"0026_decision_search_fts",
+		"0026_issue_ownership",
 	}, got)
 }
 
