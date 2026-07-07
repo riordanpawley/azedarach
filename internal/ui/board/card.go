@@ -126,7 +126,7 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 	if state.IsMergeCandidate {
 		headerParts = append(headerParts, renderMergeCandidateBadge(s))
 	}
-	headerParts = append(headerParts, issueToken, renderTaskTypeBadge(task.Type, s))
+	headerParts = append(headerParts, issueToken)
 	if phaseBadge != "" {
 		headerParts = append(headerParts, phaseBadge)
 	}
@@ -140,6 +140,7 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 	visibleRuntimeSignals := runtimeSignalsForHeader(task.Session, runtimeSignals)
 	runtimeRow := renderRuntimeSignals(visibleRuntimeSignals, s)
 	runtimeCompact := renderRuntimeSignalsCompact(visibleRuntimeSignals, s)
+	typeBadge := renderTaskTypeBadge(task.Type, s)
 	headerTitle := strings.Join(headerParts, " ")
 	headerTokens := []struct {
 		full    string
@@ -148,6 +149,7 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 		{full: sessionRow, compact: sessionCompact},
 		{full: runtimeRow, compact: runtimeCompact},
 		{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
+		{full: typeBadge, compact: typeBadge},
 	}
 	preferCompact := maxLineLen < 44
 	headerLines := []string{headerTitle}
@@ -313,9 +315,11 @@ func appendHeaderToken(headerLines []string, maxLineLen int, full string, compac
 		if lineIdx < 0 || lineIdx >= len(headerLines) {
 			return false
 		}
-		candidate := strings.TrimSpace(headerLines[lineIdx])
-		if candidate != "" {
+		candidate := headerLines[lineIdx]
+		if strings.TrimSpace(candidate) != "" {
 			candidate += " "
+		} else {
+			candidate = ""
 		}
 		candidate += token
 		if ansi.StringWidth(candidate) <= maxLineLen {
@@ -456,9 +460,11 @@ func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
 	}
 
 	stateStyle := s.Session(session)
-	label := session.DisplayCode()
+	label := renderSessionStatusLabel(session)
 	var value string
-	if elapsed != "" {
+	if label == "" {
+		value = icon
+	} else if elapsed != "" {
 		value = fmt.Sprintf("%s %s %s", icon, label, elapsed)
 	} else {
 		value = fmt.Sprintf("%s %s", icon, label)
@@ -466,25 +472,43 @@ func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
 	return stateStyle.Render(value)
 }
 
+func renderSessionStatusLabel(session *domain.Session) string {
+	if session == nil {
+		return "idle"
+	}
+	if session.IsPartial() {
+		return ""
+	}
+	if displayState, ok := session.DisplayState(); ok {
+		return sessionStateCardLabel(displayState)
+	}
+	if session.DisplayActivity() != "" {
+		return ""
+	}
+	return sessionStateCardLabel(session.State)
+}
+
+func sessionStateCardLabel(state domain.SessionState) string {
+	switch state {
+	case domain.SessionBusy:
+		return "busy"
+	case domain.SessionIdle:
+		return "idle"
+	case domain.SessionWaiting:
+		return "wait"
+	case domain.SessionDone:
+		return "done"
+	default:
+		return ""
+	}
+}
+
 func renderSessionStatusCompact(session *domain.Session) string {
 	if session == nil {
 		return ""
 	}
 
-	icon := session.DisplayIcon()
-	displayState, hasDisplayState := session.DisplayState()
-	if !hasDisplayState {
-		if session.DisplayActivity() == "no-agent" {
-			displayState = domain.SessionIdle
-		} else {
-			displayState = session.State
-		}
-	}
-	if session.StartedAt != nil && (displayState == domain.SessionBusy || displayState == domain.SessionWaiting) {
-		return fmt.Sprintf("%s%s", icon, formatCompactDuration(time.Since(*session.StartedAt)))
-	}
-
-	return icon + session.DisplayCode()
+	return session.DisplayIcon()
 }
 
 func renderRuntimeSignals(signals *RuntimeSignals, s *styles.Styles) string {

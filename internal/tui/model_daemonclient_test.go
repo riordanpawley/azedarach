@@ -3625,7 +3625,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 					t.Fatalf("runtime signals after session event = %+v, want tmux session", runtime)
 				}
 				view := boardView(model)
-				if !strings.Contains(view, "⏸ P") {
+				if !strings.Contains(view, "⏸") {
 					t.Fatalf("board view after session event = %q, missing paused session state", view)
 				}
 				workspaceView := workspace(model).View()

@@ -191,7 +191,7 @@ func TestRenderCard_WithPartialAggregateSession(t *testing.T) {
 
 	result := RenderCard(task, false, false, 64, s)
 	stripped := stripANSI(result)
-	if !strings.Contains(stripped, "◒ M") {
+	if !strings.Contains(stripped, "◒") || strings.Contains(stripped, "mix") {
 		t.Fatalf("partial aggregate session should render mixed signage, got: %s", stripped)
 	}
 }
@@ -487,8 +487,8 @@ func TestRenderSessionStatus(t *testing.T) {
 		if !strings.Contains(stripped, "●") {
 			t.Errorf("Busy session should contain busy icon, got: %s", stripped)
 		}
-		if !strings.Contains(stripped, " B ") {
-			t.Errorf("Busy session should contain compact B label, got: %s", stripped)
+		if !strings.Contains(stripped, "busy") {
+			t.Errorf("Busy session should contain readable busy label, got: %s", stripped)
 		}
 
 		if !strings.Contains(stripped, "h") || !strings.Contains(stripped, "m") {
@@ -512,10 +512,10 @@ func TestRenderSessionStatus(t *testing.T) {
 		if !strings.Contains(stripped, "○") {
 			t.Errorf("Hook-idle session should contain idle icon, got: %s", stripped)
 		}
-		if !strings.Contains(stripped, " I") {
-			t.Errorf("Hook-idle session should contain compact I label, got: %s", stripped)
+		if !strings.Contains(stripped, "idle") {
+			t.Errorf("Hook-idle session should contain readable idle label, got: %s", stripped)
 		}
-		if strings.Contains(stripped, " B") {
+		if strings.Contains(stripped, "busy") {
 			t.Errorf("Hook-idle session should not render busy label, got: %s", stripped)
 		}
 		if strings.Contains(stripped, "h") || strings.Contains(stripped, "m") {
@@ -535,8 +535,8 @@ func TestRenderSessionStatus(t *testing.T) {
 		if !strings.Contains(stripped, "✓") {
 			t.Errorf("Done session should contain done icon, got: %s", stripped)
 		}
-		if !strings.Contains(stripped, " D") {
-			t.Errorf("Done session should contain compact D label, got: %s", stripped)
+		if !strings.Contains(stripped, "done") {
+			t.Errorf("Done session should contain readable done label, got: %s", stripped)
 		}
 
 		// Should NOT contain time format
@@ -558,6 +558,61 @@ func TestRenderSessionStatus(t *testing.T) {
 			t.Errorf("Error session should contain error icon, got: %s", stripped)
 		}
 	})
+}
+
+func TestRenderSessionStatusLabelUsesReadableLabelsOrIconOnly(t *testing.T) {
+	tests := []struct {
+		name    string
+		session *domain.Session
+		want    string
+	}{
+		{name: "nil", session: nil, want: "idle"},
+		{name: "busy", session: &domain.Session{State: domain.SessionBusy}, want: "busy"},
+		{name: "idle", session: &domain.Session{State: domain.SessionIdle}, want: "idle"},
+		{name: "waiting", session: &domain.Session{State: domain.SessionWaiting}, want: "wait"},
+		{name: "done", session: &domain.Session{State: domain.SessionDone}, want: "done"},
+		{name: "error", session: &domain.Session{State: domain.SessionError}, want: ""},
+		{name: "paused", session: &domain.Session{State: domain.SessionPaused}, want: ""},
+		{name: "partial", session: &domain.Session{State: domain.SessionBusy, ActiveCount: 1, PausedCount: 1}, want: ""},
+		{name: "no agent", session: &domain.Session{State: domain.SessionBusy, Activity: "no-agent"}, want: ""},
+		{name: "unknown", session: &domain.Session{State: domain.SessionBusy, Activity: "unknown"}, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := renderSessionStatusLabel(tt.session)
+			if got != tt.want {
+				t.Fatalf("renderSessionStatusLabel() = %q, want %q", got, tt.want)
+			}
+			if len(got) > 4 {
+				t.Fatalf("renderSessionStatusLabel() = %q, want at most 4 chars", got)
+			}
+		})
+	}
+}
+
+func TestRenderSessionStatusCompactUsesIconOnly(t *testing.T) {
+	startedAt := time.Now().Add(-90 * time.Minute)
+	tests := []struct {
+		name    string
+		session *domain.Session
+		want    string
+	}{
+		{name: "busy", session: &domain.Session{State: domain.SessionBusy, StartedAt: &startedAt}, want: "●"},
+		{name: "idle", session: &domain.Session{State: domain.SessionBusy, Activity: "idle", StartedAt: &startedAt}, want: "○"},
+		{name: "waiting", session: &domain.Session{State: domain.SessionWaiting, StartedAt: &startedAt}, want: "◐"},
+		{name: "paused", session: &domain.Session{State: domain.SessionPaused}, want: "⏸"},
+		{name: "nil", session: nil, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := renderSessionStatusCompact(tt.session)
+			if got != tt.want {
+				t.Fatalf("renderSessionStatusCompact() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestRenderCard_NestedIssueShowsTreeContext(t *testing.T) {
@@ -657,7 +712,7 @@ func TestRenderCard_MetadataOnFirstLine(t *testing.T) {
 	if first == "" {
 		t.Fatalf("expected metadata line containing issue id, got: %s", result)
 	}
-	for _, token := range []string{"P2", "CHE-3002", " T ", " W ", "2d 2h", worktreeToken, "✎", "+12/-3", "[1/7]"} {
+	for _, token := range []string{"P2", "CHE-3002", " T ", "wait", "2d 2h", worktreeToken, "✎", "+12/-3", "[1/7]"} {
 		if !strings.Contains(first, token) {
 			t.Fatalf("first line should contain %q, got: %s", token, first)
 		}
@@ -708,14 +763,57 @@ func TestRenderCard_NarrowWidthUsesSecondHeaderRowBeforeCompaction(t *testing.T)
 	if first == "" {
 		t.Fatalf("expected metadata line containing issue id, got: %s", result)
 	}
-	if !strings.Contains(first, "P2") || !strings.Contains(first, "CHE-3010") || !strings.Contains(first, " T ") {
-		t.Fatalf("first line must preserve core tokens, got: %s", first)
+	if !strings.Contains(first, "P2") || !strings.Contains(first, "CHE-3010") || !strings.Contains(first, "wait") {
+		t.Fatalf("first line must preserve issue identity and session state, got: %s", first)
 	}
 	header := lines[firstIdx] + " " + lines[firstIdx+1]
-	for _, token := range []string{" W ", "✎", "+12/-3", "[1/7]"} {
+	for _, token := range []string{" T ", "✎", "+12/-3", "[1/7]"} {
 		if !strings.Contains(header, token) {
 			t.Fatalf("expected token %q to survive across narrow two-row header, got: %q", token, header)
 		}
+	}
+}
+
+func TestRenderCard_SessionActivityPrecedesTaskType(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-90 * time.Minute)
+	task := domain.Task{
+		ID:       "CHE-3011",
+		Title:    "activity before type",
+		Status:   domain.StatusInProgress,
+		Priority: domain.P2,
+		Type:     domain.TypeBug,
+		Session: &domain.Session{
+			IssueID:        "CHE-3011",
+			State:          domain.SessionBusy,
+			Activity:       "idle",
+			ActivitySource: "hooks",
+			StartedAt:      &startedAt,
+		},
+	}
+
+	result := stripANSI(renderCard(task, CardState{}, nil, nil, nil, 64, s))
+	lines := strings.Split(result, "\n")
+	var header string
+	for _, line := range lines {
+		if strings.Contains(line, "CHE-3011") {
+			header = line
+			break
+		}
+	}
+	if header == "" {
+		t.Fatalf("expected header line containing issue id, got: %s", result)
+	}
+	activityIdx := strings.Index(header, "idle")
+	typeIdx := strings.LastIndex(header, " B ")
+	if activityIdx < 0 {
+		t.Fatalf("expected idle activity token in header, got: %s", header)
+	}
+	if typeIdx < 0 {
+		t.Fatalf("expected task type token in header, got: %s", header)
+	}
+	if activityIdx > typeIdx {
+		t.Fatalf("activity token should precede type token, got: %s", header)
 	}
 }
 
@@ -799,9 +897,9 @@ func TestRenderCard_NarrowWidthKeepsVerboseHeaderTokensAcrossTwoRows(t *testing.
 		t.Fatalf("expected at least two header rows and title row, got: %q", narrow)
 	}
 	header := lines[firstIdx] + " " + lines[firstIdx+1]
-	for _, token := range []string{" W ", "✎", "+12/-3", "[1/7]"} {
+	for _, token := range []string{"wait", "✓G*", " T "} {
 		if !strings.Contains(header, token) {
-			t.Fatalf("expected verbose token %q to be preserved in narrow two-row header, got: %q", token, header)
+			t.Fatalf("expected token %q to be preserved in narrow two-row header, got: %q", token, header)
 		}
 	}
 }
