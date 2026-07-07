@@ -495,16 +495,18 @@ func (d *Daemon) directRuntimeReconcileForMutation(ctx context.Context, projectI
 	}
 	reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	reconcileCtx = context.WithValue(reconcileCtx, runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
+	_, err := d.directRuntimeReconcile(reconcileCtx, projectID, "mutation-direct:"+strings.TrimSpace(reason))
+	return err
+}
+
+func (d *Daemon) directRuntimeReconcile(ctx context.Context, projectID string, reason string) (protocol.RuntimeReconcileResponseBody, error) {
+	reconcileCtx := context.WithValue(ctx, runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
 		Priority: reconcilePriorityManual,
-		Reason:   "mutation-direct:" + strings.TrimSpace(reason),
+		Reason:   strings.TrimSpace(reason),
 	})
 	result, err := d.ensureRuntimeReconciler().Reconcile(reconcileCtx, projectID)
 	d.ensureRuntimeReconcileThrottle().Record(projectID, runtimeReconcileResultSignature(result), err)
-	if err != nil {
-		return err
-	}
-	return nil
+	return result, err
 }
 
 func (d *Daemon) handleRuntimeReconcile(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -530,6 +532,24 @@ func (d *Daemon) handleRuntimeReconcile(ctx context.Context, req protocol.Reques
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	if outcome.Err != nil {
+		if submission.Deduped && errors.Is(outcome.Err, context.DeadlineExceeded) {
+			retryOutcome, retryErr := d.retryManualRuntimeReconcileAfterDedupedTimeout(ctx, projectID)
+			if retryErr == nil {
+				outcome = retryOutcome
+			} else {
+				outcome.Err = fmt.Errorf("%w; retry manual runtime reconcile after deduped timeout: %w", outcome.Err, retryErr)
+			}
+			if outcome.Err != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("manual runtime reconcile retry after deduped timeout failed",
+					"project_id", projectID,
+					"error", outcome.Err,
+					"retry_error", retryErr,
+					"retry_outcome_error", retryOutcome.Err,
+				)
+			}
+		}
+	}
+	if outcome.Err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, outcome.Err.Error()), nil
 	}
 	result := outcome.Value
@@ -545,6 +565,14 @@ func (d *Daemon) handleRuntimeReconcile(ctx context.Context, req protocol.Reques
 	}
 	resp.Body = bodyBytes
 	return resp, nil
+}
+
+func (d *Daemon) retryManualRuntimeReconcileAfterDedupedTimeout(ctx context.Context, projectID string) (reconcileQueueResult[protocol.RuntimeReconcileResponseBody], error) {
+	submission, err := d.queueRuntimeReconcile(ctx, projectID, reconcilePriorityManual, "manual-retry-after-deduped-timeout")
+	if err != nil {
+		return reconcileQueueResult[protocol.RuntimeReconcileResponseBody]{}, err
+	}
+	return submission.Wait(ctx)
 }
 
 func (d *Daemon) handleRuntimeReconcileIssue(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

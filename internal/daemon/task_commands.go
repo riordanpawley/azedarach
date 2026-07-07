@@ -57,8 +57,10 @@ const (
 )
 
 const (
-	taskListSnapshotCacheTTL    = 5 * time.Second
-	taskListSnapshotLoadTimeout = 10 * time.Second
+	taskListSnapshotCacheTTL        = 5 * time.Second
+	taskListRuntimeRefreshTTL       = 5 * time.Second
+	taskListSnapshotRuntimeCacheTTL = taskListRuntimeRefreshTTL
+	taskListSnapshotLoadTimeout     = 10 * time.Second
 )
 
 const (
@@ -72,6 +74,7 @@ type taskListSnapshotCacheEntry struct {
 	Freshness     protocol.TaskListFreshness
 	Tasks         []domain.Task
 	CachedAt      time.Time
+	RuntimeAt     time.Time
 	SummariesOnly bool
 }
 
@@ -81,10 +84,17 @@ type taskListSnapshotLoad struct {
 	err    error
 }
 
+type taskListRuntimeRefresh struct {
+	done      chan struct{}
+	runtimeAt time.Time
+	err       error
+}
+
 type taskListSnapshotLoadResult struct {
 	Revision      uint64
 	LastCheckedAt time.Time
 	Freshness     protocol.TaskListFreshness
+	RuntimeAt     time.Time
 	SummariesOnly bool
 	Tasks         []domain.Task
 }
@@ -406,11 +416,12 @@ func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestE
 func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string, includeDependencies bool) (taskListSnapshotLoadResult, error) {
 	query = strings.TrimSpace(query)
 	refreshStartedAt := time.Now()
-	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("task list session runtime projection refresh failed", "project_id", projectID, "error", err)
+	runtimeAt, runtimeRefreshed, refreshErr := d.refreshTaskListSessionRuntimeState(ctx, projectID)
+	if refreshErr != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("task list session runtime projection refresh failed", "project_id", projectID, "error", refreshErr)
 	}
 	d.triggerWorktreeStateRefresh(projectID)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.worktree_refresh_trigger", refreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.worktree_refresh_trigger", refreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "session_runtime_refreshed", runtimeRefreshed)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task list requested", "project_id", projectID, "query", query != "")
 	}
@@ -447,15 +458,63 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "freshness", freshness)
 	revision := d.currentRevision(projectID)
 	if query == "" && !includeDependencies {
-		d.storeTaskListSnapshotCache(projectID, revision, lastCheckedAt, freshness, tasks, summariesOnly)
+		d.storeTaskListSnapshotCacheWithRuntimeAt(projectID, revision, lastCheckedAt, freshness, runtimeAt, tasks, summariesOnly)
 	}
 	return taskListSnapshotLoadResult{
 		Revision:      revision,
 		LastCheckedAt: lastCheckedAt,
 		Freshness:     freshness,
+		RuntimeAt:     runtimeAt,
 		SummariesOnly: summariesOnly,
 		Tasks:         tasks,
 	}, nil
+}
+
+func (d *Daemon) refreshTaskListSessionRuntimeState(ctx context.Context, projectID string) (time.Time, bool, error) {
+	if d == nil || d.tmux == nil || d.sessionRuntimeStateStoreIfConfigured(projectID) == nil {
+		return time.Time{}, false, nil
+	}
+	projectID = d.canonicalProjectID(projectID)
+	now := timeNow().UTC()
+
+	d.taskListRuntimeRefreshMu.Lock()
+	if d.taskListRuntimeLastRefresh == nil {
+		d.taskListRuntimeLastRefresh = map[string]time.Time{}
+	}
+	if d.taskListRuntimeRefreshes == nil {
+		d.taskListRuntimeRefreshes = map[string]*taskListRuntimeRefresh{}
+	}
+	lastRefresh := d.taskListRuntimeLastRefresh[projectID]
+	if !lastRefresh.IsZero() && now.Sub(lastRefresh) < taskListRuntimeRefreshTTL {
+		d.taskListRuntimeRefreshMu.Unlock()
+		return lastRefresh, false, nil
+	}
+	if refresh := d.taskListRuntimeRefreshes[projectID]; refresh != nil {
+		d.taskListRuntimeRefreshMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return time.Time{}, false, ctx.Err()
+		case <-refresh.done:
+			return refresh.runtimeAt, false, refresh.err
+		}
+	}
+	refresh := &taskListRuntimeRefresh{done: make(chan struct{})}
+	d.taskListRuntimeRefreshes[projectID] = refresh
+	d.taskListRuntimeRefreshMu.Unlock()
+
+	refresh.runtimeAt = now
+	refresh.err = d.refreshExistingSessionRuntimeState(ctx, projectID)
+
+	d.taskListRuntimeRefreshMu.Lock()
+	d.taskListRuntimeLastRefresh[projectID] = now
+	delete(d.taskListRuntimeRefreshes, projectID)
+	close(refresh.done)
+	d.taskListRuntimeRefreshMu.Unlock()
+
+	if refresh.err != nil {
+		return now, true, refresh.err
+	}
+	return now, true, nil
 }
 
 func cloneTaskListSnapshotLoadResult(result taskListSnapshotLoadResult) taskListSnapshotLoadResult {
@@ -745,11 +804,22 @@ func (d *Daemon) readFreshTaskListSnapshotCache(projectID string) (taskListSnaps
 	if timeNow().Sub(cached.CachedAt) > taskListSnapshotCacheTTL {
 		return taskListSnapshotCacheEntry{}, false
 	}
+	runtimeAt := cached.RuntimeAt
+	if runtimeAt.IsZero() {
+		runtimeAt = cached.CachedAt
+	}
+	if timeNow().Sub(runtimeAt) > taskListSnapshotRuntimeCacheTTL {
+		return taskListSnapshotCacheEntry{}, false
+	}
 	cached.Tasks = cloneTasks(cached.Tasks)
 	return cached, true
 }
 
 func (d *Daemon) storeTaskListSnapshotCache(projectID string, revision uint64, lastCheckedAt time.Time, freshness protocol.TaskListFreshness, tasks []domain.Task, summariesOnly bool) {
+	d.storeTaskListSnapshotCacheWithRuntimeAt(projectID, revision, lastCheckedAt, freshness, timeNow(), tasks, summariesOnly)
+}
+
+func (d *Daemon) storeTaskListSnapshotCacheWithRuntimeAt(projectID string, revision uint64, lastCheckedAt time.Time, freshness protocol.TaskListFreshness, runtimeAt time.Time, tasks []domain.Task, summariesOnly bool) {
 	if freshness != protocol.TaskListFreshnessFresh {
 		return
 	}
@@ -759,12 +829,17 @@ func (d *Daemon) storeTaskListSnapshotCache(projectID string, revision uint64, l
 	if d.taskListSnapshotCache == nil {
 		d.taskListSnapshotCache = map[string]taskListSnapshotCacheEntry{}
 	}
+	now := timeNow()
+	if runtimeAt.IsZero() {
+		runtimeAt = now
+	}
 	d.taskListSnapshotCache[projectID] = taskListSnapshotCacheEntry{
 		Revision:      revision,
 		LastCheckedAt: lastCheckedAt.UTC(),
 		Freshness:     freshness,
 		Tasks:         stripRuntimeFromTasks(tasks),
-		CachedAt:      timeNow(),
+		CachedAt:      now,
+		RuntimeAt:     runtimeAt.UTC(),
 		SummariesOnly: summariesOnly,
 	}
 }
@@ -3499,9 +3574,6 @@ func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID 
 }
 
 func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectID, rootIssueID string) ([]domain.Task, error) {
-	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("task graph session runtime refresh failed", "project_id", projectID, "root_issue_id", rootIssueID, "error", err)
-	}
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
@@ -3509,6 +3581,20 @@ func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectI
 	tasks, err := issueClient.ListGraphReadinessWithRuntime(ctx, projectID, rootIssueID)
 	if err != nil {
 		return nil, err
+	}
+	contextTaskIDs := taskIDsFromTasks(tasks)
+	canRefreshSessionRuntime := d != nil && d.tmux != nil && d.sessionRuntimeStateStoreIfConfigured(projectID) != nil
+	if canRefreshSessionRuntime && len(contextTaskIDs) > 0 {
+		if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("task graph scoped session runtime refresh failed", "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs), "error", err)
+			}
+		} else {
+			tasks, err = issueClient.ListGraphReadinessWithRuntime(ctx, projectID, rootIssueID)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Debug("task graph readiness loaded root-scoped tasks",

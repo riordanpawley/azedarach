@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -100,6 +101,11 @@ func issueCloseCommand(issueID string) string {
 var orchestrateObserveNow = func() time.Time {
 	return time.Now().UTC()
 }
+
+var (
+	orchestrateStartWaitTimeout      = sessionStartCommandTimeout
+	orchestrateStartWaitPollInterval = 250 * time.Millisecond
+)
 
 type orchestrateStatusResult struct {
 	RootIssueID            string                               `json:"root_issue_id"`
@@ -791,6 +797,16 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 
 	for _, launch := range pendingLaunches {
 		issueID := launch.IssueID
+		launch, pending, err := waitForOrchestrateStartLaunch(deps, opts, launch)
+		if err != nil {
+			result.Failed[issueID] = err.Error()
+			continue
+		}
+		if pending != nil {
+			result.Pending = append(result.Pending, *pending)
+			emitOrchestrateStartProgressWithLaunch(opts, "pending", launch)
+			continue
+		}
 		launch.WatchCommand = result.Advice.WatchCommand
 		launch.IntegrateHint = issueCloseCommand(issueID)
 		launch.CloseHint = fmt.Sprintf("az orchestrate close-session --issue %s", issueID)
@@ -800,6 +816,57 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	}
 
 	return result, nil
+}
+
+func waitForOrchestrateStartLaunch(deps *Dependencies, opts OrchestrateStartOptions, launch orchestrateStartLaunch) (orchestrateStartLaunch, *orchestrateStartPending, error) {
+	operationID := strings.TrimSpace(launch.OperationID)
+	if operationID == "" {
+		return launch, nil, nil
+	}
+
+	timeout := orchestrateStartWaitTimeout
+	if timeout <= 0 {
+		timeout = sessionStartCommandTimeout
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	record, err := deps.DaemonClient.WaitForOperation(waitCtx, operationID, orchestrateStartWaitPollInterval)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			if record.OperationID == "" {
+				record.OperationID = naming.OperationID(operationID)
+				record.State = operationStateFromString(launch.OperationState)
+			}
+			state := string(record.State)
+			if state == "" {
+				state = strings.TrimSpace(launch.OperationState)
+			}
+			if state == "" {
+				state = "unknown"
+			}
+			launch.OperationState = state
+			pending := orchestrateStartPending{
+				IssueID:        launch.IssueID,
+				OperationID:    operationID,
+				OperationState: state,
+				Reason:         fmt.Sprintf("timed out after %s waiting for daemon operation to finish; operation is still %s", timeout, state),
+				FollowUpCommands: []string{
+					fmt.Sprintf("az operation get --id %s --wait", operationID),
+					fmt.Sprintf("az orchestrate status --root %s --json", opts.RootIssueID),
+				},
+			}
+			return launch, &pending, nil
+		}
+		return launch, nil, fmt.Errorf("wait for operation %s: %w", operationID, err)
+	}
+
+	launch.OperationID = record.OperationID.String()
+	launch.OperationState = string(record.State)
+	if err := operationRecordError(record); err != nil {
+		return launch, nil, err
+	}
+	return launch, nil, nil
 }
 
 func emitOrchestrateStartProgress(opts OrchestrateStartOptions, stage, issueID string) {

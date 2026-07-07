@@ -25,10 +25,17 @@ func (m *mockRunner) Run(ctx context.Context, args ...string) (string, error) {
 type recordingRunner struct {
 	err      error
 	commands [][]string
+	inputs   []string
 }
 
 func (r *recordingRunner) Run(ctx context.Context, args ...string) (string, error) {
 	r.commands = append(r.commands, append([]string(nil), args...))
+	return "", r.err
+}
+
+func (r *recordingRunner) RunWithInput(ctx context.Context, input string, args ...string) (string, error) {
+	r.commands = append(r.commands, append([]string(nil), args...))
+	r.inputs = append(r.inputs, input)
 	return "", r.err
 }
 
@@ -319,10 +326,11 @@ func TestClient_PasteTextAndSubmit(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, [][]string{
-		{"set-buffer", "-b", "azedarach-message-az-42", "line one\nline two"},
+		{"load-buffer", "-b", "azedarach-message-az-42", "-"},
 		{"paste-buffer", "-dp", "-b", "azedarach-message-az-42", "-t", "az-42"},
 		{"send-keys", "-t", "az-42", "Enter"},
 	}, runner.commands)
+	assert.Equal(t, []string{"line one\nline two"}, runner.inputs)
 }
 
 func TestClient_PasteTextAndSubmitDelayRespectsContext(t *testing.T) {
@@ -342,9 +350,10 @@ func TestClient_PasteTextAndSubmitDelayRespectsContext(t *testing.T) {
 	assert.ErrorAs(t, err, &tmuxErr)
 	assert.Equal(t, "send-keys", tmuxErr.Op)
 	assert.Equal(t, [][]string{
-		{"set-buffer", "-b", "azedarach-message-az-42", "message"},
+		{"load-buffer", "-b", "azedarach-message-az-42", "-"},
 		{"paste-buffer", "-dp", "-b", "azedarach-message-az-42", "-t", "az-42"},
 	}, runner.commands)
+	assert.Equal(t, []string{"message"}, runner.inputs)
 }
 
 func TestClient_CapturePane(t *testing.T) {
