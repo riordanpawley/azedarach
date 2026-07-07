@@ -9,7 +9,7 @@ Commands:
   get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]  Fetch many issues in requested order
   check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Alias for get
   doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Run integrity checks for one issue
-  create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an issue; auto-parents to AZEDARACH_ISSUE_ID when set
+  create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an issue; auto-parents to AZEDARACH_ISSUE_ID when set
   split [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create a child issue and launch it with az orchestrate start
   update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields (`--status closed` integrates, cleans, then closes)
   close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]  Integrate, clean up, and close an issue
@@ -37,8 +37,8 @@ Status semantics:
 
 Graph/root membership:
   To create a child under the active issue, run `az issue create "Child task"` from a session with AZEDARACH_ISSUE_ID set.
-  To attach to a different parent/root, create the issue and then run `az issue dep add <child-id> <parent-id> --type parent-child`.
-  Child/root membership comes from AZEDARACH_ISSUE_ID auto-parenting or `dep add --type parent-child`.
+  To attach to a different parent/root at creation time, pass `--parent <issue-id>`.
+  Child/root membership comes from AZEDARACH_ISSUE_ID auto-parenting, `--parent`, or `dep add --type parent-child`.
   Do not use `--impl <id>` when you mean "parent this under <id>".
   `--impl` assigns implementation/spec variant metadata only; it never attaches an issue to a graph/root.
 

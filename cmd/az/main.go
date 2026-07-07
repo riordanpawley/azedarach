@@ -1302,8 +1302,8 @@ func printWorktreeUsage() {
 }
 
 func printIssueCreateUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: az issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
-	fmt.Fprintln(w, "Note: `az issue create \"Child task\"` auto-parents to AZEDARACH_ISSUE_ID when set; use `az issue dep add <child-id> <parent-id> --type parent-child` for another parent/root.")
+	fmt.Fprintln(w, "Usage: az issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
+	fmt.Fprintln(w, "Note: `az issue create \"Child task\"` auto-parents to AZEDARACH_ISSUE_ID when set; use `--parent <issue-id>` for another parent/root.")
 	fmt.Fprintln(w, "Note: --impl only assigns implementation/spec variant metadata; it is not parent/root selection.")
 }
 

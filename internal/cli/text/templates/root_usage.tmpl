@@ -37,7 +37,7 @@ Commands:
   issue get-many [--project <project-id>] --id <id> [--id <id> ...] [--ids a,b,c] [--json] [--with-notes]  Fetch many issues in requested order
   issue check [--project <project-id>] [--id <id>] [--json] [<id>]  Alias for issue get
   issue doctor [--project <project-id>] [--id <id>] [--json] [<id>]  Run integrity checks for one issue
-  issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--title ...] [--description ...] [--json] [<title>]  Create an issue (auto-parent when AZEDARACH_ISSUE_ID is set; --impl is not parentage)
+  issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--title ...] [--description ...] [--json] [<title>]  Create an issue (auto-parent when AZEDARACH_ISSUE_ID is set; --parent selects parentage; --impl is not parentage)
   issue split [--project <project-id>] [--parent <id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an isolated child issue/session for later parent-side merge
   issue update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields (`--status closed` integrates, cleans, then closes)
   issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--force-worktree] [<id>]  Integrate, clean up, and close an issue

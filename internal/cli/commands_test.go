@@ -4986,6 +4986,18 @@ func TestParseIssueCreateArgs(t *testing.T) {
 			},
 		},
 		{
+			name: "explicit parent",
+			args: []string{"--parent", "az-explicit", "Title"},
+			want: IssueCreateOptions{
+				Title:                  "Title",
+				Type:                   domain.TypeTask,
+				Priority:               domain.P2,
+				AutoParentFromIssueID:  ptrToString("az-explicit"),
+				AutoCreatedFromIssueID: ptrToString("az-explicit"),
+				ExplicitParent:         true,
+			},
+		},
+		{
 			name: "interspersed flags after title",
 			args: []string{"Title", "--impl", "go-bubbletea", "--priority", "P1"},
 			want: IssueCreateOptions{
@@ -5017,7 +5029,7 @@ func TestParseIssueCreateArgs(t *testing.T) {
 		{
 			name:        "missing title",
 			args:        []string{},
-			errContains: "usage: az issue create [--project <project-id>] [--impl <implementation> ...] [--deferred]",
+			errContains: "usage: az issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred]",
 		},
 		{
 			name:        "title flag and positional are ambiguous",
@@ -5672,7 +5684,7 @@ func TestResolveIssueWriteImplementation(t *testing.T) {
 			{ID: "az-2", Implementations: []string{"default"}},
 		})
 		_, err := resolveIssueWriteImplementation(context.Background(), deps, "")
-		if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl (multiple implementations configured: default, go-bubbletea)") {
+		if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl (implementation is ambiguous; valid --impl values: default, go-bubbletea)") {
 			t.Fatalf("expected multi-implementation error, got %v", err)
 		}
 	})
@@ -5688,9 +5700,10 @@ func TestResolveIssueWriteImplementation(t *testing.T) {
 		}
 		for _, want := range []string{
 			`unknown implementation "cif"`,
-			"known implementations: default, go-bubbletea",
+			"valid --impl values: default, go-bubbletea",
 			"Run `az impl list`",
 			"parent work under",
+			"--parent cif",
 		} {
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("error = %v, want substring %q", err, want)
@@ -5708,7 +5721,7 @@ func TestResolveIssueWriteImplementation(t *testing.T) {
 			t.Fatalf("resolveIssueWriteImplementation(default) = %q, want default", impl)
 		}
 		_, err = resolveIssueWriteImplementation(context.Background(), deps, "cif")
-		if err == nil || !strings.Contains(err.Error(), `unknown implementation "cif" (known implementations: default)`) {
+		if err == nil || !strings.Contains(err.Error(), `unknown implementation "cif" (valid --impl values: default)`) {
 			t.Fatalf("resolveIssueWriteImplementation(cif) error = %v, want unknown default-only implementation", err)
 		}
 	})
@@ -7717,6 +7730,81 @@ func TestIssueCreateCommandAutoParentsAndInheritsImplsFromActiveIssue(t *testing
 	}
 }
 
+func TestIssueCreateCommandUsesInheritedImplWhenTaskSnapshotTimesOut(t *testing.T) {
+	var requests []protocol.RequestEnvelope
+	var createReq daemonclient.TaskCreateParams
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				requests = append(requests, req)
+				switch req.Command {
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-parent")
+					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
+						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+						ProtocolVersion:  protocol.CurrentVersion,
+						SnapshotRevision: 1,
+						ProjectID:        "proj",
+						LastCheckedAt:    time.Now().UTC(),
+						Freshness:        protocol.TaskListFreshnessFresh,
+						Tasks: []domain.Task{{
+							ID:              "az-parent",
+							Title:           "Parent",
+							Status:          domain.StatusInProgress,
+							Priority:        domain.P1,
+							Type:            domain.TypeTask,
+							Implementations: []string{"default"},
+						}},
+					}), nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{}, &daemonclient.ReadWaitTimeoutError{
+						Mode:   daemonclient.ReadWaitModeDefault,
+						Budget: 2 * time.Second,
+						Hint:   "Task snapshot read timed out after 2s; keeping current local view",
+						Err:    context.DeadlineExceeded,
+					}
+				case daemonclient.CommandTaskCreate:
+					if err := json.Unmarshal(req.Body, &createReq); err != nil {
+						t.Fatalf("unmarshal create request: %v", err)
+					}
+					return responseWithJSON(req, map[string]string{"task_id": "az-child"}), nil
+				case daemonclient.CommandTaskDependencyAdd:
+					return responseWithJSON(req, map[string]any{}), nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	parentID := "az-parent"
+	_ = captureStdout(t, func() error {
+		return IssueCreateCommand(deps, IssueCreateOptions{
+			Title:                  "Child issue",
+			Type:                   domain.TypeTask,
+			Priority:               domain.P2,
+			AutoParentFromIssueID:  &parentID,
+			AutoCreatedFromIssueID: &parentID,
+		})
+	})
+	commands := commandNames(requests)
+	if len(commands) < 4 || commands[0] != daemonclient.CommandTaskGetMany || commands[1] != daemonclient.CommandTaskList {
+		t.Fatalf("commands = %+v, want parent lookup followed by implementation validation", commands)
+	}
+	if commands[len(commands)-2] != daemonclient.CommandTaskCreate || commands[len(commands)-1] != daemonclient.CommandTaskDependencyAdd {
+		t.Fatalf("commands = %+v, want create and created-in edge after snapshot timeout fallback", commands)
+	}
+	if createReq.ParentID == nil || *createReq.ParentID != "az-parent" {
+		t.Fatalf("create parent = %+v, want az-parent", createReq.ParentID)
+	}
+	if !reflect.DeepEqual(createReq.Implementations, []string{"default"}) {
+		t.Fatalf("create implementations = %+v, want [default]", createReq.Implementations)
+	}
+}
+
 func TestIssueCreateCommandAutoParentsFromTmuxSessionWhenEnvMissing(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "")
 	previousTmuxPaneSessionName := tmuxPaneSessionName
@@ -7993,6 +8081,86 @@ func TestIssueCreateCommandCrossProjectSkipsImplicitAutoParentAndCreatedFrom(t *
 	}
 	if strings.Contains(output, "created-from") || strings.Contains(output, "parent:") {
 		t.Fatalf("output should not mention implicit parent/provenance for cross-project create: %q", output)
+	}
+}
+
+func TestIssueCreateCommandCrossProjectKeepsExplicitParent(t *testing.T) {
+	var requests []protocol.RequestEnvelope
+	var createReq daemonclient.TaskCreateParams
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				requests = append(requests, req)
+				switch req.Command {
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-parent")
+					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
+						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+						ProtocolVersion:  protocol.CurrentVersion,
+						SnapshotRevision: 1,
+						ProjectID:        "azedarach",
+						LastCheckedAt:    time.Now().UTC(),
+						Freshness:        protocol.TaskListFreshnessFresh,
+						Tasks: []domain.Task{{
+							ID:              "az-parent",
+							Title:           "Parent",
+							Status:          domain.StatusInProgress,
+							Priority:        domain.P1,
+							Type:            domain.TypeTask,
+							Implementations: []string{"default"},
+						}},
+					}), nil
+				case daemonclient.CommandTaskList:
+					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
+						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+						ProtocolVersion:  protocol.CurrentVersion,
+						SnapshotRevision: 2,
+						ProjectID:        "azedarach",
+						LastCheckedAt:    time.Now().UTC(),
+						Freshness:        protocol.TaskListFreshnessFresh,
+						Tasks:            []domain.Task{{ID: "az-parent", Implementations: []string{"default"}}},
+					}), nil
+				case daemonclient.CommandTaskCreate:
+					if err := json.Unmarshal(req.Body, &createReq); err != nil {
+						t.Fatalf("unmarshal create request: %v", err)
+					}
+					return responseWithJSON(req, map[string]string{"task_id": "az-child"}), nil
+				case daemonclient.CommandTaskDependencyAdd:
+					return responseWithJSON(req, map[string]any{}), nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}).WithProjectID("chefy"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "chefy",
+	}
+
+	parentID := "az-parent"
+	output := captureStdout(t, func() error {
+		return IssueCreateCommand(deps, IssueCreateOptions{
+			Project:                "azedarach",
+			Title:                  "Explicitly parented child",
+			Type:                   domain.TypeTask,
+			Priority:               domain.P2,
+			AutoParentFromIssueID:  &parentID,
+			AutoCreatedFromIssueID: &parentID,
+			ExplicitParent:         true,
+		})
+	})
+
+	if len(requests) != 4 {
+		t.Fatalf("request count = %d, want 4", len(requests))
+	}
+	if requests[0].Meta.ProjectID.String() != "azedarach" || requests[2].Meta.ProjectID.String() != "azedarach" {
+		t.Fatalf("request projects = %q, %q; want azedarach", requests[0].Meta.ProjectID, requests[2].Meta.ProjectID)
+	}
+	if createReq.ParentID == nil || *createReq.ParentID != "az-parent" {
+		t.Fatalf("create parent = %+v, want az-parent", createReq.ParentID)
+	}
+	if !strings.Contains(output, "Created issue: azedarach:az-child (parent: az-parent, explicit --parent) [created-from: az-parent]") {
+		t.Fatalf("output missing explicit parent message: %q", output)
 	}
 }
 
@@ -8392,7 +8560,7 @@ func TestIssueCreateCommandRejectsUnknownExplicitImplementation(t *testing.T) {
 		Priority:        domain.P2,
 		Implementations: []string{"cif"},
 	})
-	if err == nil || !strings.Contains(err.Error(), `unknown implementation "cif"`) || !strings.Contains(err.Error(), "known implementations: default") {
+	if err == nil || !strings.Contains(err.Error(), `unknown implementation "cif"`) || !strings.Contains(err.Error(), "valid --impl values: default") {
 		t.Fatalf("IssueCreateCommand() error = %v, want unknown implementation", err)
 	}
 	if createCalled {
@@ -8457,7 +8625,7 @@ func TestIssueCreateCommandRequiresImplWhenMultipleConfigured(t *testing.T) {
 		Type:        domain.TypeTask,
 		Priority:    domain.P2,
 	})
-	if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl (multiple implementations configured: default, go-bubbletea)") {
+	if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl (implementation is ambiguous; valid --impl values: default, go-bubbletea)") {
 		t.Fatalf("expected multi-implementation error, got %v", err)
 	}
 	if createCalled {
@@ -8492,7 +8660,7 @@ func TestIssueCreateCommandSuggestsImplWhenInferenceUnavailable(t *testing.T) {
 		Type:     domain.TypeTask,
 		Priority: domain.P2,
 	})
-	if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl (unable to infer implementation automatically:") || !strings.Contains(err.Error(), "Specify --impl <implementation>") {
+	if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl (implementation inference unavailable:") || !strings.Contains(err.Error(), "Specify --impl <implementation>") {
 		t.Fatalf("expected actionable impl inference failure, got %v", err)
 	}
 }
@@ -8914,7 +9082,7 @@ func TestIssueUpdateCommandRejectsUnknownImplementationAssignment(t *testing.T) 
 		IssueID:     "az-1",
 		UpdateImpls: []string{"cif"},
 	})
-	if err == nil || !strings.Contains(err.Error(), `invalid implementation update: unknown implementation "cif"`) || !strings.Contains(err.Error(), "known implementations: default") {
+	if err == nil || !strings.Contains(err.Error(), `invalid implementation update: unknown implementation "cif"`) || !strings.Contains(err.Error(), "valid --impl values: default") {
 		t.Fatalf("IssueUpdateCommand() error = %v, want unknown implementation", err)
 	}
 	if updateCalled {
@@ -10439,7 +10607,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue doctor [--project <project-id>] [--id <id>] [--json] [<id>]") {
 		t.Fatalf("usage missing issue doctor command: %q", output)
 	}
-	if !strings.Contains(output, "issue create [--project <project-id>] [--impl <implementation> ...] [--deferred]") {
+	if !strings.Contains(output, "issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred]") {
 		t.Fatalf("usage missing issue create command: %q", output)
 	}
 	if !strings.Contains(output, "issue split [--project <project-id>] [--parent <id>]") {
@@ -10641,7 +10809,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Batch planning/catalog fanout: `az issue bulk-create --input issues.json --json` with `parent_id` or nested `children` creates parented child issues without starting sessions or orchestration.") {
 		t.Fatalf("prime output missing non-orchestrating batch child creation guidance: %q", output)
 	}
-	if !strings.Contains(output, "Single tracking-only child: `az issue create \"Child task\" [--json]` auto-parents under `AZEDARACH_ISSUE_ID`; for another parent, create the issue and attach it with `az issue dep add <child-id> <parent-id> --type parent-child`.") {
+	if !strings.Contains(output, "Single tracking-only child: `az issue create \"Child task\" [--json]` auto-parents under `AZEDARACH_ISSUE_ID`; for another parent, pass `--parent <issue-id>`.") {
 		t.Fatalf("prime output missing non-orchestrating single child creation guidance: %q", output)
 	}
 	if !strings.Contains(output, "Worker fanout/session launch: `az issue split --parent <issue-id> \"Child task\"` can create the child and start orchestration/session work; use `az issue split` only when you intentionally want isolated worker fanout.") {
@@ -11709,7 +11877,7 @@ func TestPrimeCommandShowsImplementationOptionsWhenMultipleConfigured(t *testing
 	if !strings.Contains(output, "If you mean \"make this a child of the active issue\", run `az issue create \"Child task\"`; auto-parenting uses `AZEDARACH_ISSUE_ID`, not `--impl`.") {
 		t.Fatalf("prime output missing active-parent create guidance: %q", output)
 	}
-	if !strings.Contains(output, "If you mean \"attach this to another parent/root\", create the issue and add `az issue dep add <child-id> <parent-id> --type parent-child`.") {
+	if !strings.Contains(output, "If you mean \"attach this to another parent/root\", run `az issue create --parent <issue-id> \"Child task\"`.") {
 		t.Fatalf("prime output missing explicit parent-child guidance: %q", output)
 	}
 	if !strings.Contains(output, "`--impl` selects implementation/spec variant assignment only; it does not attach an issue to a parent/root graph.") {
@@ -11718,7 +11886,7 @@ func TestPrimeCommandShowsImplementationOptionsWhenMultipleConfigured(t *testing
 	if !strings.Contains(output, "`az issue create --impl default \"Implementation-specific task\"`") {
 		t.Fatalf("prime output missing create-with-impl example: %q", output)
 	}
-	if !strings.Contains(output, "this still relies on auto-parenting or parent-child edges for graph membership") {
+	if !strings.Contains(output, "this still relies on auto-parenting, `--parent`, or parent-child edges for graph membership") {
 		t.Fatalf("prime output missing impl-example parentage caveat: %q", output)
 	}
 	if !strings.Contains(output, "Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.") {
