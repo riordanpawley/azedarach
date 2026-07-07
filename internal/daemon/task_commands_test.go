@@ -2241,6 +2241,15 @@ func taskClosePhaseNames(phases []taskClosePhaseTiming) []string {
 	return names
 }
 
+func taskClosePhaseByName(phases []taskClosePhaseTiming, name string) (taskClosePhaseTiming, bool) {
+	for _, phase := range phases {
+		if phase.Name == name {
+			return phase, true
+		}
+	}
+	return taskClosePhaseTiming{}, false
+}
+
 func TestTaskCloseRepairsLegacyProjectRuntimeProjectionBeforeFinalStatusUpdate(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -3110,8 +3119,16 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			return "", nil
 		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "worktree" && args[3] == "add":
 			scratchWorktree = args[5]
+			scratchHook := filepath.Join(scratchWorktree, ".git", "hooks", "commit-msg")
+			if err := os.MkdirAll(filepath.Dir(scratchHook), 0o755); err != nil {
+				t.Fatalf("mkdir scratch hooks: %v", err)
+			}
+			if err := os.WriteFile(scratchHook, []byte("#!/bin/sh\nsleep 1\n"), 0o755); err != nil {
+				t.Fatalf("write scratch hook: %v", err)
+			}
 			return "", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge":
+			time.Sleep(20 * time.Millisecond)
 			return "merge complete", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "reset" && args[3] == "--hard":
 			return "", nil
@@ -3181,6 +3198,16 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	}
 	if !result.IntegrationRequested || !result.Integrated || result.IntegratedSourceBranch != sourceBranch || result.IntegratedTargetBranch != "main" {
 		t.Fatalf("close integration result = %+v", result)
+	}
+	hookPhase, ok := taskClosePhaseByName(result.Phases, "githook.commit-msg")
+	if !ok {
+		t.Fatalf("close phases = %+v, want githook.commit-msg", result.Phases)
+	}
+	if hookPhase.Hook != "commit-msg" || hookPhase.Command != "git merge --no-edit "+sourceBranch || hookPhase.ElapsedMS < 15 {
+		t.Fatalf("hook phase = %+v, want commit-msg merge timing", hookPhase)
+	}
+	if hookPhase.ExitStatus == nil || *hookPhase.ExitStatus != 0 || hookPhase.Blocking == nil || !*hookPhase.Blocking {
+		t.Fatalf("hook phase = %+v, want exit_status=0 blocking=true", hookPhase)
 	}
 	closed, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
 	if err != nil {

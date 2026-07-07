@@ -83,8 +83,10 @@ func normalizeRuntimeSignalCommand(cmd protocol.RuntimeSignalIngestCommandBody) 
 	cmd.TmuxPane = strings.TrimSpace(cmd.TmuxPane)
 	cmd.Agent = strings.TrimSpace(cmd.Agent)
 	cmd.Hook = strings.TrimSpace(cmd.Hook)
+	cmd.Command = strings.TrimSpace(cmd.Command)
 	cmd.Event = strings.TrimSpace(cmd.Event)
 	cmd.Activity = strings.TrimSpace(cmd.Activity)
+	cmd.Level = strings.TrimSpace(cmd.Level)
 	cmd.Message = strings.TrimSpace(cmd.Message)
 	return cmd
 }
@@ -141,14 +143,22 @@ func runtimeSignalHookLogEvent(projectID string, cmd protocol.RuntimeSignalInges
 	if hook == "" {
 		hook = cmd.Event
 	}
+	level := cmd.Level
+	if level == "" {
+		level = "info"
+	}
 	evt, err := normalizeHookLogEvent(projectID, protocol.HookLogEvent{
-		ProjectID: naming.ProjectID(projectID),
-		IssueID:   naming.IssueID(cmd.IssueID),
-		Hook:      hook,
-		Worktree:  cmd.Worktree,
-		Source:    source,
-		Level:     "info",
-		Message:   message,
+		ProjectID:  naming.ProjectID(projectID),
+		IssueID:    naming.IssueID(cmd.IssueID),
+		Hook:       hook,
+		Command:    cmd.Command,
+		Worktree:   cmd.Worktree,
+		Source:     source,
+		Level:      level,
+		Message:    message,
+		ElapsedMS:  cmd.ElapsedMS,
+		ExitStatus: cmd.ExitStatus,
+		Blocking:   cmd.Blocking,
 	})
 	if err != nil {
 		return protocol.HookLogEvent{}, err

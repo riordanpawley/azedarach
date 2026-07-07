@@ -367,6 +367,11 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 		}
 		return nil
 	}
+	startedAt := time.Now()
+	hookCommand := "az githooks hook --hook " + hookName
+	finishHook := func(reconcileDir string, runErr error) error {
+		return finishGitHookCommand(reconcileDir, deps, hookName, hookCommand, startedAt, runErr, opts.Verbose)
+	}
 
 	preCommitMergeInProgress := false
 	skipPreCommitDecisionSync := hookName == "pre-commit" && gitHookEnvFlagEnabled("AZEDARACH_SKIP_DECISION_SYNC")
@@ -401,7 +406,7 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 		}
 		if runErr := runShellCommand(projectDir, command); runErr != nil {
 			if !cfg.GitHooks.BestEffort {
-				return fmt.Errorf("githooks %s command failed: %w", hookName, runErr)
+				return finishHook(projectDir, fmt.Errorf("githooks %s command failed: %w", hookName, runErr))
 			}
 			if opts.Verbose {
 				fmt.Fprintf(os.Stderr, "githooks %s command failed: %v\n", hookName, runErr)
@@ -423,7 +428,7 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 	if restageEnabled {
 		if err := restageHookChanges(projectDir, restagePaths); err != nil {
 			if !cfg.GitHooks.BestEffort {
-				return fmt.Errorf("githooks %s restage failed: %w", hookName, err)
+				return finishHook(projectDir, fmt.Errorf("githooks %s restage failed: %w", hookName, err))
 			}
 			if opts.Verbose {
 				fmt.Fprintf(os.Stderr, "githooks %s restage failed: %v\n", hookName, err)
@@ -438,7 +443,41 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 		}
 	}
 
-	return reconcileDaemonGitState(reconcileDir, deps, hookName, opts.Verbose)
+	return finishHook(reconcileDir, nil)
+}
+
+func finishGitHookCommand(projectDir string, deps *Dependencies, hookName, command string, startedAt time.Time, runErr error, verbose bool) error {
+	exitStatus := 0
+	level := "info"
+	message := "git hook completed"
+	if runErr != nil {
+		exitStatus = 1
+		level = "warn"
+		message = fmt.Sprintf("git hook failed: %v", runErr)
+	}
+	blocking := true
+	diag := gitHookRuntimeDiagnostic{
+		Command:    strings.TrimSpace(command),
+		ElapsedMS:  time.Since(startedAt).Milliseconds(),
+		ExitStatus: &exitStatus,
+		Blocking:   &blocking,
+		Level:      level,
+		Message:    message,
+	}
+	reconcileErr := reconcileDaemonGitState(projectDir, deps, hookName, verbose, diag)
+	if runErr != nil {
+		return runErr
+	}
+	return reconcileErr
+}
+
+type gitHookRuntimeDiagnostic struct {
+	Command    string
+	ElapsedMS  int64
+	ExitStatus *int
+	Blocking   *bool
+	Level      string
+	Message    string
 }
 
 func gitHookEnvFlagEnabled(name string) bool {
@@ -539,7 +578,7 @@ func restageHookChanges(projectDir string, paths []string) error {
 	return nil
 }
 
-func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName string, verbose bool) error {
+func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName string, verbose bool, diag gitHookRuntimeDiagnostic) error {
 	if deps != nil && deps.Logger != nil {
 		deps.Logger.Info("githooks hook: reconcile requested",
 			"hook", strings.TrimSpace(hookName),
@@ -565,14 +604,18 @@ func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName str
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), gitHookDaemonRefreshTimeout)
 	defer cancel()
-	err = ingestGitHookRuntimeSignalWithRetry(ctx, deps, worktreeRoot, hookName)
+	err = ingestGitHookRuntimeSignalWithRetry(ctx, deps, worktreeRoot, hookName, diag)
 	if err != nil {
 		appendHookLogEventBestEffort(deps, protocol.HookLogEvent{
-			Hook:     strings.TrimSpace(hookName),
-			Worktree: worktreeRoot,
-			Source:   "githooks.hook",
-			Level:    "warn",
-			Message:  fmt.Sprintf("daemon runtime signal ingest failed: %v", err),
+			Hook:       strings.TrimSpace(hookName),
+			Command:    diag.Command,
+			Worktree:   worktreeRoot,
+			Source:     "githooks.hook",
+			Level:      "warn",
+			Message:    fmt.Sprintf("daemon runtime signal ingest failed: %v", err),
+			ElapsedMS:  diag.ElapsedMS,
+			ExitStatus: diag.ExitStatus,
+			Blocking:   diag.Blocking,
 		})
 		if deps.Logger != nil {
 			deps.Logger.Warn("githooks hook: daemon runtime signal ingest failed", "hook", strings.TrimSpace(hookName), "worktree", worktreeRoot, "error", err)
@@ -591,16 +634,25 @@ func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName str
 	return nil
 }
 
-func ingestGitHookRuntimeSignalWithRetry(ctx context.Context, deps *Dependencies, worktreeRoot, hookName string) error {
+func ingestGitHookRuntimeSignalWithRetry(ctx context.Context, deps *Dependencies, worktreeRoot, hookName string, diag gitHookRuntimeDiagnostic) error {
+	message := strings.TrimSpace(diag.Message)
+	if message == "" {
+		message = "git hook runtime signal ingested"
+	}
 	return ingestRuntimeSignalWithRetry(ctx, deps, protocol.RuntimeSignalIngestCommandBody{
-		Source:    protocol.RuntimeSignalSourceGitHook,
-		Kind:      protocol.RuntimeSignalKindGitWorktreeChanged,
-		ProjectID: strings.TrimSpace(deps.ProjectID),
-		Worktree:  strings.TrimSpace(worktreeRoot),
-		Hook:      strings.TrimSpace(hookName),
-		Event:     strings.TrimSpace(hookName),
-		Log:       true,
-		Message:   "git hook runtime signal ingested",
+		Source:     protocol.RuntimeSignalSourceGitHook,
+		Kind:       protocol.RuntimeSignalKindGitWorktreeChanged,
+		ProjectID:  strings.TrimSpace(deps.ProjectID),
+		Worktree:   strings.TrimSpace(worktreeRoot),
+		Hook:       strings.TrimSpace(hookName),
+		Command:    diag.Command,
+		Event:      strings.TrimSpace(hookName),
+		Log:        true,
+		Level:      diag.Level,
+		Message:    message,
+		ElapsedMS:  diag.ElapsedMS,
+		ExitStatus: diag.ExitStatus,
+		Blocking:   diag.Blocking,
 	})
 }
 

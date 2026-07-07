@@ -128,9 +128,13 @@ type TaskCloseResult struct {
 }
 
 type TaskClosePhaseTiming struct {
-	Name      string `json:"name"`
-	ElapsedMS int64  `json:"elapsed_ms"`
-	Skipped   bool   `json:"skipped,omitempty"`
+	Name       string `json:"name"`
+	ElapsedMS  int64  `json:"elapsed_ms"`
+	Skipped    bool   `json:"skipped,omitempty"`
+	Hook       string `json:"hook,omitempty"`
+	Command    string `json:"command,omitempty"`
+	ExitStatus *int   `json:"exit_status,omitempty"`
+	Blocking   *bool  `json:"blocking,omitempty"`
 }
 
 func (p TaskClosePhaseTiming) Elapsed() time.Duration {
