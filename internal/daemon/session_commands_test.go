@@ -1213,6 +1213,7 @@ type sessionStartTmuxRunner struct {
 	sendKeysTargets      []string
 	sendKeysPayloads     []string
 	newSessionErr        error
+	maxNewSessionCommand int
 	sendKeysErr          error
 	sendKeysErrOnCall    int
 }
@@ -1266,6 +1267,9 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 	case "new-session":
 		if len(args) < 4 {
 			return "", errors.New("missing session name")
+		}
+		if r.maxNewSessionCommand > 0 && len(args) > 4 && len(args[len(args)-1]) > r.maxNewSessionCommand {
+			return "", errors.New("command too long")
 		}
 		if r.newSessionErr != nil {
 			return "", r.newSessionErr
@@ -2748,6 +2752,104 @@ func TestSessionStartLargeCodexPromptUsesPostLaunchPaste(t *testing.T) {
 	}
 	if got := tmuxRunner.sendKeysPayloads[len(tmuxRunner.sendKeysPayloads)-1]; got != "Enter" {
 		t.Fatalf("prompt submit key = %q, want Enter", got)
+	}
+}
+
+func TestSessionStartCodexPromptWithLargeEncodedLaunchUsesPostLaunchPaste(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj-large-encoded-codex-prompt"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Start AI worker with encoded prompt near tmux limit",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	branch := "testuser/" + issueID + "/start-ai-worker-encoded-prompt"
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	worktreeRunner := &worktreeCreateRunner{
+		worktreePath: worktreePath,
+		branchName:   branch,
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.maxNewSessionCommand = codexLaunchCommandArgMaxBytes
+	store := daemonstate.NewStore()
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	promptLine := "Codex orchestration bootstrap prompt.\n"
+	initialPrompt := strings.Repeat(promptLine, 180)
+	if len(initialPrompt) >= codexLaunchPromptArgMaxBytes {
+		t.Fatalf("test prompt length = %d, want below raw prompt arg limit %d", len(initialPrompt), codexLaunchPromptArgMaxBytes)
+	}
+	encodedLaunchCommand := d.buildSessionLaunchCommand(projectID, issueID, naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID), false, nil, initialPrompt)
+	if len(encodedLaunchCommand) <= codexLaunchCommandArgMaxBytes {
+		t.Fatalf("encoded launch command length = %d, want above tmux-safe bound %d", len(encodedLaunchCommand), codexLaunchCommandArgMaxBytes)
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-large-encoded-codex-prompt",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]any{
+			"project_id":     projectID,
+			"session_id":     issueID,
+			"initial_prompt": initialPrompt,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session start response not OK: %+v", resp)
+	}
+
+	sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
+	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, sessionID)
+	if len(launchCommand) > codexLaunchCommandArgMaxBytes {
+		t.Fatalf("launch command length = %d, want <= %d", len(launchCommand), codexLaunchCommandArgMaxBytes)
+	}
+	for _, mustNotContain := range []string{promptLine, initialPromptShellVariable} {
+		if strings.Contains(launchCommand, mustNotContain) {
+			t.Fatalf("launch command = %q, must not contain prompt fragment %q", launchCommand, mustNotContain)
+		}
+	}
+	if len(tmuxRunner.inputPayloads) != 1 {
+		t.Fatalf("input payloads = %+v, want one post-launch prompt payload", tmuxRunner.inputPayloads)
+	}
+	if got := tmuxRunner.inputPayloads[0]; got != strings.TrimSpace(initialPrompt) {
+		t.Fatalf("post-launch prompt length = %d, want trimmed initial prompt length %d", len(got), len(strings.TrimSpace(initialPrompt)))
 	}
 }
 

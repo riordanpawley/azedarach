@@ -105,6 +105,7 @@ const (
 	sessionRestartContinuePromptDelay = 500 * time.Millisecond
 	sessionRestartContinuePrompt      = "Continue your prior task. Start by running `az prime` if you need to refresh issue context, then keep working from the existing conversation without waiting for further instruction."
 	codexLaunchPromptArgMaxBytes      = 24 * 1024
+	codexLaunchCommandArgMaxBytes     = 16 * 1024
 )
 
 func reportSessionStartProgress(ctx context.Context, phase, message string, percent int) {
@@ -954,6 +955,11 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			postLaunchPrompt = initialPrompt
 		}
 		launchCommand = d.buildSessionLaunchCommandWithInitReadyPathAndEnv(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, launchPrompt, sessionInitMarker.RelativePath, sessionLaunchStartupExportCommands(d.runtimeConfigForProject(cmd.ProjectID), resourceCtx))
+		if launchPrompt != "" && d.sessionLaunchCommandNeedsPostLaunchPrompt(cmd.ProjectID, launchCommand) {
+			launchPrompt = ""
+			postLaunchPrompt = initialPrompt
+			launchCommand = d.buildSessionLaunchCommandWithInitReadyPathAndEnv(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, launchPrompt, sessionInitMarker.RelativePath, sessionLaunchStartupExportCommands(d.runtimeConfigForProject(cmd.ProjectID), resourceCtx))
+		}
 	}
 	reportSessionStartProgress(ctx, "tmux_launch", "creating tmux session", 70)
 	if cmd.StartWork {
@@ -3792,6 +3798,11 @@ func (d *Daemon) sessionRestartNeedsPostLaunchPrompt(projectID string) bool {
 func (d *Daemon) sessionLaunchNeedsPostLaunchPrompt(projectID, prompt string) bool {
 	tool := strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
 	return strings.EqualFold(tool, "codex") && !codexLaunchPromptArgAllowed(prompt)
+}
+
+func (d *Daemon) sessionLaunchCommandNeedsPostLaunchPrompt(projectID, launchCommand string) bool {
+	tool := strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
+	return strings.EqualFold(tool, "codex") && len(launchCommand) > codexLaunchCommandArgMaxBytes
 }
 
 func codexLaunchPromptArgAllowed(prompt string) bool {
