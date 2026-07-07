@@ -55,7 +55,8 @@ Commands:
   issue fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply a pre-authored nested issue tree from JSON
   issue fanout ready [--project <project-id>] --root <issue-id> [--json]  List runnable leaf issues under a fanout root
   issue fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
-  mail <send|list|watch>  Mailbox event operations for orchestrator/worker coordination
+  mail <send|list|watch|validate-evidence>  Mailbox event operations for orchestrator/worker coordination
+  evidence validate [--body <json>|--file <path>] [--fix] [--template] [--json]  Validate worker_evidence.v1 packets locally
   observe [--root <issue-id>] [--json]  Show artifact-backed observations for active work
   orchestrate <status|start|group|watch|observe|prompt|message|complete-check|integrate|close-session>  Orchestration operations for parent issues
   config set <key> <value> [--project-dir <dir>]  Update project config
@@ -118,6 +119,8 @@ Examples:
   az issue fanout ready --root az-123 --json
   az issue fanout drift --issue az-456 --worktree /tmp/az-456
   az mail send --parent az-123 --type dependency-ready --body "contract merged"
+  az mail validate-evidence --template
+  az mail validate-evidence --fix --body '{"schema":"worker_evidence.v1",...}'
   az observe --json
   az observe --root az-123
   az issue events az-123 --json

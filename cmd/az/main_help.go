@@ -318,13 +318,19 @@ func printHelpForPath(path []string) bool {
 	case "issue fanout drift":
 		fmt.Println(issueFanoutDriftUsage)
 	case "mail":
-		fmt.Println("Usage: az mail <send|list|watch> [arguments]")
+		fmt.Println("Usage: az mail <send|list|watch|validate-evidence> [arguments]")
 	case "mail send":
 		fmt.Println(mailSendUsage)
 	case "mail list":
 		fmt.Println(mailListUsage)
 	case "mail watch":
 		fmt.Println(mailWatchUsage)
+	case "mail validate-evidence":
+		fmt.Println(mailValidateEvidenceUsage)
+	case "evidence":
+		fmt.Println("Usage: az evidence <validate> [arguments]")
+	case "evidence validate":
+		fmt.Println(evidenceValidateUsage)
 	case "observe":
 		fmt.Println(observeUsage)
 	case "orchestrate":
@@ -420,6 +426,8 @@ const (
 	mailSendUsage                 = "Usage: az mail send --parent <issue-id> --type <event-type> --body <text> [--issue <issue-id>] [--from <actor>] [--to <actor>] [--json]"
 	mailListUsage                 = "Usage: az mail list --parent <issue-id> [--since <seq>] [--limit <n>] [--json]"
 	mailWatchUsage                = "Usage: az mail watch --parent <issue-id> [--since <seq>] [--jsonl] [--once]"
+	mailValidateEvidenceUsage     = "Usage: az mail validate-evidence [--body <json>|--file <path>] [--fix] [--template] [--json]"
+	evidenceValidateUsage         = "Usage: az evidence validate [--body <json>|--file <path>] [--fix] [--template] [--json]"
 	observeUsage                  = "Usage: az observe [--root <issue-id>] [--project <project-id>] [--json]"
 	orchestrateStatusUsage        = "Usage: az orchestrate status --root <issue-id> [--project <project-id>] [--since <seq>] [--limit <n>] [--json] [--summary|--full]"
 	orchestrateStartUsage         = "Usage: az orchestrate start --root <issue-id> [--project <project-id>] [--limit <n>] [--issue <issue-id> ...] [--json]"

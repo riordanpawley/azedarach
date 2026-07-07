@@ -94,6 +94,88 @@ func TestParseWorkerEvidencePacketBodyRejectsArtifactLinksStringArray(t *testing
 	}
 }
 
+func TestParseWorkerEvidencePacketBodyNormalizesSafeAliases(t *testing.T) {
+	body := `{
+		"schema": "worker_evidence.v1",
+		"summary": "Ready for integration.",
+		"commands_run": [{"command": "just test", "result": "passed"}],
+		"key_assertions": ["validation passed"],
+		"files_changed": ["internal/domain/worker_evidence.go"],
+		"review": {"status": "pass", "findings": []},
+		"risks": ["none"]
+	}`
+
+	packet, result := ParseWorkerEvidencePacketBody(body)
+	if !result.Found || !result.Complete {
+		t.Fatalf("parse result = %+v, want found complete", result)
+	}
+	if packet.Review.Status != "clean" {
+		t.Fatalf("review status = %q, want clean", packet.Review.Status)
+	}
+	if len(packet.CommandsRun) != 1 || packet.CommandsRun[0] != "just test (passed)" {
+		t.Fatalf("commands_run = %+v, want normalized command result", packet.CommandsRun)
+	}
+	joined := strings.Join(result.Normalized, "\n")
+	for _, want := range []string{"/review/status", "/commands_run"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("normalized = %+v, missing %s", result.Normalized, want)
+		}
+	}
+}
+
+func TestValidateWorkerEvidencePacketBodyReportsPointerDiagnostics(t *testing.T) {
+	body := `{
+		"schema": "worker_evidence.v1",
+		"summary": "Ready for integration.",
+		"commands_run": ["just test"],
+		"key_assertions": ["validation passed"],
+		"files_changed": ["internal/domain/worker_evidence.go"],
+		"review": {"status": "shipit", "findings": []},
+		"risks": ["none"]
+	}`
+
+	result := ValidateWorkerEvidencePacketBody(body, false)
+	if result.Complete {
+		t.Fatalf("validation = %+v, want incomplete", result)
+	}
+	var found bool
+	for _, diagnostic := range result.Diagnostics {
+		if diagnostic.Path == "/review/status" && strings.Contains(diagnostic.Message, "review.status") && strings.Join(diagnostic.AllowedValues, ",") == "clean,findings,not_run,blocked" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("diagnostics = %+v, want review.status pointer with allowed values", result.Diagnostics)
+	}
+}
+
+func TestValidateWorkerEvidencePacketBodyFixesRepairablePacket(t *testing.T) {
+	body := `{
+		"schema": "worker_evidence.v1",
+		"summary": "Ready for integration.",
+		"commands_run": [{"command": "just test", "result": "passed"}],
+		"key_assertions": ["validation passed"],
+		"files_changed": ["internal/domain/worker_evidence.go"],
+		"review": {"status": "pass"},
+		"risks": ["none"],
+		"artifact_links": ["https://example.test/run/1"]
+	}`
+
+	result := ValidateWorkerEvidencePacketBody(body, true)
+	if !result.Complete || !result.Fixed || strings.TrimSpace(result.FixedBody) == "" {
+		t.Fatalf("validation = %+v, want fixed complete packet", result)
+	}
+	if result.Packet == nil || result.Packet.Review.Status != "clean" {
+		t.Fatalf("packet = %+v, want clean fixed packet", result.Packet)
+	}
+	if len(result.Packet.ArtifactLinks) != 1 || result.Packet.ArtifactLinks[0].Label != "artifact 1" {
+		t.Fatalf("artifact_links = %+v, want generated object link", result.Packet.ArtifactLinks)
+	}
+	if !strings.Contains(result.FixedBody, `"artifact_links"`) || !strings.Contains(result.FixedBody, `"findings": []`) {
+		t.Fatalf("fixed body = %s, want artifact links and review findings", result.FixedBody)
+	}
+}
+
 func TestParseWorkerEvidencePacketBodyIgnoresUnstructuredText(t *testing.T) {
 	_, result := ParseWorkerEvidencePacketBody("tests pass; ready")
 	if result.Found || result.Complete || len(result.Problems()) != 0 {

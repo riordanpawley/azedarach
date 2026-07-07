@@ -66,6 +66,14 @@ type MailWatchOptions struct {
 	Once          bool
 }
 
+type EvidenceValidateOptions struct {
+	Body     string
+	FilePath string
+	Fix      bool
+	JSON     bool
+	Template bool
+}
+
 type fanoutSpec struct {
 	ParentIssue string       `json:"parent_issue"`
 	Nodes       []fanoutNode `json:"nodes"`
@@ -427,6 +435,27 @@ func ParseMailWatchArgs(args []string) (MailWatchOptions, error) {
 	return opts, nil
 }
 
+func ParseEvidenceValidateArgs(args []string) (EvidenceValidateOptions, error) {
+	opts := EvidenceValidateOptions{}
+	fs := flag.NewFlagSet("evidence validate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Body, "body", "", "worker_evidence.v1 JSON body")
+	fs.StringVar(&opts.FilePath, "file", "", "path to worker_evidence.v1 JSON body")
+	fs.BoolVar(&opts.Fix, "fix", false, "emit a canonical packet for repairable schema mismatches")
+	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
+	fs.BoolVar(&opts.Template, "template", false, "print the canonical worker_evidence.v1 template")
+	if err := fs.Parse(args); err != nil {
+		return EvidenceValidateOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return EvidenceValidateOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	if strings.TrimSpace(opts.Body) != "" && strings.TrimSpace(opts.FilePath) != "" {
+		return EvidenceValidateOptions{}, fmt.Errorf("provide only one of --body or --file")
+	}
+	return opts, nil
+}
+
 func MailSendCommand(deps *Dependencies, opts MailSendOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -450,6 +479,115 @@ func MailSendCommand(deps *Dependencies, opts MailSendOptions) error {
 	}
 	fmt.Printf("mail event seq=%d parent=%s type=%s\n", event.Seq, event.ParentIssue, event.Type)
 	return nil
+}
+
+func EvidenceValidateCommand(_ *Dependencies, opts EvidenceValidateOptions) error {
+	if opts.Template {
+		template := domain.WorkerEvidencePacketTemplate()
+		if opts.JSON {
+			return printJSON(template)
+		}
+		data, err := json.MarshalIndent(template, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+	body, err := evidenceValidationBody(opts)
+	if err != nil {
+		return err
+	}
+	result := domain.ValidateWorkerEvidencePacketBody(body, opts.Fix)
+	if opts.JSON {
+		if err := printJSON(result); err != nil {
+			return err
+		}
+		if !result.Complete {
+			return fmt.Errorf("worker_evidence.v1 invalid")
+		}
+		return nil
+	}
+	if result.Complete {
+		if opts.Fix && strings.TrimSpace(result.FixedBody) != "" {
+			fmt.Println(result.FixedBody)
+		} else {
+			fmt.Println("worker_evidence.v1 valid")
+			if len(result.Normalized) > 0 {
+				fmt.Printf("normalized: %s\n", strings.Join(dedupeOrderedIDs(result.Normalized), ", "))
+			}
+		}
+		return nil
+	}
+	printWorkerEvidenceValidationProblems(result)
+	return fmt.Errorf("worker_evidence.v1 invalid")
+}
+
+func evidenceValidationBody(opts EvidenceValidateOptions) (string, error) {
+	if strings.TrimSpace(opts.Body) != "" {
+		return opts.Body, nil
+	}
+	if strings.TrimSpace(opts.FilePath) != "" {
+		data, err := os.ReadFile(opts.FilePath)
+		if err != nil {
+			return "", fmt.Errorf("read evidence file: %w", err)
+		}
+		return string(data), nil
+	}
+	stat, err := os.Stdin.Stat()
+	if err != nil {
+		return "", fmt.Errorf("stat stdin: %w", err)
+	}
+	if stat.Mode()&os.ModeCharDevice == 0 {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return "", fmt.Errorf("read stdin: %w", err)
+		}
+		if strings.TrimSpace(string(data)) != "" {
+			return string(data), nil
+		}
+	}
+	return "", fmt.Errorf("missing evidence body: provide --body, --file, or stdin; use --template for an example")
+}
+
+func printWorkerEvidenceValidationProblems(result domain.WorkerEvidenceValidationResult) {
+	if !result.Found {
+		fmt.Println("worker_evidence.v1 packet not found")
+	} else {
+		fmt.Println("worker_evidence.v1 invalid")
+	}
+	if len(result.Diagnostics) == 0 {
+		for _, problem := range append(append([]string{}, result.Missing...), result.Invalid...) {
+			fmt.Printf("- %s\n", problem)
+		}
+	} else {
+		seen := map[string]struct{}{}
+		for _, diagnostic := range result.Diagnostics {
+			key := diagnostic.Path + "\x00" + diagnostic.Message + "\x00" + diagnostic.Suggestion
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			path := diagnostic.Path
+			if path == "" {
+				path = "/"
+			}
+			fmt.Printf("- %s: %s\n", path, diagnostic.Message)
+			if len(diagnostic.AllowedValues) > 0 {
+				fmt.Printf("  allowed: %s\n", strings.Join(diagnostic.AllowedValues, ", "))
+			}
+			if strings.TrimSpace(diagnostic.Suggestion) != "" {
+				fmt.Printf("  fix: %s\n", diagnostic.Suggestion)
+			}
+		}
+	}
+	fmt.Println("template: az mail validate-evidence --template")
+	if strings.TrimSpace(result.FixedBody) != "" {
+		fmt.Println("fixed packet:")
+		fmt.Println(result.FixedBody)
+	} else {
+		fmt.Println("auto-fix: az mail validate-evidence --fix --body '<json>'")
+	}
 }
 
 func MailListCommand(deps *Dependencies, opts MailListOptions) error {
