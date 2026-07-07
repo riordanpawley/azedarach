@@ -233,11 +233,38 @@ func invalidWorkerEvidenceMessage(body string) string {
 	if !validation.Found || validation.Complete {
 		return ""
 	}
-	problems := strings.Join(validation.Problems(), "; ")
+	problems := workerEvidenceProblemSummary(validation)
 	if strings.TrimSpace(problems) == "" {
 		problems = "packet is incomplete"
 	}
-	return "invalid worker_evidence.v1 packet: " + problems + `. Omit artifact_links unless links are needed; if present, artifact_links must be objects like [{"label":"CI","url":"https://example.test/run"}], not a string array.`
+	return "invalid worker_evidence.v1 packet: " + problems + `. Omit artifact_links unless links are needed. Run az mail validate-evidence --fix --body '<json>' for repairable schema mismatches, or az mail validate-evidence --template for the canonical shape.`
+}
+
+func workerEvidenceProblemSummary(validation domain.WorkerEvidenceParseResult) string {
+	if len(validation.Diagnostics) == 0 {
+		return strings.Join(validation.Problems(), "; ")
+	}
+	parts := make([]string, 0, len(validation.Diagnostics))
+	seen := map[string]struct{}{}
+	for _, diagnostic := range validation.Diagnostics {
+		path := strings.TrimSpace(diagnostic.Path)
+		if path == "" {
+			path = "/"
+		}
+		part := path + ": " + diagnostic.Message
+		if len(diagnostic.AllowedValues) > 0 {
+			part += " (allowed: " + strings.Join(diagnostic.AllowedValues, ", ") + ")"
+		}
+		if strings.TrimSpace(diagnostic.Suggestion) != "" {
+			part += " (fix: " + strings.TrimSpace(diagnostic.Suggestion) + ")"
+		}
+		if _, ok := seen[part]; ok {
+			continue
+		}
+		seen[part] = struct{}{}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func sanitizeMailboxKey(parentIssue string) string {
