@@ -445,6 +445,39 @@ func TestMergePreservesCommitHooksAndAbortsIncompleteMerge(t *testing.T) {
 	}
 }
 
+func TestMergeReportsSlowHookDiagnostics(t *testing.T) {
+	repo := initDivergedRepo(t)
+	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nsleep 0.05\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	result, err := client.Merge(context.Background(), repo, "feature")
+	if err != nil {
+		t.Fatalf("Merge() error = %v", err)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("Merge() result = %+v, want success", result)
+	}
+	if len(result.HookDiagnostics) != 1 {
+		t.Fatalf("hook diagnostics = %+v, want one entry", result.HookDiagnostics)
+	}
+	diag := result.HookDiagnostics[0]
+	if diag.Hook != "commit-msg" {
+		t.Fatalf("hook = %q, want commit-msg", diag.Hook)
+	}
+	if diag.Command != "git merge --no-edit feature" {
+		t.Fatalf("command = %q, want git merge command", diag.Command)
+	}
+	if diag.ElapsedMS < 40 {
+		t.Fatalf("elapsed_ms = %d, want slow hook attribution", diag.ElapsedMS)
+	}
+	if diag.ExitStatus != 0 || !diag.Blocking {
+		t.Fatalf("hook diagnostic = %+v, want exit 0 blocking", diag)
+	}
+}
+
 func TestMergeCleanlyDiscardsDirtyPostMergeHookAndReportsFailure(t *testing.T) {
 	repo := initDivergedRepo(t)
 	hookPath := filepath.Join(repo, ".git", "hooks", "post-merge")

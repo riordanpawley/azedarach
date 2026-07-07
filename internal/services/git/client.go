@@ -2,8 +2,12 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -44,10 +48,21 @@ type GitStatus struct {
 
 // MergeResult represents the result of a git merge operation.
 type MergeResult struct {
-	Success       bool
-	HasConflicts  bool
-	ConflictFiles []string
-	Message       string
+	Success         bool
+	HasConflicts    bool
+	ConflictFiles   []string
+	Message         string
+	HookDiagnostics []GitHookDiagnostic `json:"hook_diagnostics,omitempty"`
+}
+
+// GitHookDiagnostic describes synchronous git hook time observed while a git
+// command was blocking its caller.
+type GitHookDiagnostic struct {
+	Hook       string `json:"hook,omitempty"`
+	Command    string `json:"command,omitempty"`
+	ElapsedMS  int64  `json:"elapsed_ms"`
+	ExitStatus int    `json:"exit_status"`
+	Blocking   bool   `json:"blocking"`
 }
 
 // IsTransactionalMergeStaleTarget reports whether a transactional scratch
@@ -158,13 +173,17 @@ func (c *Client) Fetch(ctx context.Context, worktree, remote string) error {
 func (c *Client) Merge(ctx context.Context, worktree, branch string) (*MergeResult, error) {
 	c.logger.Info("merging branch", "worktree", worktree, "branch", branch)
 
+	hooks := c.detectMergeHooks(worktree)
+	startedAt := time.Now()
 	output, err := c.runInWorktree(ctx, worktree, "merge", "--no-edit", branch)
+	elapsed := time.Since(startedAt)
 
 	result := &MergeResult{
 		Success:      err == nil,
 		HasConflicts: false,
 		Message:      mergeResultMessage(output, err),
 	}
+	result.HookDiagnostics = gitHookDiagnosticsForCommand(hooks, "git merge --no-edit "+branch, elapsed, err, true)
 
 	if err != nil {
 		// Check if it's a merge conflict
@@ -378,6 +397,91 @@ func appendMergeResultDetail(message, detail string) string {
 	default:
 		return message + "\n" + detail
 	}
+}
+
+func (c *Client) detectMergeHooks(worktree string) []string {
+	hookNames := []string{"pre-merge-commit", "prepare-commit-msg", "commit-msg", "post-merge"}
+	present := make([]string, 0, len(hookNames))
+	dirs := gitHookDirectoriesForWorktree(worktree)
+	for _, hookName := range hookNames {
+		for _, dir := range dirs {
+			info, statErr := os.Stat(filepath.Join(dir, hookName))
+			if statErr != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+				continue
+			}
+			present = append(present, hookName)
+			break
+		}
+	}
+	return present
+}
+
+func gitHookDirectoriesForWorktree(worktree string) []string {
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	dirs := make([]string, 0, 3)
+	add := func(dir string) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			return
+		}
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(worktree, dir)
+		}
+		dir = filepath.Clean(dir)
+		if _, ok := seen[dir]; ok {
+			return
+		}
+		seen[dir] = struct{}{}
+		dirs = append(dirs, dir)
+	}
+
+	add(filepath.Join(worktree, ".githooks"))
+
+	gitPath := filepath.Join(worktree, ".git")
+	info, err := os.Stat(gitPath)
+	if err == nil && info.IsDir() {
+		add(filepath.Join(gitPath, "hooks"))
+		return dirs
+	}
+	data, err := os.ReadFile(gitPath)
+	if err != nil {
+		return dirs
+	}
+	line := strings.TrimSpace(string(data))
+	gitDir, ok := strings.CutPrefix(line, "gitdir:")
+	if !ok {
+		return dirs
+	}
+	add(filepath.Join(strings.TrimSpace(gitDir), "hooks"))
+	return dirs
+}
+
+func gitHookDiagnosticsForCommand(hooks []string, command string, elapsed time.Duration, err error, blocking bool) []GitHookDiagnostic {
+	if len(hooks) == 0 {
+		return nil
+	}
+	return []GitHookDiagnostic{{
+		Hook:       strings.Join(hooks, ","),
+		Command:    strings.TrimSpace(command),
+		ElapsedMS:  elapsed.Milliseconds(),
+		ExitStatus: gitCommandExitStatus(err),
+		Blocking:   blocking,
+	}}
+}
+
+func gitCommandExitStatus(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
 }
 
 func (c *Client) mergeInProgress(ctx context.Context, worktree string) bool {
