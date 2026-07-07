@@ -15,6 +15,7 @@ const (
 	CloseFailureActionRetry              CloseFailureAction = "retry"
 	CloseFailureActionAIMerge            CloseFailureAction = "ai_merge"
 	CloseFailureActionForceWorktree      CloseFailureAction = "force_worktree"
+	CloseFailureActionAllowActiveSession CloseFailureAction = "allow_active_session"
 	CloseFailureActionCloseCleanChildren CloseFailureAction = "close_clean_children"
 	CloseFailureActionCancel             CloseFailureAction = "cancel"
 )
@@ -33,6 +34,7 @@ type CloseFailureActionMsg struct {
 	Action             CloseFailureAction
 	ForceWorktree      bool
 	CloseCleanChildren bool
+	AllowActiveSession bool
 }
 
 type CloseFailureDialogOptions struct {
@@ -47,8 +49,10 @@ type CloseFailureDialogOptions struct {
 	TargetStatus            string
 	ForceWorktree           bool
 	CloseCleanChildren      bool
+	AllowActiveSession      bool
 	AllowAIMerge            bool
 	AllowForceWorktree      bool
+	AllowActiveSessionRetry bool
 	AllowCloseCleanChildren bool
 }
 
@@ -70,6 +74,7 @@ type closeFailureActionItem struct {
 	action      CloseFailureAction
 	force       bool
 	cleanKids   bool
+	activeClose bool
 }
 
 func NewCloseFailureDialog(taskID, reason string, options CloseFailureDialogOptions) *CloseFailureDialog {
@@ -111,6 +116,9 @@ func (c *CloseFailureDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "a", "A":
 			return c, c.selectionForAction(CloseFailureActionAIMerge)
 		case "f", "F":
+			if c.options.AllowActiveSessionRetry {
+				return c, c.selectionForAction(CloseFailureActionAllowActiveSession)
+			}
 			return c, c.selectionForAction(CloseFailureActionForceWorktree)
 		case "c", "C":
 			return c, c.selectionForAction(CloseFailureActionCloseCleanChildren)
@@ -160,7 +168,9 @@ func (c *CloseFailureDialog) StatusBindings() []keybinds.Binding {
 	if c.allowAIMerge() {
 		bindings = append(bindings, keybinds.Binding{Key: "a", Description: "AI merge"})
 	}
-	if c.options.AllowForceWorktree {
+	if c.options.AllowActiveSessionRetry {
+		bindings = append(bindings, keybinds.Binding{Key: "f", Description: "force active close"})
+	} else if c.options.AllowForceWorktree {
 		bindings = append(bindings, keybinds.Binding{Key: "f", Description: "force cleanup"})
 	}
 	if c.options.AllowCloseCleanChildren {
@@ -277,6 +287,7 @@ func (c *CloseFailureDialog) selectionCmd(item closeFailureActionItem) tea.Cmd {
 				Action:             item.action,
 				ForceWorktree:      item.force,
 				CloseCleanChildren: item.cleanKids,
+				AllowActiveSession: item.activeClose,
 			},
 		}
 	}
@@ -290,6 +301,7 @@ func (c *CloseFailureDialog) closeFailureActions() []closeFailureActionItem {
 		action:      CloseFailureActionRetry,
 		force:       c.options.ForceWorktree,
 		cleanKids:   c.options.CloseCleanChildren,
+		activeClose: c.options.AllowActiveSession,
 	}}
 	if c.allowAIMerge() {
 		actions = append(actions, closeFailureActionItem{
@@ -299,9 +311,21 @@ func (c *CloseFailureDialog) closeFailureActions() []closeFailureActionItem {
 			action:      CloseFailureActionAIMerge,
 			force:       c.options.ForceWorktree,
 			cleanKids:   c.options.CloseCleanChildren,
+			activeClose: c.options.AllowActiveSession,
 		})
 	}
-	if c.options.AllowForceWorktree {
+	if c.options.AllowActiveSessionRetry {
+		actions = append(actions, closeFailureActionItem{
+			key:         "f",
+			label:       "Force active close",
+			description: "Retry and allow cleanup of the active AI session.",
+			action:      CloseFailureActionAllowActiveSession,
+			force:       c.options.ForceWorktree,
+			cleanKids:   c.options.CloseCleanChildren,
+			activeClose: true,
+		})
+	}
+	if c.options.AllowForceWorktree && !c.options.AllowActiveSessionRetry {
 		actions = append(actions, closeFailureActionItem{
 			key:         "f",
 			label:       "Force cleanup",
@@ -309,6 +333,7 @@ func (c *CloseFailureDialog) closeFailureActions() []closeFailureActionItem {
 			action:      CloseFailureActionForceWorktree,
 			force:       true,
 			cleanKids:   c.options.CloseCleanChildren,
+			activeClose: c.options.AllowActiveSession,
 		})
 	}
 	if c.options.AllowCloseCleanChildren {
@@ -319,6 +344,7 @@ func (c *CloseFailureDialog) closeFailureActions() []closeFailureActionItem {
 			action:      CloseFailureActionCloseCleanChildren,
 			force:       c.options.ForceWorktree,
 			cleanKids:   true,
+			activeClose: c.options.AllowActiveSession,
 		})
 	}
 	actions = append(actions, closeFailureActionItem{
@@ -342,7 +368,9 @@ func (c *CloseFailureDialog) nextStepLines() []string {
 	if c.allowAIMerge() {
 		lines = append(lines, "- AI merge starts an agent when integration recovery needs help.")
 	}
-	if c.options.AllowForceWorktree {
+	if c.options.AllowActiveSessionRetry {
+		lines = append(lines, "- Force active close stops the active session during close cleanup.")
+	} else if c.options.AllowForceWorktree {
 		lines = append(lines, "- Force cleanup discards modified or untracked worktree files.")
 	}
 	if c.options.AllowCloseCleanChildren {

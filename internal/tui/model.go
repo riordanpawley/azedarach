@@ -4813,6 +4813,7 @@ func (m Model) updateTaskStatusWithTimeoutOptions(taskID string, status domain.S
 		closeOpts.ForceWorktree = opts.ForceWorktree
 		closeOpts.IgnoreAhead = opts.IgnoreAhead
 		closeOpts.CloseCleanChildren = opts.CloseCleanChildren
+		closeOpts.AllowActiveSession = opts.AllowActiveSession
 		return m.closeTaskWithIntegrationAndCleanup(ctx, taskID, closeOpts)
 	}
 	return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, status, opts)
@@ -5009,8 +5010,10 @@ func (m Model) closeFailureDialogCmd(msg taskStatusResultMsg) tea.Cmd {
 		TargetStatus:            msg.newStatus.String(),
 		ForceWorktree:           msg.opts.ForceWorktree,
 		CloseCleanChildren:      msg.opts.CloseCleanChildren,
+		AllowActiveSession:      msg.opts.AllowActiveSession,
 		AllowAIMerge:            true,
 		AllowForceWorktree:      closeFailureSupportsForceWorktree(msg.err),
+		AllowActiveSessionRetry: closeFailureSupportsActiveSessionRetry(msg.err),
 		AllowCloseCleanChildren: closeFailureSupportsCloseCleanChildren(msg.err),
 	}
 	return m.openOverlay(overlay.NewCloseFailureDialog(msg.taskID, msg.err.Error(), options))
@@ -5027,6 +5030,15 @@ func closeFailureSupportsForceWorktree(err error) bool {
 		strings.Contains(message, "modified or untracked") ||
 		strings.Contains(message, "force worktree") ||
 		strings.Contains(message, "--force-worktree")
+}
+
+func closeFailureSupportsActiveSessionRetry(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "session activity is ") &&
+		strings.Contains(message, "session projection to report idle/done/terminal activity")
 }
 
 func closeFailureSupportsCloseCleanChildren(err error) bool {

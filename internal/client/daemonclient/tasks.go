@@ -84,6 +84,7 @@ type TaskStatusOptions struct {
 	IntegrateBeforeClose bool
 	CloseCleanChildren   bool
 	CascadeChildren      bool
+	AllowActiveSession   bool
 }
 
 type TaskDeleteOptions struct {
@@ -99,6 +100,7 @@ type taskCloseRequest struct {
 	IgnoreAhead          bool           `json:"ignore_ahead,omitempty"`
 	IntegrateBeforeClose bool           `json:"integrate_before_close,omitempty"`
 	CloseCleanChildren   bool           `json:"close_clean_children,omitempty"`
+	AllowActiveSession   bool           `json:"allow_active_session,omitempty"`
 }
 
 type taskDeleteRequest struct {
@@ -882,6 +884,7 @@ func (c *Client) CloseTask(ctx context.Context, taskID string, opts TaskStatusOp
 		IgnoreAhead:          opts.IgnoreAhead,
 		IntegrateBeforeClose: opts.IntegrateBeforeClose,
 		CloseCleanChildren:   opts.CloseCleanChildren,
+		AllowActiveSession:   opts.AllowActiveSession,
 	}, &out); err != nil {
 		return TaskCloseResult{}, err
 	}
