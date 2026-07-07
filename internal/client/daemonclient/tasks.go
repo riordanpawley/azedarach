@@ -28,6 +28,8 @@ const (
 	CommandTaskContextRisk      = "task.context_risk"
 	CommandTaskMergeBaseTarget  = "task.merge_base_target"
 	CommandTaskFollowOnMerge    = "task.follow_on_merge_candidates"
+	CommandTaskClaimOwnership   = "task.ownership.claim"
+	CommandTaskReleaseOwnership = "task.ownership.release"
 	CommandTaskUpdateStatus     = "task.update_status"
 	CommandTaskUpdate           = "task.update_details"
 	CommandTaskAppendNotes      = "task.append_notes"
@@ -75,6 +77,14 @@ type TaskStatusRequest struct {
 	TaskID          naming.IssueID `json:"task_id"`
 	Status          domain.Status  `json:"status"`
 	CascadeChildren bool           `json:"cascade_children,omitempty"`
+}
+
+type TaskOwnershipRequest struct {
+	TaskID    naming.IssueID `json:"task_id"`
+	OwnerID   string         `json:"owner_id,omitempty"`
+	OwnerKind string         `json:"owner_kind,omitempty"`
+	TTL       string         `json:"ttl,omitempty"`
+	Force     bool           `json:"force,omitempty"`
 }
 
 // TaskStatusOptions controls client-side status transition behavior.
@@ -282,6 +292,11 @@ type TaskIntegrationReadiness struct {
 type taskIntegrationReadinessRequest struct {
 	TaskID  naming.IssueID `json:"task_id"`
 	RepoDir string         `json:"repo_dir,omitempty"`
+}
+
+type taskGraphReadinessRequest struct {
+	TaskID  naming.IssueID `json:"task_id"`
+	ActorID string         `json:"actor_id,omitempty"`
 }
 
 type taskContextRiskRequest struct {
@@ -883,6 +898,32 @@ func (c *Client) CloseTask(ctx context.Context, taskID string, opts TaskStatusOp
 	return out, nil
 }
 
+func (c *Client) ClaimTaskOwnership(ctx context.Context, taskID string, params TaskOwnershipRequest) (domain.Task, error) {
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("invalid task id: %w", err)
+	}
+	params.TaskID = parsedTaskID
+	var out domain.Task
+	if err := c.commandJSON(ctx, CommandTaskClaimOwnership, params, &out); err != nil {
+		return domain.Task{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) ReleaseTaskOwnership(ctx context.Context, taskID string, params TaskOwnershipRequest) (domain.Task, error) {
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("invalid task id: %w", err)
+	}
+	params.TaskID = parsedTaskID
+	var out domain.Task
+	if err := c.commandJSON(ctx, CommandTaskReleaseOwnership, params, &out); err != nil {
+		return domain.Task{}, err
+	}
+	return out, nil
+}
+
 // UpdateTaskDetails updates a task's details through the daemon client boundary.
 func (c *Client) UpdateTaskDetails(ctx context.Context, taskID string, params TaskUpdateParams) error {
 	parsedTaskID, err := naming.ParseIssueID(taskID)
@@ -946,12 +987,21 @@ func (c *Client) ArchiveTask(ctx context.Context, taskID string) error {
 
 // TaskGraphReadiness returns daemon-owned runnable-leaf policy for a root issue.
 func (c *Client) TaskGraphReadiness(ctx context.Context, rootIssueID string) (TaskGraphReadiness, error) {
+	return c.TaskGraphReadinessForActor(ctx, rootIssueID, "")
+}
+
+// TaskGraphReadinessForActor returns daemon-owned runnable-leaf policy for a root issue
+// from a specific actor's ownership perspective.
+func (c *Client) TaskGraphReadinessForActor(ctx context.Context, rootIssueID string, actorID string) (TaskGraphReadiness, error) {
 	parsedRootID, err := naming.ParseIssueID(rootIssueID)
 	if err != nil {
 		return TaskGraphReadiness{}, fmt.Errorf("invalid root issue id: %w", err)
 	}
 	var out TaskGraphReadiness
-	if err := c.commandJSON(ctx, CommandTaskGraphReadiness, TaskIDRequest{TaskID: parsedRootID}, &out); err != nil {
+	if err := c.commandJSON(ctx, CommandTaskGraphReadiness, taskGraphReadinessRequest{
+		TaskID:  parsedRootID,
+		ActorID: strings.TrimSpace(actorID),
+	}, &out); err != nil {
 		return TaskGraphReadiness{}, err
 	}
 	return out, nil

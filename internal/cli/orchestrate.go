@@ -750,7 +750,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		return err
 	}
 
-	ready, err := deps.DaemonClient.TaskGraphReadiness(ctx, opts.RootIssueID)
+	ready, err := deps.DaemonClient.TaskGraphReadinessForActor(ctx, opts.RootIssueID, orchestrateOwnerID())
 	if err != nil {
 		return err
 	}
@@ -1148,7 +1148,8 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return orchestrateStartResult{}, err
 	}
-	ready, err := deps.DaemonClient.TaskGraphReadiness(ctx, opts.RootIssueID)
+	ownerID := orchestrateOwnerID()
+	ready, err := deps.DaemonClient.TaskGraphReadinessForActor(ctx, opts.RootIssueID, ownerID)
 	if err != nil {
 		return orchestrateStartResult{}, err
 	}
@@ -1183,6 +1184,10 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 					skipped[id] = "session-already-running"
 					continue
 				}
+				if reason := strings.TrimSpace(ready.Blocked[id]); reason != "" {
+					skipped[id] = reason
+					continue
+				}
 				skipped[id] = "not-runnable"
 				continue
 			}
@@ -1215,9 +1220,18 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 			continue
 		}
 		emitOrchestrateStartProgress(opts, "preparing", issueID)
-		launch, err := submitSessionStartForIssueWithBaseBranch(deps, issueID, opts.BaseBranchOverride)
+		claimed, reason, err := claimOrchestrateStartIssue(ctx, deps, issueID, ownerID)
 		if err != nil {
 			result.Failed[issueID] = err.Error()
+			continue
+		}
+		if !claimed {
+			result.Skipped[issueID] = reason
+			continue
+		}
+		launch, err := submitSessionStartForIssueWithBaseBranch(deps, issueID, opts.BaseBranchOverride)
+		if err != nil {
+			result.Failed[issueID] = releaseOrchestrateStartClaimAfterSubmitFailure(ctx, deps, issueID, ownerID, err)
 			continue
 		}
 		emitOrchestrateStartProgressWithLaunch(opts, "submitted", launch)
@@ -1246,6 +1260,40 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	}
 
 	return result, nil
+}
+
+func orchestrateOwnerID() string {
+	if ownerID := defaultIssueOwnerID(); ownerID != "" {
+		return ownerID
+	}
+	return "orchestrate"
+}
+
+func claimOrchestrateStartIssue(ctx context.Context, deps *Dependencies, issueID, ownerID string) (bool, string, error) {
+	_, err := deps.DaemonClient.ClaimTaskOwnership(ctx, issueID, daemonclient.TaskOwnershipRequest{
+		OwnerID:   ownerID,
+		OwnerKind: "agent",
+	})
+	if err == nil {
+		return true, "", nil
+	}
+	var commandErr *daemonclient.CommandError
+	if errors.As(err, &commandErr) && commandErr.Code == protocol.ErrorCodeConflict {
+		reason := strings.TrimSpace(commandErr.Message)
+		if reason == "" {
+			reason = "owned by another actor"
+		}
+		return false, reason, nil
+	}
+	return false, "", fmt.Errorf("claim ownership before launch: %w", err)
+}
+
+func releaseOrchestrateStartClaimAfterSubmitFailure(ctx context.Context, deps *Dependencies, issueID, ownerID string, submitErr error) string {
+	_, releaseErr := deps.DaemonClient.ReleaseTaskOwnership(ctx, issueID, daemonclient.TaskOwnershipRequest{OwnerID: ownerID})
+	if releaseErr == nil {
+		return submitErr.Error()
+	}
+	return fmt.Sprintf("%s; release ownership after failed submit: %v", submitErr.Error(), releaseErr)
 }
 
 func waitForOrchestrateStartLaunch(deps *Dependencies, opts OrchestrateStartOptions, launch orchestrateStartLaunch) (orchestrateStartLaunch, *orchestrateStartPending, error) {

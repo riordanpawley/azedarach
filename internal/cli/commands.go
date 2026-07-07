@@ -157,6 +157,16 @@ type IssueGetOptions struct {
 	IncludeNotes bool
 }
 
+type IssueOwnershipOptions struct {
+	Project   string
+	IssueID   string
+	OwnerID   string
+	OwnerKind string
+	TTL       string
+	Force     bool
+	JSON      bool
+}
+
 type IssueEventsOptions struct {
 	Project    string
 	IssueID    string
@@ -2618,6 +2628,40 @@ func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 	return opts, nil
 }
 
+func ParseIssueOwnershipArgs(args []string, command string) (IssueOwnershipOptions, error) {
+	opts := IssueOwnershipOptions{}
+	issueIDFlag := ""
+	fs := flag.NewFlagSet("issue "+command, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.BoolVar(&opts.JSON, "json", false, "output updated issue as JSON")
+	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&opts.OwnerID, "owner", "", "owner id; defaults to current actor")
+	fs.StringVar(&opts.OwnerKind, "kind", "agent", "owner kind: human, agent, or orchestrator")
+	fs.StringVar(&opts.TTL, "ttl", "", "optional lease duration, for example 2h")
+	fs.BoolVar(&opts.Force, "force", false, "take over or release another active owner")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueOwnershipOptions{}, err
+	}
+	if fs.NArg() > 1 {
+		return IssueOwnershipOptions{}, fmt.Errorf("usage: az issue %s [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<issue-id>]", command)
+	}
+	if fs.NArg() == 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return IssueOwnershipOptions{}, fmt.Errorf("usage: az issue %s [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<issue-id>]", command)
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	opts.OwnerID = strings.TrimSpace(opts.OwnerID)
+	opts.OwnerKind = strings.TrimSpace(opts.OwnerKind)
+	opts.TTL = strings.TrimSpace(opts.TTL)
+	return opts, nil
+}
+
 func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
 	opts := IssueEventsOptions{}
 	issueIDFlag := ""
@@ -4048,9 +4092,9 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
 	if opts.Deps {
-		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tASSIGNEE\tEST\tIMPL\tDEPS\tTITLE")
+		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tASSIGNEE\tOWNER\tEST\tIMPL\tDEPS\tTITLE")
 	} else {
-		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tASSIGNEE\tEST\tIMPL\tTITLE")
+		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tASSIGNEE\tOWNER\tEST\tIMPL\tTITLE")
 	}
 	for _, task := range tasks {
 		assigneeSummary := "-"
@@ -4061,16 +4105,18 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		if task.Estimate != nil {
 			estimateSummary = strconv.Itoa(*task.Estimate)
 		}
+		ownerSummary := renderIssueOwnershipListCell(task.Ownership)
 		implSummary := formatIssueImplementationSummary(task.Implementations)
 		if opts.Deps {
 			fmt.Fprintf(
 				w,
-				"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				task.ID,
 				task.Status,
 				task.Priority.String(),
 				task.Type,
 				assigneeSummary,
+				ownerSummary,
 				estimateSummary,
 				implSummary,
 				formatDependencySummary(task.Dependencies),
@@ -4078,7 +4124,7 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 			)
 			continue
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", task.ID, task.Status, task.Priority.String(), task.Type, assigneeSummary, estimateSummary, implSummary, task.Title)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", task.ID, task.Status, task.Priority.String(), task.Type, assigneeSummary, ownerSummary, estimateSummary, implSummary, task.Title)
 	}
 	if err := w.Flush(); err != nil {
 		return err
@@ -4260,6 +4306,9 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	if runtimeSummary := renderIssueRuntimeSummary(task); runtimeSummary != "" {
 		fmt.Printf("Runtime: %s\n", runtimeSummary)
 	}
+	if ownershipSummary := renderIssueOwnershipSummary(task.Ownership); ownershipSummary != "" {
+		fmt.Printf("Owner: %s\n", ownershipSummary)
+	}
 	if gitSummary := renderIssueGitSummary(task); gitSummary != "" {
 		fmt.Printf("Git: %s\n", gitSummary)
 	}
@@ -4287,6 +4336,72 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	fmt.Printf("Created: %s\n", task.CreatedAt.UTC().Format(time.RFC3339))
 	fmt.Printf("Updated: %s\n", task.UpdatedAt.UTC().Format(time.RFC3339))
 	return nil
+}
+
+func IssueClaimCommand(deps *Dependencies, opts IssueOwnershipOptions) error {
+	return issueOwnershipCommand(deps, opts, true)
+}
+
+func IssueReleaseCommand(deps *Dependencies, opts IssueOwnershipOptions) error {
+	return issueOwnershipCommand(deps, opts, false)
+}
+
+func issueOwnershipCommand(deps *Dependencies, opts IssueOwnershipOptions, claim bool) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ownerID := strings.TrimSpace(opts.OwnerID)
+	if ownerID == "" {
+		ownerID = defaultIssueOwnerID()
+	}
+	if ownerID == "" {
+		return fmt.Errorf("--owner is required when current actor cannot be inferred")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	req := daemonclient.TaskOwnershipRequest{
+		OwnerID:   ownerID,
+		OwnerKind: opts.OwnerKind,
+		TTL:       opts.TTL,
+		Force:     opts.Force,
+	}
+	var (
+		task domain.Task
+		err  error
+	)
+	if claim {
+		task, err = deps.DaemonClient.ClaimTaskOwnership(ctx, opts.IssueID, req)
+	} else {
+		task, err = deps.DaemonClient.ReleaseTaskOwnership(ctx, opts.IssueID, req)
+	}
+	if err != nil {
+		return err
+	}
+	if opts.JSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(task)
+	}
+	if claim {
+		fmt.Printf("Claimed issue %s: %s\n", task.ID, renderIssueOwnershipSummary(task.Ownership))
+		return nil
+	}
+	fmt.Printf("Released issue %s ownership\n", task.ID)
+	return nil
+}
+
+func defaultIssueOwnerID() string {
+	for _, name := range []string{"AZEDARACH_AUDIT_ACTOR", "USER", "LOGNAME"} {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func IssueEventsCommand(deps *Dependencies, opts IssueEventsOptions) error {
@@ -6428,6 +6543,36 @@ func renderIssueRuntimeSummary(task domain.Task) string {
 		parts = append(parts, "worktree=yes")
 	}
 	return strings.Join(parts, ", ")
+}
+
+func renderIssueOwnershipSummary(ownership *domain.IssueOwnership) string {
+	if ownership == nil || strings.TrimSpace(ownership.OwnerID) == "" {
+		return ""
+	}
+	kind := strings.TrimSpace(ownership.OwnerKind)
+	if kind == "" {
+		kind = "owner"
+	}
+	parts := []string{fmt.Sprintf("%s:%s", kind, strings.TrimSpace(ownership.OwnerID))}
+	if !ownership.ClaimedAt.IsZero() {
+		parts = append(parts, "claimed "+ownership.ClaimedAt.UTC().Format(time.RFC3339))
+	}
+	if ownership.ExpiresAt != nil && !ownership.ExpiresAt.IsZero() {
+		parts = append(parts, "expires "+ownership.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func renderIssueOwnershipListCell(ownership *domain.IssueOwnership) string {
+	if ownership == nil || strings.TrimSpace(ownership.OwnerID) == "" {
+		return "-"
+	}
+	ownerID := strings.TrimSpace(ownership.OwnerID)
+	kind := strings.TrimSpace(ownership.OwnerKind)
+	if kind == "" {
+		return ownerID
+	}
+	return kind + ":" + ownerID
 }
 
 func renderIssueGitSummary(task domain.Task) string {

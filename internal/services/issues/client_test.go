@@ -1861,6 +1861,81 @@ func TestClient_IssueObservationEventsRecordIssueMutations(t *testing.T) {
 	assert.Equal(t, domain.IssueEventIssueStatusChanged, filtered[0].Type)
 }
 
+func TestClient_IssueOwnershipClaimConflictReleaseAndExpiredTakeover(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Owned work",
+		Type:     domain.TypeFeature,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	claimed, err := client.ClaimOwnershipWithRuntime(ctx, "project-1", taskID, OwnershipClaimParams{
+		OwnerID:   "agent-a",
+		OwnerKind: "agent",
+		TTL:       time.Hour,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, claimed.Ownership)
+	assert.Equal(t, "agent-a", claimed.Ownership.OwnerID)
+	assert.Equal(t, "agent", claimed.Ownership.OwnerKind)
+	require.NotNil(t, claimed.Ownership.ExpiresAt)
+	assert.True(t, claimed.Ownership.IsActive(time.Now().UTC()))
+
+	_, err = client.ClaimOwnershipWithRuntime(ctx, "project-1", taskID, OwnershipClaimParams{
+		OwnerID: "agent-b",
+	})
+	require.ErrorIs(t, err, domain.ErrConflict)
+
+	_, err = client.ReleaseOwnershipWithRuntime(ctx, "project-1", taskID, OwnershipClaimParams{
+		OwnerID: "agent-b",
+	})
+	require.ErrorIs(t, err, domain.ErrConflict)
+
+	released, err := client.ReleaseOwnershipWithRuntime(ctx, "project-1", taskID, OwnershipClaimParams{
+		OwnerID: "agent-a",
+	})
+	require.NoError(t, err)
+	assert.Nil(t, released.Ownership)
+
+	expiredClaim, err := client.ClaimOwnershipWithRuntime(ctx, "project-1", taskID, OwnershipClaimParams{
+		OwnerID: "agent-a",
+		TTL:     time.Hour,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, expiredClaim.Ownership)
+
+	db, err := sql.Open("sqlite", client.dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
+	_, err = db.ExecContext(ctx, `UPDATE issues SET owner_expires_at = ? WHERE id = ?`, past, taskID)
+	require.NoError(t, err)
+
+	takenOver, err := client.ClaimOwnershipWithRuntime(ctx, "project-1", taskID, OwnershipClaimParams{
+		OwnerID:   "agent-b",
+		OwnerKind: "orchestrator",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, takenOver.Ownership)
+	assert.Equal(t, "agent-b", takenOver.Ownership.OwnerID)
+	assert.Equal(t, "orchestrator", takenOver.Ownership.OwnerKind)
+	assert.Nil(t, takenOver.Ownership.ExpiresAt)
+
+	events, err := client.ListIssueObservationEvents(ctx, taskID, IssueObservationEventListOptions{
+		Types: []domain.IssueObservationEventType{domain.IssueEventIssueOwnershipChanged},
+	})
+	require.NoError(t, err)
+	require.Len(t, events, 4)
+	assert.Equal(t, "claimed", events[0].Payload["action"])
+	assert.Equal(t, "agent-a", events[0].Payload["owner_id"])
+	assert.Equal(t, "released", events[1].Payload["action"])
+	assert.Equal(t, "agent-a", events[2].Payload["owner_id"])
+	assert.Equal(t, "agent-b", events[3].Payload["owner_id"])
+}
+
 func TestClient_AppendIssueObservationEventRecordsSourceMetadata(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -3254,6 +3329,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0021_agent_learning_relations",
 		"0021_agent_learning_target_state",
 		"0025_agent_learning_privacy",
+		"0026_issue_ownership",
 	}, got)
 }
 
@@ -3393,6 +3469,53 @@ func TestClient_ReplaysAgentLearningPrivacyMigrationWhenColumnAlreadyExists(t *t
 		SELECT EXISTS(
 			SELECT 1 FROM sqlite_master
 			WHERE type = 'index' AND name = 'idx_agent_learnings_active_privacy'
+		)
+	`).Scan(&indexed)
+	require.NoError(t, err)
+	assert.True(t, indexed)
+}
+
+func TestClient_ReplaysIssueOwnershipMigrationWhenColumnsAlreadyExist(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+
+	client := NewClientAtPath(dbPath, slog.Default())
+	_, err := client.Create(ctx, CreateTaskParams{
+		Title:    "seed migrated ownership schema",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.CloseDB())
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	_, err = db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE id = '0026_issue_ownership'`)
+	require.NoError(t, err)
+
+	client = NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, client.CloseDB())
+	})
+	_, err = client.List(ctx)
+	require.NoError(t, err)
+
+	var applied bool
+	err = db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM schema_migrations WHERE id = '0026_issue_ownership'
+		)
+	`).Scan(&applied)
+	require.NoError(t, err)
+	assert.True(t, applied)
+
+	var indexed bool
+	err = db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM sqlite_master
+			WHERE type = 'index' AND name = 'idx_issues_owner_active'
 		)
 	`).Scan(&indexed)
 	require.NoError(t, err)

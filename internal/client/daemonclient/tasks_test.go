@@ -207,12 +207,15 @@ func TestTaskGraphReadinessDecodesWorkerObservations(t *testing.T) {
 			if req.Command != CommandTaskGraphReadiness {
 				t.Fatalf("command = %q, want %q", req.Command, CommandTaskGraphReadiness)
 			}
-			var body TaskIDRequest
+			var body taskGraphReadinessRequest
 			if err := json.Unmarshal(req.Body, &body); err != nil {
 				t.Fatalf("unmarshal request: %v", err)
 			}
 			if body.TaskID != "az-root" {
 				t.Fatalf("request body = %+v", body)
+			}
+			if body.ActorID != "agent-a" {
+				t.Fatalf("actor_id = %q, want agent-a", body.ActorID)
 			}
 			return responseWithJSON(t, req, TaskGraphReadiness{
 				RootIssueID: "az-root",
@@ -242,7 +245,7 @@ func TestTaskGraphReadinessDecodesWorkerObservations(t *testing.T) {
 	}
 
 	client := New(transport).WithProjectID(wantProjectID)
-	ready, err := client.TaskGraphReadiness(context.Background(), "az-root")
+	ready, err := client.TaskGraphReadinessForActor(context.Background(), "az-root", "agent-a")
 	if err != nil {
 		t.Fatalf("TaskGraphReadiness error: %v", err)
 	}

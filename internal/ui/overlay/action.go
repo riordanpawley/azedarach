@@ -3,6 +3,7 @@ package overlay
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -162,6 +163,14 @@ func (m *ActionMenu) buildActions() []Action {
 		Action{Key: "4", Label: "Set status: Done", Enabled: m.task.Status != domain.StatusDone && !activeMutation},
 		Action{Key: "C", Label: "Set review incl children", Enabled: m.task.Status != domain.StatusInReview && !activeMutation},
 	)
+	if m.task.Ownership != nil && m.task.Ownership.IsActive(time.Now().UTC()) {
+		actions = append(actions,
+			Action{Key: "y", Label: "Release ownership", Enabled: !activeMutation},
+			Action{Key: "U", Label: "Take over ownership", Enabled: !activeMutation},
+		)
+	} else {
+		actions = append(actions, Action{Key: "o", Label: "Claim ownership", Enabled: !activeMutation})
+	}
 	if !m.hideStatusMoveActions {
 		actions = append(actions,
 			Action{Key: "h", Label: "Move left", Enabled: m.task.Status != domain.StatusOpen && !activeMutation},
@@ -394,6 +403,7 @@ func (m *ActionMenu) StatusBindings() []keybinds.Binding {
 		{Key: "Enter", Description: "run action"},
 		{Key: "x", Description: "cancel/stop"},
 		{Key: "r", Description: "refresh issue"},
+		{Key: "o/U/y", Description: "ownership"},
 		{Key: "V", Description: "dev servers"},
 		{Key: "1/2/3/4", Description: "set status"},
 		{Key: "h/l", Description: "move status"},

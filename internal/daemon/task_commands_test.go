@@ -5654,6 +5654,109 @@ func TestTaskGraphReadinessDependencyGating(t *testing.T) {
 	}
 }
 
+func TestTaskGraphReadinessSkipsForeignOwnedRunnableIssues(t *testing.T) {
+	root := naming.IssueID("az-root")
+	leaf := naming.IssueID("az-owned")
+	leafParent := root
+	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(time.Hour)
+
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
+		{
+			ID:       leaf,
+			Type:     domain.TypeTask,
+			Status:   domain.StatusOpen,
+			ParentID: &leafParent,
+			Ownership: &domain.IssueOwnership{
+				OwnerID:   "agent-a",
+				OwnerKind: "agent",
+				ClaimedAt: now.Add(-time.Minute),
+				ExpiresAt: &expiresAt,
+			},
+		},
+	}
+
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), tasks)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphIndexes error: %v", err)
+	}
+	foreignActor, err := daemonTaskGraphReadinessFromIndexesForActor(rootID, byID, children, "agent-b", now)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphReadinessFromIndexesForActor foreign actor error: %v", err)
+	}
+	if len(foreignActor.Runnable) != 0 {
+		t.Fatalf("foreign actor runnable = %v, want empty", foreignActor.Runnable)
+	}
+	if got := foreignActor.Blocked[leaf.String()]; !strings.Contains(got, "owned by agent-a") {
+		t.Fatalf("foreign actor blocked[%s] = %q, want ownership blocker", leaf.String(), got)
+	}
+
+	ownerActor, err := daemonTaskGraphReadinessFromIndexesForActor(rootID, byID, children, "agent-a", now)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphReadinessFromIndexesForActor owner actor error: %v", err)
+	}
+	if len(ownerActor.Runnable) != 1 || ownerActor.Runnable[0] != leaf.String() {
+		t.Fatalf("owner actor runnable = %v, want [%s]", ownerActor.Runnable, leaf.String())
+	}
+
+	expiredActor, err := daemonTaskGraphReadinessFromIndexesForActor(rootID, byID, children, "agent-b", expiresAt.Add(time.Second))
+	if err != nil {
+		t.Fatalf("daemonTaskGraphReadinessFromIndexesForActor expired actor error: %v", err)
+	}
+	if len(expiredActor.Runnable) != 1 || expiredActor.Runnable[0] != leaf.String() {
+		t.Fatalf("expired actor runnable = %v, want [%s]", expiredActor.Runnable, leaf.String())
+	}
+}
+
+func TestTaskOwnershipClaimConflictReturnsProtocolConflict(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-ownership-conflict"
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Owned worker",
+		Type:   domain.TypeTask,
+		Status: domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{OwnerID: "agent-a"}); err != nil {
+		t.Fatalf("seed ownership: %v", err)
+	}
+	d := &Daemon{
+		cfg: Config{Logger: slog.Default()},
+		hub: publish.NewHub(16, 8, slog.Default()),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{},
+	}
+	body, err := json.Marshal(taskOwnershipRequest{TaskID: taskID, OwnerID: "agent-b"})
+	if err != nil {
+		t.Fatalf("marshal ownership request: %v", err)
+	}
+
+	resp, err := d.handleTaskOwnershipClaim(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-ownership-conflict",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.ownership.claim",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskOwnershipClaim error: %v", err)
+	}
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("handleTaskOwnershipClaim response = %+v, want conflict error", resp)
+	}
+	if resp.Error.Code != protocol.ErrorCodeConflict {
+		t.Fatalf("error code = %s, want %s", resp.Error.Code, protocol.ErrorCodeConflict)
+	}
+}
+
 func TestTaskGraphReadinessReportsMissingDependencyAndActiveSession(t *testing.T) {
 	root := naming.IssueID("az-root")
 	missingLeaf := naming.IssueID("az-leaf")

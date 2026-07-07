@@ -8363,6 +8363,8 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 						BranchAttached: true,
 						AncestorChain:  []string{root.String()},
 					}), nil
+				case daemonclient.CommandTaskClaimOwnership:
+					return responseWithTaskOwnershipMutation(t, req), nil
 				case protocol.CommandOperationSubmit:
 					if err := json.Unmarshal(req.Body, &submitted); err != nil {
 						t.Fatalf("decode operation submit: %v", err)

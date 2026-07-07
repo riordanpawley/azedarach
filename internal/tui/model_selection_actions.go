@@ -478,7 +478,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	// Keep task workspace open for actions that should layer over it or return
 	// to it without forcing users to reopen the details.
 	keepWorkspaceOpen := isTaskWorkspaceOverlay(m.overlayStack.Current()) &&
-		(msg.Key == "a" || msg.Key == "c" || msg.Key == "r" || msg.Key == "w" || msg.Key == "W" || msg.Key == "x")
+		(msg.Key == "a" || msg.Key == "c" || msg.Key == "o" || msg.Key == "U" || msg.Key == "y" || msg.Key == "r" || msg.Key == "w" || msg.Key == "W" || msg.Key == "x")
 	if !keepWorkspaceOpen {
 		m.overlayStack.Pop()
 	}
@@ -740,6 +740,15 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.beginMutationFeedback(fmt.Sprintf("Refreshing %s", task.ID))
 		return m, m.refreshTaskWorkspaceInBackgroundCmd(task.ID.String())
+	case "o":
+		m.beginMutationFeedback(fmt.Sprintf("Claiming ownership for %s", task.ID))
+		return m, m.issueOwnershipCmd(task.ID.String(), "claim", false)
+	case "U":
+		m.beginMutationFeedback(fmt.Sprintf("Taking ownership for %s", task.ID))
+		return m, m.issueOwnershipCmd(task.ID.String(), "claim", true)
+	case "y":
+		m.beginMutationFeedback(fmt.Sprintf("Releasing ownership for %s", task.ID))
+		return m, m.issueOwnershipCmd(task.ID.String(), "release", false)
 
 	case "V":
 		// Dev server menu

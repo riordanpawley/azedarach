@@ -71,6 +71,28 @@ func TestDetailPanelView(t *testing.T) {
 	assert.Contains(t, view, "This is a test description")
 }
 
+func TestDetailPanelViewShowsIssueOwnership(t *testing.T) {
+	expiresAt := time.Date(2026, 7, 7, 13, 0, 0, 0, time.UTC)
+	task := domain.Task{
+		ID:     "az-123",
+		Title:  "Owned task",
+		Status: domain.StatusOpen,
+		Ownership: &domain.IssueOwnership{
+			OwnerID:   "agent-a",
+			OwnerKind: "agent",
+			ClaimedAt: expiresAt.Add(-time.Hour),
+			ExpiresAt: &expiresAt,
+		},
+	}
+
+	panel := NewDetailPanel(task)
+	view := panel.View()
+
+	assert.Contains(t, view, "Owner:")
+	assert.Contains(t, view, "agent-a")
+	assert.Contains(t, view, "agent")
+}
+
 func TestDetailPanelViewWithSession(t *testing.T) {
 	startTime := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
 	task := domain.Task{
