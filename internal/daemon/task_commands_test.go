@@ -140,7 +140,7 @@ func TestProjectIssueStoreMigrationFailureSuppressesRepeatedPolls(t *testing.T) 
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
-	seedIssueStoreMissingImplementationsJSON(t, dbPath)
+	seedIssueStoreInvalidGraphClosureObject(t, dbPath)
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot: %v", err)
@@ -183,8 +183,8 @@ func TestProjectIssueStoreMigrationFailureSuppressesRepeatedPolls(t *testing.T) 
 	if first.OK || first.Error == nil {
 		t.Fatalf("first task.list response OK = %v, error = %+v; want migration error", first.OK, first.Error)
 	}
-	if got := first.Error.Message; !strings.Contains(got, "apply migration 0016_issue_search_fts") || !strings.Contains(got, "implementations_json") {
-		t.Fatalf("first task.list error = %q, want migration/implementations_json context", got)
+	if got := first.Error.Message; !strings.Contains(got, "apply migration 0018_issue_graph_closure") || !strings.Contains(got, "issue_graph_closure") {
+		t.Fatalf("first task.list error = %q, want issue_graph_closure migration context", got)
 	}
 
 	removeSQLiteFiles(t, dbPath)
@@ -242,7 +242,7 @@ func TestProjectIssueStoreMigrationFailureSuppressesRepeatedPolls(t *testing.T) 
 	}
 }
 
-func seedIssueStoreMissingImplementationsJSON(t *testing.T, dbPath string) {
+func seedIssueStoreInvalidGraphClosureObject(t *testing.T, dbPath string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		t.Fatalf("mkdir db dir: %v", err)
@@ -273,6 +273,15 @@ func seedIssueStoreMissingImplementationsJSON(t *testing.T, dbPath string) {
 			updated_at TEXT NOT NULL,
 			deleted_at TEXT
 		);
+		CREATE VIEW issue_graph_closure AS
+			SELECT
+				'default' AS project_id,
+				'' AS ancestor_id,
+				'' AS descendant_id,
+				'parent-child' AS dependency_type,
+				0 AS depth,
+				'1970-01-01T00:00:00Z' AS updated_at
+			WHERE 0;
 	`); err != nil {
 		t.Fatalf("create legacy issue store fixture: %v", err)
 	}
@@ -293,6 +302,8 @@ func seedIssueStoreMissingImplementationsJSON(t *testing.T, dbPath string) {
 		"0013_closed_runtime_invariants",
 		"0014_linear_sync_external_refs_backfill",
 		"0015_issue_attachments",
+		"0016_issue_search_fts",
+		"0017_spec_requirement_search_fts",
 	}
 	for _, id := range applied {
 		if _, err := db.Exec(`INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, id, "2026-07-07T00:00:00Z"); err != nil {

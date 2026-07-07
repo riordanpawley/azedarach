@@ -3257,6 +3257,101 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 	}, got)
 }
 
+func TestClient_RepairsLegacyIssueColumnsBeforeSearchFTSMigration(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.ExecContext(ctx, `
+		CREATE TABLE schema_migrations (
+			id TEXT PRIMARY KEY,
+			applied_at TEXT NOT NULL
+		);
+		CREATE TABLE issues (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			description TEXT,
+			notes TEXT,
+			design TEXT,
+			acceptance TEXT,
+			assignee TEXT,
+			labels_json TEXT,
+			status TEXT NOT NULL,
+			priority INTEGER NOT NULL,
+			issue_type TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			deleted_at TEXT
+		);
+		CREATE TABLE issue_dependencies (
+			issue_id TEXT NOT NULL,
+			depends_on_id TEXT NOT NULL,
+			dependency_type TEXT NOT NULL,
+			tombstoned_at TEXT,
+			PRIMARY KEY (issue_id, depends_on_id, dependency_type)
+		);
+		CREATE TABLE meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+		INSERT INTO issues (
+			id, title, description, notes, design, acceptance, assignee, labels_json,
+			status, priority, issue_type, created_at, updated_at
+		)
+		VALUES ('legacy-search', 'Legacy search fixture', '', '', '', '', '', '[]', 'open', 2, 'task', ?, ?);
+	`, now, now)
+	require.NoError(t, err)
+	for _, id := range []string{
+		"0001_bootstrap_tables",
+		"0002_dependency_foreign_keys",
+		"0003_issue_indexes",
+		"0004_spec_tables",
+		"0005_spec_audit_log",
+		"0006_external_issue_sync",
+		"0006_issue_external_refs",
+		"0007_external_issue_sync_payload",
+		"0008_decision_tables",
+		"0009_decision_audit_log",
+		"0010_decisions_refresh",
+		"0011_decisions_consequences",
+		"0012_blocked_status_to_open",
+		"0013_closed_runtime_invariants",
+		"0014_linear_sync_external_refs_backfill",
+		"0015_issue_attachments",
+	} {
+		_, err = db.ExecContext(ctx, `INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, id, now)
+		require.NoError(t, err)
+	}
+
+	client := NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, client.CloseDB())
+	})
+	results, err := client.SearchWithRuntime(ctx, "proj", "legacy search")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, naming.IssueID("legacy-search"), results[0].ID)
+
+	columns, err := tableColumns(db, "issues")
+	require.NoError(t, err)
+	for _, column := range []string{"closed_at", "implementations_json", "estimate"} {
+		assert.Contains(t, columns, column)
+	}
+
+	var applied bool
+	err = db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM schema_migrations WHERE id = '0016_issue_search_fts'
+		)
+	`).Scan(&applied)
+	require.NoError(t, err)
+	assert.True(t, applied)
+}
+
 func TestClient_ReplaysAgentLearningPrivacyMigrationWhenColumnAlreadyExists(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
