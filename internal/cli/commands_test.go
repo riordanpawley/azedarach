@@ -11444,6 +11444,36 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	}
 }
 
+func TestRenderPrimeContainmentRiskSectionShowsStaleChildBranch(t *testing.T) {
+	output := renderPrimeContainmentRiskSection("fsy", []daemonclient.TaskContainmentRisk{
+		{
+			IssueID:                "fsy",
+			RootIssueID:            "fmd",
+			RootBranch:             "riordan/fmd/profile-and-worker-mater-cif-merge",
+			ActiveBranch:           "riordan/fsy/reconcile",
+			ClosedChildIssueID:     "frv",
+			EvidenceCommit:         "67cc4c5cad123456",
+			RootContainsEvidence:   true,
+			ActiveContainsEvidence: false,
+			Classification:         "stale_child_branch",
+			Message:                "stale child branch: parent branch contains closed child evidence",
+			OverlapFiles:           []string{"internal/rpc/materializer.go"},
+			SuggestedCommand:       "merge or rebase parent before continuing",
+		},
+	})
+	for _, want := range []string{
+		"Stale child branch",
+		"root_contains=true active_contains=false",
+		"67cc4c5cad12",
+		"internal/rpc/materializer.go",
+		"merge or rebase parent before continuing",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestPrimeCommandShowsRootExitContractForAzOrchestrationRoot(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-root")
 	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)

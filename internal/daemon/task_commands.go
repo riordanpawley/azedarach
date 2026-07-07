@@ -199,6 +199,7 @@ type taskGraphReadinessResult struct {
 	ActiveSessions         []taskGraphActiveSession        `json:"active_sessions,omitempty"`
 	SessionStartProgress   []taskGraphSessionStartProgress `json:"session_start_progress,omitempty"`
 	StaleCloseableChildren []taskStaleCloseableCandidate   `json:"stale_closeable_children,omitempty"`
+	ContainmentRisks       []taskContainmentRisk           `json:"containment_risks,omitempty"`
 	WorkerObservations     []domain.WorkerObservation      `json:"worker_observations,omitempty"`
 	Blocked                map[string]string               `json:"blocked"`
 }
@@ -275,6 +276,23 @@ type taskStaleCloseableCandidate struct {
 	Status           string   `json:"status"`
 	Evidence         []string `json:"evidence"`
 	SuggestedCommand string   `json:"suggested_command"`
+}
+
+type taskContainmentRisk struct {
+	IssueID                string   `json:"issue_id"`
+	ActiveBranch           string   `json:"active_branch,omitempty"`
+	RootIssueID            string   `json:"root_issue_id"`
+	RootBranch             string   `json:"root_branch,omitempty"`
+	ClosedChildIssueID     string   `json:"closed_child_issue_id"`
+	EvidenceCommit         string   `json:"evidence_commit"`
+	EvidenceSubject        string   `json:"evidence_subject,omitempty"`
+	RootContainsEvidence   bool     `json:"root_contains_evidence"`
+	ActiveContainsEvidence bool     `json:"active_contains_evidence"`
+	Classification         string   `json:"classification"`
+	Message                string   `json:"message"`
+	ChangedFiles           []string `json:"changed_files,omitempty"`
+	OverlapFiles           []string `json:"overlap_files,omitempty"`
+	SuggestedCommand       string   `json:"suggested_command,omitempty"`
 }
 
 type taskIntegrationReadinessResult struct {
@@ -3822,6 +3840,7 @@ func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID 
 	ready.ActiveSessions = d.daemonTaskGraphActiveSessions(ctx, projectID, ready.Active, byID, startProgressByIssue)
 	ready.ActiveSessions = append(ready.ActiveSessions, daemonTaskGraphCleanupPendingSessions(rootID, byID, children)...)
 	ready.SessionStartProgress = daemonTaskGraphSessionStartProgressList(rootID, children, startProgressByIssue)
+	ready.ContainmentRisks = d.daemonTaskGraphContainmentRisks(ctx, projectID, rootID, byID, children)
 	ready.WorkerObservations = d.daemonTaskGraphWorkerObservations(ctx, projectID, rootID, byID, children, ready)
 	ready.Capacity = daemonTaskGraphCapacitySummary(ready)
 	return ready, nil
@@ -4051,6 +4070,203 @@ func daemonTaskStaleCloseableEvidence(task domain.Task) []string {
 		evidence = append(evidence, "in_review status is completion evidence")
 	}
 	return evidence
+}
+
+func (d *Daemon) daemonTaskGraphContainmentRisks(
+	ctx context.Context,
+	projectID string,
+	rootID naming.IssueID,
+	byID map[naming.IssueID]domain.Task,
+	children map[naming.IssueID][]naming.IssueID,
+) []taskContainmentRisk {
+	if d == nil || d.git == nil || d.worktreeAdapter == nil {
+		return nil
+	}
+	worktrees, err := d.worktreeAdapter.List(ctx, projectID)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("containment risk worktree list failed", "project_id", projectID, "root_issue_id", rootID.String(), "error", err)
+		}
+		return nil
+	}
+	rootWorktree, ok := daemonWorktreeForIssue(worktrees, rootID.String())
+	if !ok || strings.TrimSpace(rootWorktree.Path) == "" || strings.TrimSpace(rootWorktree.Branch) == "" {
+		return nil
+	}
+
+	descendants := daemonTaskGraphDescendants(rootID, children)
+	activeWorktrees := make([]git.Worktree, 0, 4)
+	closedChildIDs := make([]naming.IssueID, 0, 4)
+	for _, id := range descendants {
+		task := byID[id]
+		if task.ID.IsZero() || task.Type == domain.TypeEpic {
+			continue
+		}
+		if task.Status == domain.StatusDone {
+			closedChildIDs = append(closedChildIDs, id)
+			continue
+		}
+		if worktree, ok := daemonWorktreeForIssue(worktrees, id.String()); ok && strings.TrimSpace(worktree.Branch) != "" {
+			activeWorktrees = append(activeWorktrees, worktree)
+		}
+	}
+	if len(activeWorktrees) == 0 || len(closedChildIDs) == 0 {
+		return nil
+	}
+
+	type activeBranchEvidence struct {
+		worktree    git.Worktree
+		changedFile map[string]struct{}
+	}
+	active := make([]activeBranchEvidence, 0, len(activeWorktrees))
+	for _, worktree := range activeWorktrees {
+		files, err := d.git.ChangedFilesBetweenRefs(ctx, rootWorktree.Path, rootWorktree.Branch, worktree.Branch)
+		if err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("containment risk active branch changed-file probe failed",
+				"project_id", projectID,
+				"root_issue_id", rootID.String(),
+				"active_issue_id", worktree.IssueID,
+				"root_branch", rootWorktree.Branch,
+				"active_branch", worktree.Branch,
+				"error", err,
+			)
+		}
+		active = append(active, activeBranchEvidence{
+			worktree:    worktree,
+			changedFile: stringStructSet(files),
+		})
+	}
+
+	seen := make(map[string]struct{})
+	risks := make([]taskContainmentRisk, 0)
+	for _, closedID := range closedChildIDs {
+		commits, err := d.git.IssueEvidenceCommits(ctx, rootWorktree.Path, rootWorktree.Branch, closedID.String())
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("containment risk closed child evidence lookup failed",
+					"project_id", projectID,
+					"root_issue_id", rootID.String(),
+					"closed_child_issue_id", closedID.String(),
+					"root_branch", rootWorktree.Branch,
+					"error", err,
+				)
+			}
+			continue
+		}
+		for _, commit := range commits {
+			rootContains, err := d.git.CommitContainedInRef(ctx, rootWorktree.Path, commit.Hash, rootWorktree.Branch)
+			if err != nil {
+				if d.cfg.Logger != nil {
+					d.cfg.Logger.Debug("containment risk root containment probe failed",
+						"project_id", projectID,
+						"root_issue_id", rootID.String(),
+						"closed_child_issue_id", closedID.String(),
+						"commit", commit.Hash,
+						"root_branch", rootWorktree.Branch,
+						"error", err,
+					)
+				}
+				continue
+			}
+			changedFiles, _ := d.git.CommitChangedFiles(ctx, rootWorktree.Path, commit.Hash)
+			changedFiles = uniqueNonEmpty(changedFiles)
+			for _, item := range active {
+				activeContains, err := d.git.CommitContainedInRef(ctx, rootWorktree.Path, commit.Hash, item.worktree.Branch)
+				if err != nil {
+					if d.cfg.Logger != nil {
+						d.cfg.Logger.Debug("containment risk active containment probe failed",
+							"project_id", projectID,
+							"root_issue_id", rootID.String(),
+							"active_issue_id", item.worktree.IssueID,
+							"closed_child_issue_id", closedID.String(),
+							"commit", commit.Hash,
+							"active_branch", item.worktree.Branch,
+							"error", err,
+						)
+					}
+					continue
+				}
+				if rootContains && activeContains {
+					continue
+				}
+				key := item.worktree.IssueID + "\x00" + closedID.String() + "\x00" + commit.Hash
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+				classification := "parent_evidence_missing"
+				message := fmt.Sprintf("closed child evidence %s from %s is not contained in parent branch %s", shortCommitHash(commit.Hash), closedID.String(), rootWorktree.Branch)
+				suggested := fmt.Sprintf("inspect integration evidence for %s before continuing", closedID.String())
+				if rootContains && !activeContains {
+					classification = "stale_child_branch"
+					message = fmt.Sprintf("stale child branch: parent branch %s contains closed child evidence %s from %s, but active branch %s for %s does not", rootWorktree.Branch, shortCommitHash(commit.Hash), closedID.String(), item.worktree.Branch, item.worktree.IssueID)
+					suggested = fmt.Sprintf("merge or rebase %s into %s before continuing, or record explicit supersession evidence", rootWorktree.Branch, item.worktree.Branch)
+				}
+				risks = append(risks, taskContainmentRisk{
+					IssueID:                item.worktree.IssueID,
+					ActiveBranch:           item.worktree.Branch,
+					RootIssueID:            rootID.String(),
+					RootBranch:             rootWorktree.Branch,
+					ClosedChildIssueID:     closedID.String(),
+					EvidenceCommit:         commit.Hash,
+					EvidenceSubject:        commit.Subject,
+					RootContainsEvidence:   rootContains,
+					ActiveContainsEvidence: activeContains,
+					Classification:         classification,
+					Message:                message,
+					ChangedFiles:           changedFiles,
+					OverlapFiles:           overlapStrings(changedFiles, item.changedFile),
+					SuggestedCommand:       suggested,
+				})
+			}
+		}
+	}
+	sort.SliceStable(risks, func(i, j int) bool {
+		if risks[i].IssueID != risks[j].IssueID {
+			return risks[i].IssueID < risks[j].IssueID
+		}
+		if risks[i].ClosedChildIssueID != risks[j].ClosedChildIssueID {
+			return risks[i].ClosedChildIssueID < risks[j].ClosedChildIssueID
+		}
+		return risks[i].EvidenceCommit < risks[j].EvidenceCommit
+	})
+	return risks
+}
+
+func stringStructSet(values []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out[value] = struct{}{}
+		}
+	}
+	return out
+}
+
+func overlapStrings(values []string, set map[string]struct{}) []string {
+	if len(values) == 0 || len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0)
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := set[value]; ok {
+			out = append(out, value)
+		}
+	}
+	return uniqueNonEmpty(out)
+}
+
+func shortCommitHash(hash string) string {
+	hash = strings.TrimSpace(hash)
+	if len(hash) > 12 {
+		return hash[:12]
+	}
+	return hash
 }
 
 func (d *Daemon) daemonTaskGraphNestedRoots(

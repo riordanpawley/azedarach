@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -6328,6 +6329,127 @@ func TestTaskGraphReadinessSurfacesStaleCloseableChild(t *testing.T) {
 			t.Fatalf("candidate evidence = %+v, missing %q", candidate.Evidence, want)
 		}
 	}
+}
+
+func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-containment-risk"
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(dbPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	rootIDRaw, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	rootID := naming.IssueID(rootIDRaw)
+	closedIDRaw, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Closed child", Type: domain.TypeTask, Status: domain.StatusDone, ParentID: &rootIDRaw})
+	if err != nil {
+		t.Fatalf("create closed child: %v", err)
+	}
+	closedID := naming.IssueID(closedIDRaw)
+	activeIDRaw, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Active reconciliation", Type: domain.TypeBug, Status: domain.StatusInProgress, ParentID: &rootIDRaw})
+	if err != nil {
+		t.Fatalf("create active child: %v", err)
+	}
+	activeID := naming.IssueID(activeIDRaw)
+	rootBranch := "riordan/" + rootID.String() + "/profile-and-worker-mater-cif-merge"
+	activeBranch := "riordan/" + activeID.String() + "/reconcile"
+
+	repoDir := t.TempDir()
+	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repoDir, "config", "user.email", "test@example.com")
+	runDaemonTestGit(t, repoDir, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repoDir, "rpc.go"), []byte("package rpc\n\nfunc materialize() string { return \"base\" }\n"), 0o644); err != nil {
+		t.Fatalf("write base file: %v", err)
+	}
+	runDaemonTestGit(t, repoDir, "add", "rpc.go")
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "base")
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "-b", activeBranch)
+	if err := os.WriteFile(filepath.Join(repoDir, "rpc.go"), []byte("package rpc\n\nfunc materialize() string { return \"generic\" }\n"), 0o644); err != nil {
+		t.Fatalf("write active file: %v", err)
+	}
+	runDaemonTestGit(t, repoDir, "commit", "-am", activeID.String()+": keep generic materializer")
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "main")
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "-b", rootBranch)
+	if err := os.WriteFile(filepath.Join(repoDir, "rpc.go"), []byte("package rpc\n\nfunc materializeTyped() string { return \"typed\" }\n"), 0o644); err != nil {
+		t.Fatalf("write evidence file: %v", err)
+	}
+	runDaemonTestGit(t, repoDir, "commit", "-am", closedID.String()+": generate typed materializer rpc")
+	evidenceCommit := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
+
+	for _, state := range []daemonstate.WorktreeState{
+		{ProjectID: projectID, IssueID: rootID.String(), Path: repoDir, Branch: rootBranch, UpdatedAt: time.Now().UTC()},
+		{ProjectID: projectID, IssueID: activeID.String(), Path: repoDir, Branch: activeBranch, UpdatedAt: time.Now().UTC()},
+	} {
+		if err := runtimeStateStore.UpsertWorktreeState(ctx, state); err != nil {
+			t.Fatalf("seed worktree state: %v", err)
+		}
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger},
+		git: git.NewClient(git.NewExecRunner(repoDir), logger),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+		worktreeAdapter: &worktreeServiceAdapter{
+			manager:           git.NewWorktreeManager(git.NewExecRunner(repoDir), repoDir, logger),
+			runtimeStateStore: runtimeStateStore,
+			logger:            logger,
+		},
+	}
+
+	ready, err := d.taskGraphReadiness(ctx, projectID, rootID.String())
+	if err != nil {
+		t.Fatalf("taskGraphReadiness error: %v", err)
+	}
+	if len(ready.ContainmentRisks) != 1 {
+		t.Fatalf("containment risks = %+v, want one stale child risk", ready.ContainmentRisks)
+	}
+	risk := ready.ContainmentRisks[0]
+	if risk.Classification != "stale_child_branch" || risk.IssueID != activeID.String() || risk.ClosedChildIssueID != closedID.String() {
+		t.Fatalf("risk identity = %+v, want stale child risk for active %s closed %s", risk, activeID, closedID)
+	}
+	if !risk.RootContainsEvidence || risk.ActiveContainsEvidence {
+		t.Fatalf("risk containment = root:%t active:%t, want root true active false", risk.RootContainsEvidence, risk.ActiveContainsEvidence)
+	}
+	if risk.EvidenceCommit != evidenceCommit {
+		t.Fatalf("evidence commit = %s, want %s", risk.EvidenceCommit, evidenceCommit)
+	}
+	if !slices.Contains(risk.OverlapFiles, "rpc.go") {
+		t.Fatalf("overlap files = %+v, want rpc.go", risk.OverlapFiles)
+	}
+	if !strings.Contains(risk.Message, "stale child branch") || !strings.Contains(risk.Message, "parent branch") {
+		t.Fatalf("risk message = %q, want stale child branch parent wording", risk.Message)
+	}
+}
+
+func runDaemonTestGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+}
+
+func runDaemonTestGitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func TestTaskGraphReadinessDoesNotMisreportIncompleteChildAsCloseable(t *testing.T) {

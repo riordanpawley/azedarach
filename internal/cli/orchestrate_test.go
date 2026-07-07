@@ -350,6 +350,65 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	}
 }
 
+func TestOrchestrateStatusCommandPrintsContainmentRisks(t *testing.T) {
+	root := naming.IssueID("fmd")
+	active := naming.IssueID("fsy")
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Blocked:     map[string]string{},
+						ContainmentRisks: []daemonclient.TaskContainmentRisk{{
+							IssueID:                active.String(),
+							RootIssueID:            root.String(),
+							RootBranch:             "riordan/fmd/profile-and-worker-mater-cif-merge",
+							ActiveBranch:           "riordan/fsy/reconcile",
+							ClosedChildIssueID:     "frv",
+							EvidenceCommit:         "67cc4c5cad123456",
+							RootContainsEvidence:   true,
+							ActiveContainsEvidence: false,
+							Classification:         "stale_child_branch",
+							Message:                "stale child branch: parent branch contains closed child evidence",
+							OverlapFiles:           []string{"internal/rpc/materializer.go"},
+							SuggestedCommand:       "merge or rebase parent before continuing",
+						}},
+					}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees":  []map[string]string{},
+					}), nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateStatusCommand(deps, OrchestrateStatusOptions{RootIssueID: root.String()})
+	})
+	for _, want := range []string{
+		"Containment risks:",
+		"stale child branch",
+		"child=frv commit=67cc4c5cad12 root_contains=true active_contains=false",
+		"overlap: internal/rpc/materializer.go",
+		"next: merge or rebase parent before continuing",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestOrchestrateStatusCommandIncludesNestedRoots(t *testing.T) {
 	root := naming.IssueID("az-1")
 	nested := naming.IssueID("az-2")
