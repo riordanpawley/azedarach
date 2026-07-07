@@ -82,6 +82,12 @@ type GitStatus struct {
 	GitBehindCount int      `json:"git_behind_count,omitempty"`
 }
 
+// EvidenceCommit is an issue-scoped commit found on a branch.
+type EvidenceCommit struct {
+	Hash    string
+	Subject string
+}
+
 // MergeResult represents the result of a git merge operation.
 type MergeResult struct {
 	Success         bool
@@ -964,6 +970,86 @@ func (c *Client) RevListCount(ctx context.Context, worktree, revRange string) (i
 	}
 
 	return count, nil
+}
+
+// IssueEvidenceCommits returns commits on ref whose subject starts with
+// "<issueID>:". Az close/integration commits use that convention as durable
+// code evidence for closed child issues.
+func (c *Client) IssueEvidenceCommits(ctx context.Context, worktree, ref, issueID string) ([]EvidenceCommit, error) {
+	ref = strings.TrimSpace(ref)
+	issueID = strings.TrimSpace(issueID)
+	if ref == "" {
+		return nil, fmt.Errorf("ref is required")
+	}
+	if issueID == "" {
+		return nil, fmt.Errorf("issue id is required")
+	}
+	pattern := "^" + regexp.QuoteMeta(issueID) + ":"
+	output, err := c.runInWorktree(ctx, worktree, "log", "--format=%H%x00%s", "--regexp-ignore-case", "--grep="+pattern, ref, "--")
+	if err != nil {
+		return nil, fmt.Errorf("list issue evidence commits for %s on %s: %w", issueID, ref, err)
+	}
+	lines := splitNonEmptyLines(output)
+	out := make([]EvidenceCommit, 0, len(lines))
+	for _, line := range lines {
+		hash, subject, ok := strings.Cut(line, "\x00")
+		hash = strings.TrimSpace(hash)
+		subject = strings.TrimSpace(subject)
+		if !ok || hash == "" {
+			continue
+		}
+		out = append(out, EvidenceCommit{Hash: hash, Subject: subject})
+	}
+	return out, nil
+}
+
+// CommitContainedInRef reports whether commit is reachable from ref.
+func (c *Client) CommitContainedInRef(ctx context.Context, worktree, commit, ref string) (bool, error) {
+	commit = strings.TrimSpace(commit)
+	ref = strings.TrimSpace(ref)
+	if commit == "" {
+		return false, fmt.Errorf("commit is required")
+	}
+	if ref == "" {
+		return false, fmt.Errorf("ref is required")
+	}
+	if _, err := c.runInWorktree(ctx, worktree, "merge-base", "--is-ancestor", commit, ref); err != nil {
+		if strings.Contains(err.Error(), "exit status 1") {
+			return false, nil
+		}
+		return false, fmt.Errorf("check whether %s contains %s: %w", ref, commit, err)
+	}
+	return true, nil
+}
+
+// CommitChangedFiles returns files touched by commit.
+func (c *Client) CommitChangedFiles(ctx context.Context, worktree, commit string) ([]string, error) {
+	commit = strings.TrimSpace(commit)
+	if commit == "" {
+		return nil, fmt.Errorf("commit is required")
+	}
+	output, err := c.runInWorktree(ctx, worktree, "diff-tree", "--no-commit-id", "--name-only", "-r", commit)
+	if err != nil {
+		return nil, fmt.Errorf("list files changed by commit %s: %w", commit, err)
+	}
+	return splitNonEmptyLines(output), nil
+}
+
+// ChangedFilesBetweenRefs returns files changed between baseRef and headRef.
+func (c *Client) ChangedFilesBetweenRefs(ctx context.Context, worktree, baseRef, headRef string) ([]string, error) {
+	baseRef = strings.TrimSpace(baseRef)
+	headRef = strings.TrimSpace(headRef)
+	if baseRef == "" {
+		return nil, fmt.Errorf("base ref is required")
+	}
+	if headRef == "" {
+		return nil, fmt.Errorf("head ref is required")
+	}
+	output, err := c.runInWorktree(ctx, worktree, "diff", "--name-only", baseRef+"..."+headRef, "--")
+	if err != nil {
+		return nil, fmt.Errorf("list files changed between %s and %s: %w", baseRef, headRef, err)
+	}
+	return splitNonEmptyLines(output), nil
 }
 
 // BranchAheadBehind reports commit deltas for HEAD relative to the base branch.

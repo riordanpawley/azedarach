@@ -164,6 +164,7 @@ type TaskGraphReadiness struct {
 	ActiveSessions         []TaskActiveSession           `json:"active_sessions,omitempty"`
 	SessionStartProgress   []TaskSessionStartProgress    `json:"session_start_progress,omitempty"`
 	StaleCloseableChildren []TaskStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
+	ContainmentRisks       []TaskContainmentRisk         `json:"containment_risks,omitempty"`
 	WorkerObservations     []domain.WorkerObservation    `json:"worker_observations,omitempty"`
 	Blocked                map[string]string             `json:"blocked"`
 }
@@ -236,6 +237,23 @@ type TaskStaleCloseableCandidate struct {
 	Status           string   `json:"status"`
 	Evidence         []string `json:"evidence"`
 	SuggestedCommand string   `json:"suggested_command"`
+}
+
+type TaskContainmentRisk struct {
+	IssueID                string   `json:"issue_id"`
+	ActiveBranch           string   `json:"active_branch,omitempty"`
+	RootIssueID            string   `json:"root_issue_id"`
+	RootBranch             string   `json:"root_branch,omitempty"`
+	ClosedChildIssueID     string   `json:"closed_child_issue_id"`
+	EvidenceCommit         string   `json:"evidence_commit"`
+	EvidenceSubject        string   `json:"evidence_subject,omitempty"`
+	RootContainsEvidence   bool     `json:"root_contains_evidence"`
+	ActiveContainsEvidence bool     `json:"active_contains_evidence"`
+	Classification         string   `json:"classification"`
+	Message                string   `json:"message"`
+	ChangedFiles           []string `json:"changed_files,omitempty"`
+	OverlapFiles           []string `json:"overlap_files,omitempty"`
+	SuggestedCommand       string   `json:"suggested_command,omitempty"`
 }
 
 // TaskCompleteCheckResult is the daemon-owned root close readiness gate.

@@ -130,6 +130,7 @@ type orchestrateStatusResult struct {
 	ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
 	SessionStartProgress   []orchestrateSessionStartProgress    `json:"session_start_progress,omitempty"`
 	StaleCloseableChildren []orchestrateStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
+	ContainmentRisks       []orchestrateContainmentRisk         `json:"containment_risks,omitempty"`
 	WorkerObservations     []orchestrateObservation             `json:"worker_observations,omitempty"`
 	Blocked                map[string]string                    `json:"blocked"`
 	MailboxEvents          []protocol.MailEvent                 `json:"mailbox_events"`
@@ -246,6 +247,7 @@ type orchestrateWatchFrame struct {
 	ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
 	SessionStartProgress   []orchestrateSessionStartProgress    `json:"session_start_progress,omitempty"`
 	StaleCloseableChildren []orchestrateStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
+	ContainmentRisks       []orchestrateContainmentRisk         `json:"containment_risks,omitempty"`
 	Blocked                map[string]string                    `json:"blocked"`
 	Events                 []mailEvent                          `json:"events"`
 }
@@ -374,6 +376,23 @@ type orchestrateStaleCloseableCandidate struct {
 	Status           string   `json:"status"`
 	Evidence         []string `json:"evidence"`
 	SuggestedCommand string   `json:"suggested_command"`
+}
+
+type orchestrateContainmentRisk struct {
+	IssueID                string   `json:"issue_id"`
+	ActiveBranch           string   `json:"active_branch,omitempty"`
+	RootIssueID            string   `json:"root_issue_id"`
+	RootBranch             string   `json:"root_branch,omitempty"`
+	ClosedChildIssueID     string   `json:"closed_child_issue_id"`
+	EvidenceCommit         string   `json:"evidence_commit"`
+	EvidenceSubject        string   `json:"evidence_subject,omitempty"`
+	RootContainsEvidence   bool     `json:"root_contains_evidence"`
+	ActiveContainsEvidence bool     `json:"active_contains_evidence"`
+	Classification         string   `json:"classification"`
+	Message                string   `json:"message"`
+	ChangedFiles           []string `json:"changed_files,omitempty"`
+	OverlapFiles           []string `json:"overlap_files,omitempty"`
+	SuggestedCommand       string   `json:"suggested_command,omitempty"`
 }
 
 type orchestratePromptResult struct {
@@ -756,6 +775,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		ActiveSessions:         orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
 		SessionStartProgress:   orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
 		StaleCloseableChildren: orchestrateStaleCloseableFromDaemon(ready.StaleCloseableChildren),
+		ContainmentRisks:       orchestrateContainmentRisksFromDaemon(ready.ContainmentRisks),
 		WorkerObservations:     orchestrateObservationsFromDaemon(ready.WorkerObservations, orchestrateObserveNow()),
 		Blocked:                ready.Blocked,
 		MailboxEvents:          events,
@@ -866,6 +886,21 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 			}
 			if candidate.SuggestedCommand != "" {
 				fmt.Printf("  next: %s\n", candidate.SuggestedCommand)
+			}
+		}
+	}
+	if len(result.ContainmentRisks) > 0 {
+		fmt.Println("Containment risks:")
+		for _, risk := range result.ContainmentRisks {
+			fmt.Printf("- %s: %s\n", risk.IssueID, risk.Message)
+			fmt.Printf("  evidence: child=%s commit=%s root_contains=%t active_contains=%t\n", risk.ClosedChildIssueID, shortCLICommitHash(risk.EvidenceCommit), risk.RootContainsEvidence, risk.ActiveContainsEvidence)
+			if len(risk.OverlapFiles) > 0 {
+				fmt.Printf("  overlap: %s\n", strings.Join(risk.OverlapFiles, ", "))
+			} else if len(risk.ChangedFiles) > 0 {
+				fmt.Printf("  changed files: %s\n", strings.Join(risk.ChangedFiles, ", "))
+			}
+			if risk.SuggestedCommand != "" {
+				fmt.Printf("  next: %s\n", risk.SuggestedCommand)
 			}
 		}
 	}
@@ -1414,6 +1449,40 @@ func orchestrateStaleCloseableFromDaemon(candidates []daemonclient.TaskStaleClos
 		})
 	}
 	return out
+}
+
+func orchestrateContainmentRisksFromDaemon(risks []daemonclient.TaskContainmentRisk) []orchestrateContainmentRisk {
+	if len(risks) == 0 {
+		return nil
+	}
+	out := make([]orchestrateContainmentRisk, 0, len(risks))
+	for _, risk := range risks {
+		out = append(out, orchestrateContainmentRisk{
+			IssueID:                risk.IssueID,
+			ActiveBranch:           risk.ActiveBranch,
+			RootIssueID:            risk.RootIssueID,
+			RootBranch:             risk.RootBranch,
+			ClosedChildIssueID:     risk.ClosedChildIssueID,
+			EvidenceCommit:         risk.EvidenceCommit,
+			EvidenceSubject:        risk.EvidenceSubject,
+			RootContainsEvidence:   risk.RootContainsEvidence,
+			ActiveContainsEvidence: risk.ActiveContainsEvidence,
+			Classification:         risk.Classification,
+			Message:                risk.Message,
+			ChangedFiles:           append([]string(nil), risk.ChangedFiles...),
+			OverlapFiles:           append([]string(nil), risk.OverlapFiles...),
+			SuggestedCommand:       risk.SuggestedCommand,
+		})
+	}
+	return out
+}
+
+func shortCLICommitHash(hash string) string {
+	hash = strings.TrimSpace(hash)
+	if len(hash) > 12 {
+		return hash[:12]
+	}
+	return hash
 }
 
 func buildOrchestrateObserveForRoot(deps *Dependencies, rootIssueID string) (orchestrateObserveResult, error) {
@@ -1976,6 +2045,7 @@ func orchestrateWatchFrameFromReadiness(ready daemonclient.TaskGraphReadiness, e
 		ActiveSessions:         orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
 		SessionStartProgress:   orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
 		StaleCloseableChildren: orchestrateStaleCloseableFromDaemon(ready.StaleCloseableChildren),
+		ContainmentRisks:       orchestrateContainmentRisksFromDaemon(ready.ContainmentRisks),
 		Blocked:                ready.Blocked,
 		Events:                 events,
 	}
@@ -1991,6 +2061,7 @@ func orchestrateWatchFrameSnapshotKey(frame orchestrateWatchFrame) string {
 		ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
 		SessionStartProgress   []orchestrateSessionStartProgress    `json:"session_start_progress,omitempty"`
 		StaleCloseableChildren []orchestrateStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
+		ContainmentRisks       []orchestrateContainmentRisk         `json:"containment_risks,omitempty"`
 		Blocked                map[string]string                    `json:"blocked"`
 	}
 	activeSessions := append([]orchestrateActiveSession(nil), frame.ActiveSessions...)
@@ -2015,6 +2086,7 @@ func orchestrateWatchFrameSnapshotKey(frame orchestrateWatchFrame) string {
 		ActiveSessions:         activeSessions,
 		SessionStartProgress:   sessionStartProgress,
 		StaleCloseableChildren: frame.StaleCloseableChildren,
+		ContainmentRisks:       frame.ContainmentRisks,
 		Blocked:                frame.Blocked,
 	})
 	if err != nil {

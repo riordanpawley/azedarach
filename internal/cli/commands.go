@@ -6846,10 +6846,16 @@ func PrimeCommand(deps *Dependencies) error {
 				task = detailTask
 			}
 			observations := readiness.WorkerObservations
+			containmentRisks := readiness.ContainmentRisks
+			if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
+				if parentReadiness, ok := loadPrimeTaskGraphReadiness(context.Background(), deps, strings.TrimSpace(task.ParentID.String())); ok {
+					containmentRisks = parentReadiness.ContainmentRisks
+				}
+			}
 			if orchestratorExitContract == "" && primeIssueIsAzOrchestrationRoot(task, snapshot.Tasks, orchestrationViaAz) {
 				orchestratorExitContract = renderPrimeOrchestratorExitContract(issueID)
 			}
-			issueSection = renderPrimeIssueSection(issueID, task, snapshot.Tasks, observations, tmuxAvailable)
+			issueSection = renderPrimeIssueSection(issueID, task, snapshot.Tasks, observations, containmentRisks, tmuxAvailable)
 			if task.Status == domain.StatusDone {
 				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `closed`; start by picking/opening actionable work (for example `az issue list --limit 20` or `az issue create \"Next task\"`). Use `--deferred` only for standalone backlog work.", task.ID)
 			}
@@ -7066,7 +7072,7 @@ func renderPrimeImplementationSection(implementations []string) string {
 		strings.Join(quoted, ", "), exampleImpl)
 }
 
-func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Task, observations []domain.WorkerObservation, tmuxAvailable bool) string {
+func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Task, observations []domain.WorkerObservation, containmentRisks []daemonclient.TaskContainmentRisk, tmuxAvailable bool) string {
 	structuredContext := renderPrimeStructuredIssueContext(issueID, task)
 	implementations := formatPrimeImplementations(task.Implementations)
 	parent := ""
@@ -7078,8 +7084,9 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 	}
 	childWorkRecommendation := renderPrimeChildWorkRecommendation(task, tasks, tmuxAvailable)
 	observationSection := renderPrimeWorkerObservationSection(observations)
+	containmentSection := renderPrimeContainmentRiskSection(issueID, containmentRisks)
 	return fmt.Sprintf(
-		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s impl=%s]%s%s\nDependencies:\n%s\n```\n%s%s%s",
+		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s impl=%s]%s%s\nDependencies:\n%s\n```\n%s%s%s%s",
 		issueID,
 		issueID,
 		task.ID,
@@ -7092,6 +7099,7 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 		structuredContext,
 		formatPrimeDependencyLines(task.Dependencies),
 		observationSection,
+		containmentSection,
 		childWorkRecommendation,
 		mailbox,
 	)
@@ -7217,6 +7225,57 @@ func renderPrimeWorkerObservationSection(observations []domain.WorkerObservation
 	}
 	if len(observations) > len(sorted) {
 		fmt.Fprintf(&b, "  - ... %d more observations omitted; run `az orchestrate observe --root <root>` for full projection.\n", len(observations)-len(sorted))
+	}
+	return b.String()
+}
+
+func renderPrimeContainmentRiskSection(issueID string, risks []daemonclient.TaskContainmentRisk) string {
+	if len(risks) == 0 {
+		return ""
+	}
+	issueID = strings.TrimSpace(issueID)
+	filtered := make([]daemonclient.TaskContainmentRisk, 0, len(risks))
+	for _, risk := range risks {
+		if issueID != "" && !naming.IssueIDsEqual(risk.IssueID, issueID) {
+			continue
+		}
+		filtered = append(filtered, risk)
+	}
+	if len(filtered) == 0 {
+		return ""
+	}
+	sort.SliceStable(filtered, func(i, j int) bool {
+		if filtered[i].ClosedChildIssueID != filtered[j].ClosedChildIssueID {
+			return filtered[i].ClosedChildIssueID < filtered[j].ClosedChildIssueID
+		}
+		return filtered[i].EvidenceCommit < filtered[j].EvidenceCommit
+	})
+	filteredTotal := len(filtered)
+	if len(filtered) > 5 {
+		filtered = filtered[:5]
+	}
+	var b strings.Builder
+	b.WriteString("- Containment risks:\n")
+	for _, risk := range filtered {
+		label := "Containment risk"
+		if strings.TrimSpace(risk.Classification) == "stale_child_branch" {
+			label = "Stale child branch"
+		}
+		message := strings.TrimSpace(risk.Message)
+		if message == "" {
+			message = fmt.Sprintf("closed child evidence %s from %s has root_contains=%t active_contains=%t", shortCLICommitHash(risk.EvidenceCommit), risk.ClosedChildIssueID, risk.RootContainsEvidence, risk.ActiveContainsEvidence)
+		}
+		fmt.Fprintf(&b, "  - %s: %s\n", label, message)
+		fmt.Fprintf(&b, "    Evidence: child=%s commit=%s root_contains=%t active_contains=%t\n", risk.ClosedChildIssueID, shortCLICommitHash(risk.EvidenceCommit), risk.RootContainsEvidence, risk.ActiveContainsEvidence)
+		if len(risk.OverlapFiles) > 0 {
+			fmt.Fprintf(&b, "    Overlap: %s\n", strings.Join(risk.OverlapFiles, ", "))
+		}
+		if strings.TrimSpace(risk.SuggestedCommand) != "" {
+			fmt.Fprintf(&b, "    Next: %s\n", strings.TrimSpace(risk.SuggestedCommand))
+		}
+	}
+	if filteredTotal > len(filtered) {
+		fmt.Fprintf(&b, "  - ... %d more containment risks omitted; run `az orchestrate status --root <root> --json` for full projection.\n", filteredTotal-len(filtered))
 	}
 	return b.String()
 }
