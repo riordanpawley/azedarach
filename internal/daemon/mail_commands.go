@@ -50,6 +50,9 @@ func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope)
 			"body_bytes", len(cmd.Body),
 		)
 	}
+	if msg := invalidWorkerEvidenceMessage(cmd.Body); msg != "" {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, msg), nil
+	}
 	unlock, err := lockMailbox(repoDir, parentIssue)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("lock mailbox: %v", err)), nil
@@ -223,6 +226,18 @@ func workerEvidencePayload(body string) map[string]interface{} {
 		payload["worker_evidence"] = packet
 	}
 	return payload
+}
+
+func invalidWorkerEvidenceMessage(body string) string {
+	_, validation := domain.ParseWorkerEvidencePacketBody(body)
+	if !validation.Found || validation.Complete {
+		return ""
+	}
+	problems := strings.Join(validation.Problems(), "; ")
+	if strings.TrimSpace(problems) == "" {
+		problems = "packet is incomplete"
+	}
+	return "invalid worker_evidence.v1 packet: " + problems + `. Omit artifact_links unless links are needed; if present, artifact_links must be objects like [{"label":"CI","url":"https://example.test/run"}], not a string array.`
 }
 
 func sanitizeMailboxKey(parentIssue string) string {

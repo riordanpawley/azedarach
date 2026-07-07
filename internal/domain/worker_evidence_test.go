@@ -70,6 +70,30 @@ func TestParseWorkerEvidencePacketBodyReportsIncompletePacket(t *testing.T) {
 	}
 }
 
+func TestParseWorkerEvidencePacketBodyRejectsArtifactLinksStringArray(t *testing.T) {
+	body := `{
+		"schema": "worker_evidence.v1",
+		"summary": "Ready for integration.",
+		"commands_run": ["just test"],
+		"key_assertions": ["validation passed"],
+		"files_changed": ["internal/domain/worker_evidence.go"],
+		"review": {"status": "clean", "findings": []},
+		"risks": ["none"],
+		"artifact_links": ["https://example.test/run/1"]
+	}`
+
+	_, result := ParseWorkerEvidencePacketBody(body)
+	if !result.Found || result.Complete {
+		t.Fatalf("parse result = %+v, want found incomplete", result)
+	}
+	problems := strings.Join(result.Problems(), "\n")
+	for _, want := range []string{"artifact_links[0] must be an object", "omit artifact_links unless needed", "not a string array"} {
+		if !strings.Contains(problems, want) {
+			t.Fatalf("problems = %q, missing %q", problems, want)
+		}
+	}
+}
+
 func TestParseWorkerEvidencePacketBodyIgnoresUnstructuredText(t *testing.T) {
 	_, result := ParseWorkerEvidencePacketBody("tests pass; ready")
 	if result.Found || result.Complete || len(result.Problems()) != 0 {

@@ -7126,8 +7126,11 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 			t.Fatalf("prompt = %q, want mailbox event type %s", prompt, eventType)
 		}
 	}
-	if !strings.Contains(prompt, "Evidence bodies should be JSON `worker_evidence.v1` packets with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, `risks`, and optional `artifact_links`") {
+	if !strings.Contains(prompt, "Evidence bodies should be JSON `worker_evidence.v1` packets with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`") {
 		t.Fatalf("prompt = %q, want structured worker evidence guidance", prompt)
+	}
+	if !strings.Contains(prompt, "Omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array") {
+		t.Fatalf("prompt = %q, want artifact_links object-shape guidance", prompt)
 	}
 	if !strings.Contains(prompt, "worker-ready and worker-complete are accepted only as legacy aliases for worker-integration-ready") {
 		t.Fatalf("prompt = %q, want legacy worker-ready/worker-complete alias guidance", prompt)
