@@ -3,6 +3,7 @@ package issues
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,6 +138,101 @@ func TestDecisionStore_RecordAndLinks(t *testing.T) {
 	require.NoError(t, client.DeleteDecision(ctx, "dec-1"))
 	_, err = client.GetDecision(ctx, "dec-1")
 	require.ErrorIs(t, err, domain.ErrNotFound)
+}
+
+func TestDecisionStore_QuerySearchUsesFTSAndCoversDecisionFields(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	cases := []struct {
+		name   string
+		params RecordDecisionParams
+		query  string
+	}{
+		{
+			name: "title",
+			params: RecordDecisionParams{
+				Title:     "Aurora decision title",
+				Rationale: "Keep title matching indexed.",
+			},
+			query: "aurora",
+		},
+		{
+			name: "rationale",
+			params: RecordDecisionParams{
+				Title:     "Rationale indexed",
+				Rationale: "Borealis reasoning belongs in the search surface.",
+			},
+			query: "borealis",
+		},
+		{
+			name: "context",
+			params: RecordDecisionParams{
+				Title:     "Context indexed",
+				Rationale: "Decision rationale.",
+				Context:   "Quasar context belongs in the search surface.",
+			},
+			query: "quasar",
+		},
+		{
+			name: "consequences",
+			params: RecordDecisionParams{
+				Title:        "Consequences indexed",
+				Rationale:    "Decision rationale.",
+				Consequences: "Nebula consequences belong in the search surface.",
+			},
+			query: "nebula",
+		},
+	}
+
+	wantByQuery := map[string]string{}
+	for _, tc := range cases {
+		created, err := client.RecordDecision(ctx, tc.params)
+		require.NoError(t, err, tc.name)
+		wantByQuery[tc.query] = created.LocalID
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := client.ListDecisions(ctx, DecisionFilter{Query: tc.query})
+			require.NoError(t, err)
+			require.Len(t, got, 1)
+			assert.Equal(t, wantByQuery[tc.query], got[0].LocalID)
+		})
+	}
+
+	query, args, empty := decisionListQuery(DecisionFilter{Query: "quasar"})
+	require.False(t, empty)
+	assert.Contains(t, query, "decision_search_fts MATCH ?")
+	assert.NotContains(t, strings.ToUpper(query), " LIKE ")
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	plan := explainQueryPlan(t, ctx, db, query, args...)
+	assert.Contains(t, plan, "SCAN decision_search_fts VIRTUAL TABLE INDEX", plan)
+	assert.Contains(t, plan, "SEARCH d USING INTEGER PRIMARY KEY", plan)
+
+	newRationale := "Pulsar reasoning replaces the original indexed rationale."
+	_, err = client.UpdateDecision(ctx, wantByQuery["borealis"], UpdateDecisionParams{Rationale: &newRationale})
+	require.NoError(t, err)
+	staleMatches, err := client.ListDecisions(ctx, DecisionFilter{Query: "borealis"})
+	require.NoError(t, err)
+	assert.Empty(t, staleMatches)
+	updatedMatches, err := client.ListDecisions(ctx, DecisionFilter{Query: "pulsar"})
+	require.NoError(t, err)
+	require.Len(t, updatedMatches, 1)
+	assert.Equal(t, wantByQuery["borealis"], updatedMatches[0].LocalID)
+
+	require.NoError(t, client.DeleteDecision(ctx, wantByQuery["quasar"]))
+	deletedMatches, err := client.ListDecisions(ctx, DecisionFilter{Query: "quasar"})
+	require.NoError(t, err)
+	assert.Empty(t, deletedMatches)
+
+	deletedMatches, err = client.ListDecisions(ctx, DecisionFilter{Query: "quasar", IncludeDeleted: true})
+	require.NoError(t, err)
+	require.Len(t, deletedMatches, 1)
+	assert.Equal(t, wantByQuery["quasar"], deletedMatches[0].LocalID)
+	assert.NotNil(t, deletedMatches[0].DeletedAt)
 }
 
 func TestDecisionStore_AuditLogIsolatedFromSpecAudit(t *testing.T) {
