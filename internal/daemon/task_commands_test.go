@@ -801,6 +801,145 @@ func TestHandleTaskGetUsesFreshTaskListSnapshotCache(t *testing.T) {
 	}
 }
 
+func TestHandleTaskGetComposesRuntimeProjectionOverCachedTaskSnapshot(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-task-get-worktree-refresh"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "stale dirty worktree issue",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	worktreePath := filepath.Join(t.TempDir(), "Chefy-"+taskID)
+	branch := "riordanpawley/" + taskID + "/stale-dirty"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      worktreePath,
+		Branch:    branch,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+	staleDirtyStatus := git.GitStatus{
+		HasChanges:     true,
+		GitAdditions:   2154,
+		GitDeletions:   1400,
+		GitAheadCount:  4,
+		GitBehindCount: 25,
+	}
+	staleDirtyStatusRaw, err := json.Marshal(staleDirtyStatus)
+	if err != nil {
+		t.Fatalf("marshal stale status: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeStateGitStatus(ctx, projectID, taskID, staleDirtyStatusRaw, time.Now().Add(-time.Hour).UTC()); err != nil {
+		t.Fatalf("seed stale dirty git status: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{BaseBranch: "main", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		revision: map[string]uint64{projectID: 12},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.storeTaskListSnapshotCache(projectID, 12, time.Now().UTC(), protocol.TaskListFreshnessFresh, []domain.Task{{
+		ID:                    naming.IssueID(taskID),
+		Title:                 "cached durable issue",
+		Type:                  domain.TypeTask,
+		Priority:              domain.P2,
+		Status:                domain.StatusInProgress,
+		HasWorktree:           true,
+		HasUncommittedChanges: true,
+		GitAdditions:          2154,
+		GitDeletions:          1400,
+		GitAheadCount:         4,
+		GitBehindCount:        25,
+	}}, false)
+	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); !ok {
+		t.Fatal("task snapshot cache should be fresh")
+	} else if cached.Tasks[0].HasUncommittedChanges || cached.Tasks[0].GitAdditions != 0 || cached.Tasks[0].GitDeletions != 0 {
+		t.Fatalf("cached task retained runtime fields: %+v", cached.Tasks[0])
+	}
+	cleanStatusRaw, err := json.Marshal(git.GitStatus{
+		HasChanges:     false,
+		GitAdditions:   12,
+		GitDeletions:   4,
+		GitAheadCount:  4,
+		GitBehindCount: 25,
+	})
+	if err != nil {
+		t.Fatalf("marshal clean status: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeStateGitStatus(ctx, projectID, taskID, cleanStatusRaw, time.Now().UTC()); err != nil {
+		t.Fatalf("persist refreshed clean git status: %v", err)
+	}
+
+	body, err := json.Marshal(map[string]string{"task_id": taskID})
+	if err != nil {
+		t.Fatalf("marshal task get request: %v", err)
+	}
+	resp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-get-refresh-stale-dirty",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.get",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskGet error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.get response = %+v", resp.Error)
+	}
+
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("decode task.get body: %v", err)
+	}
+	if got, want := len(payload.Tasks), 1; got != want {
+		t.Fatalf("payload.Tasks len = %d, want %d", got, want)
+	}
+	task := payload.Tasks[0]
+	if !task.HasWorktree {
+		t.Fatal("task.HasWorktree = false, want true")
+	}
+	if got, want := task.Title, "cached durable issue"; got != want {
+		t.Fatalf("task.Title = %q, want cached durable title %q", got, want)
+	}
+	if task.HasUncommittedChanges {
+		t.Fatalf("task.HasUncommittedChanges = true, want false: %+v", task)
+	}
+	if got, want := task.GitAdditions, 12; got != want {
+		t.Fatalf("task.GitAdditions = %d, want refreshed %d", got, want)
+	}
+	if got, want := task.GitDeletions, 4; got != want {
+		t.Fatalf("task.GitDeletions = %d, want refreshed %d", got, want)
+	}
+	if got, want := task.GitAheadCount, 4; got != want {
+		t.Fatalf("task.GitAheadCount = %d, want refreshed %d", got, want)
+	}
+	if got, want := task.GitBehindCount, 25; got != want {
+		t.Fatalf("task.GitBehindCount = %d, want refreshed %d", got, want)
+	}
+}
+
 func TestHandleTaskListIgnoresFreshCacheAndReadsSQLiteProjection(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -880,10 +1019,10 @@ func TestHandleTaskListIgnoresFreshCacheAndReadsSQLiteProjection(t *testing.T) {
 	}
 }
 
-func TestHandleTaskListIgnoresStaleRuntimeCacheAndReadsSQLiteProjection(t *testing.T) {
+func TestHandleBoardFetchComposesRuntimeProjectionOverCachedTaskSnapshot(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
-	projectID := "proj-cache-list-runtime-stale"
+	projectID := "proj-cache-board-runtime-overlay"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
@@ -891,7 +1030,7 @@ func TestHandleTaskListIgnoresStaleRuntimeCacheAndReadsSQLiteProjection(t *testi
 	t.Cleanup(func() { _ = runtimeStore.Close() })
 
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-		Title:    "runtime stale cache",
+		Title:    "sqlite title should not replace durable cache",
 		Type:     domain.TypeTask,
 		Priority: domain.P2,
 		Status:   domain.StatusOpen,
@@ -900,18 +1039,29 @@ func TestHandleTaskListIgnoresStaleRuntimeCacheAndReadsSQLiteProjection(t *testi
 		t.Fatalf("create issue: %v", err)
 	}
 
-	now := time.Date(2026, time.April, 2, 12, 0, 0, 0, time.UTC)
-	originalNow := timeNow
-	t.Cleanup(func() { timeNow = originalNow })
-	timeNow = func() time.Time { return now }
-
-	cachedTask := domain.Task{
-		ID:       naming.IssueID(taskID),
-		Title:    "stale cached title",
-		Type:     domain.TypeTask,
-		Priority: domain.P2,
-		Status:   domain.StatusOpen,
+	worktreePath := filepath.Join(t.TempDir(), "Chefy-"+taskID)
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      worktreePath,
+		Branch:    "az/" + taskID,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
 	}
+	statusRaw, err := json.Marshal(git.GitStatus{
+		HasChanges:    true,
+		GitAdditions:  7,
+		GitDeletions:  2,
+		GitAheadCount: 3,
+	})
+	if err != nil {
+		t.Fatalf("marshal git status: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeStateGitStatus(ctx, projectID, taskID, statusRaw, time.Now().UTC()); err != nil {
+		t.Fatalf("seed git status projection: %v", err)
+	}
+
 	d := &Daemon{
 		cfg: Config{Logger: logger},
 		issueClientsByProject: map[string]*issues.Client{
@@ -923,45 +1073,43 @@ func TestHandleTaskListIgnoresStaleRuntimeCacheAndReadsSQLiteProjection(t *testi
 		worktreeAdapter: &worktreeServiceAdapter{},
 		revision:        map[string]uint64{projectID: 11},
 		hub:             publish.NewHub(16, 8, logger),
-		taskListSnapshotCache: map[string]taskListSnapshotCacheEntry{
-			projectID: {
-				Revision:      11,
-				LastCheckedAt: now,
-				Freshness:     protocol.TaskListFreshnessFresh,
-				Tasks:         []domain.Task{cachedTask},
-				CachedAt:      now,
-				RuntimeAt:     now.Add(-taskListSnapshotRuntimeCacheTTL - time.Millisecond),
-				SummariesOnly: true,
-			},
-		},
 	}
+	d.storeTaskListSnapshotCache(projectID, 11, time.Now().UTC(), protocol.TaskListFreshnessFresh, []domain.Task{{
+		ID:                    naming.IssueID(taskID),
+		Title:                 "cached durable title",
+		Type:                  domain.TypeTask,
+		Priority:              domain.P2,
+		Status:                domain.StatusOpen,
+		HasWorktree:           false,
+		HasUncommittedChanges: false,
+	}}, true)
 
-	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+	resp, err := d.handleBoardFetch(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-task-list-runtime-cache-stale",
+		RequestID:       "req-board-fetch-runtime-overlay",
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Command:         "task.list",
+		Command:         "board.fetch",
 	})
 	if err != nil {
-		t.Fatalf("handleTaskList error: %v", err)
+		t.Fatalf("handleBoardFetch error: %v", err)
 	}
 	if !resp.OK {
-		t.Fatalf("task.list response = %+v", resp.Error)
+		t.Fatalf("board.fetch response = %+v", resp.Error)
 	}
-	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	payload, err := protocol.DecodeBoardSnapshotPayload(resp.Body)
 	if err != nil {
-		t.Fatalf("decode task.list body: %v", err)
+		t.Fatalf("decode board.fetch body: %v", err)
 	}
-	if got, want := payload.Tasks[0].Title, "runtime stale cache"; got != want {
-		t.Fatalf("payload task title = %q, want refreshed %q", got, want)
+	if got, want := len(payload.Tasks), 1; got != want {
+		t.Fatalf("payload.Tasks len = %d, want %d", got, want)
 	}
-
-	d.worktreeStateRefreshMu.Lock()
-	gotRefresh := d.worktreeStateLastRefresh[projectID]
-	d.worktreeStateRefreshMu.Unlock()
-	if gotRefresh.IsZero() {
-		t.Fatal("worktree refresh was not triggered on task.list sqlite projection read")
+	task := payload.Tasks[0]
+	if got, want := task.Title, "cached durable title"; got != want {
+		t.Fatalf("task.Title = %q, want cached durable title %q", got, want)
+	}
+	if !task.HasWorktree || !task.HasUncommittedChanges || task.GitAdditions != 7 || task.GitDeletions != 2 || task.GitAheadCount != 3 {
+		t.Fatalf("task runtime overlay = %+v, want dirty projected worktree", task)
 	}
 }
 
@@ -8043,7 +8191,7 @@ func TestHandleTaskSnapshotExportUsesProjectionSessions(t *testing.T) {
 	}
 }
 
-func TestHandleTaskGetTriggersOnlyRequestedIssueWorktreeRefreshAsync(t *testing.T) {
+func TestHandleTaskGetEnqueuesOnlyRequestedIssueWorktreeRefreshAsync(t *testing.T) {
 	ctx := context.Background()
 	projectID := protocol.DefaultProjectID
 	repoDir := t.TempDir()

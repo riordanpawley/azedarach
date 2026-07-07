@@ -908,6 +908,42 @@ func (c *Client) listSummariesWithRuntime(ctx context.Context, projectID string,
 	return tasks, nil
 }
 
+// HydrateRuntime overlays the current runtime projection onto the provided
+// tasks while preserving their durable issue fields and dependency shape.
+func (c *Client) HydrateRuntime(ctx context.Context, projectID string, tasks []domain.Task) ([]domain.Task, error) {
+	if len(tasks) == 0 {
+		return nil, nil
+	}
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		if id := strings.TrimSpace(task.ID.String()); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	runtimeTasks, err := c.queryTaskMetadataWithRuntime(ctx, db, projectID, ids...)
+	if err != nil {
+		return nil, c.wrapError("hydrate-runtime", projectID, err)
+	}
+	runtimeByID := make(map[string]domain.Task, len(runtimeTasks))
+	for _, task := range runtimeTasks {
+		runtimeByID[strings.TrimSpace(task.ID.String())] = task
+	}
+	out := make([]domain.Task, len(tasks))
+	for i := range out {
+		out[i] = cloneTaskForRuntimeOverlay(tasks[i])
+		applyRuntimeOverlay(&out[i], runtimeByID[strings.TrimSpace(out[i].ID.String())])
+	}
+	return out, nil
+}
+
 // ListGraphReadinessWithRuntime fetches the root graph plus direct dependency
 // context needed by daemon graph-readiness checks. The read scales with the
 // requested root graph instead of all active issues in the project.
@@ -3521,6 +3557,43 @@ func applyGitStatusProjection(task *domain.Task, raw string) {
 	if task.GitDeletions == 0 {
 		task.GitDeletions = len(status.Deleted)
 	}
+}
+
+func applyRuntimeOverlay(task *domain.Task, runtime domain.Task) {
+	if task == nil {
+		return
+	}
+	task.Session = cloneDomainSession(runtime.Session)
+	task.HasTmuxSession = runtime.HasTmuxSession
+	task.HasWorktree = runtime.HasWorktree
+	task.GitAheadCount = runtime.GitAheadCount
+	task.GitBehindCount = runtime.GitBehindCount
+	task.HasUncommittedChanges = runtime.HasUncommittedChanges
+	task.HasConflicts = runtime.HasConflicts
+	task.ConflictFiles = append([]string(nil), runtime.ConflictFiles...)
+	task.GitAdditions = runtime.GitAdditions
+	task.GitDeletions = runtime.GitDeletions
+	task.RuntimeUpdatedAt = runtime.RuntimeUpdatedAt
+	if strings.TrimSpace(runtime.Origin) != "" {
+		task.Origin = runtime.Origin
+	}
+}
+
+func cloneTaskForRuntimeOverlay(task domain.Task) domain.Task {
+	task.Session = cloneDomainSession(task.Session)
+	task.Dependencies = append([]domain.Dependency(nil), task.Dependencies...)
+	task.Implementations = append([]string(nil), task.Implementations...)
+	task.Labels = append([]string(nil), task.Labels...)
+	task.ConflictFiles = append([]string(nil), task.ConflictFiles...)
+	return task
+}
+
+func cloneDomainSession(session *domain.Session) *domain.Session {
+	if session == nil {
+		return nil
+	}
+	cloned := *session
+	return &cloned
 }
 
 func taskRuntimeProjectionQuery(projectID string, includeDetails bool, issueIDs ...string) (string, []any) {

@@ -41,6 +41,7 @@ func (w *daemonRuntimeProjectionWriter) PersistSessionProjection(ctx context.Con
 	if w == nil || w.d == nil {
 		return nil
 	}
+	projectID = w.d.canonicalProjectID(projectID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.d.persistSessionState(projectID, session)
@@ -92,6 +93,7 @@ func (w *daemonRuntimeProjectionWriter) PersistWorktreeProjection(ctx context.Co
 	if w == nil || w.d == nil {
 		return nil
 	}
+	projectID = w.d.canonicalProjectID(projectID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.d.persistWorktreeState(ctx, projectID, issueID, path, branch)

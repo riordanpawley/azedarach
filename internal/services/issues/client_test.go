@@ -904,6 +904,91 @@ func TestClient_ListSummariesWithRuntimeKeepsParentAndRuntimeProjection(t *testi
 	assert.Equal(t, domain.DependencyBlocks, got.Dependencies[0].Type)
 }
 
+func TestClient_HydrateRuntimePreservesDurableFieldsAndOverlaysProjection(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-hydrate-runtime"
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "SQLite durable title",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	require.NoError(t, err)
+
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(client.dbPath, slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	updatedAt := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
+	require.NoError(t, runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      "/tmp/proj-hydrate-runtime-" + taskID,
+		Branch:    "riordan/" + taskID + "/runtime",
+		UpdatedAt: updatedAt,
+	}))
+	statusRaw, err := json.Marshal(git.GitStatus{
+		HasChanges:     true,
+		GitAdditions:   8,
+		GitDeletions:   3,
+		GitAheadCount:  2,
+		GitBehindCount: 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, runtimeStore.UpsertWorktreeStateGitStatus(ctx, projectID, taskID, statusRaw, updatedAt))
+
+	cached := []domain.Task{{
+		ID:               naming.IssueID(taskID),
+		Title:            "cached durable title",
+		Status:           domain.StatusInProgress,
+		Type:             domain.TypeTask,
+		Priority:         domain.P1,
+		Labels:           []string{"cached"},
+		Implementations:  []string{"worker-a"},
+		Dependencies:     []domain.Dependency{{ID: "az-dep", Type: domain.DependencyBlocks}},
+		RuntimeUpdatedAt: time.Now().UTC().Add(-time.Hour),
+	}, {
+		ID:                    "az-missing-runtime",
+		Title:                 "cached missing task",
+		Status:                domain.StatusOpen,
+		Type:                  domain.TypeTask,
+		HasWorktree:           true,
+		HasUncommittedChanges: true,
+		GitAdditions:          99,
+		RuntimeUpdatedAt:      time.Now().UTC().Add(-time.Hour),
+	}}
+
+	hydrated, err := client.HydrateRuntime(ctx, projectID, cached)
+	require.NoError(t, err)
+	require.Len(t, hydrated, 2)
+
+	got := hydrated[0]
+	assert.Equal(t, "cached durable title", got.Title)
+	assert.Equal(t, domain.StatusInProgress, got.Status)
+	assert.Equal(t, domain.P1, got.Priority)
+	assert.Equal(t, []string{"cached"}, got.Labels)
+	require.Len(t, got.Dependencies, 1)
+	assert.Equal(t, domain.DependencyBlocks, got.Dependencies[0].Type)
+	assert.True(t, got.HasWorktree)
+	assert.True(t, got.HasUncommittedChanges)
+	assert.Equal(t, 8, got.GitAdditions)
+	assert.Equal(t, 3, got.GitDeletions)
+	assert.Equal(t, 2, got.GitAheadCount)
+	assert.Equal(t, 1, got.GitBehindCount)
+	assert.Truef(t, got.RuntimeUpdatedAt.Equal(updatedAt), "runtime updated_at = %v, want %v", got.RuntimeUpdatedAt, updatedAt)
+
+	hydrated[0].Dependencies[0].Type = domain.DependencyRelatedTo
+	assert.Equal(t, domain.DependencyBlocks, cached[0].Dependencies[0].Type)
+
+	missing := hydrated[1]
+	assert.Equal(t, "cached missing task", missing.Title)
+	assert.False(t, missing.HasWorktree)
+	assert.False(t, missing.HasUncommittedChanges)
+	assert.Zero(t, missing.GitAdditions)
+	assert.True(t, missing.RuntimeUpdatedAt.IsZero())
+}
+
 func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
