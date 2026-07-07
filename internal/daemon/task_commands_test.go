@@ -5237,6 +5237,38 @@ func TestWorkerObservationStateDerivationPrecedence(t *testing.T) {
 	}
 }
 
+func TestLatestWorkerObservationIssueEventFiltersStructuralDependencies(t *testing.T) {
+	blocking := domain.IssueObservationEvent{
+		ID:         1,
+		Type:       domain.IssueEventIssueDependencyAdded,
+		ObservedAt: time.Date(2026, time.June, 17, 8, 0, 0, 0, time.UTC),
+		Source:     "issue-store",
+		Payload:    map[string]any{"dependency_type": string(domain.DependencyBlocks)},
+	}
+	events := []domain.IssueObservationEvent{
+		blocking,
+		{
+			ID:         2,
+			Type:       domain.IssueEventIssueDependencyAdded,
+			ObservedAt: blocking.ObservedAt.Add(time.Minute),
+			Source:     "issue-store",
+			Payload:    map[string]any{"dependency_type": string(domain.DependencyParentChild)},
+		},
+		{
+			ID:         3,
+			Type:       domain.IssueEventIssueDependencyAdded,
+			ObservedAt: blocking.ObservedAt.Add(2 * time.Minute),
+			Source:     "issue-store",
+			Payload:    map[string]any{"dependency_type": string(domain.DependencyCreatedIn)},
+		},
+	}
+
+	got := latestWorkerObservationIssueEvent(events)
+	if got == nil || got.ID != blocking.ID {
+		t.Fatalf("latestWorkerObservationIssueEvent() = %+v, want blocking dependency event", got)
+	}
+}
+
 func TestTaskGraphReadinessWorkerObservationsIncludeEvidenceAndMissingProjectionStates(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -5361,6 +5393,8 @@ func TestTaskGraphReadinessWorkerObservationsIncludeEvidenceAndMissingProjection
 	}
 	if got := strings.Join(observations[reviewID].EvidenceSummary, "\n"); !strings.Contains(got, "worker-integration-ready") || !strings.Contains(got, "evidence.submitted") {
 		t.Fatalf("review evidence = %q", got)
+	} else if strings.Contains(got, "issue.dependency_added") || strings.Contains(got, "parent-child") {
+		t.Fatalf("review evidence includes structural dependency event: %q", got)
 	}
 	if got := observations[closedID]; got.State != domain.WorkerObservationCleanupPending {
 		t.Fatalf("closed observation = %+v", got)
