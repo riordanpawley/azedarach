@@ -37,7 +37,10 @@ func (r *ExecRunner) Run(ctx context.Context, args ...string) (string, error) {
 	}
 
 	cmd := exec.CommandContext(ctx, "tmux", args...)
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
+	if err != nil && len(out) > 0 {
+		return string(out), fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
 	return string(out), err
 }
 
@@ -55,7 +58,10 @@ func (r *ExecRunner) RunWithInput(ctx context.Context, input string, args ...str
 
 	cmd := exec.CommandContext(ctx, "tmux", args...)
 	cmd.Stdin = strings.NewReader(input)
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
+	if err != nil && len(out) > 0 {
+		return string(out), fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
 	return string(out), err
 }
 
