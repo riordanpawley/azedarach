@@ -49,6 +49,7 @@ var orderedMigrations = []migration{
 	{id: "0025_agent_learning_privacy", path: "migrations/0025_agent_learning_privacy.sql", apply: applyAgentLearningPrivacyMigration},
 	{id: "0026_issue_ownership", path: "migrations/0026_issue_ownership.sql", apply: applyIssueOwnershipMigration},
 	{id: "0026_decision_search_fts", path: "migrations/0026_decision_search_fts.sql", apply: applyDecisionSearchFTSMigration},
+	{id: "0027_issue_id_allocations", path: "migrations/0027_issue_id_allocations.sql"},
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
@@ -119,7 +120,84 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := repairAgentLearningBaseSchema(ctx, db); err != nil {
 		return fmt.Errorf("repair agent learning base schema: %w", err)
 	}
+	if err := repairIssueIDAllocationSchema(ctx, db); err != nil {
+		return fmt.Errorf("repair issue id allocation schema: %w", err)
+	}
 
+	return nil
+}
+
+func repairIssueIDAllocationSchema(ctx context.Context, db *sql.DB) error {
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS issue_id_allocations (
+			id TEXT PRIMARY KEY,
+			allocated_at TEXT NOT NULL,
+			source TEXT NOT NULL DEFAULT ''
+		)
+	`); err != nil {
+		return fmt.Errorf("ensure issue_id_allocations table: %w", err)
+	}
+	if err := ensureTableColumns(db, "issue_id_allocations", []sqliteColumnSpec{
+		{name: "allocated_at", ddl: "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'"},
+		{name: "source", ddl: "TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return fmt.Errorf("ensure issue_id_allocations columns: %w", err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	sources := []struct {
+		table  string
+		column string
+		source string
+	}{
+		{table: "issues", column: "id", source: "issues"},
+		{table: "issue_dependencies", column: "issue_id", source: "issue_dependencies.issue_id"},
+		{table: "issue_dependencies", column: "depends_on_id", source: "issue_dependencies.depends_on_id"},
+		{table: "issue_external_refs", column: "issue_id", source: "issue_external_refs"},
+		{table: "azedarach_external_issue_refs", column: "issue_id", source: "azedarach_external_issue_refs"},
+		{table: "spec_requirements", column: "issue_id", source: "spec_requirements"},
+		{table: "spec_links", column: "issue_id", source: "spec_links"},
+		{table: "issue_attachments", column: "issue_id", source: "issue_attachments"},
+		{table: "issue_observation_events", column: "issue_id", source: "issue_observation_events"},
+		{table: "daemon_session_projections", column: "issue_id", source: "daemon_session_projections"},
+		{table: "daemon_session_observations", column: "issue_id", source: "daemon_session_observations"},
+		{table: "daemon_worktree_projections", column: "issue_id", source: "daemon_worktree_projections"},
+		{table: "agent_learnings", column: "issue_id", source: "agent_learnings"},
+		{table: "agent_learning_relations", column: "scope_issue_id", source: "agent_learning_relations"},
+	}
+	for _, source := range sources {
+		if err := seedIssueIDAllocationsFromColumn(ctx, db, source.table, source.column, source.source, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func seedIssueIDAllocationsFromColumn(ctx context.Context, db *sql.DB, tableName, columnName, source, allocatedAt string) error {
+	exists, err := tableExists(db, tableName)
+	if err != nil {
+		return fmt.Errorf("inspect %s for issue id allocation seed: %w", tableName, err)
+	}
+	if !exists {
+		return nil
+	}
+	columns, err := tableColumns(db, tableName)
+	if err != nil {
+		return fmt.Errorf("inspect %s columns for issue id allocation seed: %w", tableName, err)
+	}
+	if _, ok := columns[columnName]; !ok {
+		return nil
+	}
+	stmt := fmt.Sprintf(`
+		INSERT INTO issue_id_allocations (id, allocated_at, source)
+		SELECT DISTINCT TRIM(%[1]s), ?, ?
+		FROM %[2]s
+		WHERE TRIM(COALESCE(%[1]s, '')) <> ''
+		ON CONFLICT(id) DO NOTHING
+	`, columnName, tableName)
+	if _, err := db.ExecContext(ctx, stmt, allocatedAt, source); err != nil {
+		return fmt.Errorf("seed issue id allocations from %s.%s: %w", tableName, columnName, err)
+	}
 	return nil
 }
 

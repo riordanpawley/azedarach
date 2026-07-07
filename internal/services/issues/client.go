@@ -293,6 +293,10 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		_ = db.Close()
 		return nil, c.wrapError("open-db", "", err)
 	}
+	if err := repairIssueIDAllocationSchema(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, c.wrapError("open-db", "", err)
+	}
 	specAuditDoneAt := time.Now()
 
 	c.db = db
@@ -617,6 +621,13 @@ func (c *Client) normalizeProviderDisplayKeyIssueIDs(ctx context.Context, db *sq
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("read next alpha id for provider display-key normalization: %w", err)
 	}
+	if allocated, err := c.loadAllocatedIssueIDs(ctx, tx); err != nil {
+		return fmt.Errorf("read allocated issue ids for provider display-key normalization: %w", err)
+	} else {
+		for id := range allocated {
+			existing[id] = struct{}{}
+		}
+	}
 
 	migrations := make([]issueIDMigration, 0, len(legacyIDs))
 	for _, oldID := range legacyIDs {
@@ -637,6 +648,9 @@ func (c *Client) normalizeProviderDisplayKeyIssueIDs(ctx context.Context, db *sq
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, migration := range migrations {
 		if err := c.migrateProviderDisplayKeyIssueID(ctx, tx, migration, now); err != nil {
+			return err
+		}
+		if err := c.reserveIssueID(ctx, tx, migration.NewID, now, "provider-display-key-normalization"); err != nil {
 			return err
 		}
 	}
@@ -2077,25 +2091,16 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 		return "", c.wrapError("create", "", err)
 	}
 
-	existingRows, err := tx.QueryContext(ctx, `SELECT id FROM issues`)
+	existing, err := c.loadAllocatedIssueIDs(ctx, tx)
 	if err != nil {
-		return "", c.wrapError("create", "", err)
-	}
-	defer existingRows.Close()
-	existing := map[string]struct{}{}
-	for existingRows.Next() {
-		var id string
-		if err := existingRows.Scan(&id); err != nil {
-			return "", c.wrapError("create", "", err)
-		}
-		existing[id] = struct{}{}
-	}
-	if err := existingRows.Err(); err != nil {
 		return "", c.wrapError("create", "", err)
 	}
 
 	issueID, nextReserved := allocateNextAlphaIssueID(nextIndex, existing)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := c.reserveIssueID(ctx, tx, issueID, now, "issue.create"); err != nil {
+		return "", c.wrapError("create", issueID, err)
+	}
 	issueType := params.Type
 	if issueType == "" {
 		issueType = domain.TypeTask
@@ -4321,6 +4326,50 @@ func (c *Client) getMetaValue(ctx context.Context, tx *sql.Tx, key string) (stri
 		return "", err
 	}
 	return value, nil
+}
+
+func (c *Client) loadAllocatedIssueIDs(ctx context.Context, queryer sqlIssueDBTX) (map[string]struct{}, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT id FROM issue_id_allocations
+		UNION
+		SELECT id FROM issues
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		ids[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+func (c *Client) reserveIssueID(ctx context.Context, execer sqlIssueExecer, issueID, allocatedAt, source string) error {
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return fmt.Errorf("issue id is required")
+	}
+	if strings.TrimSpace(allocatedAt) == "" {
+		allocatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	_, err := execer.ExecContext(ctx, `
+		INSERT INTO issue_id_allocations (id, allocated_at, source)
+		VALUES (?, ?, ?)
+	`, issueID, allocatedAt, strings.TrimSpace(source))
+	return err
 }
 
 func parseNextAlphaIssueIndex(raw string) int {

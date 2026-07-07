@@ -3002,10 +3002,35 @@ func TestClient_CreateDoesNotReuseDeletedLocalIssueIDs(t *testing.T) {
 	require.Equal(t, "c", thirdID)
 
 	require.NoError(t, client.Delete(ctx, secondID))
+	db, err := sql.Open("sqlite", "file:"+client.dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.ExecContext(ctx, `UPDATE meta SET value = '1' WHERE key = ?`, nextAlphaIssueIndexMetaKey)
+	require.NoError(t, err)
 
 	fourthID, err := client.Create(ctx, CreateTaskParams{Title: "fourth", Type: domain.TypeTask, Priority: domain.P3})
 	require.NoError(t, err)
 	assert.Equal(t, "d", fourthID)
+}
+
+func TestClient_CreateDoesNotReuseClosedLocalIssueIDsWhenMetaIndexDrifts(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	firstID, err := client.Create(ctx, CreateTaskParams{Title: "first", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	require.Equal(t, "a", firstID)
+	require.NoError(t, client.Close(ctx, firstID, "done"))
+
+	db, err := sql.Open("sqlite", "file:"+client.dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.ExecContext(ctx, `UPDATE meta SET value = '0' WHERE key = ?`, nextAlphaIssueIndexMetaKey)
+	require.NoError(t, err)
+
+	secondID, err := client.Create(ctx, CreateTaskParams{Title: "second", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	assert.Equal(t, "b", secondID)
 }
 
 func TestClient_CreateSkipsHistoricallyUsedIDsWhenMetaIndexDrifts(t *testing.T) {
@@ -3027,6 +3052,70 @@ func TestClient_CreateSkipsHistoricallyUsedIDsWhenMetaIndexDrifts(t *testing.T) 
 	require.NoError(t, err)
 
 	thirdID, err := client.Create(ctx, CreateTaskParams{Title: "third", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	assert.Equal(t, "c", thirdID)
+}
+
+func TestClient_CreateRepairsAllocatorFromDeletedIssueHistory(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	client := NewClientAtPath(dbPath, slog.Default())
+
+	firstID, err := client.Create(ctx, CreateTaskParams{Title: "first", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	secondID, err := client.Create(ctx, CreateTaskParams{Title: "second", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	require.Equal(t, "a", firstID)
+	require.Equal(t, "b", secondID)
+	require.NoError(t, client.Delete(ctx, secondID))
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `DELETE FROM issue_id_allocations WHERE id = ?`, secondID)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `UPDATE meta SET value = '1' WHERE key = ?`, nextAlphaIssueIndexMetaKey)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	require.NoError(t, client.CloseDB())
+
+	reopened := NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { require.NoError(t, reopened.CloseDB()) })
+	thirdID, err := reopened.Create(ctx, CreateTaskParams{Title: "third", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	assert.Equal(t, "c", thirdID)
+}
+
+func TestClient_CreateRepairsAllocatorFromOldWorktreeProjection(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	client := NewClientAtPath(dbPath, slog.Default())
+
+	firstID, err := client.Create(ctx, CreateTaskParams{Title: "first", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	secondID, err := client.Create(ctx, CreateTaskParams{Title: "second", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	require.Equal(t, "a", firstID)
+	require.Equal(t, "b", secondID)
+	require.NoError(t, client.Delete(ctx, secondID))
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, "default", secondID, filepath.Join(t.TempDir(), "repo-"+secondID), "riordan/"+secondID+"/old-branch", now)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `DELETE FROM issue_id_allocations WHERE id = ?`, secondID)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `UPDATE meta SET value = '1' WHERE key = ?`, nextAlphaIssueIndexMetaKey)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	require.NoError(t, client.CloseDB())
+
+	reopened := NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { require.NoError(t, reopened.CloseDB()) })
+	thirdID, err := reopened.Create(ctx, CreateTaskParams{Title: "third", Type: domain.TypeTask, Priority: domain.P3})
 	require.NoError(t, err)
 	assert.Equal(t, "c", thirdID)
 }
@@ -3331,6 +3420,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0025_agent_learning_privacy",
 		"0026_decision_search_fts",
 		"0026_issue_ownership",
+		"0027_issue_id_allocations",
 	}, got)
 }
 
