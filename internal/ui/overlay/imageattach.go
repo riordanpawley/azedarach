@@ -445,7 +445,9 @@ type attachmentAddedMsg struct {
 	attachment *attachment.Attachment
 }
 
-type attachmentDeletedMsg struct{}
+type attachmentDeletedMsg struct {
+	AttachmentID string
+}
 
 type errorMsg struct {
 	err error
@@ -496,7 +498,7 @@ func (i *ImageAttachOverlay) deleteAttachment() tea.Cmd {
 		if err != nil {
 			return errorMsg{err}
 		}
-		return attachmentDeletedMsg{}
+		return attachmentDeletedMsg{AttachmentID: file.ID}
 	}
 }
 

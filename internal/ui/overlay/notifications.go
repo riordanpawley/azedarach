@@ -286,16 +286,26 @@ func (o *NotificationHistoryOverlay) renderSelectedDetails(width int) []string {
 	if !ok {
 		return nil
 	}
+	expanded := o.itemExpanded(item)
 	lines := []string{o.styles.MenuKey.Render("Selected:")}
-	for _, line := range wrapNotificationMessage(item.Message, width) {
+	messageLines := 3
+	detailLines := 2
+	if expanded {
+		messageLines = 12
+		detailLines = 18
+	}
+	for _, line := range wrapNotificationMessageLines(item.Message, width, messageLines) {
 		lines = append(lines, o.styles.MenuItem.Render(line))
 	}
 	if strings.TrimSpace(item.Detail) != "" {
-		for _, line := range wrapNotificationMessage(item.Detail, width) {
+		for _, line := range wrapNotificationMessageLines(item.Detail, width, detailLines) {
 			lines = append(lines, o.styles.MenuItemDisabled.Render(line))
 		}
 	}
-	if !o.itemExpanded(item) && len(lines) > 5 {
+	if expanded {
+		lines = append(lines, notificationContextLines(o.styles, item, width)...)
+	}
+	if !expanded && len(lines) > 5 {
 		lines = lines[:5]
 	}
 	return lines
@@ -686,6 +696,58 @@ func notificationDetails(item NotificationHistoryItem) string {
 	return strings.Join(parts, "\n")
 }
 
+func notificationContextLines(styles *Styles, item NotificationHistoryItem, width int) []string {
+	context := []string{}
+	if len(item.Actions) > 0 {
+		labels := make([]string, 0, len(item.Actions))
+		for _, action := range item.Actions {
+			label := strings.TrimSpace(action.Label)
+			if label == "" {
+				label = strings.TrimSpace(action.ActionID)
+			}
+			if label == "" {
+				continue
+			}
+			if !action.Enabled {
+				if reason := strings.TrimSpace(action.DisabledReason); reason != "" {
+					label += " unavailable: " + reason
+				} else {
+					label += " unavailable"
+				}
+			}
+			labels = append(labels, label)
+		}
+		if len(labels) > 0 {
+			context = append(context, "actions: "+strings.Join(labels, ", "))
+		}
+	}
+	if item.ScopeID != "" {
+		scope := item.ScopeID
+		if item.ScopeType != "" {
+			scope = item.ScopeType + ":" + scope
+		}
+		context = append(context, "scope: "+scope)
+	}
+	if item.OperationID != "" {
+		context = append(context, "operation: "+item.OperationID)
+	}
+	if item.Reference != "" {
+		context = append(context, "reference: "+item.Reference)
+	}
+	if item.State != "" {
+		context = append(context, "state: "+item.State)
+	}
+	if len(context) == 0 {
+		return nil
+	}
+	wrapped := wrapNotificationMessageLines(strings.Join(context, "  "), width, 2)
+	lines := []string{styles.MenuKey.Render("Context:")}
+	for _, line := range wrapped {
+		lines = append(lines, styles.MenuItemDisabled.Render(line))
+	}
+	return lines
+}
+
 func shortNotificationTime(ts time.Time) string {
 	if ts.IsZero() {
 		return "unknown"
@@ -702,40 +764,59 @@ func emptyDefault(value, fallback string) string {
 }
 
 func wrapNotificationMessage(message string, width int) []string {
+	return wrapNotificationMessageLines(message, width, 6)
+}
+
+func wrapNotificationMessageLines(message string, width, maxLines int) []string {
 	message = strings.TrimSpace(message)
 	if message == "" {
 		message = "No details provided"
 	}
 	width = max(8, width)
+	if maxLines < 1 {
+		maxLines = 1
+	}
 	words := strings.Fields(message)
 	if len(words) == 0 {
 		return []string{"No details provided"}
 	}
 	lines := make([]string, 0, 3)
 	var current string
-	for _, word := range words {
+	truncated := false
+	for i, word := range words {
 		if ansi.StringWidth(word) > width {
 			word = ansi.Truncate(word, width, "...")
 		}
 		if current == "" {
 			current = word
+			if i == len(words)-1 {
+				lines = append(lines, current)
+			}
 			continue
 		}
 		candidate := current + " " + word
 		if ansi.StringWidth(candidate) <= width {
 			current = candidate
+			if i == len(words)-1 {
+				lines = append(lines, current)
+			}
 			continue
 		}
 		lines = append(lines, current)
-		current = word
-		if len(lines) >= 6 {
+		if len(lines) >= maxLines {
+			truncated = true
 			break
 		}
+		current = word
+		if i == len(words)-1 {
+			lines = append(lines, current)
+		}
 	}
-	if current != "" && len(lines) < 6 {
-		lines = append(lines, current)
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+		truncated = true
 	}
-	if len(lines) == 6 && strings.Join(lines, " ") != message {
+	if truncated && len(lines) > 0 {
 		lines[len(lines)-1] = ansi.Truncate(lines[len(lines)-1]+" ...", width, "...")
 	}
 	return lines
