@@ -10779,6 +10779,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Worker completion flow: workers should leave their issue `in_review`") {
 		t.Fatalf("prime output missing in-review worker completion guidance: %q", output)
 	}
+	if !strings.Contains(output, "Parent/tracker completion includes child lifecycle cleanup: before reporting the parent complete, inspect child statuses, close accepted completed children with `az issue close --id <child-issue>`") {
+		t.Fatalf("prime output missing parent child lifecycle cleanup guidance: %q", output)
+	}
+	if !strings.Contains(output, "leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale") {
+		t.Fatalf("prime output missing unresolved child rationale guidance: %q", output)
+	}
 	if !strings.Contains(output, "before accepting closeout, run `az issue context-risk <worker-issue> --since 14d`") {
 		t.Fatalf("prime output missing context-risk closeout guidance: %q", output)
 	}
@@ -11167,6 +11173,8 @@ func TestPrimeCommandShowsRootExitContractForAzOrchestrationRoot(t *testing.T) {
 		"az orchestrate complete-check --root az-root",
 		"Treat `worker-integration-ready` and `in_review` as evidence to inspect and validate",
 		"run `az issue close --id <worker>` instead of handing off to the user",
+		"Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `az issue close --id <child-issue>`",
+		"leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale",
 		"final assistant response only after root completion, a named hard blocker, or an explicit user pause",
 		"az-child: review_ready - worker reported integration-ready evidence",
 	} {
@@ -11454,6 +11462,9 @@ func TestPrimeCommandRecommendsChildIssuesForEpicContext(t *testing.T) {
 	if !strings.Contains(output, "Do the child implementation from the child issue execution context: preferably a child session (`az session start <child-issue>` or `az issue split \"Child task\"`) and at minimum the child worktree (`az worktree create <child-issue>`).") {
 		t.Fatalf("prime output missing child execution context guidance for epic context: %q", output)
 	}
+	if !strings.Contains(output, "Parent/tracker completion includes child lifecycle cleanup: before reporting the parent complete, inspect child statuses, close accepted completed children with `az issue close --id <child-issue>`") {
+		t.Fatalf("prime output missing child completion cleanup guidance for epic context: %q", output)
+	}
 }
 
 func TestPrimeCommandRecommendsChildIssuesWhenActiveIssueHasChildren(t *testing.T) {
@@ -11525,6 +11536,9 @@ func TestPrimeCommandRecommendsChildIssuesWhenActiveIssueHasChildren(t *testing.
 	}
 	if !strings.Contains(output, "Do the child implementation from the child issue execution context: preferably a child session (`az session start <child-issue>`) and at minimum the child worktree (`az worktree create <child-issue>`).") {
 		t.Fatalf("prime output missing child execution context guidance for parent task: %q", output)
+	}
+	if !strings.Contains(output, "before reporting the parent complete, inspect child statuses, close accepted completed children with `az issue close --id <child-issue>`") {
+		t.Fatalf("prime output missing child completion cleanup guidance for parent task: %q", output)
 	}
 	if strings.Contains(output, "Parent-context recommendation: `az-1` is an epic or already has child issues; keep implementation/subtask work in child issues with `az issue create \"Child task\"` or `az issue split \"Child task\"`") {
 		t.Fatalf("prime output should not mention split command when tmux is unavailable: %q", output)

@@ -5429,10 +5429,11 @@ func TestTaskGraphReadinessSurfacesPendingSessionStartProgress(t *testing.T) {
 }
 
 func TestTaskCompletionAdviceIncludesDomainNextSteps(t *testing.T) {
-	advice := daemonTaskCompletionAdvice("az-1", []string{"az-2"}, []string{"az-3"}, []string{"az-4"}, nil)
+	advice := daemonTaskCompletionAdvice("az-1", []string{"az-2"}, []taskGraphNestedRoot{{IssueID: "az-5"}}, []string{"az-3"}, []string{"az-4"}, nil)
 	joined := strings.Join(advice, "\n")
 	for _, want := range []string{
 		"az orchestrate close-session --issue az-4",
+		"az session start az-5",
 		"az issue close --id az-3",
 		"az orchestrate start --root az-1 --issue az-2 --json",
 	} {
@@ -5506,6 +5507,133 @@ func TestTaskGraphReadinessDoesNotMisreportIncompleteChildAsCloseable(t *testing
 	}
 	if !slices.Contains(result.Runnable, child.String()) {
 		t.Fatalf("runnable = %+v, want incomplete child runnable", result.Runnable)
+	}
+}
+
+func TestTaskGraphReadinessReportsNestedTrackerRootInsteadOfFlatteningDescendants(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	projectID := "proj-nested-tracker-readiness"
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Outer root",
+		Type:   domain.TypeEpic,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	directID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Direct worker",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create direct worker: %v", err)
+	}
+	trackerID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Nested tracker",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create tracker: %v", err)
+	}
+	grandchildID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Tracker child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		ParentID: &trackerID,
+	})
+	if err != nil {
+		t.Fatalf("create tracker child: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		sessionStore: daemonstate.NewStore(),
+	}
+	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskGraphReadiness error: %v", err)
+	}
+	if !slices.Contains(ready.Runnable, directID) {
+		t.Fatalf("runnable = %+v, want direct worker %s", ready.Runnable, directID)
+	}
+	if slices.Contains(ready.Runnable, grandchildID) {
+		t.Fatalf("runnable = %+v, did not expect nested child %s under outer root", ready.Runnable, grandchildID)
+	}
+	if len(ready.NestedRoots) != 1 {
+		t.Fatalf("nested_roots = %+v, want one nested tracker", ready.NestedRoots)
+	}
+	nested := ready.NestedRoots[0]
+	if nested.IssueID != trackerID || nested.Status != string(domain.StatusOpen) || nested.Type != string(domain.TypeTask) || nested.ChildCount != 1 {
+		t.Fatalf("nested root = %+v, want tracker %s", nested, trackerID)
+	}
+	if !strings.Contains(nested.Advice, "az session start "+trackerID) {
+		t.Fatalf("nested advice = %q, want session start guidance", nested.Advice)
+	}
+	for _, observation := range ready.WorkerObservations {
+		if observation.IssueID == grandchildID {
+			t.Fatalf("worker observations included nested child under outer root: %+v", ready.WorkerObservations)
+		}
+	}
+}
+
+func TestTaskCompleteCheckIgnoresClosedNestedRootWithClosedDescendants(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	projectID := "proj-complete-closed-nested-root"
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	trackerID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Closed tracker", Type: domain.TypeTask, Status: domain.StatusDone, ParentID: &rootID})
+	if err != nil {
+		t.Fatalf("create tracker: %v", err)
+	}
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Closed child", Type: domain.TypeTask, Status: domain.StatusDone, ParentID: &trackerID}); err != nil {
+		t.Fatalf("create tracker child: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		sessionStore: daemonstate.NewStore(),
+	}
+	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskGraphReadiness error: %v", err)
+	}
+	if len(ready.NestedRoots) != 0 {
+		t.Fatalf("nested_roots = %+v, want none for closed nested subtree", ready.NestedRoots)
+	}
+	result, err := d.taskCompleteCheck(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskCompleteCheck error: %v", err)
+	}
+	if !result.Pass {
+		t.Fatalf("complete check = %+v, want pass for closed nested subtree", result)
 	}
 }
 

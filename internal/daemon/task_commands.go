@@ -187,6 +187,7 @@ type taskDeletePreflightResult struct {
 type taskGraphReadinessResult struct {
 	RootIssueID            string                          `json:"root_issue_id"`
 	Runnable               []string                        `json:"runnable"`
+	NestedRoots            []taskGraphNestedRoot           `json:"nested_roots,omitempty"`
 	Pending                []taskGraphPendingStart         `json:"pending,omitempty"`
 	Active                 []string                        `json:"active,omitempty"`
 	ActiveSessions         []taskGraphActiveSession        `json:"active_sessions,omitempty"`
@@ -194,6 +195,15 @@ type taskGraphReadinessResult struct {
 	StaleCloseableChildren []taskStaleCloseableCandidate   `json:"stale_closeable_children,omitempty"`
 	WorkerObservations     []domain.WorkerObservation      `json:"worker_observations,omitempty"`
 	Blocked                map[string]string               `json:"blocked"`
+}
+
+type taskGraphNestedRoot struct {
+	IssueID       string                  `json:"issue_id"`
+	Status        string                  `json:"status"`
+	Type          string                  `json:"type"`
+	ChildCount    int                     `json:"child_count"`
+	ActiveSession *taskGraphActiveSession `json:"active_session,omitempty"`
+	Advice        string                  `json:"advice,omitempty"`
 }
 
 type taskGraphPendingStart struct {
@@ -3522,6 +3532,13 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 	if len(ready.Runnable) > 0 {
 		reasons = append(reasons, fmt.Sprintf("runnable leaves remain: %s", strings.Join(ready.Runnable, ",")))
 	}
+	if len(ready.NestedRoots) > 0 {
+		ids := make([]string, 0, len(ready.NestedRoots))
+		for _, nested := range ready.NestedRoots {
+			ids = append(ids, nested.IssueID)
+		}
+		reasons = append(reasons, fmt.Sprintf("nested roots require orchestration: %s", strings.Join(ids, ",")))
+	}
 	if len(openDescendants) > 0 {
 		reasons = append(reasons, fmt.Sprintf("required descendants not closed: %s", strings.Join(openDescendants, ",")))
 	}
@@ -3539,7 +3556,7 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 		RootIssueID:            rootID.String(),
 		Pass:                   len(reasons) == 0,
 		Reasons:                reasons,
-		Advice:                 daemonTaskCompletionAdvice(rootID.String(), ready.Runnable, openDescendants, activeSessions, staleCloseable),
+		Advice:                 daemonTaskCompletionAdvice(rootID.String(), ready.Runnable, ready.NestedRoots, openDescendants, activeSessions, staleCloseable),
 		StaleCloseableChildren: staleCloseable,
 	}, nil
 }
@@ -3566,6 +3583,7 @@ func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID 
 	}
 	startProgressByIssue := d.sessionStartProgressByIssue(ctx, projectID)
 	ready.removeRunnableSessionStarts(startProgressByIssue)
+	ready.NestedRoots = d.daemonTaskGraphNestedRoots(ctx, projectID, ready.NestedRoots, byID, startProgressByIssue)
 	ready.ActiveSessions = d.daemonTaskGraphActiveSessions(ctx, projectID, ready.Active, byID, startProgressByIssue)
 	ready.ActiveSessions = append(ready.ActiveSessions, daemonTaskGraphCleanupPendingSessions(rootID, byID, children)...)
 	ready.SessionStartProgress = daemonTaskGraphSessionStartProgressList(rootID, children, startProgressByIssue)
@@ -3655,7 +3673,7 @@ func daemonTaskGraphIndexes(rootIssueID string, tasks []domain.Task) (naming.Iss
 }
 
 func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) (taskGraphReadinessResult, error) {
-	leafIDs := daemonTaskGraphLeafIDs(rootID, byID, children)
+	leafIDs := daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children)
 	leaves := make([]string, 0, len(leafIDs))
 	for _, id := range leafIDs {
 		task := byID[id]
@@ -3668,6 +3686,7 @@ func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.
 	result := taskGraphReadinessResult{
 		RootIssueID: rootID.String(),
 		Runnable:    make([]string, 0, len(leaves)),
+		NestedRoots: daemonTaskGraphNestedRootSummaries(rootID, byID, children),
 		Active:      make([]string, 0),
 		Blocked:     make(map[string]string),
 	}
@@ -3700,7 +3719,7 @@ func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.
 
 func daemonTaskGraphStaleCloseableCandidates(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) []taskStaleCloseableCandidate {
 	out := make([]taskStaleCloseableCandidate, 0)
-	for _, id := range daemonTaskGraphLeafIDs(rootID, byID, children) {
+	for _, id := range daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children) {
 		task := byID[id]
 		if !daemonTaskStaleCloseableCandidate(task) {
 			continue
@@ -3751,6 +3770,48 @@ func daemonTaskStaleCloseableEvidence(task domain.Task) []string {
 	return evidence
 }
 
+func (d *Daemon) daemonTaskGraphNestedRoots(
+	ctx context.Context,
+	projectID string,
+	nested []taskGraphNestedRoot,
+	byID map[naming.IssueID]domain.Task,
+	startProgressByIssue map[string]taskGraphSessionStartProgress,
+) []taskGraphNestedRoot {
+	if len(nested) == 0 {
+		return nil
+	}
+	activeIDs := make([]string, 0, len(nested))
+	for _, item := range nested {
+		taskID, parseErr := naming.ParseIssueID(item.IssueID)
+		task := byID[taskID]
+		if parseErr == nil && (daemonCloseGuardTaskHasSession(task) || hasTaskGraphSessionStartProgress(item.IssueID, startProgressByIssue)) {
+			activeIDs = append(activeIDs, item.IssueID)
+		}
+	}
+	activeByIssue := daemonTaskGraphActiveSessionsByIssue(d.daemonTaskGraphActiveSessions(ctx, projectID, activeIDs, byID, startProgressByIssue))
+	out := make([]taskGraphNestedRoot, 0, len(nested))
+	for _, item := range nested {
+		if active := activeByIssue[item.IssueID]; active != nil {
+			copyActive := *active
+			item.ActiveSession = &copyActive
+			item.Advice = fmt.Sprintf("watch nested root orchestrator: az orchestrate status --root %s --json", item.IssueID)
+		}
+		if strings.TrimSpace(item.Advice) == "" {
+			item.Advice = fmt.Sprintf("start nested root orchestrator: az session start %s", item.IssueID)
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func hasTaskGraphSessionStartProgress(issueID string, progressByIssue map[string]taskGraphSessionStartProgress) bool {
+	if len(progressByIssue) == 0 {
+		return false
+	}
+	_, ok := progressByIssue[sessionKey(issueID)]
+	return ok
+}
+
 func (d *Daemon) daemonTaskGraphWorkerObservations(
 	ctx context.Context,
 	projectID string,
@@ -3759,7 +3820,7 @@ func (d *Daemon) daemonTaskGraphWorkerObservations(
 	children map[naming.IssueID][]naming.IssueID,
 	ready taskGraphReadinessResult,
 ) []domain.WorkerObservation {
-	leafIDs := daemonTaskGraphLeafIDs(rootID, byID, children)
+	leafIDs := daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children)
 	if len(leafIDs) == 0 {
 		return nil
 	}
@@ -4285,6 +4346,106 @@ func daemonTaskGraphLeafIDs(root naming.IssueID, byID map[naming.IssueID]domain.
 	return out
 }
 
+func daemonTaskGraphDirectWorkerLeafIDs(root naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) []naming.IssueID {
+	if len(children[root]) == 0 {
+		if task := byID[root]; !task.ID.IsZero() && task.Type != domain.TypeEpic {
+			return []naming.IssueID{root}
+		}
+		return nil
+	}
+	out := make([]naming.IssueID, 0, len(children[root]))
+	seen := map[naming.IssueID]struct{}{}
+	var walk func(naming.IssueID)
+	walk = func(id naming.IssueID) {
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		task := byID[id]
+		if task.ID.IsZero() {
+			return
+		}
+		if daemonTaskGraphRequiresNestedRootOrchestration(root, id, task, children, byID) {
+			return
+		}
+		if len(children[id]) == 0 {
+			if task.Type != domain.TypeEpic {
+				out = append(out, id)
+			}
+			return
+		}
+		for _, childID := range children[id] {
+			walk(childID)
+		}
+	}
+	for _, childID := range children[root] {
+		walk(childID)
+	}
+	return out
+}
+
+func daemonTaskGraphNestedRootSummaries(root naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) []taskGraphNestedRoot {
+	if len(children[root]) == 0 {
+		return nil
+	}
+	out := make([]taskGraphNestedRoot, 0, len(children[root]))
+	seenRoots := map[naming.IssueID]struct{}{}
+	seenWalk := map[naming.IssueID]struct{}{}
+	var walk func(naming.IssueID)
+	walk = func(id naming.IssueID) {
+		if _, ok := seenWalk[id]; ok {
+			return
+		}
+		seenWalk[id] = struct{}{}
+		task := byID[id]
+		if task.ID.IsZero() {
+			return
+		}
+		if daemonTaskGraphRequiresNestedRootOrchestration(root, id, task, children, byID) {
+			if _, ok := seenRoots[id]; ok {
+				return
+			}
+			seenRoots[id] = struct{}{}
+			out = append(out, taskGraphNestedRoot{
+				IssueID:    id.String(),
+				Status:     string(task.Status),
+				Type:       string(task.Type),
+				ChildCount: len(daemonTaskGraphDescendants(id, children)),
+				Advice:     fmt.Sprintf("start nested root orchestrator: az session start %s", id.String()),
+			})
+			return
+		}
+		for _, childID := range children[id] {
+			walk(childID)
+		}
+	}
+	for _, childID := range children[root] {
+		walk(childID)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].IssueID < out[j].IssueID
+	})
+	return out
+}
+
+func daemonTaskGraphRequiresNestedRootOrchestration(root, id naming.IssueID, task domain.Task, children map[naming.IssueID][]naming.IssueID, byID map[naming.IssueID]domain.Task) bool {
+	if id == root || task.ID.IsZero() {
+		return false
+	}
+	if task.Type != domain.TypeEpic && len(children[id]) == 0 {
+		return false
+	}
+	if task.Status != domain.StatusDone {
+		return true
+	}
+	for _, descID := range daemonTaskGraphDescendants(id, children) {
+		if byID[descID].Status != domain.StatusDone {
+			return true
+		}
+	}
+	return false
+}
+
 func daemonTaskGraphUnresolvedBlockers(task domain.Task, byID map[naming.IssueID]domain.Task) []string {
 	out := make([]string, 0, 4)
 	for _, dep := range task.Dependencies {
@@ -4477,10 +4638,17 @@ func daemonTaskGraphSessionStartProgressList(rootID naming.IssueID, children map
 	return out
 }
 
-func daemonTaskCompletionAdvice(rootIssueID string, runnable, openDescendants, activeSessions []string, staleCloseable []taskStaleCloseableCandidate) []string {
-	advice := make([]string, 0, len(runnable)+len(openDescendants)+len(activeSessions)+len(staleCloseable))
+func daemonTaskCompletionAdvice(rootIssueID string, runnable []string, nestedRoots []taskGraphNestedRoot, openDescendants, activeSessions []string, staleCloseable []taskStaleCloseableCandidate) []string {
+	advice := make([]string, 0, len(runnable)+len(nestedRoots)+len(openDescendants)+len(activeSessions)+len(staleCloseable))
 	for _, id := range activeSessions {
 		advice = append(advice, fmt.Sprintf("if intentionally abandoning active worker session, repair-stop it: az orchestrate close-session --issue %s", id))
+	}
+	for _, nested := range nestedRoots {
+		if strings.TrimSpace(nested.Advice) != "" {
+			advice = append(advice, nested.Advice)
+		} else {
+			advice = append(advice, fmt.Sprintf("start nested root orchestrator: az session start %s", nested.IssueID))
+		}
 	}
 	if len(staleCloseable) > 0 {
 		advice = append(advice, fmt.Sprintf("stale-closeable children can be handled by the parent close path: az issue close --id %s --close-clean-children", rootIssueID))

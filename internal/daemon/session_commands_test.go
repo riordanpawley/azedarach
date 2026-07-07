@@ -7102,6 +7102,12 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "close accepted worker issues with `az issue close --id <issue-id>`") {
 		t.Fatalf("prompt = %q, want issue close completion guidance", prompt)
 	}
+	if !strings.Contains(prompt, "Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `az issue close --id <child-issue>`") {
+		t.Fatalf("prompt = %q, want child lifecycle cleanup guidance", prompt)
+	}
+	if !strings.Contains(prompt, "leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale") {
+		t.Fatalf("prompt = %q, want unresolved child rationale guidance", prompt)
+	}
 }
 
 func TestSessionMessagePastesTextAndSubmitsActiveIssueSession(t *testing.T) {

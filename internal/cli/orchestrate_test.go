@@ -303,6 +303,59 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	}
 }
 
+func TestOrchestrateStatusCommandIncludesNestedRoots(t *testing.T) {
+	root := naming.IssueID("az-1")
+	nested := naming.IssueID("az-2")
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{"az-3"},
+						NestedRoots: []daemonclient.TaskNestedRoot{{
+							IssueID:    nested.String(),
+							Status:     string(domain.StatusOpen),
+							Type:       string(domain.TypeTask),
+							ChildCount: 2,
+							Advice:     "start nested root orchestrator: az session start az-2",
+						}},
+						Blocked: map[string]string{},
+					}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees":  []map[string]string{},
+					}), nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateStatusCommand(deps, OrchestrateStatusOptions{RootIssueID: root.String(), JSON: true})
+	})
+	var result orchestrateStatusResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if len(result.NestedRoots) != 1 {
+		t.Fatalf("nested_roots = %+v, want one nested root", result.NestedRoots)
+	}
+	got := result.NestedRoots[0]
+	if got.IssueID != nested.String() || got.ChildCount != 2 || !strings.Contains(got.Advice, "az session start az-2") {
+		t.Fatalf("nested root = %+v", got)
+	}
+}
+
 func TestOrchestrateStatusCommandIncludesWorkerObservations(t *testing.T) {
 	root := naming.IssueID("az-1")
 	review := naming.IssueID("az-2")
@@ -1035,6 +1088,18 @@ func TestOrchestrateWatchReadinessCacheReusesSnapshotFields(t *testing.T) {
 		ActiveSessions: []orchestrateActiveSession{
 			{IssueID: "az-4", Activity: "busy", ActivitySource: "hooks", State: "busy"},
 		},
+		NestedRoots: []orchestrateNestedRoot{{
+			IssueID:    "az-nested",
+			Status:     "open",
+			Type:       "task",
+			ChildCount: 1,
+			ActiveSession: &orchestrateActiveSession{
+				IssueID:        "az-nested",
+				Activity:       "busy",
+				ActivitySource: "hooks",
+				StartProgress:  &orchestrateSessionStartProgress{IssueID: "az-nested", OperationID: "op-nested", OperationState: "running", ElapsedMS: 100},
+			},
+		}},
 		SessionStartProgress: []orchestrateSessionStartProgress{
 			{IssueID: "az-5", OperationID: "op-2", OperationState: "running", Phase: "worktree"},
 		},
@@ -1058,6 +1123,9 @@ func TestOrchestrateWatchReadinessCacheReusesSnapshotFields(t *testing.T) {
 	if len(frame.ActiveSessions) != 1 || frame.ActiveSessions[0].IssueID != "az-4" {
 		t.Fatalf("active sessions = %+v", frame.ActiveSessions)
 	}
+	if len(frame.NestedRoots) != 1 || frame.NestedRoots[0].IssueID != "az-nested" {
+		t.Fatalf("nested roots = %+v", frame.NestedRoots)
+	}
 	if len(frame.SessionStartProgress) != 1 || frame.SessionStartProgress[0].IssueID != "az-5" {
 		t.Fatalf("session start progress = %+v", frame.SessionStartProgress)
 	}
@@ -1069,6 +1137,18 @@ func TestOrchestrateWatchReadinessCacheReusesSnapshotFields(t *testing.T) {
 	}
 	if len(frame.Events) != 1 || frame.Events[0].Seq != 12 {
 		t.Fatalf("events = %+v", frame.Events)
+	}
+
+	second := cached
+	second.NestedRoots = append([]orchestrateNestedRoot(nil), cached.NestedRoots...)
+	second.NestedRoots[0].ActiveSession = &orchestrateActiveSession{
+		IssueID:        "az-nested",
+		Activity:       "busy",
+		ActivitySource: "hooks",
+		StartProgress:  &orchestrateSessionStartProgress{IssueID: "az-nested", OperationID: "op-nested", OperationState: "running", ElapsedMS: 900},
+	}
+	if orchestrateWatchFrameSnapshotKey(cached) != orchestrateWatchFrameSnapshotKey(second) {
+		t.Fatal("snapshot key changed when only nested root elapsed time changed")
 	}
 }
 

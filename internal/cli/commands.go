@@ -7073,6 +7073,7 @@ func renderPrimeOrchestratorExitContract(rootIssueID string) string {
 	return fmt.Sprintf(`Orchestrator Exit Contract (root %s):
 - Keep running the status/start/watch/integrate/close loop until `+"`az orchestrate complete-check --root %s`"+` passes, then run final validation and close the root.
 - Treat `+"`worker-integration-ready`"+` and `+"`in_review`"+` as evidence to inspect and validate; if accepted, run `+"`az issue close --id <worker>`"+` instead of handing off to the user.
+- Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `+"`az issue close --id <child-issue>`"+`, and leave any child `+"`open`"+` or `+"`in_progress`"+` only with an explicit blocker, dependency, or remaining-scope rationale.
 - Send the final assistant response only after root completion, a named hard blocker, or an explicit user pause.
 `, rootIssueID, rootIssueID)
 }
@@ -7224,7 +7225,7 @@ func renderPrimeChildWorkRecommendation(task domain.Task, tasks []domain.Task, t
 		commands += "; use `az issue split \"Child task\"` only when that child should launch immediately in its own session"
 		sessionCommands += " or `az issue split \"Child task\"`"
 	}
-	return fmt.Sprintf("- Parent-context recommendation: `%s` is an epic or already has child issues; keep implementation/subtask work in child issues with %s instead of accumulating detailed work on the parent. Do the child implementation from the child issue execution context: preferably a child session (%s) and at minimum the child worktree (`az worktree create <child-issue>`).\n", task.ID, commands, sessionCommands)
+	return fmt.Sprintf("- Parent-context recommendation: `%s` is an epic or already has child issues; keep implementation/subtask work in child issues with %s instead of accumulating detailed work on the parent. Do the child implementation from the child issue execution context: preferably a child session (%s) and at minimum the child worktree (`az worktree create <child-issue>`). Parent/tracker completion includes child lifecycle cleanup: before reporting the parent complete, inspect child statuses, close accepted completed children with `az issue close --id <child-issue>`, and leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale.\n", task.ID, commands, sessionCommands)
 }
 
 func issueHasChildren(issueID naming.IssueID, tasks []domain.Task) bool {

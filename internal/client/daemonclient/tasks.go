@@ -153,6 +153,7 @@ type TaskDeleteResult struct {
 type TaskGraphReadiness struct {
 	RootIssueID            string                        `json:"root_issue_id"`
 	Runnable               []string                      `json:"runnable"`
+	NestedRoots            []TaskNestedRoot              `json:"nested_roots,omitempty"`
 	Pending                []TaskPendingStart            `json:"pending,omitempty"`
 	Active                 []string                      `json:"active,omitempty"`
 	ActiveSessions         []TaskActiveSession           `json:"active_sessions,omitempty"`
@@ -160,6 +161,17 @@ type TaskGraphReadiness struct {
 	StaleCloseableChildren []TaskStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
 	WorkerObservations     []domain.WorkerObservation    `json:"worker_observations,omitempty"`
 	Blocked                map[string]string             `json:"blocked"`
+}
+
+// TaskNestedRoot describes a nested orchestration root that must be started
+// from its own parent session instead of flattened into the current root.
+type TaskNestedRoot struct {
+	IssueID       string             `json:"issue_id"`
+	Status        string             `json:"status"`
+	Type          string             `json:"type"`
+	ChildCount    int                `json:"child_count"`
+	ActiveSession *TaskActiveSession `json:"active_session,omitempty"`
+	Advice        string             `json:"advice,omitempty"`
 }
 
 // TaskPendingStart contains durable operation state for submitted session starts.
