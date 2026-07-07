@@ -445,6 +445,39 @@ func TestMergePreservesCommitHooksAndAbortsIncompleteMerge(t *testing.T) {
 	}
 }
 
+func TestMergeReportsSlowHookDiagnostics(t *testing.T) {
+	repo := initDivergedRepo(t)
+	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nsleep 0.05\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	result, err := client.Merge(context.Background(), repo, "feature")
+	if err != nil {
+		t.Fatalf("Merge() error = %v", err)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("Merge() result = %+v, want success", result)
+	}
+	if len(result.HookDiagnostics) != 1 {
+		t.Fatalf("hook diagnostics = %+v, want one entry", result.HookDiagnostics)
+	}
+	diag := result.HookDiagnostics[0]
+	if diag.Hook != "commit-msg" {
+		t.Fatalf("hook = %q, want commit-msg", diag.Hook)
+	}
+	if diag.Command != "git merge --no-edit feature" {
+		t.Fatalf("command = %q, want git merge command", diag.Command)
+	}
+	if diag.ElapsedMS < 40 {
+		t.Fatalf("elapsed_ms = %d, want slow hook attribution", diag.ElapsedMS)
+	}
+	if diag.ExitStatus != 0 || !diag.Blocking {
+		t.Fatalf("hook diagnostic = %+v, want exit 0 blocking", diag)
+	}
+}
+
 func TestMergeCleanlyDiscardsDirtyPostMergeHookAndReportsFailure(t *testing.T) {
 	repo := initDivergedRepo(t)
 	hookPath := filepath.Join(repo, ".git", "hooks", "post-merge")
@@ -1437,6 +1470,191 @@ func TestDiffStatAgainstBaseBranchFallsBackToLocalChangesWhenMergeBaseFails(t *t
 	}
 	if stat != expectedStat {
 		t.Errorf("DiffStat() = %v, want %v", stat, expectedStat)
+	}
+}
+
+func TestDiffStatAgainstBaseBranchBacksOffMissingMergeBaseAndSkipsFallback(t *testing.T) {
+	now := time.Date(2026, time.July, 7, 12, 0, 0, 0, time.UTC)
+	mergeBaseCalls := 0
+	localDiffCalls := 0
+	unstagedStat := "1 file changed, 3 insertions(+)"
+	stagedStat := "1 file changed, 1 deletion(-)"
+	expectedStat := unstagedStat + "\n" + stagedStat
+
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			switch {
+			case len(args) >= 3 && args[0] == "symbolic-ref" && args[1] == "--short" && args[2] == "refs/remotes/origin/HEAD":
+				return "", fmt.Errorf("origin HEAD unavailable")
+			case len(args) >= 3 && args[0] == "merge-base" && args[2] == "HEAD":
+				mergeBaseCalls++
+				return "", fmt.Errorf("unknown revision %s", args[1])
+			case len(args) >= 3 && args[0] == "diff" && args[1] == "--cached" && args[2] == "--shortstat":
+				localDiffCalls++
+				return stagedStat, nil
+			case len(args) >= 2 && args[0] == "diff" && args[1] == "--shortstat":
+				localDiffCalls++
+				return unstagedStat, nil
+			default:
+				return "", fmt.Errorf("unexpected command: %v", args)
+			}
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	client.now = func() time.Time { return now }
+
+	stat, err := client.DiffStat(context.Background(), "/fake/worktree", "preview")
+	if err != nil {
+		t.Fatalf("first DiffStat() error = %v", err)
+	}
+	if stat != expectedStat {
+		t.Fatalf("first DiffStat() = %v, want %v", stat, expectedStat)
+	}
+	if mergeBaseCalls != 2 {
+		t.Fatalf("merge-base calls after first DiffStat = %d, want 2", mergeBaseCalls)
+	}
+	if localDiffCalls != 2 {
+		t.Fatalf("local diff calls after first DiffStat = %d, want 2", localDiffCalls)
+	}
+
+	_, err = client.DiffStat(context.Background(), "/fake/worktree", "preview")
+	if err == nil {
+		t.Fatal("second DiffStat() error = nil, want backoff error")
+	}
+	if _, ok := diffStatBackoffErr(err); !ok {
+		t.Fatalf("second DiffStat() error = %T %[1]v, want diffStatBackoffError", err)
+	}
+	if mergeBaseCalls != 2 {
+		t.Fatalf("merge-base calls after backoff DiffStat = %d, want 2", mergeBaseCalls)
+	}
+	if localDiffCalls != 2 {
+		t.Fatalf("local diff calls after backoff DiffStat = %d, want 2", localDiffCalls)
+	}
+
+	now = now.Add(diffStatFailureBackoff + time.Second)
+	stat, err = client.DiffStat(context.Background(), "/fake/worktree", "preview")
+	if err != nil {
+		t.Fatalf("third DiffStat() after backoff error = %v", err)
+	}
+	if stat != expectedStat {
+		t.Fatalf("third DiffStat() = %v, want %v", stat, expectedStat)
+	}
+	if mergeBaseCalls != 4 {
+		t.Fatalf("merge-base calls after expired backoff = %d, want 4", mergeBaseCalls)
+	}
+	if localDiffCalls != 4 {
+		t.Fatalf("local diff calls after expired backoff = %d, want 4", localDiffCalls)
+	}
+}
+
+func TestDiffStatAgainstBaseBranchBacksOffKilledBaseShortstatAndSkipsFallback(t *testing.T) {
+	now := time.Date(2026, time.July, 7, 12, 0, 0, 0, time.UTC)
+	baseDiffCalls := 0
+	localDiffCalls := 0
+	sawBaseDeadline := false
+	unstagedStat := "1 file changed, 2 insertions(+)"
+	stagedStat := "1 file changed, 1 deletion(-)"
+	expectedStat := unstagedStat + "\n" + stagedStat
+
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			switch {
+			case len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD":
+				return "abc123\n", nil
+			case len(args) >= 6 && args[0] == "diff" && args[1] == "--shortstat" && args[2] == "abc123" && args[3] == "HEAD":
+				baseDiffCalls++
+				if _, ok := ctx.Deadline(); ok {
+					sawBaseDeadline = true
+				}
+				return "", fmt.Errorf("signal: killed")
+			case len(args) >= 3 && args[0] == "diff" && args[1] == "--cached" && args[2] == "--shortstat":
+				localDiffCalls++
+				return stagedStat, nil
+			case len(args) >= 2 && args[0] == "diff" && args[1] == "--shortstat":
+				localDiffCalls++
+				return unstagedStat, nil
+			default:
+				return "", fmt.Errorf("unexpected command: %v", args)
+			}
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	client.now = func() time.Time { return now }
+
+	stat, err := client.DiffStat(context.Background(), "/fake/worktree", "main")
+	if err != nil {
+		t.Fatalf("first DiffStat() error = %v", err)
+	}
+	if stat != expectedStat {
+		t.Fatalf("first DiffStat() = %v, want %v", stat, expectedStat)
+	}
+	if baseDiffCalls != 1 {
+		t.Fatalf("base diff calls after first DiffStat = %d, want 1", baseDiffCalls)
+	}
+	if !sawBaseDeadline {
+		t.Fatal("base diff did not run with a context deadline")
+	}
+	if localDiffCalls != 2 {
+		t.Fatalf("local diff calls after first DiffStat = %d, want 2", localDiffCalls)
+	}
+
+	_, err = client.DiffStat(context.Background(), "/fake/worktree", "main")
+	if err == nil {
+		t.Fatal("second DiffStat() error = nil, want shortstat backoff error")
+	}
+	if _, ok := diffStatBackoffErr(err); !ok {
+		t.Fatalf("second DiffStat() error = %T %[1]v, want diffStatBackoffError", err)
+	}
+	if baseDiffCalls != 1 {
+		t.Fatalf("base diff calls after backoff DiffStat = %d, want 1", baseDiffCalls)
+	}
+	if localDiffCalls != 2 {
+		t.Fatalf("local diff calls after backoff DiffStat = %d, want 2", localDiffCalls)
+	}
+}
+
+func TestLocalDiffStatFallbackUsesTimeoutAndBacksOffFailure(t *testing.T) {
+	now := time.Date(2026, time.July, 7, 12, 0, 0, 0, time.UTC)
+	fallbackCalls := 0
+	sawDeadline := false
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--shortstat" {
+				fallbackCalls++
+				if _, ok := ctx.Deadline(); ok {
+					sawDeadline = true
+				}
+				return "", context.DeadlineExceeded
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	client.now = func() time.Time { return now }
+
+	_, err := client.localDiffStat(context.Background(), "/fake/worktree", "preview", true)
+	if err == nil {
+		t.Fatal("localDiffStat() error = nil, want timeout failure")
+	}
+	if !sawDeadline {
+		t.Fatal("fallback diff did not run with a context deadline")
+	}
+	if fallbackCalls != 1 {
+		t.Fatalf("fallback calls after first localDiffStat = %d, want 1", fallbackCalls)
+	}
+
+	_, err = client.localDiffStat(context.Background(), "/fake/worktree", "preview", true)
+	if err == nil {
+		t.Fatal("second localDiffStat() error = nil, want backoff error")
+	}
+	if _, ok := diffStatBackoffErr(err); !ok {
+		t.Fatalf("second localDiffStat() error = %T %[1]v, want diffStatBackoffError", err)
+	}
+	if fallbackCalls != 1 {
+		t.Fatalf("fallback calls after backoff localDiffStat = %d, want 1", fallbackCalls)
 	}
 }
 

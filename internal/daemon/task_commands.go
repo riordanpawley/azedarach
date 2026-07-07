@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -159,9 +160,13 @@ type deferredTaskWorktreeCleanupPlan struct {
 }
 
 type taskClosePhaseTiming struct {
-	Name      string `json:"name"`
-	ElapsedMS int64  `json:"elapsed_ms"`
-	Skipped   bool   `json:"skipped,omitempty"`
+	Name       string `json:"name"`
+	ElapsedMS  int64  `json:"elapsed_ms"`
+	Skipped    bool   `json:"skipped,omitempty"`
+	Hook       string `json:"hook,omitempty"`
+	Command    string `json:"command,omitempty"`
+	ExitStatus *int   `json:"exit_status,omitempty"`
+	Blocking   *bool  `json:"blocking,omitempty"`
 }
 
 type taskDeleteResult struct {
@@ -1721,6 +1726,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	phaseStartedAt = time.Now()
 	integration, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, cmd.IntegrateBeforeClose)
 	recordPhase("integrate_before_close", phaseStartedAt, !cmd.IntegrateBeforeClose)
+	recordTaskCloseHookPhases(&result, d.cfg.Logger, req, projectID, taskID, integration.HookDiagnostics)
 	if err != nil {
 		return result, fmt.Errorf("phase integrate_before_close for issue %s: %w", taskID, err)
 	}
@@ -2161,11 +2167,12 @@ func (d *Daemon) liveTmuxSessionSet(ctx context.Context) (map[string]struct{}, b
 }
 
 type taskCloseIntegrationResult struct {
-	Requested    bool
-	Integrated   bool
-	NoChanges    bool
-	SourceBranch string
-	TargetBranch string
+	Requested       bool
+	Integrated      bool
+	NoChanges       bool
+	SourceBranch    string
+	TargetBranch    string
+	HookDiagnostics []git.GitHookDiagnostic
 }
 
 func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID string, requested bool) (taskCloseIntegrationResult, error) {
@@ -2281,12 +2288,48 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s failed: %s", source.Branch, targetBranch, details)
 	}
 	integration = taskCloseIntegrationResult{
-		Requested:    true,
-		Integrated:   true,
-		SourceBranch: source.Branch,
-		TargetBranch: targetBranch,
+		Requested:       true,
+		Integrated:      true,
+		SourceBranch:    source.Branch,
+		TargetBranch:    targetBranch,
+		HookDiagnostics: append([]git.GitHookDiagnostic(nil), merge.HookDiagnostics...),
 	}
 	return integration, nil
+}
+
+func recordTaskCloseHookPhases(result *taskCloseResult, logger *slog.Logger, req protocol.RequestEnvelope, projectID, taskID string, hooks []git.GitHookDiagnostic) {
+	if result == nil || len(hooks) == 0 {
+		return
+	}
+	for _, hook := range hooks {
+		hookName := strings.TrimSpace(hook.Hook)
+		name := "githook"
+		if hookName != "" {
+			name += "." + hookName
+		}
+		exitStatus := hook.ExitStatus
+		blocking := hook.Blocking
+		phase := taskClosePhaseTiming{
+			Name:       name,
+			Hook:       hookName,
+			Command:    strings.TrimSpace(hook.Command),
+			ElapsedMS:  hook.ElapsedMS,
+			ExitStatus: &exitStatus,
+			Blocking:   &blocking,
+		}
+		result.Phases = append(result.Phases, phase)
+		startedAt := time.Now().Add(-time.Duration(hook.ElapsedMS) * time.Millisecond)
+		latencytrace.LogPhase(logger, "daemon", "task.close."+name, startedAt,
+			"command", req.Command,
+			"request_id", req.RequestID,
+			"project_id", projectID,
+			"task_id", taskID,
+			"hook", hookName,
+			"hook_command", phase.Command,
+			"exit_status", exitStatus,
+			"blocking", blocking,
+		)
+	}
 }
 
 func (d *Daemon) mergeTaskBranchBeforeClose(ctx context.Context, projectID, taskID, targetWorktree, targetBranch, sourceBranch string) (*git.MergeResult, error) {

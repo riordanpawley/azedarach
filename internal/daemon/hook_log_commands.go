@@ -38,6 +38,7 @@ func (d *Daemon) handleHookLogAppend(_ context.Context, req protocol.RequestEnve
 func normalizeHookLogEvent(projectID string, evt protocol.HookLogEvent) (protocol.HookLogEvent, error) {
 	evt.ProjectID = naming.ProjectID(projectID)
 	evt.Hook = strings.TrimSpace(evt.Hook)
+	evt.Command = strings.TrimSpace(evt.Command)
 	evt.Worktree = strings.TrimSpace(evt.Worktree)
 	evt.Source = strings.TrimSpace(evt.Source)
 	evt.Level = strings.TrimSpace(evt.Level)

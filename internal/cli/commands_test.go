@@ -7550,6 +7550,8 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 					if !body.IntegrateBeforeClose {
 						t.Fatalf("task close integrate_before_close = false, want true")
 					}
+					exitStatus := 0
+					blocking := true
 					return responseWithJSON(req, daemonclient.TaskCloseResult{
 						TaskID:                 "az-9",
 						Status:                 string(domain.StatusDone),
@@ -7562,6 +7564,7 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 						WorktreeForced:         body.ForceWorktree,
 						Phases: []daemonclient.TaskClosePhaseTiming{
 							{Name: "integrate_before_close", ElapsedMS: 123},
+							{Name: "githook.commit-msg", Hook: "commit-msg", Command: "git merge --no-edit riordan/az-9/finish-flow", ElapsedMS: 42000, ExitStatus: &exitStatus, Blocking: &blocking},
 							{Name: "session_cleanup", ElapsedMS: 0, Skipped: true},
 						},
 					}), nil
@@ -7594,7 +7597,10 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 	if !strings.Contains(output, "Closed issue: az-9") || !strings.Contains(output, "- Integration requested") || !strings.Contains(output, "- Cleanup performed") {
 		t.Fatalf("output = %q", output)
 	}
-	if !strings.Contains(output, "- Phase timings:") || !strings.Contains(output, "integrate_before_close: 123ms") || !strings.Contains(output, "session_cleanup: 0s (skipped)") {
+	if !strings.Contains(output, "- Phase timings:") ||
+		!strings.Contains(output, "integrate_before_close: 123ms") ||
+		!strings.Contains(output, "githook.commit-msg: 42s [hook=commit-msg command=git merge --no-edit riordan/az-9/finish-flow exit_status=0 blocking=true]") ||
+		!strings.Contains(output, "session_cleanup: 0s (skipped)") {
 		t.Fatalf("output = %q", output)
 	}
 }

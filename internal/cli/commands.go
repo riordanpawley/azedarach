@@ -4905,6 +4905,18 @@ func taskClosePhaseJSON(phases []daemonclient.TaskClosePhaseTiming) []map[string
 		if phase.Skipped {
 			item["skipped"] = true
 		}
+		if hook := strings.TrimSpace(phase.Hook); hook != "" {
+			item["hook"] = hook
+		}
+		if command := strings.TrimSpace(phase.Command); command != "" {
+			item["command"] = command
+		}
+		if phase.ExitStatus != nil {
+			item["exit_status"] = *phase.ExitStatus
+		}
+		if phase.Blocking != nil {
+			item["blocking"] = *phase.Blocking
+		}
 		out = append(out, item)
 	}
 	return out
@@ -4923,6 +4935,22 @@ func printTaskClosePhases(phases []daemonclient.TaskClosePhaseTiming) {
 		suffix := ""
 		if phase.Skipped {
 			suffix = " (skipped)"
+		}
+		details := []string{}
+		if hook := strings.TrimSpace(phase.Hook); hook != "" {
+			details = append(details, "hook="+hook)
+		}
+		if command := strings.TrimSpace(phase.Command); command != "" {
+			details = append(details, "command="+command)
+		}
+		if phase.ExitStatus != nil {
+			details = append(details, fmt.Sprintf("exit_status=%d", *phase.ExitStatus))
+		}
+		if phase.Blocking != nil {
+			details = append(details, fmt.Sprintf("blocking=%t", *phase.Blocking))
+		}
+		if len(details) > 0 {
+			suffix += " [" + strings.Join(details, " ") + "]"
 		}
 		fmt.Printf("  - %s: %s%s\n", name, phase.Elapsed().Round(time.Millisecond), suffix)
 	}

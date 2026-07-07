@@ -825,7 +825,7 @@ func TestGitHooksNotifyCommandRetriesAfterStalledGitStatusAttempt(t *testing.T) 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	if err := ingestGitHookRuntimeSignalWithRetry(ctx, deps, t.TempDir(), "post-commit"); err != nil {
+	if err := ingestGitHookRuntimeSignalWithRetry(ctx, deps, t.TempDir(), "post-commit", gitHookRuntimeDiagnostic{}); err != nil {
 		t.Fatalf("ingestGitHookRuntimeSignalWithRetry error: %v", err)
 	}
 	if attempts != 3 {
@@ -1370,6 +1370,51 @@ func TestAppendHookLogEventBestEffortResolvesIssueIDFromWorktree(t *testing.T) {
 	}
 	if !sawAppend {
 		t.Fatal("expected hook append command")
+	}
+}
+
+func TestGitHooksHookCommandLogsDurationExitStatusAndBlocking(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.GitHooks.Commands = map[string][]string{
+		"custom-hook": {"sleep 0.02"},
+	}
+
+	var signal protocol.RuntimeSignalIngestCommandBody
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case protocol.CommandRuntimeSignalIngest:
+				if err := json.Unmarshal(req.Body, &signal); err != nil {
+					t.Fatalf("unmarshal runtime signal: %v", err)
+				}
+				return responseWithJSON(req, protocol.RuntimeSignalIngestResponseBody{Accepted: true, SignalID: "sig-hook"}), nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+	deps := &Dependencies{
+		Config:       cfg,
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+	}
+
+	if err := GitHooksHookCommand(deps, GitHooksHookOptions{ProjectDir: projectDir, Hook: "custom-hook"}); err != nil {
+		t.Fatalf("GitHooksHookCommand error: %v", err)
+	}
+	if signal.Hook != "custom-hook" || signal.Command != "az githooks hook --hook custom-hook" {
+		t.Fatalf("signal hook metadata = %+v", signal)
+	}
+	if signal.ElapsedMS < 15 {
+		t.Fatalf("elapsed_ms = %d, want slow hook command timing", signal.ElapsedMS)
+	}
+	if signal.ExitStatus == nil || *signal.ExitStatus != 0 || signal.Blocking == nil || !*signal.Blocking {
+		t.Fatalf("signal = %+v, want exit_status=0 blocking=true", signal)
 	}
 }
 

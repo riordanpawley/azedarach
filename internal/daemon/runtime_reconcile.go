@@ -130,12 +130,10 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 				errs = append(errs, fmt.Errorf("refresh issue session runtime state: %w", err))
 			}
 		} else {
-			for _, issueID := range issueIDs {
-				sessionResult, err := d.reconcileTmuxAndDaemonSessions(ctx, result.ProjectID.String(), issueID)
-				if err != nil {
-					errs = append(errs, fmt.Errorf("reconcile issue session %s: %w", issueID, err))
-					continue
-				}
+			sessionResult, err := d.reconcileTmuxAndDaemonSessionsForIssues(ctx, result.ProjectID.String(), issueIDs)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("reconcile issue sessions (%d targets): %w", len(issueIDs), err))
+			} else {
 				result.RecreatedTmuxSessions += sessionResult.RecreatedTmuxSessions
 				result.AlignedDaemonSessions += sessionResult.AlignedDaemonSessions
 			}
