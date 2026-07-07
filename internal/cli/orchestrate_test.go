@@ -1188,7 +1188,15 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 						},
 					}), nil
 				case protocol.CommandOperationGet:
-					t.Fatal("orchestrate start should not wait for submitted session start operation")
+					return responseWithJSON(req, protocol.OperationGetResponseBody{
+						Operation: protocol.OperationRecord{
+							OperationID: "op-1",
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     child,
+							State:       protocol.OperationStateDone,
+						},
+					}), nil
 				case protocol.CommandMailSend:
 					t.Fatal("orchestrate start should not send session-started mail before operation completion is observed")
 				default:
@@ -1208,7 +1216,7 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	})
 	for _, want := range []string{
 		"orchestrate start: submitted az-2 operation=op-1 state=queued",
-		"orchestrate start: launched az-2 operation=op-1 state=queued",
+		"orchestrate start: launched az-2 operation=op-1 state=done",
 	} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr = %q, want %q", stderr, want)
@@ -1219,7 +1227,7 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, output)
 	}
-	if len(result.Launched) != 1 || result.Launched[0].OperationID != "op-1" || result.Launched[0].OperationState != string(protocol.OperationStateQueued) {
+	if len(result.Launched) != 1 || result.Launched[0].OperationID != "op-1" || result.Launched[0].OperationState != string(protocol.OperationStateDone) {
 		t.Fatalf("launched = %+v", result.Launched)
 	}
 	if !strings.Contains(result.Advice.WatchInstruction, "leave it running") || strings.Contains(result.Advice.WatchCommand, "--once") {
@@ -1240,8 +1248,8 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	if !containsString(submitted.ResourceKeys, "session:"+naming.CanonicalSessionID("/repo", child.String())) {
 		t.Fatalf("submitted resource keys = %+v, want session resource key", submitted.ResourceKeys)
 	}
-	if strings.Join(commands, ",") == "" || !containsString(commands, protocol.CommandOperationSubmit) || containsString(commands, protocol.CommandOperationGet) {
-		t.Fatalf("commands = %+v, want operation submit without wait", commands)
+	if strings.Join(commands, ",") == "" || !containsString(commands, protocol.CommandOperationSubmit) || !containsString(commands, protocol.CommandOperationGet) {
+		t.Fatalf("commands = %+v, want operation submit and readiness wait", commands)
 	}
 }
 
@@ -1359,7 +1367,7 @@ func TestOrchestrateStartWarnsOnExpensiveSessionSyncInitCommandsDuringFanout(t *
 	}
 }
 
-func TestOrchestrateStartSubmitsAllOperationsBeforeReturning(t *testing.T) {
+func TestOrchestrateStartWaitsForAllOperationsBeforeReturning(t *testing.T) {
 	root := naming.IssueID("az-1")
 	childA := naming.IssueID("az-2")
 	childB := naming.IssueID("az-3")
@@ -1417,7 +1425,20 @@ func TestOrchestrateStartSubmitsAllOperationsBeforeReturning(t *testing.T) {
 						},
 					}), nil
 				case protocol.CommandOperationGet:
-					t.Fatal("orchestrate start should not wait for submitted session start operations")
+					var body protocol.OperationGetRequestBody
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode operation get body: %v", err)
+					}
+					issueID := strings.TrimPrefix(body.OperationID.String(), "op-")
+					return responseWithJSON(req, protocol.OperationGetResponseBody{
+						Operation: protocol.OperationRecord{
+							OperationID: body.OperationID,
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     naming.IssueID(issueID),
+							State:       protocol.OperationStateDone,
+						},
+					}), nil
 				case daemonclient.CommandWorktreeList:
 					return responseWithJSON(req, map[string]any{"project_id": protocol.DefaultProjectID, "worktrees": []map[string]string{}}), nil
 				case protocol.CommandMailSend:
@@ -1441,13 +1462,22 @@ func TestOrchestrateStartSubmitsAllOperationsBeforeReturning(t *testing.T) {
 		t.Fatalf("submitted = %+v, want both children", submitted)
 	}
 	for _, launch := range result.Launched {
-		if launch.OperationID == "" || launch.OperationState != string(protocol.OperationStateQueued) {
-			t.Fatalf("launch = %+v, want queued operation id", launch)
+		if launch.OperationID == "" || launch.OperationState != string(protocol.OperationStateDone) {
+			t.Fatalf("launch = %+v, want done operation id", launch)
 		}
 	}
 }
 
-func TestOrchestrateStartReportsSubmittedOperationWithoutWaiting(t *testing.T) {
+func TestOrchestrateStartReportsPendingOperationWhenChildIsNotReadyBeforeDeadline(t *testing.T) {
+	oldTimeout := orchestrateStartWaitTimeout
+	oldPollInterval := orchestrateStartWaitPollInterval
+	orchestrateStartWaitTimeout = time.Millisecond
+	orchestrateStartWaitPollInterval = time.Hour
+	defer func() {
+		orchestrateStartWaitTimeout = oldTimeout
+		orchestrateStartWaitPollInterval = oldPollInterval
+	}()
+
 	root := naming.IssueID("az-1")
 	child := naming.IssueID("az-2")
 	taskListBody, err := marshalTaskListBody([]domain.Task{
@@ -1498,7 +1528,15 @@ func TestOrchestrateStartReportsSubmittedOperationWithoutWaiting(t *testing.T) {
 						},
 					}), nil
 				case protocol.CommandOperationGet:
-					t.Fatal("orchestrate start should not wait for submitted session start operation")
+					return responseWithJSON(req, protocol.OperationGetResponseBody{
+						Operation: protocol.OperationRecord{
+							OperationID: "op-1",
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     child,
+							State:       protocol.OperationStateRunning,
+						},
+					}), nil
 				case protocol.CommandMailSend:
 					t.Fatal("orchestrate start should not send session-started mail before operation completion is observed")
 				default:
@@ -1519,12 +1557,15 @@ func TestOrchestrateStartReportsSubmittedOperationWithoutWaiting(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, output)
 	}
-	if len(result.Failed) != 0 || len(result.Pending) != 0 || len(result.Started) != 1 || len(result.Launched) != 1 {
-		t.Fatalf("started=%+v launched=%+v pending=%+v failed=%+v, want one launched start", result.Started, result.Launched, result.Pending, result.Failed)
+	if len(result.Failed) != 0 || len(result.Pending) != 1 || len(result.Started) != 0 || len(result.Launched) != 0 {
+		t.Fatalf("started=%+v launched=%+v pending=%+v failed=%+v, want one pending start", result.Started, result.Launched, result.Pending, result.Failed)
 	}
-	launch := result.Launched[0]
-	if launch.IssueID != child.String() || launch.OperationID != "op-1" || launch.OperationState != string(protocol.OperationStateQueued) {
-		t.Fatalf("launch = %+v", launch)
+	pending := result.Pending[0]
+	if pending.IssueID != child.String() || pending.OperationID != "op-1" || pending.OperationState != string(protocol.OperationStateRunning) {
+		t.Fatalf("pending = %+v", pending)
+	}
+	if !strings.Contains(pending.Reason, "timed out") || !containsString(pending.FollowUpCommands, "az operation get --id op-1 --wait") {
+		t.Fatalf("pending = %+v, want timeout reason and operation follow-up", pending)
 	}
 }
 
