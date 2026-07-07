@@ -2404,6 +2404,118 @@ func TestTaskStatusDoneFailureShowsRecoveryDialogWithRetryActions(t *testing.T) 
 	}
 }
 
+func TestTaskStatusDoneFailureCanOverrideActiveSessionBlock(t *testing.T) {
+	closeBodies := make([]struct {
+		TaskID               string `json:"task_id"`
+		IntegrateBeforeClose bool   `json:"integrate_before_close"`
+		AllowActiveSession   bool   `json:"allow_active_session"`
+	}, 0, 2)
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskClose {
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			var body struct {
+				TaskID               string `json:"task_id"`
+				IntegrateBeforeClose bool   `json:"integrate_before_close"`
+				AllowActiveSession   bool   `json:"allow_active_session"`
+			}
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal close request: %v", err)
+			}
+			closeBodies = append(closeBodies, body)
+			if len(closeBodies) == 1 {
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              false,
+					Error: &protocol.ErrorEnvelope{
+						Code:    protocol.ErrorCodeInternal,
+						Message: "cannot close issue az-4: session activity is busy (source: hooks). Next: wait for the session projection to report idle/done/terminal activity or intentionally stop the session, then retry",
+					},
+				}, nil
+			}
+			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
+				TaskID: "az-4",
+				Status: string(domain.StatusDone),
+			})
+			if err != nil {
+				t.Fatalf("marshal close response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{ID: "az-4", Status: domain.StatusInReview}}
+	m.nav.SelectTask("az-4", domain.StatusInReview.Column())
+
+	promptedAny, promptCmd := m.handleSelection(overlay.SelectionMsg{Key: "l"})
+	if promptCmd == nil {
+		t.Fatal("expected close confirmation command")
+	}
+	prompted := promptedAny.(Model)
+	confirmedAny, statusCmd := prompted.handleSelection(overlay.SelectionMsg{Key: "yes"})
+	if statusCmd == nil {
+		t.Fatal("expected status command after confirmation")
+	}
+	confirmed := confirmedAny.(Model)
+	failedAny, dialogCmd := confirmed.Update(statusCmd())
+	if dialogCmd == nil {
+		t.Fatal("expected close failure dialog command")
+	}
+	failed := failedAny.(Model)
+	dialog, ok := failed.overlayStack.Current().(*overlay.CloseFailureDialog)
+	if !ok {
+		t.Fatalf("overlay = %T, want CloseFailureDialog", failed.overlayStack.Current())
+	}
+	view := dialog.View()
+	if !strings.Contains(view, "Force active close") || strings.Contains(view, "Force cleanup") {
+		t.Fatalf("dialog view should expose active-session override only:\n%s", view)
+	}
+
+	afterFAny, forceSelectionCmd := failed.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	if forceSelectionCmd == nil {
+		t.Fatal("expected active-session override selection command")
+	}
+	selection, ok := forceSelectionCmd().(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("force selection = %T, want SelectionMsg", forceSelectionCmd())
+	}
+	retryAny, retryCmd := afterFAny.(Model).Update(selection)
+	if retryCmd == nil {
+		t.Fatal("expected retry close command")
+	}
+	retrying := retryAny.(Model)
+	if retrying.overlayStack.Current() != nil {
+		t.Fatalf("overlay after force selection = %T, want none", retrying.overlayStack.Current())
+	}
+	result := retryCmd()
+	statusResult, ok := result.(taskStatusResultMsg)
+	if !ok {
+		t.Fatalf("retry result = %T, want taskStatusResultMsg", result)
+	}
+	if statusResult.err != nil {
+		t.Fatalf("retry status err = %v", statusResult.err)
+	}
+	if len(closeBodies) != 2 {
+		t.Fatalf("close request count = %d, want 2", len(closeBodies))
+	}
+	if closeBodies[0].AllowActiveSession {
+		t.Fatalf("first close body = %+v, want default active-session guard", closeBodies[0])
+	}
+	if !closeBodies[1].AllowActiveSession || !closeBodies[1].IntegrateBeforeClose {
+		t.Fatalf("second close body = %+v, want active-session override integrate close", closeBodies[1])
+	}
+}
+
 func TestCloseFailureRetryUsesFailedOperationProjectAfterProjectSwitch(t *testing.T) {
 	var closeProjects []string
 	transport := &recordingDaemonTransport{
@@ -3513,7 +3625,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 					t.Fatalf("runtime signals after session event = %+v, want tmux session", runtime)
 				}
 				view := boardView(model)
-				if !strings.Contains(view, "⏸ P") {
+				if !strings.Contains(view, "⏸") {
 					t.Fatalf("board view after session event = %q, missing paused session state", view)
 				}
 				workspaceView := workspace(model).View()

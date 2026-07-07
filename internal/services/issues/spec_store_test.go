@@ -667,6 +667,61 @@ func TestClient_ListSpecAuditEntriesSupportsTimeWindow(t *testing.T) {
 	require.Len(t, filtered, 1)
 }
 
+func TestClient_ListSpecAuditEntriesFilteredQueriesUseAuditIndexes(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+
+	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	to := from.Add(time.Hour)
+
+	tests := []struct {
+		name    string
+		filter  SpecAuditFilter
+		want    string
+		notWant []string
+	}{
+		{
+			name: "entity and time window",
+			filter: SpecAuditFilter{
+				EntityType:  specAuditEntityRequirement,
+				EntityID:    "REQ-INDEXED",
+				CreatedFrom: &from,
+				CreatedTo:   &to,
+			},
+			want: "idx_spec_audit_entity_created_at",
+			notWant: []string{
+				"SCAN spec_audit_log",
+				"USE TEMP B-TREE FOR ORDER BY",
+			},
+		},
+		{
+			name: "time window",
+			filter: SpecAuditFilter{
+				CreatedFrom: &from,
+				CreatedTo:   &to,
+			},
+			want: "idx_spec_audit_created_at",
+			notWant: []string{
+				"SCAN spec_audit_log",
+				"USE TEMP B-TREE FOR ORDER BY",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			query, args := specAuditEntriesQuery(tt.filter)
+			got := explainQueryPlan(t, ctx, db, query, args...)
+			assert.Contains(t, got, tt.want, got)
+			for _, notWant := range tt.notWant {
+				assert.NotContains(t, got, notWant, got)
+			}
+		})
+	}
+}
+
 func TestClient_ListSpecLinksRequirementSelectorRejectsAmbiguousLocalIDAndExternalCode(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

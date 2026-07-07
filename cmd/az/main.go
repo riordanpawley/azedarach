@@ -76,7 +76,7 @@ func main() {
 	switch command {
 	case "session":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az session <start|attach|stop|status|restart-all> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az session <start|attach|stop|status|diagnose|restart-all|resolve-conflict> [arguments]\n")
 			os.Exit(1)
 		}
 		sessionCommand := commandArgs[0]
@@ -582,7 +582,7 @@ func main() {
 		case "events":
 			opts, err := cli.ParseIssueEventsArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -596,7 +596,7 @@ func main() {
 		case "context-risk":
 			opts, err := cli.ParseIssueContextRiskArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--json] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--summary|--full] [--json] [<issue-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -1342,7 +1342,7 @@ func printRootUsage() {
 		return
 	}
 	replacements := map[string]string{
-		"session <subcommand>  Session commands (start|attach|stop|status)":                                              "session <subcommand>  Session commands (start|attach|stop|status|restart-all|resolve-conflict)",
+		"session <subcommand>  Session commands (start|attach|stop|status|diagnose)":                                     "session <subcommand>  Session commands (start|attach|stop|status|diagnose|restart-all|resolve-conflict)",
 		"branch <subcommand>   Branch commands (merge)":                                                                  "branch <subcommand>   Branch commands (merge|agent-merge)",
 		"az session status az-123  # Show status for az-123":                                                             "az session status az-123  # Show status for az-123\n  az session restart-all --force-busy\n  az session resolve-conflict az-123 --file README.md",
 		"az branch merge az-123    # Repair/manual merge into resolved target branch (normal close uses az issue close)": "az branch merge az-123    # Repair/manual merge into resolved target branch (normal close uses az issue close)\n  az branch agent-merge az-123 --target base",
@@ -1355,13 +1355,14 @@ func printRootUsage() {
 }
 
 func printSessionUsage() {
-	fmt.Println("Usage: az session <start|attach|stop|status|restart-all|resolve-conflict> [arguments]")
+	fmt.Println("Usage: az session <start|attach|stop|status|diagnose|restart-all|resolve-conflict> [arguments]")
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  start <issue-id>      Start a session for an issue")
 	fmt.Println("  attach <issue-id>     Attach to an existing issue session")
 	fmt.Println("  stop <issue-id>       Stop an issue session")
 	fmt.Println("  status [issue-id]     Show all sessions or one issue session status")
+	fmt.Println("  diagnose <issue-id>   Collect session, worktree, operation, hook, and log diagnostics")
 	fmt.Println("  restart-all           Restart idle AI sessions and tell them to continue; use --force-busy to include busy sessions")
 	fmt.Println("  resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]")
 	fmt.Println("                        Launch conflict-resolution agent")
@@ -1429,6 +1430,11 @@ func sessionCommandUsage(command string, namespaced bool) (string, bool) {
 			return "usage: az session status [issue-id]", true
 		}
 		return "usage: az status [issue-id]", true
+	case "diagnose":
+		if namespaced {
+			return "usage: az session diagnose <issue-id>", true
+		}
+		return "", false
 	case "restart-all":
 		if namespaced {
 			return "usage: az session restart-all [--force-busy] [--yolo] [--json]", true
@@ -1594,6 +1600,16 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.StatusCommand(deps, issueID)
 		})
+	case "diagnose":
+		if !namespaced {
+			return fmt.Errorf("unknown session command: %s", command)
+		}
+		if sessionHelpRequested(args...) || len(args) != 1 {
+			return fmt.Errorf("usage: az session diagnose <issue-id>")
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.SessionDiagnoseCommand(deps, args[0])
+		})
 	case "restart-all":
 		if !namespaced {
 			return fmt.Errorf("unknown session command: %s", command)
@@ -1624,7 +1640,7 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 		})
 	default:
 		if namespaced {
-			return fmt.Errorf("unknown session command: %s (usage: az session <start|attach|stop|status|restart-all|resolve-conflict>)", command)
+			return fmt.Errorf("unknown session command: %s (usage: az session <start|attach|stop|status|diagnose|restart-all|resolve-conflict>)", command)
 		}
 		return fmt.Errorf("unknown session command: %s", command)
 	}

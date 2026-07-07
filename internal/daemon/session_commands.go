@@ -128,6 +128,52 @@ type SessionLongRunningExecutor interface {
 	Execute(ctx context.Context, req protocol.RequestEnvelope, command string, exec func(context.Context) (protocol.ResponseEnvelope, error)) (protocol.ResponseEnvelope, error)
 }
 
+func sessionStartLaunchFailureMessage(phase string, cmd resolvedSessionTarget, worktreePath, launchCommand string, startWork bool, err error, cleanupNote string) string {
+	phase = strings.TrimSpace(phase)
+	if phase == "" {
+		phase = "session_start"
+	}
+	lines := []string{
+		fmt.Sprintf("session start failed during %s", phase),
+		fmt.Sprintf("issue_id=%s", cmd.IssueID),
+		fmt.Sprintf("session_id=%s", cmd.SessionID),
+		fmt.Sprintf("cwd=%s", strings.TrimSpace(worktreePath)),
+		"command=" + sessionStartTmuxCommandLine(cmd.SessionID, worktreePath, launchCommand, startWork),
+	}
+	if err != nil && strings.TrimSpace(err.Error()) != "" {
+		lines = append(lines, "cause="+strings.TrimSpace(err.Error()))
+	}
+	if trimmedCleanup := strings.TrimSpace(cleanupNote); trimmedCleanup != "" {
+		lines = append(lines, "cleanup="+trimmedCleanup)
+	}
+	lines = append(lines,
+		fmt.Sprintf("Repair: Worktree exists but tmux session is not active; retry with `az session start %s`.", cmd.IssueID),
+		fmt.Sprintf("Diagnostics: az session diagnose %s", cmd.IssueID),
+	)
+	return strings.Join(lines, "\n")
+}
+
+func sessionStartTmuxCommandLine(sessionID, worktreePath, launchCommand string, startWork bool) string {
+	parts := []string{"tmux", "new-session", "-d", "-s", strings.TrimSpace(sessionID)}
+	if trimmedWorktree := strings.TrimSpace(worktreePath); trimmedWorktree != "" {
+		parts = append(parts, "-c", trimmedWorktree)
+	}
+	if startWork {
+		if trimmedLaunch := strings.TrimSpace(launchCommand); trimmedLaunch != "" {
+			parts = append(parts, compactSessionStartCommandDetail(trimmedLaunch, 500))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func compactSessionStartCommandDetail(value string, limit int) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return fmt.Sprintf("%s... [truncated, bytes=%d]", value[:limit], len(value))
+}
+
 func sessionKey(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
@@ -913,7 +959,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if cmd.StartWork {
 		if err := d.tmux.NewSessionWithCommand(ctx, cmd.SessionID, worktree.Path, launchCommand); err != nil {
 			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
+			return d.errorResponse(req, protocol.ErrorCodeInternal, sessionStartLaunchFailureMessage("tmux_launch", cmd, worktree.Path, launchCommand, true, err, cleanupNote)), nil
 		}
 		if err := d.setSessionContextEnv(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
 			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
@@ -940,7 +986,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	} else {
 		if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
 			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
+			return d.errorResponse(req, protocol.ErrorCodeInternal, sessionStartLaunchFailureMessage("tmux_launch", cmd, worktree.Path, "", false, err, cleanupNote)), nil
 		}
 		if err := d.exportSessionContextEnv(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
 			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)

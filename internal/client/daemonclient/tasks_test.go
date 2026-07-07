@@ -1044,7 +1044,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal close request: %v", err)
 				}
-				if body.TaskID != "az-3" || !body.ForceWorktree || !body.IgnoreAhead || !body.IntegrateBeforeClose {
+				if body.TaskID != "az-3" || !body.ForceWorktree || !body.IgnoreAhead || !body.IntegrateBeforeClose || !body.AllowActiveSession {
 					t.Fatalf("close body = %+v", body)
 				}
 				return responseWithJSON(t, req, TaskCloseResult{
@@ -1062,7 +1062,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		got, err := client.CloseTask(context.Background(), "az-3", TaskStatusOptions{ForceWorktree: true, IgnoreAhead: true, IntegrateBeforeClose: true})
+		got, err := client.CloseTask(context.Background(), "az-3", TaskStatusOptions{ForceWorktree: true, IgnoreAhead: true, IntegrateBeforeClose: true, AllowActiveSession: true})
 		if err != nil {
 			t.Fatalf("CloseTask error: %v", err)
 		}

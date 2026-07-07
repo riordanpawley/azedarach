@@ -311,6 +311,40 @@ func (c *Client) ListDecisions(ctx context.Context, filter DecisionFilter) ([]De
 		return nil, err
 	}
 
+	queryText, args, empty := decisionListQuery(filter)
+	if empty {
+		return []Decision{}, nil
+	}
+
+	rows, err := db.QueryContext(ctx, queryText, args...)
+	if err != nil {
+		return nil, c.wrapError("list-decisions", "", err)
+	}
+	defer rows.Close()
+
+	records := make([]decisionRecord, 0, 16)
+	for rows.Next() {
+		record, scanErr := scanDecisionRecord(rows)
+		if scanErr != nil {
+			return nil, c.wrapError("list-decisions", "", scanErr)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-decisions", "", err)
+	}
+
+	out := recordsToDecisions(records)
+	if len(filter.LocalIDs) > 0 {
+		out = filterDecisionsByLocalID(out, normalizeOrderedIDs(filter.LocalIDs))
+	}
+	if strings.TrimSpace(filter.Query) != "" {
+		out = filterDecisionsByContentQuery(out, filter.Query)
+	}
+	return out, nil
+}
+
+func decisionListQuery(filter DecisionFilter) (string, []any, bool) {
 	query := strings.Builder{}
 	query.WriteString(`
 		SELECT DISTINCT
@@ -322,6 +356,14 @@ func (c *Client) ListDecisions(ctx context.Context, filter DecisionFilter) ([]De
 		FROM decisions d
 	`)
 	args := make([]any, 0, 6)
+	if trimmed := strings.TrimSpace(filter.Query); trimmed != "" {
+		expr := domain.ContentQueryFTSExpression(trimmed)
+		if expr == "" {
+			return "", nil, true
+		}
+		query.WriteString(` JOIN decision_search_fts ON decision_search_fts.rowid = d.rowid AND decision_search_fts MATCH ?`)
+		args = append(args, expr)
+	}
 	joinedLinks := false
 	joinLinks := func() {
 		if joinedLinks {
@@ -346,39 +388,8 @@ func (c *Client) ListDecisions(ctx context.Context, filter DecisionFilter) ([]De
 		query.WriteString(` AND l.target_kind = ? AND l.target_id = ?`)
 		args = append(args, string(DecisionTargetRequirement), trimmed)
 	}
-	if trimmed := strings.TrimSpace(filter.Query); trimmed != "" {
-		like := "%" + trimmed + "%"
-		query.WriteString(` AND (d.local_id LIKE ? OR d.title LIKE ? OR COALESCE(d.rationale, '') LIKE ? OR COALESCE(d.context, '') LIKE ? OR COALESCE(d.consequences, '') LIKE ?)`)
-		args = append(args, like, like, like, like, like)
-	}
 	query.WriteString(` ORDER BY d.updated_at DESC, d.local_id ASC`)
-
-	rows, err := db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, c.wrapError("list-decisions", "", err)
-	}
-	defer rows.Close()
-
-	records := make([]decisionRecord, 0, 16)
-	for rows.Next() {
-		record, scanErr := scanDecisionRecord(rows)
-		if scanErr != nil {
-			return nil, c.wrapError("list-decisions", "", scanErr)
-		}
-		records = append(records, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, c.wrapError("list-decisions", "", err)
-	}
-
-	out := make([]Decision, 0, len(records))
-	for _, record := range records {
-		out = append(out, record.Decision)
-	}
-	if len(filter.LocalIDs) > 0 {
-		out = filterDecisionsByLocalID(out, normalizeOrderedIDs(filter.LocalIDs))
-	}
-	return out, nil
+	return query.String(), args, false
 }
 
 func (c *Client) UpdateDecision(ctx context.Context, selector string, params UpdateDecisionParams) (Decision, error) {
@@ -987,6 +998,38 @@ func filterDecisionsByLocalID(decisions []Decision, ids []string) []Decision {
 		}
 	}
 	return out
+}
+
+func recordsToDecisions(records []decisionRecord) []Decision {
+	decisions := make([]Decision, 0, len(records))
+	for _, record := range records {
+		decisions = append(decisions, record.Decision)
+	}
+	return decisions
+}
+
+func filterDecisionsByContentQuery(decisions []Decision, query string) []Decision {
+	if strings.TrimSpace(query) == "" {
+		return decisions
+	}
+	terms := domain.ContentQueryTerms(query)
+	filtered := make([]Decision, 0, len(decisions))
+	for _, decision := range decisions {
+		if domain.ContentFieldsMatchTerms(decisionSearchFields(decision), terms) {
+			filtered = append(filtered, decision)
+		}
+	}
+	return filtered
+}
+
+func decisionSearchFields(decision Decision) []string {
+	return []string{
+		decision.LocalID,
+		decision.Title,
+		decision.Rationale,
+		decision.Context,
+		decision.Consequences,
+	}
 }
 
 func decisionLinkID(decisionLocalID string, kind DecisionTargetKind, targetID string) string {

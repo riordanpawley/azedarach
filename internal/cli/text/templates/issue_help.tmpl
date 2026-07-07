@@ -8,7 +8,7 @@ Commands:
   takeover [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--json] [<issue-id>]  Force-claim an issue ownership lease
   release [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--force] [--json] [<issue-id>]  Release an issue ownership lease
   events [--project <project-id>] [--id <issue-id>] [--json] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]  List an issue's durable observation event stream
-  context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--json] [<issue-id>]  Show compact repeated local failure/overlap risk context
+  context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--summary|--full] [--json] [<issue-id>]  Show compact repeated local failure/overlap risk context
   get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]  Fetch many issues in requested order
   check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Alias for get
   doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Run integrity checks for one issue

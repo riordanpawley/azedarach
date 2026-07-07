@@ -3341,6 +3341,94 @@ func TestOperationCommandsUseDaemonClient(t *testing.T) {
 	}
 }
 
+func TestSessionDiagnoseCommandPrintsBoundedDiagnostics(t *testing.T) {
+	repoDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Session.LogDir = filepath.Join(t.TempDir(), "logs")
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "az-1", Title: "Diagnose session", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+	deps := &Dependencies{
+		Config: cfg,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGetMany:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case commandSessionStatus:
+					return responseWithJSON(req, commandOutputBody{Output: "no active session found for issue: az-1\n"}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": "proj",
+						"worktrees": []map[string]string{{
+							"path":     filepath.Join(repoDir, "../repo-az-1"),
+							"branch":   "user/az-1/diagnose-session",
+							"issue_id": "az-1",
+						}},
+					}), nil
+				case protocol.CommandOperationList:
+					return responseWithJSON(req, protocol.OperationListResponseBody{
+						ProjectID: "proj",
+						Operations: []protocol.OperationRecord{{
+							OperationID: "op-start",
+							ProjectID:   "proj",
+							Kind:        commandSessionStart,
+							IssueID:     "az-1",
+							State:       protocol.OperationStateFailed,
+							Progress: &protocol.OperationProgress{
+								Phase:   "tmux_launch",
+								Message: "creating tmux session",
+								Percent: 70,
+							},
+							Error: &protocol.OperationError{
+								Code:    protocol.ErrorCodeInternal,
+								Message: "session start failed during tmux_launch\ncause=tmux new-session [az-1]: exit status 1",
+							},
+						}},
+					}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   repoDir,
+	}
+
+	output := captureStdout(t, func() error {
+		return SessionDiagnoseCommand(deps, "az-1")
+	})
+
+	for _, needle := range []string{
+		"Session diagnose: az-1",
+		"Session status:",
+		"no active session found for issue: az-1",
+		"Worktree:",
+		"user/az-1/diagnose-session",
+		"Recent session.start operations:",
+		"op-start failed phase=tmux_launch",
+		"session start failed during tmux_launch cause=tmux new-session",
+		"AI hook status:",
+		"Logs:",
+		filepath.Join(cfg.Session.LogDir, logging.DaemonLogFileName),
+	} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("output = %q, missing %q", output, needle)
+		}
+	}
+}
+
 func TestLogCommandPrintsSourcePrefixedPrettyLines(t *testing.T) {
 	repoDir := t.TempDir()
 	cfg := config.DefaultConfig()
@@ -4802,6 +4890,38 @@ func TestParseIssueEventsArgs(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "--limit must be non-negative") {
 		t.Fatalf("expected negative limit error, got %v", err)
 	}
+
+	got, err = ParseIssueEventsArgs([]string{"--jq-help"})
+	if err != nil {
+		t.Fatalf("ParseIssueEventsArgs(jq help) error = %v", err)
+	}
+	if !got.JQHelp || got.IssueID != "" {
+		t.Fatalf("ParseIssueEventsArgs(jq help) = %+v", got)
+	}
+}
+
+func TestParseIssueContextRiskArgsSummaryAndFull(t *testing.T) {
+	got, err := ParseIssueContextRiskArgs([]string{"az-1", "--json", "--summary", "--since", "2w"})
+	if err != nil {
+		t.Fatalf("ParseIssueContextRiskArgs() error = %v", err)
+	}
+	if got.IssueID != "az-1" || !got.JSON || !got.Summary || got.Full || got.Since.IsZero() {
+		t.Fatalf("ParseIssueContextRiskArgs() = %+v, want summary JSON for az-1", got)
+	}
+
+	got, err = ParseIssueContextRiskArgs([]string{"--id", "az-2", "--full"})
+	if err != nil {
+		t.Fatalf("ParseIssueContextRiskArgs(full) error = %v", err)
+	}
+	if got.IssueID != "az-2" || !got.Full || got.Summary {
+		t.Fatalf("ParseIssueContextRiskArgs(full) = %+v", got)
+	}
+
+	_, err = ParseIssueContextRiskArgs([]string{"az-1", "--summary", "--full"})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected summary/full conflict, got %v", err)
+	}
+
 }
 
 func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
@@ -6360,6 +6480,11 @@ func TestIssueEventsCommandJSON(t *testing.T) {
 							"from_status": "open",
 							"to_status":   "in_progress",
 						},
+					}, {
+						ID:         8,
+						IssueID:    "az-5",
+						Type:       domain.IssueEventEvidenceSubmitted,
+						ObservedAt: observedAt.Add(time.Second),
 					}},
 				})
 				if err != nil {
@@ -6389,8 +6514,73 @@ func TestIssueEventsCommandJSON(t *testing.T) {
 			Limit:      10,
 		})
 	})
-	if !strings.Contains(output, "\"issue_id\": \"az-5\"") || !strings.Contains(output, "\"event_type\": \"issue.status_changed\"") {
-		t.Fatalf("output missing event json fields: %q", output)
+
+	var got struct {
+		SchemaVersion string `json:"schema_version"`
+		IssueID       string `json:"issue_id"`
+		Events        []struct {
+			ID         int64          `json:"id"`
+			IssueID    string         `json:"issue_id"`
+			Type       string         `json:"type"`
+			EventType  string         `json:"event_type"`
+			CreatedAt  time.Time      `json:"created_at"`
+			ObservedAt time.Time      `json:"observed_at"`
+			Source     string         `json:"source"`
+			Body       *string        `json:"body"`
+			Notes      *string        `json:"notes"`
+			Data       map[string]any `json:"data"`
+			Payload    map[string]any `json:"payload"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatalf("unmarshal issue events json: %v\n%s", err, output)
+	}
+	if got.SchemaVersion != "issue_events.v1" || got.IssueID != "az-5" || len(got.Events) != 2 {
+		t.Fatalf("issue events json header = %+v", got)
+	}
+	event := got.Events[0]
+	if event.ID != 7 || event.IssueID != "az-5" {
+		t.Fatalf("event identity = %+v", event)
+	}
+	if event.Type != "issue.status_changed" || event.EventType != event.Type {
+		t.Fatalf("event type fields = type %q event_type %q", event.Type, event.EventType)
+	}
+	if !event.CreatedAt.Equal(observedAt) || !event.ObservedAt.Equal(observedAt) {
+		t.Fatalf("event timestamp fields = created_at %s observed_at %s, want %s", event.CreatedAt, event.ObservedAt, observedAt)
+	}
+	if event.Source != "issue-store" {
+		t.Fatalf("event source = %q", event.Source)
+	}
+	if event.Body == nil || event.Notes == nil {
+		t.Fatalf("event body/notes fields missing: body=%v notes=%v", event.Body, event.Notes)
+	}
+	if event.Data["to_status"] != "in_progress" || event.Payload["to_status"] != "in_progress" {
+		t.Fatalf("event data aliases = data %+v payload %+v", event.Data, event.Payload)
+	}
+	emptyPayloadEvent := got.Events[1]
+	if emptyPayloadEvent.Type != "evidence.submitted" {
+		t.Fatalf("empty payload event type = %q", emptyPayloadEvent.Type)
+	}
+	if emptyPayloadEvent.Body == nil || emptyPayloadEvent.Notes == nil {
+		t.Fatalf("empty payload event body/notes fields missing: body=%v notes=%v", emptyPayloadEvent.Body, emptyPayloadEvent.Notes)
+	}
+	if emptyPayloadEvent.Data == nil || emptyPayloadEvent.Payload == nil || len(emptyPayloadEvent.Data) != 0 || len(emptyPayloadEvent.Payload) != 0 {
+		t.Fatalf("empty payload aliases = data %+v payload %+v, want empty objects", emptyPayloadEvent.Data, emptyPayloadEvent.Payload)
+	}
+}
+
+func TestIssueEventsCommandJQHelp(t *testing.T) {
+	output := captureStdout(t, func() error {
+		return IssueEventsCommand(&Dependencies{}, IssueEventsOptions{JQHelp: true})
+	})
+	for _, want := range []string{
+		"az issue events az-123 --json | jq '.events[0]'",
+		"jq '[.events[] | {type, created_at, source, data}]'",
+		"jq '.events[] | select(.type == \"issue.status_changed\")'",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("jq help missing %q in:\n%s", want, output)
+		}
 	}
 }
 
@@ -9309,6 +9499,127 @@ func TestIssueUpdateCommandPassesCascadeChildrenForInReviewStatus(t *testing.T) 
 	}
 }
 
+func TestIssueContextRiskCommandJSONSummaryIsBoundedByDefault(t *testing.T) {
+	var compactRequested bool
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskContextRisk {
+					return responseWithJSON(req, map[string]any{}), nil
+				}
+				var body struct {
+					Compact bool `json:"compact,omitempty"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal context-risk request: %v", err)
+				}
+				compactRequested = body.Compact
+				return responseWithJSON(req, contextRiskTestPacket()), nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueContextRiskCommand(deps, IssueContextRiskOptions{IssueID: "az-1", JSON: true})
+	})
+	if !compactRequested {
+		t.Fatal("context-risk request compact=false, want compact summary request by default")
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(output), &raw); err != nil {
+		t.Fatalf("unmarshal summary output: %v\n%s", err, output)
+	}
+	if _, ok := raw["evidence"]; ok {
+		t.Fatalf("summary output unexpectedly contains raw evidence: %s", output)
+	}
+	snippets, ok := raw["evidence_snippets"].([]any)
+	if !ok || len(snippets) != 3 {
+		t.Fatalf("evidence_snippets = %#v, want three snippets", raw["evidence_snippets"])
+	}
+}
+
+func TestIssueContextRiskCommandJSONFullKeepsRawEvidence(t *testing.T) {
+	var compactRequested bool
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				var body struct {
+					Compact bool `json:"compact,omitempty"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal context-risk request: %v", err)
+				}
+				compactRequested = body.Compact
+				return responseWithJSON(req, contextRiskTestPacket()), nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueContextRiskCommand(deps, IssueContextRiskOptions{IssueID: "az-1", JSON: true, Full: true})
+	})
+	if compactRequested {
+		t.Fatal("context-risk --full request compact=true, want full daemon packet")
+	}
+	var packet domain.IssueContextRiskPacket
+	if err := json.Unmarshal([]byte(output), &packet); err != nil {
+		t.Fatalf("unmarshal full output: %v\n%s", err, output)
+	}
+	if len(packet.Evidence) != 4 {
+		t.Fatalf("full evidence = %d, want raw evidence retained", len(packet.Evidence))
+	}
+}
+
+func TestIssueContextRiskCommandTextFullPrintsEvidence(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				return responseWithJSON(req, contextRiskTestPacket()), nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueContextRiskCommand(deps, IssueContextRiskOptions{IssueID: "az-1", Full: true})
+	})
+	if !strings.Contains(output, "Evidence:") || !strings.Contains(output, "az-4 sibling files=internal/daemon/task_commands.go") {
+		t.Fatalf("full text output missing raw evidence:\n%s", output)
+	}
+}
+
+func TestIssueContextRiskCommandTimeoutReturnsDegradedSummary(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				return protocol.ResponseEnvelope{}, context.DeadlineExceeded
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueContextRiskCommand(deps, IssueContextRiskOptions{IssueID: "az-1", JSON: true})
+	})
+	var summary domain.IssueContextRiskSummary
+	if err := json.Unmarshal([]byte(output), &summary); err != nil {
+		t.Fatalf("unmarshal degraded summary: %v\n%s", err, output)
+	}
+	if !summary.Degraded || !summary.Timeout || summary.IssueID != "az-1" {
+		t.Fatalf("summary = %+v, want degraded timeout summary for az-1", summary)
+	}
+}
+
 func TestIssueUpdateCommandBlocksInReviewForHighContextRiskBeforeMutating(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	var commands []string
@@ -11231,8 +11542,11 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az issue events <issue-id> [--type <event-type>] [--limit <n>] [--json]` shows durable observation/evidence events") {
 		t.Fatalf("prime output missing issue events command map guidance: %q", output)
 	}
-	if !strings.Contains(output, "`az issue context-risk <issue-id> --since 14d [--json]` shows repeated local failure risk") {
+	if !strings.Contains(output, "`az issue context-risk <issue-id> --since 14d [--summary|--full] [--json]` shows repeated local failure risk") {
 		t.Fatalf("prime output missing issue context-risk command map guidance: %q", output)
+	}
+	if !strings.Contains(output, "default/`--summary` output is bounded for closeout, and `--full` expands raw evidence") {
+		t.Fatalf("prime output missing bounded context-risk summary guidance: %q", output)
 	}
 	if !strings.Contains(output, "use it before accepting worker closeout, not as a blanket root-level gate") {
 		t.Fatalf("prime output missing context-risk gate guidance: %q", output)
@@ -12763,6 +13077,35 @@ func responseWithJSON(req protocol.RequestEnvelope, body any) protocol.ResponseE
 		panic(err)
 	}
 	return responseWithBody(req, payload)
+}
+
+func contextRiskTestPacket() domain.IssueContextRiskPacket {
+	return domain.IssueContextRiskPacket{
+		IssueID:           "az-1",
+		ParentIssueID:     "az-root",
+		Level:             domain.IssueContextRiskHigh,
+		Confidence:        80,
+		CandidateCount:    4,
+		OverlapIssueCount: 3,
+		RelatedIssueIDs:   []string{"az-2", "az-3", "az-4"},
+		Signals: []string{
+			`file overlap "internal/daemon/task_commands.go" with az-2, az-3, az-4`,
+			"az-2 has recorded risk evidence",
+			"az-3 has recorded risk evidence",
+			"az-4 has recorded risk evidence",
+		},
+		CloseoutPrompts: []string{"Record a diagnosis or structured risk note before marking this issue ready for closeout."},
+		HandoffFields: domain.IssueContextHandoffFields{
+			StructuredFields: []string{"files_changed", "root_cause", "invariant", "changed_symbols", "tests_changed", "related_consumers_audited", "regression_validation"},
+			Missing:          []string{"root_cause", "invariant", "regression_validation"},
+		},
+		Evidence: []domain.IssueContextRiskEvidence{
+			{IssueID: "az-1", Relationship: "target", Files: []string{"internal/daemon/task_commands.go"}},
+			{IssueID: "az-2", Relationship: "sibling", Files: []string{"internal/daemon/task_commands.go"}, RiskNotes: []string{"same failure"}},
+			{IssueID: "az-3", Relationship: "sibling", Files: []string{"internal/daemon/task_commands.go"}, RiskNotes: []string{"same failure"}},
+			{IssueID: "az-4", Relationship: "sibling", Files: []string{"internal/daemon/task_commands.go"}, RiskNotes: []string{"same failure"}},
+		},
+	}
 }
 
 func responseWithBody(req protocol.RequestEnvelope, body []byte) protocol.ResponseEnvelope {

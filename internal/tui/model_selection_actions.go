@@ -377,11 +377,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		opts := daemonclient.TaskStatusOptions{
 			ForceWorktree:      action.ForceWorktree,
 			CloseCleanChildren: action.CloseCleanChildren,
+			AllowActiveSession: action.AllowActiveSession,
 		}
 		m.beginTaskStatusMoveFeedback(action.TaskID, previousStatus, targetStatus)
 		switch action.Action {
 		case overlay.CloseFailureActionForceWorktree:
 			m.addToast(Toast{Level: ToastWarning, Message: fmt.Sprintf("Retrying close for %s with forced worktree cleanup", action.TaskID), Expires: time.Now().Add(5 * time.Second)})
+		case overlay.CloseFailureActionAllowActiveSession:
+			m.addToast(Toast{Level: ToastWarning, Message: fmt.Sprintf("Retrying close for %s and allowing active session cleanup", action.TaskID), Expires: time.Now().Add(5 * time.Second)})
 		case overlay.CloseFailureActionCloseCleanChildren:
 			m.addToast(Toast{Level: ToastInfo, Message: fmt.Sprintf("Retrying close for %s and clean child issues", action.TaskID), Expires: time.Now().Add(5 * time.Second)})
 		default:

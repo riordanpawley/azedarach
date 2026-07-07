@@ -75,3 +75,31 @@ func TestCloseFailureDialogDoesNotOfferAIMergeForDirtyState(t *testing.T) {
 		t.Fatalf("view exposes AI merge for dirty-state failure: %q", view)
 	}
 }
+
+func TestCloseFailureDialogAllowsActiveSessionOverride(t *testing.T) {
+	dialog := NewCloseFailureDialog("az-1", "cannot close issue az-1: session activity is busy (source: hooks). Next: wait for the session projection to report idle/done/terminal activity or intentionally stop the session, then retry", CloseFailureDialogOptions{
+		PreviousStatus:          "in_review",
+		TargetStatus:            "closed",
+		AllowActiveSessionRetry: true,
+	})
+
+	_, cmd := dialog.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	if cmd == nil {
+		t.Fatal("expected active-session override command")
+	}
+	selection, ok := cmd().(SelectionMsg)
+	if !ok {
+		t.Fatalf("message = %T, want SelectionMsg", cmd())
+	}
+	action, ok := selection.Value.(CloseFailureActionMsg)
+	if !ok {
+		t.Fatalf("selection value = %T, want CloseFailureActionMsg", selection.Value)
+	}
+	if action.TaskID != "az-1" || action.Action != CloseFailureActionAllowActiveSession || !action.AllowActiveSession {
+		t.Fatalf("active-session action = %+v, want task and allow-active-session", action)
+	}
+	view := dialog.View()
+	if !strings.Contains(view, "Force active close") || strings.Contains(view, "Force cleanup") {
+		t.Fatalf("view should expose active-session override only: %q", view)
+	}
+}

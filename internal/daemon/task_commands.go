@@ -102,6 +102,7 @@ type taskListSnapshotLoadResult struct {
 
 type taskClosePreflightOptions struct {
 	AllowTargetSession  bool `json:"allow_target_session,omitempty"`
+	AllowActiveSession  bool `json:"allow_active_session,omitempty"`
 	AllowTargetWorktree bool `json:"allow_target_worktree,omitempty"`
 	ForceWorktree       bool `json:"force_worktree,omitempty"`
 	IgnoreAhead         bool `json:"ignore_ahead,omitempty"`
@@ -119,6 +120,7 @@ type taskCloseRequest struct {
 	IgnoreAhead          bool   `json:"ignore_ahead,omitempty"`
 	IntegrateBeforeClose bool   `json:"integrate_before_close,omitempty"`
 	CloseCleanChildren   bool   `json:"close_clean_children,omitempty"`
+	AllowActiveSession   bool   `json:"allow_active_session,omitempty"`
 }
 
 type taskDeleteRequest struct {
@@ -1877,6 +1879,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	phaseStartedAt = time.Now()
 	guard, err := d.validateTaskClosePreflight(ctx, projectID, taskID, taskClosePreflightOptions{
 		AllowTargetSession:  true,
+		AllowActiveSession:  cmd.AllowActiveSession,
 		AllowTargetWorktree: true,
 		ForceWorktree:       cmd.ForceWorktree,
 		IgnoreAhead:         cmd.IgnoreAhead || integration.Integrated || integration.NoChanges,
@@ -3113,8 +3116,10 @@ func daemonCloseGuardRuntimeBlockers(task domain.Task, opts taskClosePreflightOp
 	if daemonCloseGuardTaskHasSession(task) {
 		if !opts.AllowTargetSession {
 			reasons = append(reasons, "issue still has a session")
-		} else if reason := daemonCloseGuardActiveSessionActivityReason(task); reason != "" {
-			reasons = append(reasons, reason)
+		} else if !opts.AllowActiveSession {
+			if reason := daemonCloseGuardActiveSessionActivityReason(task); reason != "" {
+				reasons = append(reasons, reason)
+			}
 		}
 	}
 	if !opts.AllowTargetWorktree && daemonCloseGuardTaskHasWorktree(task) {
