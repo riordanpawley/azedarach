@@ -138,6 +138,18 @@ func (r *testTmuxRunner) listSessionCallCount() int {
 	return r.listSessionsCalls
 }
 
+type failingListSessionsTmuxRunner struct {
+	listSessionsCalls int
+}
+
+func (r *failingListSessionsTmuxRunner) Run(_ context.Context, args ...string) (string, error) {
+	if len(args) > 0 && args[0] == "list-sessions" {
+		r.listSessionsCalls++
+		return "", context.Canceled
+	}
+	return "", nil
+}
+
 type testGitRunner struct {
 	worktreePath string
 	branchName   string
@@ -493,7 +505,7 @@ func TestReconcileSessionValidationIssueIDsUsesOnlyObservedCandidates(t *testing
 		{ID: "###", IssueID: ""},
 	}
 
-	ids := reconcileSessionValidationIssueIDs("", tmuxSet, snapshotSessions, namingScope)
+	ids := reconcileSessionValidationIssueIDs(nil, tmuxSet, snapshotSessions, namingScope)
 	got := map[string]struct{}{}
 	for _, id := range ids {
 		got[id] = struct{}{}
@@ -519,9 +531,157 @@ func TestReconcileSessionValidationIssueIDsHonorsTargetIssue(t *testing.T) {
 		{ID: naming.CanonicalSessionID(namingScope, "cpb"), IssueID: "cpb"},
 	}
 
-	ids := reconcileSessionValidationIssueIDs("cpa", tmuxSet, snapshotSessions, namingScope)
+	ids := reconcileSessionValidationIssueIDs(map[string]struct{}{"cpa": {}}, tmuxSet, snapshotSessions, namingScope)
 	if len(ids) != 1 || ids[0] != "cpa" {
 		t.Fatalf("validation ids = %v, want [cpa]", ids)
+	}
+}
+
+func TestReconcileSessionValidationIssueIDsHonorsMultipleTargetIssues(t *testing.T) {
+	namingScope := "/repo"
+	tmuxSet := map[string]struct{}{
+		"cpa": {},
+		"cpb": {},
+		"cpc": {},
+	}
+	snapshotSessions := []daemonstate.Session{
+		{ID: naming.CanonicalSessionID(namingScope, "cpa"), IssueID: "cpa"},
+		{ID: naming.CanonicalSessionID(namingScope, "cpb"), IssueID: "cpb"},
+		{ID: naming.CanonicalSessionID(namingScope, "cpc"), IssueID: "cpc"},
+	}
+
+	ids := reconcileSessionValidationIssueIDs(map[string]struct{}{"cpa": {}, "cpc": {}}, tmuxSet, snapshotSessions, namingScope)
+	got := map[string]struct{}{}
+	for _, id := range ids {
+		got[id] = struct{}{}
+	}
+	for _, want := range []string{"cpa", "cpc"} {
+		if _, ok := got[want]; !ok {
+			t.Fatalf("validation ids = %v, missing %s", ids, want)
+		}
+	}
+	if _, ok := got["cpb"]; ok || len(got) != 2 {
+		t.Fatalf("validation ids = %v, want only cpa/cpc", ids)
+	}
+}
+
+func TestRuntimeReconcileIssuesReusesSharedTmuxSessionSnapshotForTargets(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	issueIDs := []string{"cpa", "cpb", "cpc", "cpd"}
+	tmuxRunner := &testTmuxRunner{
+		sessions:    map[string]bool{},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	for _, issueID := range issueIDs {
+		sessionID := naming.CanonicalSessionID(repoDir, issueID)
+		tmuxRunner.sessions[sessionID] = true
+		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			ID:        sessionID,
+			IssueID:   issueID,
+			State:     daemonstate.SessionStateAttached,
+			UpdatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("seed runtime session %s: %v", issueID, err)
+		}
+	}
+
+	store := daemonstate.NewStore()
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: repoDir,
+			CLITool: "claude",
+			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-cpa"), branchName: "riordan/cpa/test"}, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-cpa"), branchName: "riordan/cpa/test"}, repoDir, slog.Default()),
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+	}
+	t.Cleanup(func() { daemon.closeIssueClients() })
+
+	if _, err := daemon.ensureRuntimeReconciler().ReconcileIssues(ctx, projectID, issueIDs); err != nil {
+		t.Fatalf("ReconcileIssues: %v", err)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 1 {
+		t.Fatalf("tmux list-sessions calls = %d, want one shared target snapshot", got)
+	}
+}
+
+func TestRuntimeReconcileIssuesSummarizesSharedTmuxSnapshotFailure(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	issueIDs := []string{"cpa", "cpb", "cpc", "cpd"}
+	for _, issueID := range issueIDs {
+		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			ID:        naming.CanonicalSessionID(repoDir, issueID),
+			IssueID:   issueID,
+			State:     daemonstate.SessionStateAttached,
+			UpdatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("seed runtime session %s: %v", issueID, err)
+		}
+	}
+
+	tmuxRunner := &failingListSessionsTmuxRunner{}
+	store := daemonstate.NewStore()
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: repoDir,
+			CLITool: "claude",
+			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-cpa"), branchName: "riordan/cpa/test"}, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-cpa"), branchName: "riordan/cpa/test"}, repoDir, slog.Default()),
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+	}
+	t.Cleanup(func() { daemon.closeIssueClients() })
+
+	_, err = daemon.ensureRuntimeReconciler().ReconcileIssues(ctx, projectID, issueIDs)
+	if err == nil {
+		t.Fatal("ReconcileIssues error = nil, want tmux snapshot failure")
+	}
+	errText := err.Error()
+	if !strings.Contains(errText, "reconcile issue sessions (4 targets)") {
+		t.Fatalf("error = %q, want target-count summary", errText)
+	}
+	if strings.Contains(errText, "reconcile issue session cpa") || strings.Contains(errText, "reconcile issue session cpb") {
+		t.Fatalf("error = %q, want no repeated per-issue reconcile fragments", errText)
+	}
+	if got := tmuxRunner.listSessionsCalls; got != 1 {
+		t.Fatalf("tmux list-sessions calls = %d, want one failed shared snapshot", got)
 	}
 }
 
