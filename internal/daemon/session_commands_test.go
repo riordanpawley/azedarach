@@ -2360,9 +2360,6 @@ func TestSessionStartDefaultsAgentActivityToBusy(t *testing.T) {
 	if tmuxRunner.sendKeysCalls == 0 {
 		t.Fatal("send-keys calls = 0, want AI launch")
 	}
-	if tmuxRunner.sendKeysCalls < 2 {
-		t.Fatalf("send-keys calls = %d, want at least launch command and prompt submit", tmuxRunner.sendKeysCalls)
-	}
 	launchCommand := ""
 	for _, payload := range tmuxRunner.sendKeysPayloads {
 		if strings.Contains(payload, " codex") {
@@ -2376,24 +2373,22 @@ func TestSessionStartDefaultsAgentActivityToBusy(t *testing.T) {
 	if !strings.Contains(launchCommand, `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) {
 		t.Fatalf("launch command = %q, want codex launch", launchCommand)
 	}
+	if !strings.Contains(launchCommand, initialPromptShellVariable+`=$(printf`) {
+		t.Fatalf("launch command = %q, want encoded initial prompt assignment", launchCommand)
+	}
+	if !strings.Contains(launchCommand, `codex -- "$`+initialPromptShellVariable+`"`) {
+		t.Fatalf("launch command = %q, want codex prompt argv", launchCommand)
+	}
 	for _, mustNotContain := range []string{
 		"Start AI worker",
 		"Start by running",
-		"__AZEDARACH_INITIAL_PROMPT",
 	} {
 		if strings.Contains(launchCommand, mustNotContain) {
 			t.Fatalf("launch command = %q, must not contain prompt fragment %q", launchCommand, mustNotContain)
 		}
 	}
-	if got := tmuxRunner.sendKeysPayloads[len(tmuxRunner.sendKeysPayloads)-1]; got != "Enter" {
-		t.Fatalf("prompt submit key = %q, want Enter", got)
-	}
-	if len(tmuxRunner.inputPayloads) != 1 {
-		t.Fatalf("input payloads = %+v, want one initial prompt payload", tmuxRunner.inputPayloads)
-	}
-	if promptPayload := tmuxRunner.inputPayloads[0]; !strings.Contains(promptPayload, "Start AI worker") ||
-		!strings.Contains(promptPayload, "Start by running `az prime`") {
-		t.Fatalf("prompt payload = %q, want start-work prompt text", promptPayload)
+	if len(tmuxRunner.inputPayloads) != 0 {
+		t.Fatalf("input payloads = %+v, want no post-launch paste for bounded codex prompt", tmuxRunner.inputPayloads)
 	}
 
 	sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
@@ -2406,6 +2401,100 @@ func TestSessionStartDefaultsAgentActivityToBusy(t *testing.T) {
 	}
 	if session.Activity != "busy" || session.ActivitySource != "session" {
 		t.Fatalf("session activity = %s/%s, want busy/session", session.Activity, session.ActivitySource)
+	}
+}
+
+func TestSessionStartLargeCodexPromptUsesPostLaunchPaste(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj-large-codex-prompt"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Start AI worker with large prompt",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	branch := "testuser/" + issueID + "/start-ai-worker-with-large-prompt"
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	worktreeRunner := &worktreeCreateRunner{
+		worktreePath: worktreePath,
+		branchName:   branch,
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	largePrompt := strings.Repeat("large prompt line\n", 32*1024)
+	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-large-codex-prompt",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]any{
+			"project_id":     projectID,
+			"session_id":     issueID,
+			"initial_prompt": largePrompt,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session start response not OK: %+v", resp)
+	}
+
+	launchCommand := ""
+	for _, payload := range tmuxRunner.sendKeysPayloads {
+		if strings.Contains(payload, " codex") {
+			launchCommand = payload
+			break
+		}
+	}
+	if launchCommand == "" {
+		t.Fatalf("send keys payloads = %+v, want codex launch command", tmuxRunner.sendKeysPayloads)
+	}
+	if strings.Contains(launchCommand, "large prompt line") || strings.Contains(launchCommand, initialPromptShellVariable) {
+		t.Fatalf("launch command contains large prompt payload or prompt variable")
+	}
+	if len(tmuxRunner.inputPayloads) != 1 {
+		t.Fatalf("input payloads = %+v, want one post-launch prompt payload", tmuxRunner.inputPayloads)
+	}
+	if promptPayload := tmuxRunner.inputPayloads[0]; !strings.Contains(promptPayload, "large prompt line") || len(promptPayload) < codexLaunchPromptArgMaxBytes {
+		t.Fatalf("prompt payload length = %d, want large post-launch prompt content", len(promptPayload))
+	}
+	if got := tmuxRunner.sendKeysPayloads[len(tmuxRunner.sendKeysPayloads)-1]; got != "Enter" {
+		t.Fatalf("prompt submit key = %q, want Enter", got)
 	}
 }
 
@@ -2800,8 +2889,8 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 		t.Fatalf("expected conflict window to be created in session %q", sessionID)
 	}
 	targetPane := sessionID + ":" + sessionConflictWindowName
-	if tmuxRunner.sendKeysCalls != 2 {
-		t.Fatalf("send-keys calls = %d, want launch and prompt submit keys", tmuxRunner.sendKeysCalls)
+	if tmuxRunner.sendKeysCalls != 1 {
+		t.Fatalf("send-keys calls = %d, want launch submit key", tmuxRunner.sendKeysCalls)
 	}
 	if gotTarget := tmuxRunner.sendKeysTargets[0]; gotTarget != targetPane {
 		t.Fatalf("send-keys target = %q, want %q", gotTarget, targetPane)
@@ -2809,27 +2898,12 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 	if gotKey := tmuxRunner.sendKeysPayloads[0]; gotKey != "Enter" {
 		t.Fatalf("launch submit payload = %q, want Enter submit", gotKey)
 	}
-	if gotKey := tmuxRunner.sendKeysPayloads[1]; gotKey != "Enter" {
-		t.Fatalf("prompt submit payload = %q, want Enter submit", gotKey)
-	}
-	if len(tmuxRunner.inputPayloads) < 2 {
-		t.Fatalf("input payloads = %+v, want launch command and prompt payload", tmuxRunner.inputPayloads)
+	if len(tmuxRunner.inputPayloads) != 1 {
+		t.Fatalf("input payloads = %+v, want only launch command payload", tmuxRunner.inputPayloads)
 	}
 	launchCommand := tmuxRunner.inputPayloads[0]
-	promptPayload := tmuxRunner.inputPayloads[1]
 	if launchCommand == "" {
 		t.Fatalf("missing launch command input payload in tmux commands: %+v", tmuxRunner.commands)
-	}
-	wantPaste := []string{"paste-buffer", "-dp", "-b", "azedarach-message-" + sessionID + "_" + sessionConflictWindowName, "-t", targetPane}
-	foundPaste := false
-	for _, cmd := range tmuxRunner.commands {
-		if reflect.DeepEqual(cmd, wantPaste) {
-			foundPaste = true
-			break
-		}
-	}
-	if !foundPaste {
-		t.Fatalf("missing paste-buffer command %v in tmux commands: %+v", wantPaste, tmuxRunner.commands)
 	}
 	if strings.Contains(launchCommand, "Resolve merge conflicts for issue "+issueID) ||
 		strings.Contains(launchCommand, "README.md") ||
@@ -2837,14 +2911,10 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 		t.Fatalf("launch command contains raw conflict prompt text: %s", launchCommand)
 	}
 	if !strings.Contains(launchCommand, `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) ||
-		strings.Contains(launchCommand, `__AZEDARACH_INITIAL_PROMPT`) ||
-		!strings.Contains(launchCommand, "--dangerously-bypass-approvals-and-sandbox") {
+		!strings.Contains(launchCommand, initialPromptShellVariable+`=$(printf`) ||
+		!strings.Contains(launchCommand, "--dangerously-bypass-approvals-and-sandbox") ||
+		!strings.Contains(launchCommand, `-- "$`+initialPromptShellVariable+`"`) {
 		t.Fatalf("launch command missing small codex launch shape or yolo flag: %s", launchCommand)
-	}
-	if !strings.Contains(promptPayload, "Resolve merge conflicts for issue "+issueID) ||
-		!strings.Contains(promptPayload, "README.md") ||
-		!strings.Contains(promptPayload, "main.go") {
-		t.Fatalf("prompt payload missing conflict prompt text: %q", promptPayload)
 	}
 
 	snapshot := store.ReadSnapshot(projectID)
@@ -6940,9 +7010,8 @@ func TestBuildSessionLaunchCommandDoesNotInjectCodexHookOverrides(t *testing.T) 
 		}
 	}
 
-	// Surrounding launch behaviour stays intact: env prefix and image flags.
-	// Codex prompts are delivered after launch through a tmux buffer so large
-	// prompts do not hit OS argv/env limits.
+	// Surrounding launch behaviour stays intact: env prefix, image flags, and
+	// the encoded Codex positional prompt.
 	if !strings.Contains(command, `AZEDARACH_ISSUE_ID="axt-123"`) {
 		t.Fatalf("command = %q, want AZEDARACH_ISSUE_ID env exported for the launched codex", command)
 	}
@@ -6952,8 +7021,14 @@ func TestBuildSessionLaunchCommandDoesNotInjectCodexHookOverrides(t *testing.T) 
 	if !strings.Contains(command, `--image "/tmp/with space/image.png"`) {
 		t.Fatalf("command = %q, want codex image argument for spaced path", command)
 	}
-	if strings.Contains(command, `__AZEDARACH_INITIAL_PROMPT`) || strings.Contains(command, "Verify startup behavior") {
-		t.Fatalf("command = %q, want codex prompt omitted from launch command", command)
+	if !strings.Contains(command, initialPromptShellVariable+`=$(printf`) {
+		t.Fatalf("command = %q, want encoded initial prompt assignment", command)
+	}
+	if !strings.Contains(command, `codex --image "/tmp/a.png" --image "/tmp/with space/image.png" -- "$`+initialPromptShellVariable+`"`) {
+		t.Fatalf("command = %q, want codex positional prompt after image args", command)
+	}
+	if strings.Contains(command, "Verify startup behavior") {
+		t.Fatalf("command = %q, want raw prompt text encoded out of launch command", command)
 	}
 }
 
@@ -6983,8 +7058,11 @@ func TestBuildSessionLaunchCommandOmitsMultilinePromptForCodex(t *testing.T) {
 	if strings.Contains(command, "Start by running") {
 		t.Fatalf("command = %q, want multiline prompt text encoded out of the shell command", command)
 	}
-	if strings.Contains(command, `__AZEDARACH_INITIAL_PROMPT`) || strings.Contains(command, `-- "$`) {
-		t.Fatalf("command = %q, want codex prompt omitted from launch command", command)
+	if !strings.Contains(command, initialPromptShellVariable+`=$(printf`) {
+		t.Fatalf("command = %q, want encoded initial prompt assignment", command)
+	}
+	if !strings.Contains(command, `codex -- "$`+initialPromptShellVariable+`"`) {
+		t.Fatalf("command = %q, want codex positional prompt", command)
 	}
 	if !strings.Contains(command, `AZEDARACH_ISSUE_ID="az-42" codex`) {
 		t.Fatalf("command = %q, want small codex launch command", command)

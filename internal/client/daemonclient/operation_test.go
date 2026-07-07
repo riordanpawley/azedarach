@@ -259,6 +259,9 @@ func TestStartSessionOperationIncludesDedupeAndResourceKeys(t *testing.T) {
 			if len(payload.ImagePaths) != 2 || payload.ImagePaths[0] != "/tmp/a.png" || payload.ImagePaths[1] != "/tmp/with space/image.png" {
 				t.Fatalf("image_paths = %+v", payload.ImagePaths)
 			}
+			if payload.Prompt != "custom start prompt" {
+				t.Fatalf("prompt = %q, want custom start prompt", payload.Prompt)
+			}
 			respBody, _ := json.Marshal(protocol.OperationSubmitResponseBody{
 				Created: true,
 				Operation: protocol.OperationRecord{
@@ -288,6 +291,7 @@ func TestStartSessionOperationIncludesDedupeAndResourceKeys(t *testing.T) {
 		Yolo:       true,
 		StartWork:  &startWork,
 		ImagePaths: []string{"/tmp/a.png", "/tmp/with space/image.png"},
+		Prompt:     "custom start prompt",
 	})
 	if err != nil {
 		t.Fatalf("StartSessionOperation error: %v", err)

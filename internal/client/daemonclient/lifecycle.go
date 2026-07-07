@@ -41,6 +41,7 @@ type sessionCommandBody struct {
 	Yolo       bool             `json:"yolo,omitempty"`
 	StartWork  *bool            `json:"start_work,omitempty"`
 	ImagePaths []string         `json:"image_paths,omitempty"`
+	Prompt     string           `json:"initial_prompt,omitempty"`
 	Message    string           `json:"message,omitempty"`
 }
 
@@ -53,6 +54,7 @@ type StartSessionParams struct {
 	Yolo       bool
 	StartWork  *bool
 	ImagePaths []string
+	Prompt     string
 }
 
 type ResolveConflictParams struct {
@@ -180,6 +182,7 @@ func (c *Client) StartSessionOperation(ctx context.Context, params StartSessionP
 		Yolo:       params.Yolo,
 		StartWork:  params.StartWork,
 		ImagePaths: params.ImagePaths,
+		Prompt:     params.Prompt,
 	})
 	if err != nil {
 		return protocol.OperationRecord{}, fmt.Errorf("marshal session start payload: %w", err)

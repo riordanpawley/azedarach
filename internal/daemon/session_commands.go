@@ -103,6 +103,7 @@ const (
 	sessionActivityStartupGrace       = 45 * time.Second
 	sessionRestartContinuePromptDelay = 500 * time.Millisecond
 	sessionRestartContinuePrompt      = "Continue your prior task. Start by running `az prime` if you need to refresh issue context, then keep working from the existing conversation without waiting for further instruction."
+	codexLaunchPromptArgMaxBytes      = 24 * 1024
 )
 
 func reportSessionStartProgress(ctx context.Context, phase, message string, percent int) {
@@ -894,7 +895,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title, parentIssueID != "", parentIssueID)
 		}
 		launchPrompt := initialPrompt
-		if d.sessionLaunchNeedsPostLaunchPrompt(cmd.ProjectID) {
+		if d.sessionLaunchNeedsPostLaunchPrompt(cmd.ProjectID, initialPrompt) {
 			launchPrompt = ""
 			postLaunchPrompt = initialPrompt
 		}
@@ -1746,7 +1747,7 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 	}
 	launchPrompt := prompt
 	postLaunchPrompt := ""
-	if d.sessionLaunchNeedsPostLaunchPrompt(projectID) {
+	if d.sessionLaunchNeedsPostLaunchPrompt(projectID, prompt) {
 		launchPrompt = ""
 		postLaunchPrompt = prompt
 	}
@@ -3666,12 +3667,17 @@ func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string,
 }
 
 func (d *Daemon) sessionRestartNeedsPostLaunchPrompt(projectID string) bool {
-	return d.sessionLaunchNeedsPostLaunchPrompt(projectID)
-}
-
-func (d *Daemon) sessionLaunchNeedsPostLaunchPrompt(projectID string) bool {
 	tool := strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
 	return strings.EqualFold(tool, "codex")
+}
+
+func (d *Daemon) sessionLaunchNeedsPostLaunchPrompt(projectID, prompt string) bool {
+	tool := strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
+	return strings.EqualFold(tool, "codex") && !codexLaunchPromptArgAllowed(prompt)
+}
+
+func codexLaunchPromptArgAllowed(prompt string) bool {
+	return len(prompt) <= codexLaunchPromptArgMaxBytes
 }
 
 func (d *Daemon) buildClaudeContinueCommand(projectID, issueID string, yolo bool, prompt string) string {
@@ -4346,13 +4352,14 @@ func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo 
 		}
 	}
 	if initialPrompt != "" {
-		switch strings.ToLower(tool) {
-		case "codex":
-			return strings.Join(parts, " ")
-		}
 		promptAssignment := initialPromptShellAssignment(initialPrompt)
 		promptArg := `"$` + initialPromptShellVariable + `"`
 		switch strings.ToLower(tool) {
+		case "codex":
+			if !codexLaunchPromptArgAllowed(initialPrompt) {
+				return strings.Join(parts, " ")
+			}
+			parts = append(parts, "--", promptArg)
 		case "opencode":
 			parts = append(parts, "--prompt", promptArg)
 		default:
