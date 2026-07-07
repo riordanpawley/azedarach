@@ -29,12 +29,16 @@ import (
 )
 
 type testTmuxRunner struct {
-	mu              sync.Mutex
-	sessions        map[string]bool
-	panes           map[string][]string
-	newSessionCalls int
-	killEntered     chan struct{}
-	killRelease     chan struct{}
+	mu                  sync.Mutex
+	sessions            map[string]bool
+	panes               map[string][]string
+	newSessionCalls     int
+	listSessionsCalls   int
+	listPanesCalls      int
+	listSessionsEntered chan struct{}
+	listSessionsRelease chan struct{}
+	killEntered         chan struct{}
+	killRelease         chan struct{}
 }
 
 func newTestTmuxRunner(initialSession string) *testTmuxRunner {
@@ -76,12 +80,27 @@ func (r *testTmuxRunner) Run(_ context.Context, args ...string) (string, error) 
 		r.mu.Lock()
 		return "", nil
 	case "list-sessions":
+		r.listSessionsCalls++
 		names := make([]string, 0, len(r.sessions))
 		for name := range r.sessions {
 			names = append(names, name)
 		}
+		entered, release := r.listSessionsEntered, r.listSessionsRelease
+		if entered != nil {
+			select {
+			case <-entered:
+			default:
+				close(entered)
+			}
+		}
+		if release != nil {
+			r.mu.Unlock()
+			<-release
+			r.mu.Lock()
+		}
 		return strings.Join(names, "\n"), nil
 	case "list-panes":
+		r.listPanesCalls++
 		lines := make([]string, 0, len(r.sessions))
 		for name := range r.sessions {
 			panes := r.panes[name]
@@ -109,6 +128,12 @@ func (r *testTmuxRunner) hasSession(name string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.sessions[name]
+}
+
+func (r *testTmuxRunner) listSessionCallCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.listSessionsCalls
 }
 
 type testGitRunner struct {

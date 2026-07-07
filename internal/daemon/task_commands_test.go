@@ -637,6 +637,196 @@ func TestHandleTaskListRefreshesMissingTmuxSessionBeforeReportingActive(t *testi
 	}
 }
 
+func TestHandleTaskListThrottlesSessionRuntimeRefresh(t *testing.T) {
+	originalNow := timeNow
+	now := time.Date(2026, time.July, 7, 3, 30, 0, 0, time.UTC)
+	timeNow = func() time.Time { return now }
+	t.Cleanup(func() { timeNow = originalNow })
+
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	projectID := "proj-task-list-refresh-throttle"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Task list refresh throttle",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	sessionID := naming.CanonicalSessionID(projectID, taskID)
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            sessionID,
+		IssueID:       taskID,
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateAttached,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed projected session: %v", err)
+	}
+
+	tmuxRunner := &testTmuxRunner{sessions: map[string]bool{}}
+	d := &Daemon{
+		cfg:          Config{RepoDir: repoDir, Logger: logger},
+		issues:       issuesClient,
+		sessionStore: daemonstate.NewStore(),
+		tmux:         tmux.NewClient(tmuxRunner, logger),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-list-refresh-throttle",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+	}
+	if resp, err := d.handleTaskList(ctx, req); err != nil {
+		t.Fatalf("first handleTaskList error: %v", err)
+	} else if !resp.OK {
+		t.Fatalf("first task.list response = %+v", resp.Error)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 1 {
+		t.Fatalf("tmux list-sessions calls after first task.list = %d, want 1", got)
+	}
+
+	now = now.Add(time.Second)
+	req.RequestID = "req-task-list-refresh-throttle-second"
+	if resp, err := d.handleTaskList(ctx, req); err != nil {
+		t.Fatalf("second handleTaskList error: %v", err)
+	} else if !resp.OK {
+		t.Fatalf("second task.list response = %+v", resp.Error)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 1 {
+		t.Fatalf("tmux list-sessions calls after throttled task.list = %d, want 1", got)
+	}
+
+	now = now.Add(taskListRuntimeRefreshTTL + time.Millisecond)
+	req.RequestID = "req-task-list-refresh-throttle-third"
+	if resp, err := d.handleTaskList(ctx, req); err != nil {
+		t.Fatalf("third handleTaskList error: %v", err)
+	} else if !resp.OK {
+		t.Fatalf("third task.list response = %+v", resp.Error)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 2 {
+		t.Fatalf("tmux list-sessions calls after throttle expiry = %d, want 2", got)
+	}
+}
+
+func TestTaskListSessionRuntimeRefreshSharesInFlightRefresh(t *testing.T) {
+	originalNow := timeNow
+	now := time.Date(2026, time.July, 7, 3, 45, 0, 0, time.UTC)
+	timeNow = func() time.Time { return now }
+	t.Cleanup(func() { timeNow = originalNow })
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	const (
+		projectID = "proj-task-list-refresh-shared"
+		issueID   = "az-1"
+	)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            naming.CanonicalSessionID(projectID, issueID),
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateAttached,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed projected session: %v", err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	tmuxRunner := &testTmuxRunner{
+		sessions:            map[string]bool{},
+		listSessionsEntered: entered,
+		listSessionsRelease: release,
+		killEntered:         make(chan struct{}),
+		killRelease:         make(chan struct{}),
+	}
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore: daemonstate.NewStore(),
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+	}
+	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+
+	type result struct {
+		runtimeAt time.Time
+		refreshed bool
+		err       error
+	}
+	firstCh := make(chan result, 1)
+	go func() {
+		runtimeAt, refreshed, err := d.refreshTaskListSessionRuntimeState(ctx, projectID)
+		firstCh <- result{runtimeAt: runtimeAt, refreshed: refreshed, err: err}
+	}()
+
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for first refresh to enter tmux: %v", ctx.Err())
+	}
+
+	secondCh := make(chan result, 1)
+	go func() {
+		runtimeAt, refreshed, err := d.refreshTaskListSessionRuntimeState(ctx, projectID)
+		secondCh <- result{runtimeAt: runtimeAt, refreshed: refreshed, err: err}
+	}()
+	close(release)
+
+	first := <-firstCh
+	if first.err != nil {
+		t.Fatalf("first refresh error: %v", first.err)
+	}
+	if !first.refreshed {
+		t.Fatal("first refresh refreshed = false, want true")
+	}
+	second := <-secondCh
+	if second.err != nil {
+		t.Fatalf("second refresh error: %v", second.err)
+	}
+	if second.refreshed {
+		t.Fatal("second refresh refreshed = true, want shared in-flight result")
+	}
+	if !second.runtimeAt.Equal(first.runtimeAt) {
+		t.Fatalf("second runtimeAt = %v, want shared %v", second.runtimeAt, first.runtimeAt)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 1 {
+		t.Fatalf("tmux list-sessions calls = %d, want one shared refresh", got)
+	}
+}
+
 func TestHandleTaskListIgnoresAgentPaneStatusForTaskLifecycle(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

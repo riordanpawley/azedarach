@@ -155,6 +155,9 @@ type Daemon struct {
 	worktreeStateRefreshMu             sync.Mutex
 	worktreeStateRefreshing            map[string]bool
 	worktreeStateLastRefresh           map[string]time.Time
+	taskListRuntimeRefreshMu           sync.Mutex
+	taskListRuntimeLastRefresh         map[string]time.Time
+	taskListRuntimeRefreshes           map[string]*taskListRuntimeRefresh
 	taskListSnapshotCacheMu            sync.Mutex
 	taskListSnapshotCache              map[string]taskListSnapshotCacheEntry
 	taskListSnapshotLoadMu             sync.Mutex
@@ -290,6 +293,8 @@ func New(cfg Config) *Daemon {
 		sessionStateLastRefresh:            map[string]time.Time{},
 		worktreeStateRefreshing:            map[string]bool{},
 		worktreeStateLastRefresh:           map[string]time.Time{},
+		taskListRuntimeLastRefresh:         map[string]time.Time{},
+		taskListRuntimeRefreshes:           map[string]*taskListRuntimeRefresh{},
 		taskListSnapshotCache:              map[string]taskListSnapshotCacheEntry{},
 		revision:                           map[string]uint64{},
 		shutdownReqCh:                      make(chan struct{}),
