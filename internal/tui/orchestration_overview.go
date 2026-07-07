@@ -74,12 +74,8 @@ func (m Model) loadOrchestrationOverviewCmd() tea.Cmd {
 				entry.Tasks, entryHiddenTasks = sessionOverviewTasks(snapshot.Tasks)
 				entry.MailByTask = overviewLatestMailByTask(ctx, client, project.path, snapshot.Tasks)
 				entry.Observations, entry.ObservationErrs = overviewWorkerObservations(ctx, client, snapshot.Tasks)
-				visibleBeforeObservations := len(entry.Tasks)
 				entry.Tasks = overviewMergeObservationTasks(entry.Tasks, snapshot.Tasks, entry.Observations)
-				visibleFromObservations := len(entry.Tasks) - visibleBeforeObservations
-				if visibleFromObservations > 0 {
-					entryHiddenTasks = max(0, entryHiddenTasks-visibleFromObservations)
-				}
+				entry.Observations = overviewSessionObservations(entry.Observations, entry.Tasks)
 				hiddenTasks += entryHiddenTasks
 				entry.Revision = snapshot.Revision
 				entry.LastCheckedAt = snapshot.LastCheckedAt
@@ -243,7 +239,7 @@ func sessionOverviewTasks(tasks []domain.Task) ([]domain.Task, int) {
 		if task.Status == domain.StatusDone {
 			continue
 		}
-		if task.Session == nil && !task.HasTmuxSession {
+		if !overviewTaskHasRuntimeSession(task) {
 			hidden++
 			continue
 		}
@@ -262,6 +258,10 @@ func sessionOverviewTasks(tasks []domain.Task) ([]domain.Task, int) {
 		return strings.ToLower(active[i].ID.String()) < strings.ToLower(active[j].ID.String())
 	})
 	return active, hidden
+}
+
+func overviewTaskHasRuntimeSession(task domain.Task) bool {
+	return task.Session != nil || task.HasTmuxSession
 }
 
 func overviewWorkerObservations(ctx context.Context, client *daemonclient.Client, tasks []domain.Task) ([]domain.WorkerObservation, []string) {
@@ -333,15 +333,7 @@ func overviewObservationIssueIDs(tasks []domain.Task) []string {
 }
 
 func overviewObservationCandidate(task domain.Task) bool {
-	if task.HasTmuxSession || task.HasWorktree {
-		return true
-	}
-	switch task.Status {
-	case domain.StatusInProgress, domain.StatusInReview:
-		return true
-	default:
-		return false
-	}
+	return overviewTaskHasRuntimeSession(task)
 }
 
 func overviewMergeObservationTasks(active, source []domain.Task, observations []domain.WorkerObservation) []domain.Task {
@@ -371,19 +363,32 @@ func overviewMergeObservationTasks(active, source []domain.Task, observations []
 			continue
 		}
 		if task, ok := byID[issueID]; ok {
-			merged = append(merged, task)
-		} else if parsed, err := naming.ParseIssueID(issueID); err == nil {
-			merged = append(merged, domain.Task{
-				ID:       parsed,
-				Title:    issueID,
-				Status:   overviewStatusFromObservation(observation.State),
-				Priority: domain.P2,
-				Type:     domain.TypeTask,
-			})
+			if overviewTaskHasRuntimeSession(task) {
+				merged = append(merged, task)
+			}
 		}
 		seen[issueID] = struct{}{}
 	}
 	return merged
+}
+
+func overviewSessionObservations(observations []domain.WorkerObservation, tasks []domain.Task) []domain.WorkerObservation {
+	if len(observations) == 0 {
+		return nil
+	}
+	taskByID := overviewTasksByID(tasks)
+	out := make([]domain.WorkerObservation, 0, len(observations))
+	for _, observation := range observations {
+		task, ok := taskByID[strings.TrimSpace(observation.IssueID)]
+		if !ok || !overviewTaskHasRuntimeSession(task) {
+			continue
+		}
+		out = append(out, observation)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func overviewStatusFromObservation(state domain.WorkerObservationState) domain.Status {
@@ -540,6 +545,16 @@ func sessionOverviewTasksNoHidden(tasks []domain.Task) []domain.Task {
 	return active
 }
 
+func overviewRuntimeSessionTasks(tasks []domain.Task) []domain.Task {
+	active := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if overviewTaskHasRuntimeSession(task) {
+			active = append(active, task)
+		}
+	}
+	return active
+}
+
 func overviewStatusRank(status domain.Status) int {
 	switch status {
 	case domain.StatusInProgress:
@@ -664,7 +679,7 @@ func openOverviewTaskWorkspace(m Model, taskRef orchestrationOverviewTaskRef) (M
 
 func (m Model) overviewProjectsForInteraction() []orchestrationProjectOverview {
 	if len(m.orchestrationOverview) > 0 {
-		return m.orchestrationOverview
+		return overviewVisibleProjects(m.orchestrationOverview)
 	}
 	if !m.orchestrationOverviewLoadedAt.IsZero() {
 		return nil
@@ -691,10 +706,11 @@ func orchestrationOverviewTaskRefs(projects []orchestrationProjectOverview) []or
 	count := orchestrationOverviewTaskCount(projects)
 	taskRefs := make([]orchestrationOverviewTaskRef, 0, count)
 	for _, project := range projects {
-		if len(project.Observations) > 0 {
+		sessionObservations := overviewSessionObservations(project.Observations, project.Tasks)
+		if len(sessionObservations) > 0 {
 			taskByID := overviewTasksByID(project.Tasks)
 			for _, group := range overviewObservationGroupOrder {
-				for _, observation := range overviewObservationsInGroup(project.Observations, group.name) {
+				for _, observation := range overviewObservationsInGroup(sessionObservations, group.name) {
 					taskRefs = append(taskRefs, orchestrationOverviewTaskRef{
 						Project: project,
 						Task:    taskByID[strings.TrimSpace(observation.IssueID)],
@@ -716,8 +732,9 @@ func orchestrationOverviewTaskRefs(projects []orchestrationProjectOverview) []or
 func orchestrationOverviewTaskCount(projects []orchestrationProjectOverview) int {
 	count := 0
 	for _, project := range projects {
-		if len(project.Observations) > 0 {
-			count += len(project.Observations)
+		sessionObservations := overviewSessionObservations(project.Observations, project.Tasks)
+		if len(sessionObservations) > 0 {
+			count += len(sessionObservations)
 			continue
 		}
 		count += len(project.Tasks)
@@ -753,6 +770,10 @@ func (m Model) renderOrchestrationOverview() string {
 			projects[0].Name = "current"
 		}
 	}
+	projects = overviewVisibleProjects(projects)
+	if len(projects) == 0 {
+		return m.renderEmptyOrchestrationOverview(width, height)
+	}
 
 	header := m.renderOverviewHeader(projects, width, counts)
 	headerHeight := lipgloss.Height(header)
@@ -775,6 +796,22 @@ func (m Model) renderOrchestrationOverview() string {
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, header, cards)
 	return lipgloss.NewStyle().Width(width).Height(height).MaxHeight(height).Render(content)
+}
+
+func overviewVisibleProjects(projects []orchestrationProjectOverview) []orchestrationProjectOverview {
+	if len(projects) == 0 {
+		return nil
+	}
+	out := make([]orchestrationProjectOverview, 0, len(projects))
+	for _, project := range projects {
+		project.Tasks = overviewRuntimeSessionTasks(project.Tasks)
+		project.Observations = overviewSessionObservations(project.Observations, project.Tasks)
+		if len(project.Tasks) == 0 && len(project.Observations) == 0 {
+			continue
+		}
+		out = append(out, project)
+	}
+	return out
 }
 
 func (m Model) renderOverviewHiddenProjectsLine(width int) string {
@@ -948,12 +985,10 @@ func overviewColumnCount(projects []orchestrationProjectOverview, width int) int
 
 func overviewBaseCardWidth(width int) int {
 	switch {
-	case width >= 150:
-		return 50
-	case width >= 110:
-		return 44
+	case width >= 120:
+		return 60
 	case width >= 80:
-		return 40
+		return 44
 	default:
 		return width
 	}
@@ -1045,10 +1080,11 @@ func (m Model) renderOverviewProjectCard(project orchestrationProjectOverview, w
 		lines = append(lines, m.styles.StatusHint.Render(ansi.Truncate(warning, innerWidth, "...")))
 		remaining = innerHeight - len(lines)
 	}
-	if len(project.Observations) > 0 {
+	sessionObservations := overviewSessionObservations(project.Observations, project.Tasks)
+	if len(sessionObservations) > 0 {
 		taskByID := overviewTasksByID(project.Tasks)
 		for _, group := range overviewObservationGroupOrder {
-			groupObservations := overviewObservationsInGroup(project.Observations, group.name)
+			groupObservations := overviewObservationsInGroup(sessionObservations, group.name)
 			if len(groupObservations) == 0 || remaining <= 0 {
 				continue
 			}
@@ -1110,7 +1146,7 @@ func overviewTasksByID(tasks []domain.Task) map[string]domain.Task {
 func overviewProjectSessionCount(project orchestrationProjectOverview) int {
 	count := 0
 	for _, task := range project.Tasks {
-		if task.Session != nil || task.HasTmuxSession {
+		if overviewTaskHasRuntimeSession(task) {
 			count++
 		}
 	}

@@ -495,13 +495,36 @@ func TestView_OrchestrationOverviewGroupsObservationRowsByActionability(t *testi
 		GitDeletions:          1,
 	}
 	review := domain.Task{
-		ID:     naming.IssueID("ctp"),
-		Title:  "Worker observation projection",
-		Status: domain.StatusInReview,
+		ID:             naming.IssueID("ctp"),
+		Title:          "Worker observation projection",
+		Status:         domain.StatusInReview,
+		Session:        &domain.Session{IssueID: naming.IssueID("ctp"), State: domain.SessionIdle, Activity: "idle"},
+		HasTmuxSession: true,
+	}
+	blocked := domain.Task{
+		ID:             naming.IssueID("ctf"),
+		Title:          "Blocked dependency",
+		Status:         domain.StatusInProgress,
+		Session:        &domain.Session{IssueID: naming.IssueID("ctf"), State: domain.SessionIdle, Activity: "idle"},
+		HasTmuxSession: true,
+	}
+	working := domain.Task{
+		ID:             naming.IssueID("ctw"),
+		Title:          "Busy worker",
+		Status:         domain.StatusInProgress,
+		Session:        &domain.Session{IssueID: naming.IssueID("ctw"), State: domain.SessionBusy, Activity: "busy"},
+		HasTmuxSession: true,
+	}
+	cleanup := domain.Task{
+		ID:             naming.IssueID("ctx"),
+		Title:          "Closed worker cleanup",
+		Status:         domain.StatusDone,
+		Session:        &domain.Session{IssueID: naming.IssueID("ctx"), State: domain.SessionIdle, Activity: "idle"},
+		HasTmuxSession: true,
 	}
 	m.orchestrationOverview = []orchestrationProjectOverview{{
 		Name:  "azedarach",
-		Tasks: []domain.Task{waiting, review},
+		Tasks: []domain.Task{waiting, review, blocked, working, cleanup},
 		Observations: []domain.WorkerObservation{
 			{
 				IssueID: "ctn",
@@ -551,6 +574,52 @@ func TestView_OrchestrationOverviewGroupsObservationRowsByActionability(t *testi
 		if !strings.Contains(view, want) {
 			t.Fatalf("overview missing observation row detail %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestView_OrchestrationOverviewHidesRowsWithoutRuntimeSessions(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+	m.height = 24
+	m.loading = false
+	m.viewMode = ViewModeOverview
+	visible := domain.Task{
+		ID:             naming.IssueID("ctn"),
+		Title:          "Visible worker",
+		Status:         domain.StatusInProgress,
+		Session:        &domain.Session{IssueID: naming.IssueID("ctn"), State: domain.SessionBusy, Activity: "busy"},
+		HasTmuxSession: true,
+	}
+	hidden := domain.Task{
+		ID:     naming.IssueID("ctp"),
+		Title:  "Review without runtime",
+		Status: domain.StatusInReview,
+	}
+	m.orchestrationOverview = []orchestrationProjectOverview{{
+		Name:  "azedarach",
+		Tasks: []domain.Task{visible, hidden},
+		Observations: []domain.WorkerObservation{
+			{IssueID: "ctn", State: domain.WorkerObservationWorking, Reason: "active session is present"},
+			{IssueID: "ctp", State: domain.WorkerObservationReviewReady, Reason: "issue is in_review"},
+			{IssueID: "ctq", State: domain.WorkerObservationRunnable, Reason: "leaf worker has no blockers"},
+		},
+	}}
+
+	view := ansi.Strip(m.View())
+	for _, want := range []string{"1 projects", "1 sessions", "ctn", "active session is present"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("overview missing visible runtime row %q:\n%s", want, view)
+		}
+	}
+	for _, notWant := range []string{"ctp", "ctq", "Review Ready", "runnable", "issue is in_review", "leaf worker has no blockers"} {
+		if strings.Contains(view, notWant) {
+			t.Fatalf("overview should hide non-session row %q:\n%s", notWant, view)
+		}
+	}
+
+	refs := orchestrationOverviewTaskRefs(m.overviewProjectsForInteraction())
+	if len(refs) != 1 || refs[0].Task.ID != visible.ID {
+		t.Fatalf("overview refs = %+v, want only %s", refs, visible.ID)
 	}
 }
 
@@ -875,6 +944,19 @@ func TestView_OrchestrationOverviewEmptyAfterLoadedSnapshot(t *testing.T) {
 	}
 }
 
+func TestView_OrchestrationOverviewColumnCountAvoidsCrampedThreeColumnLayout(t *testing.T) {
+	projects := []orchestrationProjectOverview{{Name: "one"}, {Name: "two"}, {Name: "three"}}
+	if got := overviewColumnCount(projects, 153); got != 2 {
+		t.Fatalf("columns at screenshot-width viewport = %d, want 2", got)
+	}
+	if got := overviewColumnCount(projects, 179); got != 2 {
+		t.Fatalf("columns just below wide viewport = %d, want 2", got)
+	}
+	if got := overviewColumnCount(projects, 180); got != 3 {
+		t.Fatalf("columns at wide viewport = %d, want 3", got)
+	}
+}
+
 func TestView_OrchestrationOverviewFitsDefaultAndNarrowViewports(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
@@ -891,9 +973,13 @@ func TestView_OrchestrationOverviewFitsDefaultAndNarrowViewports(t *testing.T) {
 			m.height = tt.height
 			m.loading = false
 			m.viewMode = ViewModeOverview
+			tasks := append([]domain.Task(nil), m.tasks...)
+			for i := range tasks {
+				tasks[i].HasTmuxSession = true
+			}
 			m.orchestrationOverview = []orchestrationProjectOverview{
-				{Name: "alpha", Tasks: m.tasks[:2]},
-				{Name: "beta", Tasks: m.tasks[2:]},
+				{Name: "alpha", Tasks: tasks[:2]},
+				{Name: "beta", Tasks: tasks[2:]},
 			}
 
 			view := m.View()
