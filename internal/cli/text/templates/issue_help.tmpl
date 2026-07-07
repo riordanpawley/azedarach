@@ -5,7 +5,7 @@ Commands:
   search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)  Search title, description, notes, design, acceptance, labels, and implementations
   get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]  Show a single issue by ID
   events [--project <project-id>] [--id <issue-id>] [--json] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]  List an issue's durable observation event stream
-  context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--json] [<issue-id>]  Show compact repeated local failure/overlap risk context
+  context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--summary|--full] [--json] [<issue-id>]  Show compact repeated local failure/overlap risk context
   get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]  Fetch many issues in requested order
   check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Alias for get
   doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Run integrity checks for one issue
