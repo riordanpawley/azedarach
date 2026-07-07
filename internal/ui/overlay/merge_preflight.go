@@ -147,7 +147,7 @@ func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "i", "I":
-			if strings.TrimSpace(m.sourceWorktree) == "" || strings.TrimSpace(m.targetWorktree) == "" {
+			if !m.canIgnoreSourceDirty() {
 				return m, nil
 			}
 			return m, func() tea.Msg {
@@ -167,7 +167,7 @@ func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "g", "G":
-			if strings.TrimSpace(m.sourceID) == "" || len(m.conflictFiles) == 0 {
+			if !m.canAgentMerge() {
 				return m, nil
 			}
 			return m, func() tea.Msg {
@@ -378,11 +378,13 @@ func (m *MergePreflightOverlay) sizeHeight() int {
 func (m *MergePreflightOverlay) actionBindings() []keybinds.Binding {
 	bindings := []keybinds.Binding{
 		{Key: "R", Description: "refresh"},
-		{Key: "I", Description: "ignore source dirty"},
 		{Key: "c/d", Description: "commit/discard source"},
 		{Key: "C/D", Description: "commit/discard target"},
 	}
-	if len(m.conflictFiles) > 0 {
+	if m.canIgnoreSourceDirty() {
+		bindings = append(bindings, keybinds.Binding{Key: "I", Description: "ignore source dirty"})
+	}
+	if m.canAgentMerge() {
 		bindings = append(bindings, keybinds.Binding{Key: "G", Description: "agent merge"})
 	}
 	if m.canAbortTarget {
@@ -390,4 +392,18 @@ func (m *MergePreflightOverlay) actionBindings() []keybinds.Binding {
 	}
 	bindings = append(bindings, keybinds.Binding{Key: "Esc/q/Enter", Description: "close"})
 	return bindings
+}
+
+func (m *MergePreflightOverlay) canAgentMerge() bool {
+	return strings.TrimSpace(m.sourceID) != "" &&
+		len(m.conflictFiles) > 0 &&
+		len(m.sourceFiles) == 0 &&
+		len(m.targetFiles) == 0
+}
+
+func (m *MergePreflightOverlay) canIgnoreSourceDirty() bool {
+	return strings.TrimSpace(m.sourceWorktree) != "" &&
+		strings.TrimSpace(m.targetWorktree) != "" &&
+		len(m.sourceFiles) > 0 &&
+		len(m.targetFiles) == 0
 }

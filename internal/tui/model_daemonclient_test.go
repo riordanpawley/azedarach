@@ -2619,7 +2619,7 @@ func TestCloseFailureAIMergeUsesFailedOperationProjectAfterProjectSwitch(t *test
 	}
 }
 
-func TestCloseFailureAIMergePreflightRefreshUsesFailedOperationProjectAfterProjectSwitch(t *testing.T) {
+func TestCloseFailureDirtyStateDoesNotOfferAIMergeAfterProjectSwitch(t *testing.T) {
 	var requestProjects []string
 	jsonResponse := func(req protocol.RequestEnvelope, body any) (protocol.ResponseEnvelope, error) {
 		respBody, err := json.Marshal(body)
@@ -2712,42 +2712,12 @@ func TestCloseFailureAIMergePreflightRefreshUsesFailedOperationProjectAfterProje
 	opened.repoDir = "/repo-b"
 	opened.tasks = []domain.Task{{ID: "az-other", Status: domain.StatusOpen}}
 
-	afterKeyAny, selectionCmd := opened.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
-	if selectionCmd == nil {
-		t.Fatal("expected AI merge selection command")
+	_, selectionCmd := opened.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if selectionCmd != nil {
+		t.Fatal("unexpected AI merge selection command for dirty-state close failure")
 	}
-	selection := selectionCmd().(overlay.SelectionMsg)
-	queuedAny, launchCmd := afterKeyAny.(Model).Update(selection)
-	if launchCmd == nil {
-		t.Fatal("expected AI merge preflight command")
-	}
-	preflightMsg := launchCmd()
-	if _, ok := preflightMsg.(mergePreflightFailureMsg); !ok {
-		t.Fatalf("AI merge result = %T, want mergePreflightFailureMsg", preflightMsg)
-	}
-	preflightAny, cmd := queuedAny.(Model).Update(preflightMsg)
-	if cmd != nil {
-		t.Fatal("unexpected command while opening preflight overlay")
-	}
-	preflightModel := preflightAny.(Model)
-	if _, ok := preflightModel.overlayStack.Current().(*overlay.MergePreflightOverlay); !ok {
-		t.Fatalf("overlay = %T, want MergePreflightOverlay", preflightModel.overlayStack.Current())
-	}
-
-	afterRefreshKeyAny, refreshSelectionCmd := preflightModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
-	if refreshSelectionCmd == nil {
-		t.Fatal("expected preflight refresh selection")
-	}
-	refreshSelection := refreshSelectionCmd().(overlay.SelectionMsg)
-	_, refreshCmd := afterRefreshKeyAny.(Model).Update(refreshSelection)
-	if refreshCmd == nil {
-		t.Fatal("expected preflight refresh command")
-	}
-	_ = refreshCmd()
-	for _, got := range requestProjects {
-		if got != "project-a" {
-			t.Fatalf("request projects = %v, want all project-a", requestProjects)
-		}
+	if len(requestProjects) != 0 {
+		t.Fatalf("request projects = %v, want no daemon requests", requestProjects)
 	}
 }
 
@@ -2894,7 +2864,7 @@ func TestCloseFailureAIMergeActionLaunchesAgentMerge(t *testing.T) {
 	}
 }
 
-func TestCloseFailureAIMergeActionOpensPreflightForDirtyTarget(t *testing.T) {
+func TestCloseFailureDirtyTargetDoesNotOfferAIMergeAction(t *testing.T) {
 	jsonResponse := func(req protocol.RequestEnvelope, body any) (protocol.ResponseEnvelope, error) {
 		respBody, err := json.Marshal(body)
 		if err != nil {
@@ -2979,46 +2949,12 @@ func TestCloseFailureAIMergeActionOpensPreflightForDirtyTarget(t *testing.T) {
 		},
 	))
 
-	afterKeyAny, selectionCmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
-	if selectionCmd == nil {
-		t.Fatal("expected AI merge selection command")
+	_, selectionCmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if selectionCmd != nil {
+		t.Fatal("unexpected AI merge selection command for dirty target")
 	}
-	selection, ok := selectionCmd().(overlay.SelectionMsg)
-	if !ok {
-		t.Fatalf("selection = %T, want SelectionMsg", selectionCmd())
-	}
-	queuedAny, launchCmd := afterKeyAny.(Model).Update(selection)
-	if launchCmd == nil {
-		t.Fatal("expected AI merge preflight command")
-	}
-
-	msg := launchCmd()
-	preflight, ok := msg.(mergePreflightFailureMsg)
-	if !ok {
-		t.Fatalf("AI merge dirty target result = %T, want mergePreflightFailureMsg", msg)
-	}
-	if preflight.sourceID != "az-4" || preflight.targetID != mergeBaseTargetID {
-		t.Fatalf("preflight target = %+v, want az-4 -> base", preflight)
-	}
-	if len(preflight.conflictFiles) != 0 {
-		t.Fatalf("preflight conflict files = %+v, want none for dirty target", preflight.conflictFiles)
-	}
-	if len(preflight.targetFiles) != 1 || preflight.targetFiles[0] != "README.md" {
-		t.Fatalf("preflight target files = %+v, want README.md", preflight.targetFiles)
-	}
-
-	updatedAny, cmd := queuedAny.(Model).Update(preflight)
-	if cmd != nil {
-		t.Fatal("unexpected command opening merge preflight overlay")
-	}
-	updated := updatedAny.(Model)
-	if _, ok := updated.overlayStack.Current().(*overlay.MergePreflightOverlay); !ok {
-		t.Fatalf("overlay = %T, want MergePreflightOverlay", updated.overlayStack.Current())
-	}
-	for _, command := range transport.requests {
-		if command == daemonclient.CommandSessionResolveConflict {
-			t.Fatalf("dirty target should not launch agent; requests = %v", transport.requests)
-		}
+	if len(transport.requests) != 0 {
+		t.Fatalf("dirty target should not issue daemon requests; requests = %v", transport.requests)
 	}
 }
 

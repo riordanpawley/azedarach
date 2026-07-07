@@ -1,13 +1,14 @@
 package overlay
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestCloseFailureDialogActions(t *testing.T) {
-	dialog := NewCloseFailureDialog("az-1", "dirty worktree", CloseFailureDialogOptions{
+	dialog := NewCloseFailureDialog("az-1", "merge preflight would conflict in README.md", CloseFailureDialogOptions{
 		PreviousStatus:          "in_review",
 		TargetStatus:            "closed",
 		CloseCleanChildren:      true,
@@ -50,5 +51,27 @@ func TestCloseFailureDialogActions(t *testing.T) {
 	action = selection.Value.(CloseFailureActionMsg)
 	if action.Action != CloseFailureActionAIMerge || action.TaskID != "az-1" {
 		t.Fatalf("AI merge action = %+v, want ai_merge for az-1", action)
+	}
+}
+
+func TestCloseFailureDialogDoesNotOfferAIMergeForDirtyState(t *testing.T) {
+	dialog := NewCloseFailureDialog("az-1", "base worktree has local changes: README.md", CloseFailureDialogOptions{
+		PreviousStatus: "in_review",
+		TargetStatus:   "closed",
+		AllowAIMerge:   true,
+	})
+
+	_, cmd := dialog.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if cmd != nil {
+		t.Fatal("unexpected AI merge action for dirty-state close failure")
+	}
+	for _, binding := range dialog.StatusBindings() {
+		if binding.Key == "a" {
+			t.Fatalf("unexpected AI merge status binding: %+v", binding)
+		}
+	}
+	view := dialog.View()
+	if strings.Contains(view, "AI merge") {
+		t.Fatalf("view exposes AI merge for dirty-state failure: %q", view)
 	}
 }

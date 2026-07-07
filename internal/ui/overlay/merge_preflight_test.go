@@ -65,10 +65,33 @@ func TestMergePreflightOverlayIgnoreSourceDirtySelection(t *testing.T) {
 		t.Fatalf("selection value = %T, want MergePreflightRefreshSelection", selection.Value)
 	}
 	if !value.IgnoreSourceDirty {
-		t.Fatalf("ignore source dirty = false, want true")
+		t.Fatal("ignore source dirty = false, want true")
 	}
 	if !value.StopTargetBeforeMerge {
-		t.Fatalf("stop target before merge = false, want true")
+		t.Fatal("stop target before merge = false, want true")
+	}
+	var sawIgnore bool
+	for _, binding := range o.actionBindings() {
+		if strings.Contains(strings.ToLower(binding.Description), "ignore source dirty") {
+			sawIgnore = true
+			break
+		}
+	}
+	if !sawIgnore {
+		t.Fatal("missing ignore source dirty binding")
+	}
+}
+
+func TestMergePreflightOverlayDoesNotOfferIgnoreSourceDirtyWhenTargetDirty(t *testing.T) {
+	o := NewMergePreflightOverlay("az-1", "base", "/tmp/az-1", ".", []string{"Source and target are not clean"}, []string{"foo.go"}, []string{"bar.go"}, nil, "main", "az/az-1", true, true)
+	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if cmd != nil {
+		t.Fatal("unexpected ignore source dirty command when target is dirty")
+	}
+	for _, binding := range o.actionBindings() {
+		if strings.Contains(strings.ToLower(binding.Description), "ignore") {
+			t.Fatalf("unexpected ignore action binding: %+v", binding)
+		}
 	}
 }
 
@@ -169,6 +192,31 @@ func TestMergePreflightOverlayAgentSelection(t *testing.T) {
 	}
 	if len(value.ConflictFiles) != 1 || value.ConflictFiles[0] != "conflict.go" {
 		t.Fatalf("conflict files = %+v, want conflict.go", value.ConflictFiles)
+	}
+}
+
+func TestMergePreflightOverlayDoesNotOfferAgentMergeWhenDirty(t *testing.T) {
+	tests := []struct {
+		name        string
+		sourceFiles []string
+		targetFiles []string
+	}{
+		{name: "source dirty", sourceFiles: []string{"source.go"}},
+		{name: "target dirty", targetFiles: []string{"target.go"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := NewMergePreflightOverlay("az-1", "base", "/tmp/az-1", ".", nil, tt.sourceFiles, tt.targetFiles, []string{"conflict.go"}, "main", "az/az-1", false, true)
+			_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+			if cmd != nil {
+				t.Fatal("unexpected agent merge command for dirty preflight")
+			}
+			for _, binding := range o.actionBindings() {
+				if strings.Contains(strings.ToLower(binding.Description), "agent merge") {
+					t.Fatalf("unexpected agent merge action binding: %+v", binding)
+				}
+			}
+		})
 	}
 }
 
