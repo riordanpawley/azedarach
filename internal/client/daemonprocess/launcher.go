@@ -461,15 +461,19 @@ func (l *Launcher) daemonLockOwnerAlive() bool {
 }
 
 func waitForDaemonReady(ctx context.Context, socketPath string) error {
+	waitCtx, endSpan := latencytrace.StartSpan(ctx, "dependency", "daemon_process.wait_ready")
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	if strings.TrimSpace(socketPath) == "" {
 		return nil
 	}
 	dialer := net.Dialer{Timeout: 200 * time.Millisecond}
 	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if waitCtx.Err() != nil {
+			spanErr = waitCtx.Err()
+			return waitCtx.Err()
 		}
-		conn, err := dialer.DialContext(ctx, "unix", socketPath)
+		conn, err := dialer.DialContext(waitCtx, "unix", socketPath)
 		if err == nil {
 			_ = conn.Close()
 			return nil
@@ -534,6 +538,9 @@ func gracefulShutdownViaSocketWithReason(ctx context.Context, socketPath string,
 }
 
 func waitForSocketGone(ctx context.Context, socketPath string) error {
+	waitCtx, endSpan := latencytrace.StartSpan(ctx, "dependency", "daemon_process.wait_socket_gone")
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	for {
 		if strings.TrimSpace(socketPath) == "" {
 			return nil
@@ -542,10 +549,12 @@ func waitForSocketGone(ctx context.Context, socketPath string) error {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
 			}
+			spanErr = err
 			return err
 		}
-		if ctx != nil {
-			if err := ctx.Err(); err != nil {
+		if waitCtx != nil {
+			if err := waitCtx.Err(); err != nil {
+				spanErr = err
 				return err
 			}
 		}

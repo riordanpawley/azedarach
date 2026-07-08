@@ -20,6 +20,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/observability/tracesqlite"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
@@ -245,7 +246,7 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		"file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate",
 		filepath.ToSlash(c.dbPath),
 	)
-	db, err := sql.Open("sqlite", dsn)
+	db, err := tracesqlite.Open(dsn)
 	if err != nil {
 		return nil, c.wrapError("open-db", "", err)
 	}

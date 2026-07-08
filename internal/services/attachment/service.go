@@ -15,8 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/observability/tracesqlite"
 	"github.com/riordanpawley/azedarach/internal/sqliteutil"
-	_ "modernc.org/sqlite"
 )
 
 const (
@@ -485,7 +485,7 @@ func (s *Service) openDB() (*sql.DB, error) {
 		"file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate",
 		filepath.ToSlash(s.dbPath),
 	)
-	db, err := sql.Open("sqlite", dsn)
+	db, err := tracesqlite.Open(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open attachment database: %w", err)
 	}

@@ -78,6 +78,7 @@ type Dependencies struct {
 	ProjectID      string
 	RepoDir        string
 	RuntimeRepoDir string
+	TraceContext   context.Context
 }
 
 type repeatedStringFlag []string
@@ -7716,7 +7717,7 @@ func PrimeCommand(deps *Dependencies) error {
 		return fmt.Errorf("render prime output: %w", err)
 	}
 	fmt.Print(output)
-	latencytrace.LogPhase(primeLogger(deps), "cli", "prime.total", commandStartedAt, "issue_id", issueID)
+	latencytrace.LogPhaseContext(primeTraceContext(deps), primeLogger(deps), "cli", "prime.total", commandStartedAt, "issue_id", issueID)
 	return nil
 }
 
@@ -7733,7 +7734,7 @@ func primePhase(deps *Dependencies, phase, message string) func(error) {
 		} else {
 			fmt.Fprintf(os.Stderr, "az prime: %s ready in %s\n", phase, time.Since(startedAt).Round(time.Millisecond))
 		}
-		latencytrace.LogPhase(primeLogger(deps), "cli", "prime."+phase, startedAt, attrs...)
+		latencytrace.LogPhaseContext(primeTraceContext(deps), primeLogger(deps), "cli", "prime."+phase, startedAt, attrs...)
 	}
 }
 
@@ -7742,6 +7743,13 @@ func primeLogger(deps *Dependencies) *slog.Logger {
 		return nil
 	}
 	return deps.Logger
+}
+
+func primeTraceContext(deps *Dependencies) context.Context {
+	if deps == nil || deps.TraceContext == nil {
+		return context.Background()
+	}
+	return deps.TraceContext
 }
 
 func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID string) string {

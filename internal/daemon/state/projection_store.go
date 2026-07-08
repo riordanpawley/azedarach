@@ -14,9 +14,8 @@ import (
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
-
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/observability/tracesqlite"
 	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
@@ -1464,7 +1463,7 @@ func (s *RuntimeStateStore) dbHandle() (*sql.DB, error) {
 		return nil, fmt.Errorf("ensure db directory: %w", err)
 	}
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_txlock=immediate", filepath.ToSlash(s.dbPath))
-	db, err := sql.Open("sqlite", dsn)
+	db, err := tracesqlite.Open(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}

@@ -18,8 +18,10 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
+	"github.com/riordanpawley/azedarach/internal/observability"
+	"github.com/riordanpawley/azedarach/internal/observability/tracesqlite"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
-	_ "modernc.org/sqlite"
 )
 
 const (
@@ -117,19 +119,38 @@ type operation struct {
 }
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
+	shutdown, err := observability.Configure(context.Background(), observability.Options{
+		ServiceName: "azedarach-bench-large-project-sqlite",
+	})
+	if err != nil {
+		return exitf("configure otel: %v", err)
+	}
+	defer func() {
+		_ = shutdown(context.Background())
+	}()
 	cfg := parseFlags()
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
+	ctx, endSpan := latencytrace.StartSpan(ctx, "cli", "bench_large_project_sqlite")
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 
 	result, err := runHarness(ctx, cfg)
 	if err != nil {
-		exitf("%v", err)
+		spanErr = err
+		return exitf("%v", err)
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(result); err != nil {
-		exitf("encode result: %v", err)
+		spanErr = err
+		return exitf("encode result: %v", err)
 	}
+	return 0
 }
 
 func parseFlags() harnessConfig {
@@ -162,11 +183,16 @@ func parseFlags() harnessConfig {
 }
 
 func runHarness(ctx context.Context, cfg harnessConfig) (harnessResult, error) {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "cli", "bench_large_project_sqlite.run")
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	if err := validateConfig(&cfg); err != nil {
+		spanErr = err
 		return harnessResult{}, err
 	}
-	dbPath, cleanup, err := prepareDBPath(cfg.DBPath)
+	dbPath, cleanup, err := prepareDBPath(ctx, cfg.DBPath)
 	if err != nil {
+		spanErr = err
 		return harnessResult{}, err
 	}
 	defer cleanup()
@@ -174,10 +200,12 @@ func runHarness(ctx context.Context, cfg harnessConfig) (harnessResult, error) {
 
 	started := time.Now().UTC()
 	if err := initializeStore(ctx, dbPath); err != nil {
+		spanErr = err
 		return harnessResult{}, err
 	}
-	db, err := openHarnessDB(dbPath)
+	db, err := openHarnessDB(ctx, dbPath)
 	if err != nil {
+		spanErr = err
 		return harnessResult{}, err
 	}
 	ids, fixture, err := seedFixture(ctx, db, cfg)
@@ -185,13 +213,15 @@ func runHarness(ctx context.Context, cfg harnessConfig) (harnessResult, error) {
 		err = closeErr
 	}
 	if err != nil {
+		spanErr = err
 		return harnessResult{}, err
 	}
 
 	client := issues.NewClientAtPath(dbPath, discardLogger())
 	defer client.CloseDB()
-	directDB, err := openHarnessDB(dbPath)
+	directDB, err := openHarnessDB(ctx, dbPath)
 	if err != nil {
+		spanErr = err
 		return harnessResult{}, err
 	}
 	defer directDB.Close()
@@ -237,6 +267,7 @@ func runHarness(ctx context.Context, cfg harnessConfig) (harnessResult, error) {
 	for _, op := range ops {
 		result, err := measureOperation(ctx, cfg, op)
 		if err != nil {
+			spanErr = err
 			return harnessResult{}, err
 		}
 		results = append(results, result)
@@ -244,6 +275,7 @@ func runHarness(ctx context.Context, cfg harnessConfig) (harnessResult, error) {
 
 	plans, planErr := captureQueryPlans(ctx, directDB, cfg, ids)
 	if planErr != nil {
+		spanErr = planErr
 		return harnessResult{}, planErr
 	}
 
@@ -287,22 +319,32 @@ func validateConfig(cfg *harnessConfig) error {
 	return nil
 }
 
-func prepareDBPath(path string) (string, func(), error) {
+func prepareDBPath(ctx context.Context, path string) (string, func(), error) {
+	_, endSpan := latencytrace.StartSpan(ctx, "dependency", "filesystem",
+		"dependency.name", "filesystem",
+		"dependency.operation", "prepare_db_path",
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	path = strings.TrimSpace(path)
 	if path != "" {
 		abs, err := filepath.Abs(path)
 		if err != nil {
+			spanErr = err
 			return "", nil, fmt.Errorf("resolve db path: %w", err)
 		}
 		if _, err := os.Stat(abs); err == nil {
+			spanErr = fmt.Errorf("db path already exists")
 			return "", nil, fmt.Errorf("db path already exists: %s", abs)
 		} else if !errors.Is(err, os.ErrNotExist) {
+			spanErr = err
 			return "", nil, fmt.Errorf("inspect db path: %w", err)
 		}
 		return abs, func() {}, nil
 	}
 	dir, err := os.MkdirTemp("", "az-large-sqlite-*")
 	if err != nil {
+		spanErr = err
 		return "", nil, fmt.Errorf("create temp dir: %w", err)
 	}
 	return filepath.Join(dir, "azedarach-large-project.db"), func() { _ = os.RemoveAll(dir) }, nil
@@ -315,20 +357,33 @@ func initializeStore(ctx context.Context, dbPath string) error {
 	return err
 }
 
-func openHarnessDB(dbPath string) (*sql.DB, error) {
+func openHarnessDB(ctx context.Context, dbPath string) (*sql.DB, error) {
+	_, endSpan := latencytrace.StartSpan(ctx, "dependency", "sqlite.open",
+		"dependency.name", "sqlite",
+		"dependency.operation", "open",
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate", filepath.ToSlash(dbPath))
-	db, err := sql.Open("sqlite", dsn)
+	db, err := tracesqlite.Open(dsn)
 	if err != nil {
+		spanErr = err
 		return nil, err
 	}
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
+		spanErr = err
 		return nil, err
 	}
 	return db, nil
 }
 
-func seedFixture(ctx context.Context, db *sql.DB, cfg harnessConfig) (fixtureIDs, fixtureSummary, error) {
+func seedFixture(ctx context.Context, db *sql.DB, cfg harnessConfig) (ids fixtureIDs, summary fixtureSummary, err error) {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "sqlite.seed_fixture",
+		"dependency.name", "sqlite",
+		"dependency.operation", "seed_fixture",
+	)
+	defer func() { endSpan(err) }()
 	now := "2026-01-01T00:00:00Z"
 	closeCandidateCount := cfg.Iterations
 	tx, err := db.BeginTx(ctx, nil)
@@ -378,13 +433,13 @@ func seedFixture(ctx context.Context, db *sql.DB, cfg harnessConfig) (fixtureIDs
 	}
 	defer refStmt.Close()
 
-	ids := fixtureIDs{
+	ids = fixtureIDs{
 		RootID:          rootID(0),
 		BatchIDs:        make([]string, 0, cfg.BatchSize),
 		MetadataIDs:     make([]string, 0, cfg.BatchSize),
 		CloseCandidates: make([]string, 0, closeCandidateCount),
 	}
-	summary := fixtureSummary{
+	summary = fixtureSummary{
 		DBPath:          cfg.DBPath,
 		ProjectID:       cfg.ProjectID,
 		RootCount:       cfg.RootCount,
@@ -490,7 +545,14 @@ func seedFixture(ctx context.Context, db *sql.DB, cfg harnessConfig) (fixtureIDs
 }
 
 func rebuildGraphClosure(ctx context.Context, db execer) error {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "sqlite.rebuild_graph_closure",
+		"dependency.name", "sqlite",
+		"dependency.operation", "rebuild_graph_closure",
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	if _, err := db.ExecContext(ctx, `DELETE FROM issue_graph_closure`); err != nil {
+		spanErr = err
 		return err
 	}
 	_, err := db.ExecContext(ctx, `
@@ -516,6 +578,7 @@ func rebuildGraphClosure(ctx context.Context, db execer) error {
 		WHERE ancestor_id <> descendant_id
 		GROUP BY ancestor_id, descendant_id
 	`, "2026-01-01T00:00:00Z")
+	spanErr = err
 	return err
 }
 
@@ -524,6 +587,11 @@ type execer interface {
 }
 
 func measureOperation(ctx context.Context, cfg harnessConfig, op operation) (operationResult, error) {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "cli", "bench_large_project_sqlite.operation",
+		"operation", op.name,
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	samples := make([]sample, 0, cfg.Iterations)
 	outputCount := 0
 	for i := 0; i < cfg.Iterations; i++ {
@@ -531,6 +599,7 @@ func measureOperation(ctx context.Context, cfg harnessConfig, op operation) (ope
 		count, err := op.run(ctx, i)
 		elapsed := float64(time.Since(start).Microseconds()) / 1000.0
 		if err != nil {
+			spanErr = err
 			return operationResult{}, fmt.Errorf("%s iteration %d: %w", op.name, i, err)
 		}
 		outputCount = count
@@ -613,6 +682,12 @@ func rankBottlenecks(results []operationResult, limit int) []bottleneckRank {
 }
 
 func countWorktreeProjectionRows(ctx context.Context, db *sql.DB, projectID string) (int, error) {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "sqlite.query",
+		"dependency.name", "sqlite",
+		"dependency.operation", "worktree_projection_scan",
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	rows, err := db.QueryContext(ctx, `
 		SELECT w.issue_id, w.path, w.branch, w.git_status_json, w.updated_at
 		FROM daemon_worktree_projections w
@@ -621,6 +696,7 @@ func countWorktreeProjectionRows(ctx context.Context, db *sql.DB, projectID stri
 		ORDER BY w.updated_at DESC, w.issue_id
 	`, projectID)
 	if err != nil {
+		spanErr = err
 		return 0, err
 	}
 	defer rows.Close()
@@ -628,14 +704,22 @@ func countWorktreeProjectionRows(ctx context.Context, db *sql.DB, projectID stri
 	for rows.Next() {
 		var issueID, path, branch, gitStatus, updated string
 		if err := rows.Scan(&issueID, &path, &branch, &gitStatus, &updated); err != nil {
+			spanErr = err
 			return 0, err
 		}
 		count++
 	}
-	return count, rows.Err()
+	spanErr = rows.Err()
+	return count, spanErr
 }
 
 func preflightCloseCandidate(ctx context.Context, db *sql.DB, issueID string) error {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "sqlite.query",
+		"dependency.name", "sqlite",
+		"dependency.operation", "close_preflight",
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	var openChildCount int
 	if err := db.QueryRowContext(ctx, `
 		SELECT COUNT(1)
@@ -643,9 +727,11 @@ func preflightCloseCandidate(ctx context.Context, db *sql.DB, issueID string) er
 		JOIN issues child ON child.id = d.issue_id
 		WHERE d.depends_on_id = ? AND d.tombstoned_at IS NULL AND d.dependency_type IN ('parent-child', 'parent_child') AND child.deleted_at IS NULL AND child.status != 'closed'
 	`, issueID).Scan(&openChildCount); err != nil {
+		spanErr = err
 		return fmt.Errorf("close preflight open child guard: %w", err)
 	}
 	if openChildCount > 0 {
+		spanErr = fmt.Errorf("open child issues")
 		return fmt.Errorf("close preflight failed: %s has %d open child issues", issueID, openChildCount)
 	}
 	var runtimeAttachmentCount int
@@ -674,9 +760,11 @@ func preflightCloseCandidate(ctx context.Context, db *sql.DB, issueID string) er
 			END
 		)
 	`, issueID, issueID).Scan(&runtimeAttachmentCount); err != nil {
+		spanErr = err
 		return fmt.Errorf("close preflight runtime guard: %w", err)
 	}
 	if runtimeAttachmentCount > 0 {
+		spanErr = fmt.Errorf("runtime attachments")
 		return fmt.Errorf("close preflight failed: %s has %d runtime attachments", issueID, runtimeAttachmentCount)
 	}
 	return nil
@@ -740,8 +828,15 @@ func captureQueryPlans(ctx context.Context, db *sql.DB, cfg harnessConfig, ids f
 }
 
 func explainQueryPlan(ctx context.Context, db *sql.DB, query string, args ...any) ([]queryPlanRow, error) {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "sqlite.query_plan",
+		"dependency.name", "sqlite",
+		"dependency.operation", "explain",
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	rows, err := db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query, args...)
 	if err != nil {
+		spanErr = err
 		return nil, err
 	}
 	defer rows.Close()
@@ -750,11 +845,13 @@ func explainQueryPlan(ctx context.Context, db *sql.DB, query string, args ...any
 		var row queryPlanRow
 		var notUsed int
 		if err := rows.Scan(&row.ID, &row.Parent, &notUsed, &row.Detail); err != nil {
+			spanErr = err
 			return nil, err
 		}
 		out = append(out, row)
 	}
-	return out, rows.Err()
+	spanErr = rows.Err()
+	return out, spanErr
 }
 
 func planTaskRuntimeProjectionQuery(_ bool, filtered bool, idCount int) string {
@@ -899,7 +996,7 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func exitf(format string, args ...any) {
+func exitf(format string, args ...any) int {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
-	os.Exit(1)
+	return 1
 }
