@@ -100,6 +100,12 @@ type taskListSnapshotLoadResult struct {
 	Tasks         []domain.Task
 }
 
+type taskGraphReadinessLoad struct {
+	done   chan struct{}
+	result taskGraphReadinessResult
+	err    error
+}
+
 type taskClosePreflightOptions struct {
 	AllowTargetSession  bool `json:"allow_target_session,omitempty"`
 	AllowActiveSession  bool `json:"allow_active_session,omitempty"`
@@ -448,10 +454,13 @@ func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestE
 	}
 	if load := d.taskListSnapshotLoads[loadKey]; load != nil {
 		d.taskListSnapshotLoadMu.Unlock()
+		waitStartedAt := time.Now()
 		select {
 		case <-ctx.Done():
+			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.singleflight_wait", waitStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "query", query != "", "include_dependencies", includeDependencies, "shared_load", true, "caller_deadline_remaining_ms", contextDeadlineRemainingMillis(ctx), "error", ctx.Err())
 			return taskListSnapshotLoadResult{}, true, ctx.Err()
 		case <-load.done:
+			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.singleflight_wait", waitStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "query", query != "", "include_dependencies", includeDependencies, "shared_load", true, "caller_deadline_remaining_ms", contextDeadlineRemainingMillis(ctx), "error", load.err)
 			return cloneTaskListSnapshotLoadResult(load.result), true, load.err
 		}
 	}
@@ -473,18 +482,42 @@ func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestE
 	return result, false, err
 }
 
+func contextDeadlineRemainingMillis(ctx context.Context) int64 {
+	if ctx == nil {
+		return -1
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return -1
+	}
+	remaining := time.Until(deadline)
+	if remaining < 0 {
+		return 0
+	}
+	return remaining.Milliseconds()
+}
+
 func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string, includeDependencies bool) (taskListSnapshotLoadResult, error) {
 	if err, unhealthy := d.projectIssueStoreHealthError(projectID); unhealthy {
 		return taskListSnapshotLoadResult{}, err
 	}
 	query = strings.TrimSpace(query)
 	refreshStartedAt := time.Now()
-	runtimeAt, runtimeRefreshed, refreshErr := d.refreshTaskListSessionRuntimeState(ctx, projectID)
-	if refreshErr != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("task list session runtime projection refresh failed", "project_id", projectID, "error", refreshErr)
+	var (
+		runtimeAt        time.Time
+		runtimeRefreshed bool
+		refreshErr       error
+	)
+	if query == "" {
+		runtimeAt, runtimeRefreshed, refreshErr = d.refreshTaskListSessionRuntimeState(ctx, projectID)
+		if refreshErr != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("task list session runtime projection refresh failed", "project_id", projectID, "error", refreshErr)
+		}
+		d.triggerWorktreeStateRefresh(projectID)
+	} else {
+		runtimeAt, _ = d.taskListSnapshotFreshness(ctx, projectID)
 	}
-	d.triggerWorktreeStateRefresh(projectID)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.worktree_refresh_trigger", refreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "session_runtime_refreshed", runtimeRefreshed)
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.runtime_refresh", refreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "session_runtime_refreshed", runtimeRefreshed, "query", query != "", "skipped_for_query", query != "", "error", refreshErr)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task list requested", "project_id", projectID, "query", query != "")
 	}
@@ -4081,6 +4114,44 @@ func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID 
 }
 
 func (d *Daemon) taskGraphReadinessForActor(ctx context.Context, projectID, rootIssueID, actorID string) (taskGraphReadinessResult, error) {
+	projectID = d.canonicalProjectID(projectID)
+	rootIssueID = strings.TrimSpace(rootIssueID)
+	actorID = strings.TrimSpace(actorID)
+	loadKey := taskGraphReadinessLoadKey(projectID, rootIssueID, actorID)
+
+	d.taskGraphReadinessMu.Lock()
+	if d.taskGraphReadinessLoads == nil {
+		d.taskGraphReadinessLoads = map[string]*taskGraphReadinessLoad{}
+	}
+	if load := d.taskGraphReadinessLoads[loadKey]; load != nil {
+		d.taskGraphReadinessMu.Unlock()
+		waitStartedAt := time.Now()
+		select {
+		case <-ctx.Done():
+			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.singleflight_wait", waitStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "actor_id", actorID, "shared_load", true, "error", ctx.Err())
+			return taskGraphReadinessResult{}, ctx.Err()
+		case <-load.done:
+			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.singleflight_wait", waitStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "actor_id", actorID, "shared_load", true, "error", load.err)
+			return cloneTaskGraphReadinessResult(load.result), load.err
+		}
+	}
+	load := &taskGraphReadinessLoad{done: make(chan struct{})}
+	d.taskGraphReadinessLoads[loadKey] = load
+	d.taskGraphReadinessMu.Unlock()
+
+	result, err := d.buildTaskGraphReadinessForActor(ctx, projectID, rootIssueID, actorID)
+	load.result = cloneTaskGraphReadinessResult(result)
+	load.err = err
+
+	d.taskGraphReadinessMu.Lock()
+	delete(d.taskGraphReadinessLoads, loadKey)
+	close(load.done)
+	d.taskGraphReadinessMu.Unlock()
+
+	return result, err
+}
+
+func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID, rootIssueID, actorID string) (taskGraphReadinessResult, error) {
 	tasks, err := d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootIssueID)
 	if err != nil {
 		return taskGraphReadinessResult{}, fmt.Errorf("inspect issue graph readiness: %w", err)
@@ -4111,6 +4182,10 @@ func (d *Daemon) taskGraphReadinessForActor(ctx context.Context, projectID, root
 	ready.WorkerObservations = d.daemonTaskGraphWorkerObservations(ctx, projectID, rootID, byID, children, ready)
 	ready.Capacity = daemonTaskGraphCapacitySummary(ready)
 	return ready, nil
+}
+
+func taskGraphReadinessLoadKey(projectID, rootIssueID, actorID string) string {
+	return strings.TrimSpace(projectID) + "\x00" + strings.TrimSpace(rootIssueID) + "\x00" + strings.TrimSpace(actorID)
 }
 
 func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectID, rootIssueID string) ([]domain.Task, error) {
@@ -4714,6 +4789,64 @@ func daemonTaskGraphCapacitySummary(ready taskGraphReadinessResult) taskGraphCap
 	}
 	summary.TotalCountingCapacityCount = len(countingCapacity)
 	return summary
+}
+
+func cloneTaskGraphReadinessResult(result taskGraphReadinessResult) taskGraphReadinessResult {
+	result.Runnable = append([]string(nil), result.Runnable...)
+	result.Pending = append([]taskGraphPendingStart(nil), result.Pending...)
+	result.Active = append([]string(nil), result.Active...)
+	result.SessionStartProgress = append([]taskGraphSessionStartProgress(nil), result.SessionStartProgress...)
+	result.StaleCloseableChildren = append([]taskStaleCloseableCandidate(nil), result.StaleCloseableChildren...)
+	result.ContainmentRisks = append([]taskContainmentRisk(nil), result.ContainmentRisks...)
+	result.WorkerObservations = append([]domain.WorkerObservation(nil), result.WorkerObservations...)
+	if result.Blocked != nil {
+		blocked := make(map[string]string, len(result.Blocked))
+		for key, value := range result.Blocked {
+			blocked[key] = value
+		}
+		result.Blocked = blocked
+	}
+	result.NestedRoots = cloneTaskGraphNestedRoots(result.NestedRoots)
+	result.ActiveSessions = cloneTaskGraphActiveSessions(result.ActiveSessions)
+	return result
+}
+
+func cloneTaskGraphNestedRoots(in []taskGraphNestedRoot) []taskGraphNestedRoot {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]taskGraphNestedRoot, len(in))
+	for i := range in {
+		out[i] = in[i]
+		if in[i].ActiveSession != nil {
+			active := *in[i].ActiveSession
+			if active.StartProgress != nil {
+				progress := *active.StartProgress
+				active.StartProgress = &progress
+			}
+			out[i].ActiveSession = &active
+		}
+		if in[i].StartFailure != nil {
+			failure := *in[i].StartFailure
+			out[i].StartFailure = &failure
+		}
+	}
+	return out
+}
+
+func cloneTaskGraphActiveSessions(in []taskGraphActiveSession) []taskGraphActiveSession {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]taskGraphActiveSession, len(in))
+	for i := range in {
+		out[i] = in[i]
+		if in[i].StartProgress != nil {
+			progress := *in[i].StartProgress
+			out[i].StartProgress = &progress
+		}
+	}
+	return out
 }
 
 func hasTaskGraphSessionStartProgress(issueID string, progressByIssue map[string]taskGraphSessionStartProgress) bool {

@@ -28,7 +28,6 @@ func (m Model) Init() tea.Cmd {
 		m.attachLogStreamCmd(),
 		m.gitSyncService.FetchAndCheck(),
 		m.loadUIViewModeCmd(),
-		m.loadOrchestrationOverviewCmd(),
 	)
 }
 
@@ -312,9 +311,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			if opCmd := m.loadOperationsCmd(); opCmd != nil {
 				cmds = append(cmds, opCmd)
-				cmds = append(cmds, m.loadOrchestrationOverviewCmd())
+				if overviewCmd := m.loadOrchestrationOverviewIfVisibleCmd(); overviewCmd != nil {
+					cmds = append(cmds, overviewCmd)
+				}
 			} else {
-				cmds = append(cmds, m.loadOrchestrationOverviewCmd())
+				if overviewCmd := m.loadOrchestrationOverviewIfVisibleCmd(); overviewCmd != nil {
+					cmds = append(cmds, overviewCmd)
+				}
 			}
 			if noticeCmd := m.loadFeedbackProjectionCmd(); noticeCmd != nil {
 				cmds = append(cmds, noticeCmd)
@@ -367,6 +370,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.found {
 			m.viewMode = msg.viewMode
+		}
+		if m.viewMode == ViewModeOverview {
+			return m, m.loadOrchestrationOverviewCmd()
 		}
 		return m, nil
 
@@ -1097,7 +1103,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Switched to project: %s", msg.project.Name),
 			Expires: time.Now().Add(3 * time.Second),
 		})
-		cmds := []tea.Cmd{m.waitForDaemonEventCmd(), m.loadOrchestrationOverviewCmd()}
+		cmds := []tea.Cmd{m.waitForDaemonEventCmd()}
+		if overviewCmd := m.loadOrchestrationOverviewIfVisibleCmd(); overviewCmd != nil {
+			cmds = append(cmds, overviewCmd)
+		}
 		if opCmd := m.loadOperationsCmd(); opCmd != nil {
 			cmds = append(cmds, opCmd)
 		}
