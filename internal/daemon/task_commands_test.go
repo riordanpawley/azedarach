@@ -1744,6 +1744,87 @@ func TestHandleTaskListAppliesContentQueryInDaemon(t *testing.T) {
 	}
 }
 
+func TestHandleTaskListQuerySkipsLiveRuntimeRefresh(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	projectID := "proj-query-skip-refresh"
+	issuesDBPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	matchID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:       "RPC cache invalidation",
+		Description: "Track task snapshot timeout while searching rpc cache invalidation",
+		Type:        domain.TypeBug,
+		Priority:    domain.P1,
+		Status:      domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create matching issue: %v", err)
+	}
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            naming.CanonicalSessionID(projectID, matchID),
+		IssueID:       matchID,
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateAttached,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed projected session: %v", err)
+	}
+
+	tmuxRunner := &testTmuxRunner{sessions: map[string]bool{}}
+	d := &Daemon{
+		cfg:          Config{RepoDir: repoDir, Logger: logger},
+		issues:       issuesClient,
+		sessionStore: daemonstate.NewStore(),
+		tmux:         tmux.NewClient(tmuxRunner, logger),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 31},
+	}
+	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+
+	body, err := json.Marshal(protocol.TaskListRequestBody{Query: "rpc cache invalidation"})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-query-skip-runtime-refresh",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskList error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("handleTaskList response = %+v", resp.Error)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 0 {
+		t.Fatalf("tmux list-sessions calls = %d, want 0 for query snapshot", got)
+	}
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("decode task list body: %v", err)
+	}
+	if len(payload.Tasks) != 1 || payload.Tasks[0].ID.String() != matchID {
+		t.Fatalf("payload tasks = %+v, want only %s", payload.Tasks, matchID)
+	}
+}
+
 func TestHandleTaskListIncludesDependenciesOnlyWhenRequested(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -6265,7 +6346,7 @@ func TestTaskGraphReadinessRefreshesOnlyRootScopedSessions(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := issues.NewClientAtPath(dbPath, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
-	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -6366,6 +6447,119 @@ func TestTaskGraphReadinessRefreshesOnlyRootScopedSessions(t *testing.T) {
 	}
 	if !unrelatedRow.UpdatedAt.Equal(seededAt) {
 		t.Fatalf("unrelated updated_at = %v, want unchanged %v", unrelatedRow.UpdatedAt, seededAt)
+	}
+}
+
+func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	projectID := "proj-graph-shared-load"
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Shared readiness root",
+		Type:   domain.TypeEpic,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Shared readiness child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusInProgress,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	sessionID := naming.CanonicalSessionID(projectID, childID)
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            sessionID,
+		IssueID:       childID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed session state: %v", err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	tmuxRunner := &testTmuxRunner{
+		sessions:            map[string]bool{sessionID: true},
+		listSessionsEntered: entered,
+		listSessionsRelease: release,
+	}
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionStore: daemonstate.NewStore(),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+
+	type readinessResult struct {
+		ready taskGraphReadinessResult
+		err   error
+	}
+	firstCh := make(chan readinessResult, 1)
+	go func() {
+		ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
+		firstCh <- readinessResult{ready: ready, err: err}
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for first readiness load to enter tmux: %v", ctx.Err())
+	}
+
+	secondCh := make(chan readinessResult, 1)
+	go func() {
+		ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
+		secondCh <- readinessResult{ready: ready, err: err}
+	}()
+	close(release)
+
+	var first, second readinessResult
+	select {
+	case first = <-firstCh:
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for first readiness result: %v", ctx.Err())
+	}
+	select {
+	case second = <-secondCh:
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for second readiness result: %v", ctx.Err())
+	}
+	if first.err != nil {
+		t.Fatalf("first readiness error: %v", first.err)
+	}
+	if second.err != nil {
+		t.Fatalf("second readiness error: %v", second.err)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 1 {
+		t.Fatalf("tmux list-sessions calls = %d, want one shared graph readiness load", got)
+	}
+	if len(first.ready.Active) != 1 || first.ready.Active[0] != childID {
+		t.Fatalf("first active = %v, want [%s]", first.ready.Active, childID)
+	}
+	if len(second.ready.Active) != 1 || second.ready.Active[0] != childID {
+		t.Fatalf("second active = %v, want [%s]", second.ready.Active, childID)
 	}
 }
 

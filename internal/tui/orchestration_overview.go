@@ -115,6 +115,13 @@ func (m Model) loadOrchestrationOverviewCmd() tea.Cmd {
 	}
 }
 
+func (m Model) loadOrchestrationOverviewIfVisibleCmd() tea.Cmd {
+	if m.viewMode != ViewModeOverview {
+		return nil
+	}
+	return m.loadOrchestrationOverviewCmd()
+}
+
 func overviewHiddenProjectLabel(name string, err error) string {
 	name = strings.TrimSpace(name)
 	if name == "" {

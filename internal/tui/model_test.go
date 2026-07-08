@@ -8080,3 +8080,16 @@ func TestPendingWorktreeCleanupOperationFailureOpensForceConfirmation(t *testing
 		t.Fatal("pending board operation was not cleared")
 	}
 }
+
+func TestLoadOrchestrationOverviewIfVisibleCmd(t *testing.T) {
+	m := newTestModel()
+	m.viewMode = ViewModeBoard
+	if cmd := m.loadOrchestrationOverviewIfVisibleCmd(); cmd != nil {
+		t.Fatalf("hidden overview load command = %T, want nil", cmd)
+	}
+
+	m.viewMode = ViewModeOverview
+	if cmd := m.loadOrchestrationOverviewIfVisibleCmd(); cmd == nil {
+		t.Fatal("visible overview load command = nil, want command")
+	}
+}
