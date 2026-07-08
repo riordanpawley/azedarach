@@ -1506,7 +1506,7 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 	var phases []commandPhaseTiming
 	recordPhase := func(name string, startedAt time.Time) {
 		phases = append(phases, commandPhaseTiming{Name: name, Elapsed: time.Since(startedAt)})
-		latencytrace.LogPhase(deps.Logger, "cli", "branch.merge."+name, startedAt, "issue_id", opts.IssueID)
+		latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "branch.merge."+name, startedAt, "issue_id", opts.IssueID)
 	}
 	wrapPhaseErr := func(name string, err error) error {
 		if err == nil {
@@ -8917,14 +8917,14 @@ func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) er
 		Capabilities:    []string{"snapshot", "subscribe"},
 	})
 	if err != nil {
-		latencytrace.LogPhase(deps.Logger, "cli", "daemon_attach", startedAt, "client_name", clientName, "error", err)
+		latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "daemon_attach", startedAt, "client_name", clientName, "error", err)
 		return fmt.Errorf("daemon attach failed: %w", err)
 	}
 	if !ack.Accepted {
-		latencytrace.LogPhase(deps.Logger, "cli", "daemon_attach", startedAt, "client_name", clientName, "accepted", false, "reason", ack.Reason)
+		latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "daemon_attach", startedAt, "client_name", clientName, "accepted", false, "reason", ack.Reason)
 		return fmt.Errorf("daemon handshake rejected: %s", ack.Reason)
 	}
-	latencytrace.LogPhase(deps.Logger, "cli", "daemon_attach", startedAt, "client_name", clientName, "accepted", true, "daemon_version", ack.DaemonVersion)
+	latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "daemon_attach", startedAt, "client_name", clientName, "accepted", true, "daemon_version", ack.DaemonVersion)
 	return nil
 }
 

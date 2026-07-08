@@ -40,9 +40,17 @@ func (c *Client) WithTimeout(timeout time.Duration) *Client {
 }
 
 func (c *Client) dial(ctx context.Context) (net.Conn, error) {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "ipc.dial",
+		"dependency.name", "unix_socket",
+		"dependency.operation", "dial",
+		"transport", "unix",
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	dialer := &net.Dialer{Timeout: c.timeout}
 	conn, err := dialer.DialContext(ctx, "unix", c.socketPath)
 	if err != nil {
+		spanErr = err
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("daemon socket unavailable: %w", err)
 		}

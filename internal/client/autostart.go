@@ -78,11 +78,11 @@ func NewAutostartOrchestrator(handshaker Handshaker, starter Starter) *Autostart
 func (o *AutostartOrchestrator) EnsureAttached(ctx context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
 	startedAt := time.Now()
 	defer func() {
-		latencytrace.LogPhase(slog.Default(), "cli", "autostart.ensure_attached", startedAt, "client_name", hello.ClientName)
+		latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "autostart.ensure_attached", startedAt, "client_name", hello.ClientName)
 	}()
 	handshakeStartedAt := time.Now()
 	ack, err := o.handshaker.Handshake(ctx, hello)
-	latencytrace.LogPhase(slog.Default(), "cli", "autostart.initial_handshake", handshakeStartedAt, "client_name", hello.ClientName, "accepted", err == nil && ack.Accepted, "error", err)
+	latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "autostart.initial_handshake", handshakeStartedAt, "client_name", hello.ClientName, "accepted", err == nil && ack.Accepted, "error", err)
 	if err == nil && ack.Accepted {
 		return ack, nil
 	}
@@ -96,7 +96,7 @@ func (o *AutostartOrchestrator) EnsureAttached(ctx context.Context, hello protoc
 			}
 			retryStartedAt := time.Now()
 			ack, err = o.handshaker.Handshake(ctx, hello)
-			latencytrace.LogPhase(slog.Default(), "cli", "autostart.pre_start_handshake", retryStartedAt, "client_name", hello.ClientName, "attempt", attempt+1, "accepted", err == nil && ack.Accepted, "error", err)
+			latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "autostart.pre_start_handshake", retryStartedAt, "client_name", hello.ClientName, "attempt", attempt+1, "accepted", err == nil && ack.Accepted, "error", err)
 			if err == nil && ack.Accepted {
 				return ack, nil
 			}
@@ -120,10 +120,10 @@ func (o *AutostartOrchestrator) EnsureAttached(ctx context.Context, hello protoc
 	} else {
 		startDaemonStartedAt := time.Now()
 		if startErr := o.startDaemon(ctx); startErr != nil {
-			latencytrace.LogPhase(slog.Default(), "cli", "autostart.start_daemon", startDaemonStartedAt, "client_name", hello.ClientName, "error", startErr)
+			latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "autostart.start_daemon", startDaemonStartedAt, "client_name", hello.ClientName, "error", startErr)
 			return protocol.HelloAck{}, fmt.Errorf("autostart daemon: %w", startErr)
 		}
-		latencytrace.LogPhase(slog.Default(), "cli", "autostart.start_daemon", startDaemonStartedAt, "client_name", hello.ClientName)
+		latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "autostart.start_daemon", startDaemonStartedAt, "client_name", hello.ClientName)
 	}
 
 	return o.awaitAttached(ctx, hello)
@@ -137,7 +137,7 @@ func (o *AutostartOrchestrator) awaitAttached(ctx context.Context, hello protoco
 	for attempt := 0; attempt <= o.maxRetries; attempt++ {
 		handshakeStartedAt := time.Now()
 		ack, err = o.handshaker.Handshake(ctx, hello)
-		latencytrace.LogPhase(slog.Default(), "cli", "autostart.await_handshake", handshakeStartedAt, "client_name", hello.ClientName, "attempt", attempt+1, "accepted", err == nil && ack.Accepted, "error", err)
+		latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "autostart.await_handshake", handshakeStartedAt, "client_name", hello.ClientName, "attempt", attempt+1, "accepted", err == nil && ack.Accepted, "error", err)
 		if err == nil && ack.Accepted {
 			return ack, nil
 		}
