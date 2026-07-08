@@ -599,6 +599,17 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	projectID := d.projectID(req.Meta)
 	req.Meta.ProjectID = naming.ProjectID(projectID)
 	ctx = withDaemonProjectIDContext(ctx, projectID)
+	ctx, endCommandSpan := latencytrace.StartSpan(ctx, "daemon", "command", "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
+	defer func() {
+		switch {
+		case err != nil:
+			endCommandSpan(err)
+		case resp.Error != nil:
+			endCommandSpan(fmt.Errorf("daemon response error: %s", resp.Error.Code))
+		default:
+			endCommandSpan(nil)
+		}
+	}()
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Log(
 			ctx,

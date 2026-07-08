@@ -13,6 +13,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
@@ -235,9 +236,16 @@ func (m Model) openPRCmd(worktree, issueID string) tea.Cmd {
 		if err != nil {
 			return openPRResultMsg{issueID: issueID, err: fmt.Errorf("resolve branch: %w", err)}
 		}
+		ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "gh",
+			"dependency.name", "gh",
+			"dependency.operation", "pr",
+			"arg_count", 5,
+		)
 		cmd := exec.CommandContext(ctx, "gh", "pr", "view", "--head", branch, "--web")
 		cmd.Dir = resolvedWorktree
-		if err := cmd.Run(); err != nil {
+		err = cmd.Run()
+		endSpan(err)
+		if err != nil {
 			return openPRResultMsg{issueID: issueID, err: err}
 		}
 		return openPRResultMsg{issueID: issueID}

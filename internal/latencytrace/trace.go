@@ -22,17 +22,22 @@ const tracerName = "github.com/riordanpawley/azedarach/internal/latencytrace"
 var configEnabled atomic.Bool
 
 var spanStringAttributeKeys = map[string]struct{}{
-	"client_name":    {},
-	"command":        {},
-	"command_shape":  {},
-	"daemon_version": {},
-	"freshness":      {},
-	"issue_id":       {},
-	"project_id":     {},
-	"reason":         {},
-	"request_id":     {},
-	"root_issue_id":  {},
-	"task_id":        {},
+	"client_name":          {},
+	"command":              {},
+	"command_shape":        {},
+	"daemon_version":       {},
+	"dependency.name":      {},
+	"dependency.operation": {},
+	"freshness":            {},
+	"issue_id":             {},
+	"operation":            {},
+	"outcome":              {},
+	"project_id":           {},
+	"reason":               {},
+	"request_id":           {},
+	"root_issue_id":        {},
+	"transport":            {},
+	"task_id":              {},
 }
 
 // SetConfigEnabled sets the persisted config default for latency phase logging.
@@ -133,6 +138,47 @@ func LogPhaseContext(ctx context.Context, logger *slog.Logger, component, phase 
 		span.SetStatus(codes.Error, "phase failed")
 	}
 	span.End(oteltrace.WithTimestamp(startedAt.Add(duration)))
+}
+
+// StartSpan starts a safe, bounded span when OpenTelemetry diagnostics are enabled.
+func StartSpan(ctx context.Context, component, phase string, attrs ...any) (context.Context, func(error)) {
+	if !observability.Enabled(configEnabled.Load()) {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		return ctx, func(error) {}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	spanAttrs := []attribute.KeyValue{
+		attribute.String("component", component),
+		attribute.String("phase", phase),
+	}
+	hadError := false
+	for i := 0; i+1 < len(attrs); i += 2 {
+		key, ok := attrs[i].(string)
+		if !ok || key == "" {
+			continue
+		}
+		attr, isError, ok := spanAttribute(key, attrs[i+1])
+		if ok {
+			spanAttrs = append(spanAttrs, attr)
+		}
+		hadError = hadError || isError
+	}
+	ctx, span := otel.Tracer(tracerName).Start(
+		ctx,
+		component+"."+phase,
+		oteltrace.WithAttributes(spanAttrs...),
+	)
+	return ctx, func(err error) {
+		if err != nil || hadError {
+			span.SetAttributes(attribute.Bool("error", true))
+			span.SetStatus(codes.Error, "operation failed")
+		}
+		span.End()
+	}
 }
 
 func spanAttribute(key string, value any) (attribute.KeyValue, bool, bool) {

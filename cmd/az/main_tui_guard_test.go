@@ -163,7 +163,11 @@ func TestOwnedJustRunScopedDaemonCleanupStopsWorktreeScopedDaemon(t *testing.T) 
 	if err != nil {
 		t.Fatalf("EvalSymlinks(worktree): %v", err)
 	}
-	if hooks.repoDir != wantWorktree {
+	gotRepoDir, err := filepath.EvalSymlinks(hooks.repoDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(hooks.repoDir): %v", err)
+	}
+	if gotRepoDir != wantWorktree {
 		t.Fatalf("launcher repoDir = %q, want %q", hooks.repoDir, wantWorktree)
 	}
 	wantSocket := config.ScopedDaemonSocketPath(wantWorktree)

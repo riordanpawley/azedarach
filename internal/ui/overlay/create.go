@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
@@ -1207,7 +1208,13 @@ func (c *CreateTaskOverlay) editInEditorCmd() tea.Cmd {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	_, endSpan := latencytrace.StartSpan(context.Background(), "dependency", "editor",
+		"dependency.name", filepath.Base(editorName),
+		"dependency.operation", "edit_task_template",
+		"arg_count", 1,
+	)
 	return overlayExecProcess(cmd, func(err error) tea.Msg {
+		endSpan(err)
 		defer os.Remove(tempFile)
 		if err != nil {
 			return taskEditorErrorMsg{err: fmt.Errorf("open editor: %w", err)}

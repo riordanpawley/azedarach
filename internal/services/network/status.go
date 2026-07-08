@@ -2,11 +2,13 @@ package network
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
 
 // StatusChecker monitors network connectivity status
@@ -44,8 +46,16 @@ func (s *StatusChecker) Check(ctx context.Context) bool {
 		return false
 	}
 
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "http",
+		"dependency.name", "github",
+		"dependency.operation", "connectivity_check",
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
+	req = req.WithContext(ctx)
 	resp, err := s.client.Do(req)
 	if err != nil {
+		spanErr = err
 		s.setOnline(false)
 		return false
 	}
@@ -53,6 +63,9 @@ func (s *StatusChecker) Check(ctx context.Context) bool {
 
 	// Any 2xx or 3xx response means we're online
 	online := resp.StatusCode >= 200 && resp.StatusCode < 400
+	if !online {
+		spanErr = fmt.Errorf("http status %d", resp.StatusCode)
+	}
 
 	s.setOnline(online)
 	return online

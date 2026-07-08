@@ -18,6 +18,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/sqliteutil"
@@ -164,13 +165,21 @@ func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) 
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "issue_store.mutation_lock",
+		"dependency.name", "sqlite",
+		"dependency.operation", "issue_mutation_lock",
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	if locked, _ := ctx.Value(issueMutationLockKey{}).(bool); locked {
-		return fn(ctx)
+		spanErr = fn(ctx)
+		return spanErr
 	}
 	lock := issueMutationLockForPath(c.dbPath)
 	lock.Lock()
 	defer lock.Unlock()
-	return fn(context.WithValue(ctx, issueMutationLockKey{}, true))
+	spanErr = fn(context.WithValue(ctx, issueMutationLockKey{}, true))
+	return spanErr
 }
 
 func issueMutationLockForPath(dbPath string) *sync.Mutex {
@@ -3754,7 +3763,7 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 }
 
 func (c *Client) logSQLiteRead(ctx context.Context, operation string, startedAt time.Time, rowCount int, err error, attrs ...any) {
-	if c == nil || c.logger == nil || startedAt.IsZero() {
+	if c == nil || startedAt.IsZero() {
 		return
 	}
 	outcome := "success"
@@ -3773,6 +3782,12 @@ func (c *Client) logSQLiteRead(ctx context.Context, operation string, startedAt 
 	base = append(base, attrs...)
 	if err != nil {
 		base = append(base, "error_class", "sqlite_query")
+	}
+	latencytrace.LogPhaseContext(ctx, nil, "dependency", "sqlite."+operation, startedAt, base...)
+	if c.logger == nil {
+		return
+	}
+	if err != nil {
 		c.logger.WarnContext(ctx, "sqlite query completed", base...)
 		return
 	}

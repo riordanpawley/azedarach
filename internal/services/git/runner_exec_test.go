@@ -41,6 +41,30 @@ func TestExecRunnerReturnsStdoutOnMergeTreeConflict(t *testing.T) {
 	}
 }
 
+func TestGitOperationSkipsGlobalOptions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "simple", args: []string{"status", "--porcelain"}, want: "status"},
+		{name: "repo dir", args: []string{"-C", "/tmp/repo", "status", "--porcelain"}, want: "status"},
+		{name: "config option", args: []string{"-c", "core.quotePath=false", "worktree", "list"}, want: "worktree"},
+		{name: "long global equals", args: []string{"--git-dir=/tmp/repo/.git", "rev-parse", "--git-dir"}, want: "rev-parse"},
+		{name: "version flag", args: []string{"--version"}, want: ""},
+		{name: "empty", args: nil, want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := gitOperation(tc.args); got != tc.want {
+				t.Fatalf("gitOperation(%v) = %q, want %q", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

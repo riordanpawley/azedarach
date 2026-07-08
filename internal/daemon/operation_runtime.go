@@ -19,6 +19,7 @@ import (
 	opmanager "github.com/riordanpawley/azedarach/internal/daemon/operations/manager"
 	opstore "github.com/riordanpawley/azedarach/internal/daemon/operations/store"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -324,14 +325,22 @@ func (e sessionOperationExecutor) Execute(ctx context.Context, req protocol.Requ
 }
 
 func (r *operationRuntime) executeLegacy(ctx context.Context, req protocol.RequestEnvelope, command string, runner operationDirectRunner) (protocol.ResponseEnvelope, error) {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "daemon", "operation.execute_legacy", "command", command, "request_id", req.RequestID, "project_id", req.Meta.ProjectID.String())
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	submitReq, err := r.buildSubmitRequest(command, req.Meta.ProjectID.String(), req.Body, operationSubmitOverrides{})
 	if err != nil {
+		spanErr = err
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 	}
 	completed := make(chan protocol.ResponseEnvelope, 1)
 	submitResult, submitErr := r.manager.Submit(ctx, submitReq, func(runCtx context.Context) ([]byte, error) {
+		runCtx, endRunSpan := latencytrace.StartSpan(runCtx, "daemon", "operation.run", "command", command, "project_id", req.Meta.ProjectID.String())
+		var runSpanErr error
+		defer func() { endRunSpan(runSpanErr) }()
 		resp, runErr := runner(runCtx, req)
 		if runErr != nil {
+			runSpanErr = runErr
 			resp = r.errorResponse(req, protocol.ErrorCodeInternal, runErr.Error())
 		}
 		select {
@@ -340,16 +349,20 @@ func (r *operationRuntime) executeLegacy(ctx context.Context, req protocol.Reque
 		}
 		if !resp.OK {
 			if err := runCtx.Err(); err != nil {
+				runSpanErr = err
 				return nil, err
 			}
 			if resp.Error != nil {
-				return nil, errors.New(resp.Error.Message)
+				runSpanErr = errors.New(resp.Error.Message)
+				return nil, runSpanErr
 			}
-			return nil, errors.New("operation failed")
+			runSpanErr = errors.New("operation failed")
+			return nil, runSpanErr
 		}
 		return append([]byte(nil), resp.Body...), nil
 	})
 	if submitErr != nil {
+		spanErr = submitErr
 		return r.errorResponse(req, mapOperationSubmitErrorCode(submitErr), submitErr.Error()), nil
 	}
 
@@ -360,6 +373,7 @@ func (r *operationRuntime) executeLegacy(ctx context.Context, req protocol.Reque
 				return r.wrapLegacyPending(req, record), nil
 			}
 		}
+		spanErr = waitErr
 		return r.errorResponse(req, mapOperationSubmitErrorCode(waitErr), waitErr.Error()), nil
 	}
 
@@ -369,8 +383,10 @@ func (r *operationRuntime) executeLegacy(ctx context.Context, req protocol.Reque
 			return r.wrapLegacySuccess(req, terminal, resp.Body), nil
 		}
 		if resp.Error != nil {
+			spanErr = fmt.Errorf("operation response error: %s", resp.Error.Code)
 			return r.errorResponse(req, resp.Error.Code, resp.Error.Message), nil
 		}
+		spanErr = errors.New("operation failed")
 		return r.errorResponse(req, protocol.ErrorCodeInternal, "operation failed"), nil
 	default:
 	}
@@ -378,14 +394,21 @@ func (r *operationRuntime) executeLegacy(ctx context.Context, req protocol.Reque
 	if terminal.State == daemonops.StateDone {
 		return r.wrapLegacySuccess(req, terminal, terminal.ResultPayload), nil
 	}
+	spanErr = errors.New(operationErrorMessage(terminal))
 	return r.errorResponse(req, mapOperationRecordErrorCode(terminal), operationErrorMessage(terminal)), nil
 }
 
 func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "daemon", "operation.submit", "request_id", req.RequestID, "project_id", req.Meta.ProjectID.String())
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	var body protocol.OperationSubmitRequestBody
 	if err := json.Unmarshal(req.Body, &body); err != nil {
+		spanErr = err
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err))
 	}
+	ctx, endKindSpan := latencytrace.StartSpan(ctx, "daemon", "operation.submit_kind", "command", body.Kind, "project_id", req.Meta.ProjectID.String())
+	defer func() { endKindSpan(spanErr) }()
 	projectID := r.coalesceProjectID(body.ProjectID.String(), req.Meta.ProjectID.String())
 	if r.logger != nil {
 		r.logger.Info("daemon operation submit requested",
@@ -400,13 +423,18 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 		ResourceKeys: body.ResourceKeys,
 	})
 	if err != nil {
+		spanErr = err
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error())
 	}
 	runner, err := r.directRunnerForKind(body.Kind)
 	if err != nil {
+		spanErr = err
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error())
 	}
 	submitResult, submitErr := r.manager.Submit(ctx, submitReq, func(runCtx context.Context) ([]byte, error) {
+		runCtx, endRunSpan := latencytrace.StartSpan(runCtx, "daemon", "operation.run", "command", body.Kind, "project_id", projectID)
+		var runSpanErr error
+		defer func() { endRunSpan(runSpanErr) }()
 		runReq := protocol.RequestEnvelope{
 			ProtocolVersion: req.ProtocolVersion,
 			RequestID:       req.RequestID,
@@ -419,20 +447,25 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 		}
 		resp, runErr := runner(runCtx, runReq)
 		if runErr != nil {
+			runSpanErr = runErr
 			return nil, runErr
 		}
 		if !resp.OK {
 			if err := runCtx.Err(); err != nil {
+				runSpanErr = err
 				return nil, err
 			}
 			if resp.Error != nil {
-				return nil, errors.New(resp.Error.Message)
+				runSpanErr = errors.New(resp.Error.Message)
+				return nil, runSpanErr
 			}
-			return nil, errors.New("operation failed")
+			runSpanErr = errors.New("operation failed")
+			return nil, runSpanErr
 		}
 		return append([]byte(nil), resp.Body...), nil
 	})
 	if submitErr != nil {
+		spanErr = submitErr
 		return r.errorResponse(req, mapOperationSubmitErrorCode(submitErr), submitErr.Error())
 	}
 
@@ -444,6 +477,7 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 		Operation: record,
 	})
 	if err != nil {
+		spanErr = err
 		return r.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal operation submit response: %v", err))
 	}
 	resp.Body = encoded

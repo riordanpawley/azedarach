@@ -34,7 +34,7 @@ AZEDARACH_OTEL=true go run ./cmd/az issue get cxk
 AZEDARACH_OTEL=true go run ./cmd/az prime
 ```
 
-4. Open `http://localhost:16686`, select `az` or `azd`, then filter by operation/span names such as `cli.command_execute`, `cli.daemonclient.command_attempt`, `daemon.command.begin`, and `daemon.command.dispatcher_handle`.
+4. Open `http://localhost:16686`, select `az` or `azd`, then filter by operation/span names such as `cli.command`, `cli.daemonclient.command`, `cli.transport.command`, `daemon.ipc.command`, `daemon.command`, `daemon.command.dispatcher_handle`, `daemon.operation.run`, `dependency.git`, `dependency.tmux`, `dependency.http`, and `dependency.sqlite.issue.runtime_projection`.
 
 ## Investigation Workflow
 
@@ -43,7 +43,7 @@ Start with service separation:
 - `az`: CLI and TUI process startup, command execution, daemon client attempts.
 - `azd`: daemon command receipt, begin-command contention, dispatcher handling.
 
-Check whether the CLI span time is mostly before, during, or after `daemonclient.command_attempt`. If the command attempt dominates, switch to `azd` traces using the shared `request_id`.
+Check whether the CLI span time is mostly before, during, or after `cli.daemonclient.command` and `cli.transport.command`. If the command attempt dominates, switch to `azd` traces using the shared `request_id`.
 
 Use `command_shape` instead of raw argv when grouping slow commands. Treat missing `request_id` as evidence that the path did not cross the daemon RPC boundary.
 
@@ -51,13 +51,16 @@ For daemon bottlenecks:
 
 - Long `daemon.command.begin` usually points to command concurrency/backpressure.
 - Long `daemon.command.dispatcher_handle` points to domain/store/runtime work behind the typed daemon command.
+- Long `daemon.operation.run` points to asynchronous operation execution after daemon admission.
+- Long `dependency.sqlite.*` points to issue-store projection/search reads; use `dependency.operation` to group controlled query names.
 - Repeated failed spans with `error=true` need the paired logs for the sanitized error message.
 
 For CLI/TUI bottlenecks:
 
 - Long `cli.dependencies_init` points to config, project resolution, or client setup.
-- Long `cli.daemonclient.command_attempt` points to daemon transport or server-side work.
+- Long `cli.daemonclient.command` or `cli.transport.command` points to daemon transport or server-side work.
 - Long `cli.command_execute` with short daemon attempts points to client-side rendering, parsing, or post-processing.
+- Long `dependency.git`, `dependency.tmux`, `dependency.process`, `dependency.clipboard`, `dependency.editor`, `dependency.file_viewer`, or `dependency.http` points to local process, helper, viewer, or remote API boundaries.
 
 ## Guardrails
 

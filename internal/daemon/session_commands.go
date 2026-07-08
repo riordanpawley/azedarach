@@ -19,6 +19,7 @@ import (
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -4332,10 +4333,17 @@ func (d *Daemon) runIssueResourceCommands(ctx context.Context, projectID string,
 		if trimmed == "" {
 			continue
 		}
-		cmd := exec.CommandContext(ctx, shell, "-lc", trimmed)
+		commandCtx, endSpan := latencytrace.StartSpan(ctx, "dependency", "issue_resource_command",
+			"dependency.name", filepath.Base(shell),
+			"dependency.operation", "run",
+			"project_id", projectID,
+			"arg_count", 2,
+		)
+		cmd := exec.CommandContext(commandCtx, shell, "-lc", trimmed)
 		cmd.Dir = issueResourceCommandDir(resourceCtx)
 		cmd.Env = append(os.Environ(), env...)
 		output, err := cmd.CombinedOutput()
+		endSpan(err)
 		result.Ran = append(result.Ran, trimmed)
 		if err != nil {
 			return result, fmt.Errorf("%s: %w (%s)", trimmed, err, strings.TrimSpace(string(output)))
@@ -4578,10 +4586,17 @@ func (d *Daemon) runWorktreeInitCommandList(ctx context.Context, initCtx worktre
 		if trimmed == "" {
 			continue
 		}
-		cmd := exec.CommandContext(ctx, shell, "-lc", trimmed)
+		commandCtx, endSpan := latencytrace.StartSpan(ctx, "dependency", "worktree_init_command",
+			"dependency.name", filepath.Base(shell),
+			"dependency.operation", "run",
+			"project_id", projectID,
+			"arg_count", 2,
+		)
+		cmd := exec.CommandContext(commandCtx, shell, "-lc", trimmed)
 		cmd.Dir = initCtx.WorktreePath
 		cmd.Env = worktreeInitCommandEnv(initCtx, phase)
 		output, err := cmd.CombinedOutput()
+		endSpan(err)
 		if err != nil {
 			return fmt.Errorf("%s: %w (%s)", trimmed, err, strings.TrimSpace(string(output)))
 		}

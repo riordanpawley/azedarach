@@ -7771,9 +7771,17 @@ func defaultTmuxPaneSessionName(ctx context.Context) (string, error) {
 		ctx, cancel = context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
 	}
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "tmux",
+		"dependency.name", "tmux",
+		"dependency.operation", "display-message",
+		"arg_count", 5,
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	cmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", paneID, "#{session_name}")
 	out, err := cmd.Output()
 	if err != nil {
+		spanErr = err
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil

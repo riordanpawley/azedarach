@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
 
 // CommandRunner executes git commands and returns their output.
@@ -27,7 +29,15 @@ func NewExecRunner(workDir string) *ExecRunner {
 }
 
 // Run executes a git command with the given arguments.
-func (e *ExecRunner) Run(ctx context.Context, args ...string) (string, error) {
+func (e *ExecRunner) Run(ctx context.Context, args ...string) (out string, err error) {
+	operation := gitOperation(args)
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "git",
+		"dependency.name", "git",
+		"dependency.operation", operation,
+		"arg_count", len(args),
+	)
+	defer func() { endSpan(err) }()
+
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = e.workDir
 	cmd.Env = sanitizedGitEnv(os.Environ())
@@ -36,7 +46,7 @@ func (e *ExecRunner) Run(ctx context.Context, args ...string) (string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 	stdoutText := strings.TrimSpace(stdout.String())
 	stderrText := strings.TrimSpace(stderr.String())
 	if err != nil {
@@ -51,6 +61,30 @@ func (e *ExecRunner) Run(ctx context.Context, args ...string) (string, error) {
 	}
 
 	return stdoutText, nil
+}
+
+func gitOperation(args []string) string {
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if arg == "" {
+			continue
+		}
+		switch arg {
+		case "-C", "-c", "--git-dir", "--work-tree", "--namespace":
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--git-dir=") ||
+			strings.HasPrefix(arg, "--work-tree=") ||
+			strings.HasPrefix(arg, "--namespace=") {
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return arg
+	}
+	return ""
 }
 
 func sanitizedGitEnv(env []string) []string {

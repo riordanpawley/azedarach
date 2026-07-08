@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"sync"
+
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
 
 // PortAllocator manages port allocation for dev servers.
@@ -94,8 +96,16 @@ func (p *PortAllocator) GetPort(issueID string) (int, bool) {
 
 // isPortAvailable checks if a port is available by attempting to listen on it.
 func isPortAvailable(port int) bool {
+	_, endSpan := latencytrace.StartSpan(nil, "dependency", "tcp_listen_probe",
+		"dependency.name", "localhost",
+		"dependency.operation", "port_available",
+		"port", port,
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
+		spanErr = err
 		return false
 	}
 	ln.Close()

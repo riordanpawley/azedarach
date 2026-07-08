@@ -20,6 +20,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
@@ -180,6 +181,13 @@ func (l *Launcher) Start(ctx context.Context) error {
 	// Do not bind daemon lifetime to the caller context. Attach contexts are short-lived.
 	args := append([]string{}, daemonCmd.args...)
 	args = append(args, "--repo", l.RepoDir, "--socket", l.SocketPath, "--lock", l.LockPath)
+	launchCtx, endSpan := latencytrace.StartSpan(ctx, "dependency", "daemon_process",
+		"dependency.name", filepath.Base(daemonCmd.executable),
+		"dependency.operation", "start",
+		"arg_count", len(args),
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	cmd := exec.Command(daemonCmd.executable, args...)
 	if strings.TrimSpace(daemonCmd.dir) != "" {
 		cmd.Dir = daemonCmd.dir
@@ -188,13 +196,15 @@ func (l *Launcher) Start(ctx context.Context) error {
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
+		spanErr = err
 		return fmt.Errorf("start daemon %s: %w", daemonCmd.displayName(), err)
 	}
 	if l.waitForReady != nil {
-		readyCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		readyCtx, cancel := context.WithTimeout(launchCtx, 15*time.Second)
 		err := l.waitForReady(readyCtx, l.SocketPath)
 		cancel()
 		if err != nil {
+			spanErr = err
 			return fmt.Errorf("wait for daemon socket readiness: %w", err)
 		}
 	}

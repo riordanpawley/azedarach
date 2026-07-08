@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
@@ -520,8 +521,16 @@ func (i *ImageAttachOverlay) openInViewer() tea.Cmd {
 		}
 
 		ctx := context.Background()
+		ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "file_viewer",
+			"dependency.name", cmd,
+			"dependency.operation", "open_attachment",
+			"arg_count", 1,
+		)
+		var spanErr error
+		defer func() { endSpan(spanErr) }()
 		execCmd := exec.CommandContext(ctx, cmd, file.Path)
 		if err := execCmd.Start(); err != nil {
+			spanErr = err
 			return errorMsg{err}
 		}
 		return nil

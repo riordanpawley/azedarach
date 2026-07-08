@@ -4,6 +4,8 @@ import (
 	"context"
 	"os/exec"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
 
 // CommandRunner abstracts command execution for testing
@@ -15,7 +17,14 @@ type CommandRunner interface {
 type ExecRunner struct{}
 
 // Run executes a command with a 30-second timeout (gh commands can be slow)
-func (r *ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+func (r *ExecRunner) Run(ctx context.Context, name string, args ...string) (out []byte, err error) {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "process",
+		"dependency.name", name,
+		"dependency.operation", firstArg(args),
+		"arg_count", len(args),
+	)
+	defer func() { endSpan(err) }()
+
 	// Add timeout to context if not already present
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
@@ -25,4 +34,11 @@ func (r *ExecRunner) Run(ctx context.Context, name string, args ...string) ([]by
 
 	cmd := exec.CommandContext(ctx, name, args...)
 	return cmd.CombinedOutput()
+}
+
+func firstArg(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
 }

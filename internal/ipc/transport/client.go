@@ -52,13 +52,17 @@ func (c *Client) dial(ctx context.Context) (net.Conn, error) {
 }
 
 func (c *Client) Handshake(ctx context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "cli", "transport.handshake", "client_name", hello.ClientName)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	dialStartedAt := time.Now()
 	conn, err := c.dial(ctx)
 	if err != nil {
-		latencytrace.LogPhase(slog.Default(), "cli", "transport.handshake.dial", dialStartedAt, "socket", c.socketPath, "error", err)
+		spanErr = err
+		latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "transport.handshake.dial", dialStartedAt, "socket", c.socketPath, "error", err)
 		return protocol.HelloAck{}, err
 	}
-	latencytrace.LogPhase(slog.Default(), "cli", "transport.handshake.dial", dialStartedAt, "socket", c.socketPath)
+	latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "transport.handshake.dial", dialStartedAt, "socket", c.socketPath)
 	defer conn.Close()
 	c.setDeadline(ctx, conn)
 
@@ -67,34 +71,42 @@ func (c *Client) Handshake(ctx context.Context, hello protocol.Hello) (protocol.
 		Type:  frameTypeHello,
 		Hello: &hello,
 	}); err != nil {
-		latencytrace.LogPhase(slog.Default(), "cli", "transport.handshake.write", writeStartedAt, "socket", c.socketPath, "error", err)
+		spanErr = err
+		latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "transport.handshake.write", writeStartedAt, "socket", c.socketPath, "error", err)
 		return protocol.HelloAck{}, err
 	}
-	latencytrace.LogPhase(slog.Default(), "cli", "transport.handshake.write", writeStartedAt, "socket", c.socketPath)
+	latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "transport.handshake.write", writeStartedAt, "socket", c.socketPath)
 	readStartedAt := time.Now()
 	reply, err := readFrame(conn, c.codec)
 	if err != nil {
-		latencytrace.LogPhase(slog.Default(), "cli", "transport.handshake.read", readStartedAt, "socket", c.socketPath, "error", err)
+		spanErr = err
+		latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "transport.handshake.read", readStartedAt, "socket", c.socketPath, "error", err)
 		return protocol.HelloAck{}, err
 	}
-	latencytrace.LogPhase(slog.Default(), "cli", "transport.handshake.read", readStartedAt, "socket", c.socketPath)
+	latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "transport.handshake.read", readStartedAt, "socket", c.socketPath)
 	if reply.Type == frameTypeError && reply.Error != nil {
-		return protocol.HelloAck{}, fmt.Errorf("handshake error: %s", reply.Error.Message)
+		spanErr = fmt.Errorf("handshake error: %s", reply.Error.Message)
+		return protocol.HelloAck{}, spanErr
 	}
 	if reply.HelloAck == nil {
-		return protocol.HelloAck{}, fmt.Errorf("invalid handshake response")
+		spanErr = fmt.Errorf("invalid handshake response")
+		return protocol.HelloAck{}, spanErr
 	}
 	return *reply.HelloAck, nil
 }
 
 func (c *Client) Command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "cli", "transport.command", "command", req.Command, "request_id", req.RequestID)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	dialStartedAt := time.Now()
 	conn, err := c.dial(ctx)
 	if err != nil {
-		latencytrace.LogPhase(slog.Default(), "cli", "transport.command.dial", dialStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID, "error", err)
+		spanErr = err
+		latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "transport.command.dial", dialStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID, "error", err)
 		return protocol.ResponseEnvelope{}, err
 	}
-	latencytrace.LogPhase(slog.Default(), "cli", "transport.command.dial", dialStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID)
+	latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "transport.command.dial", dialStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID)
 	defer conn.Close()
 	c.setDeadline(ctx, conn)
 
@@ -103,29 +115,40 @@ func (c *Client) Command(ctx context.Context, req protocol.RequestEnvelope) (pro
 		Type:    frameTypeCommand,
 		Request: &req,
 	}); err != nil {
-		latencytrace.LogPhase(slog.Default(), "cli", "transport.command.write", writeStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID, "error", err)
+		spanErr = err
+		latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "transport.command.write", writeStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID, "error", err)
 		return protocol.ResponseEnvelope{}, err
 	}
-	latencytrace.LogPhase(slog.Default(), "cli", "transport.command.write", writeStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID)
+	latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "transport.command.write", writeStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID)
 	readStartedAt := time.Now()
 	reply, err := readFrame(conn, c.codec)
 	if err != nil {
-		latencytrace.LogPhase(slog.Default(), "cli", "transport.command.read", readStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID, "error", err)
+		spanErr = err
+		latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "transport.command.read", readStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID, "error", err)
 		return protocol.ResponseEnvelope{}, err
 	}
-	latencytrace.LogPhase(slog.Default(), "cli", "transport.command.read", readStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID)
+	latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "transport.command.read", readStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID)
 	if reply.Type == frameTypeError && reply.Error != nil {
-		return protocol.ResponseEnvelope{}, fmt.Errorf("command error: %s", reply.Error.Message)
+		spanErr = fmt.Errorf("command error: %s", reply.Error.Message)
+		return protocol.ResponseEnvelope{}, spanErr
 	}
 	if reply.Response == nil {
-		return protocol.ResponseEnvelope{}, fmt.Errorf("invalid command response")
+		spanErr = fmt.Errorf("invalid command response")
+		return protocol.ResponseEnvelope{}, spanErr
+	}
+	if reply.Response.Error != nil {
+		spanErr = fmt.Errorf("daemon response error: %s", reply.Response.Error.Code)
 	}
 	return *reply.Response, nil
 }
 
 func (c *Client) Subscribe(ctx context.Context, projectID string, fromRevision uint64) (<-chan protocol.EventEnvelope, error) {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "cli", "transport.subscribe", "project_id", projectID)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	conn, err := c.dial(ctx)
 	if err != nil {
+		spanErr = err
 		return nil, err
 	}
 	_ = conn.SetDeadline(time.Time{})
@@ -138,6 +161,7 @@ func (c *Client) Subscribe(ctx context.Context, projectID string, fromRevision u
 		},
 	}); err != nil {
 		_ = conn.Close()
+		spanErr = err
 		return nil, err
 	}
 

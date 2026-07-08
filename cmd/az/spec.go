@@ -16,6 +16,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/cli"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -619,12 +620,18 @@ func runSpecSliceGateRPC(cfg *config.Config, opts specSliceGateOptions) error {
 
 	testsOK := true
 	if !opts.SkipTests {
-		cmd := exec.Command("sh", "-lc", opts.TestCommand)
+		testCtx, endSpan := latencytrace.StartSpan(context.Background(), "dependency", "spec_test_command",
+			"dependency.name", "sh",
+			"dependency.operation", "test_command",
+		)
+		cmd := exec.CommandContext(testCtx, "sh", "-lc", opts.TestCommand)
 		var stdout bytes.Buffer
 		var stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
+		err := cmd.Run()
+		endSpan(err)
+		if err != nil {
 			testsOK = false
 		}
 	}

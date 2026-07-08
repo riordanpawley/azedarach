@@ -8,9 +8,11 @@ import (
 	"strings"
 
 	"github.com/riordanpawley/azedarach/internal/buildinfo"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
@@ -46,6 +48,7 @@ func Enabled(configDefault bool) bool {
 
 // Configure installs a process-wide trace provider when OTel is enabled.
 func Configure(ctx context.Context, opts Options) (func(context.Context) error, error) {
+	otel.SetTextMapPropagator(propagation.TraceContext{})
 	if !Enabled(opts.Enabled) {
 		return func(context.Context) error { return nil }, nil
 	}
@@ -91,6 +94,31 @@ func Configure(ctx context.Context, opts Options) (func(context.Context) error, 
 		)
 	}
 	return provider.Shutdown, nil
+}
+
+// InjectMetadata writes W3C trace context into daemon protocol metadata.
+func InjectMetadata(ctx context.Context, meta *protocol.Metadata) {
+	if ctx == nil || meta == nil {
+		return
+	}
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	meta.TraceParent = carrier.Get("traceparent")
+	meta.TraceState = carrier.Get("tracestate")
+}
+
+// ExtractMetadata reads W3C trace context from daemon protocol metadata.
+func ExtractMetadata(ctx context.Context, meta protocol.Metadata) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(meta.TraceParent) == "" && strings.TrimSpace(meta.TraceState) == "" {
+		return ctx
+	}
+	carrier := propagation.MapCarrier{}
+	carrier.Set("traceparent", meta.TraceParent)
+	carrier.Set("tracestate", meta.TraceState)
+	return otel.GetTextMapPropagator().Extract(ctx, carrier)
 }
 
 func configuredEndpointSummary() string {

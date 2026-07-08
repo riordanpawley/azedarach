@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
@@ -383,11 +384,18 @@ func writeClipboardText(ctx context.Context, text string) error {
 		if err != nil {
 			continue
 		}
-		cmd := exec.CommandContext(ctx, path, candidate[1:]...)
+		commandCtx, endSpan := latencytrace.StartSpan(ctx, "dependency", "clipboard",
+			"dependency.name", candidate[0],
+			"dependency.operation", "write",
+			"arg_count", len(candidate)-1,
+		)
+		cmd := exec.CommandContext(commandCtx, path, candidate[1:]...)
 		cmd.Stdin = strings.NewReader(text)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
+		err = cmd.Run()
+		endSpan(err)
+		if err != nil {
 			tried = append(tried, candidate[0]+": "+strings.TrimSpace(stderr.String()))
 			continue
 		}

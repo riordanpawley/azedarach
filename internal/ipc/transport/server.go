@@ -13,6 +13,8 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/ipc/codec"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
+	"github.com/riordanpawley/azedarach/internal/observability"
 )
 
 // Handlers defines daemon runtime hooks used by IPC server.
@@ -133,9 +135,13 @@ func (s *Server) Close() error {
 }
 
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
+	ctx, endConnSpan := latencytrace.StartSpan(ctx, "daemon", "ipc.connection", "transport", "unix")
+	var connSpanErr error
+	defer func() { endConnSpan(connSpanErr) }()
 	defer conn.Close()
 	defer func() {
 		if r := recover(); r != nil {
+			connSpanErr = fmt.Errorf("panic: %T", r)
 			_, _ = fmt.Fprintf(os.Stderr, "azd ipc server recovered panic in connection handler: %v\n%s", r, debug.Stack())
 		}
 	}()
@@ -143,12 +149,24 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 
 	first, err := readFrame(conn, s.codec)
 	if err != nil {
+		connSpanErr = err
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 	switch first.Type {
 	case frameTypeHello:
+		helloCtx, endSpan := latencytrace.StartSpan(ctx, "daemon", "ipc.handshake", "transport", "unix")
+		var spanErr error
+		defer func() {
+			if r := recover(); r != nil {
+				spanErr = fmt.Errorf("panic: %T", r)
+				endSpan(spanErr)
+				panic(r)
+			}
+			endSpan(spanErr)
+		}()
 		if first.Hello == nil {
+			spanErr = fmt.Errorf("missing hello payload")
 			_ = writeFrame(conn, s.codec, rpcFrame{
 				Type: frameTypeError,
 				Error: &protocol.ErrorEnvelope{
@@ -158,8 +176,9 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			})
 			return
 		}
-		ack, err := s.handlers.Handshake(ctx, *first.Hello)
+		ack, err := s.handlers.Handshake(helloCtx, *first.Hello)
 		if err != nil {
+			spanErr = err
 			_ = writeFrame(conn, s.codec, rpcFrame{
 				Type: frameTypeError,
 				Error: &protocol.ErrorEnvelope{
@@ -170,12 +189,16 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			return
 		}
 		_ = conn.SetWriteDeadline(time.Now().Add(serverFrameTimeout))
-		_ = writeFrame(conn, s.codec, rpcFrame{
+		if err := writeFrame(conn, s.codec, rpcFrame{
 			Type:     frameTypeHelloAck,
 			HelloAck: &ack,
-		})
+		}); err != nil {
+			spanErr = err
+			connSpanErr = err
+		}
 	case frameTypeCommand:
 		if first.Request == nil {
+			connSpanErr = fmt.Errorf("missing command payload")
 			_ = writeFrame(conn, s.codec, rpcFrame{
 				Type: frameTypeError,
 				Error: &protocol.ErrorEnvelope{
@@ -186,11 +209,27 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			return
 		}
 		commandCtx, cancelCommand := context.WithCancel(ctx)
+		commandCtx = observability.ExtractMetadata(commandCtx, first.Request.Meta)
+		commandCtx, endSpan := latencytrace.StartSpan(commandCtx, "daemon", "ipc.command", "command", first.Request.Command, "request_id", first.Request.RequestID, "project_id", first.Request.Meta.ProjectID.String())
+		var spanErr error
+		defer func() {
+			if r := recover(); r != nil {
+				spanErr = fmt.Errorf("panic: %T", r)
+				endSpan(spanErr)
+				panic(r)
+			}
+			endSpan(spanErr)
+		}()
 		doneWatchingCommandConn, stopWatchingCommandConn := watchCommandConnClose(commandCtx, conn, cancelCommand)
+		defer func() {
+			stopWatchingCommandConn()
+			<-doneWatchingCommandConn
+		}()
 		resp, err := s.handlers.Command(commandCtx, *first.Request)
 		stopWatchingCommandConn()
 		<-doneWatchingCommandConn
 		if err != nil {
+			spanErr = err
 			resp = protocol.ResponseEnvelope{
 				ProtocolVersion: first.Request.ProtocolVersion,
 				RequestID:       first.Request.RequestID,
@@ -203,16 +242,36 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 					Retryable: false,
 				},
 			}
+		} else if resp.Error != nil {
+			spanErr = fmt.Errorf("daemon response error: %s", resp.Error.Code)
 		}
 		_ = conn.SetWriteDeadline(time.Now().Add(serverFrameTimeout))
-		_ = writeFrame(conn, s.codec, rpcFrame{
+		if err := writeFrame(conn, s.codec, rpcFrame{
 			Type:     frameTypeResponse,
 			Response: &resp,
-		})
+		}); err != nil {
+			spanErr = err
+			connSpanErr = err
+		}
 	case frameTypeSubscribe:
+		subscribeProjectID := ""
+		if first.Subscribe != nil {
+			subscribeProjectID = first.Subscribe.ProjectID
+		}
+		subscribeCtx, endSpan := latencytrace.StartSpan(ctx, "daemon", "ipc.subscribe", "project_id", subscribeProjectID, "transport", "unix")
+		var spanErr error
+		defer func() {
+			if r := recover(); r != nil {
+				spanErr = fmt.Errorf("panic: %T", r)
+				endSpan(spanErr)
+				panic(r)
+			}
+			endSpan(spanErr)
+		}()
 		_ = conn.SetReadDeadline(time.Time{})
 		_ = conn.SetWriteDeadline(time.Time{})
 		if first.Subscribe == nil || first.Subscribe.ProjectID == "" {
+			spanErr = fmt.Errorf("missing subscribe payload")
 			_ = writeFrame(conn, s.codec, rpcFrame{
 				Type: frameTypeError,
 				Error: &protocol.ErrorEnvelope{
@@ -222,7 +281,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			})
 			return
 		}
-		subscribeCtx, cancelSubscribe := context.WithCancel(ctx)
+		subscribeCtx, cancelSubscribe := context.WithCancel(subscribeCtx)
 		doneWatchingSubscribeConn, stopWatchingSubscribeConn := watchCommandConnClose(subscribeCtx, conn, cancelSubscribe)
 		defer func() {
 			stopWatchingSubscribeConn()
@@ -230,6 +289,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		}()
 		ch, cancel, err := s.handlers.Subscribe(subscribeCtx, first.Subscribe.ProjectID, first.Subscribe.FromRevision)
 		if err != nil {
+			spanErr = err
 			_ = writeFrame(conn, s.codec, rpcFrame{
 				Type: frameTypeError,
 				Error: &protocol.ErrorEnvelope{
@@ -253,6 +313,8 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 					Type:  frameTypeEvent,
 					Event: &evt,
 				}); err != nil {
+					spanErr = err
+					connSpanErr = err
 					return
 				}
 			}

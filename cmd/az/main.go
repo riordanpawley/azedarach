@@ -1350,6 +1350,9 @@ func ownedJustRunScopedDaemonCleanup() func(context.Context) error {
 	if err != nil || strings.TrimSpace(worktreeRoot) == "" {
 		return nil
 	}
+	if resolved, err := filepath.EvalSymlinks(worktreeRoot); err == nil && strings.TrimSpace(resolved) != "" {
+		worktreeRoot = resolved
+	}
 	socketPath := config.ScopedDaemonSocketPath(worktreeRoot)
 	if filepath.Clean(socketPath) == filepath.Clean(config.GlobalDaemonSocketPath()) {
 		return nil
@@ -1513,15 +1516,21 @@ func parseSessionStartArgs(args []string, namespaced bool) (string, cli.SessionC
 }
 
 // runCommand executes a CLI command with dependency injection
-func runCommand(cfg *config.Config, fn func(*cli.Dependencies) error) error {
+func runCommand(cfg *config.Config, fn func(*cli.Dependencies) error) (err error) {
+	commandShape := latencytrace.CommandShape(os.Args[1:])
+	ctx, endSpan := latencytrace.StartSpan(context.Background(), "cli", "command", "command_shape", commandShape)
+	defer func() { endSpan(err) }()
+
 	depsStartedAt := time.Now()
 	deps, err := cli.NewDependencies(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to initialize dependencies: %w", err)
 	}
-	commandShape := latencytrace.CommandShape(os.Args[1:])
-	latencytrace.LogPhase(deps.Logger, "cli", "dependencies_init", depsStartedAt, "command_shape", commandShape)
-	latencytrace.LogPhase(deps.Logger, "cli", "process_to_dependencies_ready", processStartedAt, "command_shape", commandShape)
+	if deps.DaemonClient != nil {
+		deps.DaemonClient.WithTraceContext(ctx)
+	}
+	latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "dependencies_init", depsStartedAt, "command_shape", commandShape)
+	latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "process_to_dependencies_ready", processStartedAt, "command_shape", commandShape)
 	audit := beginCommandAudit(deps.Logger, deps, commandShape, os.Args[1:])
 	commandStartedAt := time.Now()
 	err = fn(deps)
@@ -1530,19 +1539,25 @@ func runCommand(cfg *config.Config, fn func(*cli.Dependencies) error) error {
 	if err != nil {
 		attrs = append(attrs, "error", err)
 	}
-	latencytrace.LogPhase(deps.Logger, "cli", "command_execute", commandStartedAt, attrs...)
+	latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "command_execute", commandStartedAt, attrs...)
 	return err
 }
 
-func runCommandAtRepoDir(cfg *config.Config, repoDir string, fn func(*cli.Dependencies) error) error {
+func runCommandAtRepoDir(cfg *config.Config, repoDir string, fn func(*cli.Dependencies) error) (err error) {
+	commandShape := latencytrace.CommandShape(os.Args[1:])
+	ctx, endSpan := latencytrace.StartSpan(context.Background(), "cli", "command", "command_shape", commandShape)
+	defer func() { endSpan(err) }()
+
 	depsStartedAt := time.Now()
 	deps, err := cli.NewDependenciesAt(cfg, repoDir)
 	if err != nil {
 		return fmt.Errorf("failed to initialize dependencies: %w", err)
 	}
-	commandShape := latencytrace.CommandShape(os.Args[1:])
-	latencytrace.LogPhase(deps.Logger, "cli", "dependencies_init", depsStartedAt, "command_shape", commandShape, "repo_dir", repoDir)
-	latencytrace.LogPhase(deps.Logger, "cli", "process_to_dependencies_ready", processStartedAt, "command_shape", commandShape, "repo_dir", repoDir)
+	if deps.DaemonClient != nil {
+		deps.DaemonClient.WithTraceContext(ctx)
+	}
+	latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "dependencies_init", depsStartedAt, "command_shape", commandShape, "repo_dir", repoDir)
+	latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "process_to_dependencies_ready", processStartedAt, "command_shape", commandShape, "repo_dir", repoDir)
 	audit := beginCommandAudit(deps.Logger, deps, commandShape, os.Args[1:])
 	commandStartedAt := time.Now()
 	err = fn(deps)
@@ -1551,7 +1566,7 @@ func runCommandAtRepoDir(cfg *config.Config, repoDir string, fn func(*cli.Depend
 	if err != nil {
 		attrs = append(attrs, "error", err)
 	}
-	latencytrace.LogPhase(deps.Logger, "cli", "command_execute", commandStartedAt, attrs...)
+	latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "command_execute", commandStartedAt, attrs...)
 	return err
 }
 

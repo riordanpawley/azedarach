@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
 
 // ReadImageFromClipboard reads an image from the system clipboard
@@ -30,8 +32,7 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 
 	// Try pngpaste first (faster and more reliable for images)
 	if pngpastePath, ok := findPNGPastePath(); ok {
-		cmd := exec.CommandContext(ctx, pngpastePath, "-")
-		output, err := cmd.Output()
+		output, err := clipboardOutput(ctx, pngpastePath, "-")
 		if err == nil && len(output) > 0 {
 			return output, nil
 		}
@@ -113,8 +114,7 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 		end writeDataToFile
 	`
 
-	cmd := exec.CommandContext(ctx, "osascript", "-e", script)
-	output, err := cmd.Output()
+	output, err := clipboardOutput(ctx, "osascript", "-e", script)
 	if err != nil {
 		attempts = append(attempts, "osascript execution failed: "+compactWhitespace(err.Error()))
 		return nil, fmt.Errorf("failed to read clipboard image on macOS (%s)", compactWhitespace(strings.Join(attempts, "; ")))
@@ -157,8 +157,7 @@ func readClipboardMacOSFileAlias(ctx context.Context) ([]byte, error) {
 			return "ERROR:" & errMsg
 		end try
 	`
-	cmd := exec.CommandContext(ctx, "osascript", "-e", script)
-	output, err := cmd.Output()
+	output, err := clipboardOutput(ctx, "osascript", "-e", script)
 	if err != nil {
 		return nil, fmt.Errorf("osascript alias read failed: %w", err)
 	}
@@ -259,8 +258,7 @@ function isImageLikeType(t) {
 })();
 `
 
-	cmd := exec.CommandContext(ctx, "osascript", "-l", "JavaScript", "-e", script)
-	output, err := cmd.CombinedOutput()
+	output, err := clipboardCombinedOutput(ctx, "osascript", "-l", "JavaScript", "-e", script)
 	if err != nil {
 		return nil, fmt.Errorf("jxa pasteboard read failed: %w: %s", err, compactWhitespace(string(output)))
 	}
@@ -288,8 +286,7 @@ function isImageLikeType(t) {
 }
 
 func readClipboardMacOSTextPath(ctx context.Context) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "pbpaste")
-	output, err := cmd.Output()
+	output, err := clipboardOutput(ctx, "pbpaste")
 	if err != nil {
 		return nil, fmt.Errorf("pbpaste failed: %w", err)
 	}
@@ -334,8 +331,7 @@ func readClipboardMacOSPNGScript(ctx context.Context) ([]byte, error) {
 		"-e", "write png_data to fp",
 		"-e", "close access fp",
 	}
-	cmd := exec.CommandContext(ctx, "osascript", args...)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if output, err := clipboardCombinedOutput(ctx, "osascript", args...); err != nil {
 		return nil, fmt.Errorf("%w: %s", err, compactWhitespace(string(output)))
 	}
 
@@ -350,8 +346,7 @@ func readClipboardMacOSPNGScript(ctx context.Context) ([]byte, error) {
 }
 
 func readClipboardMacOSPBPasteRaw(ctx context.Context) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "pbpaste")
-	output, err := cmd.Output()
+	output, err := clipboardOutput(ctx, "pbpaste")
 	if err != nil {
 		return nil, fmt.Errorf("pbpaste execution failed: %w", err)
 	}
@@ -369,15 +364,13 @@ func readClipboardMacOSPBPasteRaw(ctx context.Context) ([]byte, error) {
 func readClipboardLinux(ctx context.Context) ([]byte, error) {
 	// Try wl-paste first (Wayland)
 	if hasCommand("wl-paste") {
-		cmd := exec.CommandContext(ctx, "wl-paste", "--type", "image/png")
-		output, err := cmd.Output()
+		output, err := clipboardOutput(ctx, "wl-paste", "--type", "image/png")
 		if err == nil && len(output) > 0 {
 			return output, nil
 		}
 
 		// Try without specifying type
-		cmd = exec.CommandContext(ctx, "wl-paste", "--no-newline")
-		output, err = cmd.Output()
+		output, err = clipboardOutput(ctx, "wl-paste", "--no-newline")
 		if err == nil && len(output) > 0 && detectMimeType(output, "") != "application/octet-stream" {
 			return output, nil
 		}
@@ -385,15 +378,13 @@ func readClipboardLinux(ctx context.Context) ([]byte, error) {
 
 	// Try xclip (X11)
 	if hasCommand("xclip") {
-		cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "image/png", "-o")
-		output, err := cmd.Output()
+		output, err := clipboardOutput(ctx, "xclip", "-selection", "clipboard", "-t", "image/png", "-o")
 		if err == nil && len(output) > 0 {
 			return output, nil
 		}
 
 		// Try JPEG
-		cmd = exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "image/jpeg", "-o")
-		output, err = cmd.Output()
+		output, err = clipboardOutput(ctx, "xclip", "-selection", "clipboard", "-t", "image/jpeg", "-o")
 		if err == nil && len(output) > 0 {
 			return output, nil
 		}
@@ -406,6 +397,27 @@ func readClipboardLinux(ctx context.Context) ([]byte, error) {
 func hasCommand(name string) bool {
 	_, err := exec.LookPath(name)
 	return err == nil
+}
+
+func clipboardOutput(ctx context.Context, executable string, args ...string) (out []byte, err error) {
+	cmd, endSpan := clipboardCommand(ctx, executable, args...)
+	defer func() { endSpan(err) }()
+	return cmd.Output()
+}
+
+func clipboardCombinedOutput(ctx context.Context, executable string, args ...string) (out []byte, err error) {
+	cmd, endSpan := clipboardCommand(ctx, executable, args...)
+	defer func() { endSpan(err) }()
+	return cmd.CombinedOutput()
+}
+
+func clipboardCommand(ctx context.Context, executable string, args ...string) (*exec.Cmd, func(error)) {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "clipboard",
+		"dependency.name", filepath.Base(executable),
+		"dependency.operation", "read",
+		"arg_count", len(args),
+	)
+	return exec.CommandContext(ctx, executable, args...), endSpan
 }
 
 // hasPNGPaste checks if pngpaste is installed on macOS
@@ -454,8 +466,7 @@ func summarizeClipboardText(value string) string {
 }
 
 func readClipboardMacOSInfo(ctx context.Context) string {
-	cmd := exec.CommandContext(ctx, "osascript", "-e", "clipboard info")
-	output, err := cmd.Output()
+	output, err := clipboardOutput(ctx, "osascript", "-e", "clipboard info")
 	if err != nil {
 		return ""
 	}
