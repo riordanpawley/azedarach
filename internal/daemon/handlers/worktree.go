@@ -52,8 +52,13 @@ func WithWorktreeLongRunningExecutor(executor WorktreeLongRunningExecutor) Workt
 type worktreeService interface {
 	List(context.Context, string) ([]git.Worktree, error)
 	Create(context.Context, string, string, string) (*git.Worktree, string, error)
-	Delete(context.Context, string, string, bool) error
+	Delete(context.Context, string, string, WorktreeRemoveOptions) (*git.Worktree, bool, error)
 	CleanupOrphaned(context.Context, string) (*CleanupOrphanedResult, error)
+}
+
+type WorktreeRemoveOptions struct {
+	Force        bool
+	DeleteBranch bool
 }
 
 // CleanupOrphanedResult captures the deterministic cleanup outcome used by the handler.
@@ -75,10 +80,11 @@ func NewWorktreeHandler(service worktreeService, opts ...WorktreeHandlerOption) 
 }
 
 type worktreeCommandBody struct {
-	ProjectID  string `json:"project_id"`
-	IssueID    string `json:"issue_id,omitempty"`
-	BaseBranch string `json:"base_branch,omitempty"`
-	Force      bool   `json:"force,omitempty"`
+	ProjectID    string `json:"project_id"`
+	IssueID      string `json:"issue_id,omitempty"`
+	BaseBranch   string `json:"base_branch,omitempty"`
+	Force        bool   `json:"force,omitempty"`
+	DeleteBranch bool   `json:"delete_branch,omitempty"`
 }
 
 type worktreePayload struct {
@@ -99,8 +105,10 @@ type worktreeResultBody struct {
 }
 
 type worktreeRemoveResultBody struct {
-	ProjectID string `json:"project_id"`
-	IssueID   string `json:"issue_id"`
+	ProjectID     string `json:"project_id"`
+	IssueID       string `json:"issue_id"`
+	Branch        string `json:"branch,omitempty"`
+	BranchDeleted bool   `json:"branch_deleted,omitempty"`
 }
 
 // Handle executes one worktree command from a daemon request envelope.
@@ -216,14 +224,24 @@ func (h *WorktreeHandler) HandleDirect(ctx context.Context, req protocol.Request
 			return resp
 		}
 
-		if err := h.service.Delete(ctx, cmd.ProjectID, cmd.IssueID, cmd.Force); err != nil {
+		removed, branchDeleted, err := h.service.Delete(ctx, cmd.ProjectID, cmd.IssueID, WorktreeRemoveOptions{
+			Force:        cmd.Force,
+			DeleteBranch: cmd.DeleteBranch,
+		})
+		if err != nil {
 			resp.Error = mapWorktreeError(err)
 			return resp
 		}
+		branch := ""
+		if removed != nil {
+			branch = strings.TrimSpace(removed.Branch)
+		}
 
 		body, err := json.Marshal(worktreeRemoveResultBody{
-			ProjectID: cmd.ProjectID,
-			IssueID:   cmd.IssueID,
+			ProjectID:     cmd.ProjectID,
+			IssueID:       cmd.IssueID,
+			Branch:        branch,
+			BranchDeleted: branchDeleted,
 		})
 		if err != nil {
 			resp.Error = &protocol.ErrorEnvelope{

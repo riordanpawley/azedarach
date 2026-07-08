@@ -219,13 +219,20 @@ func (w *WorktreeManager) DeleteWithOptions(ctx context.Context, issueID string,
 	worktree, err := w.deleteWorktreeWithOptions(ctx, issueID, opts.Force)
 	if err != nil {
 		if errors.Is(err, ErrWorktreeNotFound) {
-			if branchErr := w.deleteBranchForPolicy(ctx, opts.FallbackBranch, opts.BranchCleanup); branchErr != nil {
+			fallbackBranch := strings.TrimSpace(opts.FallbackBranch)
+			if branchErr := w.deleteBranchForPolicy(ctx, fallbackBranch, opts.BranchCleanup, ""); branchErr != nil {
 				return nil, branchErr
+			}
+			if opts.BranchCleanup != WorktreeBranchCleanupNone && fallbackBranch != "" {
+				return &Worktree{
+					Branch:  fallbackBranch,
+					IssueID: issueID,
+				}, nil
 			}
 		}
 		return nil, err
 	}
-	if err := w.deleteBranchForPolicy(ctx, worktree.Branch, opts.BranchCleanup); err != nil {
+	if err := w.deleteBranchForPolicy(ctx, worktree.Branch, opts.BranchCleanup, worktree.Path); err != nil {
 		return nil, err
 	}
 	return worktree, nil
@@ -293,12 +300,12 @@ func (w *WorktreeManager) deleteWorktreeWithOptions(ctx context.Context, issueID
 	return worktree, nil
 }
 
-func (w *WorktreeManager) deleteBranchForPolicy(ctx context.Context, branchName string, mode WorktreeBranchCleanupMode) error {
+func (w *WorktreeManager) deleteBranchForPolicy(ctx context.Context, branchName string, mode WorktreeBranchCleanupMode, ignoredWorktreePath string) error {
 	branchName = strings.TrimSpace(branchName)
 	if mode == WorktreeBranchCleanupNone || branchName == "" {
 		return nil
 	}
-	err := w.DeleteBranch(ctx, branchName)
+	err := w.deleteBranch(ctx, branchName, ignoredWorktreePath)
 	if err == nil {
 		return nil
 	}
@@ -311,9 +318,16 @@ func (w *WorktreeManager) deleteBranchForPolicy(ctx context.Context, branchName 
 
 // DeleteBranch deletes a local issue branch and treats an already-missing branch as success.
 func (w *WorktreeManager) DeleteBranch(ctx context.Context, branchName string) error {
+	return w.deleteBranch(ctx, branchName, "")
+}
+
+func (w *WorktreeManager) deleteBranch(ctx context.Context, branchName, ignoredWorktreePath string) error {
 	branchName = strings.TrimSpace(branchName)
 	if branchName == "" {
 		return fmt.Errorf("branch name is required")
+	}
+	if err := w.validateBranchDeleteSafety(ctx, branchName, ignoredWorktreePath); err != nil {
+		return err
 	}
 	if _, err := w.runner.Run(ctx, "branch", "-D", branchName); err != nil {
 		if !isBranchAlreadyDeletedError(err, branchName) {
@@ -322,6 +336,46 @@ func (w *WorktreeManager) DeleteBranch(ctx context.Context, branchName string) e
 		w.logger.Info("issue branch already deleted", "branch", branchName)
 	}
 	return nil
+}
+
+func (w *WorktreeManager) validateBranchDeleteSafety(ctx context.Context, branchName, ignoredWorktreePath string) error {
+	if isProtectedWorktreeBranch(branchName) {
+		return fmt.Errorf("refusing to delete protected branch %s", branchName)
+	}
+	if current, err := w.runner.Run(ctx, "branch", "--show-current"); err == nil && strings.TrimSpace(current) == branchName {
+		return fmt.Errorf("refusing to delete current checkout branch %s", branchName)
+	}
+	output, err := w.runner.Run(ctx, "worktree", "list", "--porcelain")
+	if err != nil {
+		return fmt.Errorf("verify branch %s worktree attachments: %w", branchName, err)
+	}
+	for _, entry := range parseWorktreeEntries(output) {
+		if sameCleanPath(entry.Path, ignoredWorktreePath) {
+			continue
+		}
+		if entry.Branch == branchName {
+			return fmt.Errorf("refusing to delete branch %s because it is still checked out at worktree %s", branchName, entry.Path)
+		}
+	}
+	return nil
+}
+
+func sameCleanPath(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+func isProtectedWorktreeBranch(branchName string) bool {
+	switch strings.ToLower(strings.TrimSpace(branchName)) {
+	case "main", "master", "develop", "development", "dev", "trunk":
+		return true
+	default:
+		return false
+	}
 }
 
 // Get returns information about the worktree for the given issue ID.
@@ -421,17 +475,43 @@ func (w *WorktreeManager) parseWorktreeList(output string) []Worktree {
 
 func parseWorktreePaths(output string) []string {
 	paths := make([]string, 0)
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "worktree ") {
-			continue
-		}
-		path := strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
-		if path != "" {
-			paths = append(paths, path)
-		}
+	for _, entry := range parseWorktreeEntries(output) {
+		paths = append(paths, entry.Path)
 	}
 	return paths
+}
+
+type worktreeListEntry struct {
+	Path   string
+	Branch string
+}
+
+func parseWorktreeEntries(output string) []worktreeListEntry {
+	entries := make([]worktreeListEntry, 0)
+	var current worktreeListEntry
+	flush := func() {
+		if strings.TrimSpace(current.Path) != "" {
+			entries = append(entries, current)
+		}
+		current = worktreeListEntry{}
+	}
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			if current.Path != "" {
+				flush()
+			}
+			current.Path = strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
+		case strings.HasPrefix(line, "branch "):
+			branchRef := strings.TrimSpace(strings.TrimPrefix(line, "branch "))
+			current.Branch = strings.TrimPrefix(branchRef, "refs/heads/")
+		case line == "":
+			flush()
+		}
+	}
+	flush()
+	return entries
 }
 
 func (w *WorktreeManager) extractCanonicalIssueID(branchName, worktreePath string) (string, bool) {

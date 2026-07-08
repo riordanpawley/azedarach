@@ -490,7 +490,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		pending := m.pendingBulkCleanup
 		m.pendingBulkCleanup = nil
 		m.beginMutationFeedback(fmt.Sprintf("Bulk cleanup queued for %d task(s)", len(pending.taskIDs)))
-		return m, m.bulkCleanupWorktreeCmd(pending.taskIDs, pending.deletedTasks)
+		return m, m.bulkCleanupWorktreeCmd(pending.taskIDs, pending.deletedTasks, pending.deleteBranch)
+	}
+	if msg.Key == "yes-delete-branch" && m.pendingBulkCleanup != nil {
+		pending := m.pendingBulkCleanup
+		pending.deleteBranch = true
+		m.pendingBulkCleanup = nil
+		m.beginMutationFeedback(fmt.Sprintf("Bulk cleanup + branch delete queued for %d task(s)", len(pending.taskIDs)))
+		return m, m.bulkCleanupWorktreeCmd(pending.taskIDs, pending.deletedTasks, true)
 	}
 	if msg.Key == "no" && m.pendingBulkCleanup != nil {
 		pending := m.pendingBulkCleanup
@@ -507,7 +514,15 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		pending := m.pendingCleanup
 		m.pendingCleanup = nil
 		m.beginMutationFeedback(fmt.Sprintf("Worktree cleanup queued for %s", pending.taskID))
-		return m, m.cleanupWorktreeCmd(pending.taskID, pending.deletedTask, pending.force)
+		return m, m.cleanupWorktreeCmd(pending.taskID, pending.deletedTask, pending.force, pending.deleteBranch)
+	}
+	if msg.Key == "yes-delete-branch" && m.pendingCleanup != nil {
+		pending := m.pendingCleanup
+		pending.deleteBranch = true
+		m.pendingCleanup = nil
+		branch := cleanupBranchLabel(pending.branch)
+		m.beginMutationFeedback(fmt.Sprintf("Worktree cleanup + branch delete queued for %s (%s)", pending.taskID, branch))
+		return m, m.cleanupWorktreeCmd(pending.taskID, pending.deletedTask, pending.force, true)
 	}
 	if msg.Key == "no" && m.pendingCleanup != nil {
 		pending := m.pendingCleanup

@@ -2008,7 +2008,10 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 			result.WorktreeCleanupDeferred = true
 			deferredCleanupPlan = plan
 		} else {
-			if err := d.worktreeAdapter.Delete(ctx, projectID, taskID, cmd.ForceWorktree); err != nil {
+			if _, _, err := d.worktreeAdapter.Delete(ctx, projectID, taskID, daemonhandlers.WorktreeRemoveOptions{
+				Force:        cmd.ForceWorktree,
+				DeleteBranch: true,
+			}); err != nil {
 				recordPhase("worktree_cleanup", phaseStartedAt, false)
 				return result, taskClosePostIntegrationPhaseError(taskID, "worktree_cleanup", integration, err)
 			}
@@ -5840,7 +5843,10 @@ func (d *Daemon) deleteTask(ctx context.Context, issueClient *issues.Client, pro
 			if d.worktreeAdapter == nil {
 				return result, fmt.Errorf("remove worktree before deleting %s: worktree cleanup unavailable", taskID)
 			}
-			if err := d.worktreeAdapter.Delete(ctx, projectID, taskID, cmd.ForceWorktree); err != nil {
+			if _, _, err := d.worktreeAdapter.Delete(ctx, projectID, taskID, daemonhandlers.WorktreeRemoveOptions{
+				Force:        cmd.ForceWorktree,
+				DeleteBranch: true,
+			}); err != nil {
 				return result, fmt.Errorf("remove worktree before deleting %s: %w", taskID, err)
 			}
 			result.WorktreeRemoved = true
