@@ -491,7 +491,7 @@ func main() {
 
 	case "issue":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|claim|takeover|release|events|context-risk|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]\n")
 			os.Exit(1)
 		}
 		issueCommand := commandArgs[0]
@@ -588,6 +588,19 @@ func main() {
 			}
 			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
 				return cli.IssueEventsCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		case "record":
+			opts, err := cli.ParseIssueRecordArgs(issueArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az issue record [--project <project-id>] [--id <issue-id>] [--type <event-type>] [--summary <text>] [--body <text>] [--data <json-object>] [--follow-up <issue-id> ...] [--json] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.IssueRecordCommand(deps, opts)
 			}); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -962,7 +975,7 @@ func main() {
 
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown issue command: %s\n", issueCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|claim|takeover|release|events|context-risk|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]\n")
 			os.Exit(1)
 		}
 
@@ -1658,7 +1671,7 @@ func runBranchCommand(cfg *config.Config, command string, args []string) error {
 		})
 	case "agent-merge":
 		if sessionHelpRequested(args...) {
-			return fmt.Errorf("usage: az branch agent-merge <issue-id> [--target base|<issue-id>]")
+			return fmt.Errorf("usage: az branch agent-merge [--project <project-id>] <issue-id> [--target base|<issue-id>]")
 		}
 		opts, err := parseBranchAgentMergeArgs(args)
 		if err != nil {
@@ -1678,9 +1691,9 @@ func runBranchCommand(cfg *config.Config, command string, args []string) error {
 func branchCommandUsage(command string) (string, bool) {
 	switch command {
 	case "merge", "merge-to-base":
-		return "usage: az branch merge [issue-id]", true
+		return "usage: az branch merge [--project <project-id>] [issue-id]", true
 	case "agent-merge":
-		return "usage: az branch agent-merge <issue-id> [--target base|<issue-id>]", true
+		return "usage: az branch agent-merge [--project <project-id>] <issue-id> [--target base|<issue-id>]", true
 	default:
 		return "", false
 	}
@@ -1688,19 +1701,36 @@ func branchCommandUsage(command string) (string, bool) {
 
 func parseBranchMergeArgs(args []string) (cli.BranchMergeToBaseOptions, error) {
 	opts := cli.BranchMergeToBaseOptions{}
-	for _, arg := range args {
+	usageErr := func() (cli.BranchMergeToBaseOptions, error) {
+		return cli.BranchMergeToBaseOptions{}, fmt.Errorf("usage: az branch merge [--project <project-id>] [issue-id]")
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		trimmed := strings.TrimSpace(arg)
 		switch trimmed {
 		case "--allow-base-for-child":
 			opts.AllowBaseForChild = true
+		case "--project":
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" || strings.HasPrefix(strings.TrimSpace(args[i+1]), "-") {
+				return usageErr()
+			}
+			i++
+			opts.Project = strings.TrimSpace(args[i])
 		case "":
 			continue
 		default:
+			if strings.HasPrefix(trimmed, "--project=") {
+				opts.Project = strings.TrimSpace(strings.TrimPrefix(trimmed, "--project="))
+				if opts.Project == "" {
+					return usageErr()
+				}
+				continue
+			}
 			if strings.HasPrefix(trimmed, "--") {
-				return cli.BranchMergeToBaseOptions{}, fmt.Errorf("usage: az branch merge [issue-id]")
+				return usageErr()
 			}
 			if opts.IssueID != "" {
-				return cli.BranchMergeToBaseOptions{}, fmt.Errorf("usage: az branch merge [issue-id]")
+				return usageErr()
 			}
 			opts.IssueID = trimmed
 		}
@@ -1749,27 +1779,43 @@ func parseSessionResolveConflictArgs(args []string) (cli.SessionResolveConflictO
 
 func parseBranchAgentMergeArgs(args []string) (cli.BranchAgentMergeOptions, error) {
 	opts := cli.BranchAgentMergeOptions{Target: "base"}
+	usageErr := func() (cli.BranchAgentMergeOptions, error) {
+		return opts, fmt.Errorf("usage: az branch agent-merge [--project <project-id>] <issue-id> [--target base|<issue-id>]")
+	}
 	for i := 0; i < len(args); i++ {
 		arg := strings.TrimSpace(args[i])
 		switch arg {
+		case "--project":
+			i++
+			if i >= len(args) || strings.TrimSpace(args[i]) == "" || strings.HasPrefix(strings.TrimSpace(args[i]), "-") {
+				return usageErr()
+			}
+			opts.Project = strings.TrimSpace(args[i])
 		case "--target":
 			i++
 			if i >= len(args) {
-				return opts, fmt.Errorf("usage: az branch agent-merge <issue-id> [--target base|<issue-id>]")
+				return usageErr()
 			}
 			opts.Target = args[i]
 		default:
+			if strings.HasPrefix(arg, "--project=") {
+				opts.Project = strings.TrimSpace(strings.TrimPrefix(arg, "--project="))
+				if opts.Project == "" {
+					return usageErr()
+				}
+				continue
+			}
 			if strings.HasPrefix(arg, "-") {
-				return opts, fmt.Errorf("usage: az branch agent-merge <issue-id> [--target base|<issue-id>]")
+				return usageErr()
 			}
 			if strings.TrimSpace(opts.IssueID) != "" {
-				return opts, fmt.Errorf("usage: az branch agent-merge <issue-id> [--target base|<issue-id>]")
+				return usageErr()
 			}
 			opts.IssueID = arg
 		}
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return opts, fmt.Errorf("usage: az branch agent-merge <issue-id> [--target base|<issue-id>]")
+		return usageErr()
 	}
 	return opts, nil
 }

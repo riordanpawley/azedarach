@@ -20,6 +20,7 @@ const (
 	CommandTaskGet              = "task.get"
 	CommandTaskGetMany          = "task.get_many"
 	CommandTaskEvents           = "task.events"
+	CommandTaskEventAppend      = "task.event.append"
 	CommandTaskCreate           = "task.create"
 	CommandTaskClose            = "task.close"
 	CommandTaskGraphReadiness   = "task.graph_readiness"
@@ -285,6 +286,8 @@ type TaskIntegrationReadiness struct {
 	ContextRisk            *domain.IssueContextRiskPacket `json:"context_risk,omitempty"`
 	Reasons                []string                       `json:"reasons,omitempty"`
 	EvidenceEventSeq       int64                          `json:"evidence_event_seq,omitempty"`
+	EvidenceEventID        int64                          `json:"evidence_event_id,omitempty"`
+	EvidenceSource         string                         `json:"evidence_source,omitempty"`
 	EvidencePacket         *domain.WorkerEvidencePacket   `json:"evidence_packet,omitempty"`
 	EvidenceIncomplete     bool                           `json:"evidence_incomplete,omitempty"`
 	EvidenceMissingFields  []string                       `json:"evidence_missing_fields,omitempty"`
@@ -365,6 +368,7 @@ type TaskIDsRequest struct {
 	TaskIDs           []naming.IssueID `json:"task_ids"`
 	IncludeAncestors  bool             `json:"include_ancestors,omitempty"`
 	ExcludeDependents bool             `json:"exclude_dependents,omitempty"`
+	DirectDependents  bool             `json:"direct_dependents,omitempty"`
 	MetadataOnly      bool             `json:"metadata_only,omitempty"`
 }
 
@@ -373,6 +377,18 @@ type TaskEventsRequest struct {
 	TaskID naming.IssueID `json:"task_id"`
 	Types  []string       `json:"event_types,omitempty"`
 	Limit  int            `json:"limit,omitempty"`
+}
+
+// TaskEventAppendRequest contains the payload used to append one issue observation event.
+type TaskEventAppendRequest struct {
+	TaskID        naming.IssueID `json:"task_id"`
+	Type          string         `json:"event_type"`
+	Source        string         `json:"source,omitempty"`
+	SourceCommand string         `json:"source_command,omitempty"`
+	OperationID   string         `json:"operation_id,omitempty"`
+	SessionID     string         `json:"session_id,omitempty"`
+	WorktreePath  string         `json:"worktree_path,omitempty"`
+	Payload       map[string]any `json:"payload,omitempty"`
 }
 
 // TaskDependencyParams contains the payload used for dependency operations.
@@ -640,9 +656,15 @@ func (c *Client) GetManyTaskSnapshotWithAncestorsNoDependentsMetadataOnlyMode(ct
 	return c.getManyTaskSnapshot(ctx, taskIDs, mode, getManyTaskSnapshotOptions{includeAncestors: true, excludeDependents: true, metadataOnly: true})
 }
 
+// GetChildBoardSnapshotWithMode fetches a parent plus its direct child board context.
+func (c *Client) GetChildBoardSnapshotWithMode(ctx context.Context, parentID string, mode ReadWaitMode) (TaskSnapshot, error) {
+	return c.getManyTaskSnapshot(ctx, []string{parentID}, mode, getManyTaskSnapshotOptions{includeAncestors: true, directDependents: true})
+}
+
 type getManyTaskSnapshotOptions struct {
 	includeAncestors  bool
 	excludeDependents bool
+	directDependents  bool
 	metadataOnly      bool
 }
 
@@ -666,7 +688,7 @@ func (c *Client) getManyTaskSnapshot(ctx context.Context, taskIDs []string, mode
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
-	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGetMany, TaskIDsRequest{TaskIDs: parsedTaskIDs, IncludeAncestors: opts.includeAncestors, ExcludeDependents: opts.excludeDependents, MetadataOnly: opts.metadataOnly})
+	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGetMany, TaskIDsRequest{TaskIDs: parsedTaskIDs, IncludeAncestors: opts.includeAncestors, ExcludeDependents: opts.excludeDependents, DirectDependents: opts.directDependents, MetadataOnly: opts.metadataOnly})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
@@ -704,6 +726,31 @@ func (c *Client) ListTaskEvents(ctx context.Context, taskID string, eventTypes [
 		return nil, err
 	}
 	return append([]domain.IssueObservationEvent(nil), out.Events...), nil
+}
+
+// AppendTaskEvent records a durable issue-scoped observation event.
+func (c *Client) AppendTaskEvent(ctx context.Context, taskID string, req TaskEventAppendRequest) (domain.IssueObservationEvent, error) {
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return domain.IssueObservationEvent{}, fmt.Errorf("invalid task id: %w", err)
+	}
+	req.TaskID = parsedTaskID
+	req.Type = strings.TrimSpace(req.Type)
+	req.Source = strings.TrimSpace(req.Source)
+	req.SourceCommand = strings.TrimSpace(req.SourceCommand)
+	req.OperationID = strings.TrimSpace(req.OperationID)
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	req.WorktreePath = strings.TrimSpace(req.WorktreePath)
+	if req.Payload == nil {
+		req.Payload = map[string]any{}
+	}
+	var out struct {
+		Event domain.IssueObservationEvent `json:"event"`
+	}
+	if err := c.commandJSON(ctx, CommandTaskEventAppend, req, &out); err != nil {
+		return domain.IssueObservationEvent{}, err
+	}
+	return out.Event, nil
 }
 
 // ListTasksSnapshot fetches the current task set and revision through the daemon client boundary.

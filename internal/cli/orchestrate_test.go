@@ -2463,10 +2463,11 @@ func TestOrchestratePromptCommandPrintsNativeWorkerHandoff(t *testing.T) {
 		"az spec read --issue az-2",
 		"Current notes: present but omitted from worker prompt. Run `az issue get az-2 --with-notes` only if full note history is necessary.",
 		"Status semantics: use `in_progress` while actively working, `in_review` when your implementation is complete and ready for orchestrator review/integration",
-		"Blocked work is represented by dependency edges or `worker-blocked` mailbox events, not by setting issue status to `in_review`.",
+		"Keep `az-2` status current; record progress, follow-ups, validation, review facts, risks, blockers, and closeout evidence with `az issue record` instead of routine notes.",
+		"Blocked work is represented by dependency edges, issue record evidence, or active-coordination `worker-blocked` mailbox events, not by setting issue status to `in_review`.",
 		"Do not append raw logs, exploratory transcripts, routine progress narration, duplicate prompt context, or speculative scratch work to notes.",
 		"Return progress, blockers, and final results through the native subagent result channel.",
-		"Do not use `az mail` unless the orchestrator explicitly asks for mailbox coordination.",
+		"Do not use `az mail` unless the orchestrator explicitly asks for mailbox coordination; use `az issue record` for durable issue activity/evidence.",
 		"Do not close root issue `az-1`",
 	} {
 		if !strings.Contains(output, want) {
@@ -2492,12 +2493,15 @@ func TestOrchestratePromptCommandMailboxCoordinationOptIn(t *testing.T) {
 	for _, want := range []string{
 		"Coordination mode: mailbox",
 		"Coordination mailbox parent: az-1",
-		"Use mailbox events for hybrid coordination",
+		"Use mailbox events for active hybrid coordination only",
+		"For non-orchestrated durable facts, use `az issue record`.",
 		"Check inbound orchestrator messages with `az mail list --parent az-1 --since 0 --json` before declaring yourself blocked or idle",
 		"Report to parent `az-1` with `az mail send --parent az-1 --issue az-2 --type <worker-progress|worker-blocked|worker-integration-ready> --body \"<evidence>\"`; do not use `az orchestrate message` for your own status",
 		"Evidence bodies should be JSON `worker_evidence.v1` packets with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`",
+		"use `az issue record --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant",
 		"Omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array",
 		"az mail list --parent az-1 --since 0 --json",
+		"az issue record az-2 --type evidence.submitted",
 		"`worker-ready` and `worker-complete` are accepted only as legacy aliases for `worker-integration-ready`",
 		"az mail send --parent az-1 --issue az-2 --type worker-integration-ready",
 		`"schema":"worker_evidence.v1","summary":"Ready for integration."`,
@@ -2876,15 +2880,20 @@ func TestOrchestrateIntegrateApplyRequiresCompletionEvidence(t *testing.T) {
 }
 
 func TestOrchestrateIntegrateApplyDaemonIntegrationFailureStopsBeforeAppend(t *testing.T) {
-	deps, commands, _ := orchestrateIntegrateApplyDeps(t, "merge")
+	deps, commands, _ := orchestrateIntegrateApplyDeps(t, "merge_project")
 	output, err := captureStdoutAllowError(t, func() error {
-		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2", Apply: true})
+		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{Project: "azedarach", IssueID: "az-2", Apply: true})
 	})
 	if err == nil {
 		t.Fatal("expected daemon integration failure")
 	}
-	if !strings.Contains(output, "integrate_and_close: failed") || !strings.Contains(output, "az branch merge az-2") {
+	if !strings.Contains(output, "integrate_and_close: failed") ||
+		!strings.Contains(output, "az branch merge --project azedarach az-2") ||
+		!strings.Contains(output, "az orchestrate integrate --project azedarach --issue az-2 --apply") {
 		t.Fatalf("output missing daemon integration failure recovery:\n%s", output)
+	}
+	if strings.Contains(output, "az orchestrate integrate --issue az-2 --apply") {
+		t.Fatalf("output included unscoped project retry recovery:\n%s", output)
 	}
 	if containsString(*commands, daemonclient.CommandTaskAppendNotes) || containsString(*commands, daemonclient.CommandGitMerge) || containsString(*commands, commandTaskClosePreflight) || containsString(*commands, commandSessionStop) || containsString(*commands, daemonclient.CommandWorktreeRemove) || containsString(*commands, daemonclient.CommandTaskUpdateStatus) {
 		t.Fatalf("commands = %+v, append/client integration cleanup should not run after daemon integration failure", *commands)
@@ -3013,6 +3022,9 @@ func orchestrateIntegrateApplyDeps(t *testing.T, failStep string) (*Dependencies
 						Result:   gitservice.MergeResult{Success: true},
 					}), nil
 				case daemonclient.CommandTaskClose:
+					if failStep == "merge_project" && req.Meta.ProjectID.String() != "azedarach" {
+						t.Fatalf("task.close project = %q, want azedarach", req.Meta.ProjectID)
+					}
 					if deadline, ok := ctx.Deadline(); ok {
 						closeBudgets = append(closeBudgets, time.Until(deadline))
 					}
@@ -3025,7 +3037,7 @@ func orchestrateIntegrateApplyDeps(t *testing.T, failStep string) (*Dependencies
 					if !body.IntegrateBeforeClose {
 						t.Fatalf("task.close integrate_before_close = false, want true")
 					}
-					if failStep == "merge" {
+					if failStep == "merge" || failStep == "merge_project" {
 						return protocol.ResponseEnvelope{}, fmt.Errorf("integrate before closing az-2: merge failed")
 					}
 					if failStep == "merge_conflict" {
