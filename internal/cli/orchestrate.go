@@ -2322,32 +2322,32 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), orchestrateIntegrateCommandTimeout(opts.Apply))
 	defer cancel()
+	result := orchestrateIntegrateResult{
+		IssueID: opts.IssueID,
+		Apply:   opts.Apply,
+	}
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
-		return err
+		return finishOrchestrateIntegratePreflightFailure(opts, &result, err)
 	}
 	wt, found, err := worktreeForIssue(ctx, deps, opts.IssueID)
 	if err != nil {
-		return err
+		return finishOrchestrateIntegratePreflightFailure(opts, &result, err)
 	}
 	readiness, err := deps.DaemonClient.TaskIntegrationReadiness(ctx, opts.IssueID, deps.RepoDir)
 	if err != nil {
-		return err
+		return finishOrchestrateIntegratePreflightFailure(opts, &result, err)
 	}
 	mergeReady := readiness.Ready
 	contextRiskBlocked := readiness.ContextRisk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*readiness.ContextRisk)
 	closeoutReady := mergeReady && !contextRiskBlocked
 	commands := orchestrateIntegrationCommands(opts.IssueID, opts.Project, wt, found, closeoutReady)
-	result := orchestrateIntegrateResult{
-		IssueID:       opts.IssueID,
-		MergeReady:    mergeReady,
-		CloseoutReady: closeoutReady,
-		ContextRisk:   readiness.ContextRisk,
-		Apply:         opts.Apply,
-		Reasons:       readiness.Reasons,
-		Commands:      commands,
-	}
+	result.MergeReady = mergeReady
+	result.CloseoutReady = closeoutReady
+	result.ContextRisk = readiness.ContextRisk
+	result.Reasons = readiness.Reasons
+	result.Commands = commands
 	if contextRiskBlocked {
 		result.Reasons = append(result.Reasons, issueContextRiskCloseoutBlockMessage(opts.IssueID))
 	}
@@ -2402,6 +2402,34 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 	return nil
 }
 
+func orchestrateIntegrateCommandTimeout(apply bool) time.Duration {
+	if apply {
+		return issueCloseCleanupTimeout
+	}
+	return daemonCommandTimeout
+}
+
+func finishOrchestrateIntegratePreflightFailure(opts OrchestrateIntegrateOptions, result *orchestrateIntegrateResult, err error) error {
+	wrapped := fmt.Errorf("phase preflight for issue %s: %w", opts.IssueID, err)
+	if !opts.Apply {
+		return wrapped
+	}
+	result.Steps = append(result.Steps, orchestrateIntegrateStep{
+		Name:   "preflight",
+		Status: "failed",
+		Error:  err.Error(),
+	})
+	result.Recovery = orchestrateIntegrationRecovery(opts.IssueID, opts.Project, "preflight_failed")
+	if opts.JSON {
+		if printErr := printJSON(*result); printErr != nil {
+			return printErr
+		}
+		return wrapped
+	}
+	printOrchestrateIntegrateApplyResult(*result)
+	return wrapped
+}
+
 func applyOrchestrateIntegration(deps *Dependencies, issueID, projectID string, mergeReady bool, result *orchestrateIntegrateResult) error {
 	if !mergeReady {
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{
@@ -2430,9 +2458,10 @@ func applyOrchestrateIntegration(deps *Dependencies, issueID, projectID string, 
 		IntegrateBeforeClose: true,
 	})
 	if err != nil {
-		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "integrate_and_close", Status: "failed", Error: err.Error()})
+		wrapped := fmt.Errorf("phase integrate_and_close for issue %s: %w", issueID, err)
+		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "integrate_and_close", Status: "failed", Error: wrapped.Error()})
 		result.Recovery = orchestrateIntegrationRecovery(issueID, projectID, "integration_failed")
-		return fmt.Errorf("apply integration for %s: %w", issueID, err)
+		return fmt.Errorf("apply integration for %s: %w", issueID, wrapped)
 	}
 	result.Applied = true
 	closeOutput := fmt.Sprintf("Closed %s (session_stopped=%t, worktree_removed=%t)", closeResult.TaskID, closeResult.SessionStopped, closeResult.WorktreeRemoved)
@@ -2481,6 +2510,11 @@ func printOrchestrateIntegrateApplyResult(result orchestrateIntegrateResult) {
 
 func orchestrateIntegrationRecovery(issueID, projectID, reason string) []string {
 	switch reason {
+	case "preflight_failed":
+		return []string{
+			fmt.Sprintf("no integration/cleanup/status mutation started; retry from preflight: %s", orchestrateIntegrateApplyCommandForProject(issueID, projectID)),
+			fmt.Sprintf("if this repeats, inspect daemon/runtime health before retrying: %s", issueGetCommandForProject(issueID, projectID)),
+		}
 	case "missing_completion_evidence":
 		return []string{
 			fmt.Sprintf("review worker output and send a worker-integration-ready mailbox event for %s, or close if ready to integrate and clean up: %s", issueID, issueCloseCommandForProject(issueID, projectID)),
