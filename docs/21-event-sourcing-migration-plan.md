@@ -372,3 +372,6 @@ Create these child issues before implementation:
 Do not start migrating issue graph, mailbox, operations, or notices until the
 session lifecycle spike proves the interface is deep enough to improve locality
 and leverage.
+
+For a fuller workstream dependency map, phase gates, and risk mitigations, see
+[22-event-sourcing-detailed-map-and-risk-register.md](22-event-sourcing-detailed-map-and-risk-register.md).
