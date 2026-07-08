@@ -9,11 +9,17 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/pr"
 )
 
 const (
 	CommandPRCreate        = "pr.create"
+	CommandPRGet           = "pr.get"
+	CommandPRChecks        = "pr.checks"
+	CommandPROpen          = "pr.open"
+	CommandPRMerge         = "pr.merge"
 	CommandGitBranchBehind = "git.branch_behind"
 )
 
@@ -21,14 +27,23 @@ const (
 type PRHandler struct {
 	prWorkflow prWorkflow
 	gitClient  branchBehindService
+	issueRefs  prIssueRefStore
 }
 
 type prWorkflow interface {
 	Create(context.Context, pr.CreatePRParams) (*pr.PRInfo, error)
+	Get(context.Context, string) (*pr.PRInfo, error)
+	Checks(context.Context, string) ([]pr.CheckInfo, error)
+	Open(context.Context, string) error
+	Merge(context.Context, int, string) error
 }
 
 type branchBehindService interface {
 	BranchBehind(context.Context, string, string, string, string) (int, int, error)
+}
+
+type prIssueRefStore interface {
+	UpsertExternalIssueRef(context.Context, issues.UpsertExternalIssueRefParams) (domain.ExternalIssueRef, error)
 }
 
 type prCreateCommandBody struct {
@@ -40,6 +55,20 @@ type prCreateCommandBody struct {
 	IssueID    string `json:"issue_id"`
 }
 
+type prBranchCommandBody struct {
+	Branch string `json:"branch"`
+}
+
+type prChecksCommandBody struct {
+	Ref string `json:"ref"`
+}
+
+type prMergeCommandBody struct {
+	Branch   string `json:"branch"`
+	Number   int    `json:"number"`
+	Strategy string `json:"strategy"`
+}
+
 type branchBehindCommandBody struct {
 	Worktree   string `json:"worktree"`
 	BaseBranch string `json:"base_branch"`
@@ -49,6 +78,25 @@ type branchBehindCommandBody struct {
 type prCreateResultBody struct {
 	IssueID     string    `json:"issue_id"`
 	PullRequest pr.PRInfo `json:"pull_request"`
+}
+
+type prGetResultBody struct {
+	PullRequest pr.PRInfo `json:"pull_request"`
+}
+
+type prChecksResultBody struct {
+	Ref          string         `json:"ref"`
+	Checks       []pr.CheckInfo `json:"checks"`
+	ChecksStatus string         `json:"checks_status"`
+}
+
+type prOpenResultBody struct {
+	Branch string `json:"branch"`
+}
+
+type prMergeResultBody struct {
+	Number   int    `json:"number"`
+	Strategy string `json:"strategy"`
 }
 
 type branchBehindResultBody struct {
@@ -64,10 +112,15 @@ type branchBehindResultBody struct {
 }
 
 // NewPRHandler returns a daemon handler for PR creation and branch-behind checks.
-func NewPRHandler(prWorkflow prWorkflow, gitClient branchBehindService) *PRHandler {
+func NewPRHandler(prWorkflow prWorkflow, gitClient branchBehindService, issueRefs ...prIssueRefStore) *PRHandler {
+	var refs prIssueRefStore
+	if len(issueRefs) > 0 {
+		refs = issueRefs[0]
+	}
 	return &PRHandler{
 		prWorkflow: prWorkflow,
 		gitClient:  gitClient,
+		issueRefs:  refs,
 	}
 }
 
@@ -84,6 +137,14 @@ func (h *PRHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) pr
 	switch req.Command {
 	case CommandPRCreate:
 		return h.handleCreate(ctx, resp, req)
+	case CommandPRGet:
+		return h.handleGet(ctx, resp, req)
+	case CommandPRChecks:
+		return h.handleChecks(ctx, resp, req)
+	case CommandPROpen:
+		return h.handleOpen(ctx, resp, req)
+	case CommandPRMerge:
+		return h.handleMerge(ctx, resp, req)
 	case CommandGitBranchBehind:
 		return h.handleBranchBehind(ctx, resp, req)
 	default:
@@ -96,32 +157,131 @@ func (h *PRHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) pr
 	}
 }
 
+func (h *PRHandler) handleGet(ctx context.Context, resp protocol.ResponseEnvelope, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	if h.prWorkflow == nil {
+		resp.Error = prWorkflowUnavailableError()
+		return resp
+	}
+	var cmd prBranchCommandBody
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		resp.Error = invalidPRBodyError(err)
+		return resp
+	}
+	cmd.Branch = strings.TrimSpace(cmd.Branch)
+	if cmd.Branch == "" {
+		resp.Error = missingPRFieldsError("missing required fields: branch")
+		return resp
+	}
+	info, err := h.prWorkflow.Get(ctx, cmd.Branch)
+	if err != nil {
+		resp.Error = mapPRGitError(err)
+		return resp
+	}
+	if info == nil {
+		resp.Error = &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInternal, Message: "get PR returned no result", Retryable: false}
+		return resp
+	}
+	return marshalPRResponse(resp, prGetResultBody{PullRequest: *info})
+}
+
+func (h *PRHandler) handleChecks(ctx context.Context, resp protocol.ResponseEnvelope, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	if h.prWorkflow == nil {
+		resp.Error = prWorkflowUnavailableError()
+		return resp
+	}
+	var cmd prChecksCommandBody
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		resp.Error = invalidPRBodyError(err)
+		return resp
+	}
+	cmd.Ref = strings.TrimSpace(cmd.Ref)
+	if cmd.Ref == "" {
+		resp.Error = missingPRFieldsError("missing required fields: ref")
+		return resp
+	}
+	checks, err := h.prWorkflow.Checks(ctx, cmd.Ref)
+	if err != nil {
+		resp.Error = mapPRGitError(err)
+		return resp
+	}
+	return marshalPRResponse(resp, prChecksResultBody{Ref: cmd.Ref, Checks: checks, ChecksStatus: summarizeChecksStatus(checks)})
+}
+
+func (h *PRHandler) handleOpen(ctx context.Context, resp protocol.ResponseEnvelope, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	if h.prWorkflow == nil {
+		resp.Error = prWorkflowUnavailableError()
+		return resp
+	}
+	var cmd prBranchCommandBody
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		resp.Error = invalidPRBodyError(err)
+		return resp
+	}
+	cmd.Branch = strings.TrimSpace(cmd.Branch)
+	if cmd.Branch == "" {
+		resp.Error = missingPRFieldsError("missing required fields: branch")
+		return resp
+	}
+	if err := h.prWorkflow.Open(ctx, cmd.Branch); err != nil {
+		resp.Error = mapPRGitError(err)
+		return resp
+	}
+	return marshalPRResponse(resp, prOpenResultBody{Branch: cmd.Branch})
+}
+
+func (h *PRHandler) handleMerge(ctx context.Context, resp protocol.ResponseEnvelope, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	if h.prWorkflow == nil {
+		resp.Error = prWorkflowUnavailableError()
+		return resp
+	}
+	var cmd prMergeCommandBody
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		resp.Error = invalidPRBodyError(err)
+		return resp
+	}
+	cmd.Branch = strings.TrimSpace(cmd.Branch)
+	cmd.Strategy = strings.TrimSpace(cmd.Strategy)
+	if cmd.Strategy == "" {
+		cmd.Strategy = "squash"
+	}
+	number := cmd.Number
+	if number == 0 {
+		if cmd.Branch == "" {
+			resp.Error = missingPRFieldsError("missing required fields: number or branch")
+			return resp
+		}
+		info, err := h.prWorkflow.Get(ctx, cmd.Branch)
+		if err != nil {
+			resp.Error = mapPRGitError(err)
+			return resp
+		}
+		if info == nil || info.Number == 0 {
+			resp.Error = &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInternal, Message: "resolved PR has no number", Retryable: false}
+			return resp
+		}
+		number = info.Number
+	}
+	if err := h.prWorkflow.Merge(ctx, number, cmd.Strategy); err != nil {
+		resp.Error = mapPRGitError(err)
+		return resp
+	}
+	return marshalPRResponse(resp, prMergeResultBody{Number: number, Strategy: cmd.Strategy})
+}
+
 func (h *PRHandler) handleCreate(ctx context.Context, resp protocol.ResponseEnvelope, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
 	if h.prWorkflow == nil {
-		resp.Error = &protocol.ErrorEnvelope{
-			Code:      protocol.ErrorCodeInternal,
-			Message:   "PR workflow unavailable",
-			Retryable: false,
-		}
+		resp.Error = prWorkflowUnavailableError()
 		return resp
 	}
 
 	var cmd prCreateCommandBody
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
-		resp.Error = &protocol.ErrorEnvelope{
-			Code:      protocol.ErrorCodeInvalidRequest,
-			Message:   fmt.Sprintf("invalid command body: %v", err),
-			Retryable: false,
-		}
+		resp.Error = invalidPRBodyError(err)
 		return resp
 	}
 
 	if cmd.Title == "" || cmd.Body == "" || cmd.Branch == "" || cmd.BaseBranch == "" || cmd.IssueID == "" {
-		resp.Error = &protocol.ErrorEnvelope{
-			Code:      protocol.ErrorCodeInvalidRequest,
-			Message:   "missing required fields: title/body/branch/base_branch/issue_id",
-			Retryable: false,
-		}
+		resp.Error = missingPRFieldsError("missing required fields: title/body/branch/base_branch/issue_id")
 		return resp
 	}
 
@@ -145,23 +305,33 @@ func (h *PRHandler) handleCreate(ctx context.Context, resp protocol.ResponseEnve
 		}
 		return resp
 	}
+	h.persistPullRequestRef(ctx, cmd.IssueID, *info)
 
-	body, err := json.Marshal(prCreateResultBody{
+	return marshalPRResponse(resp, prCreateResultBody{
 		IssueID:     cmd.IssueID,
 		PullRequest: *info,
 	})
-	if err != nil {
-		resp.Error = &protocol.ErrorEnvelope{
-			Code:      protocol.ErrorCodeInternal,
-			Message:   fmt.Sprintf("marshal response body: %v", err),
-			Retryable: false,
-		}
-		return resp
-	}
+}
 
-	resp.OK = true
-	resp.Body = body
-	return resp
+func (h *PRHandler) persistPullRequestRef(ctx context.Context, issueID string, info pr.PRInfo) {
+	if h == nil || h.issueRefs == nil || strings.TrimSpace(issueID) == "" || info.Number == 0 {
+		return
+	}
+	metadata := map[string]string{
+		"state": info.State,
+		"draft": fmt.Sprintf("%t", info.Draft),
+	}
+	if checks := strings.TrimSpace(info.ChecksStatus); checks != "" {
+		metadata["checks_status"] = checks
+	}
+	_, _ = h.issueRefs.UpsertExternalIssueRef(ctx, issues.UpsertExternalIssueRefParams{
+		IssueID:    strings.TrimSpace(issueID),
+		Provider:   "github",
+		RemoteKey:  fmt.Sprintf("%d", info.Number),
+		DisplayKey: fmt.Sprintf("#%d", info.Number),
+		URL:        strings.TrimSpace(info.URL),
+		Metadata:   metadata,
+	})
 }
 
 func (h *PRHandler) handleBranchBehind(ctx context.Context, resp protocol.ResponseEnvelope, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
@@ -234,6 +404,64 @@ func (h *PRHandler) handleBranchBehind(ctx context.Context, resp protocol.Respon
 	resp.OK = true
 	resp.Body = body
 	return resp
+}
+
+func prWorkflowUnavailableError() *protocol.ErrorEnvelope {
+	return &protocol.ErrorEnvelope{
+		Code:      protocol.ErrorCodeInternal,
+		Message:   "PR workflow unavailable",
+		Retryable: false,
+	}
+}
+
+func invalidPRBodyError(err error) *protocol.ErrorEnvelope {
+	return &protocol.ErrorEnvelope{
+		Code:      protocol.ErrorCodeInvalidRequest,
+		Message:   fmt.Sprintf("invalid command body: %v", err),
+		Retryable: false,
+	}
+}
+
+func missingPRFieldsError(message string) *protocol.ErrorEnvelope {
+	return &protocol.ErrorEnvelope{
+		Code:      protocol.ErrorCodeInvalidRequest,
+		Message:   message,
+		Retryable: false,
+	}
+}
+
+func marshalPRResponse(resp protocol.ResponseEnvelope, payload any) protocol.ResponseEnvelope {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		resp.Error = &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInternal,
+			Message:   fmt.Sprintf("marshal response body: %v", err),
+			Retryable: false,
+		}
+		return resp
+	}
+	resp.OK = true
+	resp.Body = body
+	return resp
+}
+
+func summarizeChecksStatus(checks []pr.CheckInfo) string {
+	if len(checks) == 0 {
+		return "unknown"
+	}
+	hasPending := false
+	for _, check := range checks {
+		switch strings.ToLower(strings.TrimSpace(check.Bucket)) {
+		case "fail", "cancel":
+			return "fail"
+		case "pending":
+			hasPending = true
+		}
+	}
+	if hasPending {
+		return "pending"
+	}
+	return "pass"
 }
 
 func mapPRGitError(err error) *protocol.ErrorEnvelope {

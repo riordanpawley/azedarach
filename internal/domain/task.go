@@ -53,10 +53,23 @@ type Task struct {
 	GitAdditions          int             `json:"git_additions,omitempty"`
 	GitDeletions          int             `json:"git_deletions,omitempty"`
 	Origin                string          `json:"origin,omitempty"`
+	PullRequest           *PullRequest    `json:"pull_request,omitempty"`
 	RuntimeUpdatedAt      time.Time       `json:"runtime_updated_at,omitempty,omitzero"`
 	Ownership             *IssueOwnership `json:"ownership,omitempty"`
 	CreatedAt             time.Time       `json:"created_at"`
 	UpdatedAt             time.Time       `json:"updated_at"`
+}
+
+// PullRequest is compact GitHub PR metadata attached to an issue for board
+// rendering and CLI/TUI status surfaces.
+type PullRequest struct {
+	Number       int    `json:"number,omitempty"`
+	RemoteKey    string `json:"remote_key,omitempty"`
+	DisplayKey   string `json:"display_key,omitempty"`
+	URL          string `json:"url,omitempty"`
+	State        string `json:"state,omitempty"`
+	Draft        bool   `json:"draft,omitempty"`
+	ChecksStatus string `json:"checks_status,omitempty"`
 }
 
 // IssueOwnership is a durable issue claim used to prevent duplicate agent pickup.

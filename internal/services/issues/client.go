@@ -3522,6 +3522,10 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 		c.logSQLiteRead(ctx, "issue.metadata_runtime_projection", startedAt, len(tasks), err, "issue_count", len(ids))
 		return nil, err
 	}
+	if err := c.loadPullRequestsForTasks(ctx, db, tasks); err != nil {
+		c.logSQLiteRead(ctx, "issue.metadata_runtime_projection", startedAt, len(tasks), err, "issue_count", len(ids))
+		return nil, err
+	}
 	c.logSQLiteRead(ctx, "issue.metadata_runtime_projection", startedAt, len(tasks), nil, "issue_count", len(ids))
 	return tasks, nil
 }
@@ -3759,8 +3763,115 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 		c.logSQLiteRead(ctx, "issue.runtime_projection", startedAt, len(tasks), err, "include_details", includeDetails, "issue_count", issueCount)
 		return nil, err
 	}
+	if err := c.loadPullRequestsForTasks(ctx, db, tasks); err != nil {
+		c.logSQLiteRead(ctx, "issue.runtime_projection", startedAt, len(tasks), err, "include_details", includeDetails, "issue_count", issueCount)
+		return nil, err
+	}
 	c.logSQLiteRead(ctx, "issue.runtime_projection", startedAt, len(tasks), nil, "include_details", includeDetails, "issue_count", issueCount)
 	return tasks, nil
+}
+
+func (c *Client) loadPullRequestsForTasks(ctx context.Context, db *sql.DB, tasks []domain.Task) error {
+	if len(tasks) == 0 {
+		return nil
+	}
+	taskIndexByID := make(map[string]int, len(tasks))
+	ids := make([]string, 0, len(tasks))
+	for i := range tasks {
+		id := strings.TrimSpace(tasks[i].ID.String())
+		if id == "" {
+			continue
+		}
+		taskIndexByID[id] = i
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	query := fmt.Sprintf(`
+		SELECT issue_id, remote_key, COALESCE(display_key, ''), COALESCE(url, ''), COALESCE(metadata_json, '')
+		FROM issue_external_refs
+		WHERE deleted_at IS NULL
+			AND LOWER(provider) IN ('github', 'gh')
+			AND issue_id IN (%s)
+		ORDER BY updated_at DESC
+	`, placeholders)
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var issueID, remoteKey, displayKey, url, metadataRaw string
+		if err := rows.Scan(&issueID, &remoteKey, &displayKey, &url, &metadataRaw); err != nil {
+			return err
+		}
+		idx, ok := taskIndexByID[strings.TrimSpace(issueID)]
+		if !ok || tasks[idx].PullRequest != nil {
+			continue
+		}
+		tasks[idx].PullRequest = pullRequestFromExternalRef(remoteKey, displayKey, url, metadataRaw)
+		if strings.TrimSpace(tasks[idx].Origin) == "" || strings.EqualFold(tasks[idx].Origin, "local") {
+			tasks[idx].Origin = "github"
+		}
+	}
+	return rows.Err()
+}
+
+func pullRequestFromExternalRef(remoteKey, displayKey, refURL, metadataRaw string) *domain.PullRequest {
+	metadata := map[string]string{}
+	if strings.TrimSpace(metadataRaw) != "" {
+		_ = json.Unmarshal([]byte(metadataRaw), &metadata)
+	}
+	pr := &domain.PullRequest{
+		RemoteKey:  strings.TrimSpace(remoteKey),
+		DisplayKey: strings.TrimSpace(displayKey),
+		URL:        strings.TrimSpace(refURL),
+		State:      firstMetadataValue(metadata, "state", "pr_state"),
+		Draft:      parseMetadataBool(firstMetadataValue(metadata, "draft", "is_draft")),
+	}
+	pr.ChecksStatus = firstMetadataValue(metadata, "checks_status", "checks", "status_checks")
+	if number := firstMetadataValue(metadata, "number", "pr_number"); number != "" {
+		if parsed, err := strconv.Atoi(strings.TrimPrefix(number, "#")); err == nil {
+			pr.Number = parsed
+		}
+	}
+	if pr.Number == 0 {
+		for _, candidate := range []string{pr.DisplayKey, pr.RemoteKey} {
+			candidate = strings.TrimPrefix(strings.TrimSpace(candidate), "#")
+			if parsed, err := strconv.Atoi(candidate); err == nil {
+				pr.Number = parsed
+				break
+			}
+		}
+	}
+	if pr.DisplayKey == "" && pr.Number > 0 {
+		pr.DisplayKey = fmt.Sprintf("#%d", pr.Number)
+	}
+	return pr
+}
+
+func firstMetadataValue(metadata map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(metadata[key]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func parseMetadataBool(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *Client) logSQLiteRead(ctx context.Context, operation string, startedAt time.Time, rowCount int, err error, attrs ...any) {
@@ -3834,6 +3945,7 @@ func applyRuntimeOverlay(task *domain.Task, runtime domain.Task) {
 	task.GitDeletions = runtime.GitDeletions
 	task.RuntimeUpdatedAt = runtime.RuntimeUpdatedAt
 	task.Ownership = cloneIssueOwnership(runtime.Ownership)
+	task.PullRequest = clonePullRequest(runtime.PullRequest)
 	if strings.TrimSpace(runtime.Origin) != "" {
 		task.Origin = runtime.Origin
 	}
@@ -3846,7 +3958,16 @@ func cloneTaskForRuntimeOverlay(task domain.Task) domain.Task {
 	task.Implementations = append([]string(nil), task.Implementations...)
 	task.Labels = append([]string(nil), task.Labels...)
 	task.ConflictFiles = append([]string(nil), task.ConflictFiles...)
+	task.PullRequest = clonePullRequest(task.PullRequest)
 	return task
+}
+
+func clonePullRequest(pr *domain.PullRequest) *domain.PullRequest {
+	if pr == nil {
+		return nil
+	}
+	cloned := *pr
+	return &cloned
 }
 
 func cloneDomainSession(session *domain.Session) *domain.Session {

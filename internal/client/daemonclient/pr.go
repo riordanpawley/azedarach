@@ -10,6 +10,10 @@ import (
 
 const (
 	CommandPRCreate        = "pr.create"
+	CommandPRGet           = "pr.get"
+	CommandPRChecks        = "pr.checks"
+	CommandPROpen          = "pr.open"
+	CommandPRMerge         = "pr.merge"
 	CommandGitBranchBehind = "git.branch_behind"
 )
 
@@ -27,6 +31,41 @@ type CreatePullRequestParams struct {
 type CreatePullRequestResult struct {
 	IssueID     string    `json:"issue_id"`
 	PullRequest pr.PRInfo `json:"pull_request"`
+}
+
+// PullRequestBranchParams identifies a PR by head branch.
+type PullRequestBranchParams struct {
+	Branch string `json:"branch"`
+}
+
+// PullRequestGetResult captures PR metadata for a branch.
+type PullRequestGetResult struct {
+	PullRequest pr.PRInfo `json:"pull_request"`
+}
+
+// PullRequestChecksParams identifies a PR for checks by branch, number, or URL.
+type PullRequestChecksParams struct {
+	Ref string `json:"ref"`
+}
+
+// PullRequestChecksResult captures summarized and per-check CI status.
+type PullRequestChecksResult struct {
+	Ref          string         `json:"ref"`
+	Checks       []pr.CheckInfo `json:"checks"`
+	ChecksStatus string         `json:"checks_status"`
+}
+
+// PullRequestMergeParams identifies a PR to merge.
+type PullRequestMergeParams struct {
+	Branch   string `json:"branch"`
+	Number   int    `json:"number"`
+	Strategy string `json:"strategy"`
+}
+
+// PullRequestMergeResult captures a completed merge request.
+type PullRequestMergeResult struct {
+	Number   int    `json:"number"`
+	Strategy string `json:"strategy"`
 }
 
 // BranchBehindCheckParams contains the payload used to check whether a branch is behind its base branch.
@@ -57,6 +96,50 @@ func (c *Client) CreatePullRequest(ctx context.Context, params CreatePullRequest
 	}
 	if out.IssueID == "" {
 		return CreatePullRequestResult{}, fmt.Errorf("%s returned empty issue id", CommandPRCreate)
+	}
+	return out, nil
+}
+
+// GetPullRequest asks the daemon for PR metadata by branch.
+func (c *Client) GetPullRequest(ctx context.Context, params PullRequestBranchParams) (PullRequestGetResult, error) {
+	var out PullRequestGetResult
+	if err := c.commandJSON(ctx, CommandPRGet, params, &out); err != nil {
+		return PullRequestGetResult{}, err
+	}
+	if out.PullRequest.Number == 0 {
+		return PullRequestGetResult{}, fmt.Errorf("%s returned empty pull request number", CommandPRGet)
+	}
+	return out, nil
+}
+
+// GetPullRequestChecks asks the daemon for PR checks by branch, number, or URL.
+func (c *Client) GetPullRequestChecks(ctx context.Context, params PullRequestChecksParams) (PullRequestChecksResult, error) {
+	var out PullRequestChecksResult
+	if err := c.commandJSON(ctx, CommandPRChecks, params, &out); err != nil {
+		return PullRequestChecksResult{}, err
+	}
+	return out, nil
+}
+
+// OpenPullRequest asks the daemon to open a PR in the browser.
+func (c *Client) OpenPullRequest(ctx context.Context, params PullRequestBranchParams) error {
+	var out struct {
+		Branch string `json:"branch"`
+	}
+	if err := c.commandJSON(ctx, CommandPROpen, params, &out); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MergePullRequest asks the daemon to merge a PR.
+func (c *Client) MergePullRequest(ctx context.Context, params PullRequestMergeParams) (PullRequestMergeResult, error) {
+	var out PullRequestMergeResult
+	if err := c.commandJSON(ctx, CommandPRMerge, params, &out); err != nil {
+		return PullRequestMergeResult{}, err
+	}
+	if out.Number == 0 {
+		return PullRequestMergeResult{}, fmt.Errorf("%s returned empty pull request number", CommandPRMerge)
 	}
 	return out, nil
 }

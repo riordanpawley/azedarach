@@ -148,6 +148,7 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 	}{
 		{full: sessionRow, compact: sessionCompact},
 		{full: runtimeRow, compact: runtimeCompact},
+		{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s)},
 		{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
 		{full: typeBadge, compact: typeBadge},
 	}
@@ -259,6 +260,62 @@ func renderOriginBadge(origin string) string {
 		Background(bg).
 		Bold(true).
 		Render(label)
+}
+
+func renderPullRequestBadge(pr *domain.PullRequest, s *styles.Styles) string {
+	if pr == nil {
+		return ""
+	}
+	label := pullRequestLabel(pr)
+	state := strings.TrimSpace(strings.ToLower(pr.State))
+	checks := strings.TrimSpace(strings.ToLower(pr.ChecksStatus))
+	if state != "" {
+		label += " " + state
+	}
+	if checks != "" {
+		label += "/" + checks
+	}
+	return s.Card.Foreground(styles.Mauve).Bold(true).Render(label)
+}
+
+func renderPullRequestBadgeCompact(pr *domain.PullRequest, s *styles.Styles) string {
+	if pr == nil {
+		return ""
+	}
+	label := pullRequestLabel(pr)
+	if checks := strings.TrimSpace(strings.ToLower(pr.ChecksStatus)); checks != "" {
+		label += "/" + compactChecksStatus(checks)
+	}
+	return s.Card.Foreground(styles.Mauve).Bold(true).Render(label)
+}
+
+func pullRequestLabel(pr *domain.PullRequest) string {
+	if pr == nil {
+		return ""
+	}
+	if displayKey := strings.TrimSpace(pr.DisplayKey); displayKey != "" {
+		return "PR" + displayKey
+	}
+	if pr.Number > 0 {
+		return fmt.Sprintf("PR#%d", pr.Number)
+	}
+	if remoteKey := strings.TrimSpace(pr.RemoteKey); remoteKey != "" {
+		return "PR " + remoteKey
+	}
+	return "PR"
+}
+
+func compactChecksStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "pass", "passing", "success":
+		return "ok"
+	case "fail", "failing", "failure":
+		return "fail"
+	case "pending":
+		return "pend"
+	default:
+		return status
+	}
 }
 
 // renderMergeCandidateBadge paints a single-character badge in the card

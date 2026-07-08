@@ -52,6 +52,7 @@ type BoardTaskSummary struct {
 	GitAdditions          int                    `json:"git_additions,omitempty" msgpack:"git_additions,omitempty"`
 	GitDeletions          int                    `json:"git_deletions,omitempty" msgpack:"git_deletions,omitempty"`
 	Origin                string                 `json:"origin,omitempty" msgpack:"origin,omitempty"`
+	PullRequest           *domain.PullRequest    `json:"pull_request,omitempty" msgpack:"pull_request,omitempty"`
 	Ownership             *domain.IssueOwnership `json:"ownership,omitempty" msgpack:"ownership,omitempty"`
 	CreatedAt             time.Time              `json:"created_at" msgpack:"created_at"`
 	UpdatedAt             time.Time              `json:"updated_at" msgpack:"updated_at"`
@@ -81,6 +82,7 @@ func BoardTaskSummaryFromDomain(task domain.Task) BoardTaskSummary {
 		GitAdditions:          task.GitAdditions,
 		GitDeletions:          task.GitDeletions,
 		Origin:                task.Origin,
+		PullRequest:           cloneProtocolPullRequest(task.PullRequest),
 		Ownership:             cloneProtocolOwnership(task.Ownership),
 		CreatedAt:             task.CreatedAt,
 		UpdatedAt:             task.UpdatedAt,
@@ -111,6 +113,7 @@ func (s BoardTaskSummary) ToDomainTask() domain.Task {
 		GitAdditions:          s.GitAdditions,
 		GitDeletions:          s.GitDeletions,
 		Origin:                s.Origin,
+		PullRequest:           cloneProtocolPullRequest(s.PullRequest),
 		Ownership:             cloneProtocolOwnership(s.Ownership),
 		CreatedAt:             s.CreatedAt,
 		UpdatedAt:             s.UpdatedAt,
@@ -137,6 +140,14 @@ func DomainTasksFromBoardSummaries(tasks []BoardTaskSummary) []domain.Task {
 		out = append(out, task.ToDomainTask())
 	}
 	return out
+}
+
+func cloneProtocolPullRequest(pr *domain.PullRequest) *domain.PullRequest {
+	if pr == nil {
+		return nil
+	}
+	cloned := *pr
+	return &cloned
 }
 
 func DecodeBoardSnapshotPayload(data []byte) (BoardSnapshotPayload, error) {

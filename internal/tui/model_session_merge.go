@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -13,7 +12,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
@@ -236,16 +234,11 @@ func (m Model) openPRCmd(worktree, issueID string) tea.Cmd {
 		if err != nil {
 			return openPRResultMsg{issueID: issueID, err: fmt.Errorf("resolve branch: %w", err)}
 		}
-		ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "gh",
-			"dependency.name", "gh",
-			"dependency.operation", "pr",
-			"arg_count", 5,
-		)
-		cmd := exec.CommandContext(ctx, "gh", "pr", "view", "--head", branch, "--web")
-		cmd.Dir = resolvedWorktree
-		err = cmd.Run()
-		endSpan(err)
-		if err != nil {
+
+		if m.daemonClient == nil {
+			return openPRResultMsg{issueID: issueID, err: fmt.Errorf("daemon client unavailable")}
+		}
+		if err := m.daemonClient.OpenPullRequest(ctx, daemonclient.PullRequestBranchParams{Branch: branch}); err != nil {
 			return openPRResultMsg{issueID: issueID, err: err}
 		}
 		return openPRResultMsg{issueID: issueID}

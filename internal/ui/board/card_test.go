@@ -121,6 +121,28 @@ func TestRenderTaskTypeBadge_UsesSingleLetter(t *testing.T) {
 	}
 }
 
+func TestRenderCard_WithPullRequestSummary(t *testing.T) {
+	s := styles.New()
+	task := domain.Task{
+		ID:       "az-pr",
+		Title:    "Task with PR",
+		Status:   domain.StatusInReview,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		PullRequest: &domain.PullRequest{
+			Number:       42,
+			DisplayKey:   "#42",
+			State:        "open",
+			ChecksStatus: "pending",
+		},
+	}
+
+	stripped := stripANSI(RenderCard(task, false, false, 72, s))
+	if !strings.Contains(stripped, "PR#42") || !strings.Contains(stripped, "open/pending") {
+		t.Fatalf("card should contain PR summary, got: %s", stripped)
+	}
+}
+
 func TestRenderCard_TitleAlwaysStartsWithIssueID(t *testing.T) {
 	s := styles.New()
 	task := domain.Task{
