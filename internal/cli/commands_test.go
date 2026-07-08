@@ -11590,6 +11590,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Do not treat `az issue update <issue-id> --status in_progress` as starting a session unless the user explicitly asks to mark/update status.") {
 		t.Fatalf("prime output missing status-vs-session distinction: %q", output)
 	}
+	if !strings.Contains(output, "Child session handoff: after `az session start <child-issue>` or `az issue split \"Child task\"` starts a child tmux/session, the current parent/orchestrator session should only observe, wait for, or coordinate that child session. Watching the child tmux/session is fine; continuing the child implementation locally in the parent session is not.") {
+		t.Fatalf("prime output missing child session handoff guidance: %q", output)
+	}
 	if !strings.Contains(output, "create many issues, epics, or nested `children` trees from JSON when shaping a graph up front") {
 		t.Fatalf("prime output missing bulk-create nested tree guidance: %q", output)
 	}
@@ -12118,6 +12121,12 @@ func TestPrimeCommandWithActiveIssueUsesTargetedSnapshot(t *testing.T) {
 	}
 	if !strings.Contains(output, "Targeted detail") {
 		t.Fatalf("prime output missing targeted issue detail: %q", output)
+	}
+	if !strings.Contains(output, "Child session handoff: after `az session start <child-issue>` starts a child tmux/session, the current parent/orchestrator session should only observe, wait for, or coordinate that child session. Watching the child tmux/session is fine; continuing the child implementation locally in the parent session is not.") {
+		t.Fatalf("prime output missing no-tmux child session handoff guidance: %q", output)
+	}
+	if strings.Contains(output, "Child session handoff: after `az session start <child-issue>` or `az issue split \"Child task\"` starts a child tmux/session") {
+		t.Fatalf("prime no-tmux handoff guidance should not include split launch wording: %q", output)
 	}
 }
 
