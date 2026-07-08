@@ -1183,6 +1183,28 @@ func mustMarshalBoardSnapshot(t *testing.T, protocolVersion protocol.Version, re
 	return body
 }
 
+func worktreeListResponse(t *testing.T, req protocol.RequestEnvelope, issueID, path, branch string) protocol.ResponseEnvelope {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"project_id": req.Meta.ProjectID.String(),
+		"worktrees": []map[string]any{{
+			"path":     path,
+			"branch":   branch,
+			"issue_id": issueID,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal worktree list response: %v", err)
+	}
+	return protocol.ResponseEnvelope{
+		ProtocolVersion: req.ProtocolVersion,
+		RequestID:       req.RequestID,
+		Kind:            protocol.EnvelopeKindResponse,
+		OK:              true,
+		Body:            body,
+	}
+}
+
 func mustMarshalFullTaskSnapshot(t *testing.T, protocolVersion protocol.Version, revision uint64, projectID string, tasks []domain.Task) []byte {
 	t.Helper()
 	body, err := json.Marshal(protocol.TaskListSnapshotPayload{
@@ -7095,6 +7117,25 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true},
 						}),
 					}, nil
+				case daemonclient.CommandWorktreeList:
+					body, err := json.Marshal(map[string]any{
+						"project_id": req.Meta.ProjectID.String(),
+						"worktrees": []map[string]any{{
+							"path":     "/tmp/az-1",
+							"branch":   "riordan/az-1/task",
+							"issue_id": "az-1",
+						}},
+					})
+					if err != nil {
+						t.Fatalf("marshal worktree list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            body,
+					}, nil
 				case daemonclient.CommandSessionStop:
 					var body struct {
 						ProjectID string `json:"project_id"`
@@ -7108,14 +7149,18 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 					}
 				case daemonclient.CommandWorktreeRemove:
 					var body struct {
-						ProjectID string `json:"project_id"`
-						IssueID   string `json:"issue_id"`
+						ProjectID    string `json:"project_id"`
+						IssueID      string `json:"issue_id"`
+						DeleteBranch bool   `json:"delete_branch"`
 					}
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal worktree remove request: %v", err)
 					}
 					if body.IssueID != "az-1" {
 						t.Fatalf("worktree remove body = %+v, want issue_id=az-1", body)
+					}
+					if body.DeleteBranch {
+						t.Fatalf("worktree remove body = %+v, want delete_branch false", body)
 					}
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
@@ -7173,9 +7218,10 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		if updated.tasks[1].ID.String() != "az-2" || updated.tasks[1].Status != domain.StatusInReview {
 			t.Fatalf("unrelated task after cleanup preflight = %+v, want preserved blocked az-2", updated.tasks[1])
 		}
-		if got := transport.requests; len(got) != 2 ||
+		if got := transport.requests; len(got) != 3 ||
 			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
-			got[1] != daemonclient.CommandBoardFetch {
+			got[1] != daemonclient.CommandBoardFetch ||
+			got[2] != daemonclient.CommandWorktreeList {
 			t.Fatalf("requests before confirmation = %v", got)
 		}
 
@@ -7214,17 +7260,18 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		if result.deletedTask {
 			t.Fatalf("deletedTask = true, want false")
 		}
-		if got := transport.requests; len(got) != 4 ||
+		if got := transport.requests; len(got) != 5 ||
 			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
 			got[1] != daemonclient.CommandBoardFetch ||
-			got[2] != daemonclient.CommandSessionStop ||
-			got[3] != daemonclient.CommandWorktreeRemove {
+			got[2] != daemonclient.CommandWorktreeList ||
+			got[3] != daemonclient.CommandSessionStop ||
+			got[4] != daemonclient.CommandWorktreeRemove {
 			t.Fatalf("requests = %v", got)
 		}
-		if len(transport.commandBudgets) != 4 {
-			t.Fatalf("command budget count = %d, want 4", len(transport.commandBudgets))
+		if len(transport.commandBudgets) != 5 {
+			t.Fatalf("command budget count = %d, want 5", len(transport.commandBudgets))
 		}
-		if removeBudget := transport.commandBudgets[3]; removeBudget < (worktreeCleanupMutationTimeout - 10*time.Second) {
+		if removeBudget := transport.commandBudgets[4]; removeBudget < (worktreeCleanupMutationTimeout - 10*time.Second) {
 			t.Fatalf("worktree remove timeout budget = %s, want near %s", removeBudget, worktreeCleanupMutationTimeout)
 		}
 	})
@@ -7258,6 +7305,25 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 						Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true},
 						}),
+					}, nil
+				case daemonclient.CommandWorktreeList:
+					body, err := json.Marshal(map[string]any{
+						"project_id": req.Meta.ProjectID.String(),
+						"worktrees": []map[string]any{{
+							"path":     "/tmp/az-1",
+							"branch":   "riordan/az-1/task",
+							"issue_id": "az-1",
+						}},
+					})
+					if err != nil {
+						t.Fatalf("marshal worktree list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            body,
 					}, nil
 				case daemonclient.CommandTaskDelete:
 					if err := json.Unmarshal(req.Body, &deleteBody); err != nil {
@@ -7339,10 +7405,11 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		if deleteBody.TaskID != "az-1" || !deleteBody.Cleanup {
 			t.Fatalf("delete body = %+v, want az-1 cleanup", deleteBody)
 		}
-		if got := transport.requests; len(got) != 3 ||
+		if got := transport.requests; len(got) != 4 ||
 			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
 			got[1] != daemonclient.CommandBoardFetch ||
-			got[2] != daemonclient.CommandTaskDelete {
+			got[2] != daemonclient.CommandWorktreeList ||
+			got[3] != daemonclient.CommandTaskDelete {
 			t.Fatalf("requests = %v", got)
 		}
 	})
@@ -7373,6 +7440,8 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true},
 						}),
 					}, nil
+				case daemonclient.CommandWorktreeList:
+					return worktreeListResponse(t, req, "az-1", "/tmp/az-1", "riordan/az-1/task"), nil
 				case daemonclient.CommandSessionStop:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -7458,11 +7527,12 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 			t.Fatalf("cleanup result err = %v", result.err)
 		}
 
-		if got := transport.requests; len(got) != 4 ||
+		if got := transport.requests; len(got) != 5 ||
 			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
 			got[1] != daemonclient.CommandBoardFetch ||
-			got[2] != daemonclient.CommandSessionStop ||
-			got[3] != daemonclient.CommandWorktreeRemove {
+			got[2] != daemonclient.CommandWorktreeList ||
+			got[3] != daemonclient.CommandSessionStop ||
+			got[4] != daemonclient.CommandWorktreeRemove {
 			t.Fatalf("requests = %v", got)
 		}
 	})
@@ -7495,6 +7565,8 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true, HasUncommittedChanges: false, GitAdditions: 4, GitDeletions: 2},
 						}),
 					}, nil
+				case daemonclient.CommandWorktreeList:
+					return worktreeListResponse(t, req, "az-1", "/tmp/az-1", "riordan/az-1/task"), nil
 				case daemonclient.CommandSessionStop:
 					stopCalls++
 					if stopCalls > 1 {
@@ -7644,13 +7716,14 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		if stopCalls != 2 {
 			t.Fatalf("stop calls = %d, want 2", stopCalls)
 		}
-		if got := transport.requests; len(got) != 6 ||
+		if got := transport.requests; len(got) != 7 ||
 			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
 			got[1] != daemonclient.CommandBoardFetch ||
-			got[2] != daemonclient.CommandSessionStop ||
-			got[3] != daemonclient.CommandWorktreeRemove ||
-			got[4] != daemonclient.CommandSessionStop ||
-			got[5] != daemonclient.CommandWorktreeRemove {
+			got[2] != daemonclient.CommandWorktreeList ||
+			got[3] != daemonclient.CommandSessionStop ||
+			got[4] != daemonclient.CommandWorktreeRemove ||
+			got[5] != daemonclient.CommandSessionStop ||
+			got[6] != daemonclient.CommandWorktreeRemove {
 			t.Fatalf("requests = %v", got)
 		}
 	})
@@ -7682,6 +7755,8 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true, HasUncommittedChanges: true, GitAdditions: 4, GitDeletions: 2},
 						}),
 					}, nil
+				case daemonclient.CommandWorktreeList:
+					return worktreeListResponse(t, req, "az-1", "/tmp/az-1", "riordan/az-1/task"), nil
 				case daemonclient.CommandSessionStop:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -10029,6 +10104,8 @@ func TestTaskWorkspaceCleanupSelectsTargetAndConfirmReplacesWorkspace(t *testing
 						{ID: "az-2", Title: "Previous board selection", Status: domain.StatusOpen},
 					}),
 				}, nil
+			case daemonclient.CommandWorktreeList:
+				return worktreeListResponse(t, req, "az-1", "/tmp/az-1", "riordan/az-1/cleanup-target"), nil
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
 			}
@@ -10211,7 +10288,7 @@ func TestCleanupWorktreeUsesExtendedDaemonDeadlines(t *testing.T) {
 	transport := &recordingDaemonTransport{}
 	m := newDaemonTestModel(transport)
 
-	msg := m.cleanupWorktreeCmd("az-1", false, false)()
+	msg := m.cleanupWorktreeCmd("az-1", false, false, false)()
 	result, ok := msg.(worktreeCleanupResultMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want worktreeCleanupResultMsg", msg)
@@ -10232,12 +10309,71 @@ func TestCleanupWorktreeUsesExtendedDaemonDeadlines(t *testing.T) {
 	}
 }
 
+func TestCleanupWorktreeCanRequestBranchDelete(t *testing.T) {
+	var removeBody struct {
+		IssueID      string `json:"issue_id"`
+		DeleteBranch bool   `json:"delete_branch"`
+	}
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandSessionStop:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+				}, nil
+			case daemonclient.CommandWorktreeRemove:
+				if err := json.Unmarshal(req.Body, &removeBody); err != nil {
+					t.Fatalf("unmarshal worktree remove request: %v", err)
+				}
+				body, err := json.Marshal(map[string]any{
+					"project_id":     req.Meta.ProjectID.String(),
+					"issue_id":       "az-1",
+					"branch":         "riordan/az-1/task",
+					"branch_deleted": true,
+				})
+				if err != nil {
+					t.Fatalf("marshal worktree remove response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            body,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+	m := newDaemonTestModel(transport)
+
+	msg := m.cleanupWorktreeCmd("az-1", false, false, true)()
+	result, ok := msg.(worktreeCleanupResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want worktreeCleanupResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("cleanup result err = %v", result.err)
+	}
+	if removeBody.IssueID != "az-1" || !removeBody.DeleteBranch {
+		t.Fatalf("remove body = %+v, want delete_branch true", removeBody)
+	}
+	if !result.deleteBranch || result.branch != "riordan/az-1/task" {
+		t.Fatalf("cleanup result = %+v, want deleted branch name", result)
+	}
+}
+
 func TestBulkCleanupWorktreeUsesPerStepExtendedDaemonDeadlines(t *testing.T) {
 	transport := &recordingDaemonTransport{}
 	m := newDaemonTestModel(transport)
 	m.tasks = []domain.Task{{ID: "az-1", Status: domain.StatusOpen}}
 
-	msg := m.bulkCleanupWorktreeCmd([]string{"az-1"}, true)()
+	msg := m.bulkCleanupWorktreeCmd([]string{"az-1"}, true, true)()
 	result, ok := msg.(bulkStatusResultMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want bulkStatusResultMsg", msg)
@@ -10297,7 +10433,7 @@ func TestBulkCleanupWorktreeTracksPendingDaemonOperations(t *testing.T) {
 		m := newDaemonTestModel(transport)
 		m.tasks = []domain.Task{{ID: "az-1", Status: domain.StatusOpen}}
 
-		msg := m.bulkCleanupWorktreeCmd([]string{"az-1"}, false)()
+		msg := m.bulkCleanupWorktreeCmd([]string{"az-1"}, false, false)()
 		result, ok := msg.(bulkStatusResultMsg)
 		if !ok {
 			t.Fatalf("message type = %T, want bulkStatusResultMsg", msg)
@@ -10341,7 +10477,7 @@ func TestBulkCleanupWorktreeTracksPendingDaemonOperations(t *testing.T) {
 		m := newDaemonTestModel(transport)
 		m.tasks = []domain.Task{{ID: "az-1", Status: domain.StatusOpen}}
 
-		msg := m.bulkCleanupWorktreeCmd([]string{"az-1"}, true)()
+		msg := m.bulkCleanupWorktreeCmd([]string{"az-1"}, true, true)()
 		result, ok := msg.(bulkStatusResultMsg)
 		if !ok {
 			t.Fatalf("message type = %T, want bulkStatusResultMsg", msg)
@@ -11949,7 +12085,7 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			{ID: "az-2", Status: domain.StatusOpen},
 		}
 
-		cleanupOnly := m.bulkCleanupWorktreeCmd([]string{"az-1"}, false)()
+		cleanupOnly := m.bulkCleanupWorktreeCmd([]string{"az-1"}, false, false)()
 		cleanupOnlyResult, ok := cleanupOnly.(bulkStatusResultMsg)
 		if !ok {
 			t.Fatalf("cleanup-only message type = %T, want bulkStatusResultMsg", cleanupOnly)
@@ -11958,7 +12094,7 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			t.Fatalf("cleanup-only result = %+v", cleanupOnlyResult)
 		}
 
-		deleteAndCleanup := m.bulkCleanupWorktreeCmd([]string{"az-2"}, true)()
+		deleteAndCleanup := m.bulkCleanupWorktreeCmd([]string{"az-2"}, true, true)()
 		deleteAndCleanupResult, ok := deleteAndCleanup.(bulkStatusResultMsg)
 		if !ok {
 			t.Fatalf("delete+cleanup message type = %T, want bulkStatusResultMsg", deleteAndCleanup)

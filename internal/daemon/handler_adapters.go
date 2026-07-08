@@ -1415,19 +1415,23 @@ func cleanupWorktreeAfterInitFailure(ctx context.Context, manager *git.WorktreeM
 	return fmt.Sprintf(" (removed failed worktree %s)", worktreePath)
 }
 
-func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, issueID string, force bool) error {
+func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, issueID string, removeOpts daemonhandlers.WorktreeRemoveOptions) (*git.Worktree, bool, error) {
 	manager := a.managerFor(projectID)
 	if manager == nil {
-		return errors.New("worktree manager unavailable")
+		return nil, false, errors.New("worktree manager unavailable")
 	}
 	projectID = normalizedProjectID(projectID)
 	projectedWorktree, hasProjectedWorktree, err := a.projectedWorktreeForIssue(ctx, projectID, issueID)
 	if err != nil {
-		return err
+		return nil, false, err
+	}
+	branchCleanup := git.WorktreeBranchCleanupNone
+	if removeOpts.DeleteBranch {
+		branchCleanup = git.WorktreeBranchCleanupRequired
 	}
 	opts := git.WorktreeDeleteOptions{
-		Force:         force,
-		BranchCleanup: git.WorktreeBranchCleanupRequired,
+		Force:         removeOpts.Force,
+		BranchCleanup: branchCleanup,
 	}
 	if hasProjectedWorktree {
 		opts.FallbackBranch = projectedWorktree.Branch
@@ -1438,17 +1442,18 @@ func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, i
 			if a.runtimeProjectionWriter != nil {
 				a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
 			}
-			return nil
+			return nil, false, nil
 		}
-		return err
+		return nil, false, err
 	}
-	if removedWorktree != nil {
+	if removedWorktree != nil && strings.TrimSpace(removedWorktree.Path) != "" {
 		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(removedWorktree.Path))
 	}
 	if a.runtimeProjectionWriter != nil {
 		a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
 	}
-	return nil
+	branchDeleted := removeOpts.DeleteBranch && removedWorktree != nil && strings.TrimSpace(removedWorktree.Branch) != ""
+	return removedWorktree, branchDeleted, nil
 }
 
 func (a *worktreeServiceAdapter) projectedWorktreeForIssue(ctx context.Context, projectID, issueID string) (daemonstate.WorktreeState, bool, error) {

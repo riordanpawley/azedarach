@@ -334,6 +334,72 @@ branch refs/heads/az/issue-123
 	mock.AssertCommand(t, "branch -D az/issue-123")
 }
 
+func TestWorktreeManager_DeleteWithOptions_PreservesBranchWhenCleanupNone(t *testing.T) {
+	ctx := context.Background()
+	repoDir := "/home/user/test-repo"
+	issueID := "issue-123"
+
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "list" {
+			return `worktree /home/user/test-repo
+HEAD abc123
+branch refs/heads/main
+
+worktree /home/user/test-repo-issue-123
+HEAD def456
+branch refs/heads/az/issue-123
+`, nil
+		}
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "remove" {
+			return "", nil
+		}
+		if len(args) > 1 && args[0] == "branch" && args[1] == "-D" {
+			t.Fatalf("unexpected branch delete: %v", args)
+		}
+		return "", nil
+	}
+
+	manager := NewWorktreeManager(mock, repoDir, slog.Default())
+
+	_, err := manager.DeleteWithOptions(ctx, issueID, WorktreeDeleteOptions{
+		BranchCleanup: WorktreeBranchCleanupNone,
+	})
+
+	require.NoError(t, err)
+	mock.AssertCommand(t, "worktree remove /home/user/test-repo-issue-123")
+}
+
+func TestWorktreeManager_DeleteWithOptions_CleansFallbackBranchWhenWorktreeMissing(t *testing.T) {
+	ctx := context.Background()
+	repoDir := "/home/user/test-repo"
+	issueID := "issue-123"
+
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "list" {
+			return `worktree /home/user/test-repo
+HEAD abc123
+branch refs/heads/main
+`, nil
+		}
+		return "", nil
+	}
+
+	manager := NewWorktreeManager(mock, repoDir, slog.Default())
+
+	worktree, err := manager.DeleteWithOptions(ctx, issueID, WorktreeDeleteOptions{
+		BranchCleanup:  WorktreeBranchCleanupRequired,
+		FallbackBranch: "az/issue-123",
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, worktree)
+	assert.Equal(t, "az/issue-123", worktree.Branch)
+	assert.Equal(t, issueID, worktree.IssueID)
+	mock.AssertCommand(t, "branch -D az/issue-123")
+}
+
 func TestWorktreeManager_DeleteWithOptions_ToleratesBranchDeleteError(t *testing.T) {
 	ctx := context.Background()
 	repoDir := "/home/user/test-repo"
@@ -387,6 +453,59 @@ func TestWorktreeManager_DeleteBranch_ReturnsBranchDeleteError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to delete branch az/issue-123")
 	mock.AssertCommand(t, "branch -D az/issue-123")
+}
+
+func TestWorktreeManager_DeleteBranch_RefusesProtectedBranch(t *testing.T) {
+	manager := NewWorktreeManager(NewMockRunner(), "/home/user/test-repo", slog.Default())
+
+	err := manager.DeleteBranch(context.Background(), "main")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing to delete protected branch main")
+}
+
+func TestWorktreeManager_DeleteBranch_RefusesCurrentCheckout(t *testing.T) {
+	ctx := context.Background()
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) == 2 && args[0] == "branch" && args[1] == "--show-current" {
+			return "az/issue-123\n", nil
+		}
+		return "", nil
+	}
+	manager := NewWorktreeManager(mock, "/home/user/test-repo", slog.Default())
+
+	err := manager.DeleteBranch(ctx, "az/issue-123")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing to delete current checkout branch az/issue-123")
+}
+
+func TestWorktreeManager_DeleteBranch_RefusesBranchUsedByWorktree(t *testing.T) {
+	ctx := context.Background()
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) == 2 && args[0] == "branch" && args[1] == "--show-current" {
+			return "main\n", nil
+		}
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "list" {
+			return `worktree /home/user/test-repo
+HEAD abc123
+branch refs/heads/main
+
+worktree /home/user/test-repo-other
+HEAD def456
+branch refs/heads/az/issue-123
+`, nil
+		}
+		return "", nil
+	}
+	manager := NewWorktreeManager(mock, "/home/user/test-repo", slog.Default())
+
+	err := manager.DeleteBranch(ctx, "az/issue-123")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing to delete branch az/issue-123 because it is still checked out at worktree /home/user/test-repo-other")
 }
 
 func TestWorktreeManager_DeleteWithOptions_ReturnsRequiredBranchDeleteError(t *testing.T) {

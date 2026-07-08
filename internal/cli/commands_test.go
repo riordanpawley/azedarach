@@ -606,6 +606,16 @@ func TestParseWorktreeCreateArgs(t *testing.T) {
 	}
 }
 
+func TestParseWorktreeDeleteArgs(t *testing.T) {
+	opts, err := ParseWorktreeDeleteArgs([]string{"--project", "proj-a", "--force", "--delete-branch", "--json", "az-1"})
+	if err != nil {
+		t.Fatalf("ParseWorktreeDeleteArgs error: %v", err)
+	}
+	if opts.Project != "proj-a" || opts.IssueID != "az-1" || !opts.Force || !opts.DeleteBranch || !opts.JSON {
+		t.Fatalf("opts = %+v", opts)
+	}
+}
+
 func TestWorktreeCreateCommandCreatesWorktreeWithoutStartingSession(t *testing.T) {
 	taskListBody, err := marshalTaskListBody([]domain.Task{
 		{ID: "az-1", Title: "Parent", Status: domain.StatusOpen},
@@ -682,6 +692,79 @@ func TestWorktreeCreateCommandCreatesWorktreeWithoutStartingSession(t *testing.T
 		t.Fatalf("create body = %+v", body)
 	}
 	if output != "Worktree ready: /tmp/az-1\nBranch: az/az-1\nBase: az/parent\n" {
+		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestWorktreeDeleteCommandCanDeleteBranch(t *testing.T) {
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusInProgress},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	var gotRemoveReq protocol.RequestEnvelope
+	commands := []string{}
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-1")
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case daemonclient.CommandWorktreeRemove:
+					gotRemoveReq = req
+					return responseWithJSON(req, map[string]any{
+						"project_id":     "proj",
+						"issue_id":       "az-1",
+						"branch":         "riordan/az-1/task",
+						"branch_deleted": true,
+					}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   "/repo",
+	}
+
+	output := captureStdout(t, func() error {
+		return WorktreeDeleteCommand(deps, WorktreeDeleteOptions{IssueID: "az-1", Force: true, DeleteBranch: true})
+	})
+
+	if gotRemoveReq.Command != daemonclient.CommandWorktreeRemove {
+		t.Fatalf("command = %q, want %q", gotRemoveReq.Command, daemonclient.CommandWorktreeRemove)
+	}
+	if !reflect.DeepEqual(commands, []string{daemonclient.CommandTaskGetMany, daemonclient.CommandWorktreeRemove}) {
+		t.Fatalf("commands = %v", commands)
+	}
+	var body struct {
+		ProjectID    string `json:"project_id"`
+		IssueID      string `json:"issue_id"`
+		Force        bool   `json:"force"`
+		DeleteBranch bool   `json:"delete_branch"`
+	}
+	if err := json.Unmarshal(gotRemoveReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal remove body: %v", err)
+	}
+	if body.ProjectID != "proj" || body.IssueID != "az-1" || !body.Force || !body.DeleteBranch {
+		t.Fatalf("remove body = %+v, want force/delete_branch", body)
+	}
+	if output != "Worktree deleted for az-1\nBranch deleted: riordan/az-1/task\n" {
 		t.Fatalf("output = %q", output)
 	}
 }

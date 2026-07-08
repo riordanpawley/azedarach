@@ -1586,9 +1586,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.applySingleTaskWorkspaceRefresh(msg.taskID, msg.task)
 		}
 		m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
-			taskID:      msg.taskID,
-			deletedTask: msg.deletedTask,
-			force:       msg.force,
+			taskID:       msg.taskID,
+			deletedTask:  msg.deletedTask,
+			force:        msg.force,
+			deleteBranch: msg.deleteBranch,
+			branch:       msg.branch,
 		}
 		title := "Confirm worktree cleanup?"
 		if msg.deletedTask {
@@ -1601,6 +1603,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		confirm := overlay.NewConfirmDialogExplicitYN(title, formatWorktreeCleanupConfirmPrompt(msg))
+		if !msg.deletedTask {
+			confirm = overlay.NewConfirmDialogExplicitYNWithExtraKeys(title, formatWorktreeCleanupConfirmPrompt(msg), map[string]overlay.SelectionMsg{
+				"b": {Key: "yes-delete-branch", Value: overlay.ConfirmResult{Confirmed: true}},
+				"B": {Key: "yes-delete-branch", Value: overlay.ConfirmResult{Confirmed: true}},
+			})
+		}
 		return m, m.openOverlay(confirm)
 
 	case bulkCleanupPreflightMsg:
@@ -1609,21 +1617,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.applyTaskRefreshes(msg.refreshedTasks)
 		if len(msg.risks) == 0 && msg.snapshotErr == nil {
-			return m, m.bulkCleanupWorktreeCmd(msg.taskIDs, msg.deletedTasks)
+			return m, m.bulkCleanupWorktreeCmd(msg.taskIDs, msg.deletedTasks, msg.deleteBranch)
 		}
 		m.pendingBulkCleanup = &pendingBulkCleanupConfirmation{
 			taskIDs:      append([]string(nil), msg.taskIDs...),
 			deletedTasks: msg.deletedTasks,
+			deleteBranch: msg.deleteBranch,
 		}
 		confirm := overlay.NewConfirmDialogExplicitYN("Bulk cleanup preflight", formatBulkCleanupPreflightPrompt(msg))
+		if !msg.deletedTasks {
+			confirm = overlay.NewConfirmDialogExplicitYNWithExtraKeys("Bulk cleanup preflight", formatBulkCleanupPreflightPrompt(msg), map[string]overlay.SelectionMsg{
+				"b": {Key: "yes-delete-branch", Value: overlay.ConfirmResult{Confirmed: true}},
+				"B": {Key: "yes-delete-branch", Value: overlay.ConfirmResult{Confirmed: true}},
+			})
+		}
 		return m, m.openOverlay(confirm)
 
 	case worktreeCleanupResultMsg:
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {
 			m.pendingCleanupOps[msg.operationID] = pendingWorktreeCleanupConfirmation{
-				taskID:      msg.taskID,
-				deletedTask: msg.deletedTask,
-				force:       msg.force,
+				taskID:       msg.taskID,
+				deletedTask:  msg.deletedTask,
+				force:        msg.force,
+				deleteBranch: msg.deleteBranch,
+				branch:       msg.branch,
 			}
 			m.markTaskOperationPending(msg.taskID, "worktree_cleanup", msg.operationID, msg.state)
 			m.syncTaskWorkspaceOverlay()
@@ -1636,9 +1653,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.needsForce {
 			m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
-				taskID:      msg.taskID,
-				deletedTask: msg.deletedTask,
-				force:       true,
+				taskID:       msg.taskID,
+				deletedTask:  msg.deletedTask,
+				force:        true,
+				deleteBranch: msg.deleteBranch,
+				branch:       msg.branch,
 			}
 			action := "cleanup worktree"
 			if msg.deletedTask {

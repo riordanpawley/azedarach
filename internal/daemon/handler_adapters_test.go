@@ -1076,13 +1076,12 @@ branch refs/heads/riordan/bvx/worktree-delete
 		},
 	}
 
-	if err := adapter.Delete(context.Background(), "proj", "bvx", false); err != nil {
+	if _, _, err := adapter.Delete(context.Background(), "proj", "bvx", daemonhandlers.WorktreeRemoveOptions{}); err != nil {
 		t.Fatalf("Delete returned error: %v", err)
 	}
 	wantCommands := []string{
 		"worktree list --porcelain",
 		"worktree remove " + worktreePath,
-		"branch -D riordan/bvx/worktree-delete",
 	}
 	if strings.Join(runner.commands, "\n") != strings.Join(wantCommands, "\n") {
 		t.Fatalf("commands = %v, want %v", runner.commands, wantCommands)
@@ -1111,7 +1110,7 @@ branch refs/heads/` + branchName + `
 		logger:  logger,
 	}
 
-	err := adapter.Delete(context.Background(), "proj", "bvx", false)
+	_, _, err := adapter.Delete(context.Background(), "proj", "bvx", daemonhandlers.WorktreeRemoveOptions{DeleteBranch: true})
 
 	if err == nil || !strings.Contains(err.Error(), "failed to delete branch "+branchName) {
 		t.Fatalf("Delete error = %v, want branch cleanup failure", err)
@@ -1119,6 +1118,8 @@ branch refs/heads/` + branchName + `
 	wantCommands := []string{
 		"worktree list --porcelain",
 		"worktree remove " + worktreePath,
+		"branch --show-current",
+		"worktree list --porcelain",
 		"branch -D " + branchName,
 	}
 	if strings.Join(runner.commands, "\n") != strings.Join(wantCommands, "\n") {
@@ -1158,10 +1159,16 @@ branch refs/heads/main
 		logger:                  logger,
 	}
 
-	if err := adapter.Delete(ctx, projectID, issueID, false); err != nil {
+	removed, branchDeleted, err := adapter.Delete(ctx, projectID, issueID, daemonhandlers.WorktreeRemoveOptions{DeleteBranch: true})
+	if err != nil {
 		t.Fatalf("Delete returned error: %v", err)
 	}
+	if removed == nil || removed.Branch != branchName || !branchDeleted {
+		t.Fatalf("Delete result = %+v branchDeleted=%v, want projected branch cleanup", removed, branchDeleted)
+	}
 	wantCommands := []string{
+		"worktree list --porcelain",
+		"branch --show-current",
 		"worktree list --porcelain",
 		"branch -D " + branchName,
 	}
@@ -1214,12 +1221,14 @@ branch refs/heads/main
 		logger:                  logger,
 	}
 
-	if err := adapter.Delete(ctx, projectID, issueID, false); err != nil {
+	if _, _, err := adapter.Delete(ctx, projectID, issueID, daemonhandlers.WorktreeRemoveOptions{DeleteBranch: true}); err != nil {
 		t.Fatalf("Delete returned error: %v", err)
 	}
 	wantCommands := []string{
 		"worktree list --porcelain",
 		"worktree remove " + worktreePath,
+		"branch --show-current",
+		"worktree list --porcelain",
 		"branch -D " + branchName,
 	}
 	if strings.Join(runner.commands, "\n") != strings.Join(wantCommands, "\n") {
