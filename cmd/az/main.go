@@ -1547,6 +1547,7 @@ func runCommand(cfg *config.Config, fn func(*cli.Dependencies) error) (err error
 	if deps.DaemonClient != nil {
 		deps.DaemonClient.WithTraceContext(ctx)
 	}
+	deps.TraceContext = ctx
 	latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "dependencies_init", depsStartedAt, "command_shape", commandShape)
 	latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "process_to_dependencies_ready", processStartedAt, "command_shape", commandShape)
 	audit := beginCommandAudit(deps.Logger, deps, commandShape, os.Args[1:])
@@ -1574,6 +1575,7 @@ func runCommandAtRepoDir(cfg *config.Config, repoDir string, fn func(*cli.Depend
 	if deps.DaemonClient != nil {
 		deps.DaemonClient.WithTraceContext(ctx)
 	}
+	deps.TraceContext = ctx
 	latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "dependencies_init", depsStartedAt, "command_shape", commandShape, "repo_dir", repoDir)
 	latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "process_to_dependencies_ready", processStartedAt, "command_shape", commandShape, "repo_dir", repoDir)
 	audit := beginCommandAudit(deps.Logger, deps, commandShape, os.Args[1:])

@@ -362,7 +362,7 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	}
 	payload := buildTaskListSnapshotPayload(projectID, result.Revision, result.LastCheckedAt, result.Freshness, result.Tasks, result.SummariesOnly)
 	marshalStartedAt := time.Now()
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(result.Tasks), "cache_hit", false, "shared_load", shared, "query", query != "")
+	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(result.Tasks), "cache_hit", false, "shared_load", shared, "query", query != "")
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -386,14 +386,14 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok {
 		hydrated, hydrateErr := d.hydrateTaskListSnapshotCache(ctx, projectID, cached.Tasks)
 		if hydrateErr != nil {
-			latencytrace.LogPhase(d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_hydrate", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false, "error", hydrateErr)
+			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_hydrate", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false, "error", hydrateErr)
 		} else {
 			cached.Tasks = hydrated
-			latencytrace.LogPhase(d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", true)
+			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", true)
 			payload := buildBoardSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks)
 			marshalStartedAt := time.Now()
 			body, err := json.Marshal(payload)
-			latencytrace.LogPhase(d.cfg.Logger, "daemon", "board.fetch.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(cached.Tasks), "cache_hit", true)
+			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(cached.Tasks), "cache_hit", true)
 			if err != nil {
 				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 			}
@@ -405,7 +405,7 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 			return resp, nil
 		}
 	}
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false)
+	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false)
 	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, "", false)
 	if err != nil {
 		return d.errorResponse(req, projectIssueStoreHealthErrorCode(err), err.Error()), nil
@@ -413,7 +413,7 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 	payload := buildBoardSnapshotPayload(projectID, result.Revision, result.LastCheckedAt, result.Freshness, result.Tasks)
 	marshalStartedAt := time.Now()
 	body, err := json.Marshal(payload)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "board.fetch.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(result.Tasks), "cache_hit", false, "shared_load", shared)
+	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(result.Tasks), "cache_hit", false, "shared_load", shared)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -457,10 +457,10 @@ func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestE
 		waitStartedAt := time.Now()
 		select {
 		case <-ctx.Done():
-			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.singleflight_wait", waitStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "query", query != "", "include_dependencies", includeDependencies, "shared_load", true, "caller_deadline_remaining_ms", contextDeadlineRemainingMillis(ctx), "error", ctx.Err())
+			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.singleflight_wait", waitStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "query", query != "", "include_dependencies", includeDependencies, "shared_load", true, "caller_deadline_remaining_ms", contextDeadlineRemainingMillis(ctx), "error", ctx.Err())
 			return taskListSnapshotLoadResult{}, true, ctx.Err()
 		case <-load.done:
-			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.singleflight_wait", waitStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "query", query != "", "include_dependencies", includeDependencies, "shared_load", true, "caller_deadline_remaining_ms", contextDeadlineRemainingMillis(ctx), "error", load.err)
+			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.singleflight_wait", waitStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "query", query != "", "include_dependencies", includeDependencies, "shared_load", true, "caller_deadline_remaining_ms", contextDeadlineRemainingMillis(ctx), "error", load.err)
 			return cloneTaskListSnapshotLoadResult(load.result), true, load.err
 		}
 	}
@@ -468,7 +468,7 @@ func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestE
 	d.taskListSnapshotLoads[loadKey] = load
 	d.taskListSnapshotLoadMu.Unlock()
 
-	buildCtx, cancel := context.WithTimeout(context.Background(), taskListSnapshotLoadTimeout)
+	buildCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), taskListSnapshotLoadTimeout)
 	defer cancel()
 	result, err := d.buildTaskListSnapshot(buildCtx, req, projectID, query, includeDependencies)
 	load.result = cloneTaskListSnapshotLoadResult(result)
@@ -517,7 +517,7 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 	} else {
 		runtimeAt, _ = d.taskListSnapshotFreshness(ctx, projectID)
 	}
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.runtime_refresh", refreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "session_runtime_refreshed", runtimeRefreshed, "query", query != "", "skipped_for_query", query != "", "error", refreshErr)
+	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.runtime_refresh", refreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "session_runtime_refreshed", runtimeRefreshed, "query", query != "", "skipped_for_query", query != "", "error", refreshErr)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task list requested", "project_id", projectID, "query", query != "")
 	}
@@ -538,7 +538,7 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 			tasks, err = issueClient.ListSummariesWithRuntime(ctx, projectID)
 		}
 		summariesOnly = true
-		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_list_summaries_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "include_dependencies", includeDependencies)
+		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.issue_store_list_summaries_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "include_dependencies", includeDependencies)
 	} else {
 		tasks, err = issueClient.SearchWithRuntime(ctx, projectID, query)
 	}
@@ -547,12 +547,12 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 	}
 	d.clearProjectIssueStoreHealth(projectID)
 	if query != "" {
-		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_search_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(tasks))
+		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.issue_store_search_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(tasks))
 	}
 	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
 	freshnessStartedAt := time.Now()
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "freshness", freshness)
+	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "freshness", freshness)
 	revision := d.currentRevision(projectID)
 	if query == "" && !includeDependencies {
 		d.storeTaskListSnapshotCacheWithRuntimeAt(projectID, revision, lastCheckedAt, freshness, runtimeAt, tasks, summariesOnly)
@@ -638,15 +638,15 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 		if _, found := findCachedTaskByID(cached.Tasks, taskID); found {
 			hydrated, hydrateErr := d.hydrateTaskListSnapshotCache(ctx, projectID, cached.Tasks)
 			if hydrateErr != nil {
-				latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.snapshot_cache_hydrate", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "cache_hit", false, "error", hydrateErr)
+				latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.snapshot_cache_hydrate", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "cache_hit", false, "error", hydrateErr)
 			} else {
 				cached.Tasks = hydrated
 				cached.LastCheckedAt, cached.Freshness = d.taskListSnapshotFreshness(ctx, projectID)
-				latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "cache_hit", true)
+				latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "cache_hit", true)
 				payload := buildTaskListSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks, cached.SummariesOnly)
 				marshalStartedAt := time.Now()
 				body, err := json.Marshal(payload)
-				latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "context_task_count", len(cached.Tasks), "cache_hit", true)
+				latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "context_task_count", len(cached.Tasks), "cache_hit", true)
 				if err != nil {
 					return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 				}
@@ -660,20 +660,20 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 			}
 		}
 	}
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "cache_hit", false)
+	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "cache_hit", false)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task get requested", "project_id", projectID, "task_id", taskID)
 	}
 	refreshIssueStartedAt := time.Now()
 	d.refreshIssueWorktreeState(ctx, projectID, taskID)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.issue_worktree_refresh", refreshIssueStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
+	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.issue_worktree_refresh", refreshIssueStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
 	queryStartedAt := time.Now()
 	tasks, err := issueClient.GetWithDependencyContextRuntime(ctx, projectID, taskID)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.issue_store_get_dependency_context_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
+	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.issue_store_get_dependency_context_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) || strings.Contains(err.Error(), domain.ErrNotFound.Error()) {
 			if d.cfg.Logger != nil {
@@ -691,11 +691,11 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Debug("task get session runtime refresh failed", "project_id", projectID, "task_id", taskID, "context_task_count", len(contextTaskIDs), "error", err)
 	}
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "context_task_count", len(contextTaskIDs))
+	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "context_task_count", len(contextTaskIDs))
 	if len(contextTaskIDs) > 0 {
 		queryStartedAt = time.Now()
 		tasks, err = issueClient.GetWithDependencyContextRuntime(ctx, projectID, taskID)
-		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.issue_store_get_dependency_context_runtime_after_session_refresh", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
+		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.issue_store_get_dependency_context_runtime_after_session_refresh", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
 		if err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("daemon task get reload after session refresh failed", "project_id", projectID, "task_id", taskID, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
@@ -705,11 +705,11 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	}
 	freshnessStartedAt := time.Now()
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "freshness", freshness)
+	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "freshness", freshness)
 	payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, freshness, tasks, false)
 	marshalStartedAt := time.Now()
 	body, err := json.Marshal(payload)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "context_task_count", len(tasks), "cache_hit", false)
+	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "context_task_count", len(tasks), "cache_hit", false)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -787,13 +787,13 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 			for _, taskID := range contextTaskIDs {
 				d.refreshIssueWorktreeState(ctx, projectID, taskID)
 			}
-			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get_many.direct_dependent_worktree_refresh", worktreeRefreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs))
+			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get_many.direct_dependent_worktree_refresh", worktreeRefreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs))
 		}
 		refreshSessionStartedAt := time.Now()
 		if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil && d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("task get-many session runtime refresh failed", "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs), "error", err)
 		}
-		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get_many.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs))
+		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get_many.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs))
 	}
 	if !cmd.MetadataOnly && len(contextTaskIDs) > 0 {
 		tasks, err = issueClient.GetManyWithDependencyContextRuntime(ctx, projectID, taskIDs, contextOptions...)
@@ -1961,7 +1961,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 			ElapsedMS: time.Since(startedAt).Milliseconds(),
 			Skipped:   skipped,
 		})
-		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.close."+name, startedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "skipped", skipped)
+		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.close."+name, startedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "skipped", skipped)
 	}
 	var deferredCleanupPlan deferredTaskWorktreeCleanupPlan
 
@@ -1976,7 +1976,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	phaseStartedAt = time.Now()
 	integration, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, cmd.IntegrateBeforeClose)
 	recordPhase("integrate_before_close", phaseStartedAt, !cmd.IntegrateBeforeClose)
-	recordTaskCloseHookPhases(&result, d.cfg.Logger, req, projectID, taskID, integration.HookDiagnostics)
+	recordTaskCloseHookPhases(ctx, &result, d.cfg.Logger, req, projectID, taskID, integration.HookDiagnostics)
 	if err != nil {
 		return result, fmt.Errorf("phase integrate_before_close for issue %s: %w", taskID, err)
 	}
@@ -2596,7 +2596,7 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 	return integration, nil
 }
 
-func recordTaskCloseHookPhases(result *taskCloseResult, logger *slog.Logger, req protocol.RequestEnvelope, projectID, taskID string, hooks []git.GitHookDiagnostic) {
+func recordTaskCloseHookPhases(ctx context.Context, result *taskCloseResult, logger *slog.Logger, req protocol.RequestEnvelope, projectID, taskID string, hooks []git.GitHookDiagnostic) {
 	if result == nil || len(hooks) == 0 {
 		return
 	}
@@ -2618,7 +2618,7 @@ func recordTaskCloseHookPhases(result *taskCloseResult, logger *slog.Logger, req
 		}
 		result.Phases = append(result.Phases, phase)
 		startedAt := time.Now().Add(-time.Duration(hook.ElapsedMS) * time.Millisecond)
-		latencytrace.LogPhase(logger, "daemon", "task.close."+name, startedAt,
+		latencytrace.LogPhaseContext(ctx, logger, "daemon", "task.close."+name, startedAt,
 			"command", req.Command,
 			"request_id", req.RequestID,
 			"project_id", projectID,
@@ -3589,13 +3589,13 @@ func (d *Daemon) handleTaskGraphReadiness(ctx context.Context, req protocol.Requ
 		actorID = strings.TrimSpace(req.Meta.ClientActor)
 	}
 	result, err := d.taskGraphReadinessForActor(ctx, projectID, cmd.TaskID, actorID)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.evaluate", evalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "root_issue_id", cmd.TaskID)
+	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.evaluate", evalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "root_issue_id", cmd.TaskID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	marshalStartedAt := time.Now()
 	body, err := json.Marshal(result)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.marshal_result", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "root_issue_id", cmd.TaskID, "runnable_count", len(result.Runnable), "active_count", len(result.Active))
+	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.marshal_result", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "root_issue_id", cmd.TaskID, "runnable_count", len(result.Runnable), "active_count", len(result.Active))
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -4128,10 +4128,10 @@ func (d *Daemon) taskGraphReadinessForActor(ctx context.Context, projectID, root
 		waitStartedAt := time.Now()
 		select {
 		case <-ctx.Done():
-			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.singleflight_wait", waitStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "actor_id", actorID, "shared_load", true, "error", ctx.Err())
+			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.singleflight_wait", waitStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "actor_id", actorID, "shared_load", true, "error", ctx.Err())
 			return taskGraphReadinessResult{}, ctx.Err()
 		case <-load.done:
-			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.singleflight_wait", waitStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "actor_id", actorID, "shared_load", true, "error", load.err)
+			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.singleflight_wait", waitStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "actor_id", actorID, "shared_load", true, "error", load.err)
 			return cloneTaskGraphReadinessResult(load.result), load.err
 		}
 	}
@@ -4195,7 +4195,7 @@ func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectI
 	}
 	loadStartedAt := time.Now()
 	tasks, err := issueClient.ListGraphReadinessWithRuntime(ctx, projectID, rootIssueID)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.issue_store_list_graph_readiness_with_runtime", loadStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "task_count", len(tasks))
+	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.issue_store_list_graph_readiness_with_runtime", loadStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "task_count", len(tasks))
 	if err != nil {
 		return nil, err
 	}
@@ -4204,15 +4204,15 @@ func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectI
 	if canRefreshSessionRuntime && len(contextTaskIDs) > 0 {
 		refreshStartedAt := time.Now()
 		if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil {
-			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.scoped_session_runtime_refresh", refreshStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs), "error", err)
+			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.scoped_session_runtime_refresh", refreshStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs), "error", err)
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("task graph scoped session runtime refresh failed", "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs), "error", err)
 			}
 		} else {
-			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.scoped_session_runtime_refresh", refreshStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs))
+			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.scoped_session_runtime_refresh", refreshStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs))
 			reloadStartedAt := time.Now()
 			tasks, err = issueClient.ListGraphReadinessWithRuntime(ctx, projectID, rootIssueID)
-			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.issue_store_reload_after_runtime_refresh", reloadStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "task_count", len(tasks))
+			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.issue_store_reload_after_runtime_refresh", reloadStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "task_count", len(tasks))
 			if err != nil {
 				return nil, err
 			}
@@ -4227,7 +4227,7 @@ func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectI
 	}
 	enrichStartedAt := time.Now()
 	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.graph_readiness.enrich_session_state", enrichStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "task_count", len(tasks))
+	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.enrich_session_state", enrichStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "task_count", len(tasks))
 	return tasks, nil
 }
 
