@@ -29,6 +29,7 @@ This directory primarily contains **developer/internal documentation**.
 - [18-async-notice-architecture.md](18-async-notice-architecture.md)
 - [19-issue-context-risk.md](19-issue-context-risk.md)
 - [20-runtime-event-sourcing-evaluation.md](20-runtime-event-sourcing-evaluation.md)
+- [21-event-sourcing-migration-plan.md](21-event-sourcing-migration-plan.md)
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 - [adr/2-daemon-owned-async-notices.md](adr/2-daemon-owned-async-notices.md)
 
