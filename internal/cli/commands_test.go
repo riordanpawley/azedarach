@@ -4901,6 +4901,43 @@ func TestParseIssueEventsArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueRecordArgsFollowUpsDefaultToFollowUpEvent(t *testing.T) {
+	got, err := ParseIssueRecordArgs([]string{
+		"az-parent",
+		"--summary", "Created follow-up issues",
+		"--follow-up", "az-child-1",
+		"--follow-up", "az-child-2",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("ParseIssueRecordArgs() error = %v", err)
+	}
+	if got.IssueID != "az-parent" || got.EventType != string(domain.IssueEventFollowupCreated) || !got.JSON {
+		t.Fatalf("ParseIssueRecordArgs() = %+v", got)
+	}
+	if !reflect.DeepEqual(got.FollowUpIssueIDs, []string{"az-child-1", "az-child-2"}) {
+		t.Fatalf("follow-up ids = %+v", got.FollowUpIssueIDs)
+	}
+
+	got, err = ParseIssueRecordArgs([]string{
+		"--id", "az-2",
+		"--type", "validation.passed",
+		"--summary", "just test passed",
+		"--data", `{"commands":["just test"]}`,
+	})
+	if err != nil {
+		t.Fatalf("ParseIssueRecordArgs(explicit type) error = %v", err)
+	}
+	if got.IssueID != "az-2" || got.EventType != string(domain.IssueEventValidationPassed) {
+		t.Fatalf("ParseIssueRecordArgs(explicit type) = %+v", got)
+	}
+
+	_, err = ParseIssueRecordArgs([]string{"az-1"})
+	if err == nil || !strings.Contains(err.Error(), "at least one of --summary") {
+		t.Fatalf("expected missing payload error, got %v", err)
+	}
+}
+
 func TestParseIssueContextRiskArgsSummaryAndFull(t *testing.T) {
 	got, err := ParseIssueContextRiskArgs([]string{"az-1", "--json", "--summary", "--since", "2w"})
 	if err != nil {
@@ -6567,6 +6604,71 @@ func TestIssueEventsCommandJSON(t *testing.T) {
 	}
 	if emptyPayloadEvent.Data == nil || emptyPayloadEvent.Payload == nil || len(emptyPayloadEvent.Data) != 0 || len(emptyPayloadEvent.Payload) != 0 {
 		t.Fatalf("empty payload aliases = data %+v payload %+v, want empty objects", emptyPayloadEvent.Data, emptyPayloadEvent.Payload)
+	}
+}
+
+func TestIssueRecordCommandAppendsDurableObservationEvent(t *testing.T) {
+	observedAt := time.Date(2026, 7, 8, 1, 0, 0, 0, time.UTC)
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskEventAppend {
+					t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskEventAppend)
+				}
+				var body daemonclient.TaskEventAppendRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal task event append body: %v", err)
+				}
+				if body.TaskID != "az-5" || body.Type != string(domain.IssueEventFollowupCreated) {
+					t.Fatalf("append body identity = %+v", body)
+				}
+				if body.SourceCommand != "az issue record" {
+					t.Fatalf("source command = %q", body.SourceCommand)
+				}
+				if body.Payload["summary"] != "Created follow-up issues" {
+					t.Fatalf("payload summary = %+v", body.Payload)
+				}
+				followUps, ok := body.Payload["follow_up_issue_ids"].([]any)
+				if !ok || len(followUps) != 2 || followUps[0] != "az-6" || followUps[1] != "az-7" {
+					t.Fatalf("payload follow ups = %#v", body.Payload["follow_up_issue_ids"])
+				}
+				return responseWithJSON(req, struct {
+					Event domain.IssueObservationEvent `json:"event"`
+				}{
+					Event: domain.IssueObservationEvent{
+						ID:         42,
+						IssueID:    "az-5",
+						Type:       domain.IssueEventFollowupCreated,
+						ObservedAt: observedAt,
+						Source:     "agent",
+						Payload:    body.Payload,
+					},
+				}), nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   "/repo",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueRecordCommand(deps, IssueRecordOptions{
+			IssueID:          "az-5",
+			EventType:        string(domain.IssueEventFollowupCreated),
+			Summary:          "Created follow-up issues",
+			FollowUpIssueIDs: []string{"az-6", "az-7"},
+			Source:           "agent",
+			JSON:             true,
+		})
+	})
+
+	var got issueEventJSON
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatalf("unmarshal issue record json: %v\n%s", err, output)
+	}
+	if got.ID != 42 || got.Type != string(domain.IssueEventFollowupCreated) || got.Data["summary"] != "Created follow-up issues" {
+		t.Fatalf("recorded event = %+v", got)
 	}
 }
 
@@ -11504,7 +11606,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "If work was launched under the wrong parent, do not treat it as a simple move") {
 		t.Fatalf("prime output missing wrong-parent correction guidance: %q", output)
 	}
-	if !strings.Contains(output, "Worker completion flow: workers should leave their issue `in_review`") {
+	if !strings.Contains(output, "Worker completion flow: workers should leave their issue `in_review` with structured worker evidence") {
 		t.Fatalf("prime output missing in-review worker completion guidance: %q", output)
 	}
 	if !strings.Contains(output, "Parent/tracker completion includes child lifecycle cleanup: before reporting the parent complete, inspect child statuses, close accepted completed children with `az issue close --id <child-issue>`") {
@@ -11513,7 +11615,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale") {
 		t.Fatalf("prime output missing unresolved child rationale guidance: %q", output)
 	}
-	if !strings.Contains(output, "before accepting closeout, run `az issue context-risk <worker-issue> --since 14d`") {
+	if !strings.Contains(output, "Before accepting closeout, run `az issue context-risk <worker-issue> --since 14d`") {
 		t.Fatalf("prime output missing context-risk closeout guidance: %q", output)
 	}
 	if !strings.Contains(output, "treat `none`/`fyi` as advisory, ask the bounded prompts for `medium`, and require diagnosis or structured risk evidence for `high`") {
@@ -11525,7 +11627,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, `"schema":"worker_evidence.v1","summary":"Ready for integration."`) {
 		t.Fatalf("prime output missing copy-safe worker evidence packet example: %q", output)
 	}
-	if !strings.Contains(output, "Worker integration evidence should be a structured JSON `worker_evidence.v1` packet in the `worker-integration-ready` mailbox body with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`; omit `artifact_links` unless links are needed") {
+	if !strings.Contains(output, "Worker integration evidence should be a structured JSON `worker_evidence.v1` packet with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`. Use a `worker-integration-ready` mailbox body when an active parent orchestrator/watch is coordinating delivery; otherwise use `az issue record <issue-id> --type evidence.submitted --data '<json>'`") {
 		t.Fatalf("prime output missing worker evidence summary artifact_links guidance: %q", output)
 	}
 	if !strings.Contains(output, "For `worker_evidence.v1`, omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array.") {
@@ -11534,10 +11636,13 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Use `az orchestrate message --root <parent-issue> --issue <worker-issue> --body \"...\"` only for evidence-backed orchestrator-to-running-worker nudges when the intervention threshold is met") {
 		t.Fatalf("prime output missing active worker nudge guidance: %q", output)
 	}
-	if !strings.Contains(output, "workers reporting their own progress/status must use `az mail send --parent <parent-issue> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`") {
+	if !strings.Contains(output, "Workers reporting to an active parent orchestrator/watch should use `az mail send --parent <parent-issue> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`") {
 		t.Fatalf("prime output missing worker safe reporting guidance: %q", output)
 	}
-	if !strings.Contains(output, "bare `az mail send` is durable mailbox-only and may not be seen until the worker next checks mail") {
+	if !strings.Contains(output, "`az issue record <issue-id> --summary \"...\" [--type <event-type>] [--data <json-object>] [--follow-up <issue-id> ...] [--json]` appends durable issue activity/evidence without mailbox delivery") {
+		t.Fatalf("prime output missing issue record guidance: %q", output)
+	}
+	if !strings.Contains(output, "Bare `az mail send` is durable mailbox-only and may not be seen until the worker next checks mail") {
 		t.Fatalf("prime output missing passive mailbox warning: %q", output)
 	}
 	if !strings.Contains(output, "Decision records:") {
@@ -11606,10 +11711,13 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Keep notes terse and evidence-oriented: final commands run, key outputs/assertions, files changed, AC pass/fail, blockers, and remaining scope only.") {
 		t.Fatalf("prime output missing terse notes guidance: %q", output)
 	}
-	if !strings.Contains(output, "Use observation/evidence paths for progress, validation, risks, blockers, and review facts: `az observe`, `az issue events <issue-id>`, and mailbox `worker_evidence.v1` packets.") {
+	if !strings.Contains(output, "Record non-orchestrated progress, follow-up creation, validation, risks, blockers, review facts, and closeout evidence with `az issue record`; read them with `az issue events <issue-id>` or `az observe`.") {
 		t.Fatalf("prime output missing observation/evidence guidance: %q", output)
 	}
-	if !strings.Contains(output, "Do not use `az issue update --notes` or `az issue update --append-notes` for routine agent progress, validation, review facts, or worker closeout; use mailbox/observation evidence instead.") {
+	if !strings.Contains(output, "Use mailbox `worker_evidence.v1` packets only when an active parent orchestrator/watch needs coordination delivery; otherwise record the same structured packet with `az issue record --type evidence.submitted --data '<json>'`.") {
+		t.Fatalf("prime output missing mailbox/evidence split guidance: %q", output)
+	}
+	if !strings.Contains(output, "Do not use `az issue update --notes` or `az issue update --append-notes` for routine agent progress, validation, review facts, or worker closeout; use issue records or active-coordination mailbox evidence instead.") {
 		t.Fatalf("prime output missing notes write deprecation guidance: %q", output)
 	}
 	if strings.Contains(output, "`az issue update <issue-id> --notes \"...\"`") || strings.Contains(output, "`az issue update <issue-id> --append-notes \"...\"`") {

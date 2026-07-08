@@ -304,6 +304,8 @@ type taskIntegrationReadinessResult struct {
 	ContextRisk            *domain.IssueContextRiskPacket `json:"context_risk,omitempty"`
 	Reasons                []string                       `json:"reasons,omitempty"`
 	EvidenceEventSeq       int64                          `json:"evidence_event_seq,omitempty"`
+	EvidenceEventID        int64                          `json:"evidence_event_id,omitempty"`
+	EvidenceSource         string                         `json:"evidence_source,omitempty"`
 	EvidencePacket         *domain.WorkerEvidencePacket   `json:"evidence_packet,omitempty"`
 	EvidenceIncomplete     bool                           `json:"evidence_incomplete,omitempty"`
 	EvidenceMissingFields  []string                       `json:"evidence_missing_fields,omitempty"`
@@ -817,6 +819,69 @@ func (d *Daemon) handleTaskEvents(ctx context.Context, req protocol.RequestEnvel
 	resp := d.successResponse(req)
 	resp.Body = body
 	resp.Revision = d.currentRevision(projectID)
+	return resp, nil
+}
+
+func (d *Daemon) handleTaskEventAppend(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
+	var cmd struct {
+		TaskID        string         `json:"task_id"`
+		Type          string         `json:"event_type"`
+		Source        string         `json:"source,omitempty"`
+		SourceCommand string         `json:"source_command,omitempty"`
+		OperationID   string         `json:"operation_id,omitempty"`
+		SessionID     string         `json:"session_id,omitempty"`
+		WorktreePath  string         `json:"worktree_path,omitempty"`
+		Payload       map[string]any `json:"payload,omitempty"`
+	}
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	taskID := strings.TrimSpace(cmd.TaskID)
+	if taskID == "" {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "task id is required"), nil
+	}
+	eventType := strings.TrimSpace(cmd.Type)
+	if eventType == "" {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "event type is required"), nil
+	}
+	source := strings.TrimSpace(cmd.Source)
+	if source == "" {
+		source = "az issue record"
+	}
+	event, err := issueClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+		Type:          domain.IssueObservationEventType(eventType),
+		Source:        source,
+		SourceCommand: strings.TrimSpace(cmd.SourceCommand),
+		OperationID:   strings.TrimSpace(cmd.OperationID),
+		SessionID:     strings.TrimSpace(cmd.SessionID),
+		WorktreePath:  strings.TrimSpace(cmd.WorktreePath),
+		Payload:       cmd.Payload,
+	})
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue not found: %s", taskID)), nil
+		}
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	body, err := json.Marshal(struct {
+		Event domain.IssueObservationEvent `json:"event"`
+	}{Event: event})
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = body
+	resp.Revision = d.nextRevision(projectID)
+	if task, err := issueClient.GetWithRuntime(ctx, projectID, taskID); err == nil {
+		d.publishTaskEvent(req, protocol.EventTaskUpdated, resp.Revision, taskEventBodyFromTask(projectID, task))
+	} else if d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("daemon task event append publish task lookup failed", "project_id", projectID, "task_id", taskID, "error", err)
+	}
 	return resp, nil
 }
 
@@ -3530,6 +3595,41 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 		}, nil
 	}
 
+	issueEvents := d.workerObservationIssueEvents(ctx, projectID, task.ID.String())
+	if evt := latestWorkerEvidenceIssueEvent(issueEvents); evt != nil {
+		packet, validation := workerEvidencePacketFromIssueEvent(*evt)
+		if validation.Complete {
+			return taskIntegrationReadinessResult{
+				IssueID:         task.ID.String(),
+				ParentIssueID:   parentIssueID,
+				Ready:           true,
+				ContextRisk:     contextRisk,
+				EvidenceEventID: evt.ID,
+				EvidenceSource:  "issue_event",
+				EvidencePacket:  &packet,
+			}, nil
+		}
+		reasons := []string{fmt.Sprintf("issue %s is not closed", task.ID.String())}
+		if validation.Found {
+			reasons = append(reasons, fmt.Sprintf("worker evidence packet in issue event %d is incomplete", evt.ID))
+		} else {
+			reasons = append(reasons, fmt.Sprintf("issue evidence event %d does not contain a structured worker_evidence.v1 packet", evt.ID))
+		}
+		reasons = append(reasons, validation.Problems()...)
+		return taskIntegrationReadinessResult{
+			IssueID:                task.ID.String(),
+			ParentIssueID:          parentIssueID,
+			Ready:                  false,
+			ContextRisk:            contextRisk,
+			Reasons:                reasons,
+			EvidenceEventID:        evt.ID,
+			EvidenceSource:         "issue_event",
+			EvidenceIncomplete:     true,
+			EvidenceMissingFields:  validation.Missing,
+			EvidenceInvalidReasons: validation.Invalid,
+		}, nil
+	}
+
 	repoDir = strings.TrimSpace(repoDir)
 	if repoDir == "" {
 		return taskIntegrationReadinessResult{
@@ -3539,7 +3639,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 			ContextRisk:   contextRisk,
 			Reasons: []string{
 				fmt.Sprintf("issue %s is not closed", task.ID.String()),
-				"repo_dir is required to inspect worker-integration-ready mailbox evidence",
+				"repo_dir is required to inspect worker-integration-ready mailbox evidence when no issue evidence.submitted record exists",
 			},
 		}, nil
 	}
@@ -4851,6 +4951,8 @@ func latestWorkerObservationIssueEvent(events []domain.IssueObservationEvent) *d
 func workerObservationIssueEventMeaningful(evt domain.IssueObservationEvent) bool {
 	switch evt.Type {
 	case domain.IssueEventIssueStatusChanged,
+		domain.IssueEventProgressRecorded,
+		domain.IssueEventFollowupCreated,
 		domain.IssueEventSessionLifecycleChanged,
 		domain.IssueEventAgentActivityChanged,
 		domain.IssueEventWorktreeGitChanged,
@@ -4911,7 +5013,9 @@ func workerObservationEvidenceEvents(events []domain.IssueObservationEvent) []do
 	out := make([]domain.IssueObservationEvent, 0, 4)
 	for _, evt := range events {
 		switch evt.Type {
-		case domain.IssueEventEvidenceSubmitted,
+		case domain.IssueEventProgressRecorded,
+			domain.IssueEventFollowupCreated,
+			domain.IssueEventEvidenceSubmitted,
 			domain.IssueEventValidationPassed,
 			domain.IssueEventValidationFailed,
 			domain.IssueEventReviewCompleted,
@@ -4932,6 +5036,35 @@ func workerObservationEvidenceEvents(events []domain.IssueObservationEvent) []do
 		out = out[:5]
 	}
 	return out
+}
+
+func latestWorkerEvidenceIssueEvent(events []domain.IssueObservationEvent) *domain.IssueObservationEvent {
+	var latest *domain.IssueObservationEvent
+	for i := range events {
+		if events[i].Type != domain.IssueEventEvidenceSubmitted {
+			continue
+		}
+		if latest == nil ||
+			(!events[i].ObservedAt.IsZero() && events[i].ObservedAt.After(latest.ObservedAt)) ||
+			(events[i].ObservedAt.Equal(latest.ObservedAt) && events[i].ID > latest.ID) {
+			latest = &events[i]
+		}
+	}
+	return latest
+}
+
+func workerEvidencePacketFromIssueEvent(evt domain.IssueObservationEvent) (domain.WorkerEvidencePacket, domain.WorkerEvidenceParseResult) {
+	if len(evt.Payload) == 0 {
+		return domain.WorkerEvidencePacket{}, domain.WorkerEvidenceParseResult{}
+	}
+	body, err := json.Marshal(evt.Payload)
+	if err != nil {
+		return domain.WorkerEvidencePacket{}, domain.WorkerEvidenceParseResult{
+			Found:   true,
+			Invalid: []string{fmt.Sprintf("marshal issue event payload: %v", err)},
+		}
+	}
+	return domain.ParseWorkerEvidencePacketBody(string(body))
 }
 
 func truncateObservationSummary(value string) string {

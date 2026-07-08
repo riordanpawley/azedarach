@@ -7377,6 +7377,192 @@ func TestTaskIntegrationReadinessRequiresCompleteWorkerEvidencePacket(t *testing
 	}
 }
 
+func TestTaskIntegrationReadinessAcceptsIssueRecordWorkerEvidence(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-worker-issue-evidence-ready"
+	repoDir := t.TempDir()
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusInReview, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	event, err := issuesClient.AppendIssueObservationEvent(ctx, childID, issues.IssueObservationEventParams{
+		Type:   domain.IssueEventEvidenceSubmitted,
+		Source: "az issue record",
+		Payload: map[string]any{
+			"schema":         "worker_evidence.v1",
+			"summary":        "Ready for integration.",
+			"commands_run":   []string{"go test ./internal/daemon"},
+			"key_assertions": []string{"integration readiness accepts issue-recorded worker evidence"},
+			"files_changed":  []string{"internal/daemon/task_commands.go"},
+			"review": map[string]any{
+				"status":   "clean",
+				"findings": []string{},
+			},
+			"risks": []string{"none"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("append issue evidence: %v", err)
+	}
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+
+	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, "")
+	if err != nil {
+		t.Fatalf("taskIntegrationReadiness error: %v", err)
+	}
+	if !result.Ready || result.EvidenceEventID != event.ID || result.EvidenceSource != "issue_event" || result.EvidencePacket == nil {
+		t.Fatalf("result = %+v, want ready with issue evidence packet", result)
+	}
+}
+
+func TestHandleTaskEventAppendPublishesTaskUpdate(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-event-append"
+	repoDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "append event", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger},
+		hub: publish.NewHub(16, 8, logger),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 3},
+	}
+	events, cancel := d.hub.Subscribe(projectID, 0)
+	defer cancel()
+
+	resp, err := d.handleTaskEventAppend(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       naming.RequestID("task-event-append-req"),
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.event.append",
+		SentAt:          time.Now().UTC(),
+		Body: mustJSON(t, map[string]any{
+			"task_id":    taskID,
+			"event_type": string(domain.IssueEventProgressRecorded),
+			"payload": map[string]any{
+				"summary": "recorded durable progress",
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleTaskEventAppend error: %v", err)
+	}
+	if !resp.OK || resp.Revision != 4 {
+		t.Fatalf("response = %+v, want ok revision 4", resp)
+	}
+	var body struct {
+		Event domain.IssueObservationEvent `json:"event"`
+	}
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("unmarshal response body: %v", err)
+	}
+	if body.Event.ID == 0 || body.Event.Type != domain.IssueEventProgressRecorded {
+		t.Fatalf("event = %+v, want recorded progress event", body.Event)
+	}
+
+	select {
+	case evt := <-events:
+		if evt.Event != protocol.EventTaskUpdated || evt.Revision != 4 {
+			t.Fatalf("published event = %+v, want task.updated revision 4", evt)
+		}
+		var taskBody protocol.TaskEventBody
+		if err := json.Unmarshal(evt.Body, &taskBody); err != nil {
+			t.Fatalf("unmarshal task event body: %v", err)
+		}
+		if taskBody.ProjectID.String() != projectID || taskBody.TaskID.String() != taskID {
+			t.Fatalf("task event body = %+v, want project %s task %s", taskBody, projectID, taskID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for task update event")
+	}
+}
+
+func TestTaskIntegrationReadinessLatestIssueEvidenceEventWins(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-worker-issue-evidence-latest"
+	repoDir := t.TempDir()
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusInReview, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	observedAt := time.Now().UTC()
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, childID, issues.IssueObservationEventParams{
+		Type:       domain.IssueEventEvidenceSubmitted,
+		ObservedAt: observedAt,
+		Source:     "az issue record",
+		Payload: map[string]any{
+			"schema":         "worker_evidence.v1",
+			"summary":        "Earlier complete packet.",
+			"commands_run":   []string{"go test ./internal/daemon"},
+			"key_assertions": []string{"older complete evidence should not hide latest malformed issue evidence"},
+			"files_changed":  []string{"internal/daemon/task_commands.go"},
+			"review": map[string]any{
+				"status":   "clean",
+				"findings": []string{},
+			},
+			"risks": []string{"none"},
+		},
+	}); err != nil {
+		t.Fatalf("append complete issue evidence: %v", err)
+	}
+	latest, err := issuesClient.AppendIssueObservationEvent(ctx, childID, issues.IssueObservationEventParams{
+		Type:       domain.IssueEventEvidenceSubmitted,
+		ObservedAt: observedAt.Add(time.Second),
+		Source:     "az issue record",
+		Payload: map[string]any{
+			"summary": "Latest evidence is not a worker_evidence.v1 packet.",
+		},
+	})
+	if err != nil {
+		t.Fatalf("append malformed issue evidence: %v", err)
+	}
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+
+	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, "")
+	if err != nil {
+		t.Fatalf("taskIntegrationReadiness error: %v", err)
+	}
+	if result.Ready || !result.EvidenceIncomplete || result.EvidenceEventID != latest.ID || result.EvidenceSource != "issue_event" {
+		t.Fatalf("result = %+v, want latest malformed issue evidence to block readiness", result)
+	}
+	reasons := strings.Join(result.Reasons, "\n")
+	if !strings.Contains(reasons, fmt.Sprintf("issue evidence event %d does not contain a structured worker_evidence.v1 packet", latest.ID)) {
+		t.Fatalf("reasons = %+v, want malformed latest issue evidence reason", result.Reasons)
+	}
+}
+
 func TestTaskIntegrationReadinessReportsIncompleteWorkerEvidencePacket(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-worker-evidence-incomplete"

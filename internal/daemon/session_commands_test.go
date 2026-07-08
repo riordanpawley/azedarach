@@ -7573,7 +7573,7 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 	if !strings.Contains(prompt, "before declaring yourself blocked or idle") {
 		t.Fatalf("prompt = %q, want receive-before-idle guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Report coordination state with `az mail send --parent <parent-issue> --issue az-42 --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; do not use `az orchestrate message` for your own status") {
+	if !strings.Contains(prompt, "Report coordination state to an active parent orchestrator/watch with `az mail send --parent <parent-issue> --issue az-42 --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; do not use `az orchestrate message` for your own status") {
 		t.Fatalf("prompt = %q, want safe worker reporting guidance", prompt)
 	}
 	for _, eventType := range []string{"worker-progress", "worker-blocked", "worker-integration-ready"} {
@@ -7590,13 +7590,16 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 	if !strings.Contains(prompt, "worker-ready and worker-complete are accepted only as legacy aliases for worker-integration-ready") {
 		t.Fatalf("prompt = %q, want legacy worker-ready/worker-complete alias guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Keep issue status current; report progress, blockers, risks, and readiness through mailbox/worker evidence, with notes as terse human audit scratchpad only.") {
+	if !strings.Contains(prompt, "For non-orchestrated progress, follow-ups, validation, risks, blockers, or closeout evidence, use `az issue record` instead.") {
+		t.Fatalf("prompt = %q, want issue record split guidance", prompt)
+	}
+	if !strings.Contains(prompt, "Keep issue status current; report progress, blockers, risks, and readiness through issue records or active-coordination mailbox evidence, with notes as terse human audit scratchpad only.") {
 		t.Fatalf("prompt = %q, want worker evidence-first status guidance", prompt)
 	}
 	if !strings.Contains(prompt, "Use `in_progress` while actively working and `in_review` when complete and ready for orchestrator integration") {
 		t.Fatalf("prompt = %q, want worker status semantics", prompt)
 	}
-	if !strings.Contains(prompt, "Report blockers via dependency edges or worker-blocked mailbox events, not by setting `in_review`") {
+	if !strings.Contains(prompt, "Report blockers via dependency edges, issue record evidence, or active worker-blocked mailbox events, not by setting `in_review`") {
 		t.Fatalf("prompt = %q, want blocked-as-graph guidance", prompt)
 	}
 	if strings.Contains(prompt, "events: , , and .") {
@@ -7612,13 +7615,13 @@ func TestBuildStartWorkPromptOmitsMailboxGuidanceForStandaloneTask(t *testing.T)
 	if strings.Contains(prompt, "worker-progress") || strings.Contains(prompt, "worker-blocked") || strings.Contains(prompt, "worker-integration-ready") || strings.Contains(prompt, "worker-ready") || strings.Contains(prompt, "worker-complete") {
 		t.Fatalf("prompt = %q, want mailbox worker event types omitted", prompt)
 	}
-	if !strings.Contains(prompt, "Keep issue status current; record validation, blockers, review facts, and risks through observation/evidence paths when available, with notes as terse human audit scratchpad only.") {
+	if !strings.Contains(prompt, "Keep issue status current; record progress, follow-ups, validation, blockers, review facts, risks, and closeout evidence with `az issue record`; keep notes as terse human audit scratchpad only.") {
 		t.Fatalf("prompt = %q, want contributor evidence-first status guidance", prompt)
 	}
 	if !strings.Contains(prompt, "Use `in_progress` while actively working, `in_review` when complete and awaiting review/integration") {
 		t.Fatalf("prompt = %q, want contributor status semantics", prompt)
 	}
-	if !strings.Contains(prompt, "Represent blocked work with dependency edges and evidence notes, not by using `in_review`") {
+	if !strings.Contains(prompt, "Represent blocked work with dependency edges and issue record evidence, not by using `in_review`") {
 		t.Fatalf("prompt = %q, want contributor blocked-as-graph guidance", prompt)
 	}
 }
@@ -7665,10 +7668,10 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"") {
 		t.Fatalf("prompt = %q, want active worker message instruction", prompt)
 	}
-	if !strings.Contains(prompt, "bare `az mail send` is durable mailbox-only") {
+	if !strings.Contains(prompt, "Bare `az mail send` is durable mailbox-only") {
 		t.Fatalf("prompt = %q, want passive mailbox warning", prompt)
 	}
-	if !strings.Contains(prompt, "workers reporting their own status should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`") {
+	if !strings.Contains(prompt, "workers reporting to this active parent orchestrator/watch should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`") {
 		t.Fatalf("prompt = %q, want safe worker reporting guidance", prompt)
 	}
 	if !strings.Contains(prompt, "Worker integration evidence should be a structured JSON `worker_evidence.v1` packet") {

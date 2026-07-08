@@ -271,6 +271,8 @@ func printHelpForPath(path []string) bool {
 		fmt.Println(issueReleaseUsage)
 	case "issue events":
 		fmt.Println(issueEventsUsage)
+	case "issue record":
+		fmt.Println(issueRecordUsage)
 	case "issue context-risk":
 		fmt.Println(issueContextRiskUsage)
 	case "issue get-many":
@@ -378,7 +380,7 @@ func printHelpForPath(path []string) bool {
 func printIssueHelp() {
 	helpText, err := clitext.Render("issue_help", nil)
 	if err != nil {
-		fmt.Println("Usage: az issue <list|search|get|claim|takeover|release|events|context-risk|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]")
+		fmt.Println("Usage: az issue <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]")
 		return
 	}
 	fmt.Print(helpText)
@@ -412,6 +414,7 @@ const (
 	issueTakeoverUsage            = "Usage: az issue takeover [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--json] [<issue-id>]"
 	issueReleaseUsage             = "Usage: az issue release [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--force] [--json] [<issue-id>]"
 	issueEventsUsage              = "Usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]"
+	issueRecordUsage              = "Usage: az issue record [--project <project-id>] [--id <issue-id>] [--type <event-type>] [--summary <text>] [--body <text>] [--data <json-object>] [--follow-up <issue-id> ...] [--json] [<issue-id>]"
 	issueContextRiskUsage         = "Usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--summary|--full] [--json] [<issue-id>]"
 	issueGetManyUsage             = "Usage: az issue get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]"
 	issueCheckUsage               = "Usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]"

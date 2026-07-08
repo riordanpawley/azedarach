@@ -3025,14 +3025,16 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 		"az prime",
 		fmt.Sprintf("az issue get %s", issueID),
 		fmt.Sprintf("az spec read --issue %s", issueID),
+		fmt.Sprintf("az issue record %s --summary \"<progress>\"", issueID),
 		fmt.Sprintf("az issue update %s --status in_progress", issueID),
 	}
 	if coordination == "mailbox" {
 		commands = append(commands,
 			fmt.Sprintf("az mail list --parent %s --since 0 --json", parentIssueID),
 			fmt.Sprintf("az mail send --parent %s --issue %s --type worker-progress --body \"<progress>\"", parentIssueID, issueID),
-			"az mail validate-evidence --template",
-			`az mail validate-evidence --body '{"schema":"worker_evidence.v1","summary":"Ready for integration.","commands_run":["just test"],"key_assertions":["validation passed"],"files_changed":["internal/daemon/mail_commands.go"],"review":{"status":"clean","findings":[]},"risks":["none"]}'`,
+			"az evidence validate --template",
+			`az evidence validate --body '{"schema":"worker_evidence.v1","summary":"Ready for integration.","commands_run":["just test"],"key_assertions":["validation passed"],"files_changed":["internal/daemon/mail_commands.go"],"review":{"status":"clean","findings":[]},"risks":["none"]}'`,
+			fmt.Sprintf("az issue record %s --type evidence.submitted --data '{\"schema\":\"worker_evidence.v1\",\"summary\":\"Ready for integration.\",\"commands_run\":[\"just test\"],\"key_assertions\":[\"validation passed\"],\"files_changed\":[\"internal/daemon/mail_commands.go\"],\"review\":{\"status\":\"clean\",\"findings\":[]},\"risks\":[\"none\"]}'", issueID),
 			fmt.Sprintf("az mail send --parent %s --issue %s --type worker-integration-ready --body '{\"schema\":\"worker_evidence.v1\",\"summary\":\"Ready for integration.\",\"commands_run\":[\"just test\"],\"key_assertions\":[\"validation passed\"],\"files_changed\":[\"internal/daemon/mail_commands.go\"],\"review\":{\"status\":\"clean\",\"findings\":[]},\"risks\":[\"none\"]}'", parentIssueID, issueID),
 		)
 	}
@@ -3066,19 +3068,19 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 	fmt.Fprintf(&b, "\nRole: worker\n")
 	fmt.Fprintf(&b, "- Focus only on issue %s unless the orchestrator explicitly expands scope.\n", issueID)
 	fmt.Fprintf(&b, "- Before behavior changes, inspect linked requirements with `az spec read --issue %s`; if none are linked, find nearby requirements with `az spec req list --query \"<issue title and feature terms>\" --match any --limit 10`/`az spec read --req <req-id>` or create/update one before implementation. For contract-preserving refactors, tests, tooling, docs, internal cleanup, or fixes that restore existing behavior, record explicit `Spec impact: none (...)` evidence instead of creating implementation-only requirements.\n", issueID)
-	fmt.Fprintf(&b, "- Keep `%s` status and notes current with terse evidence: final commands run, key outputs/assertions, files changed, AC pass/fail, blockers, and remaining scope only.\n", issueID)
+	fmt.Fprintf(&b, "- Keep `%s` status current; record progress, follow-ups, validation, review facts, risks, blockers, and closeout evidence with `az issue record` instead of routine notes.\n", issueID)
 	fmt.Fprintf(&b, "- Status semantics: use `in_progress` while actively working, `in_review` when your implementation is complete and ready for orchestrator review/integration, and `closed` only after the orchestrator has integrated/accepted the work.\n")
-	fmt.Fprintf(&b, "- Blocked work is represented by dependency edges or `worker-blocked` mailbox events, not by setting issue status to `in_review`.\n")
+	fmt.Fprintf(&b, "- Blocked work is represented by dependency edges, issue record evidence, or active-coordination `worker-blocked` mailbox events, not by setting issue status to `in_review`.\n")
 	fmt.Fprintf(&b, "- Do not append raw logs, exploratory transcripts, routine progress narration, duplicate prompt context, or speculative scratch work to notes.\n")
 	if coordination == "mailbox" {
-		fmt.Fprintf(&b, "- Use mailbox events for hybrid coordination: `worker-progress`, `worker-blocked`, and `worker-integration-ready`; `worker-ready` and `worker-complete` are accepted only as legacy aliases for `worker-integration-ready`.\n")
+		fmt.Fprintf(&b, "- Use mailbox events for active hybrid coordination only: `worker-progress`, `worker-blocked`, and `worker-integration-ready`; `worker-ready` and `worker-complete` are accepted only as legacy aliases for `worker-integration-ready`. For non-orchestrated durable facts, use `az issue record`.\n")
 		fmt.Fprintf(&b, "- Check inbound orchestrator messages with `az mail list --parent %s --since 0 --json` before declaring yourself blocked or idle; apply events for `%s` and continue without waiting for a separate user prompt.\n", parentIssueID, issueID)
 		fmt.Fprintf(&b, "- Report to parent `%s` with `az mail send --parent %s --issue %s --type <worker-progress|worker-blocked|worker-integration-ready> --body \"<evidence>\"`; do not use `az orchestrate message` for your own status because it is an orchestrator-to-worker live delivery command.\n", parentIssueID, parentIssueID, issueID)
-		fmt.Fprintf(&b, "- Evidence bodies should be JSON `worker_evidence.v1` packets with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`; use `\"none\"` entries when a required list has no findings or risks. Omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array. Preflight with `az mail validate-evidence --body '<json>'`; use `az mail validate-evidence --fix --body '<json>'` for repairable schema aliases or `az mail validate-evidence --template` for the canonical template.\n")
-		fmt.Fprintf(&b, "- When ready for integration, set/leave the issue `in_review` and send `worker-integration-ready` to parent `%s` with a complete `worker_evidence.v1` packet; leave integration/merge/close to the orchestrator.\n", parentIssueID)
+		fmt.Fprintf(&b, "- Evidence bodies should be JSON `worker_evidence.v1` packets with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`; use `\"none\"` entries when a required list has no findings or risks. Omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array. Preflight with `az evidence validate --body '<json>'`; use `az issue record --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant.\n")
+		fmt.Fprintf(&b, "- When ready for integration, set/leave the issue `in_review` and provide a complete `worker_evidence.v1` packet. Send `worker-integration-ready` to parent `%s` only when this active mailbox coordination path is being watched; otherwise record it with `az issue record --type evidence.submitted --data '<json>'`. Leave integration/merge/close to the orchestrator.\n", parentIssueID)
 	} else {
 		fmt.Fprintf(&b, "- Return progress, blockers, and final results through the native subagent result channel.\n")
-		fmt.Fprintf(&b, "- Do not use `az mail` unless the orchestrator explicitly asks for mailbox coordination.\n")
+		fmt.Fprintf(&b, "- Do not use `az mail` unless the orchestrator explicitly asks for mailbox coordination; use `az issue record` for durable issue activity/evidence.\n")
 	}
 	fmt.Fprintf(&b, "- Do not close root issue `%s`; close only your worker issue when the orchestrator has integrated or explicitly instructs you.\n", rootIssueID)
 	fmt.Fprintf(&b, "\nUseful commands:\n")

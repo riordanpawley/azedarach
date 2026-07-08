@@ -31,17 +31,11 @@ func TestOperationFailureEmitsTypedNotice(t *testing.T) {
 	}
 	record := waitForRuntimeState(t, runtime, result.Record.ID, daemonops.StateFailed)
 
-	records, err := notices.List(ctx, daemonnotices.Query{
+	records := waitForNoticeRecords(t, notices, daemonnotices.Query{
 		ProjectID: "proj-1",
 		States:    []daemonnotices.State{daemonnotices.StateActive},
 		Category:  "operation_failed",
-	})
-	if err != nil {
-		t.Fatalf("list notices: %v", err)
-	}
-	if len(records) != 1 {
-		t.Fatalf("notices len = %d, want 1: %+v", len(records), records)
-	}
+	}, 1)
 	notice := records[0]
 	if notice.Scope.Type != "task" || notice.Scope.ID != "AZ-1" {
 		t.Fatalf("notice scope = %+v, want task/AZ-1", notice.Scope)
@@ -87,18 +81,12 @@ func TestOperationFailureNoticeDedupesRepeatedFailures(t *testing.T) {
 		waitForRuntimeState(t, runtime, result.Record.ID, daemonops.StateFailed)
 	}
 
-	records, err := notices.List(ctx, daemonnotices.Query{
+	records := waitForNoticeRecords(t, notices, daemonnotices.Query{
 		ProjectID: "proj-1",
 		States:    []daemonnotices.State{daemonnotices.StateActive},
 		Category:  "operation_failed",
 		DedupeKey: "operation_failed:session.start:session.start:AZ-1",
-	})
-	if err != nil {
-		t.Fatalf("list notices: %v", err)
-	}
-	if len(records) != 1 {
-		t.Fatalf("notices len = %d, want one deduped notice: %+v", len(records), records)
-	}
+	}, 1)
 	if records[0].OccurrenceCount != 2 || records[0].Cause == nil || records[0].Cause.Code != "conflict" {
 		t.Fatalf("notice = %+v cause=%+v, want occurrence_count=2 conflict", records[0], records[0].Cause)
 	}
@@ -141,16 +129,13 @@ func TestOperationSuccessResolvesMatchingFailureNotice(t *testing.T) {
 	if len(active) != 0 {
 		t.Fatalf("active notices = %+v, want none after success", active)
 	}
-	resolved, err := notices.List(ctx, daemonnotices.Query{
+	resolved := waitForNoticeRecords(t, notices, daemonnotices.Query{
 		ProjectID: "proj-1",
 		States:    []daemonnotices.State{daemonnotices.StateResolved},
 		Category:  "operation_failed",
 		DedupeKey: "operation_failed:session.start:session.start:AZ-1",
-	})
-	if err != nil {
-		t.Fatalf("list resolved notices: %v", err)
-	}
-	if len(resolved) != 1 || resolved[0].ResolvedAt == nil {
+	}, 1)
+	if resolved[0].ResolvedAt == nil {
 		t.Fatalf("resolved notices = %+v, want one resolved notice", resolved)
 	}
 }
@@ -326,6 +311,25 @@ func newOperationNoticeTestRuntime(t *testing.T) (*operationRuntime, *daemonnoti
 		_ = runtime.Close()
 	})
 	return runtime, notices
+}
+
+func waitForNoticeRecords(t *testing.T, notices *daemonnotices.Service, query daemonnotices.Query, wantLen int) []daemonnotices.Record {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var records []daemonnotices.Record
+	var err error
+	for time.Now().Before(deadline) {
+		records, err = notices.List(context.Background(), query)
+		if err == nil && len(records) == wantLen {
+			return records
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("list notices: %v", err)
+	}
+	t.Fatalf("notices len = %d, want %d: %+v", len(records), wantLen, records)
+	return nil
 }
 
 func noticeHasAction(record daemonnotices.Record, actionID string) bool {
