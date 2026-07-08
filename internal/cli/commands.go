@@ -143,6 +143,7 @@ type IssueListOptions struct {
 	Deps          bool
 	Limit         int
 	Query         string
+	Archived      string
 	IDs           []string
 	States        []domain.Status
 	ParentIDs     []string
@@ -158,6 +159,7 @@ type IssueGetOptions struct {
 	IssueID      string
 	JSON         bool
 	IncludeNotes bool
+	Archived     string
 }
 
 type IssueOwnershipOptions struct {
@@ -2723,6 +2725,7 @@ func parseIssueListArgs(args []string, allowQueryArgs bool) (IssueListOptions, e
 	fs.IntVar(&opts.Limit, "limit", defaultIssueListLimit, "maximum issues to list in one window")
 	fs.StringVar(&opts.Query, "query", "", "case-insensitive content query")
 	fs.StringVar(&opts.Query, "q", "", "case-insensitive content query")
+	fs.StringVar(&opts.Archived, "archived", "", "archived issue visibility: exclude, include, or only")
 	fs.StringVar(&createdAfterRaw, "created-after", "", "include issues created at or after date/time")
 	fs.StringVar(&createdBeforeRaw, "created-before", "", "include issues created at or before date/time")
 	fs.StringVar(&updatedAfterRaw, "updated-after", "", "include issues updated at or after date/time")
@@ -2785,8 +2788,15 @@ func parseIssueListArgs(args []string, allowQueryArgs bool) (IssueListOptions, e
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	opts.Query = strings.TrimSpace(opts.Query)
+	if strings.TrimSpace(opts.Archived) != "" {
+		archiveMode, archiveErr := protocol.NormalizeArchiveMode(opts.Archived)
+		if archiveErr != nil {
+			return IssueListOptions{}, archiveErr
+		}
+		opts.Archived = string(archiveMode)
+	}
 	if allowQueryArgs && opts.Query == "" {
-		return IssueListOptions{}, fmt.Errorf("usage: az issue search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)")
+		return IssueListOptions{}, fmt.Errorf("usage: az issue search [--project <project-id>] [--json] [--deps] [--archived exclude|include|only] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)")
 	}
 	var parseErr error
 	if opts.CreatedAfter, parseErr = parseIssueListDateFilter(createdAfterRaw, false); parseErr != nil {
@@ -2850,6 +2860,7 @@ func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.BoolVar(&opts.JSON, "json", false, "output issue as JSON")
 	fs.BoolVar(&opts.IncludeNotes, "with-notes", false, "include full notes in text output")
+	fs.StringVar(&opts.Archived, "archived", "", "archived issue visibility: exclude, include, or only")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueGetOptions{}, err
@@ -2864,7 +2875,14 @@ func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueGetOptions{}, fmt.Errorf("usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]")
+		return IssueGetOptions{}, fmt.Errorf("usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [--archived exclude|include|only] [<issue-id>]")
+	}
+	if strings.TrimSpace(opts.Archived) != "" {
+		archiveMode, archiveErr := protocol.NormalizeArchiveMode(opts.Archived)
+		if archiveErr != nil {
+			return IssueGetOptions{}, archiveErr
+		}
+		opts.Archived = string(archiveMode)
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -4107,8 +4125,29 @@ func setConfigValue(cfg *config.Config, key, value string) (string, error) {
 		}
 		cfg.Diagnostics.LatencyTrace = parsed
 		return fmt.Sprintf("%t", parsed), nil
+	case "issues.autoArchive.enabled":
+		parsed, ok := parseBooleanConfigValue(value)
+		if !ok {
+			return "", fmt.Errorf("Invalid boolean value '%s' for issues.autoArchive.enabled. Use true/false, on/off, yes/no, or 1/0.", value)
+		}
+		cfg.Issues.AutoArchive.Enabled = parsed
+		return fmt.Sprintf("%t", parsed), nil
+	case "issues.autoArchive.closedAfterDays":
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || parsed < 1 {
+			return "", fmt.Errorf("Invalid integer value '%s' for issues.autoArchive.closedAfterDays. Use a positive day count.", value)
+		}
+		cfg.Issues.AutoArchive.ClosedAfterDays = parsed
+		return strconv.Itoa(parsed), nil
+	case "issues.autoArchive.interval":
+		parsed, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || parsed <= 0 {
+			return "", fmt.Errorf("Invalid duration value '%s' for issues.autoArchive.interval. Use a positive Go duration such as 24h.", value)
+		}
+		cfg.Issues.AutoArchive.Interval = strings.TrimSpace(value)
+		return cfg.Issues.AutoArchive.Interval, nil
 	default:
-		return "", fmt.Errorf("Unsupported config key '%s'. Supported keys: spec.enabled, diagnostics.latencyTrace", key)
+		return "", fmt.Errorf("Unsupported config key '%s'. Supported keys: spec.enabled, diagnostics.latencyTrace, issues.autoArchive.enabled, issues.autoArchive.closedAfterDays, issues.autoArchive.interval", key)
 	}
 }
 
@@ -4322,15 +4361,28 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 	}
 
 	var (
-		snapshot daemonclient.TaskSnapshot
-		err      error
+		snapshot    daemonclient.TaskSnapshot
+		err         error
+		archiveMode protocol.ArchiveMode
 	)
+	archiveMode, err = protocol.NormalizeArchiveMode(opts.Archived)
+	if err != nil {
+		return err
+	}
 	if strings.TrimSpace(opts.Query) != "" {
-		snapshot, err = deps.DaemonClient.ListTasksSnapshotWithQuery(ctx, opts.Query)
+		snapshot, err = deps.DaemonClient.ListTasksSnapshotWithQueryArchiveMode(ctx, opts.Query, archiveMode)
 	} else if opts.Deps || len(opts.DependsOnIDs) > 0 {
-		snapshot, err = listTasksSnapshotWithDependenciesForCLI(ctx, deps)
+		if archiveMode == protocol.ArchiveModeExclude {
+			snapshot, err = listTasksSnapshotWithDependenciesForCLI(ctx, deps)
+		} else {
+			snapshot, err = deps.DaemonClient.ListTasksSnapshotWithDependenciesArchiveMode(ctx, archiveMode)
+		}
 	} else {
-		snapshot, err = listTasksSnapshotForCLI(ctx, deps)
+		if archiveMode == protocol.ArchiveModeExclude {
+			snapshot, err = listTasksSnapshotForCLI(ctx, deps)
+		} else {
+			snapshot, err = deps.DaemonClient.ListTasksSnapshotWithArchiveMode(ctx, archiveMode)
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("failed to list issues: %w", err)
@@ -4553,7 +4605,11 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 		return err
 	}
 
-	snapshot, err := deps.DaemonClient.GetTaskSnapshot(ctx, opts.IssueID)
+	archiveMode, err := protocol.NormalizeArchiveMode(opts.Archived)
+	if err != nil {
+		return err
+	}
+	snapshot, err := deps.DaemonClient.GetTaskSnapshotWithArchiveMode(ctx, opts.IssueID, archiveMode, daemonclient.ReadWaitModeDefault)
 	if err != nil {
 		if deps.Logger != nil {
 			deps.Logger.Warn("issue get failed during daemon read", "issue_id", opts.IssueID, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)

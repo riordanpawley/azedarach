@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,40 @@ import (
 type dependencyRemovalConfirmationKey struct{}
 type parentChildOrphanConfirmationKey struct{}
 type issueMutationLockKey struct{}
+
+type ArchiveMode string
+
+const (
+	ArchiveExclude ArchiveMode = "exclude"
+	ArchiveInclude ArchiveMode = "include"
+	ArchiveOnly    ArchiveMode = "only"
+)
+
+func NormalizeArchiveMode(value string) ArchiveMode {
+	switch ArchiveMode(strings.TrimSpace(strings.ToLower(value))) {
+	case ArchiveInclude:
+		return ArchiveInclude
+	case ArchiveOnly:
+		return ArchiveOnly
+	default:
+		return ArchiveExclude
+	}
+}
+
+func archiveWhere(alias string, mode ArchiveMode) string {
+	prefix := strings.TrimSpace(alias)
+	if prefix != "" && !strings.HasSuffix(prefix, ".") {
+		prefix += "."
+	}
+	switch NormalizeArchiveMode(string(mode)) {
+	case ArchiveInclude:
+		return "1=1"
+	case ArchiveOnly:
+		return prefix + "deleted_at IS NOT NULL"
+	default:
+		return prefix + "deleted_at IS NULL"
+	}
+}
 
 const runtimeSessionProjectionUnionSQL = `
 	SELECT
@@ -865,6 +900,12 @@ func (c *Client) ListWithRuntime(ctx context.Context, projectID string) ([]domai
 // SearchWithRuntime fetches active issues matching query through the issue
 // content FTS index, then hydrates only the matching runtime rows.
 func (c *Client) SearchWithRuntime(ctx context.Context, projectID, query string) ([]domain.Task, error) {
+	return c.SearchWithRuntimeArchiveMode(ctx, projectID, query, ArchiveExclude)
+}
+
+// SearchWithRuntimeArchiveMode fetches issues matching query through the issue
+// content FTS index, then hydrates only the matching runtime rows.
+func (c *Client) SearchWithRuntimeArchiveMode(ctx context.Context, projectID, query string, archiveMode ArchiveMode) ([]domain.Task, error) {
 	startedAt := time.Now()
 	db, err := c.dbHandle()
 	if err != nil {
@@ -878,7 +919,34 @@ func (c *Client) SearchWithRuntime(ctx context.Context, projectID, query string)
 	if expr == "" {
 		return []domain.Task{}, nil
 	}
-	rows, err := db.QueryContext(ctx, issueSearchIDsQuery(), expr)
+	archiveMode = NormalizeArchiveMode(string(archiveMode))
+	if archiveMode != ArchiveExclude {
+		tasks := []domain.Task{}
+		if archiveMode == ArchiveInclude {
+			active, err := c.searchActiveWithRuntime(ctx, db, projectID, query, expr, startedAt)
+			if err != nil {
+				return nil, err
+			}
+			tasks = append(tasks, active...)
+		}
+		archived, err := c.queryTasksWithRuntimeArchiveMode(ctx, db, projectID, ArchiveOnly)
+		if err != nil {
+			return nil, c.wrapError("search-with-runtime", projectID, err)
+		}
+		tasks = append(tasks, domain.FilterTasksByContentQuery(archived, query)...)
+		sort.SliceStable(tasks, func(i, j int) bool {
+			if tasks[i].UpdatedAt.Equal(tasks[j].UpdatedAt) {
+				return tasks[i].ID < tasks[j].ID
+			}
+			return tasks[i].UpdatedAt.After(tasks[j].UpdatedAt)
+		})
+		return tasks, nil
+	}
+	return c.searchActiveWithRuntime(ctx, db, projectID, query, expr, startedAt)
+}
+
+func (c *Client) searchActiveWithRuntime(ctx context.Context, db *sql.DB, projectID, query, expr string, startedAt time.Time) ([]domain.Task, error) {
+	rows, err := db.QueryContext(ctx, issueSearchIDsQuery(ArchiveExclude), expr)
 	if err != nil {
 		c.logSQLiteRead(ctx, "issue.search_ids_fts", startedAt, 0, err)
 		return nil, c.wrapError("search-with-runtime", projectID, err)
@@ -917,38 +985,46 @@ func (c *Client) SearchWithRuntime(ctx context.Context, projectID, query string)
 		return []domain.Task{}, nil
 	}
 
-	tasks, err := c.queryTasksWithRuntime(ctx, db, projectID, ids...)
+	tasks, err := c.queryTasksWithRuntimeArchiveMode(ctx, db, projectID, ArchiveExclude, ids...)
 	if err != nil {
 		return nil, c.wrapError("search-with-runtime", projectID, err)
 	}
 	return domain.FilterTasksByContentQuery(tasks, query), nil
 }
 
-func issueSearchIDsQuery() string {
-	return `
+func issueSearchIDsQuery(archiveMode ArchiveMode) string {
+	return fmt.Sprintf(`
 		SELECT i.id
 		FROM issue_search_fts
 		JOIN issues i ON i.rowid = issue_search_fts.rowid
 		WHERE issue_search_fts MATCH ?
-			AND i.deleted_at IS NULL
+			AND %s
 		ORDER BY i.updated_at DESC, i.id
-	`
+	`, archiveWhere("i", archiveMode))
 }
 
 // ListSummariesWithRuntime fetches active issues with runtime projection fields
 // but without long-form detail text. It is intended for board/list snapshots
 // where fetching full issue bodies for every task dominates load time.
 func (c *Client) ListSummariesWithRuntime(ctx context.Context, projectID string) ([]domain.Task, error) {
-	return c.listSummariesWithRuntime(ctx, projectID, false)
+	return c.ListSummariesWithRuntimeArchiveMode(ctx, projectID, ArchiveExclude)
 }
 
 // ListSummariesWithRuntimeDependencies fetches active issue summaries with runtime projection fields
 // and full outgoing dependency edges.
 func (c *Client) ListSummariesWithRuntimeDependencies(ctx context.Context, projectID string) ([]domain.Task, error) {
-	return c.listSummariesWithRuntime(ctx, projectID, true)
+	return c.ListSummariesWithRuntimeDependenciesArchiveMode(ctx, projectID, ArchiveExclude)
 }
 
-func (c *Client) listSummariesWithRuntime(ctx context.Context, projectID string, includeDependencies bool) ([]domain.Task, error) {
+func (c *Client) ListSummariesWithRuntimeArchiveMode(ctx context.Context, projectID string, archiveMode ArchiveMode) ([]domain.Task, error) {
+	return c.listSummariesWithRuntime(ctx, projectID, false, archiveMode)
+}
+
+func (c *Client) ListSummariesWithRuntimeDependenciesArchiveMode(ctx context.Context, projectID string, archiveMode ArchiveMode) ([]domain.Task, error) {
+	return c.listSummariesWithRuntime(ctx, projectID, true, archiveMode)
+}
+
+func (c *Client) listSummariesWithRuntime(ctx context.Context, projectID string, includeDependencies bool, archiveMode ArchiveMode) ([]domain.Task, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return nil, err
@@ -957,7 +1033,7 @@ func (c *Client) listSummariesWithRuntime(ctx context.Context, projectID string,
 	if projectID == "" {
 		projectID = "default"
 	}
-	tasks, err := c.queryTaskSummariesWithRuntime(ctx, db, projectID, includeDependencies)
+	tasks, err := c.queryTaskSummariesWithRuntimeArchiveMode(ctx, db, projectID, includeDependencies, archiveMode)
 	if err != nil {
 		return nil, c.wrapError("list-summaries-with-runtime", projectID, err)
 	}
@@ -1023,7 +1099,7 @@ func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, r
 	if len(issueIDs) == 0 {
 		return []domain.Task{}, nil
 	}
-	tasks, err := c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, taskDependencyLoadAll, issueIDs...)
+	tasks, err := c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, taskDependencyLoadAll, ArchiveExclude, issueIDs...)
 	if err != nil {
 		return nil, c.wrapError("list-graph-readiness-with-runtime", rootID, err)
 	}
@@ -1053,7 +1129,7 @@ func (c *Client) ListParentChildSubtreeWithRuntime(ctx context.Context, projectI
 	if len(issueIDs) == 0 {
 		return []domain.Task{}, nil
 	}
-	tasks, err := c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, taskDependencyLoadAll, issueIDs...)
+	tasks, err := c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, taskDependencyLoadAll, ArchiveExclude, issueIDs...)
 	if err != nil {
 		return nil, c.wrapError("list-parent-child-subtree-with-runtime", rootID, err)
 	}
@@ -1062,6 +1138,11 @@ func (c *Client) ListParentChildSubtreeWithRuntime(ctx context.Context, projectI
 
 // GetWithRuntime fetches one active issue with runtime projection fields.
 func (c *Client) GetWithRuntime(ctx context.Context, projectID, id string) (domain.Task, error) {
+	return c.GetWithRuntimeArchiveMode(ctx, projectID, id, ArchiveExclude)
+}
+
+// GetWithRuntimeArchiveMode fetches one issue with runtime projection fields.
+func (c *Client) GetWithRuntimeArchiveMode(ctx context.Context, projectID, id string, archiveMode ArchiveMode) (domain.Task, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return domain.Task{}, err
@@ -1074,7 +1155,7 @@ func (c *Client) GetWithRuntime(ctx context.Context, projectID, id string) (doma
 	if id == "" {
 		return domain.Task{}, c.wrapError("get-with-runtime", id, domain.ErrNotFound)
 	}
-	tasks, err := c.queryTasksWithRuntime(ctx, db, projectID, id)
+	tasks, err := c.queryTasksWithRuntimeArchiveMode(ctx, db, projectID, archiveMode, id)
 	if err != nil {
 		return domain.Task{}, c.wrapError("get-with-runtime", id, err)
 	}
@@ -1107,6 +1188,12 @@ func (c *Client) GetManyWithRuntime(ctx context.Context, projectID string, ids [
 
 // GetWithDependencyContextRuntime fetches one issue plus direct dependencies and dependents.
 func (c *Client) GetWithDependencyContextRuntime(ctx context.Context, projectID, id string) ([]domain.Task, error) {
+	return c.GetWithDependencyContextRuntimeArchiveMode(ctx, projectID, id, ArchiveExclude)
+}
+
+// GetWithDependencyContextRuntimeArchiveMode fetches one issue plus direct dependencies and dependents.
+func (c *Client) GetWithDependencyContextRuntimeArchiveMode(ctx context.Context, projectID, id string, archiveMode ArchiveMode) ([]domain.Task, error) {
+	archiveMode = NormalizeArchiveMode(string(archiveMode))
 	db, err := c.dbHandle()
 	if err != nil {
 		return nil, err
@@ -1157,7 +1244,7 @@ func (c *Client) GetWithDependencyContextRuntime(ctx context.Context, projectID,
 		return nil, c.wrapError("get-with-dependency-context-runtime", id, err)
 	}
 
-	tasks, err := c.queryTasksWithRuntime(ctx, db, projectID, issueIDs...)
+	tasks, err := c.queryTasksWithRuntimeArchiveMode(ctx, db, projectID, archiveMode, issueIDs...)
 	if err != nil {
 		return nil, c.wrapError("get-with-dependency-context-runtime", id, err)
 	}
@@ -3393,15 +3480,23 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 }
 
 func (c *Client) queryTaskSummariesWithRuntime(ctx context.Context, db *sql.DB, projectID string, includeDependencies bool, issueIDs ...string) ([]domain.Task, error) {
+	return c.queryTaskSummariesWithRuntimeArchiveMode(ctx, db, projectID, includeDependencies, ArchiveExclude, issueIDs...)
+}
+
+func (c *Client) queryTaskSummariesWithRuntimeArchiveMode(ctx context.Context, db *sql.DB, projectID string, includeDependencies bool, archiveMode ArchiveMode, issueIDs ...string) ([]domain.Task, error) {
 	dependencyMode := taskDependencyLoadParentOnly
 	if includeDependencies {
 		dependencyMode = taskDependencyLoadAll
 	}
-	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, dependencyMode, issueIDs...)
+	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, dependencyMode, archiveMode, issueIDs...)
 }
 
 func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectID string, issueIDs ...string) ([]domain.Task, error) {
-	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, true, taskDependencyLoadAll, issueIDs...)
+	return c.queryTasksWithRuntimeArchiveMode(ctx, db, projectID, ArchiveExclude, issueIDs...)
+}
+
+func (c *Client) queryTasksWithRuntimeArchiveMode(ctx context.Context, db *sql.DB, projectID string, archiveMode ArchiveMode, issueIDs ...string) ([]domain.Task, error) {
+	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, true, taskDependencyLoadAll, archiveMode, issueIDs...)
 }
 
 func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, projectID string, issueIDs ...string) ([]domain.Task, error) {
@@ -3618,10 +3713,10 @@ const (
 	taskDependencyLoadParentOnly
 )
 
-func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB, projectID string, includeDetails bool, dependencyMode taskDependencyLoadMode, issueIDs ...string) ([]domain.Task, error) {
+func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB, projectID string, includeDetails bool, dependencyMode taskDependencyLoadMode, archiveMode ArchiveMode, issueIDs ...string) ([]domain.Task, error) {
 	startedAt := time.Now()
 	issueCount := len(uniqueIssueIDStrings(issueIDs))
-	query, args := taskRuntimeProjectionQuery(projectID, includeDetails, issueIDs...)
+	query, args := taskRuntimeProjectionQuery(projectID, includeDetails, archiveMode, issueIDs...)
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		c.logSQLiteRead(ctx, "issue.runtime_projection", startedAt, 0, err, "include_details", includeDetails, "issue_count", issueCount)
@@ -3887,7 +3982,7 @@ func parseIssueOwnership(ownerIDRaw, ownerKindRaw, claimedRaw, expiresRaw string
 	return ownership
 }
 
-func taskRuntimeProjectionQuery(projectID string, includeDetails bool, issueIDs ...string) (string, []any) {
+func taskRuntimeProjectionQuery(projectID string, includeDetails bool, archiveMode ArchiveMode, issueIDs ...string) (string, []any) {
 	detailSelect := `
 			COALESCE(i.description, ''),
 			COALESCE(i.notes, ''),
@@ -4000,7 +4095,7 @@ func taskRuntimeProjectionQuery(projectID string, includeDetails bool, issueIDs 
 		LEFT JOIN daemon_worktree_projections w
 			ON w.project_id = ? AND w.issue_id = i.id
 		LEFT JOIN origin_pick o ON o.issue_id = i.id
-		WHERE i.deleted_at IS NULL
+		WHERE ` + archiveWhere("i", archiveMode) + `
 	` + whereFilter
 	query += " ORDER BY i.updated_at DESC"
 

@@ -20,6 +20,7 @@ type daemonProjectRuntimeConfig struct {
 	WorktreeInitCommands       []string
 	WorktreeAsyncInitCommands  []string
 	IssueResources             appconfig.IssueResourcesConfig
+	IssueAutoArchive           appconfig.IssueAutoArchiveConfig
 	ScheduledScripts           appconfig.ScheduledScriptsConfig
 }
 
@@ -53,6 +54,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		WorktreeInitCommands:       append([]string(nil), d.cfg.WorktreeInitCommands...),
 		WorktreeAsyncInitCommands:  append([]string(nil), d.cfg.WorktreeAsyncInitCommands...),
 		IssueResources:             cloneIssueResourcesConfig(d.cfg.IssueResources),
+		IssueAutoArchive:           cloneIssueAutoArchiveConfig(d.cfg.IssueAutoArchive),
 		ScheduledScripts:           cloneScheduledScriptsConfig(d.cfg.ScheduledScripts),
 	}
 	if defaultConfig.BaseBranch == "" {
@@ -123,6 +125,12 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	if d.issueResourcesByRoot == nil {
 		d.issueResourcesByRoot = map[string]appconfig.IssueResourcesConfig{}
 	}
+	if d.issueAutoArchiveByProject == nil {
+		d.issueAutoArchiveByProject = map[string]appconfig.IssueAutoArchiveConfig{}
+	}
+	if d.issueAutoArchiveByRoot == nil {
+		d.issueAutoArchiveByRoot = map[string]appconfig.IssueAutoArchiveConfig{}
+	}
 	if d.scheduledScriptsByProject == nil {
 		d.scheduledScriptsByProject = map[string]appconfig.ScheduledScriptsConfig{}
 	}
@@ -155,6 +163,9 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		}
 		if resources, ok := d.issueResourcesByProject[projectID]; ok {
 			cfg.IssueResources = cloneIssueResourcesConfig(resources)
+		}
+		if autoArchive, ok := d.issueAutoArchiveByProject[projectID]; ok {
+			cfg.IssueAutoArchive = cloneIssueAutoArchiveConfig(autoArchive)
 		}
 		if scripts, ok := d.scheduledScriptsByProject[projectID]; ok {
 			cfg.ScheduledScripts = cloneScheduledScriptsConfig(scripts)
@@ -195,6 +206,9 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			if resources, ok := d.issueResourcesByRoot[repoDir]; ok {
 				cfg.IssueResources = cloneIssueResourcesConfig(resources)
 			}
+			if autoArchive, ok := d.issueAutoArchiveByRoot[repoDir]; ok {
+				cfg.IssueAutoArchive = cloneIssueAutoArchiveConfig(autoArchive)
+			}
 			if scripts, ok := d.scheduledScriptsByRoot[repoDir]; ok {
 				cfg.ScheduledScripts = cloneScheduledScriptsConfig(scripts)
 			}
@@ -207,6 +221,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			d.worktreeInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeInitCommands...)
 			d.worktreeAsyncInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeAsyncInitCommands...)
 			d.issueResourcesByProject[projectID] = cloneIssueResourcesConfig(cfg.IssueResources)
+			d.issueAutoArchiveByProject[projectID] = cloneIssueAutoArchiveConfig(cfg.IssueAutoArchive)
 			d.scheduledScriptsByProject[projectID] = cloneScheduledScriptsConfig(cfg.ScheduledScripts)
 			d.projectConfigMu.Unlock()
 			return cfg
@@ -234,6 +249,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 				cfg.WorktreeInitCommands = append([]string(nil), loaded.Worktree.SyncInitCommands...)
 				cfg.WorktreeAsyncInitCommands = append([]string(nil), loaded.Worktree.AsyncInitCommands...)
 				cfg.IssueResources = cloneIssueResourcesConfig(loaded.IssueResources)
+				cfg.IssueAutoArchive = cloneIssueAutoArchiveConfig(loaded.Issues.AutoArchive)
 				cfg.ScheduledScripts = cloneScheduledScriptsConfig(loaded.ScheduledScripts)
 			}
 		}
@@ -252,6 +268,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	d.worktreeInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeInitCommands...)
 	d.worktreeAsyncInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeAsyncInitCommands...)
 	d.issueResourcesByProject[projectID] = cloneIssueResourcesConfig(cfg.IssueResources)
+	d.issueAutoArchiveByProject[projectID] = cloneIssueAutoArchiveConfig(cfg.IssueAutoArchive)
 	d.scheduledScriptsByProject[projectID] = cloneScheduledScriptsConfig(cfg.ScheduledScripts)
 	if repoDir != "" {
 		if d.baseBranchByRoot == nil {
@@ -266,10 +283,15 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		d.worktreeInitCommandsByRoot[repoDir] = append([]string(nil), cfg.WorktreeInitCommands...)
 		d.worktreeAsyncInitCommandsByRoot[repoDir] = append([]string(nil), cfg.WorktreeAsyncInitCommands...)
 		d.issueResourcesByRoot[repoDir] = cloneIssueResourcesConfig(cfg.IssueResources)
+		d.issueAutoArchiveByRoot[repoDir] = cloneIssueAutoArchiveConfig(cfg.IssueAutoArchive)
 		d.scheduledScriptsByRoot[repoDir] = cloneScheduledScriptsConfig(cfg.ScheduledScripts)
 	}
 	d.projectConfigMu.Unlock()
 
+	return cfg
+}
+
+func cloneIssueAutoArchiveConfig(cfg appconfig.IssueAutoArchiveConfig) appconfig.IssueAutoArchiveConfig {
 	return cfg
 }
 

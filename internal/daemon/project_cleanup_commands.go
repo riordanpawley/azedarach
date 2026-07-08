@@ -149,9 +149,16 @@ func (d *Daemon) cleanupOldDoneTasks(ctx context.Context, req protocol.RequestEn
 }
 
 func (d *Daemon) cleanupArchiveDoneTasks(ctx context.Context, req protocol.RequestEnvelope, projectID string, tasks []domain.Task) (int, error) {
+	return d.cleanupArchiveDoneTasksBefore(ctx, req, projectID, tasks, time.Time{})
+}
+
+func (d *Daemon) cleanupArchiveDoneTasksBefore(ctx context.Context, req protocol.RequestEnvelope, projectID string, tasks []domain.Task, cutoff time.Time) (int, error) {
 	archived := 0
 	var lastErr error
 	for _, task := range doneTasksInArchiveOrder(tasks) {
+		if !cutoff.IsZero() && !task.UpdatedAt.Before(cutoff) {
+			continue
+		}
 		if err := d.archiveTaskForCleanup(ctx, req, projectID, task.ID.String()); err != nil {
 			lastErr = err
 			continue

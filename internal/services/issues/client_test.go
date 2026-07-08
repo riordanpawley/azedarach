@@ -276,6 +276,57 @@ func TestClient_GetManyWithRuntimeFiltersRequestedActiveIssues(t *testing.T) {
 	assert.NotContains(t, got, archivedID)
 }
 
+func TestClient_ArchiveModeRuntimeReads(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-archive-mode"
+
+	activeID, err := client.Create(ctx, CreateTaskParams{
+		Title:       "active retained needle",
+		Description: "active archive-mode search body",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+	})
+	require.NoError(t, err)
+	archivedID, err := client.Create(ctx, CreateTaskParams{
+		Title:       "archived retained needle",
+		Description: "archived archive-mode search body",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, archivedID, activeID, string(domain.DependencyBlocks)))
+	require.NoError(t, client.Archive(ctx, archivedID))
+
+	activeOnly, err := client.ListSummariesWithRuntimeArchiveMode(ctx, projectID, ArchiveExclude)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{activeID}, taskIDStrings(activeOnly))
+
+	withArchived, err := client.ListSummariesWithRuntimeArchiveMode(ctx, projectID, ArchiveInclude)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{activeID, archivedID}, taskIDStrings(withArchived))
+
+	archivedOnly, err := client.ListSummariesWithRuntimeArchiveMode(ctx, projectID, ArchiveOnly)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{archivedID}, taskIDStrings(archivedOnly))
+
+	searchArchived, err := client.SearchWithRuntimeArchiveMode(ctx, projectID, "archived archive-mode", ArchiveOnly)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{archivedID}, taskIDStrings(searchArchived))
+
+	_, err = client.GetWithDependencyContextRuntimeArchiveMode(ctx, projectID, archivedID, ArchiveExclude)
+	require.Error(t, err)
+	require.ErrorIs(t, err, domain.ErrNotFound)
+
+	tasks, err := client.GetWithDependencyContextRuntimeArchiveMode(ctx, projectID, archivedID, ArchiveInclude)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{activeID, archivedID}, taskIDStrings(tasks))
+
+	tasks, err = client.GetWithDependencyContextRuntimeArchiveMode(ctx, projectID, archivedID, ArchiveOnly)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{archivedID}, taskIDStrings(tasks))
+}
+
 func TestClient_LinearSyncExternalRefsUseCanonicalOriginTable(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -1570,7 +1621,7 @@ func TestTaskRuntimeProjectionQueryFiltersRuntimeCTEsForRequestedIDs(t *testing.
 	assert.Equal(t, 2, strings.Count(query, "issue_id IN (?,?)"), query)
 	assert.Contains(t, query, "i.id IN (?,?)")
 
-	unfilteredQuery, unfilteredArgs := taskRuntimeProjectionQuery("proj-batch-context", false)
+	unfilteredQuery, unfilteredArgs := taskRuntimeProjectionQuery("proj-batch-context", false, ArchiveExclude)
 	assert.Equal(t, []any{"proj-batch-context", "proj-batch-context"}, unfilteredArgs)
 	assert.NotContains(t, unfilteredQuery, "issue_id IN")
 	assert.NotContains(t, unfilteredQuery, "i.id IN")
@@ -1691,7 +1742,7 @@ func TestSQLiteHotQueryPlansUseExpectedIndexes(t *testing.T) {
 			name: "search candidate ids",
 			build: func(t *testing.T) (string, []any) {
 				t.Helper()
-				return issueSearchIDsQuery(), []any{domain.ContentQueryFTSExpression("runtime cache")}
+				return issueSearchIDsQuery(ArchiveExclude), []any{domain.ContentQueryFTSExpression("runtime cache")}
 			},
 			want: []string{
 				"SCAN issue_search_fts VIRTUAL TABLE INDEX",
@@ -1746,7 +1797,7 @@ func TestSQLiteHotQueryPlansUseExpectedIndexes(t *testing.T) {
 			name: "unfiltered runtime projection",
 			build: func(t *testing.T) (string, []any) {
 				t.Helper()
-				return taskRuntimeProjectionQuery("project", false)
+				return taskRuntimeProjectionQuery("project", false, ArchiveExclude)
 			},
 			want: []string{
 				"idx_daemon_session_projections_project_issue_updated",
@@ -4680,4 +4731,12 @@ func BenchmarkClient_GetManyMetadataWithAncestorContextRuntimeLargeProject(b *te
 			b.Fatal("expected metadata tasks")
 		}
 	}
+}
+
+func taskIDStrings(tasks []domain.Task) []string {
+	out := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		out = append(out, task.ID.String())
+	}
+	return out
 }

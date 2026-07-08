@@ -54,6 +54,56 @@ func TestServiceRunImportsRemoteIssueAndRecordsRef(t *testing.T) {
 	}
 }
 
+func TestServiceRunDoesNotReimportKnownArchivedLocalIssue(t *testing.T) {
+	store := &fakeStore{
+		refs: []issues.ExternalRef{{
+			Provider:           ProviderLinear,
+			IssueID:            "CHE-1",
+			ExternalID:         "lin-1",
+			ExternalIdentifier: "CHE-1",
+			LastSyncHash:       "previous",
+		}},
+	}
+	remoteUpdated := time.Date(2026, 5, 5, 1, 0, 0, 0, time.UTC)
+	service := Service{
+		Store: store,
+		Linear: &fakeLinear{issues: []linearapi.Issue{{
+			ID:          "lin-1",
+			Identifier:  "CHE-1",
+			Title:       "Remote issue",
+			Description: "Body",
+			Priority:    2,
+			State:       linearapi.State{Name: "Todo", Type: "unstarted"},
+			CreatedAt:   remoteUpdated.Add(-time.Hour),
+			UpdatedAt:   remoteUpdated,
+		}}},
+		Config: config.IssueTrackerConfig{
+			Backend: "linear",
+			Sync:    config.IssueSyncConfig{Enabled: true},
+			Linear:  config.LinearTrackerConfig{Team: "CHE"},
+		},
+		ProjectID: "chefy",
+		Now:       func() time.Time { return remoteUpdated.Add(time.Hour) },
+	}
+
+	summary, err := service.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if summary.Imported != 0 || summary.UpdatedLocal != 0 {
+		t.Fatalf("summary = %+v, want no local import/update", summary)
+	}
+	if store.upsertSyncedCalls != 0 {
+		t.Fatalf("upsert synced calls = %d, want 0", store.upsertSyncedCalls)
+	}
+	if len(store.tasks) != 0 {
+		t.Fatalf("tasks = %+v, want archived local issue to remain absent from active list", store.tasks)
+	}
+	if len(store.refs) != 1 || store.refs[0].LastSyncHash == "previous" {
+		t.Fatalf("refs = %+v, want external ref refreshed without local reimport", store.refs)
+	}
+}
+
 func TestServiceRunTreatsMissingLinearProjectAsTeamOnlySync(t *testing.T) {
 	store := &fakeStore{}
 	linear := &fakeLinear{}
@@ -788,10 +838,11 @@ func (f *fakeLinear) Metrics() linearapi.Metrics {
 }
 
 type fakeStore struct {
-	tasks     []domain.Task
-	refs      []issues.ExternalRef
-	conflicts []issues.SyncConflict
-	states    map[string]issues.ExternalSyncState
+	tasks             []domain.Task
+	refs              []issues.ExternalRef
+	conflicts         []issues.SyncConflict
+	states            map[string]issues.ExternalSyncState
+	upsertSyncedCalls int
 }
 
 func (s *fakeStore) List(context.Context) ([]domain.Task, error) {
@@ -799,6 +850,7 @@ func (s *fakeStore) List(context.Context) ([]domain.Task, error) {
 }
 
 func (s *fakeStore) UpsertSyncedTask(_ context.Context, task domain.Task) (bool, error) {
+	s.upsertSyncedCalls++
 	for i, existing := range s.tasks {
 		if existing.ID == task.ID {
 			s.tasks[i] = task

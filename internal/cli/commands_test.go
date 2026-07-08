@@ -4340,6 +4340,42 @@ func TestConfigSetCommandWritesLatencyTraceConfig(t *testing.T) {
 	}
 }
 
+func TestConfigSetCommandWritesIssueAutoArchiveConfig(t *testing.T) {
+	projectDir := t.TempDir()
+
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{}),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+		RepoDir:      projectDir,
+	}
+
+	for _, opts := range []ConfigSetOptions{
+		{Key: "issues.autoArchive.enabled", Value: "on"},
+		{Key: "issues.autoArchive.closedAfterDays", Value: "45"},
+		{Key: "issues.autoArchive.interval", Value: "12h"},
+	} {
+		_ = captureStdout(t, func() error {
+			return ConfigSetCommand(deps, opts)
+		})
+	}
+
+	cfg, err := config.LoadConfig(projectDir)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if !cfg.Issues.AutoArchive.Enabled {
+		t.Fatalf("Issues.AutoArchive.Enabled = false, want true")
+	}
+	if cfg.Issues.AutoArchive.ClosedAfterDays != 45 {
+		t.Fatalf("Issues.AutoArchive.ClosedAfterDays = %d, want 45", cfg.Issues.AutoArchive.ClosedAfterDays)
+	}
+	if cfg.Issues.AutoArchive.Interval != "12h" {
+		t.Fatalf("Issues.AutoArchive.Interval = %q, want 12h", cfg.Issues.AutoArchive.Interval)
+	}
+}
+
 func TestConfigSetCommandRejectsRemovedCloseCleanupConfig(t *testing.T) {
 	projectDir := t.TempDir()
 
@@ -4779,6 +4815,11 @@ func TestParseIssueListArgs(t *testing.T) {
 			want: IssueListOptions{JSON: false, Deps: true, Limit: defaultIssueListLimit},
 		},
 		{
+			name: "archived include",
+			args: []string{"--archived", "include"},
+			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, Archived: "include"},
+		},
+		{
 			name: "limit override",
 			args: []string{"--limit", "25"},
 			want: IssueListOptions{JSON: false, Deps: false, Limit: 25},
@@ -4841,6 +4882,11 @@ func TestParseIssueListArgs(t *testing.T) {
 			args:        []string{"--status", "queued"},
 			errContains: "invalid status: queued",
 		},
+		{
+			name:        "invalid archived mode",
+			args:        []string{"--archived", "maybe"},
+			errContains: "archived must be one of",
+		},
 	}
 
 	for _, tt := range tests {
@@ -4887,7 +4933,7 @@ func TestParseIssueGetArgs(t *testing.T) {
 		{
 			name:        "missing issue id",
 			args:        []string{},
-			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]",
+			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [--archived exclude|include|only] [<issue-id>]",
 		},
 		{
 			name:        "too many args",
@@ -4903,6 +4949,16 @@ func TestParseIssueGetArgs(t *testing.T) {
 			name: "named id",
 			args: []string{"--id", "az-4"},
 			want: IssueGetOptions{IssueID: "az-4", JSON: false},
+		},
+		{
+			name: "archived only",
+			args: []string{"--archived", "only", "az-4"},
+			want: IssueGetOptions{IssueID: "az-4", Archived: "only"},
+		},
+		{
+			name:        "invalid archived mode",
+			args:        []string{"--archived", "maybe", "az-4"},
+			errContains: "archived must be one of",
 		},
 		{
 			name:        "single-dash long flag rejected",
@@ -5114,6 +5170,11 @@ func TestParseIssueSearchArgs(t *testing.T) {
 			name: "query flag",
 			args: []string{"--query", "linear error"},
 			want: IssueListOptions{Limit: defaultIssueListLimit, Query: "linear error"},
+		},
+		{
+			name: "archived include",
+			args: []string{"--archived", "include", "--query", "linear error"},
+			want: IssueListOptions{Limit: defaultIssueListLimit, Query: "linear error", Archived: "include"},
 		},
 		{
 			name: "short query flag",

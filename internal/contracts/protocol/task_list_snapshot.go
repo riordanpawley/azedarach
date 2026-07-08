@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -15,10 +16,15 @@ const TaskListSnapshotSchemaVersion uint16 = 2
 
 // TaskListFreshness describes whether the daemon's joined runtime projection is current enough for UI display.
 type TaskListFreshness string
+type ArchiveMode string
 
 const (
 	TaskListFreshnessFresh TaskListFreshness = "fresh"
 	TaskListFreshnessStale TaskListFreshness = "stale"
+
+	ArchiveModeExclude ArchiveMode = "exclude"
+	ArchiveModeInclude ArchiveMode = "include"
+	ArchiveModeOnly    ArchiveMode = "only"
 )
 
 // TaskListRequestBody is the optional request body for task.list. Empty bodies
@@ -26,11 +32,34 @@ const (
 type TaskListRequestBody struct {
 	Query               string `json:"query,omitempty" msgpack:"query,omitempty"`
 	IncludeDependencies bool   `json:"include_dependencies,omitempty" msgpack:"include_dependencies,omitempty"`
+	Archived            string `json:"archived,omitempty" msgpack:"archived,omitempty"`
 }
 
 func (f TaskListFreshness) Valid() bool {
 	switch f {
 	case TaskListFreshnessFresh, TaskListFreshnessStale:
+		return true
+	default:
+		return false
+	}
+}
+
+func NormalizeArchiveMode(value string) (ArchiveMode, error) {
+	switch ArchiveMode(strings.TrimSpace(strings.ToLower(value))) {
+	case "", ArchiveModeExclude:
+		return ArchiveModeExclude, nil
+	case ArchiveModeInclude:
+		return ArchiveModeInclude, nil
+	case ArchiveModeOnly:
+		return ArchiveModeOnly, nil
+	default:
+		return "", fmt.Errorf("archived must be one of %q, %q, or %q", ArchiveModeExclude, ArchiveModeInclude, ArchiveModeOnly)
+	}
+}
+
+func (m ArchiveMode) Valid() bool {
+	switch m {
+	case ArchiveModeExclude, ArchiveModeInclude, ArchiveModeOnly:
 		return true
 	default:
 		return false

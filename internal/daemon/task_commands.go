@@ -355,8 +355,9 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
 	query := strings.TrimSpace(listReq.Query)
+	archiveMode := protocol.ArchiveMode(listReq.Archived)
 	startedAt := time.Now()
-	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, query, listReq.IncludeDependencies)
+	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, query, listReq.IncludeDependencies, archiveMode)
 	if err != nil {
 		return d.errorResponse(req, projectIssueStoreHealthErrorCode(err), err.Error()), nil
 	}
@@ -406,7 +407,7 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 		}
 	}
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false)
-	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, "", false)
+	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, "", false, protocol.ArchiveModeExclude)
 	if err != nil {
 		return d.errorResponse(req, projectIssueStoreHealthErrorCode(err), err.Error()), nil
 	}
@@ -434,18 +435,29 @@ func decodeTaskListRequest(body []byte) (protocol.TaskListRequestBody, error) {
 		return protocol.TaskListRequestBody{}, err
 	}
 	req.Query = strings.TrimSpace(req.Query)
+	archiveMode, err := protocol.NormalizeArchiveMode(req.Archived)
+	if err != nil {
+		return protocol.TaskListRequestBody{}, err
+	}
+	req.Archived = string(archiveMode)
 	return req, nil
 }
 
-func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string, includeDependencies bool) (taskListSnapshotLoadResult, bool, error) {
+func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string, includeDependencies bool, archiveMode protocol.ArchiveMode) (taskListSnapshotLoadResult, bool, error) {
 	projectID = d.canonicalProjectID(projectID)
 	query = strings.TrimSpace(query)
+	if !archiveMode.Valid() {
+		archiveMode = protocol.ArchiveModeExclude
+	}
 	loadKey := projectID
 	if query != "" {
 		loadKey = projectID + "\x00query:" + strings.ToLower(query)
 	}
 	if includeDependencies {
 		loadKey += "\x00deps"
+	}
+	if archiveMode != protocol.ArchiveModeExclude {
+		loadKey += "\x00archive:" + string(archiveMode)
 	}
 
 	d.taskListSnapshotLoadMu.Lock()
@@ -470,7 +482,7 @@ func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestE
 
 	buildCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), taskListSnapshotLoadTimeout)
 	defer cancel()
-	result, err := d.buildTaskListSnapshot(buildCtx, req, projectID, query, includeDependencies)
+	result, err := d.buildTaskListSnapshot(buildCtx, req, projectID, query, includeDependencies, archiveMode)
 	load.result = cloneTaskListSnapshotLoadResult(result)
 	load.err = err
 
@@ -497,11 +509,14 @@ func contextDeadlineRemainingMillis(ctx context.Context) int64 {
 	return remaining.Milliseconds()
 }
 
-func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string, includeDependencies bool) (taskListSnapshotLoadResult, error) {
+func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string, includeDependencies bool, archiveMode protocol.ArchiveMode) (taskListSnapshotLoadResult, error) {
 	if err, unhealthy := d.projectIssueStoreHealthError(projectID); unhealthy {
 		return taskListSnapshotLoadResult{}, err
 	}
 	query = strings.TrimSpace(query)
+	if !archiveMode.Valid() {
+		archiveMode = protocol.ArchiveModeExclude
+	}
 	refreshStartedAt := time.Now()
 	var (
 		runtimeAt        time.Time
@@ -533,14 +548,14 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 	)
 	if query == "" {
 		if includeDependencies {
-			tasks, err = issueClient.ListSummariesWithRuntimeDependencies(ctx, projectID)
+			tasks, err = issueClient.ListSummariesWithRuntimeDependenciesArchiveMode(ctx, projectID, issues.ArchiveMode(archiveMode))
 		} else {
-			tasks, err = issueClient.ListSummariesWithRuntime(ctx, projectID)
+			tasks, err = issueClient.ListSummariesWithRuntimeArchiveMode(ctx, projectID, issues.ArchiveMode(archiveMode))
 		}
 		summariesOnly = true
 		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.issue_store_list_summaries_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "include_dependencies", includeDependencies)
 	} else {
-		tasks, err = issueClient.SearchWithRuntime(ctx, projectID, query)
+		tasks, err = issueClient.SearchWithRuntimeArchiveMode(ctx, projectID, query, issues.ArchiveMode(archiveMode))
 	}
 	if err != nil {
 		return taskListSnapshotLoadResult{}, d.recordProjectIssueStoreFailure(projectID, err)
@@ -554,7 +569,7 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "freshness", freshness)
 	revision := d.currentRevision(projectID)
-	if query == "" && !includeDependencies {
+	if query == "" && !includeDependencies && archiveMode == protocol.ArchiveModeExclude {
 		d.storeTaskListSnapshotCacheWithRuntimeAt(projectID, revision, lastCheckedAt, freshness, runtimeAt, tasks, summariesOnly)
 	}
 	return taskListSnapshotLoadResult{
@@ -623,8 +638,9 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	projectID := d.projectID(req.Meta)
 	startedAt := time.Now()
 	var cmd struct {
-		TaskID  string `json:"task_id"`
-		ActorID string `json:"actor_id,omitempty"`
+		TaskID   string `json:"task_id"`
+		ActorID  string `json:"actor_id,omitempty"`
+		Archived string `json:"archived,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -633,30 +649,36 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	if taskID == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "task_id is required"), nil
 	}
+	archiveMode, err := protocol.NormalizeArchiveMode(cmd.Archived)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+	}
 	cacheStartedAt := time.Now()
-	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok && !cached.SummariesOnly {
-		if _, found := findCachedTaskByID(cached.Tasks, taskID); found {
-			hydrated, hydrateErr := d.hydrateTaskListSnapshotCache(ctx, projectID, cached.Tasks)
-			if hydrateErr != nil {
-				latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.snapshot_cache_hydrate", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "cache_hit", false, "error", hydrateErr)
-			} else {
-				cached.Tasks = hydrated
-				cached.LastCheckedAt, cached.Freshness = d.taskListSnapshotFreshness(ctx, projectID)
-				latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "cache_hit", true)
-				payload := buildTaskListSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks, cached.SummariesOnly)
-				marshalStartedAt := time.Now()
-				body, err := json.Marshal(payload)
-				latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "context_task_count", len(cached.Tasks), "cache_hit", true)
-				if err != nil {
-					return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	if archiveMode == protocol.ArchiveModeExclude {
+		if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok && !cached.SummariesOnly {
+			if _, found := findCachedTaskByID(cached.Tasks, taskID); found {
+				hydrated, hydrateErr := d.hydrateTaskListSnapshotCache(ctx, projectID, cached.Tasks)
+				if hydrateErr != nil {
+					latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.snapshot_cache_hydrate", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "cache_hit", false, "error", hydrateErr)
+				} else {
+					cached.Tasks = hydrated
+					cached.LastCheckedAt, cached.Freshness = d.taskListSnapshotFreshness(ctx, projectID)
+					latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "cache_hit", true)
+					payload := buildTaskListSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks, cached.SummariesOnly)
+					marshalStartedAt := time.Now()
+					body, err := json.Marshal(payload)
+					latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "context_task_count", len(cached.Tasks), "cache_hit", true)
+					if err != nil {
+						return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+					}
+					resp := d.successResponse(req)
+					resp.Body = body
+					resp.Revision = payload.SnapshotRevision
+					if d.cfg.Logger != nil {
+						d.cfg.Logger.Info("daemon task get completed", "project_id", projectID, "task_id", taskID, "context_task_count", len(cached.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "cache_hit", true)
+					}
+					return resp, nil
 				}
-				resp := d.successResponse(req)
-				resp.Body = body
-				resp.Revision = payload.SnapshotRevision
-				if d.cfg.Logger != nil {
-					d.cfg.Logger.Info("daemon task get completed", "project_id", projectID, "task_id", taskID, "context_task_count", len(cached.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "cache_hit", true)
-				}
-				return resp, nil
 			}
 		}
 	}
@@ -672,7 +694,7 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
 	queryStartedAt := time.Now()
-	tasks, err := issueClient.GetWithDependencyContextRuntime(ctx, projectID, taskID)
+	tasks, err := issueClient.GetWithDependencyContextRuntimeArchiveMode(ctx, projectID, taskID, issues.ArchiveMode(archiveMode))
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.issue_store_get_dependency_context_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) || strings.Contains(err.Error(), domain.ErrNotFound.Error()) {
@@ -694,7 +716,7 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "context_task_count", len(contextTaskIDs))
 	if len(contextTaskIDs) > 0 {
 		queryStartedAt = time.Now()
-		tasks, err = issueClient.GetWithDependencyContextRuntime(ctx, projectID, taskID)
+		tasks, err = issueClient.GetWithDependencyContextRuntimeArchiveMode(ctx, projectID, taskID, issues.ArchiveMode(archiveMode))
 		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.issue_store_get_dependency_context_runtime_after_session_refresh", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
 		if err != nil {
 			if d.cfg.Logger != nil {

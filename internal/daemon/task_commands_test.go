@@ -753,6 +753,111 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	}
 }
 
+func TestHandleTaskListAndGetSupportArchivedOnly(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() {
+		if err := issuesClient.CloseDB(); err != nil {
+			t.Fatalf("close issues db: %v", err)
+		}
+	})
+
+	projectID := "proj-archived-only"
+	activeID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "active issue",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create active issue: %v", err)
+	}
+	archivedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:       "archived issue",
+		Description: "archived details",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusDone,
+	})
+	if err != nil {
+		t.Fatalf("create archived issue: %v", err)
+	}
+	if err := issuesClient.Archive(ctx, archivedID); err != nil {
+		t.Fatalf("archive issue: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  logger,
+		},
+		issues: issuesClient,
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		sessionStore: daemonstate.NewStore(),
+		revision:     map[string]uint64{projectID: 3},
+		git:          &git.Client{},
+	}
+
+	listBody, err := json.Marshal(protocol.TaskListRequestBody{Archived: string(protocol.ArchiveModeOnly)})
+	if err != nil {
+		t.Fatalf("marshal task.list request: %v", err)
+	}
+	listResp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-list-archived-only",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+		Body:            listBody,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskList error: %v", err)
+	}
+	if !listResp.OK {
+		t.Fatalf("task.list response = %+v", listResp.Error)
+	}
+	listPayload, err := protocol.DecodeTaskListSnapshotPayload(listResp.Body)
+	if err != nil {
+		t.Fatalf("decode task.list body: %v", err)
+	}
+	if got := taskIDStrings(listPayload.Tasks); len(got) != 1 || got[0] != archivedID {
+		t.Fatalf("task.list ids = %v, want [%s]; active id was %s", got, archivedID, activeID)
+	}
+
+	getBody, err := json.Marshal(map[string]string{"task_id": archivedID, "archived": string(protocol.ArchiveModeOnly)})
+	if err != nil {
+		t.Fatalf("marshal task.get request: %v", err)
+	}
+	getResp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-get-archived-only",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.get",
+		Body:            getBody,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskGet error: %v", err)
+	}
+	if !getResp.OK {
+		t.Fatalf("task.get response = %+v", getResp.Error)
+	}
+	getPayload, err := protocol.DecodeTaskListSnapshotPayload(getResp.Body)
+	if err != nil {
+		t.Fatalf("decode task.get body: %v", err)
+	}
+	if got := taskIDStrings(getPayload.Tasks); len(got) != 1 || got[0] != archivedID {
+		t.Fatalf("task.get ids = %v, want [%s]", got, archivedID)
+	}
+	if got := getPayload.Tasks[0].Description; got != "archived details" {
+		t.Fatalf("task.get description = %q, want archived details", got)
+	}
+}
+
 func TestHandleTaskListRefreshesMissingTmuxSessionBeforeReportingActive(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -1582,7 +1687,7 @@ func TestLoadTaskListSnapshotSharesInFlightProjectLoad(t *testing.T) {
 			Kind:            protocol.EnvelopeKindCommand,
 			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 			Command:         "task.list",
-		}, projectID, "", false)
+		}, projectID, "", false, protocol.ArchiveModeExclude)
 		if !shared {
 			errCh <- errors.New("load was not shared")
 			return
@@ -1661,7 +1766,7 @@ func TestLoadTaskListSnapshotUsesDetachedBuildContext(t *testing.T) {
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Command:         "task.list",
-	}, projectID, "", false)
+	}, projectID, "", false, protocol.ArchiveModeExclude)
 	if err != nil {
 		t.Fatalf("loadTaskListSnapshot error = %v, want detached load to succeed", err)
 	}
@@ -11754,4 +11859,12 @@ func TestWorktreeGitProbeThrottleKeyIncludesResolvedBaseBranch(t *testing.T) {
 	if !throttle.Admit(parentBaseKey, false).Allowed() {
 		t.Fatal("parent-base probe should not be suppressed by previous preview-base record")
 	}
+}
+
+func taskIDStrings(tasks []domain.Task) []string {
+	out := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		out = append(out, task.ID.String())
+	}
+	return out
 }
