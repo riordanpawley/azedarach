@@ -1560,9 +1560,11 @@ func (m *Model) handlePendingWorktreeCleanupOperationEvent(evt protocol.EventEnv
 	}
 
 	m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
-		taskID:      pending.taskID,
-		deletedTask: pending.deletedTask,
-		force:       true,
+		taskID:       pending.taskID,
+		deletedTask:  pending.deletedTask,
+		force:        true,
+		deleteBranch: pending.deleteBranch,
+		branch:       pending.branch,
 	}
 	action := "cleanup worktree"
 	if pending.deletedTask {
@@ -3378,14 +3380,16 @@ type taskDeletedResultMsg struct {
 }
 
 type worktreeCleanupResultMsg struct {
-	taskID      string
-	deletedTask bool
-	force       bool
-	operationID string
-	state       protocol.OperationState
-	needsForce  bool
-	reason      string
-	err         error
+	taskID       string
+	deletedTask  bool
+	force        bool
+	deleteBranch bool
+	branch       string
+	operationID  string
+	state        protocol.OperationState
+	needsForce   bool
+	reason       string
+	err          error
 }
 
 type worktreeCleanupConfirmPromptMsg struct {
@@ -3394,6 +3398,8 @@ type worktreeCleanupConfirmPromptMsg struct {
 	taskID       string
 	deletedTask  bool
 	force        bool
+	deleteBranch bool
+	branch       string
 	task         domain.Task
 	freshness    protocol.TaskListFreshness
 	checkedAt    time.Time
@@ -3406,13 +3412,16 @@ type worktreeCleanupConfirmPromptMsg struct {
 	additions    int
 	deletions    int
 	reconcileErr error
+	branchErr    error
 	snapshotErr  error
 }
 
 type pendingWorktreeCleanupConfirmation struct {
-	taskID      string
-	deletedTask bool
-	force       bool
+	taskID       string
+	deletedTask  bool
+	force        bool
+	deleteBranch bool
+	branch       string
 }
 
 type bulkCleanupRisk struct {
@@ -3428,6 +3437,7 @@ type bulkCleanupPreflightMsg struct {
 	revision       uint64
 	taskIDs        []string
 	deletedTasks   bool
+	deleteBranch   bool
 	refreshedTasks []domain.Task
 	risks          []bulkCleanupRisk
 	freshness      protocol.TaskListFreshness
@@ -3439,6 +3449,7 @@ type bulkCleanupPreflightMsg struct {
 type pendingBulkCleanupConfirmation struct {
 	taskIDs      []string
 	deletedTasks bool
+	deleteBranch bool
 }
 
 type pendingCloseCleanupConfirmation struct {
@@ -3599,10 +3610,10 @@ func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
 	}
 }
 
-func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) tea.Cmd {
+func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool, deleteBranch bool) tea.Cmd {
 	return func() tea.Msg {
 		if m.daemonClient == nil {
-			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: fmt.Errorf("daemon client unavailable")}
+			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, deleteBranch: deleteBranch, err: fmt.Errorf("daemon client unavailable")}
 		}
 
 		if deleteTask {
@@ -3615,25 +3626,27 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 			if err != nil {
 				if pending, ok := pendingOperationDetails(err); ok {
 					return worktreeCleanupResultMsg{
-						taskID:      taskID,
-						deletedTask: true,
-						force:       force,
-						operationID: pending.OperationID,
-						state:       pending.State,
+						taskID:       taskID,
+						deletedTask:  true,
+						force:        force,
+						deleteBranch: deleteBranch,
+						operationID:  pending.OperationID,
+						state:        pending.State,
 					}
 				}
 				if !force && isDirtyWorktreeRemovalError(err) {
 					return worktreeCleanupResultMsg{
-						taskID:      taskID,
-						deletedTask: true,
-						force:       force,
-						needsForce:  true,
-						reason:      strings.TrimSpace(err.Error()),
+						taskID:       taskID,
+						deletedTask:  true,
+						force:        force,
+						deleteBranch: deleteBranch,
+						needsForce:   true,
+						reason:       strings.TrimSpace(err.Error()),
 					}
 				}
-				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: true, force: force, err: err}
+				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: true, force: force, deleteBranch: deleteBranch, err: err}
 			}
-			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: true, force: force}
+			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: true, force: force, deleteBranch: deleteBranch}
 		}
 
 		// Always ask daemon to stop first; local projection may be stale.
@@ -3643,36 +3656,41 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 		stopCancel()
 		if stopErr != nil {
 			if !isSessionAlreadyStoppedError(stopErr) && !isSessionStopSkippableDuringCleanup(stopErr) {
-				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: stopErr}
+				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, deleteBranch: deleteBranch, err: stopErr}
 			}
 		}
 
 		removeCtx, removeCancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
-		err := m.daemonClient.RemoveWorktreeWithOptions(removeCtx, taskID, force)
+		result, err := m.daemonClient.RemoveWorktreeWithOptions(removeCtx, taskID, daemonclient.WorktreeRemoveOptions{
+			Force:        force,
+			DeleteBranch: deleteBranch,
+		})
 		removeCancel()
 		if err != nil {
 			if pending, ok := pendingOperationDetails(err); ok {
 				return worktreeCleanupResultMsg{
-					taskID:      taskID,
-					deletedTask: deleteTask,
-					force:       force,
-					operationID: pending.OperationID,
-					state:       pending.State,
+					taskID:       taskID,
+					deletedTask:  deleteTask,
+					force:        force,
+					deleteBranch: deleteBranch,
+					operationID:  pending.OperationID,
+					state:        pending.State,
 				}
 			}
 			if !force && isDirtyWorktreeRemovalError(err) {
 				return worktreeCleanupResultMsg{
-					taskID:      taskID,
-					deletedTask: deleteTask,
-					force:       force,
-					needsForce:  true,
-					reason:      strings.TrimSpace(err.Error()),
+					taskID:       taskID,
+					deletedTask:  deleteTask,
+					force:        force,
+					deleteBranch: deleteBranch,
+					needsForce:   true,
+					reason:       strings.TrimSpace(err.Error()),
 				}
 			}
-			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: err}
+			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, deleteBranch: deleteBranch, err: err}
 		}
 
-		return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force}
+		return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, deleteBranch: result.BranchDeleted, branch: result.Branch}
 	}
 }
 
@@ -3680,9 +3698,10 @@ func (m Model) requestWorktreeCleanupConfirmationCmd(taskID string, deleteTask b
 	projectID := m.daemonProjectID()
 	return func() tea.Msg {
 		msg := worktreeCleanupConfirmPromptMsg{
-			projectID:   projectID,
-			taskID:      taskID,
-			deletedTask: deleteTask,
+			projectID:    projectID,
+			taskID:       taskID,
+			deletedTask:  deleteTask,
+			deleteBranch: deleteTask,
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -3725,6 +3744,16 @@ func (m Model) requestWorktreeCleanupConfirmationCmd(taskID string, deleteTask b
 			msg.force = msg.dirty
 			break
 		}
+		if worktrees, err := m.daemonClient.ListWorktrees(ctx); err != nil {
+			msg.branchErr = err
+		} else {
+			for _, worktree := range worktrees {
+				if taskIDKey(worktree.IssueID) == taskIDKey(taskID) {
+					msg.branch = strings.TrimSpace(worktree.Branch)
+					break
+				}
+			}
+		}
 
 		return msg
 	}
@@ -3758,6 +3787,7 @@ func formatWorktreeCleanupConfirmPrompt(msg worktreeCleanupConfirmPromptMsg) str
 		}
 		lines = append(lines,
 			fmt.Sprintf("- Worktree: %s", worktreeState),
+			fmt.Sprintf("- Branch: %s", cleanupBranchLabel(msg.branch)),
 			fmt.Sprintf("- Changes: %s", changeState),
 			fmt.Sprintf("- Base diff (+/-): +%d/-%d", msg.additions, msg.deletions),
 			fmt.Sprintf("- Ahead/Behind: ↑%d/↓%d", msg.ahead, msg.behind),
@@ -3770,13 +3800,28 @@ func formatWorktreeCleanupConfirmPrompt(msg worktreeCleanupConfirmPromptMsg) str
 	if msg.reconcileErr != nil {
 		lines = append(lines, "", fmt.Sprintf("Note: reconcile warning: %v", msg.reconcileErr))
 	}
+	if msg.branchErr != nil {
+		lines = append(lines, fmt.Sprintf("Note: branch lookup warning: %v", msg.branchErr))
+	}
 
 	if msg.force {
 		lines = append(lines, "", "Force removal will discard modified/untracked files.")
 	}
 
-	lines = append(lines, "", "Proceed?")
+	if msg.deletedTask {
+		lines = append(lines, "", "Press Y to delete the task, worktree, and branch, or N to cancel.")
+	} else {
+		lines = append(lines, "", "Press Y to delete the worktree only, B to delete the worktree and branch, or N to cancel.")
+	}
 	return strings.Join(lines, "\n")
+}
+
+func cleanupBranchLabel(branch string) string {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return "unknown"
+	}
+	return branch
 }
 
 func isDirtyWorktreeRemovalError(err error) bool {
@@ -4398,7 +4443,7 @@ func (m Model) bulkArchiveCmd(taskIDs []string) tea.Cmd {
 	}
 }
 
-func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd {
+func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool, deleteBranch bool) tea.Cmd {
 	return func() tea.Msg {
 		updated := 0
 		failed := 0
@@ -4455,7 +4500,9 @@ func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd
 			}
 
 			removeCtx, removeCancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
-			removeErr := m.daemonClient.RemoveWorktreeWithOptions(removeCtx, taskID, false)
+			_, removeErr := m.daemonClient.RemoveWorktreeWithOptions(removeCtx, taskID, daemonclient.WorktreeRemoveOptions{
+				DeleteBranch: deleteBranch,
+			})
 			removeCancel()
 			if removeErr != nil {
 				if pending, ok := pendingOperationDetails(removeErr); ok {
@@ -4492,6 +4539,7 @@ func (m Model) bulkCleanupPreflightCmd(taskIDs []string, deleteTask bool) tea.Cm
 			projectID:    projectID,
 			taskIDs:      selected,
 			deletedTasks: deleteTask,
+			deleteBranch: deleteTask,
 		}
 		if len(selected) == 0 {
 			return msg
@@ -4678,7 +4726,11 @@ func formatBulkCleanupPreflightPrompt(msg bulkCleanupPreflightMsg) string {
 	if msg.reconcileErr != nil {
 		lines = append(lines, fmt.Sprintf("Reconcile warning: %v", msg.reconcileErr))
 	}
-	lines = append(lines, "", "Proceed?")
+	if msg.deletedTasks {
+		lines = append(lines, "", "Press Y to delete tasks, worktrees, and branches, or N to cancel.")
+	} else {
+		lines = append(lines, "", "Press Y to delete worktrees only, B to delete worktrees and branches, or N to cancel.")
+	}
 	return strings.Join(lines, "\n")
 }
 

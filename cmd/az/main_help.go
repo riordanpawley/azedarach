@@ -71,6 +71,8 @@ func printHelpForPath(path []string) bool {
 		printWorktreeUsage()
 	case "worktree create":
 		fmt.Println("Usage: az worktree create [--project <project-id>] [--base <branch>] [--json] <issue-id>")
+	case "worktree delete", "worktree remove":
+		fmt.Println("Usage: az worktree delete [--project <project-id>] [--force] [--delete-branch] [--json] <issue-id>")
 	case "operation":
 		fmt.Println("Usage: az operation <get|list|queue|logs|cancel> [arguments]")
 	case "operation get":

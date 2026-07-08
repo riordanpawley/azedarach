@@ -7573,7 +7573,7 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 	if !strings.Contains(prompt, "before declaring yourself blocked or idle") {
 		t.Fatalf("prompt = %q, want receive-before-idle guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Report coordination state to an active parent orchestrator/watch with `az mail send --parent <parent-issue> --issue az-42 --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; do not use `az orchestrate message` for your own status") {
+	if !strings.Contains(prompt, "Report coordination state to an active parent orchestrator/watch with `az mail send --parent az-1 --issue az-42 --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; do not use `az orchestrate message` for your own status") {
 		t.Fatalf("prompt = %q, want safe worker reporting guidance", prompt)
 	}
 	for _, eventType := range []string{"worker-progress", "worker-blocked", "worker-integration-ready"} {
@@ -7583,6 +7583,12 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 	}
 	if !strings.Contains(prompt, "Evidence bodies should be JSON `worker_evidence.v1` packets with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`") {
 		t.Fatalf("prompt = %q, want structured worker evidence guidance", prompt)
+	}
+	if !strings.Contains(prompt, "use `az issue record az-42 --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant") {
+		t.Fatalf("prompt = %q, want concrete issue evidence command", prompt)
+	}
+	if !strings.Contains(prompt, "Before handing off, run the relevant validation/review checks, build the final `worker_evidence.v1` packet from actual results, run `az evidence validate --body '<json>'`, record or send that exact JSON packet, then set/leave the issue `in_review`. Do not rely on a prose-only final response as the handoff.") {
+		t.Fatalf("prompt = %q, want validated handoff sequence", prompt)
 	}
 	if !strings.Contains(prompt, "Omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array") {
 		t.Fatalf("prompt = %q, want artifact_links object-shape guidance", prompt)

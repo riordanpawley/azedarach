@@ -101,10 +101,11 @@ type worktreePayload struct {
 }
 
 type worktreeCommandBody struct {
-	ProjectID  naming.ProjectID `json:"project_id"`
-	IssueID    naming.IssueID   `json:"issue_id,omitempty"`
-	BaseBranch string           `json:"base_branch,omitempty"`
-	Force      bool             `json:"force,omitempty"`
+	ProjectID    naming.ProjectID `json:"project_id"`
+	IssueID      naming.IssueID   `json:"issue_id,omitempty"`
+	BaseBranch   string           `json:"base_branch,omitempty"`
+	Force        bool             `json:"force,omitempty"`
+	DeleteBranch bool             `json:"delete_branch,omitempty"`
 }
 
 type worktreeResultBody struct {
@@ -114,14 +115,28 @@ type worktreeResultBody struct {
 }
 
 type worktreeRemoveResponseBody struct {
-	ProjectID naming.ProjectID `json:"project_id"`
-	IssueID   naming.IssueID   `json:"issue_id"`
+	ProjectID     naming.ProjectID `json:"project_id"`
+	IssueID       naming.IssueID   `json:"issue_id"`
+	Branch        string           `json:"branch,omitempty"`
+	BranchDeleted bool             `json:"branch_deleted,omitempty"`
 }
 
 type WorktreeCreateResult struct {
 	ProjectID  string
 	BaseBranch string
 	Worktree   git.Worktree
+}
+
+type WorktreeRemoveOptions struct {
+	Force        bool
+	DeleteBranch bool
+}
+
+type WorktreeRemoveResult struct {
+	ProjectID     string
+	IssueID       string
+	Branch        string
+	BranchDeleted bool
 }
 
 // RuntimeReconcileResult captures the runtime repair summary returned by the daemon.
@@ -536,21 +551,31 @@ func (c *Client) CreateWorktreeResult(ctx context.Context, issueID, baseBranch s
 
 // RemoveWorktree asks the daemon to remove one worktree for an issue in the current project route.
 func (c *Client) RemoveWorktree(ctx context.Context, issueID string) error {
-	return c.RemoveWorktreeWithOptions(ctx, issueID, false)
+	_, err := c.RemoveWorktreeWithOptions(ctx, issueID, WorktreeRemoveOptions{})
+	return err
 }
 
 // RemoveWorktreeWithOptions asks the daemon to remove one worktree for an issue in the current project route.
-func (c *Client) RemoveWorktreeWithOptions(ctx context.Context, issueID string, force bool) error {
+func (c *Client) RemoveWorktreeWithOptions(ctx context.Context, issueID string, opts WorktreeRemoveOptions) (WorktreeRemoveResult, error) {
 	parsedIssueID, err := parseIssueID(issueID)
 	if err != nil {
-		return err
+		return WorktreeRemoveResult{}, err
 	}
 	var out worktreeRemoveResponseBody
-	return c.commandJSON(ctx, CommandWorktreeRemove, worktreeCommandBody{
-		ProjectID: c.projectID,
-		IssueID:   parsedIssueID,
-		Force:     force,
-	}, &out)
+	if err := c.commandJSON(ctx, CommandWorktreeRemove, worktreeCommandBody{
+		ProjectID:    c.projectID,
+		IssueID:      parsedIssueID,
+		Force:        opts.Force,
+		DeleteBranch: opts.DeleteBranch,
+	}, &out); err != nil {
+		return WorktreeRemoveResult{}, err
+	}
+	return WorktreeRemoveResult{
+		ProjectID:     out.ProjectID.String(),
+		IssueID:       out.IssueID.String(),
+		Branch:        out.Branch,
+		BranchDeleted: out.BranchDeleted,
+	}, nil
 }
 
 // CleanupOrphanedWorktrees asks the daemon to remove orphaned worktrees for the current project route.

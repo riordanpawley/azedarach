@@ -2468,6 +2468,8 @@ func TestOrchestratePromptCommandPrintsNativeWorkerHandoff(t *testing.T) {
 		"Do not append raw logs, exploratory transcripts, routine progress narration, duplicate prompt context, or speculative scratch work to notes.",
 		"Return progress, blockers, and final results through the native subagent result channel.",
 		"Do not use `az mail` unless the orchestrator explicitly asks for mailbox coordination; use `az issue record` for durable issue activity/evidence.",
+		"Before handing off, run the relevant validation/review checks and include the same facts expected in `worker_evidence.v1`: summary, commands run, key assertions, files changed, review status/findings, and risks.",
+		"Do not rely on a prose-only status update.",
 		"Do not close root issue `az-1`",
 	} {
 		if !strings.Contains(output, want) {
@@ -2500,6 +2502,9 @@ func TestOrchestratePromptCommandMailboxCoordinationOptIn(t *testing.T) {
 		"Evidence bodies should be JSON `worker_evidence.v1` packets with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`",
 		"use `az issue record --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant",
 		"Omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array",
+		"Before handing off, run the relevant validation/review checks, build the final `worker_evidence.v1` packet from actual results, run `az evidence validate --body '<json>'`, record or send that exact JSON packet, then set/leave `az-2` `in_review`",
+		"Do not rely on a prose-only final response as the handoff.",
+		"otherwise record it with `az issue record az-2 --type evidence.submitted --data '<json>'`",
 		"az mail list --parent az-1 --since 0 --json",
 		"az issue record az-2 --type evidence.submitted",
 		"`worker-ready` and `worker-complete` are accepted only as legacy aliases for `worker-integration-ready`",

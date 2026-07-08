@@ -78,6 +78,7 @@ type Dependencies struct {
 	ProjectID      string
 	RepoDir        string
 	RuntimeRepoDir string
+	TraceContext   context.Context
 }
 
 type repeatedStringFlag []string
@@ -409,6 +410,14 @@ type WorktreeCreateOptions struct {
 	JSON       bool
 }
 
+type WorktreeDeleteOptions struct {
+	Project      string
+	IssueID      string
+	Force        bool
+	DeleteBranch bool
+	JSON         bool
+}
+
 func ParseWorktreeCreateArgs(args []string) (WorktreeCreateOptions, error) {
 	opts := WorktreeCreateOptions{}
 	fs := flag.NewFlagSet("worktree create", flag.ContinueOnError)
@@ -422,6 +431,24 @@ func ParseWorktreeCreateArgs(args []string) (WorktreeCreateOptions, error) {
 	}
 	if fs.NArg() != 1 {
 		return WorktreeCreateOptions{}, fmt.Errorf("issue id is required")
+	}
+	opts.IssueID = strings.TrimSpace(fs.Arg(0))
+	return opts, nil
+}
+
+func ParseWorktreeDeleteArgs(args []string) (WorktreeDeleteOptions, error) {
+	opts := WorktreeDeleteOptions{}
+	fs := flag.NewFlagSet("worktree delete", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.BoolVar(&opts.Force, "force", false, "force worktree removal")
+	fs.BoolVar(&opts.DeleteBranch, "delete-branch", false, "delete the associated local branch after removing the worktree")
+	fs.BoolVar(&opts.JSON, "json", false, "print JSON output")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return WorktreeDeleteOptions{}, err
+	}
+	if fs.NArg() != 1 {
+		return WorktreeDeleteOptions{}, fmt.Errorf("issue id is required")
 	}
 	opts.IssueID = strings.TrimSpace(fs.Arg(0))
 	return opts, nil
@@ -732,6 +759,62 @@ func WorktreeCreateCommand(deps *Dependencies, opts WorktreeCreateOptions) error
 	fmt.Printf("Worktree ready: %s\n", worktree.Path)
 	fmt.Printf("Branch: %s\n", worktree.Branch)
 	fmt.Printf("Base: %s\n", baseBranch)
+	return nil
+}
+
+func WorktreeDeleteCommand(deps *Dependencies, opts WorktreeDeleteOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	target, err := resolveSessionStartIssueTarget(ctx, deps, opts.IssueID, opts.Project)
+	if err != nil {
+		return err
+	}
+	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
+	defer restoreProject()
+
+	result, err := deps.DaemonClient.RemoveWorktreeWithOptions(ctx, target.IssueID, daemonclient.WorktreeRemoveOptions{
+		Force:        opts.Force,
+		DeleteBranch: opts.DeleteBranch,
+	})
+	if err != nil {
+		wrappedErr := fmt.Errorf("failed to delete worktree for %s: %w", target.IssueID, err)
+		if opts.JSON {
+			if printErr := printJSON(map[string]any{
+				"ok":            false,
+				"project_id":    target.ProjectID,
+				"issue_id":      target.IssueID,
+				"delete_branch": opts.DeleteBranch,
+				"error":         wrappedErr.Error(),
+			}); printErr != nil {
+				return fmt.Errorf("%w (also failed to write JSON error response: %v)", wrappedErr, printErr)
+			}
+		}
+		return wrappedErr
+	}
+
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"project_id":       target.ProjectID,
+			"issue_id":         target.IssueID,
+			"worktree_deleted": true,
+			"branch":           result.Branch,
+			"branch_deleted":   result.BranchDeleted,
+			"forced":           opts.Force,
+		})
+	}
+
+	fmt.Printf("Worktree deleted for %s\n", target.IssueID)
+	if result.BranchDeleted {
+		fmt.Printf("Branch deleted: %s\n", result.Branch)
+	} else if opts.DeleteBranch {
+		fmt.Println("Branch delete requested, but no branch was reported.")
+	} else if strings.TrimSpace(result.Branch) != "" {
+		fmt.Printf("Branch preserved: %s\n", result.Branch)
+	}
 	return nil
 }
 
@@ -7634,7 +7717,7 @@ func PrimeCommand(deps *Dependencies) error {
 		return fmt.Errorf("render prime output: %w", err)
 	}
 	fmt.Print(output)
-	latencytrace.LogPhase(primeLogger(deps), "cli", "prime.total", commandStartedAt, "issue_id", issueID)
+	latencytrace.LogPhaseContext(primeTraceContext(deps), primeLogger(deps), "cli", "prime.total", commandStartedAt, "issue_id", issueID)
 	return nil
 }
 
@@ -7651,7 +7734,7 @@ func primePhase(deps *Dependencies, phase, message string) func(error) {
 		} else {
 			fmt.Fprintf(os.Stderr, "az prime: %s ready in %s\n", phase, time.Since(startedAt).Round(time.Millisecond))
 		}
-		latencytrace.LogPhase(primeLogger(deps), "cli", "prime."+phase, startedAt, attrs...)
+		latencytrace.LogPhaseContext(primeTraceContext(deps), primeLogger(deps), "cli", "prime."+phase, startedAt, attrs...)
 	}
 }
 
@@ -7660,6 +7743,13 @@ func primeLogger(deps *Dependencies) *slog.Logger {
 		return nil
 	}
 	return deps.Logger
+}
+
+func primeTraceContext(deps *Dependencies) context.Context {
+	if deps == nil || deps.TraceContext == nil {
+		return context.Background()
+	}
+	return deps.TraceContext
 }
 
 func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID string) string {

@@ -692,7 +692,7 @@ func TestRemoveWorktreeWithOptionsPassesForceFlag(t *testing.T) {
 	transport := &lifecycleRecordingTransport{}
 	client := New(transport).WithProjectID("proj-a")
 
-	if err := client.RemoveWorktreeWithOptions(context.Background(), "az-1", true); err != nil {
+	if _, err := client.RemoveWorktreeWithOptions(context.Background(), "az-1", WorktreeRemoveOptions{Force: true, DeleteBranch: true}); err != nil {
 		t.Fatalf("RemoveWorktreeWithOptions error: %v", err)
 	}
 	var body worktreeCommandBody
@@ -701,6 +701,9 @@ func TestRemoveWorktreeWithOptionsPassesForceFlag(t *testing.T) {
 	}
 	if !body.Force {
 		t.Fatalf("force = false, want true")
+	}
+	if !body.DeleteBranch {
+		t.Fatalf("delete_branch = false, want true")
 	}
 }
 
@@ -725,7 +728,7 @@ func TestRemoveWorktreeReturnsPendingOperationError(t *testing.T) {
 	}
 
 	client := New(transport).WithProjectID("proj-a")
-	err := client.RemoveWorktreeWithOptions(context.Background(), "az-1", true)
+	_, err := client.RemoveWorktreeWithOptions(context.Background(), "az-1", WorktreeRemoveOptions{Force: true})
 	var pending *OperationPendingError
 	if !errors.As(err, &pending) {
 		t.Fatalf("RemoveWorktreeWithOptions error = %v, want OperationPendingError", err)

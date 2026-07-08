@@ -117,7 +117,7 @@ func main() {
 
 	case "worktree":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az worktree create [--project <project-id>] [--base <branch>] [--json] <issue-id>\n")
+			fmt.Fprintf(os.Stderr, "Usage: az worktree <create|delete> [arguments]\n")
 			os.Exit(1)
 		}
 		worktreeCommand := commandArgs[0]
@@ -129,6 +129,10 @@ func main() {
 		if sessionHelpRequested(worktreeArgs...) {
 			if worktreeCommand == "create" {
 				fmt.Println("Usage: az worktree create [--project <project-id>] [--base <branch>] [--json] <issue-id>")
+				os.Exit(0)
+			}
+			if worktreeCommand == "delete" || worktreeCommand == "remove" {
+				fmt.Println("Usage: az worktree delete [--project <project-id>] [--force] [--delete-branch] [--json] <issue-id>")
 				os.Exit(0)
 			}
 		}
@@ -146,9 +150,22 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
+		case "delete", "remove":
+			opts, err := cli.ParseWorktreeDeleteArgs(worktreeArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az worktree delete [--project <project-id>] [--force] [--delete-branch] [--json] <issue-id>\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.WorktreeDeleteCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown worktree command: %s\n", worktreeCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az worktree create [--project <project-id>] [--base <branch>] [--json] <issue-id>\n")
+			fmt.Fprintf(os.Stderr, "Usage: az worktree <create|delete> [arguments]\n")
 			os.Exit(1)
 		}
 
@@ -1421,10 +1438,11 @@ func printSessionUsage() {
 }
 
 func printWorktreeUsage() {
-	fmt.Println("Usage: az worktree create [--project <project-id>] [--base <branch>] [--json] <issue-id>")
+	fmt.Println("Usage: az worktree <create|delete> [arguments]")
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  create <issue-id>     Create an issue worktree without starting a session")
+	fmt.Println("  delete <issue-id>     Delete an issue worktree; add --delete-branch to delete its branch")
 }
 
 func printIssueCreateUsage(w io.Writer) {
@@ -1529,6 +1547,7 @@ func runCommand(cfg *config.Config, fn func(*cli.Dependencies) error) (err error
 	if deps.DaemonClient != nil {
 		deps.DaemonClient.WithTraceContext(ctx)
 	}
+	deps.TraceContext = ctx
 	latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "dependencies_init", depsStartedAt, "command_shape", commandShape)
 	latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "process_to_dependencies_ready", processStartedAt, "command_shape", commandShape)
 	audit := beginCommandAudit(deps.Logger, deps, commandShape, os.Args[1:])
@@ -1556,6 +1575,7 @@ func runCommandAtRepoDir(cfg *config.Config, repoDir string, fn func(*cli.Depend
 	if deps.DaemonClient != nil {
 		deps.DaemonClient.WithTraceContext(ctx)
 	}
+	deps.TraceContext = ctx
 	latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "dependencies_init", depsStartedAt, "command_shape", commandShape, "repo_dir", repoDir)
 	latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "process_to_dependencies_ready", processStartedAt, "command_shape", commandShape, "repo_dir", repoDir)
 	audit := beginCommandAudit(deps.Logger, deps, commandShape, os.Args[1:])

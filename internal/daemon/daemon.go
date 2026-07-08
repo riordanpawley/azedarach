@@ -164,6 +164,8 @@ type Daemon struct {
 	taskListSnapshotCache              map[string]taskListSnapshotCacheEntry
 	taskListSnapshotLoadMu             sync.Mutex
 	taskListSnapshotLoads              map[string]*taskListSnapshotLoad
+	taskGraphReadinessMu               sync.Mutex
+	taskGraphReadinessLoads            map[string]*taskGraphReadinessLoad
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -299,6 +301,7 @@ func New(cfg Config) *Daemon {
 		taskListRuntimeLastRefresh:         map[string]time.Time{},
 		taskListRuntimeRefreshes:           map[string]*taskListRuntimeRefresh{},
 		taskListSnapshotCache:              map[string]taskListSnapshotCacheEntry{},
+		taskGraphReadinessLoads:            map[string]*taskGraphReadinessLoad{},
 		revision:                           map[string]uint64{},
 		shutdownReqCh:                      make(chan struct{}),
 	}
