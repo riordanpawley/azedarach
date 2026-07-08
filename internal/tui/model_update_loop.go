@@ -198,6 +198,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
 		}
+		if scopedParentID := strings.TrimSpace(msg.scopedParentID); scopedParentID != "" && !naming.IssueIDsEqual(scopedParentID, m.drillDownParentID) {
+			if msg.eventsCancel != nil {
+				msg.eventsCancel()
+			}
+			m.loading = false
+			m.boardRefreshing = false
+			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
+		}
 		if msg.daemonClient != nil {
 			m.daemonClient = msg.daemonClient
 			if strings.TrimSpace(msg.daemonSocket) != "" {
@@ -206,20 +214,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		wasLoading := m.loading
 		if msg.stale {
+			now := time.Now()
 			m.loading = false
 			m.boardRefreshing = false
-			if wasLoading && msg.freshnessHint != "" {
+			if m.taskSnapshotCheckedAt.IsZero() {
+				m.taskSnapshotCheckedAt = now
+			}
+			m.taskSnapshotFreshness = protocol.TaskListFreshnessStale
+			if msg.freshnessHint != "" {
 				m.addToast(Toast{
 					Level:   ToastWarning,
 					Message: msg.freshnessHint,
-					Expires: time.Now().Add(8 * time.Second),
+					Expires: now.Add(8 * time.Second),
 				})
 			}
 			if msg.reconcileWarn != nil {
 				m.addToast(Toast{
 					Level:   ToastWarning,
 					Message: fmt.Sprintf("Runtime reconcile warning: %v", msg.reconcileWarn),
-					Expires: time.Now().Add(6 * time.Second),
+					Expires: now.Add(6 * time.Second),
 				})
 			}
 			var cmds []tea.Cmd
@@ -236,7 +249,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
-		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
+		if scopedParentID := strings.TrimSpace(msg.scopedParentID); scopedParentID != "" {
+			m.tasks = reconcileScopedChildBoardTasks(m.tasks, tasks, scopedParentID)
+		} else {
+			m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
+		}
 		for i := range m.tasks {
 			m.tasks[i].Session = cloneSession(m.tasks[i].Session)
 		}
@@ -2058,6 +2075,49 @@ func (m *Model) applyUICommandEvent(event protocol.EventEnvelope) tea.Cmd {
 		*m = opened
 	}
 	return cmd
+}
+
+func reconcileScopedChildBoardTasks(current, scoped []domain.Task, parentID string) []domain.Task {
+	parentID = strings.TrimSpace(parentID)
+	if parentID == "" {
+		return linearsync.ReconcileHydratedTasks(current, scoped)
+	}
+	scoped = linearsync.ReconcileHydratedTasks(nil, scoped)
+	byID := make(map[string]domain.Task, len(scoped))
+	for _, task := range scoped {
+		if id := strings.TrimSpace(task.ID.String()); id != "" {
+			byID[id] = task
+		}
+	}
+
+	reconciled := make([]domain.Task, 0, len(current)+len(scoped))
+	seen := make(map[string]struct{}, len(current)+len(scoped))
+	for _, task := range current {
+		id := strings.TrimSpace(task.ID.String())
+		if refreshed, ok := byID[id]; ok {
+			reconciled = append(reconciled, refreshed)
+			seen[id] = struct{}{}
+			continue
+		}
+		if isChildOfParent(task, parentID) {
+			continue
+		}
+		reconciled = append(reconciled, task)
+		if id != "" {
+			seen[id] = struct{}{}
+		}
+	}
+	for _, task := range scoped {
+		id := strings.TrimSpace(task.ID.String())
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		reconciled = append(reconciled, task)
+		if id != "" {
+			seen[id] = struct{}{}
+		}
+	}
+	return reconciled
 }
 
 func (m Model) refreshOpenDiffOverlayFromProjectionBody(body protocol.ProjectionUpdateEventBody) tea.Cmd {

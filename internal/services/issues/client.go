@@ -1154,8 +1154,9 @@ func (c *Client) GetWithDependencyContextRuntime(ctx context.Context, projectID,
 }
 
 type dependencyContextOptions struct {
-	includeAncestors  bool
-	includeDependents bool
+	includeAncestors          bool
+	includeDependents         bool
+	parentChildDependentsOnly bool
 }
 
 // DependencyContextOption configures task dependency context reads.
@@ -1172,6 +1173,14 @@ func WithAncestorContext() DependencyContextOption {
 func WithoutDependentContext() DependencyContextOption {
 	return func(opts *dependencyContextOptions) {
 		opts.includeDependents = false
+	}
+}
+
+// WithParentChildDependentContext limits dependent context to direct parent-child children.
+func WithParentChildDependentContext() DependencyContextOption {
+	return func(opts *dependencyContextOptions) {
+		opts.includeDependents = true
+		opts.parentChildDependentsOnly = true
 	}
 }
 
@@ -1259,12 +1268,16 @@ func dependencyContextIDsQuery(ids []string, opts dependencyContextOptions) (str
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(issueIDs)), ",")
 	dependentQuery := ""
 	if opts.includeDependents {
+		typeFilter := ""
+		if opts.parentChildDependentsOnly {
+			typeFilter = " AND dependency_type IN (?, ?)"
+		}
 		dependentQuery = fmt.Sprintf(`
 			UNION ALL
 			SELECT issue_id AS id
 			FROM issue_dependencies
-			WHERE depends_on_id IN (%s) AND tombstoned_at IS NULL
-		`, placeholders)
+			WHERE depends_on_id IN (%s) AND tombstoned_at IS NULL%s
+		`, placeholders, typeFilter)
 	}
 	query := fmt.Sprintf(`
 		SELECT DISTINCT id
@@ -1289,6 +1302,9 @@ func dependencyContextIDsQuery(ids []string, opts dependencyContextOptions) (str
 	if opts.includeDependents {
 		for _, issueID := range issueIDs {
 			args = append(args, issueID)
+		}
+		if opts.parentChildDependentsOnly {
+			args = append(args, string(domain.DependencyParentChild), "parent_child")
 		}
 	}
 	return query, args

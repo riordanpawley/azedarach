@@ -368,6 +368,7 @@ type TaskIDsRequest struct {
 	TaskIDs           []naming.IssueID `json:"task_ids"`
 	IncludeAncestors  bool             `json:"include_ancestors,omitempty"`
 	ExcludeDependents bool             `json:"exclude_dependents,omitempty"`
+	DirectDependents  bool             `json:"direct_dependents,omitempty"`
 	MetadataOnly      bool             `json:"metadata_only,omitempty"`
 }
 
@@ -655,9 +656,15 @@ func (c *Client) GetManyTaskSnapshotWithAncestorsNoDependentsMetadataOnlyMode(ct
 	return c.getManyTaskSnapshot(ctx, taskIDs, mode, getManyTaskSnapshotOptions{includeAncestors: true, excludeDependents: true, metadataOnly: true})
 }
 
+// GetChildBoardSnapshotWithMode fetches a parent plus its direct child board context.
+func (c *Client) GetChildBoardSnapshotWithMode(ctx context.Context, parentID string, mode ReadWaitMode) (TaskSnapshot, error) {
+	return c.getManyTaskSnapshot(ctx, []string{parentID}, mode, getManyTaskSnapshotOptions{includeAncestors: true, directDependents: true})
+}
+
 type getManyTaskSnapshotOptions struct {
 	includeAncestors  bool
 	excludeDependents bool
+	directDependents  bool
 	metadataOnly      bool
 }
 
@@ -681,7 +688,7 @@ func (c *Client) getManyTaskSnapshot(ctx context.Context, taskIDs []string, mode
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
-	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGetMany, TaskIDsRequest{TaskIDs: parsedTaskIDs, IncludeAncestors: opts.includeAncestors, ExcludeDependents: opts.excludeDependents, MetadataOnly: opts.metadataOnly})
+	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGetMany, TaskIDsRequest{TaskIDs: parsedTaskIDs, IncludeAncestors: opts.includeAncestors, ExcludeDependents: opts.excludeDependents, DirectDependents: opts.directDependents, MetadataOnly: opts.metadataOnly})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
