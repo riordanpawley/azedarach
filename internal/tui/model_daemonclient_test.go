@@ -3137,6 +3137,205 @@ func TestLoadIssuesCmdTimeoutReturnsStaleIssuesMsg(t *testing.T) {
 	}
 }
 
+func TestLoadIssuesCmdUsesScopedChildBoardSnapshotWhenDrilledDown(t *testing.T) {
+	var gotBody daemonclient.TaskIDsRequest
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			parentID := naming.IssueID("az-parent")
+			if req.Command != daemonclient.CommandTaskGetMany {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskGetMany)
+			}
+			if err := json.Unmarshal(req.Body, &gotBody); err != nil {
+				t.Fatalf("unmarshal request body: %v", err)
+			}
+			body, err := json.Marshal(protocol.TaskListSnapshotPayload{
+				SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+				ProtocolVersion:  req.ProtocolVersion,
+				ProjectID:        req.Meta.ProjectID,
+				SnapshotRevision: 44,
+				LastCheckedAt:    time.Date(2026, time.July, 8, 1, 2, 3, 0, time.UTC),
+				Freshness:        protocol.TaskListFreshnessFresh,
+				Tasks: []domain.Task{
+					{ID: "az-parent", Title: "Parent", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeEpic},
+					{ID: "az-child", Title: "Child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal snapshot: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				Revision:        44,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+	m.drillDownParentID = "az-parent"
+
+	msg := m.loadIssuesCmd()()
+	if errMsg, ok := msg.(issuesErrorMsg); ok {
+		t.Fatalf("loadIssuesCmd error: %v", errMsg.err)
+	}
+	if _, ok := msg.(issuesLoadedMsg); !ok {
+		t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+	}
+	if !gotBody.IncludeAncestors || !gotBody.DirectDependents {
+		t.Fatalf("request flags ancestors=%v direct_dependents=%v, want true/true", gotBody.IncludeAncestors, gotBody.DirectDependents)
+	}
+	if len(gotBody.TaskIDs) != 1 || gotBody.TaskIDs[0] != "az-parent" {
+		t.Fatalf("task_ids = %+v, want [az-parent]", gotBody.TaskIDs)
+	}
+}
+
+func TestStaleIssuesLoadedMsgMarksManualDrillDownRefreshStale(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.boardRefreshing = true
+	m.drillDownParentID = "az-parent"
+	m.drillDownParentName = "Parent"
+	m.taskSnapshotCheckedAt = time.Date(2026, time.July, 8, 1, 2, 3, 0, time.UTC)
+	m.taskSnapshotFreshness = protocol.TaskListFreshnessFresh
+
+	updatedAny, _ := m.Update(issuesLoadedMsg{
+		stale:         true,
+		freshnessHint: "Drill-down child-board refresh timed out during task snapshot read after 5s; keeping current local view",
+	})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if updated.boardRefreshing {
+		t.Fatal("boardRefreshing = true, want false after stale refresh result")
+	}
+	if updated.taskSnapshotFreshness != protocol.TaskListFreshnessStale {
+		t.Fatalf("taskSnapshotFreshness = %q, want stale", updated.taskSnapshotFreshness)
+	}
+	if len(updated.toasts) == 0 || !strings.Contains(updated.toasts[len(updated.toasts)-1].Message, "Drill-down child-board refresh timed out") {
+		t.Fatalf("toasts = %+v, want drill-down timeout hint", updated.toasts)
+	}
+
+	updated.width = 80
+	updated.height = 24
+	view := updated.View()
+	if !strings.Contains(view, "stale 01:02:03") {
+		t.Fatalf("view = %q, want stale freshness indicator", view)
+	}
+}
+
+func TestIssuesLoadedScopedChildBoardRefreshPreservesUnrelatedTasks(t *testing.T) {
+	parentID := naming.IssueID("az-parent")
+	otherParentID := naming.IssueID("az-other")
+	m := newTestModel()
+	m.loading = false
+	m.drillDownParentID = "az-parent"
+	m.tasks = []domain.Task{
+		{ID: parentID, Title: "Parent old", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeEpic},
+		{ID: "az-stale-child", Title: "Stale child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
+		{ID: "az-fresh-child", Title: "Fresh child old", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
+		{ID: "az-unrelated", Title: "Unrelated root", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-other-child", Title: "Other child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &otherParentID},
+	}
+
+	updatedAny, _ := m.Update(issuesLoadedMsg{
+		scopedParentID: "az-parent",
+		tasks: []domain.Task{
+			{ID: parentID, Title: "Parent fresh", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeEpic},
+			{ID: "az-fresh-child", Title: "Fresh child updated", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
+			{ID: "az-new-child", Title: "New child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
+		},
+		lastCheckedAt: time.Date(2026, time.July, 8, 2, 3, 4, 0, time.UTC),
+		freshness:     protocol.TaskListFreshnessFresh,
+	})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	taskByID := map[string]domain.Task{}
+	for _, task := range updated.tasks {
+		taskByID[task.ID.String()] = task
+	}
+
+	if _, ok := taskByID["az-stale-child"]; ok {
+		t.Fatalf("stale direct child should be removed: %+v", updated.tasks)
+	}
+	if got := taskByID["az-fresh-child"].Title; got != "Fresh child updated" {
+		t.Fatalf("fresh child title = %q, want updated", got)
+	}
+	if got := taskByID["az-parent"].Title; got != "Parent fresh" {
+		t.Fatalf("parent title = %q, want fresh", got)
+	}
+	if _, ok := taskByID["az-new-child"]; !ok {
+		t.Fatalf("new child missing: %+v", updated.tasks)
+	}
+	if _, ok := taskByID["az-unrelated"]; !ok {
+		t.Fatalf("unrelated root should be preserved: %+v", updated.tasks)
+	}
+	if _, ok := taskByID["az-other-child"]; !ok {
+		t.Fatalf("other parent child should be preserved: %+v", updated.tasks)
+	}
+}
+
+func TestIssuesLoadedIgnoresScopedChildBoardRefreshAfterDrillDownExit(t *testing.T) {
+	parentID := naming.IssueID("az-parent")
+	m := newTestModel()
+	m.loading = true
+	m.boardRefreshing = true
+	m.issueRefreshInFlight = true
+	m.issueRefreshSeq = 7
+	m.tasks = []domain.Task{
+		{ID: parentID, Title: "Parent old", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeEpic},
+		{ID: "az-stale-child", Title: "Stale child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
+		{ID: "az-root", Title: "Root task", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+
+	updatedAny, cmd := m.Update(issuesLoadedMsg{
+		refreshSeq:     7,
+		scopedParentID: "az-parent",
+		tasks: []domain.Task{
+			{ID: parentID, Title: "Parent fresh", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeEpic},
+			{ID: "az-new-child", Title: "New child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
+		},
+		lastCheckedAt: time.Date(2026, time.July, 8, 2, 3, 4, 0, time.UTC),
+		freshness:     protocol.TaskListFreshnessFresh,
+	})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if cmd != nil {
+		t.Fatalf("cmd = %v, want nil when finishing stale scoped refresh without pending replay", cmd)
+	}
+	if updated.loading {
+		t.Fatal("loading = true, want false after ignored scoped refresh")
+	}
+	if updated.boardRefreshing {
+		t.Fatal("boardRefreshing = true, want false after ignored scoped refresh")
+	}
+	if updated.issueRefreshInFlight {
+		t.Fatal("issueRefreshInFlight = true, want false after finishing ignored scoped refresh")
+	}
+	taskByID := map[string]domain.Task{}
+	for _, task := range updated.tasks {
+		taskByID[task.ID.String()] = task
+	}
+	if got := taskByID["az-parent"].Title; got != "Parent old" {
+		t.Fatalf("parent title = %q, want unchanged root-board task", got)
+	}
+	if _, ok := taskByID["az-stale-child"]; !ok {
+		t.Fatalf("stale child should remain because scoped payload was ignored: %+v", updated.tasks)
+	}
+	if _, ok := taskByID["az-new-child"]; ok {
+		t.Fatalf("new child from stale scoped payload should not be applied: %+v", updated.tasks)
+	}
+	if _, ok := taskByID["az-root"]; !ok {
+		t.Fatalf("root task should remain: %+v", updated.tasks)
+	}
+}
+
 func TestIssuesLoadedHydratesFreshnessMetadataAndSyncsWorkspace(t *testing.T) {
 	m := newTestModel()
 	m.loading = false

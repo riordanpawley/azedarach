@@ -1133,19 +1133,20 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Message types for async operations
 
 type issuesLoadedMsg struct {
-	refreshSeq    uint64
-	projectID     string
-	tasks         []domain.Task
-	revision      uint64
-	lastCheckedAt time.Time
-	freshness     protocol.TaskListFreshness
-	events        <-chan protocol.EventEnvelope
-	eventsCancel  context.CancelFunc
-	daemonClient  *daemonclient.Client
-	daemonSocket  string
-	stale         bool
-	freshnessHint string
-	reconcileWarn error
+	refreshSeq     uint64
+	projectID      string
+	scopedParentID string
+	tasks          []domain.Task
+	revision       uint64
+	lastCheckedAt  time.Time
+	freshness      protocol.TaskListFreshness
+	events         <-chan protocol.EventEnvelope
+	eventsCancel   context.CancelFunc
+	daemonClient   *daemonclient.Client
+	daemonSocket   string
+	stale          bool
+	freshnessHint  string
+	reconcileWarn  error
 }
 
 type issuesErrorMsg struct {
@@ -1660,6 +1661,7 @@ func (m Model) lookupTaskIDByWorktree(worktree string) string {
 func (m Model) loadIssuesCmd() tea.Cmd {
 	projectID := m.daemonProjectID()
 	refreshSeq := m.issueRefreshSeq
+	scopedParentID := strings.TrimSpace(m.drillDownParentID)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -1673,21 +1675,23 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			var timeoutErr *daemonclient.ReadWaitTimeoutError
 			if errors.As(err, &timeoutErr) {
 				return issuesLoadedMsg{
-					refreshSeq:    refreshSeq,
-					projectID:     projectID,
-					stale:         true,
-					freshnessHint: timeoutErr.Hint,
+					refreshSeq:     refreshSeq,
+					projectID:      projectID,
+					scopedParentID: scopedParentID,
+					stale:          true,
+					freshnessHint:  m.taskSnapshotTimeoutHint(timeoutErr),
 				}
 			}
 			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: err}
 		}
 		return issuesLoadedMsg{
-			refreshSeq:    refreshSeq,
-			projectID:     projectID,
-			tasks:         snapshot.Tasks,
-			revision:      snapshot.Revision,
-			lastCheckedAt: snapshot.LastCheckedAt,
-			freshness:     snapshot.Freshness,
+			refreshSeq:     refreshSeq,
+			projectID:      projectID,
+			scopedParentID: scopedParentID,
+			tasks:          snapshot.Tasks,
+			revision:       snapshot.Revision,
+			lastCheckedAt:  snapshot.LastCheckedAt,
+			freshness:      snapshot.Freshness,
 		}
 	}
 }
@@ -1799,6 +1803,7 @@ func viewModeFromPersistedValue(value string) (ViewMode, bool) {
 func (m Model) loadIssuesAfterRuntimeReconcileCmd() tea.Cmd {
 	projectID := m.daemonProjectID()
 	refreshSeq := m.issueRefreshSeq
+	scopedParentID := strings.TrimSpace(m.drillDownParentID)
 	return func() tea.Msg {
 		if m.daemonClient == nil {
 			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
@@ -1818,24 +1823,26 @@ func (m Model) loadIssuesAfterRuntimeReconcileCmd() tea.Cmd {
 			var timeoutErr *daemonclient.ReadWaitTimeoutError
 			if errors.As(err, &timeoutErr) {
 				return issuesLoadedMsg{
-					refreshSeq:    refreshSeq,
-					projectID:     projectID,
-					stale:         true,
-					freshnessHint: timeoutErr.Hint,
-					reconcileWarn: reconcileWarn,
+					refreshSeq:     refreshSeq,
+					projectID:      projectID,
+					scopedParentID: scopedParentID,
+					stale:          true,
+					freshnessHint:  m.taskSnapshotTimeoutHint(timeoutErr),
+					reconcileWarn:  reconcileWarn,
 				}
 			}
 			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: err}
 		}
 
 		return issuesLoadedMsg{
-			refreshSeq:    refreshSeq,
-			projectID:     projectID,
-			tasks:         snapshot.Tasks,
-			revision:      snapshot.Revision,
-			lastCheckedAt: snapshot.LastCheckedAt,
-			freshness:     snapshot.Freshness,
-			reconcileWarn: reconcileWarn,
+			refreshSeq:     refreshSeq,
+			projectID:      projectID,
+			scopedParentID: scopedParentID,
+			tasks:          snapshot.Tasks,
+			revision:       snapshot.Revision,
+			lastCheckedAt:  snapshot.LastCheckedAt,
+			freshness:      snapshot.Freshness,
+			reconcileWarn:  reconcileWarn,
 		}
 	}
 }
@@ -1843,6 +1850,7 @@ func (m Model) loadIssuesAfterRuntimeReconcileCmd() tea.Cmd {
 func (m Model) loadIssuesAfterIssueReconcileCmd(issueIDs []string) tea.Cmd {
 	projectID := m.daemonProjectID()
 	refreshSeq := m.issueRefreshSeq
+	scopedParentID := strings.TrimSpace(m.drillDownParentID)
 	selected := make([]string, 0, len(issueIDs))
 	seen := make(map[string]struct{}, len(issueIDs))
 	for _, issueID := range issueIDs {
@@ -1880,24 +1888,26 @@ func (m Model) loadIssuesAfterIssueReconcileCmd(issueIDs []string) tea.Cmd {
 			var timeoutErr *daemonclient.ReadWaitTimeoutError
 			if errors.As(err, &timeoutErr) {
 				return issuesLoadedMsg{
-					refreshSeq:    refreshSeq,
-					projectID:     projectID,
-					stale:         true,
-					freshnessHint: timeoutErr.Hint,
-					reconcileWarn: reconcileWarn,
+					refreshSeq:     refreshSeq,
+					projectID:      projectID,
+					scopedParentID: scopedParentID,
+					stale:          true,
+					freshnessHint:  m.taskSnapshotTimeoutHint(timeoutErr),
+					reconcileWarn:  reconcileWarn,
 				}
 			}
 			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: err}
 		}
 
 		return issuesLoadedMsg{
-			refreshSeq:    refreshSeq,
-			projectID:     projectID,
-			tasks:         snapshot.Tasks,
-			revision:      snapshot.Revision,
-			lastCheckedAt: snapshot.LastCheckedAt,
-			freshness:     snapshot.Freshness,
-			reconcileWarn: reconcileWarn,
+			refreshSeq:     refreshSeq,
+			projectID:      projectID,
+			scopedParentID: scopedParentID,
+			tasks:          snapshot.Tasks,
+			revision:       snapshot.Revision,
+			lastCheckedAt:  snapshot.LastCheckedAt,
+			freshness:      snapshot.Freshness,
+			reconcileWarn:  reconcileWarn,
 		}
 	}
 }
@@ -2040,7 +2050,23 @@ func (m Model) readTaskSnapshot(ctx context.Context, client *daemonclient.Client
 	if client == nil {
 		return daemonclient.TaskSnapshot{}, fmt.Errorf("daemon client unavailable")
 	}
+	if parentID := strings.TrimSpace(m.drillDownParentID); parentID != "" {
+		return client.GetChildBoardSnapshotWithMode(ctx, parentID, daemonclient.ReadWaitModeExplicit)
+	}
 	return client.BoardSnapshotWithMode(ctx, daemonclient.ReadWaitModeExplicit)
+}
+
+func (m Model) taskSnapshotTimeoutHint(timeoutErr *daemonclient.ReadWaitTimeoutError) string {
+	if timeoutErr == nil {
+		return ""
+	}
+	if strings.TrimSpace(m.drillDownParentID) != "" {
+		return fmt.Sprintf("Drill-down child-board refresh timed out during task snapshot read after %s; keeping current local view", timeoutErr.Budget)
+	}
+	if strings.TrimSpace(timeoutErr.Hint) != "" {
+		return timeoutErr.Hint
+	}
+	return timeoutErr.Error()
 }
 
 func (m Model) loadOperationsCmd() tea.Cmd {

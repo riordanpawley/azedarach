@@ -1354,6 +1354,47 @@ func TestClient_GetManyWithDependencyContextRuntimeCanOmitDependents(t *testing.
 	}
 }
 
+func TestClient_GetManyWithDependencyContextRuntimeCanLimitDependentsToParentChild(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-parent-child-dependents"
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Parent",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+		ParentID: &parentID,
+	})
+	require.NoError(t, err)
+	blockerID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Blocker",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, blockerID, parentID, string(domain.DependencyBlocks)))
+
+	tasks, err := client.GetManyWithDependencyContextRuntime(ctx, projectID, []string{parentID}, WithParentChildDependentContext())
+	require.NoError(t, err)
+	taskByID := map[string]domain.Task{}
+	for _, task := range tasks {
+		taskByID[task.ID.String()] = task
+	}
+
+	require.Contains(t, taskByID, parentID)
+	require.Contains(t, taskByID, childID)
+	require.NotContains(t, taskByID, blockerID)
+}
+
 func TestClient_GetManyMetadataWithAncestorContextRuntimeIsLean(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

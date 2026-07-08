@@ -694,6 +694,7 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 		TaskIDs           []string `json:"task_ids"`
 		IncludeAncestors  bool     `json:"include_ancestors,omitempty"`
 		ExcludeDependents bool     `json:"exclude_dependents,omitempty"`
+		DirectDependents  bool     `json:"direct_dependents,omitempty"`
 		MetadataOnly      bool     `json:"metadata_only,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
@@ -722,6 +723,9 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 	if cmd.ExcludeDependents {
 		contextOptions = append(contextOptions, issues.WithoutDependentContext())
 	}
+	if cmd.DirectDependents {
+		contextOptions = append(contextOptions, issues.WithParentChildDependentContext())
+	}
 	var (
 		tasks []domain.Task
 		err   error
@@ -743,6 +747,13 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 	}
 	contextTaskIDs := taskIDsFromTasks(tasks)
 	if !cmd.MetadataOnly {
+		if cmd.DirectDependents {
+			worktreeRefreshStartedAt := time.Now()
+			for _, taskID := range contextTaskIDs {
+				d.refreshIssueWorktreeState(ctx, projectID, taskID)
+			}
+			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get_many.direct_dependent_worktree_refresh", worktreeRefreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs))
+		}
 		refreshSessionStartedAt := time.Now()
 		if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil && d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("task get-many session runtime refresh failed", "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs), "error", err)
