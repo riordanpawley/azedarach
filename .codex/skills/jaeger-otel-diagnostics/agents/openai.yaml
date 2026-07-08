@@ -1,0 +1,4 @@
+interface:
+  display_name: "Jaeger OTel Diagnostics"
+  short_description: "Diagnose local Jaeger traces for Azedarach."
+  default_prompt: "Use $jaeger-otel-diagnostics to diagnose Azedarach latency with local Jaeger traces."

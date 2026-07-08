@@ -123,7 +123,7 @@ func (c *Client) Command(ctx context.Context, req protocol.RequestEnvelope) (pro
 		attemptStartedAt := time.Now()
 		resp, err := c.transport.Command(ctx, req)
 		if err == nil {
-			latencytrace.LogPhase(slog.Default(), "cli", "daemonclient.command_attempt", attemptStartedAt, "command", req.Command, "request_id", req.RequestID, "attempt", attempt+1, "ok", resp.OK)
+			latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "daemonclient.command_attempt", attemptStartedAt, "command", req.Command, "request_id", req.RequestID, "attempt", attempt+1, "ok", resp.OK)
 			if shouldRetryReadCommandResponse(req.Command, resp) {
 				if !c.policy.ShouldRetry(attempt + 1) {
 					return resp, nil
@@ -135,7 +135,7 @@ func (c *Client) Command(ctx context.Context, req protocol.RequestEnvelope) (pro
 			}
 			return resp, nil
 		}
-		latencytrace.LogPhase(slog.Default(), "cli", "daemonclient.command_attempt", attemptStartedAt, "command", req.Command, "request_id", req.RequestID, "attempt", attempt+1, "error", err)
+		latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "daemonclient.command_attempt", attemptStartedAt, "command", req.Command, "request_id", req.RequestID, "attempt", attempt+1, "error", err)
 		lastErr = err
 		if !reconnect.IsTransientTransportError(err) || !c.policy.ShouldRetry(attempt+1) {
 			break

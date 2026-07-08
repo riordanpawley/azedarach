@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/client/daemonprocess"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
+	"github.com/riordanpawley/azedarach/internal/observability"
 	app "github.com/riordanpawley/azedarach/internal/tui"
 )
 
@@ -62,6 +64,8 @@ func main() {
 		os.Exit(1)
 	}
 	latencytrace.SetConfigEnabled(cfg.Diagnostics.LatencyTrace)
+	shutdownObservability := configureProcessObservability("az", cfg)
+	defer shutdownObservability()
 
 	// If no arguments, run the TUI
 	if len(args) == 0 {
@@ -1253,6 +1257,30 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", command)
 		printRootUsage()
 		os.Exit(1)
+	}
+}
+
+func configureProcessObservability(serviceName string, cfg *config.Config) func() {
+	enabled := false
+	if cfg != nil {
+		enabled = cfg.Diagnostics.LatencyTrace
+	}
+	shutdown, err := observability.Configure(context.Background(), observability.Options{
+		ServiceName:    serviceName,
+		ServiceVersion: buildinfo.VersionString(),
+		Enabled:        enabled,
+		Logger:         slog.Default(),
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to configure otel tracing: %v\n", err)
+		return func() {}
+	}
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdown(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to flush otel traces: %v\n", err)
+		}
 	}
 }
 

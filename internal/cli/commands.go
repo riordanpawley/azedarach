@@ -3881,10 +3881,10 @@ func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
 	case "diagnostics.latencyTrace":
 		if renderedValue == "true" {
 			latencytrace.SetConfigEnabled(true)
-			fmt.Println("Latency trace logging is enabled. Restart the daemon for daemon-side trace logs to use the persisted setting.")
+			fmt.Println("Latency trace logging and OpenTelemetry spans are enabled. Restart the daemon for daemon-side diagnostics to use the persisted setting.")
 		} else {
 			latencytrace.SetConfigEnabled(false)
-			fmt.Println("Latency trace logging is disabled.")
+			fmt.Println("Latency trace logging and OpenTelemetry spans are disabled.")
 		}
 	}
 
