@@ -134,6 +134,44 @@ func TestToastRenderer_Render_NarrowWidthKeepsWordsAndBorderInsideViewport(t *te
 	assert.NotContains(t, ansi.Strip(result), "queu\ned", "Normal-width words should not be hard-split")
 }
 
+func TestToastRenderer_RenderWithin_TruncatesLargeErrorPreviewToHeight(t *testing.T) {
+	renderer := New(styles.New())
+	now := time.Now()
+	longToken := strings.Repeat("validation-error-token-", 20)
+	toasts := []types.Toast{{
+		Level:     types.ToastError,
+		Message:   "Mutation failed: " + longToken,
+		CreatedAt: now,
+		Expires:   now.Add(5 * time.Second),
+	}}
+
+	result := renderer.RenderAtWithin(toasts, 48, 6, now)
+	lines := strings.Split(result, "\n")
+
+	assert.LessOrEqual(t, len(lines), 6, "Large toast preview should fit requested stack height")
+	assert.Contains(t, ansi.Strip(result), "...", "Truncated preview should signal omitted detail")
+	for _, line := range lines {
+		assert.LessOrEqual(t, lipgloss.Width(line), 48, "Toast line should fit viewport width")
+	}
+}
+
+func TestToastRenderer_RenderWithin_DropsOlderToastsBeforeExceedingHeight(t *testing.T) {
+	renderer := New(styles.New())
+	now := time.Now()
+	toasts := []types.Toast{
+		{Level: types.ToastInfo, Message: "first notice", CreatedAt: now, Expires: now.Add(5 * time.Second)},
+		{Level: types.ToastInfo, Message: "second notice", CreatedAt: now, Expires: now.Add(5 * time.Second)},
+		{Level: types.ToastError, Message: strings.Repeat("large-error-detail ", 12), CreatedAt: now, Expires: now.Add(5 * time.Second)},
+	}
+
+	result := renderer.RenderAtWithin(toasts, 60, 6, now)
+
+	assert.NotContains(t, result, "first notice", "Oldest toast should be hidden when stack height is constrained")
+	assert.NotContains(t, result, "second notice", "Older toast should be hidden when latest toast consumes stack height")
+	assert.Contains(t, result, "large-error-detail", "Latest toast should remain visible")
+	assert.LessOrEqual(t, len(strings.Split(result, "\n")), 6, "Stack should fit requested height")
+}
+
 func TestToastRenderer_Render_DifferentLevels(t *testing.T) {
 	renderer := New(styles.New())
 
