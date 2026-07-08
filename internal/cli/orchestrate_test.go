@@ -2861,6 +2861,64 @@ func TestOrchestrateIntegrateApplySuccess(t *testing.T) {
 	}
 }
 
+func TestOrchestrateIntegrateApplyJSONReportsPreflightDeadlineWithRetry(t *testing.T) {
+	child := naming.IssueID("az-2")
+	parent := naming.IssueID("az-1")
+	commands := make([]string, 0, 4)
+	var readinessBudget time.Duration
+	deps := &Dependencies{
+		RepoDir:   "/repo-parent",
+		ProjectID: protocol.DefaultProjectID,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": parent.String(), "path": "/repo-parent", "branch": "user/az-1/parent"},
+							{"issue_id": child.String(), "path": "/repo-az-2", "branch": "user/az-2/worker"},
+						},
+					}), nil
+				case daemonclient.CommandTaskIntegrationReady:
+					if deadline, ok := ctx.Deadline(); ok {
+						readinessBudget = time.Until(deadline)
+					}
+					return protocol.ResponseEnvelope{}, context.DeadlineExceeded
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output, err := captureStdoutAllowError(t, func() error {
+		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: child.String(), Apply: true, JSON: true})
+	})
+	if err == nil {
+		t.Fatal("expected preflight deadline error")
+	}
+	if !strings.Contains(err.Error(), "phase preflight for issue az-2") || !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("error = %v, want preflight phase attribution", err)
+	}
+	for _, want := range []string{`"apply": true`, `"applied": false`, `"name": "preflight"`, `"status": "failed"`, "context deadline exceeded", "no integration/cleanup/status mutation started", "az orchestrate integrate --issue az-2 --apply"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+	for _, unexpected := range []string{daemonclient.CommandTaskClose, daemonclient.CommandTaskAppendNotes, daemonclient.CommandGitMerge, commandSessionStop, daemonclient.CommandWorktreeRemove, daemonclient.CommandTaskUpdateStatus} {
+		if containsString(commands, unexpected) {
+			t.Fatalf("commands = %+v, did not expect mutation command %s", commands, unexpected)
+		}
+	}
+	if readinessBudget < issueCloseCleanupTimeout-10*time.Second {
+		t.Fatalf("readiness budget = %s, want near %s", readinessBudget, issueCloseCleanupTimeout)
+	}
+}
+
 func TestOrchestrateIntegrateApplyRequiresCompletionEvidence(t *testing.T) {
 	deps, commands, _ := orchestrateIntegrateApplyDeps(t, "missing_evidence")
 	output, err := captureStdoutAllowError(t, func() error {
