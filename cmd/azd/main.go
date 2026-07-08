@@ -101,6 +101,7 @@ func main() {
 		WorktreeInitCommands:       cfg.Worktree.SyncInitCommands,
 		WorktreeAsyncInitCommands:  cfg.Worktree.AsyncInitCommands,
 		IssueResources:             cfg.IssueResources,
+		IssueAutoArchive:           cfg.Issues.AutoArchive,
 		ScheduledScripts:           cfg.ScheduledScripts,
 	})
 	if err := d.Run(ctx); err != nil {

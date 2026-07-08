@@ -142,8 +142,15 @@ type NotifyConfig struct {
 
 // IssuesConfig contains issue store settings (legacy key name retained for compatibility)
 type IssuesConfig struct {
-	Path         string `json:"path"`
-	SyncInterval int    `json:"syncInterval"`
+	Path         string                 `json:"path"`
+	SyncInterval int                    `json:"syncInterval"`
+	AutoArchive  IssueAutoArchiveConfig `json:"autoArchive"`
+}
+
+type IssueAutoArchiveConfig struct {
+	Enabled         bool   `json:"enabled"`
+	ClosedAfterDays int    `json:"closedAfterDays"`
+	Interval        string `json:"interval"`
 }
 
 // NetworkConfig contains network-related settings
@@ -287,6 +294,11 @@ func DefaultConfig() *Config {
 		Issues: IssuesConfig{
 			Path:         ".azedarach",
 			SyncInterval: 300, // 5 minutes
+			AutoArchive: IssueAutoArchiveConfig{
+				Enabled:         false,
+				ClosedAfterDays: 30,
+				Interval:        "24h",
+			},
 		},
 		Network: NetworkConfig{
 			AutoDetect:     true,
@@ -698,6 +710,12 @@ func MergeWithDefaults(cfg *Config) *Config {
 	}
 	if cfg.Issues.SyncInterval == 0 {
 		cfg.Issues.SyncInterval = defaults.Issues.SyncInterval
+	}
+	if cfg.Issues.AutoArchive.ClosedAfterDays == 0 {
+		cfg.Issues.AutoArchive.ClosedAfterDays = defaults.Issues.AutoArchive.ClosedAfterDays
+	}
+	if strings.TrimSpace(cfg.Issues.AutoArchive.Interval) == "" {
+		cfg.Issues.AutoArchive.Interval = defaults.Issues.AutoArchive.Interval
 	}
 
 	// Merge Network config

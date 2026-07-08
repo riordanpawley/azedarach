@@ -45,6 +45,7 @@ Commands:
   issue update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields (`--status closed` integrates, cleans, then closes)
   issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--force-worktree] [<id>]  Integrate, clean up, and close an issue
   issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]  Permanently delete an issue
+  issue unarchive [--project <project-id>] [--id <id>] [--json] [--with-parents] [--cascade-children] [<id>]  Restore archived issues to active reads
   issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]  Attach an image to an issue
   issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]  Remove an image attachment from an issue
   issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]  Attach a report/document to an issue
@@ -108,6 +109,7 @@ Examples:
   az issue close --id az-123 --force-worktree  # force worktree removal after integration
   az issue delete az-123 --confirm --cleanup
   az issue delete --id az-123 --confirm
+  az issue unarchive az-123 --with-parents
   az issue image add --issue-id az-123 --path ./screenshot.png
   az issue image remove --issue-id az-123 --attachment-id 1a2b3c4d
   az issue document add --issue-id az-123 --path ./report.md

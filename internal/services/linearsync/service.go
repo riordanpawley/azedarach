@@ -159,6 +159,15 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 		ref, hasRef := refByIdentifier[strings.ToUpper(remote.Identifier)]
 		local, hasLocal := localByID[issueID]
 		if !hasLocal {
+			if hasRef {
+				ref = externalRef(remote, issueID, remoteHash, remotePayload, now())
+				if err := s.Store.UpsertExternalRef(ctx, ref); err != nil {
+					return summary, err
+				}
+				refByIdentifier[strings.ToUpper(remote.Identifier)] = ref
+				refByIssueID[issueID] = ref
+				continue
+			}
 			if _, err := s.Store.UpsertSyncedTask(ctx, task); err != nil {
 				return summary, fmt.Errorf("import linear issue %s: %w", remote.Identifier, err)
 			}

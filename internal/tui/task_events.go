@@ -12,6 +12,7 @@ func isTaskMutationEvent(event string) bool {
 	switch event {
 	case protocol.EventTaskCreated,
 		protocol.EventTaskUpdated,
+		protocol.EventTaskRestored,
 		protocol.EventTaskDeleted,
 		protocol.EventTaskArchived:
 		return true
@@ -47,7 +48,7 @@ func (m *Model) applyTaskEvent(evt protocol.EventEnvelope) bool {
 	switch evt.Event {
 	case protocol.EventTaskDeleted, protocol.EventTaskArchived:
 		m.tasks = removeTaskByID(m.tasks, taskID)
-	case protocol.EventTaskCreated, protocol.EventTaskUpdated:
+	case protocol.EventTaskCreated, protocol.EventTaskUpdated, protocol.EventTaskRestored:
 		if body.Task == nil {
 			return false
 		}

@@ -240,6 +240,27 @@
           "type": "integer",
           "minimum": 1,
           "default": 300
+        },
+        "autoArchive": {
+          "type": "object",
+          "description": "Local daemon cleanup for soft-archiving done issues after a retention window.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "closedAfterDays": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 30
+            },
+            "interval": {
+              "type": "string",
+              "description": "Go duration between auto-archive scans, such as 24h.",
+              "default": "24h"
+            }
+          }
         }
       }
     },

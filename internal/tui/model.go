@@ -4197,6 +4197,8 @@ func humanizeRuntimeEventName(eventName string) string {
 		return "Task deleted"
 	case protocol.EventTaskArchived:
 		return "Task archived"
+	case protocol.EventTaskRestored:
+		return "Task restored"
 	case "session.started":
 		return "Session started"
 	case "session.stopped":

@@ -276,6 +276,147 @@ func TestClient_GetManyWithRuntimeFiltersRequestedActiveIssues(t *testing.T) {
 	assert.NotContains(t, got, archivedID)
 }
 
+func TestClient_ArchiveModeRuntimeReads(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-archive-mode"
+
+	activeID, err := client.Create(ctx, CreateTaskParams{
+		Title:       "active retained needle",
+		Description: "active archive-mode search body",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+	})
+	require.NoError(t, err)
+	archivedID, err := client.Create(ctx, CreateTaskParams{
+		Title:       "archived retained needle",
+		Description: "archived archive-mode search body",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, archivedID, activeID, string(domain.DependencyBlocks)))
+	require.NoError(t, client.Archive(ctx, archivedID))
+
+	activeOnly, err := client.ListSummariesWithRuntimeArchiveMode(ctx, projectID, ArchiveExclude)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{activeID}, taskIDStrings(activeOnly))
+
+	withArchived, err := client.ListSummariesWithRuntimeArchiveMode(ctx, projectID, ArchiveInclude)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{activeID, archivedID}, taskIDStrings(withArchived))
+
+	archivedOnly, err := client.ListSummariesWithRuntimeArchiveMode(ctx, projectID, ArchiveOnly)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{archivedID}, taskIDStrings(archivedOnly))
+
+	searchArchived, err := client.SearchWithRuntimeArchiveMode(ctx, projectID, "archived archive-mode", ArchiveOnly)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{archivedID}, taskIDStrings(searchArchived))
+
+	_, err = client.GetWithDependencyContextRuntimeArchiveMode(ctx, projectID, archivedID, ArchiveExclude)
+	require.Error(t, err)
+	require.ErrorIs(t, err, domain.ErrNotFound)
+
+	tasks, err := client.GetWithDependencyContextRuntimeArchiveMode(ctx, projectID, archivedID, ArchiveInclude)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{activeID, archivedID}, taskIDStrings(tasks))
+
+	tasks, err = client.GetWithDependencyContextRuntimeArchiveMode(ctx, projectID, archivedID, ArchiveOnly)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{archivedID}, taskIDStrings(tasks))
+}
+
+func TestClient_UnarchiveRestoresActiveRuntimeReadsAndSearch(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-unarchive"
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:       "archived restore needle",
+		Description: "restored issue search body",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusDone,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Archive(ctx, issueID))
+	_, err = client.GetWithRuntime(ctx, projectID, issueID)
+	require.ErrorIs(t, err, domain.ErrNotFound)
+	require.NoError(t, client.Unarchive(ctx, issueID))
+
+	task, err := client.GetWithRuntime(ctx, projectID, issueID)
+	require.NoError(t, err)
+	assert.Equal(t, "archived restore needle", task.Title)
+
+	activeSearch, err := client.SearchWithRuntime(ctx, projectID, "restored issue search")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{issueID}, taskIDStrings(activeSearch))
+
+	archivedOnly, err := client.ListSummariesWithRuntimeArchiveMode(ctx, projectID, ArchiveOnly)
+	require.NoError(t, err)
+	assert.NotContains(t, taskIDStrings(archivedOnly), issueID)
+}
+
+func TestClient_UnarchiveChildWithArchivedParentIsBlockedUnlessParentsIncluded(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Archived parent",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+	})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Archived child",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, childID, parentID, "parent-child"))
+	require.NoError(t, client.Archive(ctx, childID))
+	require.NoError(t, client.Archive(ctx, parentID))
+
+	err = client.Unarchive(ctx, childID)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIssueHasArchivedParents)
+	assert.Contains(t, err.Error(), "unarchive the parent first")
+
+	result, err := client.UnarchiveWithOptions(ctx, childID, UnarchiveOptions{WithParents: true})
+	require.NoError(t, err)
+	assert.Equal(t, []string{parentID, childID}, result.UnarchivedIDs)
+
+	active, err := client.ListSummariesWithRuntimeArchiveMode(ctx, "proj-unarchive-parents", ArchiveExclude)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{parentID, childID}, taskIDStrings(active))
+}
+
+func TestClient_UnarchiveCascadeChildrenRestoresArchivedSubtree(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	rootID, err := client.Create(ctx, CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Priority: domain.P1})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{Title: "Child", Type: domain.TypeTask, Priority: domain.P2})
+	require.NoError(t, err)
+	grandchildID, err := client.Create(ctx, CreateTaskParams{Title: "Grandchild", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, childID, rootID, "parent-child"))
+	require.NoError(t, client.AddDependency(ctx, grandchildID, childID, "parent-child"))
+	require.NoError(t, client.Archive(ctx, grandchildID))
+	require.NoError(t, client.Archive(ctx, childID))
+	require.NoError(t, client.Archive(ctx, rootID))
+
+	result, err := client.UnarchiveWithOptions(ctx, rootID, UnarchiveOptions{CascadeChildren: true})
+	require.NoError(t, err)
+	assert.Equal(t, []string{rootID, childID, grandchildID}, result.UnarchivedIDs)
+
+	active, err := client.ListSummariesWithRuntimeArchiveMode(ctx, "proj-unarchive-subtree", ArchiveExclude)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{rootID, childID, grandchildID}, taskIDStrings(active))
+}
+
 func TestClient_LinearSyncExternalRefsUseCanonicalOriginTable(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -1570,7 +1711,7 @@ func TestTaskRuntimeProjectionQueryFiltersRuntimeCTEsForRequestedIDs(t *testing.
 	assert.Equal(t, 2, strings.Count(query, "issue_id IN (?,?)"), query)
 	assert.Contains(t, query, "i.id IN (?,?)")
 
-	unfilteredQuery, unfilteredArgs := taskRuntimeProjectionQuery("proj-batch-context", false)
+	unfilteredQuery, unfilteredArgs := taskRuntimeProjectionQuery("proj-batch-context", false, ArchiveExclude)
 	assert.Equal(t, []any{"proj-batch-context", "proj-batch-context"}, unfilteredArgs)
 	assert.NotContains(t, unfilteredQuery, "issue_id IN")
 	assert.NotContains(t, unfilteredQuery, "i.id IN")
@@ -1691,7 +1832,7 @@ func TestSQLiteHotQueryPlansUseExpectedIndexes(t *testing.T) {
 			name: "search candidate ids",
 			build: func(t *testing.T) (string, []any) {
 				t.Helper()
-				return issueSearchIDsQuery(), []any{domain.ContentQueryFTSExpression("runtime cache")}
+				return issueSearchIDsQuery(ArchiveExclude), []any{domain.ContentQueryFTSExpression("runtime cache")}
 			},
 			want: []string{
 				"SCAN issue_search_fts VIRTUAL TABLE INDEX",
@@ -1746,7 +1887,7 @@ func TestSQLiteHotQueryPlansUseExpectedIndexes(t *testing.T) {
 			name: "unfiltered runtime projection",
 			build: func(t *testing.T) (string, []any) {
 				t.Helper()
-				return taskRuntimeProjectionQuery("project", false)
+				return taskRuntimeProjectionQuery("project", false, ArchiveExclude)
 			},
 			want: []string{
 				"idx_daemon_session_projections_project_issue_updated",
@@ -1880,10 +2021,12 @@ func TestClient_IssueObservationEventsRecordIssueMutations(t *testing.T) {
 		Type:     domain.TypeBug,
 		Priority: domain.P1,
 	}))
+	require.NoError(t, client.Archive(ctx, taskID))
+	require.NoError(t, client.Unarchive(ctx, taskID))
 
 	events, err := client.ListIssueObservationEvents(ctx, taskID, IssueObservationEventListOptions{})
 	require.NoError(t, err)
-	require.Len(t, events, 4)
+	require.Len(t, events, 6)
 	assert.Equal(t, domain.IssueEventIssueCreated, events[0].Type)
 	assert.Equal(t, "issue-store", events[0].Source)
 	assert.Equal(t, "Observable task", events[0].Payload["title"])
@@ -1894,6 +2037,8 @@ func TestClient_IssueObservationEventsRecordIssueMutations(t *testing.T) {
 	assert.Equal(t, "first evidence", events[2].Payload["line"])
 	assert.Equal(t, domain.IssueEventIssueDetailsChanged, events[3].Type)
 	assert.Contains(t, events[3].Payload["changed_fields"], "title")
+	assert.Equal(t, domain.IssueEventIssueArchived, events[4].Type)
+	assert.Equal(t, domain.IssueEventIssueUnarchived, events[5].Type)
 
 	filtered, err := client.ListIssueObservationEvents(ctx, taskID, IssueObservationEventListOptions{
 		Types: []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged},
@@ -4680,4 +4825,12 @@ func BenchmarkClient_GetManyMetadataWithAncestorContextRuntimeLargeProject(b *te
 			b.Fatal("expected metadata tasks")
 		}
 	}
+}
+
+func taskIDStrings(tasks []domain.Task) []string {
+	out := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		out = append(out, task.ID.String())
+	}
+	return out
 }

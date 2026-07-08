@@ -753,6 +753,263 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	}
 }
 
+func TestHandleTaskListAndGetSupportArchivedOnly(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() {
+		if err := issuesClient.CloseDB(); err != nil {
+			t.Fatalf("close issues db: %v", err)
+		}
+	})
+
+	projectID := "proj-archived-only"
+	activeID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "active issue",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create active issue: %v", err)
+	}
+	archivedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:       "archived issue",
+		Description: "archived details",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusDone,
+	})
+	if err != nil {
+		t.Fatalf("create archived issue: %v", err)
+	}
+	if err := issuesClient.Archive(ctx, archivedID); err != nil {
+		t.Fatalf("archive issue: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  logger,
+		},
+		issues: issuesClient,
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		sessionStore: daemonstate.NewStore(),
+		revision:     map[string]uint64{projectID: 3},
+		git:          &git.Client{},
+	}
+
+	listBody, err := json.Marshal(protocol.TaskListRequestBody{Archived: string(protocol.ArchiveModeOnly)})
+	if err != nil {
+		t.Fatalf("marshal task.list request: %v", err)
+	}
+	listResp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-list-archived-only",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+		Body:            listBody,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskList error: %v", err)
+	}
+	if !listResp.OK {
+		t.Fatalf("task.list response = %+v", listResp.Error)
+	}
+	listPayload, err := protocol.DecodeTaskListSnapshotPayload(listResp.Body)
+	if err != nil {
+		t.Fatalf("decode task.list body: %v", err)
+	}
+	if got := taskIDStrings(listPayload.Tasks); len(got) != 1 || got[0] != archivedID {
+		t.Fatalf("task.list ids = %v, want [%s]; active id was %s", got, archivedID, activeID)
+	}
+
+	getBody, err := json.Marshal(map[string]string{"task_id": archivedID, "archived": string(protocol.ArchiveModeOnly)})
+	if err != nil {
+		t.Fatalf("marshal task.get request: %v", err)
+	}
+	getResp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-get-archived-only",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.get",
+		Body:            getBody,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskGet error: %v", err)
+	}
+	if !getResp.OK {
+		t.Fatalf("task.get response = %+v", getResp.Error)
+	}
+	getPayload, err := protocol.DecodeTaskListSnapshotPayload(getResp.Body)
+	if err != nil {
+		t.Fatalf("decode task.get body: %v", err)
+	}
+	if got := taskIDStrings(getPayload.Tasks); len(got) != 1 || got[0] != archivedID {
+		t.Fatalf("task.get ids = %v, want [%s]", got, archivedID)
+	}
+	if got := getPayload.Tasks[0].Description; got != "archived details" {
+		t.Fatalf("task.get description = %q, want archived details", got)
+	}
+}
+
+func TestHandleTaskUnarchiveRestoresArchivedIssue(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() {
+		if err := issuesClient.CloseDB(); err != nil {
+			t.Fatalf("close issues db: %v", err)
+		}
+	})
+
+	projectID := "proj-unarchive"
+	archivedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "archived issue",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusDone,
+	})
+	if err != nil {
+		t.Fatalf("create archived issue: %v", err)
+	}
+	if err := issuesClient.Archive(ctx, archivedID); err != nil {
+		t.Fatalf("archive issue: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  logger,
+		},
+		issues: issuesClient,
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		hub:          publish.NewHub(16, 8, logger),
+		sessionStore: daemonstate.NewStore(),
+		revision:     map[string]uint64{projectID: 9},
+		git:          &git.Client{},
+	}
+	events, cancel := d.hub.Subscribe(projectID, 0)
+	defer cancel()
+
+	body, err := json.Marshal(map[string]string{"task_id": archivedID})
+	if err != nil {
+		t.Fatalf("marshal task.unarchive request: %v", err)
+	}
+	resp, err := d.handleTaskUnarchive(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-unarchive",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.unarchive",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskUnarchive error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.unarchive response = %+v", resp.Error)
+	}
+	if resp.Revision != 10 {
+		t.Fatalf("revision = %d, want 10", resp.Revision)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, archivedID)
+	if err != nil {
+		t.Fatalf("unarchived issue not active: %v", err)
+	}
+	if task.Title != "archived issue" {
+		t.Fatalf("title = %q, want archived issue", task.Title)
+	}
+	select {
+	case evt := <-events:
+		if evt.Event != protocol.EventTaskRestored || evt.Revision != 10 {
+			t.Fatalf("published event = %+v, want %s revision 10", evt, protocol.EventTaskRestored)
+		}
+		var taskBody protocol.TaskEventBody
+		if err := json.Unmarshal(evt.Body, &taskBody); err != nil {
+			t.Fatalf("unmarshal task event body: %v", err)
+		}
+		if taskBody.TaskID.String() != archivedID || taskBody.Task == nil || taskBody.Task.ID.String() != archivedID {
+			t.Fatalf("task event body = %+v, want restored task %s", taskBody, archivedID)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s event", protocol.EventTaskRestored)
+	}
+}
+
+func TestHandleTaskUnarchiveRejectsArchivedParentWithoutFlag(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	projectID := "proj-unarchive-parent-guard"
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Archived parent",
+		Type:  domain.TypeEpic,
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Archived child",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := issuesClient.AddDependency(ctx, childID, parentID, "parent-child"); err != nil {
+		t.Fatalf("add parent-child: %v", err)
+	}
+	if err := issuesClient.Archive(ctx, childID); err != nil {
+		t.Fatalf("archive child: %v", err)
+	}
+	if err := issuesClient.Archive(ctx, parentID); err != nil {
+		t.Fatalf("archive parent: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		hub: publish.NewHub(16, 8, logger),
+	}
+	body, err := json.Marshal(map[string]string{"task_id": childID})
+	if err != nil {
+		t.Fatalf("marshal task.unarchive request: %v", err)
+	}
+	resp, err := d.handleTaskUnarchive(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-unarchive-parent-guard",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.unarchive",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskUnarchive error: %v", err)
+	}
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("task.unarchive response = %+v, want conflict", resp)
+	}
+	if resp.Error.Code != protocol.ErrorCodeConflict {
+		t.Fatalf("error code = %s, want %s", resp.Error.Code, protocol.ErrorCodeConflict)
+	}
+	if !strings.Contains(resp.Error.Message, "unarchive the parent first") {
+		t.Fatalf("error message = %q", resp.Error.Message)
+	}
+}
+
 func TestHandleTaskListRefreshesMissingTmuxSessionBeforeReportingActive(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -1582,7 +1839,7 @@ func TestLoadTaskListSnapshotSharesInFlightProjectLoad(t *testing.T) {
 			Kind:            protocol.EnvelopeKindCommand,
 			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 			Command:         "task.list",
-		}, projectID, "", false)
+		}, projectID, "", false, protocol.ArchiveModeExclude)
 		if !shared {
 			errCh <- errors.New("load was not shared")
 			return
@@ -1661,7 +1918,7 @@ func TestLoadTaskListSnapshotUsesDetachedBuildContext(t *testing.T) {
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Command:         "task.list",
-	}, projectID, "", false)
+	}, projectID, "", false, protocol.ArchiveModeExclude)
 	if err != nil {
 		t.Fatalf("loadTaskListSnapshot error = %v, want detached load to succeed", err)
 	}
@@ -11754,4 +12011,12 @@ func TestWorktreeGitProbeThrottleKeyIncludesResolvedBaseBranch(t *testing.T) {
 	if !throttle.Admit(parentBaseKey, false).Allowed() {
 		t.Fatal("parent-base probe should not be suppressed by previous preview-base record")
 	}
+}
+
+func taskIDStrings(tasks []domain.Task) []string {
+	out := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		out = append(out, task.ID.String())
+	}
+	return out
 }

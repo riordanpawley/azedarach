@@ -790,6 +790,8 @@ func humanizeEventLogName(eventName string) string {
 		return "Task deleted"
 	case protocol.EventTaskArchived:
 		return "Task archived"
+	case protocol.EventTaskRestored:
+		return "Task restored"
 	case protocol.EventOperationQueued:
 		return "Operation queued"
 	case protocol.EventOperationRunning:
@@ -820,6 +822,7 @@ func isTaskMutationLogEvent(event string) bool {
 	switch event {
 	case protocol.EventTaskCreated,
 		protocol.EventTaskUpdated,
+		protocol.EventTaskRestored,
 		protocol.EventTaskDeleted,
 		protocol.EventTaskArchived:
 		return true

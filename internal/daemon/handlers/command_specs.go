@@ -53,6 +53,7 @@ const (
 	commandTaskAppendNotes       = "task.append_notes"
 	commandTaskDelete            = "task.delete"
 	commandTaskArchive           = "task.archive"
+	commandTaskUnarchive         = "task.unarchive"
 	commandTaskDependencyAdd     = "task.dependency.add"
 	commandTaskDependencyRemove  = "task.dependency.remove"
 	commandTaskSnapshotExport    = "task.snapshot.export"
@@ -179,6 +180,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	commandTaskAppendNotes:                 {Command: commandTaskAppendNotes, RequiresProjectID: true},
 	commandTaskDelete:                      {Command: commandTaskDelete, RequiresProjectID: true},
 	commandTaskArchive:                     {Command: commandTaskArchive, RequiresProjectID: true},
+	commandTaskUnarchive:                   {Command: commandTaskUnarchive, RequiresProjectID: true},
 	commandTaskDependencyAdd:               {Command: commandTaskDependencyAdd, RequiresProjectID: true},
 	commandTaskDependencyRemove:            {Command: commandTaskDependencyRemove, RequiresProjectID: true},
 	commandTaskSnapshotExport:              {Command: commandTaskSnapshotExport, RequiresProjectID: true},

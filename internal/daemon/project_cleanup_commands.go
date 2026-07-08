@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -148,10 +149,14 @@ func (d *Daemon) cleanupOldDoneTasks(ctx context.Context, req protocol.RequestEn
 }
 
 func (d *Daemon) cleanupArchiveDoneTasks(ctx context.Context, req protocol.RequestEnvelope, projectID string, tasks []domain.Task) (int, error) {
+	return d.cleanupArchiveDoneTasksBefore(ctx, req, projectID, tasks, time.Time{})
+}
+
+func (d *Daemon) cleanupArchiveDoneTasksBefore(ctx context.Context, req protocol.RequestEnvelope, projectID string, tasks []domain.Task, cutoff time.Time) (int, error) {
 	archived := 0
 	var lastErr error
-	for _, task := range tasks {
-		if task.Status != domain.StatusDone {
+	for _, task := range doneTasksInArchiveOrder(tasks) {
+		if !cutoff.IsZero() && !task.UpdatedAt.Before(cutoff) {
 			continue
 		}
 		if err := d.archiveTaskForCleanup(ctx, req, projectID, task.ID.String()); err != nil {
@@ -161,6 +166,49 @@ func (d *Daemon) cleanupArchiveDoneTasks(ctx context.Context, req protocol.Reque
 		archived++
 	}
 	return archived, lastErr
+}
+
+func doneTasksInArchiveOrder(tasks []domain.Task) []domain.Task {
+	byID := make(map[naming.IssueID]domain.Task, len(tasks))
+	done := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID] = task
+		if task.Status == domain.StatusDone {
+			done = append(done, task)
+		}
+	}
+	depthByID := make(map[naming.IssueID]int, len(done))
+	var depth func(naming.IssueID, map[naming.IssueID]struct{}) int
+	depth = func(id naming.IssueID, seen map[naming.IssueID]struct{}) int {
+		if cached, ok := depthByID[id]; ok {
+			return cached
+		}
+		if _, ok := seen[id]; ok {
+			return 0
+		}
+		task, ok := byID[id]
+		if !ok || task.ParentID == nil || task.ParentID.IsZero() {
+			depthByID[id] = 0
+			return 0
+		}
+		nextSeen := make(map[naming.IssueID]struct{}, len(seen)+1)
+		for seenID := range seen {
+			nextSeen[seenID] = struct{}{}
+		}
+		nextSeen[id] = struct{}{}
+		value := 1 + depth(*task.ParentID, nextSeen)
+		depthByID[id] = value
+		return value
+	}
+	sort.SliceStable(done, func(i, j int) bool {
+		leftDepth := depth(done[i].ID, nil)
+		rightDepth := depth(done[j].ID, nil)
+		if leftDepth != rightDepth {
+			return leftDepth > rightDepth
+		}
+		return done[i].ID.String() < done[j].ID.String()
+	})
+	return done
 }
 
 func (d *Daemon) cleanupOrphanedWorktrees(ctx context.Context, projectID string) (int, error) {

@@ -36,6 +36,7 @@ const (
 	CommandTaskAppendNotes      = "task.append_notes"
 	CommandTaskDelete           = "task.delete"
 	CommandTaskArchive          = "task.archive"
+	CommandTaskUnarchive        = "task.unarchive"
 	CommandTaskDependencyAdd    = "task.dependency.add"
 	CommandTaskDependencyRemove = "task.dependency.remove"
 	CommandSyncRun              = "sync.run"
@@ -103,6 +104,11 @@ type TaskDeleteOptions struct {
 	StopSession    bool
 	RemoveWorktree bool
 	ForceWorktree  bool
+}
+
+type TaskUnarchiveOptions struct {
+	WithParents     bool
+	CascadeChildren bool
 }
 
 type taskCloseRequest struct {
@@ -360,7 +366,8 @@ type TaskAppendNotesRequest struct {
 
 // TaskIDRequest contains the payload used for delete/archive task operations.
 type TaskIDRequest struct {
-	TaskID naming.IssueID `json:"task_id"`
+	TaskID   naming.IssueID `json:"task_id"`
+	Archived string         `json:"archived,omitempty"`
 }
 
 // TaskIDsRequest contains the payload used for batch task reads.
@@ -594,15 +601,23 @@ func (c *Client) GetTaskSnapshot(ctx context.Context, taskID string) (TaskSnapsh
 
 // GetTaskSnapshotWithMode fetches one task and its direct dependency context with the requested bounded read budget.
 func (c *Client) GetTaskSnapshotWithMode(ctx context.Context, taskID string, mode ReadWaitMode) (TaskSnapshot, error) {
+	return c.GetTaskSnapshotWithArchiveMode(ctx, taskID, protocol.ArchiveModeExclude, mode)
+}
+
+// GetTaskSnapshotWithArchiveMode fetches one task with explicit archived issue visibility.
+func (c *Client) GetTaskSnapshotWithArchiveMode(ctx context.Context, taskID string, archiveMode protocol.ArchiveMode, mode ReadWaitMode) (TaskSnapshot, error) {
 	parsedTaskID, err := naming.ParseIssueID(taskID)
 	if err != nil {
 		return TaskSnapshot{}, fmt.Errorf("invalid task id: %w", err)
+	}
+	if !archiveMode.Valid() {
+		return TaskSnapshot{}, fmt.Errorf("invalid archive mode: %s", archiveMode)
 	}
 
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
-	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGet, TaskIDRequest{TaskID: parsedTaskID})
+	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGet, TaskIDRequest{TaskID: parsedTaskID, Archived: string(archiveMode)})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
@@ -775,17 +790,36 @@ func (c *Client) ListTasksSnapshotWithQuery(ctx context.Context, query string) (
 
 // ListTasksSnapshotWithQueryMode fetches a task snapshot with an optional daemon-side content query.
 func (c *Client) ListTasksSnapshotWithQueryMode(ctx context.Context, query string, mode ReadWaitMode) (TaskSnapshot, error) {
-	return c.listTasksSnapshotWithQueryMode(ctx, query, mode, false)
+	return c.listTasksSnapshotWithQueryArchiveMode(ctx, query, mode, false, protocol.ArchiveModeExclude)
+}
+
+func (c *Client) ListTasksSnapshotWithArchiveMode(ctx context.Context, archiveMode protocol.ArchiveMode) (TaskSnapshot, error) {
+	return c.listTasksSnapshotWithQueryArchiveMode(ctx, "", ReadWaitModeDefault, false, archiveMode)
+}
+
+func (c *Client) ListTasksSnapshotWithDependenciesArchiveMode(ctx context.Context, archiveMode protocol.ArchiveMode) (TaskSnapshot, error) {
+	return c.listTasksSnapshotWithQueryArchiveMode(ctx, "", ReadWaitModeDefault, true, archiveMode)
+}
+
+func (c *Client) ListTasksSnapshotWithQueryArchiveMode(ctx context.Context, query string, archiveMode protocol.ArchiveMode) (TaskSnapshot, error) {
+	return c.listTasksSnapshotWithQueryArchiveMode(ctx, query, ReadWaitModeDefault, false, archiveMode)
 }
 
 func (c *Client) listTasksSnapshotWithQueryMode(ctx context.Context, query string, mode ReadWaitMode, includeDependencies bool) (TaskSnapshot, error) {
+	return c.listTasksSnapshotWithQueryArchiveMode(ctx, query, mode, includeDependencies, protocol.ArchiveModeExclude)
+}
+
+func (c *Client) listTasksSnapshotWithQueryArchiveMode(ctx context.Context, query string, mode ReadWaitMode, includeDependencies bool, archiveMode protocol.ArchiveMode) (TaskSnapshot, error) {
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
+	if !archiveMode.Valid() {
+		return TaskSnapshot{}, fmt.Errorf("invalid archive mode: %s", archiveMode)
+	}
 
 	var body any
 	query = strings.TrimSpace(query)
-	if query != "" || includeDependencies {
-		body = protocol.TaskListRequestBody{Query: query, IncludeDependencies: includeDependencies}
+	if query != "" || includeDependencies || archiveMode != protocol.ArchiveModeExclude {
+		body = protocol.TaskListRequestBody{Query: query, IncludeDependencies: includeDependencies, Archived: string(archiveMode)}
 	}
 
 	resp, err := c.commandJSONResponse(waitCtx, CommandTaskList, body)
@@ -1038,6 +1072,28 @@ func (c *Client) ArchiveTask(ctx context.Context, taskID string) error {
 		return fmt.Errorf("invalid task id: %w", err)
 	}
 	return c.commandJSON(ctx, CommandTaskArchive, TaskIDRequest{TaskID: parsedTaskID}, nil)
+}
+
+// UnarchiveTask restores an archived task through the daemon client boundary.
+func (c *Client) UnarchiveTask(ctx context.Context, taskID string) error {
+	return c.UnarchiveTaskWithOptions(ctx, taskID, TaskUnarchiveOptions{})
+}
+
+// UnarchiveTaskWithOptions restores archived task graph rows through the daemon client boundary.
+func (c *Client) UnarchiveTaskWithOptions(ctx context.Context, taskID string, opts TaskUnarchiveOptions) error {
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return fmt.Errorf("invalid task id: %w", err)
+	}
+	return c.commandJSON(ctx, CommandTaskUnarchive, struct {
+		TaskID          naming.IssueID `json:"task_id"`
+		WithParents     bool           `json:"with_parents,omitempty"`
+		CascadeChildren bool           `json:"cascade_children,omitempty"`
+	}{
+		TaskID:          parsedTaskID,
+		WithParents:     opts.WithParents,
+		CascadeChildren: opts.CascadeChildren,
+	}, nil)
 }
 
 // TaskGraphReadiness returns daemon-owned runnable-leaf policy for a root issue.

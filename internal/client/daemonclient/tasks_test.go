@@ -1468,8 +1468,44 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err := client.ArchiveTask(context.Background(), "az-5"); err != nil {
 			t.Fatalf("ArchiveTask error: %v", err)
 		}
-		if len(commands) != 2 || commands[0] != CommandTaskDelete || commands[1] != CommandTaskArchive {
+		if err := client.UnarchiveTask(context.Background(), "az-5"); err != nil {
+			t.Fatalf("UnarchiveTask error: %v", err)
+		}
+		if len(commands) != 3 || commands[0] != CommandTaskDelete || commands[1] != CommandTaskArchive || commands[2] != CommandTaskUnarchive {
 			t.Fatalf("commands = %v", commands)
+		}
+	})
+
+	t.Run("unarchive with graph options", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if req.Command != CommandTaskUnarchive {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskUnarchive)
+				}
+				var body struct {
+					TaskID          naming.IssueID `json:"task_id"`
+					WithParents     bool           `json:"with_parents"`
+					CascadeChildren bool           `json:"cascade_children"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal unarchive request: %v", err)
+				}
+				if body.TaskID != "az-5" || !body.WithParents || !body.CascadeChildren {
+					t.Fatalf("unarchive request = %+v, want graph options", body)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		if err := client.UnarchiveTaskWithOptions(context.Background(), "az-5", TaskUnarchiveOptions{WithParents: true, CascadeChildren: true}); err != nil {
+			t.Fatalf("UnarchiveTaskWithOptions error: %v", err)
 		}
 	})
 

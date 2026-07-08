@@ -75,6 +75,7 @@ type Config struct {
 	WorktreeInitCommands       []string
 	WorktreeAsyncInitCommands  []string
 	IssueResources             appconfig.IssueResourcesConfig
+	IssueAutoArchive           appconfig.IssueAutoArchiveConfig
 	ScheduledScripts           appconfig.ScheduledScriptsConfig
 	Logger                     *slog.Logger
 	IdleTimeout                time.Duration
@@ -117,6 +118,8 @@ type Daemon struct {
 	worktreeAsyncInitCommandsByRoot    map[string][]string
 	issueResourcesByProject            map[string]appconfig.IssueResourcesConfig
 	issueResourcesByRoot               map[string]appconfig.IssueResourcesConfig
+	issueAutoArchiveByProject          map[string]appconfig.IssueAutoArchiveConfig
+	issueAutoArchiveByRoot             map[string]appconfig.IssueAutoArchiveConfig
 	scheduledScriptsByProject          map[string]appconfig.ScheduledScriptsConfig
 	scheduledScriptsByRoot             map[string]appconfig.ScheduledScriptsConfig
 	worktreeManagersMu                 sync.Mutex
@@ -149,6 +152,8 @@ type Daemon struct {
 	noticeService                      *daemonnotices.Service
 	runtimeProjectionCoalescer         *runtimeProjectionEventCoalescer
 	scheduledScripts                   *scheduledScriptManager
+	issueAutoArchive                   *issueAutoArchiveWorker
+	issueAutoArchiveLastRun            map[string]time.Time
 	sessionStopMu                      sync.Mutex
 	sessionStopPending                 map[string]int
 	sessionStateRefreshMu              sync.Mutex
@@ -278,6 +283,8 @@ func New(cfg Config) *Daemon {
 		worktreeAsyncInitCommandsByRoot:    map[string][]string{},
 		issueResourcesByProject:            map[string]appconfig.IssueResourcesConfig{},
 		issueResourcesByRoot:               map[string]appconfig.IssueResourcesConfig{},
+		issueAutoArchiveByProject:          map[string]appconfig.IssueAutoArchiveConfig{},
+		issueAutoArchiveByRoot:             map[string]appconfig.IssueAutoArchiveConfig{},
 		scheduledScriptsByProject:          map[string]appconfig.ScheduledScriptsConfig{},
 		scheduledScriptsByRoot:             map[string]appconfig.ScheduledScriptsConfig{},
 		worktreeManagersByProject:          map[string]*git.WorktreeManager{},
@@ -301,6 +308,7 @@ func New(cfg Config) *Daemon {
 		taskListRuntimeLastRefresh:         map[string]time.Time{},
 		taskListRuntimeRefreshes:           map[string]*taskListRuntimeRefresh{},
 		taskListSnapshotCache:              map[string]taskListSnapshotCacheEntry{},
+		issueAutoArchiveLastRun:            map[string]time.Time{},
 		taskGraphReadinessLoads:            map[string]*taskGraphReadinessLoad{},
 		revision:                           map[string]uint64{},
 		shutdownReqCh:                      make(chan struct{}),
@@ -326,6 +334,7 @@ func New(cfg Config) *Daemon {
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
 	d.runtimeProjectionCoalescer = newRuntimeProjectionEventCoalescer(d, defaultRuntimeProjectionCoalesceWindow)
 	d.scheduledScripts = newScheduledScriptManager(d, cfg.Logger, cfg.scheduledScriptRunner)
+	d.issueAutoArchive = newIssueAutoArchiveWorker(d, cfg.Logger)
 	gitService.runtimeProjectionWriter = d.runtimeProjectionStateWriter()
 	gitService.runtimeStateStoreForProject = func(projectID string) *daemonstate.RuntimeStateStore {
 		return d.worktreeRuntimeStateStore(projectID)
@@ -499,6 +508,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if d.scheduledScripts != nil {
 			d.scheduledScripts.Close()
 		}
+		if d.issueAutoArchive != nil {
+			d.issueAutoArchive.Close()
+		}
 		d.closeIssueClients()
 		if d.runtimeReconcileQueue != nil {
 			if closeErr := d.runtimeReconcileQueue.Close(); closeErr != nil && d.cfg.Logger != nil {
@@ -559,6 +571,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.startRuntimeReconcileWorker(serveCtx)
 	d.startLinearSyncWorker(serveCtx)
 	d.startScheduledScriptWorker(serveCtx)
+	d.startIssueAutoArchiveWorker(serveCtx)
 	d.cfg.Logger.Info("daemon startup phase", "phase", "startup_ready", "duration_ms", time.Since(startedAt).Milliseconds())
 	err = <-serveErrCh
 	if ctx.Err() != nil {
@@ -756,6 +769,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskDelete(ctx, req)
 	case "task.archive":
 		return d.handleTaskArchive(ctx, req)
+	case "task.unarchive":
+		return d.handleTaskUnarchive(ctx, req)
 	case "task.dependency.add":
 		return d.handleTaskDependencyAdd(ctx, req)
 	case "task.dependency.remove":
