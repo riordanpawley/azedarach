@@ -64,14 +64,15 @@ func main() {
 		os.Exit(1)
 	}
 	latencytrace.SetConfigEnabled(cfg.Diagnostics.LatencyTrace)
-	shutdownObservability := configureProcessObservability("az", cfg)
-	defer shutdownObservability()
 
 	// If no arguments, run the TUI
 	if len(args) == 0 {
 		runTUI(cfg)
 		return
 	}
+
+	shutdownObservability := configureProcessObservability("az", cfg)
+	defer shutdownObservability()
 
 	// Handle subcommands
 	command := args[0]
@@ -1334,6 +1335,8 @@ func runTUIWithOptions(cfg *config.Config, opts ...app.Option) {
 		finishCommandAudit(nil, audit, runErr)
 	}()
 	model := app.NewWithOptions(cfg, opts...)
+	shutdownObservability := configureProcessObservability("az", cfg)
+	defer shutdownObservability()
 	p := newTUIProgramRunner(model)
 
 	if _, err := p.Run(); err != nil {

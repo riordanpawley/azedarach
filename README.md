@@ -28,6 +28,10 @@ Build, link, and run:
 just build-link-run
 ```
 
+This also starts or reuses a local Jaeger container named `azedarach-jaeger`
+for OTLP traces on `localhost:4318` and the UI at `http://localhost:16686`.
+Set `AZEDARACH_SKIP_JAEGER=1` to skip that startup step.
+
 Build and link without starting interactive TUI:
 
 ```bash

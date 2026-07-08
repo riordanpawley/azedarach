@@ -1,7 +1,11 @@
 package observability
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -42,6 +46,42 @@ func TestConfigureDisabledReturnsNoopShutdown(t *testing.T) {
 	}
 	if err := shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown() error = %v", err)
+	}
+}
+
+func TestConfigureRoutesOTelErrorsToLogger(t *testing.T) {
+	t.Setenv(EnvVar, "on")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+	var log bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&log, nil))
+	shutdown, err := Configure(context.Background(), Options{Enabled: true, Logger: logger})
+	if err != nil {
+		t.Fatalf("Configure() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = shutdown(context.Background())
+		otel.SetTracerProvider(oteltrace.NewNoopTracerProvider())
+	})
+
+	otel.Handle(errors.New(`traces export: Post "http://user:secret@localhost:4318/v1/traces?token=abc#frag": dial tcp [::1]:4318: connect: connection refused`))
+
+	got := log.String()
+	for _, want := range []string{
+		"otel trace export failed",
+		"event=otel.trace_export.failed",
+		"error_class=dependency",
+		"error_boundary=dependency",
+		"error_retryable=true",
+		"http://localhost:4318/v1/traces",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("log = %q, want %q", got, want)
+		}
+	}
+	for _, leaked := range []string{"user:secret", "token=abc", "#frag"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("log = %q, leaked %q", got, leaked)
+		}
 	}
 }
 

@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/riordanpawley/azedarach/internal/buildinfo"
@@ -22,6 +24,8 @@ const (
 	DefaultOTLPEndpoint = "localhost:4318"
 	defaultOTLPURL      = "http://" + DefaultOTLPEndpoint + "/v1/traces"
 )
+
+var errorMessageURLPattern = regexp.MustCompile(`https?://[^\s"]+`)
 
 // Options controls process-level OpenTelemetry setup.
 type Options struct {
@@ -49,6 +53,7 @@ func Enabled(configDefault bool) bool {
 // Configure installs a process-wide trace provider when OTel is enabled.
 func Configure(ctx context.Context, opts Options) (func(context.Context) error, error) {
 	otel.SetTextMapPropagator(propagation.TraceContext{})
+	installErrorHandler(opts.Logger)
 	if !Enabled(opts.Enabled) {
 		return func(context.Context) error { return nil }, nil
 	}
@@ -94,6 +99,44 @@ func Configure(ctx context.Context, opts Options) (func(context.Context) error, 
 		)
 	}
 	return provider.Shutdown, nil
+}
+
+func installErrorHandler(logger *slog.Logger) {
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+		if err == nil {
+			return
+		}
+		activeLogger := logger
+		if activeLogger == nil {
+			activeLogger = slog.Default()
+		}
+		if activeLogger == nil {
+			return
+		}
+		activeLogger.Warn("otel trace export failed",
+			"event", "otel.trace_export.failed",
+			"error_class", "dependency",
+			"error_boundary", "dependency",
+			"error_retryable", true,
+			"error_message", sanitizeErrorMessage(err),
+		)
+	}))
+}
+
+func sanitizeErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return errorMessageURLPattern.ReplaceAllStringFunc(err.Error(), func(raw string) string {
+		parsed, parseErr := url.Parse(raw)
+		if parseErr != nil {
+			return raw
+		}
+		parsed.User = nil
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		return parsed.String()
+	})
 }
 
 // InjectMetadata writes W3C trace context into daemon protocol metadata.
