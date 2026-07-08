@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -11686,6 +11687,117 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if strings.Contains(output, "same PR") || strings.Contains(output, "one PR") {
 		t.Fatalf("prime output should frame the heuristic around base-branch atomic merges, not PRs: %q", output)
 	}
+}
+
+func TestPrimeCommandEmitsProgressBeforeBlockedSnapshotReturns(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
+	setPrimeTmuxAvailable(t, false)
+
+	previousTimeout := primeDaemonReadTimeout
+	primeDaemonReadTimeout = time.Second
+	t.Cleanup(func() {
+		primeDaemonReadTimeout = previousTimeout
+	})
+
+	blockSnapshot := make(chan struct{})
+	snapshotEntered := make(chan struct{})
+	taskListCalls := 0
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command == daemonclient.CommandTaskList {
+					taskListCalls++
+					if taskListCalls == 1 {
+						close(snapshotEntered)
+					}
+					<-blockSnapshot
+					return protocol.ResponseEnvelope{}, errors.New("snapshot still blocked")
+				}
+				return responseWithJSON(req, map[string]any{}), nil
+			},
+		}),
+		ProjectID: "proj",
+		Config:    config.DefaultConfig(),
+	}
+
+	oldStdout := os.Stdout
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	os.Stdout = stdoutW
+	stdoutDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, stdoutR)
+		close(stdoutDone)
+	}()
+
+	oldStderr := os.Stderr
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	os.Stderr = stderrW
+	lineCh := make(chan string, 1)
+	readErrCh := make(chan error, 1)
+	go func() {
+		line, err := bufio.NewReader(stderrR).ReadString('\n')
+		lineCh <- line
+		readErrCh <- err
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- PrimeCommand(deps)
+		_ = stdoutW.Close()
+		_ = stderrW.Close()
+	}()
+	t.Cleanup(func() {
+		os.Stdout = oldStdout
+		os.Stderr = oldStderr
+		_ = stdoutR.Close()
+		_ = stderrR.Close()
+	})
+
+	select {
+	case <-snapshotEntered:
+	case err := <-done:
+		t.Fatalf("PrimeCommand returned before entering blocked snapshot call: %v", err)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("PrimeCommand did not enter snapshot call")
+	}
+
+	var line string
+	select {
+	case line = <-lineCh:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("PrimeCommand did not emit progress while snapshot call was blocked")
+	}
+	if err := <-readErrCh; err != nil {
+		t.Fatalf("read stderr progress: %v", err)
+	}
+	if !strings.Contains(line, "az prime: loading daemon issue snapshot") {
+		t.Fatalf("first progress line = %q, want task snapshot phase", line)
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("PrimeCommand returned before blocked snapshot was released: %v", err)
+	default:
+	}
+
+	close(blockSnapshot)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("PrimeCommand error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("PrimeCommand did not finish after snapshot release")
+	}
+	_ = stdoutW.Close()
+	_ = stderrW.Close()
+	<-stdoutDone
 }
 
 func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
