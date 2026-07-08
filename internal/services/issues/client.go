@@ -40,6 +40,7 @@ const runtimeSessionProjectionUnionSQL = `
 		started_at,
 		updated_at
 	FROM daemon_session_projections
+	INDEXED BY idx_daemon_session_projections_project_issue_updated
 	UNION ALL
 	SELECT
 		project_id,
@@ -48,11 +49,12 @@ const runtimeSessionProjectionUnionSQL = `
 		state,
 		observed_state,
 		activity,
-			activity_source,
-			tmux_attached_count,
-			started_at,
-			updated_at
-		FROM daemon_session_observations
+		activity_source,
+		tmux_attached_count,
+		started_at,
+		updated_at
+	FROM daemon_session_observations
+	INDEXED BY idx_daemon_session_observations_project_issue_updated
 `
 
 // ErrDependencyRemovalConfirmationRequired is returned when a removal that can
@@ -353,6 +355,8 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_session_projections_project_issue
 			ON daemon_session_projections (project_id, issue_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_daemon_session_projections_project_issue_updated
+			ON daemon_session_projections (project_id, issue_id, updated_at DESC, session_id DESC)`,
 		`CREATE TABLE IF NOT EXISTS daemon_session_observations (
 			project_id TEXT NOT NULL,
 			session_id TEXT NOT NULL,
@@ -368,6 +372,8 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_session_observations_project_issue
 			ON daemon_session_observations (project_id, issue_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_daemon_session_observations_project_issue_updated
+			ON daemon_session_observations (project_id, issue_id, updated_at DESC, session_id DESC)`,
 		`CREATE TABLE IF NOT EXISTS daemon_worktree_projections (
 			project_id TEXT NOT NULL,
 			issue_id TEXT NOT NULL,

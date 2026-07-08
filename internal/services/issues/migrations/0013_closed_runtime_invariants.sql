@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS daemon_session_projections (
 CREATE INDEX IF NOT EXISTS idx_daemon_session_projections_project_issue
 	ON daemon_session_projections (project_id, issue_id);
 
+CREATE INDEX IF NOT EXISTS idx_daemon_session_projections_project_issue_updated
+	ON daemon_session_projections (project_id, issue_id, updated_at DESC, session_id DESC);
+
 CREATE TABLE IF NOT EXISTS daemon_worktree_projections (
 	project_id TEXT NOT NULL,
 	issue_id TEXT NOT NULL,

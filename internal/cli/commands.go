@@ -7319,15 +7319,27 @@ func PrimeCommand(deps *Dependencies) error {
 	var snapshot daemonclient.TaskSnapshot
 	snapshotLoaded := false
 	if deps != nil && deps.DaemonClient != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), primeDaemonReadTimeout)
-		finish := primePhase(deps, "task_snapshot", "loading daemon issue snapshot")
-		loaded, err := deps.DaemonClient.ListTasksSnapshotWithDependencies(ctx)
-		cancel()
-		finish(err)
-		if err == nil {
-			snapshot = loaded
-			snapshotLoaded = true
-			implementationSection = renderPrimeImplementationSection(configuredIssueImplementations(snapshot.Tasks))
+		if issueID != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), primeDaemonReadTimeout)
+			finish := primePhase(deps, "issue_snapshot", fmt.Sprintf("loading active issue snapshot for %s", issueID))
+			loaded, err := deps.DaemonClient.GetTaskSnapshot(ctx, issueID)
+			cancel()
+			finish(err)
+			if err == nil {
+				snapshot = loaded
+				snapshotLoaded = true
+			}
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), primeDaemonReadTimeout)
+			finish := primePhase(deps, "task_snapshot", "loading daemon issue snapshot")
+			loaded, err := deps.DaemonClient.ListTasksSnapshotWithDependencies(ctx)
+			cancel()
+			finish(err)
+			if err == nil {
+				snapshot = loaded
+				snapshotLoaded = true
+				implementationSection = renderPrimeImplementationSection(configuredIssueImplementations(snapshot.Tasks))
+			}
 		}
 	}
 	if issueID == "" && snapshotLoaded {
@@ -7350,8 +7362,10 @@ func PrimeCommand(deps *Dependencies) error {
 		if !snapshotLoaded {
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nCould not load issue details automatically; run `az issue get %s`.\n", issueID, issueID)
 		} else if task, ok := findTaskByID(snapshot.Tasks, issueID); ok {
-			if detailTask, err := loadPrimeIssueDetailTask(context.Background(), deps, issueID); err == nil {
-				task = detailTask
+			if err := snapshot.RequireFullDetails("prime active issue snapshot"); err != nil {
+				if detailTask, err := loadPrimeIssueDetailTask(context.Background(), deps, issueID); err == nil {
+					task = detailTask
+				}
 			}
 			observations := readiness.WorkerObservations
 			containmentRisks := readiness.ContainmentRisks

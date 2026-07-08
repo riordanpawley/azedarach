@@ -773,9 +773,9 @@ func planTaskRuntimeProjectionQuery(_ bool, filtered bool, idCount int) string {
 				COALESCE(activity, '') AS activity, COALESCE(activity_source, '') AS activity_source, COALESCE(tmux_attached_count, 0) AS tmux_attached_count,
 				ROW_NUMBER() OVER (PARTITION BY issue_id ORDER BY CASE COALESCE(NULLIF(TRIM(observed_state), ''), state) WHEN 'running' THEN 0 WHEN 'attached' THEN 0 WHEN 'paused' THEN 1 WHEN 'starting' THEN 2 WHEN 'stopped' THEN 3 ELSE 4 END, updated_at DESC, session_id DESC) AS rn
 			FROM (
-				SELECT project_id, session_id, issue_id, state, observed_state, activity, activity_source, tmux_attached_count, started_at, updated_at FROM daemon_session_projections
+				SELECT project_id, session_id, issue_id, state, observed_state, activity, activity_source, tmux_attached_count, started_at, updated_at FROM daemon_session_projections INDEXED BY idx_daemon_session_projections_project_issue_updated
 				UNION ALL
-				SELECT project_id, session_id, issue_id, state, observed_state, activity, activity_source, tmux_attached_count, started_at, updated_at FROM daemon_session_observations
+				SELECT project_id, session_id, issue_id, state, observed_state, activity, activity_source, tmux_attached_count, started_at, updated_at FROM daemon_session_observations INDEXED BY idx_daemon_session_observations_project_issue_updated
 			)
 			WHERE project_id = ?` + sessionFilter + `
 		),
@@ -816,9 +816,9 @@ func planMetadataRuntimeQuery(idCount int) string {
 				COALESCE(activity, '') AS activity, COALESCE(activity_source, '') AS activity_source, COALESCE(tmux_attached_count, 0) AS tmux_attached_count,
 				ROW_NUMBER() OVER (PARTITION BY issue_id ORDER BY updated_at DESC, session_id DESC) AS rn
 			FROM (
-				SELECT project_id, session_id, issue_id, state, observed_state, activity, activity_source, tmux_attached_count, started_at, updated_at FROM daemon_session_projections
+				SELECT project_id, session_id, issue_id, state, observed_state, activity, activity_source, tmux_attached_count, started_at, updated_at FROM daemon_session_projections INDEXED BY idx_daemon_session_projections_project_issue_updated
 				UNION ALL
-				SELECT project_id, session_id, issue_id, state, observed_state, activity, activity_source, tmux_attached_count, started_at, updated_at FROM daemon_session_observations
+				SELECT project_id, session_id, issue_id, state, observed_state, activity, activity_source, tmux_attached_count, started_at, updated_at FROM daemon_session_observations INDEXED BY idx_daemon_session_observations_project_issue_updated
 			)
 			WHERE project_id = ? AND issue_id IN (` + ph + `)
 		),

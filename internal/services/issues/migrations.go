@@ -50,6 +50,7 @@ var orderedMigrations = []migration{
 	{id: "0026_issue_ownership", path: "migrations/0026_issue_ownership.sql", apply: applyIssueOwnershipMigration},
 	{id: "0026_decision_search_fts", path: "migrations/0026_decision_search_fts.sql", apply: applyDecisionSearchFTSMigration},
 	{id: "0027_issue_id_allocations", path: "migrations/0027_issue_id_allocations.sql"},
+	{id: "0028_runtime_projection_order_indexes", path: "migrations/0028_runtime_projection_order_indexes.sql"},
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {

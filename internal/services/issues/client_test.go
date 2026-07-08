@@ -1542,8 +1542,8 @@ func TestTaskRuntimeProjectionFilteredQueryUsesProjectionIndexes(t *testing.T) {
 
 	query, args := taskRuntimeProjectionQuery("proj-batch-context", false, "second", "third")
 	got := explainQueryPlan(t, ctx, db, query, args...)
-	assert.Contains(t, got, "idx_daemon_session_projections_project_issue", got)
-	assert.Contains(t, got, "idx_daemon_session_observations_project_issue", got)
+	assert.Contains(t, got, "idx_daemon_session_projections_project_issue_updated", got)
+	assert.Contains(t, got, "idx_daemon_session_observations_project_issue_updated", got)
 	assert.Contains(t, got, "sqlite_autoindex_daemon_worktree_projections_1", got)
 	assert.Contains(t, got, "idx_issue_external_refs_issue_active", got)
 }
@@ -1693,8 +1693,8 @@ func TestSQLiteHotQueryPlansUseExpectedIndexes(t *testing.T) {
 				return taskMetadataRuntimeProjectionQuery("project", "second", "third")
 			},
 			want: []string{
-				"idx_daemon_session_projections_project_issue",
-				"idx_daemon_session_observations_project_issue",
+				"idx_daemon_session_projections_project_issue_updated",
+				"idx_daemon_session_observations_project_issue_updated",
 				"sqlite_autoindex_daemon_worktree_projections_1",
 				"idx_dependencies_issue_active_type",
 			},
@@ -1707,8 +1707,8 @@ func TestSQLiteHotQueryPlansUseExpectedIndexes(t *testing.T) {
 				return taskRuntimeProjectionQuery("project", false)
 			},
 			want: []string{
-				"idx_daemon_session_projections_project_issue",
-				"idx_daemon_session_observations_project_issue",
+				"idx_daemon_session_projections_project_issue_updated",
+				"idx_daemon_session_observations_project_issue_updated",
 				"idx_issues_deleted_updated",
 			},
 			description: "board snapshot reads may scan active issues through the deleted/updated index, not the table",
@@ -3421,6 +3421,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0026_decision_search_fts",
 		"0026_issue_ownership",
 		"0027_issue_id_allocations",
+		"0028_runtime_projection_order_indexes",
 	}, got)
 }
 

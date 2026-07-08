@@ -11705,7 +11705,7 @@ func TestPrimeCommandEmitsProgressBeforeBlockedSnapshotReturns(t *testing.T) {
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command == daemonclient.CommandTaskList {
+				if req.Command == daemonclient.CommandTaskGet {
 					taskListCalls++
 					if taskListCalls == 1 {
 						close(snapshotEntered)
@@ -11776,8 +11776,8 @@ func TestPrimeCommandEmitsProgressBeforeBlockedSnapshotReturns(t *testing.T) {
 	if err := <-readErrCh; err != nil {
 		t.Fatalf("read stderr progress: %v", err)
 	}
-	if !strings.Contains(line, "az prime: loading daemon issue snapshot") {
-		t.Fatalf("first progress line = %q, want task snapshot phase", line)
+	if !strings.Contains(line, "az prime: loading active issue snapshot for az-1") {
+		t.Fatalf("first progress line = %q, want issue snapshot phase", line)
 	}
 
 	select {
@@ -11798,6 +11798,73 @@ func TestPrimeCommandEmitsProgressBeforeBlockedSnapshotReturns(t *testing.T) {
 	_ = stdoutW.Close()
 	_ = stderrW.Close()
 	<-stdoutDone
+}
+
+func TestPrimeCommandWithActiveIssueUsesTargetedSnapshot(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
+	setPrimeTmuxAvailable(t, false)
+	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+	taskGetCalls := 0
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGet:
+					taskGetCalls++
+					body, err := marshalTaskListBody([]domain.Task{{
+						ID:          "az-1",
+						Title:       "Prime issue",
+						Description: "Targeted detail",
+						Status:      domain.StatusInProgress,
+						Priority:    domain.P1,
+						Type:        domain.TypeBug,
+						CreatedAt:   now,
+						UpdatedAt:   now,
+					}})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskList:
+					t.Fatalf("prime with active issue must not load full task list")
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: "az-1",
+						Blocked:     map[string]string{},
+					}), nil
+				case protocol.CommandLearnRecall:
+					return responseWithJSON(req, protocol.LearnRecallResponseBody{}), nil
+				default:
+					t.Fatalf("unexpected daemon command: %q", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+		ProjectID: "proj",
+		Config:    config.DefaultConfig(),
+	}
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(deps)
+	})
+
+	if taskGetCalls != 1 {
+		t.Fatalf("task.get calls = %d, want 1", taskGetCalls)
+	}
+	if !strings.Contains(output, "Prime issue") {
+		t.Fatalf("prime output missing targeted issue title: %q", output)
+	}
+	if !strings.Contains(output, "Targeted detail") {
+		t.Fatalf("prime output missing targeted issue detail: %q", output)
+	}
 }
 
 func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
@@ -12300,7 +12367,7 @@ func TestPrimeCommandRecommendsChildIssuesForEpicContext(t *testing.T) {
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command != daemonclient.CommandTaskList {
+				if req.Command != daemonclient.CommandTaskGet {
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -12363,7 +12430,7 @@ func TestPrimeCommandRecommendsChildIssuesWhenActiveIssueHasChildren(t *testing.
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command != daemonclient.CommandTaskList {
+				if req.Command != daemonclient.CommandTaskGet {
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -12597,7 +12664,7 @@ func TestPrimeCommandTruncatesLargeIssueDescription(t *testing.T) {
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command != daemonclient.CommandTaskList {
+				if req.Command != daemonclient.CommandTaskGet {
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -12654,7 +12721,7 @@ func TestPrimeCommandWarnsWhenActiveIssueClosed(t *testing.T) {
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command != daemonclient.CommandTaskList {
+				if req.Command != daemonclient.CommandTaskGet {
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
