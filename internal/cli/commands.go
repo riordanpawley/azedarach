@@ -178,6 +178,21 @@ type IssueEventsOptions struct {
 	Limit      int
 }
 
+type IssueRecordOptions struct {
+	Project          string
+	IssueID          string
+	EventType        string
+	Summary          string
+	Body             string
+	DataJSON         string
+	Source           string
+	OperationID      string
+	SessionID        string
+	WorktreePath     string
+	FollowUpIssueIDs []string
+	JSON             bool
+}
+
 type IssueContextRiskOptions struct {
 	Project string
 	IssueID string
@@ -2847,6 +2862,64 @@ func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
 	return opts, nil
 }
 
+func ParseIssueRecordArgs(args []string) (IssueRecordOptions, error) {
+	opts := IssueRecordOptions{EventType: string(domain.IssueEventProgressRecorded)}
+	issueIDFlag := ""
+	var followUpFlags repeatedStringFlag
+	fs := flag.NewFlagSet("issue record", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&opts.EventType, "type", opts.EventType, "observation event type")
+	fs.StringVar(&opts.Summary, "summary", "", "short human-readable summary")
+	fs.StringVar(&opts.Body, "body", "", "longer evidence body")
+	fs.StringVar(&opts.DataJSON, "data", "", "JSON object payload to merge into the event")
+	fs.StringVar(&opts.Source, "source", "agent", "event source")
+	fs.StringVar(&opts.OperationID, "operation", "", "operation id")
+	fs.StringVar(&opts.SessionID, "session", "", "session id")
+	fs.StringVar(&opts.WorktreePath, "worktree", "", "worktree path")
+	fs.Var(&followUpFlags, "follow-up", "follow-up issue id; may be repeated")
+	fs.BoolVar(&opts.JSON, "json", false, "output recorded event as JSON")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueRecordOptions{}, err
+	}
+	if fs.NArg() > 1 {
+		return IssueRecordOptions{}, fmt.Errorf("usage: az issue record [--project <project-id>] [--id <issue-id>] [--type <event-type>] [--summary <text>] [--body <text>] [--data <json-object>] [--follow-up <issue-id> ...] [--json] [<issue-id>]")
+	}
+	if fs.NArg() == 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	typeExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "type" {
+			typeExplicit = true
+		}
+	})
+	opts.FollowUpIssueIDs = dedupeOrderedIDs([]string(followUpFlags))
+	if len(opts.FollowUpIssueIDs) > 0 && !typeExplicit {
+		opts.EventType = string(domain.IssueEventFollowupCreated)
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	opts.EventType = strings.TrimSpace(opts.EventType)
+	opts.Summary = strings.TrimSpace(opts.Summary)
+	opts.Body = strings.TrimSpace(opts.Body)
+	opts.DataJSON = strings.TrimSpace(opts.DataJSON)
+	opts.Source = strings.TrimSpace(opts.Source)
+	opts.OperationID = strings.TrimSpace(opts.OperationID)
+	opts.SessionID = strings.TrimSpace(opts.SessionID)
+	opts.WorktreePath = strings.TrimSpace(opts.WorktreePath)
+	if opts.EventType == "" {
+		return IssueRecordOptions{}, fmt.Errorf("--type is required")
+	}
+	if opts.Summary == "" && opts.Body == "" && opts.DataJSON == "" && len(opts.FollowUpIssueIDs) == 0 {
+		return IssueRecordOptions{}, fmt.Errorf("at least one of --summary, --body, --data, or --follow-up is required")
+	}
+	return opts, nil
+}
+
 func ParseIssueContextRiskArgs(args []string) (IssueContextRiskOptions, error) {
 	opts := IssueContextRiskOptions{}
 	issueIDFlag := ""
@@ -4618,6 +4691,99 @@ func IssueEventsCommand(deps *Dependencies, opts IssueEventsOptions) error {
 		fmt.Println()
 	}
 	return nil
+}
+
+func IssueRecordCommand(deps *Dependencies, opts IssueRecordOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	issueID := strings.TrimSpace(opts.IssueID)
+	if issueID == "" {
+		issueID = strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID"))
+	}
+	if issueID == "" {
+		return fmt.Errorf("issue id is required; pass --id or run with AZEDARACH_ISSUE_ID")
+	}
+	payload, err := issueRecordPayload(opts)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	event, err := deps.DaemonClient.AppendTaskEvent(ctx, issueID, daemonclient.TaskEventAppendRequest{
+		Type:          opts.EventType,
+		Source:        opts.Source,
+		SourceCommand: "az issue record",
+		OperationID:   opts.OperationID,
+		SessionID:     opts.SessionID,
+		WorktreePath:  issueRecordWorktreePath(deps, opts.WorktreePath),
+		Payload:       payload,
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), fmt.Sprintf("issue not found: %s", issueID)) {
+			return fmt.Errorf("issue not found: %s", issueID)
+		}
+		return fmt.Errorf("failed to record issue event for %s: %w", issueID, err)
+	}
+
+	if opts.JSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(issueEventJSONFromDomain(event))
+	}
+	fmt.Printf("Recorded %s for %s as event %d\n", event.Type, event.IssueID, event.ID)
+	if summary := issueObservationEventSummaryText(event.Payload); summary != "" {
+		fmt.Printf("Summary: %s\n", summary)
+	}
+	return nil
+}
+
+func issueRecordPayload(opts IssueRecordOptions) (map[string]any, error) {
+	payload := map[string]any{}
+	if strings.TrimSpace(opts.DataJSON) != "" {
+		if err := json.Unmarshal([]byte(opts.DataJSON), &payload); err != nil {
+			return nil, fmt.Errorf("parse --data JSON object: %w", err)
+		}
+		if payload == nil {
+			payload = map[string]any{}
+		}
+	}
+	if strings.TrimSpace(opts.Summary) != "" {
+		payload["summary"] = strings.TrimSpace(opts.Summary)
+	}
+	if strings.TrimSpace(opts.Body) != "" {
+		payload["body"] = strings.TrimSpace(opts.Body)
+	}
+	if len(opts.FollowUpIssueIDs) > 0 {
+		payload["follow_up_issue_ids"] = append([]string(nil), opts.FollowUpIssueIDs...)
+	}
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("record payload is empty")
+	}
+	return payload, nil
+}
+
+func issueRecordWorktreePath(deps *Dependencies, explicit string) string {
+	if trimmed := strings.TrimSpace(explicit); trimmed != "" {
+		return trimmed
+	}
+	if deps != nil && strings.TrimSpace(deps.RepoDir) != "" {
+		return strings.TrimSpace(deps.RepoDir)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return wd
+}
+
+func issueObservationEventSummaryText(payload map[string]any) string {
+	return firstStringPayloadValue(payload, "summary", "message", "body", "line", "evidence")
 }
 
 type issueEventsJSONOutput struct {

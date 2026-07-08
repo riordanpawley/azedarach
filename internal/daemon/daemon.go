@@ -706,6 +706,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskGetMany(ctx, req)
 	case "task.events":
 		return d.handleTaskEvents(ctx, req)
+	case "task.event.append":
+		return d.handleTaskEventAppend(ctx, req)
 	case "task.create":
 		return d.handleTaskCreate(ctx, req)
 	case "task.close":

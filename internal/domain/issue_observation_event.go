@@ -19,6 +19,8 @@ const (
 	IssueEventIssueOwnershipChanged   IssueObservationEventType = "issue.ownership_changed"
 	IssueEventIssueArchived           IssueObservationEventType = "issue.archived"
 	IssueEventIssueDeleted            IssueObservationEventType = "issue.deleted"
+	IssueEventProgressRecorded        IssueObservationEventType = "progress.recorded"
+	IssueEventFollowupCreated         IssueObservationEventType = "follow_up.created"
 	IssueEventSessionLifecycleChanged IssueObservationEventType = "session.lifecycle_changed"
 	IssueEventAgentActivityChanged    IssueObservationEventType = "agent.activity_changed"
 	IssueEventWorktreeGitChanged      IssueObservationEventType = "worktree.git_changed"
