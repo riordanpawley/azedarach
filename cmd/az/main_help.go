@@ -293,6 +293,8 @@ func printHelpForPath(path []string) bool {
 		printIssueCloseUsage(os.Stdout)
 	case "issue delete":
 		fmt.Println(issueDeleteUsage)
+	case "issue unarchive":
+		fmt.Println(issueUnarchiveUsage)
 	case "issue image":
 		fmt.Println("Usage: az issue image <add|remove> [arguments]")
 	case "issue image add":
@@ -382,7 +384,7 @@ func printHelpForPath(path []string) bool {
 func printIssueHelp() {
 	helpText, err := clitext.Render("issue_help", nil)
 	if err != nil {
-		fmt.Println("Usage: az issue <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]")
+		fmt.Println("Usage: az issue <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|delete|unarchive|image|document|dep|bulk-create|bulk-update|fanout> [arguments]")
 		return
 	}
 	fmt.Print(helpText)
@@ -424,6 +426,7 @@ const (
 	issueUpdateUsage              = "Usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]"
 	issueCloseUsage               = "Usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]"
 	issueDeleteUsage              = "Usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [<issue-id>]"
+	issueUnarchiveUsage           = "Usage: az issue unarchive [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]"
 	issueImageAddUsage            = "Usage: az issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]"
 	issueImageRemoveUsage         = "Usage: az issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]"
 	issueDocumentAddUsage         = "Usage: az issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]"

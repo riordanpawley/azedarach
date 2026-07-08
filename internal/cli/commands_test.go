@@ -5500,6 +5500,29 @@ func TestParseIssueDeleteArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueUnarchiveArgs(t *testing.T) {
+	got, err := ParseIssueUnarchiveArgs([]string{"az-1", "--json"})
+	if err != nil {
+		t.Fatalf("ParseIssueUnarchiveArgs() error = %v", err)
+	}
+	if got.IssueID != "az-1" || !got.JSON {
+		t.Fatalf("ParseIssueUnarchiveArgs() = %+v", got)
+	}
+
+	got, err = ParseIssueUnarchiveArgs([]string{"--id", "az-2"})
+	if err != nil {
+		t.Fatalf("ParseIssueUnarchiveArgs(named id) error = %v", err)
+	}
+	if got.IssueID != "az-2" {
+		t.Fatalf("ParseIssueUnarchiveArgs(named id) = %+v", got)
+	}
+
+	_, err = ParseIssueUnarchiveArgs([]string{})
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue unarchive") {
+		t.Fatalf("expected usage error, got %v", err)
+	}
+}
+
 func TestParseIssueUpdateArgs(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -9644,6 +9667,46 @@ func TestIssueDeleteCommandCleansRuntimeAttachmentsBeforeDelete(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output = %q, want substring %q", output, want)
 		}
+	}
+}
+
+func TestIssueUnarchiveCommandCallsDaemon(t *testing.T) {
+	var gotCommand string
+	var gotTaskID string
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				gotCommand = req.Command
+				var body struct {
+					TaskID string `json:"task_id"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal task unarchive body: %v", err)
+				}
+				gotTaskID = body.TaskID
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueUnarchiveCommand(deps, IssueUnarchiveOptions{IssueID: "az-1"})
+	})
+	if gotCommand != daemonclient.CommandTaskUnarchive || gotTaskID != "az-1" {
+		t.Fatalf("command=%s task_id=%s, want %s az-1", gotCommand, gotTaskID, daemonclient.CommandTaskUnarchive)
+	}
+	if !strings.Contains(output, "Unarchived issue: az-1") {
+		t.Fatalf("output = %q", output)
 	}
 }
 

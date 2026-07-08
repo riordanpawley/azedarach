@@ -12,6 +12,7 @@ const (
 	EventTaskUpdated  = "task.updated"
 	EventTaskDeleted  = "task.deleted"
 	EventTaskArchived = "task.archived"
+	EventTaskRestored = "task.restored"
 )
 
 // TaskEventBody carries the changed task row so clients can update board projections without waiting for a snapshot read.

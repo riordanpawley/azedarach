@@ -10694,6 +10694,30 @@ func TestTaskEventBodyAppliesWithoutSnapshotRefresh(t *testing.T) {
 	if len(deleted.tasks) != 0 {
 		t.Fatalf("tasks after delete event = %+v, want empty", deleted.tasks)
 	}
+
+	restoredTask := domain.Task{ID: "az-1", Title: "Restored", Description: "Restored detail", Status: domain.StatusDone, Priority: domain.P2, Type: domain.TypeTask}
+	restoreBody, err := json.Marshal(protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(deleted.daemonProjectID()),
+		TaskID:    "az-1",
+		Task:      &restoredTask,
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal restore task event body: %v", err)
+	}
+	restoredAny, _ := deleted.Update(daemonStreamEventMsg{event: protocol.EventEnvelope{
+		ProjectID: naming.ProjectID(deleted.daemonProjectID()),
+		Revision:  7,
+		Event:     protocol.EventTaskRestored,
+		Body:      restoreBody,
+	}})
+	restored := restoredAny.(Model)
+	if restored.daemonRevision != 7 {
+		t.Fatalf("daemonRevision after restore = %d, want 7", restored.daemonRevision)
+	}
+	if len(restored.tasks) != 1 || restored.tasks[0].Title != "Restored" || restored.tasks[0].Description != "Restored detail" {
+		t.Fatalf("tasks after restore event = %+v, want restored task", restored.tasks)
+	}
 }
 
 func TestDaemonStreamEventBatchAppliesTaskEventBehindProjectionBacklog(t *testing.T) {

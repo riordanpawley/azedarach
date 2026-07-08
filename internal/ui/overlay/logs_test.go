@@ -317,7 +317,7 @@ func TestEventLogOverlay_Update_FilterCycles(t *testing.T) {
 			ProtocolVersion: protocol.CurrentVersion,
 			ProjectID:       "proj-a",
 			Revision:        2,
-			Event:           protocol.EventTaskUpdated,
+			Event:           protocol.EventTaskRestored,
 			Kind:            protocol.EnvelopeKindEvent,
 			EmittedAt:       time.Date(2026, time.March, 25, 17, 0, 2, 0, time.UTC),
 			Body:            []byte(`{"project_id":"proj-a","task_id":"az-2"}`),
@@ -354,6 +354,9 @@ func TestEventLogOverlay_Update_FilterCycles(t *testing.T) {
 	}
 	if !strings.Contains(mutationView, "az-2") || !strings.Contains(mutationView, "task") {
 		t.Fatalf("mutation filter view missing task event: %s", mutationView)
+	}
+	if !strings.Contains(mutationView, "Task rest") {
+		t.Fatalf("mutation filter view missing restored label: %s", mutationView)
 	}
 
 	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})

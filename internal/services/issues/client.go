@@ -3131,6 +3131,56 @@ func (c *Client) archiveLocked(ctx context.Context, id string) error {
 	return nil
 }
 
+// Unarchive restores a soft-deleted issue to active issue reads.
+func (c *Client) Unarchive(ctx context.Context, id string) error {
+	return c.withMutationLock(ctx, func(ctx context.Context) error {
+		return c.unarchiveLocked(ctx, id)
+	})
+}
+
+func (c *Client) unarchiveLocked(ctx context.Context, id string) error {
+	db, err := c.dbHandle()
+	if err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return c.wrapError("unarchive", id, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := tx.ExecContext(ctx, `
+		UPDATE issues
+		SET
+			deleted_at = NULL,
+			updated_at = ?
+		WHERE id = ? AND deleted_at IS NOT NULL
+	`, now, id)
+	if err != nil {
+		return c.wrapError("unarchive", id, err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return c.wrapError("unarchive", id, domain.ErrNotFound)
+	}
+	if err := c.appendIssueObservationEvent(ctx, tx, id, domain.IssueEventIssueUnarchived, map[string]any{}); err != nil {
+		return c.wrapError("unarchive", id, err)
+	}
+	if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
+		return c.wrapError("unarchive", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return c.wrapError("unarchive", id, err)
+	}
+	tx = nil
+	return nil
+}
+
 func (c *Client) EnsureNoUndeletedParentChildDescendants(ctx context.Context, operation, issueID string) error {
 	db, err := c.dbHandle()
 	if err != nil {

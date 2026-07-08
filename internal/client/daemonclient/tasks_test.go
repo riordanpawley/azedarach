@@ -1468,7 +1468,10 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err := client.ArchiveTask(context.Background(), "az-5"); err != nil {
 			t.Fatalf("ArchiveTask error: %v", err)
 		}
-		if len(commands) != 2 || commands[0] != CommandTaskDelete || commands[1] != CommandTaskArchive {
+		if err := client.UnarchiveTask(context.Background(), "az-5"); err != nil {
+			t.Fatalf("UnarchiveTask error: %v", err)
+		}
+		if len(commands) != 3 || commands[0] != CommandTaskDelete || commands[1] != CommandTaskArchive || commands[2] != CommandTaskUnarchive {
 			t.Fatalf("commands = %v", commands)
 		}
 	})

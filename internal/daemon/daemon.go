@@ -769,6 +769,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskDelete(ctx, req)
 	case "task.archive":
 		return d.handleTaskArchive(ctx, req)
+	case "task.unarchive":
+		return d.handleTaskUnarchive(ctx, req)
 	case "task.dependency.add":
 		return d.handleTaskDependencyAdd(ctx, req)
 	case "task.dependency.remove":

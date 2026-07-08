@@ -269,3 +269,11 @@ func (d *Daemon) Archive(ctx context.Context, issueID string) error {
 	}
 	return client.Archive(ctx, issueID)
 }
+
+func (d *Daemon) Unarchive(ctx context.Context, issueID string) error {
+	client, _, err := d.issueClientFromContext(ctx)
+	if err != nil {
+		return err
+	}
+	return client.Unarchive(ctx, issueID)
+}

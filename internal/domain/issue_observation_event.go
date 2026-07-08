@@ -18,6 +18,7 @@ const (
 	IssueEventIssueDependencyRemoved  IssueObservationEventType = "issue.dependency_removed"
 	IssueEventIssueOwnershipChanged   IssueObservationEventType = "issue.ownership_changed"
 	IssueEventIssueArchived           IssueObservationEventType = "issue.archived"
+	IssueEventIssueUnarchived         IssueObservationEventType = "issue.unarchived"
 	IssueEventIssueDeleted            IssueObservationEventType = "issue.deleted"
 	IssueEventProgressRecorded        IssueObservationEventType = "progress.recorded"
 	IssueEventFollowupCreated         IssueObservationEventType = "follow_up.created"

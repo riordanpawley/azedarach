@@ -6086,6 +6086,33 @@ func (d *Daemon) handleTaskArchive(ctx context.Context, req protocol.RequestEnve
 	return resp, nil
 }
 
+func (d *Daemon) handleTaskUnarchive(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
+	var cmd struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task unarchive requested", "project_id", projectID, "task_id", cmd.TaskID)
+	}
+	if err := issueClient.Unarchive(ctx, cmd.TaskID); err != nil {
+		return d.errorResponse(req, daemonTaskMutationErrorCode(err), err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Revision = d.nextRevision(projectID)
+	d.publishTaskEvent(req, protocol.EventTaskRestored, resp.Revision, d.taskEventBody(ctx, projectID, cmd.TaskID))
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task unarchive completed", "project_id", projectID, "task_id", cmd.TaskID, "revision", resp.Revision)
+	}
+	return resp, nil
+}
+
 func daemonTaskMutationErrorCode(err error) protocol.ErrorCode {
 	if errors.Is(err, issues.ErrIssueHasLiveChildren) {
 		return protocol.ErrorCodeConflict

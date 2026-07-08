@@ -304,6 +304,12 @@ type IssueDeleteOptions struct {
 	ForceWorktree  bool
 }
 
+type IssueUnarchiveOptions struct {
+	Project string
+	IssueID string
+	JSON    bool
+}
+
 type IssueDependencyAddOptions struct {
 	Project            string
 	IssueID            string
@@ -3331,6 +3337,33 @@ func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 	return opts, nil
 }
 
+func ParseIssueUnarchiveArgs(args []string) (IssueUnarchiveOptions, error) {
+	opts := IssueUnarchiveOptions{}
+	issueIDFlag := ""
+	fs := flag.NewFlagSet("issue unarchive", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
+	fs.BoolVar(&opts.JSON, "json", false, "output issue unarchive result as JSON")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueUnarchiveOptions{}, err
+	}
+	if fs.NArg() > 1 {
+		return IssueUnarchiveOptions{}, fmt.Errorf("usage: az issue unarchive [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
+	}
+	if fs.NArg() == 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return IssueUnarchiveOptions{}, fmt.Errorf("usage: az issue unarchive [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
 func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	opts := IssueUpdateOptions{}
 	issueIDFlag := ""
@@ -5804,6 +5837,28 @@ func IssueDeleteCommand(deps *Dependencies, opts IssueDeleteOptions) error {
 		return err
 	}
 	return printIssueDeleteResult(opts, cleanup)
+}
+
+func IssueUnarchiveCommand(deps *Dependencies, opts IssueUnarchiveOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+	if err := deps.DaemonClient.UnarchiveTask(ctx, opts.IssueID); err != nil {
+		return fmt.Errorf("failed to unarchive issue: %w", err)
+	}
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id":   opts.IssueID,
+			"unarchived": true,
+		})
+	}
+	fmt.Printf("Unarchived issue: %s\n", opts.IssueID)
+	return nil
 }
 
 type issueDeleteCleanupResult struct {

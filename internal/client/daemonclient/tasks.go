@@ -36,6 +36,7 @@ const (
 	CommandTaskAppendNotes      = "task.append_notes"
 	CommandTaskDelete           = "task.delete"
 	CommandTaskArchive          = "task.archive"
+	CommandTaskUnarchive        = "task.unarchive"
 	CommandTaskDependencyAdd    = "task.dependency.add"
 	CommandTaskDependencyRemove = "task.dependency.remove"
 	CommandSyncRun              = "sync.run"
@@ -1066,6 +1067,15 @@ func (c *Client) ArchiveTask(ctx context.Context, taskID string) error {
 		return fmt.Errorf("invalid task id: %w", err)
 	}
 	return c.commandJSON(ctx, CommandTaskArchive, TaskIDRequest{TaskID: parsedTaskID}, nil)
+}
+
+// UnarchiveTask restores an archived task through the daemon client boundary.
+func (c *Client) UnarchiveTask(ctx context.Context, taskID string) error {
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return fmt.Errorf("invalid task id: %w", err)
+	}
+	return c.commandJSON(ctx, CommandTaskUnarchive, TaskIDRequest{TaskID: parsedTaskID}, nil)
 }
 
 // TaskGraphReadiness returns daemon-owned runnable-leaf policy for a root issue.

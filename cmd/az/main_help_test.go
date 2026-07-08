@@ -37,6 +37,7 @@ func TestMaybePrintCommandHelpUsesSpecificUsage(t *testing.T) {
 		{name: "issue record leaf", args: []string{"issue", "record", "--help"}, want: issueRecordUsage},
 		{name: "issue context risk leaf", args: []string{"issue", "context-risk", "--help"}, want: issueContextRiskUsage},
 		{name: "issue leaf", args: []string{"issue", "get", "--help"}, want: issueGetUsage},
+		{name: "issue unarchive leaf", args: []string{"issue", "unarchive", "--help"}, want: issueUnarchiveUsage},
 		{name: "issue parent", args: []string{"issue", "document", "--help"}, want: "Usage: az issue document <add|list|remove> [arguments]"},
 		{name: "issue nested leaf", args: []string{"issue", "dep", "bulk", "apply", "--help"}, want: issueDepBulkApplyUsage},
 		{name: "mail leaf", args: []string{"mail", "watch", "--help"}, want: mailWatchUsage},

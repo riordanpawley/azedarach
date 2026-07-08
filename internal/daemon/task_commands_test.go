@@ -858,6 +858,93 @@ func TestHandleTaskListAndGetSupportArchivedOnly(t *testing.T) {
 	}
 }
 
+func TestHandleTaskUnarchiveRestoresArchivedIssue(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() {
+		if err := issuesClient.CloseDB(); err != nil {
+			t.Fatalf("close issues db: %v", err)
+		}
+	})
+
+	projectID := "proj-unarchive"
+	archivedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "archived issue",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusDone,
+	})
+	if err != nil {
+		t.Fatalf("create archived issue: %v", err)
+	}
+	if err := issuesClient.Archive(ctx, archivedID); err != nil {
+		t.Fatalf("archive issue: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  logger,
+		},
+		issues: issuesClient,
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		hub:          publish.NewHub(16, 8, logger),
+		sessionStore: daemonstate.NewStore(),
+		revision:     map[string]uint64{projectID: 9},
+		git:          &git.Client{},
+	}
+	events, cancel := d.hub.Subscribe(projectID, 0)
+	defer cancel()
+
+	body, err := json.Marshal(map[string]string{"task_id": archivedID})
+	if err != nil {
+		t.Fatalf("marshal task.unarchive request: %v", err)
+	}
+	resp, err := d.handleTaskUnarchive(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-unarchive",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.unarchive",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskUnarchive error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.unarchive response = %+v", resp.Error)
+	}
+	if resp.Revision != 10 {
+		t.Fatalf("revision = %d, want 10", resp.Revision)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, archivedID)
+	if err != nil {
+		t.Fatalf("unarchived issue not active: %v", err)
+	}
+	if task.Title != "archived issue" {
+		t.Fatalf("title = %q, want archived issue", task.Title)
+	}
+	select {
+	case evt := <-events:
+		if evt.Event != protocol.EventTaskRestored || evt.Revision != 10 {
+			t.Fatalf("published event = %+v, want %s revision 10", evt, protocol.EventTaskRestored)
+		}
+		var taskBody protocol.TaskEventBody
+		if err := json.Unmarshal(evt.Body, &taskBody); err != nil {
+			t.Fatalf("unmarshal task event body: %v", err)
+		}
+		if taskBody.TaskID.String() != archivedID || taskBody.Task == nil || taskBody.Task.ID.String() != archivedID {
+			t.Fatalf("task event body = %+v, want restored task %s", taskBody, archivedID)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s event", protocol.EventTaskRestored)
+	}
+}
+
 func TestHandleTaskListRefreshesMissingTmuxSessionBeforeReportingActive(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
