@@ -5245,6 +5245,7 @@ func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
 	if mixedIssueResourceLifecycleHooksConfigured(deps) {
 		diagnostics = append(diagnostics, "issueResources config mixes reconcileCommand with one-shot prepare/cleanup hooks; verify lifecycle ownership is intentional")
 	}
+	diagnostics = append(diagnostics, issueDoctorRuntimeDiagnostics(ctx, deps, task)...)
 
 	if len(diagnostics) == 0 {
 		if opts.JSON {
@@ -5287,6 +5288,52 @@ func mixedIssueResourceLifecycleHooksConfigured(deps *Dependencies) bool {
 	return len(resources.PrepareCommands) > 0 ||
 		len(resources.FailedStartCleanupCommands) > 0 ||
 		len(resources.CleanupCommands) > 0
+}
+
+func issueDoctorRuntimeDiagnostics(ctx context.Context, deps *Dependencies, task domain.Task) []string {
+	diagnostics := make([]string, 0, 2)
+	issueID := strings.TrimSpace(task.ID.String())
+	if issueID == "" {
+		issueID = "<issue-id>"
+	}
+	if task.Session != nil || task.HasTmuxSession {
+		sessionStatusOutput := ""
+		if deps != nil && deps.DaemonClient != nil && issueID != "<issue-id>" {
+			if output, err := deps.DaemonClient.SessionStatus(ctx, issueID); err == nil {
+				sessionStatusOutput = strings.TrimSpace(output)
+			} else {
+				sessionStatusOutput = strings.TrimSpace(err.Error())
+			}
+		}
+		state := "unknown"
+		activity := ""
+		source := ""
+		if task.Session != nil {
+			if trimmed := strings.TrimSpace(string(task.Session.State)); trimmed != "" {
+				state = trimmed
+			}
+			activity = strings.TrimSpace(task.Session.DisplayActivity())
+			if activity == "" {
+				activity = strings.TrimSpace(task.Session.Activity)
+			}
+			source = strings.TrimSpace(task.Session.ActivitySource)
+		}
+		detail := fmt.Sprintf("runtime session metadata remains: state=%s", state)
+		if activity != "" {
+			detail += " activity=" + activity
+		}
+		if source != "" {
+			detail += " source=" + source
+		}
+		if strings.Contains(strings.ToLower(sessionStatusOutput), "no active session found") {
+			detail = "stale " + detail + "; live session status reports no active session"
+		}
+		diagnostics = append(diagnostics, fmt.Sprintf("%s; verify live state with `az session status %s`; if no active session exists, repair with `az orchestrate close-session --issue %s`, then retry close", detail, issueID, issueID))
+	}
+	if task.HasWorktree {
+		diagnostics = append(diagnostics, fmt.Sprintf("runtime worktree metadata remains; verify the worktree still exists, or retry close with cleanup/force options after confirming it is gone for %s", issueID))
+	}
+	return diagnostics
 }
 
 func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {

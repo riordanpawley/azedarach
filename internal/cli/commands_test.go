@@ -9308,6 +9308,69 @@ func TestIssueCheckDoctorAndDeleteCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 }
 
+func TestIssueDoctorWarnsOnRuntimeSessionMetadata(t *testing.T) {
+	now := time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC)
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-1")
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:        "az-1",
+							Title:     "Doctor runtime target",
+							Type:      domain.TypeTask,
+							Priority:  domain.P2,
+							Status:    domain.StatusInReview,
+							CreatedAt: now,
+							UpdatedAt: now,
+							Session: &domain.Session{
+								IssueID:        "az-1",
+								State:          domain.SessionBusy,
+								Activity:       "busy",
+								ActivitySource: "hooks",
+								UpdatedAt:      now,
+							},
+							HasTmuxSession: true,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return responseWithBody(req, body), nil
+				case daemonclient.CommandSessionStatus:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              false,
+						CompletedAt:     req.SentAt,
+						Error: &protocol.ErrorEnvelope{
+							Code:    protocol.ErrorCodeInvalidRequest,
+							Message: "no active session found for issue: az-1",
+						},
+					}, nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	doctorOut := captureStdout(t, func() error {
+		return IssueDoctorCommand(deps, IssueDoctorOptions{IssueID: "az-1"})
+	})
+	if !strings.Contains(doctorOut, "Doctor: WARN az-1") ||
+		!strings.Contains(doctorOut, "stale runtime session metadata remains: state=busy activity=busy source=hooks; live session status reports no active session") ||
+		!strings.Contains(doctorOut, "az orchestrate close-session --issue az-1") {
+		t.Fatalf("doctor output = %q", doctorOut)
+	}
+}
+
 func TestIssueDeleteCommandBlocksWhenRuntimeAttachmentsPresent(t *testing.T) {
 	deleteCalled := false
 	deps := &Dependencies{

@@ -1953,6 +1953,13 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	result.IntegratedTargetBranch = integration.TargetBranch
 
 	phaseStartedAt = time.Now()
+	if err := d.repairStaleSessionRuntimeProjections(ctx, projectID, taskID); err != nil {
+		recordPhase("preflight_runtime_projection_repair", phaseStartedAt, false)
+		return result, taskClosePostIntegrationPhaseError(taskID, "preflight_runtime_projection_repair", integration, err)
+	}
+	recordPhase("preflight_runtime_projection_repair", phaseStartedAt, false)
+
+	phaseStartedAt = time.Now()
 	guard, err := d.validateTaskClosePreflight(ctx, projectID, taskID, taskClosePreflightOptions{
 		AllowTargetSession:  true,
 		AllowActiveSession:  cmd.AllowActiveSession,
@@ -2037,6 +2044,43 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	return result, nil
 }
 
+func (d *Daemon) repairStaleSessionRuntimeProjections(ctx context.Context, projectID, taskID string) error {
+	store := d.runtimeStateStoreForProject(projectID)
+	if store == nil {
+		return nil
+	}
+	liveSessions, sessionsLoaded, err := d.liveTmuxSessionSet(ctx)
+	if err != nil {
+		return err
+	}
+	if !sessionsLoaded {
+		return nil
+	}
+	projectIDs, err := store.ListProjectIDs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, projectionProjectID := range projectIDs {
+		sessions, err := store.ListSessionStates(ctx, projectionProjectID)
+		if err != nil {
+			return err
+		}
+		for _, session := range sessions {
+			if !naming.IssueIDsEqual(session.IssueID, taskID) || daemonSessionProjectionStopped(session) {
+				continue
+			}
+			if _, live := liveSessions[session.ID]; live {
+				continue
+			}
+			markSessionProjectionStopped(&session)
+			if err := store.UpsertSessionState(ctx, projectionProjectID, session); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (d *Daemon) repairStaleRuntimeProjections(ctx context.Context, projectID, taskID string) error {
 	store := d.runtimeStateStoreForProject(projectID)
 	if store == nil {
@@ -2102,10 +2146,7 @@ func (d *Daemon) repairStaleRuntimeProjections(ctx context.Context, projectID, t
 			}
 			if sessionsLoaded {
 				if _, live := liveSessions[session.ID]; !live {
-					session.State = daemonstate.SessionStateStopped
-					session.ObservedState = daemonstate.SessionStateStopped
-					session.TmuxAttachedCount = 0
-					session.UpdatedAt = time.Now().UTC()
+					markSessionProjectionStopped(&session)
 					if err := store.UpsertSessionState(ctx, projectionProjectID, session); err != nil {
 						return err
 					}
@@ -2119,6 +2160,16 @@ func (d *Daemon) repairStaleRuntimeProjections(ctx context.Context, projectID, t
 		return fmt.Errorf("active runtime projection aliases remain: %s", strings.Join(blocked, ", "))
 	}
 	return nil
+}
+
+func markSessionProjectionStopped(session *daemonstate.Session) {
+	if session == nil {
+		return
+	}
+	session.State = daemonstate.SessionStateStopped
+	session.ObservedState = daemonstate.SessionStateStopped
+	session.TmuxAttachedCount = 0
+	session.UpdatedAt = time.Now().UTC()
 }
 
 func daemonShouldDeferWorktreeCleanupForClose(cmd taskCloseRequest, integration taskCloseIntegrationResult, guard taskClosePreflightResult) bool {

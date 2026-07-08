@@ -15,6 +15,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -4305,6 +4306,48 @@ func TestClient_CreateRetriesAfterSQLiteBusyTimeout(t *testing.T) {
 	}
 
 	assert.GreaterOrEqual(t, time.Since(start), 5*time.Second)
+}
+
+func TestClient_UpdateRetriesAfterSQLiteBusyTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	client := newTestClient(t)
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "update-retry-target",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+
+	lockDB, err := sql.Open("sqlite", "file:"+client.dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lockDB.Close() })
+
+	_, err = lockDB.Exec(`BEGIN IMMEDIATE`)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		done <- client.Update(ctx, issueID, domain.StatusInReview)
+	}()
+
+	time.Sleep(5500 * time.Millisecond)
+	_, err = lockDB.Exec(`COMMIT`)
+	require.NoError(t, err)
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("update did not complete after retrying past busy timeout")
+	}
+
+	assert.GreaterOrEqual(t, time.Since(start), 5*time.Second)
+	task, err := client.GetWithRuntime(ctx, protocol.DefaultProjectID, issueID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusInReview, task.Status)
 }
 
 func explainQueryPlan(t *testing.T, ctx context.Context, db *sql.DB, query string, args ...any) string {
