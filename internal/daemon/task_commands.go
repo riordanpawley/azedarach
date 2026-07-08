@@ -2354,12 +2354,6 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 	targetWorktree := strings.TrimSpace(target.WorktreePath)
 	branchAttached := target.BranchAttached
 	if targetWorktree == "" {
-		if attached, found, err := d.git.WorktreePathForBranch(ctx, targetBranch); err == nil && found && strings.TrimSpace(attached) != "" {
-			targetWorktree = strings.TrimSpace(attached)
-			branchAttached = true
-		}
-	}
-	if targetWorktree == "" {
 		targetWorktree = strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
 		if targetWorktree == "" {
 			targetWorktree = strings.TrimSpace(d.resolveRepoDirForProject(projectID))

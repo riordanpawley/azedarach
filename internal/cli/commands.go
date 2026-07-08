@@ -475,11 +475,13 @@ type sessionProjectCandidate struct {
 
 type BranchAgentMergeOptions struct {
 	IssueID string
+	Project string
 	Target  string
 }
 
 type BranchMergeToBaseOptions struct {
 	IssueID           string
+	Project           string
 	AllowBaseForChild bool
 }
 
@@ -1372,6 +1374,9 @@ func BranchMergeToBaseCommand(deps *Dependencies, issueID string) error {
 }
 
 func BranchMergeToBaseCommandWithOptions(deps *Dependencies, opts BranchMergeToBaseOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
 	result, err := runBranchMergeToBase(deps, opts)
 	if err != nil {
 		return err
@@ -1658,6 +1663,9 @@ func resolveMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID s
 }
 
 func BranchAgentMergeCommand(deps *Dependencies, opts BranchAgentMergeOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
 	ctx, cancel := context.WithTimeout(context.Background(), branchMergeToBaseTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {

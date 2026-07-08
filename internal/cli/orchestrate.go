@@ -111,6 +111,46 @@ func issueCloseCommand(issueID string) string {
 	return fmt.Sprintf("az issue close --id %s", issueID)
 }
 
+func issueCloseCommandForProject(issueID, projectID string) string {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return issueCloseCommand(issueID)
+	}
+	return fmt.Sprintf("az issue close --project %s --id %s", projectID, issueID)
+}
+
+func issueGetCommandForProject(issueID, projectID string) string {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return fmt.Sprintf("az issue get %s", issueID)
+	}
+	return fmt.Sprintf("az issue get --project %s %s", projectID, issueID)
+}
+
+func branchMergeCommandForProject(issueID, projectID string) string {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return fmt.Sprintf("az branch merge %s", issueID)
+	}
+	return fmt.Sprintf("az branch merge --project %s %s", projectID, issueID)
+}
+
+func orchestrateIntegrateApplyCommandForProject(issueID, projectID string) string {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return fmt.Sprintf("az orchestrate integrate --issue %s --apply", issueID)
+	}
+	return fmt.Sprintf("az orchestrate integrate --project %s --issue %s --apply", projectID, issueID)
+}
+
+func orchestrateCloseSessionCommandForProject(issueID, projectID string) string {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return fmt.Sprintf("az orchestrate close-session --issue %s", issueID)
+	}
+	return fmt.Sprintf("az orchestrate close-session --project %s --issue %s", projectID, issueID)
+}
+
 var orchestrateObserveNow = func() time.Time {
 	return time.Now().UTC()
 }
@@ -2298,7 +2338,7 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 	mergeReady := readiness.Ready
 	contextRiskBlocked := readiness.ContextRisk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*readiness.ContextRisk)
 	closeoutReady := mergeReady && !contextRiskBlocked
-	commands := orchestrateIntegrationCommands(opts.IssueID, wt, found, closeoutReady)
+	commands := orchestrateIntegrationCommands(opts.IssueID, opts.Project, wt, found, closeoutReady)
 	result := orchestrateIntegrateResult{
 		IssueID:       opts.IssueID,
 		MergeReady:    mergeReady,
@@ -2316,7 +2356,7 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 		result.Branch = wt.Branch
 	}
 	if opts.Apply {
-		applyErr := applyOrchestrateIntegration(deps, opts.IssueID, mergeReady, &result)
+		applyErr := applyOrchestrateIntegration(deps, opts.IssueID, opts.Project, mergeReady, &result)
 		if opts.JSON {
 			if err := printJSON(result); err != nil {
 				return err
@@ -2362,14 +2402,14 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 	return nil
 }
 
-func applyOrchestrateIntegration(deps *Dependencies, issueID string, mergeReady bool, result *orchestrateIntegrateResult) error {
+func applyOrchestrateIntegration(deps *Dependencies, issueID, projectID string, mergeReady bool, result *orchestrateIntegrateResult) error {
 	if !mergeReady {
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{
 			Name:   "completion_evidence",
 			Status: "failed",
 			Error:  "missing completion evidence",
 		})
-		result.Recovery = orchestrateIntegrationRecovery(issueID, "missing_completion_evidence")
+		result.Recovery = orchestrateIntegrationRecovery(issueID, projectID, "missing_completion_evidence")
 		return fmt.Errorf("cannot apply integration for %s: missing completion evidence", issueID)
 	}
 	result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "completion_evidence", Status: "success"})
@@ -2391,7 +2431,7 @@ func applyOrchestrateIntegration(deps *Dependencies, issueID string, mergeReady 
 	})
 	if err != nil {
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "integrate_and_close", Status: "failed", Error: err.Error()})
-		result.Recovery = orchestrateIntegrationRecovery(issueID, "integration_failed")
+		result.Recovery = orchestrateIntegrationRecovery(issueID, projectID, "integration_failed")
 		return fmt.Errorf("apply integration for %s: %w", issueID, err)
 	}
 	result.Applied = true
@@ -2407,10 +2447,10 @@ func applyOrchestrateIntegration(deps *Dependencies, issueID string, mergeReady 
 		Output: closeOutput,
 	})
 
-	note := fmt.Sprintf("Integrated by `az orchestrate integrate --issue %s --apply`: daemon task.close integrated the branch, stopped session/worktree runtime if present, and closed the issue.", issueID)
+	note := fmt.Sprintf("Integrated by `%s`: daemon task.close integrated the branch, stopped session/worktree runtime if present, and closed the issue.", orchestrateIntegrateApplyCommandForProject(issueID, projectID))
 	if err := deps.DaemonClient.AppendTaskNotes(cleanupCtx, issueID, note); err != nil {
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "append_evidence", Status: "failed", Error: err.Error()})
-		result.Recovery = orchestrateIntegrationRecovery(issueID, "post_close_failed")
+		result.Recovery = orchestrateIntegrationRecovery(issueID, projectID, "post_close_failed")
 		return fmt.Errorf("integration applied for %s but append evidence failed: %w", issueID, err)
 	} else {
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "append_evidence", Status: "success"})
@@ -2439,27 +2479,27 @@ func printOrchestrateIntegrateApplyResult(result orchestrateIntegrateResult) {
 	}
 }
 
-func orchestrateIntegrationRecovery(issueID, reason string) []string {
+func orchestrateIntegrationRecovery(issueID, projectID, reason string) []string {
 	switch reason {
 	case "missing_completion_evidence":
 		return []string{
-			fmt.Sprintf("review worker output and send a worker-integration-ready mailbox event for %s, or close if ready to integrate and clean up: %s", issueID, issueCloseCommand(issueID)),
-			fmt.Sprintf("retry: az orchestrate integrate --issue %s --apply", issueID),
+			fmt.Sprintf("review worker output and send a worker-integration-ready mailbox event for %s, or close if ready to integrate and clean up: %s", issueID, issueCloseCommandForProject(issueID, projectID)),
+			fmt.Sprintf("retry: %s", orchestrateIntegrateApplyCommandForProject(issueID, projectID)),
 		}
 	case "merge_failed", "integration_failed":
 		return []string{
-			fmt.Sprintf("inspect merge failure and retry existing merge path: az branch merge %s", issueID),
-			fmt.Sprintf("after repair, retry daemon-owned integration/cleanup: az orchestrate integrate --issue %s --apply", issueID),
+			fmt.Sprintf("inspect merge failure and retry existing merge path: %s", branchMergeCommandForProject(issueID, projectID)),
+			fmt.Sprintf("after repair, retry daemon-owned integration/cleanup: %s", orchestrateIntegrateApplyCommandForProject(issueID, projectID)),
 		}
 	case "post_close_failed":
 		return []string{
-			fmt.Sprintf("integration/close already completed; inspect issue state: az issue get %s", issueID),
+			fmt.Sprintf("integration/close already completed; inspect issue state: %s", issueGetCommandForProject(issueID, projectID)),
 			fmt.Sprintf("append evidence notes to %s with the merge and validation summary", issueID),
 		}
 	default:
 		return []string{
-			fmt.Sprintf("run cleanup steps manually: az orchestrate close-session --issue %s", issueID),
-			fmt.Sprintf("close the worker issue if ready to integrate and clean up: %s", issueCloseCommand(issueID)),
+			fmt.Sprintf("run cleanup steps manually: %s", orchestrateCloseSessionCommandForProject(issueID, projectID)),
+			fmt.Sprintf("close the worker issue if ready to integrate and clean up: %s", issueCloseCommandForProject(issueID, projectID)),
 			fmt.Sprintf("append evidence notes to %s with the merge and validation summary", issueID),
 		}
 	}
@@ -3306,7 +3346,7 @@ func worktreeForIssue(ctx context.Context, deps *Dependencies, issueID string) (
 	return daemonclient.Worktree{}, false, nil
 }
 
-func orchestrateIntegrationCommands(issueID string, wt daemonclient.Worktree, found, mergeReady bool) []string {
+func orchestrateIntegrationCommands(issueID, projectID string, wt daemonclient.Worktree, found, mergeReady bool) []string {
 	commands := make([]string, 0, 5)
 	if found && strings.TrimSpace(wt.Path) != "" {
 		commands = append(commands,
@@ -3314,11 +3354,14 @@ func orchestrateIntegrationCommands(issueID string, wt daemonclient.Worktree, fo
 			fmt.Sprintf("git -C %s log --oneline --max-count=10", shellSingleQuote(wt.Path)),
 		)
 	} else {
-		commands = append(commands, fmt.Sprintf("az issue get %s", issueID), fmt.Sprintf("az session status %s", issueID))
+		commands = append(commands, issueGetCommandForProject(issueID, projectID))
+		if strings.TrimSpace(projectID) == "" {
+			commands = append(commands, fmt.Sprintf("az session status %s", issueID))
+		}
 	}
 	if mergeReady {
-		commands = append(commands, issueCloseCommand(issueID))
-		commands = append(commands, fmt.Sprintf("repair merge only if close reports conflicts: az branch merge %s", issueID))
+		commands = append(commands, issueCloseCommandForProject(issueID, projectID))
+		commands = append(commands, fmt.Sprintf("repair merge only if close reports conflicts: %s", branchMergeCommandForProject(issueID, projectID)))
 	}
 	return commands
 }

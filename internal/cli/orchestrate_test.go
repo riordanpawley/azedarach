@@ -2876,15 +2876,20 @@ func TestOrchestrateIntegrateApplyRequiresCompletionEvidence(t *testing.T) {
 }
 
 func TestOrchestrateIntegrateApplyDaemonIntegrationFailureStopsBeforeAppend(t *testing.T) {
-	deps, commands, _ := orchestrateIntegrateApplyDeps(t, "merge")
+	deps, commands, _ := orchestrateIntegrateApplyDeps(t, "merge_project")
 	output, err := captureStdoutAllowError(t, func() error {
-		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2", Apply: true})
+		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{Project: "azedarach", IssueID: "az-2", Apply: true})
 	})
 	if err == nil {
 		t.Fatal("expected daemon integration failure")
 	}
-	if !strings.Contains(output, "integrate_and_close: failed") || !strings.Contains(output, "az branch merge az-2") {
+	if !strings.Contains(output, "integrate_and_close: failed") ||
+		!strings.Contains(output, "az branch merge --project azedarach az-2") ||
+		!strings.Contains(output, "az orchestrate integrate --project azedarach --issue az-2 --apply") {
 		t.Fatalf("output missing daemon integration failure recovery:\n%s", output)
+	}
+	if strings.Contains(output, "az orchestrate integrate --issue az-2 --apply") {
+		t.Fatalf("output included unscoped project retry recovery:\n%s", output)
 	}
 	if containsString(*commands, daemonclient.CommandTaskAppendNotes) || containsString(*commands, daemonclient.CommandGitMerge) || containsString(*commands, commandTaskClosePreflight) || containsString(*commands, commandSessionStop) || containsString(*commands, daemonclient.CommandWorktreeRemove) || containsString(*commands, daemonclient.CommandTaskUpdateStatus) {
 		t.Fatalf("commands = %+v, append/client integration cleanup should not run after daemon integration failure", *commands)
@@ -3013,6 +3018,9 @@ func orchestrateIntegrateApplyDeps(t *testing.T, failStep string) (*Dependencies
 						Result:   gitservice.MergeResult{Success: true},
 					}), nil
 				case daemonclient.CommandTaskClose:
+					if failStep == "merge_project" && req.Meta.ProjectID.String() != "azedarach" {
+						t.Fatalf("task.close project = %q, want azedarach", req.Meta.ProjectID)
+					}
 					if deadline, ok := ctx.Deadline(); ok {
 						closeBudgets = append(closeBudgets, time.Until(deadline))
 					}
@@ -3025,7 +3033,7 @@ func orchestrateIntegrateApplyDeps(t *testing.T, failStep string) (*Dependencies
 					if !body.IntegrateBeforeClose {
 						t.Fatalf("task.close integrate_before_close = false, want true")
 					}
-					if failStep == "merge" {
+					if failStep == "merge" || failStep == "merge_project" {
 						return protocol.ResponseEnvelope{}, fmt.Errorf("integrate before closing az-2: merge failed")
 					}
 					if failStep == "merge_conflict" {

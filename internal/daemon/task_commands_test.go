@@ -3603,7 +3603,7 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			return "tree-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "fetch":
 			return "", nil
-		case len(args) >= 5 && args[0] == "-C" && args[2] == "checkout":
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "checkout":
 			return "", nil
 		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "worktree" && args[3] == "add":
 			scratchWorktree = args[5]
@@ -3719,6 +3719,164 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	}
 	if strings.Contains(joined, "-C "+repoDir+" fetch origin") {
 		t.Fatalf("git commands should not fetch during local close integration:\n%s", joined)
+	}
+}
+
+func TestTaskCloseCommandIntegrationIgnoresDuplicateIssueTargetWorktreeFromOtherProject(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-target"
+	repoDir := t.TempDir()
+	otherRepo := filepath.Join(t.TempDir(), "Chefy-production")
+	if err := os.MkdirAll(otherRepo, 0o755); err != nil {
+		t.Fatalf("mkdir other repo: %v", err)
+	}
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Duplicate issue id integration",
+		Type:     domain.TypeBug,
+		Priority: domain.P0,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
+	sourceBranch := "riordan/" + taskID + "/integrate"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      sourceWorktree,
+		Branch:    sourceBranch,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	worktreeListOutput := strings.Join([]string{
+		fmt.Sprintf("worktree %s\nbranch refs/heads/main\n", otherRepo),
+		fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n", sourceWorktree, sourceBranch),
+	}, "\n")
+	commands := make([]string, 0, 24)
+	var scratchWorktree string
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		joined := strings.Join(args, " ")
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return worktreeListOutput, nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == otherRepo && args[2] == "status":
+			return "A  domain/commerce/tsconfig.json\n", nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
+			return filepath.Join(repoDir, ".git"), nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
+			return "target-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
+			return "merged-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
+			return "base-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff" && slices.Contains(args, "--name-status"):
+			return "M\tmain.go\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-list" && args[4] == "main.."+sourceBranch:
+			return "1", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "rev-list":
+			return "0", nil
+		case len(args) >= 6 && args[0] == "-C" && args[2] == "merge-tree":
+			return "tree-sha", nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "checkout":
+			return "", nil
+		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "worktree" && args[3] == "add":
+			scratchWorktree = args[5]
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge":
+			return "merge complete", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "reset" && args[3] == "--hard":
+			return "", nil
+		case len(args) >= 6 && args[0] == "-C" && args[1] == repoDir && args[2] == "worktree" && args[3] == "remove":
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected git args: %s", joined)
+		}
+	}}
+
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		git:      git.NewClient(runner, logger),
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
+		logger:                  logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	body, err := json.Marshal(taskCloseRequest{
+		TaskID:               taskID,
+		IntegrateBeforeClose: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal task close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-duplicate-project",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		if resp.Error != nil {
+			t.Fatalf("handleTaskClose error = %s", resp.Error.Message)
+		}
+		t.Fatalf("handleTaskClose response = %+v", resp)
+	}
+	var result taskCloseResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal close result: %v", err)
+	}
+	if !result.IntegrationRequested || !result.Integrated || result.IntegratedTargetBranch != "main" {
+		t.Fatalf("close integration result = %+v, want project-scoped integration to main", result)
+	}
+	joined := strings.Join(commands, "\n")
+	if strings.Contains(joined, "-C "+otherRepo+" ") {
+		t.Fatalf("git commands used non-target project worktree:\n%s", joined)
+	}
+	if !strings.Contains(joined, "-C "+repoDir+" status --porcelain") {
+		t.Fatalf("git commands missing requested project target status:\n%s", joined)
 	}
 }
 
