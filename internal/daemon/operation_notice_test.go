@@ -79,6 +79,12 @@ func TestOperationFailureNoticeDedupesRepeatedFailures(t *testing.T) {
 			t.Fatalf("submit operation %d: %v", i, err)
 		}
 		waitForRuntimeState(t, runtime, result.Record.ID, daemonops.StateFailed)
+		waitForNoticeOccurrenceCount(t, notices, daemonnotices.Query{
+			ProjectID: "proj-1",
+			States:    []daemonnotices.State{daemonnotices.StateActive},
+			Category:  "operation_failed",
+			DedupeKey: "operation_failed:session.start:session.start:AZ-1",
+		}, i+1)
 	}
 
 	records := waitForNoticeRecords(t, notices, daemonnotices.Query{
@@ -330,6 +336,25 @@ func waitForNoticeRecords(t *testing.T, notices *daemonnotices.Service, query da
 	}
 	t.Fatalf("notices len = %d, want %d: %+v", len(records), wantLen, records)
 	return nil
+}
+
+func waitForNoticeOccurrenceCount(t *testing.T, notices *daemonnotices.Service, query daemonnotices.Query, wantCount int) daemonnotices.Record {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var records []daemonnotices.Record
+	var err error
+	for time.Now().Before(deadline) {
+		records, err = notices.List(context.Background(), query)
+		if err == nil && len(records) == 1 && records[0].OccurrenceCount == wantCount {
+			return records[0]
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("list notices: %v", err)
+	}
+	t.Fatalf("notice occurrence count not reached, want %d: %+v", wantCount, records)
+	return daemonnotices.Record{}
 }
 
 func noticeHasAction(record daemonnotices.Record, actionID string) bool {

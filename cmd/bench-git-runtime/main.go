@@ -13,6 +13,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
+	"github.com/riordanpawley/azedarach/internal/observability"
 )
 
 type worktreeInfo struct {
@@ -40,23 +43,40 @@ type opStats struct {
 }
 
 type opResult struct {
-	Stats   opStats   `json:"stats"`
-	Samples []sample  `json:"samples,omitempty"`
+	Stats   opStats  `json:"stats"`
+	Samples []sample `json:"samples,omitempty"`
 }
 
 type benchmarkResult struct {
-	StartedAt           time.Time             `json:"started_at"`
-	FinishedAt          time.Time             `json:"finished_at"`
-	RepoRoot            string                `json:"repo_root"`
-	BaseBranch          string                `json:"base_branch"`
-	Iterations          int                   `json:"iterations"`
-	WorktreeCount       int                   `json:"worktree_count"`
-	PerCommandTimeoutMs int64                 `json:"per_command_timeout_ms"`
-	Operations          map[string]opResult   `json:"operations"`
-	Worktrees           []worktreeInfo        `json:"worktrees"`
+	StartedAt           time.Time           `json:"started_at"`
+	FinishedAt          time.Time           `json:"finished_at"`
+	RepoRoot            string              `json:"repo_root"`
+	BaseBranch          string              `json:"base_branch"`
+	Iterations          int                 `json:"iterations"`
+	WorktreeCount       int                 `json:"worktree_count"`
+	PerCommandTimeoutMs int64               `json:"per_command_timeout_ms"`
+	Operations          map[string]opResult `json:"operations"`
+	Worktrees           []worktreeInfo      `json:"worktrees"`
 }
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
+	shutdown, err := observability.Configure(context.Background(), observability.Options{
+		ServiceName: "azedarach-bench-git-runtime",
+	})
+	if err != nil {
+		return exitf("configure otel: %v", err)
+	}
+	defer func() {
+		_ = shutdown(context.Background())
+	}()
+	ctx, endSpan := latencytrace.StartSpan(context.Background(), "cli", "bench_git_runtime")
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
+
 	repoFlag := flag.String("repo", ".", "repository path")
 	baseFlag := flag.String("base", "main", "base branch for ahead/behind and merge-base checks")
 	iterationsFlag := flag.Int("iterations", 2, "number of benchmark iterations")
@@ -66,23 +86,28 @@ func main() {
 	flag.Parse()
 
 	if *iterationsFlag < 1 {
-		exitf("iterations must be >= 1")
+		spanErr = fmt.Errorf("iterations must be >= 1")
+		return exitf("iterations must be >= 1")
 	}
 	if *perCommandTimeoutFlag <= 0 {
-		exitf("timeout must be > 0")
+		spanErr = fmt.Errorf("timeout must be > 0")
+		return exitf("timeout must be > 0")
 	}
 
 	repoRoot, err := absPath(*repoFlag)
 	if err != nil {
-		exitf("resolve repo path: %v", err)
+		spanErr = err
+		return exitf("resolve repo path: %v", err)
 	}
 
-	worktrees, err := listWorktrees(repoRoot)
+	worktrees, err := listWorktrees(ctx, repoRoot)
 	if err != nil {
-		exitf("list worktrees: %v", err)
+		spanErr = err
+		return exitf("list worktrees: %v", err)
 	}
 	if len(worktrees) == 0 {
-		exitf("no worktrees found for %s", repoRoot)
+		spanErr = fmt.Errorf("no worktrees found")
+		return exitf("no worktrees found for %s", repoRoot)
 	}
 	if *maxWorktreesFlag > 0 && len(worktrees) > *maxWorktreesFlag {
 		worktrees = worktrees[:*maxWorktreesFlag]
@@ -101,36 +126,36 @@ func main() {
 	}
 
 	rawSamples := map[string][]sample{
-		"worktree_list": {},
-		"status":        {},
-		"merge_base":    {},
+		"worktree_list":   {},
+		"status":          {},
+		"merge_base":      {},
 		"rev_list_ahead":  {},
 		"rev_list_behind": {},
 		"diff_shortstat":  {},
 	}
 
 	for i := 0; i < *iterationsFlag; i++ {
-		s := runCommand(repoRoot, *perCommandTimeoutFlag, "git", "-C", repoRoot, "worktree", "list", "--porcelain")
+		s := runCommand(ctx, repoRoot, *perCommandTimeoutFlag, "git", "-C", repoRoot, "worktree", "list", "--porcelain")
 		rawSamples["worktree_list"] = append(rawSamples["worktree_list"], s)
 
 		for _, wt := range worktrees {
-			statusSample := runCommand(repoRoot, *perCommandTimeoutFlag, "git", "-C", wt.Path, "status", "--porcelain")
+			statusSample := runCommand(ctx, repoRoot, *perCommandTimeoutFlag, "git", "-C", wt.Path, "status", "--porcelain")
 			rawSamples["status"] = append(rawSamples["status"], statusSample)
 
-			mergeBaseSample, mergeBase := runCommandOutput(repoRoot, *perCommandTimeoutFlag, "git", "-C", wt.Path, "merge-base", *baseFlag, "HEAD")
+			mergeBaseSample, mergeBase := runCommandOutput(ctx, repoRoot, *perCommandTimeoutFlag, "git", "-C", wt.Path, "merge-base", *baseFlag, "HEAD")
 			rawSamples["merge_base"] = append(rawSamples["merge_base"], mergeBaseSample)
 
-			behindSample := runCommand(repoRoot, *perCommandTimeoutFlag, "git", "-C", wt.Path, "rev-list", "--count", "HEAD.."+*baseFlag)
+			behindSample := runCommand(ctx, repoRoot, *perCommandTimeoutFlag, "git", "-C", wt.Path, "rev-list", "--count", "HEAD.."+*baseFlag)
 			rawSamples["rev_list_behind"] = append(rawSamples["rev_list_behind"], behindSample)
 
-			aheadSample := runCommand(repoRoot, *perCommandTimeoutFlag, "git", "-C", wt.Path, "rev-list", "--count", *baseFlag+"..HEAD")
+			aheadSample := runCommand(ctx, repoRoot, *perCommandTimeoutFlag, "git", "-C", wt.Path, "rev-list", "--count", *baseFlag+"..HEAD")
 			rawSamples["rev_list_ahead"] = append(rawSamples["rev_list_ahead"], aheadSample)
 
 			diffArgs := []string{"git", "-C", wt.Path, "diff", "--shortstat"}
 			if mergeBaseSample.Success && mergeBase != "" {
 				diffArgs = []string{"git", "-C", wt.Path, "diff", "--shortstat", mergeBase, "HEAD", "--", ":^.azedarach"}
 			}
-			diffSample := runCommand(repoRoot, *perCommandTimeoutFlag, diffArgs[0], diffArgs[1:]...)
+			diffSample := runCommand(ctx, repoRoot, *perCommandTimeoutFlag, diffArgs[0], diffArgs[1:]...)
 			rawSamples["diff_shortstat"] = append(rawSamples["diff_shortstat"], diffSample)
 		}
 	}
@@ -147,14 +172,23 @@ func main() {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(result); err != nil {
-		exitf("encode result: %v", err)
+		spanErr = err
+		return exitf("encode result: %v", err)
 	}
+	return 0
 }
 
-func listWorktrees(repoRoot string) ([]worktreeInfo, error) {
-	cmd := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain")
+func listWorktrees(ctx context.Context, repoRoot string) ([]worktreeInfo, error) {
+	commandCtx, endSpan := latencytrace.StartSpan(ctx, "dependency", "process",
+		"dependency.name", "git",
+		"dependency.operation", "worktree",
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
+	cmd := exec.CommandContext(commandCtx, "git", "-C", repoRoot, "worktree", "list", "--porcelain")
 	out, err := cmd.Output()
 	if err != nil {
+		spanErr = err
 		return nil, fmt.Errorf("git worktree list --porcelain failed: %w", err)
 	}
 	return parseWorktreeListPorcelain(string(out))
@@ -195,14 +229,20 @@ func parseWorktreeListPorcelain(raw string) ([]worktreeInfo, error) {
 	return worktrees, nil
 }
 
-func runCommand(repoRoot string, timeout time.Duration, bin string, args ...string) sample {
-	s, _ := runCommandOutput(repoRoot, timeout, bin, args...)
+func runCommand(ctx context.Context, repoRoot string, timeout time.Duration, bin string, args ...string) sample {
+	s, _ := runCommandOutput(ctx, repoRoot, timeout, bin, args...)
 	return s
 }
 
-func runCommandOutput(repoRoot string, timeout time.Duration, bin string, args ...string) (sample, string) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+func runCommandOutput(parent context.Context, repoRoot string, timeout time.Duration, bin string, args ...string) (sample, string) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "process",
+		"dependency.name", bin,
+		"dependency.operation", commandOperation(args),
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = repoRoot
@@ -220,10 +260,12 @@ func runCommandOutput(repoRoot string, timeout time.Duration, bin string, args .
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		s.Timeout = true
 		s.Error = "timeout"
+		spanErr = ctx.Err()
 		return s, ""
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
+		spanErr = err
 		stderr := strings.TrimSpace(string(exitErr.Stderr))
 		if stderr != "" {
 			s.Error = stderr
@@ -232,8 +274,27 @@ func runCommandOutput(repoRoot string, timeout time.Duration, bin string, args .
 		}
 		return s, ""
 	}
+	spanErr = err
 	s.Error = err.Error()
 	return s, ""
+}
+
+func commandOperation(args []string) string {
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if arg == "" {
+			continue
+		}
+		if arg == "-C" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return arg
+	}
+	return "unknown"
 }
 
 func summarize(samples []sample) opStats {
@@ -297,7 +358,7 @@ func absPath(path string) (string, error) {
 	return filepath.Clean(abs), nil
 }
 
-func exitf(format string, args ...any) {
+func exitf(format string, args ...any) int {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
-	os.Exit(1)
+	return 1
 }

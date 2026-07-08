@@ -47,18 +47,25 @@ func NewServer(socketPath string, handlers Handlers) *Server {
 
 // Serve starts listening and blocks until context cancellation or fatal error.
 func (s *Server) Serve(ctx context.Context) error {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "daemon", "ipc.serve_start", "transport", "unix")
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	if s.handlers.Handshake == nil || s.handlers.Command == nil || s.handlers.Subscribe == nil {
-		return fmt.Errorf("missing required handlers")
+		spanErr = fmt.Errorf("missing required handlers")
+		return spanErr
 	}
 	if err := os.MkdirAll(filepath.Dir(s.socketPath), 0o755); err != nil {
+		spanErr = err
 		return fmt.Errorf("create socket dir: %w", err)
 	}
-	if err := clearStaleSocketPath(s.socketPath); err != nil {
+	if err := clearStaleSocketPath(ctx, s.socketPath); err != nil {
+		spanErr = err
 		return err
 	}
 
 	l, err := net.Listen("unix", s.socketPath)
 	if err != nil {
+		spanErr = err
 		return fmt.Errorf("listen unix socket: %w", err)
 	}
 	s.listener = l
@@ -78,37 +85,47 @@ func (s *Server) Serve(ctx context.Context) error {
 			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 				return nil
 			}
+			spanErr = err
 			return fmt.Errorf("accept connection: %w", err)
 		}
 		go s.handleConn(ctx, conn)
 	}
 }
 
-func clearStaleSocketPath(socketPath string) error {
+func clearStaleSocketPath(ctx context.Context, socketPath string) error {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "daemon", "ipc.clear_stale_socket", "transport", "unix")
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	info, err := os.Stat(socketPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
+		spanErr = err
 		return fmt.Errorf("stat socket path: %w", err)
 	}
 	if info.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("socket path exists and is not a unix socket: %s", socketPath)
+		spanErr = fmt.Errorf("socket path exists and is not a unix socket")
+		return fmt.Errorf("%w: %s", spanErr, socketPath)
 	}
 
 	dialer := net.Dialer{Timeout: 150 * time.Millisecond}
-	conn, dialErr := dialer.Dial("unix", socketPath)
+	conn, dialErr := dialer.DialContext(ctx, "unix", socketPath)
 	if dialErr == nil {
 		_ = conn.Close()
-		return fmt.Errorf("%w: %s", errSocketInUse, socketPath)
+		spanErr = errSocketInUse
+		return fmt.Errorf("%w: %s", spanErr, socketPath)
 	}
 	if isSocketDialPermissionError(dialErr) {
+		spanErr = dialErr
 		return fmt.Errorf("%w: %s: %v", errSocketInUse, socketPath, dialErr)
 	}
 	if !isSocketDialDefinitelyStale(dialErr) {
+		spanErr = dialErr
 		return fmt.Errorf("%w: %s: %v", errSocketInUse, socketPath, dialErr)
 	}
 	if rmErr := os.Remove(socketPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+		spanErr = rmErr
 		return fmt.Errorf("remove stale socket path: %w", rmErr)
 	}
 	return nil
