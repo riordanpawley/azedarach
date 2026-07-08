@@ -1,6 +1,7 @@
 package toast
 
 import (
+	"math"
 	"strings"
 	"time"
 
@@ -35,27 +36,57 @@ func (r *ToastRenderer) Render(toasts []types.Toast, width int) string {
 }
 
 func (r *ToastRenderer) RenderAt(toasts []types.Toast, width int, now time.Time) string {
-	if len(toasts) == 0 || width < 1 {
+	return r.RenderAtWithin(toasts, width, math.MaxInt, now)
+}
+
+func (r *ToastRenderer) RenderWithin(toasts []types.Toast, width, height int) string {
+	return r.RenderAtWithin(toasts, width, height, time.Now())
+}
+
+func (r *ToastRenderer) RenderAtWithin(toasts []types.Toast, width, height int, now time.Time) string {
+	if len(toasts) == 0 || width < 1 || height < 1 {
 		return ""
 	}
 
-	var rendered []string
 	toastWidth := notificationWidth(width)
 	visible := visibleToasts(toasts)
+	rendered := make([]string, 0, len(visible))
+	remainingHeight := height
 
-	for _, t := range visible {
+	for i := len(visible) - 1; i >= 0; i-- {
+		t := visible[i]
 		style := r.styleForLevel(t.Level)
-		contentWidth := toastWidth - style.GetHorizontalFrameSize()
-		if contentWidth < 1 {
-			contentWidth = 1
+		styleWidth := toastWidth - style.GetHorizontalBorderSize() - style.GetHorizontalMargins()
+		if styleWidth < 1 {
+			styleWidth = 1
 		}
-		message := ansi.Wrap(t.Message, contentWidth, "")
+		textWidth := styleWidth - style.GetHorizontalPadding()
+		if textWidth < 1 {
+			textWidth = 1
+		}
+		maxContentLines := remainingHeight - style.GetVerticalFrameSize()
+		if maxContentLines < 1 {
+			break
+		}
+		message := ansi.Hardwrap(ansi.Wrap(t.Message, textWidth, ""), textWidth, false)
+		message = truncateWrappedLines(message, textWidth, maxContentLines)
 		style = style.
-			Width(contentWidth).
+			Width(styleWidth).
 			MaxWidth(toastWidth)
-		rendered = append(rendered, r.renderBorderCountdown(style.Render(message), t, now))
+		view := r.renderBorderCountdown(style.Render(message), t, now)
+		_, viewHeight := renderedBlockSize(view)
+		if viewHeight > remainingHeight {
+			view = truncateBlockHeight(view, remainingHeight)
+			_, viewHeight = renderedBlockSize(view)
+		}
+		if viewHeight < 1 {
+			break
+		}
+		rendered = append(rendered, view)
+		remainingHeight -= viewHeight
 	}
 
+	reverseStrings(rendered)
 	return lipgloss.JoinVertical(lipgloss.Right, rendered...)
 }
 
@@ -178,6 +209,69 @@ func visibleToasts(toasts []types.Toast) []types.Toast {
 		return toasts
 	}
 	return toasts[len(toasts)-maxVisibleToasts:]
+}
+
+func truncateWrappedLines(message string, width, maxLines int) string {
+	if maxLines < 1 {
+		return ""
+	}
+	lines := strings.Split(message, "\n")
+	if len(lines) <= maxLines {
+		return message
+	}
+	lines = lines[:maxLines]
+	last := lines[len(lines)-1]
+	tail := truncationTail(width)
+	tailWidth := ansi.StringWidth(tail)
+	if tailWidth == 0 {
+		lines[len(lines)-1] = ansi.Truncate(last, width, "")
+	} else if width <= tailWidth {
+		lines[len(lines)-1] = ansi.Truncate(tail, width, "")
+	} else {
+		lines[len(lines)-1] = ansi.Truncate(last, width-tailWidth, "") + tail
+	}
+	return strings.Join(lines, "\n")
+}
+
+func truncationTail(width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if width < 3 {
+		return strings.Repeat(".", width)
+	}
+	return "..."
+}
+
+func renderedBlockSize(view string) (int, int) {
+	if view == "" {
+		return 0, 0
+	}
+	lines := strings.Split(view, "\n")
+	maxWidth := 0
+	for _, line := range lines {
+		if w := lipgloss.Width(line); w > maxWidth {
+			maxWidth = w
+		}
+	}
+	return maxWidth, len(lines)
+}
+
+func truncateBlockHeight(view string, height int) string {
+	if height < 1 || view == "" {
+		return ""
+	}
+	lines := strings.Split(view, "\n")
+	if len(lines) <= height {
+		return view
+	}
+	return strings.Join(lines[:height], "\n")
+}
+
+func reverseStrings(values []string) {
+	for i, j := 0, len(values)-1; i < j; i, j = i+1, j-1 {
+		values[i], values[j] = values[j], values[i]
+	}
 }
 
 func notificationWidth(width int) int {

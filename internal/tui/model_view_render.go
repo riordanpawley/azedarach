@@ -155,7 +155,7 @@ func (m Model) layerNotificationStack(contentView string, width, height int) str
 		return contentView
 	}
 
-	stack := toast.New(m.styles).Render(m.toasts, width)
+	stack := toast.New(m.styles).RenderWithin(m.toasts, width, notificationStackHeight(height))
 	if strings.TrimSpace(ansi.Strip(stack)) == "" {
 		return contentView
 	}
@@ -208,6 +208,23 @@ func (m Model) layerNotificationStack(contentView string, width, height int) str
 	}
 
 	return strings.Join(contentLines[:height], "\n")
+}
+
+func notificationStackHeight(height int) int {
+	if height < 1 {
+		return 0
+	}
+	limit := height / 2
+	if limit < 3 {
+		limit = height
+	}
+	if limit > 12 {
+		limit = 12
+	}
+	if limit > height {
+		limit = height
+	}
+	return limit
 }
 
 func (m Model) renderModalBackdrop(contentHeight int) string {

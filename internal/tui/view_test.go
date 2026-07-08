@@ -15,6 +15,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
+	"github.com/riordanpawley/azedarach/internal/ui/toast"
 )
 
 func TestViewHeight(t *testing.T) {
@@ -143,6 +144,39 @@ func TestViewWithToastFitsNarrowViewport(t *testing.T) {
 	}
 	if !strings.Contains(view, "mutation failed") {
 		t.Fatalf("expected wrapped floating notification in narrow viewport; view=%q", view)
+	}
+}
+
+func TestLayerNotificationStackWithLargeToastKeepsTopContentVisible(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	contentHeight := 23
+	m.toasts = []types.Toast{{
+		Level:   types.ToastError,
+		Message: "operation failed: " + strings.Repeat("very-large-validation-error-detail ", 80),
+		Expires: time.Now().Add(time.Hour),
+	}}
+	stack := toast.New(m.styles).RenderWithin(m.toasts, m.width, notificationStackHeight(contentHeight))
+	if !strings.Contains(stack, "...") {
+		t.Fatalf("expected direct toast render to show truncation marker; heightLimit=%d frame=%d stack=%q", notificationStackHeight(contentHeight), m.styles.ToastError.GetVerticalFrameSize(), stack)
+	}
+	contentLines := make([]string, 0, contentHeight)
+	contentLines = append(contentLines, "Open (2)"+strings.Repeat(" ", 92))
+	for len(contentLines) < contentHeight {
+		contentLines = append(contentLines, strings.Repeat("board row ", 12))
+	}
+	content := strings.Join(contentLines, "\n")
+
+	rendered := m.layerNotificationStack(content, m.width, contentHeight)
+	lines := strings.Split(strings.TrimRight(rendered, "\n"), "\n")
+	if len(lines) > contentHeight {
+		t.Fatalf("content with large toast is too tall: got %d lines, want <= %d", len(lines), contentHeight)
+	}
+	if !strings.Contains(lines[0], "Open (") {
+		t.Fatalf("expected board header to remain visible above large toast; first line=%q", lines[0])
+	}
+	if !strings.Contains(rendered, "...") {
+		t.Fatalf("expected large toast preview to show truncation marker; rendered=%q", rendered)
 	}
 }
 
