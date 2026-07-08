@@ -1,11 +1,14 @@
 {
   "$schema": "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json",
-  "$version": 9,
+  "$version": 10,
   "cliTool": "codex",
   "devServer": {
     "basePort": 3000,
     "environments": {},
     "maxPort": 3100
+  },
+  "diagnostics": {
+    "latencyTrace": true
   },
   "git": {
     "baseBranch": "main",
@@ -31,6 +34,13 @@
       "command": "",
       "enabled": false
     }
+  },
+  "issueResources": {
+    "cleanupCommands": [],
+    "env": {},
+    "failedStartCleanupCommands": [],
+    "prepareCommands": [],
+    "reconcileCommand": ""
   },
   "issueTracker": {
     "backend": "local",
@@ -78,31 +88,40 @@
     "errorThreshold": 3,
     "failedTask": true
   },
+  "orchestration": {
+    "via": "az"
+  },
   "pr": {
     "autoLink": true,
     "createWithoutMerge": false,
     "draftByDefault": true,
     "notifyAfterCreate": true
   },
+  "scheduledScripts": {
+    "env": {},
+    "scripts": []
+  },
   "session": {
+    "asyncInitCommands": [],
     "dangerouslySkipPermissions": true,
-    "initCommands": [],
     "logDir": "/Users/riordan/.azedarach/logs",
     "shell": "zsh",
+    "syncInitCommands": [],
     "timeoutMs": 30000
   },
   "spec": {
     "enabled": true
   },
   "worktree": {
+    "asyncInitCommands": [],
     "autoCleanup": true,
     "basePath": "../",
+    "keepDays": 7,
+    "nameFormat": "{project}-{issueID}",
     "syncInitCommands": [
       "mkdir -p .gocache .gopath",
       "base_repo=$(dirname \"$(dirname \"$(dirname \"$(git rev-parse --git-dir)\")\")\") \u0026\u0026 cp -R \"$base_repo/.gocache\" \"$base_repo/.gopath\" . 2\u003e/dev/null || true",
       "direnv allow"
-    ],
-    "keepDays": 7,
-    "nameFormat": "{project}-{issueID}"
+    ]
   }
 }
