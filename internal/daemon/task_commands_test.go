@@ -2883,6 +2883,91 @@ func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.
 	}
 }
 
+func TestTaskCloseRepairsStaleBusyHookProjectionBeforePreflight(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-stale-hook-preflight"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Close after close-session with stale hook activity",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	sessionID := "ch-" + taskID
+	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:             sessionID,
+		IssueID:        taskID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed stale busy hook session projection: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: logger, BaseBranch: "main"},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		tmux:     tmux.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) { return "", nil }}, logger),
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+
+	body, err := json.Marshal(taskCloseRequest{TaskID: taskID})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-stale-hook-preflight",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.close response = %+v, want stale hook projection repaired before preflight", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get closed issue: %v", err)
+	}
+	if task.Status != domain.StatusDone {
+		t.Fatalf("task status = %s, want %s", task.Status, domain.StatusDone)
+	}
+	session, found, err := runtimeStore.GetSessionState(ctx, projectID, sessionID)
+	if err != nil {
+		t.Fatalf("get repaired session projection: %v", err)
+	}
+	if !found {
+		t.Fatalf("repaired session projection missing for %s", sessionID)
+	}
+	if session.State != daemonstate.SessionStateStopped ||
+		session.ObservedState != daemonstate.SessionStateStopped ||
+		session.Activity != "" ||
+		session.ActivitySource != "" {
+		t.Fatalf("session projection = %+v, want stopped with cleared hook activity", session)
+	}
+}
+
 func TestTaskCloseBlocksLiveLegacyProjectRuntimeProjection(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

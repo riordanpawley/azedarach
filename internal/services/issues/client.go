@@ -1764,9 +1764,11 @@ func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 
 // Update changes an issue status.
 func (c *Client) Update(ctx context.Context, id string, status domain.Status) error {
-	return c.withMutationLock(ctx, func(ctx context.Context) error {
-		return sqliteutil.WithWriteLock(c.dbPath, func() error {
-			return c.updateLocked(ctx, id, status)
+	return retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return sqliteutil.WithWriteLock(c.dbPath, func() error {
+				return c.updateLocked(ctx, id, status)
+			})
 		})
 	})
 }
