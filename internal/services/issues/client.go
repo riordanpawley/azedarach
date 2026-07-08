@@ -100,6 +100,7 @@ var ErrDependencyRemovalConfirmationRequired = errors.New("explicit confirmation
 var ErrParentChildOrphanConfirmationRequired = errors.New("parent-child removal would orphan active child; keep the parent-child hierarchy and use blocks/open status to pause or supersede child work, or pass explicit parent-orphan confirmation")
 var ErrDeleteBlockedByRuntimeAttachments = errors.New("delete blocked: task has worktree or active session")
 var ErrIssueHasLiveChildren = errors.New("issue has undeleted descendants")
+var ErrIssueHasArchivedParents = errors.New("issue has archived parents")
 
 type ParentChangeRequiredError struct {
 	IssueID         string
@@ -133,6 +134,39 @@ func (e LiveChildrenMutationError) Error() string {
 
 func (e LiveChildrenMutationError) Is(target error) bool {
 	return target == ErrIssueHasLiveChildren
+}
+
+type ArchivedParentsMutationError struct {
+	Operation   string
+	IssueID     string
+	ParentCount int
+}
+
+func (e ArchivedParentsMutationError) Error() string {
+	parentLabel := "parents"
+	if e.ParentCount == 1 {
+		parentLabel = "parent"
+	}
+	return fmt.Sprintf(
+		"cannot %s issue %s: %d archived %s remain through parent-child edges; unarchive the parent first or pass --with-parents",
+		e.Operation,
+		e.IssueID,
+		e.ParentCount,
+		parentLabel,
+	)
+}
+
+func (e ArchivedParentsMutationError) Is(target error) bool {
+	return target == ErrIssueHasArchivedParents
+}
+
+type UnarchiveOptions struct {
+	WithParents     bool
+	CascadeChildren bool
+}
+
+type UnarchiveResult struct {
+	UnarchivedIDs []string
 }
 
 // WithDependencyRemovalConfirmation marks a context as explicitly confirming a
@@ -180,6 +214,7 @@ type sqlIssueExecer interface {
 }
 
 type sqlIssueQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
@@ -3133,52 +3168,221 @@ func (c *Client) archiveLocked(ctx context.Context, id string) error {
 
 // Unarchive restores a soft-deleted issue to active issue reads.
 func (c *Client) Unarchive(ctx context.Context, id string) error {
-	return c.withMutationLock(ctx, func(ctx context.Context) error {
-		return c.unarchiveLocked(ctx, id)
-	})
+	_, err := c.UnarchiveWithOptions(ctx, id, UnarchiveOptions{})
+	return err
 }
 
-func (c *Client) unarchiveLocked(ctx context.Context, id string) error {
+// UnarchiveWithOptions restores an archived issue and optionally its archived
+// parent chain and parent-child descendants.
+func (c *Client) UnarchiveWithOptions(ctx context.Context, id string, opts UnarchiveOptions) (UnarchiveResult, error) {
+	var result UnarchiveResult
+	err := c.withMutationLock(ctx, func(ctx context.Context) error {
+		var err error
+		result, err = c.unarchiveLocked(ctx, id, opts)
+		return err
+	})
+	return result, err
+}
+
+func (c *Client) unarchiveLocked(ctx context.Context, id string, opts UnarchiveOptions) (UnarchiveResult, error) {
+	result := UnarchiveResult{}
 	db, err := c.dbHandle()
 	if err != nil {
-		return err
+		return result, err
 	}
 	id = strings.TrimSpace(id)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return c.wrapError("unarchive", id, err)
+		return result, c.wrapError("unarchive", id, err)
 	}
 	defer func() {
 		if tx != nil {
 			_ = tx.Rollback()
 		}
 	}()
+
+	var targetDeletedAt sql.NullString
+	if err := tx.QueryRowContext(ctx, `
+		SELECT deleted_at
+		FROM issues
+		WHERE id = ?
+	`, id).Scan(&targetDeletedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return result, c.wrapError("unarchive", id, domain.ErrNotFound)
+		}
+		return result, c.wrapError("unarchive", id, err)
+	}
+
+	archivedParents, err := c.archivedParentChildAncestorIDs(ctx, tx, id)
+	if err != nil {
+		return result, c.wrapError("unarchive", id, err)
+	}
+	if len(archivedParents) > 0 && !opts.WithParents {
+		return result, c.wrapError("unarchive", id, ArchivedParentsMutationError{
+			Operation:   "unarchive",
+			IssueID:     id,
+			ParentCount: len(archivedParents),
+		})
+	}
+
+	restoreIDs := make([]string, 0, len(archivedParents)+1)
+	if opts.WithParents {
+		restoreIDs = append(restoreIDs, archivedParents...)
+	}
+	if targetDeletedAt.Valid && strings.TrimSpace(targetDeletedAt.String) != "" {
+		restoreIDs = append(restoreIDs, id)
+	}
+	if opts.CascadeChildren {
+		descendants, err := c.archivedParentChildDescendantIDs(ctx, tx, id)
+		if err != nil {
+			return result, c.wrapError("unarchive", id, err)
+		}
+		restoreIDs = append(restoreIDs, descendants...)
+	}
+	restoreIDs = dedupeNonEmptyStrings(restoreIDs)
+	if len(restoreIDs) == 0 {
+		return result, c.wrapError("unarchive", id, domain.ErrNotFound)
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(restoreIDs)), ",")
+	args := make([]any, 0, len(restoreIDs)+1)
+	args = append(args, now)
+	for _, restoreID := range restoreIDs {
+		args = append(args, restoreID)
+	}
 	res, err := tx.ExecContext(ctx, `
 		UPDATE issues
 		SET
 			deleted_at = NULL,
 			updated_at = ?
-		WHERE id = ? AND deleted_at IS NOT NULL
-	`, now, id)
+		WHERE deleted_at IS NOT NULL
+			AND id IN (`+placeholders+`)
+	`, args...)
 	if err != nil {
-		return c.wrapError("unarchive", id, err)
+		return result, c.wrapError("unarchive", id, err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
-		return c.wrapError("unarchive", id, domain.ErrNotFound)
+		return result, c.wrapError("unarchive", id, domain.ErrNotFound)
 	}
-	if err := c.appendIssueObservationEvent(ctx, tx, id, domain.IssueEventIssueUnarchived, map[string]any{}); err != nil {
-		return c.wrapError("unarchive", id, err)
+	for _, restoreID := range restoreIDs {
+		if err := c.appendIssueObservationEvent(ctx, tx, restoreID, domain.IssueEventIssueUnarchived, map[string]any{}); err != nil {
+			return result, c.wrapError("unarchive", id, err)
+		}
 	}
 	if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
-		return c.wrapError("unarchive", id, err)
+		return result, c.wrapError("unarchive", id, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return c.wrapError("unarchive", id, err)
+		return result, c.wrapError("unarchive", id, err)
 	}
 	tx = nil
-	return nil
+	result.UnarchivedIDs = restoreIDs
+	return result, nil
+}
+
+func (c *Client) archivedParentChildAncestorIDs(ctx context.Context, queryer sqlIssueQueryer, issueID string) ([]string, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		WITH RECURSIVE ancestors(id, depth, path) AS (
+			SELECT parent.id, 1, ',' || child.id || ',' || parent.id || ','
+			FROM issue_dependencies dep
+			INNER JOIN issues child ON child.id = dep.issue_id
+			INNER JOIN issues parent ON parent.id = dep.depends_on_id
+			WHERE dep.issue_id = ?
+				AND dep.tombstoned_at IS NULL
+				AND dep.dependency_type IN (?, 'parent_child')
+
+			UNION ALL
+
+			SELECT parent.id, ancestors.depth + 1, ancestors.path || parent.id || ','
+			FROM ancestors
+			INNER JOIN issue_dependencies dep ON dep.issue_id = ancestors.id
+			INNER JOIN issues parent ON parent.id = dep.depends_on_id
+			WHERE dep.tombstoned_at IS NULL
+				AND dep.dependency_type IN (?, 'parent_child')
+				AND instr(ancestors.path, ',' || parent.id || ',') = 0
+		)
+		SELECT ancestors.id
+		FROM ancestors
+		INNER JOIN issues parent ON parent.id = ancestors.id
+		WHERE parent.deleted_at IS NOT NULL
+		ORDER BY ancestors.depth DESC, ancestors.id
+	`, issueID, string(domain.DependencyParentChild), string(domain.DependencyParentChild))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanStringRows(rows)
+}
+
+func (c *Client) archivedParentChildDescendantIDs(ctx context.Context, queryer sqlIssueQueryer, issueID string) ([]string, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		WITH RECURSIVE descendants(id, depth, path) AS (
+			SELECT child.id, 1, ',' || parent.id || ',' || child.id || ','
+			FROM issue_dependencies dep
+			INNER JOIN issues parent ON parent.id = dep.depends_on_id
+			INNER JOIN issues child ON child.id = dep.issue_id
+			WHERE dep.depends_on_id = ?
+				AND dep.tombstoned_at IS NULL
+				AND dep.dependency_type IN (?, 'parent_child')
+
+			UNION ALL
+
+			SELECT child.id, descendants.depth + 1, descendants.path || child.id || ','
+			FROM descendants
+			INNER JOIN issue_dependencies dep ON dep.depends_on_id = descendants.id
+			INNER JOIN issues child ON child.id = dep.issue_id
+			WHERE dep.tombstoned_at IS NULL
+				AND dep.dependency_type IN (?, 'parent_child')
+				AND instr(descendants.path, ',' || child.id || ',') = 0
+		)
+		SELECT descendants.id
+		FROM descendants
+		INNER JOIN issues child ON child.id = descendants.id
+		WHERE child.deleted_at IS NOT NULL
+		ORDER BY descendants.depth ASC, descendants.id
+	`, issueID, string(domain.DependencyParentChild), string(domain.DependencyParentChild))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanStringRows(rows)
+}
+
+func scanStringRows(rows *sql.Rows) ([]string, error) {
+	values := []string{}
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, err
+		}
+		value = strings.TrimSpace(value)
+		if value != "" {
+			values = append(values, value)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+func dedupeNonEmptyStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func (c *Client) EnsureNoUndeletedParentChildDescendants(ctx context.Context, operation, issueID string) error {

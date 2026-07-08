@@ -305,9 +305,11 @@ type IssueDeleteOptions struct {
 }
 
 type IssueUnarchiveOptions struct {
-	Project string
-	IssueID string
-	JSON    bool
+	Project         string
+	IssueID         string
+	JSON            bool
+	WithParents     bool
+	CascadeChildren bool
 }
 
 type IssueDependencyAddOptions struct {
@@ -3345,11 +3347,13 @@ func ParseIssueUnarchiveArgs(args []string) (IssueUnarchiveOptions, error) {
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue unarchive result as JSON")
+	fs.BoolVar(&opts.WithParents, "with-parents", false, "also restore archived parent-child ancestors")
+	fs.BoolVar(&opts.CascadeChildren, "cascade-children", false, "also restore archived parent-child descendants")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueUnarchiveOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUnarchiveOptions{}, fmt.Errorf("usage: az issue unarchive [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
+		return IssueUnarchiveOptions{}, fmt.Errorf("usage: az issue unarchive [--project <project-id>] [--id <issue-id>] [--json] [--with-parents] [--cascade-children] [<issue-id>]")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -3358,7 +3362,7 @@ func ParseIssueUnarchiveArgs(args []string) (IssueUnarchiveOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUnarchiveOptions{}, fmt.Errorf("usage: az issue unarchive [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
+		return IssueUnarchiveOptions{}, fmt.Errorf("usage: az issue unarchive [--project <project-id>] [--id <issue-id>] [--json] [--with-parents] [--cascade-children] [<issue-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -5848,16 +5852,32 @@ func IssueUnarchiveCommand(deps *Dependencies, opts IssueUnarchiveOptions) error
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	if err := deps.DaemonClient.UnarchiveTask(ctx, opts.IssueID); err != nil {
+	if err := deps.DaemonClient.UnarchiveTaskWithOptions(ctx, opts.IssueID, daemonclient.TaskUnarchiveOptions{
+		WithParents:     opts.WithParents,
+		CascadeChildren: opts.CascadeChildren,
+	}); err != nil {
 		return fmt.Errorf("failed to unarchive issue: %w", err)
 	}
 	if opts.JSON {
 		return printJSON(map[string]any{
-			"issue_id":   opts.IssueID,
-			"unarchived": true,
+			"issue_id":         opts.IssueID,
+			"unarchived":       true,
+			"with_parents":     opts.WithParents,
+			"cascade_children": opts.CascadeChildren,
 		})
 	}
-	fmt.Printf("Unarchived issue: %s\n", opts.IssueID)
+	details := []string{}
+	if opts.WithParents {
+		details = append(details, "with parents")
+	}
+	if opts.CascadeChildren {
+		details = append(details, "with children")
+	}
+	if len(details) == 0 {
+		fmt.Printf("Unarchived issue: %s\n", opts.IssueID)
+		return nil
+	}
+	fmt.Printf("Unarchived issue: %s (%s)\n", opts.IssueID, strings.Join(details, ", "))
 	return nil
 }
 

@@ -106,6 +106,11 @@ type TaskDeleteOptions struct {
 	ForceWorktree  bool
 }
 
+type TaskUnarchiveOptions struct {
+	WithParents     bool
+	CascadeChildren bool
+}
+
 type taskCloseRequest struct {
 	TaskID               naming.IssueID `json:"task_id"`
 	ForceWorktree        bool           `json:"force_worktree,omitempty"`
@@ -1071,11 +1076,24 @@ func (c *Client) ArchiveTask(ctx context.Context, taskID string) error {
 
 // UnarchiveTask restores an archived task through the daemon client boundary.
 func (c *Client) UnarchiveTask(ctx context.Context, taskID string) error {
+	return c.UnarchiveTaskWithOptions(ctx, taskID, TaskUnarchiveOptions{})
+}
+
+// UnarchiveTaskWithOptions restores archived task graph rows through the daemon client boundary.
+func (c *Client) UnarchiveTaskWithOptions(ctx context.Context, taskID string, opts TaskUnarchiveOptions) error {
 	parsedTaskID, err := naming.ParseIssueID(taskID)
 	if err != nil {
 		return fmt.Errorf("invalid task id: %w", err)
 	}
-	return c.commandJSON(ctx, CommandTaskUnarchive, TaskIDRequest{TaskID: parsedTaskID}, nil)
+	return c.commandJSON(ctx, CommandTaskUnarchive, struct {
+		TaskID          naming.IssueID `json:"task_id"`
+		WithParents     bool           `json:"with_parents,omitempty"`
+		CascadeChildren bool           `json:"cascade_children,omitempty"`
+	}{
+		TaskID:          parsedTaskID,
+		WithParents:     opts.WithParents,
+		CascadeChildren: opts.CascadeChildren,
+	}, nil)
 }
 
 // TaskGraphReadiness returns daemon-owned runnable-leaf policy for a root issue.

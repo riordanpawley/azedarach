@@ -6093,7 +6093,9 @@ func (d *Daemon) handleTaskUnarchive(ctx context.Context, req protocol.RequestEn
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
 	var cmd struct {
-		TaskID string `json:"task_id"`
+		TaskID          string `json:"task_id"`
+		WithParents     bool   `json:"with_parents,omitempty"`
+		CascadeChildren bool   `json:"cascade_children,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -6101,12 +6103,18 @@ func (d *Daemon) handleTaskUnarchive(ctx context.Context, req protocol.RequestEn
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task unarchive requested", "project_id", projectID, "task_id", cmd.TaskID)
 	}
-	if err := issueClient.Unarchive(ctx, cmd.TaskID); err != nil {
+	result, err := issueClient.UnarchiveWithOptions(ctx, cmd.TaskID, issues.UnarchiveOptions{
+		WithParents:     cmd.WithParents,
+		CascadeChildren: cmd.CascadeChildren,
+	})
+	if err != nil {
 		return d.errorResponse(req, daemonTaskMutationErrorCode(err), err.Error()), nil
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)
-	d.publishTaskEvent(req, protocol.EventTaskRestored, resp.Revision, d.taskEventBody(ctx, projectID, cmd.TaskID))
+	for _, restoredID := range result.UnarchivedIDs {
+		d.publishTaskEvent(req, protocol.EventTaskRestored, resp.Revision, d.taskEventBody(ctx, projectID, restoredID))
+	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task unarchive completed", "project_id", projectID, "task_id", cmd.TaskID, "revision", resp.Revision)
 	}
@@ -6114,7 +6122,7 @@ func (d *Daemon) handleTaskUnarchive(ctx context.Context, req protocol.RequestEn
 }
 
 func daemonTaskMutationErrorCode(err error) protocol.ErrorCode {
-	if errors.Is(err, issues.ErrIssueHasLiveChildren) {
+	if errors.Is(err, issues.ErrIssueHasLiveChildren) || errors.Is(err, issues.ErrIssueHasArchivedParents) {
 		return protocol.ErrorCodeConflict
 	}
 	return protocol.ErrorCodeInternal

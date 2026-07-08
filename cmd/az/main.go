@@ -761,7 +761,7 @@ func main() {
 		case "unarchive":
 			opts, err := cli.ParseIssueUnarchiveArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue unarchive [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue unarchive [--project <project-id>] [--id <issue-id>] [--json] [--with-parents] [--cascade-children] [<issue-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

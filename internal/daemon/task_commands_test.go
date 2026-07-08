@@ -945,6 +945,71 @@ func TestHandleTaskUnarchiveRestoresArchivedIssue(t *testing.T) {
 	}
 }
 
+func TestHandleTaskUnarchiveRejectsArchivedParentWithoutFlag(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	projectID := "proj-unarchive-parent-guard"
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Archived parent",
+		Type:  domain.TypeEpic,
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Archived child",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := issuesClient.AddDependency(ctx, childID, parentID, "parent-child"); err != nil {
+		t.Fatalf("add parent-child: %v", err)
+	}
+	if err := issuesClient.Archive(ctx, childID); err != nil {
+		t.Fatalf("archive child: %v", err)
+	}
+	if err := issuesClient.Archive(ctx, parentID); err != nil {
+		t.Fatalf("archive parent: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		hub: publish.NewHub(16, 8, logger),
+	}
+	body, err := json.Marshal(map[string]string{"task_id": childID})
+	if err != nil {
+		t.Fatalf("marshal task.unarchive request: %v", err)
+	}
+	resp, err := d.handleTaskUnarchive(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-unarchive-parent-guard",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.unarchive",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskUnarchive error: %v", err)
+	}
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("task.unarchive response = %+v, want conflict", resp)
+	}
+	if resp.Error.Code != protocol.ErrorCodeConflict {
+		t.Fatalf("error code = %s, want %s", resp.Error.Code, protocol.ErrorCodeConflict)
+	}
+	if !strings.Contains(resp.Error.Message, "unarchive the parent first") {
+		t.Fatalf("error message = %q", resp.Error.Message)
+	}
+}
+
 func TestHandleTaskListRefreshesMissingTmuxSessionBeforeReportingActive(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

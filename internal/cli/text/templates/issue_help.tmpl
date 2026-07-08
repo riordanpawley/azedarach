@@ -18,7 +18,7 @@ Commands:
   update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields (`--status closed` integrates, cleans, then closes)
   close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]  Integrate, clean up, and close an issue
   delete [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]  Permanently delete an issue
-  unarchive [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Restore an archived issue to active issue reads
+  unarchive [--project <project-id>] [--id <issue-id>] [--json] [--with-parents] [--cascade-children] [<issue-id>]  Restore archived issues to active reads
   image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]  Attach an image to an issue
   image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]  Remove an image attachment from an issue
   document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]  Attach a report/document to an issue

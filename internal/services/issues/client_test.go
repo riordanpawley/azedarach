@@ -358,6 +358,65 @@ func TestClient_UnarchiveRestoresActiveRuntimeReadsAndSearch(t *testing.T) {
 	assert.NotContains(t, taskIDStrings(archivedOnly), issueID)
 }
 
+func TestClient_UnarchiveChildWithArchivedParentIsBlockedUnlessParentsIncluded(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Archived parent",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+	})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Archived child",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, childID, parentID, "parent-child"))
+	require.NoError(t, client.Archive(ctx, childID))
+	require.NoError(t, client.Archive(ctx, parentID))
+
+	err = client.Unarchive(ctx, childID)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIssueHasArchivedParents)
+	assert.Contains(t, err.Error(), "unarchive the parent first")
+
+	result, err := client.UnarchiveWithOptions(ctx, childID, UnarchiveOptions{WithParents: true})
+	require.NoError(t, err)
+	assert.Equal(t, []string{parentID, childID}, result.UnarchivedIDs)
+
+	active, err := client.ListSummariesWithRuntimeArchiveMode(ctx, "proj-unarchive-parents", ArchiveExclude)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{parentID, childID}, taskIDStrings(active))
+}
+
+func TestClient_UnarchiveCascadeChildrenRestoresArchivedSubtree(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	rootID, err := client.Create(ctx, CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Priority: domain.P1})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{Title: "Child", Type: domain.TypeTask, Priority: domain.P2})
+	require.NoError(t, err)
+	grandchildID, err := client.Create(ctx, CreateTaskParams{Title: "Grandchild", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, childID, rootID, "parent-child"))
+	require.NoError(t, client.AddDependency(ctx, grandchildID, childID, "parent-child"))
+	require.NoError(t, client.Archive(ctx, grandchildID))
+	require.NoError(t, client.Archive(ctx, childID))
+	require.NoError(t, client.Archive(ctx, rootID))
+
+	result, err := client.UnarchiveWithOptions(ctx, rootID, UnarchiveOptions{CascadeChildren: true})
+	require.NoError(t, err)
+	assert.Equal(t, []string{rootID, childID, grandchildID}, result.UnarchivedIDs)
+
+	active, err := client.ListSummariesWithRuntimeArchiveMode(ctx, "proj-unarchive-subtree", ArchiveExclude)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{rootID, childID, grandchildID}, taskIDStrings(active))
+}
+
 func TestClient_LinearSyncExternalRefsUseCanonicalOriginTable(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

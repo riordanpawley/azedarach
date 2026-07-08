@@ -5501,11 +5501,11 @@ func TestParseIssueDeleteArgs(t *testing.T) {
 }
 
 func TestParseIssueUnarchiveArgs(t *testing.T) {
-	got, err := ParseIssueUnarchiveArgs([]string{"az-1", "--json"})
+	got, err := ParseIssueUnarchiveArgs([]string{"az-1", "--json", "--with-parents", "--cascade-children"})
 	if err != nil {
 		t.Fatalf("ParseIssueUnarchiveArgs() error = %v", err)
 	}
-	if got.IssueID != "az-1" || !got.JSON {
+	if got.IssueID != "az-1" || !got.JSON || !got.WithParents || !got.CascadeChildren {
 		t.Fatalf("ParseIssueUnarchiveArgs() = %+v", got)
 	}
 
@@ -9673,18 +9673,24 @@ func TestIssueDeleteCommandCleansRuntimeAttachmentsBeforeDelete(t *testing.T) {
 func TestIssueUnarchiveCommandCallsDaemon(t *testing.T) {
 	var gotCommand string
 	var gotTaskID string
+	var gotWithParents bool
+	var gotCascadeChildren bool
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				gotCommand = req.Command
 				var body struct {
-					TaskID string `json:"task_id"`
+					TaskID          string `json:"task_id"`
+					WithParents     bool   `json:"with_parents"`
+					CascadeChildren bool   `json:"cascade_children"`
 				}
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal task unarchive body: %v", err)
 				}
 				gotTaskID = body.TaskID
+				gotWithParents = body.WithParents
+				gotCascadeChildren = body.CascadeChildren
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
@@ -9700,12 +9706,12 @@ func TestIssueUnarchiveCommandCallsDaemon(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() error {
-		return IssueUnarchiveCommand(deps, IssueUnarchiveOptions{IssueID: "az-1"})
+		return IssueUnarchiveCommand(deps, IssueUnarchiveOptions{IssueID: "az-1", WithParents: true, CascadeChildren: true})
 	})
-	if gotCommand != daemonclient.CommandTaskUnarchive || gotTaskID != "az-1" {
-		t.Fatalf("command=%s task_id=%s, want %s az-1", gotCommand, gotTaskID, daemonclient.CommandTaskUnarchive)
+	if gotCommand != daemonclient.CommandTaskUnarchive || gotTaskID != "az-1" || !gotWithParents || !gotCascadeChildren {
+		t.Fatalf("command=%s task_id=%s with_parents=%v cascade_children=%v, want %s az-1 true true", gotCommand, gotTaskID, gotWithParents, gotCascadeChildren, daemonclient.CommandTaskUnarchive)
 	}
-	if !strings.Contains(output, "Unarchived issue: az-1") {
+	if !strings.Contains(output, "Unarchived issue: az-1 (with parents, with children)") {
 		t.Fatalf("output = %q", output)
 	}
 }

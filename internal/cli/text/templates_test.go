@@ -24,7 +24,7 @@ func TestRenderIssueHelpPrefersNamedFlagForms(t *testing.T) {
 		"split [--project <project-id>] [--parent <issue-id>]",
 		"close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]",
 		"delete [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]",
-		"unarchive [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Restore an archived issue to active issue reads",
+		"unarchive [--project <project-id>] [--id <issue-id>] [--json] [--with-parents] [--cascade-children] [<issue-id>]  Restore archived issues to active reads",
 		"Agent progress, validation, review facts, and worker closeout belong in mail/observation evidence, not issue notes.",
 		"To create a child under the active issue, run `az issue create \"Child task\"` from a session with AZEDARACH_ISSUE_ID set.",
 		"To attach to a different parent/root at creation time, pass `--parent <issue-id>`.",
