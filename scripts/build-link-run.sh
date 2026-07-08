@@ -73,6 +73,66 @@ choose_container_engine() {
   return 1
 }
 
+container_host_port() {
+  local engine="$1"
+  local name="$2"
+  local container_port="$3"
+  local mapping
+  mapping="$("$engine" port "$name" "${container_port}/tcp" 2>/dev/null | head -n 1 || true)"
+  if [[ -z "$mapping" ]]; then
+    return 1
+  fi
+  mapping="${mapping##*:}"
+  if [[ -z "$mapping" ]]; then
+    return 1
+  fi
+  echo "$mapping"
+}
+
+publish_jaeger_env() {
+  local engine="$1"
+  local name="$2"
+  local ui_port
+  local otlp_port
+
+  if ! ui_port="$(container_host_port "$engine" "$name" 16686)"; then
+    echo "Warning: Jaeger container $name has no published UI port" >&2
+    return 1
+  fi
+  if ! otlp_port="$(container_host_port "$engine" "$name" 4318)"; then
+    echo "Warning: Jaeger container $name has no published OTLP HTTP port" >&2
+    return 1
+  fi
+
+  export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:${otlp_port}"
+  export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="http://localhost:${otlp_port}/v1/traces"
+  echo "Jaeger ready: http://localhost:${ui_port} (OTLP ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT})"
+}
+
+start_jaeger_container() {
+  local engine="$1"
+  local name="$2"
+  local image="$3"
+  local ui_port="$4"
+  local otlp_port="$5"
+  local fixed_ports="$6"
+
+  if [[ "$fixed_ports" == "1" ]]; then
+    "$engine" run -d \
+      --name "$name" \
+      -p "127.0.0.1:${ui_port}:16686" \
+      -p "127.0.0.1:${otlp_port}:4318" \
+      "$image" >/dev/null
+    return $?
+  fi
+
+  "$engine" run -d \
+    --name "$name" \
+    -p "127.0.0.1::16686" \
+    -p "127.0.0.1::4318" \
+    "$image" >/dev/null
+}
+
 ensure_jaeger() {
   if [[ "${AZEDARACH_SKIP_JAEGER:-0}" == "1" ]]; then
     echo "Skipping Jaeger (AZEDARACH_SKIP_JAEGER=1)"
@@ -91,30 +151,37 @@ ensure_jaeger() {
   local otlp_port="${AZEDARACH_OTLP_HTTP_PORT:-4318}"
 
   if [[ "$("$engine" inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)" == "true" ]]; then
-    echo "Jaeger already running: http://localhost:${ui_port}"
+    echo "Jaeger already running: $name"
+    publish_jaeger_env "$engine" "$name" || true
     return 0
   fi
 
   if "$engine" inspect "$name" >/dev/null 2>&1; then
     echo "Starting existing Jaeger container: $name"
     if ! "$engine" start "$name" >/dev/null; then
-      echo "Warning: failed to start Jaeger container $name" >&2
+      local fallback_name="${name}-$$"
+      echo "Warning: failed to start Jaeger container $name; starting $fallback_name with dynamic ports" >&2
+      if ! start_jaeger_container "$engine" "$fallback_name" "$image" "$ui_port" "$otlp_port" 0; then
+        echo "Warning: failed to start Jaeger container $fallback_name" >&2
+        return 0
+      fi
+      publish_jaeger_env "$engine" "$fallback_name" || true
       return 0
     fi
-    echo "Jaeger ready: http://localhost:${ui_port} (OTLP http://localhost:${otlp_port}/v1/traces)"
+    publish_jaeger_env "$engine" "$name" || true
     return 0
   fi
 
   echo "Starting Jaeger container: $name"
-  if ! "$engine" run -d \
-    --name "$name" \
-    -p "${ui_port}:16686" \
-    -p "${otlp_port}:4318" \
-    "$image" >/dev/null; then
-    echo "Warning: failed to start Jaeger container $name" >&2
-    return 0
+  if ! start_jaeger_container "$engine" "$name" "$image" "$ui_port" "$otlp_port" 1; then
+    echo "Warning: failed to start Jaeger on ${ui_port}/${otlp_port}; retrying with dynamic ports" >&2
+    "$engine" rm "$name" >/dev/null 2>&1 || true
+    if ! start_jaeger_container "$engine" "$name" "$image" "$ui_port" "$otlp_port" 0; then
+      echo "Warning: failed to start Jaeger container $name" >&2
+      return 0
+    fi
   fi
-  echo "Jaeger ready: http://localhost:${ui_port} (OTLP http://localhost:${otlp_port}/v1/traces)"
+  publish_jaeger_env "$engine" "$name" || true
 }
 
 echo "Linked az -> $link_dir/az"

@@ -29,8 +29,10 @@ just build-link-run
 ```
 
 This also starts or reuses a local Jaeger container named `azedarach-jaeger`
-for OTLP traces on `localhost:4318` and the UI at `http://localhost:16686`.
-Set `AZEDARACH_SKIP_JAEGER=1` to skip that startup step.
+for OTLP traces. It prefers `localhost:4318` and `http://localhost:16686`,
+falls back to available localhost ports when those are occupied, and exports
+the discovered OTLP endpoint to the launched daemon and TUI. Set
+`AZEDARACH_SKIP_JAEGER=1` to skip that startup step.
 
 Build and link without starting interactive TUI:
 
