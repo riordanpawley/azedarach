@@ -476,6 +476,7 @@
       "properties": {
         "latencyTrace": {
           "type": "boolean",
+          "description": "Enable bounded latency diagnostics. When true, Azedarach emits latency trace logs and OpenTelemetry spans unless AZEDARACH_OTEL explicitly disables span export.",
           "default": false
         }
       }

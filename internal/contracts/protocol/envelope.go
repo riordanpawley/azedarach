@@ -33,6 +33,8 @@ type Metadata struct {
 	ClientActor         string               `json:"client_actor,omitempty" msgpack:"client_actor,omitempty"`
 	ClientUID           string               `json:"client_uid,omitempty" msgpack:"client_uid,omitempty"`
 	ClientActiveIssue   string               `json:"client_active_issue,omitempty" msgpack:"client_active_issue,omitempty"`
+	TraceParent         string               `json:"traceparent,omitempty" msgpack:"traceparent,omitempty"`
+	TraceState          string               `json:"tracestate,omitempty" msgpack:"tracestate,omitempty"`
 }
 
 // RequestEnvelope is the daemon command request shell.

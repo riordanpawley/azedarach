@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
 
 type prGenerationRequest struct {
@@ -71,6 +73,11 @@ func generatePRContentWithCodex(ctx context.Context, req prGenerationRequest) (p
 	}
 
 	prompt := buildPRGenerationPrompt(req, baseBranch, commitLog, diffStat)
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "codex",
+		"dependency.name", "codex",
+		"dependency.operation", "exec",
+		"arg_count", 9,
+	)
 	cmd := exec.CommandContext(ctx,
 		"codex",
 		"exec",
@@ -82,6 +89,7 @@ func generatePRContentWithCodex(ctx context.Context, req prGenerationRequest) (p
 		prompt,
 	)
 	out, err := cmd.CombinedOutput()
+	endSpan(err)
 	if err != nil {
 		return prGeneratedContent{}, fmt.Errorf("generate PR title/body with codex: %w (%s)", err, strings.TrimSpace(string(out)))
 	}

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
 
 const (
@@ -208,23 +209,34 @@ func (s *Service) callClaude(ctx context.Context, prompt string) (string, error)
 	req.Header.Set("x-api-key", s.apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "http",
+		"dependency.name", "anthropic",
+		"dependency.operation", "messages",
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
+	req = req.WithContext(ctx)
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
+		spanErr = err
 		return "", fmt.Errorf("API request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		spanErr = fmt.Errorf("http status %d", resp.StatusCode)
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var apiResp anthropicResponse
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		spanErr = err
 		return "", fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	if len(apiResp.Content) == 0 {
+		spanErr = errors.New("empty response")
 		return "", errors.New("empty response from Claude API")
 	}
 
@@ -234,6 +246,7 @@ func (s *Service) callClaude(ctx context.Context, prompt string) (string, error)
 		}
 	}
 
+	spanErr = errors.New("missing text content")
 	return "", errors.New("no text content in Claude response")
 }
 

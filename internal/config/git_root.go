@@ -1,11 +1,14 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
 
 // ResolveBaseGitRoot resolves the repository root from any nested worktree path.
@@ -46,8 +49,7 @@ func ResolveWorktreeRoot(startPath string) (string, error) {
 }
 
 func resolveBaseGitRootWithGitExec(startDir string) (string, error) {
-	cmd := gitExecCommand(startDir, "rev-parse", "--path-format=absolute", "--git-common-dir")
-	out, err := cmd.Output()
+	out, err := runGitExecCommand(startDir, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return "", fmt.Errorf("resolve git common dir: %w", err)
 	}
@@ -55,8 +57,7 @@ func resolveBaseGitRootWithGitExec(startDir string) (string, error) {
 }
 
 func resolveWorktreeRootWithGitExec(startDir string) (string, error) {
-	cmd := gitExecCommand(startDir, "rev-parse", "--path-format=absolute", "--show-toplevel")
-	out, err := cmd.Output()
+	out, err := runGitExecCommand(startDir, "rev-parse", "--path-format=absolute", "--show-toplevel")
 	if err != nil {
 		return "", fmt.Errorf("resolve git worktree root: %w", err)
 	}
@@ -67,9 +68,24 @@ func resolveWorktreeRootWithGitExec(startDir string) (string, error) {
 	return root, nil
 }
 
+func runGitExecCommand(startDir string, operation string, args ...string) (out []byte, err error) {
+	ctx, endSpan := latencytrace.StartSpan(context.Background(), "dependency", "git_root",
+		"dependency.name", "git",
+		"dependency.operation", operation,
+		"arg_count", len(args)+1,
+	)
+	defer func() { endSpan(err) }()
+	cmd := gitExecCommandContext(ctx, startDir, args...)
+	return cmd.Output()
+}
+
 func gitExecCommand(startDir string, args ...string) *exec.Cmd {
+	return gitExecCommandContext(context.Background(), startDir, args...)
+}
+
+func gitExecCommandContext(ctx context.Context, startDir string, args ...string) *exec.Cmd {
 	cmdArgs := append([]string{"-C", startDir}, args...)
-	cmd := exec.Command("git", cmdArgs...)
+	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	cmd.Env = gitExecEnv(os.Environ())
 	return cmd
 }

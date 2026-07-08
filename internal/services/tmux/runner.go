@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
 
 // CommandRunner abstracts command execution for testing
@@ -24,7 +26,18 @@ type InputCommandRunner interface {
 type ExecRunner struct{}
 
 // Run executes a tmux command with a 5-second timeout
-func (r *ExecRunner) Run(ctx context.Context, args ...string) (string, error) {
+func (r *ExecRunner) Run(ctx context.Context, args ...string) (out string, err error) {
+	operation := ""
+	if len(args) > 0 {
+		operation = args[0]
+	}
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "tmux",
+		"dependency.name", "tmux",
+		"dependency.operation", operation,
+		"arg_count", len(args),
+	)
+	defer func() { endSpan(err) }()
+
 	if refuseUnsafeTmuxCommandFromGoTest(args) {
 		return "", fmt.Errorf("refusing to run tmux command %q from go test; use a fake tmux runner or set AZEDARACH_ALLOW_REAL_TMUX_IN_TESTS=1", args[0])
 	}
@@ -37,15 +50,26 @@ func (r *ExecRunner) Run(ctx context.Context, args ...string) (string, error) {
 	}
 
 	cmd := exec.CommandContext(ctx, "tmux", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil && len(out) > 0 {
-		return string(out), fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	output, err := cmd.CombinedOutput()
+	if err != nil && len(output) > 0 {
+		return string(output), fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 	}
-	return string(out), err
+	return string(output), err
 }
 
 // RunWithInput executes a tmux command with a 5-second timeout and stdin.
-func (r *ExecRunner) RunWithInput(ctx context.Context, input string, args ...string) (string, error) {
+func (r *ExecRunner) RunWithInput(ctx context.Context, input string, args ...string) (out string, err error) {
+	operation := ""
+	if len(args) > 0 {
+		operation = args[0]
+	}
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "tmux_with_input",
+		"dependency.name", "tmux",
+		"dependency.operation", operation,
+		"arg_count", len(args),
+	)
+	defer func() { endSpan(err) }()
+
 	if refuseUnsafeTmuxCommandFromGoTest(args) {
 		return "", fmt.Errorf("refusing to run tmux command %q from go test; use a fake tmux runner or set AZEDARACH_ALLOW_REAL_TMUX_IN_TESTS=1", args[0])
 	}
@@ -58,11 +82,11 @@ func (r *ExecRunner) RunWithInput(ctx context.Context, input string, args ...str
 
 	cmd := exec.CommandContext(ctx, "tmux", args...)
 	cmd.Stdin = strings.NewReader(input)
-	out, err := cmd.CombinedOutput()
-	if err != nil && len(out) > 0 {
-		return string(out), fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	output, err := cmd.CombinedOutput()
+	if err != nil && len(output) > 0 {
+		return string(output), fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 	}
-	return string(out), err
+	return string(output), err
 }
 
 func refuseUnsafeTmuxCommandFromGoTest(args []string) bool {

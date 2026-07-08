@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
 
 // AgentInstallTarget identifies a hook install destination. The unified
@@ -1106,11 +1108,18 @@ func runRulesyncGenerate(ctx context.Context, projectDir string, verbose bool) e
 	} else {
 		fmt.Printf("Running %s ...\n", strings.Join(runner.Argv, " "))
 	}
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "rulesync",
+		"dependency.name", filepath.Base(runner.Argv[0]),
+		"dependency.operation", "generate",
+		"arg_count", len(runner.Argv)-1,
+	)
 	cmd := exec.CommandContext(ctx, runner.Argv[0], runner.Argv[1:]...)
 	cmd.Dir = projectDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	endSpan(err)
+	if err != nil {
 		return fmt.Errorf("%s: %w", strings.Join(runner.Argv, " "), err)
 	}
 	return nil

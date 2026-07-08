@@ -24,6 +24,8 @@ func TestRoundTripEnvelopeVariants(t *testing.T) {
 			ClientID:            "client-1",
 			CorrelationID:       "corr-1",
 			LastAppliedRevision: 11,
+			TraceParent:         "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			TraceState:          "az=1",
 		},
 		Command: "session.start",
 		SentAt:  now,
@@ -40,6 +42,9 @@ func TestRoundTripEnvelopeVariants(t *testing.T) {
 	}
 	if decodedReq.RequestID != req.RequestID || decodedReq.Command != req.Command {
 		t.Fatalf("decoded request mismatch: %+v", decodedReq)
+	}
+	if decodedReq.Meta.TraceParent != req.Meta.TraceParent || decodedReq.Meta.TraceState != req.Meta.TraceState {
+		t.Fatalf("decoded trace metadata mismatch: %+v", decodedReq.Meta)
 	}
 
 	resp := protocol.ResponseEnvelope{

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
 
 const DefaultEndpoint = "https://api.linear.app/graphql"
@@ -282,8 +284,16 @@ func (c *Client) graphql(ctx context.Context, query string, variables map[string
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", apiKey)
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "http",
+		"dependency.name", "linear",
+		"dependency.operation", "graphql",
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
+	req = req.WithContext(ctx)
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		spanErr = err
 		return fmt.Errorf("linear graphql request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -291,9 +301,11 @@ func (c *Client) graphql(ctx context.Context, query string, variables map[string
 	c.recordRequest(rateLimit)
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		spanErr = err
 		return fmt.Errorf("read linear graphql response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		spanErr = fmt.Errorf("http status %d", resp.StatusCode)
 		return &APIError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(respBody)), RateLimit: rateLimit}
 	}
 	var envelope struct {
@@ -303,15 +315,19 @@ func (c *Client) graphql(ctx context.Context, query string, variables map[string
 		} `json:"errors"`
 	}
 	if err := json.Unmarshal(respBody, &envelope); err != nil {
+		spanErr = err
 		return fmt.Errorf("decode linear graphql response: %w", err)
 	}
 	if len(envelope.Errors) > 0 {
+		spanErr = errors.New("graphql error")
 		return fmt.Errorf("linear graphql error: %s", envelope.Errors[0].Message)
 	}
 	if len(envelope.Data) == 0 || string(envelope.Data) == "null" {
+		spanErr = errors.New("missing data")
 		return errors.New("linear graphql response missing data")
 	}
 	if err := json.Unmarshal(envelope.Data, out); err != nil {
+		spanErr = err
 		return fmt.Errorf("decode linear graphql data: %w", err)
 	}
 	return nil

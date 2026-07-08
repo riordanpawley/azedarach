@@ -3963,10 +3963,10 @@ func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
 	case "diagnostics.latencyTrace":
 		if renderedValue == "true" {
 			latencytrace.SetConfigEnabled(true)
-			fmt.Println("Latency trace logging is enabled. Restart the daemon for daemon-side trace logs to use the persisted setting.")
+			fmt.Println("Latency trace logging and OpenTelemetry spans are enabled. Restart the daemon for daemon-side diagnostics to use the persisted setting.")
 		} else {
 			latencytrace.SetConfigEnabled(false)
-			fmt.Println("Latency trace logging is disabled.")
+			fmt.Println("Latency trace logging and OpenTelemetry spans are disabled.")
 		}
 	}
 
@@ -7853,9 +7853,17 @@ func defaultTmuxPaneSessionName(ctx context.Context) (string, error) {
 		ctx, cancel = context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
 	}
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "tmux",
+		"dependency.name", "tmux",
+		"dependency.operation", "display-message",
+		"arg_count", 5,
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	cmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", paneID, "#{session_name}")
 	out, err := cmd.Output()
 	if err != nil {
+		spanErr = err
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil

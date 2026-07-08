@@ -17,6 +17,7 @@ import (
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -33,10 +34,17 @@ type scheduledScriptCommandRunner interface {
 type execScheduledScriptRunner struct{}
 
 func (execScheduledScriptRunner) Run(ctx context.Context, shell, command, cwd string, env []string) ([]byte, error) {
+	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "scheduled_script",
+		"dependency.name", filepath.Base(shell),
+		"dependency.operation", "run",
+		"arg_count", 2,
+	)
 	cmd := exec.CommandContext(ctx, shell, "-lc", command)
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), env...)
-	return cmd.CombinedOutput()
+	out, err := cmd.CombinedOutput()
+	endSpan(err)
+	return out, err
 }
 
 type scheduledScriptManager struct {

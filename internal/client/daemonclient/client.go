@@ -11,6 +11,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/observability"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // TransportClient is the daemon RPC transport abstraction.
@@ -26,6 +28,7 @@ type Client struct {
 	policy    reconnect.Policy
 	readWait  ReadWaitPolicy
 	projectID naming.ProjectID
+	traceCtx  context.Context
 }
 
 // New returns a shared daemon client with default reconnect policy.
@@ -45,6 +48,13 @@ func New(transport TransportClient) *Client {
 // WithProjectID sets the default project route used for command metadata and fallback subscriptions.
 func (c *Client) WithProjectID(projectID string) *Client {
 	c.projectID = normalizeRouteProjectID(projectID)
+	return c
+}
+
+// WithTraceContext sets a fallback parent span for command handlers that create
+// their own timeout/background contexts.
+func (c *Client) WithTraceContext(ctx context.Context) *Client {
+	c.traceCtx = ctx
 	return c
 }
 
@@ -99,31 +109,49 @@ func (c *Client) WithReadWaitPolicy(policy ReadWaitPolicy) *Client {
 
 // Handshake performs attach/reconnect compatibility validation.
 func (c *Client) Handshake(ctx context.Context, hello protocol.Hello) (protocol.HelloAck, *compatibility.Diagnostic) {
+	ctx = c.contextWithTraceFallback(ctx)
+	ctx, endSpan := latencytrace.StartSpan(ctx, "cli", "daemonclient.handshake", "client_name", hello.ClientName)
 	ack, err := c.transport.Handshake(ctx, hello)
 	if err != nil {
+		endSpan(err)
 		return protocol.HelloAck{}, compatibility.ClassifyConnectError(err)
 	}
 	if diag := compatibility.ClassifyHandshake(ack); diag != nil {
+		endSpan(fmt.Errorf("handshake diagnostic: %s", diag.Code))
 		return ack, diag
 	}
+	endSpan(nil)
 	return ack, nil
 }
 
 // Command executes one daemon command envelope.
-func (c *Client) Command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+func (c *Client) Command(ctx context.Context, req protocol.RequestEnvelope) (resp protocol.ResponseEnvelope, err error) {
+	ctx = c.contextWithTraceFallback(ctx)
 	if metaProjectID := protocol.TrimProjectID(req.Meta.ProjectID.String()); metaProjectID != "" {
 		req.Meta.ProjectID = naming.ProjectID(metaProjectID)
 	} else {
 		req.Meta.ProjectID = naming.ProjectID(c.projectRoute())
 	}
 	populateClientAuditMetadata(&req.Meta)
+	ctx, endSpan := latencytrace.StartSpan(ctx, "cli", "daemonclient.command", "command", req.Command, "request_id", req.RequestID, "project_id", req.Meta.ProjectID.String())
+	defer func() {
+		switch {
+		case err != nil:
+			endSpan(err)
+		case resp.Error != nil:
+			endSpan(fmt.Errorf("daemon response error: %s", resp.Error.Code))
+		default:
+			endSpan(nil)
+		}
+	}()
+	observability.InjectMetadata(ctx, &req.Meta)
 
 	var lastErr error
 	for attempt := 0; c.policy.ShouldRetry(attempt); attempt++ {
 		attemptStartedAt := time.Now()
 		resp, err := c.transport.Command(ctx, req)
 		if err == nil {
-			latencytrace.LogPhase(slog.Default(), "cli", "daemonclient.command_attempt", attemptStartedAt, "command", req.Command, "request_id", req.RequestID, "attempt", attempt+1, "ok", resp.OK)
+			latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "daemonclient.command_attempt", attemptStartedAt, "command", req.Command, "request_id", req.RequestID, "attempt", attempt+1, "ok", resp.OK)
 			if shouldRetryReadCommandResponse(req.Command, resp) {
 				if !c.policy.ShouldRetry(attempt + 1) {
 					return resp, nil
@@ -135,7 +163,7 @@ func (c *Client) Command(ctx context.Context, req protocol.RequestEnvelope) (pro
 			}
 			return resp, nil
 		}
-		latencytrace.LogPhase(slog.Default(), "cli", "daemonclient.command_attempt", attemptStartedAt, "command", req.Command, "request_id", req.RequestID, "attempt", attempt+1, "error", err)
+		latencytrace.LogPhaseContext(ctx, slog.Default(), "cli", "daemonclient.command_attempt", attemptStartedAt, "command", req.Command, "request_id", req.RequestID, "attempt", attempt+1, "error", err)
 		lastErr = err
 		if !reconnect.IsTransientTransportError(err) || !c.policy.ShouldRetry(attempt+1) {
 			break
@@ -215,9 +243,13 @@ func isDaemonReadCommand(command string) bool {
 
 // Subscribe opens a daemon event stream with reconnect attempts.
 func (c *Client) Subscribe(ctx context.Context, projectID string, fromRevision uint64) (<-chan protocol.EventEnvelope, error) {
+	ctx = c.contextWithTraceFallback(ctx)
 	if projectID = protocol.TrimProjectID(projectID); projectID == "" {
 		projectID = c.projectRoute()
 	}
+	ctx, endSpan := latencytrace.StartSpan(ctx, "cli", "daemonclient.subscribe", "project_id", projectID)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	var lastErr error
 	for attempt := 0; c.policy.ShouldRetry(attempt); attempt++ {
 		ch, err := c.transport.Subscribe(ctx, projectID, fromRevision)
@@ -230,11 +262,27 @@ func (c *Client) Subscribe(ctx context.Context, projectID string, fromRevision u
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			spanErr = ctx.Err()
+			return nil, spanErr
 		case <-time.After(c.policy.Delay(attempt)):
 		}
 	}
-	return nil, fmt.Errorf("subscribe failed after retries: %w", lastErr)
+	spanErr = fmt.Errorf("subscribe failed after retries: %w", lastErr)
+	return nil, spanErr
+}
+
+func (c *Client) contextWithTraceFallback(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if oteltrace.SpanContextFromContext(ctx).IsValid() || c == nil || c.traceCtx == nil {
+		return ctx
+	}
+	parent := oteltrace.SpanFromContext(c.traceCtx)
+	if !parent.SpanContext().IsValid() {
+		return ctx
+	}
+	return oteltrace.ContextWithSpan(ctx, parent)
 }
 
 func normalizeRouteProjectID(projectID string) naming.ProjectID {

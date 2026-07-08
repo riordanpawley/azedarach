@@ -9,6 +9,11 @@ import (
 	"github.com/riordanpawley/azedarach/internal/client/compatibility"
 	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/observability"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 type fakeTransport struct {
@@ -68,6 +73,38 @@ func TestClientCommandPassThrough(t *testing.T) {
 	}
 	if !resp.OK {
 		t.Fatal("expected OK command response")
+	}
+}
+
+func TestClientCommandInjectsTraceMetadata(t *testing.T) {
+	t.Setenv(observability.EnvVar, "true")
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	provider := sdktrace.NewTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(oteltrace.NewNoopTracerProvider())
+	})
+
+	var got protocol.RequestEnvelope
+	rootCtx, rootSpan := otel.Tracer("test").Start(context.Background(), "cli.command")
+	defer rootSpan.End()
+	c := New(&fakeTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			got = req
+			return protocol.ResponseEnvelope{OK: true}, nil
+		},
+	}).WithTraceContext(rootCtx)
+
+	if _, err := c.Command(context.Background(), protocol.RequestEnvelope{Command: "task.list"}); err != nil {
+		t.Fatalf("Command error: %v", err)
+	}
+	if got.Meta.TraceParent == "" {
+		t.Fatal("TraceParent is empty")
+	}
+	extracted := observability.ExtractMetadata(context.Background(), got.Meta)
+	if traceID := oteltrace.SpanContextFromContext(extracted).TraceID(); traceID != rootSpan.SpanContext().TraceID() {
+		t.Fatalf("trace id = %s, want %s", traceID, rootSpan.SpanContext().TraceID())
 	}
 }
 

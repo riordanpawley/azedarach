@@ -30,6 +30,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/logstream"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -3191,7 +3192,6 @@ func (m Model) openLogStreamCmd(logPaths ...string) tea.Cmd {
 		args := make([]string, 0, len(availablePaths)+3)
 		args = append(args, "-n", "+1", "-F")
 		args = append(args, availablePaths...)
-		cmd := exec.Command("tail", args...)
 		if strings.TrimSpace(os.Getenv("TMUX")) != "" && m.tmuxClient != nil {
 			quoted := make([]string, 0, len(availablePaths))
 			for _, path := range availablePaths {
@@ -3206,10 +3206,18 @@ func (m Model) openLogStreamCmd(logPaths ...string) tea.Cmd {
 			}
 			return overlay.SelectionMsg{Key: "event-log-opened", Value: strings.Join(availablePaths, ", ")}
 		}
+		ctx, endSpan := latencytrace.StartSpan(context.Background(), "dependency", "tail",
+			"dependency.name", "tail",
+			"dependency.operation", "follow_logs",
+			"arg_count", len(args),
+		)
+		cmd := exec.CommandContext(ctx, "tail", args...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
+		err := cmd.Run()
+		endSpan(err)
+		if err != nil {
 			return overlay.SelectionMsg{
 				Key:   "event-log-error",
 				Value: fmt.Errorf("stream logs: %w", err),
@@ -3345,11 +3353,17 @@ func (m Model) openLogEditorCmd(logPath string) tea.Cmd {
 		editorName = "vim"
 	}
 
+	_, endSpan := latencytrace.StartSpan(context.Background(), "dependency", "editor",
+		"dependency.name", filepath.Base(editorName),
+		"dependency.operation", "open_log",
+		"arg_count", 1,
+	)
 	cmd := exec.Command(editorName, path)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return execProcess(cmd, func(err error) tea.Msg {
+		endSpan(err)
 		if err != nil {
 			return overlay.SelectionMsg{
 				Key:   "event-log-error",

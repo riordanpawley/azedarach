@@ -602,6 +602,17 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	projectID := d.projectID(req.Meta)
 	req.Meta.ProjectID = naming.ProjectID(projectID)
 	ctx = withDaemonProjectIDContext(ctx, projectID)
+	ctx, endCommandSpan := latencytrace.StartSpan(ctx, "daemon", "command", "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
+	defer func() {
+		switch {
+		case err != nil:
+			endCommandSpan(err)
+		case resp.Error != nil:
+			endCommandSpan(fmt.Errorf("daemon response error: %s", resp.Error.Code))
+		default:
+			endCommandSpan(nil)
+		}
+	}()
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Log(
 			ctx,
@@ -646,10 +657,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 
 	beginStartedAt := time.Now()
 	if err := d.beginCommand(); err != nil {
-		latencytrace.LogPhase(d.cfg.Logger, "daemon", "command.begin", beginStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "error", err)
+		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "command.begin", beginStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "error", err)
 		return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
 	}
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "command.begin", beginStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
+	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "command.begin", beginStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	defer d.endCommand()
 
 	if daemonhandlers.DaemonRoutesThroughDispatcher(req.Command) {
@@ -658,7 +669,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		}
 		dispatchStartedAt := time.Now()
 		defer func() {
-			latencytrace.LogPhase(d.cfg.Logger, "daemon", "command.dispatcher_handle", dispatchStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
+			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "command.dispatcher_handle", dispatchStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 		}()
 		return d.router.Handle(ctx, req), nil
 	}

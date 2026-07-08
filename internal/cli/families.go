@@ -17,6 +17,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
@@ -1762,12 +1763,19 @@ func codexGuardValueHasPrimeEvidence(value any) bool {
 }
 
 func runShellCommand(projectDir, command string) error {
-	cmd := exec.Command("/bin/sh", "-lc", command)
+	ctx, endSpan := latencytrace.StartSpan(context.Background(), "dependency", "hook_shell",
+		"dependency.name", "sh",
+		"dependency.operation", "run_hook",
+		"arg_count", 2,
+	)
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-lc", command)
 	cmd.Dir = projectDir
 	cmd.Env = gitExecEnvForHookShellCommand()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	err := cmd.Run()
+	endSpan(err)
+	return err
 }
 
 func setGitHooksPath(projectDir, hooksPath string) error {

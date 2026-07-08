@@ -18,6 +18,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/logging"
+	"github.com/riordanpawley/azedarach/internal/observability"
 )
 
 var daemonExecutable = os.Executable
@@ -81,6 +82,8 @@ func main() {
 	}
 	logger := newDaemonLogger()
 	slog.SetDefault(logger)
+	shutdownObservability := configureProcessObservability("azd", cfg, logger)
+	defer shutdownObservability()
 
 	d := daemon.New(daemon.Config{
 		RepoDir:                    repoDir,
@@ -103,6 +106,30 @@ func main() {
 	if err := d.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon failed: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+func configureProcessObservability(serviceName string, cfg *config.Config, logger *slog.Logger) func() {
+	enabled := false
+	if cfg != nil {
+		enabled = cfg.Diagnostics.LatencyTrace
+	}
+	shutdown, err := observability.Configure(context.Background(), observability.Options{
+		ServiceName:    serviceName,
+		ServiceVersion: buildinfo.VersionString(),
+		Enabled:        enabled,
+		Logger:         logger,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to configure otel tracing: %v\n", err)
+		return func() {}
+	}
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdown(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to flush otel traces: %v\n", err)
+		}
 	}
 }
 

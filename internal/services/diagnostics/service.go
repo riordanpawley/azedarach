@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/services/linearsync"
 )
 
@@ -515,8 +516,16 @@ func (s *Service) GetCachedDiagnostics() *SystemDiagnostics {
 
 // isPortAvailable checks if a port is available by attempting to listen on it
 func isPortAvailable(port int) bool {
+	_, endSpan := latencytrace.StartSpan(nil, "dependency", "tcp_listen_probe",
+		"dependency.name", "localhost",
+		"dependency.operation", "port_available",
+		"port", port,
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
+		spanErr = err
 		return false
 	}
 	ln.Close()
