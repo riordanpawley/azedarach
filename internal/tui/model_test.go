@@ -7584,6 +7584,97 @@ func TestDaemonOperationProgressEventUpdatesRuntimeSignalsAndClearsOnDone(t *tes
 	}
 }
 
+func TestRuntimeSignalsForBoardHidesWorktreeOperationFailureWithoutWorktree(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-no-worktree", Title: "Open task without worktree", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-worktree", Title: "Open task with blocked worktree", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, HasWorktree: true},
+	}
+	m.pendingOpsByTask = map[string]pendingOperationProgress{
+		taskIDKey("az-no-worktree"): {
+			operationID: "op-stale-merge",
+			kind:        daemonclient.CommandGitMerge,
+			state:       protocol.OperationStateFailed,
+			message:     "merge failed",
+			updatedAt:   time.Now(),
+		},
+		taskIDKey("az-worktree"): {
+			operationID: "op-real-merge",
+			kind:        daemonclient.CommandGitMerge,
+			state:       protocol.OperationStateFailed,
+			message:     "merge failed",
+			updatedAt:   time.Now(),
+		},
+	}
+
+	viewForTask := func(task domain.Task) string {
+		return board.Render(
+			[]board.Column{{Title: "Open", Tasks: []domain.Task{task}}},
+			board.Cursor{Column: 0, Task: 0},
+			map[string]bool{},
+			m.runtimeSignalsForBoard(),
+			board.BuildChildProgress([]domain.Task{task}),
+			nil,
+			false,
+			nil,
+			0,
+			m.styles,
+			90,
+			20,
+		)
+	}
+
+	if got := ansi.Strip(viewForTask(m.tasks[0])); strings.Contains(got, "M:!") {
+		t.Fatalf("no-worktree task rendered worktree operation marker:\n%s", got)
+	}
+	if got := ansi.Strip(viewForTask(m.tasks[1])); !strings.Contains(got, "M:!") {
+		t.Fatalf("worktree-backed task did not render operation marker:\n%s", got)
+	}
+
+	m.pendingOpsByTask = nil
+	m.pendingFailures = map[string]taskMutationFailure{
+		taskIDKey("az-no-worktree"): {
+			operationID: "op-stale-notice",
+			action:      daemonclient.CommandGitMerge,
+			message:     "merge failed",
+			updatedAt:   time.Now(),
+		},
+		taskIDKey("az-worktree"): {
+			operationID: "op-real-notice",
+			action:      daemonclient.CommandGitMerge,
+			message:     "merge failed",
+			updatedAt:   time.Now(),
+		},
+	}
+
+	if got := ansi.Strip(viewForTask(m.tasks[0])); strings.Contains(got, "M:!") {
+		t.Fatalf("no-worktree task rendered worktree failure marker:\n%s", got)
+	}
+	if got := ansi.Strip(viewForTask(m.tasks[1])); !strings.Contains(got, "M:!") {
+		t.Fatalf("worktree-backed task did not render failure marker:\n%s", got)
+	}
+
+	m.pendingFailures = nil
+	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
+		"az-no-worktree": {
+			PendingOperationID:    "op-stale-runtime",
+			PendingOperationState: string(protocol.OperationStateFailed),
+		},
+		"az-worktree": {
+			HasWorktree:           true,
+			PendingOperationID:    "op-real-runtime",
+			PendingOperationState: string(protocol.OperationStateFailed),
+		},
+	}
+
+	if got := ansi.Strip(viewForTask(m.tasks[0])); strings.Contains(got, "M:!") {
+		t.Fatalf("no-worktree task rendered runtime worktree marker:\n%s", got)
+	}
+	if got := ansi.Strip(viewForTask(m.tasks[1])); !strings.Contains(got, "M:!") {
+		t.Fatalf("worktree-backed task did not render runtime marker:\n%s", got)
+	}
+}
+
 func TestDaemonOperationFailureEventRemainsVisibleWithReason(t *testing.T) {
 	m := newTestModel()
 	m.tasks = []domain.Task{
@@ -7796,8 +7887,8 @@ func TestApplyOperationRecordsLoadsQueuedAndRecentFailedOperations(t *testing.T)
 	if got := signals["az-1"]; got.PendingOperationID != "op-start" || got.PendingOperationState != string(protocol.OperationStateQueued) {
 		t.Fatalf("az-1 pending = %+v, want queued op-start", got)
 	}
-	if got := signals["az-2"]; got.PendingOperationID != "op-failed" || got.PendingOperationState != string(protocol.OperationStateFailed) {
-		t.Fatalf("az-2 pending = %+v, want failed op-failed", got)
+	if got := signals["az-2"]; got.PendingOperationID != "" || got.PendingOperationState != "" {
+		t.Fatalf("az-2 board signal = %+v, want no failed git marker without worktree", got)
 	}
 	progress := m.pendingMutationForTask("az-2")
 	want := "Could not merge az-2. It stayed Open. Reason: the change conflicts with current daemon state. Next: refresh the task, resolve the reported blocker, then retry"

@@ -805,6 +805,11 @@ func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
 			signals.PendingOperationState = runtime.PendingOperationState
 			signals.PendingOperationID = runtime.PendingOperationID
 			signals.PendingOperationPercent = runtime.PendingOperationPercent
+			if m.shouldSuppressWorktreeOperationMarker(task, "git.runtime", protocol.OperationState(runtime.PendingOperationState)) {
+				signals.PendingOperationState = ""
+				signals.PendingOperationID = ""
+				signals.PendingOperationPercent = 0
+			}
 		}
 		taskKey := taskIDKey(taskID)
 		pending, ok := m.pendingStatuses[taskKey]
@@ -823,6 +828,9 @@ func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
 		if !ok {
 			continue
 		}
+		if m.shouldSuppressWorktreeOperationMarker(task, pending.kind, pending.state) {
+			continue
+		}
 		signals := signalsByTask[taskID]
 		signals.PendingOperationState = string(pending.state)
 		signals.PendingOperationID = pending.operationID
@@ -834,6 +842,9 @@ func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
 		taskID := task.ID.String()
 		failure, ok := m.pendingFailures[taskIDKey(taskID)]
 		if !ok {
+			continue
+		}
+		if m.shouldSuppressWorktreeOperationMarker(task, failure.action, protocol.OperationStateFailed) {
 			continue
 		}
 		signals := signalsByTask[taskID]
@@ -849,6 +860,41 @@ func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
 	}
 
 	return signalsByTask
+}
+
+func (m Model) shouldSuppressWorktreeOperationMarker(task domain.Task, kind string, state protocol.OperationState) bool {
+	if task.Status != domain.StatusOpen {
+		return false
+	}
+	if state != protocol.OperationStateFailed && state != protocol.OperationStateCancelled {
+		return false
+	}
+	return pendingOperationRequiresWorktree(kind) && !m.taskHasWorktreeRuntimeSignal(task)
+}
+
+func (m Model) taskHasWorktreeRuntimeSignal(task domain.Task) bool {
+	if task.HasWorktree {
+		return true
+	}
+	if task.Session != nil && strings.TrimSpace(task.Session.Worktree) != "" {
+		return true
+	}
+	taskID := strings.TrimSpace(task.ID.String())
+	if taskID == "" {
+		return false
+	}
+	if path := strings.TrimSpace(m.runtimeSignalWorktreeByTask[taskID]); path != "" {
+		return true
+	}
+	if signals, ok := m.runtimeSignalsByTask[taskID]; ok && signals.HasWorktree {
+		return true
+	}
+	return false
+}
+
+func pendingOperationRequiresWorktree(kind string) bool {
+	kind = strings.TrimSpace(kind)
+	return strings.HasPrefix(kind, "git.") || strings.HasPrefix(kind, "worktree.")
 }
 
 func buildActiveDescendantSessionByTask(tasks []domain.Task) map[string]bool {
