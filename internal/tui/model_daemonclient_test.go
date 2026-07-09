@@ -9713,7 +9713,7 @@ func TestStartSessionShiftSStartsDirectlyFromBaseBranch(t *testing.T) {
 	}
 }
 
-func TestStartSessionLowercaseSStartsTmuxOnly(t *testing.T) {
+func TestStartSessionLowercaseSMatchesCLIStartWork(t *testing.T) {
 	baseBranch := "develop"
 	childID := "az-child"
 
@@ -9731,8 +9731,8 @@ func TestStartSessionLowercaseSStartsTmuxOnly(t *testing.T) {
 				if body.Yolo {
 					t.Fatal("expected yolo=false for s start")
 				}
-				if body.StartWork == nil || *body.StartWork {
-					t.Fatal("expected start_work=false for s start")
+				if body.StartWork == nil || !*body.StartWork {
+					t.Fatal("expected start_work=true for s start")
 				}
 				return sessionOperationSubmitResponse(t, req, "op-start", daemonclient.CommandSessionStart, childID, protocol.OperationStateQueued), nil
 			default:
@@ -9758,6 +9758,65 @@ func TestStartSessionLowercaseSStartsTmuxOnly(t *testing.T) {
 	_, startCmd := m.handleSelection(overlay.SelectionMsg{Key: "s"})
 	if startCmd == nil {
 		t.Fatal("expected session start command")
+	}
+	startMsg := startCmd()
+	started, ok := startMsg.(sessionStartedMsg)
+	if !ok {
+		t.Fatalf("start message type = %T, want sessionStartedMsg", startMsg)
+	}
+	if started.issueID != childID {
+		t.Fatalf("started issue = %q, want %q", started.issueID, childID)
+	}
+	if len(transport.requests) != 1 || transport.requests[0] != protocol.CommandOperationSubmit {
+		t.Fatalf("requests = %v", transport.requests)
+	}
+}
+
+func TestStartSessionTStartsTmuxOnly(t *testing.T) {
+	baseBranch := "develop"
+	childID := "az-child"
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case protocol.CommandOperationSubmit:
+				body := decodeSessionOperationSubmit(t, req, daemonclient.CommandSessionStart)
+				if body.SessionID != naming.SessionID(childID) {
+					t.Fatalf("session ID = %q, want %q", body.SessionID, childID)
+				}
+				if body.BaseBranch != baseBranch {
+					t.Fatalf("base branch = %q, want %q", body.BaseBranch, baseBranch)
+				}
+				if body.Yolo {
+					t.Fatal("expected yolo=false for t start")
+				}
+				if body.StartWork == nil || *body.StartWork {
+					t.Fatal("expected start_work=false for t start")
+				}
+				return sessionOperationSubmitResponse(t, req, "op-start", daemonclient.CommandSessionStart, childID, protocol.OperationStateQueued), nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.config.Git.BaseBranch = baseBranch
+	childIssueID := naming.IssueID(childID)
+	m.tasks = []domain.Task{
+		{
+			ID:     childIssueID,
+			Title:  "Child task",
+			Status: domain.StatusInProgress,
+			Type:   domain.TypeTask,
+		},
+	}
+	m.nav.SelectTask(childID, 0)
+
+	_, startCmd := m.handleSelection(overlay.SelectionMsg{Key: "t"})
+	if startCmd == nil {
+		t.Fatal("expected tmux-only session start command")
 	}
 	startMsg := startCmd()
 	started, ok := startMsg.(sessionStartedMsg)
@@ -9799,7 +9858,7 @@ func TestStartSessionCommandReturnsPendingOperationToast(t *testing.T) {
 		t.Fatal("expected queued operation toast")
 	}
 	gotToast := updatedModel.toasts[len(updatedModel.toasts)-1].Message
-	if !strings.Contains(gotToast, "Session start queued for az-child (operation op-start)") {
+	if !strings.Contains(gotToast, "AI session start queued for az-child (operation op-start)") {
 		t.Fatalf("toast = %q, want queued operation message", gotToast)
 	}
 }
@@ -10146,7 +10205,7 @@ func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
 	if strings.Contains(view, "Pause session") || strings.Contains(view, "Stop session") {
 		t.Fatalf("stopped session actions should not remain after daemon refresh: %q", view)
 	}
-	if !strings.Contains(view, "Start session") {
+	if !strings.Contains(view, "Start AI session") {
 		t.Fatalf("expected start action after daemon refresh removed session: %q", view)
 	}
 	if got := transport.requests; len(got) != 2 || got[0] != protocol.CommandOperationSubmit || got[1] != daemonclient.CommandBoardFetch {

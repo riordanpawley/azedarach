@@ -133,7 +133,9 @@ var registry = []ActionSpec{
 
 	// Action mode status hints.
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "h/l"}}, Hint: "move"},
-	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "s/S/!"}}, Hint: "start"},
+	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "s"}}, Hint: "AI start"},
+	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "t"}}, Hint: "tmux only"},
+	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "!"}}, Hint: "yolo AI"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "a"}}, Hint: "attach"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "p"}}, Hint: "pause"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "R"}}, Hint: "resume"},

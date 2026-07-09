@@ -1291,6 +1291,7 @@ type sessionStartedMsg struct {
 	issueID     string
 	operationID string
 	state       protocol.OperationState
+	actionLabel string
 }
 
 type sessionStoppedMsg struct {
@@ -2827,6 +2828,24 @@ func (m Model) daemonCommandTimeout() time.Duration {
 	return 30 * time.Second
 }
 
+func sessionStartActionLabel(yolo bool, startWork bool) string {
+	if !startWork {
+		return "Tmux shell start"
+	}
+	if yolo {
+		return "AI session start (yolo)"
+	}
+	return "AI session start"
+}
+
+func normalizeSessionStartActionLabel(label string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return "Session start"
+	}
+	return label
+}
+
 // startSessionCmd requests daemon-owned lifecycle start and lets daemon snapshots rebuild the local projection.
 func (m Model) startSessionCmd(issueID string, baseBranch string, yolo bool, startWork bool) tea.Cmd {
 	return func() tea.Msg {
@@ -2850,7 +2869,7 @@ func (m Model) startSessionCmd(issueID string, baseBranch string, yolo bool, sta
 		if err != nil {
 			return sessionErrorMsg{issueID: issueID, err: err}
 		}
-		return sessionStartedMsg{issueID: issueID, operationID: record.OperationID.String(), state: record.State}
+		return sessionStartedMsg{issueID: issueID, operationID: record.OperationID.String(), state: record.State, actionLabel: sessionStartActionLabel(yolo, startWork)}
 	}
 }
 

@@ -6912,9 +6912,10 @@ func TestHandleSelectionSessionMutationsShowImmediatePendingFeedback(t *testing.
 		wantAction string
 		wantToast  string
 	}{
-		{name: "start tmux only", key: "s", wantAction: "session_start", wantToast: "Session start queued for az-1"},
-		{name: "start work", key: "S", wantAction: "session_start", wantToast: "Session start queued for az-1"},
-		{name: "start yolo", key: "!", wantAction: "session_start", wantToast: "Session start queued for az-1"},
+		{name: "start work", key: "s", wantAction: "session_start", wantToast: "AI session start queued for az-1"},
+		{name: "start tmux only", key: "t", wantAction: "session_start", wantToast: "Tmux shell start queued for az-1"},
+		{name: "start work legacy shortcut", key: "S", wantAction: "session_start", wantToast: "AI session start queued for az-1"},
+		{name: "start yolo", key: "!", wantAction: "session_start", wantToast: "AI session start (yolo) queued for az-1"},
 		{name: "stop", key: "x", wantAction: "session_stop", wantToast: "Session stop queued for az-1"},
 	}
 
