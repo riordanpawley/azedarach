@@ -24,6 +24,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
+	prservice "github.com/riordanpawley/azedarach/internal/services/pr"
 	_ "modernc.org/sqlite"
 )
 
@@ -68,6 +69,94 @@ func marshalTaskListBodyForProject(projectID string, tasks []domain.Task) ([]byt
 		Freshness:        protocol.TaskListFreshnessFresh,
 		Tasks:            tasks,
 	})
+}
+
+func TestParsePRArgsListAcceptsProjectStateLimitAndJSON(t *testing.T) {
+	opts, err := ParsePRArgs([]string{"list", "--project", "proj", "--state", "all", "--limit", "12", "--json"})
+	if err != nil {
+		t.Fatalf("ParsePRArgs returned error: %v", err)
+	}
+	if opts.Command != "list" || opts.Project != "proj" || opts.State != "all" || opts.Limit != 12 || !opts.JSON {
+		t.Fatalf("opts = %+v", opts)
+	}
+}
+
+func TestParsePRArgsListRejectsTargetSelectors(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "positional issue", args: []string{"list", "cxs"}, want: "does not accept issue or pull request selectors"},
+		{name: "issue flag", args: []string{"list", "--issue", "cxs"}, want: "--issue"},
+		{name: "branch flag", args: []string{"list", "--branch", "feature"}, want: "--branch"},
+		{name: "number flag", args: []string{"list", "--number", "12"}, want: "--number"},
+		{name: "pr alias", args: []string{"list", "--pr", "12"}, want: "--pr"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParsePRArgs(tt.args)
+			if err == nil {
+				t.Fatalf("ParsePRArgs returned nil error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want substring %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
+func TestPRCommandStatusUsesPullRequestNumber(t *testing.T) {
+	var refs []string
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandPRGet:
+					var body daemonclient.PullRequestBranchParams
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal pr get body: %v", err)
+					}
+					refs = append(refs, "get:"+body.Branch)
+					return responseWithJSON(req, daemonclient.PullRequestGetResult{
+						PullRequest: prservice.PRInfo{Number: 12, Title: "Example", URL: "https://example.test/pr/12", State: "open", Branch: "feature", BaseRef: "main"},
+					}), nil
+				case daemonclient.CommandPRChecks:
+					var body daemonclient.PullRequestChecksParams
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal pr checks body: %v", err)
+					}
+					refs = append(refs, "checks:"+body.Ref)
+					return responseWithJSON(req, daemonclient.PullRequestChecksResult{Ref: body.Ref, ChecksStatus: "passing"}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   "/repo",
+	}
+
+	if err := PRCommand(deps, PROptions{Command: "status", Number: 12, JSON: true}); err != nil {
+		t.Fatalf("PRCommand returned error: %v", err)
+	}
+	want := []string{"get:12", "checks:12"}
+	if !reflect.DeepEqual(refs, want) {
+		t.Fatalf("refs = %v, want %v", refs, want)
+	}
+}
+
+func TestPRCreateRejectsPullRequestNumber(t *testing.T) {
+	err := prCreateCommand(context.Background(), &Dependencies{}, PROptions{Number: 12, IssueID: "cxs"})
+	if err == nil {
+		t.Fatalf("prCreateCommand returned nil error")
+	}
+	if !strings.Contains(err.Error(), "does not accept pull request number") {
+		t.Fatalf("error = %q", err.Error())
+	}
 }
 
 func assertMetadataOnlyTaskGetManyRequest(t *testing.T, req protocol.RequestEnvelope, issueID string) {

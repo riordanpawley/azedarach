@@ -171,16 +171,17 @@ func main() {
 
 	case "pr":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az pr <status|checks|open|create|merge> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az pr <list|status|checks|open|create|merge> [arguments]\n")
 			os.Exit(1)
 		}
 		if sessionHelpRequested(commandArgs...) {
-			fmt.Println("Usage: az pr <status|checks|open|create|merge> [--project <project-id>] [--issue <issue-id>|--branch <branch>|--number <n>] [--json]")
+			fmt.Println("Usage: az pr list [--project <project-id>] [--state <open|closed|merged|all>] [--limit <n>] [--json]")
+			fmt.Println("       az pr <status|checks|open|create|merge> [--project <project-id>] [--issue <issue-id>|--branch <branch>|--number <n>] [--json]")
 			os.Exit(0)
 		}
 		opts, err := cli.ParsePRArgs(commandArgs)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Usage: az pr <status|checks|open|create|merge> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az pr <list|status|checks|open|create|merge> [arguments]\n")
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}

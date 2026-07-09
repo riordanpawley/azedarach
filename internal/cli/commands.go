@@ -429,6 +429,8 @@ type PROptions struct {
 	Body       string
 	BaseBranch string
 	Strategy   string
+	State      string
+	Limit      int
 	Draft      bool
 	Confirm    bool
 	JSON       bool
@@ -436,9 +438,9 @@ type PROptions struct {
 
 func ParsePRArgs(args []string) (PROptions, error) {
 	if len(args) == 0 {
-		return PROptions{}, fmt.Errorf("usage: az pr <status|checks|open|create|merge> [arguments]")
+		return PROptions{}, fmt.Errorf("usage: az pr <list|status|checks|open|create|merge> [arguments]")
 	}
-	opts := PROptions{Command: strings.TrimSpace(args[0]), Strategy: "squash", Draft: true}
+	opts := PROptions{Command: strings.TrimSpace(args[0]), Strategy: "squash", State: "open", Limit: 30, Draft: true}
 	fs := flag.NewFlagSet("pr "+opts.Command, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&opts.Project, "project", "", "project id")
@@ -452,21 +454,49 @@ func ParsePRArgs(args []string) (PROptions, error) {
 	fs.StringVar(&opts.BaseBranch, "base", "", "base branch")
 	fs.StringVar(&opts.BaseBranch, "base-branch", "", "base branch")
 	fs.StringVar(&opts.Strategy, "strategy", opts.Strategy, "merge strategy: squash, rebase, or merge")
+	fs.StringVar(&opts.State, "state", opts.State, "PR state for list: open, closed, merged, or all")
+	fs.IntVar(&opts.Limit, "limit", opts.Limit, "maximum PRs to list")
 	fs.BoolVar(&opts.Draft, "draft", opts.Draft, "create as draft")
 	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm merge")
 	fs.BoolVar(&opts.JSON, "json", false, "emit JSON")
 	if err := fs.Parse(args[1:]); err != nil {
 		return PROptions{}, err
 	}
-	if fs.NArg() > 0 && opts.IssueID == "" && opts.Branch == "" && opts.Number == 0 {
-		opts.IssueID = fs.Arg(0)
-	}
 	switch opts.Command {
-	case "status", "checks", "open", "create", "merge":
+	case "list", "status", "checks", "open", "create", "merge":
 	default:
 		return PROptions{}, fmt.Errorf("unknown pr command: %s", opts.Command)
 	}
+	if opts.Command == "list" {
+		if unsupported := unsupportedPRListFlags(fs); len(unsupported) > 0 {
+			return PROptions{}, fmt.Errorf("az pr list does not accept %s", strings.Join(unsupported, ", "))
+		}
+		if fs.NArg() > 0 {
+			return PROptions{}, fmt.Errorf("az pr list does not accept issue or pull request selectors")
+		}
+		return opts, nil
+	}
+	if fs.NArg() > 0 && opts.IssueID == "" && opts.Branch == "" && opts.Number == 0 {
+		opts.IssueID = fs.Arg(0)
+	}
 	return opts, nil
+}
+
+func unsupportedPRListFlags(fs *flag.FlagSet) []string {
+	allowed := map[string]bool{
+		"json":    true,
+		"limit":   true,
+		"project": true,
+		"state":   true,
+	}
+	var unsupported []string
+	fs.Visit(func(f *flag.Flag) {
+		if !allowed[f.Name] {
+			unsupported = append(unsupported, "--"+f.Name)
+		}
+	})
+	sort.Strings(unsupported)
+	return unsupported
 }
 
 func ParseWorktreeCreateArgs(args []string) (WorktreeCreateOptions, error) {
@@ -881,16 +911,29 @@ func PRCommand(deps *Dependencies, opts PROptions) error {
 	}
 
 	switch opts.Command {
+	case "list":
+		result, err := deps.DaemonClient.ListPullRequests(ctx, daemonclient.PullRequestListParams{
+			State: strings.TrimSpace(opts.State),
+			Limit: opts.Limit,
+		})
+		if err != nil {
+			return fmt.Errorf("list pull requests: %w", err)
+		}
+		if opts.JSON {
+			return printJSON(result)
+		}
+		printPullRequestList(result)
+		return nil
 	case "status":
-		branch, err := resolvePRBranch(ctx, deps, opts)
+		ref, err := resolvePRRef(ctx, deps, opts)
 		if err != nil {
 			return err
 		}
-		status, err := deps.DaemonClient.GetPullRequest(ctx, daemonclient.PullRequestBranchParams{Branch: branch})
+		status, err := deps.DaemonClient.GetPullRequest(ctx, daemonclient.PullRequestBranchParams{Branch: ref})
 		if err != nil {
 			return fmt.Errorf("get pull request: %w", err)
 		}
-		checks, checksErr := deps.DaemonClient.GetPullRequestChecks(ctx, daemonclient.PullRequestChecksParams{Ref: branch})
+		checks, checksErr := deps.DaemonClient.GetPullRequestChecks(ctx, daemonclient.PullRequestChecksParams{Ref: ref})
 		if opts.JSON {
 			payload := map[string]any{"pull_request": status.PullRequest}
 			if checksErr == nil {
@@ -961,6 +1004,9 @@ func PRCommand(deps *Dependencies, opts PROptions) error {
 }
 
 func prCreateCommand(ctx context.Context, deps *Dependencies, opts PROptions) error {
+	if opts.Number > 0 {
+		return fmt.Errorf("pr create does not accept pull request number selectors")
+	}
 	branch, err := resolvePRBranch(ctx, deps, opts)
 	if err != nil {
 		return err
@@ -1063,6 +1109,30 @@ func printPullRequestChecks(result daemonclient.PullRequestChecksResult) {
 		}
 		fmt.Printf("- %s: %s\n", name, state)
 	}
+}
+
+func printPullRequestList(result daemonclient.PullRequestListResult) {
+	if len(result.PullRequests) == 0 {
+		fmt.Printf("No %s pull requests found.\n", strings.TrimSpace(result.State))
+		return
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "NUMBER\tSTATE\tDRAFT\tBRANCH\tBASE\tTITLE")
+	for _, pr := range result.PullRequests {
+		draft := ""
+		if pr.Draft {
+			draft = "yes"
+		}
+		fmt.Fprintf(w, "#%d\t%s\t%s\t%s\t%s\t%s\n",
+			pr.Number,
+			strings.ToLower(strings.TrimSpace(pr.State)),
+			draft,
+			strings.TrimSpace(pr.Branch),
+			strings.TrimSpace(pr.BaseRef),
+			strings.TrimSpace(pr.Title),
+		)
+	}
+	_ = w.Flush()
 }
 
 func resolveSessionStartIssueTarget(ctx context.Context, deps *Dependencies, issueID, project string) (sessionIssueTarget, error) {

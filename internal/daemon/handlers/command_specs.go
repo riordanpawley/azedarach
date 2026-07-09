@@ -84,6 +84,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandOperationCancel:        {Command: protocol.CommandOperationCancel, DispatchTarget: CommandDispatchOperation, RequiresProjectID: true},
 	CommandPRCreate:                        {Command: CommandPRCreate, DispatchTarget: CommandDispatchPR, RequiresProjectID: true},
 	CommandPRGet:                           {Command: CommandPRGet, DispatchTarget: CommandDispatchPR, RequiresProjectID: true},
+	CommandPRList:                          {Command: CommandPRList, DispatchTarget: CommandDispatchPR, RequiresProjectID: true},
 	CommandPRChecks:                        {Command: CommandPRChecks, DispatchTarget: CommandDispatchPR, RequiresProjectID: true},
 	CommandPROpen:                          {Command: CommandPROpen, DispatchTarget: CommandDispatchPR, RequiresProjectID: true},
 	CommandPRMerge:                         {Command: CommandPRMerge, DispatchTarget: CommandDispatchPR, RequiresProjectID: true},

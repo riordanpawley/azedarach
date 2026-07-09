@@ -51,6 +51,12 @@ type CreatePRParams struct {
 	IssueID    string
 }
 
+// ListPRParams controls gh pr list filtering.
+type ListPRParams struct {
+	State string
+	Limit int
+}
+
 // NewPRWorkflow creates a new PR workflow service
 func NewPRWorkflow(runner CommandRunner, logger *slog.Logger) *PRWorkflow {
 	return &PRWorkflow{
@@ -184,12 +190,26 @@ func isPendingChecksExit(err error) bool {
 	return errors.As(err, &exitErr) && exitErr.ExitCode() == 8
 }
 
-// List retrieves all open pull requests
-func (w *PRWorkflow) List(ctx context.Context) ([]PRInfo, error) {
-	w.logger.Debug("listing open PRs")
+// List retrieves pull requests matching the requested filters.
+func (w *PRWorkflow) List(ctx context.Context, params ListPRParams) ([]PRInfo, error) {
+	state := strings.TrimSpace(params.State)
+	if state == "" {
+		state = "open"
+	}
+	if state != "open" && state != "closed" && state != "merged" && state != "all" {
+		return nil, fmt.Errorf("invalid PR state: %s (must be open, closed, merged, or all)", state)
+	}
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 30
+	}
+
+	w.logger.Debug("listing PRs", "state", state, "limit", limit)
 
 	args := []string{
 		"pr", "list",
+		"--state", state,
+		"--limit", fmt.Sprintf("%d", limit),
 		"--json", "number,title,url,state,isDraft,headRefName,baseRefName",
 	}
 

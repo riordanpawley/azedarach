@@ -364,7 +364,7 @@ func TestPRWorkflow_List(t *testing.T) {
 			}
 			workflow := NewPRWorkflow(runner, slog.Default())
 
-			prs, err := workflow.List(context.Background())
+			prs, err := workflow.List(context.Background(), ListPRParams{State: "all", Limit: 50})
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -376,8 +376,19 @@ func TestPRWorkflow_List(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Len(t, prs, tt.wantCount)
+			if !tt.wantErr {
+				assert.Equal(t, []string{"gh", "pr", "list", "--state", "all", "--limit", "50", "--json", "number,title,url,state,isDraft,headRefName,baseRefName"}, runner.calls[0])
+			}
 		})
 	}
+}
+
+func TestPRWorkflow_ListRejectsInvalidState(t *testing.T) {
+	workflow := NewPRWorkflow(&mockRunner{}, slog.Default())
+
+	_, err := workflow.List(context.Background(), ListPRParams{State: "weird"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid PR state")
 }
 
 func TestPRWorkflow_Checks(t *testing.T) {

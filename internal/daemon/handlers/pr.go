@@ -17,6 +17,7 @@ import (
 const (
 	CommandPRCreate        = "pr.create"
 	CommandPRGet           = "pr.get"
+	CommandPRList          = "pr.list"
 	CommandPRChecks        = "pr.checks"
 	CommandPROpen          = "pr.open"
 	CommandPRMerge         = "pr.merge"
@@ -33,6 +34,7 @@ type PRHandler struct {
 type prWorkflow interface {
 	Create(context.Context, pr.CreatePRParams) (*pr.PRInfo, error)
 	Get(context.Context, string) (*pr.PRInfo, error)
+	List(context.Context, pr.ListPRParams) ([]pr.PRInfo, error)
 	Checks(context.Context, string) ([]pr.CheckInfo, error)
 	Open(context.Context, string) error
 	Merge(context.Context, int, string) error
@@ -63,6 +65,11 @@ type prChecksCommandBody struct {
 	Ref string `json:"ref"`
 }
 
+type prListCommandBody struct {
+	State string `json:"state"`
+	Limit int    `json:"limit"`
+}
+
 type prMergeCommandBody struct {
 	Branch   string `json:"branch"`
 	Number   int    `json:"number"`
@@ -82,6 +89,11 @@ type prCreateResultBody struct {
 
 type prGetResultBody struct {
 	PullRequest pr.PRInfo `json:"pull_request"`
+}
+
+type prListResultBody struct {
+	State        string      `json:"state"`
+	PullRequests []pr.PRInfo `json:"pull_requests"`
 }
 
 type prChecksResultBody struct {
@@ -139,6 +151,8 @@ func (h *PRHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) pr
 		return h.handleCreate(ctx, resp, req)
 	case CommandPRGet:
 		return h.handleGet(ctx, resp, req)
+	case CommandPRList:
+		return h.handleList(ctx, resp, req)
 	case CommandPRChecks:
 		return h.handleChecks(ctx, resp, req)
 	case CommandPROpen:
@@ -155,6 +169,30 @@ func (h *PRHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) pr
 		}
 		return resp
 	}
+}
+
+func (h *PRHandler) handleList(ctx context.Context, resp protocol.ResponseEnvelope, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	if h.prWorkflow == nil {
+		resp.Error = prWorkflowUnavailableError()
+		return resp
+	}
+	var cmd prListCommandBody
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &cmd); err != nil {
+			resp.Error = invalidPRBodyError(err)
+			return resp
+		}
+	}
+	cmd.State = strings.TrimSpace(cmd.State)
+	if cmd.State == "" {
+		cmd.State = "open"
+	}
+	prs, err := h.prWorkflow.List(ctx, pr.ListPRParams{State: cmd.State, Limit: cmd.Limit})
+	if err != nil {
+		resp.Error = mapPRGitError(err)
+		return resp
+	}
+	return marshalPRResponse(resp, prListResultBody{State: cmd.State, PullRequests: prs})
 }
 
 func (h *PRHandler) handleGet(ctx context.Context, resp protocol.ResponseEnvelope, req protocol.RequestEnvelope) protocol.ResponseEnvelope {

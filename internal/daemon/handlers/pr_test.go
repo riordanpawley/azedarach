@@ -16,6 +16,7 @@ type fakePRWorkflow struct {
 	lastParams   pr.CreatePRParams
 	lastBranch   string
 	lastRef      string
+	lastList     pr.ListPRParams
 	lastNumber   int
 	lastStrategy string
 	result       *pr.PRInfo
@@ -51,6 +52,14 @@ func (f *fakePRWorkflow) Get(_ context.Context, branch string) (*pr.PRInfo, erro
 		return f.result, nil
 	}
 	return &pr.PRInfo{Number: 7, Title: "Add feature", URL: "https://github.com/example/repo/pull/7", State: "open", Branch: branch, BaseRef: "main"}, nil
+}
+
+func (f *fakePRWorkflow) List(_ context.Context, params pr.ListPRParams) ([]pr.PRInfo, error) {
+	f.lastList = params
+	if f.err != nil {
+		return nil, f.err
+	}
+	return []pr.PRInfo{{Number: 7, Title: "Add feature", URL: "https://github.com/example/repo/pull/7", State: "open", Branch: "feature/add", BaseRef: "main"}}, nil
 }
 
 func (f *fakePRWorkflow) Checks(_ context.Context, ref string) ([]pr.CheckInfo, error) {
@@ -303,6 +312,29 @@ func TestPRHandlerGetChecksOpenAndMerge(t *testing.T) {
 		}
 		if out.PullRequest.Branch != "feature/add" || workflow.lastBranch != "feature/add" {
 			t.Fatalf("get result = %+v workflow branch=%q", out, workflow.lastBranch)
+		}
+	})
+
+	t.Run("list", func(t *testing.T) {
+		workflow := &fakePRWorkflow{}
+		handler := NewPRHandler(workflow, nil)
+		body, _ := json.Marshal(map[string]any{"state": "all", "limit": 12})
+		resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-pr-list",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         CommandPRList,
+			Body:            body,
+		})
+		if !resp.OK {
+			t.Fatalf("list response error: %+v", resp.Error)
+		}
+		var out prListResultBody
+		if err := json.Unmarshal(resp.Body, &out); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
+		if out.State != "all" || len(out.PullRequests) != 1 || workflow.lastList.State != "all" || workflow.lastList.Limit != 12 {
+			t.Fatalf("list result = %+v workflow params=%+v", out, workflow.lastList)
 		}
 	})
 

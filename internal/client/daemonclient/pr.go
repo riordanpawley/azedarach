@@ -11,6 +11,7 @@ import (
 const (
 	CommandPRCreate        = "pr.create"
 	CommandPRGet           = "pr.get"
+	CommandPRList          = "pr.list"
 	CommandPRChecks        = "pr.checks"
 	CommandPROpen          = "pr.open"
 	CommandPRMerge         = "pr.merge"
@@ -41,6 +42,18 @@ type PullRequestBranchParams struct {
 // PullRequestGetResult captures PR metadata for a branch.
 type PullRequestGetResult struct {
 	PullRequest pr.PRInfo `json:"pull_request"`
+}
+
+// PullRequestListParams controls PR list filtering.
+type PullRequestListParams struct {
+	State string `json:"state"`
+	Limit int    `json:"limit"`
+}
+
+// PullRequestListResult captures a filtered PR list.
+type PullRequestListResult struct {
+	State        string      `json:"state"`
+	PullRequests []pr.PRInfo `json:"pull_requests"`
 }
 
 // PullRequestChecksParams identifies a PR for checks by branch, number, or URL.
@@ -108,6 +121,15 @@ func (c *Client) GetPullRequest(ctx context.Context, params PullRequestBranchPar
 	}
 	if out.PullRequest.Number == 0 {
 		return PullRequestGetResult{}, fmt.Errorf("%s returned empty pull request number", CommandPRGet)
+	}
+	return out, nil
+}
+
+// ListPullRequests asks the daemon for a filtered PR list.
+func (c *Client) ListPullRequests(ctx context.Context, params PullRequestListParams) (PullRequestListResult, error) {
+	var out PullRequestListResult
+	if err := c.commandJSON(ctx, CommandPRList, params, &out); err != nil {
+		return PullRequestListResult{}, err
 	}
 	return out, nil
 }

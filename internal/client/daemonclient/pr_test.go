@@ -174,6 +174,20 @@ func TestPullRequestCommandsRouteAndDecodeResponses(t *testing.T) {
 			},
 		},
 		{
+			name:    "list",
+			command: CommandPRList,
+			call: func(client *Client) error {
+				out, err := client.ListPullRequests(context.Background(), PullRequestListParams{State: "all", Limit: 12})
+				if err != nil {
+					return err
+				}
+				if out.State != "all" || len(out.PullRequests) != 1 || out.PullRequests[0].Number != 12 {
+					t.Fatalf("list result = %+v", out)
+				}
+				return nil
+			},
+		},
+		{
 			name:    "checks",
 			command: CommandPRChecks,
 			call: func(client *Client) error {
@@ -245,6 +259,8 @@ func pullRequestTestResponseBody(command string) ([]byte, error) {
 	switch command {
 	case CommandPRGet:
 		return json.Marshal(PullRequestGetResult{PullRequest: pr.PRInfo{Number: 12, Title: "PR", URL: "https://example.test/pr/12", State: "open", Branch: "feature/add", BaseRef: "main"}})
+	case CommandPRList:
+		return json.Marshal(PullRequestListResult{State: "all", PullRequests: []pr.PRInfo{{Number: 12, Title: "PR", URL: "https://example.test/pr/12", State: "open", Branch: "feature/add", BaseRef: "main"}}})
 	case CommandPRChecks:
 		return json.Marshal(PullRequestChecksResult{Ref: "feature/add", ChecksStatus: "pass", Checks: []pr.CheckInfo{{Name: "unit", Bucket: "pass"}}})
 	case CommandPROpen:
