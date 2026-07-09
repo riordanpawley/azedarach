@@ -37,6 +37,7 @@ type Task struct {
 	Labels                []string        `json:"labels,omitempty"`
 	Estimate              *int            `json:"estimate,omitempty"`
 	Status                Status          `json:"status"`
+	State                 IssueState      `json:"issue_state,omitzero" msgpack:"issue_state,omitempty"`
 	Priority              Priority        `json:"priority"`
 	Type                  TaskType        `json:"issue_type"`
 	ParentID              *naming.IssueID `json:"parent_id,omitempty"`

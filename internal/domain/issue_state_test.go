@@ -208,6 +208,53 @@ func TestTaskIssueDisplayPhaseDerivesReviewFromSessionActivity(t *testing.T) {
 	}
 }
 
+func TestTaskIssueDisplayPhasePrefersFirstClassIssueState(t *testing.T) {
+	tests := []struct {
+		name string
+		task Task
+		want IssueDisplayPhase
+	}{
+		{
+			name: "high-priority backlog remains backlog",
+			task: Task{
+				Status:   StatusOpen,
+				State:    mustIssueState(t, IssueStateParts{Workflow: IssueWorkflowBacklog}),
+				Priority: P1,
+			},
+			want: IssueDisplayBacklog,
+		},
+		{
+			name: "low-priority open remains open",
+			task: Task{
+				Status:   StatusOpen,
+				State:    mustIssueState(t, IssueStateParts{Workflow: IssueWorkflowOpen}),
+				Priority: P4,
+			},
+			want: IssueDisplayOpen,
+		},
+		{
+			name: "cancelled close outcome does not rely on compatibility status",
+			task: Task{
+				Status: StatusDone,
+				State: mustIssueState(t, IssueStateParts{
+					Workflow:     IssueWorkflowClosed,
+					CloseOutcome: IssueCloseCancelled,
+				}),
+				Priority: P2,
+			},
+			want: IssueDisplayCancelled,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.task.IssueDisplayPhase(); got != tt.want {
+				t.Fatalf("IssueDisplayPhase() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNewIssueStateRejectsInvalidCombinations(t *testing.T) {
 	tests := []struct {
 		name  string

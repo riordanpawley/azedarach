@@ -122,6 +122,15 @@ func mustTaskSnapshotCheckedAt() time.Time {
 	return time.Date(2026, time.April, 2, 10, 31, 45, 0, time.UTC)
 }
 
+func mustTaskIssueState(t *testing.T, parts domain.IssueStateParts) domain.IssueState {
+	t.Helper()
+	state, err := domain.NewIssueState(parts)
+	if err != nil {
+		t.Fatalf("NewIssueState(%+v) error = %v", parts, err)
+	}
+	return state
+}
+
 func mustMarshalRawTaskListSnapshotBody(t *testing.T, body any) []byte {
 	t.Helper()
 	data, err := json.Marshal(body)
@@ -358,9 +367,14 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 						Title:       "Board task",
 						Description: "description must not cross board payload",
 						Notes:       "notes must not cross board payload",
-						Status:      domain.StatusInProgress,
-						Priority:    domain.P1,
-						Type:        domain.TypeTask,
+						Status:      domain.StatusInReview,
+						State: mustTaskIssueState(t, domain.IssueStateParts{
+							Workflow: domain.IssueWorkflowActive,
+							Review:   domain.IssueReviewRequested,
+						}),
+						Session:  &domain.Session{IssueID: "az-board", Activity: string(domain.SessionBusy)},
+						Priority: domain.P1,
+						Type:     domain.TypeTask,
 					}}),
 				}, nil
 			},
@@ -383,6 +397,9 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		task := snapshot.Tasks[0]
 		if task.ID != "az-board" || task.Title != "Board task" || task.Status != domain.StatusInProgress {
 			t.Fatalf("task = %+v", task)
+		}
+		if got, want := task.State.Review(), domain.IssueReviewRequested; got != want {
+			t.Fatalf("task issue review state = %s, want %s", got, want)
 		}
 		if task.Description != "" || task.Notes != "" || task.Design != "" || task.Acceptance != "" {
 			t.Fatalf("board snapshot decoded detail fields: description=%q notes=%q design=%q acceptance=%q", task.Description, task.Notes, task.Design, task.Acceptance)
@@ -777,7 +794,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				},
 				wantSubstrs: []string{
 					"decode task.list response",
-					"schema_version mismatch: expected 2, actual 3",
+					"schema_version mismatch: expected 3, actual 4",
 				},
 			},
 			{

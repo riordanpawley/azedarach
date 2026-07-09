@@ -3952,6 +3952,7 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 		if err != nil {
 			return nil, err
 		}
+		task.State = state
 		task.Status = legacyStatusFromIssueState(state)
 		task.Type = domain.TaskType(typeRaw)
 		task.CreatedAt = parseTimestamp(createdRaw)
@@ -4089,6 +4090,7 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 			c.logSQLiteRead(ctx, "issue.metadata_runtime_projection", startedAt, len(tasks), err, "issue_count", len(ids))
 			return nil, err
 		}
+		task.State = state
 		task.Status = legacyStatusFromIssueState(state)
 		task.Type = domain.TaskType(typeRaw)
 		task.CreatedAt = parseTimestamp(createdRaw)
@@ -4330,6 +4332,7 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 			c.logSQLiteRead(ctx, "issue.runtime_projection", startedAt, len(tasks), err, "include_details", includeDetails, "issue_count", issueCount)
 			return nil, err
 		}
+		task.State = state
 		task.Status = legacyStatusFromIssueState(state)
 		task.Type = domain.TaskType(typeRaw)
 		task.CreatedAt = parseTimestamp(createdRaw)

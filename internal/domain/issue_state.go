@@ -80,11 +80,11 @@ type IssueStateParts struct {
 }
 
 type IssueState struct {
-	workflow     IssueWorkflow
-	review       IssueReviewState
-	closeOutcome IssueCloseOutcome
-	archive      IssueArchiveState
-	deletion     IssueDeletionState
+	LifecycleState IssueWorkflow      `json:"lifecycle_state" msgpack:"lifecycle_state"`
+	ReviewState    IssueReviewState   `json:"review_state" msgpack:"review_state"`
+	ClosedOutcome  IssueCloseOutcome  `json:"closed_outcome" msgpack:"closed_outcome"`
+	ArchiveState   IssueArchiveState  `json:"archive_state" msgpack:"archive_state"`
+	DeletionState  IssueDeletionState `json:"deletion_state" msgpack:"deletion_state"`
 }
 
 type LegacyIssueStateInput struct {
@@ -142,45 +142,45 @@ func NewIssueState(parts IssueStateParts) (IssueState, error) {
 		return IssueState{}, err
 	}
 	return IssueState{
-		workflow:     parts.Workflow,
-		review:       parts.Review,
-		closeOutcome: parts.CloseOutcome,
-		archive:      parts.Archive,
-		deletion:     parts.Deletion,
+		LifecycleState: parts.Workflow,
+		ReviewState:    parts.Review,
+		ClosedOutcome:  parts.CloseOutcome,
+		ArchiveState:   parts.Archive,
+		DeletionState:  parts.Deletion,
 	}, nil
 }
 
 func (s IssueState) Workflow() IssueWorkflow {
-	return s.workflow
+	return s.LifecycleState
 }
 
 func (s IssueState) Review() IssueReviewState {
-	return s.review
+	return s.ReviewState
 }
 
 func (s IssueState) CloseOutcome() IssueCloseOutcome {
-	return s.closeOutcome
+	return s.ClosedOutcome
 }
 
 func (s IssueState) Archive() IssueArchiveState {
-	return s.archive
+	return s.ArchiveState
 }
 
 func (s IssueState) Deletion() IssueDeletionState {
-	return s.deletion
+	return s.DeletionState
 }
 
 func (s IssueState) BoardPhase() IssueBoardPhase {
 	if err := s.Validate(); err != nil {
 		return IssueBoardUnknown
 	}
-	if s.workflow == IssueWorkflowClosed {
+	if s.LifecycleState == IssueWorkflowClosed {
 		return IssueBoardClosed
 	}
-	if s.review == IssueReviewRequested {
+	if s.ReviewState == IssueReviewRequested {
 		return IssueBoardReview
 	}
-	switch s.workflow {
+	switch s.LifecycleState {
 	case IssueWorkflowBacklog:
 		return IssueBoardBacklog
 	case IssueWorkflowActive:
@@ -194,16 +194,16 @@ func (s IssueState) DisplayPhase() IssueDisplayPhase {
 	if err := s.Validate(); err != nil {
 		return IssueDisplayUnknown
 	}
-	if s.workflow == IssueWorkflowClosed {
-		if s.closeOutcome == IssueCloseCancelled {
+	if s.LifecycleState == IssueWorkflowClosed {
+		if s.ClosedOutcome == IssueCloseCancelled {
 			return IssueDisplayCancelled
 		}
 		return IssueDisplayDone
 	}
-	if s.review == IssueReviewRequested {
+	if s.ReviewState == IssueReviewRequested {
 		return IssueDisplayReview
 	}
-	switch s.workflow {
+	switch s.LifecycleState {
 	case IssueWorkflowBacklog:
 		return IssueDisplayBacklog
 	case IssueWorkflowActive:
@@ -214,20 +214,24 @@ func (s IssueState) DisplayPhase() IssueDisplayPhase {
 }
 
 func (s IssueState) IsArchived() bool {
-	return s.archive == IssueArchiveArchived
+	return s.ArchiveState == IssueArchiveArchived
 }
 
 func (s IssueState) IsTombstoned() bool {
-	return s.deletion == IssueDeletionTombstoned
+	return s.DeletionState == IssueDeletionTombstoned
+}
+
+func (s IssueState) IsZero() bool {
+	return s == IssueState{}
 }
 
 func (s IssueState) Validate() error {
 	return validateIssueStateParts(IssueStateParts{
-		Workflow:     s.workflow,
-		Review:       s.review,
-		CloseOutcome: s.closeOutcome,
-		Archive:      s.archive,
-		Deletion:     s.deletion,
+		Workflow:     s.LifecycleState,
+		Review:       s.ReviewState,
+		CloseOutcome: s.ClosedOutcome,
+		Archive:      s.ArchiveState,
+		Deletion:     s.DeletionState,
 	})
 }
 
@@ -325,16 +329,16 @@ const (
 )
 
 func (s IssueState) transitionKey() issueStateTransition {
-	if s.workflow == IssueWorkflowClosed {
-		if s.closeOutcome == IssueCloseCancelled {
+	if s.LifecycleState == IssueWorkflowClosed {
+		if s.ClosedOutcome == IssueCloseCancelled {
 			return issueTransitionCancel
 		}
 		return issueTransitionComplete
 	}
-	if s.review == IssueReviewRequested {
+	if s.ReviewState == IssueReviewRequested {
 		return issueTransitionReview
 	}
-	switch s.workflow {
+	switch s.LifecycleState {
 	case IssueWorkflowBacklog:
 		return issueTransitionBacklog
 	case IssueWorkflowActive:
@@ -442,6 +446,12 @@ func (p IssueDisplayPhase) StatusText() string {
 }
 
 func (t Task) IssueState() (IssueState, error) {
+	if !t.State.IsZero() {
+		if err := t.State.Validate(); err != nil {
+			return IssueState{}, err
+		}
+		return t.State, nil
+	}
 	return IssueStateFromLegacy(LegacyIssueStateInput{
 		Status:   t.Status,
 		Priority: t.Priority,
