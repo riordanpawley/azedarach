@@ -250,10 +250,10 @@ func TestRenderCard_WithSession(t *testing.T) {
 		t.Errorf("Card should contain session icon, got: %s", stripped)
 	}
 
-	// Should contain elapsed time (approximately 2h 30m)
-	// Note: exact time will vary slightly, so we just check for "h" and "m"
-	if !strings.Contains(stripped, "h") || !strings.Contains(stripped, "m") {
-		t.Errorf("Card should contain elapsed time for busy session, got: %s", stripped)
+	// Should contain compact elapsed time without minute detail once the
+	// session has crossed an hour.
+	if !strings.Contains(stripped, "2h") || strings.Contains(stripped, "30m") {
+		t.Errorf("Card should contain compact elapsed time for busy session, got: %s", stripped)
 	}
 
 }
@@ -579,8 +579,8 @@ func TestRenderSessionStatus(t *testing.T) {
 			t.Errorf("Busy session should contain readable busy label, got: %s", stripped)
 		}
 
-		if !strings.Contains(stripped, "h") || !strings.Contains(stripped, "m") {
-			t.Errorf("Busy session should show elapsed time, got: %s", stripped)
+		if !strings.Contains(stripped, "1h") || strings.Contains(stripped, "30m") {
+			t.Errorf("Busy session should show compact elapsed time, got: %s", stripped)
 		}
 	})
 
@@ -800,7 +800,7 @@ func TestRenderCard_MetadataOnFirstLine(t *testing.T) {
 	if first == "" {
 		t.Fatalf("expected metadata line containing issue id, got: %s", result)
 	}
-	for _, token := range []string{"P2", "CHE-3002", " T ", "wait", "2d 2h", worktreeToken, "✎", "+12/-3", "[1/7]"} {
+	for _, token := range []string{"P2", "CHE-3002", " T ", "wait", "2d", worktreeToken, "✎", "+12/-3", "[1/7]"} {
 		if !strings.Contains(first, token) {
 			t.Fatalf("first line should contain %q, got: %s", token, first)
 		}
@@ -1077,6 +1077,27 @@ func TestRenderRuntimeSignals(t *testing.T) {
 		}
 	})
 
+	t.Run("large git counts use whole suffixes", func(t *testing.T) {
+		signals := &RuntimeSignals{
+			GitAheadCount:         3333,
+			GitBehindCount:        4,
+			HasUncommittedChanges: true,
+			GitAdditions:          3335,
+			GitDeletions:          8827,
+		}
+		got := stripANSI(renderRuntimeSignals(signals, styles.New()))
+		for _, want := range []string{"↑3k", "↓4", "+3k/-9k"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("renderRuntimeSignals(...) = %q, missing %q", got, want)
+			}
+		}
+		for _, notWant := range []string{"↑3333", "+3335", "-8827"} {
+			if strings.Contains(got, notWant) {
+				t.Fatalf("renderRuntimeSignals(...) = %q, should compact %q", got, notWant)
+			}
+		}
+	})
+
 	t.Run("local preparing operation", func(t *testing.T) {
 		signals := &RuntimeSignals{
 			PendingOperationState: "preparing",
@@ -1132,11 +1153,11 @@ func TestRenderRuntimeSignalsCompact(t *testing.T) {
 	t.Run("shows directional pairing without line changes", func(t *testing.T) {
 		signals := &RuntimeSignals{
 			HasWorktree:    true,
-			GitAheadCount:  2,
-			GitBehindCount: 3,
+			GitAheadCount:  1237,
+			GitBehindCount: 210,
 		}
 		got := stripANSI(renderRuntimeSignalsCompact(signals, styles.New()))
-		if !strings.Contains(got, "G↑2/↓3") {
+		if !strings.Contains(got, "G↑1k/↓210") {
 			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, missing directional ahead/behind pairing", got)
 		}
 	})
@@ -1151,6 +1172,29 @@ func TestRenderRuntimeSignalsCompact(t *testing.T) {
 			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, want M:!", got)
 		}
 	})
+}
+
+func TestFormatCompactCount(t *testing.T) {
+	tests := []struct {
+		name string
+		n    int
+		want string
+	}{
+		{name: "small", n: 999, want: "999"},
+		{name: "thousands round down", n: 3333, want: "3k"},
+		{name: "thousands round up", n: 8827, want: "9k"},
+		{name: "rounded thousands roll to million", n: 999500, want: "1M"},
+		{name: "millions", n: 2500000, want: "3M"},
+		{name: "negative", n: -3333, want: "-3k"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatCompactCount(tt.n); got != tt.want {
+				t.Fatalf("formatCompactCount(%d) = %q, want %q", tt.n, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestRuntimeSignalsForHeader_SuppressesTmuxMarkersWithSession(t *testing.T) {
