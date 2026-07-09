@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExecRunnerRefusesMutatingTmuxCommandsInGoTests(t *testing.T) {
@@ -30,7 +31,9 @@ func TestExecRunnerPreservesCombinedOutputOnFailure(t *testing.T) {
 	t.Setenv("PATH", dir)
 
 	var runner ExecRunner
-	out, err := runner.Run(context.Background(), "display-message", "-p", "test")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := runner.Run(ctx, "display-message", "-p", "test")
 	if err == nil {
 		t.Fatal("expected fake tmux failure")
 	}

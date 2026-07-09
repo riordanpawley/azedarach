@@ -331,6 +331,18 @@ func TestImagePreviewOverlay_TitleAndSize(t *testing.T) {
 }
 
 func TestImagePreviewOverlay_RendersMarkdownAttachment(t *testing.T) {
+	oldRenderer := renderMarkdownDocument
+	defer func() { renderMarkdownDocument = oldRenderer }()
+	renderMarkdownDocument = func(_ context.Context, source string, width int) (string, error) {
+		if !strings.Contains(source, "# Session Report") {
+			t.Fatalf("markdown source missing report heading: %q", source)
+		}
+		if width < 24 {
+			t.Fatalf("markdown width = %d, want at least 24", width)
+		}
+		return "Leaf Preview\nSession Report\n- Result: done\n", nil
+	}
+
 	service, _, cleanup := setupTestAttachmentService(t)
 	defer cleanup()
 
@@ -361,6 +373,9 @@ func TestImagePreviewOverlay_RendersMarkdownAttachment(t *testing.T) {
 		t.Fatalf("view missing markdown preview header: %q", view)
 	}
 	plainView := ansi.Strip(view)
+	if !strings.Contains(plainView, "Leaf Preview") {
+		t.Fatalf("view missing shared renderer output: %q", view)
+	}
 	if !strings.Contains(plainView, "Session Report") {
 		t.Fatalf("view missing rendered markdown content: %q", view)
 	}

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
@@ -520,14 +519,7 @@ func (i *ImagePreviewOverlay) loadCurrentMarkdown() tea.Cmd {
 		if err != nil {
 			return markdownPreviewLoadedMsg{attachmentID: file.ID, err: fmt.Errorf("read markdown: %w", err)}
 		}
-		renderer, err := glamour.NewTermRenderer(
-			glamour.WithAutoStyle(),
-			glamour.WithWordWrap(wrap),
-		)
-		if err != nil {
-			return markdownPreviewLoadedMsg{attachmentID: file.ID, err: fmt.Errorf("create markdown renderer: %w", err)}
-		}
-		rendered, err := renderer.Render(string(data))
+		rendered, err := renderMarkdownDocument(context.Background(), string(data), wrap)
 		if err != nil {
 			return markdownPreviewLoadedMsg{attachmentID: file.ID, err: fmt.Errorf("render markdown: %w", err)}
 		}

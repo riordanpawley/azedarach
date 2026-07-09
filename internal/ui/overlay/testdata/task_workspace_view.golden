@@ -10,7 +10,7 @@
 ││     Updated:  0001-01-01 00:00:00                                            [u] Update from base branch            │
 ││                                                                              [m] Follow-on merge                    │
 ││ Description                                                                  [b] Merge into...                      │
-││ review panel structure and preserve layout                                   [P] Create PR                          │
+││ [38;2;208;210;218mreview panel structure and preserve layout[0m[0m                                   [P] Create PR                          │
 ││                                                                              [O] Open PR                            │
 ││                                                                              [M] Abort merge                        │
 ││                                                                              [H] Open Helix                         │
