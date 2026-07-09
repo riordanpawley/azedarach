@@ -584,7 +584,7 @@ func TestRenderSessionStatus(t *testing.T) {
 		}
 	})
 
-	t.Run("hook idle live session does not render busy or elapsed time", func(t *testing.T) {
+	t.Run("hook idle live session renders idle label and session age", func(t *testing.T) {
 		startedAt := time.Now().Add(-1*time.Hour - 30*time.Minute)
 		session := &domain.Session{
 			IssueID:        "test",
@@ -606,8 +606,8 @@ func TestRenderSessionStatus(t *testing.T) {
 		if strings.Contains(stripped, "busy") {
 			t.Errorf("Hook-idle session should not render busy label, got: %s", stripped)
 		}
-		if strings.Contains(stripped, "h") || strings.Contains(stripped, "m") {
-			t.Errorf("Hook-idle session should not show elapsed active time, got: %s", stripped)
+		if !strings.Contains(stripped, "1h") || strings.Contains(stripped, "30m") {
+			t.Errorf("Hook-idle session should show compact session age, got: %s", stripped)
 		}
 	})
 
@@ -644,6 +644,57 @@ func TestRenderSessionStatus(t *testing.T) {
 
 		if !strings.Contains(stripped, "✗") {
 			t.Errorf("Error session should contain error icon, got: %s", stripped)
+		}
+	})
+
+	t.Run("icon-only active sessions render age", func(t *testing.T) {
+		startedAt := time.Now().Add(-2*time.Hour - 15*time.Minute)
+		tests := []struct {
+			name     string
+			session  *domain.Session
+			wantIcon string
+		}{
+			{
+				name: "paused",
+				session: &domain.Session{
+					IssueID:   "test",
+					State:     domain.SessionPaused,
+					StartedAt: &startedAt,
+				},
+				wantIcon: domain.SessionPaused.Icon(),
+			},
+			{
+				name: "no-agent",
+				session: &domain.Session{
+					IssueID:   "test",
+					State:     domain.SessionBusy,
+					Activity:  "no-agent",
+					StartedAt: &startedAt,
+				},
+				wantIcon: domain.SessionState("no-agent").Icon(),
+			},
+			{
+				name: "unknown",
+				session: &domain.Session{
+					IssueID:   "test",
+					State:     domain.SessionBusy,
+					Activity:  "unknown",
+					StartedAt: &startedAt,
+				},
+				wantIcon: domain.SessionState("unknown").Icon(),
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result := stripANSI(renderSessionStatus(tt.session, s))
+				if !strings.Contains(result, tt.wantIcon) {
+					t.Fatalf("session should show icon %q, got: %s", tt.wantIcon, result)
+				}
+				if !strings.Contains(result, "2h") || strings.Contains(result, "15m") {
+					t.Fatalf("session should show compact age, got: %s", result)
+				}
+			})
 		}
 	})
 }
@@ -923,12 +974,42 @@ func TestRenderCard_InReviewSuppressesBusySessionStatus(t *testing.T) {
 		},
 	}
 
-	result := stripANSI(renderCard(task, CardState{}, nil, nil, nil, 64, s))
+	result := stripANSI(renderCard(task, CardState{}, &RuntimeSignals{HasTmuxSession: true}, nil, nil, 64, s))
 	if strings.Contains(result, "busy") || strings.Contains(result, "working") || strings.Contains(result, domain.SessionBusy.Icon()) {
 		t.Fatalf("in_review card should suppress busy session status, got: %s", result)
 	}
+	if !strings.Contains(result, tmuxSessionToken+" 1h") || strings.Contains(result, "30m") {
+		t.Fatalf("in_review card should keep compact session age when busy session is suppressed, got: %s", result)
+	}
 	if !strings.Contains(result, " T ") {
 		t.Fatalf("in_review card should keep type metadata when busy session is suppressed, got: %s", result)
+	}
+}
+
+func TestRenderCard_InReviewIdleSessionShowsAge(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-2*time.Hour - 15*time.Minute)
+	task := domain.Task{
+		ID:       "CHE-3013",
+		Title:    "ready but idle",
+		Status:   domain.StatusInReview,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		Session: &domain.Session{
+			IssueID:        "CHE-3013",
+			State:          domain.SessionBusy,
+			Activity:       "idle",
+			ActivitySource: "hooks",
+			StartedAt:      &startedAt,
+		},
+	}
+
+	result := stripANSI(renderCard(task, CardState{}, nil, nil, nil, 64, s))
+	if !strings.Contains(result, "idle") {
+		t.Fatalf("in_review idle card should show idle activity, got: %s", result)
+	}
+	if !strings.Contains(result, "2h") || strings.Contains(result, "15m") {
+		t.Fatalf("in_review idle card should show compact session age, got: %s", result)
 	}
 }
 

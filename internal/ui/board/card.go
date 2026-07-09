@@ -138,6 +138,10 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 	if displaySession != nil {
 		sessionRow = renderSessionStatus(displaySession, s)
 	}
+	var hiddenSessionAge string
+	if displaySession == nil && task.Session != nil {
+		hiddenSessionAge = renderSessionAge(task.Session, s)
+	}
 	sessionCompact := renderSessionStatusCompact(displaySession)
 	visibleRuntimeSignals := runtimeSignalsForHeader(displaySession, runtimeSignals)
 	runtimeRow := renderRuntimeSignals(visibleRuntimeSignals, s)
@@ -153,17 +157,29 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 	headerTokens := []headerToken{
 		{full: sessionRow, compact: sessionCompact},
 		{full: runtimeRow, compact: runtimeCompact},
+		{full: hiddenSessionAge, compact: hiddenSessionAge},
 		{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s), compactWhenNarrow: true},
 		{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
 		{full: typeBadge, compact: typeBadge},
 	}
 	if preferCompact {
-		headerTokens = []headerToken{
-			{full: sessionRow, compact: sessionCompact},
-			{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
-			{full: typeBadge, compact: typeBadge},
-			{full: runtimeRow, compact: runtimeCompact},
-			{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s), compactWhenNarrow: true},
+		if hiddenSessionAge != "" {
+			headerTokens = []headerToken{
+				{full: sessionRow, compact: sessionCompact},
+				{full: runtimeRow, compact: runtimeCompact},
+				{full: hiddenSessionAge, compact: hiddenSessionAge},
+				{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
+				{full: typeBadge, compact: typeBadge},
+				{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s), compactWhenNarrow: true},
+			}
+		} else {
+			headerTokens = []headerToken{
+				{full: sessionRow, compact: sessionCompact},
+				{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
+				{full: typeBadge, compact: typeBadge},
+				{full: runtimeRow, compact: runtimeCompact},
+				{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s), compactWhenNarrow: true},
+			}
 		}
 	}
 	headerLines := []string{headerTitle}
@@ -605,25 +621,15 @@ func renderTitleBodyLines(title string, maxLineLen int, maxLines int) []string {
 func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
 	icon := session.DisplayIcon()
 
-	// Elapsed time if active/waiting and started.
-	var elapsed string
-	displayState, hasDisplayState := session.DisplayState()
-	if !hasDisplayState {
-		if session.DisplayActivity() == "no-agent" {
-			displayState = domain.SessionIdle
-		} else {
-			displayState = session.State
-		}
-	}
-	if session.StartedAt != nil && (displayState == domain.SessionBusy || displayState == domain.SessionWaiting) {
-		d := time.Since(*session.StartedAt)
-		elapsed = formatCompactDuration(d)
-	}
+	// Session age comes from tmux/runtime start time, independent of activity label.
+	elapsed := renderSessionAge(session, s)
 
 	stateStyle := s.Session(session)
 	label := renderSessionStatusLabel(session)
 	var value string
-	if label == "" {
+	if label == "" && elapsed != "" {
+		value = fmt.Sprintf("%s %s", icon, elapsed)
+	} else if label == "" {
 		value = icon
 	} else if elapsed != "" {
 		value = fmt.Sprintf("%s %s %s", icon, label, elapsed)
@@ -631,6 +637,17 @@ func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
 		value = fmt.Sprintf("%s %s", icon, label)
 	}
 	return stateStyle.Render(value)
+}
+
+func renderSessionAge(session *domain.Session, s *styles.Styles) string {
+	if session == nil || session.StartedAt == nil {
+		return ""
+	}
+	age := formatCompactDuration(time.Since(*session.StartedAt))
+	if s == nil {
+		return age
+	}
+	return s.Session(session).Render(age)
 }
 
 func renderSessionStatusLabel(session *domain.Session) string {
