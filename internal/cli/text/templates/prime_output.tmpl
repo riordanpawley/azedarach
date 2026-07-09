@@ -114,7 +114,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - `az learn add --issue <id> --tag <tag> --evidence <text> [--private]`, `az learn recall --query <text> [--limit N] [--include-private]`, `az learn show <learning-id>`, `az learn review [--queue-status <status>] [--older-than 30d] [--issue <id>]`, `az learn review --id <learning-id> [--id <learning-id> ...] --status accepted|rejected|stale --note <text>`, `az learn review --bulk-stale --older-than 30d --note <reason>`, `az learn promote --target rulesync|agents|skill|spec|decision --target-id <id-or-path> <learning-id>`, `az learn relate --type supersedes|conflicts --note <text> <source-learning-id> <target-learning-id>`
   - Use `az learn` for evidence-backed observations and session discoveries. Use `az decision` for durable why/choice records; promoted learnings can become decisions, specs, AGENTS/.rulesync guidance, or skills.
   - Session/runtime operations:
-  - `az session status [issue-id]`, `az worktree create <issue-id>` (prepare parent/ancestor integration target without starting a session), `az daemon start|stop|restart`, `az export --format json [--out <path>]`
+  - `az session status [issue-id]`, `az worktree create <issue-id>` (prepare parent/ancestor integration target without starting a session), `az daemon start|stop|restart`, `az daemon watch-clients [--json] [--all]`, `az export --format json [--out <path>]`
   - `az session start <issue-id>` is for explicit/manual orchestration; agents should not run it unless the user asks.
 - Use `az issue` commands as the task-tracker interface for this repo.
 - Prefer `az issue` operations over direct backend issue CLI commands in sessions.

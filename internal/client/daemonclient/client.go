@@ -233,6 +233,7 @@ func isDaemonReadCommand(command string) bool {
 		protocol.CommandNoticeList,
 		protocol.CommandNoticeGet,
 		protocol.CommandScheduledScriptsStatus,
+		protocol.CommandDaemonWatchClients,
 		protocol.CommandMailList,
 		protocol.CommandMailWatch:
 		return true

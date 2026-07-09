@@ -1966,15 +1966,24 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	watchCtx, stopWatch := newWatchCommandContext("orchestrate watch")
+	defer stopWatch()
+	if watchCtx.Err() != nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(watchCtx, daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
 
 	lastSeq := opts.SinceSeq
-	frame, err := buildOrchestrateWatchFrame(deps, opts.RootIssueID, lastSeq)
+	frame, err := buildOrchestrateWatchFrameContext(watchCtx, deps, opts.RootIssueID, lastSeq)
 	if err != nil {
+		if isWatchContextDone(watchCtx, err) {
+			return nil
+		}
 		return err
 	}
 	lastSnapshotKey := orchestrateWatchFrameSnapshotKey(frame)
@@ -1997,8 +2006,10 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 	}
 
 	for {
-		time.Sleep(opts.PollInterval)
-		events, err := watchDaemonCommand(deps, func(ctx context.Context) ([]protocol.MailEvent, error) {
+		if err := sleepWatchPoll(watchCtx, opts.PollInterval); err != nil {
+			return nil
+		}
+		events, err := watchDaemonCommandContext(watchCtx, deps, func(ctx context.Context) ([]protocol.MailEvent, error) {
 			return deps.DaemonClient.MailWatch(ctx, protocol.MailWatchCommandBody{
 				RepoDir:     deps.RepoDir,
 				ParentIssue: opts.RootIssueID,
@@ -2006,6 +2017,9 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 			})
 		})
 		if err != nil {
+			if isWatchContextDone(watchCtx, err) {
+				return nil
+			}
 			if shouldContinueOrchestrateWatchAfterError(err) {
 				continue
 			}
@@ -2032,10 +2046,13 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 		}
 		var frame orchestrateWatchFrame
 		if refreshReadiness {
-			ready, err := watchDaemonCommand(deps, func(ctx context.Context) (daemonclient.TaskGraphReadiness, error) {
+			ready, err := watchDaemonCommandContext(watchCtx, deps, func(ctx context.Context) (daemonclient.TaskGraphReadiness, error) {
 				return deps.DaemonClient.TaskGraphReadiness(ctx, opts.RootIssueID)
 			})
 			if err != nil {
+				if isWatchContextDone(watchCtx, err) {
+					return nil
+				}
 				return err
 			}
 			frame = orchestrateWatchFrameFromReadiness(ready, watchEvents, lastSeq, nextSince)
@@ -2204,11 +2221,15 @@ func normalizeOrchestrateNestedRootsForSnapshot(nested []orchestrateNestedRoot) 
 }
 
 func watchDaemonCommand[T any](deps *Dependencies, call func(context.Context) (T, error)) (T, error) {
-	value, err := call(context.Background())
+	return watchDaemonCommandContext(context.Background(), deps, call)
+}
+
+func watchDaemonCommandContext[T any](ctx context.Context, deps *Dependencies, call func(context.Context) (T, error)) (T, error) {
+	value, err := call(ctx)
 	if err == nil || !reconnect.IsTransientTransportError(err) {
 		return value, err
 	}
-	return commandWithDaemonAutostartRetry(context.Background(), deps, call)
+	return commandWithDaemonAutostartRetry(ctx, deps, call)
 }
 
 func shouldContinueOrchestrateWatchAfterError(err error) bool {
@@ -2627,11 +2648,15 @@ func formatOrchestratorSessionMessage(opts OrchestrateMessageOptions) string {
 }
 
 func buildOrchestrateWatchFrame(deps *Dependencies, rootIssueID string, since int64) (orchestrateWatchFrame, error) {
-	ready, err := deps.DaemonClient.TaskGraphReadiness(context.Background(), rootIssueID)
+	return buildOrchestrateWatchFrameContext(context.Background(), deps, rootIssueID, since)
+}
+
+func buildOrchestrateWatchFrameContext(ctx context.Context, deps *Dependencies, rootIssueID string, since int64) (orchestrateWatchFrame, error) {
+	ready, err := deps.DaemonClient.TaskGraphReadiness(ctx, rootIssueID)
 	if err != nil {
 		return orchestrateWatchFrame{}, err
 	}
-	events, err := deps.DaemonClient.MailList(context.Background(), protocol.MailListCommandBody{
+	events, err := deps.DaemonClient.MailList(ctx, protocol.MailListCommandBody{
 		RepoDir:     deps.RepoDir,
 		ParentIssue: rootIssueID,
 		SinceSeq:    since,

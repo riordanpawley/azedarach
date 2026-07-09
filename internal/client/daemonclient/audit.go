@@ -23,6 +23,11 @@ const (
 	auditEnvActiveIssue  = "AZEDARACH_AUDIT_ACTIVE_ISSUE"
 )
 
+var (
+	auditCurrentPID  = os.Getpid
+	auditCurrentPPID = os.Getppid
+)
+
 func populateClientAuditMetadata(meta *protocol.Metadata) {
 	if meta == nil {
 		return
@@ -60,6 +65,12 @@ func populateClientAuditMetadata(meta *protocol.Metadata) {
 	if meta.ClientActiveIssue == "" {
 		meta.ClientActiveIssue = strings.TrimSpace(os.Getenv(auditEnvActiveIssue))
 	}
+	if meta.ClientPID == 0 {
+		meta.ClientPID = auditCurrentPID()
+	}
+	if meta.ClientPPID == 0 || auditCommandShapeLooksWatch(meta.ClientCommandShape) {
+		meta.ClientPPID = auditCurrentPPID()
+	}
 }
 
 func readAuditArgvEnv() []string {
@@ -80,4 +91,8 @@ func readAuditIntEnv(name string) int {
 		return 0
 	}
 	return value
+}
+
+func auditCommandShapeLooksWatch(shape string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(shape)), " watch")
 }

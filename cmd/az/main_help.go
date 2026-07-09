@@ -368,13 +368,15 @@ func printHelpForPath(path []string) bool {
 	case "orchestrate close-session":
 		fmt.Println(orchestrateCloseSessionUsage)
 	case "daemon":
-		fmt.Println("Usage: az daemon <start|stop|restart>")
+		fmt.Println("Usage: az daemon <start|stop|restart|watch-clients>")
 	case "daemon start":
 		fmt.Println("Usage: az daemon start")
 	case "daemon stop":
 		fmt.Println("Usage: az daemon stop")
 	case "daemon restart":
 		fmt.Println("Usage: az daemon restart")
+	case "daemon watch-clients":
+		fmt.Println("Usage: az daemon watch-clients [--json] [--all]")
 	default:
 		return false
 	}
