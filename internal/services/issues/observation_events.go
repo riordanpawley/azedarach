@@ -33,7 +33,7 @@ type IssueObservationEventListOptions struct {
 }
 
 func (c *Client) AppendIssueObservationEvent(ctx context.Context, issueID string, params IssueObservationEventParams) (domain.IssueObservationEvent, error) {
-	var event domain.IssueObservationEvent
+	var eventID int64
 	err := retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
 			return sqliteutil.WithWriteLock(c.dbPath, func() error {
@@ -61,15 +61,19 @@ func (c *Client) AppendIssueObservationEvent(ctx context.Context, issueID string
 					return c.wrapError("append-observation-event", issueID, err)
 				}
 				tx = nil
-				event, err = c.getIssueObservationEventByID(ctx, id)
-				if err != nil {
-					return c.wrapError("append-observation-event", issueID, err)
-				}
+				eventID = id
 				return nil
 			})
 		})
 	})
-	return event, err
+	if err != nil {
+		return domain.IssueObservationEvent{}, err
+	}
+	event, err := c.getIssueObservationEventByID(ctx, eventID)
+	if err != nil {
+		return domain.IssueObservationEvent{}, c.wrapError("append-observation-event", issueID, err)
+	}
+	return event, nil
 }
 
 func (c *Client) ListIssueObservationEvents(ctx context.Context, issueID string, opts IssueObservationEventListOptions) ([]domain.IssueObservationEvent, error) {
