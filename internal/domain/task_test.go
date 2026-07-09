@@ -25,6 +25,31 @@ func TestStatus_Column(t *testing.T) {
 	}
 }
 
+func TestBoardStatusForTaskDerivesReviewPhaseFromSessionActivity(t *testing.T) {
+	base := Task{Status: StatusInReview}
+	tests := []struct {
+		name string
+		task Task
+		want Status
+	}{
+		{name: "review without runtime remains review", task: base, want: StatusInReview},
+		{name: "review idle remains review", task: Task{Status: StatusInReview, HasTmuxSession: true, Session: &Session{Activity: "idle"}}, want: StatusInReview},
+		{name: "review done remains review", task: Task{Status: StatusInReview, HasTmuxSession: true, Session: &Session{Activity: "done"}}, want: StatusInReview},
+		{name: "review no agent remains review", task: Task{Status: StatusInReview, HasTmuxSession: true, Session: &Session{Activity: "no-agent"}}, want: StatusInReview},
+		{name: "review busy is active", task: Task{Status: StatusInReview, HasTmuxSession: true, Session: &Session{Activity: "busy"}}, want: StatusInProgress},
+		{name: "review waiting is active", task: Task{Status: StatusInReview, HasTmuxSession: true, Session: &Session{Activity: "waiting_tool"}}, want: StatusInProgress},
+		{name: "non review unchanged", task: Task{Status: StatusOpen, HasTmuxSession: true, Session: &Session{Activity: "busy"}}, want: StatusOpen},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := BoardStatusForTask(tt.task); got != tt.want {
+				t.Fatalf("BoardStatusForTask() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPriority_String(t *testing.T) {
 	tests := []struct {
 		priority Priority

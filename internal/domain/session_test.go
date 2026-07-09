@@ -98,3 +98,53 @@ func TestSessionDisplayNoAgentActivity(t *testing.T) {
 		t.Fatalf("DisplayState() = %q/%v, want no derived lifecycle state", display, ok)
 	}
 }
+
+func TestSessionReviewReadyPhaseAllowsOnlyIdleDoneOrNoAgent(t *testing.T) {
+	tests := []struct {
+		name       string
+		session    *Session
+		hasSession bool
+		want       bool
+	}{
+		{name: "no runtime", want: true},
+		{name: "projected runtime without session detail", hasSession: true, want: false},
+		{name: "idle", session: &Session{Activity: "idle"}, hasSession: true, want: true},
+		{name: "done", session: &Session{Activity: "done"}, hasSession: true, want: true},
+		{name: "no agent", session: &Session{Activity: "no-agent"}, hasSession: true, want: true},
+		{name: "ended", session: &Session{Activity: "ended"}, hasSession: true, want: true},
+		{name: "busy", session: &Session{Activity: "busy"}, hasSession: true, want: false},
+		{name: "working", session: &Session{Activity: "working"}, hasSession: true, want: false},
+		{name: "waiting human", session: &Session{Activity: "waiting_human"}, hasSession: true, want: false},
+		{name: "waiting ai", session: &Session{Activity: "waiting_ai"}, hasSession: true, want: false},
+		{name: "waiting tool", session: &Session{Activity: "waiting_tool"}, hasSession: true, want: false},
+		{name: "unknown", session: &Session{Activity: "unknown"}, hasSession: true, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.session.AllowsReviewReadyPhase(tt.hasSession); got != tt.want {
+				t.Fatalf("AllowsReviewReadyPhase() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSessionBlocksReviewHandoffForBusyAndWaitingActivity(t *testing.T) {
+	for _, activity := range []string{"busy", "starting", "working", "waiting", "waiting_human", "waiting_ai", "waiting_tool"} {
+		t.Run(activity, func(t *testing.T) {
+			session := &Session{Activity: activity}
+			if !session.BlocksReviewHandoff() {
+				t.Fatalf("BlocksReviewHandoff() = false, want true")
+			}
+		})
+	}
+
+	for _, activity := range []string{"idle", "done", "no-agent", "ended", "paused", "error"} {
+		t.Run(activity, func(t *testing.T) {
+			session := &Session{Activity: activity}
+			if session.BlocksReviewHandoff() {
+				t.Fatalf("BlocksReviewHandoff() = true, want false")
+			}
+		})
+	}
+}

@@ -119,7 +119,7 @@ func (s *Session) DisplayActivity() string {
 	}
 	activity := strings.ToLower(strings.TrimSpace(s.Activity))
 	switch activity {
-	case string(SessionBusy), string(SessionIdle), string(SessionWaiting), string(SessionPaused), string(SessionDone), string(SessionError), "unknown", "no-agent", "starting", "working", "ended":
+	case string(SessionBusy), string(SessionIdle), string(SessionWaiting), string(SessionPaused), string(SessionDone), string(SessionError), "unknown", "no-agent", "starting", "working", "ended", "waiting_human", "waiting_ai", "waiting_tool", "waiting-for-human", "waiting-for-ai", "waiting-for-tool":
 		return activity
 	default:
 		return ""
@@ -142,6 +142,38 @@ func (s *Session) DisplayState() (SessionState, bool) {
 		return SessionError, true
 	default:
 		return "", false
+	}
+}
+
+func (s *Session) AllowsReviewReadyPhase(hasSession bool) bool {
+	if s == nil {
+		return !hasSession
+	}
+	activity := s.DisplayActivity()
+	if activity == "" {
+		activity = strings.ToLower(strings.TrimSpace(string(s.State)))
+	}
+	switch activity {
+	case "", string(SessionIdle), string(SessionDone), "no-agent", "ended":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Session) BlocksReviewHandoff() bool {
+	if s == nil {
+		return false
+	}
+	activity := s.DisplayActivity()
+	if activity == "" {
+		activity = strings.ToLower(strings.TrimSpace(string(s.State)))
+	}
+	switch activity {
+	case string(SessionBusy), "starting", "working", string(SessionWaiting), "waiting_human", "waiting_ai", "waiting_tool", "waiting-for-human", "waiting-for-ai", "waiting-for-tool":
+		return true
+	default:
+		return false
 	}
 }
 
