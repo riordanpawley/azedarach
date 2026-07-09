@@ -12289,12 +12289,20 @@ func TestPrimeCommandEmitsProgressBeforeBlockedSnapshotReturns(t *testing.T) {
 
 func TestPrimeCommandWithActiveIssueUsesTargetedSnapshot(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
+	t.Setenv("AZEDARACH_AUDIT_ACTOR", "agent-prime")
 	setPrimeTmuxAvailable(t, false)
 	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
 	taskGetCalls := 0
+	commands := []string{}
+	var claimReq daemonclient.TaskOwnershipRequest
+	var readinessReq struct {
+		TaskID  naming.IssueID `json:"task_id"`
+		ActorID string         `json:"actor_id,omitempty"`
+	}
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
 				switch req.Command {
 				case daemonclient.CommandTaskGet:
 					taskGetCalls++
@@ -12322,7 +12330,15 @@ func TestPrimeCommandWithActiveIssueUsesTargetedSnapshot(t *testing.T) {
 					}, nil
 				case daemonclient.CommandTaskList:
 					t.Fatalf("prime with active issue must not load full task list")
+				case daemonclient.CommandTaskClaimOwnership:
+					if err := json.Unmarshal(req.Body, &claimReq); err != nil {
+						t.Fatalf("decode ownership claim request: %v", err)
+					}
+					return responseWithPrimeOwnershipClaim(t, req), nil
 				case daemonclient.CommandTaskGraphReadiness:
+					if err := json.Unmarshal(req.Body, &readinessReq); err != nil {
+						t.Fatalf("decode readiness request: %v", err)
+					}
 					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
 						RootIssueID: "az-1",
 						Blocked:     map[string]string{},
@@ -12346,6 +12362,20 @@ func TestPrimeCommandWithActiveIssueUsesTargetedSnapshot(t *testing.T) {
 	if taskGetCalls != 1 {
 		t.Fatalf("task.get calls = %d, want 1", taskGetCalls)
 	}
+	wantFirstCommands := []string{
+		daemonclient.CommandTaskGet,
+		daemonclient.CommandTaskClaimOwnership,
+		daemonclient.CommandTaskGraphReadiness,
+	}
+	if len(commands) < len(wantFirstCommands) || !reflect.DeepEqual(commands[:len(wantFirstCommands)], wantFirstCommands) {
+		t.Fatalf("first commands = %+v, want targeted get, ownership claim, actor-aware readiness", commands)
+	}
+	if claimReq.TaskID != "az-1" || claimReq.OwnerID != "agent-prime" || claimReq.OwnerKind != "agent" || claimReq.Force {
+		t.Fatalf("claim request = %+v, want non-forced agent-prime claim for az-1", claimReq)
+	}
+	if readinessReq.TaskID != "az-1" || readinessReq.ActorID != "agent-prime" {
+		t.Fatalf("readiness request = %+v, want actor-aware readiness for agent-prime", readinessReq)
+	}
 	if !strings.Contains(output, "Prime issue") {
 		t.Fatalf("prime output missing targeted issue title: %q", output)
 	}
@@ -12357,6 +12387,65 @@ func TestPrimeCommandWithActiveIssueUsesTargetedSnapshot(t *testing.T) {
 	}
 	if strings.Contains(output, "Child session handoff: after `az session start <child-issue>` or `az issue split \"Child task\"` starts a child tmux/session") {
 		t.Fatalf("prime no-tmux handoff guidance should not include split launch wording: %q", output)
+	}
+}
+
+func TestPrimeCommandStopsOnActiveIssueOwnershipConflict(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
+	t.Setenv("AZEDARACH_AUDIT_ACTOR", "agent-prime")
+	setPrimeTmuxAvailable(t, false)
+	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGet:
+					body, err := marshalTaskListBody([]domain.Task{{
+						ID:        "az-1",
+						Title:     "Prime issue",
+						Status:    domain.StatusInProgress,
+						Priority:  domain.P1,
+						Type:      domain.TypeTask,
+						CreatedAt: now,
+						UpdatedAt: now,
+					}})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return responseWithBody(req, body), nil
+				case daemonclient.CommandTaskClaimOwnership:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              false,
+						Error:           &protocol.ErrorEnvelope{Code: protocol.ErrorCodeConflict, Message: "owned by agent-a"},
+					}, nil
+				case daemonclient.CommandTaskGraphReadiness:
+					t.Fatal("prime must not continue to readiness after ownership conflict")
+				case protocol.CommandLearnRecall:
+					t.Fatal("prime must not continue to learning recall after ownership conflict")
+				default:
+					t.Fatalf("unexpected daemon command: %q", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+		ProjectID: "proj",
+		Config:    config.DefaultConfig(),
+	}
+
+	output, err := captureStdoutAllowError(t, func() error {
+		return PrimeCommand(deps)
+	})
+	if err == nil {
+		t.Fatal("PrimeCommand error = nil, want ownership conflict")
+	}
+	if !strings.Contains(err.Error(), "active issue az-1 is already claimed: owned by agent-a") {
+		t.Fatalf("PrimeCommand error = %v, want ownership conflict", err)
+	}
+	if strings.Contains(output, "Azedarach Session Primer") {
+		t.Fatalf("prime rendered output despite ownership conflict: %q", output)
 	}
 }
 
@@ -12411,6 +12500,8 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 						Freshness:        protocol.TaskListFreshnessFresh,
 						Tasks:            []domain.Task{task},
 					}), nil
+				case daemonclient.CommandTaskClaimOwnership:
+					return responseWithPrimeOwnershipClaim(t, req), nil
 				case daemonclient.CommandTaskGraphReadiness:
 					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
 						RootIssueID: "az-1",
@@ -12583,6 +12674,8 @@ func TestPrimeCommandShowsRootExitContractForAzOrchestrationRoot(t *testing.T) {
 						Freshness:        protocol.TaskListFreshnessFresh,
 						Tasks:            []domain.Task{root, child},
 					}), nil
+				case daemonclient.CommandTaskClaimOwnership:
+					return responseWithPrimeOwnershipClaim(t, req), nil
 				case daemonclient.CommandTaskGraphReadiness:
 					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
 						RootIssueID: "az-root",
@@ -12668,6 +12761,8 @@ func TestPrimeCommandShowsRootExitContractForTaskRootWithActiveReadiness(t *test
 						Freshness:        protocol.TaskListFreshnessFresh,
 						Tasks:            []domain.Task{root},
 					}), nil
+				case daemonclient.CommandTaskClaimOwnership:
+					return responseWithPrimeOwnershipClaim(t, req), nil
 				case daemonclient.CommandTaskGraphReadiness:
 					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
 						RootIssueID: "az-root",
@@ -12860,6 +12955,9 @@ func TestPrimeCommandRecommendsChildIssuesForEpicContext(t *testing.T) {
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command == daemonclient.CommandTaskClaimOwnership {
+					return responseWithPrimeOwnershipClaim(t, req), nil
+				}
 				if req.Command != daemonclient.CommandTaskGet {
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -12923,6 +13021,9 @@ func TestPrimeCommandRecommendsChildIssuesWhenActiveIssueHasChildren(t *testing.
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command == daemonclient.CommandTaskClaimOwnership {
+					return responseWithPrimeOwnershipClaim(t, req), nil
+				}
 				if req.Command != daemonclient.CommandTaskGet {
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -13006,6 +13107,9 @@ func TestPrimeCommandUsesTmuxSessionContextWhenEnvMissing(t *testing.T) {
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command == daemonclient.CommandTaskClaimOwnership {
+					return responseWithPrimeOwnershipClaim(t, req), nil
+				}
 				if req.Command != daemonclient.CommandTaskList {
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -13157,6 +13261,9 @@ func TestPrimeCommandTruncatesLargeIssueDescription(t *testing.T) {
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command == daemonclient.CommandTaskClaimOwnership {
+					return responseWithPrimeOwnershipClaim(t, req), nil
+				}
 				if req.Command != daemonclient.CommandTaskGet {
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -13214,6 +13321,9 @@ func TestPrimeCommandWarnsWhenActiveIssueClosed(t *testing.T) {
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command == daemonclient.CommandTaskClaimOwnership {
+					t.Fatal("prime must not claim a closed active issue")
+				}
 				if req.Command != daemonclient.CommandTaskGet {
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -13824,6 +13934,33 @@ func responseWithJSON(req protocol.RequestEnvelope, body any) protocol.ResponseE
 		panic(err)
 	}
 	return responseWithBody(req, payload)
+}
+
+func responseWithPrimeOwnershipClaim(t *testing.T, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	t.Helper()
+	var body daemonclient.TaskOwnershipRequest
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		t.Fatalf("decode prime ownership claim: %v", err)
+	}
+	if body.TaskID == "" {
+		t.Fatal("prime ownership claim missing task_id")
+	}
+	if strings.TrimSpace(body.OwnerID) == "" {
+		t.Fatal("prime ownership claim missing owner_id")
+	}
+	if body.OwnerKind != "agent" {
+		t.Fatalf("prime ownership claim owner_kind = %q, want agent", body.OwnerKind)
+	}
+	if body.Force {
+		t.Fatal("prime ownership claim must not force takeover")
+	}
+	return responseWithJSON(req, domain.Task{
+		ID: body.TaskID,
+		Ownership: &domain.IssueOwnership{
+			OwnerID:   body.OwnerID,
+			OwnerKind: body.OwnerKind,
+		},
+	})
 }
 
 func contextRiskTestPacket() domain.IssueContextRiskPacket {
