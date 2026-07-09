@@ -8655,6 +8655,82 @@ func TestSessionDisplayActivityUsesLatestParentSessionActivity(t *testing.T) {
 	}
 }
 
+func TestSessionDisplayActivityKeepsNewerCanonicalIdleOverStalePaneBusy(t *testing.T) {
+	const (
+		projectID = "proj-stale-pane-busy"
+		issueID   = "bpb"
+	)
+
+	now := time.Date(2026, time.April, 1, 10, 45, 0, 0, time.UTC)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	sessions := []daemonstate.Session{
+		{
+			ID:             sessionID + ".pane-500",
+			IssueID:        issueID,
+			State:          daemonstate.SessionStateRunning,
+			ObservedState:  daemonstate.SessionStateRunning,
+			Activity:       "busy",
+			ActivitySource: "hooks",
+			UpdatedAt:      now,
+		},
+		{
+			ID:             sessionID,
+			IssueID:        issueID,
+			State:          daemonstate.SessionStateRunning,
+			ObservedState:  daemonstate.SessionStateRunning,
+			Activity:       "idle",
+			ActivitySource: "hooks",
+			UpdatedAt:      now.Add(time.Minute),
+		},
+	}
+
+	activityByKey := sessionDisplayActivityByIssueKeyFromSessions(sessions, projectID)
+	display, found := activityByKey[sessionKey(issueID)]
+	if !found {
+		t.Fatal("expected session activity")
+	}
+	if display.Activity != "idle" || display.Source != "hooks" {
+		t.Fatalf("activity = %s/%s, want newer canonical idle/hooks", display.Activity, display.Source)
+	}
+}
+
+func TestSessionDisplayActivityDoesNotLetUntimedPaneBusyOverrideTimedCanonicalIdle(t *testing.T) {
+	const (
+		projectID = "proj-untimed-pane-busy"
+		issueID   = "bpc"
+	)
+
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	sessions := []daemonstate.Session{
+		{
+			ID:             sessionID + ".pane-500",
+			IssueID:        issueID,
+			State:          daemonstate.SessionStateRunning,
+			ObservedState:  daemonstate.SessionStateRunning,
+			Activity:       "busy",
+			ActivitySource: "hooks",
+		},
+		{
+			ID:             sessionID,
+			IssueID:        issueID,
+			State:          daemonstate.SessionStateRunning,
+			ObservedState:  daemonstate.SessionStateRunning,
+			Activity:       "idle",
+			ActivitySource: "hooks",
+			UpdatedAt:      time.Date(2026, time.April, 1, 10, 45, 0, 0, time.UTC),
+		},
+	}
+
+	activityByKey := sessionDisplayActivityByIssueKeyFromSessions(sessions, projectID)
+	display, found := activityByKey[sessionKey(issueID)]
+	if !found {
+		t.Fatal("expected session activity")
+	}
+	if display.Activity != "idle" || display.Source != "hooks" {
+		t.Fatalf("activity = %s/%s, want timed canonical idle/hooks", display.Activity, display.Source)
+	}
+}
+
 func TestSessionHookActivityIgnoresDesiredStoppedWithStaleObservedRunning(t *testing.T) {
 	const (
 		projectID = "proj-stale-hook"

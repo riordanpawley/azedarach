@@ -14,6 +14,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
@@ -259,6 +260,71 @@ func TestRuntimeSignalIngestKeepsCanonicalBusyWhenAnotherPaneWaits(t *testing.T)
 	}
 	if canonical.Activity != "busy" || canonical.ActivitySource != "hooks" {
 		t.Fatalf("canonical session projection = %+v, want busy/hooks", canonical)
+	}
+}
+
+func TestRuntimeSignalIngestCanonicalStopClearsStalePaneBusyForDisplay(t *testing.T) {
+	repoDir := initRuntimeSignalGitRepo(t)
+	d := New(Config{
+		RepoDir: repoDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	projectID := "proj-signals"
+	issueID := "az-42"
+	parentSessionID := "pr-az-42"
+
+	signals := []protocol.RuntimeSignalIngestCommandBody{
+		{
+			Source:    protocol.RuntimeSignalSourceAgentHook,
+			Kind:      protocol.RuntimeSignalKindAgentActivityChanged,
+			IssueID:   issueID,
+			SessionID: parentSessionID + ".pane-500",
+			Worktree:  repoDir,
+			Agent:     "codex",
+			Hook:      "pre_tool_use",
+			Event:     "pre_tool_use",
+		},
+		{
+			Source:    protocol.RuntimeSignalSourceAgentHook,
+			Kind:      protocol.RuntimeSignalKindAgentActivityChanged,
+			IssueID:   issueID,
+			SessionID: parentSessionID,
+			Worktree:  repoDir,
+			Agent:     "codex",
+			Hook:      "stop",
+			Event:     "stop",
+		},
+	}
+	for i, signal := range signals {
+		if i > 0 {
+			time.Sleep(time.Millisecond)
+		}
+		resp, err := d.command(context.Background(), protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       naming.RequestID("runtime-signal-agent-" + signal.Hook),
+			Kind:            protocol.EnvelopeKindCommand,
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			Command:         protocol.CommandRuntimeSignalIngest,
+			Body:            mustMarshal(t, signal),
+		})
+		if err != nil {
+			t.Fatalf("runtime.signal.ingest command error: %v", err)
+		}
+		if !resp.OK {
+			t.Fatalf("runtime.signal.ingest response not ok: %+v", resp.Error)
+		}
+	}
+
+	tasks := d.enrichTasksWithSessionState(context.Background(), projectID, []domain.Task{{
+		ID:    naming.IssueID(issueID),
+		Title: "Codex worker",
+		Type:  domain.TypeTask,
+	}})
+	if len(tasks) != 1 || tasks[0].Session == nil {
+		t.Fatalf("missing session projection: %+v", tasks)
+	}
+	if tasks[0].Session.Activity != "idle" || tasks[0].Session.ActivitySource != "hooks" {
+		t.Fatalf("display activity = %s/%s, want idle/hooks", tasks[0].Session.Activity, tasks[0].Session.ActivitySource)
 	}
 }
 
