@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	termimg "github.com/blacktop/go-termimg"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 )
@@ -155,6 +156,61 @@ func TestRenderAttachmentPreviewBlockIncludesTerminalImageOutput(t *testing.T) {
 	}
 }
 
+func TestRenderTerminalImagePreviewSelectsKittyVirtualRenderer(t *testing.T) {
+	restore := stubTerminalImageStrategy(t, termimg.Kitty, "kitty-virtual", "halfblock")
+	defer restore()
+
+	output, err := renderTerminalImagePreviewWithTermimg("/tmp/screen.png", 40, 8)
+	if err != nil {
+		t.Fatalf("renderTerminalImagePreviewWithTermimg: %v", err)
+	}
+	if output != "kitty-virtual" {
+		t.Fatalf("output = %q, want kitty virtual renderer output", output)
+	}
+}
+
+func TestRenderTerminalImagePreviewSelectsHalfblocksForNonKitty(t *testing.T) {
+	restore := stubTerminalImageStrategy(t, termimg.Sixel, "kitty-virtual", "halfblock")
+	defer restore()
+
+	output, err := renderTerminalImagePreviewWithTermimg("/tmp/screen.png", 40, 8)
+	if err != nil {
+		t.Fatalf("renderTerminalImagePreviewWithTermimg: %v", err)
+	}
+	if output != "halfblock" {
+		t.Fatalf("output = %q, want halfblock renderer output", output)
+	}
+}
+
+func TestFitTerminalImageCellsStaysWithinBounds(t *testing.T) {
+	tests := []struct {
+		name     string
+		viewW    int
+		viewH    int
+		imgW     int
+		imgH     int
+		wantMaxW int
+		wantMaxH int
+	}{
+		{name: "normal", viewW: 40, viewH: 8, imgW: 800, imgH: 600, wantMaxW: 40, wantMaxH: 8},
+		{name: "panorama", viewW: 40, viewH: 8, imgW: 4000, imgH: 100, wantMaxW: 40, wantMaxH: 8},
+		{name: "tower", viewW: 40, viewH: 8, imgW: 100, imgH: 4000, wantMaxW: 40, wantMaxH: 8},
+		{name: "missing bounds", viewW: 40, viewH: 8, imgW: 0, imgH: 0, wantMaxW: 40, wantMaxH: 8},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotW, gotH := fitTerminalImageCells(tt.viewW, tt.viewH, tt.imgW, tt.imgH)
+			if gotW < 1 || gotH < 1 {
+				t.Fatalf("fitTerminalImageCells() = %dx%d, want both dimensions >= 1", gotW, gotH)
+			}
+			if gotW > tt.wantMaxW || gotH > tt.wantMaxH {
+				t.Fatalf("fitTerminalImageCells() = %dx%d, want <= %dx%d", gotW, gotH, tt.wantMaxW, tt.wantMaxH)
+			}
+		})
+	}
+}
+
 var errTestTerminalImageUnsupported = testTerminalImageUnsupportedError{}
 
 type testTerminalImageUnsupportedError struct{}
@@ -171,5 +227,26 @@ func stubTerminalImageRenderer(t *testing.T, output string, err error) func() {
 	}
 	return func() {
 		renderTerminalImagePreview = original
+	}
+}
+
+func stubTerminalImageStrategy(t *testing.T, protocol termimg.Protocol, kittyOutput, halfblockOutput string) func() {
+	t.Helper()
+	originalDetect := detectTerminalImageProtocol
+	originalKitty := renderKittyTerminalImage
+	originalHalfblock := renderHalfblockTerminalImage
+	detectTerminalImageProtocol = func() termimg.Protocol {
+		return protocol
+	}
+	renderKittyTerminalImage = func(string, int, int) (string, error) {
+		return kittyOutput, nil
+	}
+	renderHalfblockTerminalImage = func(string, int, int) (string, error) {
+		return halfblockOutput, nil
+	}
+	return func() {
+		detectTerminalImageProtocol = originalDetect
+		renderKittyTerminalImage = originalKitty
+		renderHalfblockTerminalImage = originalHalfblock
 	}
 }

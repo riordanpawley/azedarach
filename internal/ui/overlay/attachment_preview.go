@@ -127,18 +127,30 @@ func isPreviewableImageAttachment(att attachment.Attachment) bool {
 	}
 }
 
-var renderTerminalImagePreview = renderTerminalImagePreviewWithTermimg
+var (
+	detectTerminalImageProtocol  = termimg.DetectProtocol
+	renderTerminalImagePreview   = renderTerminalImagePreviewWithTermimg
+	renderKittyTerminalImage     = renderKittyVirtualImagePreview
+	renderHalfblockTerminalImage = renderHalfblockImagePreview
+)
 
 func renderTerminalImagePreviewWithTermimg(path string, width, height int) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", fmt.Errorf("attachment has no local path")
 	}
+	if detectTerminalImageProtocol() == termimg.Kitty {
+		return renderKittyTerminalImage(path, width, height)
+	}
+	return renderHalfblockTerminalImage(path, width, height)
+}
+
+func renderHalfblockImagePreview(path string, width, height int) (string, error) {
 	img, err := termimg.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("load terminal image: %w", err)
 	}
 	outcome := termimg.NewStatefulImageWidget(img).
-		SetProtocol(termimg.Auto).
+		SetProtocol(termimg.Halfblocks).
 		SetScaleMode(termimg.ScaleFit).
 		SetMinimumCells(1, 1).
 		RenderInto(width, height)
@@ -149,6 +161,44 @@ func renderTerminalImagePreviewWithTermimg(path string, width, height int) (stri
 		return "", fmt.Errorf("terminal image renderer produced no output")
 	}
 	return outcome.Output, nil
+}
+
+func renderKittyVirtualImagePreview(path string, width, height int) (string, error) {
+	img, err := termimg.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("load terminal image: %w", err)
+	}
+	targetW, targetH := fitTerminalImageCells(width, height, img.Bounds.Dx(), img.Bounds.Dy())
+	output, err := termimg.NewImageWidget(img).
+		SetSize(targetW, targetH).
+		SetProtocol(termimg.Kitty).
+		SetVirtual(true).
+		RenderVirtual()
+	if err != nil {
+		return "", fmt.Errorf("render terminal image: %w", err)
+	}
+	if strings.TrimSpace(output) == "" {
+		return "", fmt.Errorf("terminal image renderer produced no output")
+	}
+	return output, nil
+}
+
+func fitTerminalImageCells(viewW, viewH, imgW, imgH int) (int, int) {
+	viewW = max(1, viewW)
+	viewH = max(1, viewH)
+	if imgW <= 0 || imgH <= 0 {
+		return viewW, viewH
+	}
+
+	widthScale := float64(viewW) / float64(imgW)
+	heightScale := (float64(viewH) * 2) / float64(imgH)
+	scale := widthScale
+	if heightScale < scale {
+		scale = heightScale
+	}
+	targetW := int(float64(imgW) * scale)
+	targetH := int((float64(imgH) * scale) / 2)
+	return max(1, min(viewW, targetW)), max(1, min(viewH, targetH))
 }
 
 func imagePreviewLines(att attachment.Attachment, renderErr error) []string {
