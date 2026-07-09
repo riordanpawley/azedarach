@@ -55,6 +55,7 @@ type taskSnapshotExportSession struct {
 
 const (
 	taskInvariantTaskListFreshness daemonInvariantID = daemonInvariantTaskListFreshness
+	taskInvariantReviewHandoff     daemonInvariantID = daemonInvariantTaskReviewHandoff
 )
 
 const (
@@ -129,6 +130,11 @@ type taskCloseRequest struct {
 	AllowActiveSession   bool   `json:"allow_active_session,omitempty"`
 }
 
+type taskStatusUpdateOptions struct {
+	CascadeChildren            bool
+	AllowBusyReviewHandoffTask string
+}
+
 type taskDeleteRequest struct {
 	TaskID         string `json:"task_id"`
 	Cleanup        bool   `json:"cleanup,omitempty"`
@@ -175,6 +181,7 @@ type taskClosePhaseTiming struct {
 	Command    string `json:"command,omitempty"`
 	ExitStatus *int   `json:"exit_status,omitempty"`
 	Blocking   *bool  `json:"blocking,omitempty"`
+	TimedOut   *bool  `json:"timed_out,omitempty"`
 }
 
 type taskDeleteResult struct {
@@ -1834,7 +1841,10 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("context risk is high for issue %s: record root_cause, invariant, regression_validation, or a structured risk note before marking in_review", cmd.TaskID)), nil
 		}
 	}
-	task, updatedTasks, err := d.updateTaskStatusExcludingClose(ctx, projectID, cmd.TaskID, cmd.Status, cmd.CascadeChildren)
+	task, updatedTasks, err := d.updateTaskStatusExcludingClose(ctx, projectID, cmd.TaskID, cmd.Status, taskStatusUpdateOptions{
+		CascadeChildren:            cmd.CascadeChildren,
+		AllowBusyReviewHandoffTask: reviewHandoffActiveIssue(req.Meta, cmd.TaskID),
+	})
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -2508,6 +2518,8 @@ type taskCloseIntegrationResult struct {
 	HookDiagnostics []git.GitHookDiagnostic
 }
 
+const taskCloseSlowGitHookThreshold = 1 * time.Second
+
 func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID string, requested bool) (taskCloseIntegrationResult, error) {
 	if !requested {
 		return taskCloseIntegrationResult{}, nil
@@ -2555,6 +2567,9 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 	}
 
 	var integration taskCloseIntegrationResult
+	if daemonCloseIntegrationShouldUseOriginBase(d.workflowModeForProject(projectID), target) {
+		return d.integrateTaskBeforeCloseOriginBase(ctx, source, targetWorktree, targetBranch)
+	}
 	sourceUniqueCommits, err := d.git.RevListCount(ctx, targetWorktree, targetBranch+".."+source.Branch)
 	if err == nil && sourceUniqueCommits == 0 {
 		return taskCloseIntegrationResult{
@@ -2624,6 +2639,69 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 	return integration, nil
 }
 
+func daemonCloseIntegrationShouldUseOriginBase(workflowMode string, target taskMergeBaseTargetResult) bool {
+	return strings.EqualFold(strings.TrimSpace(workflowMode), "origin") &&
+		strings.EqualFold(strings.TrimSpace(target.TargetID), "base") &&
+		strings.TrimSpace(target.WorktreePath) == ""
+}
+
+func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, source git.Worktree, targetWorktree, targetBranch string) (taskCloseIntegrationResult, error) {
+	remoteBaseRef := daemonRemoteTrackingBaseRef(targetBranch)
+	result := taskCloseIntegrationResult{
+		Requested:    true,
+		SourceBranch: source.Branch,
+		TargetBranch: remoteBaseRef,
+	}
+	sourceStatus, err := d.git.Status(ctx, source.Path)
+	if err != nil {
+		return result, fmt.Errorf("read source status for %s: %w", source.IssueID, err)
+	}
+	if gitStatusHasDirtyFiles(sourceStatus) {
+		return result, fmt.Errorf("source worker %s is not clean: %s", source.IssueID, gitStatusSummaryWithDetails(sourceStatus))
+	}
+	if err := d.git.Fetch(ctx, targetWorktree, "origin"); err != nil {
+		return result, fmt.Errorf("fetch origin before origin-mode close integration for %s: %w", source.IssueID, err)
+	}
+	changedFiles, err := d.git.ChangedFilesBetweenRefTrees(ctx, targetWorktree, remoteBaseRef, source.Branch)
+	if err != nil {
+		return result, fmt.Errorf("inspect origin-mode close diff for %s against %s: %w", source.IssueID, remoteBaseRef, err)
+	}
+	if len(changedFiles) == 0 {
+		result.NoChanges = true
+		return result, nil
+	}
+	return result, fmt.Errorf(
+		"origin workflow close will not merge %s into the local %s checkout; %s still differs from %s (%d file(s): %s). Next: integrate through the remote workflow, fetch %s, then retry close",
+		source.Branch,
+		targetBranch,
+		source.IssueID,
+		remoteBaseRef,
+		len(changedFiles),
+		strings.Join(daemonLimitStrings(changedFiles, 8), ", "),
+		remoteBaseRef,
+	)
+}
+
+func daemonRemoteTrackingBaseRef(targetBranch string) string {
+	targetBranch = strings.TrimSpace(targetBranch)
+	if targetBranch == "" {
+		targetBranch = "main"
+	}
+	if strings.HasPrefix(targetBranch, "refs/remotes/") || strings.HasPrefix(targetBranch, "origin/") {
+		return targetBranch
+	}
+	return "origin/" + targetBranch
+}
+
+func daemonLimitStrings(values []string, limit int) []string {
+	if limit <= 0 || len(values) <= limit {
+		return values
+	}
+	out := append([]string(nil), values[:limit]...)
+	out = append(out, fmt.Sprintf("%d more omitted", len(values)-limit))
+	return out
+}
+
 func recordTaskCloseHookPhases(ctx context.Context, result *taskCloseResult, logger *slog.Logger, req protocol.RequestEnvelope, projectID, taskID string, hooks []git.GitHookDiagnostic) {
 	if result == nil || len(hooks) == 0 {
 		return
@@ -2636,6 +2714,7 @@ func recordTaskCloseHookPhases(ctx context.Context, result *taskCloseResult, log
 		}
 		exitStatus := hook.ExitStatus
 		blocking := hook.Blocking
+		timedOut := hook.TimedOut
 		phase := taskClosePhaseTiming{
 			Name:       name,
 			Hook:       hookName,
@@ -2643,6 +2722,7 @@ func recordTaskCloseHookPhases(ctx context.Context, result *taskCloseResult, log
 			ElapsedMS:  hook.ElapsedMS,
 			ExitStatus: &exitStatus,
 			Blocking:   &blocking,
+			TimedOut:   &timedOut,
 		}
 		result.Phases = append(result.Phases, phase)
 		startedAt := time.Now().Add(-time.Duration(hook.ElapsedMS) * time.Millisecond)
@@ -2652,10 +2732,27 @@ func recordTaskCloseHookPhases(ctx context.Context, result *taskCloseResult, log
 			"project_id", projectID,
 			"task_id", taskID,
 			"hook", hookName,
-			"hook_command", phase.Command,
+			"hook_command_shape", phase.Command,
+			"command_shape", phase.Command,
 			"exit_status", exitStatus,
 			"blocking", blocking,
+			"timed_out", timedOut,
 		)
+		if logger != nil && time.Duration(hook.ElapsedMS)*time.Millisecond >= taskCloseSlowGitHookThreshold {
+			logger.WarnContext(ctx, "slow task close git hook",
+				"event", "task.close.githook.slow",
+				"operation", "task.close",
+				"request_id", req.RequestID,
+				"project_id", projectID,
+				"task_id", taskID,
+				"hook", hookName,
+				"hook_command_shape", phase.Command,
+				"elapsed_ms", hook.ElapsedMS,
+				"exit_status", exitStatus,
+				"blocking", blocking,
+				"timed_out", timedOut,
+			)
+		}
 	}
 }
 
@@ -2926,7 +3023,7 @@ func (d *Daemon) cleanupTaskIssueResourcesForClose(ctx context.Context, projectI
 	return err
 }
 
-func (d *Daemon) updateTaskStatusExcludingClose(ctx context.Context, projectID, taskID string, status domain.Status, cascadeChildren bool) (domain.Task, []domain.Task, error) {
+func (d *Daemon) updateTaskStatusExcludingClose(ctx context.Context, projectID, taskID string, status domain.Status, opts taskStatusUpdateOptions) (domain.Task, []domain.Task, error) {
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return domain.Task{}, nil, fmt.Errorf("issue store unavailable")
@@ -2935,12 +3032,15 @@ func (d *Daemon) updateTaskStatusExcludingClose(ctx context.Context, projectID, 
 	if status == domain.StatusDone {
 		return domain.Task{}, nil, fmt.Errorf("status %s must be applied with task.close", status)
 	}
-	if cascadeChildren && status != domain.StatusInReview {
+	if opts.CascadeChildren && status != domain.StatusInReview {
 		return domain.Task{}, nil, fmt.Errorf("cascade_children is only supported with status %s", domain.StatusInReview)
 	}
 	var cascaded []domain.Task
 	if status == domain.StatusInReview {
-		updated, err := d.validateOrCascadeChildrenForReview(ctx, projectID, taskID, cascadeChildren)
+		if err := d.validateTaskActivityForReview(ctx, projectID, taskID, reviewHandoffAllowsBusy(opts, taskID)); err != nil {
+			return domain.Task{}, nil, err
+		}
+		updated, err := d.validateOrCascadeChildrenForReview(ctx, projectID, taskID, opts)
 		if err != nil {
 			return domain.Task{}, nil, err
 		}
@@ -2953,7 +3053,64 @@ func (d *Daemon) updateTaskStatusExcludingClose(ctx context.Context, projectID, 
 	return task, cascaded, nil
 }
 
-func (d *Daemon) validateOrCascadeChildrenForReview(ctx context.Context, projectID, taskID string, cascadeChildren bool) ([]domain.Task, error) {
+func reviewHandoffActiveIssue(meta protocol.Metadata, taskID string) string {
+	activeIssue := strings.TrimSpace(meta.ClientActiveIssue)
+	if activeIssue == "" || !naming.IssueIDsEqual(activeIssue, taskID) {
+		return ""
+	}
+	return activeIssue
+}
+
+func reviewHandoffAllowsBusy(opts taskStatusUpdateOptions, taskID string) bool {
+	return strings.TrimSpace(opts.AllowBusyReviewHandoffTask) != "" && naming.IssueIDsEqual(opts.AllowBusyReviewHandoffTask, taskID)
+}
+
+func (d *Daemon) validateTaskActivityForReview(ctx context.Context, projectID, taskID string, allowBusy bool) error {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return fmt.Errorf("issue store unavailable")
+	}
+	taskID = strings.TrimSpace(taskID)
+	source := d.sourceForTaskInvariant(taskInvariantReviewHandoff)
+	task, err := taskForReviewActivityInvariant(ctx, issueClient, projectID, taskID, source)
+	if err != nil {
+		return fmt.Errorf("inspect session activity before moving %s to in_review: %w", taskID, err)
+	}
+	if task.Session == nil {
+		return nil
+	}
+	displayState, ok := task.Session.DisplayState()
+	if !ok || displayState != domain.SessionBusy {
+		return nil
+	}
+	if allowBusy {
+		return nil
+	}
+	activity := strings.TrimSpace(task.Session.DisplayActivity())
+	if activity == "" {
+		activity = strings.TrimSpace(string(task.Session.State))
+	}
+	if activity == "" {
+		activity = string(domain.SessionBusy)
+	}
+	activitySource := strings.TrimSpace(task.Session.ActivitySource)
+	if activitySource != "" {
+		activitySource = " (source: " + activitySource + ")"
+	}
+	return fmt.Errorf("cannot move issue %s to in_review: session activity is %s%s. Next: leave it in_progress until the session reports idle/waiting/done/terminal activity, or intentionally stop the session before handoff", taskID, activity, activitySource)
+}
+
+func taskForReviewActivityInvariant(ctx context.Context, issueClient *issues.Client, projectID, taskID string, source daemonInvariantSource) (domain.Task, error) {
+	if issueClient == nil {
+		return domain.Task{}, fmt.Errorf("issue store unavailable")
+	}
+	if !usesProjectionSource(source) {
+		return domain.Task{}, fmt.Errorf("unsupported review handoff invariant source: %s", source)
+	}
+	return issueClient.GetWithRuntime(ctx, projectID, taskID)
+}
+
+func (d *Daemon) validateOrCascadeChildrenForReview(ctx context.Context, projectID, taskID string, opts taskStatusUpdateOptions) ([]domain.Task, error) {
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
@@ -2978,11 +3135,14 @@ func (d *Daemon) validateOrCascadeChildrenForReview(ctx context.Context, project
 	if len(blocked) == 0 {
 		return nil, nil
 	}
-	if !cascadeChildren {
+	if !opts.CascadeChildren {
 		return nil, fmt.Errorf("cannot move issue %s to in_review: child issues are not review-ready: %s. Next: move or finish the listed child issues first, or retry with --cascade-children to move them to in_review first", taskID, strings.Join(blocked, "; "))
 	}
 	updated := make([]domain.Task, 0)
 	for _, childID := range daemonReviewGuardChildIDsToCascade(task.ID, tasks) {
+		if err := d.validateTaskActivityForReview(ctx, projectID, childID.String(), reviewHandoffAllowsBusy(opts, childID.String())); err != nil {
+			return nil, fmt.Errorf("cascade child %s to in_review before moving %s: %w", childID.String(), taskID, err)
+		}
 		child, err := issueClient.UpdateWithRuntime(ctx, projectID, childID.String(), domain.StatusInReview)
 		if err != nil {
 			return nil, fmt.Errorf("cascade child %s to in_review before moving %s: %w", childID.String(), taskID, err)

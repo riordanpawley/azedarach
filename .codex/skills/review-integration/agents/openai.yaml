@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Integration"
+  short_description: "Integrate in-review Azedarach issues"
+  default_prompt: "Use $review-integration to review all in_review Azedarach issues and integrate the ones that are ready."

@@ -3277,6 +3277,53 @@ func taskClosePhaseByName(phases []taskClosePhaseTiming, name string) (taskClose
 	return taskClosePhaseTiming{}, false
 }
 
+func TestRecordTaskCloseHookPhasesLogsSlowHookWithSanitizedContext(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	result := taskCloseResult{TaskID: "cyi", Status: string(domain.StatusDone)}
+	recordTaskCloseHookPhases(context.Background(), &result, logger, protocol.RequestEnvelope{
+		RequestID: "task.close-test",
+		Command:   "task.close",
+	}, "proj-test", "cyi", []git.GitHookDiagnostic{{
+		Hook:       "commit-msg",
+		Command:    "git merge --...",
+		ElapsedMS:  int64((taskCloseSlowGitHookThreshold + time.Second) / time.Millisecond),
+		ExitStatus: 0,
+		Blocking:   true,
+	}})
+
+	phase, ok := taskClosePhaseByName(result.Phases, "githook.commit-msg")
+	if !ok {
+		t.Fatalf("phases = %+v, want githook.commit-msg", result.Phases)
+	}
+	if phase.Command != "git merge --..." || phase.Hook != "commit-msg" {
+		t.Fatalf("phase = %+v, want sanitized hook command shape", phase)
+	}
+	logOutput := buf.String()
+	for _, want := range []string{
+		"event=task.close.githook.slow",
+		"operation=task.close",
+		"hook=commit-msg",
+		"hook_command_shape=\"git merge --...\"",
+		"blocking=true",
+		"timed_out=false",
+	} {
+		if !strings.Contains(logOutput, want) {
+			t.Fatalf("slow hook log missing %q:\n%s", want, logOutput)
+		}
+	}
+	for _, forbidden := range []string{
+		"feature",
+		"/Users/",
+		"token=",
+		"authorization",
+	} {
+		if strings.Contains(logOutput, forbidden) {
+			t.Fatalf("slow hook log contains forbidden value %q:\n%s", forbidden, logOutput)
+		}
+	}
+}
+
 func TestTaskCloseRepairsLegacyProjectRuntimeProjectionBeforeFinalStatusUpdate(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -4252,6 +4299,32 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			return "", nil
 		}
 	}}
+	runner.runWithEnvFn = func(runCtx context.Context, extraEnv []string, args ...string) (string, error) {
+		tracePath := ""
+		for _, entry := range extraEnv {
+			if value, ok := strings.CutPrefix(entry, "GIT_TRACE2_EVENT="); ok {
+				tracePath = value
+				break
+			}
+		}
+		startedAt := time.Now().UTC()
+		output, err := runner.Run(runCtx, args...)
+		endedAt := time.Now().UTC()
+		if tracePath != "" && len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge" {
+			elapsed := endedAt.Sub(startedAt).Seconds()
+			trace := fmt.Sprintf(
+				"{\"event\":\"child_start\",\"time\":%q,\"child_id\":1,\"child_class\":\"hook\",\"hook_name\":\"commit-msg\",\"argv\":[\".git/hooks/commit-msg\"]}\n"+
+					"{\"event\":\"child_exit\",\"time\":%q,\"child_id\":1,\"code\":0,\"t_rel\":%.6f}\n",
+				startedAt.Format(time.RFC3339Nano),
+				endedAt.Format(time.RFC3339Nano),
+				elapsed,
+			)
+			if writeErr := os.WriteFile(tracePath, []byte(trace), 0o644); writeErr != nil {
+				t.Fatalf("write trace2 hook events: %v", writeErr)
+			}
+		}
+		return output, err
+	}
 
 	manager := git.NewWorktreeManager(runner, repoDir, logger)
 	d := &Daemon{
@@ -4317,7 +4390,7 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	if !ok {
 		t.Fatalf("close phases = %+v, want githook.commit-msg", result.Phases)
 	}
-	if hookPhase.Hook != "commit-msg" || hookPhase.Command != "git merge --no-edit "+sourceBranch || hookPhase.ElapsedMS < 15 {
+	if hookPhase.Hook != "commit-msg" || hookPhase.Command != "git merge --..." || hookPhase.ElapsedMS < 15 {
 		t.Fatalf("hook phase = %+v, want commit-msg merge timing", hookPhase)
 	}
 	if hookPhase.ExitStatus == nil || *hookPhase.ExitStatus != 0 || hookPhase.Blocking == nil || !*hookPhase.Blocking {
@@ -5046,6 +5119,256 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 	}
 	if !strings.Contains(joined, "-C "+projectRepo+" worktree add --detach ") {
 		t.Fatalf("git commands missing project repo worktree add:\n%s", joined)
+	}
+}
+
+func TestTaskCloseIntegrationOriginBaseSkipsLocalMergeWhenRemoteTreeMatches(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Already remote integrated",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
+	sourceBranch := "riordan/" + taskID + "/remote-integrated"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      sourceWorktree,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
+	commands := make([]string, 0, 8)
+	fetchedOrigin := false
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return worktreeListOutput, nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "status":
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "fetch" && args[3] == "origin":
+			fetchedOrigin = true
+			return "", nil
+		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "diff" && args[3] == "--name-only" && args[4] == "origin/preview" && args[5] == sourceBranch:
+			if !fetchedOrigin {
+				t.Fatal("origin close diff ran before fetching origin")
+			}
+			return "", nil
+		case slices.Contains(args, "merge") || slices.Contains(args, "checkout") || slices.Contains(args, "reset"):
+			t.Fatalf("origin close attempted local mutation command: %s", strings.Join(args, " "))
+		default:
+			return "", nil
+		}
+		return "", nil
+	}}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:         repoDir,
+			BaseBranch:      "preview",
+			GitWorkflowMode: "origin",
+			Logger:          logger,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		git:      git.NewClient(runner, logger),
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
+		logger:                  logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true)
+	if err != nil {
+		t.Fatalf("integrateTaskBeforeClose error: %v", err)
+	}
+	if !result.NoChanges || result.Integrated {
+		t.Fatalf("integration result = %+v, want origin-base no-changes without local integration", result)
+	}
+	if result.TargetBranch != "origin/preview" {
+		t.Fatalf("target branch = %q, want origin/preview", result.TargetBranch)
+	}
+	if !fetchedOrigin {
+		t.Fatal("origin close did not fetch origin before integration evidence")
+	}
+	joined := strings.Join(commands, "\n")
+	for _, forbidden := range []string{" checkout ", " merge ", " reset ", " worktree add "} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("origin close attempted local mutation %q:\n%s", forbidden, joined)
+		}
+	}
+}
+
+func TestTaskCloseIntegrationOriginBaseRefusesLocalMergeWhenRemoteDiffRemains(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Not remote integrated",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
+	sourceBranch := "riordan/" + taskID + "/not-remote-integrated"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      sourceWorktree,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
+	commands := make([]string, 0, 8)
+	fetchedOrigin := false
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return worktreeListOutput, nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "status":
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "fetch" && args[3] == "origin":
+			fetchedOrigin = true
+			return "", nil
+		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "diff" && args[3] == "--name-only" && args[4] == "origin/preview" && args[5] == sourceBranch:
+			if !fetchedOrigin {
+				t.Fatal("origin close diff ran before fetching origin")
+			}
+			return "main.go\n", nil
+		case slices.Contains(args, "merge") || slices.Contains(args, "checkout") || slices.Contains(args, "reset"):
+			t.Fatalf("origin close attempted local mutation command: %s", strings.Join(args, " "))
+		default:
+			return "", nil
+		}
+		return "", nil
+	}}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:         repoDir,
+			BaseBranch:      "preview",
+			GitWorkflowMode: "origin",
+			Logger:          logger,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		git:      git.NewClient(runner, logger),
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
+		logger:                  logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true)
+	if err == nil {
+		t.Fatalf("integrateTaskBeforeClose error = nil, result = %+v; want origin-mode refusal", result)
+	}
+	if !strings.Contains(err.Error(), "origin workflow close will not merge") || !strings.Contains(err.Error(), "main.go") {
+		t.Fatalf("integrateTaskBeforeClose error = %v, want origin-mode recovery with changed file", err)
+	}
+	if !fetchedOrigin {
+		t.Fatal("origin close did not fetch origin before integration evidence")
+	}
+	joined := strings.Join(commands, "\n")
+	for _, forbidden := range []string{" checkout ", " merge ", " reset ", " worktree add "} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("origin close attempted local mutation %q:\n%s", forbidden, joined)
+		}
+	}
+}
+
+func TestDaemonRemoteTrackingBaseRef(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "plain branch", in: "preview", want: "origin/preview"},
+		{name: "branch with slash", in: "release/2026-07", want: "origin/release/2026-07"},
+		{name: "origin ref", in: "origin/preview", want: "origin/preview"},
+		{name: "full remote ref", in: "refs/remotes/origin/preview", want: "refs/remotes/origin/preview"},
+		{name: "empty defaults main", in: "", want: "origin/main"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := daemonRemoteTrackingBaseRef(tt.in); got != tt.want {
+				t.Fatalf("daemonRemoteTrackingBaseRef(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -10087,6 +10410,114 @@ func TestTaskUpdateStatusRejectsInReviewWithUnreadyChildren(t *testing.T) {
 	}
 }
 
+func TestTaskUpdateStatusRejectsInReviewWithBusyActivity(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-guard-busy"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Busy handoff",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	seedReviewGuardSessionProjection(t, d, projectID, taskID, daemonstate.Session{
+		ID:             naming.CanonicalSessionID(projectID, taskID),
+		IssueID:        taskID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
+	})
+
+	resp := updateStatusForTest(t, d, projectID, taskID, domain.StatusInReview, false)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "session activity is busy (source: hooks)") || !strings.Contains(resp.Error.Message, "leave it in_progress") {
+		t.Fatalf("task.update_status response = %+v, want busy activity guard", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if task.Status != domain.StatusInProgress {
+		t.Fatalf("task status = %s, want in_progress", task.Status)
+	}
+}
+
+func TestTaskUpdateStatusAllowsInReviewWithBusyActivityForActiveIssueSelfHandoff(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-guard-busy-self"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Busy self handoff",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	seedReviewGuardSessionProjection(t, d, projectID, taskID, daemonstate.Session{
+		ID:             naming.CanonicalSessionID(projectID, taskID),
+		IssueID:        taskID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
+	})
+
+	resp := updateStatusForTestWithActiveIssue(t, d, projectID, taskID, domain.StatusInReview, false, taskID)
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("task.update_status response = %+v, want active issue self-handoff success", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if task.Status != domain.StatusInReview {
+		t.Fatalf("task status = %s, want in_review", task.Status)
+	}
+}
+
+func TestTaskUpdateStatusAllowsInReviewWithIdleActivity(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-guard-idle"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Idle handoff",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	seedReviewGuardSessionProjection(t, d, projectID, taskID, daemonstate.Session{
+		ID:             naming.CanonicalSessionID(projectID, taskID),
+		IssueID:        taskID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "idle",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
+	})
+
+	resp := updateStatusForTest(t, d, projectID, taskID, domain.StatusInReview, false)
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("task.update_status response = %+v, want success", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if task.Status != domain.StatusInReview {
+		t.Fatalf("task status = %s, want in_review", task.Status)
+	}
+}
+
 func TestTaskUpdateStatusCascadeChildrenMovesNestedDescendantsToInReview(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-review-cascade-children"
@@ -10126,6 +10557,49 @@ func TestTaskUpdateStatusCascadeChildrenMovesNestedDescendantsToInReview(t *test
 		}
 		if task.Status != domain.StatusInReview {
 			t.Fatalf("%s status = %s, want in_review", id, task.Status)
+		}
+	}
+}
+
+func TestTaskUpdateStatusCascadeChildrenRejectsBusyChildActivity(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-cascade-busy-child"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Busy child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusInProgress,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	seedReviewGuardSessionProjection(t, d, projectID, childID, daemonstate.Session{
+		ID:             naming.CanonicalSessionID(projectID, childID),
+		IssueID:        childID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "working",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
+	})
+
+	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, true)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "cascade child "+childID+" to in_review") || !strings.Contains(resp.Error.Message, "session activity is working (source: hooks)") {
+		t.Fatalf("task.update_status response = %+v, want busy child cascade guard", resp)
+	}
+	for _, id := range []string{parentID, childID} {
+		task, err := issuesClient.GetWithRuntime(ctx, projectID, id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if task.Status == domain.StatusInReview {
+			t.Fatalf("%s status = %s, want not in_review", id, task.Status)
 		}
 	}
 }
@@ -10215,17 +10689,50 @@ func newTaskStatusReviewGuardDaemon(t *testing.T, projectID string) (*Daemon, *i
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := issues.NewClientAtPath(issuesDBPath, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
 	return &Daemon{
 		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
 		issueClientsByProject: map[string]*issues.Client{
 			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
 		},
 		revision: map[string]uint64{projectID: 1},
 		hub:      publish.NewHub(16, 8, slog.Default()),
 	}, issuesClient
 }
 
+func seedReviewGuardSessionProjection(t *testing.T, d *Daemon, projectID, taskID string, session daemonstate.Session) {
+	t.Helper()
+	if session.ID == "" {
+		session.ID = naming.CanonicalSessionID(projectID, taskID)
+	}
+	if session.IssueID == "" {
+		session.IssueID = taskID
+	}
+	if session.State == "" {
+		session.State = daemonstate.SessionStateRunning
+	}
+	if session.UpdatedAt.IsZero() {
+		session.UpdatedAt = time.Now().UTC()
+	}
+	store := d.sessionRuntimeStateStore(projectID)
+	if store == nil {
+		t.Fatal("missing runtime store")
+	}
+	if err := store.UpsertSessionState(context.Background(), projectID, session); err != nil {
+		t.Fatalf("seed session projection: %v", err)
+	}
+}
+
 func updateStatusForTest(t *testing.T, d *Daemon, projectID, taskID string, status domain.Status, cascadeChildren bool) protocol.ResponseEnvelope {
+	t.Helper()
+	return updateStatusForTestWithActiveIssue(t, d, projectID, taskID, status, cascadeChildren, "")
+}
+
+func updateStatusForTestWithActiveIssue(t *testing.T, d *Daemon, projectID, taskID string, status domain.Status, cascadeChildren bool, activeIssue string) protocol.ResponseEnvelope {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{
 		"task_id":          taskID,
@@ -10239,9 +10746,12 @@ func updateStatusForTest(t *testing.T, d *Daemon, projectID, taskID string, stat
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       naming.RequestID("req-review-guard-" + taskID),
 		Kind:            protocol.EnvelopeKindCommand,
-		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Command:         "task.update_status",
-		Body:            body,
+		Meta: protocol.Metadata{
+			ProjectID:         naming.ProjectID(projectID),
+			ClientActiveIssue: activeIssue,
+		},
+		Command: "task.update_status",
+		Body:    body,
 	})
 	if err != nil {
 		t.Fatalf("handleTaskUpdateStatus error: %v", err)

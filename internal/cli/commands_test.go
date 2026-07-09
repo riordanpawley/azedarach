@@ -13653,6 +13653,38 @@ func TestPrimeCommandAzOrchestrationGuidanceRequiresAzVia(t *testing.T) {
 	}
 }
 
+func TestPrimeCommandAzOrchestrationGuidanceRoutesReviewFindingsToSessions(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	setPrimeTmuxAvailable(t, true)
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(&Dependencies{
+			Config: &config.Config{
+				Spec:          config.SpecConfig{Enabled: true},
+				Orchestration: config.OrchestrationConfig{Via: "az"},
+			},
+		})
+	})
+
+	for _, want := range []string{
+		"Review/integration ownership",
+		"live or paused session",
+		"do not patch non-trivial actionable findings directly",
+		"`az orchestrate message --root <parent-issue> --issue <worker-issue> --body",
+		"\"type\":\"review-finding\"",
+		"\"suggested_fix\":\"...\"",
+		"\"validation\":[\"go test ./...\"]",
+		"`az issue record <worker-issue> --type review.recorded --summary \"<why reviewer fixed directly>\"`",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("prime output missing review integration ownership guidance %q: %q", want, output)
+		}
+	}
+	if strings.Contains(output, "$review-integration") {
+		t.Fatalf("prime output should not point to agent skills: %q", output)
+	}
+}
+
 func TestPrimeCommandAzOrchestrationGuidanceRequiresTmux(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "")
 	setPrimeTmuxAvailable(t, false)

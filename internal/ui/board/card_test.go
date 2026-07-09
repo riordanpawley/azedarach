@@ -905,6 +905,33 @@ func TestRenderCard_SessionActivityPrecedesTaskType(t *testing.T) {
 	}
 }
 
+func TestRenderCard_InReviewSuppressesBusySessionStatus(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-90 * time.Minute)
+	task := domain.Task{
+		ID:       "CHE-3012",
+		Title:    "ready for review",
+		Status:   domain.StatusInReview,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		Session: &domain.Session{
+			IssueID:        "CHE-3012",
+			State:          domain.SessionBusy,
+			Activity:       "working",
+			ActivitySource: "hooks",
+			StartedAt:      &startedAt,
+		},
+	}
+
+	result := stripANSI(renderCard(task, CardState{}, nil, nil, nil, 64, s))
+	if strings.Contains(result, "busy") || strings.Contains(result, "working") || strings.Contains(result, domain.SessionBusy.Icon()) {
+		t.Fatalf("in_review card should suppress busy session status, got: %s", result)
+	}
+	if !strings.Contains(result, " T ") {
+		t.Fatalf("in_review card should keep type metadata when busy session is suppressed, got: %s", result)
+	}
+}
+
 func TestRenderCard_NarrowWidthAddsOneCardRowAndOneHeaderRow(t *testing.T) {
 	s := styles.New()
 	startedAt := time.Now().Add(-80 * time.Minute)

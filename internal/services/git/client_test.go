@@ -447,9 +447,15 @@ func TestMergePreservesCommitHooksAndAbortsIncompleteMerge(t *testing.T) {
 
 func TestMergeReportsSlowHookDiagnostics(t *testing.T) {
 	repo := initDivergedRepo(t)
-	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
-	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nsleep 0.05\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write hook: %v", err)
+	hooks := map[string]string{
+		"commit-msg": "#!/bin/sh\nsleep 0.05\nexit 0\n",
+		"post-merge": "#!/bin/sh\nsleep 0.04\nexit 0\n",
+	}
+	for hookName, body := range hooks {
+		hookPath := filepath.Join(repo, ".git", "hooks", hookName)
+		if err := os.WriteFile(hookPath, []byte(body), 0o755); err != nil {
+			t.Fatalf("write hook %s: %v", hookName, err)
+		}
 	}
 
 	client := NewClient(NewExecRunner(repo), slog.Default())
@@ -460,21 +466,49 @@ func TestMergeReportsSlowHookDiagnostics(t *testing.T) {
 	if result == nil || !result.Success {
 		t.Fatalf("Merge() result = %+v, want success", result)
 	}
-	if len(result.HookDiagnostics) != 1 {
-		t.Fatalf("hook diagnostics = %+v, want one entry", result.HookDiagnostics)
+	if len(result.HookDiagnostics) != 2 {
+		t.Fatalf("hook diagnostics = %+v, want two entries", result.HookDiagnostics)
 	}
-	diag := result.HookDiagnostics[0]
-	if diag.Hook != "commit-msg" {
-		t.Fatalf("hook = %q, want commit-msg", diag.Hook)
+	byHook := map[string]GitHookDiagnostic{}
+	for _, diag := range result.HookDiagnostics {
+		byHook[diag.Hook] = diag
+		if diag.Command != "git merge --..." {
+			t.Fatalf("command = %q, want sanitized git merge command shape", diag.Command)
+		}
+		if strings.Contains(diag.Command, "feature") || strings.Contains(diag.Command, repo) {
+			t.Fatalf("command = %q, must not contain branch or path", diag.Command)
+		}
+		if diag.ExitStatus != 0 || !diag.Blocking || diag.TimedOut {
+			t.Fatalf("hook diagnostic = %+v, want exit 0 blocking without timeout", diag)
+		}
 	}
-	if diag.Command != "git merge --no-edit feature" {
-		t.Fatalf("command = %q, want git merge command", diag.Command)
+	if byHook["commit-msg"].ElapsedMS < 40 {
+		t.Fatalf("commit-msg elapsed_ms = %d, want slow hook attribution", byHook["commit-msg"].ElapsedMS)
 	}
-	if diag.ElapsedMS < 40 {
-		t.Fatalf("elapsed_ms = %d, want slow hook attribution", diag.ElapsedMS)
+	if byHook["post-merge"].ElapsedMS < 30 {
+		t.Fatalf("post-merge elapsed_ms = %d, want slow hook attribution", byHook["post-merge"].ElapsedMS)
 	}
-	if diag.ExitStatus != 0 || !diag.Blocking {
-		t.Fatalf("hook diagnostic = %+v, want exit 0 blocking", diag)
+}
+
+func TestMergeCommandContextAddsDefaultTimeout(t *testing.T) {
+	ctx, cancel := mergeCommandContext(context.Background())
+	defer cancel()
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("merge command context has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining <= mergeCommandTimeout-time.Second || remaining > mergeCommandTimeout {
+		t.Fatalf("merge command timeout remaining = %v, want close to %v", remaining, mergeCommandTimeout)
+	}
+
+	parent, parentCancel := context.WithTimeout(context.Background(), time.Hour)
+	defer parentCancel()
+	ctx, cancel = mergeCommandContext(parent)
+	defer cancel()
+	if ctx != parent {
+		t.Fatal("merge command context should preserve caller deadline context")
 	}
 }
 
@@ -2116,6 +2150,32 @@ func TestChangedFilesLocalBaseDoesNotFallBackToRemote(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "should not use remote base branch") {
 		t.Fatalf("ChangedFilesLocalBase() attempted remote fallback: %v", err)
+	}
+}
+
+func TestChangedFilesBetweenRefTreesDoesNotUseMergeBase(t *testing.T) {
+	var gotArgs []string
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			gotArgs = append([]string(nil), args...)
+			if len(args) >= 5 && args[0] == "diff" && args[1] == "--name-only" && args[2] == "origin/preview" && args[3] == "feature" {
+				return "main.go\ninternal/app.go\n", nil
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	files, err := client.ChangedFilesBetweenRefTrees(context.Background(), "/fake/worktree", "origin/preview", "feature")
+	if err != nil {
+		t.Fatalf("ChangedFilesBetweenRefTrees() error = %v", err)
+	}
+	if !reflect.DeepEqual(files, []string{"main.go", "internal/app.go"}) {
+		t.Fatalf("ChangedFilesBetweenRefTrees() = %v", files)
+	}
+	joined := strings.Join(gotArgs, " ")
+	if strings.Contains(joined, "...") || strings.Contains(joined, "merge-base") {
+		t.Fatalf("ChangedFilesBetweenRefTrees() used ancestry comparison: %v", gotArgs)
 	}
 }
 

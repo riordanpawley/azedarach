@@ -226,7 +226,7 @@ func (d *Daemon) Update(ctx context.Context, issueID string, status domain.Statu
 	if err != nil {
 		return domain.Task{}, err
 	}
-	task, _, err := d.updateTaskStatusExcludingClose(ctx, projectID, issueID, status, false)
+	task, _, err := d.updateTaskStatusExcludingClose(ctx, projectID, issueID, status, taskStatusUpdateOptions{})
 	return task, err
 }
 
