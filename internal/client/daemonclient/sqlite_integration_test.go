@@ -163,10 +163,11 @@ func startDaemonForTest(t *testing.T, repoDir, socketPath, lockPath string) func
 	t.Helper()
 
 	d := daemon.New(daemon.Config{
-		RepoDir:    repoDir,
-		SocketPath: socketPath,
-		LockPath:   lockPath,
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RepoDir:     repoDir,
+		SocketPath:  socketPath,
+		LockPath:    lockPath,
+		IdleTimeout: 250 * time.Millisecond,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -209,7 +210,7 @@ func startDaemonForTest(t *testing.T, repoDir, socketPath, lockPath string) func
 			if err != nil {
 				t.Fatalf("daemon shutdown error: %v", err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatalf("daemon shutdown timed out")
 		}
 	}

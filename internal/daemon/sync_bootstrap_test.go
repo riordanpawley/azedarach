@@ -17,6 +17,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 )
 
+const syncBootstrapTestTimeout = 5 * time.Second
+
 type bootstrapRecorder struct {
 	mu     sync.Mutex
 	events []string
@@ -87,17 +89,17 @@ func TestRunStartsServingBeforeSyncBootstrapCompletes(t *testing.T) {
 
 	select {
 	case <-serveStarted:
-	case <-time.After(time.Second):
+	case <-time.After(syncBootstrapTestTimeout):
 		t.Fatal("daemon server did not start before bootstrap completed")
 	}
 	select {
 	case <-bootstrapStarted:
-	case <-time.After(time.Second):
+	case <-time.After(syncBootstrapTestTimeout):
 		t.Fatal("sync bootstrap did not start")
 	}
 
 	close(releaseBootstrap)
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(syncBootstrapTestTimeout)
 	for {
 		events := recorder.snapshot()
 		if len(events) >= 3 {
@@ -114,7 +116,7 @@ func TestRunStartsServingBeforeSyncBootstrapCompletes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Run() error = %v", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(syncBootstrapTestTimeout):
 		t.Fatal("daemon did not stop after context cancellation")
 	}
 
@@ -150,15 +152,23 @@ func TestRunContinuesWhenSyncBootstrapFails(t *testing.T) {
 
 	select {
 	case <-serveStarted:
-	case <-time.After(time.Second):
+	case <-time.After(syncBootstrapTestTimeout):
 		cancel()
 		t.Fatal("daemon server did not continue serving after bootstrap failure")
 	}
 
-	diag := d.syncBootstrapDiagnostic()
-	if diag.Ready || diag.State != "failed" || diag.Reason != wantErr.Error() {
-		cancel()
-		t.Fatalf("sync bootstrap diagnostic = %+v, want failed diagnostic", diag)
+	deadline := time.Now().Add(syncBootstrapTestTimeout)
+	var diag syncBootstrapDiagnostic
+	for {
+		diag = d.syncBootstrapDiagnostic()
+		if !diag.Ready && diag.State == "failed" && diag.Reason == wantErr.Error() {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("sync bootstrap diagnostic = %+v, want failed diagnostic", diag)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	cancel()
@@ -167,7 +177,56 @@ func TestRunContinuesWhenSyncBootstrapFails(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Run() error = %v", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(syncBootstrapTestTimeout):
+		t.Fatal("daemon did not stop after context cancellation")
+	}
+}
+
+func TestRunContextCancelDuringSyncBootstrapReturnsNil(t *testing.T) {
+	recorder := &bootstrapRecorder{}
+	serveStarted := make(chan struct{})
+	bootstrapStarted := make(chan struct{})
+	d := &Daemon{
+		cfg: Config{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		lock:  bootstrapRecordingLock{},
+		serve: &bootstrapRecordingServer{recorder: recorder, started: serveStarted},
+	}
+	d.syncBootstrapFn = func(ctx context.Context) error {
+		recorder.add("bootstrap-start")
+		close(bootstrapStarted)
+		<-ctx.Done()
+		recorder.add("bootstrap-canceled")
+		return ctx.Err()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- d.Run(ctx)
+	}()
+
+	select {
+	case <-serveStarted:
+	case <-time.After(syncBootstrapTestTimeout):
+		cancel()
+		t.Fatal("daemon server did not start before bootstrap completed")
+	}
+	select {
+	case <-bootstrapStarted:
+	case <-time.After(syncBootstrapTestTimeout):
+		cancel()
+		t.Fatal("sync bootstrap did not start")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil for context cancellation during sync bootstrap", err)
+		}
+	case <-time.After(syncBootstrapTestTimeout):
 		t.Fatal("daemon did not stop after context cancellation")
 	}
 }

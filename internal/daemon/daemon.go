@@ -534,9 +534,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 		serveErrCh <- d.serve.Serve(serveCtx)
 	}()
 	d.cfg.Logger.Info("daemon startup phase", "phase", "ipc_serve_start", "duration_ms", time.Since(startedAt).Milliseconds())
+	waitForShutdown := func() {
+		if ctx.Err() != nil {
+			<-shutdownDone
+		}
+	}
 	checkServeErr := func(phase string) error {
 		select {
 		case err := <-serveErrCh:
+			if ctx.Err() != nil {
+				waitForShutdown()
+				return nil
+			}
 			if err != nil {
 				return fmt.Errorf("daemon server exited during %s: %w", phase, err)
 			}
@@ -556,6 +565,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	} else {
 		d.cfg.Logger.Info("daemon startup phase", "phase", "sync_bootstrap", "duration_ms", time.Since(bootstrapStartedAt).Milliseconds())
 	}
+	if ctx.Err() != nil {
+		waitForShutdown()
+		return nil
+	}
 	if err := checkServeErr("sync bootstrap"); err != nil {
 		return err
 	}
@@ -569,6 +582,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		)
 	} else {
 		d.cfg.Logger.Info("daemon startup phase", "phase", "runtime_reconcile", "project_id", result.ProjectID, "duration_ms", time.Since(reconcileStartedAt).Milliseconds())
+	}
+	if ctx.Err() != nil {
+		waitForShutdown()
+		return nil
 	}
 	d.startRuntimeReconcileWorker(serveCtx)
 	d.startLinearSyncWorker(serveCtx)
