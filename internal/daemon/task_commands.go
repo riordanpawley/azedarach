@@ -1169,7 +1169,7 @@ func buildTaskListSnapshotPayload(projectID string, revision uint64, lastChecked
 	}
 }
 
-func buildBoardSnapshotPayload(projectID string, revision uint64, lastCheckedAt time.Time, freshness protocol.TaskListFreshness, tasks []domain.Task, view domain.BoardViewDefinition) (protocol.BoardSnapshotPayload, error) {
+func buildBoardSnapshotPayload(projectID string, revision uint64, lastCheckedAt time.Time, freshness protocol.TaskListFreshness, tasks []domain.Task, view domain.BoardView) (protocol.BoardSnapshotPayload, error) {
 	if lastCheckedAt.IsZero() {
 		lastCheckedAt = timeNow()
 	}

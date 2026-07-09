@@ -75,7 +75,7 @@ func (c *Client) GetBoardView(ctx context.Context, projectID, viewID string) (do
 	return record, nil
 }
 
-func (c *Client) SaveBoardView(ctx context.Context, projectID string, view domain.BoardViewDefinition) (domain.BoardViewRecord, error) {
+func (c *Client) SaveBoardView(ctx context.Context, projectID string, view domain.BoardView) (domain.BoardViewRecord, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return domain.BoardViewRecord{}, err
@@ -112,12 +112,12 @@ func (c *Client) SaveBoardView(ctx context.Context, projectID string, view domai
 				built_in = 0,
 				updated_at = excluded.updated_at,
 				deleted_at = NULL
-		`, projectID, view.ID, view.Name, string(definitionJSON), now, now)
+		`, projectID, view.ID, view.Title, string(definitionJSON), now, now)
 		return execErr
 	}); err != nil {
 		return domain.BoardViewRecord{}, c.wrapError("board-view-save", projectID, err)
 	}
-	return c.GetBoardView(ctx, projectID, view.ID)
+	return c.GetBoardView(ctx, projectID, string(view.ID))
 }
 
 func (c *Client) DeleteBoardView(ctx context.Context, projectID, viewID string) error {
@@ -188,7 +188,7 @@ func (c *Client) seedBuiltInBoardViews(ctx context.Context, db *sql.DB, projectI
 				updated_at = excluded.updated_at,
 				deleted_at = NULL
 			WHERE board_views.built_in = 1
-		`, projectID, view.ID, view.Name, string(definitionJSON), now, now); err != nil {
+		`, projectID, view.ID, view.Title, string(definitionJSON), now, now); err != nil {
 			return fmt.Errorf("seed board view %q: %w", view.ID, err)
 		}
 	}

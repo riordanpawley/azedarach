@@ -435,7 +435,7 @@ type TaskIDResponse struct {
 // TaskSnapshot captures a task list snapshot and the revision it was read at.
 type TaskSnapshot struct {
 	Tasks         []domain.Task
-	View          domain.BoardViewDefinition
+	View          domain.BoardView
 	Columns       []domain.BoardViewColumnSnapshot
 	Revision      uint64
 	LastCheckedAt time.Time

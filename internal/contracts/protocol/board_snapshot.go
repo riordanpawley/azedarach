@@ -25,15 +25,15 @@ const (
 // fields needed to render and route board actions, but omit long detail fields
 // such as description, notes, design, and acceptance.
 type BoardSnapshotPayload struct {
-	SchemaVersion    uint16                     `json:"schema_version" msgpack:"schema_version"`
-	ProtocolVersion  Version                    `json:"protocol_version" msgpack:"protocol_version"`
-	SnapshotRevision uint64                     `json:"snapshot_revision" msgpack:"snapshot_revision"`
-	ProjectID        naming.ProjectID           `json:"project_id" msgpack:"project_id"`
-	LastCheckedAt    time.Time                  `json:"last_checked_at" msgpack:"last_checked_at"`
-	Freshness        TaskListFreshness          `json:"freshness" msgpack:"freshness"`
-	View             domain.BoardViewDefinition `json:"view" msgpack:"view"`
-	Columns          []BoardSnapshotColumn      `json:"columns" msgpack:"columns"`
-	Tasks            []BoardTaskSummary         `json:"tasks" msgpack:"tasks"`
+	SchemaVersion    uint16                `json:"schema_version" msgpack:"schema_version"`
+	ProtocolVersion  Version               `json:"protocol_version" msgpack:"protocol_version"`
+	SnapshotRevision uint64                `json:"snapshot_revision" msgpack:"snapshot_revision"`
+	ProjectID        naming.ProjectID      `json:"project_id" msgpack:"project_id"`
+	LastCheckedAt    time.Time             `json:"last_checked_at" msgpack:"last_checked_at"`
+	Freshness        TaskListFreshness     `json:"freshness" msgpack:"freshness"`
+	View             domain.BoardView      `json:"view" msgpack:"view"`
+	Columns          []BoardSnapshotColumn `json:"columns" msgpack:"columns"`
+	Tasks            []BoardTaskSummary    `json:"tasks" msgpack:"tasks"`
 }
 
 type BoardSnapshotRequestBody struct {
@@ -42,11 +42,11 @@ type BoardSnapshotRequestBody struct {
 }
 
 type BoardSnapshotColumn struct {
-	Definition BoardViewColumnDefinition `json:"definition" msgpack:"definition"`
-	Tasks      []BoardTaskSummary        `json:"tasks" msgpack:"tasks"`
+	Definition BoardColumn        `json:"definition" msgpack:"definition"`
+	Tasks      []BoardTaskSummary `json:"tasks" msgpack:"tasks"`
 }
 
-type BoardViewColumnDefinition = domain.BoardViewColumnDefinition
+type BoardColumn = domain.BoardColumn
 
 type BoardViewListRequestBody struct {
 	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
@@ -58,8 +58,8 @@ type BoardViewGetRequestBody struct {
 }
 
 type BoardViewSaveRequestBody struct {
-	ProjectID naming.ProjectID           `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
-	View      domain.BoardViewDefinition `json:"view" msgpack:"view"`
+	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	View      domain.BoardView `json:"view" msgpack:"view"`
 }
 
 type BoardViewDeleteRequestBody struct {
@@ -97,6 +97,7 @@ type BoardTaskSummary struct {
 	Estimate              *int                   `json:"estimate,omitempty" msgpack:"estimate,omitempty"`
 	Status                domain.Status          `json:"status" msgpack:"status"`
 	State                 domain.IssueState      `json:"issue_state,omitzero" msgpack:"issue_state,omitempty"`
+	Facts                 domain.IssueFacts      `json:"issue_facts,omitzero" msgpack:"issue_facts,omitempty"`
 	Priority              domain.Priority        `json:"priority" msgpack:"priority"`
 	Type                  domain.TaskType        `json:"issue_type" msgpack:"issue_type"`
 	ParentID              *naming.IssueID        `json:"parent_id,omitempty" msgpack:"parent_id,omitempty"`
@@ -134,6 +135,7 @@ func BoardSnapshotColumnsFromDomain(columns []domain.BoardViewColumnSnapshot) []
 }
 
 func BoardTaskSummaryFromDomain(task domain.Task) BoardTaskSummary {
+	facts := task.IssueFacts()
 	return BoardTaskSummary{
 		ID:                    task.ID,
 		Title:                 task.Title,
@@ -142,6 +144,7 @@ func BoardTaskSummaryFromDomain(task domain.Task) BoardTaskSummary {
 		Estimate:              cloneIntPointer(task.Estimate),
 		Status:                domain.BoardStatusForTask(task),
 		State:                 task.State,
+		Facts:                 facts,
 		Priority:              task.Priority,
 		Type:                  task.Type,
 		ParentID:              cloneIssueIDPointer(task.ParentID),
@@ -174,6 +177,7 @@ func (s BoardTaskSummary) ToDomainTask() domain.Task {
 		Estimate:              cloneIntPointer(s.Estimate),
 		Status:                s.Status,
 		State:                 s.State,
+		Facts:                 s.Facts,
 		Priority:              s.Priority,
 		Type:                  s.Type,
 		ParentID:              cloneIssueIDPointer(s.ParentID),
@@ -252,7 +256,7 @@ func DecodeBoardSnapshotPayload(data []byte) (BoardSnapshotPayload, error) {
 	if !payload.Freshness.Valid() {
 		return BoardSnapshotPayload{}, fmt.Errorf("board snapshot freshness mismatch: expected one of [%s %s], actual %q", TaskListFreshnessFresh, TaskListFreshnessStale, payload.Freshness)
 	}
-	if payload.View.ID != "" || payload.View.SchemaVersion != 0 || len(payload.View.Columns) > 0 {
+	if payload.View.ID != "" || payload.View.Title != "" || len(payload.View.Columns) > 0 {
 		if err := payload.View.Validate(); err != nil {
 			return BoardSnapshotPayload{}, fmt.Errorf("board snapshot view invalid: %w", err)
 		}

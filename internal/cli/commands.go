@@ -7346,7 +7346,7 @@ func filterTasksByIssueDisplayPhase(tasks []domain.Task, phases []domain.IssueDi
 	}
 	filtered := make([]domain.Task, 0, len(tasks))
 	for _, task := range tasks {
-		if _, ok := phaseSet[task.IssueDisplayPhase()]; ok {
+		if _, ok := phaseSet[task.IssueFacts().DisplayPhase]; ok {
 			filtered = append(filtered, task)
 		}
 	}

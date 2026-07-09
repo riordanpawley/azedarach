@@ -498,7 +498,7 @@ func TestBuildBoardSnapshotPayloadOmitsDetailFields(t *testing.T) {
 	if got, want := len(decoded.Tasks), 1; got != want {
 		t.Fatalf("task count = %d, want %d", got, want)
 	}
-	if got, want := decoded.View.ID, domain.DefaultBoardViewID; got != want {
+	if got, want := string(decoded.View.ID), domain.DefaultBoardViewID; got != want {
 		t.Fatalf("view id = %q, want %q", got, want)
 	}
 	if got := len(decoded.Columns); got == 0 {
@@ -535,17 +535,16 @@ func TestHandleBoardFetchGroupsBySelectedView(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create active issue: %v", err)
 	}
-	customView := domain.BoardViewDefinition{
-		SchemaVersion: domain.BoardViewDefinitionSchemaVersion,
-		ID:            "active-only",
-		Name:          "Active Only",
-		Columns: []domain.BoardViewColumnDefinition{{
-			ID:    "active",
+	customView := domain.BoardView{
+		ID:    "active-only",
+		Title: "Active Only",
+		Columns: []domain.BoardColumn{{
+			ID:    domain.BoardColumnActive,
 			Title: "Active",
-			Predicate: domain.BoardViewColumnPredicate{
-				Type:         domain.BoardViewPredicateDisplayPhase,
-				DisplayPhase: domain.IssueDisplayActive,
-			},
+			Predicates: []domain.BoardColumnPredicate{{
+				Kind:          domain.BoardPredicateDisplayPhase,
+				DisplayPhases: []domain.IssueDisplayPhase{domain.IssueDisplayActive},
+			}},
 		}},
 	}
 	if _, err := issuesClient.SaveBoardView(ctx, projectID, customView); err != nil {
@@ -594,7 +593,7 @@ func TestHandleBoardFetchGroupsBySelectedView(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeBoardSnapshotPayload error: %v", err)
 	}
-	if got, want := payload.View.ID, "active-only"; got != want {
+	if got, want := string(payload.View.ID), "active-only"; got != want {
 		t.Fatalf("payload view id = %q, want %q", got, want)
 	}
 	if got, want := len(payload.Columns), 1; got != want {
@@ -605,6 +604,12 @@ func TestHandleBoardFetchGroupsBySelectedView(t *testing.T) {
 	}
 	if got, want := payload.Columns[0].Tasks[0].Title, "Active issue"; got != want {
 		t.Fatalf("active task title = %q, want %q", got, want)
+	}
+	if payload.Tasks[0].Facts.DisplayPhase != domain.IssueDisplayActive {
+		t.Fatalf("issue facts display phase = %s, want %s", payload.Tasks[0].Facts.DisplayPhase, domain.IssueDisplayActive)
+	}
+	if !slices.Contains(payload.Tasks[0].Facts.ReasonMessages(), "lifecycle is active") {
+		t.Fatalf("issue facts reasons = %#v, want lifecycle reason", payload.Tasks[0].Facts.ReasonMessages())
 	}
 }
 
@@ -2155,14 +2160,22 @@ func TestHandleBoardFetchDerivesInReviewPhaseFromSessionActivity(t *testing.T) {
 		t.Fatalf("decode board.fetch body: %v", err)
 	}
 	statusByID := map[string]domain.Status{}
+	factsByID := map[string]domain.IssueFacts{}
 	for _, task := range payload.Tasks {
 		statusByID[task.ID.String()] = task.Status
+		factsByID[task.ID.String()] = task.Facts
 	}
 	if got := statusByID[busyID]; got != domain.StatusInProgress {
 		t.Fatalf("busy handoff board status = %s, want %s", got, domain.StatusInProgress)
 	}
 	if got := statusByID[idleID]; got != domain.StatusInReview {
 		t.Fatalf("idle handoff board status = %s, want %s", got, domain.StatusInReview)
+	}
+	if got := factsByID[busyID]; got.DisplayPhase != domain.IssueDisplayActive || got.ReviewReadyVisible {
+		t.Fatalf("busy handoff facts = %+v, want active and not review-ready", got)
+	}
+	if got := factsByID[idleID]; got.DisplayPhase != domain.IssueDisplayReview || !got.ReviewReadyVisible {
+		t.Fatalf("idle handoff facts = %+v, want review-ready", got)
 	}
 }
 

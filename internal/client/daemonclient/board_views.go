@@ -33,7 +33,7 @@ func (c *Client) GetBoardView(ctx context.Context, viewID string) (protocol.Boar
 	return out, nil
 }
 
-func (c *Client) SaveBoardView(ctx context.Context, view domain.BoardViewDefinition) (protocol.BoardViewResponseBody, error) {
+func (c *Client) SaveBoardView(ctx context.Context, view domain.BoardView) (protocol.BoardViewResponseBody, error) {
 	body := protocol.BoardViewSaveRequestBody{View: view}
 	if strings.TrimSpace(c.projectID.String()) != "" {
 		body.ProjectID = c.projectID

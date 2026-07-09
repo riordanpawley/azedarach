@@ -54,7 +54,7 @@ func TestBoardViewClientCommandsUseTypedProtocol(t *testing.T) {
 	client := New(transport).WithProjectID("proj-board-client")
 	view := domain.DefaultBoardView()
 	view.ID = "custom"
-	view.Name = "Custom"
+	view.Title = "Custom"
 
 	saveResp, err := client.SaveBoardView(context.Background(), view)
 	if err != nil {

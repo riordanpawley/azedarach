@@ -71,25 +71,24 @@ func TestBoardViewCorruptDefinitionFailsSafely(t *testing.T) {
 	}
 }
 
-func boardViewTestCustomView(id string) domain.BoardViewDefinition {
-	return domain.BoardViewDefinition{
-		SchemaVersion: domain.BoardViewDefinitionSchemaVersion,
-		ID:            id,
-		Name:          "Custom Active",
-		Columns: []domain.BoardViewColumnDefinition{{
-			ID:    "active",
+func boardViewTestCustomView(id string) domain.BoardView {
+	return domain.BoardView{
+		ID:    domain.BoardViewID(id),
+		Title: "Custom Active",
+		Columns: []domain.BoardColumn{{
+			ID:    domain.BoardColumnActive,
 			Title: "Active",
-			Predicate: domain.BoardViewColumnPredicate{
-				Type:         domain.BoardViewPredicateDisplayPhase,
-				DisplayPhase: domain.IssueDisplayActive,
-			},
+			Predicates: []domain.BoardColumnPredicate{{
+				Kind:          domain.BoardPredicateDisplayPhase,
+				DisplayPhases: []domain.IssueDisplayPhase{domain.IssueDisplayActive},
+			}},
 		}},
 	}
 }
 
 func boardViewTestHasView(views []domain.BoardViewRecord, id string) bool {
 	for _, view := range views {
-		if view.View.ID == id {
+		if string(view.View.ID) == id {
 			return true
 		}
 	}
