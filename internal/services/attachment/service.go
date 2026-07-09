@@ -22,6 +22,7 @@ import (
 const (
 	legacyImageCollection = "images"
 	attachmentCollection  = "attachments"
+	clipboardReadTimeout  = 8 * time.Second
 )
 
 var errAttachmentNotFound = errors.New("attachment not found")
@@ -123,7 +124,7 @@ func (s *Service) Attach(ctx context.Context, issueID string, sourcePath string)
 // AttachFromClipboard reads an image from the clipboard and attaches it
 func (s *Service) AttachFromClipboard(ctx context.Context, issueID string) (*Attachment, error) {
 	s.logger.Info("attaching image from clipboard", "issue_id", issueID)
-	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	readCtx, cancel := context.WithTimeout(ctx, clipboardReadTimeout)
 	defer cancel()
 
 	// Read image from clipboard
