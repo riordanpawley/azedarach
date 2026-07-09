@@ -366,6 +366,10 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			_, cmd := actionModel.agentMergeCurrentIssueIntoDefaultTarget(task)
 			return m, cmd
 		}
+		if action.Action == overlay.CloseFailureActionCreatePR {
+			m.beginMutationFeedback(fmt.Sprintf("Preparing PR for %s", action.TaskID))
+			return m, actionModel.openPROverlayCmd(action.SourceWorktree, action.TaskID)
+		}
 		previousStatus := domain.Status(strings.TrimSpace(action.PreviousStatus))
 		targetStatus := domain.Status(strings.TrimSpace(action.TargetStatus))
 		if previousStatus == "" {
@@ -621,20 +625,24 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	switch msg.Key {
 	// Session actions
 	case "s":
-		// Start tmux session only; do not launch work automatically.
-		m.beginTaskMutationFeedback(task.ID.String(), "session_start", "Session start")
+		// Match CLI `az session start`: daemon defaults to launching AI work.
+		m.beginTaskMutationFeedback(task.ID.String(), "session_start", sessionStartActionLabel(false, true))
+		return m, m.startSessionCmd(task.ID.String(), m.resolveBaseBranch(), false, true)
+	case "t":
+		// Explicit tmux-only session; do not launch work automatically.
+		m.beginTaskMutationFeedback(task.ID.String(), "session_start", sessionStartActionLabel(false, false))
 		return m, m.startSessionCmd(task.ID.String(), m.resolveBaseBranch(), false, false)
 	case "S":
 		// Start session directly without origin/base selection prompt.
-		m.beginTaskMutationFeedback(task.ID.String(), "session_start", "Session start")
+		m.beginTaskMutationFeedback(task.ID.String(), "session_start", sessionStartActionLabel(false, true))
 		return m, m.startSessionCmd(task.ID.String(), m.resolveBaseBranch(), false, true)
 	case "!":
 		// Start session with dangerous skip-permissions mode.
-		m.beginTaskMutationFeedback(task.ID.String(), "session_start", "Session start")
+		m.beginTaskMutationFeedback(task.ID.String(), "session_start", sessionStartActionLabel(true, true))
 		return m, m.startSessionCmd(task.ID.String(), m.resolveBaseBranch(), true, true)
 	case "session_origin":
 		if originMsg, ok := msg.Value.(overlay.MergeTargetSelectedMsg); ok {
-			m.beginTaskMutationFeedback(task.ID.String(), "session_start", "Session start")
+			m.beginTaskMutationFeedback(task.ID.String(), "session_start", sessionStartActionLabel(false, true))
 			return m, m.startSessionCmd(task.ID.String(), m.originBranchForSelection(originMsg.SourceID), false, true)
 		}
 		return m, nil

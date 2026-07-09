@@ -265,7 +265,7 @@ func (sb StatusBar) inlineHints() string {
 func truncateHintBindings(mode types.Mode, bindings []keybinds.Binding) []keybinds.Binding {
 	maxHints := len(bindings)
 	if mode == types.ModeAction {
-		maxHints = 10
+		maxHints = 12
 	}
 	if maxHints >= len(bindings) {
 		return bindings

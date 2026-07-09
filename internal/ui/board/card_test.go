@@ -250,10 +250,10 @@ func TestRenderCard_WithSession(t *testing.T) {
 		t.Errorf("Card should contain session icon, got: %s", stripped)
 	}
 
-	// Should contain elapsed time (approximately 2h 30m)
-	// Note: exact time will vary slightly, so we just check for "h" and "m"
-	if !strings.Contains(stripped, "h") || !strings.Contains(stripped, "m") {
-		t.Errorf("Card should contain elapsed time for busy session, got: %s", stripped)
+	// Should contain compact elapsed time without minute detail once the
+	// session has crossed an hour.
+	if !strings.Contains(stripped, "2h") || strings.Contains(stripped, "30m") {
+		t.Errorf("Card should contain compact elapsed time for busy session, got: %s", stripped)
 	}
 
 }
@@ -579,12 +579,12 @@ func TestRenderSessionStatus(t *testing.T) {
 			t.Errorf("Busy session should contain readable busy label, got: %s", stripped)
 		}
 
-		if !strings.Contains(stripped, "h") || !strings.Contains(stripped, "m") {
-			t.Errorf("Busy session should show elapsed time, got: %s", stripped)
+		if !strings.Contains(stripped, "1h") || strings.Contains(stripped, "30m") {
+			t.Errorf("Busy session should show compact elapsed time, got: %s", stripped)
 		}
 	})
 
-	t.Run("hook idle live session does not render busy or elapsed time", func(t *testing.T) {
+	t.Run("hook idle live session renders idle label and session age", func(t *testing.T) {
 		startedAt := time.Now().Add(-1*time.Hour - 30*time.Minute)
 		session := &domain.Session{
 			IssueID:        "test",
@@ -606,8 +606,8 @@ func TestRenderSessionStatus(t *testing.T) {
 		if strings.Contains(stripped, "busy") {
 			t.Errorf("Hook-idle session should not render busy label, got: %s", stripped)
 		}
-		if strings.Contains(stripped, "h") || strings.Contains(stripped, "m") {
-			t.Errorf("Hook-idle session should not show elapsed active time, got: %s", stripped)
+		if !strings.Contains(stripped, "1h") || strings.Contains(stripped, "30m") {
+			t.Errorf("Hook-idle session should show compact session age, got: %s", stripped)
 		}
 	})
 
@@ -644,6 +644,57 @@ func TestRenderSessionStatus(t *testing.T) {
 
 		if !strings.Contains(stripped, "✗") {
 			t.Errorf("Error session should contain error icon, got: %s", stripped)
+		}
+	})
+
+	t.Run("icon-only active sessions render age", func(t *testing.T) {
+		startedAt := time.Now().Add(-2*time.Hour - 15*time.Minute)
+		tests := []struct {
+			name     string
+			session  *domain.Session
+			wantIcon string
+		}{
+			{
+				name: "paused",
+				session: &domain.Session{
+					IssueID:   "test",
+					State:     domain.SessionPaused,
+					StartedAt: &startedAt,
+				},
+				wantIcon: domain.SessionPaused.Icon(),
+			},
+			{
+				name: "no-agent",
+				session: &domain.Session{
+					IssueID:   "test",
+					State:     domain.SessionBusy,
+					Activity:  "no-agent",
+					StartedAt: &startedAt,
+				},
+				wantIcon: domain.SessionState("no-agent").Icon(),
+			},
+			{
+				name: "unknown",
+				session: &domain.Session{
+					IssueID:   "test",
+					State:     domain.SessionBusy,
+					Activity:  "unknown",
+					StartedAt: &startedAt,
+				},
+				wantIcon: domain.SessionState("unknown").Icon(),
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result := stripANSI(renderSessionStatus(tt.session, s))
+				if !strings.Contains(result, tt.wantIcon) {
+					t.Fatalf("session should show icon %q, got: %s", tt.wantIcon, result)
+				}
+				if !strings.Contains(result, "2h") || strings.Contains(result, "15m") {
+					t.Fatalf("session should show compact age, got: %s", result)
+				}
+			})
 		}
 	})
 }
@@ -800,7 +851,7 @@ func TestRenderCard_MetadataOnFirstLine(t *testing.T) {
 	if first == "" {
 		t.Fatalf("expected metadata line containing issue id, got: %s", result)
 	}
-	for _, token := range []string{"P2", "CHE-3002", " T ", "wait", "2d 2h", worktreeToken, "✎", "+12/-3", "[1/7]"} {
+	for _, token := range []string{"P2", "CHE-3002", " T ", "wait", "2d", worktreeToken, "✎", "+12/-3", "[1/7]"} {
 		if !strings.Contains(first, token) {
 			t.Fatalf("first line should contain %q, got: %s", token, first)
 		}
@@ -923,12 +974,42 @@ func TestRenderCard_InReviewSuppressesBusySessionStatus(t *testing.T) {
 		},
 	}
 
-	result := stripANSI(renderCard(task, CardState{}, nil, nil, nil, 64, s))
+	result := stripANSI(renderCard(task, CardState{}, &RuntimeSignals{HasTmuxSession: true}, nil, nil, 64, s))
 	if strings.Contains(result, "busy") || strings.Contains(result, "working") || strings.Contains(result, domain.SessionBusy.Icon()) {
 		t.Fatalf("in_review card should suppress busy session status, got: %s", result)
 	}
+	if !strings.Contains(result, tmuxSessionToken+" 1h") || strings.Contains(result, "30m") {
+		t.Fatalf("in_review card should keep compact session age when busy session is suppressed, got: %s", result)
+	}
 	if !strings.Contains(result, " T ") {
 		t.Fatalf("in_review card should keep type metadata when busy session is suppressed, got: %s", result)
+	}
+}
+
+func TestRenderCard_InReviewIdleSessionShowsAge(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-2*time.Hour - 15*time.Minute)
+	task := domain.Task{
+		ID:       "CHE-3013",
+		Title:    "ready but idle",
+		Status:   domain.StatusInReview,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		Session: &domain.Session{
+			IssueID:        "CHE-3013",
+			State:          domain.SessionBusy,
+			Activity:       "idle",
+			ActivitySource: "hooks",
+			StartedAt:      &startedAt,
+		},
+	}
+
+	result := stripANSI(renderCard(task, CardState{}, nil, nil, nil, 64, s))
+	if !strings.Contains(result, "idle") {
+		t.Fatalf("in_review idle card should show idle activity, got: %s", result)
+	}
+	if !strings.Contains(result, "2h") || strings.Contains(result, "15m") {
+		t.Fatalf("in_review idle card should show compact session age, got: %s", result)
 	}
 }
 
@@ -1104,6 +1185,27 @@ func TestRenderRuntimeSignals(t *testing.T) {
 		}
 	})
 
+	t.Run("large git counts use whole suffixes", func(t *testing.T) {
+		signals := &RuntimeSignals{
+			GitAheadCount:         3333,
+			GitBehindCount:        4,
+			HasUncommittedChanges: true,
+			GitAdditions:          3335,
+			GitDeletions:          8827,
+		}
+		got := stripANSI(renderRuntimeSignals(signals, styles.New()))
+		for _, want := range []string{"↑3k", "↓4", "+3k/-9k"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("renderRuntimeSignals(...) = %q, missing %q", got, want)
+			}
+		}
+		for _, notWant := range []string{"↑3333", "+3335", "-8827"} {
+			if strings.Contains(got, notWant) {
+				t.Fatalf("renderRuntimeSignals(...) = %q, should compact %q", got, notWant)
+			}
+		}
+	})
+
 	t.Run("local preparing operation", func(t *testing.T) {
 		signals := &RuntimeSignals{
 			PendingOperationState: "preparing",
@@ -1159,11 +1261,11 @@ func TestRenderRuntimeSignalsCompact(t *testing.T) {
 	t.Run("shows directional pairing without line changes", func(t *testing.T) {
 		signals := &RuntimeSignals{
 			HasWorktree:    true,
-			GitAheadCount:  2,
-			GitBehindCount: 3,
+			GitAheadCount:  1237,
+			GitBehindCount: 210,
 		}
 		got := stripANSI(renderRuntimeSignalsCompact(signals, styles.New()))
-		if !strings.Contains(got, "G↑2/↓3") {
+		if !strings.Contains(got, "G↑1k/↓210") {
 			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, missing directional ahead/behind pairing", got)
 		}
 	})
@@ -1178,6 +1280,29 @@ func TestRenderRuntimeSignalsCompact(t *testing.T) {
 			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, want M:!", got)
 		}
 	})
+}
+
+func TestFormatCompactCount(t *testing.T) {
+	tests := []struct {
+		name string
+		n    int
+		want string
+	}{
+		{name: "small", n: 999, want: "999"},
+		{name: "thousands round down", n: 3333, want: "3k"},
+		{name: "thousands round up", n: 8827, want: "9k"},
+		{name: "rounded thousands roll to million", n: 999500, want: "1M"},
+		{name: "millions", n: 2500000, want: "3M"},
+		{name: "negative", n: -3333, want: "-3k"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatCompactCount(tt.n); got != tt.want {
+				t.Fatalf("formatCompactCount(%d) = %q, want %q", tt.n, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestRuntimeSignalsForHeader_SuppressesTmuxMarkersWithSession(t *testing.T) {

@@ -1355,6 +1355,28 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 	}
 }
 
+type failingRuntimeProjectionWriter struct {
+	recordingRuntimeProjectionWriter
+	failWorktreePersist error
+	failSessionPersist  error
+}
+
+func (w *failingRuntimeProjectionWriter) PersistWorktreeProjection(ctx context.Context, projectID, issueID, path, branch string) error {
+	w.record("worktree.persist")
+	if w.failWorktreePersist != nil {
+		return w.failWorktreePersist
+	}
+	return w.recordingRuntimeProjectionWriter.PersistWorktreeProjection(ctx, projectID, issueID, path, branch)
+}
+
+func (w *failingRuntimeProjectionWriter) PersistSessionProjection(ctx context.Context, projectID string, session daemonstate.Session) error {
+	w.record("session.persist")
+	if w.failSessionPersist != nil {
+		return w.failSessionPersist
+	}
+	return w.recordingRuntimeProjectionWriter.PersistSessionProjection(ctx, projectID, session)
+}
+
 func TestSessionStartRollsBackWorktreeWhenCreateFailsAfterMaterializing(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -1470,6 +1492,13 @@ func TestSessionStartRollsBackWorktreeWhenCreateFailsAfterMaterializing(t *testi
 	}
 	if tmuxRunner.sendKeysCalls != 0 {
 		t.Fatalf("send-keys calls = %d, want none when create fails", tmuxRunner.sendKeysCalls)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, issueID)
+	if err != nil {
+		t.Fatalf("get issue after failure: %v", err)
+	}
+	if task.Status != domain.StatusOpen {
+		t.Fatalf("issue status = %s, want rollback to %s", task.Status, domain.StatusOpen)
 	}
 }
 
@@ -1951,6 +1980,274 @@ func TestSessionStartIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
 	}
 	if !tmuxRunner.sessions[sessionID] {
 		t.Fatalf("expected tmux session %q to be created", sessionID)
+	}
+}
+
+func TestSessionStartReactivatesClosedIssueBeforeRuntimeProjection(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Closed task should reactivate",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if err := issuesClient.Update(ctx, issueID, domain.StatusDone); err != nil {
+		t.Fatalf("close issue: %v", err)
+	}
+
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	worktreeRunner := &worktreeCreateRunner{
+		worktreePath: worktreePath,
+		branchName:   "testuser/" + issueID + "/closed-task-should-react",
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-closed-reactivate",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionStart,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: marshalJSON(map[string]any{
+			"project_id": projectID,
+			"session_id": issueID,
+			"start_work": false,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("session start response = %+v, want success", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, issueID)
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if task.Status != domain.StatusInProgress {
+		t.Fatalf("issue status = %s, want %s", task.Status, domain.StatusInProgress)
+	}
+	if _, found, err := runtimeStateStore.GetWorktreeStateByIssueID(ctx, projectID, issueID); err != nil || !found {
+		t.Fatalf("worktree projection found=%t err=%v, want persisted", found, err)
+	}
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	sessionProjection, found, err := runtimeStateStore.GetSessionState(ctx, projectID, sessionID)
+	if err != nil || !found {
+		t.Fatalf("session projection found=%t err=%v, want persisted", found, err)
+	}
+	if sessionProjection.State == daemonstate.SessionStateStopped {
+		t.Fatalf("session projection = %+v, want active", sessionProjection)
+	}
+}
+
+func TestSessionStartFailsAndRollsBackWhenSessionProjectionPersistFails(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Projection failure should fail",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	worktreeRunner := &worktreeCreateRunner{
+		worktreePath: worktreePath,
+		branchName:   "testuser/" + issueID + "/projection-failure-shou",
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	projectionErr := errors.New("runtime projection unavailable")
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:                    tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:                  issuesClient,
+		session:                 daemonhandlers.NewSessionHandler(store),
+		sessionStore:            store,
+		revision:                map[string]uint64{},
+		runtimeProjectionWriter: &failingRuntimeProjectionWriter{failSessionPersist: projectionErr},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-session-projection-fails",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionStart,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: marshalJSON(map[string]any{
+			"project_id": projectID,
+			"session_id": issueID,
+			"start_work": false,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("session start response = %+v, want projection failure", resp)
+	}
+	if !strings.Contains(resp.Error.Message, projectionErr.Error()) {
+		t.Fatalf("error message = %q, want projection failure", resp.Error.Message)
+	}
+	if tmuxRunner.sessions[sessionID] {
+		t.Fatalf("tmux session %q still exists after projection failure", sessionID)
+	}
+	snapshot := store.ReadSnapshot(projectID)
+	if got := snapshot.Sessions[sessionID]; got.State != daemonstate.SessionStateStopped {
+		t.Fatalf("session store state = %+v, want stopped rollback", got)
+	}
+	if !worktreeRunner.worktreeRemoved {
+		t.Fatal("expected new worktree cleanup after session projection failure")
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, issueID)
+	if err != nil {
+		t.Fatalf("get issue after failure: %v", err)
+	}
+	if task.Status != domain.StatusOpen {
+		t.Fatalf("issue status = %s, want rollback to %s", task.Status, domain.StatusOpen)
+	}
+}
+
+func TestSessionStartFailsBeforeTmuxWhenWorktreeProjectionPersistFails(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Worktree projection failure should fail",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	worktreeRunner := &worktreeCreateRunner{
+		worktreePath: worktreePath,
+		branchName:   "testuser/" + issueID + "/worktree-projection-fai",
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+	projectionErr := errors.New("worktree projection unavailable")
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:                    tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:                  issuesClient,
+		session:                 daemonhandlers.NewSessionHandler(store),
+		sessionStore:            store,
+		revision:                map[string]uint64{},
+		runtimeProjectionWriter: &failingRuntimeProjectionWriter{failWorktreePersist: projectionErr},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-worktree-projection-fails",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionStart,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: marshalJSON(map[string]any{
+			"project_id": projectID,
+			"session_id": issueID,
+			"start_work": false,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("session start response = %+v, want projection failure", resp)
+	}
+	if !strings.Contains(resp.Error.Message, projectionErr.Error()) {
+		t.Fatalf("error message = %q, want projection failure", resp.Error.Message)
+	}
+	if len(tmuxRunner.sessions) != 0 {
+		t.Fatalf("tmux sessions = %v, want none before worktree projection succeeds", tmuxRunner.sessions)
+	}
+	if !worktreeRunner.worktreeRemoved {
+		t.Fatal("expected new worktree cleanup after worktree projection failure")
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, issueID)
+	if err != nil {
+		t.Fatalf("get issue after failure: %v", err)
+	}
+	if task.Status != domain.StatusOpen {
+		t.Fatalf("issue status = %s, want rollback to %s", task.Status, domain.StatusOpen)
 	}
 }
 

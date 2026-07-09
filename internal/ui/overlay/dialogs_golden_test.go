@@ -426,6 +426,11 @@ func goldenImageAttachListView(t *testing.T) string {
 		{ID: "a2", IssueID: "az-321", Filename: "mobile-panel.png", MimeType: "image/png", Size: 99872},
 	}
 	overlay.cursor = 1
+	overlay.preview = attachmentPreviewState{
+		attachmentID: "a2",
+		title:        "Image Preview",
+		lines:        []string{"Inline image rendering is not available in this terminal.", "Press Enter/v for full preview or o to open externally."},
+	}
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
 	return model.(*ImageAttachOverlay).View()
 }
@@ -445,6 +450,11 @@ func goldenImageAttachPreviewView(t *testing.T) string {
 			Created:  time.Date(2026, time.March, 30, 8, 10, 0, 0, time.UTC),
 		},
 	}
+	overlay.preview = attachmentPreviewState{
+		attachmentID: "a2",
+		title:        "Image Preview",
+		lines:        []string{"Inline image rendering is not available in this terminal.", "Press Enter/v for full preview or o to open externally."},
+	}
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
 	return model.(*ImageAttachOverlay).View()
 }
@@ -463,6 +473,11 @@ func goldenImageAttachPreviewSmallView(t *testing.T) string {
 			Path:     "/tmp/mobile-panel.png",
 			Created:  time.Date(2026, time.March, 30, 8, 10, 0, 0, time.UTC),
 		},
+	}
+	overlay.preview = attachmentPreviewState{
+		attachmentID: "a2",
+		title:        "Image Preview",
+		lines:        []string{"Inline image rendering is not available in this terminal.", "Press Enter/v for full preview or o to open externally."},
 	}
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	return model.(*ImageAttachOverlay).View()
@@ -512,6 +527,11 @@ func goldenImageAttachListSmallView(t *testing.T) string {
 	overlay.files = []attachment.Attachment{
 		{ID: "a1", IssueID: "az-321", Filename: "board-screen.png", MimeType: "image/png", Size: 340223},
 		{ID: "a2", IssueID: "az-321", Filename: "mobile-panel.png", MimeType: "image/png", Size: 99872},
+	}
+	overlay.preview = attachmentPreviewState{
+		attachmentID: "a1",
+		title:        "Image Preview",
+		lines:        []string{"Inline image rendering is not available in this terminal.", "Press Enter/v for full preview or o to open externally."},
 	}
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	return model.(*ImageAttachOverlay).View()

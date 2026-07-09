@@ -14,6 +14,7 @@ type CloseFailureAction string
 const (
 	CloseFailureActionRetry              CloseFailureAction = "retry"
 	CloseFailureActionAIMerge            CloseFailureAction = "ai_merge"
+	CloseFailureActionCreatePR           CloseFailureAction = "create_pr"
 	CloseFailureActionForceWorktree      CloseFailureAction = "force_worktree"
 	CloseFailureActionAllowActiveSession CloseFailureAction = "allow_active_session"
 	CloseFailureActionCloseCleanChildren CloseFailureAction = "close_clean_children"
@@ -115,6 +116,8 @@ func (c *CloseFailureDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return c, c.selectionForAction(CloseFailureActionRetry)
 		case "a", "A":
 			return c, c.selectionForAction(CloseFailureActionAIMerge)
+		case "p", "P":
+			return c, c.selectionForAction(CloseFailureActionCreatePR)
 		case "f", "F":
 			if c.options.AllowActiveSessionRetry {
 				return c, c.selectionForAction(CloseFailureActionAllowActiveSession)
@@ -156,7 +159,7 @@ func (c *CloseFailureDialog) Title() string {
 }
 
 func (c *CloseFailureDialog) Size() (width, height int) {
-	reasonLines := len(wrapDescriptionLines(c.reason, 64))
+	reasonLines := len(wrapDescriptionLines(c.reasonOrFallback(), 64))
 	return c.ClampResponsive(92, max(18, min(32, reasonLines+17)))
 }
 
@@ -167,6 +170,9 @@ func (c *CloseFailureDialog) StatusBindings() []keybinds.Binding {
 	}
 	if c.allowAIMerge() {
 		bindings = append(bindings, keybinds.Binding{Key: "a", Description: "AI merge"})
+	}
+	if c.allowCreatePR() {
+		bindings = append(bindings, keybinds.Binding{Key: "p", Description: "create PR"})
 	}
 	if c.options.AllowActiveSessionRetry {
 		bindings = append(bindings, keybinds.Binding{Key: "f", Description: "force active close"})
@@ -314,6 +320,17 @@ func (c *CloseFailureDialog) closeFailureActions() []closeFailureActionItem {
 			activeClose: c.options.AllowActiveSession,
 		})
 	}
+	if c.allowCreatePR() {
+		actions = append(actions, closeFailureActionItem{
+			key:         "p",
+			label:       "Create PR",
+			description: "Start the remote integration PR flow.",
+			action:      CloseFailureActionCreatePR,
+			force:       c.options.ForceWorktree,
+			cleanKids:   c.options.CloseCleanChildren,
+			activeClose: c.options.AllowActiveSession,
+		})
+	}
 	if c.options.AllowActiveSessionRetry {
 		actions = append(actions, closeFailureActionItem{
 			key:         "f",
@@ -358,12 +375,18 @@ func (c *CloseFailureDialog) closeFailureActions() []closeFailureActionItem {
 
 func (c *CloseFailureDialog) reasonOrFallback() string {
 	if strings.TrimSpace(c.reason) != "" {
-		return strings.TrimSpace(c.reason)
+		return closeFailureReadableReason(c.reason)
 	}
 	return "The close request failed without details."
 }
 
 func (c *CloseFailureDialog) nextStepLines() []string {
+	if c.allowCreatePR() {
+		return []string{
+			"- Create and merge the PR, or otherwise land the branch remotely.",
+			"- Retry close after the refreshed remote base contains the branch tree.",
+		}
+	}
 	lines := []string{"- Fix the blocker described above, then retry."}
 	if c.allowAIMerge() {
 		lines = append(lines, "- AI merge starts an agent when integration recovery needs help.")
@@ -383,6 +406,32 @@ func (c *CloseFailureDialog) allowAIMerge() bool {
 	return c.options.AllowAIMerge && closeFailureReasonSupportsAIMerge(c.reasonOrFallback())
 }
 
+func (c *CloseFailureDialog) allowCreatePR() bool {
+	return closeFailureReasonSupportsCreatePR(c.reasonOrFallback())
+}
+
+func closeFailureReadableReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return ""
+	}
+	const phasePrefix = "phase integrate_before_close for issue "
+	phaseIndex := strings.Index(reason, phasePrefix)
+	if phaseIndex == -1 {
+		return reason
+	}
+	afterPhase := reason[phaseIndex+len(phasePrefix):]
+	colonIndex := strings.Index(afterPhase, ":")
+	if colonIndex == -1 {
+		return reason
+	}
+	trimmed := strings.TrimSpace(afterPhase[colonIndex+1:])
+	if trimmed == "" {
+		return reason
+	}
+	return trimmed
+}
+
 func closeFailureReasonSupportsAIMerge(reason string) bool {
 	reason = strings.ToLower(strings.TrimSpace(reason))
 	return strings.Contains(reason, "merge preflight would conflict") ||
@@ -392,4 +441,10 @@ func closeFailureReasonSupportsAIMerge(reason string) bool {
 		strings.Contains(reason, "automatic merge failed") ||
 		strings.Contains(reason, "conflict while merging") ||
 		strings.Contains(reason, "conflicts:")
+}
+
+func closeFailureReasonSupportsCreatePR(reason string) bool {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	return strings.Contains(reason, "origin workflow close will not merge") &&
+		strings.Contains(reason, "still differs from origin/")
 }

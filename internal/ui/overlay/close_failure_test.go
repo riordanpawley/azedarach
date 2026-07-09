@@ -76,6 +76,46 @@ func TestCloseFailureDialogDoesNotOfferAIMergeForDirtyState(t *testing.T) {
 	}
 }
 
+func TestCloseFailureDialogOffersCreatePRForOriginWorkflowBlocker(t *testing.T) {
+	dialog := NewCloseFailureDialog("az-1", "internal: phase integrate_before_close for issue az-1: origin workflow close will not merge riordan/az-1/branch into the local preview checkout; az-1 still differs from origin/preview (1 file(s): main.go). Next: integrate through the remote workflow, fetch origin/preview, then retry close", CloseFailureDialogOptions{
+		PreviousStatus: "in_review",
+		TargetStatus:   "closed",
+		AllowAIMerge:   true,
+	})
+
+	_, cmd := dialog.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	if cmd == nil {
+		t.Fatal("expected create PR action command")
+	}
+	selection, ok := cmd().(SelectionMsg)
+	if !ok {
+		t.Fatalf("message = %T, want SelectionMsg", cmd())
+	}
+	action, ok := selection.Value.(CloseFailureActionMsg)
+	if !ok {
+		t.Fatalf("selection value = %T, want CloseFailureActionMsg", selection.Value)
+	}
+	if action.TaskID != "az-1" || action.Action != CloseFailureActionCreatePR {
+		t.Fatalf("create PR action = %+v, want create_pr for az-1", action)
+	}
+	view := dialog.View()
+	if !strings.Contains(view, "Create PR") {
+		t.Fatalf("view does not expose create PR action: %q", view)
+	}
+	if strings.Contains(view, "internal: phase integrate_before_close") {
+		t.Fatalf("view should hide transport phase prefix: %q", view)
+	}
+	if !strings.Contains(view, "Create and merge the PR") {
+		t.Fatalf("view does not show remote workflow next step: %q", view)
+	}
+	for _, binding := range dialog.StatusBindings() {
+		if binding.Key == "p" {
+			return
+		}
+	}
+	t.Fatal("status bindings missing create PR key")
+}
+
 func TestCloseFailureDialogAllowsActiveSessionOverride(t *testing.T) {
 	dialog := NewCloseFailureDialog("az-1", "cannot close issue az-1: session activity is busy (source: hooks). Next: wait for the session projection to report idle/done/terminal activity or intentionally stop the session, then retry", CloseFailureDialogOptions{
 		PreviousStatus:          "in_review",

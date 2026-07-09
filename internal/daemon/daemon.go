@@ -1032,7 +1032,11 @@ func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 		session.Activity = normalizeSessionActivity(session.Activity)
 		session.ActivitySource = normalizeSessionActivitySource(session.ActivitySource, "session")
 	}
-	d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, session)
+	writer := d.runtimeProjectionStateWriter()
+	if err := writer.PersistSessionProjection(ctx, projectID, session); err != nil {
+		return err
+	}
+	writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, session)
 	return nil
 }
 
@@ -1358,22 +1362,26 @@ func (d *Daemon) closeRuntimeStateStores() {
 	}
 }
 
-func (d *Daemon) persistSessionState(projectID string, session daemonstate.Session) {
+func (d *Daemon) persistSessionState(projectID string, session daemonstate.Session) error {
 	if d.sessionRuntimeStateStore(projectID) == nil {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(ctx, projectID, session); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Warn(
-			"persist session runtime state failed",
-			"project_id", projectID,
-			"session_id", session.ID,
-			"issue_id", session.IssueID,
-			"state", session.State,
-			"error", err,
-		)
+	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(ctx, projectID, session); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn(
+				"persist session runtime state failed",
+				"project_id", projectID,
+				"session_id", session.ID,
+				"issue_id", session.IssueID,
+				"state", session.State,
+				"error", err,
+			)
+		}
+		return err
 	}
+	return nil
 }
 
 func (d *Daemon) triggerSessionStateRefresh(projectID string, refreshFn func(context.Context, string) error) {
@@ -1513,15 +1521,17 @@ func (d *Daemon) persistWorktreeState(ctx context.Context, projectID, issueID, p
 		Path:      strings.TrimSpace(path),
 		Branch:    strings.TrimSpace(branch),
 		UpdatedAt: time.Now().UTC(),
-	}); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Warn(
-			"persist worktree runtime state failed",
-			"project_id", projectID,
-			"issue_id", issueID,
-			"path", path,
-			"branch", branch,
-			"error", err,
-		)
+	}); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn(
+				"persist worktree runtime state failed",
+				"project_id", projectID,
+				"issue_id", issueID,
+				"path", path,
+				"branch", branch,
+				"error", err,
+			)
+		}
 		return err
 	}
 	return nil

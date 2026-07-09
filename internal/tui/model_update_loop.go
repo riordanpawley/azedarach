@@ -443,12 +443,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessionStartedMsg:
+		actionLabel := normalizeSessionStartActionLabel(msg.actionLabel)
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {
 			m.markTaskOperationPending(msg.issueID, "session_start", msg.operationID, msg.state)
 			m.syncTaskWorkspaceOverlay()
 			m.addToast(Toast{
 				Level:   ToastInfo,
-				Message: formatPendingOperationMessage("Session start", msg.issueID, msg.operationID, msg.state),
+				Message: formatPendingOperationMessage(actionLabel, msg.issueID, msg.operationID, msg.state),
 				Expires: time.Now().Add(5 * time.Second),
 			})
 			return m, m.scheduleIssuesRefreshCmd()
@@ -456,9 +457,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clearPendingTaskStatus(msg.issueID)
 		m.clearTaskMutationFailure(msg.issueID)
 		m.syncTaskWorkspaceOverlay()
+		successMessage := fmt.Sprintf("%s completed: %s", actionLabel, msg.issueID)
+		if strings.TrimSpace(msg.actionLabel) == "" {
+			successMessage = fmt.Sprintf("Session started: %s", msg.issueID)
+		}
 		m.addToast(Toast{
 			Level:   ToastSuccess,
-			Message: fmt.Sprintf("Session started: %s", msg.issueID),
+			Message: successMessage,
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		return m, nil

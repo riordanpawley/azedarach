@@ -3091,6 +3091,99 @@ func TestCloseFailureAIMergeActionLaunchesAgentMerge(t *testing.T) {
 	}
 }
 
+func TestCloseFailureCreatePRActionLaunchesPRFlow(t *testing.T) {
+	jsonResponse := func(req protocol.RequestEnvelope, body any) (protocol.ResponseEnvelope, error) {
+		respBody, err := json.Marshal(body)
+		if err != nil {
+			return protocol.ResponseEnvelope{}, err
+		}
+		return protocol.ResponseEnvelope{
+			ProtocolVersion: req.ProtocolVersion,
+			RequestID:       req.RequestID,
+			Kind:            protocol.EnvelopeKindResponse,
+			OK:              true,
+			Body:            respBody,
+		}, nil
+	}
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				return jsonResponse(req, struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "default",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: "/tmp/az-5", Branch: "riordan/az-5/remote-workflow", IssueID: "az-5"},
+					},
+				})
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{
+		ID:     "az-5",
+		Status: domain.StatusInReview,
+		Session: &domain.Session{
+			IssueID:  "az-5",
+			State:    domain.SessionIdle,
+			Worktree: "/tmp/az-5",
+		},
+	}}
+	m.overlayStack.Push(overlay.NewCloseFailureDialog(
+		"az-5",
+		"internal: phase integrate_before_close for issue az-5: origin workflow close will not merge riordan/az-5/remote-workflow into the local preview checkout; az-5 still differs from origin/preview (1 file(s): main.go). Next: integrate through the remote workflow, fetch origin/preview, then retry close",
+		overlay.CloseFailureDialogOptions{
+			PreviousStatus: "in_review",
+			TargetStatus:   "closed",
+			SourceWorktree: "/tmp/az-5",
+			AllowAIMerge:   true,
+		},
+	))
+
+	afterKeyAny, selectionCmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	if selectionCmd == nil {
+		t.Fatal("expected create PR selection command")
+	}
+	selection, ok := selectionCmd().(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("selection = %T, want SelectionMsg", selectionCmd())
+	}
+	queuedAny, launchCmd := afterKeyAny.(Model).Update(selection)
+	if launchCmd == nil {
+		t.Fatal("expected PR launch command")
+	}
+	queued := queuedAny.(Model)
+	if queued.overlayStack.Current() != nil {
+		t.Fatalf("overlay after create PR selection = %T, want none", queued.overlayStack.Current())
+	}
+
+	msg := launchCmd()
+	result, ok := msg.(openPROverlayResultMsg)
+	if !ok {
+		t.Fatalf("create PR command returned %T, want openPROverlayResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("create PR result err = %v", result.err)
+	}
+	if result.issueID != "az-5" || result.worktree != "/tmp/az-5" || result.branch != "riordan/az-5/remote-workflow" {
+		t.Fatalf("create PR result = %+v, want az-5 /tmp/az-5 branch", result)
+	}
+}
+
 func TestCloseFailureDirtyTargetDoesNotOfferAIMergeAction(t *testing.T) {
 	jsonResponse := func(req protocol.RequestEnvelope, body any) (protocol.ResponseEnvelope, error) {
 		respBody, err := json.Marshal(body)
@@ -9806,7 +9899,7 @@ func TestStartSessionShiftSStartsDirectlyFromBaseBranch(t *testing.T) {
 	}
 }
 
-func TestStartSessionLowercaseSStartsTmuxOnly(t *testing.T) {
+func TestStartSessionLowercaseSMatchesCLIStartWork(t *testing.T) {
 	baseBranch := "develop"
 	childID := "az-child"
 
@@ -9824,8 +9917,8 @@ func TestStartSessionLowercaseSStartsTmuxOnly(t *testing.T) {
 				if body.Yolo {
 					t.Fatal("expected yolo=false for s start")
 				}
-				if body.StartWork == nil || *body.StartWork {
-					t.Fatal("expected start_work=false for s start")
+				if body.StartWork == nil || !*body.StartWork {
+					t.Fatal("expected start_work=true for s start")
 				}
 				return sessionOperationSubmitResponse(t, req, "op-start", daemonclient.CommandSessionStart, childID, protocol.OperationStateQueued), nil
 			default:
@@ -9851,6 +9944,65 @@ func TestStartSessionLowercaseSStartsTmuxOnly(t *testing.T) {
 	_, startCmd := m.handleSelection(overlay.SelectionMsg{Key: "s"})
 	if startCmd == nil {
 		t.Fatal("expected session start command")
+	}
+	startMsg := startCmd()
+	started, ok := startMsg.(sessionStartedMsg)
+	if !ok {
+		t.Fatalf("start message type = %T, want sessionStartedMsg", startMsg)
+	}
+	if started.issueID != childID {
+		t.Fatalf("started issue = %q, want %q", started.issueID, childID)
+	}
+	if len(transport.requests) != 1 || transport.requests[0] != protocol.CommandOperationSubmit {
+		t.Fatalf("requests = %v", transport.requests)
+	}
+}
+
+func TestStartSessionTStartsTmuxOnly(t *testing.T) {
+	baseBranch := "develop"
+	childID := "az-child"
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case protocol.CommandOperationSubmit:
+				body := decodeSessionOperationSubmit(t, req, daemonclient.CommandSessionStart)
+				if body.SessionID != naming.SessionID(childID) {
+					t.Fatalf("session ID = %q, want %q", body.SessionID, childID)
+				}
+				if body.BaseBranch != baseBranch {
+					t.Fatalf("base branch = %q, want %q", body.BaseBranch, baseBranch)
+				}
+				if body.Yolo {
+					t.Fatal("expected yolo=false for t start")
+				}
+				if body.StartWork == nil || *body.StartWork {
+					t.Fatal("expected start_work=false for t start")
+				}
+				return sessionOperationSubmitResponse(t, req, "op-start", daemonclient.CommandSessionStart, childID, protocol.OperationStateQueued), nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.config.Git.BaseBranch = baseBranch
+	childIssueID := naming.IssueID(childID)
+	m.tasks = []domain.Task{
+		{
+			ID:     childIssueID,
+			Title:  "Child task",
+			Status: domain.StatusInProgress,
+			Type:   domain.TypeTask,
+		},
+	}
+	m.nav.SelectTask(childID, 0)
+
+	_, startCmd := m.handleSelection(overlay.SelectionMsg{Key: "t"})
+	if startCmd == nil {
+		t.Fatal("expected tmux-only session start command")
 	}
 	startMsg := startCmd()
 	started, ok := startMsg.(sessionStartedMsg)
@@ -9892,7 +10044,7 @@ func TestStartSessionCommandReturnsPendingOperationToast(t *testing.T) {
 		t.Fatal("expected queued operation toast")
 	}
 	gotToast := updatedModel.toasts[len(updatedModel.toasts)-1].Message
-	if !strings.Contains(gotToast, "Session start queued for az-child (operation op-start)") {
+	if !strings.Contains(gotToast, "AI session start queued for az-child (operation op-start)") {
 		t.Fatalf("toast = %q, want queued operation message", gotToast)
 	}
 }
@@ -10239,7 +10391,7 @@ func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
 	if strings.Contains(view, "Pause session") || strings.Contains(view, "Stop session") {
 		t.Fatalf("stopped session actions should not remain after daemon refresh: %q", view)
 	}
-	if !strings.Contains(view, "Start session") {
+	if !strings.Contains(view, "Start AI session") {
 		t.Fatalf("expected start action after daemon refresh removed session: %q", view)
 	}
 	if got := transport.requests; len(got) != 2 || got[0] != protocol.CommandOperationSubmit || got[1] != daemonclient.CommandBoardFetch {

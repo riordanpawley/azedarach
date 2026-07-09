@@ -839,6 +839,32 @@ func TestCreateTaskOverlayWithAttachmentServiceShowsGuidance(t *testing.T) {
 	assert.Contains(t, view, "No staged attachments yet.")
 }
 
+func TestCreateTaskOverlayRenderAttachmentListShowsSelectedPreview(t *testing.T) {
+	svc := &createTestAttachmentService{}
+	overlay := NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, nil, svc)
+	overlay.attachments = []attachment.Attachment{
+		{
+			ID:       "doc-1",
+			IssueID:  "draft-1",
+			Filename: "report.md",
+			Path:     "/tmp/report.md",
+			MimeType: "text/markdown",
+			Size:     42,
+		},
+	}
+	overlay.attachmentPreview = attachmentPreviewState{
+		attachmentID: "doc-1",
+		title:        "Markdown Preview",
+		lines:        []string{"Report summary", "Risk: low"},
+	}
+
+	view := overlay.renderAttachmentList()
+
+	assert.Contains(t, view, "report.md")
+	assert.Contains(t, view, "Markdown Preview")
+	assert.Contains(t, view, "Report summary")
+}
+
 func TestEditTaskOverlayPasteKeyVariantsAttachFromClipboard(t *testing.T) {
 	task := domain.Task{ID: "az-78", Title: "Edit me", Type: domain.TypeTask, Priority: domain.P2}
 

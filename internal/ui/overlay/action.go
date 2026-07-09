@@ -83,33 +83,28 @@ func (m *ActionMenu) buildActions() []Action {
 	// Session actions
 	hasProjectedSession := m.session != nil && strings.TrimSpace(string(m.session.State)) != ""
 	hasTmuxSession := m.task.HasTmuxSession || hasProjectedSession
-	if !hasProjectedSession {
-		// Keep start actions available when there is no projected session.
-		// Runtime/tmux presence can be stale, and users still need a direct
-		// start path from the task workspace.
-		if hasTmuxSession {
-			actions = append(actions, Action{Key: "a", Label: "Attach to session", Enabled: true})
-		}
-		actions = append(actions, Action{Key: "s", Label: "Start session", Enabled: !activeMutation})
-		actions = append(actions, Action{Key: "S", Label: "Start session + work", Enabled: !activeMutation})
-		actions = append(actions, Action{Key: "!", Label: "Start session (yolo)", Enabled: !activeMutation})
-	} else {
+	if hasTmuxSession {
 		// Attach action when a tmux session is known to exist.
 		actions = append(actions, Action{Key: "a", Label: "Attach to session", Enabled: true})
 
 		// State-specific actions
-		switch m.session.State {
-		case domain.SessionIdle:
-			actions = append(actions, Action{Key: "s", Label: "Start session", Enabled: !activeMutation})
-		case domain.SessionBusy, domain.SessionWaiting:
-			actions = append(actions, Action{Key: "p", Label: "Pause session", Enabled: !activeMutation})
-			actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: !activeMutation})
-		case domain.SessionPaused:
-			actions = append(actions, Action{Key: "R", Label: "Resume session", Enabled: !activeMutation})
-			actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: !activeMutation})
-		case domain.SessionDone, domain.SessionError:
-			actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: !activeMutation})
+		if hasProjectedSession {
+			switch m.session.State {
+			case domain.SessionIdle:
+			case domain.SessionBusy, domain.SessionWaiting:
+				actions = append(actions, Action{Key: "p", Label: "Pause session", Enabled: !activeMutation})
+				actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: !activeMutation})
+			case domain.SessionPaused:
+				actions = append(actions, Action{Key: "R", Label: "Resume session", Enabled: !activeMutation})
+				actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: !activeMutation})
+			case domain.SessionDone, domain.SessionError:
+				actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: !activeMutation})
+			}
 		}
+	} else {
+		actions = append(actions, Action{Key: "s", Label: "Start AI session", Enabled: !activeMutation})
+		actions = append(actions, Action{Key: "t", Label: "Start tmux shell only", Enabled: !activeMutation})
+		actions = append(actions, Action{Key: "!", Label: "Start AI session (yolo)", Enabled: !activeMutation})
 	}
 
 	// Git actions separator

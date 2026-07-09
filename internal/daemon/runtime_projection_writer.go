@@ -80,8 +80,7 @@ func (w *daemonRuntimeProjectionWriter) PersistSessionProjection(ctx context.Con
 	}
 	projectID = w.d.canonicalProjectID(projectID)
 	defer w.lockProjectionWriter(ctx, projectID, "session.persist")()
-	w.d.persistSessionState(projectID, session)
-	return nil
+	return w.d.persistSessionState(projectID, session)
 }
 
 func (w *daemonRuntimeProjectionWriter) PersistSessionProjectionAndPublish(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session) uint64 {
@@ -90,7 +89,9 @@ func (w *daemonRuntimeProjectionWriter) PersistSessionProjectionAndPublish(ctx c
 	}
 	projectID = w.d.canonicalProjectID(projectID)
 	defer w.lockProjectionWriter(ctx, projectID, "session.persist_publish")()
-	w.d.persistSessionState(projectID, session)
+	if err := w.d.persistSessionState(projectID, session); err != nil {
+		return 0
+	}
 	if w.d.runtimeProjectionCoalescer != nil {
 		return w.d.runtimeProjectionCoalescer.ScheduleSession(ctx, projectID, meta, session)
 	}
@@ -137,7 +138,9 @@ func (w *daemonRuntimeProjectionWriter) PersistWorktreeProjectionAndPublish(ctx 
 	}
 	projectID = w.d.canonicalProjectID(projectID)
 	defer w.lockProjectionWriter(ctx, projectID, "worktree.persist_publish")()
-	_ = w.d.persistWorktreeState(ctx, projectID, issueID, path, branch)
+	if err := w.d.persistWorktreeState(ctx, projectID, issueID, path, branch); err != nil {
+		return 0
+	}
 	if w.d.runtimeProjectionCoalescer != nil {
 		return w.d.runtimeProjectionCoalescer.ScheduleWorktree(ctx, projectID, issueID, path)
 	}
