@@ -151,12 +151,14 @@ func (m *ActionMenu) buildActions() []Action {
 	actions = append(actions, Action{Key: "", Label: "───────────────────", Enabled: false})
 
 	// Task actions (always available)
+	actionPhase := taskActionPhase(m.task)
 	actions = append(actions,
-		Action{Key: "1", Label: "Set status: Open", Enabled: m.task.Status != domain.StatusOpen && !activeMutation},
-		Action{Key: "2", Label: "Set status: In Progress", Enabled: m.task.Status != domain.StatusInProgress && !activeMutation},
-		Action{Key: "3", Label: "Set status: In Review", Enabled: m.task.Status != domain.StatusInReview && !activeMutation},
-		Action{Key: "4", Label: "Set status: Done", Enabled: m.task.Status != domain.StatusDone && !activeMutation},
-		Action{Key: "C", Label: "Set review incl children", Enabled: m.task.Status != domain.StatusInReview && !activeMutation},
+		Action{Key: "0", Label: "Move to backlog", Enabled: actionPhase != domain.IssueDisplayBacklog && !activeMutation},
+		Action{Key: "1", Label: "Move to open", Enabled: actionPhase != domain.IssueDisplayOpen && !activeMutation},
+		Action{Key: "2", Label: "Start active work", Enabled: m.task.Status != domain.StatusInProgress && !activeMutation},
+		Action{Key: "3", Label: "Request review", Enabled: m.task.Status != domain.StatusInReview && !activeMutation},
+		Action{Key: "4", Label: "Integrate and close", Enabled: m.task.Status != domain.StatusDone && !activeMutation},
+		Action{Key: "C", Label: "Request review incl children", Enabled: m.task.Status != domain.StatusInReview && !activeMutation},
 	)
 	if m.task.Ownership != nil && m.task.Ownership.IsActive(time.Now().UTC()) {
 		actions = append(actions,
@@ -168,8 +170,8 @@ func (m *ActionMenu) buildActions() []Action {
 	}
 	if !m.hideStatusMoveActions {
 		actions = append(actions,
-			Action{Key: "h", Label: "Move left", Enabled: m.task.Status != domain.StatusOpen && !activeMutation},
-			Action{Key: "l", Label: "Move right", Enabled: m.task.Status != domain.StatusDone && !activeMutation},
+			Action{Key: "h", Label: "Previous lifecycle action", Enabled: actionPhase != domain.IssueDisplayBacklog && !activeMutation},
+			Action{Key: "l", Label: "Next lifecycle action", Enabled: m.task.Status != domain.StatusDone && m.task.Status != domain.StatusCancelled && !activeMutation},
 		)
 	}
 	actions = append(actions,
@@ -192,6 +194,14 @@ func (m *ActionMenu) hasActiveMutation() bool {
 	default:
 		return false
 	}
+}
+
+func taskActionPhase(task domain.Task) domain.IssueDisplayPhase {
+	state, err := task.IssueState()
+	if err != nil || state.IsZero() {
+		return domain.IssueDisplayUnknown
+	}
+	return state.DisplayPhase()
 }
 
 func (m *ActionMenu) hasCancellableMutation() bool {
@@ -400,8 +410,8 @@ func (m *ActionMenu) StatusBindings() []keybinds.Binding {
 		{Key: "r", Description: "refresh issue"},
 		{Key: "o/U/y", Description: "ownership"},
 		{Key: "V", Description: "dev servers"},
-		{Key: "1/2/3/4", Description: "set status"},
-		{Key: "h/l", Description: "move status"},
+		{Key: "0/1/2/3/4", Description: "lifecycle action"},
+		{Key: "h/l", Description: "prev/next lifecycle"},
 		{Key: "Esc/q", Description: "close"},
 	}
 }
@@ -564,15 +574,16 @@ func NewBulkActionMenu(selectedIDs []string, count int) *BulkActionMenu {
 // buildActions creates the bulk action list
 func (m *BulkActionMenu) buildActions() []Action {
 	actions := []Action{
-		// Status transitions
-		{Key: "h", Label: "Move left (previous status)", Enabled: true},
-		{Key: "l", Label: "Move right (next status)", Enabled: true},
+		// Lifecycle transitions
+		{Key: "h", Label: "Previous lifecycle action", Enabled: true},
+		{Key: "l", Label: "Next lifecycle action", Enabled: true},
 		{Key: "", Label: "───────────────────", Enabled: false},
-		// Specific status
-		{Key: "1", Label: "Set status: Open", Enabled: true},
-		{Key: "2", Label: "Set status: In Progress", Enabled: true},
-		{Key: "3", Label: "Set status: In Review", Enabled: true},
-		{Key: "4", Label: "Set status: Done", Enabled: true},
+		// Specific lifecycle actions
+		{Key: "0", Label: "Move to backlog", Enabled: true},
+		{Key: "1", Label: "Move to open", Enabled: true},
+		{Key: "2", Label: "Start active work", Enabled: true},
+		{Key: "3", Label: "Request review", Enabled: true},
+		{Key: "4", Label: "Integrate and close", Enabled: true},
 		{Key: "", Label: "───────────────────", Enabled: false},
 		// Other actions
 		{Key: "w", Label: "Cleanup worktrees", Enabled: true},

@@ -4347,13 +4347,6 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 
 func (m Model) bulkMoveStatusCmdWithOptions(taskIDs []string, delta int, opts daemonclient.TaskStatusOptions) tea.Cmd {
 	return func() tea.Msg {
-		statusOrder := []domain.Status{
-			domain.StatusOpen,
-			domain.StatusInProgress,
-			domain.StatusInReview,
-			domain.StatusDone,
-		}
-
 		updated := 0
 		failed := 0
 		issues := make([]bulkTaskIssue, 0)
@@ -4374,30 +4367,19 @@ func (m Model) bulkMoveStatusCmdWithOptions(taskIDs []string, delta int, opts da
 				continue
 			}
 
-			// Find current status index
-			currentIdx := -1
-			for i, s := range statusOrder {
-				if s == currentTask.Status {
-					currentIdx = i
-					break
-				}
-			}
-
-			if currentIdx == -1 {
-				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "invalid status"})
+			action, ok := shiftedTaskLifecycleAction(*currentTask, delta)
+			if !ok {
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "cannot move beyond lifecycle action bounds"})
 				continue
 			}
+			newStatus := action.LegacyStatus()
 
-			// Calculate new status
-			newIdx := currentIdx + delta
-			if newIdx < 0 || newIdx >= len(statusOrder) {
-				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "cannot move beyond status bounds"})
-				continue
+			var err error
+			if action.IsLifecycleOnly() {
+				err = m.updateTaskLifecycleWithTimeout(taskID, action.Lifecycle, 10*time.Second)
+			} else {
+				err = m.updateTaskStatusWithTimeoutOptions(taskID, newStatus, 10*time.Second, opts)
 			}
-
-			newStatus := statusOrder[newIdx]
-
-			err := m.updateTaskStatusWithTimeoutOptions(taskID, newStatus, 10*time.Second, opts)
 			if err != nil {
 				if pending, ok := pendingOperationDetails(err); ok {
 					pendingOps = append(pendingOps, bulkTaskPendingOperation{
@@ -4677,6 +4659,29 @@ func (m Model) bulkSetStatusCmdWithOptions(taskIDs []string, status domain.Statu
 	}
 }
 
+func (m Model) bulkSetLifecycleCmd(taskIDs []string, lifecycle domain.IssueWorkflow) tea.Cmd {
+	return func() tea.Msg {
+		updated := 0
+		failed := 0
+		issues := make([]bulkTaskIssue, 0)
+
+		for _, taskID := range taskIDs {
+			if !m.taskExists(taskID) {
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "task not found"})
+				continue
+			}
+			if err := m.updateTaskLifecycleWithTimeout(taskID, lifecycle, 10*time.Second); err != nil {
+				failed++
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
+				continue
+			}
+			updated++
+		}
+
+		return bulkStatusResultMsg{updated: updated, issues: issues, failed: failed}
+	}
+}
+
 func (m Model) taskExists(taskID string) bool {
 	for i := range m.tasks {
 		if m.tasks[i].ID.String() == taskID {
@@ -4876,6 +4881,15 @@ type taskStatusResultMsg struct {
 	err            error
 }
 
+type taskLifecycleResultMsg struct {
+	taskID        string
+	previousTask  domain.Task
+	targetAction  taskLifecycleAction
+	targetLegacy  domain.Status
+	targetDisplay string
+	err           error
+}
+
 type taskOwnershipResultMsg struct {
 	taskID string
 	action string
@@ -4962,6 +4976,21 @@ func (m Model) moveTaskStatusCmdWithOptions(taskID string, previousStatus, newSt
 	}
 }
 
+func (m Model) moveTaskLifecycleCmd(task domain.Task, action taskLifecycleAction) tea.Cmd {
+	targetLegacy := action.LegacyStatus()
+	return func() tea.Msg {
+		err := m.updateTaskLifecycleWithTimeout(task.ID.String(), action.Lifecycle, 5*time.Second)
+		return taskLifecycleResultMsg{
+			taskID:        task.ID.String(),
+			previousTask:  task,
+			targetAction:  action,
+			targetLegacy:  targetLegacy,
+			targetDisplay: action.DisplayName(),
+			err:           err,
+		}
+	}
+}
+
 func (m Model) moveTaskStatusCascadeChildrenCmd(taskID string, previousStatus, newStatus domain.Status) tea.Cmd {
 	return func() tea.Msg {
 		opts := daemonclient.TaskStatusOptions{CascadeChildren: true}
@@ -5004,6 +5033,25 @@ func (m Model) updateTaskStatusWithTimeoutOptions(taskID string, status domain.S
 		return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, status, closeOpts)
 	}
 	return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, status, opts)
+}
+
+func (m Model) updateTaskLifecycleWithTimeout(taskID string, lifecycle domain.IssueWorkflow, defaultTimeout time.Duration) error {
+	if m.daemonClient == nil {
+		return fmt.Errorf("daemon client unavailable")
+	}
+	task, _, ok := m.taskAndSessionByID(taskID)
+	if !ok || task == nil {
+		return fmt.Errorf("task not found")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+	return m.daemonClient.UpdateTaskDetails(ctx, taskID, daemonclient.TaskUpdateParams{
+		Title:       task.Title,
+		Description: task.Description,
+		Type:        task.Type,
+		Priority:    task.Priority,
+		Lifecycle:   &lifecycle,
+	})
 }
 
 func (m Model) reviewCascadeChildIDs(parentID string) []string {
@@ -5068,7 +5116,7 @@ func formatReviewCascadeConfirmPrompt(pending pendingReviewCascadeConfirmation) 
 	for _, childID := range pending.childIDs {
 		lines = append(lines, "- "+childID)
 	}
-	lines = append(lines, "", "Move these child issues to in_review, then move the parent to in_review?")
+	lines = append(lines, "", "Request review for these child issues, then request review for the parent?")
 	return strings.Join(lines, "\n")
 }
 
@@ -5079,44 +5127,117 @@ func taskStatusMutationTimeout(status domain.Status, defaultTimeout time.Duratio
 	return defaultTimeout
 }
 
-func shiftedTaskStatus(current domain.Status, delta int) (domain.Status, bool) {
-	statusOrder := []domain.Status{
-		domain.StatusOpen,
-		domain.StatusInProgress,
-		domain.StatusInReview,
-		domain.StatusDone,
+type taskLifecycleAction struct {
+	Lifecycle domain.IssueWorkflow
+	Status    domain.Status
+	Phase     domain.IssueDisplayPhase
+}
+
+func (a taskLifecycleAction) IsZero() bool {
+	return a.Lifecycle == "" && a.Status == "" && a.Phase == ""
+}
+
+func (a taskLifecycleAction) LegacyStatus() domain.Status {
+	if a.Status != "" {
+		return a.Status
 	}
+	switch a.Lifecycle {
+	case domain.IssueWorkflowBacklog, domain.IssueWorkflowOpen:
+		return domain.StatusOpen
+	case domain.IssueWorkflowActive:
+		return domain.StatusInProgress
+	default:
+		return ""
+	}
+}
+
+func (a taskLifecycleAction) DisplayName() string {
+	if a.Phase != "" {
+		if a.Phase == domain.IssueDisplayReview {
+			return "Review Requested"
+		}
+		return a.Phase.Label()
+	}
+	return statusDisplayName(a.LegacyStatus())
+}
+
+func (a taskLifecycleAction) RequiresClose() bool {
+	return terminalTaskStatusRequiresClose(a.LegacyStatus())
+}
+
+func (a taskLifecycleAction) IsLifecycleOnly() bool {
+	return a.Lifecycle != "" && a.Status == ""
+}
+
+func taskLifecycleActionForPhase(phase domain.IssueDisplayPhase) (taskLifecycleAction, bool) {
+	switch phase {
+	case domain.IssueDisplayBacklog:
+		return taskLifecycleAction{Lifecycle: domain.IssueWorkflowBacklog, Phase: domain.IssueDisplayBacklog}, true
+	case domain.IssueDisplayOpen:
+		return taskLifecycleAction{Lifecycle: domain.IssueWorkflowOpen, Phase: domain.IssueDisplayOpen}, true
+	case domain.IssueDisplayActive:
+		return taskLifecycleAction{Status: domain.StatusInProgress, Phase: domain.IssueDisplayActive}, true
+	case domain.IssueDisplayReview:
+		return taskLifecycleAction{Status: domain.StatusInReview, Phase: domain.IssueDisplayReview}, true
+	case domain.IssueDisplayDone:
+		return taskLifecycleAction{Status: domain.StatusDone, Phase: domain.IssueDisplayDone}, true
+	case domain.IssueDisplayCancelled:
+		return taskLifecycleAction{Status: domain.StatusCancelled, Phase: domain.IssueDisplayCancelled}, true
+	default:
+		return taskLifecycleAction{}, false
+	}
+}
+
+func taskActionPhase(task domain.Task) domain.IssueDisplayPhase {
+	state, err := task.IssueState()
+	if err != nil || state.IsZero() {
+		return domain.IssueDisplayUnknown
+	}
+	return state.DisplayPhase()
+}
+
+func shiftedTaskLifecycleAction(task domain.Task, delta int) (taskLifecycleAction, bool) {
+	phaseOrder := []domain.IssueDisplayPhase{
+		domain.IssueDisplayBacklog,
+		domain.IssueDisplayOpen,
+		domain.IssueDisplayActive,
+		domain.IssueDisplayReview,
+		domain.IssueDisplayDone,
+	}
+	currentPhase := taskActionPhase(task)
 	currentIdx := -1
-	for i, status := range statusOrder {
-		if status == current {
+	for i, phase := range phaseOrder {
+		if phase == currentPhase {
 			currentIdx = i
 			break
 		}
 	}
 	if currentIdx == -1 {
-		return "", false
+		return taskLifecycleAction{}, false
 	}
 	newIdx := currentIdx + delta
-	if newIdx < 0 || newIdx >= len(statusOrder) {
-		return "", false
+	if newIdx < 0 || newIdx >= len(phaseOrder) {
+		return taskLifecycleAction{}, false
 	}
-	return statusOrder[newIdx], true
+	return taskLifecycleActionForPhase(phaseOrder[newIdx])
 }
 
-func exactTaskStatusForKey(key string) (domain.Status, bool) {
+func exactTaskActionForKey(key string) (taskLifecycleAction, bool) {
 	switch key {
+	case "0":
+		return taskLifecycleActionForPhase(domain.IssueDisplayBacklog)
 	case "1":
-		return domain.StatusOpen, true
+		return taskLifecycleActionForPhase(domain.IssueDisplayOpen)
 	case "2":
-		return domain.StatusInProgress, true
+		return taskLifecycleActionForPhase(domain.IssueDisplayActive)
 	case "3":
-		return domain.StatusInReview, true
+		return taskLifecycleActionForPhase(domain.IssueDisplayReview)
 	case "4":
-		return domain.StatusDone, true
+		return taskLifecycleActionForPhase(domain.IssueDisplayDone)
 	case "5":
-		return domain.StatusCancelled, true
+		return taskLifecycleActionForPhase(domain.IssueDisplayCancelled)
 	default:
-		return "", false
+		return taskLifecycleAction{}, false
 	}
 }
 
@@ -5253,12 +5374,12 @@ func (m Model) bulkMoveNeedsCloseCleanupConfirmation(taskIDs []string, delta int
 func (m Model) bulkMoveCloseCleanupTaskIDs(taskIDs []string, delta int) []string {
 	closeTaskIDs := make([]string, 0, len(taskIDs))
 	for _, taskID := range taskIDs {
-		status, ok := m.taskStatusByID(taskID)
-		if !ok {
+		task, _, ok := m.taskAndSessionByID(taskID)
+		if !ok || task == nil {
 			continue
 		}
-		next, ok := shiftedTaskStatus(status, delta)
-		if ok && terminalTaskStatusRequiresClose(next) {
+		next, ok := shiftedTaskLifecycleAction(*task, delta)
+		if ok && next.RequiresClose() {
 			closeTaskIDs = append(closeTaskIDs, taskID)
 		}
 	}
@@ -5653,6 +5774,40 @@ func (m *Model) applyOptimisticTaskStatus(taskID string, status domain.Status) {
 		}
 	}
 	m.reconcileCursorAfterIssuesRefresh()
+}
+
+func (m *Model) applyOptimisticTaskLifecycle(taskID string, lifecycle domain.IssueWorkflow) {
+	state, err := domain.NewIssueState(domain.IssueStateParts{Workflow: lifecycle})
+	if err != nil {
+		return
+	}
+	for i := range m.tasks {
+		if m.tasks[i].ID.String() == taskID {
+			m.tasks[i].Status = domain.StatusOpen
+			m.tasks[i].State = state
+			m.tasks[i].Facts = domain.DeriveIssueFacts(domain.IssueFactsInput{
+				Status:         m.tasks[i].Status,
+				Priority:       m.tasks[i].Priority,
+				State:          m.tasks[i].State,
+				Session:        m.tasks[i].Session,
+				HasTmuxSession: m.tasks[i].HasTmuxSession,
+			})
+			break
+		}
+	}
+	m.reconcileCursorAfterIssuesRefresh()
+	m.syncTaskWorkspaceOverlay()
+}
+
+func (m *Model) rollbackOptimisticTask(task domain.Task) {
+	for i := range m.tasks {
+		if m.tasks[i].ID.String() == task.ID.String() {
+			m.tasks[i] = task
+			break
+		}
+	}
+	m.reconcileCursorAfterIssuesRefresh()
+	m.syncTaskWorkspaceOverlay()
 }
 
 func (m *Model) rollbackTaskStatus(taskID string, previousStatus domain.Status) {
