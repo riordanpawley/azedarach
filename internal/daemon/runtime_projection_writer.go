@@ -34,11 +34,36 @@ type daemonRuntimeProjectionWriter struct {
 	mu sync.Mutex
 }
 
+type runtimeProjectionWriterOperationContextKey struct{}
+
 func newRuntimeProjectionWriter(d *Daemon) *daemonRuntimeProjectionWriter {
 	return &daemonRuntimeProjectionWriter{d: d}
 }
 
+func contextWithRuntimeProjectionWriterOperation(ctx context.Context, operation string) context.Context {
+	operation = strings.TrimSpace(operation)
+	if operation == "" {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, runtimeProjectionWriterOperationContextKey{}, operation)
+}
+
+func runtimeProjectionWriterOperationFromContext(ctx context.Context, fallback string) string {
+	if ctx != nil {
+		if operation, ok := ctx.Value(runtimeProjectionWriterOperationContextKey{}).(string); ok {
+			if operation = strings.TrimSpace(operation); operation != "" {
+				return operation
+			}
+		}
+	}
+	return fallback
+}
+
 func (w *daemonRuntimeProjectionWriter) lockProjectionWriter(ctx context.Context, projectID, operation string) func() {
+	operation = runtimeProjectionWriterOperationFromContext(ctx, operation)
 	waitStartedAt := time.Now()
 	w.mu.Lock()
 	latencytrace.LogPhaseContext(ctx, w.d.cfg.Logger, "daemon", "runtime_projection.writer_lock_wait", waitStartedAt, "project_id", projectID, "operation", operation)

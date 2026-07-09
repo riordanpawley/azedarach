@@ -567,6 +567,12 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
 	freshnessStartedAt := time.Now()
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
+	if query == "" && refreshErr == nil && !runtimeAt.IsZero() {
+		lastCheckedAt = laterTime(lastCheckedAt, runtimeAt)
+		if timeNow().Sub(lastCheckedAt) <= taskListSnapshotStaleAfter {
+			freshness = protocol.TaskListFreshnessFresh
+		}
+	}
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "freshness", freshness)
 	revision := d.currentRevision(projectID)
 	if query == "" && !includeDependencies && archiveMode == protocol.ArchiveModeExclude {

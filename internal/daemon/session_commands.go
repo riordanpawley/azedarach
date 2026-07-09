@@ -3474,11 +3474,53 @@ func applyObservedRuntimeLiveness(session *daemonstate.Session, info tmux.Sessio
 	session.TmuxAttachedCount = 0
 }
 
+func sessionRuntimeProjectionChanged(before, after daemonstate.Session) bool {
+	if strings.TrimSpace(before.ID) != strings.TrimSpace(after.ID) {
+		return true
+	}
+	if strings.TrimSpace(before.IssueID) != strings.TrimSpace(after.IssueID) {
+		return true
+	}
+	if daemonstate.NormalizeSessionState(before.State) != daemonstate.NormalizeSessionState(after.State) {
+		return true
+	}
+	if daemonstate.NormalizeSessionState(before.ObservedState) != daemonstate.NormalizeSessionState(after.ObservedState) {
+		return true
+	}
+	if normalizeSessionActivity(before.Activity) != normalizeSessionActivity(after.Activity) {
+		return true
+	}
+	if normalizeSessionActivitySource(before.ActivitySource, "") != normalizeSessionActivitySource(after.ActivitySource, "") {
+		return true
+	}
+	if before.TmuxAttachedCount != after.TmuxAttachedCount {
+		return true
+	}
+	return !runtimeProjectionTimesEqual(before.StartedAt, after.StartedAt)
+}
+
+func runtimeProjectionTimesEqual(left, right *time.Time) bool {
+	if left == nil || left.IsZero() {
+		return right == nil || right.IsZero()
+	}
+	if right == nil || right.IsZero() {
+		return false
+	}
+	return left.UTC().Equal(right.UTC())
+}
+
 func (d *Daemon) refreshExistingSessionRuntimeState(ctx context.Context, projectID string) error {
 	if d == nil || d.tmux == nil || d.sessionRuntimeStateStoreIfConfigured(projectID) == nil {
 		return nil
 	}
 	projectID = d.canonicalProjectID(projectID)
+	startedAt := time.Now()
+	scanned := 0
+	changed := 0
+	skippedUnchanged := 0
+	defer func() {
+		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "session_runtime.refresh_existing_projection", startedAt, "project_id", projectID, "session_count", scanned, "changed_count", changed, "skipped_unchanged_count", skippedUnchanged)
+	}()
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	existingSessions, err := store.ListSessionStates(ctx, projectID)
 	if err != nil {
@@ -3497,23 +3539,32 @@ func (d *Daemon) refreshExistingSessionRuntimeState(ctx context.Context, project
 	}
 	live := newTmuxRuntimeLiveness(tmuxSessions, tmuxPanes)
 	writer := d.runtimeProjectionStateWriter()
+	persistCtx := contextWithRuntimeProjectionWriterOperation(ctx, "session.refresh_existing.persist")
 	for _, session := range existingSessions {
+		scanned++
+		before := session
 		sessionID := strings.TrimSpace(session.ID)
 		if sessionID == "" {
 			continue
 		}
 		info, infoLive := live.sessionByID[sessionID]
 		applyObservedRuntimeLiveness(&session, info, infoLive, live)
+		if !sessionRuntimeProjectionChanged(before, session) {
+			skippedUnchanged++
+			continue
+		}
 		session.UpdatedAt = time.Now().UTC()
 		if writer != nil {
-			if err := writer.PersistSessionProjection(ctx, projectID, session); err != nil {
+			if err := writer.PersistSessionProjection(persistCtx, projectID, session); err != nil {
 				return err
 			}
+			changed++
 			continue
 		}
 		if err := store.UpsertSessionState(ctx, projectID, session); err != nil {
 			return err
 		}
+		changed++
 	}
 	return nil
 }
@@ -3558,16 +3609,21 @@ func (d *Daemon) refreshIssueSessionRuntimeState(ctx context.Context, projectID 
 	}
 	live := newTmuxRuntimeLiveness(tmuxSessions, tmuxPanes)
 	writer := d.runtimeProjectionStateWriter()
+	persistCtx := contextWithRuntimeProjectionWriterOperation(ctx, "session.refresh_issue.persist")
 	for _, session := range targetSessions {
+		before := session
 		sessionID := strings.TrimSpace(session.ID)
 		if sessionID == "" {
 			continue
 		}
 		info, infoLive := live.sessionByID[sessionID]
 		applyObservedRuntimeLiveness(&session, info, infoLive, live)
+		if !sessionRuntimeProjectionChanged(before, session) {
+			continue
+		}
 		session.UpdatedAt = time.Now().UTC()
 		if writer != nil {
-			if err := writer.PersistSessionProjection(ctx, projectID, session); err != nil {
+			if err := writer.PersistSessionProjection(persistCtx, projectID, session); err != nil {
 				return err
 			}
 			continue
@@ -3687,7 +3743,15 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 		}
 	}
 	existingByIssueKey := sessionProjectionForTmuxHydrationByIssueKey(existingSessions, namingScope)
+	existingBySessionID := make(map[string]daemonstate.Session, len(existingSessions))
+	for _, session := range existingSessions {
+		sessionID := strings.TrimSpace(session.ID)
+		if sessionID != "" {
+			existingBySessionID[sessionID] = session
+		}
+	}
 	live := newTmuxRuntimeLiveness(tmuxSessions, tmuxPanes)
+	persistCtx := contextWithRuntimeProjectionWriterOperation(ctx, "session.tmux_snapshot.persist")
 	for _, info := range tmuxSessions {
 		name := strings.TrimSpace(info.Name)
 		if name == "" {
@@ -3725,7 +3789,10 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 			started := row.UpdatedAt.UTC()
 			row.StartedAt = &started
 		}
-		if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, row); err != nil && d.cfg.Logger != nil {
+		if existing, exists := existingBySessionID[name]; exists && !sessionRuntimeProjectionChanged(existing, row) {
+			continue
+		}
+		if err := d.runtimeProjectionStateWriter().PersistSessionProjection(persistCtx, projectID, row); err != nil && d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("persist live tmux session runtime state failed",
 				"project_id", projectID,
 				"session_id", row.ID,
@@ -3740,8 +3807,11 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 		}
 		stopped := session
 		applyObservedRuntimeLiveness(&stopped, tmux.SessionInfo{}, false, live)
+		if !sessionRuntimeProjectionChanged(session, stopped) {
+			continue
+		}
 		stopped.UpdatedAt = time.Now().UTC()
-		if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, stopped); err != nil && d.cfg.Logger != nil {
+		if err := d.runtimeProjectionStateWriter().PersistSessionProjection(persistCtx, projectID, stopped); err != nil && d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("persist missing tmux session as stopped failed",
 				"project_id", projectID,
 				"session_id", stopped.ID,

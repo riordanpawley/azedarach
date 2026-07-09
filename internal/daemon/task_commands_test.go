@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1286,6 +1287,208 @@ func TestTaskListSessionRuntimeRefreshSharesInFlightRefresh(t *testing.T) {
 	}
 	if got := tmuxRunner.listSessionCallCount(); got != 1 {
 		t.Fatalf("tmux list-sessions calls = %d, want one shared refresh", got)
+	}
+}
+
+type countingRuntimeProjectionWriter struct {
+	*daemonRuntimeProjectionWriter
+
+	mu             sync.Mutex
+	sessionPersist int
+}
+
+func (w *countingRuntimeProjectionWriter) PersistSessionProjection(ctx context.Context, projectID string, session daemonstate.Session) error {
+	w.mu.Lock()
+	w.sessionPersist++
+	w.mu.Unlock()
+	return w.daemonRuntimeProjectionWriter.PersistSessionProjection(ctx, projectID, session)
+}
+
+func (w *countingRuntimeProjectionWriter) sessionPersistCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.sessionPersist
+}
+
+func TestRefreshExistingSessionRuntimeStateSkipsUnchangedProjectionWrites(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-session-refresh-skip"
+	liveIssueID := "az-live"
+	staleIssueID := "az-stale"
+	liveSessionID := naming.CanonicalSessionID(projectID, liveIssueID)
+	staleSessionID := naming.CanonicalSessionID(projectID, staleIssueID)
+	seededAt := time.Date(2026, time.April, 2, 11, 0, 0, 0, time.UTC)
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	for _, session := range []daemonstate.Session{
+		{
+			ID:            liveSessionID,
+			IssueID:       liveIssueID,
+			State:         daemonstate.SessionStateRunning,
+			ObservedState: daemonstate.SessionStateRunning,
+			UpdatedAt:     seededAt,
+		},
+		{
+			ID:            staleSessionID,
+			IssueID:       staleIssueID,
+			State:         daemonstate.SessionStateRunning,
+			ObservedState: daemonstate.SessionStateRunning,
+			UpdatedAt:     seededAt,
+		},
+	} {
+		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, session); err != nil {
+			t.Fatalf("seed session %s: %v", session.ID, err)
+		}
+	}
+
+	tmuxRunner := &testTmuxRunner{
+		sessions: map[string]bool{
+			liveSessionID: true,
+		},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: logger},
+		sessionStore: daemonstate.NewStore(),
+		tmux:         tmux.NewClient(tmuxRunner, logger),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+	}
+	writer := &countingRuntimeProjectionWriter{daemonRuntimeProjectionWriter: newRuntimeProjectionWriter(d)}
+	d.runtimeProjectionWriter = writer
+
+	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil {
+		t.Fatalf("refreshExistingSessionRuntimeState: %v", err)
+	}
+	if got := writer.sessionPersistCount(); got != 1 {
+		t.Fatalf("session projection persists = %d, want only stale row persisted", got)
+	}
+
+	live, found, err := runtimeStateStore.GetSessionState(ctx, projectID, liveSessionID)
+	if err != nil {
+		t.Fatalf("get live session: %v", err)
+	}
+	if !found {
+		t.Fatal("live session missing")
+	}
+	if !live.UpdatedAt.Equal(seededAt) {
+		t.Fatalf("live updated_at = %v, want unchanged %v", live.UpdatedAt, seededAt)
+	}
+
+	stale, found, err := runtimeStateStore.GetSessionState(ctx, projectID, staleSessionID)
+	if err != nil {
+		t.Fatalf("get stale session: %v", err)
+	}
+	if !found {
+		t.Fatal("stale session missing")
+	}
+	if stale.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("stale observed state = %s, want stopped", stale.ObservedState)
+	}
+	if !stale.UpdatedAt.After(seededAt) {
+		t.Fatalf("stale updated_at = %v, want after %v", stale.UpdatedAt, seededAt)
+	}
+}
+
+func TestHandleTaskListKeepsFreshResponseWhenRuntimeRefreshSkipsUnchangedRows(t *testing.T) {
+	originalNow := timeNow
+	now := time.Date(2026, time.April, 2, 11, 5, 0, 0, time.UTC)
+	timeNow = func() time.Time { return now }
+	t.Cleanup(func() { timeNow = originalNow })
+
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	projectID := "proj-session-refresh-fresh"
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "unchanged live session stays fresh",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	sessionID := naming.CanonicalSessionID(projectID, taskID)
+	seededAt := now.Add(-time.Minute)
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            sessionID,
+		IssueID:       taskID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     seededAt,
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	tmuxRunner := &testTmuxRunner{
+		sessions: map[string]bool{
+			sessionID: true,
+		},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	d := &Daemon{
+		cfg:          Config{RepoDir: repoDir, Logger: logger},
+		issues:       issuesClient,
+		sessionStore: daemonstate.NewStore(),
+		tmux:         tmux.NewClient(tmuxRunner, logger),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+
+	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-list-refresh-fresh",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+	})
+	if err != nil {
+		t.Fatalf("handleTaskList error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.list response = %+v", resp.Error)
+	}
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if payload.Freshness != protocol.TaskListFreshnessFresh {
+		t.Fatalf("freshness = %s, want fresh after successful runtime check", payload.Freshness)
+	}
+	if !payload.LastCheckedAt.Equal(now) {
+		t.Fatalf("last_checked_at = %v, want runtime refresh time %v", payload.LastCheckedAt, now)
+	}
+	session, found, err := runtimeStateStore.GetSessionState(ctx, projectID, sessionID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if !found {
+		t.Fatal("session missing")
+	}
+	if !session.UpdatedAt.Equal(seededAt) {
+		t.Fatalf("session updated_at = %v, want unchanged %v", session.UpdatedAt, seededAt)
 	}
 }
 
