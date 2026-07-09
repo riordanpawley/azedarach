@@ -5122,6 +5122,256 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 	}
 }
 
+func TestTaskCloseIntegrationOriginBaseSkipsLocalMergeWhenRemoteTreeMatches(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Already remote integrated",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
+	sourceBranch := "riordan/" + taskID + "/remote-integrated"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      sourceWorktree,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
+	commands := make([]string, 0, 8)
+	fetchedOrigin := false
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return worktreeListOutput, nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "status":
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "fetch" && args[3] == "origin":
+			fetchedOrigin = true
+			return "", nil
+		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "diff" && args[3] == "--name-only" && args[4] == "origin/preview" && args[5] == sourceBranch:
+			if !fetchedOrigin {
+				t.Fatal("origin close diff ran before fetching origin")
+			}
+			return "", nil
+		case slices.Contains(args, "merge") || slices.Contains(args, "checkout") || slices.Contains(args, "reset"):
+			t.Fatalf("origin close attempted local mutation command: %s", strings.Join(args, " "))
+		default:
+			return "", nil
+		}
+		return "", nil
+	}}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:         repoDir,
+			BaseBranch:      "preview",
+			GitWorkflowMode: "origin",
+			Logger:          logger,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		git:      git.NewClient(runner, logger),
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
+		logger:                  logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true)
+	if err != nil {
+		t.Fatalf("integrateTaskBeforeClose error: %v", err)
+	}
+	if !result.NoChanges || result.Integrated {
+		t.Fatalf("integration result = %+v, want origin-base no-changes without local integration", result)
+	}
+	if result.TargetBranch != "origin/preview" {
+		t.Fatalf("target branch = %q, want origin/preview", result.TargetBranch)
+	}
+	if !fetchedOrigin {
+		t.Fatal("origin close did not fetch origin before integration evidence")
+	}
+	joined := strings.Join(commands, "\n")
+	for _, forbidden := range []string{" checkout ", " merge ", " reset ", " worktree add "} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("origin close attempted local mutation %q:\n%s", forbidden, joined)
+		}
+	}
+}
+
+func TestTaskCloseIntegrationOriginBaseRefusesLocalMergeWhenRemoteDiffRemains(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Not remote integrated",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
+	sourceBranch := "riordan/" + taskID + "/not-remote-integrated"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      sourceWorktree,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
+	commands := make([]string, 0, 8)
+	fetchedOrigin := false
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return worktreeListOutput, nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "status":
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "fetch" && args[3] == "origin":
+			fetchedOrigin = true
+			return "", nil
+		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "diff" && args[3] == "--name-only" && args[4] == "origin/preview" && args[5] == sourceBranch:
+			if !fetchedOrigin {
+				t.Fatal("origin close diff ran before fetching origin")
+			}
+			return "main.go\n", nil
+		case slices.Contains(args, "merge") || slices.Contains(args, "checkout") || slices.Contains(args, "reset"):
+			t.Fatalf("origin close attempted local mutation command: %s", strings.Join(args, " "))
+		default:
+			return "", nil
+		}
+		return "", nil
+	}}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:         repoDir,
+			BaseBranch:      "preview",
+			GitWorkflowMode: "origin",
+			Logger:          logger,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		git:      git.NewClient(runner, logger),
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
+		logger:                  logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true)
+	if err == nil {
+		t.Fatalf("integrateTaskBeforeClose error = nil, result = %+v; want origin-mode refusal", result)
+	}
+	if !strings.Contains(err.Error(), "origin workflow close will not merge") || !strings.Contains(err.Error(), "main.go") {
+		t.Fatalf("integrateTaskBeforeClose error = %v, want origin-mode recovery with changed file", err)
+	}
+	if !fetchedOrigin {
+		t.Fatal("origin close did not fetch origin before integration evidence")
+	}
+	joined := strings.Join(commands, "\n")
+	for _, forbidden := range []string{" checkout ", " merge ", " reset ", " worktree add "} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("origin close attempted local mutation %q:\n%s", forbidden, joined)
+		}
+	}
+}
+
+func TestDaemonRemoteTrackingBaseRef(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "plain branch", in: "preview", want: "origin/preview"},
+		{name: "branch with slash", in: "release/2026-07", want: "origin/release/2026-07"},
+		{name: "origin ref", in: "origin/preview", want: "origin/preview"},
+		{name: "full remote ref", in: "refs/remotes/origin/preview", want: "refs/remotes/origin/preview"},
+		{name: "empty defaults main", in: "", want: "origin/main"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := daemonRemoteTrackingBaseRef(tt.in); got != tt.want {
+				t.Fatalf("daemonRemoteTrackingBaseRef(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTaskCloseCommandKeepsTargetCleanWhenScratchMergeDirties(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
