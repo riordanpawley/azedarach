@@ -66,7 +66,11 @@ func buildAttachmentPreview(att attachment.Attachment) (attachmentPreviewState, 
 	if isPreviewableImageAttachment(att) {
 		rendered, err := renderTerminalImagePreview(att.Path, attachmentPreviewImageW, attachmentPreviewImageH)
 		if err == nil {
-			state.terminalImage = rendered
+			if validateErr := validateEmbeddableTerminalImageOutput(rendered, attachmentPreviewImageW, attachmentPreviewImageH); validateErr != nil {
+				err = validateErr
+			} else {
+				state.terminalImage = rendered
+			}
 		}
 		state.lines = imagePreviewLines(att, err)
 		return state, nil
@@ -128,18 +132,13 @@ func isPreviewableImageAttachment(att attachment.Attachment) bool {
 }
 
 var (
-	detectTerminalImageProtocol  = termimg.DetectProtocol
 	renderTerminalImagePreview   = renderTerminalImagePreviewWithTermimg
-	renderKittyTerminalImage     = renderKittyVirtualImagePreview
 	renderHalfblockTerminalImage = renderHalfblockImagePreview
 )
 
 func renderTerminalImagePreviewWithTermimg(path string, width, height int) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", fmt.Errorf("attachment has no local path")
-	}
-	if detectTerminalImageProtocol() == termimg.Kitty {
-		return renderKittyTerminalImage(path, width, height)
 	}
 	return renderHalfblockTerminalImage(path, width, height)
 }
@@ -163,48 +162,10 @@ func renderHalfblockImagePreview(path string, width, height int) (string, error)
 	return outcome.Output, nil
 }
 
-func renderKittyVirtualImagePreview(path string, width, height int) (string, error) {
-	img, err := termimg.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("load terminal image: %w", err)
-	}
-	targetW, targetH := fitTerminalImageCells(width, height, img.Bounds.Dx(), img.Bounds.Dy())
-	output, err := termimg.NewImageWidget(img).
-		SetSize(targetW, targetH).
-		SetProtocol(termimg.Kitty).
-		SetVirtual(true).
-		RenderVirtual()
-	if err != nil {
-		return "", fmt.Errorf("render terminal image: %w", err)
-	}
-	if strings.TrimSpace(output) == "" {
-		return "", fmt.Errorf("terminal image renderer produced no output")
-	}
-	return output, nil
-}
-
-func fitTerminalImageCells(viewW, viewH, imgW, imgH int) (int, int) {
-	viewW = max(1, viewW)
-	viewH = max(1, viewH)
-	if imgW <= 0 || imgH <= 0 {
-		return viewW, viewH
-	}
-
-	widthScale := float64(viewW) / float64(imgW)
-	heightScale := (float64(viewH) * 2) / float64(imgH)
-	scale := widthScale
-	if heightScale < scale {
-		scale = heightScale
-	}
-	targetW := int(float64(imgW) * scale)
-	targetH := int((float64(imgH) * scale) / 2)
-	return max(1, min(viewW, targetW)), max(1, min(viewH, targetH))
-}
-
 func imagePreviewLines(att attachment.Attachment, renderErr error) []string {
 	lines := make([]string, 0, 3)
 	if renderErr != nil {
-		lines = append(lines, "Terminal image render unavailable: "+compactAttachmentPreviewError(renderErr))
+		lines = append(lines, "Inline image rendering is not available in this terminal.")
 	}
 	if width, height, format := imageDimensions(att.Path); width > 0 && height > 0 {
 		if format != "" {
@@ -217,15 +178,69 @@ func imagePreviewLines(att attachment.Attachment, renderErr error) []string {
 	return lines
 }
 
-func compactAttachmentPreviewError(err error) string {
-	if err == nil {
-		return ""
+func validateEmbeddableTerminalImageOutput(output string, width, height int) error {
+	if strings.TrimSpace(output) == "" {
+		return fmt.Errorf("terminal image renderer produced no output")
 	}
-	msg := strings.TrimSpace(err.Error())
-	if msg == "" {
-		return "unknown error"
+	if containsUnsupportedTerminalControls(output) {
+		return fmt.Errorf("terminal image renderer returned unsupported control sequences")
 	}
-	return truncateToCellWidth(msg, 96)
+	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
+	if len(lines) > max(1, height) {
+		return fmt.Errorf("terminal image renderer exceeded height")
+	}
+	for _, line := range lines {
+		if ansi.StringWidth(line) > max(1, width) {
+			return fmt.Errorf("terminal image renderer exceeded width")
+		}
+	}
+	return nil
+}
+
+func containsUnsupportedTerminalControls(output string) bool {
+	for idx := 0; idx < len(output); {
+		switch output[idx] {
+		case '\x1b':
+			next, ok := parseANSIStyleSequence(output, idx)
+			if !ok {
+				return true
+			}
+			idx = next
+			continue
+		case '\n', '\r', '\t':
+			idx++
+			continue
+		}
+		if output[idx] < 0x20 || output[idx] == 0x7f {
+			return true
+		}
+		r, size := utf8.DecodeRuneInString(output[idx:])
+		if r == utf8.RuneError && size == 1 {
+			return true
+		}
+		idx += size
+	}
+	return false
+}
+
+func parseANSIStyleSequence(output string, start int) (int, bool) {
+	if start+2 >= len(output) || output[start] != '\x1b' || output[start+1] != '[' {
+		return start, false
+	}
+	for idx := start + 2; idx < len(output); idx++ {
+		ch := output[idx]
+		if ch >= 0x30 && ch <= 0x3f {
+			continue
+		}
+		if ch >= 0x20 && ch <= 0x2f {
+			continue
+		}
+		if ch >= 0x40 && ch <= 0x7e {
+			return idx + 1, ch == 'm'
+		}
+		return start, false
+	}
+	return start, false
 }
 
 func imageDimensions(path string) (int, int, string) {
@@ -333,7 +348,7 @@ func renderAttachmentPreviewBlock(styles *Styles, preview attachmentPreviewState
 	if len(body) == 0 {
 		body = []string{"Preview loading..."}
 	}
-	if preview.terminalImage != "" && preview.err == "" {
+	if preview.terminalImage != "" && preview.err == "" && validateEmbeddableTerminalImageOutput(preview.terminalImage, width, attachmentPreviewImageH) == nil {
 		for _, line := range strings.Split(strings.TrimRight(preview.terminalImage, "\n"), "\n") {
 			lines = append(lines, line)
 		}
