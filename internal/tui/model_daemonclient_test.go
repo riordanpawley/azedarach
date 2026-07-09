@@ -8751,6 +8751,83 @@ func TestHandleSelectionUpdateFromMainUsesLocalBaseBranchInLocalWorkflowMode(t *
 	}
 }
 
+func TestNormalModePullsProjectRootBaseBranchThroughDaemon(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandGitPullBase {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandGitPullBase)
+			}
+			var body daemonclient.GitCommandRequest
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal pull base request: %v", err)
+			}
+			if body.Worktree != "/repo/root" || body.Remote != "origin" || body.BaseBranch != "main" {
+				t.Fatalf("pull base body = %+v", body)
+			}
+			respBody, err := json.Marshal(daemonclient.GitCommandResponse{
+				Worktree: body.Worktree,
+				Remote:   body.Remote,
+				Branch:   body.BaseBranch,
+			})
+			if err != nil {
+				t.Fatalf("marshal pull base response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.repoDir = "/repo/root"
+	m.config.Git.BaseBranch = "main"
+	gitSync := &recordingGitSyncService{}
+	m.gitSyncService = gitSync
+
+	updated, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	updatedModel, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if cmd == nil {
+		t.Fatal("expected pull base command")
+	}
+	if got := updatedModel.toasts[len(updatedModel.toasts)-1].Message; got != "Pulling main in project root" {
+		t.Fatalf("initial toast = %q", got)
+	}
+
+	msg := cmd()
+	result, ok := msg.(pullBaseResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want pullBaseResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("pull base result error = %v", result.err)
+	}
+
+	refreshed, refreshCmd := updatedModel.Update(result)
+	refreshedModel, ok := refreshed.(Model)
+	if !ok {
+		t.Fatalf("refreshed model type = %T, want Model", refreshed)
+	}
+	if refreshCmd == nil {
+		t.Fatal("expected refresh command after pull base success")
+	}
+	if gitSync.fetchCalls != 1 {
+		t.Fatalf("git sync fetch calls = %d, want 1", gitSync.fetchCalls)
+	}
+	if !refreshedModel.boardRefreshing {
+		t.Fatal("expected board refresh flag after pull base success")
+	}
+	if got := refreshedModel.toasts[len(refreshedModel.toasts)-1].Message; got != "Pulled main in project root" {
+		t.Fatalf("success toast = %q", got)
+	}
+}
+
 func TestAsyncRecoveryRetryUpdateUsesFailedOperationProject(t *testing.T) {
 	var requestProjects []string
 	var fetchBody daemonclient.GitCommandRequest

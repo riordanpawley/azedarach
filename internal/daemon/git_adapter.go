@@ -84,6 +84,24 @@ func (a *gitServiceAdapter) Fetch(ctx context.Context, projectID, worktree, remo
 	return nil
 }
 
+func (a *gitServiceAdapter) PullBase(ctx context.Context, projectID, worktree, remote, baseBranch string) error {
+	err := a.client.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
+		currentBranch, err := a.client.CurrentBranch(ctx, worktree)
+		if err != nil {
+			return err
+		}
+		if currentBranch == baseBranch {
+			return a.client.Pull(ctx, worktree, remote, baseBranch)
+		}
+		return a.client.FetchRef(ctx, worktree, remote, baseBranch+":"+baseBranch)
+	})
+	if err != nil {
+		return err
+	}
+	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, true)
+	return nil
+}
+
 func (a *gitServiceAdapter) Merge(ctx context.Context, projectID, worktree, branch string) (*git.MergeResult, error) {
 	result, err := a.client.MergeCleanlyTransactional(ctx, worktree, branch)
 	if err != nil {

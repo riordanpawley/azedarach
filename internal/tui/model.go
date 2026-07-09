@@ -843,6 +843,19 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keybinds.ActionOpenOperationQueue:
 		return m.openOperationQueueOverlay()
 
+	case keybinds.ActionPullBase:
+		baseBranch := strings.TrimSpace(m.resolveBaseBranch())
+		if baseBranch == "" {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "Base branch unavailable",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		m.beginMutationFeedback(fmt.Sprintf("Pulling %s in project root", baseBranch))
+		return m, m.pullRootBaseBranchCmd()
+
 	case keybinds.ActionToggleView: // Toggle view mode
 		switch m.viewMode {
 		case ViewModeBoard:
@@ -4281,6 +4294,15 @@ type fetchAndMergeResultMsg struct {
 	err         error
 }
 
+type pullBaseResultMsg struct {
+	worktree    string
+	remote      string
+	baseBranch  string
+	operationID string
+	state       protocol.OperationState
+	err         error
+}
+
 type createPRResultMsg struct {
 	issueID string
 	cmd     string
@@ -6555,6 +6577,50 @@ func (m Model) updateFromBaseCmd(issueID, worktreeHint string, attachAfter bool)
 		}
 
 		return m.fetchAndMergeCmd(resolvedWorktree, m.resolveBaseBranch(), issueID, attachAfter)()
+	}
+}
+
+func (m Model) pullRootBaseBranchCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
+
+		worktree := strings.TrimSpace(m.repoDir)
+		if worktree == "" {
+			return pullBaseResultMsg{err: fmt.Errorf("project root unavailable")}
+		}
+		baseBranch := strings.TrimSpace(m.resolveBaseBranch())
+		if baseBranch == "" {
+			return pullBaseResultMsg{worktree: worktree, err: fmt.Errorf("base branch unavailable")}
+		}
+		if m.daemonClient == nil {
+			return pullBaseResultMsg{worktree: worktree, baseBranch: baseBranch, err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		remote := "origin"
+		resp, err := m.daemonClient.GitPullBase(ctx, worktree, remote, baseBranch)
+		if err != nil {
+			if pending, ok := pendingOperationDetails(err); ok {
+				return pullBaseResultMsg{
+					worktree:    worktree,
+					remote:      remote,
+					baseBranch:  baseBranch,
+					operationID: pending.OperationID,
+					state:       pending.State,
+				}
+			}
+			return pullBaseResultMsg{worktree: worktree, remote: remote, baseBranch: baseBranch, err: err}
+		}
+		if strings.TrimSpace(resp.Remote) != "" {
+			remote = strings.TrimSpace(resp.Remote)
+		}
+		if strings.TrimSpace(resp.Branch) != "" {
+			baseBranch = strings.TrimSpace(resp.Branch)
+		}
+		if strings.TrimSpace(resp.Worktree) != "" {
+			worktree = strings.TrimSpace(resp.Worktree)
+		}
+		return pullBaseResultMsg{worktree: worktree, remote: remote, baseBranch: baseBranch}
 	}
 }
 

@@ -21,6 +21,9 @@ type runtimeGitService struct{}
 type runtimeWorktreeService struct{}
 
 func (runtimeGitService) Fetch(context.Context, string, string, string) error { return nil }
+func (runtimeGitService) PullBase(context.Context, string, string, string, string) error {
+	return nil
+}
 func (runtimeGitService) Merge(context.Context, string, string, string) (*git.MergeResult, error) {
 	return &git.MergeResult{Success: true}, nil
 }
@@ -1025,6 +1028,34 @@ func TestBuildSubmitRequestDefaultsGitFetchRemote(t *testing.T) {
 	}
 	if req.DedupeKey != "git.fetch:/tmp/az-1:origin" {
 		t.Fatalf("dedupe key = %q, want default origin remote", req.DedupeKey)
+	}
+	if len(req.ResourceKeys) != 1 || req.ResourceKeys[0] != "worktree:/tmp/az-1" {
+		t.Fatalf("resource keys = %v, want worktree routing key", req.ResourceKeys)
+	}
+}
+
+func TestBuildSubmitRequestRoutesGitPullBaseByWorktreeAndBase(t *testing.T) {
+	runtime := newOperationRuntime(operationRuntimeConfig{
+		repoDir:      t.TempDir(),
+		nextRevision: sequentialRevision(),
+		gitHandler:   daemonhandlers.NewGitHandler(runtimeGitService{}),
+	})
+
+	req := runtime.buildSubmitRequestForTest(
+		t,
+		daemonhandlers.CommandGitPullBase,
+		"proj-1",
+		mustJSON(t, map[string]string{
+			"worktree":    "/tmp/az-1",
+			"base_branch": "main",
+		}),
+	)
+
+	if req.IssueID != "" {
+		t.Fatalf("issue id = %q, want empty for non-issue operation", req.IssueID)
+	}
+	if req.DedupeKey != "git.pull_base:/tmp/az-1:origin:main" {
+		t.Fatalf("dedupe key = %q, want default origin/base branch", req.DedupeKey)
 	}
 	if len(req.ResourceKeys) != 1 || req.ResourceKeys[0] != "worktree:/tmp/az-1" {
 		t.Fatalf("resource keys = %v, want worktree routing key", req.ResourceKeys)

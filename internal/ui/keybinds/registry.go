@@ -51,6 +51,7 @@ const (
 	ActionOpenOperationQueue      ActionID = "open_operation_queue"
 	ActionToggleView              ActionID = "toggle_view"
 	ActionRefresh                 ActionID = "refresh"
+	ActionPullBase                ActionID = "pull_base"
 	ActionAttachSession           ActionID = "attach_session"
 
 	ActionSelectToggle     ActionID = "select_toggle"
@@ -95,6 +96,7 @@ var registry = []ActionSpec{
 	{ID: ActionOpenNotificationHistory, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "N", Display: "N"}}},
 	{ID: ActionOpenOperationQueue, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "Q", Display: "Q"}}, Hint: "ops"},
 	{ID: ActionToggleView, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "tab", Display: "Tab"}}, Hint: "view"},
+	{ID: ActionPullBase, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "p", Display: "p"}}, Hint: "pull base"},
 	{ID: ActionOpenHelp, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "?", Display: "?"}}, Hint: "help"},
 	{ID: ActionQuit, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "q", Display: "q"}}, Hint: "quit"},
 
@@ -199,6 +201,7 @@ var registry = []ActionSpec{
 
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "a", Help: "Attach to selected issue session"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "r (board)", Help: "Refresh board data"},
+	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "p (board)", Help: "Pull the project root base branch"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "i", Help: "Open attachment manager in workspace"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "b", Help: "Open merge-into selector in workspace"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "r (workspace)", Help: "Refresh issue in workspace"},

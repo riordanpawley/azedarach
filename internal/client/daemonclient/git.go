@@ -10,6 +10,7 @@ import (
 
 const (
 	CommandGitFetch             = "git.fetch"
+	CommandGitPullBase          = "git.pull_base"
 	CommandGitMerge             = "git.merge"
 	CommandGitCheckout          = "git.checkout"
 	CommandGitAbortMerge        = "git.abort_merge"
@@ -147,6 +148,23 @@ func (c *Client) GitFetch(ctx context.Context, worktree, remote string) (GitComm
 	}
 	var resp GitCommandResponse
 	if err := decodeLongRunningJSON(CommandGitFetch, raw.Body, &resp); err != nil {
+		return GitCommandResponse{}, err
+	}
+	return resp, nil
+}
+
+// GitPullBase asks the daemon to update the configured base branch in a root worktree.
+func (c *Client) GitPullBase(ctx context.Context, worktree, remote, baseBranch string) (GitCommandResponse, error) {
+	raw, err := c.commandJSONResponse(ctx, CommandGitPullBase, GitCommandRequest{
+		Worktree:   worktree,
+		Remote:     remote,
+		BaseBranch: baseBranch,
+	})
+	if err != nil {
+		return GitCommandResponse{}, err
+	}
+	var resp GitCommandResponse
+	if err := decodeLongRunningJSON(CommandGitPullBase, raw.Body, &resp); err != nil {
 		return GitCommandResponse{}, err
 	}
 	return resp, nil
