@@ -3013,8 +3013,7 @@ func (d *Daemon) validateTaskActivityForReview(ctx context.Context, projectID, t
 	if task.Session == nil {
 		return nil
 	}
-	displayState, ok := task.Session.DisplayState()
-	if !ok || displayState != domain.SessionBusy {
+	if !task.Session.BlocksReviewHandoff() {
 		return nil
 	}
 	if allowBusy {
@@ -3031,7 +3030,7 @@ func (d *Daemon) validateTaskActivityForReview(ctx context.Context, projectID, t
 	if activitySource != "" {
 		activitySource = " (source: " + activitySource + ")"
 	}
-	return fmt.Errorf("cannot move issue %s to in_review: session activity is %s%s. Next: leave it in_progress until the session reports idle/waiting/done/terminal activity, or intentionally stop the session before handoff", taskID, activity, activitySource)
+	return fmt.Errorf("cannot move issue %s to in_review: session activity is %s%s. Next: leave it in_progress until the session reports idle/done/no-agent activity, or intentionally stop the session before handoff", taskID, activity, activitySource)
 }
 
 func taskForReviewActivityInvariant(ctx context.Context, issueClient *issues.Client, projectID, taskID string, source daemonInvariantSource) (domain.Task, error) {
@@ -5121,15 +5120,15 @@ func daemonWorkerObservationFromInputs(in workerObservationInputs) domain.Worker
 	case in.Active != nil && daemonWorkerObservationActiveFailed(*in.Active):
 		observation.State = domain.WorkerObservationFailed
 		observation.Reason = "active session reports failed runtime state"
+	case in.Task.Status == domain.StatusInReview && daemonWorkerObservationReviewReadyPhaseAllowed(in):
+		observation.State = domain.WorkerObservationReviewReady
+		observation.Reason = "review-ready handoff is idle"
 	case in.Active != nil && daemonWorkerObservationActiveWaiting(*in.Active):
 		observation.State = domain.WorkerObservationWaitingHuman
 		observation.Reason = "active session is waiting for human input"
 	case in.Active != nil:
 		observation.State = domain.WorkerObservationWorking
 		observation.Reason = "active worker session is present"
-	case in.Task.Status == domain.StatusInReview:
-		observation.State = domain.WorkerObservationReviewReady
-		observation.Reason = "issue is in_review"
 	case strings.TrimSpace(in.BlockedReason) != "":
 		observation.State = domain.WorkerObservationBlocked
 		observation.Reason = in.BlockedReason
@@ -5172,7 +5171,27 @@ func daemonWorkerObservationActiveFailed(active taskGraphActiveSession) bool {
 
 func daemonWorkerObservationActiveWaiting(active taskGraphActiveSession) bool {
 	activity := strings.ToLower(strings.TrimSpace(active.Activity))
-	return activity == "waiting" || activity == "waiting_human"
+	switch activity {
+	case "waiting", "waiting_human", "waiting_ai", "waiting_tool", "waiting-for-human", "waiting-for-ai", "waiting-for-tool":
+		return true
+	default:
+		return false
+	}
+}
+
+func daemonWorkerObservationReviewReadyPhaseAllowed(in workerObservationInputs) bool {
+	if in.Task.Status != domain.StatusInReview {
+		return false
+	}
+	if in.Active == nil {
+		return in.Task.Session.AllowsReviewReadyPhase(in.Task.HasTmuxSession)
+	}
+	session := &domain.Session{
+		State:          domain.SessionState(strings.TrimSpace(in.Active.State)),
+		Activity:       strings.TrimSpace(in.Active.Activity),
+		ActivitySource: strings.TrimSpace(in.Active.ActivitySource),
+	}
+	return session.AllowsReviewReadyPhase(true)
 }
 
 func daemonWorkerObservationEvidenceSummary(in workerObservationInputs) []string {

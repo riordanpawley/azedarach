@@ -1968,6 +1968,95 @@ func TestHandleBoardFetchComposesRuntimeProjectionOverCachedTaskSnapshot(t *test
 	}
 }
 
+func TestHandleBoardFetchDerivesInReviewPhaseFromSessionActivity(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-board-derived-review"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	busyID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Busy handoff",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create busy issue: %v", err)
+	}
+	idleID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Idle handoff",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create idle issue: %v", err)
+	}
+	for _, seed := range []struct {
+		issueID  string
+		activity string
+	}{
+		{issueID: busyID, activity: "busy"},
+		{issueID: idleID, activity: "idle"},
+	} {
+		if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			ID:             naming.CanonicalSessionID(projectID, seed.issueID),
+			IssueID:        seed.issueID,
+			State:          daemonstate.SessionStateRunning,
+			ObservedState:  daemonstate.SessionStateRunning,
+			Activity:       seed.activity,
+			ActivitySource: "hooks",
+			UpdatedAt:      time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("seed %s session projection: %v", seed.issueID, err)
+		}
+	}
+
+	d := &Daemon{
+		cfg: Config{Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		revision: map[string]uint64{projectID: 11},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+
+	resp, err := d.handleBoardFetch(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-board-fetch-derived-review",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "board.fetch",
+	})
+	if err != nil {
+		t.Fatalf("handleBoardFetch error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("board.fetch response = %+v", resp.Error)
+	}
+	payload, err := protocol.DecodeBoardSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("decode board.fetch body: %v", err)
+	}
+	statusByID := map[string]domain.Status{}
+	for _, task := range payload.Tasks {
+		statusByID[task.ID.String()] = task.Status
+	}
+	if got := statusByID[busyID]; got != domain.StatusInProgress {
+		t.Fatalf("busy handoff board status = %s, want %s", got, domain.StatusInProgress)
+	}
+	if got := statusByID[idleID]; got != domain.StatusInReview {
+		t.Fatalf("idle handoff board status = %s, want %s", got, domain.StatusInReview)
+	}
+}
+
 func TestHandleTaskListReadsSQLiteProjection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -7932,6 +8021,33 @@ func TestWorkerObservationStateDerivationPrecedence(t *testing.T) {
 			want: domain.WorkerObservationReviewReady,
 		},
 		{
+			name: "busy review handoff remains working",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task:        baseTask("az-review-busy", domain.StatusInReview),
+				Active:      &taskGraphActiveSession{IssueID: "az-review-busy", Activity: "busy", Status: "active"},
+			},
+			want: domain.WorkerObservationWorking,
+		},
+		{
+			name: "waiting review handoff remains waiting",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task:        baseTask("az-review-waiting", domain.StatusInReview),
+				Active:      &taskGraphActiveSession{IssueID: "az-review-waiting", Activity: "waiting_tool", Status: "active"},
+			},
+			want: domain.WorkerObservationWaitingHuman,
+		},
+		{
+			name: "idle review handoff is review ready",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task:        baseTask("az-review-idle", domain.StatusInReview),
+				Active:      &taskGraphActiveSession{IssueID: "az-review-idle", Activity: "idle", Status: "active"},
+			},
+			want: domain.WorkerObservationReviewReady,
+		},
+		{
 			name: "blocked",
 			in: workerObservationInputs{
 				RootIssueID:   rootID,
@@ -10186,6 +10302,42 @@ func TestTaskUpdateStatusRejectsInReviewWithBusyActivity(t *testing.T) {
 	resp := updateStatusForTest(t, d, projectID, taskID, domain.StatusInReview, false)
 	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "session activity is busy (source: hooks)") || !strings.Contains(resp.Error.Message, "leave it in_progress") {
 		t.Fatalf("task.update_status response = %+v, want busy activity guard", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if task.Status != domain.StatusInProgress {
+		t.Fatalf("task status = %s, want in_progress", task.Status)
+	}
+}
+
+func TestTaskUpdateStatusRejectsInReviewWithWaitingActivity(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-guard-waiting"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Waiting handoff",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	seedReviewGuardSessionProjection(t, d, projectID, taskID, daemonstate.Session{
+		ID:             naming.CanonicalSessionID(projectID, taskID),
+		IssueID:        taskID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "waiting_tool",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
+	})
+
+	resp := updateStatusForTest(t, d, projectID, taskID, domain.StatusInReview, false)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "session activity is waiting_tool (source: hooks)") || !strings.Contains(resp.Error.Message, "leave it in_progress") {
+		t.Fatalf("task.update_status response = %+v, want waiting activity guard", resp)
 	}
 	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
 	if err != nil {

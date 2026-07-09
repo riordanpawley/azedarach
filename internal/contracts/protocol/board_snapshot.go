@@ -65,7 +65,7 @@ func BoardTaskSummaryFromDomain(task domain.Task) BoardTaskSummary {
 		Assignee:              task.Assignee,
 		Labels:                append([]string(nil), task.Labels...),
 		Estimate:              cloneIntPointer(task.Estimate),
-		Status:                task.Status,
+		Status:                domain.BoardStatusForTask(task),
 		Priority:              task.Priority,
 		Type:                  task.Type,
 		ParentID:              cloneIssueIDPointer(task.ParentID),

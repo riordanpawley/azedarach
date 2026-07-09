@@ -127,6 +127,16 @@ func (s Status) String() string {
 	return string(s)
 }
 
+func BoardStatusForTask(task Task) Status {
+	if task.Status != StatusInReview {
+		return task.Status
+	}
+	if task.Session.AllowsReviewReadyPhase(task.HasTmuxSession) {
+		return StatusInReview
+	}
+	return StatusInProgress
+}
+
 // Priority represents task priority (0 = highest)
 type Priority int
 
