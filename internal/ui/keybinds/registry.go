@@ -134,7 +134,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeGoto, Keys: []KeySpec{{Input: "esc", Display: "Esc"}}, Hint: "cancel"},
 
 	// Action mode status hints.
-	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "h/l"}}, Hint: "move"},
+	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "h/l"}}, Hint: "lifecycle"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "s"}}, Hint: "AI start"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "t"}}, Hint: "tmux only"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "!"}}, Hint: "yolo AI"},
@@ -154,6 +154,8 @@ var registry = []ActionSpec{
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "w/W"}}, Hint: "cleanup"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "e"}}, Hint: "edit"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "c"}}, Hint: "child"},
+	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "0"}}, Hint: "backlog"},
+	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "3"}}, Hint: "request review"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "5"}}, Hint: "cancel issue"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "T/d"}}, Hint: "tombstone/delete"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "Esc/q"}}, Hint: "cancel"},

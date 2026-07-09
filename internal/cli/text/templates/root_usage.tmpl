@@ -44,7 +44,7 @@ Commands:
   issue doctor [--project <project-id>] [--id <id>] [--json] [<id>]  Run integrity checks for one issue
   issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--title ...] [--description ...] [--json] [<title>]  Create an issue (auto-parent when AZEDARACH_ISSUE_ID is set; --parent selects parentage; --impl is not parentage)
   issue split [--project <project-id>] [--parent <id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an isolated child issue/session for later parent-side merge
-  issue update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields (`--status closed` integrates; `cancelled` cleans without integration)
+  issue update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields and durable lifecycle actions (backlog/open/active/review/closed/cancelled)
   issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--force-worktree] [<id>]  Integrate, clean up, and close an issue
   issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]  Permanently delete an issue
   issue unarchive [--project <project-id>] [--id <id>] [--json] [--with-parents] [--cascade-children] [<id>]  Restore archived issues to active reads
@@ -107,7 +107,8 @@ Examples:
   az issue split "Implement child task"           # auto-parent and launch isolated child worktree; merge explicitly later
   az issue create --deferred "Investigate later"  # deferred follow-up (defaults priority to P4)
   az issue update --id az-123 --status in_progress --title "Renamed task" --priority P1
-  az issue update --id az-123 --status in_review  # ready for review/integration, not blocked
+  az issue update --id az-123 --status backlog    # move to backlog lifecycle
+  az issue update --id az-123 --status in_review  # request review/integration, not blocked
   az issue update --id az-123 --status closed
   az issue update --id az-123 --update-impl go-bubbletea
   # Agent progress, validation, review facts, and worker closeout belong in mail/observation evidence, not issue notes.

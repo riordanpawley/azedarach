@@ -537,9 +537,9 @@ func TestActionMenu_MoveActions(t *testing.T) {
 		expectMoveRight bool
 	}{
 		{
-			name:            "Open task can only move right",
+			name:            "Open task can move to backlog or active",
 			status:          domain.StatusOpen,
-			expectMoveLeft:  false,
+			expectMoveLeft:  true,
 			expectMoveRight: true,
 		},
 		{
@@ -604,11 +604,12 @@ func TestActionMenu_StatusKeyActions(t *testing.T) {
 		label   string
 		enabled bool
 	}{
-		"1": {label: "Set status: Open", enabled: true},
-		"2": {label: "Set status: In Progress", enabled: false},
-		"3": {label: "Set status: In Review", enabled: true},
-		"4": {label: "Set status: Done", enabled: true},
-		"C": {label: "Set review incl children", enabled: true},
+		"0": {label: "Move to backlog", enabled: true},
+		"1": {label: "Move to open", enabled: true},
+		"2": {label: "Start active work", enabled: false},
+		"3": {label: "Request review", enabled: true},
+		"4": {label: "Integrate and close", enabled: true},
+		"C": {label: "Request review incl children", enabled: true},
 	}
 	for key, want := range statusActions {
 		t.Run(key, func(t *testing.T) {
@@ -632,6 +633,36 @@ func TestActionMenu_StatusKeyActions(t *testing.T) {
 	}
 }
 
+func TestActionMenu_LifecycleEnablementUsesDurablePhase(t *testing.T) {
+	backlogState, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatalf("build backlog issue state: %v", err)
+	}
+	task := domain.Task{
+		ID:     "az-123",
+		Status: domain.StatusOpen,
+		State:  backlogState,
+		Facts: domain.IssueFacts{
+			DisplayPhase: domain.IssueDisplayOpen,
+		},
+	}
+	menu := NewActionMenu(task, nil)
+
+	actions := map[string]Action{}
+	for _, action := range menu.actions {
+		actions[action.Key] = action
+	}
+	if got := actions["0"]; got.Enabled {
+		t.Fatalf("backlog action enabled = true, want false from durable backlog phase")
+	}
+	if got := actions["h"]; got.Enabled {
+		t.Fatalf("previous lifecycle action enabled = true, want false from durable backlog phase")
+	}
+	if got := actions["1"]; !got.Enabled {
+		t.Fatalf("open action enabled = false, want true from durable backlog phase")
+	}
+}
+
 func TestActionMenu_StatusBindingsIncludeStatusKeys(t *testing.T) {
 	menu := NewActionMenu(domain.Task{ID: "az-123", Status: domain.StatusOpen}, nil)
 	bindings := menu.StatusBindings()
@@ -639,8 +670,8 @@ func TestActionMenu_StatusBindingsIncludeStatusKeys(t *testing.T) {
 	for _, binding := range bindings {
 		joined += binding.Key + " " + binding.Description + " "
 	}
-	if !strings.Contains(joined, "1/2/3/4") {
-		t.Fatalf("expected action menu status bindings to include exact status hint, got %q", joined)
+	if !strings.Contains(joined, "0/1/2/3/4") {
+		t.Fatalf("expected action menu status bindings to include lifecycle action hint, got %q", joined)
 	}
 	if !strings.Contains(joined, "r refresh issue") {
 		t.Fatalf("expected action menu status bindings to include refresh hint, got %q", joined)
@@ -922,7 +953,7 @@ func TestBulkActionMenu_ExposeCleanupCommands(t *testing.T) {
 func TestBulkActionMenu_UsesNumericStatusKeys(t *testing.T) {
 	menu := NewBulkActionMenu([]string{"az-1", "az-2"}, 2)
 
-	for _, key := range []string{"1", "2", "3", "4"} {
+	for _, key := range []string{"0", "1", "2", "3", "4"} {
 		cmd := menu.selectByKey(key)
 		if cmd == nil {
 			t.Fatalf("expected status command for key %s", key)
@@ -938,10 +969,11 @@ func TestBulkActionMenu_UsesNumericStatusKeys(t *testing.T) {
 
 	view := menu.View()
 	for _, want := range []string{
-		"[1] Set status: Open",
-		"[2] Set status: In Progress",
-		"[3] Set status: In Review",
-		"[4] Set status: Done",
+		"[0] Move to backlog",
+		"[1] Move to open",
+		"[2] Start active work",
+		"[3] Request review",
+		"[4] Integrate and close",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view = %q, want %q", view, want)

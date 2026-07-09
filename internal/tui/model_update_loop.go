@@ -1836,6 +1836,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, m.scheduleIssuesRefreshCmd()
 
+	case taskLifecycleResultMsg:
+		if msg.err != nil {
+			m.rollbackOptimisticTask(msg.previousTask)
+			failure := statusMutationFailureDetails(msg.taskID, msg.previousTask.Status, msg.targetLegacy, msg.err)
+			userMessage := failure.Message
+			if m.logger != nil {
+				m.logger.Warn("task lifecycle mutation failed",
+					"task_id", msg.taskID,
+					"target_lifecycle", msg.targetAction.Lifecycle,
+					"error", msg.err,
+					"user_message", userMessage,
+				)
+			}
+			m.markTaskMutationFailure(failure)
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: userMessage,
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		m.clearTaskMutationFailure(msg.taskID)
+		m.syncTaskWorkspaceOverlay()
+		m.addToast(Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Task moved to %s", msg.targetDisplay),
+			Expires: time.Now().Add(2 * time.Second),
+		})
+		return m, m.scheduleIssuesRefreshCmd()
+
 	case closeCleanupConfirmPreflightMsg:
 		pending := msg.pending
 		if msg.err != nil {

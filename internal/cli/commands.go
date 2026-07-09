@@ -3727,8 +3727,8 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue update result as JSON")
 	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal when setting closed or cancelled")
-	fs.BoolVar(&opts.CascadeChildren, "cascade-children", false, "when setting in_review, move open/in_progress descendants to in_review first")
-	fs.StringVar(&statusRaw, "status", "", "updated status (backlog|open|in_progress|in_review|closed|cancelled)")
+	fs.BoolVar(&opts.CascadeChildren, "cascade-children", false, "when requesting review, move open/in_progress descendants to in_review first")
+	fs.StringVar(&statusRaw, "status", "", "durable lifecycle action (backlog|open|in_progress|in_review|closed|cancelled)")
 	fs.Func("update-impl", "set implementation assignment (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {
@@ -6473,7 +6473,7 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 			statusOptions.CascadeChildren = opts.CascadeChildren
 		}
 		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, *opts.Status, statusOptions); err != nil {
-			return fmt.Errorf("failed to set status for issue %s: %w", opts.IssueID, err)
+			return fmt.Errorf("failed to apply lifecycle action for issue %s: %w", opts.IssueID, err)
 		}
 		if updateContextRisk != nil && !opts.JSON {
 			printIssueContextRiskCloseout(updateContextRisk)

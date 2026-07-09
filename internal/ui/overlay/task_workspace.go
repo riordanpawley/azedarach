@@ -275,14 +275,14 @@ func (w *TaskWorkspaceOverlay) StatusBindings() []keybinds.Binding {
 			{Key: "Tab", Description: "focus"},
 			{Key: "r", Description: "refresh issue"},
 			{Key: "V", Description: "dev servers"},
-			{Key: "1/2/3/4", Description: "set status"},
+			{Key: "0/1/2/3/4", Description: "lifecycle action"},
 			{Key: "Esc/q", Description: "close"},
 		}
 	case taskWorkspaceFocusActions:
 		return []keybinds.Binding{
 			{Key: "j/k/↑/↓", Description: "select action"},
 			{Key: "Enter", Description: "run action"},
-			{Key: "1/2/3/4", Description: "set status"},
+			{Key: "0/1/2/3/4", Description: "lifecycle action"},
 			{Key: "n/p", Description: "action select"},
 			{Key: "r", Description: "refresh issue"},
 			{Key: "V", Description: "dev servers"},
@@ -306,7 +306,7 @@ func (w *TaskWorkspaceOverlay) StatusBindings() []keybinds.Binding {
 			keybinds.Binding{Key: "Tab", Description: "focus"},
 			keybinds.Binding{Key: "r", Description: "refresh issue"},
 			keybinds.Binding{Key: "V", Description: "dev servers"},
-			keybinds.Binding{Key: "1/2/3/4", Description: "set status"},
+			keybinds.Binding{Key: "0/1/2/3/4", Description: "lifecycle action"},
 			keybinds.Binding{Key: "Esc/q", Description: "close"},
 		)
 		return bindings

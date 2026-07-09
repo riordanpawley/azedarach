@@ -24,11 +24,11 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 	}
 
 	switch msg.Action {
-	case "h": // Move left (previous status)
-		m.beginMutationFeedback(fmt.Sprintf("Bulk move queued for %d task(s)", count))
+	case "h": // Previous lifecycle action
+		m.beginMutationFeedback(fmt.Sprintf("Bulk lifecycle action queued for %d task(s)", count))
 		return m, m.bulkMoveStatusCmd(msg.SelectedIDs, -1)
 
-	case "l": // Move right (next status)
+	case "l": // Next lifecycle action
 		closeTaskIDs := m.bulkMoveCloseCleanupTaskIDs(msg.SelectedIDs, 1)
 		if len(closeTaskIDs) > 0 {
 			pending := pendingCloseCleanupConfirmation{
@@ -42,22 +42,26 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 			m.pendingClose = &pending
 			return m, m.confirmCloseCleanupCmd(pending)
 		}
-		m.beginMutationFeedback(fmt.Sprintf("Bulk move queued for %d task(s)", count))
+		m.beginMutationFeedback(fmt.Sprintf("Bulk lifecycle action queued for %d task(s)", count))
 		return m, m.bulkMoveStatusCmd(msg.SelectedIDs, 1)
 
-	case "1": // Set to Open
-		m.beginMutationFeedback(fmt.Sprintf("Bulk status update queued for %d task(s)", count))
-		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusOpen)
+	case "0": // Move to Backlog
+		m.beginMutationFeedback(fmt.Sprintf("Bulk backlog update queued for %d task(s)", count))
+		return m, m.bulkSetLifecycleCmd(msg.SelectedIDs, domain.IssueWorkflowBacklog)
 
-	case "2": // Set to In Progress
-		m.beginMutationFeedback(fmt.Sprintf("Bulk status update queued for %d task(s)", count))
+	case "1": // Move to Open
+		m.beginMutationFeedback(fmt.Sprintf("Bulk open update queued for %d task(s)", count))
+		return m, m.bulkSetLifecycleCmd(msg.SelectedIDs, domain.IssueWorkflowOpen)
+
+	case "2": // Start active work
+		m.beginMutationFeedback(fmt.Sprintf("Bulk active update queued for %d task(s)", count))
 		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusInProgress)
 
-	case "3": // Set to In Review
-		m.beginMutationFeedback(fmt.Sprintf("Bulk status update queued for %d task(s)", count))
+	case "3": // Request review
+		m.beginMutationFeedback(fmt.Sprintf("Bulk review request queued for %d task(s)", count))
 		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusInReview)
 
-	case "4": // Set to Done
+	case "4": // Integrate and close
 		pending := pendingCloseCleanupConfirmation{
 			taskIDs:      append([]string(nil), msg.SelectedIDs...),
 			closeTaskIDs: append([]string(nil), msg.SelectedIDs...),
@@ -794,26 +798,19 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 
 	// Task actions
 	case "h":
-		// Move task left (to previous status)
-		if task.Status == domain.StatusOpen {
-			m.addToast(Toast{
-				Level:   ToastWarning,
-				Message: "Task is already in Open status",
-				Expires: time.Now().Add(2 * time.Second),
-			})
-			return m, nil
-		}
-		newStatus, ok := shiftedTaskStatus(task.Status, -1)
+		// Move task to the previous durable lifecycle action.
+		previousStatus := task.Status
+		newAction, ok := shiftedTaskLifecycleAction(*task, -1)
 		if !ok {
 			m.addToast(Toast{
-				Level:   ToastError,
-				Message: "Failed to compute previous status",
+				Level:   ToastWarning,
+				Message: "Task is already at the first lifecycle action",
 				Expires: time.Now().Add(2 * time.Second),
 			})
 			return m, nil
 		}
-		previousStatus := task.Status
-		if terminalTaskStatusRequiresClose(newStatus) {
+		newStatus := newAction.LegacyStatus()
+		if newAction.RequiresClose() {
 			pending := pendingCloseCleanupConfirmation{
 				taskID:         task.ID.String(),
 				previousStatus: previousStatus,
@@ -823,31 +820,28 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			pending = m.prepareCloseCleanupConfirmation(pending)
 			m.pendingClose = &pending
 			return m, m.confirmCloseCleanupCmd(pending)
+		}
+		if newAction.IsLifecycleOnly() {
+			m.applyOptimisticTaskLifecycle(task.ID.String(), newAction.Lifecycle)
+			return m, m.moveTaskLifecycleCmd(*task, newAction)
 		}
 		m.beginTaskStatusMoveFeedback(task.ID.String(), previousStatus, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
 
 	case "l":
-		// Move task right (to next status)
-		if task.Status == domain.StatusDone {
-			m.addToast(Toast{
-				Level:   ToastWarning,
-				Message: "Task is already in Done status",
-				Expires: time.Now().Add(2 * time.Second),
-			})
-			return m, nil
-		}
-		newStatus, ok := shiftedTaskStatus(task.Status, 1)
+		// Move task to the next durable lifecycle action.
+		previousStatus := task.Status
+		newAction, ok := shiftedTaskLifecycleAction(*task, 1)
 		if !ok {
 			m.addToast(Toast{
-				Level:   ToastError,
-				Message: "Failed to compute next status",
+				Level:   ToastWarning,
+				Message: "Task is already at the final lifecycle action",
 				Expires: time.Now().Add(2 * time.Second),
 			})
 			return m, nil
 		}
-		previousStatus := task.Status
-		if terminalTaskStatusRequiresClose(newStatus) {
+		newStatus := newAction.LegacyStatus()
+		if newAction.RequiresClose() {
 			pending := pendingCloseCleanupConfirmation{
 				taskID:         task.ID.String(),
 				previousStatus: previousStatus,
@@ -857,24 +851,29 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			pending = m.prepareCloseCleanupConfirmation(pending)
 			m.pendingClose = &pending
 			return m, m.confirmCloseCleanupCmd(pending)
+		}
+		if newAction.IsLifecycleOnly() {
+			m.applyOptimisticTaskLifecycle(task.ID.String(), newAction.Lifecycle)
+			return m, m.moveTaskLifecycleCmd(*task, newAction)
 		}
 		m.beginTaskStatusMoveFeedback(task.ID.String(), previousStatus, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
-	case "1", "2", "3", "4", "5":
-		newStatus, ok := exactTaskStatusForKey(msg.Key)
+	case "0", "1", "2", "3", "4", "5":
+		newAction, ok := exactTaskActionForKey(msg.Key)
 		if !ok {
 			return m, nil
 		}
-		if task.Status == newStatus {
+		if taskActionPhase(*task) == newAction.Phase {
 			m.addToast(Toast{
 				Level:   ToastInfo,
-				Message: fmt.Sprintf("Task is already in %s status", statusDisplayName(newStatus)),
+				Message: fmt.Sprintf("Task is already at %s", newAction.DisplayName()),
 				Expires: time.Now().Add(2 * time.Second),
 			})
 			return m, nil
 		}
 		previousStatus := task.Status
-		if terminalTaskStatusRequiresClose(newStatus) {
+		newStatus := newAction.LegacyStatus()
+		if newAction.RequiresClose() {
 			pending := pendingCloseCleanupConfirmation{
 				taskID:         task.ID.String(),
 				previousStatus: previousStatus,
@@ -884,6 +883,10 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			pending = m.prepareCloseCleanupConfirmation(pending)
 			m.pendingClose = &pending
 			return m, m.confirmCloseCleanupCmd(pending)
+		}
+		if newAction.IsLifecycleOnly() {
+			m.applyOptimisticTaskLifecycle(task.ID.String(), newAction.Lifecycle)
+			return m, m.moveTaskLifecycleCmd(*task, newAction)
 		}
 		m.beginTaskStatusMoveFeedback(task.ID.String(), previousStatus, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
@@ -891,7 +894,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if task.Status == domain.StatusInReview {
 			m.addToast(Toast{
 				Level:   ToastInfo,
-				Message: "Task is already in In Review status",
+				Message: "Review already requested",
 				Expires: time.Now().Add(2 * time.Second),
 			})
 			return m, nil

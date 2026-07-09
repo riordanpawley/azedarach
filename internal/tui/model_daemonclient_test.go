@@ -1566,7 +1566,7 @@ func TestTaskStatusExactKeyUsesDaemonClient(t *testing.T) {
 				t.Fatalf("unmarshal status request: %v", err)
 			}
 			if body.TaskID != "az-1" || body.Status != domain.StatusInReview {
-				t.Fatalf("status body = %+v, want az-1 -> blocked", body)
+				t.Fatalf("status body = %+v, want az-1 -> in_review", body)
 			}
 			return protocol.ResponseEnvelope{
 				ProtocolVersion: req.ProtocolVersion,
@@ -1604,6 +1604,108 @@ func TestTaskStatusExactKeyUsesDaemonClient(t *testing.T) {
 	}
 	if status.previousStatus != domain.StatusOpen || status.newStatus != domain.StatusInReview || status.err != nil {
 		t.Fatalf("status result = %#v", status)
+	}
+}
+
+func TestTaskLifecycleKeysUseDaemonDetailsUpdate(t *testing.T) {
+	tests := []struct {
+		name          string
+		key           string
+		task          domain.Task
+		wantLifecycle domain.IssueWorkflow
+		wantPhase     domain.IssueDisplayPhase
+	}{
+		{
+			name: "exact backlog key writes backlog lifecycle",
+			key:  "0",
+			task: domain.Task{
+				ID:       "az-1",
+				Title:    "Task 1",
+				Status:   domain.StatusOpen,
+				Facts:    domain.IssueFacts{DisplayPhase: domain.IssueDisplayOpen},
+				Type:     domain.TypeTask,
+				Priority: domain.P2,
+			},
+			wantLifecycle: domain.IssueWorkflowBacklog,
+			wantPhase:     domain.IssueDisplayBacklog,
+		},
+		{
+			name: "next from backlog writes open lifecycle",
+			key:  "l",
+			task: func() domain.Task {
+				state, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowBacklog})
+				if err != nil {
+					t.Fatalf("build backlog issue state: %v", err)
+				}
+				return domain.Task{
+					ID:       "az-1",
+					Title:    "Task 1",
+					Status:   domain.StatusOpen,
+					State:    state,
+					Facts:    domain.IssueFacts{DisplayPhase: domain.IssueDisplayBacklog},
+					Type:     domain.TypeTask,
+					Priority: domain.P2,
+				}
+			}(),
+			wantLifecycle: domain.IssueWorkflowOpen,
+			wantPhase:     domain.IssueDisplayOpen,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var updateBody struct {
+				TaskID string `json:"task_id"`
+				daemonclient.TaskUpdateParams
+			}
+			transport := &recordingDaemonTransport{
+				replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					if req.Command != daemonclient.CommandTaskUpdate {
+						t.Fatalf("unexpected command: %s", req.Command)
+					}
+					if err := json.Unmarshal(req.Body, &updateBody); err != nil {
+						t.Fatalf("unmarshal update request: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+					}, nil
+				},
+			}
+
+			m := newDaemonTestModel(transport)
+			m.tasks = []domain.Task{tt.task}
+			m.nav.SelectTask("az-1", 0)
+
+			updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: tt.key})
+			if cmd == nil {
+				t.Fatal("expected lifecycle command")
+			}
+			optimistic := updated.(Model)
+			if got := optimistic.tasks[0].IssueDisplayPhase(); got != tt.wantPhase {
+				t.Fatalf("optimistic phase = %s, want %s", got, tt.wantPhase)
+			}
+			if len(optimistic.pendingStatuses) != 0 {
+				t.Fatalf("pending status markers = %+v, want none for lifecycle-only action", optimistic.pendingStatuses)
+			}
+
+			result := cmd()
+			lifecycle, ok := result.(taskLifecycleResultMsg)
+			if !ok {
+				t.Fatalf("result = %T, want taskLifecycleResultMsg", result)
+			}
+			if lifecycle.err != nil || lifecycle.targetAction.Lifecycle != tt.wantLifecycle {
+				t.Fatalf("lifecycle result = %#v, want %s success", lifecycle, tt.wantLifecycle)
+			}
+			if updateBody.TaskID != "az-1" || updateBody.Lifecycle == nil || *updateBody.Lifecycle != tt.wantLifecycle {
+				t.Fatalf("update body = %+v, want az-1 lifecycle %s", updateBody, tt.wantLifecycle)
+			}
+			if got := transport.requests; len(got) != 1 || got[0] != daemonclient.CommandTaskUpdate {
+				t.Fatalf("requests = %v, want task.update", got)
+			}
+		})
 	}
 }
 
@@ -12213,6 +12315,70 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 		if got := len(transport.commandBudgets); got != 1 || transport.commandBudgets[0] < taskCloseMutationTimeout-10*time.Second {
 			t.Fatalf("command budgets = %v, want close timeout", transport.commandBudgets)
+		}
+	})
+
+	t.Run("bulk backlog action writes lifecycle through task update", func(t *testing.T) {
+		updateBodies := make([]struct {
+			TaskID string `json:"task_id"`
+			daemonclient.TaskUpdateParams
+		}, 0, 2)
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskUpdate {
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				var body struct {
+					TaskID string `json:"task_id"`
+					daemonclient.TaskUpdateParams
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal update request: %v", err)
+				}
+				updateBodies = append(updateBodies, body)
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+				}, nil
+			},
+		}
+
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{
+			{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Type: domain.TypeTask, Priority: domain.P2},
+			{ID: "az-2", Title: "Task 2", Status: domain.StatusInProgress, Type: domain.TypeTask, Priority: domain.P1},
+		}
+
+		updated, cmd := m.handleBulkAction(overlay.BulkActionMsg{
+			Action:      "0",
+			SelectedIDs: []string{"az-1", "az-2"},
+		})
+		if cmd == nil {
+			t.Fatal("expected bulk lifecycle command")
+		}
+		if _, ok := updated.(Model); !ok {
+			t.Fatalf("updated model type = %T, want Model", updated)
+		}
+
+		msg := cmd()
+		result, ok := msg.(bulkStatusResultMsg)
+		if !ok || result.updated != 2 || result.failed != 0 {
+			t.Fatalf("bulk lifecycle result = %#v", msg)
+		}
+		if len(updateBodies) != 2 {
+			t.Fatalf("update bodies = %+v, want 2 updates", updateBodies)
+		}
+		for _, body := range updateBodies {
+			if body.Lifecycle == nil || *body.Lifecycle != domain.IssueWorkflowBacklog {
+				t.Fatalf("update body = %+v, want backlog lifecycle", body)
+			}
+		}
+		if got := transport.requests; len(got) != 2 ||
+			got[0] != daemonclient.CommandTaskUpdate ||
+			got[1] != daemonclient.CommandTaskUpdate {
+			t.Fatalf("requests = %v", got)
 		}
 	})
 

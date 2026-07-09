@@ -7288,11 +7288,12 @@ func TestHandleBulkActionShowsImmediateFeedback(t *testing.T) {
 		action    string
 		wantToast string
 	}{
-		{name: "move left", action: "h", wantToast: "Bulk move queued for 2 task(s)"},
-		{name: "move right", action: "l", wantToast: "Bulk move queued for 2 task(s)"},
-		{name: "open", action: "1", wantToast: "Bulk status update queued for 2 task(s)"},
-		{name: "in progress", action: "2", wantToast: "Bulk status update queued for 2 task(s)"},
-		{name: "in review", action: "3", wantToast: "Bulk status update queued for 2 task(s)"},
+		{name: "move left", action: "h", wantToast: "Bulk lifecycle action queued for 2 task(s)"},
+		{name: "move right", action: "l", wantToast: "Bulk lifecycle action queued for 2 task(s)"},
+		{name: "backlog", action: "0", wantToast: "Bulk backlog update queued for 2 task(s)"},
+		{name: "open", action: "1", wantToast: "Bulk open update queued for 2 task(s)"},
+		{name: "in progress", action: "2", wantToast: "Bulk active update queued for 2 task(s)"},
+		{name: "in review", action: "3", wantToast: "Bulk review request queued for 2 task(s)"},
 		{name: "delete", action: "d", wantToast: "Bulk delete queued for 2 task(s)"},
 		{name: "archive", action: "a", wantToast: "Bulk archive queued for 2 task(s)"},
 		{name: "cleanup", action: "w", wantToast: "Bulk cleanup preflight queued for 2 task(s)"},
