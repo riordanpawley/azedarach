@@ -982,6 +982,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case pullBaseResultMsg:
+		if msg.operationID != "" && !operationStateTerminal(msg.state) {
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: formatPendingOperationMessage("Base pull", "", msg.operationID, msg.state),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, m.loadOperationQueueCmd()
+		}
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Base pull failed: %v", msg.err),
+				Expires: time.Now().Add(6 * time.Second),
+			})
+			return m, nil
+		}
+		branch := strings.TrimSpace(msg.baseBranch)
+		if branch == "" {
+			branch = "base branch"
+		}
+		m.addToast(Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Pulled %s in project root", branch),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		m.boardRefreshing = true
+		return m, tea.Batch(m.scheduleIssuesRefreshAfterRuntimeReconcileCmd(), m.gitSyncService.FetchAndCheck())
+
 	case createPRResultMsg:
 		if msg.err != nil {
 			m.addToast(Toast{

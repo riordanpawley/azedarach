@@ -728,10 +728,11 @@ func (r *operationRuntime) deriveOperationRouting(kind, projectID string, payloa
 		}
 		dedupeKey = kind + ":" + issueID
 		return issueID, resourceKeys, dedupeKey, nil
-	case daemonhandlers.CommandGitFetch:
+	case daemonhandlers.CommandGitFetch, daemonhandlers.CommandGitPullBase:
 		var body struct {
-			Worktree string `json:"worktree"`
-			Remote   string `json:"remote"`
+			Worktree   string `json:"worktree"`
+			Remote     string `json:"remote"`
+			BaseBranch string `json:"base_branch"`
 		}
 		if err = json.Unmarshal(payload, &body); err != nil {
 			return "", nil, "", fmt.Errorf("decode %s payload: %w", kind, err)
@@ -741,11 +742,21 @@ func (r *operationRuntime) deriveOperationRouting(kind, projectID string, payloa
 		if body.Worktree == "" {
 			return "", nil, "", errors.New("missing required fields: worktree")
 		}
+		if kind == daemonhandlers.CommandGitPullBase {
+			body.BaseBranch = strings.TrimSpace(body.BaseBranch)
+			if body.BaseBranch == "" {
+				return "", nil, "", errors.New("missing required fields: worktree/base_branch")
+			}
+		}
 		if body.Remote == "" {
 			body.Remote = "origin"
 		}
 		resourceKeys = []string{"worktree:" + body.Worktree}
-		dedupeKey = kind + ":" + body.Worktree + ":" + body.Remote
+		if kind == daemonhandlers.CommandGitPullBase {
+			dedupeKey = kind + ":" + body.Worktree + ":" + body.Remote + ":" + body.BaseBranch
+		} else {
+			dedupeKey = kind + ":" + body.Worktree + ":" + body.Remote
+		}
 		return "", resourceKeys, dedupeKey, nil
 	case daemonhandlers.CommandGitMerge, daemonhandlers.CommandGitCheckout:
 		var body struct {
@@ -836,6 +847,7 @@ func (r *operationRuntime) directRunnerForKind(kind string) (operationDirectRunn
 		}
 		return r.sessionResolveConflict, nil
 	case daemonhandlers.CommandGitFetch,
+		daemonhandlers.CommandGitPullBase,
 		daemonhandlers.CommandGitMerge,
 		daemonhandlers.CommandGitCheckout,
 		daemonhandlers.CommandGitAbortMerge:
@@ -1392,6 +1404,8 @@ func operationDisplayName(kind string) string {
 		return "Session conflict recovery"
 	case daemonhandlers.CommandGitFetch:
 		return "Git fetch"
+	case daemonhandlers.CommandGitPullBase:
+		return "Git pull base"
 	case daemonhandlers.CommandGitMerge:
 		return "Git merge"
 	case daemonhandlers.CommandGitCheckout:

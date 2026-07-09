@@ -14,6 +14,7 @@ import (
 
 const (
 	CommandGitFetch             = "git.fetch"
+	CommandGitPullBase          = "git.pull_base"
 	CommandGitMerge             = "git.merge"
 	CommandGitCheckout          = "git.checkout"
 	CommandGitAbortMerge        = "git.abort_merge"
@@ -29,6 +30,7 @@ const (
 // GitService captures the daemon-owned git operations needed by client workflows.
 type GitService interface {
 	Fetch(ctx context.Context, projectID, worktree, remote string) error
+	PullBase(ctx context.Context, projectID, worktree, remote, baseBranch string) error
 	Merge(ctx context.Context, projectID, worktree, branch string) (*git.MergeResult, error)
 	Checkout(ctx context.Context, projectID, worktree, branch string) error
 	AbortMerge(ctx context.Context, projectID, worktree string) error
@@ -216,6 +218,12 @@ func (h *GitHandler) HandleDirect(ctx context.Context, req protocol.RequestEnvel
 			return resp
 		}
 		return h.handleFetch(ctx, resp, cmd)
+	case CommandGitPullBase:
+		cmd, ok := decodeGitCommandBody(&resp, req)
+		if !ok {
+			return resp
+		}
+		return h.handlePullBase(ctx, resp, cmd)
 	case CommandGitMerge:
 		cmd, ok := decodeGitCommandBody(&resp, req)
 		if !ok {
@@ -276,7 +284,7 @@ func (h *GitHandler) HandleDirect(ctx context.Context, req protocol.RequestEnvel
 
 func isGitLongRunningCommand(command string) bool {
 	switch command {
-	case CommandGitFetch, CommandGitMerge, CommandGitCheckout, CommandGitAbortMerge, CommandGitDiscardChanges, CommandGitCheckpoint:
+	case CommandGitFetch, CommandGitPullBase, CommandGitMerge, CommandGitCheckout, CommandGitAbortMerge, CommandGitDiscardChanges, CommandGitCheckpoint:
 		return true
 	default:
 		return false
@@ -331,6 +339,46 @@ func decodeGitCommandBody(resp *protocol.ResponseEnvelope, req protocol.RequestE
 	}
 	cmd.ProjectID = resolveProjectID(cmd.ProjectID, req.Meta)
 	return cmd, true
+}
+
+func (h *GitHandler) handlePullBase(ctx context.Context, resp protocol.ResponseEnvelope, cmd gitCommandBody) protocol.ResponseEnvelope {
+	cmd.Worktree = strings.TrimSpace(cmd.Worktree)
+	cmd.Remote = strings.TrimSpace(cmd.Remote)
+	cmd.BaseBranch = strings.TrimSpace(cmd.BaseBranch)
+	if cmd.Worktree == "" || cmd.BaseBranch == "" {
+		resp.Error = &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInvalidRequest,
+			Message:   "missing required fields: worktree/base_branch",
+			Retryable: false,
+		}
+		return resp
+	}
+	if cmd.Remote == "" {
+		cmd.Remote = "origin"
+	}
+
+	if err := h.service.PullBase(ctx, cmd.ProjectID, cmd.Worktree, cmd.Remote, cmd.BaseBranch); err != nil {
+		resp.Error = mapGitError(err)
+		return resp
+	}
+
+	body, err := json.Marshal(gitActionResultBody{
+		Worktree: cmd.Worktree,
+		Remote:   cmd.Remote,
+		Branch:   cmd.BaseBranch,
+	})
+	if err != nil {
+		resp.Error = &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInternal,
+			Message:   fmt.Sprintf("marshal response body: %v", err),
+			Retryable: false,
+		}
+		return resp
+	}
+
+	resp.OK = true
+	resp.Body = body
+	return resp
 }
 
 func (h *GitHandler) handleRuntimeSignals(ctx context.Context, resp protocol.ResponseEnvelope, cmd gitCommandBody) protocol.ResponseEnvelope {

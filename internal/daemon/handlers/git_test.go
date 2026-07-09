@@ -13,6 +13,7 @@ import (
 
 type fakeGitService struct {
 	fetchFn             func(context.Context, string, string, string) error
+	pullBaseFn          func(context.Context, string, string, string, string) error
 	mergeFn             func(context.Context, string, string, string) (*git.MergeResult, error)
 	checkoutFn          func(context.Context, string, string, string) error
 	abortMergeFn        func(context.Context, string, string) error
@@ -39,6 +40,13 @@ func (r *recordingGitLongRunningExecutor) Execute(ctx context.Context, req proto
 func (f *fakeGitService) Fetch(ctx context.Context, projectID, worktree, remote string) error {
 	if f.fetchFn != nil {
 		return f.fetchFn(ctx, projectID, worktree, remote)
+	}
+	return nil
+}
+
+func (f *fakeGitService) PullBase(ctx context.Context, projectID, worktree, remote, baseBranch string) error {
+	if f.pullBaseFn != nil {
+		return f.pullBaseFn(ctx, projectID, worktree, remote, baseBranch)
 	}
 	return nil
 }
@@ -129,6 +137,44 @@ func (f *fakeGitService) Checkpoint(ctx context.Context, projectID string, req G
 		return f.checkpointFn(ctx, projectID, req)
 	}
 	return &GitCheckpointResult{Worktree: req.Worktree, Message: req.Message}, nil
+}
+
+func TestGitHandlerPullBaseDefaultsRemoteAndUsesLongRunningExecutor(t *testing.T) {
+	var gotProject, gotWorktree, gotRemote, gotBase string
+	executor := &recordingGitLongRunningExecutor{}
+	handler := NewGitHandler(&fakeGitService{
+		pullBaseFn: func(_ context.Context, projectID, worktree, remote, baseBranch string) error {
+			gotProject = projectID
+			gotWorktree = worktree
+			gotRemote = remote
+			gotBase = baseBranch
+			return nil
+		},
+	}, WithGitLongRunningExecutor(executor))
+
+	req := gitRequest(t, CommandGitPullBase, map[string]string{
+		"project_id":  "proj-1",
+		"worktree":    "/repo/root",
+		"base_branch": "main",
+	})
+	resp := handler.Handle(context.Background(), req)
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("pull base response OK = %v error = %+v", resp.OK, resp.Error)
+	}
+	if gotProject != "proj-1" || gotWorktree != "/repo/root" || gotRemote != "origin" || gotBase != "main" {
+		t.Fatalf("pull base args = project:%q worktree:%q remote:%q base:%q", gotProject, gotWorktree, gotRemote, gotBase)
+	}
+	if len(executor.commands) != 1 || executor.commands[0] != CommandGitPullBase {
+		t.Fatalf("long-running commands = %v, want %q", executor.commands, CommandGitPullBase)
+	}
+
+	var body gitActionResultBody
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Worktree != "/repo/root" || body.Remote != "origin" || body.Branch != "main" {
+		t.Fatalf("response body = %+v", body)
+	}
 }
 
 func gitRequest(t *testing.T, command string, body any) protocol.RequestEnvelope {

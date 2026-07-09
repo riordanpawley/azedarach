@@ -83,6 +83,50 @@ func TestGitFetchCheckoutAndMergeCommandsRouteThroughDaemon(t *testing.T) {
 		}
 	})
 
+	t.Run("pull base", func(t *testing.T) {
+		transport := &gitRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != CommandGitPullBase {
+					t.Fatalf("command = %q, want %q", req.Command, CommandGitPullBase)
+				}
+				var body GitCommandRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request: %v", err)
+				}
+				if body.Worktree != worktree || body.Remote != "origin" || body.BaseBranch != "main" {
+					t.Fatalf("request body = %+v", body)
+				}
+				respBody, err := json.Marshal(GitCommandResponse{
+					Worktree: worktree,
+					Remote:   "origin",
+					Branch:   "main",
+				})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		resp, err := client.GitPullBase(context.Background(), worktree, "origin", "main")
+		if err != nil {
+			t.Fatalf("GitPullBase error: %v", err)
+		}
+		if resp.Worktree != worktree || resp.Remote != "origin" || resp.Branch != "main" {
+			t.Fatalf("response = %+v", resp)
+		}
+		if transport.lastReq.Meta.ProjectID != wantProjectID {
+			t.Fatalf("project_id = %q, want %q", transport.lastReq.Meta.ProjectID, wantProjectID)
+		}
+	})
+
 	t.Run("checkout", func(t *testing.T) {
 		transport := &gitRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

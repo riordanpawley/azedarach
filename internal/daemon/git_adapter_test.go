@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -573,6 +575,52 @@ func TestGitServiceAdapterMergePreflightUsesWorktreeAwareClient(t *testing.T) {
 	}
 	if !reflect.DeepEqual(result.ConflictFiles, []string{"cmd/az/main.go"}) {
 		t.Fatalf("conflict files = %v, want [cmd/az/main.go]", result.ConflictFiles)
+	}
+}
+
+func TestGitServiceAdapterPullBaseUpdatesBaseWithoutSwitchingBranches(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		currentBranch string
+		wantMutation  string
+	}{
+		{
+			name:          "pulls when root is on base branch",
+			currentBranch: "main",
+			wantMutation:  "-C /repo/root pull origin main",
+		},
+		{
+			name:          "fetches base ref when root is on another branch",
+			currentBranch: "feature/root",
+			wantMutation:  "-C /repo/root fetch origin main:main",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var calls []string
+			runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+				call := strings.Join(args, " ")
+				calls = append(calls, call)
+				if call == "-C /repo/root branch --show-current" {
+					return tt.currentBranch, nil
+				}
+				return "", nil
+			}}
+			adapter := &gitServiceAdapter{client: git.NewClient(runner, slog.Default())}
+
+			if err := adapter.PullBase(context.Background(), "default", "/repo/root", "origin", "main"); err != nil {
+				t.Fatalf("PullBase: %v", err)
+			}
+			if !slices.Contains(calls, tt.wantMutation) {
+				t.Fatalf("git calls = %v, want mutation %q", calls, tt.wantMutation)
+			}
+		})
 	}
 }
 

@@ -149,6 +149,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		protocol.CommandLearnDoctor,
 		protocol.CommandLearnGC,
 		CommandGitFetch,
+		CommandGitPullBase,
 		CommandGitMerge,
 		CommandGitCheckout,
 		CommandGitAbortMerge,
