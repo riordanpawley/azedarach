@@ -9,9 +9,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
+
+const macOSClipboardAttemptTimeout = 2 * time.Second
 
 // ReadImageFromClipboard reads an image from the system clipboard
 // Supports macOS (pbpaste), Linux (wl-paste, xclip)
@@ -32,7 +35,9 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 
 	// Try pngpaste first (faster and more reliable for images)
 	if pngpastePath, ok := findPNGPastePath(); ok {
-		output, err := clipboardOutput(ctx, pngpastePath, "-")
+		output, err := runMacOSClipboardReadAttempt(ctx, macOSClipboardAttemptTimeout, func(attemptCtx context.Context) ([]byte, error) {
+			return clipboardOutput(attemptCtx, pngpastePath, "-")
+		})
 		if err == nil && len(output) > 0 {
 			return output, nil
 		}
@@ -45,40 +50,11 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 		attempts = append(attempts, "pngpaste not installed")
 	}
 
-	// Preserve compatibility with prior clipboard flows where pbpaste exposes raw payload bytes.
-	if data, err := readClipboardMacOSPBPasteRaw(ctx); err == nil && len(data) > 0 {
+	data, fallbackAttempts := runMacOSClipboardReadAttempts(ctx, macOSClipboardAttemptTimeout, macOSClipboardFallbackAttempts())
+	if len(data) > 0 {
 		return data, nil
-	} else if err != nil {
-		attempts = append(attempts, "pbpaste raw failed: "+compactWhitespace(err.Error()))
 	}
-
-	// Try the direct PNG AppleScript flow used in earlier implementations.
-	if data, err := readClipboardMacOSPNGScript(ctx); err == nil && len(data) > 0 {
-		return data, nil
-	} else if err != nil {
-		attempts = append(attempts, "png applescript failed: "+compactWhitespace(err.Error()))
-	}
-
-	// Native screenshot clipboard payloads can require direct NSPasteboard access.
-	if data, err := readClipboardMacOSPasteboardData(ctx); err == nil && len(data) > 0 {
-		return data, nil
-	} else if err != nil {
-		attempts = append(attempts, "pasteboard fallback failed: "+compactWhitespace(err.Error()))
-	}
-
-	// Some apps place a file alias on the clipboard instead of raw image bytes.
-	if data, err := readClipboardMacOSFileAlias(ctx); err == nil && len(data) > 0 {
-		return data, nil
-	} else if err != nil {
-		attempts = append(attempts, "file alias fallback failed: "+compactWhitespace(err.Error()))
-	}
-
-	// Some clipboard flows expose an image file path as plain text.
-	if data, err := readClipboardMacOSTextPath(ctx); err == nil && len(data) > 0 {
-		return data, nil
-	} else if err != nil {
-		attempts = append(attempts, "text path fallback failed: "+compactWhitespace(err.Error()))
-	}
+	attempts = append(attempts, fallbackAttempts...)
 
 	// Fallback to osascript for PNG/TIFF/JPEG.
 	script := `
@@ -114,7 +90,10 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 		end writeDataToFile
 	`
 
-	output, err := clipboardOutput(ctx, "osascript", "-e", script)
+	finalCtx, cancel := clipboardAttemptContext(ctx, macOSClipboardAttemptTimeout)
+	defer cancel()
+
+	output, err := clipboardOutput(finalCtx, "osascript", "-e", script)
 	if err != nil {
 		attempts = append(attempts, "osascript execution failed: "+compactWhitespace(err.Error()))
 		return nil, fmt.Errorf("failed to read clipboard image on macOS (%s)", compactWhitespace(strings.Join(attempts, "; ")))
@@ -137,7 +116,7 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 	}
 
 	tmpFile := filepath.Clean(result)
-	data, err := os.ReadFile(tmpFile)
+	data, err = os.ReadFile(tmpFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read temporary file: %w", err)
 	}
@@ -146,6 +125,55 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 	_ = os.Remove(tmpFile)
 
 	return data, nil
+}
+
+type macOSClipboardAttempt struct {
+	label string
+	read  func(context.Context) ([]byte, error)
+}
+
+func macOSClipboardFallbackAttempts() []macOSClipboardAttempt {
+	return []macOSClipboardAttempt{
+		// Preserve compatibility with prior clipboard flows where pbpaste exposes raw payload bytes.
+		{label: "pbpaste raw", read: readClipboardMacOSPBPasteRaw},
+		// Native screenshot clipboard payloads can require direct NSPasteboard access.
+		{label: "pasteboard fallback", read: readClipboardMacOSPasteboardData},
+		// Some apps place a file alias on the clipboard instead of raw image bytes.
+		{label: "file alias fallback", read: readClipboardMacOSFileAlias},
+		// Some clipboard flows expose an image file path as plain text.
+		{label: "text path fallback", read: readClipboardMacOSTextPath},
+		// Try the direct PNG AppleScript flow used in earlier implementations after faster paths.
+		{label: "png applescript", read: readClipboardMacOSPNGScript},
+	}
+}
+
+func runMacOSClipboardReadAttempts(ctx context.Context, timeout time.Duration, attemptSpecs []macOSClipboardAttempt) ([]byte, []string) {
+	attempts := make([]string, 0, len(attemptSpecs))
+	for _, spec := range attemptSpecs {
+		data, err := runMacOSClipboardReadAttempt(ctx, timeout, spec.read)
+		if err == nil && len(data) > 0 {
+			return data, attempts
+		}
+		if err != nil {
+			attempts = append(attempts, spec.label+" failed: "+compactWhitespace(err.Error()))
+		} else {
+			attempts = append(attempts, spec.label+" returned empty output")
+		}
+	}
+	return nil, attempts
+}
+
+func runMacOSClipboardReadAttempt(ctx context.Context, timeout time.Duration, read func(context.Context) ([]byte, error)) ([]byte, error) {
+	attemptCtx, cancel := clipboardAttemptContext(ctx, timeout)
+	defer cancel()
+	return read(attemptCtx)
+}
+
+func clipboardAttemptContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 func readClipboardMacOSFileAlias(ctx context.Context) ([]byte, error) {
