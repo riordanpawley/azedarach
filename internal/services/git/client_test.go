@@ -2119,6 +2119,32 @@ func TestChangedFilesLocalBaseDoesNotFallBackToRemote(t *testing.T) {
 	}
 }
 
+func TestChangedFilesBetweenRefTreesDoesNotUseMergeBase(t *testing.T) {
+	var gotArgs []string
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			gotArgs = append([]string(nil), args...)
+			if len(args) >= 5 && args[0] == "diff" && args[1] == "--name-only" && args[2] == "origin/preview" && args[3] == "feature" {
+				return "main.go\ninternal/app.go\n", nil
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	files, err := client.ChangedFilesBetweenRefTrees(context.Background(), "/fake/worktree", "origin/preview", "feature")
+	if err != nil {
+		t.Fatalf("ChangedFilesBetweenRefTrees() error = %v", err)
+	}
+	if !reflect.DeepEqual(files, []string{"main.go", "internal/app.go"}) {
+		t.Fatalf("ChangedFilesBetweenRefTrees() = %v", files)
+	}
+	joined := strings.Join(gotArgs, " ")
+	if strings.Contains(joined, "...") || strings.Contains(joined, "merge-base") {
+		t.Fatalf("ChangedFilesBetweenRefTrees() used ancestry comparison: %v", gotArgs)
+	}
+}
+
 func TestParseConflicts(t *testing.T) {
 	tests := []struct {
 		name      string

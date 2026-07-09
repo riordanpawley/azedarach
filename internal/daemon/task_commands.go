@@ -2555,6 +2555,9 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 	}
 
 	var integration taskCloseIntegrationResult
+	if daemonCloseIntegrationShouldUseOriginBase(d.workflowModeForProject(projectID), target) {
+		return d.integrateTaskBeforeCloseOriginBase(ctx, source, targetWorktree, targetBranch)
+	}
 	sourceUniqueCommits, err := d.git.RevListCount(ctx, targetWorktree, targetBranch+".."+source.Branch)
 	if err == nil && sourceUniqueCommits == 0 {
 		return taskCloseIntegrationResult{
@@ -2622,6 +2625,69 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		HookDiagnostics: append([]git.GitHookDiagnostic(nil), merge.HookDiagnostics...),
 	}
 	return integration, nil
+}
+
+func daemonCloseIntegrationShouldUseOriginBase(workflowMode string, target taskMergeBaseTargetResult) bool {
+	return strings.EqualFold(strings.TrimSpace(workflowMode), "origin") &&
+		strings.EqualFold(strings.TrimSpace(target.TargetID), "base") &&
+		strings.TrimSpace(target.WorktreePath) == ""
+}
+
+func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, source git.Worktree, targetWorktree, targetBranch string) (taskCloseIntegrationResult, error) {
+	remoteBaseRef := daemonRemoteTrackingBaseRef(targetBranch)
+	result := taskCloseIntegrationResult{
+		Requested:    true,
+		SourceBranch: source.Branch,
+		TargetBranch: remoteBaseRef,
+	}
+	sourceStatus, err := d.git.Status(ctx, source.Path)
+	if err != nil {
+		return result, fmt.Errorf("read source status for %s: %w", source.IssueID, err)
+	}
+	if gitStatusHasDirtyFiles(sourceStatus) {
+		return result, fmt.Errorf("source worker %s is not clean: %s", source.IssueID, gitStatusSummaryWithDetails(sourceStatus))
+	}
+	if err := d.git.Fetch(ctx, targetWorktree, "origin"); err != nil {
+		return result, fmt.Errorf("fetch origin before origin-mode close integration for %s: %w", source.IssueID, err)
+	}
+	changedFiles, err := d.git.ChangedFilesBetweenRefTrees(ctx, targetWorktree, remoteBaseRef, source.Branch)
+	if err != nil {
+		return result, fmt.Errorf("inspect origin-mode close diff for %s against %s: %w", source.IssueID, remoteBaseRef, err)
+	}
+	if len(changedFiles) == 0 {
+		result.NoChanges = true
+		return result, nil
+	}
+	return result, fmt.Errorf(
+		"origin workflow close will not merge %s into the local %s checkout; %s still differs from %s (%d file(s): %s). Next: integrate through the remote workflow, fetch %s, then retry close",
+		source.Branch,
+		targetBranch,
+		source.IssueID,
+		remoteBaseRef,
+		len(changedFiles),
+		strings.Join(daemonLimitStrings(changedFiles, 8), ", "),
+		remoteBaseRef,
+	)
+}
+
+func daemonRemoteTrackingBaseRef(targetBranch string) string {
+	targetBranch = strings.TrimSpace(targetBranch)
+	if targetBranch == "" {
+		targetBranch = "main"
+	}
+	if strings.HasPrefix(targetBranch, "refs/remotes/") || strings.HasPrefix(targetBranch, "origin/") {
+		return targetBranch
+	}
+	return "origin/" + targetBranch
+}
+
+func daemonLimitStrings(values []string, limit int) []string {
+	if limit <= 0 || len(values) <= limit {
+		return values
+	}
+	out := append([]string(nil), values[:limit]...)
+	out = append(out, fmt.Sprintf("%d more omitted", len(values)-limit))
+	return out
 }
 
 func recordTaskCloseHookPhases(ctx context.Context, result *taskCloseResult, logger *slog.Logger, req protocol.RequestEnvelope, projectID, taskID string, hooks []git.GitHookDiagnostic) {

@@ -1052,6 +1052,24 @@ func (c *Client) ChangedFilesBetweenRefs(ctx context.Context, worktree, baseRef,
 	return splitNonEmptyLines(output), nil
 }
 
+// ChangedFilesBetweenRefTrees returns files whose final tree differs between
+// baseRef and headRef without using merge-base ancestry.
+func (c *Client) ChangedFilesBetweenRefTrees(ctx context.Context, worktree, baseRef, headRef string) ([]string, error) {
+	baseRef = strings.TrimSpace(baseRef)
+	headRef = strings.TrimSpace(headRef)
+	if baseRef == "" {
+		return nil, fmt.Errorf("base ref is required")
+	}
+	if headRef == "" {
+		return nil, fmt.Errorf("head ref is required")
+	}
+	output, err := c.runInWorktree(ctx, worktree, "diff", "--name-only", baseRef, headRef, "--")
+	if err != nil {
+		return nil, fmt.Errorf("list files with different trees between %s and %s: %w", baseRef, headRef, err)
+	}
+	return splitNonEmptyLines(output), nil
+}
+
 // BranchAheadBehind reports commit deltas for HEAD relative to the base branch.
 // It tries the local base branch first, then falls back to origin/<base>.
 func (c *Client) BranchAheadBehind(ctx context.Context, worktree, baseBranch string) (int, int, error) {
