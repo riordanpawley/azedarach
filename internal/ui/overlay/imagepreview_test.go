@@ -276,11 +276,11 @@ func TestImagePreviewOverlay_View(t *testing.T) {
 		t.Error("View should contain position indicator showing 1/2")
 	}
 
-	if !strings.Contains(view, "Filename:") {
-		t.Error("View should contain filename label")
+	if !strings.Contains(view, "test.png") {
+		t.Error("View should contain image filename in full-screen header")
 	}
 
-	if !strings.Contains(view, "h/l") || !strings.Contains(view, "Navigate") {
+	if !strings.Contains(view, "h/l") || !strings.Contains(view, "navigate") {
 		t.Error("View should contain navigation hints")
 	}
 
@@ -401,6 +401,112 @@ func TestImagePreviewOverlay_ShowsMarkdownReadError(t *testing.T) {
 	view := overlay.View()
 	if !strings.Contains(ansi.Strip(view), "Error: read markdown:") {
 		t.Fatalf("view missing markdown read error: %q", view)
+	}
+}
+
+func TestImagePreviewOverlay_RendersFullScreenImagePreview(t *testing.T) {
+	restore := stubFullScreenImageRenderer(t, "rich-image-output", "Kitty", 32, 12, nil)
+	defer restore()
+
+	overlay := NewImagePreviewOverlay("test-issue", nil, 0)
+	overlay.images = []attachment.Attachment{{
+		ID:       "img-1",
+		Filename: "screen.png",
+		MimeType: "image/png",
+		Path:     filepath.Join(t.TempDir(), "screen.png"),
+		Size:     2048,
+	}}
+	overlay.currentIndex = 0
+	overlay.ApplyWindowSize(tea.WindowSizeMsg{Width: 90, Height: 30})
+
+	cmd := overlay.loadCurrentFullImage()
+	if cmd == nil {
+		t.Fatal("expected full-screen image render command")
+	}
+	model, _ := overlay.Update(cmd())
+	overlay = model.(*ImagePreviewOverlay)
+
+	view := overlay.View()
+	if !strings.Contains(view, "rich-image-output") {
+		t.Fatalf("view missing rendered image output: %q", view)
+	}
+	if !strings.Contains(ansi.Strip(view), "Protocol: Kitty") {
+		t.Fatalf("view missing protocol metadata: %q", view)
+	}
+	if !strings.Contains(ansi.Strip(view), "Esc/q close") || !strings.Contains(ansi.Strip(view), "o open") {
+		t.Fatalf("view missing full-screen actions: %q", view)
+	}
+}
+
+func TestImagePreviewOverlay_FullScreenCloseClearsImages(t *testing.T) {
+	originalClear := clearTerminalImagesOutput
+	clearTerminalImagesOutput = func() tea.Msg { return terminalImagesClearedMsg{} }
+	defer func() { clearTerminalImagesOutput = originalClear }()
+
+	overlay := NewImagePreviewOverlay("test-issue", nil, 0)
+	overlay.images = []attachment.Attachment{{
+		ID:       "img-1",
+		Filename: "screen.png",
+		MimeType: "image/png",
+		Path:     filepath.Join(t.TempDir(), "screen.png"),
+	}}
+	overlay.currentIndex = 0
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("expected close command")
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected batch close command for full-screen image, got %T", msg)
+	}
+	if len(batch) != 3 {
+		t.Fatalf("batch command count = %d, want clear, clear-screen, close", len(batch))
+	}
+	clearMsg := batch[0]()
+	if _, ok := clearMsg.(terminalImagesClearedMsg); !ok {
+		t.Fatalf("first batch command = %T, want terminalImagesClearedMsg", clearMsg)
+	}
+	closeMsg := batch[2]()
+	if _, ok := closeMsg.(CloseOverlayMsg); !ok {
+		t.Fatalf("last batch command = %T, want CloseOverlayMsg", closeMsg)
+	}
+}
+
+func TestImagePreviewOverlay_FullScreenDeleteConfirmationClearsImages(t *testing.T) {
+	originalClear := clearTerminalImagesOutput
+	clearTerminalImagesOutput = func() tea.Msg { return terminalImagesClearedMsg{} }
+	defer func() { clearTerminalImagesOutput = originalClear }()
+
+	overlay := NewImagePreviewOverlay("test-issue", nil, 0)
+	overlay.images = []attachment.Attachment{{
+		ID:       "img-1",
+		Filename: "screen.png",
+		MimeType: "image/png",
+		Path:     filepath.Join(t.TempDir(), "screen.png"),
+	}}
+	overlay.currentIndex = 0
+
+	model, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	overlay = model.(*ImagePreviewOverlay)
+	if !overlay.confirmDelete {
+		t.Fatal("expected delete confirmation mode")
+	}
+	if cmd == nil {
+		t.Fatal("expected clear command when entering delete confirmation from full-screen image")
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected batch clear command, got %T", msg)
+	}
+	if len(batch) != 2 {
+		t.Fatalf("batch command count = %d, want clear and clear-screen", len(batch))
+	}
+	clearMsg := batch[0]()
+	if _, ok := clearMsg.(terminalImagesClearedMsg); !ok {
+		t.Fatalf("first batch command = %T, want terminalImagesClearedMsg", clearMsg)
 	}
 }
 
@@ -566,5 +672,16 @@ func TestImagePreviewOverlay_WindowSizeFitsNarrowViewport(t *testing.T) {
 	width, _ := overlay.Size()
 	if width > 58 {
 		t.Fatalf("expected preview width to fit narrow viewport, got width=%d", width)
+	}
+}
+
+func stubFullScreenImageRenderer(t *testing.T, output, protocol string, width, height int, err error) func() {
+	t.Helper()
+	original := renderFullScreenImagePreview
+	renderFullScreenImagePreview = func(string, int, int) (string, string, int, int, error) {
+		return output, protocol, width, height, err
+	}
+	return func() {
+		renderFullScreenImagePreview = original
 	}
 }

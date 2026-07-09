@@ -33,6 +33,16 @@ const (
 	attachmentPreviewImageH   = 8
 )
 
+type fullScreenImagePreviewState struct {
+	attachmentID string
+	output       string
+	protocol     string
+	width        int
+	height       int
+	lines        []string
+	err          string
+}
+
 type attachmentPreviewState struct {
 	attachmentID  string
 	title         string
@@ -134,6 +144,7 @@ func isPreviewableImageAttachment(att attachment.Attachment) bool {
 var (
 	renderTerminalImagePreview   = renderTerminalImagePreviewWithTermimg
 	renderHalfblockTerminalImage = renderHalfblockImagePreview
+	renderFullScreenImagePreview = renderFullScreenImagePreviewWithTermimg
 )
 
 func renderTerminalImagePreviewWithTermimg(path string, width, height int) (string, error) {
@@ -160,6 +171,69 @@ func renderHalfblockImagePreview(path string, width, height int) (string, error)
 		return "", fmt.Errorf("terminal image renderer produced no output")
 	}
 	return outcome.Output, nil
+}
+
+func buildFullScreenImagePreview(att attachment.Attachment, width, height int) fullScreenImagePreviewState {
+	state := fullScreenImagePreviewState{
+		attachmentID: att.ID,
+		lines:        imagePreviewLines(att, nil),
+	}
+	if !isPreviewableImageAttachment(att) {
+		state.err = "attachment is not an image"
+		return state
+	}
+	output, protocol, targetW, targetH, err := renderFullScreenImagePreview(att.Path, width, height)
+	state.protocol = protocol
+	state.width = targetW
+	state.height = targetH
+	if err != nil {
+		state.err = compactOverlayError(err)
+		return state
+	}
+	state.output = output
+	return state
+}
+
+func renderFullScreenImagePreviewWithTermimg(path string, width, height int) (string, string, int, int, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", "", 0, 0, fmt.Errorf("attachment has no local path")
+	}
+	img, err := termimg.Open(path)
+	if err != nil {
+		return "", "", 0, 0, fmt.Errorf("load terminal image: %w", err)
+	}
+
+	targetW, targetH := fitImageCells(max(1, width-4), max(1, height-8), img.Bounds.Dx(), img.Bounds.Dy())
+	protocol := termimg.DetectProtocol()
+	output, err := termimg.NewImageWidget(img).
+		SetSize(targetW, targetH).
+		SetProtocol(termimg.Auto).
+		Render()
+	if err != nil {
+		return "", protocol.String(), targetW, targetH, fmt.Errorf("render terminal image: %w", err)
+	}
+	if strings.TrimSpace(output) == "" {
+		return "", protocol.String(), targetW, targetH, fmt.Errorf("terminal image renderer produced no output")
+	}
+	return output, protocol.String(), targetW, targetH, nil
+}
+
+func fitImageCells(viewW, viewH, imgW, imgH int) (int, int) {
+	viewW = max(1, viewW)
+	viewH = max(1, viewH)
+	if imgW <= 0 || imgH <= 0 {
+		return viewW, viewH
+	}
+
+	widthScale := float64(viewW) / float64(imgW)
+	heightScale := float64(viewH) / float64(imgH)
+	scale := widthScale
+	if heightScale < scale {
+		scale = heightScale
+	}
+	targetW := int(float64(imgW) * scale)
+	targetH := int(float64(imgH) * scale)
+	return max(1, min(viewW, targetW)), max(1, min(viewH, targetH))
 }
 
 func imagePreviewLines(att attachment.Attachment, renderErr error) []string {
