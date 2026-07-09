@@ -497,6 +497,12 @@ func TestBuildBoardSnapshotPayloadOmitsDetailFields(t *testing.T) {
 	if got, want := decoded.Tasks[0].Title, "Board task"; got != want {
 		t.Fatalf("title = %q, want %q", got, want)
 	}
+	if decoded.Tasks[0].Facts.DisplayPhase != domain.IssueDisplayActive {
+		t.Fatalf("issue facts display phase = %s, want %s", decoded.Tasks[0].Facts.DisplayPhase, domain.IssueDisplayActive)
+	}
+	if !slices.Contains(decoded.Tasks[0].Facts.ReasonMessages(), "lifecycle is active") {
+		t.Fatalf("issue facts reasons = %#v, want lifecycle reason", decoded.Tasks[0].Facts.ReasonMessages())
+	}
 }
 
 func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
@@ -2046,14 +2052,22 @@ func TestHandleBoardFetchDerivesInReviewPhaseFromSessionActivity(t *testing.T) {
 		t.Fatalf("decode board.fetch body: %v", err)
 	}
 	statusByID := map[string]domain.Status{}
+	factsByID := map[string]domain.IssueFacts{}
 	for _, task := range payload.Tasks {
 		statusByID[task.ID.String()] = task.Status
+		factsByID[task.ID.String()] = task.Facts
 	}
 	if got := statusByID[busyID]; got != domain.StatusInProgress {
 		t.Fatalf("busy handoff board status = %s, want %s", got, domain.StatusInProgress)
 	}
 	if got := statusByID[idleID]; got != domain.StatusInReview {
 		t.Fatalf("idle handoff board status = %s, want %s", got, domain.StatusInReview)
+	}
+	if got := factsByID[busyID]; got.DisplayPhase != domain.IssueDisplayActive || got.ReviewReadyVisible {
+		t.Fatalf("busy handoff facts = %+v, want active and not review-ready", got)
+	}
+	if got := factsByID[idleID]; got.DisplayPhase != domain.IssueDisplayReview || !got.ReviewReadyVisible {
+		t.Fatalf("idle handoff facts = %+v, want review-ready", got)
 	}
 }
 

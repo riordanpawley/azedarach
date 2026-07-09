@@ -466,7 +466,8 @@ func (m Model) buildColumns() []board.Column {
 		columns = append(columns, board.Column{Title: phase.Label()})
 	}
 	for _, task := range filteredTasks {
-		column, ok := columnByPhase[task.IssueDisplayPhase()]
+		facts := task.IssueFacts()
+		column, ok := columnByPhase[facts.DisplayPhase]
 		if !ok || column < 0 || column >= len(columns) {
 			continue
 		}

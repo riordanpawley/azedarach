@@ -67,7 +67,15 @@ func (f *Filter) Apply(tasks []Task) []Task {
 func (f *Filter) Matches(t Task) bool {
 	// Status filter (OR within)
 	if len(f.Status) > 0 {
-		if !f.Status[t.IssueDisplayFilterStatus()] {
+		facts := t.IssueFacts()
+		matched := false
+		for status := range f.Status {
+			if facts.MatchesFilterStatus(status) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			return false
 		}
 	}

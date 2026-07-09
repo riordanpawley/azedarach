@@ -11,7 +11,7 @@ import (
 
 const (
 	CommandBoardFetch          = "board.fetch"
-	BoardSnapshotSchemaVersion = 2
+	BoardSnapshotSchemaVersion = 3
 )
 
 // BoardSnapshotPayload is the daemon/client contract for board view snapshots.
@@ -37,6 +37,7 @@ type BoardTaskSummary struct {
 	Estimate              *int                   `json:"estimate,omitempty" msgpack:"estimate,omitempty"`
 	Status                domain.Status          `json:"status" msgpack:"status"`
 	State                 domain.IssueState      `json:"issue_state,omitzero" msgpack:"issue_state,omitempty"`
+	Facts                 domain.IssueFacts      `json:"issue_facts,omitzero" msgpack:"issue_facts,omitempty"`
 	Priority              domain.Priority        `json:"priority" msgpack:"priority"`
 	Type                  domain.TaskType        `json:"issue_type" msgpack:"issue_type"`
 	ParentID              *naming.IssueID        `json:"parent_id,omitempty" msgpack:"parent_id,omitempty"`
@@ -60,6 +61,7 @@ type BoardTaskSummary struct {
 }
 
 func BoardTaskSummaryFromDomain(task domain.Task) BoardTaskSummary {
+	facts := task.IssueFacts()
 	return BoardTaskSummary{
 		ID:                    task.ID,
 		Title:                 task.Title,
@@ -68,6 +70,7 @@ func BoardTaskSummaryFromDomain(task domain.Task) BoardTaskSummary {
 		Estimate:              cloneIntPointer(task.Estimate),
 		Status:                domain.BoardStatusForTask(task),
 		State:                 task.State,
+		Facts:                 facts,
 		Priority:              task.Priority,
 		Type:                  task.Type,
 		ParentID:              cloneIssueIDPointer(task.ParentID),
@@ -100,6 +103,7 @@ func (s BoardTaskSummary) ToDomainTask() domain.Task {
 		Estimate:              cloneIntPointer(s.Estimate),
 		Status:                s.Status,
 		State:                 s.State,
+		Facts:                 s.Facts,
 		Priority:              s.Priority,
 		Type:                  s.Type,
 		ParentID:              cloneIssueIDPointer(s.ParentID),
