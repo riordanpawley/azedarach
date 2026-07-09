@@ -2998,6 +2998,99 @@ func TestCloseFailureAIMergeActionLaunchesAgentMerge(t *testing.T) {
 	}
 }
 
+func TestCloseFailureCreatePRActionLaunchesPRFlow(t *testing.T) {
+	jsonResponse := func(req protocol.RequestEnvelope, body any) (protocol.ResponseEnvelope, error) {
+		respBody, err := json.Marshal(body)
+		if err != nil {
+			return protocol.ResponseEnvelope{}, err
+		}
+		return protocol.ResponseEnvelope{
+			ProtocolVersion: req.ProtocolVersion,
+			RequestID:       req.RequestID,
+			Kind:            protocol.EnvelopeKindResponse,
+			OK:              true,
+			Body:            respBody,
+		}, nil
+	}
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				return jsonResponse(req, struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "default",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: "/tmp/az-5", Branch: "riordan/az-5/remote-workflow", IssueID: "az-5"},
+					},
+				})
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{
+		ID:     "az-5",
+		Status: domain.StatusInReview,
+		Session: &domain.Session{
+			IssueID:  "az-5",
+			State:    domain.SessionIdle,
+			Worktree: "/tmp/az-5",
+		},
+	}}
+	m.overlayStack.Push(overlay.NewCloseFailureDialog(
+		"az-5",
+		"internal: phase integrate_before_close for issue az-5: origin workflow close will not merge riordan/az-5/remote-workflow into the local preview checkout; az-5 still differs from origin/preview (1 file(s): main.go). Next: integrate through the remote workflow, fetch origin/preview, then retry close",
+		overlay.CloseFailureDialogOptions{
+			PreviousStatus: "in_review",
+			TargetStatus:   "closed",
+			SourceWorktree: "/tmp/az-5",
+			AllowAIMerge:   true,
+		},
+	))
+
+	afterKeyAny, selectionCmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	if selectionCmd == nil {
+		t.Fatal("expected create PR selection command")
+	}
+	selection, ok := selectionCmd().(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("selection = %T, want SelectionMsg", selectionCmd())
+	}
+	queuedAny, launchCmd := afterKeyAny.(Model).Update(selection)
+	if launchCmd == nil {
+		t.Fatal("expected PR launch command")
+	}
+	queued := queuedAny.(Model)
+	if queued.overlayStack.Current() != nil {
+		t.Fatalf("overlay after create PR selection = %T, want none", queued.overlayStack.Current())
+	}
+
+	msg := launchCmd()
+	result, ok := msg.(openPROverlayResultMsg)
+	if !ok {
+		t.Fatalf("create PR command returned %T, want openPROverlayResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("create PR result err = %v", result.err)
+	}
+	if result.issueID != "az-5" || result.worktree != "/tmp/az-5" || result.branch != "riordan/az-5/remote-workflow" {
+		t.Fatalf("create PR result = %+v, want az-5 /tmp/az-5 branch", result)
+	}
+}
+
 func TestCloseFailureDirtyTargetDoesNotOfferAIMergeAction(t *testing.T) {
 	jsonResponse := func(req protocol.RequestEnvelope, body any) (protocol.ResponseEnvelope, error) {
 		respBody, err := json.Marshal(body)

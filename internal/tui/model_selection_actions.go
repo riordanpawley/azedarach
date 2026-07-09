@@ -366,6 +366,10 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			_, cmd := actionModel.agentMergeCurrentIssueIntoDefaultTarget(task)
 			return m, cmd
 		}
+		if action.Action == overlay.CloseFailureActionCreatePR {
+			m.beginMutationFeedback(fmt.Sprintf("Preparing PR for %s", action.TaskID))
+			return m, actionModel.openPROverlayCmd(action.SourceWorktree, action.TaskID)
+		}
 		previousStatus := domain.Status(strings.TrimSpace(action.PreviousStatus))
 		targetStatus := domain.Status(strings.TrimSpace(action.TargetStatus))
 		if previousStatus == "" {
