@@ -7,13 +7,21 @@ import (
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/pr"
 )
 
 type fakePRWorkflow struct {
-	lastParams pr.CreatePRParams
-	result     *pr.PRInfo
-	err        error
+	lastParams   pr.CreatePRParams
+	lastBranch   string
+	lastRef      string
+	lastList     pr.ListPRParams
+	lastNumber   int
+	lastStrategy string
+	result       *pr.PRInfo
+	checks       []pr.CheckInfo
+	err          error
 }
 
 func (f *fakePRWorkflow) Create(_ context.Context, params pr.CreatePRParams) (*pr.PRInfo, error) {
@@ -35,6 +43,47 @@ func (f *fakePRWorkflow) Create(_ context.Context, params pr.CreatePRParams) (*p
 	}, nil
 }
 
+func (f *fakePRWorkflow) Get(_ context.Context, branch string) (*pr.PRInfo, error) {
+	f.lastBranch = branch
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.result != nil {
+		return f.result, nil
+	}
+	return &pr.PRInfo{Number: 7, Title: "Add feature", URL: "https://github.com/example/repo/pull/7", State: "open", Branch: branch, BaseRef: "main"}, nil
+}
+
+func (f *fakePRWorkflow) List(_ context.Context, params pr.ListPRParams) ([]pr.PRInfo, error) {
+	f.lastList = params
+	if f.err != nil {
+		return nil, f.err
+	}
+	return []pr.PRInfo{{Number: 7, Title: "Add feature", URL: "https://github.com/example/repo/pull/7", State: "open", Branch: "feature/add", BaseRef: "main"}}, nil
+}
+
+func (f *fakePRWorkflow) Checks(_ context.Context, ref string) ([]pr.CheckInfo, error) {
+	f.lastRef = ref
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.checks != nil {
+		return f.checks, nil
+	}
+	return []pr.CheckInfo{{Name: "test", Bucket: "pass"}}, nil
+}
+
+func (f *fakePRWorkflow) Open(_ context.Context, branch string) error {
+	f.lastBranch = branch
+	return f.err
+}
+
+func (f *fakePRWorkflow) Merge(_ context.Context, number int, strategy string) error {
+	f.lastNumber = number
+	f.lastStrategy = strategy
+	return f.err
+}
+
 type fakeBranchBehindGit struct {
 	branchBehindCalls []struct {
 		projectID  string
@@ -45,6 +94,19 @@ type fakeBranchBehindGit struct {
 	aheadCount  int
 	behindCount int
 	err         error
+}
+
+type fakePRIssueRefStore struct {
+	params []issues.UpsertExternalIssueRefParams
+	err    error
+}
+
+func (s *fakePRIssueRefStore) UpsertExternalIssueRef(_ context.Context, params issues.UpsertExternalIssueRefParams) (domain.ExternalIssueRef, error) {
+	s.params = append(s.params, params)
+	if s.err != nil {
+		return domain.ExternalIssueRef{}, s.err
+	}
+	return domain.ExternalIssueRef{IssueID: params.IssueID, Provider: params.Provider, RemoteKey: params.RemoteKey}, nil
 }
 
 func (g *fakeBranchBehindGit) BranchBehind(_ context.Context, projectID, worktree, baseBranch, remote string) (int, int, error) {
@@ -163,6 +225,41 @@ func TestPRHandlerCreateAndBranchBehind(t *testing.T) {
 	})
 }
 
+func TestPRHandlerCreatePersistsGitHubExternalRef(t *testing.T) {
+	workflow := &fakePRWorkflow{}
+	refs := &fakePRIssueRefStore{}
+	handler := NewPRHandler(workflow, nil, refs)
+
+	body, _ := json.Marshal(map[string]any{
+		"title":       "Add feature",
+		"body":        "Body",
+		"branch":      "feature/add",
+		"base_branch": "main",
+		"draft":       true,
+		"issue_id":    "az-1",
+	})
+	resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-pr",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         CommandPRCreate,
+		Body:            body,
+	})
+	if !resp.OK {
+		t.Fatalf("create response error: %+v", resp.Error)
+	}
+	if len(refs.params) != 1 {
+		t.Fatalf("external ref writes = %+v", refs.params)
+	}
+	got := refs.params[0]
+	if got.IssueID != "az-1" || got.Provider != "github" || got.RemoteKey != "7" || got.DisplayKey != "#7" {
+		t.Fatalf("external ref params = %+v", got)
+	}
+	if got.Metadata["state"] != "open" || got.Metadata["draft"] != "true" {
+		t.Fatalf("external ref metadata = %+v", got.Metadata)
+	}
+}
+
 func TestPRHandlerRejectsInvalidBodyAndUnsupportedCommand(t *testing.T) {
 	handler := NewPRHandler(&fakePRWorkflow{}, &fakeBranchBehindGit{})
 
@@ -192,6 +289,112 @@ func TestPRHandlerRejectsInvalidBodyAndUnsupportedCommand(t *testing.T) {
 	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnsupportedCommand {
 		t.Fatalf("error = %+v", resp.Error)
 	}
+}
+
+func TestPRHandlerGetChecksOpenAndMerge(t *testing.T) {
+	t.Run("get", func(t *testing.T) {
+		workflow := &fakePRWorkflow{}
+		handler := NewPRHandler(workflow, nil)
+		body, _ := json.Marshal(map[string]string{"branch": "feature/add"})
+		resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-pr-get",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         CommandPRGet,
+			Body:            body,
+		})
+		if !resp.OK {
+			t.Fatalf("get response error: %+v", resp.Error)
+		}
+		var out prGetResultBody
+		if err := json.Unmarshal(resp.Body, &out); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
+		if out.PullRequest.Branch != "feature/add" || workflow.lastBranch != "feature/add" {
+			t.Fatalf("get result = %+v workflow branch=%q", out, workflow.lastBranch)
+		}
+	})
+
+	t.Run("list", func(t *testing.T) {
+		workflow := &fakePRWorkflow{}
+		handler := NewPRHandler(workflow, nil)
+		body, _ := json.Marshal(map[string]any{"state": "all", "limit": 12})
+		resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-pr-list",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         CommandPRList,
+			Body:            body,
+		})
+		if !resp.OK {
+			t.Fatalf("list response error: %+v", resp.Error)
+		}
+		var out prListResultBody
+		if err := json.Unmarshal(resp.Body, &out); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
+		if out.State != "all" || len(out.PullRequests) != 1 || workflow.lastList.State != "all" || workflow.lastList.Limit != 12 {
+			t.Fatalf("list result = %+v workflow params=%+v", out, workflow.lastList)
+		}
+	})
+
+	t.Run("checks", func(t *testing.T) {
+		workflow := &fakePRWorkflow{checks: []pr.CheckInfo{{Name: "unit", Bucket: "pass"}, {Name: "lint", Bucket: "pending"}}}
+		handler := NewPRHandler(workflow, nil)
+		body, _ := json.Marshal(map[string]string{"ref": "feature/add"})
+		resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-pr-checks",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         CommandPRChecks,
+			Body:            body,
+		})
+		if !resp.OK {
+			t.Fatalf("checks response error: %+v", resp.Error)
+		}
+		var out prChecksResultBody
+		if err := json.Unmarshal(resp.Body, &out); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
+		if out.ChecksStatus != "pending" || workflow.lastRef != "feature/add" {
+			t.Fatalf("checks result = %+v workflow ref=%q", out, workflow.lastRef)
+		}
+	})
+
+	t.Run("open", func(t *testing.T) {
+		workflow := &fakePRWorkflow{}
+		handler := NewPRHandler(workflow, nil)
+		body, _ := json.Marshal(map[string]string{"branch": "feature/add"})
+		resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-pr-open",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         CommandPROpen,
+			Body:            body,
+		})
+		if !resp.OK || workflow.lastBranch != "feature/add" {
+			t.Fatalf("open response error=%+v workflow branch=%q", resp.Error, workflow.lastBranch)
+		}
+	})
+
+	t.Run("merge resolves branch", func(t *testing.T) {
+		workflow := &fakePRWorkflow{result: &pr.PRInfo{Number: 88, Branch: "feature/add"}}
+		handler := NewPRHandler(workflow, nil)
+		body, _ := json.Marshal(map[string]string{"branch": "feature/add", "strategy": "rebase"})
+		resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-pr-merge",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         CommandPRMerge,
+			Body:            body,
+		})
+		if !resp.OK {
+			t.Fatalf("merge response error: %+v", resp.Error)
+		}
+		if workflow.lastNumber != 88 || workflow.lastStrategy != "rebase" {
+			t.Fatalf("merge call number=%d strategy=%q", workflow.lastNumber, workflow.lastStrategy)
+		}
+	})
 }
 
 func TestPRHandlerMapsServiceErrors(t *testing.T) {

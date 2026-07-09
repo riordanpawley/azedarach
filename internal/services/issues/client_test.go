@@ -232,6 +232,42 @@ func TestClient_ExternalIssueRefsAreBackendNeutralMetadata(t *testing.T) {
 	assert.Equal(t, naming.IssueID(issueID), task.ID, "runtime task id stays Az-owned, not provider-owned")
 }
 
+func TestClient_GitHubExternalRefHydratesPullRequestSummary(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Task with PR",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	_, err = client.UpsertExternalIssueRef(ctx, UpsertExternalIssueRefParams{
+		IssueID:    issueID,
+		Provider:   "github",
+		RemoteKey:  "42",
+		DisplayKey: "#42",
+		URL:        "https://github.com/acme/repo/pull/42",
+		Metadata: map[string]string{
+			"state":         "open",
+			"draft":         "true",
+			"checks_status": "pending",
+		},
+	})
+	require.NoError(t, err)
+
+	task, err := client.GetWithRuntime(ctx, "proj", issueID)
+	require.NoError(t, err)
+	require.NotNil(t, task.PullRequest)
+	assert.Equal(t, "github", task.Origin)
+	assert.Equal(t, 42, task.PullRequest.Number)
+	assert.Equal(t, "#42", task.PullRequest.DisplayKey)
+	assert.Equal(t, "open", task.PullRequest.State)
+	assert.True(t, task.PullRequest.Draft)
+	assert.Equal(t, "pending", task.PullRequest.ChecksStatus)
+}
+
 func TestClient_GetManyWithRuntimeFiltersRequestedActiveIssues(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

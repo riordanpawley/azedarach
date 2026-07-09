@@ -81,6 +81,26 @@ func (w *routePRWorkflow) Create(_ context.Context, params pr.CreatePRParams) (*
 	}, nil
 }
 
+func (w *routePRWorkflow) Get(_ context.Context, branch string) (*pr.PRInfo, error) {
+	return &pr.PRInfo{Number: 42, Title: "PR", URL: "https://github.com/example/repo/pull/42", State: "open", Branch: branch, BaseRef: "main"}, nil
+}
+
+func (w *routePRWorkflow) List(context.Context, pr.ListPRParams) ([]pr.PRInfo, error) {
+	return []pr.PRInfo{{Number: 42, Title: "PR", URL: "https://github.com/example/repo/pull/42", State: "open", Branch: "feature/add", BaseRef: "main"}}, nil
+}
+
+func (w *routePRWorkflow) Checks(_ context.Context, ref string) ([]pr.CheckInfo, error) {
+	return []pr.CheckInfo{{Name: "test", Bucket: "pass"}}, nil
+}
+
+func (w *routePRWorkflow) Open(context.Context, string) error {
+	return nil
+}
+
+func (w *routePRWorkflow) Merge(context.Context, int, string) error {
+	return nil
+}
+
 type routeBranchBehindGit struct {
 	calls []struct {
 		projectID  string

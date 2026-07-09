@@ -59,6 +59,7 @@ const (
 	sessionStartCommandTimeout  = 5 * time.Minute
 	branchMergeToBaseTimeout    = 2 * time.Minute
 	daemonCommandTimeout        = 15 * time.Second
+	prCommandTimeout            = 2 * time.Minute
 	issueCloseCleanupTimeout    = 10 * time.Minute
 	issueCreateCommandTimeout   = 10 * time.Second
 	issueCreateAutostartTimeout = 12 * time.Second
@@ -426,6 +427,86 @@ type WorktreeDeleteOptions struct {
 	Force        bool
 	DeleteBranch bool
 	JSON         bool
+}
+
+type PROptions struct {
+	Command    string
+	Project    string
+	IssueID    string
+	Branch     string
+	Number     int
+	Title      string
+	Body       string
+	BaseBranch string
+	Strategy   string
+	State      string
+	Limit      int
+	Draft      bool
+	Confirm    bool
+	JSON       bool
+}
+
+func ParsePRArgs(args []string) (PROptions, error) {
+	if len(args) == 0 {
+		return PROptions{}, fmt.Errorf("usage: az pr <list|status|checks|open|create|merge> [arguments]")
+	}
+	opts := PROptions{Command: strings.TrimSpace(args[0]), Strategy: "squash", State: "open", Limit: 30, Draft: true}
+	fs := flag.NewFlagSet("pr "+opts.Command, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Project, "project", "", "project id")
+	fs.StringVar(&opts.IssueID, "issue", "", "issue id")
+	fs.StringVar(&opts.IssueID, "id", "", "issue id")
+	fs.StringVar(&opts.Branch, "branch", "", "head branch")
+	fs.IntVar(&opts.Number, "number", 0, "pull request number")
+	fs.IntVar(&opts.Number, "pr", 0, "pull request number")
+	fs.StringVar(&opts.Title, "title", "", "pull request title")
+	fs.StringVar(&opts.Body, "body", "", "pull request body")
+	fs.StringVar(&opts.BaseBranch, "base", "", "base branch")
+	fs.StringVar(&opts.BaseBranch, "base-branch", "", "base branch")
+	fs.StringVar(&opts.Strategy, "strategy", opts.Strategy, "merge strategy: squash, rebase, or merge")
+	fs.StringVar(&opts.State, "state", opts.State, "PR state for list: open, closed, merged, or all")
+	fs.IntVar(&opts.Limit, "limit", opts.Limit, "maximum PRs to list")
+	fs.BoolVar(&opts.Draft, "draft", opts.Draft, "create as draft")
+	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm merge")
+	fs.BoolVar(&opts.JSON, "json", false, "emit JSON")
+	if err := fs.Parse(args[1:]); err != nil {
+		return PROptions{}, err
+	}
+	switch opts.Command {
+	case "list", "status", "checks", "open", "create", "merge":
+	default:
+		return PROptions{}, fmt.Errorf("unknown pr command: %s", opts.Command)
+	}
+	if opts.Command == "list" {
+		if unsupported := unsupportedPRListFlags(fs); len(unsupported) > 0 {
+			return PROptions{}, fmt.Errorf("az pr list does not accept %s", strings.Join(unsupported, ", "))
+		}
+		if fs.NArg() > 0 {
+			return PROptions{}, fmt.Errorf("az pr list does not accept issue or pull request selectors")
+		}
+		return opts, nil
+	}
+	if fs.NArg() > 0 && opts.IssueID == "" && opts.Branch == "" && opts.Number == 0 {
+		opts.IssueID = fs.Arg(0)
+	}
+	return opts, nil
+}
+
+func unsupportedPRListFlags(fs *flag.FlagSet) []string {
+	allowed := map[string]bool{
+		"json":    true,
+		"limit":   true,
+		"project": true,
+		"state":   true,
+	}
+	var unsupported []string
+	fs.Visit(func(f *flag.Flag) {
+		if !allowed[f.Name] {
+			unsupported = append(unsupported, "--"+f.Name)
+		}
+	})
+	sort.Strings(unsupported)
+	return unsupported
 }
 
 func ParseWorktreeCreateArgs(args []string) (WorktreeCreateOptions, error) {
@@ -834,6 +915,242 @@ func WorktreeDeleteCommand(deps *Dependencies, opts WorktreeDeleteOptions) error
 		fmt.Printf("Branch preserved: %s\n", result.Branch)
 	}
 	return nil
+}
+
+func PRCommand(deps *Dependencies, opts PROptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), prCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+	if project := strings.TrimSpace(opts.Project); project != "" {
+		restoreProject := applyIssueProjectOverride(deps, project)
+		defer restoreProject()
+	}
+
+	switch opts.Command {
+	case "list":
+		result, err := deps.DaemonClient.ListPullRequests(ctx, daemonclient.PullRequestListParams{
+			State: strings.TrimSpace(opts.State),
+			Limit: opts.Limit,
+		})
+		if err != nil {
+			return fmt.Errorf("list pull requests: %w", err)
+		}
+		if opts.JSON {
+			return printJSON(result)
+		}
+		printPullRequestList(result)
+		return nil
+	case "status":
+		ref, err := resolvePRRef(ctx, deps, opts)
+		if err != nil {
+			return err
+		}
+		status, err := deps.DaemonClient.GetPullRequest(ctx, daemonclient.PullRequestBranchParams{Branch: ref})
+		if err != nil {
+			return fmt.Errorf("get pull request: %w", err)
+		}
+		checks, checksErr := deps.DaemonClient.GetPullRequestChecks(ctx, daemonclient.PullRequestChecksParams{Ref: ref})
+		if opts.JSON {
+			payload := map[string]any{"pull_request": status.PullRequest}
+			if checksErr == nil {
+				payload["checks_status"] = checks.ChecksStatus
+				payload["checks"] = checks.Checks
+			}
+			return printJSON(payload)
+		}
+		printPullRequestStatus(status, checks.ChecksStatus, checksErr)
+		return nil
+	case "checks":
+		ref, err := resolvePRRef(ctx, deps, opts)
+		if err != nil {
+			return err
+		}
+		checks, err := deps.DaemonClient.GetPullRequestChecks(ctx, daemonclient.PullRequestChecksParams{Ref: ref})
+		if err != nil {
+			return fmt.Errorf("get pull request checks: %w", err)
+		}
+		if opts.JSON {
+			return printJSON(checks)
+		}
+		printPullRequestChecks(checks)
+		return nil
+	case "open":
+		ref, err := resolvePRRef(ctx, deps, opts)
+		if err != nil {
+			return err
+		}
+		if err := deps.DaemonClient.OpenPullRequest(ctx, daemonclient.PullRequestBranchParams{Branch: ref}); err != nil {
+			return fmt.Errorf("open pull request: %w", err)
+		}
+		if opts.JSON {
+			return printJSON(map[string]string{"ref": ref, "status": "opened"})
+		}
+		fmt.Printf("Opened PR for %s\n", ref)
+		return nil
+	case "create":
+		return prCreateCommand(ctx, deps, opts)
+	case "merge":
+		if !opts.Confirm {
+			return fmt.Errorf("refusing to merge PR without --confirm")
+		}
+		branch := strings.TrimSpace(opts.Branch)
+		var err error
+		if branch == "" && opts.Number == 0 {
+			branch, err = resolvePRBranch(ctx, deps, opts)
+			if err != nil {
+				return err
+			}
+		}
+		result, err := deps.DaemonClient.MergePullRequest(ctx, daemonclient.PullRequestMergeParams{
+			Branch:   branch,
+			Number:   opts.Number,
+			Strategy: opts.Strategy,
+		})
+		if err != nil {
+			return fmt.Errorf("merge pull request: %w", err)
+		}
+		if opts.JSON {
+			return printJSON(result)
+		}
+		fmt.Printf("Merged PR #%d with %s\n", result.Number, result.Strategy)
+		return nil
+	default:
+		return fmt.Errorf("unknown pr command: %s", opts.Command)
+	}
+}
+
+func prCreateCommand(ctx context.Context, deps *Dependencies, opts PROptions) error {
+	if opts.Number > 0 {
+		return fmt.Errorf("pr create does not accept pull request number selectors")
+	}
+	branch, err := resolvePRBranch(ctx, deps, opts)
+	if err != nil {
+		return err
+	}
+	issueID := strings.TrimSpace(opts.IssueID)
+	if issueID == "" {
+		return fmt.Errorf("issue id is required for pr create")
+	}
+	title := strings.TrimSpace(opts.Title)
+	if title == "" {
+		title = issueID
+		if task, _, ok, err := loadIssueMetadataTask(ctx, deps, issueID); err == nil && ok && strings.TrimSpace(task.Title) != "" {
+			title = strings.TrimSpace(task.Title)
+		}
+	}
+	body := strings.TrimSpace(opts.Body)
+	if body == "" {
+		body = fmt.Sprintf("Created by az for %s.", issueID)
+	}
+	baseBranch := strings.TrimSpace(opts.BaseBranch)
+	if baseBranch == "" && deps.Config != nil {
+		baseBranch = strings.TrimSpace(deps.Config.Git.BaseBranch)
+	}
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	result, err := deps.DaemonClient.CreatePullRequest(ctx, daemonclient.CreatePullRequestParams{
+		Title:      title,
+		Body:       body,
+		Branch:     branch,
+		BaseBranch: baseBranch,
+		Draft:      opts.Draft,
+		IssueID:    issueID,
+	})
+	if err != nil {
+		return fmt.Errorf("create pull request: %w", err)
+	}
+	if opts.JSON {
+		return printJSON(result)
+	}
+	fmt.Printf("Created PR #%d: %s\n", result.PullRequest.Number, result.PullRequest.URL)
+	return nil
+}
+
+func resolvePRRef(ctx context.Context, deps *Dependencies, opts PROptions) (string, error) {
+	if opts.Number > 0 {
+		return strconv.Itoa(opts.Number), nil
+	}
+	return resolvePRBranch(ctx, deps, opts)
+}
+
+func resolvePRBranch(ctx context.Context, deps *Dependencies, opts PROptions) (string, error) {
+	if branch := strings.TrimSpace(opts.Branch); branch != "" {
+		return branch, nil
+	}
+	issueID := strings.TrimSpace(opts.IssueID)
+	if issueID == "" {
+		return "", fmt.Errorf("issue id or --branch is required")
+	}
+	worktree, err := resolveMergeToBaseSourceWorktree(ctx, deps, issueID)
+	if err != nil {
+		return "", err
+	}
+	if branch := strings.TrimSpace(worktree.Branch); branch != "" {
+		return branch, nil
+	}
+	return "", fmt.Errorf("worktree for %s has no branch", issueID)
+}
+
+func printPullRequestStatus(result daemonclient.PullRequestGetResult, checksStatus string, checksErr error) {
+	pr := result.PullRequest
+	fmt.Printf("PR #%d: %s\n", pr.Number, pr.Title)
+	fmt.Printf("State: %s", strings.ToLower(strings.TrimSpace(pr.State)))
+	if pr.Draft {
+		fmt.Print(" (draft)")
+	}
+	fmt.Println()
+	fmt.Printf("Branch: %s -> %s\n", pr.Branch, pr.BaseRef)
+	if pr.MergeStateStatus != "" || pr.ReviewDecision != "" {
+		fmt.Printf("Merge: %s  Review: %s\n", pr.MergeStateStatus, pr.ReviewDecision)
+	}
+	if checksErr != nil {
+		fmt.Printf("Checks: unavailable (%v)\n", checksErr)
+	} else {
+		fmt.Printf("Checks: %s\n", checksStatus)
+	}
+	fmt.Printf("URL: %s\n", pr.URL)
+}
+
+func printPullRequestChecks(result daemonclient.PullRequestChecksResult) {
+	fmt.Printf("Checks for %s: %s\n", result.Ref, result.ChecksStatus)
+	for _, check := range result.Checks {
+		name := strings.TrimSpace(check.Name)
+		if name == "" {
+			name = "(unnamed)"
+		}
+		state := strings.TrimSpace(check.Bucket)
+		if state == "" {
+			state = strings.TrimSpace(check.State)
+		}
+		fmt.Printf("- %s: %s\n", name, state)
+	}
+}
+
+func printPullRequestList(result daemonclient.PullRequestListResult) {
+	if len(result.PullRequests) == 0 {
+		fmt.Printf("No %s pull requests found.\n", strings.TrimSpace(result.State))
+		return
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "NUMBER\tSTATE\tDRAFT\tBRANCH\tBASE\tTITLE")
+	for _, pr := range result.PullRequests {
+		draft := ""
+		if pr.Draft {
+			draft = "yes"
+		}
+		fmt.Fprintf(w, "#%d\t%s\t%s\t%s\t%s\t%s\n",
+			pr.Number,
+			strings.ToLower(strings.TrimSpace(pr.State)),
+			draft,
+			strings.TrimSpace(pr.Branch),
+			strings.TrimSpace(pr.BaseRef),
+			strings.TrimSpace(pr.Title),
+		)
+	}
+	_ = w.Flush()
 }
 
 func resolveSessionStartIssueTarget(ctx context.Context, deps *Dependencies, issueID, project string) (sessionIssueTarget, error) {

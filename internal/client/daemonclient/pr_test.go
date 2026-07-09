@@ -152,3 +152,122 @@ func TestCheckBranchBehindRoutesAndDecodesResponse(t *testing.T) {
 		t.Fatalf("project_id = %q, want proj-a", transport.lastReq.Meta.ProjectID)
 	}
 }
+
+func TestPullRequestCommandsRouteAndDecodeResponses(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		call    func(*Client) error
+	}{
+		{
+			name:    "get",
+			command: CommandPRGet,
+			call: func(client *Client) error {
+				out, err := client.GetPullRequest(context.Background(), PullRequestBranchParams{Branch: "feature/add"})
+				if err != nil {
+					return err
+				}
+				if out.PullRequest.Number != 12 {
+					t.Fatalf("get result = %+v", out)
+				}
+				return nil
+			},
+		},
+		{
+			name:    "list",
+			command: CommandPRList,
+			call: func(client *Client) error {
+				out, err := client.ListPullRequests(context.Background(), PullRequestListParams{State: "all", Limit: 12})
+				if err != nil {
+					return err
+				}
+				if out.State != "all" || len(out.PullRequests) != 1 || out.PullRequests[0].Number != 12 {
+					t.Fatalf("list result = %+v", out)
+				}
+				return nil
+			},
+		},
+		{
+			name:    "checks",
+			command: CommandPRChecks,
+			call: func(client *Client) error {
+				out, err := client.GetPullRequestChecks(context.Background(), PullRequestChecksParams{Ref: "feature/add"})
+				if err != nil {
+					return err
+				}
+				if out.ChecksStatus != "pass" || len(out.Checks) != 1 {
+					t.Fatalf("checks result = %+v", out)
+				}
+				return nil
+			},
+		},
+		{
+			name:    "open",
+			command: CommandPROpen,
+			call: func(client *Client) error {
+				return client.OpenPullRequest(context.Background(), PullRequestBranchParams{Branch: "feature/add"})
+			},
+		},
+		{
+			name:    "merge",
+			command: CommandPRMerge,
+			call: func(client *Client) error {
+				out, err := client.MergePullRequest(context.Background(), PullRequestMergeParams{Branch: "feature/add", Strategy: "squash"})
+				if err != nil {
+					return err
+				}
+				if out.Number != 12 || out.Strategy != "squash" {
+					t.Fatalf("merge result = %+v", out)
+				}
+				return nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &prRecordingTransport{
+				replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					if req.Command != tt.command {
+						t.Fatalf("command = %q, want %q", req.Command, tt.command)
+					}
+					body, err := pullRequestTestResponseBody(tt.command)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            body,
+					}, nil
+				},
+			}
+			client := New(transport).WithProjectID("proj-a")
+			if err := tt.call(client); err != nil {
+				t.Fatalf("call error: %v", err)
+			}
+			if transport.lastReq.Meta.ProjectID != "proj-a" {
+				t.Fatalf("project_id = %q, want proj-a", transport.lastReq.Meta.ProjectID)
+			}
+		})
+	}
+}
+
+func pullRequestTestResponseBody(command string) ([]byte, error) {
+	switch command {
+	case CommandPRGet:
+		return json.Marshal(PullRequestGetResult{PullRequest: pr.PRInfo{Number: 12, Title: "PR", URL: "https://example.test/pr/12", State: "open", Branch: "feature/add", BaseRef: "main"}})
+	case CommandPRList:
+		return json.Marshal(PullRequestListResult{State: "all", PullRequests: []pr.PRInfo{{Number: 12, Title: "PR", URL: "https://example.test/pr/12", State: "open", Branch: "feature/add", BaseRef: "main"}}})
+	case CommandPRChecks:
+		return json.Marshal(PullRequestChecksResult{Ref: "feature/add", ChecksStatus: "pass", Checks: []pr.CheckInfo{{Name: "unit", Bucket: "pass"}}})
+	case CommandPROpen:
+		return json.Marshal(map[string]string{"branch": "feature/add"})
+	case CommandPRMerge:
+		return json.Marshal(PullRequestMergeResult{Number: 12, Strategy: "squash"})
+	default:
+		return nil, nil
+	}
+}

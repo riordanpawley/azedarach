@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os/exec"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -87,15 +88,15 @@ func TestBuildPRBody(t *testing.T) {
 
 func TestPRWorkflow_Create(t *testing.T) {
 	tests := []struct {
-		name       string
-		params     CreatePRParams
-		createOut  string
-		getOut     string
-		createErr  error
-		getErr     error
-		wantNumber int
-		wantDraft  bool
-		wantErr    bool
+		name            string
+		params          CreatePRParams
+		createOut       string
+		getOut          string
+		createErr       error
+		getErr          error
+		wantNumber      int
+		wantDraft       bool
+		wantErr         bool
 		wantErrContains string
 	}{
 		{
@@ -152,8 +153,8 @@ func TestPRWorkflow_Create(t *testing.T) {
 				Branch:     "test",
 				BaseBranch: "main",
 			},
-			createErr: errors.New("gh command failed"),
-			wantErr:   true,
+			createErr:       errors.New("gh command failed"),
+			wantErr:         true,
 			wantErrContains: "failed to create PR",
 		},
 		{
@@ -164,9 +165,9 @@ func TestPRWorkflow_Create(t *testing.T) {
 				Branch:     "test",
 				BaseBranch: "main",
 			},
-			createOut: "https://github.com/owner/repo/pull/101\n",
-			getErr:    errors.New("gh command failed"),
-			wantErr:   true,
+			createOut:       "https://github.com/owner/repo/pull/101\n",
+			getErr:          errors.New("gh command failed"),
+			wantErr:         true,
 			wantErrContains: "failed to get PR info",
 		},
 	}
@@ -222,13 +223,13 @@ func TestPRWorkflow_Create(t *testing.T) {
 
 func TestPRWorkflow_Get(t *testing.T) {
 	tests := []struct {
-		name       string
-		branch     string
-		output     string
-		runErr     error
-		wantNumber int
-		wantState  string
-		wantErr    bool
+		name            string
+		branch          string
+		output          string
+		runErr          error
+		wantNumber      int
+		wantState       string
+		wantErr         bool
 		wantErrContains string
 	}{
 		{
@@ -262,17 +263,17 @@ func TestPRWorkflow_Get(t *testing.T) {
 			wantState:  "merged",
 		},
 		{
-			name:    "invalid json",
-			branch:  "test",
-			output:  `not json`,
-			wantErr: true,
+			name:            "invalid json",
+			branch:          "test",
+			output:          `not json`,
+			wantErr:         true,
 			wantErrContains: "failed to parse PR JSON",
 		},
 		{
-			name:    "runner error",
-			branch:  "test",
-			runErr:  errors.New("gh command failed"),
-			wantErr: true,
+			name:            "runner error",
+			branch:          "test",
+			runErr:          errors.New("gh command failed"),
+			wantErr:         true,
 			wantErrContains: "failed to get PR info for branch test",
 		},
 	}
@@ -305,11 +306,11 @@ func TestPRWorkflow_Get(t *testing.T) {
 
 func TestPRWorkflow_List(t *testing.T) {
 	tests := []struct {
-		name      string
-		output    string
-		runErr    error
-		wantCount int
-		wantErr   bool
+		name            string
+		output          string
+		runErr          error
+		wantCount       int
+		wantErr         bool
 		wantErrContains string
 	}{
 		{
@@ -342,15 +343,15 @@ func TestPRWorkflow_List(t *testing.T) {
 			wantCount: 0,
 		},
 		{
-			name:    "invalid json",
-			output:  `{invalid}`,
-			wantErr: true,
+			name:            "invalid json",
+			output:          `{invalid}`,
+			wantErr:         true,
 			wantErrContains: "failed to parse PR list JSON",
 		},
 		{
-			name:    "runner error",
-			runErr:  errors.New("list failed"),
-			wantErr: true,
+			name:            "runner error",
+			runErr:          errors.New("list failed"),
+			wantErr:         true,
 			wantErrContains: "failed to list PRs",
 		},
 	}
@@ -363,7 +364,7 @@ func TestPRWorkflow_List(t *testing.T) {
 			}
 			workflow := NewPRWorkflow(runner, slog.Default())
 
-			prs, err := workflow.List(context.Background())
+			prs, err := workflow.List(context.Background(), ListPRParams{State: "all", Limit: 50})
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -375,17 +376,68 @@ func TestPRWorkflow_List(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Len(t, prs, tt.wantCount)
+			if !tt.wantErr {
+				assert.Equal(t, []string{"gh", "pr", "list", "--state", "all", "--limit", "50", "--json", "number,title,url,state,isDraft,headRefName,baseRefName"}, runner.calls[0])
+			}
 		})
 	}
 }
 
+func TestPRWorkflow_ListRejectsInvalidState(t *testing.T) {
+	workflow := NewPRWorkflow(&mockRunner{}, slog.Default())
+
+	_, err := workflow.List(context.Background(), ListPRParams{State: "weird"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid PR state")
+}
+
+func TestPRWorkflow_Checks(t *testing.T) {
+	runner := &mockRunner{
+		output: []byte(`[
+			{"name":"unit","state":"SUCCESS","bucket":"pass","workflow":"CI"},
+			{"name":"lint","state":"PENDING","bucket":"pending"}
+		]`),
+	}
+	workflow := NewPRWorkflow(runner, slog.Default())
+
+	checks, err := workflow.Checks(context.Background(), "feature/auth")
+	require.NoError(t, err)
+	require.Len(t, checks, 2)
+	assert.Equal(t, "unit", checks[0].Name)
+	assert.Equal(t, "pass", checks[0].Bucket)
+	assert.Equal(t, []string{"gh", "pr", "checks", "feature/auth", "--json", "name,state,bucket,workflow,link,description"}, runner.calls[0])
+}
+
+func TestPRWorkflow_ChecksParsesPendingExitOutput(t *testing.T) {
+	pendingErr := exec.Command("sh", "-c", "exit 8").Run()
+	require.Error(t, pendingErr)
+	runner := &mockRunner{
+		output: []byte(`[{"name":"unit","state":"PENDING","bucket":"pending"}]`),
+		err:    pendingErr,
+	}
+	workflow := NewPRWorkflow(runner, slog.Default())
+
+	checks, err := workflow.Checks(context.Background(), "feature/auth")
+	require.NoError(t, err)
+	require.Len(t, checks, 1)
+	assert.Equal(t, "pending", checks[0].Bucket)
+}
+
+func TestPRWorkflow_Open(t *testing.T) {
+	runner := &mockRunner{}
+	workflow := NewPRWorkflow(runner, slog.Default())
+
+	require.NoError(t, workflow.Open(context.Background(), "feature/auth"))
+	assert.Equal(t, []string{"gh", "pr", "view", "feature/auth", "--web"}, runner.calls[0])
+}
+
 func TestPRWorkflow_Merge(t *testing.T) {
 	tests := []struct {
-		name     string
-		prNumber int
-		strategy string
-		runErr   error
-		wantErr  bool
+		name            string
+		prNumber        int
+		strategy        string
+		runErr          error
+		wantErr         bool
 		wantErrContains string
 	}{
 		{
@@ -404,18 +456,18 @@ func TestPRWorkflow_Merge(t *testing.T) {
 			strategy: "merge",
 		},
 		{
-			name:     "invalid strategy",
-			prNumber: 45,
-			strategy: "invalid",
-			wantErr:  true,
+			name:            "invalid strategy",
+			prNumber:        45,
+			strategy:        "invalid",
+			wantErr:         true,
 			wantErrContains: "invalid merge strategy: invalid",
 		},
 		{
-			name:     "runner error",
-			prNumber: 46,
-			strategy: "squash",
-			runErr:   errors.New("merge failed"),
-			wantErr:  true,
+			name:            "runner error",
+			prNumber:        46,
+			strategy:        "squash",
+			runErr:          errors.New("merge failed"),
+			wantErr:         true,
 			wantErrContains: "failed to merge PR 46",
 		},
 	}
@@ -442,10 +494,10 @@ func TestPRWorkflow_Merge(t *testing.T) {
 
 func TestPRWorkflow_Close(t *testing.T) {
 	tests := []struct {
-		name     string
-		prNumber int
-		runErr   error
-		wantErr  bool
+		name            string
+		prNumber        int
+		runErr          error
+		wantErr         bool
 		wantErrContains string
 	}{
 		{
@@ -453,10 +505,10 @@ func TestPRWorkflow_Close(t *testing.T) {
 			prNumber: 99,
 		},
 		{
-			name:     "runner error",
-			prNumber: 100,
-			runErr:   errors.New("close failed"),
-			wantErr:  true,
+			name:            "runner error",
+			prNumber:        100,
+			runErr:          errors.New("close failed"),
+			wantErr:         true,
 			wantErrContains: "failed to close PR 100",
 		},
 	}
@@ -483,10 +535,10 @@ func TestPRWorkflow_Close(t *testing.T) {
 
 func TestPRWorkflow_MarkReady(t *testing.T) {
 	tests := []struct {
-		name     string
-		prNumber int
-		runErr   error
-		wantErr  bool
+		name            string
+		prNumber        int
+		runErr          error
+		wantErr         bool
 		wantErrContains string
 	}{
 		{
@@ -494,10 +546,10 @@ func TestPRWorkflow_MarkReady(t *testing.T) {
 			prNumber: 42,
 		},
 		{
-			name:     "runner error",
-			prNumber: 43,
-			runErr:   errors.New("mark ready failed"),
-			wantErr:  true,
+			name:            "runner error",
+			prNumber:        43,
+			runErr:          errors.New("mark ready failed"),
+			wantErr:         true,
 			wantErrContains: "failed to mark PR 43 ready",
 		},
 	}

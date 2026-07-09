@@ -253,7 +253,7 @@ func New(cfg Config) *Daemon {
 	sessionStore := daemonstate.NewStore()
 	issuesClient := issues.NewClient(cfg.RepoDir, cfg.Logger)
 	sessionHandler := daemonhandlers.NewSessionHandler(sessionStore)
-	prHandler := daemonhandlers.NewPRHandler(prWorkflow, gitService)
+	prHandler := daemonhandlers.NewPRHandler(prWorkflow, gitService, issuesClient)
 	devServerHandler := daemonhandlers.NewDevServerHandler(devServerManager)
 	specService := issueSpecService{daemon: nil}
 
