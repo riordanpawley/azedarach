@@ -387,8 +387,23 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	resp := d.successResponse(req)
 	projectID := d.projectID(req.Meta)
+	var boardReq protocol.BoardSnapshotRequestBody
+	if err := decodeOptionalJSON(req.Body, &boardReq); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	if strings.TrimSpace(boardReq.ProjectID.String()) != "" {
+		projectID = d.canonicalProjectID(boardReq.ProjectID.String())
+	}
+	viewID := strings.TrimSpace(boardReq.ViewID)
+	if viewID == "" {
+		viewID = d.selectedBoardViewID(projectID)
+	}
 	if err, unhealthy := d.projectIssueStoreHealthError(projectID); unhealthy {
 		return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+	}
+	viewRecord, err := d.boardViewRecord(ctx, projectID, viewID)
+	if err != nil {
+		return d.boardViewErrorResponse(req, err), nil
 	}
 	startedAt := time.Now()
 	cacheStartedAt := time.Now()
@@ -399,7 +414,10 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 		} else {
 			cached.Tasks = hydrated
 			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", true)
-			payload := buildBoardSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks)
+			payload, err := buildBoardSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks, viewRecord.View)
+			if err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			}
 			marshalStartedAt := time.Now()
 			body, err := json.Marshal(payload)
 			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(cached.Tasks), "cache_hit", true)
@@ -419,7 +437,10 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 	if err != nil {
 		return d.errorResponse(req, projectIssueStoreHealthErrorCode(err), err.Error()), nil
 	}
-	payload := buildBoardSnapshotPayload(projectID, result.Revision, result.LastCheckedAt, result.Freshness, result.Tasks)
+	payload, err := buildBoardSnapshotPayload(projectID, result.Revision, result.LastCheckedAt, result.Freshness, result.Tasks, viewRecord.View)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
 	marshalStartedAt := time.Now()
 	body, err := json.Marshal(payload)
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(result.Tasks), "cache_hit", false, "shared_load", shared)
@@ -1148,12 +1169,20 @@ func buildTaskListSnapshotPayload(projectID string, revision uint64, lastChecked
 	}
 }
 
-func buildBoardSnapshotPayload(projectID string, revision uint64, lastCheckedAt time.Time, freshness protocol.TaskListFreshness, tasks []domain.Task) protocol.BoardSnapshotPayload {
+func buildBoardSnapshotPayload(projectID string, revision uint64, lastCheckedAt time.Time, freshness protocol.TaskListFreshness, tasks []domain.Task, view domain.BoardViewDefinition) (protocol.BoardSnapshotPayload, error) {
 	if lastCheckedAt.IsZero() {
 		lastCheckedAt = timeNow()
 	}
 	if !freshness.Valid() {
 		freshness = protocol.TaskListFreshnessFresh
+	}
+	view = view.Normalized()
+	if view.ID == "" {
+		view = domain.DefaultBoardView()
+	}
+	columns, err := domain.GroupTasksByBoardView(view, tasks)
+	if err != nil {
+		return protocol.BoardSnapshotPayload{}, err
 	}
 	return protocol.BoardSnapshotPayload{
 		SchemaVersion:    protocol.BoardSnapshotSchemaVersion,
@@ -1162,8 +1191,10 @@ func buildBoardSnapshotPayload(projectID string, revision uint64, lastCheckedAt 
 		ProjectID:        naming.ProjectID(projectID),
 		LastCheckedAt:    lastCheckedAt.UTC(),
 		Freshness:        freshness,
+		View:             view,
+		Columns:          protocol.BoardSnapshotColumnsFromDomain(columns),
 		Tasks:            protocol.BoardTaskSummariesFromDomain(tasks),
-	}
+	}, nil
 }
 
 func (d *Daemon) taskEventBody(ctx context.Context, projectID, taskID string) protocol.TaskEventBody {

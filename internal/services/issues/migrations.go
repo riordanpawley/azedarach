@@ -59,6 +59,7 @@ var orderedMigrations = []migration{
 	{id: "0028_runtime_projection_order_indexes", path: "migrations/0028_runtime_projection_order_indexes.sql"},
 	{id: "0029_issue_state_model_v2"},
 	{id: "0030_issue_closed_runtime_v2_triggers", apply: applyIssueClosedRuntimeV2TriggersMigration},
+	{id: "0031_board_views", path: "migrations/0031_board_views.sql"},
 }
 
 const (
@@ -155,6 +156,9 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	}
 	if err := repairIssueIDAllocationSchema(ctx, db); err != nil {
 		return fmt.Errorf("repair issue id allocation schema: %w", err)
+	}
+	if err := c.seedBuiltInBoardViews(ctx, db, "default"); err != nil {
+		return fmt.Errorf("seed built-in board views: %w", err)
 	}
 
 	return nil

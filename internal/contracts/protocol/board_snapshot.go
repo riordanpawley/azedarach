@@ -11,7 +11,12 @@ import (
 
 const (
 	CommandBoardFetch          = "board.fetch"
-	BoardSnapshotSchemaVersion = 2
+	CommandBoardViewList       = "board.view.list"
+	CommandBoardViewGet        = "board.view.get"
+	CommandBoardViewSave       = "board.view.save"
+	CommandBoardViewDelete     = "board.view.delete"
+	CommandBoardViewSelect     = "board.view.select"
+	BoardSnapshotSchemaVersion = 3
 )
 
 // BoardSnapshotPayload is the daemon/client contract for board view snapshots.
@@ -20,13 +25,68 @@ const (
 // fields needed to render and route board actions, but omit long detail fields
 // such as description, notes, design, and acceptance.
 type BoardSnapshotPayload struct {
-	SchemaVersion    uint16             `json:"schema_version" msgpack:"schema_version"`
-	ProtocolVersion  Version            `json:"protocol_version" msgpack:"protocol_version"`
-	SnapshotRevision uint64             `json:"snapshot_revision" msgpack:"snapshot_revision"`
-	ProjectID        naming.ProjectID   `json:"project_id" msgpack:"project_id"`
-	LastCheckedAt    time.Time          `json:"last_checked_at" msgpack:"last_checked_at"`
-	Freshness        TaskListFreshness  `json:"freshness" msgpack:"freshness"`
-	Tasks            []BoardTaskSummary `json:"tasks" msgpack:"tasks"`
+	SchemaVersion    uint16                     `json:"schema_version" msgpack:"schema_version"`
+	ProtocolVersion  Version                    `json:"protocol_version" msgpack:"protocol_version"`
+	SnapshotRevision uint64                     `json:"snapshot_revision" msgpack:"snapshot_revision"`
+	ProjectID        naming.ProjectID           `json:"project_id" msgpack:"project_id"`
+	LastCheckedAt    time.Time                  `json:"last_checked_at" msgpack:"last_checked_at"`
+	Freshness        TaskListFreshness          `json:"freshness" msgpack:"freshness"`
+	View             domain.BoardViewDefinition `json:"view" msgpack:"view"`
+	Columns          []BoardSnapshotColumn      `json:"columns" msgpack:"columns"`
+	Tasks            []BoardTaskSummary         `json:"tasks" msgpack:"tasks"`
+}
+
+type BoardSnapshotRequestBody struct {
+	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	ViewID    string           `json:"view_id,omitempty" msgpack:"view_id,omitempty"`
+}
+
+type BoardSnapshotColumn struct {
+	Definition BoardViewColumnDefinition `json:"definition" msgpack:"definition"`
+	Tasks      []BoardTaskSummary        `json:"tasks" msgpack:"tasks"`
+}
+
+type BoardViewColumnDefinition = domain.BoardViewColumnDefinition
+
+type BoardViewListRequestBody struct {
+	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+}
+
+type BoardViewGetRequestBody struct {
+	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	ViewID    string           `json:"view_id" msgpack:"view_id"`
+}
+
+type BoardViewSaveRequestBody struct {
+	ProjectID naming.ProjectID           `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	View      domain.BoardViewDefinition `json:"view" msgpack:"view"`
+}
+
+type BoardViewDeleteRequestBody struct {
+	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	ViewID    string           `json:"view_id" msgpack:"view_id"`
+}
+
+type BoardViewSelectRequestBody struct {
+	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	ViewID    string           `json:"view_id" msgpack:"view_id"`
+}
+
+type BoardViewListResponseBody struct {
+	ProjectID      naming.ProjectID         `json:"project_id" msgpack:"project_id"`
+	SelectedViewID string                   `json:"selected_view_id,omitempty" msgpack:"selected_view_id,omitempty"`
+	Views          []domain.BoardViewRecord `json:"views" msgpack:"views"`
+}
+
+type BoardViewResponseBody struct {
+	ProjectID naming.ProjectID       `json:"project_id" msgpack:"project_id"`
+	View      domain.BoardViewRecord `json:"view" msgpack:"view"`
+}
+
+type BoardViewSelectResponseBody struct {
+	ProjectID naming.ProjectID `json:"project_id" msgpack:"project_id"`
+	ViewID    string           `json:"view_id" msgpack:"view_id"`
+	UpdatedAt time.Time        `json:"updated_at" msgpack:"updated_at"`
 }
 
 type BoardTaskSummary struct {
@@ -57,6 +117,20 @@ type BoardTaskSummary struct {
 	Ownership             *domain.IssueOwnership `json:"ownership,omitempty" msgpack:"ownership,omitempty"`
 	CreatedAt             time.Time              `json:"created_at" msgpack:"created_at"`
 	UpdatedAt             time.Time              `json:"updated_at" msgpack:"updated_at"`
+}
+
+func BoardSnapshotColumnsFromDomain(columns []domain.BoardViewColumnSnapshot) []BoardSnapshotColumn {
+	if len(columns) == 0 {
+		return nil
+	}
+	out := make([]BoardSnapshotColumn, 0, len(columns))
+	for _, column := range columns {
+		out = append(out, BoardSnapshotColumn{
+			Definition: column.Definition,
+			Tasks:      BoardTaskSummariesFromDomain(column.Tasks),
+		})
+	}
+	return out
 }
 
 func BoardTaskSummaryFromDomain(task domain.Task) BoardTaskSummary {
@@ -177,6 +251,11 @@ func DecodeBoardSnapshotPayload(data []byte) (BoardSnapshotPayload, error) {
 	}
 	if !payload.Freshness.Valid() {
 		return BoardSnapshotPayload{}, fmt.Errorf("board snapshot freshness mismatch: expected one of [%s %s], actual %q", TaskListFreshnessFresh, TaskListFreshnessStale, payload.Freshness)
+	}
+	if payload.View.ID != "" || payload.View.SchemaVersion != 0 || len(payload.View.Columns) > 0 {
+		if err := payload.View.Validate(); err != nil {
+			return BoardSnapshotPayload{}, fmt.Errorf("board snapshot view invalid: %w", err)
+		}
 	}
 	return payload, nil
 }

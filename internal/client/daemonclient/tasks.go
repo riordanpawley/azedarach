@@ -16,6 +16,11 @@ import (
 
 const (
 	CommandBoardFetch           = protocol.CommandBoardFetch
+	CommandBoardViewList        = protocol.CommandBoardViewList
+	CommandBoardViewGet         = protocol.CommandBoardViewGet
+	CommandBoardViewSave        = protocol.CommandBoardViewSave
+	CommandBoardViewDelete      = protocol.CommandBoardViewDelete
+	CommandBoardViewSelect      = protocol.CommandBoardViewSelect
 	CommandTaskList             = "task.list"
 	CommandTaskGet              = "task.get"
 	CommandTaskGetMany          = "task.get_many"
@@ -430,6 +435,8 @@ type TaskIDResponse struct {
 // TaskSnapshot captures a task list snapshot and the revision it was read at.
 type TaskSnapshot struct {
 	Tasks         []domain.Task
+	View          domain.BoardViewDefinition
+	Columns       []domain.BoardViewColumnSnapshot
 	Revision      uint64
 	LastCheckedAt time.Time
 	Freshness     protocol.TaskListFreshness
@@ -884,10 +891,19 @@ func (c *Client) BoardSnapshot(ctx context.Context) (TaskSnapshot, error) {
 
 // BoardSnapshotWithMode fetches a board snapshot with the requested bounded read budget.
 func (c *Client) BoardSnapshotWithMode(ctx context.Context, mode ReadWaitMode) (TaskSnapshot, error) {
+	return c.BoardSnapshotForViewWithMode(ctx, "", mode)
+}
+
+// BoardSnapshotForViewWithMode fetches a board snapshot grouped by the requested view.
+func (c *Client) BoardSnapshotForViewWithMode(ctx context.Context, viewID string, mode ReadWaitMode) (TaskSnapshot, error) {
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
-	resp, err := c.commandJSONResponse(waitCtx, CommandBoardFetch, nil)
+	var body any
+	if strings.TrimSpace(viewID) != "" {
+		body = protocol.BoardSnapshotRequestBody{ViewID: strings.TrimSpace(viewID)}
+	}
+	resp, err := c.commandJSONResponse(waitCtx, CommandBoardFetch, body)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
@@ -938,11 +954,27 @@ func (c *Client) decodeBoardSnapshotResponse(resp protocol.ResponseEnvelope) (Ta
 	}
 	return TaskSnapshot{
 		Tasks:         protocol.DomainTasksFromBoardSummaries(payload.Tasks),
+		View:          payload.View,
+		Columns:       boardSnapshotColumnsToDomain(payload.Columns),
 		Revision:      revision,
 		LastCheckedAt: payload.LastCheckedAt,
 		Freshness:     payload.Freshness,
 		SummariesOnly: true,
 	}, nil
+}
+
+func boardSnapshotColumnsToDomain(columns []protocol.BoardSnapshotColumn) []domain.BoardViewColumnSnapshot {
+	if len(columns) == 0 {
+		return nil
+	}
+	out := make([]domain.BoardViewColumnSnapshot, 0, len(columns))
+	for _, column := range columns {
+		out = append(out, domain.BoardViewColumnSnapshot{
+			Definition: column.Definition,
+			Tasks:      protocol.DomainTasksFromBoardSummaries(column.Tasks),
+		})
+	}
+	return out
 }
 
 // CreateTask creates a task through the daemon client boundary.

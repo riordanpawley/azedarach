@@ -457,7 +457,7 @@ func TestBuildTaskSnapshotExportBody_ProjectScopedSessionPrefixMatchesIssue(t *t
 }
 
 func TestBuildBoardSnapshotPayloadOmitsDetailFields(t *testing.T) {
-	payload := buildBoardSnapshotPayload(
+	payload, err := buildBoardSnapshotPayload(
 		"proj-board",
 		12,
 		time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC),
@@ -473,7 +473,11 @@ func TestBuildBoardSnapshotPayloadOmitsDetailFields(t *testing.T) {
 			Priority:    domain.P1,
 			Type:        domain.TypeTask,
 		}},
+		domain.DefaultBoardView(),
 	)
+	if err != nil {
+		t.Fatalf("build board payload: %v", err)
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal board payload: %v", err)
@@ -494,8 +498,113 @@ func TestBuildBoardSnapshotPayloadOmitsDetailFields(t *testing.T) {
 	if got, want := len(decoded.Tasks), 1; got != want {
 		t.Fatalf("task count = %d, want %d", got, want)
 	}
+	if got, want := decoded.View.ID, domain.DefaultBoardViewID; got != want {
+		t.Fatalf("view id = %q, want %q", got, want)
+	}
+	if got := len(decoded.Columns); got == 0 {
+		t.Fatal("expected grouped board columns")
+	}
 	if got, want := decoded.Tasks[0].Title, "Board task"; got != want {
 		t.Fatalf("title = %q, want %q", got, want)
+	}
+}
+
+func TestHandleBoardFetchGroupsBySelectedView(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	t.Cleanup(func() {
+		if err := issuesClient.CloseDB(); err != nil {
+			t.Fatalf("CloseDB error: %v", err)
+		}
+	})
+	projectID := "proj-board-selected"
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Open issue",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		Priority: domain.P2,
+	}); err != nil {
+		t.Fatalf("create open issue: %v", err)
+	}
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Active issue",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusInProgress,
+		Priority: domain.P1,
+	}); err != nil {
+		t.Fatalf("create active issue: %v", err)
+	}
+	customView := domain.BoardViewDefinition{
+		SchemaVersion: domain.BoardViewDefinitionSchemaVersion,
+		ID:            "active-only",
+		Name:          "Active Only",
+		Columns: []domain.BoardViewColumnDefinition{{
+			ID:    "active",
+			Title: "Active",
+			Predicate: domain.BoardViewColumnPredicate{
+				Type:         domain.BoardViewPredicateDisplayPhase,
+				DisplayPhase: domain.IssueDisplayActive,
+			},
+		}},
+	}
+	if _, err := issuesClient.SaveBoardView(ctx, projectID, customView); err != nil {
+		t.Fatalf("SaveBoardView error: %v", err)
+	}
+	repoDir := t.TempDir()
+	d := &Daemon{
+		cfg: Config{
+			Logger:  logger,
+			RepoDir: repoDir,
+		},
+		issues:                issuesClient,
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		uiState:               map[string]string{},
+		revision:              map[string]uint64{},
+	}
+	if err := d.setSelectedBoardViewID(projectID, "active-only"); err != nil {
+		t.Fatalf("setSelectedBoardViewID error: %v", err)
+	}
+	d = &Daemon{
+		cfg: Config{
+			Logger:  logger,
+			RepoDir: repoDir,
+		},
+		issues:                issuesClient,
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		uiState:               map[string]string{},
+		revision:              map[string]uint64{},
+	}
+
+	resp, err := d.handleBoardFetch(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       naming.RequestID("board-fetch-selected"),
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         protocol.CommandBoardFetch,
+		SentAt:          time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("handleBoardFetch error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("handleBoardFetch response = %+v", resp.Error)
+	}
+	payload, err := protocol.DecodeBoardSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("DecodeBoardSnapshotPayload error: %v", err)
+	}
+	if got, want := payload.View.ID, "active-only"; got != want {
+		t.Fatalf("payload view id = %q, want %q", got, want)
+	}
+	if got, want := len(payload.Columns), 1; got != want {
+		t.Fatalf("len(columns) = %d, want %d", got, want)
+	}
+	if got, want := len(payload.Columns[0].Tasks), 1; got != want {
+		t.Fatalf("len(active tasks) = %d, want %d", got, want)
+	}
+	if got, want := payload.Columns[0].Tasks[0].Title, "Active issue"; got != want {
+		t.Fatalf("active task title = %q, want %q", got, want)
 	}
 }
 

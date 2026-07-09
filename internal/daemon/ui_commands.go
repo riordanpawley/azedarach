@@ -100,9 +100,7 @@ func (d *Daemon) handleUIStateGet(_ context.Context, req protocol.RequestEnvelop
 	if key == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required field: key"), nil
 	}
-	d.uiStateMu.RLock()
-	value, found := d.uiState[key]
-	d.uiStateMu.RUnlock()
+	value, found := d.getUIStateValue(projectID, key)
 	respBody := protocol.UIStateResponseBody{
 		ProjectID: naming.ProjectID(projectID),
 		Key:       key,
@@ -139,7 +137,7 @@ func (d *Daemon) handleUIStateSet(_ context.Context, req protocol.RequestEnvelop
 	if d.uiState == nil {
 		d.uiState = map[string]string{}
 	}
-	d.uiState[key] = cmd.Value
+	d.uiState[uiStateMapKey(projectID, key)] = cmd.Value
 	d.uiStateMu.Unlock()
 	respBody := protocol.UIStateResponseBody{
 		ProjectID: naming.ProjectID(projectID),
@@ -155,4 +153,32 @@ func (d *Daemon) handleUIStateSet(_ context.Context, req protocol.RequestEnvelop
 	resp := d.successResponse(req)
 	resp.Body = payload
 	return resp, nil
+}
+
+func (d *Daemon) getUIStateValue(projectID, key string) (string, bool) {
+	projectID = d.canonicalProjectID(projectID)
+	key = strings.TrimSpace(key)
+	d.uiStateMu.RLock()
+	defer d.uiStateMu.RUnlock()
+	value, found := d.uiState[uiStateMapKey(projectID, key)]
+	if found {
+		return value, true
+	}
+	value, found = d.uiState[key]
+	return value, found
+}
+
+func (d *Daemon) setUIStateValue(projectID, key, value string) {
+	projectID = d.canonicalProjectID(projectID)
+	key = strings.TrimSpace(key)
+	d.uiStateMu.Lock()
+	if d.uiState == nil {
+		d.uiState = map[string]string{}
+	}
+	d.uiState[uiStateMapKey(projectID, key)] = value
+	d.uiStateMu.Unlock()
+}
+
+func uiStateMapKey(projectID, key string) string {
+	return strings.TrimSpace(projectID) + "\x00" + strings.TrimSpace(key)
 }

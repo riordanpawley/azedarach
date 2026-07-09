@@ -733,6 +733,16 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleUIStateGet(ctx, req)
 	case protocol.CommandUIStateSet:
 		return d.handleUIStateSet(ctx, req)
+	case protocol.CommandBoardViewList:
+		return d.handleBoardViewList(ctx, req)
+	case protocol.CommandBoardViewGet:
+		return d.handleBoardViewGet(ctx, req)
+	case protocol.CommandBoardViewSave:
+		return d.handleBoardViewSave(ctx, req)
+	case protocol.CommandBoardViewDelete:
+		return d.handleBoardViewDelete(ctx, req)
+	case protocol.CommandBoardViewSelect:
+		return d.handleBoardViewSelect(ctx, req)
 	case protocol.CommandProjectCleanup:
 		return d.handleProjectCleanup(ctx, req)
 	case protocol.CommandNoticeList:
