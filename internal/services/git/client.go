@@ -1,18 +1,21 @@
 package git
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
 
 var (
@@ -20,8 +23,16 @@ var (
 	diffStatDeletionsPattern  = regexp.MustCompile(`(\d+)\s+deletion(?:s)?\(-\)`)
 )
 
+var mergeHookNames = map[string]struct{}{
+	"pre-merge-commit":   {},
+	"prepare-commit-msg": {},
+	"commit-msg":         {},
+	"post-merge":         {},
+}
+
 const (
 	mergeCleanupTimeout           = 15 * time.Second
+	mergeCommandTimeout           = 5 * time.Minute
 	diffStatFallbackTimeout       = 1500 * time.Millisecond
 	diffStatFailureBackoff        = 5 * time.Minute
 	maxDiffStatBackoffReasonRunes = 180
@@ -105,6 +116,7 @@ type GitHookDiagnostic struct {
 	ElapsedMS  int64  `json:"elapsed_ms"`
 	ExitStatus int    `json:"exit_status"`
 	Blocking   bool   `json:"blocking"`
+	TimedOut   bool   `json:"timed_out,omitempty"`
 }
 
 // IsTransactionalMergeStaleTarget reports whether a transactional scratch
@@ -215,17 +227,17 @@ func (c *Client) Fetch(ctx context.Context, worktree, remote string) error {
 func (c *Client) Merge(ctx context.Context, worktree, branch string) (*MergeResult, error) {
 	c.logger.Info("merging branch", "worktree", worktree, "branch", branch)
 
-	hooks := c.detectMergeHooks(worktree)
-	startedAt := time.Now()
-	output, err := c.runInWorktree(ctx, worktree, "merge", "--no-edit", branch)
-	elapsed := time.Since(startedAt)
+	runCtx, cancel := mergeCommandContext(ctx)
+	defer cancel()
+
+	output, err, hookDiagnostics := c.runMergeWithHookDiagnostics(runCtx, worktree, branch)
 
 	result := &MergeResult{
 		Success:      err == nil,
 		HasConflicts: false,
 		Message:      mergeResultMessage(output, err),
 	}
-	result.HookDiagnostics = gitHookDiagnosticsForCommand(hooks, "git merge --no-edit "+branch, elapsed, err, true)
+	result.HookDiagnostics = hookDiagnostics
 
 	if err != nil {
 		// Check if it's a merge conflict
@@ -256,6 +268,41 @@ func (c *Client) Merge(ctx context.Context, worktree, branch string) (*MergeResu
 	}
 
 	return result, nil
+}
+
+// Merge hooks run inside git's synchronous merge process. Azedarach bounds that
+// process with the caller's deadline or a conservative default timeout, then
+// uses Git Trace2 to observe per-hook timing without logging hook paths, argv,
+// branch names, commit messages, or prompt/body text.
+func mergeCommandContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, mergeCommandTimeout)
+}
+
+func (c *Client) runMergeWithHookDiagnostics(ctx context.Context, worktree, branch string) (string, error, []GitHookDiagnostic) {
+	traceFile, err := os.CreateTemp("", "azedarach-git-trace2-*.json")
+	if err != nil {
+		output, runErr := c.runInWorktree(ctx, worktree, "merge", "--no-edit", branch)
+		return output, runErr, nil
+	}
+	tracePath := traceFile.Name()
+	_ = traceFile.Close()
+	defer os.Remove(tracePath)
+
+	startedAt := time.Now()
+	output, runErr := c.runInWorktreeWithEnv(ctx, worktree, []string{"GIT_TRACE2_EVENT=" + tracePath}, "merge", "--no-edit", branch)
+	elapsed := time.Since(startedAt)
+	diagnostics := parseGitMergeHookDiagnostics(tracePath, mergeCommandShape(), startedAt.Add(elapsed), errors.Is(ctx.Err(), context.DeadlineExceeded))
+	return output, runErr, diagnostics
+}
+
+func mergeCommandShape() string {
+	return "git " + latencytrace.CommandShape([]string{"merge", "--no-edit", "<branch>"})
 }
 
 // MergeCleanly merges a branch and verifies the target worktree is clean after
@@ -441,89 +488,124 @@ func appendMergeResultDetail(message, detail string) string {
 	}
 }
 
-func (c *Client) detectMergeHooks(worktree string) []string {
-	hookNames := []string{"pre-merge-commit", "prepare-commit-msg", "commit-msg", "post-merge"}
-	present := make([]string, 0, len(hookNames))
-	dirs := gitHookDirectoriesForWorktree(worktree)
-	for _, hookName := range hookNames {
-		for _, dir := range dirs {
-			info, statErr := os.Stat(filepath.Join(dir, hookName))
-			if statErr != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+type gitTrace2HookStart struct {
+	hookName string
+	started  time.Time
+}
+
+type gitTrace2Event struct {
+	Event      string   `json:"event"`
+	Time       string   `json:"time"`
+	ChildID    int      `json:"child_id"`
+	ChildClass string   `json:"child_class"`
+	HookName   string   `json:"hook_name"`
+	Argv       []string `json:"argv"`
+	Code       *int     `json:"code"`
+	TRel       float64  `json:"t_rel"`
+}
+
+func parseGitMergeHookDiagnostics(tracePath, commandShape string, observedEnd time.Time, timedOut bool) []GitHookDiagnostic {
+	file, err := os.Open(tracePath)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+
+	var out []GitHookDiagnostic
+	starts := map[int]gitTrace2HookStart{}
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024), 1024*1024)
+	for scanner.Scan() {
+		var evt gitTrace2Event
+		if err := json.Unmarshal(scanner.Bytes(), &evt); err != nil {
+			continue
+		}
+		switch evt.Event {
+		case "child_start":
+			hookName := normalizedMergeHookName(evt.HookName, evt.Argv)
+			if evt.ChildClass != "hook" || hookName == "" {
 				continue
 			}
-			present = append(present, hookName)
-			break
+			starts[evt.ChildID] = gitTrace2HookStart{
+				hookName: hookName,
+				started:  parseGitTrace2Time(evt.Time),
+			}
+		case "child_exit":
+			start, ok := starts[evt.ChildID]
+			if !ok {
+				continue
+			}
+			delete(starts, evt.ChildID)
+			exitStatus := -1
+			if evt.Code != nil {
+				exitStatus = *evt.Code
+			}
+			out = append(out, GitHookDiagnostic{
+				Hook:       start.hookName,
+				Command:    commandShape,
+				ElapsedMS:  gitTrace2ElapsedMS(start.started, evt.Time, evt.TRel, observedEnd),
+				ExitStatus: exitStatus,
+				Blocking:   true,
+			})
 		}
 	}
-	return present
+
+	for _, start := range starts {
+		elapsed := observedEnd.Sub(start.started).Milliseconds()
+		if start.started.IsZero() || elapsed < 0 {
+			elapsed = 0
+		}
+		out = append(out, GitHookDiagnostic{
+			Hook:       start.hookName,
+			Command:    commandShape,
+			ElapsedMS:  elapsed,
+			ExitStatus: -1,
+			Blocking:   true,
+			TimedOut:   timedOut,
+		})
+	}
+	return out
 }
 
-func gitHookDirectoriesForWorktree(worktree string) []string {
-	worktree = strings.TrimSpace(worktree)
-	if worktree == "" {
-		return nil
+func normalizedMergeHookName(name string, argv []string) string {
+	name = strings.TrimSpace(name)
+	if name == "" && len(argv) > 0 {
+		name = filepath.Base(strings.TrimSpace(argv[0]))
 	}
-	seen := map[string]struct{}{}
-	dirs := make([]string, 0, 3)
-	add := func(dir string) {
-		dir = strings.TrimSpace(dir)
-		if dir == "" {
-			return
-		}
-		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(worktree, dir)
-		}
-		dir = filepath.Clean(dir)
-		if _, ok := seen[dir]; ok {
-			return
-		}
-		seen[dir] = struct{}{}
-		dirs = append(dirs, dir)
+	if _, ok := mergeHookNames[name]; !ok {
+		return ""
 	}
+	return name
+}
 
-	add(filepath.Join(worktree, ".githooks"))
-
-	gitPath := filepath.Join(worktree, ".git")
-	info, err := os.Stat(gitPath)
-	if err == nil && info.IsDir() {
-		add(filepath.Join(gitPath, "hooks"))
-		return dirs
+func parseGitTrace2Time(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
 	}
-	data, err := os.ReadFile(gitPath)
+	parsed, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil {
-		return dirs
+		return time.Time{}
 	}
-	line := strings.TrimSpace(string(data))
-	gitDir, ok := strings.CutPrefix(line, "gitdir:")
-	if !ok {
-		return dirs
-	}
-	add(filepath.Join(strings.TrimSpace(gitDir), "hooks"))
-	return dirs
+	return parsed
 }
 
-func gitHookDiagnosticsForCommand(hooks []string, command string, elapsed time.Duration, err error, blocking bool) []GitHookDiagnostic {
-	if len(hooks) == 0 {
-		return nil
-	}
-	return []GitHookDiagnostic{{
-		Hook:       strings.Join(hooks, ","),
-		Command:    strings.TrimSpace(command),
-		ElapsedMS:  elapsed.Milliseconds(),
-		ExitStatus: gitCommandExitStatus(err),
-		Blocking:   blocking,
-	}}
-}
-
-func gitCommandExitStatus(err error) int {
-	if err == nil {
+func gitTrace2ElapsedMS(started time.Time, ended string, tRel float64, observedEnd time.Time) int64 {
+	if started.IsZero() {
+		if tRel > 0 {
+			return int64(tRel * 1000)
+		}
 		return 0
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode()
+	endTime := parseGitTrace2Time(ended)
+	if endTime.IsZero() {
+		endTime = observedEnd
 	}
-	return -1
+	elapsed := endTime.Sub(started).Milliseconds()
+	if elapsed < 0 {
+		return 0
+	}
+	return elapsed
 }
 
 func (c *Client) mergeInProgress(ctx context.Context, worktree string) bool {
@@ -1169,6 +1251,21 @@ func (c *Client) runInWorktree(ctx context.Context, worktree string, args ...str
 	prefixed = append(prefixed, "-C", worktree)
 	prefixed = append(prefixed, args...)
 	return c.runner.Run(ctx, prefixed...)
+}
+
+func (c *Client) runInWorktreeWithEnv(ctx context.Context, worktree string, extraEnv []string, args ...string) (string, error) {
+	runner, ok := c.runner.(envCommandRunner)
+	if !ok {
+		return c.runInWorktree(ctx, worktree, args...)
+	}
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return runner.RunWithEnv(ctx, extraEnv, args...)
+	}
+	prefixed := make([]string, 0, len(args)+2)
+	prefixed = append(prefixed, "-C", worktree)
+	prefixed = append(prefixed, args...)
+	return runner.RunWithEnv(ctx, extraEnv, prefixed...)
 }
 
 func (c *Client) diffStatBackoffKey(parts ...string) string {

@@ -3277,6 +3277,53 @@ func taskClosePhaseByName(phases []taskClosePhaseTiming, name string) (taskClose
 	return taskClosePhaseTiming{}, false
 }
 
+func TestRecordTaskCloseHookPhasesLogsSlowHookWithSanitizedContext(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	result := taskCloseResult{TaskID: "cyi", Status: string(domain.StatusDone)}
+	recordTaskCloseHookPhases(context.Background(), &result, logger, protocol.RequestEnvelope{
+		RequestID: "task.close-test",
+		Command:   "task.close",
+	}, "proj-test", "cyi", []git.GitHookDiagnostic{{
+		Hook:       "commit-msg",
+		Command:    "git merge --...",
+		ElapsedMS:  int64((taskCloseSlowGitHookThreshold + time.Second) / time.Millisecond),
+		ExitStatus: 0,
+		Blocking:   true,
+	}})
+
+	phase, ok := taskClosePhaseByName(result.Phases, "githook.commit-msg")
+	if !ok {
+		t.Fatalf("phases = %+v, want githook.commit-msg", result.Phases)
+	}
+	if phase.Command != "git merge --..." || phase.Hook != "commit-msg" {
+		t.Fatalf("phase = %+v, want sanitized hook command shape", phase)
+	}
+	logOutput := buf.String()
+	for _, want := range []string{
+		"event=task.close.githook.slow",
+		"operation=task.close",
+		"hook=commit-msg",
+		"hook_command_shape=\"git merge --...\"",
+		"blocking=true",
+		"timed_out=false",
+	} {
+		if !strings.Contains(logOutput, want) {
+			t.Fatalf("slow hook log missing %q:\n%s", want, logOutput)
+		}
+	}
+	for _, forbidden := range []string{
+		"feature",
+		"/Users/",
+		"token=",
+		"authorization",
+	} {
+		if strings.Contains(logOutput, forbidden) {
+			t.Fatalf("slow hook log contains forbidden value %q:\n%s", forbidden, logOutput)
+		}
+	}
+}
+
 func TestTaskCloseRepairsLegacyProjectRuntimeProjectionBeforeFinalStatusUpdate(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -4252,6 +4299,32 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			return "", nil
 		}
 	}}
+	runner.runWithEnvFn = func(runCtx context.Context, extraEnv []string, args ...string) (string, error) {
+		tracePath := ""
+		for _, entry := range extraEnv {
+			if value, ok := strings.CutPrefix(entry, "GIT_TRACE2_EVENT="); ok {
+				tracePath = value
+				break
+			}
+		}
+		startedAt := time.Now().UTC()
+		output, err := runner.Run(runCtx, args...)
+		endedAt := time.Now().UTC()
+		if tracePath != "" && len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge" {
+			elapsed := endedAt.Sub(startedAt).Seconds()
+			trace := fmt.Sprintf(
+				"{\"event\":\"child_start\",\"time\":%q,\"child_id\":1,\"child_class\":\"hook\",\"hook_name\":\"commit-msg\",\"argv\":[\".git/hooks/commit-msg\"]}\n"+
+					"{\"event\":\"child_exit\",\"time\":%q,\"child_id\":1,\"code\":0,\"t_rel\":%.6f}\n",
+				startedAt.Format(time.RFC3339Nano),
+				endedAt.Format(time.RFC3339Nano),
+				elapsed,
+			)
+			if writeErr := os.WriteFile(tracePath, []byte(trace), 0o644); writeErr != nil {
+				t.Fatalf("write trace2 hook events: %v", writeErr)
+			}
+		}
+		return output, err
+	}
 
 	manager := git.NewWorktreeManager(runner, repoDir, logger)
 	d := &Daemon{
@@ -4317,7 +4390,7 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	if !ok {
 		t.Fatalf("close phases = %+v, want githook.commit-msg", result.Phases)
 	}
-	if hookPhase.Hook != "commit-msg" || hookPhase.Command != "git merge --no-edit "+sourceBranch || hookPhase.ElapsedMS < 15 {
+	if hookPhase.Hook != "commit-msg" || hookPhase.Command != "git merge --..." || hookPhase.ElapsedMS < 15 {
 		t.Fatalf("hook phase = %+v, want commit-msg merge timing", hookPhase)
 	}
 	if hookPhase.ExitStatus == nil || *hookPhase.ExitStatus != 0 || hookPhase.Blocking == nil || !*hookPhase.Blocking {
