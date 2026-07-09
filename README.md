@@ -34,6 +34,19 @@ falls back to available localhost ports when those are occupied, and exports
 the discovered OTLP endpoint to the launched daemon and TUI. Set
 `AZEDARACH_SKIP_JAEGER=1` to skip that startup step.
 
+Jaeger starts with recoverable local Badger storage by default
+(`AZEDARACH_JAEGER_STORAGE=badger`) on the named volume
+`azedarach-jaeger-data`, with a container memory limit
+(`AZEDARACH_JAEGER_MEMORY=1g`) and a retention TTL
+(`AZEDARACH_JAEGER_BADGER_TTL=72h`). Set `AZEDARACH_JAEGER_VOLUME` to choose a
+different volume, `AZEDARACH_JAEGER_MEMORY=none` to disable the container memory
+limit, or `AZEDARACH_JAEGER_STORAGE=memory` with
+`AZEDARACH_JAEGER_MAX_TRACES=20000` for throwaway in-memory traces. If the
+existing `azedarach-jaeger` container was OOM-killed or was created with older
+storage settings, `just build-link-run` recreates it with the current defaults.
+Badger retains traces by TTL; it does not guarantee keeping all error traces
+after expiry.
+
 Build and link without starting interactive TUI:
 
 ```bash
