@@ -84,14 +84,17 @@ type sessionProjectionCounts struct {
 }
 
 type sessionHookActivity struct {
-	Total  int
-	Active int
-	Paused int
+	Total          int
+	Active         int
+	Paused         int
+	LatestActiveAt time.Time
+	LatestPausedAt time.Time
 }
 
 type sessionDisplayActivity struct {
-	Activity string
-	Source   string
+	Activity  string
+	Source    string
+	UpdatedAt time.Time
 }
 
 const (
@@ -2386,11 +2389,18 @@ func sessionHookActivityByIssueKeyFromSessions(sessions []daemonstate.Session, n
 		}
 		activity := activityByKey[key]
 		activity.Total++
+		updatedAt := session.UpdatedAt.UTC()
 		switch sessionActivityState(session) {
 		case domain.SessionPaused, domain.SessionIdle, domain.SessionWaiting:
 			activity.Paused++
+			if activity.LatestPausedAt.IsZero() || updatedAt.After(activity.LatestPausedAt) {
+				activity.LatestPausedAt = updatedAt
+			}
 		case domain.SessionBusy:
 			activity.Active++
+			if activity.LatestActiveAt.IsZero() || updatedAt.After(activity.LatestActiveAt) {
+				activity.LatestActiveAt = updatedAt
+			}
 		}
 		activityByKey[key] = activity
 	}
@@ -2428,6 +2438,16 @@ func sessionActivityLabel(activity sessionHookActivity) (string, string) {
 		return "busy", "hooks"
 	}
 	return "idle", "hooks"
+}
+
+func sessionHookActivityUpdatedAt(activity sessionHookActivity) time.Time {
+	if activity.Total == 0 {
+		return time.Time{}
+	}
+	if activity.Active > 0 {
+		return activity.LatestActiveAt
+	}
+	return activity.LatestPausedAt
 }
 
 func initialSessionStartActivity(startWork bool) (string, string) {
@@ -2489,7 +2509,7 @@ func explicitSessionActivity(session daemonstate.Session, opts sessionDisplayAct
 	if activity == "busy" && source == "session" && !opts.includeSessionSourcedBusy {
 		return sessionDisplayActivity{}, false
 	}
-	return sessionDisplayActivity{Activity: activity, Source: source}, true
+	return sessionDisplayActivity{Activity: activity, Source: source, UpdatedAt: session.UpdatedAt.UTC()}, true
 }
 
 func sessionDisplayActivityByIssueKeyFromSessions(sessions []daemonstate.Session, namingScope string) map[string]sessionDisplayActivity {
@@ -2513,7 +2533,16 @@ func sessionDisplayActivityByIssueKeyFromSessionsWithOptions(sessions []daemonst
 		if activity == "unknown" {
 			continue
 		}
-		out[key] = sessionDisplayActivity{Activity: activity, Source: source}
+		hookUpdatedAt := sessionHookActivityUpdatedAt(hookActivity)
+		if existing, found := out[key]; found {
+			if hookUpdatedAt.IsZero() && !existing.UpdatedAt.IsZero() {
+				continue
+			}
+			if !hookUpdatedAt.IsZero() && existing.UpdatedAt.After(hookUpdatedAt) {
+				continue
+			}
+		}
+		out[key] = sessionDisplayActivity{Activity: activity, Source: source, UpdatedAt: hookUpdatedAt}
 	}
 	return out
 }
