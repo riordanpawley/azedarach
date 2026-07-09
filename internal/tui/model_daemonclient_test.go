@@ -479,6 +479,7 @@ func TestSaveTaskCmdUpdatesEditedDescriptionThroughDaemon(t *testing.T) {
 		Estimate:    &estimate,
 		Type:        domain.TypeTask,
 		Priority:    domain.P2,
+		Lifecycle:   domain.IssueWorkflowBacklog,
 	})
 	if cmd == nil {
 		t.Fatal("saveTaskCmd returned nil")
@@ -503,7 +504,8 @@ func TestSaveTaskCmdUpdatesEditedDescriptionThroughDaemon(t *testing.T) {
 		updateBody.Estimate == nil || *updateBody.Estimate != 13 ||
 		!updateBody.EstimateSet ||
 		updateBody.Type != domain.TypeTask ||
-		updateBody.Priority != domain.P2 {
+		updateBody.Priority != domain.P2 ||
+		updateBody.Lifecycle == nil || *updateBody.Lifecycle != domain.IssueWorkflowBacklog {
 		t.Fatalf("update body = %+v, want edited TUI fields", updateBody)
 	}
 }
@@ -1288,6 +1290,9 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 					if body.Title != "New task" {
 						t.Fatalf("create body = %+v", body)
 					}
+					if body.Lifecycle != domain.IssueWorkflowOpen {
+						t.Fatalf("create lifecycle = %q, want open", body.Lifecycle)
+					}
 					respBody, _ := json.Marshal(daemonclient.TaskIDResponse{TaskID: "az-new"})
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -1307,6 +1312,9 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 					if body.TaskID != "az-1" || body.Title != "Edited" {
 						t.Fatalf("update body = %+v", body)
 					}
+					if body.Lifecycle == nil || *body.Lifecycle != domain.IssueWorkflowBacklog {
+						t.Fatalf("update lifecycle = %+v, want backlog", body.Lifecycle)
+					}
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -1322,9 +1330,10 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		m := newDaemonTestModel(transport)
 
 		createMsg := m.saveTaskCmd(overlay.TaskCreatedMsg{
-			Title:    "New task",
-			Type:     domain.TypeTask,
-			Priority: domain.P1,
+			Title:     "New task",
+			Type:      domain.TypeTask,
+			Priority:  domain.P1,
+			Lifecycle: domain.IssueWorkflowOpen,
 		})()
 		created, ok := createMsg.(taskCreatedResultMsg)
 		if !ok || created.taskID != "az-new" || created.err != nil {
@@ -1332,10 +1341,11 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 
 		updateMsg := m.saveTaskCmd(overlay.TaskCreatedMsg{
-			ID:       "az-1",
-			Title:    "Edited",
-			Type:     domain.TypeBug,
-			Priority: domain.P0,
+			ID:        "az-1",
+			Title:     "Edited",
+			Type:      domain.TypeBug,
+			Priority:  domain.P0,
+			Lifecycle: domain.IssueWorkflowBacklog,
 		})()
 		updated, ok := updateMsg.(taskCreatedResultMsg)
 		if !ok || !updated.isUpdate || updated.err != nil {

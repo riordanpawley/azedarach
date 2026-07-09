@@ -5431,6 +5431,20 @@ func TestParseIssueCreateArgs(t *testing.T) {
 				Title:                  "Title",
 				Type:                   domain.TypeTask,
 				Priority:               domain.P4,
+				Lifecycle:              domain.IssueWorkflowBacklog,
+				Deferred:               true,
+				AutoCreatedFromIssueID: ptrToString("az-parent"),
+			},
+		},
+		{
+			name: "deferred explicit priority keeps backlog lifecycle",
+			args: []string{"--deferred", "--priority", "P0", "Title"},
+			want: IssueCreateOptions{
+				Title:                  "Title",
+				Type:                   domain.TypeTask,
+				Priority:               domain.P0,
+				PriorityExplicit:       true,
+				Lifecycle:              domain.IssueWorkflowBacklog,
 				Deferred:               true,
 				AutoCreatedFromIssueID: ptrToString("az-parent"),
 			},
@@ -5741,6 +5755,28 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 				return IssueUpdateOptions{
 					IssueID: "az-1",
 					Status:  &status,
+				}
+			}(),
+		},
+		{
+			name: "backlog status is lifecycle mutation",
+			args: []string{"az-1", "--status", "backlog"},
+			want: func() IssueUpdateOptions {
+				lifecycle := domain.IssueWorkflowBacklog
+				return IssueUpdateOptions{
+					IssueID:   "az-1",
+					Lifecycle: &lifecycle,
+				}
+			}(),
+		},
+		{
+			name: "open status is lifecycle mutation",
+			args: []string{"az-1", "--status", "open"},
+			want: func() IssueUpdateOptions {
+				lifecycle := domain.IssueWorkflowOpen
+				return IssueUpdateOptions{
+					IssueID:   "az-1",
+					Lifecycle: &lifecycle,
 				}
 			}(),
 		},
@@ -6424,7 +6460,7 @@ func TestIssueListCommand_StatusFilter(t *testing.T) {
 		{ID: "az-1", Title: "Open", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(3 * time.Hour)},
 		{ID: "az-2", Title: "Review", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
 		{ID: "az-3", Title: "Closed", Status: domain.StatusDone, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(1 * time.Hour)},
-		{ID: "az-4", Title: "Backlog", Status: domain.StatusOpen, Priority: domain.P4, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(4 * time.Hour)},
+		{ID: "az-4", Title: "Backlog", Status: domain.StatusOpen, State: mustCLICommandIssueState(t, domain.IssueWorkflowBacklog), Priority: domain.P0, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(4 * time.Hour)},
 	}
 
 	deps := &Dependencies{
@@ -6462,11 +6498,11 @@ func TestIssueListCommand_StatusFilter(t *testing.T) {
 	}
 }
 
-func TestIssueListCommand_StatusFilterBacklogDisplaysDerivedStatus(t *testing.T) {
+func TestIssueListCommand_StatusFilterBacklogDisplaysStateDerivedStatus(t *testing.T) {
 	now := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
 	tasks := []domain.Task{
 		{ID: "az-1", Title: "Open", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(1 * time.Hour)},
-		{ID: "az-2", Title: "Backlog", Status: domain.StatusOpen, Priority: domain.P4, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
+		{ID: "az-2", Title: "Backlog", Status: domain.StatusOpen, State: mustCLICommandIssueState(t, domain.IssueWorkflowBacklog), Priority: domain.P0, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
 	}
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
@@ -6487,7 +6523,7 @@ func TestIssueListCommand_StatusFilterBacklogDisplaysDerivedStatus(t *testing.T)
 		return IssueListCommand(deps, IssueListOptions{States: []domain.IssueDisplayPhase{domain.IssueDisplayBacklog}})
 	})
 	if strings.Contains(output, "az-1") || !strings.Contains(output, "az-2") || !strings.Contains(output, "backlog") {
-		t.Fatalf("backlog filter output = %q, want only az-2 with derived backlog status", output)
+		t.Fatalf("backlog filter output = %q, want only az-2 with state-derived backlog status", output)
 	}
 }
 
@@ -8660,6 +8696,9 @@ func TestIssueCreateCommandDeferredIgnoresAutoParentFromIssueID(t *testing.T) {
 	if createReq.ParentID != nil {
 		t.Fatalf("create parent = %+v, want nil", createReq.ParentID)
 	}
+	if createReq.Lifecycle != domain.IssueWorkflowBacklog {
+		t.Fatalf("create lifecycle = %q, want backlog", createReq.Lifecycle)
+	}
 	if !reflect.DeepEqual(createReq.Implementations, []string{"default"}) {
 		t.Fatalf("create implementations = %+v, want [default]", createReq.Implementations)
 	}
@@ -10101,6 +10140,86 @@ func TestIssueUpdateCommandUsesDaemonTaskUpdateCommand(t *testing.T) {
 	if !strings.Contains(updateOut, "Updated issue: az-1") {
 		t.Fatalf("update output = %q", updateOut)
 	}
+}
+
+func TestIssueUpdateCommandSendsLifecycleMutation(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	var gotUpdateReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGet:
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:          "az-1",
+							Title:       "Old",
+							Description: "OldDesc",
+							Type:        domain.TypeTask,
+							Priority:    domain.P0,
+							Status:      domain.StatusOpen,
+							State:       mustCLICommandIssueState(t, domain.IssueWorkflowOpen),
+							CreatedAt:   now,
+							UpdatedAt:   now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskUpdate:
+					gotUpdateReq = req
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	lifecycle := domain.IssueWorkflowBacklog
+	if err := IssueUpdateCommand(deps, IssueUpdateOptions{IssueID: "az-1", Lifecycle: &lifecycle}); err != nil {
+		t.Fatalf("IssueUpdateCommand() error = %v", err)
+	}
+	var updateBody struct {
+		TaskID string `json:"task_id"`
+		daemonclient.TaskUpdateParams
+	}
+	if err := json.Unmarshal(gotUpdateReq.Body, &updateBody); err != nil {
+		t.Fatalf("unmarshal update body: %v", err)
+	}
+	if updateBody.Lifecycle == nil || *updateBody.Lifecycle != domain.IssueWorkflowBacklog {
+		t.Fatalf("update lifecycle = %+v, want backlog", updateBody.Lifecycle)
+	}
+	if updateBody.Priority != domain.P0 {
+		t.Fatalf("update priority = %s, want preserved P0", updateBody.Priority)
+	}
+}
+
+func mustCLICommandIssueState(t *testing.T, workflow domain.IssueWorkflow) domain.IssueState {
+	t.Helper()
+	state, err := domain.NewIssueState(domain.IssueStateParts{Workflow: workflow})
+	if err != nil {
+		t.Fatalf("NewIssueState(%s): %v", workflow, err)
+	}
+	return state
 }
 
 func TestIssueUpdateCommandRejectsUnknownImplementationAssignment(t *testing.T) {

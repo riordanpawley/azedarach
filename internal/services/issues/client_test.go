@@ -159,7 +159,15 @@ func TestClient_V2StateAuthorityDrivesLifecycleAndBacklogReadiness(t *testing.T)
 	client := newTestClient(t)
 
 	backlogID, err := client.Create(ctx, CreateTaskParams{
-		Title:    "Later backlog task",
+		Title:     "Later backlog task",
+		Type:      domain.TypeTask,
+		Priority:  domain.P0,
+		Status:    domain.StatusOpen,
+		Lifecycle: domain.IssueWorkflowBacklog,
+	})
+	require.NoError(t, err)
+	openP4ID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Low priority open task",
 		Type:     domain.TypeTask,
 		Priority: domain.P4,
 		Status:   domain.StatusOpen,
@@ -182,25 +190,42 @@ func TestClient_V2StateAuthorityDrivesLifecycleAndBacklogReadiness(t *testing.T)
 	assert.Equal(t, string(domain.StatusOpen), status)
 	tasks, err := client.List(ctx)
 	require.NoError(t, err)
-	require.Len(t, tasks, 1)
-	assert.Equal(t, domain.IssueWorkflowBacklog, tasks[0].State.Workflow())
-	assert.Equal(t, domain.StatusOpen, tasks[0].Status)
+	require.Len(t, tasks, 2)
+	tasksByID := taskByID(tasks)
+	require.Contains(t, tasksByID, backlogID)
+	require.Contains(t, tasksByID, openP4ID)
+	assert.Equal(t, domain.IssueWorkflowBacklog, tasksByID[backlogID].State.Workflow())
+	assert.Equal(t, domain.P0, tasksByID[backlogID].Priority)
+	assert.Equal(t, domain.StatusOpen, tasksByID[backlogID].Status)
+	assert.Equal(t, domain.IssueWorkflowOpen, tasksByID[openP4ID].State.Workflow())
+	assert.Equal(t, domain.P4, tasksByID[openP4ID].Priority)
+	assert.Equal(t, domain.StatusOpen, tasksByID[openP4ID].Status)
 
 	ready, err := client.Ready(ctx)
 	require.NoError(t, err)
-	assert.Empty(t, ready, "backlog issues must not be startable")
+	require.Len(t, ready, 1)
+	assert.Equal(t, openP4ID, ready[0].ID.String(), "P4 open issues must remain startable")
 
 	require.NoError(t, client.UpdateDetails(ctx, backlogID, UpdateTaskParams{
-		Title:    "Promoted backlog task",
+		Title:    "Still backlog task",
 		Type:     domain.TypeTask,
-		Priority: domain.P2,
+		Priority: domain.P4,
+	}))
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT lifecycle_state FROM issues WHERE id = ?`, backlogID).Scan(&lifecycle))
+	assert.Equal(t, string(domain.IssueWorkflowBacklog), lifecycle, "priority edits must not change lifecycle")
+
+	openLifecycle := domain.IssueWorkflowOpen
+	require.NoError(t, client.UpdateDetails(ctx, backlogID, UpdateTaskParams{
+		Title:     "Promoted backlog task",
+		Type:      domain.TypeTask,
+		Priority:  domain.P4,
+		Lifecycle: &openLifecycle,
 	}))
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT lifecycle_state FROM issues WHERE id = ?`, backlogID).Scan(&lifecycle))
 	assert.Equal(t, string(domain.IssueWorkflowOpen), lifecycle)
 	ready, err = client.Ready(ctx)
 	require.NoError(t, err)
-	require.Len(t, ready, 1)
-	assert.Equal(t, backlogID, ready[0].ID.String())
+	assert.ElementsMatch(t, []string{backlogID, openP4ID}, taskIDStrings(ready))
 
 	require.NoError(t, client.Update(ctx, backlogID, domain.StatusInReview))
 	require.NoError(t, db.QueryRowContext(ctx, `
@@ -214,10 +239,27 @@ func TestClient_V2StateAuthorityDrivesLifecycleAndBacklogReadiness(t *testing.T)
 	assert.Equal(t, string(domain.StatusInReview), status)
 	tasks, err = client.List(ctx)
 	require.NoError(t, err)
-	require.Len(t, tasks, 1)
-	assert.Equal(t, domain.IssueWorkflowActive, tasks[0].State.Workflow())
-	assert.Equal(t, domain.IssueReviewRequested, tasks[0].State.Review())
-	assert.Equal(t, domain.StatusInReview, tasks[0].Status)
+	tasksByID = taskByID(tasks)
+	require.Contains(t, tasksByID, backlogID)
+	assert.Equal(t, domain.IssueWorkflowActive, tasksByID[backlogID].State.Workflow())
+	assert.Equal(t, domain.IssueReviewRequested, tasksByID[backlogID].State.Review())
+	assert.Equal(t, domain.StatusInReview, tasksByID[backlogID].Status)
+
+	require.NoError(t, client.UpdateDetails(ctx, backlogID, UpdateTaskParams{
+		Title:     "Reopened backlog task",
+		Type:      domain.TypeTask,
+		Priority:  domain.P0,
+		Lifecycle: &openLifecycle,
+	}))
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT lifecycle_state, closed_outcome, review_state, status
+		FROM issues
+		WHERE id = ?
+	`, backlogID).Scan(&lifecycle, &closedOutcome, &reviewState, &status))
+	assert.Equal(t, string(domain.IssueWorkflowOpen), lifecycle)
+	assert.Equal(t, string(domain.IssueCloseNone), closedOutcome)
+	assert.Equal(t, string(domain.IssueReviewNone), reviewState)
+	assert.Equal(t, string(domain.StatusOpen), status)
 }
 
 func TestClient_CancelledOutcomeCountsAsClosedForParentClosure(t *testing.T) {
@@ -5111,4 +5153,12 @@ func taskIDStrings(tasks []domain.Task) []string {
 		out = append(out, task.ID.String())
 	}
 	return out
+}
+
+func taskByID(tasks []domain.Task) map[string]domain.Task {
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	return byID
 }

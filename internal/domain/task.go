@@ -146,7 +146,7 @@ const (
 	P1                 // High
 	P2                 // Medium
 	P3                 // Low
-	P4                 // Backlog
+	P4                 // Lowest
 )
 
 // String returns priority as string

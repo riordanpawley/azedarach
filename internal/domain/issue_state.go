@@ -136,6 +136,34 @@ func IssueStateFromLegacy(input LegacyIssueStateInput) (IssueState, error) {
 	return NewIssueState(parts)
 }
 
+func IssueStateFromStatus(status Status) (IssueState, error) {
+	parts := IssueStateParts{
+		Workflow:     IssueWorkflowOpen,
+		Review:       IssueReviewNone,
+		CloseOutcome: IssueCloseNone,
+		Archive:      IssueArchiveLive,
+		Deletion:     IssueDeletionPresent,
+	}
+	switch normalizeStatus(status) {
+	case StatusOpen:
+		parts.Workflow = IssueWorkflowOpen
+	case StatusInProgress:
+		parts.Workflow = IssueWorkflowActive
+	case StatusInReview:
+		parts.Workflow = IssueWorkflowActive
+		parts.Review = IssueReviewRequested
+	case StatusDone:
+		parts.Workflow = IssueWorkflowClosed
+		parts.CloseOutcome = IssueCloseCompleted
+	case StatusCancelled:
+		parts.Workflow = IssueWorkflowClosed
+		parts.CloseOutcome = IssueCloseCancelled
+	default:
+		return IssueState{}, fmt.Errorf("invalid issue status: %s", status)
+	}
+	return NewIssueState(parts)
+}
+
 func NewIssueState(parts IssueStateParts) (IssueState, error) {
 	parts = normalizeIssueStateParts(parts)
 	if err := validateIssueStateParts(parts); err != nil {
@@ -452,10 +480,7 @@ func (t Task) IssueState() (IssueState, error) {
 		}
 		return t.State, nil
 	}
-	return IssueStateFromLegacy(LegacyIssueStateInput{
-		Status:   t.Status,
-		Priority: t.Priority,
-	})
+	return IssueStateFromStatus(t.Status)
 }
 
 func (t Task) IssueDisplayPhase() IssueDisplayPhase {

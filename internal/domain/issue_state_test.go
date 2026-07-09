@@ -158,9 +158,9 @@ func TestTaskIssueDisplayPhaseDerivesReviewFromSessionActivity(t *testing.T) {
 		want IssueDisplayPhase
 	}{
 		{
-			name: "backlog is derived from open P4",
+			name: "empty first-class state treats open P4 as open",
 			task: Task{Status: StatusOpen, Priority: P4},
-			want: IssueDisplayBacklog,
+			want: IssueDisplayOpen,
 		},
 		{
 			name: "cancelled status is separate from done",

@@ -22,7 +22,7 @@ func TestPriorityBadge(t *testing.T) {
 		{1, "P1 High"},
 		{2, "P2 Medium"},
 		{3, "P3 Low"},
-		{4, "P4 Backlog"},
+		{4, "P4 Lowest"},
 		{5, "Out of bounds (should use last color)"},
 	}
 

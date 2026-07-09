@@ -695,6 +695,7 @@ func TestCreateTaskOverlayCtrlKClearsDraft(t *testing.T) {
 	overlay.description.SetValue("Draft description")
 	overlay.taskType = domain.TypeBug
 	overlay.priority = domain.P0
+	overlay.lifecycle = domain.IssueWorkflowBacklog
 	overlay.impls = []string{"go-bubbletea"}
 	overlay.syncImplementationSelection()
 	overlay.acceptanceInput.SetValue("Must pass")
@@ -708,6 +709,7 @@ func TestCreateTaskOverlayCtrlKClearsDraft(t *testing.T) {
 	assert.Equal(t, "", overlay.description.Value())
 	assert.Equal(t, domain.TypeTask, overlay.taskType)
 	assert.Equal(t, domain.P2, overlay.priority)
+	assert.Equal(t, domain.IssueWorkflowOpen, overlay.lifecycle)
 	assert.Empty(t, overlay.impls)
 	assert.Equal(t, "", overlay.acceptanceInput.Value())
 	assert.Equal(t, focusTitle, overlay.focusIndex)
@@ -1025,7 +1027,7 @@ func TestParseTaskTemplate_IgnoresTemplateDividerInsideSections(t *testing.T) {
 		"",
 		"Type:     task        (task | bug | feature | epic | chore)",
 		"Priority: P2          (P0 = highest, P4 = lowest)",
-		"Status:   open        (open | in_progress | in_review | closed)",
+		"Status:   open        (backlog | open | in_progress | in_review | closed)",
 		"Assignee:",
 		"Labels:",
 		"Impl:     default",
@@ -1055,6 +1057,7 @@ func TestParseTaskTemplate_IgnoresTemplateDividerInsideSections(t *testing.T) {
 
 	msg, err := parseTaskTemplate(markdown, "", nil)
 	require.NoError(t, err)
+	assert.Equal(t, domain.IssueWorkflowOpen, msg.Lifecycle)
 	assert.Equal(t, "First line", msg.Description)
 	assert.Equal(t, "Design line", msg.Design)
 	assert.Equal(t, "Notes line", msg.Notes)
@@ -1070,7 +1073,7 @@ func TestCreateTaskOverlayCtrlEAppliesEditedTemplate(t *testing.T) {
 			"",
 			"Type:     feature        (task | bug | feature | epic | chore)",
 			"Priority: P0          (P0 = highest, P4 = lowest)",
-			"Status:   in_review        (open | in_progress | in_review | closed)",
+			"Status:   in_review        (backlog | open | in_progress | in_review | closed)",
 			"Assignee: jane",
 			"Labels:   ui, editor",
 			"Impl:     go-bubbletea",
@@ -1140,7 +1143,7 @@ func TestEditTaskOverlayCtrlEEmitsEditedDescriptionWithTaskID(t *testing.T) {
 			"",
 			"Type:     task        (task | bug | feature | epic | chore)",
 			"Priority: P2          (P0 = highest, P4 = lowest)",
-			"Status:   open        (open | in_progress | in_review | closed)",
+			"Status:   open        (backlog | open | in_progress | in_review | closed)",
 			"Assignee:",
 			"Labels:",
 			"Impl:     default",
@@ -1202,7 +1205,7 @@ func TestCreateTaskOverlayCtrlEUsesExecProcessByDefault(t *testing.T) {
 				"",
 				"Type:     task        (task | bug | feature | epic | chore)",
 				"Priority: P2          (P0 = highest, P4 = lowest)",
-				"Status:   open        (open | in_progress | in_review | closed)",
+				"Status:   open        (backlog | open | in_progress | in_review | closed)",
 				"Assignee:",
 				"Labels:",
 				"Impl:     default",
@@ -1259,7 +1262,7 @@ func TestParseTaskTemplateFullMetadata(t *testing.T) {
 		"",
 		"Type:     chore        (task | bug | feature | epic | chore)",
 		"Priority: P4          (P0 = highest, P4 = lowest)",
-		"Status:   in_progress        (open | in_progress | in_review | closed)",
+		"Status:   in_progress        (backlog | open | in_progress | in_review | closed)",
 		"Assignee: sam",
 		"Labels:   alpha, beta",
 		"Impl:     go-bubbletea",
@@ -1289,6 +1292,7 @@ func TestParseTaskTemplateFullMetadata(t *testing.T) {
 	assert.Equal(t, domain.TypeChore, msg.Type)
 	assert.Equal(t, domain.P4, msg.Priority)
 	assert.Equal(t, domain.StatusInProgress, msg.Status)
+	assert.Empty(t, msg.Lifecycle)
 	assert.Equal(t, "sam", msg.Assignee)
 	assert.Equal(t, []string{"alpha", "beta"}, msg.Labels)
 	assert.Equal(t, []string{"go-bubbletea"}, msg.Implementations)
@@ -1298,6 +1302,28 @@ func TestParseTaskTemplateFullMetadata(t *testing.T) {
 	assert.Equal(t, "Acceptance section", msg.Acceptance)
 	require.NotNil(t, msg.Estimate)
 	assert.Equal(t, 5, *msg.Estimate)
+}
+
+func TestParseTaskTemplateBacklogLifecycle(t *testing.T) {
+	markdown := strings.Join([]string{
+		"# Backlog Task",
+		"───────────────────────────────────────────────────",
+		"",
+		"Type:     task        (task | bug | feature | epic | chore)",
+		"Priority: P0          (P0 = highest, P4 = lowest)",
+		"Status:   backlog        (backlog | open | in_progress | in_review | closed)",
+		"",
+		"## Description",
+		"",
+		"Captured for later",
+		"",
+	}, "\n")
+
+	msg, err := parseTaskTemplate(markdown, "", nil)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusOpen, msg.Status)
+	assert.Equal(t, domain.P0, msg.Priority)
+	assert.Equal(t, domain.IssueWorkflowBacklog, msg.Lifecycle)
 }
 
 func TestCreateTaskOverlayCtrlESetsError(t *testing.T) {

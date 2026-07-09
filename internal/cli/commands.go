@@ -227,6 +227,7 @@ type IssueCreateOptions struct {
 	Type                   domain.TaskType
 	Priority               domain.Priority
 	PriorityExplicit       bool
+	Lifecycle              domain.IssueWorkflow
 	Deferred               bool
 	Implementations        []string
 	AutoParentFromIssueID  *string
@@ -277,6 +278,7 @@ type IssueUpdateOptions struct {
 	Type            *domain.TaskType
 	Priority        *domain.Priority
 	Status          *domain.Status
+	Lifecycle       *domain.IssueWorkflow
 	ForceWorktree   bool
 	CascadeChildren bool
 	UpdateImpls     []string
@@ -3520,6 +3522,9 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	} else {
 		opts.Priority = domain.P2
 	}
+	if opts.Deferred {
+		opts.Lifecycle = domain.IssueWorkflowBacklog
+	}
 	opts.Type = taskType
 	opts.Implementations = dedupeOrderedIDs(impls)
 	parentFlag = strings.TrimSpace(parentFlag)
@@ -3723,7 +3728,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	fs.BoolVar(&opts.JSON, "json", false, "output issue update result as JSON")
 	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal when setting closed")
 	fs.BoolVar(&opts.CascadeChildren, "cascade-children", false, "when setting in_review, move open/in_progress descendants to in_review first")
-	fs.StringVar(&statusRaw, "status", "", "updated status (open|in_progress|in_review|closed)")
+	fs.StringVar(&statusRaw, "status", "", "updated status (backlog|open|in_progress|in_review|closed)")
 	fs.Func("update-impl", "set implementation assignment (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {
@@ -3738,7 +3743,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		return IssueUpdateOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update (it is create-only); normal field updates do not need --update-impl, and --update-impl is only for changing issue implementations")
@@ -3750,7 +3755,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if typeRaw != "" {
 		tt, err := parseTaskType(typeRaw)
@@ -3767,11 +3772,15 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.Priority = &p
 	}
 	if strings.TrimSpace(statusRaw) != "" {
-		status, err := parseStatus(statusRaw)
+		status, lifecycle, err := parseIssueUpdateStatus(statusRaw)
 		if err != nil {
 			return IssueUpdateOptions{}, err
 		}
-		opts.Status = &status
+		if lifecycle != nil {
+			opts.Lifecycle = lifecycle
+		} else {
+			opts.Status = &status
+		}
 	}
 	if opts.ForceWorktree && (opts.Status == nil || *opts.Status != domain.StatusDone) {
 		return IssueUpdateOptions{}, fmt.Errorf("--force-worktree is only supported with --status closed")
@@ -3788,7 +3797,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		}
 	})
 	opts.UpdateImpls = dedupeOrderedIDs(updateImpls)
-	if opts.Title == "" && !opts.DescriptionSet && opts.Notes == nil && opts.AppendNotes == "" && opts.Type == nil && opts.Priority == nil && opts.Status == nil && len(opts.UpdateImpls) == 0 {
+	if opts.Title == "" && !opts.DescriptionSet && opts.Notes == nil && opts.AppendNotes == "" && opts.Type == nil && opts.Priority == nil && opts.Status == nil && opts.Lifecycle == nil && len(opts.UpdateImpls) == 0 {
 		return IssueUpdateOptions{}, fmt.Errorf("no update fields provided")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
@@ -6025,6 +6034,9 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 	if parentCtx == nil {
 		parentCtx = context.Background()
 	}
+	if opts.Deferred && opts.Lifecycle == "" {
+		opts.Lifecycle = domain.IssueWorkflowBacklog
+	}
 	ctx, cancel := context.WithTimeout(parentCtx, issueCreateCommandTimeout)
 	defer cancel()
 
@@ -6064,6 +6076,7 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 			Description:     opts.Description,
 			Type:            opts.Type,
 			Priority:        opts.Priority,
+			Lifecycle:       opts.Lifecycle,
 			ParentID:        parentID,
 			Implementations: dedupeOrderedIDs(implementations),
 		})
@@ -6398,6 +6411,7 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		Notes:       opts.Notes,
 		Type:        task.Type,
 		Priority:    task.Priority,
+		Lifecycle:   opts.Lifecycle,
 	}
 	if opts.Title != "" {
 		update.Title = opts.Title
@@ -8073,7 +8087,7 @@ func parsePriority(raw string) (domain.Priority, error) {
 }
 
 func parseStatus(raw string) (domain.Status, error) {
-	switch raw {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "open":
 		return domain.StatusOpen, nil
 	case "in_progress":
@@ -8084,6 +8098,20 @@ func parseStatus(raw string) (domain.Status, error) {
 		return domain.StatusDone, nil
 	default:
 		return "", fmt.Errorf("invalid status: %s", raw)
+	}
+}
+
+func parseIssueUpdateStatus(raw string) (domain.Status, *domain.IssueWorkflow, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "backlog":
+		lifecycle := domain.IssueWorkflowBacklog
+		return "", &lifecycle, nil
+	case "open":
+		lifecycle := domain.IssueWorkflowOpen
+		return "", &lifecycle, nil
+	default:
+		status, err := parseStatus(raw)
+		return status, nil, err
 	}
 }
 

@@ -4782,6 +4782,10 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			design := msg.Design
 			notes := msg.Notes
 			acceptance := msg.Acceptance
+			var lifecycle *domain.IssueWorkflow
+			if msg.Lifecycle != "" {
+				lifecycle = &msg.Lifecycle
+			}
 			err := m.daemonClient.UpdateTaskDetails(ctx, msg.ID, daemonclient.TaskUpdateParams{
 				Title:           msg.Title,
 				Description:     msg.Description,
@@ -4792,6 +4796,7 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 				EstimateSet:     true,
 				Type:            msg.Type,
 				Priority:        msg.Priority,
+				Lifecycle:       lifecycle,
 				Implementations: msg.Implementations,
 			})
 			if err != nil {
@@ -4818,6 +4823,7 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			Type:            msg.Type,
 			Priority:        msg.Priority,
 			Status:          msg.Status,
+			Lifecycle:       msg.Lifecycle,
 			Assignee:        msg.Assignee,
 			Labels:          msg.Labels,
 			Implementations: msg.Implementations,

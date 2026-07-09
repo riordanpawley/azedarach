@@ -237,7 +237,7 @@ func TestHelperMethods(t *testing.T) {
 func TestBuildColumnsUsesIssueDisplayPhases(t *testing.T) {
 	m := New(&config.Config{CLITool: "claude"})
 	m.tasks = []domain.Task{
-		{ID: "az-backlog", Title: "Backlog", Status: domain.StatusOpen, Priority: domain.P4, Type: domain.TypeTask},
+		{ID: "az-backlog", Title: "Backlog", Status: domain.StatusOpen, State: mustModelIssueState(t, domain.IssueWorkflowBacklog), Priority: domain.P0, Type: domain.TypeTask},
 		{ID: "az-open", Title: "Open", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
 		{ID: "az-waiting-review", Title: "Waiting review", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeTask, Session: &domain.Session{Activity: string(domain.SessionWaiting)}},
 		{ID: "az-idle-review", Title: "Idle review", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeTask, Session: &domain.Session{Activity: string(domain.SessionIdle)}},
@@ -271,6 +271,15 @@ func TestBuildColumnsUsesIssueDisplayPhases(t *testing.T) {
 	if got := tasksByTitle["Cancelled"]; len(got) != 1 || got[0].ID.String() != "az-cancelled" {
 		t.Fatalf("cancelled column tasks = %+v", got)
 	}
+}
+
+func mustModelIssueState(t *testing.T, workflow domain.IssueWorkflow) domain.IssueState {
+	t.Helper()
+	state, err := domain.NewIssueState(domain.IssueStateParts{Workflow: workflow})
+	if err != nil {
+		t.Fatalf("NewIssueState(%s): %v", workflow, err)
+	}
+	return state
 }
 
 func TestRuntimeEventSummary_CompactsAndTruncates(t *testing.T) {

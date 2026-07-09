@@ -1755,19 +1755,20 @@ func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvel
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
 	var cmd struct {
-		Title           string          `json:"title"`
-		Description     string          `json:"description"`
-		Type            domain.TaskType `json:"type"`
-		Priority        domain.Priority `json:"priority"`
-		Status          domain.Status   `json:"status,omitempty"`
-		Assignee        string          `json:"assignee,omitempty"`
-		Labels          []string        `json:"labels,omitempty"`
-		Implementations []string        `json:"implementations,omitempty"`
-		Design          string          `json:"design,omitempty"`
-		Notes           string          `json:"notes,omitempty"`
-		Acceptance      string          `json:"acceptance,omitempty"`
-		Estimate        *int            `json:"estimate,omitempty"`
-		ParentID        *string         `json:"parent_id,omitempty"`
+		Title           string               `json:"title"`
+		Description     string               `json:"description"`
+		Type            domain.TaskType      `json:"type"`
+		Priority        domain.Priority      `json:"priority"`
+		Status          domain.Status        `json:"status,omitempty"`
+		Lifecycle       domain.IssueWorkflow `json:"lifecycle_state,omitempty"`
+		Assignee        string               `json:"assignee,omitempty"`
+		Labels          []string             `json:"labels,omitempty"`
+		Implementations []string             `json:"implementations,omitempty"`
+		Design          string               `json:"design,omitempty"`
+		Notes           string               `json:"notes,omitempty"`
+		Acceptance      string               `json:"acceptance,omitempty"`
+		Estimate        *int                 `json:"estimate,omitempty"`
+		ParentID        *string              `json:"parent_id,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -1787,6 +1788,7 @@ func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvel
 		Type:            cmd.Type,
 		Priority:        cmd.Priority,
 		Status:          cmd.Status,
+		Lifecycle:       cmd.Lifecycle,
 		Assignee:        cmd.Assignee,
 		Labels:          cmd.Labels,
 		Implementations: cmd.Implementations,
@@ -6031,17 +6033,18 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
 	var cmd struct {
-		TaskID          string          `json:"task_id"`
-		Title           string          `json:"title"`
-		Description     string          `json:"description"`
-		Design          *string         `json:"design,omitempty"`
-		Notes           *string         `json:"notes,omitempty"`
-		Acceptance      *string         `json:"acceptance,omitempty"`
-		Estimate        *int            `json:"estimate,omitempty"`
-		EstimateSet     bool            `json:"estimate_set,omitempty"`
-		Type            domain.TaskType `json:"type"`
-		Priority        domain.Priority `json:"priority"`
-		Implementations []string        `json:"implementations,omitempty"`
+		TaskID          string                `json:"task_id"`
+		Title           string                `json:"title"`
+		Description     string                `json:"description"`
+		Design          *string               `json:"design,omitempty"`
+		Notes           *string               `json:"notes,omitempty"`
+		Acceptance      *string               `json:"acceptance,omitempty"`
+		Estimate        *int                  `json:"estimate,omitempty"`
+		EstimateSet     bool                  `json:"estimate_set,omitempty"`
+		Type            domain.TaskType       `json:"type"`
+		Priority        domain.Priority       `json:"priority"`
+		Lifecycle       *domain.IssueWorkflow `json:"lifecycle_state,omitempty"`
+		Implementations []string              `json:"implementations,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -6059,6 +6062,7 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 		EstimateSet:     cmd.EstimateSet,
 		Type:            cmd.Type,
 		Priority:        cmd.Priority,
+		Lifecycle:       cmd.Lifecycle,
 		Implementations: cmd.Implementations,
 	})
 	if err != nil {

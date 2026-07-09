@@ -115,7 +115,7 @@ func TestFilter_Matches_EmptyFilter(t *testing.T) {
 func TestFilter_MatchesStatusAgainstIssueDisplayPhase(t *testing.T) {
 	tasks := []Task{
 		{ID: issueID("az-open"), Title: "Open", Status: StatusOpen, Priority: P2, Type: TypeTask},
-		{ID: issueID("az-backlog"), Title: "Backlog", Status: StatusOpen, Priority: P4, Type: TypeTask},
+		{ID: issueID("az-backlog"), Title: "Backlog", Status: StatusOpen, State: mustIssueState(t, IssueStateParts{Workflow: IssueWorkflowBacklog}), Priority: P0, Type: TypeTask},
 		{ID: issueID("az-waiting-review"), Title: "Waiting review", Status: StatusInReview, Priority: P2, Type: TypeTask, Session: &Session{Activity: "waiting-for-human"}},
 		{ID: issueID("az-idle-review"), Title: "Idle review", Status: StatusInReview, Priority: P2, Type: TypeTask, Session: &Session{Activity: string(SessionIdle)}},
 		{ID: issueID("az-done"), Title: "Done", Status: StatusDone, Priority: P2, Type: TypeTask},

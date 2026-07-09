@@ -47,7 +47,7 @@ var PriorityColors = []lipgloss.Color{
 	Peach,    // P1 - High
 	Yellow,   // P2 - Medium
 	Green,    // P3 - Low
-	Overlay0, // P4 - Backlog
+	Overlay0, // P4 - Lowest
 }
 
 // StatusColors maps status to colors

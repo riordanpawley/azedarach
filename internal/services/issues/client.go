@@ -107,26 +107,22 @@ func issueStateFromColumns(issueID string, priority domain.Priority, cols issueS
 	return state, nil
 }
 
-func issueStateFromStatus(status domain.Status, priority domain.Priority) (domain.IssueState, error) {
-	return domain.IssueStateFromLegacy(domain.LegacyIssueStateInput{
-		Status:    status,
-		Priority:  priority,
-		Cancelled: status == domain.StatusCancelled,
-	})
+func issueStateFromStatus(status domain.Status) (domain.IssueState, error) {
+	return domain.IssueStateFromStatus(status)
 }
 
-func issueStateForPriority(state domain.IssueState, priority domain.Priority) (domain.IssueState, error) {
-	if state.Workflow() != domain.IssueWorkflowBacklog && state.Workflow() != domain.IssueWorkflowOpen {
+func issueStateWithLifecycle(state domain.IssueState, lifecycle domain.IssueWorkflow) (domain.IssueState, error) {
+	switch lifecycle {
+	case "":
 		return state, nil
-	}
-	workflow := domain.IssueWorkflowOpen
-	if priority == domain.P4 {
-		workflow = domain.IssueWorkflowBacklog
+	case domain.IssueWorkflowBacklog, domain.IssueWorkflowOpen:
+	default:
+		return domain.IssueState{}, fmt.Errorf("unsupported lifecycle mutation: %s", lifecycle)
 	}
 	return domain.NewIssueState(domain.IssueStateParts{
-		Workflow:     workflow,
-		Review:       state.Review(),
-		CloseOutcome: state.CloseOutcome(),
+		Workflow:     lifecycle,
+		Review:       domain.IssueReviewNone,
+		CloseOutcome: domain.IssueCloseNone,
 		Archive:      state.Archive(),
 		Deletion:     state.Deletion(),
 	})
@@ -2091,7 +2087,7 @@ func (c *Client) updateLocked(ctx context.Context, id string, status domain.Stat
 	if err != nil {
 		return c.wrapError("update", id, err)
 	}
-	nextState, err := issueStateFromStatus(status, domain.Priority(oldPriorityRaw))
+	nextState, err := issueStateFromStatus(status)
 	if err != nil {
 		return c.wrapError("update", id, err)
 	}
@@ -2349,6 +2345,7 @@ type CreateTaskParams struct {
 	Type            domain.TaskType
 	Priority        domain.Priority
 	Status          domain.Status
+	Lifecycle       domain.IssueWorkflow
 	Assignee        string
 	Labels          []string
 	Implementations []string
@@ -2439,9 +2436,18 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 	if status == "" {
 		status = domain.StatusOpen
 	}
-	state, err := issueStateFromStatus(status, params.Priority)
+	state, err := issueStateFromStatus(status)
 	if err != nil {
 		return "", c.wrapError("create", issueID, err)
+	}
+	if params.Lifecycle != "" {
+		if state.Workflow() != domain.IssueWorkflowBacklog && state.Workflow() != domain.IssueWorkflowOpen {
+			return "", c.wrapError("create", issueID, fmt.Errorf("lifecycle %s cannot be combined with status %s", params.Lifecycle, status))
+		}
+		state, err = issueStateWithLifecycle(state, params.Lifecycle)
+		if err != nil {
+			return "", c.wrapError("create", issueID, err)
+		}
 	}
 	writeState := issueStateWriteValuesFromState(state, nil)
 	labelsJSON, err := marshalOptionalStringSlice(params.Labels)
@@ -2955,7 +2961,7 @@ func (c *Client) activeParents(ctx context.Context, db *sql.DB, issueID string) 
 
 func (c *Client) reopenClosedParentForActiveChild(ctx context.Context, execer sqlIssueExecer, childID, parentID string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	activeState, err := issueStateFromStatus(domain.StatusInProgress, domain.P2)
+	activeState, err := issueStateFromStatus(domain.StatusInProgress)
 	if err != nil {
 		return err
 	}
@@ -3634,6 +3640,7 @@ type UpdateTaskParams struct {
 	EstimateSet     bool
 	Type            domain.TaskType
 	Priority        domain.Priority
+	Lifecycle       *domain.IssueWorkflow
 	Implementations []string
 }
 
@@ -3777,9 +3784,15 @@ func (c *Client) updateDetailsLocked(ctx context.Context, id string, params Upda
 	if err != nil {
 		return c.wrapError("update-details", id, err)
 	}
-	nextState, err := issueStateForPriority(oldState, params.Priority)
-	if err != nil {
-		return c.wrapError("update-details", id, err)
+	nextState := oldState
+	if params.Lifecycle != nil {
+		nextState, err = issueStateWithLifecycle(oldState, *params.Lifecycle)
+		if err != nil {
+			return c.wrapError("update-details", id, err)
+		}
+		if err := domain.ValidateIssueStateTransition(oldState, nextState); err != nil {
+			return c.wrapError("update-details", id, err)
+		}
 	}
 	writeState := issueStateWriteValuesFromState(nextState, oldStateCols.ArchivedAt)
 	implSet := 0
