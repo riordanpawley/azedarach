@@ -33,41 +33,47 @@ type IssueObservationEventListOptions struct {
 }
 
 func (c *Client) AppendIssueObservationEvent(ctx context.Context, issueID string, params IssueObservationEventParams) (domain.IssueObservationEvent, error) {
-	var event domain.IssueObservationEvent
-	err := c.withMutationLock(ctx, func(ctx context.Context) error {
-		return sqliteutil.WithWriteLock(c.dbPath, func() error {
-			db, err := c.dbHandle()
-			if err != nil {
-				return err
-			}
-			tx, err := db.BeginTx(ctx, nil)
-			if err != nil {
-				return c.wrapError("append-observation-event", issueID, err)
-			}
-			defer func() {
-				if tx != nil {
-					_ = tx.Rollback()
+	var eventID int64
+	err := retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return sqliteutil.WithWriteLock(c.dbPath, func() error {
+				db, err := c.dbHandle()
+				if err != nil {
+					return err
 				}
-			}()
-			if err := c.requireIssueExists(ctx, tx, issueID, "append-observation-event"); err != nil {
-				return err
-			}
-			id, err := c.insertIssueObservationEvent(ctx, tx, issueID, params)
-			if err != nil {
-				return c.wrapError("append-observation-event", issueID, err)
-			}
-			if err := tx.Commit(); err != nil {
-				return c.wrapError("append-observation-event", issueID, err)
-			}
-			tx = nil
-			event, err = c.getIssueObservationEventByID(ctx, id)
-			if err != nil {
-				return c.wrapError("append-observation-event", issueID, err)
-			}
-			return nil
+				tx, err := db.BeginTx(ctx, nil)
+				if err != nil {
+					return c.wrapError("append-observation-event", issueID, err)
+				}
+				defer func() {
+					if tx != nil {
+						_ = tx.Rollback()
+					}
+				}()
+				if err := c.requireIssueExists(ctx, tx, issueID, "append-observation-event"); err != nil {
+					return err
+				}
+				id, err := c.insertIssueObservationEvent(ctx, tx, issueID, params)
+				if err != nil {
+					return c.wrapError("append-observation-event", issueID, err)
+				}
+				if err := tx.Commit(); err != nil {
+					return c.wrapError("append-observation-event", issueID, err)
+				}
+				tx = nil
+				eventID = id
+				return nil
+			})
 		})
 	})
-	return event, err
+	if err != nil {
+		return domain.IssueObservationEvent{}, err
+	}
+	event, err := c.getIssueObservationEventByID(ctx, eventID)
+	if err != nil {
+		return domain.IssueObservationEvent{}, c.wrapError("append-observation-event", issueID, err)
+	}
+	return event, nil
 }
 
 func (c *Client) ListIssueObservationEvents(ctx context.Context, issueID string, opts IssueObservationEventListOptions) ([]domain.IssueObservationEvent, error) {

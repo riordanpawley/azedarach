@@ -283,9 +283,11 @@ type IssueUpdateOptions struct {
 }
 
 type IssueDoctorOptions struct {
-	Project string
-	IssueID string
-	JSON    bool
+	Project       string
+	IssueID       string
+	JSON          bool
+	CheckpointWAL bool
+	TruncateWAL   bool
 }
 
 type ProjectScriptsStatusOptions struct {
@@ -3561,11 +3563,13 @@ func ParseIssueDoctorArgs(args []string) (IssueDoctorOptions, error) {
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue doctor result as JSON")
+	fs.BoolVar(&opts.CheckpointWAL, "checkpoint-wal", false, "run a safe passive SQLite WAL checkpoint")
+	fs.BoolVar(&opts.TruncateWAL, "truncate-wal", false, "run an explicit SQLite WAL truncate checkpoint")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDoctorOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueDoctorOptions{}, fmt.Errorf("usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
+		return IssueDoctorOptions{}, fmt.Errorf("usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<issue-id>]")
 	}
 	issueID := ""
 	if fs.NArg() == 1 {
@@ -3575,7 +3579,10 @@ func ParseIssueDoctorArgs(args []string) (IssueDoctorOptions, error) {
 		issueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(issueID) == "" {
-		return IssueDoctorOptions{}, fmt.Errorf("usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
+		return IssueDoctorOptions{}, fmt.Errorf("usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<issue-id>]")
+	}
+	if opts.CheckpointWAL && opts.TruncateWAL {
+		return IssueDoctorOptions{}, fmt.Errorf("--checkpoint-wal and --truncate-wal are mutually exclusive")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	opts.IssueID = issueID
@@ -5747,6 +5754,8 @@ func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
 		diagnostics = append(diagnostics, "issueResources config mixes reconcileCommand with one-shot prepare/cleanup hooks; verify lifecycle ownership is intentional")
 	}
 	diagnostics = append(diagnostics, issueDoctorRuntimeDiagnostics(ctx, deps, task)...)
+	walSummary, walPayload, walDiagnostics := issueDoctorSQLiteWALDiagnostics(ctx, deps, opts)
+	diagnostics = append(diagnostics, walDiagnostics...)
 
 	if len(diagnostics) == 0 {
 		if opts.JSON {
@@ -5754,12 +5763,16 @@ func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
 				"issue_id":      task.ID,
 				"status":        "ok",
 				"dependencies":  formatDependencySummary(task.Dependencies),
+				"sqlite_wal":    walPayload,
 				"diagnostics":   []string{},
 				"diagnostic_ct": 0,
 			})
 		}
 		fmt.Printf("Doctor: OK %s\n", task.ID)
 		fmt.Printf("Dependencies: %s\n", formatDependencySummary(task.Dependencies))
+		if walSummary != "" {
+			fmt.Printf("SQLite WAL: %s\n", walSummary)
+		}
 		return nil
 	}
 	if opts.JSON {
@@ -5767,15 +5780,80 @@ func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
 			"issue_id":      task.ID,
 			"status":        "warn",
 			"dependencies":  formatDependencySummary(task.Dependencies),
+			"sqlite_wal":    walPayload,
 			"diagnostics":   diagnostics,
 			"diagnostic_ct": len(diagnostics),
 		})
 	}
 	fmt.Printf("Doctor: WARN %s\n", task.ID)
+	if walSummary != "" {
+		fmt.Printf("SQLite WAL: %s\n", walSummary)
+	}
 	for _, diagnostic := range diagnostics {
 		fmt.Printf("- %s\n", diagnostic)
 	}
 	return nil
+}
+
+func issueDoctorSQLiteWALDiagnostics(ctx context.Context, deps *Dependencies, opts IssueDoctorOptions) (string, map[string]any, []string) {
+	if deps == nil || deps.DaemonClient == nil {
+		return "", map[string]any{"skipped": "daemon_client_unavailable"}, nil
+	}
+	mode := ""
+	if opts.TruncateWAL {
+		mode = "TRUNCATE"
+	} else if opts.CheckpointWAL {
+		mode = "PASSIVE"
+	}
+	diag, err := deps.DaemonClient.TaskSQLiteWAL(ctx, mode)
+	if err != nil {
+		return "", map[string]any{"error": err.Error()}, []string{"sqlite wal diagnostics unavailable: " + err.Error()}
+	}
+	payload := map[string]any{
+		"db_path":                    diag.DBPath,
+		"wal_path":                   diag.WALPath,
+		"wal_bytes":                  diag.WALBytes,
+		"checkpoint_threshold_bytes": diag.CheckpointThreshold,
+		"large_threshold_bytes":      diag.LargeThreshold,
+		"large":                      diag.Large,
+		"open_connections":           diag.OpenConnections,
+		"in_use":                     diag.InUse,
+		"idle":                       diag.Idle,
+	}
+	checkpoint := diag.Checkpoint
+	if checkpoint != nil {
+		payload["checkpoint"] = map[string]any{
+			"mode":                checkpoint.Mode,
+			"busy":                checkpoint.Busy,
+			"log_frames":          checkpoint.LogFrames,
+			"checkpointed_frames": checkpoint.CheckpointedFrames,
+			"wal_bytes_before":    checkpoint.WALBytesBefore,
+			"wal_bytes_after":     checkpoint.WALBytesAfter,
+			"duration_ms":         checkpoint.DurationMillisecond,
+		}
+	}
+	warnings := []string{}
+	if diag.Large {
+		warnings = append(warnings, fmt.Sprintf("sqlite wal is large: %d bytes at %s", diag.WALBytes, diag.WALPath))
+	}
+	if checkpoint != nil && checkpoint.Busy != 0 {
+		warnings = append(warnings, fmt.Sprintf("sqlite wal checkpoint could not finish because readers are active: busy=%d log_frames=%d checkpointed_frames=%d", checkpoint.Busy, checkpoint.LogFrames, checkpoint.CheckpointedFrames))
+	}
+	return issueDoctorSQLiteWALSummary(diag, checkpoint), payload, warnings
+}
+
+func issueDoctorSQLiteWALSummary(diag protocol.TaskSQLiteWALResponse, checkpoint *protocol.TaskSQLiteWALCheckpointInfo) string {
+	summary := fmt.Sprintf("%d bytes at %s", diag.WALBytes, diag.WALPath)
+	if checkpoint != nil {
+		summary += fmt.Sprintf("; checkpoint mode=%s busy=%d frames=%d/%d after=%d bytes",
+			checkpoint.Mode,
+			checkpoint.Busy,
+			checkpoint.CheckpointedFrames,
+			checkpoint.LogFrames,
+			checkpoint.WALBytesAfter,
+		)
+	}
+	return summary
 }
 
 func mixedIssueResourceLifecycleHooksConfigured(deps *Dependencies) bool {

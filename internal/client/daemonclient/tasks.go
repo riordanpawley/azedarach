@@ -39,6 +39,7 @@ const (
 	CommandTaskUnarchive        = "task.unarchive"
 	CommandTaskDependencyAdd    = "task.dependency.add"
 	CommandTaskDependencyRemove = "task.dependency.remove"
+	CommandTaskSQLiteWAL        = protocol.CommandTaskSQLiteWAL
 	CommandSyncRun              = "sync.run"
 	CommandSyncConflicts        = "sync.conflicts"
 )
@@ -766,6 +767,16 @@ func (c *Client) AppendTaskEvent(ctx context.Context, taskID string, req TaskEve
 		return domain.IssueObservationEvent{}, err
 	}
 	return out.Event, nil
+}
+
+func (c *Client) TaskSQLiteWAL(ctx context.Context, checkpointMode string) (protocol.TaskSQLiteWALResponse, error) {
+	var out protocol.TaskSQLiteWALResponse
+	if err := c.commandJSON(ctx, CommandTaskSQLiteWAL, protocol.TaskSQLiteWALRequest{
+		CheckpointMode: strings.TrimSpace(checkpointMode),
+	}, &out); err != nil {
+		return protocol.TaskSQLiteWALResponse{}, err
+	}
+	return out, nil
 }
 
 // ListTasksSnapshot fetches the current task set and revision through the daemon client boundary.

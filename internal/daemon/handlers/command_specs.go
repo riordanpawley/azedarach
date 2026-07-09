@@ -56,6 +56,7 @@ const (
 	commandTaskUnarchive         = "task.unarchive"
 	commandTaskDependencyAdd     = "task.dependency.add"
 	commandTaskDependencyRemove  = "task.dependency.remove"
+	commandTaskSQLiteWAL         = protocol.CommandTaskSQLiteWAL
 	commandTaskSnapshotExport    = "task.snapshot.export"
 	commandSyncRun               = "sync.run"
 	commandSyncConflicts         = "sync.conflicts"
@@ -189,6 +190,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	commandTaskUnarchive:                   {Command: commandTaskUnarchive, RequiresProjectID: true},
 	commandTaskDependencyAdd:               {Command: commandTaskDependencyAdd, RequiresProjectID: true},
 	commandTaskDependencyRemove:            {Command: commandTaskDependencyRemove, RequiresProjectID: true},
+	commandTaskSQLiteWAL:                   {Command: commandTaskSQLiteWAL, RequiresProjectID: true},
 	commandTaskSnapshotExport:              {Command: commandTaskSnapshotExport, RequiresProjectID: true},
 	commandSyncRun:                         {Command: commandSyncRun, RequiresProjectID: true},
 	commandSyncConflicts:                   {Command: commandSyncConflicts, RequiresProjectID: true},

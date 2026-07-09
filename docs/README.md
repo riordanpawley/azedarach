@@ -31,6 +31,7 @@ This directory primarily contains **developer/internal documentation**.
 - [20-runtime-event-sourcing-evaluation.md](20-runtime-event-sourcing-evaluation.md)
 - [21-event-sourcing-migration-plan.md](21-event-sourcing-migration-plan.md)
 - [22-event-sourcing-detailed-map-and-risk-register.md](22-event-sourcing-detailed-map-and-risk-register.md)
+- [23-sqlite-wal-policy.md](23-sqlite-wal-policy.md)
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 - [adr/2-daemon-owned-async-notices.md](adr/2-daemon-owned-async-notices.md)
 

@@ -261,6 +261,19 @@ func (s LearningTargetState) Valid() bool {
 }
 
 func (c *Client) CreateLearning(ctx context.Context, params CreateLearningParams) (Learning, error) {
+	var learning Learning
+	err := retrySQLiteBusy(ctx, func() error {
+		var err error
+		learning, err = c.createLearningOnce(ctx, params)
+		return err
+	})
+	if err == nil {
+		c.maybeMaintainSQLiteWAL(ctx)
+	}
+	return learning, err
+}
+
+func (c *Client) createLearningOnce(ctx context.Context, params CreateLearningParams) (Learning, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return Learning{}, err
@@ -521,6 +534,19 @@ func (c *Client) DoctorLearnings(ctx context.Context, params LearningMaintenance
 }
 
 func (c *Client) GCLearnings(ctx context.Context, params LearningGCParams) (LearningGCReport, error) {
+	var report LearningGCReport
+	err := retrySQLiteBusy(ctx, func() error {
+		var err error
+		report, err = c.gcLearningsOnce(ctx, params)
+		return err
+	})
+	if err == nil && params.Confirm {
+		c.maybeMaintainSQLiteWAL(ctx)
+	}
+	return report, err
+}
+
+func (c *Client) gcLearningsOnce(ctx context.Context, params LearningGCParams) (LearningGCReport, error) {
 	records, err := c.listLearningMaintenanceRecords(ctx, params.ProjectID)
 	if err != nil {
 		return LearningGCReport{}, c.wrapError("gc-learnings", "", err)
@@ -730,6 +756,19 @@ func learningRecencyScore(updatedAt time.Time) int {
 }
 
 func (c *Client) UpdateLearningStatus(ctx context.Context, selector string, status LearningStatus, note string) (Learning, error) {
+	var learning Learning
+	err := retrySQLiteBusy(ctx, func() error {
+		var err error
+		learning, err = c.updateLearningStatusOnce(ctx, selector, status, note)
+		return err
+	})
+	if err == nil {
+		c.maybeMaintainSQLiteWAL(ctx)
+	}
+	return learning, err
+}
+
+func (c *Client) updateLearningStatusOnce(ctx context.Context, selector string, status LearningStatus, note string) (Learning, error) {
 	normalized := ReviewLearningParams{
 		Status: status,
 		Note:   strings.TrimSpace(note),
@@ -766,6 +805,19 @@ func (c *Client) UpdateLearningStatus(ctx context.Context, selector string, stat
 }
 
 func (c *Client) BulkReviewLearnings(ctx context.Context, params BulkReviewLearningsParams) ([]Learning, error) {
+	var learnings []Learning
+	err := retrySQLiteBusy(ctx, func() error {
+		var err error
+		learnings, err = c.bulkReviewLearningsOnce(ctx, params)
+		return err
+	})
+	if err == nil {
+		c.maybeMaintainSQLiteWAL(ctx)
+	}
+	return learnings, err
+}
+
+func (c *Client) bulkReviewLearningsOnce(ctx context.Context, params BulkReviewLearningsParams) ([]Learning, error) {
 	params.ProjectID = strings.TrimSpace(params.ProjectID)
 	params.IDs = normalizeStringSlice(params.IDs)
 	params.Note = strings.TrimSpace(params.Note)
@@ -834,6 +886,19 @@ func (c *Client) BulkReviewLearnings(ctx context.Context, params BulkReviewLearn
 }
 
 func (c *Client) DemoteLearning(ctx context.Context, selector string, note string) (Learning, error) {
+	var learning Learning
+	err := retrySQLiteBusy(ctx, func() error {
+		var err error
+		learning, err = c.demoteLearningOnce(ctx, selector, note)
+		return err
+	})
+	if err == nil {
+		c.maybeMaintainSQLiteWAL(ctx)
+	}
+	return learning, err
+}
+
+func (c *Client) demoteLearningOnce(ctx context.Context, selector string, note string) (Learning, error) {
 	note = strings.TrimSpace(note)
 	if note == "" {
 		return Learning{}, c.wrapError("demote-learning", selector, errors.New("demotion note is required"))
@@ -923,6 +988,7 @@ func (c *Client) PromoteLearning(ctx context.Context, selector string, params Pr
 	`, string(LearningStatusPromoted), string(params.Target), params.TargetID, nullableString(params.Note), formatTimestamp(now), string(LearningTargetStateActive), nullableString(params.TargetHash), string(metadataJSON), formatTimestamp(now), record.rowID); err != nil {
 		return Learning{}, c.wrapError("promote-learning", record.LocalID, classifySQLiteConstraint(err))
 	}
+	c.maybeMaintainSQLiteWAL(ctx)
 	return c.GetLearning(ctx, record.LocalID)
 }
 
@@ -953,10 +1019,24 @@ func (c *Client) RetireLearningTarget(ctx context.Context, selector string, note
 	`, string(LearningTargetStateRetired), formatTimestamp(now), nullableString(note), formatTimestamp(now), record.rowID); err != nil {
 		return Learning{}, c.wrapError("retire-learning-target", record.LocalID, classifySQLiteConstraint(err))
 	}
+	c.maybeMaintainSQLiteWAL(ctx)
 	return c.GetLearning(ctx, record.LocalID)
 }
 
 func (c *Client) UpdateLearningTargetState(ctx context.Context, selector string, params UpdateLearningTargetStateParams) (Learning, error) {
+	var learning Learning
+	err := retrySQLiteBusy(ctx, func() error {
+		var err error
+		learning, err = c.updateLearningTargetStateOnce(ctx, selector, params)
+		return err
+	})
+	if err == nil {
+		c.maybeMaintainSQLiteWAL(ctx)
+	}
+	return learning, err
+}
+
+func (c *Client) updateLearningTargetStateOnce(ctx context.Context, selector string, params UpdateLearningTargetStateParams) (Learning, error) {
 	selector = strings.TrimSpace(selector)
 	params.State = LearningTargetState(strings.TrimSpace(string(params.State)))
 	params.TargetHash = strings.TrimSpace(params.TargetHash)
@@ -1019,6 +1099,19 @@ func (c *Client) UpdateLearningTargetState(ctx context.Context, selector string,
 }
 
 func (c *Client) RelateLearning(ctx context.Context, params RelateLearningParams) (LearningRelation, error) {
+	var relation LearningRelation
+	err := retrySQLiteBusy(ctx, func() error {
+		var err error
+		relation, err = c.relateLearningOnce(ctx, params)
+		return err
+	})
+	if err == nil {
+		c.maybeMaintainSQLiteWAL(ctx)
+	}
+	return relation, err
+}
+
+func (c *Client) relateLearningOnce(ctx context.Context, params RelateLearningParams) (LearningRelation, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return LearningRelation{}, err

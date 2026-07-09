@@ -220,6 +220,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		commandTaskUnarchive,
 		commandTaskDependencyAdd,
 		commandTaskDependencyRemove,
+		commandTaskSQLiteWAL,
 		commandTaskSnapshotExport,
 		commandSyncRun,
 		commandSyncConflicts,
