@@ -146,7 +146,7 @@ type IssueListOptions struct {
 	Query         string
 	Archived      string
 	IDs           []string
-	States        []domain.Status
+	States        []domain.IssueDisplayPhase
 	ParentIDs     []string
 	DependsOnIDs  []string
 	CreatedAfter  *time.Time
@@ -3069,9 +3069,9 @@ func parseIssueListArgs(args []string, allowQueryArgs bool) (IssueListOptions, e
 		stateInputs = append(stateInputs, v)
 		return nil
 	}
-	fs.Func("status", "restrict to a specific issue status (repeatable)", addStatusInput)
+	fs.Func("status", "restrict to a specific issue display status or phase (repeatable)", addStatusInput)
 	fs.Func("state", "deprecated alias for --status", addStatusInput)
-	fs.StringVar(&statesCSV, "statuses", "", "comma-separated issue statuses")
+	fs.StringVar(&statesCSV, "statuses", "", "comma-separated issue display statuses or phases")
 	fs.StringVar(&statesCSV, "states", "", "deprecated alias for --statuses")
 	fs.Func("id", "restrict list to specific issue ids (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
@@ -4761,7 +4761,7 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		tasks = filterTasksByIDs(tasks, opts.IDs)
 	}
 	if len(opts.States) > 0 {
-		tasks = filterTasksByStatus(tasks, opts.States)
+		tasks = filterTasksByIssueDisplayPhase(tasks, opts.States)
 	}
 	if len(opts.ParentIDs) > 0 {
 		tasks = filterTasksByParentIDs(tasks, opts.ParentIDs)
@@ -4839,7 +4839,7 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 				w,
 				"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				task.ID,
-				task.Status,
+				task.IssueDisplayStatusText(),
 				task.Priority.String(),
 				task.Type,
 				assigneeSummary,
@@ -4851,7 +4851,7 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 			)
 			continue
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", task.ID, task.Status, task.Priority.String(), task.Type, assigneeSummary, ownerSummary, estimateSummary, implSummary, task.Title)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", task.ID, task.IssueDisplayStatusText(), task.Priority.String(), task.Type, assigneeSummary, ownerSummary, estimateSummary, implSummary, task.Title)
 	}
 	if err := w.Flush(); err != nil {
 		return err
@@ -5016,7 +5016,7 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 
 	fmt.Printf("ID: %s\n", task.ID)
 	fmt.Printf("Title: %s\n", task.Title)
-	fmt.Printf("Status: %s\n", task.Status)
+	fmt.Printf("Status: %s\n", task.IssueDisplayStatusText())
 	fmt.Printf("Priority: %s\n", task.Priority.String())
 	fmt.Printf("Type: %s\n", task.Type)
 	if task.ParentID != nil {
@@ -7318,17 +7318,17 @@ func filterTasksByIDs(tasks []domain.Task, ids []string) []domain.Task {
 	return filtered
 }
 
-func filterTasksByStatus(tasks []domain.Task, statuses []domain.Status) []domain.Task {
-	if len(statuses) == 0 {
+func filterTasksByIssueDisplayPhase(tasks []domain.Task, phases []domain.IssueDisplayPhase) []domain.Task {
+	if len(phases) == 0 {
 		return tasks
 	}
-	statusSet := make(map[domain.Status]struct{}, len(statuses))
-	for _, status := range statuses {
-		statusSet[status] = struct{}{}
+	phaseSet := make(map[domain.IssueDisplayPhase]struct{}, len(phases))
+	for _, phase := range phases {
+		phaseSet[phase] = struct{}{}
 	}
 	filtered := make([]domain.Task, 0, len(tasks))
 	for _, task := range tasks {
-		if _, ok := statusSet[task.Status]; ok {
+		if _, ok := phaseSet[task.IssueDisplayPhase()]; ok {
 			filtered = append(filtered, task)
 		}
 	}
@@ -9425,15 +9425,15 @@ func parseIssueListDateFilter(raw string, endOfDay bool) (*time.Time, error) {
 	return &parsed, nil
 }
 
-func parseIssueStatuses(values []string) ([]domain.Status, error) {
+func parseIssueStatuses(values []string) ([]domain.IssueDisplayPhase, error) {
 	if len(values) == 0 {
 		return nil, nil
 	}
-	statuses := make([]domain.Status, 0, len(values))
-	seen := make(map[domain.Status]struct{}, len(values))
+	statuses := make([]domain.IssueDisplayPhase, 0, len(values))
+	seen := make(map[domain.IssueDisplayPhase]struct{}, len(values))
 	for _, value := range values {
 		for _, part := range strings.Split(value, ",") {
-			status, err := parseStatus(strings.TrimSpace(part))
+			status, err := parseIssueDisplayPhase(strings.TrimSpace(part))
 			if err != nil {
 				return nil, err
 			}
@@ -9445,6 +9445,25 @@ func parseIssueStatuses(values []string) ([]domain.Status, error) {
 		}
 	}
 	return statuses, nil
+}
+
+func parseIssueDisplayPhase(raw string) (domain.IssueDisplayPhase, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "backlog":
+		return domain.IssueDisplayBacklog, nil
+	case "open":
+		return domain.IssueDisplayOpen, nil
+	case "in_progress", "active", "working":
+		return domain.IssueDisplayActive, nil
+	case "in_review", "review", "review_ready", "review-ready":
+		return domain.IssueDisplayReview, nil
+	case "closed", "done", "completed", "complete":
+		return domain.IssueDisplayDone, nil
+	case "cancelled", "canceled":
+		return domain.IssueDisplayCancelled, nil
+	default:
+		return "", fmt.Errorf("invalid status: %s", raw)
+	}
 }
 
 func operationStateFromString(raw string) protocol.OperationState {

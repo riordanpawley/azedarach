@@ -10,6 +10,7 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 		review     IssueReviewState
 		close      IssueCloseOutcome
 		boardPhase IssueBoardPhase
+		display    IssueDisplayPhase
 		archive    IssueArchiveState
 		deletion   IssueDeletionState
 	}{
@@ -20,6 +21,7 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			review:     IssueReviewNone,
 			close:      IssueCloseNone,
 			boardPhase: IssueBoardBacklog,
+			display:    IssueDisplayBacklog,
 			archive:    IssueArchiveLive,
 			deletion:   IssueDeletionPresent,
 		},
@@ -30,6 +32,7 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			review:     IssueReviewNone,
 			close:      IssueCloseNone,
 			boardPhase: IssueBoardOpen,
+			display:    IssueDisplayOpen,
 			archive:    IssueArchiveLive,
 			deletion:   IssueDeletionPresent,
 		},
@@ -40,6 +43,7 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			review:     IssueReviewNone,
 			close:      IssueCloseNone,
 			boardPhase: IssueBoardActive,
+			display:    IssueDisplayActive,
 			archive:    IssueArchiveLive,
 			deletion:   IssueDeletionPresent,
 		},
@@ -50,6 +54,7 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			review:     IssueReviewRequested,
 			close:      IssueCloseNone,
 			boardPhase: IssueBoardReview,
+			display:    IssueDisplayReview,
 			archive:    IssueArchiveLive,
 			deletion:   IssueDeletionPresent,
 		},
@@ -60,6 +65,7 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			review:     IssueReviewNone,
 			close:      IssueCloseCompleted,
 			boardPhase: IssueBoardClosed,
+			display:    IssueDisplayDone,
 			archive:    IssueArchiveLive,
 			deletion:   IssueDeletionPresent,
 		},
@@ -70,6 +76,7 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			review:     IssueReviewNone,
 			close:      IssueCloseCancelled,
 			boardPhase: IssueBoardClosed,
+			display:    IssueDisplayCancelled,
 			archive:    IssueArchiveLive,
 			deletion:   IssueDeletionPresent,
 		},
@@ -80,6 +87,7 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			review:     IssueReviewNone,
 			close:      IssueCloseCancelled,
 			boardPhase: IssueBoardClosed,
+			display:    IssueDisplayCancelled,
 			archive:    IssueArchiveLive,
 			deletion:   IssueDeletionPresent,
 		},
@@ -90,6 +98,7 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			review:     IssueReviewNone,
 			close:      IssueCloseNone,
 			boardPhase: IssueBoardOpen,
+			display:    IssueDisplayOpen,
 			archive:    IssueArchiveArchived,
 			deletion:   IssueDeletionTombstoned,
 		},
@@ -113,6 +122,9 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			if got.BoardPhase() != tt.boardPhase {
 				t.Errorf("BoardPhase() = %s, want %s", got.BoardPhase(), tt.boardPhase)
 			}
+			if got.DisplayPhase() != tt.display {
+				t.Errorf("DisplayPhase() = %s, want %s", got.DisplayPhase(), tt.display)
+			}
 			if got.Archive() != tt.archive {
 				t.Errorf("Archive() = %s, want %s", got.Archive(), tt.archive)
 			}
@@ -133,6 +145,66 @@ func TestIssueStateFromLegacyRejectsUnknownStatus(t *testing.T) {
 func TestIssueStateBoardPhaseReturnsUnknownForInvalidState(t *testing.T) {
 	if got := (IssueState{}).BoardPhase(); got != IssueBoardUnknown {
 		t.Fatalf("BoardPhase() = %s, want %s", got, IssueBoardUnknown)
+	}
+	if got := (IssueState{}).DisplayPhase(); got != IssueDisplayUnknown {
+		t.Fatalf("DisplayPhase() = %s, want %s", got, IssueDisplayUnknown)
+	}
+}
+
+func TestTaskIssueDisplayPhaseDerivesReviewFromSessionActivity(t *testing.T) {
+	tests := []struct {
+		name string
+		task Task
+		want IssueDisplayPhase
+	}{
+		{
+			name: "backlog is derived from open P4",
+			task: Task{Status: StatusOpen, Priority: P4},
+			want: IssueDisplayBacklog,
+		},
+		{
+			name: "cancelled status is separate from done",
+			task: Task{Status: StatusCancelled, Priority: P2},
+			want: IssueDisplayCancelled,
+		},
+		{
+			name: "idle review handoff is review",
+			task: Task{Status: StatusInReview, Priority: P2, Session: &Session{Activity: string(SessionIdle)}},
+			want: IssueDisplayReview,
+		},
+		{
+			name: "waiting review handoff remains active",
+			task: Task{Status: StatusInReview, Priority: P2, Session: &Session{Activity: string(SessionWaiting)}},
+			want: IssueDisplayActive,
+		},
+		{
+			name: "waiting for human review handoff remains active",
+			task: Task{Status: StatusInReview, Priority: P2, Session: &Session{Activity: "waiting-for-human"}},
+			want: IssueDisplayActive,
+		},
+		{
+			name: "waiting for tool review handoff remains active",
+			task: Task{Status: StatusInReview, Priority: P2, Session: &Session{Activity: "waiting-for-tool"}},
+			want: IssueDisplayActive,
+		},
+		{
+			name: "busy review handoff remains active",
+			task: Task{Status: StatusInReview, Priority: P2, Session: &Session{Activity: "working"}},
+			want: IssueDisplayActive,
+		},
+		{
+			name: "no-agent review handoff is review",
+			task: Task{Status: StatusInReview, Priority: P2, Session: &Session{Activity: "no-agent"}},
+			want: IssueDisplayReview,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.task.IssueDisplayPhase(); got != tt.want {
+				t.Fatalf("IssueDisplayPhase() = %s, want %s", got, tt.want)
+			}
+		})
 	}
 }
 

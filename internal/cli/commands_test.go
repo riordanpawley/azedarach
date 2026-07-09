@@ -4935,12 +4935,17 @@ func TestParseIssueListArgs(t *testing.T) {
 		{
 			name: "status filters",
 			args: []string{"--status", "open", "--status", "in_review", "--statuses", "in_progress,open"},
-			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, States: []domain.Status{domain.StatusOpen, domain.StatusInReview, domain.StatusInProgress}},
+			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, States: []domain.IssueDisplayPhase{domain.IssueDisplayOpen, domain.IssueDisplayReview, domain.IssueDisplayActive}},
+		},
+		{
+			name: "v2 status filter aliases",
+			args: []string{"--status", "backlog", "--status", "cancelled", "--statuses", "done,review"},
+			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, States: []domain.IssueDisplayPhase{domain.IssueDisplayBacklog, domain.IssueDisplayCancelled, domain.IssueDisplayDone, domain.IssueDisplayReview}},
 		},
 		{
 			name: "state aliases",
 			args: []string{"--state", "open", "--states", "in_review"},
-			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, States: []domain.Status{domain.StatusOpen, domain.StatusInReview}},
+			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, States: []domain.IssueDisplayPhase{domain.IssueDisplayOpen, domain.IssueDisplayReview}},
 		},
 		{
 			name: "id filters",
@@ -5269,7 +5274,7 @@ func TestParseIssueSearchArgs(t *testing.T) {
 			want: IssueListOptions{
 				Limit:        defaultIssueListLimit,
 				Query:        "runtime cache",
-				States:       []domain.Status{domain.StatusOpen},
+				States:       []domain.IssueDisplayPhase{domain.IssueDisplayOpen},
 				UpdatedAfter: &updatedAfter,
 			},
 		},
@@ -6417,8 +6422,9 @@ func TestIssueListCommand_StatusFilter(t *testing.T) {
 	now := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
 	tasks := []domain.Task{
 		{ID: "az-1", Title: "Open", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(3 * time.Hour)},
-		{ID: "az-2", Title: "Blocked", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
+		{ID: "az-2", Title: "Review", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
 		{ID: "az-3", Title: "Closed", Status: domain.StatusDone, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(1 * time.Hour)},
+		{ID: "az-4", Title: "Backlog", Status: domain.StatusOpen, Priority: domain.P4, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(4 * time.Hour)},
 	}
 
 	deps := &Dependencies{
@@ -6446,13 +6452,42 @@ func TestIssueListCommand_StatusFilter(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() error {
-		return IssueListCommand(deps, IssueListOptions{States: []domain.Status{domain.StatusOpen, domain.StatusInReview}})
+		return IssueListCommand(deps, IssueListOptions{States: []domain.IssueDisplayPhase{domain.IssueDisplayOpen, domain.IssueDisplayReview}})
 	})
-	if strings.Contains(output, "az-3") {
-		t.Fatalf("status filter should exclude az-3: %q", output)
+	if strings.Contains(output, "az-3") || strings.Contains(output, "az-4") {
+		t.Fatalf("status filter should exclude closed and backlog issues: %q", output)
 	}
 	if !strings.Contains(output, "az-1") || !strings.Contains(output, "az-2") {
 		t.Fatalf("status filter should include matching issues: %q", output)
+	}
+}
+
+func TestIssueListCommand_StatusFilterBacklogDisplaysDerivedStatus(t *testing.T) {
+	now := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{ID: "az-1", Title: "Open", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(1 * time.Hour)},
+		{ID: "az-2", Title: "Backlog", Status: domain.StatusOpen, Priority: domain.P4, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
+	}
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := marshalTaskListBody(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return responseWithBody(req, body), nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueListCommand(deps, IssueListOptions{States: []domain.IssueDisplayPhase{domain.IssueDisplayBacklog}})
+	})
+	if strings.Contains(output, "az-1") || !strings.Contains(output, "az-2") || !strings.Contains(output, "backlog") {
+		t.Fatalf("backlog filter output = %q, want only az-2 with derived backlog status", output)
 	}
 }
 

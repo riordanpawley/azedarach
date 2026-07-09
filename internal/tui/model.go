@@ -1081,11 +1081,12 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Select all in current column
 	case keybinds.ActionSelectColumnAll:
-		status := m.nav.GetCurrentStatus(columns)
-		for _, t := range m.tasks {
-			if t.Status == status {
-				m.editor.Select(t.ID.String())
-			}
+		pos := m.nav.GetPosition(columns)
+		if !pos.Valid || pos.Column < 0 || pos.Column >= len(columns) {
+			return m, nil
+		}
+		for _, t := range columns[pos.Column].Tasks {
+			m.editor.Select(t.ID.String())
 		}
 		return m, nil
 
@@ -2933,13 +2934,12 @@ func projectSessionLifecycleState(state protocol.SessionLifecycleState) (domain.
 
 // currentColumn returns the tasks in the current column
 func (m Model) currentColumn() []domain.Task {
-	return m.tasksInColumn(m.columnStatus())
-}
-
-// columnStatus returns the status for the current column
-func (m Model) columnStatus() domain.Status {
 	columns := m.buildColumns()
-	return m.nav.GetCurrentStatus(columns)
+	pos := m.nav.GetPosition(columns)
+	if !pos.Valid || pos.Column < 0 || pos.Column >= len(columns) {
+		return nil
+	}
+	return columns[pos.Column].Tasks
 }
 
 // tasksInColumn returns all tasks with the given status

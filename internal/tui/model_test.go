@@ -234,6 +234,45 @@ func TestHelperMethods(t *testing.T) {
 	})
 }
 
+func TestBuildColumnsUsesIssueDisplayPhases(t *testing.T) {
+	m := New(&config.Config{CLITool: "claude"})
+	m.tasks = []domain.Task{
+		{ID: "az-backlog", Title: "Backlog", Status: domain.StatusOpen, Priority: domain.P4, Type: domain.TypeTask},
+		{ID: "az-open", Title: "Open", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-waiting-review", Title: "Waiting review", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeTask, Session: &domain.Session{Activity: string(domain.SessionWaiting)}},
+		{ID: "az-idle-review", Title: "Idle review", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeTask, Session: &domain.Session{Activity: string(domain.SessionIdle)}},
+		{ID: "az-done", Title: "Done", Status: domain.StatusDone, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-cancelled", Title: "Cancelled", Status: domain.StatusCancelled, Priority: domain.P2, Type: domain.TypeTask},
+	}
+
+	columns := m.buildColumns()
+	titles := make([]string, 0, len(columns))
+	tasksByTitle := map[string][]domain.Task{}
+	for _, col := range columns {
+		titles = append(titles, col.Title)
+		tasksByTitle[col.Title] = col.Tasks
+	}
+	wantTitles := []string{"Backlog", "Open", "In Progress", "In Review", "Done", "Cancelled"}
+	if !reflect.DeepEqual(titles, wantTitles) {
+		t.Fatalf("column titles = %#v, want %#v", titles, wantTitles)
+	}
+	if got := tasksByTitle["Backlog"]; len(got) != 1 || got[0].ID.String() != "az-backlog" {
+		t.Fatalf("backlog column tasks = %+v", got)
+	}
+	if got := tasksByTitle["Open"]; len(got) != 1 || got[0].ID.String() != "az-open" {
+		t.Fatalf("open column tasks = %+v", got)
+	}
+	if got := tasksByTitle["In Progress"]; len(got) != 1 || got[0].ID.String() != "az-waiting-review" {
+		t.Fatalf("in progress column tasks = %+v", got)
+	}
+	if got := tasksByTitle["In Review"]; len(got) != 1 || got[0].ID.String() != "az-idle-review" {
+		t.Fatalf("in review column tasks = %+v", got)
+	}
+	if got := tasksByTitle["Cancelled"]; len(got) != 1 || got[0].ID.String() != "az-cancelled" {
+		t.Fatalf("cancelled column tasks = %+v", got)
+	}
+}
+
 func TestRuntimeEventSummary_CompactsAndTruncates(t *testing.T) {
 	evt := protocol.EventEnvelope{
 		Event: "clipboard.error",

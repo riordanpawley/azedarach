@@ -458,15 +458,16 @@ func (m Model) buildColumns() []board.Column {
 	// Apply filter to tasks and enforce board-level child hiding semantics.
 	filteredTasks := m.boardVisibleTasks(m.tasks)
 
-	columns := []board.Column{
-		{Title: "Open"},
-		{Title: "In Progress"},
-		{Title: "In Review"},
-		{Title: "Done"},
+	phases := domain.IssueDisplayPhasesForTasks(filteredTasks)
+	columns := make([]board.Column, 0, len(phases))
+	columnByPhase := make(map[domain.IssueDisplayPhase]int, len(phases))
+	for _, phase := range phases {
+		columnByPhase[phase] = len(columns)
+		columns = append(columns, board.Column{Title: phase.Label()})
 	}
 	for _, task := range filteredTasks {
-		column := task.Status.Column()
-		if column < 0 || column >= len(columns) {
+		column, ok := columnByPhase[task.IssueDisplayPhase()]
+		if !ok || column < 0 || column >= len(columns) {
 			continue
 		}
 		columns[column].Tasks = append(columns[column].Tasks, task)

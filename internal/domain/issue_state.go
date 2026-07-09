@@ -59,6 +59,18 @@ const (
 	IssueBoardClosed  IssueBoardPhase = "closed"
 )
 
+type IssueDisplayPhase string
+
+const (
+	IssueDisplayUnknown   IssueDisplayPhase = "unknown"
+	IssueDisplayBacklog   IssueDisplayPhase = "backlog"
+	IssueDisplayOpen      IssueDisplayPhase = "open"
+	IssueDisplayActive    IssueDisplayPhase = "active"
+	IssueDisplayReview    IssueDisplayPhase = "review"
+	IssueDisplayDone      IssueDisplayPhase = "done"
+	IssueDisplayCancelled IssueDisplayPhase = "cancelled"
+)
+
 type IssueStateParts struct {
 	Workflow     IssueWorkflow
 	Review       IssueReviewState
@@ -175,6 +187,29 @@ func (s IssueState) BoardPhase() IssueBoardPhase {
 		return IssueBoardActive
 	default:
 		return IssueBoardOpen
+	}
+}
+
+func (s IssueState) DisplayPhase() IssueDisplayPhase {
+	if err := s.Validate(); err != nil {
+		return IssueDisplayUnknown
+	}
+	if s.workflow == IssueWorkflowClosed {
+		if s.closeOutcome == IssueCloseCancelled {
+			return IssueDisplayCancelled
+		}
+		return IssueDisplayDone
+	}
+	if s.review == IssueReviewRequested {
+		return IssueDisplayReview
+	}
+	switch s.workflow {
+	case IssueWorkflowBacklog:
+		return IssueDisplayBacklog
+	case IssueWorkflowActive:
+		return IssueDisplayActive
+	default:
+		return IssueDisplayOpen
 	}
 }
 
@@ -366,4 +401,125 @@ func deletionStateFromBool(tombstoned bool) IssueDeletionState {
 		return IssueDeletionTombstoned
 	}
 	return IssueDeletionPresent
+}
+
+func (p IssueDisplayPhase) Label() string {
+	switch p {
+	case IssueDisplayBacklog:
+		return "Backlog"
+	case IssueDisplayOpen:
+		return "Open"
+	case IssueDisplayActive:
+		return "In Progress"
+	case IssueDisplayReview:
+		return "In Review"
+	case IssueDisplayDone:
+		return "Done"
+	case IssueDisplayCancelled:
+		return "Cancelled"
+	default:
+		return "Unknown"
+	}
+}
+
+func (p IssueDisplayPhase) StatusText() string {
+	switch p {
+	case IssueDisplayBacklog:
+		return "backlog"
+	case IssueDisplayOpen:
+		return string(StatusOpen)
+	case IssueDisplayActive:
+		return string(StatusInProgress)
+	case IssueDisplayReview:
+		return string(StatusInReview)
+	case IssueDisplayDone:
+		return string(StatusDone)
+	case IssueDisplayCancelled:
+		return string(StatusCancelled)
+	default:
+		return "unknown"
+	}
+}
+
+func (t Task) IssueState() (IssueState, error) {
+	return IssueStateFromLegacy(LegacyIssueStateInput{
+		Status:   t.Status,
+		Priority: t.Priority,
+	})
+}
+
+func (t Task) IssueDisplayPhase() IssueDisplayPhase {
+	state, err := t.IssueState()
+	if err != nil {
+		return IssueDisplayUnknown
+	}
+	phase := state.DisplayPhase()
+	if phase == IssueDisplayReview && taskHasActiveReviewBlockingSession(t) {
+		return IssueDisplayActive
+	}
+	return phase
+}
+
+func (t Task) IssueDisplayStatusText() string {
+	return t.IssueDisplayPhase().StatusText()
+}
+
+func (t Task) IssueDisplayFilterStatus() Status {
+	return t.IssueDisplayPhase().FilterStatus()
+}
+
+func IssueDisplayPhasesForTasks(tasks []Task) []IssueDisplayPhase {
+	hasBacklog := false
+	hasCancelled := false
+	for _, task := range tasks {
+		switch task.IssueDisplayPhase() {
+		case IssueDisplayBacklog:
+			hasBacklog = true
+		case IssueDisplayCancelled:
+			hasCancelled = true
+		}
+	}
+	phases := make([]IssueDisplayPhase, 0, 6)
+	if hasBacklog {
+		phases = append(phases, IssueDisplayBacklog)
+	}
+	phases = append(phases, IssueDisplayOpen, IssueDisplayActive, IssueDisplayReview, IssueDisplayDone)
+	if hasCancelled {
+		phases = append(phases, IssueDisplayCancelled)
+	}
+	return phases
+}
+
+func (p IssueDisplayPhase) FilterStatus() Status {
+	switch p {
+	case IssueDisplayOpen:
+		return StatusOpen
+	case IssueDisplayActive:
+		return StatusInProgress
+	case IssueDisplayReview:
+		return StatusInReview
+	case IssueDisplayDone:
+		return StatusDone
+	case IssueDisplayCancelled:
+		return StatusCancelled
+	default:
+		return Status("")
+	}
+}
+
+func taskHasActiveReviewBlockingSession(task Task) bool {
+	if task.Session == nil {
+		return false
+	}
+	rawActivity := strings.ToLower(strings.TrimSpace(task.Session.Activity))
+	switch rawActivity {
+	case string(SessionBusy), "starting", "working", string(SessionWaiting), "waiting-for-human", "waiting-for-ai", "waiting-for-tool":
+		return true
+	}
+	switch task.Session.DisplayActivity() {
+	case string(SessionBusy), "starting", "working", string(SessionWaiting):
+		return true
+	default:
+		return false
+	}
 }
