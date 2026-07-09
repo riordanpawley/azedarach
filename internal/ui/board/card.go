@@ -15,7 +15,7 @@ import (
 // CardContentHeight is the single source of truth for rendered card content height.
 const CardContentHeight = 4
 const narrowCardExtraLines = 1
-const expandedHeaderWorstCase = "P2 CHE-1234 T Φ9 ◐ W 12h 34m ✓ M:queued(100%) ↑99 ↓99 ✎ +999/-999 [99/99]"
+const expandedHeaderWorstCase = "P2 CHE-1234 T Φ9 ◐ W 12h ✓ M:queued(100%) ↑99 ↓99 ✎ +999k/-999k [99/99]"
 
 const tmuxSessionToken = "T"
 const descendantTmuxSessionToken = "Td"
@@ -144,18 +144,28 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 	runtimeCompact := renderRuntimeSignalsCompact(visibleRuntimeSignals, s)
 	typeBadge := renderTaskTypeBadge(task.Type, s)
 	headerTitle := strings.Join(headerParts, " ")
-	headerTokens := []struct {
+	type headerToken struct {
 		full              string
 		compact           string
 		compactWhenNarrow bool
-	}{
+	}
+	preferCompact := maxLineLen < 44
+	headerTokens := []headerToken{
 		{full: sessionRow, compact: sessionCompact},
 		{full: runtimeRow, compact: runtimeCompact},
 		{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s), compactWhenNarrow: true},
 		{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
 		{full: typeBadge, compact: typeBadge},
 	}
-	preferCompact := maxLineLen < 44
+	if preferCompact {
+		headerTokens = []headerToken{
+			{full: sessionRow, compact: sessionCompact},
+			{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
+			{full: typeBadge, compact: typeBadge},
+			{full: runtimeRow, compact: runtimeCompact},
+			{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s), compactWhenNarrow: true},
+		}
+	}
 	headerLines := []string{headerTitle}
 	cardHeight := CardContentHeight
 	if shouldExpandCardHeader(maxLineLen) {
@@ -607,7 +617,7 @@ func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
 	}
 	if session.StartedAt != nil && (displayState == domain.SessionBusy || displayState == domain.SessionWaiting) {
 		d := time.Since(*session.StartedAt)
-		elapsed = formatDuration(d)
+		elapsed = formatCompactDuration(d)
 	}
 
 	stateStyle := s.Session(session)
@@ -688,20 +698,20 @@ func renderRuntimeSignals(signals *RuntimeSignals, s *styles.Styles) string {
 		parts = append(parts, renderRuntimeSignalToken("conflict", styles.Red, s))
 	}
 	if signals.GitAheadCount > 0 {
-		parts = append(parts, renderRuntimeSignalToken(fmt.Sprintf("↑%d", signals.GitAheadCount), styles.Green, s))
+		parts = append(parts, renderRuntimeSignalToken(fmt.Sprintf("↑%s", formatCompactCount(signals.GitAheadCount)), styles.Green, s))
 	}
 	if signals.GitBehindCount > 0 {
-		parts = append(parts, renderRuntimeSignalToken(fmt.Sprintf("↓%d", signals.GitBehindCount), styles.Yellow, s))
+		parts = append(parts, renderRuntimeSignalToken(fmt.Sprintf("↓%s", formatCompactCount(signals.GitBehindCount)), styles.Yellow, s))
 	}
 	if signals.HasUncommittedChanges {
 		parts = append(parts, renderRuntimeSignalToken("✎", styles.Peach, s))
 	}
 	if hasLineChanges {
 		if s == nil {
-			parts = append(parts, fmt.Sprintf("+%d/-%d", signals.GitAdditions, signals.GitDeletions))
+			parts = append(parts, fmt.Sprintf("+%s/-%s", formatCompactCount(signals.GitAdditions), formatCompactCount(signals.GitDeletions)))
 		} else {
-			add := renderRuntimeSignalToken(fmt.Sprintf("+%d", signals.GitAdditions), styles.Green, s)
-			del := renderRuntimeSignalToken(fmt.Sprintf("-%d", signals.GitDeletions), styles.Red, s)
+			add := renderRuntimeSignalToken(fmt.Sprintf("+%s", formatCompactCount(signals.GitAdditions)), styles.Green, s)
+			del := renderRuntimeSignalToken(fmt.Sprintf("-%s", formatCompactCount(signals.GitDeletions)), styles.Red, s)
 			sep := lipgloss.NewStyle().Foreground(styles.Overlay0).Render("/")
 			parts = append(parts, add+sep+del)
 		}
@@ -768,13 +778,13 @@ func tmuxAttachedRuntimeToken(signals *RuntimeSignals, compact bool) string {
 
 func formatAheadBehindToken(ahead, behind int) string {
 	if ahead > 0 && behind > 0 {
-		return fmt.Sprintf("↑%d/↓%d", ahead, behind)
+		return fmt.Sprintf("↑%s/↓%s", formatCompactCount(ahead), formatCompactCount(behind))
 	}
 	if behind > 0 {
-		return fmt.Sprintf("↓%d", behind)
+		return fmt.Sprintf("↓%s", formatCompactCount(behind))
 	}
 	if ahead > 0 {
-		return fmt.Sprintf("↑%d", ahead)
+		return fmt.Sprintf("↑%s", formatCompactCount(ahead))
 	}
 	return ""
 }
@@ -853,6 +863,34 @@ func formatCompactDuration(d time.Duration) string {
 		return fmt.Sprintf("%dh", h)
 	}
 	return fmt.Sprintf("%dm", m)
+}
+
+func formatCompactCount(n int) string {
+	sign := ""
+	value := n
+	if value < 0 {
+		sign = "-"
+		value = -value
+	}
+	switch {
+	case value >= 1000000:
+		return fmt.Sprintf("%s%dM", sign, roundedUnit(value, 1000000))
+	case value >= 1000:
+		rounded := roundedUnit(value, 1000)
+		if rounded >= 1000 {
+			return fmt.Sprintf("%s1M", sign)
+		}
+		return fmt.Sprintf("%s%dk", sign, rounded)
+	default:
+		return fmt.Sprintf("%s%d", sign, value)
+	}
+}
+
+func roundedUnit(value, unit int) int {
+	if value <= 0 {
+		return 0
+	}
+	return (value + unit/2) / unit
 }
 
 // renderChildProgress renders child completion progress with completion ratio.
