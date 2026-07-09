@@ -196,6 +196,9 @@ func (c *Client) seedBuiltInBoardViews(ctx context.Context, db *sql.DB, projectI
 }
 
 func ensureBoardViewsSchema(db *sql.DB) error {
+	if err := refusePartialBoardViewsSchema(db); err != nil {
+		return err
+	}
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS board_views (
 			project_id TEXT NOT NULL,

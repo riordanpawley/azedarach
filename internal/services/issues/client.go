@@ -312,6 +312,7 @@ type Client struct {
 	lastWALCheckAt time.Time
 
 	stateModelV2MigrationFailureHook func(stage string) error
+	boardViewsMigrationFailureHook   func(stage string) error
 }
 
 type sqlIssueExecer interface {

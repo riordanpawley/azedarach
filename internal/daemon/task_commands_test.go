@@ -613,6 +613,69 @@ func TestHandleBoardFetchGroupsBySelectedView(t *testing.T) {
 	}
 }
 
+func TestHandleBoardFetchFallsBackToDefaultWhenSelectedViewPreferenceIsCorrupt(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	t.Cleanup(func() {
+		if err := issuesClient.CloseDB(); err != nil {
+			t.Fatalf("CloseDB error: %v", err)
+		}
+	})
+	projectID := "proj-board-corrupt-pref"
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Open issue",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		Priority: domain.P2,
+	}); err != nil {
+		t.Fatalf("create open issue: %v", err)
+	}
+	repoDir := t.TempDir()
+	prefPath := filepath.Join(repoDir, ".azedarach", boardViewPreferenceFileName)
+	if err := os.MkdirAll(filepath.Dir(prefPath), 0o755); err != nil {
+		t.Fatalf("mkdir pref dir: %v", err)
+	}
+	if err := os.WriteFile(prefPath, []byte(`{"selected_view_by_project":`), 0o644); err != nil {
+		t.Fatalf("write corrupt preference: %v", err)
+	}
+	d := &Daemon{
+		cfg: Config{
+			Logger:  logger,
+			RepoDir: repoDir,
+		},
+		issues:                issuesClient,
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		uiState:               map[string]string{},
+		revision:              map[string]uint64{},
+	}
+
+	resp, err := d.handleBoardFetch(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       naming.RequestID("board-fetch-corrupt-pref"),
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         protocol.CommandBoardFetch,
+		SentAt:          time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("handleBoardFetch error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("handleBoardFetch response = %+v", resp.Error)
+	}
+	payload, err := protocol.DecodeBoardSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("DecodeBoardSnapshotPayload error: %v", err)
+	}
+	if got, want := string(payload.View.ID), domain.DefaultBoardViewID; got != want {
+		t.Fatalf("payload view id = %q, want %q", got, want)
+	}
+	if got, want := len(payload.Columns), len(domain.DefaultBoardView().Columns); got != want {
+		t.Fatalf("len(columns) = %d, want default view column count %d", got, want)
+	}
+}
+
 func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

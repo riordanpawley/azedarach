@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -67,6 +68,7 @@ const (
 	issueStateModelVersionMetaKey     = "issue:state_model_version"
 	issueStateModelV2CutoverMarkerKey = "issue:state_model_v2_cutover"
 	issueStateModelV2Version          = "2"
+	boardViewsMigrationID             = "0031_board_views"
 )
 
 type issueStateModelV2CutoverMarker struct {
@@ -126,6 +128,16 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		if shouldApply {
 			if m.id == issueStateModelV2MigrationID {
 				if err := c.applyIssueStateModelV2Migration(ctx, db, m.id); err != nil {
+					return err
+				}
+				continue
+			}
+			if m.id == boardViewsMigrationID {
+				sqlText, err := loadMigrationSQL(m.path)
+				if err != nil {
+					return fmt.Errorf("load migration %s: %w", m.id, err)
+				}
+				if err := c.applyBoardViewsMigration(ctx, db, m.id, sqlText); err != nil {
 					return err
 				}
 				continue
@@ -469,6 +481,102 @@ func (c *Client) applyMigration(ctx context.Context, db *sql.DB, id, sqlText str
 	}
 
 	return nil
+}
+
+func (c *Client) applyBoardViewsMigration(ctx context.Context, db *sql.DB, id, sqlText string) error {
+	if err := refusePartialBoardViewsSchema(db); err != nil {
+		return fmt.Errorf("migration %s: %w", id, err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	beforeCount, countErr := dependencyCount(tx)
+	if countErr != nil {
+		return fmt.Errorf("count dependencies before migration %s: %w", id, countErr)
+	}
+	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+		return fmt.Errorf("apply migration %s: %w", id, err)
+	}
+	if err := c.runBoardViewsMigrationFailureHook("after_schema"); err != nil {
+		return fmt.Errorf("migration %s rolled back: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO schema_migrations (id, applied_at)
+		VALUES (?, ?)
+	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+
+	afterCount, countErr := dependencyCount(tx)
+	if countErr != nil {
+		return fmt.Errorf("count dependencies after migration %s: %w", id, countErr)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	tx = nil
+
+	if id == boardViewsMigrationID && beforeCount != afterCount {
+		c.logger.Warn("unexpected dependency count change during board view migration", "before", beforeCount, "after", afterCount)
+	}
+	return nil
+}
+
+func (c *Client) runBoardViewsMigrationFailureHook(stage string) error {
+	if c.boardViewsMigrationFailureHook == nil {
+		return nil
+	}
+	if err := c.boardViewsMigrationFailureHook(stage); err != nil {
+		return fmt.Errorf("injected board views migration failure at %s: %w", stage, err)
+	}
+	return nil
+}
+
+func refusePartialBoardViewsSchema(db *sql.DB) error {
+	exists, err := tableExists(db, "board_views")
+	if err != nil {
+		return fmt.Errorf("inspect board_views table: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	columns, err := tableColumns(db, "board_views")
+	if err != nil {
+		return fmt.Errorf("inspect board_views columns: %w", err)
+	}
+	missing := missingBoardViewsColumns(columns)
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("refusing startup with partial board_views schema: missing columns %s; restore the database from backup before retrying", strings.Join(missing, ", "))
+}
+
+func missingBoardViewsColumns(columns map[string]struct{}) []string {
+	required := []string{
+		"project_id",
+		"id",
+		"name",
+		"definition_json",
+		"built_in",
+		"created_at",
+		"updated_at",
+		"deleted_at",
+	}
+	missing := make([]string, 0)
+	for _, column := range required {
+		if _, ok := columns[column]; !ok {
+			missing = append(missing, column)
+		}
+	}
+	sort.Strings(missing)
+	return missing
 }
 
 func refusePartialIssueStateModelV2Cutover(ctx context.Context, db *sql.DB) error {

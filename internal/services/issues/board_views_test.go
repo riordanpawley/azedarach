@@ -78,6 +78,72 @@ func TestBoardViewCorruptDefinitionFailsSafely(t *testing.T) {
 	}
 }
 
+func TestBoardViewInvalidTypedDefinitionFailsSafely(t *testing.T) {
+	ctx := context.Background()
+	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
+	t.Cleanup(func() {
+		if err := client.CloseDB(); err != nil {
+			t.Fatalf("CloseDB error: %v", err)
+		}
+	})
+	projectID := "proj-invalid-board"
+	if _, err := client.SaveBoardView(ctx, projectID, boardViewTestCustomView("invalid-me")); err != nil {
+		t.Fatalf("SaveBoardView error: %v", err)
+	}
+	db, err := client.dbHandle()
+	if err != nil {
+		t.Fatalf("dbHandle error: %v", err)
+	}
+	invalidDefinition := `{"schema_version":1,"id":"invalid-me","title":"Invalid","columns":[{"id":"active","title":"Active","predicates":[{"kind":"display_phase","display_phases":["active"],"unexpected":true}]}]}`
+	if _, err := db.ExecContext(ctx, `UPDATE board_views SET definition_json = ? WHERE project_id = ? AND id = ?`, invalidDefinition, projectID, "invalid-me"); err != nil {
+		t.Fatalf("corrupt board view: %v", err)
+	}
+
+	_, err = client.GetBoardView(ctx, projectID, "invalid-me")
+	if err == nil {
+		t.Fatal("GetBoardView error = nil, want typed definition decode error")
+	}
+	if !strings.Contains(err.Error(), `decode board view "invalid-me"`) || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("GetBoardView error = %v, want typed decode error with view id", err)
+	}
+}
+
+func TestBoardViewsReseedBuiltInDefinitions(t *testing.T) {
+	ctx := context.Background()
+	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
+	t.Cleanup(func() {
+		if err := client.CloseDB(); err != nil {
+			t.Fatalf("CloseDB error: %v", err)
+		}
+	})
+	projectID := "proj-reseed-board"
+	if _, err := client.ListBoardViews(ctx, projectID); err != nil {
+		t.Fatalf("ListBoardViews seed error: %v", err)
+	}
+	db, err := client.dbHandle()
+	if err != nil {
+		t.Fatalf("dbHandle error: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		UPDATE board_views
+		SET name = 'Broken', definition_json = '{"schema_version":999}', deleted_at = '2026-07-09T00:00:00Z'
+		WHERE project_id = ? AND id = ?
+	`, projectID, domain.DefaultBoardViewID); err != nil {
+		t.Fatalf("break default view: %v", err)
+	}
+
+	record, err := client.GetBoardView(ctx, projectID, domain.DefaultBoardViewID)
+	if err != nil {
+		t.Fatalf("GetBoardView after reseed error: %v", err)
+	}
+	if record.View.ID != domain.BoardViewCurrentID || record.View.Title != domain.DefaultBoardView().Title {
+		t.Fatalf("reseeded view = %+v, want built-in default", record.View)
+	}
+	if !record.BuiltIn {
+		t.Fatal("reseeded default BuiltIn = false, want true")
+	}
+}
+
 func boardViewTestCustomView(id string) domain.BoardView {
 	return domain.BoardView{
 		ID:    domain.BoardViewID(id),
