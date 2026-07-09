@@ -170,6 +170,87 @@ func TestClient_RefusesPartialIssueStateModelV2MigrationMarker(t *testing.T) {
 	assert.NotContains(t, columns, "lifecycle_state")
 }
 
+func TestValidateIssueStateModelV2RowsRejectsImpossibleStateCombinations(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		lifecycle     string
+		closedOutcome any
+		reviewState   string
+		wantErr       string
+	}{
+		{
+			name:          "closed lifecycle rejects null outcome",
+			lifecycle:     "closed",
+			closedOutcome: nil,
+			reviewState:   "none",
+			wantErr:       "invalid closed_outcome for closed lifecycle",
+		},
+		{
+			name:          "non-closed lifecycle rejects null outcome",
+			lifecycle:     "open",
+			closedOutcome: nil,
+			reviewState:   "none",
+			wantErr:       "invalid closed_outcome for non-closed lifecycle",
+		},
+		{
+			name:          "closed lifecycle requires terminal outcome",
+			lifecycle:     "closed",
+			closedOutcome: "none",
+			reviewState:   "none",
+			wantErr:       "invalid closed_outcome for closed lifecycle",
+		},
+		{
+			name:          "non-closed lifecycle cannot carry terminal outcome",
+			lifecycle:     "open",
+			closedOutcome: "completed",
+			reviewState:   "none",
+			wantErr:       "invalid closed_outcome for non-closed lifecycle",
+		},
+		{
+			name:          "review requested requires active lifecycle",
+			lifecycle:     "open",
+			closedOutcome: "none",
+			reviewState:   "requested",
+			wantErr:       "review requested for non-active lifecycle",
+		},
+		{
+			name:          "closed lifecycle cannot carry review request",
+			lifecycle:     "closed",
+			closedOutcome: "completed",
+			reviewState:   "requested",
+			wantErr:       "review requested for non-active lifecycle",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, err := sql.Open("sqlite", ":memory:")
+			require.NoError(t, err)
+			defer db.Close()
+
+			_, err = db.ExecContext(ctx, `
+				CREATE TABLE issues (
+					id TEXT PRIMARY KEY,
+					lifecycle_state TEXT,
+					closed_outcome TEXT,
+					review_state TEXT,
+					archived_at TEXT,
+					deleted_at TEXT
+				);
+				INSERT INTO issues (id, lifecycle_state, closed_outcome, review_state, archived_at, deleted_at)
+				VALUES ('az-invalid', ?, ?, ?, NULL, NULL);
+			`, tt.lifecycle, tt.closedOutcome, tt.reviewState)
+			require.NoError(t, err)
+
+			err = validateIssueStateModelV2Rows(ctx, db)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 func seedIssueStateModelV1DB(t *testing.T, dbPath string) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Dir(dbPath), 0o755))

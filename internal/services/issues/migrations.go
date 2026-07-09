@@ -1146,14 +1146,14 @@ func validateIssueStateModelV2Rows(ctx context.Context, db sqlIssueQueryer) erro
 				WHERE lifecycle_state NOT IN ('backlog', 'open', 'active', 'closed')`,
 		},
 		{
-			name: "missing closed_outcome for closed lifecycle",
+			name: "invalid closed_outcome for closed lifecycle",
 			query: `SELECT COUNT(*) FROM issues
-				WHERE lifecycle_state = 'closed' AND COALESCE(closed_outcome, '') = ''`,
+				WHERE lifecycle_state = 'closed' AND COALESCE(closed_outcome, '') NOT IN ('completed', 'cancelled')`,
 		},
 		{
-			name: "missing closed_outcome for non-closed lifecycle",
+			name: "invalid closed_outcome for non-closed lifecycle",
 			query: `SELECT COUNT(*) FROM issues
-				WHERE lifecycle_state <> 'closed' AND COALESCE(closed_outcome, '') = ''`,
+				WHERE lifecycle_state <> 'closed' AND COALESCE(closed_outcome, '') <> 'none'`,
 		},
 		{
 			name: "invalid closed_outcome",
@@ -1169,6 +1169,11 @@ func validateIssueStateModelV2Rows(ctx context.Context, db sqlIssueQueryer) erro
 			name: "invalid review_state",
 			query: `SELECT COUNT(*) FROM issues
 				WHERE review_state NOT IN ('none', 'requested')`,
+		},
+		{
+			name: "review requested for non-active lifecycle",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE review_state = 'requested' AND lifecycle_state <> 'active'`,
 		},
 		{
 			name: "archive timestamp drift",
