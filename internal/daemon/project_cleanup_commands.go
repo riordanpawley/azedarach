@@ -136,7 +136,7 @@ func (d *Daemon) cleanupOldDoneTasks(ctx context.Context, req protocol.RequestEn
 	deleted := 0
 	var lastErr error
 	for _, task := range tasks {
-		if task.Status != domain.StatusDone || !task.UpdatedAt.Before(cutoff) {
+		if !task.IssueClosed() || !task.UpdatedAt.Before(cutoff) {
 			continue
 		}
 		if err := d.deleteTaskForCleanup(ctx, req, projectID, task.ID.String()); err != nil {
@@ -173,7 +173,7 @@ func doneTasksInArchiveOrder(tasks []domain.Task) []domain.Task {
 	done := make([]domain.Task, 0, len(tasks))
 	for _, task := range tasks {
 		byID[task.ID] = task
-		if task.Status == domain.StatusDone {
+		if task.IssueClosed() {
 			done = append(done, task)
 		}
 	}

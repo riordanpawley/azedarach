@@ -5045,8 +5045,13 @@ func (m Model) reviewCascadeChildIDs(parentID string) []string {
 		}
 		seen[childID] = struct{}{}
 		child, ok := tasksByID[childID]
-		if ok && child.Status != domain.StatusInReview && child.Status != domain.StatusDone {
-			out = append(out, childID)
+		if ok {
+			switch child.IssueDisplayPhase() {
+			case domain.IssueDisplayReview, domain.IssueDisplayDone, domain.IssueDisplayCancelled:
+				// Already review-ready or terminal from the user's perspective.
+			default:
+				out = append(out, childID)
+			}
 		}
 		queue = append(queue, childrenByParent[childID]...)
 	}
@@ -5527,7 +5532,7 @@ func closeCleanupTargetsHaveBlockingDescendants(tasks []domain.Task, targetIDs [
 }
 
 func closeCleanupDescendantBlocksTargetOnly(task domain.Task) bool {
-	if task.Status != domain.StatusDone {
+	if !task.IssueClosed() {
 		return true
 	}
 	if task.HasTmuxSession || task.Session != nil {
@@ -5687,7 +5692,7 @@ func (m *Model) markTaskOperationPending(taskID, action, operationID string, sta
 	m.clearTaskMutationFailure(taskID)
 	current := m.pendingStatuses[key]
 	if action == "session_start" && current.targetStatus == "" {
-		if status, ok := m.taskStatusByID(taskID); ok && status != domain.StatusDone {
+		if status, ok := m.taskStatusByID(taskID); ok && !(domain.Task{Status: status}).IssueClosed() {
 			current.previousStatus = status
 			current.targetStatus = domain.StatusInProgress
 		}

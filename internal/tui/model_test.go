@@ -6772,6 +6772,7 @@ func TestReviewCascadeChildIDsIncludesUnreadyDescendants(t *testing.T) {
 			{ID: "az-grandchild", Status: domain.StatusOpen, ParentID: &childID},
 			{ID: "az-ready", Status: domain.StatusInReview, ParentID: &parentID},
 			{ID: "az-closed", Status: domain.StatusDone, ParentID: &parentID},
+			{ID: "az-cancelled", Status: domain.StatusCancelled, ParentID: &parentID},
 			{
 				ID:     legacyChildID,
 				Status: domain.StatusOpen,

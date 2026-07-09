@@ -1222,7 +1222,7 @@ func (d *Daemon) recoverInterruptedDeferredWorktreeCleanup(ctx context.Context, 
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient != nil {
 		task, err := issueClient.GetWithRuntime(ctx, projectID, taskID)
-		if err == nil && task.Status != domain.StatusDone {
+		if err == nil && !task.IssueClosed() {
 			if fallbackPath != "" {
 				d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, fallbackPath, fallbackBranch)
 			} else {

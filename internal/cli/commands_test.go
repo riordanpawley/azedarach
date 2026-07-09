@@ -13729,64 +13729,78 @@ func TestPrimeCommandTruncatesLargeIssueDescription(t *testing.T) {
 }
 
 func TestPrimeCommandWarnsWhenActiveIssueClosed(t *testing.T) {
-	t.Setenv("AZEDARACH_ISSUE_ID", "az-closed")
 	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
 
-	deps := &Dependencies{
-		DaemonClient: daemonclient.New(&fakeDaemonTransport{
-			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command == daemonclient.CommandTaskClaimOwnership {
-					t.Fatal("prime must not claim a closed active issue")
-				}
-				if req.Command != daemonclient.CommandTaskGet {
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						Meta:            req.Meta,
-						OK:              true,
-						CompletedAt:     req.SentAt,
-					}, nil
-				}
-				body, err := marshalTaskListBody([]domain.Task{{
-					ID:              "az-closed",
-					Title:           "Closed issue",
-					Status:          domain.StatusDone,
-					Priority:        domain.P2,
-					Type:            domain.TypeTask,
-					Implementations: []string{"go-bubbletea"},
-					CreatedAt:       now,
-					UpdatedAt:       now,
-				}})
-				if err != nil {
-					t.Fatalf("marshal task list: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					Meta:            req.Meta,
-					OK:              true,
-					CompletedAt:     req.SentAt,
-					Body:            body,
-				}, nil
-			},
-		}),
-		ProjectID: "proj",
+	tests := []struct {
+		name   string
+		id     naming.IssueID
+		status domain.Status
+		want   string
+	}{
+		{name: "completed", id: "az-closed", status: domain.StatusDone, want: "Active issue `az-closed` is currently `closed`"},
+		{name: "cancelled", id: "az-cancelled", status: domain.StatusCancelled, want: "Active issue `az-cancelled` is currently `cancelled`"},
 	}
 
-	output := captureStdout(t, func() error {
-		return PrimeCommand(deps)
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AZEDARACH_ISSUE_ID", tt.id.String())
+			deps := &Dependencies{
+				DaemonClient: daemonclient.New(&fakeDaemonTransport{
+					commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+						if req.Command == daemonclient.CommandTaskClaimOwnership {
+							t.Fatal("prime must not claim a closed active issue")
+						}
+						if req.Command != daemonclient.CommandTaskGet {
+							return protocol.ResponseEnvelope{
+								ProtocolVersion: req.ProtocolVersion,
+								RequestID:       req.RequestID,
+								Kind:            protocol.EnvelopeKindResponse,
+								Meta:            req.Meta,
+								OK:              true,
+								CompletedAt:     req.SentAt,
+							}, nil
+						}
+						body, err := marshalTaskListBody([]domain.Task{{
+							ID:              tt.id,
+							Title:           "Closed issue",
+							Status:          tt.status,
+							Priority:        domain.P2,
+							Type:            domain.TypeTask,
+							Implementations: []string{"go-bubbletea"},
+							CreatedAt:       now,
+							UpdatedAt:       now,
+						}})
+						if err != nil {
+							t.Fatalf("marshal task list: %v", err)
+						}
+						return protocol.ResponseEnvelope{
+							ProtocolVersion: req.ProtocolVersion,
+							RequestID:       req.RequestID,
+							Kind:            protocol.EnvelopeKindResponse,
+							Meta:            req.Meta,
+							OK:              true,
+							CompletedAt:     req.SentAt,
+							Body:            body,
+						}, nil
+					},
+				}),
+				ProjectID: "proj",
+			}
 
-	if !strings.Contains(output, "Active issue `az-closed` is currently `closed`") {
-		t.Fatalf("prime output missing closed-issue warning: %q", output)
-	}
-	if !strings.Contains(output, "`az issue list --limit 20` or `az issue create \"Next task\"") {
-		t.Fatalf("prime output missing closed-issue next-step guidance: %q", output)
-	}
-	if !strings.Contains(output, "Use `--deferred` only for standalone backlog work.") {
-		t.Fatalf("prime output missing closed-issue deferred caveat: %q", output)
+			output := captureStdout(t, func() error {
+				return PrimeCommand(deps)
+			})
+
+			if !strings.Contains(output, tt.want) {
+				t.Fatalf("prime output missing closed-issue warning: %q", output)
+			}
+			if !strings.Contains(output, "`az issue list --limit 20` or `az issue create \"Next task\"") {
+				t.Fatalf("prime output missing closed-issue next-step guidance: %q", output)
+			}
+			if !strings.Contains(output, "Use `--deferred` only for standalone backlog work.") {
+				t.Fatalf("prime output missing closed-issue deferred caveat: %q", output)
+			}
+		})
 	}
 }
 

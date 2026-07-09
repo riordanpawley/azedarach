@@ -249,6 +249,10 @@ func (s IssueState) IsTombstoned() bool {
 	return s.DeletionState == IssueDeletionTombstoned
 }
 
+func (s IssueState) IsClosed() bool {
+	return s.Validate() == nil && s.LifecycleState == IssueWorkflowClosed
+}
+
 func (s IssueState) IsZero() bool {
 	return s == IssueState{}
 }
@@ -481,6 +485,11 @@ func (t Task) IssueState() (IssueState, error) {
 		return t.State, nil
 	}
 	return IssueStateFromStatus(t.Status)
+}
+
+func (t Task) IssueClosed() bool {
+	state, err := t.IssueState()
+	return err == nil && state.IsClosed()
 }
 
 func (t Task) IssueDisplayPhase() IssueDisplayPhase {

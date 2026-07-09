@@ -151,6 +151,50 @@ func TestIssueStateBoardPhaseReturnsUnknownForInvalidState(t *testing.T) {
 	}
 }
 
+func TestTaskIssueClosedTreatsAllClosedOutcomesAsTerminal(t *testing.T) {
+	tests := []struct {
+		name string
+		task Task
+		want bool
+	}{
+		{
+			name: "completed status is closed",
+			task: Task{Status: StatusDone, Priority: P2},
+			want: true,
+		},
+		{
+			name: "cancelled status is closed",
+			task: Task{Status: StatusCancelled, Priority: P2},
+			want: true,
+		},
+		{
+			name: "active review is not closed",
+			task: Task{Status: StatusInReview, Priority: P2},
+			want: false,
+		},
+		{
+			name: "first-class cancelled state is closed regardless of compatibility status",
+			task: Task{
+				Status: StatusDone,
+				State: mustIssueState(t, IssueStateParts{
+					Workflow:     IssueWorkflowClosed,
+					CloseOutcome: IssueCloseCancelled,
+				}),
+				Priority: P2,
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.task.IssueClosed(); got != tt.want {
+				t.Fatalf("IssueClosed() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTaskIssueDisplayPhaseDerivesReviewFromSessionActivity(t *testing.T) {
 	tests := []struct {
 		name string

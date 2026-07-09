@@ -8283,7 +8283,7 @@ func PrimeCommand(deps *Dependencies) error {
 					task = detailTask
 				}
 			}
-			if task.Status != domain.StatusDone {
+			if !task.IssueClosed() {
 				if err := claimPrimeActiveIssue(context.Background(), deps, issueID, ownerID, task.Ownership); err != nil {
 					return err
 				}
@@ -8303,8 +8303,8 @@ func PrimeCommand(deps *Dependencies) error {
 				orchestratorExitContract = renderPrimeOrchestratorExitContract(issueID)
 			}
 			issueSection = renderPrimeIssueSection(issueID, task, snapshot.Tasks, observations, containmentRisks, tmuxAvailable)
-			if task.Status == domain.StatusDone {
-				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `closed`; start by picking/opening actionable work (for example `az issue list --limit 20` or `az issue create \"Next task\"`). Use `--deferred` only for standalone backlog work.", task.ID)
+			if task.IssueClosed() {
+				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `%s`; start by picking/opening actionable work (for example `az issue list --limit 20` or `az issue create \"Next task\"`). Use `--deferred` only for standalone backlog work.", task.ID, task.IssueDisplayStatusText())
 			}
 		} else {
 			readiness, hasReadiness := loadPrimeTaskGraphReadiness(context.Background(), deps, issueID, ownerID)

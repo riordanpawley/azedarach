@@ -8469,6 +8469,27 @@ func TestWorkerObservationStateDerivationPrecedence(t *testing.T) {
 			want: domain.WorkerObservationDone,
 		},
 		{
+			name: "cancelled with runtime cleanup pending wins over active",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task: func() domain.Task {
+					task := baseTask("az-cancelled-cleanup", domain.StatusCancelled)
+					task.HasTmuxSession = true
+					return task
+				}(),
+				Active: &taskGraphActiveSession{IssueID: "az-cancelled-cleanup", Activity: "busy", Status: "active"},
+			},
+			want: domain.WorkerObservationCleanupPending,
+		},
+		{
+			name: "plain cancelled is terminal done observation",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task:        baseTask("az-cancelled", domain.StatusCancelled),
+			},
+			want: domain.WorkerObservationDone,
+		},
+		{
 			name: "failed active session wins over review",
 			in: workerObservationInputs{
 				RootIssueID: rootID,
@@ -12604,22 +12625,34 @@ func TestRefreshWorktreeRuntimeStateForIssuesDeletesClosedIssueWorktreeProjectio
 func TestRuntimeWorktreeIssueEligibleRejectsClosedAncestor(t *testing.T) {
 	parentID := naming.IssueID("az-parent")
 	childID := naming.IssueID("az-child")
-	taskByIssue := map[string]domain.Task{
-		parentID.String(): {
-			ID:     parentID,
-			Status: domain.StatusDone,
-			Type:   domain.TypeTask,
-		},
-		childID.String(): {
-			ID:       childID,
-			Status:   domain.StatusInProgress,
-			Type:     domain.TypeTask,
-			ParentID: &parentID,
-		},
+	tests := []struct {
+		name         string
+		parentStatus domain.Status
+	}{
+		{name: "completed", parentStatus: domain.StatusDone},
+		{name: "cancelled", parentStatus: domain.StatusCancelled},
 	}
 
-	if runtimeWorktreeIssueEligible(childID.String(), taskByIssue) {
-		t.Fatal("child under closed ancestor should not be runtime-worktree eligible")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			taskByIssue := map[string]domain.Task{
+				parentID.String(): {
+					ID:     parentID,
+					Status: tt.parentStatus,
+					Type:   domain.TypeTask,
+				},
+				childID.String(): {
+					ID:       childID,
+					Status:   domain.StatusInProgress,
+					Type:     domain.TypeTask,
+					ParentID: &parentID,
+				},
+			}
+
+			if runtimeWorktreeIssueEligible(childID.String(), taskByIssue) {
+				t.Fatal("child under closed ancestor should not be runtime-worktree eligible")
+			}
+		})
 	}
 }
 

@@ -14,7 +14,6 @@ import (
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
-	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -187,7 +186,7 @@ func (d *Daemon) reconcileIssueResourcesPresent(ctx context.Context, projectID s
 	var errs []error
 	for _, task := range tasks {
 		issueID := strings.TrimSpace(task.ID.String())
-		if issueID == "" || task.Status == domain.StatusDone {
+		if issueID == "" || task.IssueClosed() {
 			continue
 		}
 		if len(allowed) > 0 {

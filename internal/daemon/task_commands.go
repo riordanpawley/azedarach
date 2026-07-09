@@ -1461,7 +1461,7 @@ func runtimeWorktreeIssueEligible(issueID string, taskByIssue map[string]domain.
 	if !ok {
 		return true
 	}
-	if task.Status == domain.StatusDone {
+	if task.IssueClosed() {
 		return false
 	}
 	seen := map[string]struct{}{strings.ToLower(issueID): {}}
@@ -1475,7 +1475,7 @@ func runtimeWorktreeIssueEligible(issueID string, taskByIssue map[string]domain.
 		if !ok {
 			return true
 		}
-		if parent.Status == domain.StatusDone {
+		if parent.IssueClosed() {
 			return false
 		}
 		parentID = domain.TaskParentIssueID(parent)
@@ -2382,7 +2382,7 @@ func (d *Daemon) deferredTaskWorktreeCleanupShouldSkip(ctx context.Context, proj
 		return false
 	}
 	task, err := issueClient.GetWithRuntime(ctx, projectID, taskID)
-	if err != nil || task.Status == domain.StatusDone {
+	if err != nil || task.IssueClosed() {
 		return false
 	}
 	if fallbackPath != "" {
@@ -3398,7 +3398,7 @@ func daemonCloseGuardStatusRepairs(target domain.Task, tasks []domain.Task, reas
 	repairs := make([]daemonCloseGuardStatusRepair, 0, 2)
 	seen := make(map[naming.IssueID]struct{})
 	add := func(task domain.Task) {
-		if task.Status != domain.StatusDone {
+		if !task.IssueClosed() {
 			return
 		}
 		if _, ok := seen[task.ID]; ok {
@@ -3660,7 +3660,7 @@ func daemonCloseGuardChildBlockers(parentID naming.IssueID, tasks []domain.Task,
 }
 
 func daemonCloseGuardCleanChildAutoCloseEligible(task domain.Task) bool {
-	if task.Status == domain.StatusDone {
+	if task.IssueClosed() {
 		return true
 	}
 	if daemonCloseGuardTaskHasSession(task) {
@@ -3723,7 +3723,7 @@ func daemonCloseGuardDescendants(rootID naming.IssueID, children map[naming.Issu
 
 func daemonCloseGuardChildReasons(task domain.Task) []string {
 	reasons := make([]string, 0, 3)
-	if task.Status != domain.StatusDone {
+	if !task.IssueClosed() {
 		reasons = append(reasons, string(task.Status))
 	}
 	if daemonCloseGuardTaskHasSession(task) {
@@ -4351,7 +4351,7 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 	activeSessions := make([]string, 0, len(desc))
 	for _, id := range desc {
 		task := byID[id]
-		if task.Status != domain.StatusDone {
+		if !task.IssueClosed() {
 			if _, closeable := staleCloseableSet[id.String()]; closeable {
 				continue
 			}
@@ -4608,7 +4608,7 @@ func daemonTaskGraphReadinessFromIndexesForActor(rootID naming.IssueID, byID map
 			continue
 		}
 		task := byID[id]
-		if task.Status == domain.StatusDone {
+		if task.IssueClosed() {
 			continue
 		}
 		if daemonCloseGuardTaskHasSession(task) {
@@ -4698,7 +4698,7 @@ func daemonTaskGraphStaleCloseableCandidates(rootID naming.IssueID, byID map[nam
 }
 
 func daemonTaskStaleCloseableCandidate(task domain.Task) bool {
-	if task.Status == domain.StatusDone {
+	if task.IssueClosed() {
 		return false
 	}
 	if !daemonCloseGuardCleanChildAutoCloseEligible(task) {
@@ -4757,7 +4757,7 @@ func (d *Daemon) daemonTaskGraphContainmentRisks(
 		if task.ID.IsZero() || task.Type == domain.TypeEpic {
 			continue
 		}
-		if task.Status == domain.StatusDone {
+		if task.IssueClosed() {
 			closedChildIDs = append(closedChildIDs, id)
 			continue
 		}
@@ -4968,7 +4968,7 @@ func (d *Daemon) daemonTaskGraphNestedRoots(
 			}
 		}
 		if item.Status == "" || item.Status == "startable" || item.Status == string(domain.StatusOpen) || item.Status == string(domain.StatusInProgress) || item.Status == string(domain.StatusInReview) {
-			if item.IssueStatus == string(domain.StatusDone) {
+			if (domain.Task{Status: domain.Status(item.IssueStatus)}).IssueClosed() {
 				item.Status = "not_counting_capacity"
 				item.FallbackPolicy = "repair_or_close_remaining_descendants"
 				item.Advice = fmt.Sprintf("nested root %s is closed; repair or close remaining descendants before parent completion", item.IssueID)
@@ -5216,10 +5216,10 @@ func daemonWorkerObservationFromInputs(in workerObservationInputs) domain.Worker
 	}
 
 	switch {
-	case in.Task.Status == domain.StatusDone && (daemonCloseGuardTaskHasSession(in.Task) || daemonCloseGuardTaskHasWorktree(in.Task) || in.Active != nil):
+	case in.Task.IssueClosed() && (daemonCloseGuardTaskHasSession(in.Task) || daemonCloseGuardTaskHasWorktree(in.Task) || in.Active != nil):
 		observation.State = domain.WorkerObservationCleanupPending
 		observation.Reason = "issue is closed but runtime projection remains"
-	case in.Task.Status == domain.StatusDone:
+	case in.Task.IssueClosed():
 		observation.State = domain.WorkerObservationDone
 		observation.Reason = "issue is closed"
 	case in.Active != nil && daemonWorkerObservationActiveFailed(*in.Active):
@@ -5875,11 +5875,11 @@ func daemonTaskGraphRequiresNestedRootOrchestration(root, id naming.IssueID, tas
 	if task.Type != domain.TypeEpic && len(children[id]) == 0 {
 		return false
 	}
-	if task.Status != domain.StatusDone {
+	if !task.IssueClosed() {
 		return true
 	}
 	for _, descID := range daemonTaskGraphDescendants(id, children) {
-		if byID[descID].Status != domain.StatusDone {
+		if !byID[descID].IssueClosed() {
 			return true
 		}
 	}
@@ -5897,7 +5897,7 @@ func daemonTaskGraphUnresolvedBlockers(task domain.Task, byID map[naming.IssueID
 			out = append(out, dep.ID.String()+"(missing)")
 			continue
 		}
-		if depTask.Status != domain.StatusDone {
+		if !depTask.IssueClosed() {
 			out = append(out, dep.ID.String())
 		}
 	}
@@ -5948,7 +5948,7 @@ func daemonTaskGraphCleanupPendingSessions(rootID naming.IssueID, byID map[namin
 	out := make([]taskGraphActiveSession, 0)
 	for _, id := range desc {
 		task := byID[id]
-		if task.Status != domain.StatusDone || !daemonCloseGuardTaskHasSession(task) {
+		if !task.IssueClosed() || !daemonCloseGuardTaskHasSession(task) {
 			continue
 		}
 		active := taskGraphActiveSession{
