@@ -65,6 +65,7 @@ const (
 	worktreeCleanupMutationTimeout   = 2 * time.Minute
 	orphanedWorktreeCleanupTimeout   = 2 * time.Minute
 	issueScopedRuntimeReconcileLimit = 64
+	maxBoardViewColumns              = 8
 )
 
 var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
@@ -209,6 +210,8 @@ type notificationHistoryEntry struct {
 type Model struct {
 	// Core data
 	tasks                []domain.Task
+	boardView            domain.BoardView
+	boardColumns         []domain.BoardViewColumnSnapshot
 	sessions             map[string]*domain.Session
 	suppressedTasks      map[string]struct{}
 	pendingStatuses      map[string]pendingTaskStatus
@@ -244,7 +247,7 @@ type Model struct {
 	mergePickMode                       *mergePickState
 	mouseDrag                           mouseDragState
 	mouseTap                            mouseTapState
-	viewportStarts                      [board.DefaultColumnCount]int
+	viewportStarts                      [maxBoardViewColumns]int
 	columnViewportStart                 int
 	drillDownParentID                   string
 	drillDownParentName                 string
@@ -1152,6 +1155,8 @@ type issuesLoadedMsg struct {
 	projectID      string
 	scopedParentID string
 	tasks          []domain.Task
+	boardView      domain.BoardView
+	boardColumns   []domain.BoardViewColumnSnapshot
 	revision       uint64
 	lastCheckedAt  time.Time
 	freshness      protocol.TaskListFreshness
@@ -1175,6 +1180,8 @@ type projectSwitchResultMsg struct {
 	project       config.Project
 	projectConfig *config.Config
 	tasks         []domain.Task
+	boardView     domain.BoardView
+	boardColumns  []domain.BoardViewColumnSnapshot
 	revision      uint64
 	lastCheckedAt time.Time
 	freshness     protocol.TaskListFreshness
@@ -1707,6 +1714,8 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			projectID:      projectID,
 			scopedParentID: scopedParentID,
 			tasks:          snapshot.Tasks,
+			boardView:      snapshot.View,
+			boardColumns:   snapshot.Columns,
 			revision:       snapshot.Revision,
 			lastCheckedAt:  snapshot.LastCheckedAt,
 			freshness:      snapshot.Freshness,
@@ -1857,6 +1866,8 @@ func (m Model) loadIssuesAfterRuntimeReconcileCmd() tea.Cmd {
 			projectID:      projectID,
 			scopedParentID: scopedParentID,
 			tasks:          snapshot.Tasks,
+			boardView:      snapshot.View,
+			boardColumns:   snapshot.Columns,
 			revision:       snapshot.Revision,
 			lastCheckedAt:  snapshot.LastCheckedAt,
 			freshness:      snapshot.Freshness,
@@ -1922,6 +1933,8 @@ func (m Model) loadIssuesAfterIssueReconcileCmd(issueIDs []string) tea.Cmd {
 			projectID:      projectID,
 			scopedParentID: scopedParentID,
 			tasks:          snapshot.Tasks,
+			boardView:      snapshot.View,
+			boardColumns:   snapshot.Columns,
 			revision:       snapshot.Revision,
 			lastCheckedAt:  snapshot.LastCheckedAt,
 			freshness:      snapshot.Freshness,
@@ -2247,6 +2260,8 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 			project:       project,
 			projectConfig: projectConfig,
 			tasks:         snapshot.Tasks,
+			boardView:     snapshot.View,
+			boardColumns:  snapshot.Columns,
 			revision:      snapshot.Revision,
 			lastCheckedAt: snapshot.LastCheckedAt,
 			freshness:     snapshot.Freshness,
@@ -2323,6 +2338,8 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		return issuesLoadedMsg{
 			projectID:     projectID,
 			tasks:         snapshot.Tasks,
+			boardView:     snapshot.View,
+			boardColumns:  snapshot.Columns,
 			revision:      snapshot.Revision,
 			lastCheckedAt: snapshot.LastCheckedAt,
 			freshness:     snapshot.Freshness,

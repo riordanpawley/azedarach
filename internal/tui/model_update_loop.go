@@ -253,6 +253,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
 		}
+		m.boardView = msg.boardView
+		m.boardColumns = cloneBoardViewColumnSnapshots(msg.boardColumns)
 		for i := range m.tasks {
 			m.tasks[i].Session = cloneSession(m.tasks[i].Session)
 		}
@@ -1112,6 +1114,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reuse the normal loaded-state reducer path.
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
+		m.boardView = msg.boardView
+		m.boardColumns = cloneBoardViewColumnSnapshots(msg.boardColumns)
 		for i := range m.tasks {
 			m.tasks[i].Session = cloneSession(m.tasks[i].Session)
 		}
@@ -2180,6 +2184,20 @@ func reconcileScopedChildBoardTasks(current, scoped []domain.Task, parentID stri
 		}
 	}
 	return reconciled
+}
+
+func cloneBoardViewColumnSnapshots(columns []domain.BoardViewColumnSnapshot) []domain.BoardViewColumnSnapshot {
+	if len(columns) == 0 {
+		return nil
+	}
+	cloned := make([]domain.BoardViewColumnSnapshot, len(columns))
+	for i, column := range columns {
+		cloned[i].Definition = column.Definition
+		if len(column.Tasks) > 0 {
+			cloned[i].Tasks = append([]domain.Task(nil), column.Tasks...)
+		}
+	}
+	return cloned
 }
 
 func (m Model) refreshOpenDiffOverlayFromProjectionBody(body protocol.ProjectionUpdateEventBody) tea.Cmd {
