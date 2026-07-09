@@ -152,6 +152,113 @@ func getCursorPosition(m Model) Position {
 	return m.nav.GetPosition(columns)
 }
 
+func TestBuildColumnsUsesConfiguredBoardSnapshotColumns(t *testing.T) {
+	m := newTestModel()
+	view := domain.ActivityBoardView()
+	m.boardView = view
+	m.boardColumns = []domain.BoardViewColumnSnapshot{
+		{
+			Definition: domain.BoardColumn{ID: domain.BoardColumnWaitingAI, Title: "Waiting AI"},
+			Tasks:      []domain.Task{m.tasks[0]},
+		},
+		{
+			Definition: domain.BoardColumn{ID: domain.BoardColumnOpen, Title: "Open"},
+			Tasks:      []domain.Task{m.tasks[1]},
+		},
+		{
+			Definition: domain.BoardColumn{ID: domain.BoardColumnWaitingHuman, Title: "Waiting Human"},
+		},
+	}
+
+	columns := m.buildColumns()
+	if got, want := len(columns), 3; got != want {
+		t.Fatalf("columns=%d want=%d: %+v", got, want, columns)
+	}
+	if got, want := columns[0].Title, "Waiting AI"; got != want {
+		t.Fatalf("first column title=%q want=%q", got, want)
+	}
+	if got, want := columns[0].Tasks[0].ID.String(), "az-1"; got != want {
+		t.Fatalf("first column task=%q want=%q", got, want)
+	}
+	if got, want := columns[1].Title, "Open"; got != want {
+		t.Fatalf("second column title=%q want=%q", got, want)
+	}
+	if got, want := columns[2].Title, "Waiting Human"; got != want {
+		t.Fatalf("third column title=%q want=%q", got, want)
+	}
+}
+
+func TestBuildColumnsHonorsConfiguredHiddenEmptyColumns(t *testing.T) {
+	m := newTestModel()
+	view := domain.ActivityBoardView()
+	view.Options.HideEmptyColumns = true
+	m.boardView = view
+	m.boardColumns = []domain.BoardViewColumnSnapshot{
+		{
+			Definition: domain.BoardColumn{ID: domain.BoardColumnWaitingHuman, Title: "Waiting Human"},
+		},
+		{
+			Definition: domain.BoardColumn{ID: domain.BoardColumnOpen, Title: "Open"},
+			Tasks:      []domain.Task{m.tasks[0]},
+		},
+	}
+
+	columns := m.buildColumns()
+	if got, want := len(columns), 1; got != want {
+		t.Fatalf("columns=%d want=%d: %+v", got, want, columns)
+	}
+	if got, want := columns[0].Title, "Open"; got != want {
+		t.Fatalf("remaining column title=%q want=%q", got, want)
+	}
+}
+
+func TestBoardViewportSupportsActivityViewColumns(t *testing.T) {
+	m := newTestModel()
+	view := domain.ActivityBoardView()
+	tasks := make([]domain.Task, len(view.Columns))
+	snapshots := make([]domain.BoardViewColumnSnapshot, len(view.Columns))
+	for i, column := range view.Columns {
+		tasks[i] = domain.Task{
+			ID:       naming.IssueID(fmt.Sprintf("az-%d", i+1)),
+			Title:    fmt.Sprintf("Task %d", i+1),
+			Status:   domain.StatusOpen,
+			Priority: domain.P1,
+			Type:     domain.TypeTask,
+		}
+		snapshots[i] = domain.BoardViewColumnSnapshot{
+			Definition: column,
+			Tasks:      []domain.Task{tasks[i]},
+		}
+	}
+	m.tasks = tasks
+	m.boardView = view
+	m.boardColumns = snapshots
+	m.width = 80
+	m.height = 24
+
+	columns := m.buildColumns()
+	if got, want := len(columns), len(view.Columns); got != want {
+		t.Fatalf("columns=%d want=%d", got, want)
+	}
+	if got, want := columns[2].Title, "Waiting Human"; got != want {
+		t.Fatalf("activity column 2 title=%q want=%q", got, want)
+	}
+	if got, want := columns[3].Title, "Waiting AI"; got != want {
+		t.Fatalf("activity column 3 title=%q want=%q", got, want)
+	}
+
+	lastColumn := len(columns) - 1
+	m.nav.SelectTask(tasks[lastColumn].ID.String(), lastColumn)
+	m.ensureCursorVisible(columns)
+	start, end := m.boardVisibleColumnRange(columns)
+	if got, want := start, 6; got != want {
+		t.Fatalf("visible column start=%d want=%d", got, want)
+	}
+	if got, want := end, len(columns); got != want {
+		t.Fatalf("visible column end=%d want=%d", got, want)
+	}
+}
+
 func TestHelperMethods(t *testing.T) {
 	m := newTestModel()
 

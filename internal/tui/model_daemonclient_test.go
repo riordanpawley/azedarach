@@ -1185,6 +1185,25 @@ func mustMarshalBoardSnapshot(t *testing.T, protocolVersion protocol.Version, re
 	return body
 }
 
+func mustMarshalBoardSnapshotWithView(t *testing.T, protocolVersion protocol.Version, revision uint64, projectID string, view domain.BoardView, tasks []domain.Task, columns []domain.BoardViewColumnSnapshot) []byte {
+	t.Helper()
+	body, err := json.Marshal(protocol.BoardSnapshotPayload{
+		SchemaVersion:    protocol.BoardSnapshotSchemaVersion,
+		ProtocolVersion:  protocolVersion,
+		SnapshotRevision: revision,
+		ProjectID:        naming.ProjectID(projectID),
+		LastCheckedAt:    daemonSnapshotCheckedAt(),
+		Freshness:        protocol.TaskListFreshnessFresh,
+		View:             view,
+		Columns:          protocol.BoardSnapshotColumnsFromDomain(columns),
+		Tasks:            protocol.BoardTaskSummariesFromDomain(tasks),
+	})
+	if err != nil {
+		t.Fatalf("marshal board snapshot: %v", err)
+	}
+	return body
+}
+
 func worktreeListResponse(t *testing.T, req protocol.RequestEnvelope, issueID, path, branch string) protocol.ResponseEnvelope {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{
@@ -1275,6 +1294,57 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 		if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandBoardFetch {
 			t.Fatalf("requests = %v", transport.requests)
+		}
+	})
+
+	t.Run("load carries configured board columns", func(t *testing.T) {
+		view := domain.ActivityBoardView()
+		task := domain.Task{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}
+		columns := []domain.BoardViewColumnSnapshot{
+			{
+				Definition: domain.BoardColumn{ID: domain.BoardColumnWaitingAI, Title: "Waiting AI"},
+				Tasks:      []domain.Task{task},
+			},
+			{
+				Definition: domain.BoardColumn{ID: domain.BoardColumnOpen, Title: "Open"},
+			},
+		}
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandBoardFetch {
+					t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandBoardFetch)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            mustMarshalBoardSnapshotWithView(t, req.ProtocolVersion, 3, req.Meta.ProjectID.String(), view, []domain.Task{task}, columns),
+				}, nil
+			},
+		}
+		m := newDaemonTestModel(transport)
+
+		msg := m.loadIssuesCmd()()
+		loaded, ok := msg.(issuesLoadedMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+		}
+		if got, want := loaded.boardView.ID, view.ID; got != want {
+			t.Fatalf("loaded board view id=%q want=%q", got, want)
+		}
+		if got, want := len(loaded.boardColumns), 2; got != want {
+			t.Fatalf("loaded board columns=%d want=%d", got, want)
+		}
+
+		updatedAny, _ := m.Update(loaded)
+		updated := updatedAny.(Model)
+		rendered := updated.buildColumns()
+		if got, want := rendered[0].Title, "Waiting AI"; got != want {
+			t.Fatalf("rendered first column title=%q want=%q", got, want)
+		}
+		if got, want := rendered[0].Tasks[0].ID.String(), "az-1"; got != want {
+			t.Fatalf("rendered first column task=%q want=%q", got, want)
 		}
 	})
 

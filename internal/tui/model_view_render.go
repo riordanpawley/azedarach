@@ -457,6 +457,9 @@ func renderedBlockSize(view string) (width, height int) {
 func (m Model) buildColumns() []board.Column {
 	// Apply filter to tasks and enforce board-level child hiding semantics.
 	filteredTasks := m.boardVisibleTasks(m.tasks)
+	if columns, ok := m.configuredBoardColumns(filteredTasks); ok {
+		return m.applyBoardColumnSort(columns)
+	}
 
 	phases := domain.IssueDisplayPhasesForTasks(filteredTasks)
 	columns := make([]board.Column, 0, len(phases))
@@ -474,6 +477,73 @@ func (m Model) buildColumns() []board.Column {
 		columns[column].Tasks = append(columns[column].Tasks, task)
 	}
 
+	return m.applyBoardColumnSort(columns)
+}
+
+func (m Model) configuredBoardColumns(filteredTasks []domain.Task) ([]board.Column, bool) {
+	if len(m.boardColumns) > 0 {
+		return m.boardColumnsFromSnapshot(filteredTasks), true
+	}
+	if !hasConfiguredBoardView(m.boardView) {
+		return nil, false
+	}
+	grouped, err := domain.GroupTasksByBoardView(m.boardView, filteredTasks)
+	if err != nil {
+		return nil, false
+	}
+	return boardColumnsFromViewSnapshots(grouped, m.boardView), true
+}
+
+func (m Model) boardColumnsFromSnapshot(filteredTasks []domain.Task) []board.Column {
+	visibleByID := make(map[string]domain.Task, len(filteredTasks))
+	for _, task := range filteredTasks {
+		if id := strings.TrimSpace(task.ID.String()); id != "" {
+			visibleByID[id] = task
+		}
+	}
+	columns := make([]board.Column, 0, len(m.boardColumns))
+	for _, snapshotColumn := range m.boardColumns {
+		column := board.Column{Title: strings.TrimSpace(snapshotColumn.Definition.Title)}
+		if column.Title == "" {
+			column.Title = string(snapshotColumn.Definition.ID)
+		}
+		for _, task := range snapshotColumn.Tasks {
+			if current, ok := visibleByID[strings.TrimSpace(task.ID.String())]; ok {
+				column.Tasks = append(column.Tasks, current)
+			}
+		}
+		if m.boardView.Options.HideEmptyColumns && len(column.Tasks) == 0 {
+			continue
+		}
+		columns = append(columns, column)
+	}
+	return columns
+}
+
+func boardColumnsFromViewSnapshots(snapshots []domain.BoardViewColumnSnapshot, view domain.BoardView) []board.Column {
+	columns := make([]board.Column, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		column := board.Column{Title: strings.TrimSpace(snapshot.Definition.Title)}
+		if column.Title == "" {
+			column.Title = string(snapshot.Definition.ID)
+		}
+		column.Tasks = append(column.Tasks, snapshot.Tasks...)
+		if view.Options.HideEmptyColumns && len(column.Tasks) == 0 {
+			continue
+		}
+		columns = append(columns, column)
+	}
+	return columns
+}
+
+func hasConfiguredBoardView(view domain.BoardView) bool {
+	return view.ID != "" || strings.TrimSpace(view.Title) != "" || len(view.Columns) > 0
+}
+
+func (m Model) applyBoardColumnSort(columns []board.Column) []board.Column {
+	if len(columns) == 0 {
+		return columns
+	}
 	var activeDescendantSessionByTask map[string]bool
 	sortState := m.editor.GetSort()
 	if sortState != nil && sortState.Field == domain.SortBySession {
