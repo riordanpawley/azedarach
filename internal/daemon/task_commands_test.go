@@ -10760,6 +10760,47 @@ func TestTaskUpdateStatusRejectsInReviewWithUnreadyChildren(t *testing.T) {
 	}
 }
 
+func TestTaskUpdateStatusRejectsInReviewWithBusyReviewChild(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-guard-busy-review-child"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Busy review child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusInReview,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	seedReviewGuardSessionProjection(t, d, projectID, childID, daemonstate.Session{
+		ID:             naming.CanonicalSessionID(projectID, childID),
+		IssueID:        childID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
+	})
+
+	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "child issues are not review-ready") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") {
+		t.Fatalf("task.update_status response = %+v, want busy in-review child guard", resp)
+	}
+	parent, err := issuesClient.GetWithRuntime(ctx, projectID, parentID)
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	if parent.Status != domain.StatusOpen {
+		t.Fatalf("parent status = %s, want open", parent.Status)
+	}
+}
+
 func TestTaskUpdateStatusRejectsInReviewWithBusyActivity(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-review-guard-busy"

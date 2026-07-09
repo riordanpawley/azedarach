@@ -3193,10 +3193,10 @@ func daemonReviewGuardChildBlockers(parentID naming.IssueID, tasks []domain.Task
 	blocked := make([]string, 0, len(descendants))
 	for _, childID := range descendants {
 		child, ok := byID[childID]
-		if !ok || child.Status == domain.StatusInReview || child.Status == domain.StatusDone {
+		if !ok || daemonReviewGuardChildReady(child) {
 			continue
 		}
-		blocked = append(blocked, fmt.Sprintf("%s (%s)", child.ID.String(), child.Status))
+		blocked = append(blocked, fmt.Sprintf("%s (%s)", child.ID.String(), child.IssueDisplayStatusText()))
 	}
 	return blocked
 }
@@ -3214,12 +3214,21 @@ func daemonReviewGuardChildIDsToCascade(parentID naming.IssueID, tasks []domain.
 	out := make([]naming.IssueID, 0, len(descendants))
 	for _, childID := range descendants {
 		child, ok := byID[childID]
-		if !ok || child.Status == domain.StatusInReview || child.Status == domain.StatusDone {
+		if !ok || daemonReviewGuardChildReady(child) {
 			continue
 		}
 		out = append(out, childID)
 	}
 	return out
+}
+
+func daemonReviewGuardChildReady(child domain.Task) bool {
+	switch child.IssueDisplayPhase() {
+	case domain.IssueDisplayReview, domain.IssueDisplayDone, domain.IssueDisplayCancelled:
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *Daemon) handleTaskClosePreflight(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
