@@ -461,6 +461,51 @@ func TestRenderCard_WithChildProgressAndSession(t *testing.T) {
 	}
 }
 
+func TestRenderCard_DenseHeaderPrefersCompactSingleLine(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-2 * time.Hour)
+	task := domain.Task{
+		ID:       "cyk",
+		Title:    "Redesign issue lifecycle and derived review state",
+		Status:   domain.StatusInProgress,
+		Priority: domain.P2,
+		Type:     domain.TypeEpic,
+		Session: &domain.Session{
+			IssueID:   naming.IssueID("cyk"),
+			State:     domain.SessionBusy,
+			StartedAt: &startedAt,
+		},
+	}
+	runtimeSignals := &RuntimeSignals{
+		HasWorktree:    true,
+		GitAheadCount:  12,
+		GitBehindCount: 14,
+		GitAdditions:   4000,
+		GitDeletions:   285,
+	}
+
+	rendered := renderCard(task, CardState{}, runtimeSignals, &ChildProgress{Total: 10, Done: 8}, nil, 45, s)
+	stripped := stripANSI(rendered)
+	lines := strings.Split(stripped, "\n")
+	if len(lines) < 4 {
+		t.Fatalf("rendered lines = %d, want card body:\n%s", len(lines), stripped)
+	}
+
+	header := strings.TrimSpace(strings.Trim(lines[1], "│"))
+	secondBodyLine := strings.TrimSpace(strings.Trim(lines[2], "│"))
+	for _, want := range []string{"P2", "cyk", "●", "2h", "[8/10]", "E", "G*↑12/↓14"} {
+		if !strings.Contains(header, want) {
+			t.Fatalf("dense compact header missing %q in %q\ncard:\n%s", want, header, stripped)
+		}
+	}
+	if secondBodyLine == "E" {
+		t.Fatalf("dense header stranded type badge on its own line:\n%s", stripped)
+	}
+	if !strings.Contains(secondBodyLine, "Redesign") {
+		t.Fatalf("dense card should start title on second content line, got %q\ncard:\n%s", secondBodyLine, stripped)
+	}
+}
+
 func TestRenderCard_Cursor(t *testing.T) {
 	s := styles.New()
 	task := domain.Task{
@@ -504,7 +549,7 @@ func TestRenderCard_Selected(t *testing.T) {
 
 func TestRenderCard_TitleTruncation(t *testing.T) {
 	s := styles.New()
-	longTitle := "This is a very long task title that should be truncated to fit within the card width"
+	longTitle := strings.Repeat("This is a very long task title that should be truncated to fit within the card width. ", 3)
 
 	task := domain.Task{
 		ID:       "az-333",
@@ -730,23 +775,24 @@ func TestRenderSessionStatusLabelUsesReadableLabelsOrIconOnly(t *testing.T) {
 	}
 }
 
-func TestRenderSessionStatusCompactUsesIconOnly(t *testing.T) {
+func TestRenderSessionStatusCompactUsesIconAndAge(t *testing.T) {
+	s := styles.New()
 	startedAt := time.Now().Add(-90 * time.Minute)
 	tests := []struct {
 		name    string
 		session *domain.Session
 		want    string
 	}{
-		{name: "busy", session: &domain.Session{State: domain.SessionBusy, StartedAt: &startedAt}, want: "●"},
-		{name: "idle", session: &domain.Session{State: domain.SessionBusy, Activity: "idle", StartedAt: &startedAt}, want: "○"},
-		{name: "waiting", session: &domain.Session{State: domain.SessionWaiting, StartedAt: &startedAt}, want: "◐"},
+		{name: "busy", session: &domain.Session{State: domain.SessionBusy, StartedAt: &startedAt}, want: "● 1h"},
+		{name: "idle", session: &domain.Session{State: domain.SessionBusy, Activity: "idle", StartedAt: &startedAt}, want: "○ 1h"},
+		{name: "waiting", session: &domain.Session{State: domain.SessionWaiting, StartedAt: &startedAt}, want: "◐ 1h"},
 		{name: "paused", session: &domain.Session{State: domain.SessionPaused}, want: "⏸"},
 		{name: "nil", session: nil, want: ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := renderSessionStatusCompact(tt.session)
+			got := stripANSI(renderSessionStatusCompact(tt.session, s))
 			if got != tt.want {
 				t.Fatalf("renderSessionStatusCompact() = %q, want %q", got, tt.want)
 			}
@@ -863,7 +909,7 @@ func TestRenderCard_MetadataOnFirstLine(t *testing.T) {
 	}
 }
 
-func TestRenderCard_NarrowWidthUsesSecondHeaderRowBeforeCompaction(t *testing.T) {
+func TestRenderCard_NarrowWidthCompactsHeaderBeforeUsingSecondRow(t *testing.T) {
 	s := styles.New()
 	startedAt := time.Now().Add(-90 * time.Minute)
 	task := domain.Task{
@@ -895,21 +941,23 @@ func TestRenderCard_NarrowWidthUsesSecondHeaderRowBeforeCompaction(t *testing.T)
 			break
 		}
 	}
-	if firstIdx < 0 || firstIdx+1 >= len(lines) {
-		t.Fatalf("expected at least two header rows and a title row, got: %q", result)
+	if firstIdx < 0 {
+		t.Fatalf("expected metadata line containing issue id, got: %q", result)
 	}
 	first := lines[firstIdx]
 	if first == "" {
 		t.Fatalf("expected metadata line containing issue id, got: %s", result)
 	}
-	if !strings.Contains(first, "P2") || !strings.Contains(first, "CHE-3010") || !strings.Contains(first, "wait") {
+	for _, token := range []string{"P2", "CHE-3010", "◐", "1h", "[1/7]", " T ", "✓G*"} {
+		if !strings.Contains(first, token) {
+			t.Fatalf("expected compact token %q in first header line, got: %s", token, first)
+		}
+	}
+	if strings.Contains(first, "wait") || strings.Contains(first, "+12/-3") {
 		t.Fatalf("first line must preserve issue identity and session state, got: %s", first)
 	}
-	header := lines[firstIdx] + " " + lines[firstIdx+1]
-	for _, token := range []string{" T ", "✎", "+12/-3", "[1/7]"} {
-		if !strings.Contains(header, token) {
-			t.Fatalf("expected token %q to survive across narrow two-row header, got: %q", token, header)
-		}
+	if firstIdx+1 >= len(lines) || !strings.Contains(lines[firstIdx+1], "narrow header") {
+		t.Fatalf("expected title to start after compact header, got: %q", result)
 	}
 }
 
@@ -1058,7 +1106,7 @@ func TestRenderCard_NarrowWidthAddsOneCardRowAndOneHeaderRow(t *testing.T) {
 	}
 }
 
-func TestRenderCard_NarrowWidthKeepsVerboseHeaderTokensAcrossTwoRows(t *testing.T) {
+func TestRenderCard_NarrowWidthKeepsCompactHeaderTokensAcrossTwoRows(t *testing.T) {
 	s := styles.New()
 	startedAt := time.Now().Add(-75 * time.Minute)
 	task := domain.Task{
@@ -1093,10 +1141,13 @@ func TestRenderCard_NarrowWidthKeepsVerboseHeaderTokensAcrossTwoRows(t *testing.
 		t.Fatalf("expected at least two header rows and title row, got: %q", narrow)
 	}
 	header := lines[firstIdx] + " " + lines[firstIdx+1]
-	for _, token := range []string{"wait", "✓G*", " T "} {
+	for _, token := range []string{"◐", "1h", "✓G*", " T "} {
 		if !strings.Contains(header, token) {
 			t.Fatalf("expected token %q to be preserved in narrow two-row header, got: %q", token, header)
 		}
+	}
+	if strings.Contains(header, "wait") || strings.Contains(header, "+12/-3") {
+		t.Fatalf("narrow compact header should omit verbose session/git text, got: %q", header)
 	}
 }
 
