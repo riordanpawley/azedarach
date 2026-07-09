@@ -8193,10 +8193,7 @@ func PrimeCommand(deps *Dependencies) error {
 		} else {
 			guardrail = fmt.Sprintf("- `AZEDARACH_ISSUE_ID` is set to `%s`; use it as the default issue scope and refresh stale context with `az issue get %s`.", issueID, issueID)
 		}
-		readiness, hasReadiness := loadPrimeTaskGraphReadiness(context.Background(), deps, issueID)
-		if orchestrationViaAz && hasReadiness && primeTaskGraphReadinessHasGraphState(issueID, readiness) {
-			orchestratorExitContract = renderPrimeOrchestratorExitContract(issueID)
-		}
+		ownerID := defaultIssueOwnerID()
 		if !snapshotLoaded {
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nCould not load issue details automatically; run `az issue get %s`.\n", issueID, issueID)
 		} else if task, ok := findTaskByID(snapshot.Tasks, issueID); ok {
@@ -8205,10 +8202,19 @@ func PrimeCommand(deps *Dependencies) error {
 					task = detailTask
 				}
 			}
+			if task.Status != domain.StatusDone {
+				if err := claimPrimeActiveIssue(context.Background(), deps, issueID, ownerID, task.Ownership); err != nil {
+					return err
+				}
+			}
+			readiness, hasReadiness := loadPrimeTaskGraphReadiness(context.Background(), deps, issueID, ownerID)
+			if orchestrationViaAz && hasReadiness && primeTaskGraphReadinessHasGraphState(issueID, readiness) {
+				orchestratorExitContract = renderPrimeOrchestratorExitContract(issueID)
+			}
 			observations := readiness.WorkerObservations
 			containmentRisks := readiness.ContainmentRisks
 			if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
-				if parentReadiness, ok := loadPrimeTaskGraphReadiness(context.Background(), deps, strings.TrimSpace(task.ParentID.String())); ok {
+				if parentReadiness, ok := loadPrimeTaskGraphReadiness(context.Background(), deps, strings.TrimSpace(task.ParentID.String()), ownerID); ok {
 					containmentRisks = parentReadiness.ContainmentRisks
 				}
 			}
@@ -8220,6 +8226,10 @@ func PrimeCommand(deps *Dependencies) error {
 				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `closed`; start by picking/opening actionable work (for example `az issue list --limit 20` or `az issue create \"Next task\"`). Use `--deferred` only for standalone backlog work.", task.ID)
 			}
 		} else {
+			readiness, hasReadiness := loadPrimeTaskGraphReadiness(context.Background(), deps, issueID, ownerID)
+			if orchestrationViaAz && hasReadiness && primeTaskGraphReadinessHasGraphState(issueID, readiness) {
+				orchestratorExitContract = renderPrimeOrchestratorExitContract(issueID)
+			}
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nIssue not found in current project snapshot; run `az issue get %s`.\n", issueID, issueID)
 		}
 	}
@@ -8438,13 +8448,46 @@ func loadPrimeIssueDetailTask(ctx context.Context, deps *Dependencies, issueID s
 	return task, err
 }
 
-func loadPrimeTaskGraphReadiness(ctx context.Context, deps *Dependencies, issueID string) (daemonclient.TaskGraphReadiness, bool) {
+func claimPrimeActiveIssue(ctx context.Context, deps *Dependencies, issueID, ownerID string, ownership *domain.IssueOwnership) error {
+	if deps == nil || deps.DaemonClient == nil || strings.TrimSpace(issueID) == "" {
+		return nil
+	}
+	ownerID = strings.TrimSpace(ownerID)
+	if ownerID == "" {
+		return fmt.Errorf("claim active issue %s: current actor cannot be inferred; set AZEDARACH_AUDIT_ACTOR or USER", issueID)
+	}
+	if ownership != nil && ownership.OwnedBy(ownerID, time.Now().UTC()) {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, primeDaemonReadTimeout)
+	finish := primePhase(deps, "issue_claim", fmt.Sprintf("claiming active issue %s", issueID))
+	_, err := deps.DaemonClient.ClaimTaskOwnership(ctx, issueID, daemonclient.TaskOwnershipRequest{
+		OwnerID:   ownerID,
+		OwnerKind: "agent",
+	})
+	cancel()
+	finish(err)
+	if err == nil {
+		return nil
+	}
+	var commandErr *daemonclient.CommandError
+	if errors.As(err, &commandErr) && commandErr.Code == protocol.ErrorCodeConflict {
+		reason := strings.TrimSpace(commandErr.Message)
+		if reason == "" {
+			reason = "owned by another actor"
+		}
+		return fmt.Errorf("active issue %s is already claimed: %s", issueID, reason)
+	}
+	return fmt.Errorf("claim active issue %s: %w", issueID, err)
+}
+
+func loadPrimeTaskGraphReadiness(ctx context.Context, deps *Dependencies, issueID, actorID string) (daemonclient.TaskGraphReadiness, bool) {
 	if deps == nil || deps.DaemonClient == nil || strings.TrimSpace(issueID) == "" {
 		return daemonclient.TaskGraphReadiness{}, false
 	}
 	ctx, cancel := context.WithTimeout(ctx, primeDaemonReadTimeout)
 	finish := primePhase(deps, "graph_readiness", fmt.Sprintf("loading graph readiness for %s", issueID))
-	ready, err := deps.DaemonClient.TaskGraphReadiness(ctx, issueID)
+	ready, err := deps.DaemonClient.TaskGraphReadinessForActor(ctx, issueID, actorID)
 	cancel()
 	finish(err)
 	if err != nil {
