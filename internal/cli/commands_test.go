@@ -1285,6 +1285,78 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 	}
 }
 
+func TestSessionCaptureCommandUsesTypedDaemonClient(t *testing.T) {
+	var gotReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandSessionCapture {
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				gotReq = req
+				var body protocol.SessionCaptureRequestBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request: %v", err)
+				}
+				if body.ProjectID != "proj" || body.SessionID != "az-2" || body.Lines != 33 {
+					t.Fatalf("request body = %+v, want project/session/lines", body)
+				}
+				respBody, err := json.Marshal(protocol.SessionCaptureResponseBody{
+					ProjectID: "proj",
+					IssueID:   "az-2",
+					SessionID: "proj-az-2",
+					Lines:     33,
+					Output:    "worker output\n",
+				})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					CompletedAt:     req.SentAt,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return SessionCaptureCommand(deps, SessionCaptureOptions{IssueID: "az-2", Lines: 33})
+	})
+
+	if gotReq.Command != daemonclient.CommandSessionCapture {
+		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandSessionCapture)
+	}
+	if output != "worker output\n" {
+		t.Fatalf("output = %q, want pane output", output)
+	}
+}
+
+func TestParseSessionCaptureArgsSupportsIssueFlag(t *testing.T) {
+	opts, err := ParseSessionCaptureArgs([]string{"--issue", "az-2", "--project", "proj", "--lines", "33", "--json"})
+	if err != nil {
+		t.Fatalf("ParseSessionCaptureArgs error = %v", err)
+	}
+	if opts.IssueID != "az-2" || opts.Project != "proj" || opts.Lines != 33 || !opts.JSON {
+		t.Fatalf("opts = %+v, want issue/project/lines/json", opts)
+	}
+
+	opts, err = ParseSessionCaptureArgs([]string{"az-3"})
+	if err != nil {
+		t.Fatalf("ParseSessionCaptureArgs positional error = %v", err)
+	}
+	if opts.IssueID != "az-3" || opts.Lines != 120 {
+		t.Fatalf("positional opts = %+v, want default lines", opts)
+	}
+}
+
 func TestSessionRestartAllCommandUsesDaemonEnvelope(t *testing.T) {
 	var gotReq protocol.RequestEnvelope
 	deps := &Dependencies{
@@ -12078,8 +12150,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "when activity is `unknown`, inspect hooks with `az ai status --target=auto` and run `az ai install --target=auto` only when hooks are missing, outdated, or not installed") {
 		t.Fatalf("prime output missing hook status/install fallback guidance: %q", output)
 	}
-	if !strings.Contains(output, "Do not poll tmux panes on a fixed interval") {
-		t.Fatalf("prime output missing tmux polling guardrail: %q", output)
+	if !strings.Contains(output, "az orchestrate capture --issue <worker-issue>") ||
+		!strings.Contains(output, "Do not poll panes on a fixed interval") {
+		t.Fatalf("prime output missing daemon-backed capture guardrail: %q", output)
 	}
 	if !strings.Contains(output, "Worker intervention threshold: use status/watch/mailbox output for routine observation, and do not preemptively message, interrupt, or redirect child workers unless there is concrete, high-confidence evidence that the worker is about to violate scope, use the wrong parent/root, take a destructive action, or make a material mistake.") {
 		t.Fatalf("prime output missing worker intervention threshold guidance: %q", output)

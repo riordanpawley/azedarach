@@ -1216,6 +1216,7 @@ type sessionStartTmuxRunner struct {
 	maxNewSessionCommand int
 	sendKeysErr          error
 	sendKeysErrOnCall    int
+	captureOutput        string
 }
 
 func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
@@ -1350,6 +1351,8 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 			}
 		}
 		return strings.Join(lines, "\n"), nil
+	case "capture-pane":
+		return r.captureOutput, nil
 	default:
 		return "", nil
 	}
@@ -7989,8 +7992,9 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "If activity is `unknown`, inspect hooks with `az ai status --target=auto`; run `az ai install --target=auto` only when hooks are missing, outdated, or not installed") {
 		t.Fatalf("prompt = %q, want hook status/install fallback guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Do not poll tmux panes on a fixed interval") {
-		t.Fatalf("prompt = %q, want tmux polling guardrail", prompt)
+	if !strings.Contains(prompt, "az orchestrate capture --issue <worker-issue>") ||
+		!strings.Contains(prompt, "Do not poll panes on a fixed interval") {
+		t.Fatalf("prompt = %q, want daemon-backed capture guardrail", prompt)
 	}
 	if !strings.Contains(prompt, "az orchestrate integrate --issue <issue-id>") {
 		t.Fatalf("prompt = %q, want integrate instruction", prompt)
@@ -8063,6 +8067,57 @@ func TestSessionMessagePastesTextAndSubmitsActiveIssueSession(t *testing.T) {
 	}
 	if !reflect.DeepEqual(tmuxRunner.inputPayloads, []string{"Orchestrator says proceed now.\n\nKeep notes current."}) {
 		t.Fatalf("input payloads = %#v, want session message payload", tmuxRunner.inputPayloads)
+	}
+}
+
+func TestSessionCaptureCapturesPaneThroughDaemonTmuxClient(t *testing.T) {
+	projectID := protocol.DefaultProjectID
+	issueID := naming.IssueID("az-42")
+	repoDir := "/repo"
+	sessionID := naming.CanonicalSessionIDForIssue(repoDir, issueID).String()
+	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.sessions[sessionID] = true
+	tmuxRunner.captureOutput = "line one\nline two\n"
+	daemon := &Daemon{
+		cfg:  Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		tmux: tmux.NewClient(tmuxRunner, slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
+	body, err := json.Marshal(sessionCommandBody{
+		ProjectID: projectID,
+		SessionID: issueID.String(),
+		Lines:     25,
+	})
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+
+	resp, err := daemon.handleSessionCapture(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-session-capture",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandSessionCapture,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleSessionCapture error = %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("response not OK: %+v", resp)
+	}
+	wantCommands := [][]string{
+		{"has-session", "-t", sessionID},
+		{"capture-pane", "-t", sessionID, "-p", "-S", "-25"},
+	}
+	if !reflect.DeepEqual(tmuxRunner.commands, wantCommands) {
+		t.Fatalf("tmux commands = %#v, want %#v", tmuxRunner.commands, wantCommands)
+	}
+	var got protocol.SessionCaptureResponseBody
+	if err := json.Unmarshal(resp.Body, &got); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got.ProjectID != naming.ProjectID(daemon.canonicalProjectID(projectID)) || got.IssueID != issueID || got.SessionID != naming.SessionID(sessionID) || got.Lines != 25 || got.Output != tmuxRunner.captureOutput {
+		t.Fatalf("response = %+v, want project issue session lines output", got)
 	}
 }
 
