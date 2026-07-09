@@ -12,9 +12,9 @@
 │                                                                      │
 │Actions                                                               │
 │──────────────────────────────────────────────────────────────────────│
-│[s] Start session                                                     │
-│[S] Start session + work                                              │
-│[!] Start session (yolo)                                              │
+│[s] Start AI session                                                  │
+│[t] Start tmux shell only                                             │
+│[!] Start AI session (yolo)                                           │
 │───────────────────                                                   │
 │[u] Update from base branch                                           │
 │[m] Follow-on merge                                                   │

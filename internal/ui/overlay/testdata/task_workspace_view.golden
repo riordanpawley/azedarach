@@ -3,9 +3,9 @@
 │──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
 ││ [bal]                                                                        Actions                                │
 ││       Title:  add grom renderer for detail view maybe?                       ───────────────────────────────────────│
-││                                                                              [s] Start session                      │
-││       Issue:   P2   T  Open                                                  [S] Start session + work               │
-││                                                                              [!] Start session (yolo)               │
+││                                                                              [s] Start AI session                   │
+││       Issue:   P2   T  Open                                                  [t] Start tmux shell only              │
+││                                                                              [!] Start AI session (yolo)            │
 ││     Created:  0001-01-01 00:00:00                                            ───────────────────                    │
 ││     Updated:  0001-01-01 00:00:00                                            [u] Update from base branch            │
 ││                                                                              [m] Follow-on merge                    │

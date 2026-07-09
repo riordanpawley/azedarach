@@ -59,23 +59,30 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 
 	menu := NewActionMenu(task, nil)
 
-	// Should have start session actions
-	hasStartSession := false
+	// Should have explicit start actions.
+	hasStartAI := false
+	hasStartTmuxOnly := false
 	hasYoloStart := false
 	for _, action := range menu.actions {
-		if action.Key == "s" && action.Label == "Start session" {
-			hasStartSession = true
+		if action.Key == "s" && action.Label == "Start AI session" {
+			hasStartAI = true
 		}
-		if action.Key == "!" && action.Label == "Start session (yolo)" {
+		if action.Key == "t" && action.Label == "Start tmux shell only" {
+			hasStartTmuxOnly = true
+		}
+		if action.Key == "!" && action.Label == "Start AI session (yolo)" {
 			hasYoloStart = true
 		}
 	}
 
-	if !hasStartSession {
-		t.Error("expected 'Start session' action when no session exists")
+	if !hasStartAI {
+		t.Error("expected 'Start AI session' action when no session exists")
+	}
+	if !hasStartTmuxOnly {
+		t.Error("expected 'Start tmux shell only' action when no session exists")
 	}
 	if !hasYoloStart {
-		t.Error("expected 'Start session (yolo)' action when no session exists")
+		t.Error("expected 'Start AI session (yolo)' action when no session exists")
 	}
 
 	hasCreateChild := false
@@ -192,7 +199,7 @@ func TestActionMenu_BuildActions_TmuxPresenceWithoutProjectedSession(t *testing.
 	menu := NewActionMenu(task, nil)
 	hasAttach := false
 	hasStart := false
-	hasStartAndWork := false
+	hasStartTmuxOnly := false
 	hasStartYolo := false
 	hasCleanup := false
 	hasDeleteAndCleanup := false
@@ -205,8 +212,8 @@ func TestActionMenu_BuildActions_TmuxPresenceWithoutProjectedSession(t *testing.
 		if action.Key == "s" && action.Enabled {
 			hasStart = true
 		}
-		if action.Key == "S" && action.Enabled {
-			hasStartAndWork = true
+		if action.Key == "t" && action.Enabled {
+			hasStartTmuxOnly = true
 		}
 		if action.Key == "!" && action.Enabled {
 			hasStartYolo = true
@@ -227,8 +234,8 @@ func TestActionMenu_BuildActions_TmuxPresenceWithoutProjectedSession(t *testing.
 	if !hasAttach {
 		t.Fatal("expected attach action when task has tmux presence")
 	}
-	if !hasStart || !hasStartAndWork || !hasStartYolo {
-		t.Fatal("expected start actions when projected session is missing")
+	if hasStart || hasStartTmuxOnly || hasStartYolo {
+		t.Fatal("did not expect start actions when tmux presence would fail daemon start preflight")
 	}
 	if !hasCleanup || !hasDeleteAndCleanup {
 		t.Fatal("expected cleanup actions to remain enabled when tmux session is present")
@@ -244,6 +251,29 @@ func TestActionMenu_BuildActions_TmuxPresenceWithoutProjectedSession(t *testing.
 	}
 	if len(worktreeOnlyActionsEnabled) > 1 {
 		t.Fatalf("expected worktree-path actions to stay disabled without projected worktree, got enabled: %v", worktreeOnlyActionsEnabled)
+	}
+}
+
+func TestActionMenu_BuildActions_IdleSessionDoesNotOfferStart(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-123",
+		Status: domain.StatusInProgress,
+	}
+	session := &domain.Session{
+		IssueID:  "az-123",
+		State:    domain.SessionIdle,
+		Worktree: "/path/to/worktree",
+	}
+
+	menu := NewActionMenu(task, session)
+
+	if cmd := menu.selectByKey("a"); cmd == nil {
+		t.Fatal("expected idle projected session to expose attach")
+	}
+	for _, key := range []string{"s", "t", "!"} {
+		if cmd := menu.selectByKey(key); cmd != nil {
+			t.Fatalf("did not expect start action %q for existing idle session", key)
+		}
 	}
 }
 
