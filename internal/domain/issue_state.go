@@ -493,15 +493,7 @@ func (t Task) IssueClosed() bool {
 }
 
 func (t Task) IssueDisplayPhase() IssueDisplayPhase {
-	state, err := t.IssueState()
-	if err != nil {
-		return IssueDisplayUnknown
-	}
-	phase := state.DisplayPhase()
-	if phase == IssueDisplayReview && taskHasActiveReviewBlockingSession(t) {
-		return IssueDisplayActive
-	}
-	return phase
+	return t.IssueFacts().DisplayPhase
 }
 
 func (t Task) IssueDisplayStatusText() string {
@@ -509,14 +501,14 @@ func (t Task) IssueDisplayStatusText() string {
 }
 
 func (t Task) IssueDisplayFilterStatus() Status {
-	return t.IssueDisplayPhase().FilterStatus()
+	return t.IssueFacts().DisplayStatus
 }
 
 func IssueDisplayPhasesForTasks(tasks []Task) []IssueDisplayPhase {
 	hasBacklog := false
 	hasCancelled := false
 	for _, task := range tasks {
-		switch task.IssueDisplayPhase() {
+		switch task.IssueFacts().DisplayPhase {
 		case IssueDisplayBacklog:
 			hasBacklog = true
 		case IssueDisplayCancelled:
@@ -548,22 +540,5 @@ func (p IssueDisplayPhase) FilterStatus() Status {
 		return StatusCancelled
 	default:
 		return Status("")
-	}
-}
-
-func taskHasActiveReviewBlockingSession(task Task) bool {
-	if task.Session == nil {
-		return false
-	}
-	rawActivity := strings.ToLower(strings.TrimSpace(task.Session.Activity))
-	switch rawActivity {
-	case string(SessionBusy), "starting", "working", string(SessionWaiting), "waiting-for-human", "waiting-for-ai", "waiting-for-tool":
-		return true
-	}
-	switch task.Session.DisplayActivity() {
-	case string(SessionBusy), "starting", "working", string(SessionWaiting):
-		return true
-	default:
-		return false
 	}
 }

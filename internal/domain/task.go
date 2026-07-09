@@ -38,6 +38,7 @@ type Task struct {
 	Estimate              *int            `json:"estimate,omitempty"`
 	Status                Status          `json:"status"`
 	State                 IssueState      `json:"issue_state,omitzero" msgpack:"issue_state,omitempty"`
+	Facts                 IssueFacts      `json:"issue_facts,omitzero" msgpack:"issue_facts,omitempty"`
 	Priority              Priority        `json:"priority"`
 	Type                  TaskType        `json:"issue_type"`
 	ParentID              *naming.IssueID `json:"parent_id,omitempty"`
@@ -129,13 +130,10 @@ func (s Status) String() string {
 }
 
 func BoardStatusForTask(task Task) Status {
-	if task.Status != StatusInReview {
-		return task.Status
+	if status := task.IssueFacts().DisplayStatus; status != "" {
+		return status
 	}
-	if task.Session.AllowsReviewReadyPhase(task.HasTmuxSession) {
-		return StatusInReview
-	}
-	return StatusInProgress
+	return task.Status
 }
 
 // Priority represents task priority (0 = highest)
