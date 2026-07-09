@@ -10160,6 +10160,114 @@ func TestTaskUpdateStatusRejectsInReviewWithUnreadyChildren(t *testing.T) {
 	}
 }
 
+func TestTaskUpdateStatusRejectsInReviewWithBusyActivity(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-guard-busy"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Busy handoff",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	seedReviewGuardSessionProjection(t, d, projectID, taskID, daemonstate.Session{
+		ID:             naming.CanonicalSessionID(projectID, taskID),
+		IssueID:        taskID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
+	})
+
+	resp := updateStatusForTest(t, d, projectID, taskID, domain.StatusInReview, false)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "session activity is busy (source: hooks)") || !strings.Contains(resp.Error.Message, "leave it in_progress") {
+		t.Fatalf("task.update_status response = %+v, want busy activity guard", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if task.Status != domain.StatusInProgress {
+		t.Fatalf("task status = %s, want in_progress", task.Status)
+	}
+}
+
+func TestTaskUpdateStatusAllowsInReviewWithBusyActivityForActiveIssueSelfHandoff(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-guard-busy-self"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Busy self handoff",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	seedReviewGuardSessionProjection(t, d, projectID, taskID, daemonstate.Session{
+		ID:             naming.CanonicalSessionID(projectID, taskID),
+		IssueID:        taskID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
+	})
+
+	resp := updateStatusForTestWithActiveIssue(t, d, projectID, taskID, domain.StatusInReview, false, taskID)
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("task.update_status response = %+v, want active issue self-handoff success", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if task.Status != domain.StatusInReview {
+		t.Fatalf("task status = %s, want in_review", task.Status)
+	}
+}
+
+func TestTaskUpdateStatusAllowsInReviewWithIdleActivity(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-guard-idle"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Idle handoff",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	seedReviewGuardSessionProjection(t, d, projectID, taskID, daemonstate.Session{
+		ID:             naming.CanonicalSessionID(projectID, taskID),
+		IssueID:        taskID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "idle",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
+	})
+
+	resp := updateStatusForTest(t, d, projectID, taskID, domain.StatusInReview, false)
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("task.update_status response = %+v, want success", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if task.Status != domain.StatusInReview {
+		t.Fatalf("task status = %s, want in_review", task.Status)
+	}
+}
+
 func TestTaskUpdateStatusCascadeChildrenMovesNestedDescendantsToInReview(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-review-cascade-children"
@@ -10199,6 +10307,49 @@ func TestTaskUpdateStatusCascadeChildrenMovesNestedDescendantsToInReview(t *test
 		}
 		if task.Status != domain.StatusInReview {
 			t.Fatalf("%s status = %s, want in_review", id, task.Status)
+		}
+	}
+}
+
+func TestTaskUpdateStatusCascadeChildrenRejectsBusyChildActivity(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-cascade-busy-child"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Busy child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusInProgress,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	seedReviewGuardSessionProjection(t, d, projectID, childID, daemonstate.Session{
+		ID:             naming.CanonicalSessionID(projectID, childID),
+		IssueID:        childID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "working",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
+	})
+
+	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, true)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "cascade child "+childID+" to in_review") || !strings.Contains(resp.Error.Message, "session activity is working (source: hooks)") {
+		t.Fatalf("task.update_status response = %+v, want busy child cascade guard", resp)
+	}
+	for _, id := range []string{parentID, childID} {
+		task, err := issuesClient.GetWithRuntime(ctx, projectID, id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if task.Status == domain.StatusInReview {
+			t.Fatalf("%s status = %s, want not in_review", id, task.Status)
 		}
 	}
 }
@@ -10288,17 +10439,50 @@ func newTaskStatusReviewGuardDaemon(t *testing.T, projectID string) (*Daemon, *i
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := issues.NewClientAtPath(issuesDBPath, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
 	return &Daemon{
 		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
 		issueClientsByProject: map[string]*issues.Client{
 			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
 		},
 		revision: map[string]uint64{projectID: 1},
 		hub:      publish.NewHub(16, 8, slog.Default()),
 	}, issuesClient
 }
 
+func seedReviewGuardSessionProjection(t *testing.T, d *Daemon, projectID, taskID string, session daemonstate.Session) {
+	t.Helper()
+	if session.ID == "" {
+		session.ID = naming.CanonicalSessionID(projectID, taskID)
+	}
+	if session.IssueID == "" {
+		session.IssueID = taskID
+	}
+	if session.State == "" {
+		session.State = daemonstate.SessionStateRunning
+	}
+	if session.UpdatedAt.IsZero() {
+		session.UpdatedAt = time.Now().UTC()
+	}
+	store := d.sessionRuntimeStateStore(projectID)
+	if store == nil {
+		t.Fatal("missing runtime store")
+	}
+	if err := store.UpsertSessionState(context.Background(), projectID, session); err != nil {
+		t.Fatalf("seed session projection: %v", err)
+	}
+}
+
 func updateStatusForTest(t *testing.T, d *Daemon, projectID, taskID string, status domain.Status, cascadeChildren bool) protocol.ResponseEnvelope {
+	t.Helper()
+	return updateStatusForTestWithActiveIssue(t, d, projectID, taskID, status, cascadeChildren, "")
+}
+
+func updateStatusForTestWithActiveIssue(t *testing.T, d *Daemon, projectID, taskID string, status domain.Status, cascadeChildren bool, activeIssue string) protocol.ResponseEnvelope {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{
 		"task_id":          taskID,
@@ -10312,9 +10496,12 @@ func updateStatusForTest(t *testing.T, d *Daemon, projectID, taskID string, stat
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       naming.RequestID("req-review-guard-" + taskID),
 		Kind:            protocol.EnvelopeKindCommand,
-		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Command:         "task.update_status",
-		Body:            body,
+		Meta: protocol.Metadata{
+			ProjectID:         naming.ProjectID(projectID),
+			ClientActiveIssue: activeIssue,
+		},
+		Command: "task.update_status",
+		Body:    body,
 	})
 	if err != nil {
 		t.Fatalf("handleTaskUpdateStatus error: %v", err)

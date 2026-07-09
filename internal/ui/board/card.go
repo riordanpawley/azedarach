@@ -131,13 +131,15 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 		headerParts = append(headerParts, phaseBadge)
 	}
 
+	displaySession := cardSessionForTask(task)
+
 	// Session status row (if session exists)
 	var sessionRow string
-	if task.Session != nil {
-		sessionRow = renderSessionStatus(task.Session, s)
+	if displaySession != nil {
+		sessionRow = renderSessionStatus(displaySession, s)
 	}
-	sessionCompact := renderSessionStatusCompact(task.Session)
-	visibleRuntimeSignals := runtimeSignalsForHeader(task.Session, runtimeSignals)
+	sessionCompact := renderSessionStatusCompact(displaySession)
+	visibleRuntimeSignals := runtimeSignalsForHeader(displaySession, runtimeSignals)
 	runtimeRow := renderRuntimeSignals(visibleRuntimeSignals, s)
 	runtimeCompact := renderRuntimeSignalsCompact(visibleRuntimeSignals, s)
 	typeBadge := renderTaskTypeBadge(task.Type, s)
@@ -188,6 +190,17 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 	return cardStyle.Height(cardHeight).Render(content)
+}
+
+func cardSessionForTask(task domain.Task) *domain.Session {
+	if task.Status != domain.StatusInReview || task.Session == nil {
+		return task.Session
+	}
+	displayState, ok := task.Session.DisplayState()
+	if ok && displayState == domain.SessionBusy {
+		return nil
+	}
+	return task.Session
 }
 
 func taskIsNested(task domain.Task) bool {

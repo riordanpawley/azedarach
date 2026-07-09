@@ -49,6 +49,7 @@ This directory primarily contains **developer/internal documentation**.
 - `session.start` conflict / `session.attach` target / `session.pause` and `session.resume` lifecycle targets / `session.stop` targets: `tmux`.
 - `session.recover` reconciliation: `hybrid` (projection intent + tmux runtime).
 - `task.close`, `task.close_preflight`, `task.delete`, `task.delete_preflight`, `task.graph_readiness`, and `task.complete_check`: `hybrid` (durable issue graph/projection + live runtime attachment state).
+- `task.review_handoff`: `projection` (durable issue projection + session activity projection; active issue self-handoff remains allowed).
 - `task.integration_readiness` and `task.context_risk_closeout`: `projection` (durable issue projection + mailbox/observation evidence).
 - `task.merge_base_target`: `projection` (durable issue graph + worktree projection).
 - `task.follow_on_merge_candidates`: `projection` (durable issue graph + worktree projection).

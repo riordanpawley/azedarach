@@ -21,6 +21,7 @@ const (
 	auditEnvActor        = "AZEDARACH_AUDIT_ACTOR"
 	auditEnvUID          = "AZEDARACH_AUDIT_UID"
 	auditEnvActiveIssue  = "AZEDARACH_AUDIT_ACTIVE_ISSUE"
+	auditEnvIssueID      = "AZEDARACH_ISSUE_ID"
 )
 
 var (
@@ -64,6 +65,9 @@ func populateClientAuditMetadata(meta *protocol.Metadata) {
 	}
 	if meta.ClientActiveIssue == "" {
 		meta.ClientActiveIssue = strings.TrimSpace(os.Getenv(auditEnvActiveIssue))
+	}
+	if meta.ClientActiveIssue == "" {
+		meta.ClientActiveIssue = strings.TrimSpace(os.Getenv(auditEnvIssueID))
 	}
 	if meta.ClientPID == 0 {
 		meta.ClientPID = auditCurrentPID()

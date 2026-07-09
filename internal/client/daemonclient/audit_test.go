@@ -46,6 +46,23 @@ func TestCommandPopulatesClientAuditMetadataFromEnv(t *testing.T) {
 	}
 }
 
+func TestCommandFallsBackToActiveIssueIDEnv(t *testing.T) {
+	t.Setenv(auditEnvIssueID, "cyk")
+
+	var got protocol.RequestEnvelope
+	client := New(&fakeTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		got = req
+		return protocol.ResponseEnvelope{OK: true}, nil
+	}})
+	if _, err := client.Command(context.Background(), protocol.RequestEnvelope{Command: "task.update_status"}); err != nil {
+		t.Fatalf("Command() error = %v", err)
+	}
+
+	if got.Meta.ClientActiveIssue != "cyk" {
+		t.Fatalf("active issue = %q, want cyk", got.Meta.ClientActiveIssue)
+	}
+}
+
 func TestCommandRefreshesWatchParentPID(t *testing.T) {
 	oldPID := auditCurrentPID
 	oldPPID := auditCurrentPPID
