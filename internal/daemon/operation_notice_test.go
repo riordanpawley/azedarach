@@ -79,6 +79,9 @@ func TestOperationFailureNoticeDedupesRepeatedFailures(t *testing.T) {
 			t.Fatalf("submit operation %d: %v", i, err)
 		}
 		waitForRuntimeState(t, runtime, result.Record.ID, daemonops.StateFailed)
+		if err := runtime.manager.Drain(ctx); err != nil {
+			t.Fatalf("drain operation %d: %v", i, err)
+		}
 		waitForNoticeOccurrenceCount(t, notices, daemonnotices.Query{
 			ProjectID: "proj-1",
 			States:    []daemonnotices.State{daemonnotices.StateActive},
@@ -115,6 +118,9 @@ func TestOperationSuccessResolvesMatchingFailureNotice(t *testing.T) {
 		t.Fatalf("submit failed operation: %v", err)
 	}
 	waitForRuntimeState(t, runtime, failed.Record.ID, daemonops.StateFailed)
+	if err := runtime.manager.Drain(ctx); err != nil {
+		t.Fatalf("drain failed operation: %v", err)
+	}
 
 	succeeded, err := runtime.manager.Submit(ctx, req, func(context.Context) ([]byte, error) {
 		return []byte(`{"ok":true}`), nil
@@ -123,6 +129,9 @@ func TestOperationSuccessResolvesMatchingFailureNotice(t *testing.T) {
 		t.Fatalf("submit successful operation: %v", err)
 	}
 	waitForRuntimeState(t, runtime, succeeded.Record.ID, daemonops.StateDone)
+	if err := runtime.manager.Drain(ctx); err != nil {
+		t.Fatalf("drain successful operation: %v", err)
+	}
 
 	active, err := notices.List(ctx, daemonnotices.Query{
 		ProjectID: "proj-1",

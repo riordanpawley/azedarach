@@ -1466,8 +1466,8 @@ func TestView_CanonicalProfiles(t *testing.T) {
 			if profile.Width < 80 && strings.Contains(view, "Space: task workspace") {
 				t.Fatalf("expected compact status bar without full hints for %s profile, got: %s", profile.Name, view)
 			}
-			if profile.Width >= 80 && !strings.Contains(view, "Space: task workspace") {
-				t.Fatalf("expected board hints for %s profile, got: %s", profile.Name, view)
+			if profile.Width >= 80 && !strings.Contains(view, "?: help") {
+				t.Fatalf("expected help-first board hints for %s profile, got: %s", profile.Name, view)
 			}
 		})
 	}
