@@ -1557,7 +1557,7 @@ func runCommand(cfg *config.Config, fn func(*cli.Dependencies) error) (err error
 	defer func() { endSpan(err) }()
 
 	depsStartedAt := time.Now()
-	deps, err := cli.NewDependencies(cfg)
+	deps, err := cli.NewDependenciesWithContext(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to initialize dependencies: %w", err)
 	}
@@ -1585,7 +1585,7 @@ func runCommandAtRepoDir(cfg *config.Config, repoDir string, fn func(*cli.Depend
 	defer func() { endSpan(err) }()
 
 	depsStartedAt := time.Now()
-	deps, err := cli.NewDependenciesAt(cfg, repoDir)
+	deps, err := cli.NewDependenciesAtWithContext(ctx, cfg, repoDir)
 	if err != nil {
 		return fmt.Errorf("failed to initialize dependencies: %w", err)
 	}

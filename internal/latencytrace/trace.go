@@ -142,11 +142,20 @@ func LogPhaseContext(ctx context.Context, logger *slog.Logger, component, phase 
 
 // StartSpan starts a safe, bounded span when OpenTelemetry diagnostics are enabled.
 func StartSpan(ctx context.Context, component, phase string, attrs ...any) (context.Context, func(error)) {
+	ctx, endSpan := StartSpanWithEndAttributes(ctx, component, phase, attrs...)
+	return ctx, func(err error) {
+		endSpan(err)
+	}
+}
+
+// StartSpanWithEndAttributes starts a safe, bounded span and allows callers to
+// add final low-cardinality attributes once the operation outcome is known.
+func StartSpanWithEndAttributes(ctx context.Context, component, phase string, attrs ...any) (context.Context, func(error, ...any)) {
 	if !observability.Enabled(configEnabled.Load()) {
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		return ctx, func(error) {}
+		return ctx, func(error, ...any) {}
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -172,8 +181,20 @@ func StartSpan(ctx context.Context, component, phase string, attrs ...any) (cont
 		component+"."+phase,
 		oteltrace.WithAttributes(spanAttrs...),
 	)
-	return ctx, func(err error) {
-		if err != nil || hadError {
+	return ctx, func(err error, endAttrs ...any) {
+		hadEndError := false
+		for i := 0; i+1 < len(endAttrs); i += 2 {
+			key, ok := endAttrs[i].(string)
+			if !ok || key == "" {
+				continue
+			}
+			attr, isError, ok := spanAttribute(key, endAttrs[i+1])
+			if ok {
+				span.SetAttributes(attr)
+			}
+			hadEndError = hadEndError || isError
+		}
+		if err != nil || hadError || hadEndError {
 			span.SetAttributes(attribute.Bool("error", true))
 			span.SetStatus(codes.Error, "operation failed")
 		}

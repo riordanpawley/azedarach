@@ -571,14 +571,22 @@ type OperationCancelOptions struct {
 }
 
 func NewDependencies(cfg *config.Config) (*Dependencies, error) {
+	return NewDependenciesWithContext(context.Background(), cfg)
+}
+
+func NewDependenciesWithContext(ctx context.Context, cfg *config.Config) (*Dependencies, error) {
 	repoDir, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current directory: %w", err)
 	}
-	return NewDependenciesAt(cfg, repoDir)
+	return NewDependenciesAtWithContext(ctx, cfg, repoDir)
 }
 
 func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error) {
+	return NewDependenciesAtWithContext(context.Background(), cfg, repoDir)
+}
+
+func NewDependenciesAtWithContext(ctx context.Context, cfg *config.Config, repoDir string) (*Dependencies, error) {
 	if strings.TrimSpace(repoDir) == "" {
 		return nil, fmt.Errorf("failed to get current directory: empty repo dir")
 	}
@@ -590,13 +598,13 @@ func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error
 	logger := logging.NewTextFileLogger(logPath, slog.LevelInfo)
 	slog.SetDefault(logger)
 
-	rootRepoDir, err := config.ResolveProjectRoot(absRepoDir)
+	rootRepoDir, err := config.ResolveProjectRootContext(ctx, absRepoDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve project root from %q: %w", absRepoDir, err)
 	}
 	runtimeRepoDir := rootRepoDir
 	if config.UseScopedDaemonRuntimeFor(absRepoDir) {
-		if worktreeRoot, err := config.ResolveWorktreeRoot(absRepoDir); err == nil && strings.TrimSpace(worktreeRoot) != "" {
+		if worktreeRoot, err := config.ResolveWorktreeRootContext(ctx, absRepoDir); err == nil && strings.TrimSpace(worktreeRoot) != "" {
 			runtimeRepoDir = worktreeRoot
 		}
 	}
@@ -2660,9 +2668,9 @@ func applyExplicitSessionProjectOverride(deps *Dependencies, project string) fun
 	if deps.DaemonClient != nil {
 		deps.DaemonClient.WithProjectID(candidate.Route)
 	}
-	if repoDir := sessionProjectCandidateRepoDir(candidate); repoDir != "" {
+	if repoDir := sessionProjectCandidateRepoDir(deps.TraceContext, candidate); repoDir != "" {
 		deps.RepoDir = repoDir
-		deps.RuntimeRepoDir = resolveRuntimeRepoDir(repoDir)
+		deps.RuntimeRepoDir = resolveRuntimeRepoDir(deps.TraceContext, repoDir)
 	}
 
 	return func() {
@@ -2675,12 +2683,12 @@ func applyExplicitSessionProjectOverride(deps *Dependencies, project string) fun
 	}
 }
 
-func sessionProjectCandidateRepoDir(candidate sessionProjectCandidate) string {
+func sessionProjectCandidateRepoDir(ctx context.Context, candidate sessionProjectCandidate) string {
 	path := strings.TrimSpace(candidate.Path)
 	if path == "" {
 		return ""
 	}
-	if repoDir, err := config.ResolveProjectRoot(path); err == nil && strings.TrimSpace(repoDir) != "" {
+	if repoDir, err := config.ResolveProjectRootContext(ctx, path); err == nil && strings.TrimSpace(repoDir) != "" {
 		return repoDir
 	}
 	return path
@@ -8483,7 +8491,7 @@ func LogCommand(deps *Dependencies, opts LogOptions) error {
 	}
 	runtimeRepoDir := strings.TrimSpace(deps.RuntimeRepoDir)
 	if runtimeRepoDir == "" {
-		runtimeRepoDir = resolveRuntimeRepoDir(repoDir)
+		runtimeRepoDir = resolveRuntimeRepoDir(deps.TraceContext, repoDir)
 	}
 	sessionLogDir := resolveSessionLogDirFor(deps.Config, runtimeRepoDir)
 	logSources := make([]logstream.SourceSpec, 0, len(opts.Sources))
@@ -8557,17 +8565,17 @@ func resolveSessionLogDirFor(cfg *config.Config, startPath string) string {
 	return config.SessionLogDirFor(cfg, startPath)
 }
 
-func resolveRuntimeRepoDir(repoDir string) string {
+func resolveRuntimeRepoDir(ctx context.Context, repoDir string) string {
 	if !config.UseScopedDaemonRuntimeFor(repoDir) {
 		return repoDir
 	}
-	if worktreeRoot, ok := resolveScopedWorktreeRoot(repoDir); ok {
+	if worktreeRoot, ok := resolveScopedWorktreeRoot(ctx, repoDir); ok {
 		return worktreeRoot
 	}
 	return repoDir
 }
 
-func resolveScopedWorktreeRoot(startPath string) (string, bool) {
+func resolveScopedWorktreeRoot(ctx context.Context, startPath string) (string, bool) {
 	candidates := make([]string, 0, 2)
 	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
 		candidates = append(candidates, cwd)
@@ -8576,7 +8584,7 @@ func resolveScopedWorktreeRoot(startPath string) (string, bool) {
 		candidates = append(candidates, candidate)
 	}
 	for _, candidate := range candidates {
-		worktreeRoot, err := config.ResolveWorktreeRoot(candidate)
+		worktreeRoot, err := config.ResolveWorktreeRootContext(ctx, candidate)
 		if err != nil || strings.TrimSpace(worktreeRoot) == "" {
 			continue
 		}

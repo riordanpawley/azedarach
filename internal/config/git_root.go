@@ -13,18 +13,34 @@ import (
 
 // ResolveBaseGitRoot resolves the repository root from any nested worktree path.
 func ResolveBaseGitRoot(startDir string) (string, error) {
-	if root, err := resolveBaseGitRootWithGitExec(startDir); err == nil {
+	return ResolveBaseGitRootContext(context.Background(), startDir)
+}
+
+// ResolveBaseGitRootContext resolves the repository root from any nested
+// worktree path and parents git-root probe spans under ctx.
+func ResolveBaseGitRootContext(ctx context.Context, startDir string) (string, error) {
+	root, finishGitProbe, gitErr := resolveBaseGitRootWithGitExec(ctx, startDir)
+	if gitErr == nil {
+		finishGitProbe("success", nil)
 		return root, nil
 	}
 	if root, err := resolveBaseGitRootFromGitMarker(startDir); err == nil {
+		finishGitProbe("fallback", nil)
 		return root, nil
 	}
+	finishGitProbe("failure", gitErr)
 	return "", fmt.Errorf("unable to resolve git root from %s", startDir)
 }
 
 // ResolveWorktreeRoot resolves the nearest git worktree root from a nested path.
 // For non-git paths it falls back to the absolute path.
 func ResolveWorktreeRoot(startPath string) (string, error) {
+	return ResolveWorktreeRootContext(context.Background(), startPath)
+}
+
+// ResolveWorktreeRootContext resolves the nearest git worktree root from a
+// nested path and parents git-root probe spans under ctx.
+func ResolveWorktreeRootContext(ctx context.Context, startPath string) (string, error) {
 	if strings.TrimSpace(startPath) == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -39,44 +55,68 @@ func ResolveWorktreeRoot(startPath string) (string, error) {
 	if info, statErr := os.Stat(abs); statErr == nil && !info.IsDir() {
 		abs = filepath.Dir(abs)
 	}
-	if root, err := resolveWorktreeRootWithGitExec(abs); err == nil {
+	root, finishGitProbe, gitErr := resolveWorktreeRootWithGitExec(ctx, abs)
+	if gitErr == nil {
+		finishGitProbe("success", nil)
 		return root, nil
 	}
 	if root, err := resolveWorktreeRootFromGitMarker(abs); err == nil {
+		finishGitProbe("fallback", nil)
 		return root, nil
 	}
+	finishGitProbe("fallback", nil)
 	return abs, nil
 }
 
-func resolveBaseGitRootWithGitExec(startDir string) (string, error) {
-	out, err := runGitExecCommand(startDir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+type gitRootProbeFinisher func(outcome string, err error)
+
+func resolveBaseGitRootWithGitExec(ctx context.Context, startDir string) (string, gitRootProbeFinisher, error) {
+	out, err, finish := runGitExecCommandProbe(ctx, startDir, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
-		return "", fmt.Errorf("resolve git common dir: %w", err)
+		return "", finish, fmt.Errorf("resolve git common dir: %w", err)
 	}
-	return baseGitRootFromCommonDir(startDir, strings.TrimSpace(string(out)))
+	root, err := baseGitRootFromCommonDir(startDir, strings.TrimSpace(string(out)))
+	if err != nil {
+		return "", finish, err
+	}
+	return root, finish, nil
 }
 
-func resolveWorktreeRootWithGitExec(startDir string) (string, error) {
-	out, err := runGitExecCommand(startDir, "rev-parse", "--path-format=absolute", "--show-toplevel")
+func resolveWorktreeRootWithGitExec(ctx context.Context, startDir string) (string, gitRootProbeFinisher, error) {
+	out, err, finish := runGitExecCommandProbe(ctx, startDir, "rev-parse", "--path-format=absolute", "--show-toplevel")
 	if err != nil {
-		return "", fmt.Errorf("resolve git worktree root: %w", err)
+		return "", finish, fmt.Errorf("resolve git worktree root: %w", err)
 	}
 	root := strings.TrimSpace(string(out))
 	if root == "" {
-		return "", fmt.Errorf("resolve git worktree root: empty output")
+		return "", finish, fmt.Errorf("resolve git worktree root: empty output")
 	}
-	return root, nil
+	return root, finish, nil
 }
 
-func runGitExecCommand(startDir string, operation string, args ...string) (out []byte, err error) {
-	ctx, endSpan := latencytrace.StartSpan(context.Background(), "dependency", "git_root",
+func runGitExecCommand(ctx context.Context, startDir string, operation string, args ...string) (out []byte, err error) {
+	out, err, finish := runGitExecCommandProbe(ctx, startDir, operation, args...)
+	if err != nil {
+		finish("failure", err)
+		return out, err
+	}
+	finish("success", nil)
+	return out, nil
+}
+
+func runGitExecCommandProbe(ctx context.Context, startDir string, operation string, args ...string) (out []byte, err error, finish gitRootProbeFinisher) {
+	ctx, endSpan := latencytrace.StartSpanWithEndAttributes(ctx, "dependency", "git_root",
 		"dependency.name", "git",
 		"dependency.operation", operation,
 		"arg_count", len(args)+1,
 	)
-	defer func() { endSpan(err) }()
-	cmd := gitExecCommandContext(ctx, startDir, args...)
-	return cmd.Output()
+	finish = func(outcome string, spanErr error) {
+		endSpan(spanErr, "outcome", outcome)
+	}
+	cmdArgs := append([]string{operation}, args...)
+	cmd := gitExecCommandContext(ctx, startDir, cmdArgs...)
+	out, err = cmd.Output()
+	return out, err, finish
 }
 
 func gitExecCommand(startDir string, args ...string) *exec.Cmd {
@@ -217,6 +257,12 @@ func baseGitRootFromCommonDir(startDir, commonDir string) (string, error) {
 // state. For Git repositories (including worktrees), this is always the base
 // repository root. For non-Git paths, this falls back to the absolute path.
 func ResolveProjectRoot(startPath string) (string, error) {
+	return ResolveProjectRootContext(context.Background(), startPath)
+}
+
+// ResolveProjectRootContext returns an absolute directory suitable for
+// project-scoped state and parents git-root probe spans under ctx.
+func ResolveProjectRootContext(ctx context.Context, startPath string) (string, error) {
 	if strings.TrimSpace(startPath) == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -233,7 +279,7 @@ func ResolveProjectRoot(startPath string) (string, error) {
 		abs = filepath.Dir(abs)
 	}
 
-	if baseRoot, err := ResolveBaseGitRoot(abs); err == nil {
+	if baseRoot, err := ResolveBaseGitRootContext(ctx, abs); err == nil {
 		return baseRoot, nil
 	}
 	return abs, nil
