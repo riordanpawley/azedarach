@@ -15,23 +15,30 @@ import (
 	"time"
 	"unicode/utf8"
 
+	termimg "github.com/blacktop/go-termimg"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
+	_ "golang.org/x/image/bmp"
+	_ "golang.org/x/image/tiff"
+	_ "golang.org/x/image/webp"
 )
 
 const (
 	attachmentPreviewMaxBytes = 16 * 1024
 	attachmentPreviewMaxLines = 6
 	attachmentPreviewTimeout  = 200 * time.Millisecond
+	attachmentPreviewImageW   = 40
+	attachmentPreviewImageH   = 8
 )
 
 type attachmentPreviewState struct {
-	attachmentID string
-	title        string
-	lines        []string
-	err          string
+	attachmentID  string
+	title         string
+	terminalImage string
+	lines         []string
+	err           string
 }
 
 type attachmentPreviewLoadedMsg struct {
@@ -57,7 +64,11 @@ func buildAttachmentPreview(att attachment.Attachment) (attachmentPreviewState, 
 		title:        previewTitle(att),
 	}
 	if isPreviewableImageAttachment(att) {
-		state.lines = imagePreviewLines(att)
+		rendered, err := renderTerminalImagePreview(att.Path, attachmentPreviewImageW, attachmentPreviewImageH)
+		if err == nil {
+			state.terminalImage = rendered
+		}
+		state.lines = imagePreviewLines(att, err)
 		return state, nil
 	}
 	if !isReadableDocumentAttachment(att) {
@@ -116,8 +127,35 @@ func isPreviewableImageAttachment(att attachment.Attachment) bool {
 	}
 }
 
-func imagePreviewLines(att attachment.Attachment) []string {
-	lines := []string{"Inline image rendering is not available in this terminal."}
+var renderTerminalImagePreview = renderTerminalImagePreviewWithTermimg
+
+func renderTerminalImagePreviewWithTermimg(path string, width, height int) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("attachment has no local path")
+	}
+	img, err := termimg.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("load terminal image: %w", err)
+	}
+	outcome := termimg.NewStatefulImageWidget(img).
+		SetProtocol(termimg.Auto).
+		SetScaleMode(termimg.ScaleFit).
+		SetMinimumCells(1, 1).
+		RenderInto(width, height)
+	if outcome.Err != nil {
+		return "", fmt.Errorf("render terminal image: %w", outcome.Err)
+	}
+	if outcome.Skipped || strings.TrimSpace(outcome.Output) == "" {
+		return "", fmt.Errorf("terminal image renderer produced no output")
+	}
+	return outcome.Output, nil
+}
+
+func imagePreviewLines(att attachment.Attachment, renderErr error) []string {
+	lines := make([]string, 0, 3)
+	if renderErr != nil {
+		lines = append(lines, "Terminal image render unavailable: "+compactAttachmentPreviewError(renderErr))
+	}
 	if width, height, format := imageDimensions(att.Path); width > 0 && height > 0 {
 		if format != "" {
 			lines = append(lines, fmt.Sprintf("%dx%d %s image", width, height, strings.ToUpper(format)))
@@ -127,6 +165,17 @@ func imagePreviewLines(att attachment.Attachment) []string {
 	}
 	lines = append(lines, "Press Enter/v for full preview or o to open externally.")
 	return lines
+}
+
+func compactAttachmentPreviewError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" {
+		return "unknown error"
+	}
+	return truncateToCellWidth(msg, 96)
 }
 
 func imageDimensions(path string) (int, int, string) {
@@ -233,6 +282,11 @@ func renderAttachmentPreviewBlock(styles *Styles, preview attachmentPreviewState
 	}
 	if len(body) == 0 {
 		body = []string{"Preview loading..."}
+	}
+	if preview.terminalImage != "" && preview.err == "" {
+		for _, line := range strings.Split(strings.TrimRight(preview.terminalImage, "\n"), "\n") {
+			lines = append(lines, line)
+		}
 	}
 	bodyStyle := styles.MenuItemDisabled
 	for _, line := range body {
