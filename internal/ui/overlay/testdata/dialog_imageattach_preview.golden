@@ -11,13 +11,13 @@
 ││                                                                                             │
 ││        Path:  /tmp/mobile-panel.png                                                         │
 ││                                                                                             │
-││                                                                                             │
-││                                                                                             │
-││                                                                                             │
-││                                                                                             │
-││                                                                                             │
-││                                                                                             │
-││                                                                                             │
+││ ┌───────────────────────────────────────────────                                            │
+││ │ Image Preview                                                                             │
+││ │ Inline image rendering is not available in                                                │
+││ │ this terminal.                                                                            │
+││ │ Press Enter/v for full preview or o to open                                               │
+││ │ externally.                                                                               │
+││ └───────────────────────────────────────────────                                            │
 ││                                                                                             │
 ││                                                                                             │
 ││                                                                                             │

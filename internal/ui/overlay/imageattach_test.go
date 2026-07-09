@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -267,6 +268,27 @@ func TestImageAttachOverlay_OpenPreviewOverlay(t *testing.T) {
 	closeMsg := cmd()
 	if _, ok := closeMsg.(CloseOverlayMsg); !ok {
 		t.Errorf("expected CloseOverlayMsg from preview q, got %T", closeMsg)
+	}
+}
+
+func TestImageAttachOverlayRenderListContentShowsSelectedPreview(t *testing.T) {
+	overlay := NewImageAttachOverlay("az-123", &mockClipboardAttachService{})
+	overlay.files = []attachment.Attachment{
+		{ID: "doc-1", IssueID: "az-123", Filename: "notes.txt", MimeType: "text/plain", Size: 64},
+	}
+	overlay.preview = attachmentPreviewState{
+		attachmentID: "doc-1",
+		title:        "Document Preview",
+		lines:        []string{"First note", "Second note"},
+	}
+
+	view := overlay.renderListContent(60, 18)
+
+	if !strings.Contains(view, "notes.txt") {
+		t.Fatalf("rendered list missing filename: %q", view)
+	}
+	if !strings.Contains(view, "Document Preview") || !strings.Contains(view, "First note") {
+		t.Fatalf("rendered list missing selected preview: %q", view)
 	}
 }
 
