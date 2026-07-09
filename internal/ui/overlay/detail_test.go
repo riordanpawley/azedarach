@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +70,36 @@ func TestDetailPanelView(t *testing.T) {
 	assert.Contains(t, view, "P1")
 	assert.Contains(t, view, "F")
 	assert.Contains(t, view, "This is a test description")
+}
+
+func TestDetailPanelRendersMarkdownDescriptionWithCache(t *testing.T) {
+	oldRenderer := renderMarkdownDocument
+	defer func() { renderMarkdownDocument = oldRenderer }()
+
+	calls := 0
+	renderMarkdownDocument = func(_ context.Context, source string, width int) (string, error) {
+		calls++
+		assert.Equal(t, "# Heading\n\n- item", source)
+		assert.Equal(t, 30, width)
+		return "Rendered Heading\n* rendered item", nil
+	}
+
+	task := domain.Task{
+		ID:          "az-md",
+		Title:       "Markdown task",
+		Description: "# Heading\n\n- item",
+		Status:      domain.StatusOpen,
+	}
+
+	panel := NewDetailPanel(task)
+	panel.wrapWidth = 30
+	view := panel.View()
+	secondView := panel.View()
+
+	assert.Contains(t, view, "Rendered Heading")
+	assert.Contains(t, view, "* rendered item")
+	assert.Equal(t, view, secondView)
+	assert.Equal(t, 1, calls, "detail panel should cache rendered markdown for stable text and width")
 }
 
 func TestDetailPanelViewShowsIssueOwnership(t *testing.T) {

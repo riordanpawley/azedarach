@@ -30,6 +30,7 @@ type DetailPanel struct {
 	checkedAt      time.Time
 	freshness      protocol.TaskListFreshness
 	styles         *Styles
+	markdownCache  map[string]markdownRenderCacheEntry
 }
 
 // DecisionLinkSummary is a read-only projection of a decision link rendered
@@ -126,6 +127,7 @@ func NewDetailPanel(task domain.Task) *DetailPanel {
 		descViewHeight: 20,
 		wrapWidth:      80,
 		styles:         New(),
+		markdownCache:  make(map[string]markdownRenderCacheEntry),
 	}
 }
 
@@ -386,12 +388,7 @@ func (d *DetailPanel) buildLines() ([]string, int) {
 	if d.task.Description != "" {
 		addLine("")
 		addLine(headerStyle.Render("Description"))
-		wrapWidth := d.wrapWidth
-		if wrapWidth < 10 {
-			wrapWidth = 10
-		}
-		descLines := wrapDescriptionLines(d.task.Description, wrapWidth)
-		for _, line := range descLines {
+		for _, line := range d.renderMarkdownSectionLines("Description", d.task.Description) {
 			addLine(valueStyle.Render(line))
 		}
 	}
@@ -489,9 +486,16 @@ func (d *DetailPanel) addTextSectionLines(lines *[]string, headerStyle, valueSty
 		return
 	}
 	*lines = append(*lines, "", headerStyle.Render(title))
-	for _, line := range wrapDescriptionLines(text, max(10, d.wrapWidth)) {
+	for _, line := range d.renderMarkdownSectionLines(title, text) {
 		*lines = append(*lines, valueStyle.Render(line))
 	}
+}
+
+func (d *DetailPanel) renderMarkdownSectionLines(title, text string) []string {
+	if d.markdownCache == nil {
+		d.markdownCache = make(map[string]markdownRenderCacheEntry)
+	}
+	return renderMarkdownLinesCached(d.markdownCache, title, text, max(10, d.wrapWidth))
 }
 
 func (d *DetailPanel) graphDirectionPrefix(direction string, selected bool) string {
