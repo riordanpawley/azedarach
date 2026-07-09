@@ -128,6 +128,7 @@ type taskCloseRequest struct {
 	IntegrateBeforeClose bool   `json:"integrate_before_close,omitempty"`
 	CloseCleanChildren   bool   `json:"close_clean_children,omitempty"`
 	AllowActiveSession   bool   `json:"allow_active_session,omitempty"`
+	CloseOutcome         string `json:"closed_outcome,omitempty"`
 }
 
 type taskStatusUpdateOptions struct {
@@ -1986,9 +1987,16 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	if taskID == "" {
 		return taskCloseResult{}, fmt.Errorf("task id is required")
 	}
+	closeOutcome, closeStatus, err := daemonTaskCloseOutcomeStatus(cmd.CloseOutcome)
+	if err != nil {
+		return taskCloseResult{}, err
+	}
+	if closeOutcome == domain.IssueCloseCancelled {
+		cmd.IntegrateBeforeClose = false
+	}
 	result := taskCloseResult{
 		TaskID:         taskID,
-		Status:         string(domain.StatusDone),
+		Status:         string(closeStatus),
 		WorktreeForced: cmd.ForceWorktree,
 	}
 	result.ContextRisk = d.taskContextRiskForCloseout(ctx, projectID, taskID, d.cfg.RepoDir)
@@ -2101,7 +2109,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	recordPhase("runtime_projection_repair", phaseStartedAt, false)
 
 	phaseStartedAt = time.Now()
-	task, err := issueClient.UpdateWithRuntime(ctx, projectID, taskID, domain.StatusDone)
+	task, err := issueClient.UpdateWithRuntime(ctx, projectID, taskID, closeStatus)
 	if err != nil {
 		recordPhase("status_write", phaseStartedAt, false)
 		return result, taskClosePostIntegrationPhaseError(taskID, "status_write", integration, err)
@@ -2118,6 +2126,17 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	}
 	d.publishTaskEvent(req, protocol.EventTaskUpdated, rev, taskEventBodyFromTask(projectID, task))
 	return result, nil
+}
+
+func daemonTaskCloseOutcomeStatus(raw string) (domain.IssueCloseOutcome, domain.Status, error) {
+	switch domain.IssueCloseOutcome(strings.ToLower(strings.TrimSpace(raw))) {
+	case "", domain.IssueCloseCompleted:
+		return domain.IssueCloseCompleted, domain.StatusDone, nil
+	case domain.IssueCloseCancelled:
+		return domain.IssueCloseCancelled, domain.StatusCancelled, nil
+	default:
+		return "", "", fmt.Errorf("invalid close outcome: %s", raw)
+	}
 }
 
 func (d *Daemon) repairStaleSessionRuntimeProjections(ctx context.Context, projectID, taskID string) error {
@@ -2965,7 +2984,7 @@ func (d *Daemon) updateTaskStatusExcludingClose(ctx context.Context, projectID, 
 		return domain.Task{}, nil, fmt.Errorf("issue store unavailable")
 	}
 	taskID = strings.TrimSpace(taskID)
-	if status == domain.StatusDone {
+	if status == domain.StatusDone || status == domain.StatusCancelled {
 		return domain.Task{}, nil, fmt.Errorf("status %s must be applied with task.close", status)
 	}
 	if opts.CascadeChildren && status != domain.StatusInReview {
@@ -3236,7 +3255,7 @@ func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectI
 	for i := len(descendants) - 1; i >= 0; i-- {
 		childID := descendants[i]
 		child, ok := byID[childID]
-		if !ok || child.Status == domain.StatusDone {
+		if !ok || child.Status == domain.StatusDone || child.Status == domain.StatusCancelled {
 			continue
 		}
 		if !daemonCloseGuardCleanChildAutoCloseEligible(child) {
@@ -3248,6 +3267,7 @@ func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectI
 			IgnoreAhead:          false,
 			IntegrateBeforeClose: false,
 			CloseCleanChildren:   true,
+			CloseOutcome:         cmd.CloseOutcome,
 		}, req)
 		if err != nil {
 			return closed, fmt.Errorf("close clean child %s: %w", child.ID.String(), err)

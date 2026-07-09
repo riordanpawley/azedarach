@@ -100,6 +100,7 @@ type TaskStatusOptions struct {
 	CloseCleanChildren   bool
 	CascadeChildren      bool
 	AllowActiveSession   bool
+	CloseOutcome         domain.IssueCloseOutcome
 }
 
 type TaskDeleteOptions struct {
@@ -121,6 +122,7 @@ type taskCloseRequest struct {
 	IntegrateBeforeClose bool           `json:"integrate_before_close,omitempty"`
 	CloseCleanChildren   bool           `json:"close_clean_children,omitempty"`
 	AllowActiveSession   bool           `json:"allow_active_session,omitempty"`
+	CloseOutcome         string         `json:"closed_outcome,omitempty"`
 }
 
 type taskDeleteRequest struct {
@@ -956,21 +958,29 @@ func (c *Client) CreateTask(ctx context.Context, params TaskCreateParams) (strin
 }
 
 // UpdateTaskStatus updates a task's status through the daemon client boundary.
-// Done transitions are always routed through task.close so durable close
-// invariants stay daemon-owned even when callers omit close options.
+// Done and cancelled transitions are always routed through task.close so
+// durable close invariants stay daemon-owned even when callers omit close
+// options.
 func (c *Client) UpdateTaskStatus(ctx context.Context, taskID string, status domain.Status) error {
 	return c.UpdateTaskStatusWithOptions(ctx, taskID, status, TaskStatusOptions{})
 }
 
-// UpdateTaskStatusWithOptions updates a task's status. Done transitions are
-// represented by the daemon-owned close command; other status moves use the
-// lightweight status mutation command.
+// UpdateTaskStatusWithOptions updates a task's status. Terminal close
+// transitions are represented by the daemon-owned close command; other status
+// moves use the lightweight status mutation command.
 func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string, status domain.Status, opts TaskStatusOptions) error {
 	parsedTaskID, err := naming.ParseIssueID(taskID)
 	if err != nil {
 		return fmt.Errorf("invalid task id: %w", err)
 	}
 	if status == domain.StatusDone {
+		opts.CloseOutcome = domain.IssueCloseCompleted
+		_, err := c.CloseTask(ctx, parsedTaskID.String(), opts)
+		return err
+	}
+	if status == domain.StatusCancelled {
+		opts.CloseOutcome = domain.IssueCloseCancelled
+		opts.IntegrateBeforeClose = false
 		_, err := c.CloseTask(ctx, parsedTaskID.String(), opts)
 		return err
 	}
@@ -994,6 +1004,7 @@ func (c *Client) CloseTask(ctx context.Context, taskID string, opts TaskStatusOp
 		IntegrateBeforeClose: opts.IntegrateBeforeClose,
 		CloseCleanChildren:   opts.CloseCleanChildren,
 		AllowActiveSession:   opts.AllowActiveSession,
+		CloseOutcome:         string(opts.CloseOutcome),
 	}, &out); err != nil {
 		return TaskCloseResult{}, err
 	}

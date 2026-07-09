@@ -1014,6 +1014,39 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("status update to cancelled uses close command without integration", func(t *testing.T) {
+		commands := []string{}
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				commands = append(commands, req.Command)
+				if req.Command != CommandTaskClose {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskClose)
+				}
+				var body taskCloseRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request: %v", err)
+				}
+				if body.TaskID != "az-9" || body.IntegrateBeforeClose || body.CloseOutcome != string(domain.IssueCloseCancelled) {
+					t.Fatalf("request body = %+v, want cancelled close without integration", body)
+				}
+				return responseWithJSON(t, req, TaskCloseResult{
+					TaskID: "az-9",
+					Status: string(domain.StatusCancelled),
+				}), nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		if err := client.UpdateTaskStatus(context.Background(), "az-9", domain.StatusCancelled); err != nil {
+			t.Fatalf("UpdateTaskStatus error: %v", err)
+		}
+		wantCommands := []string{CommandTaskClose}
+		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
+			t.Fatalf("commands = %v, want %v", commands, wantCommands)
+		}
+	})
+
 	t.Run("status update to done propagates close pending operation", func(t *testing.T) {
 		commands := []string{}
 		transport := &taskRecordingTransport{

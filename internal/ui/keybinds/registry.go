@@ -150,6 +150,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "w/W"}}, Hint: "cleanup"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "e"}}, Hint: "edit"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "c"}}, Hint: "child"},
+	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "5"}}, Hint: "cancel issue"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "T/d"}}, Hint: "tombstone/delete"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "Esc/q"}}, Hint: "cancel"},
 

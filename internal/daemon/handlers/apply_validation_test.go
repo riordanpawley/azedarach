@@ -160,29 +160,33 @@ func TestValidateApplyRequest_PerItemDiagnostics(t *testing.T) {
 }
 
 func TestValidateApplyRequestRejectsStatusCloseMutation(t *testing.T) {
-	req := protocol.ApplyRequestBody{
-		SchemaVersion:    protocol.ApplySchemaVersion,
-		SnapshotRevision: 99,
-		Operations: []protocol.ApplyOperationBody{{
-			Command: applyCommandTaskUpdateStatus,
-			Body:    mustApplyJSON(t, map[string]string{"task_id": "az-1", "status": "closed"}),
-		}},
-	}
+	for _, status := range []string{"closed", "cancelled"} {
+		t.Run(status, func(t *testing.T) {
+			req := protocol.ApplyRequestBody{
+				SchemaVersion:    protocol.ApplySchemaVersion,
+				SnapshotRevision: 99,
+				Operations: []protocol.ApplyOperationBody{{
+					Command: applyCommandTaskUpdateStatus,
+					Body:    mustApplyJSON(t, map[string]string{"task_id": "az-1", "status": status}),
+				}},
+			}
 
-	err := ValidateApplyRequest(req)
-	if err == nil {
-		t.Fatal("expected validation error")
-	}
-	vErr, ok := err.(*protocol.ApplyValidationError)
-	if !ok {
-		t.Fatalf("error type = %T, want *protocol.ApplyValidationError", err)
-	}
-	if got, want := len(vErr.Diagnostics), 1; got != want {
-		t.Fatalf("Diagnostics len = %d, want %d", got, want)
-	}
-	diag := vErr.Diagnostics[0]
-	if diag.Index != 0 || diag.Field != "status" || diag.Code != protocol.ApplyValidationCodeInvalidOperationBody || !strings.Contains(diag.Message, "task.close") {
-		t.Fatalf("diagnostic = %+v, want status task.close rejection", diag)
+			err := ValidateApplyRequest(req)
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			vErr, ok := err.(*protocol.ApplyValidationError)
+			if !ok {
+				t.Fatalf("error type = %T, want *protocol.ApplyValidationError", err)
+			}
+			if got, want := len(vErr.Diagnostics), 1; got != want {
+				t.Fatalf("Diagnostics len = %d, want %d", got, want)
+			}
+			diag := vErr.Diagnostics[0]
+			if diag.Index != 0 || diag.Field != "status" || diag.Code != protocol.ApplyValidationCodeInvalidOperationBody || !strings.Contains(diag.Message, "task.close") {
+				t.Fatalf("diagnostic = %+v, want status task.close rejection", diag)
+			}
+		})
 	}
 }
 

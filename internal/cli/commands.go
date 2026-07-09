@@ -3726,9 +3726,9 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	fs.StringVar(&opts.AppendNotes, "append-notes", "", "append a note line to issue notes")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue update result as JSON")
-	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal when setting closed")
+	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal when setting closed or cancelled")
 	fs.BoolVar(&opts.CascadeChildren, "cascade-children", false, "when setting in_review, move open/in_progress descendants to in_review first")
-	fs.StringVar(&statusRaw, "status", "", "updated status (backlog|open|in_progress|in_review|closed)")
+	fs.StringVar(&statusRaw, "status", "", "updated status (backlog|open|in_progress|in_review|closed|cancelled)")
 	fs.Func("update-impl", "set implementation assignment (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {
@@ -3743,7 +3743,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		return IssueUpdateOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update (it is create-only); normal field updates do not need --update-impl, and --update-impl is only for changing issue implementations")
@@ -3755,7 +3755,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if typeRaw != "" {
 		tt, err := parseTaskType(typeRaw)
@@ -3782,8 +3782,8 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 			opts.Status = &status
 		}
 	}
-	if opts.ForceWorktree && (opts.Status == nil || *opts.Status != domain.StatusDone) {
-		return IssueUpdateOptions{}, fmt.Errorf("--force-worktree is only supported with --status closed")
+	if opts.ForceWorktree && (opts.Status == nil || (*opts.Status != domain.StatusDone && *opts.Status != domain.StatusCancelled)) {
+		return IssueUpdateOptions{}, fmt.Errorf("--force-worktree is only supported with --status closed or --status cancelled")
 	}
 	if opts.CascadeChildren && (opts.Status == nil || *opts.Status != domain.StatusInReview) {
 		return IssueUpdateOptions{}, fmt.Errorf("--cascade-children is only supported with --status in_review")
@@ -6465,6 +6465,10 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		if *opts.Status == domain.StatusDone {
 			statusOptions = cleanupCloseTaskStatusOptions(opts.ForceWorktree)
 		}
+		if *opts.Status == domain.StatusCancelled {
+			statusOptions.ForceWorktree = opts.ForceWorktree
+			statusOptions.CloseOutcome = domain.IssueCloseCancelled
+		}
 		if *opts.Status == domain.StatusInReview {
 			statusOptions.CascadeChildren = opts.CascadeChildren
 		}
@@ -8096,6 +8100,8 @@ func parseStatus(raw string) (domain.Status, error) {
 		return domain.StatusInReview, nil
 	case "closed":
 		return domain.StatusDone, nil
+	case "cancelled", "canceled":
+		return domain.StatusCancelled, nil
 	default:
 		return "", fmt.Errorf("invalid status: %s", raw)
 	}
