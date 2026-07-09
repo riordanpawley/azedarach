@@ -775,6 +775,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskDependencyAdd(ctx, req)
 	case "task.dependency.remove":
 		return d.handleTaskDependencyRemove(ctx, req)
+	case protocol.CommandTaskSQLiteWAL:
+		return d.handleTaskSQLiteWAL(ctx, req)
 	case "task.snapshot.export":
 		return d.handleTaskSnapshotExport(ctx, req)
 	case commandSyncRun:

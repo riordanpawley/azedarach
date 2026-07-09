@@ -673,7 +673,7 @@ func main() {
 		case "doctor":
 			opts, err := cli.ParseIssueDoctorArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<issue-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

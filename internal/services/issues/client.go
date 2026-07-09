@@ -205,8 +205,10 @@ type Client struct {
 	dbPath string
 	logger *slog.Logger
 
-	mu sync.Mutex
-	db *sql.DB
+	mu             sync.Mutex
+	db             *sql.DB
+	walMu          sync.Mutex
+	lastWALCheckAt time.Time
 }
 
 type sqlIssueExecer interface {
@@ -247,9 +249,14 @@ func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) 
 		return spanErr
 	}
 	lock := issueMutationLockForPath(c.dbPath)
-	lock.Lock()
-	defer lock.Unlock()
-	spanErr = fn(context.WithValue(ctx, issueMutationLockKey{}, true))
+	spanErr = func() error {
+		lock.Lock()
+		defer lock.Unlock()
+		return fn(context.WithValue(ctx, issueMutationLockKey{}, true))
+	}()
+	if spanErr == nil {
+		c.maybeMaintainSQLiteWAL(ctx)
+	}
 	return spanErr
 }
 

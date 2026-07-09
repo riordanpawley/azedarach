@@ -422,7 +422,7 @@ const (
 	issueContextRiskUsage         = "Usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--summary|--full] [--json] [<issue-id>]"
 	issueGetManyUsage             = "Usage: az issue get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]"
 	issueCheckUsage               = "Usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]"
-	issueDoctorUsage              = "Usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]"
+	issueDoctorUsage              = "Usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<issue-id>]"
 	issueUpdateUsage              = "Usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]"
 	issueCloseUsage               = "Usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]"
 	issueDeleteUsage              = "Usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [<issue-id>]"

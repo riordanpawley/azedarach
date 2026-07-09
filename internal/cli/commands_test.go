@@ -5142,8 +5142,19 @@ func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 	if doctor.IssueID != "az-3" {
 		t.Fatalf("ParseIssueDoctorArgs() interspersed named id = %+v", doctor)
 	}
+	doctor, err = ParseIssueDoctorArgs([]string{"--checkpoint-wal", "--id", "az-3"})
+	if err != nil {
+		t.Fatalf("ParseIssueDoctorArgs() wal flags error = %v", err)
+	}
+	if doctor.IssueID != "az-3" || !doctor.CheckpointWAL || doctor.TruncateWAL {
+		t.Fatalf("ParseIssueDoctorArgs() wal flags = %+v", doctor)
+	}
+	_, err = ParseIssueDoctorArgs([]string{"--checkpoint-wal", "--truncate-wal", "--id", "az-3"})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected mutually exclusive wal flag error, got %v", err)
+	}
 	_, err = ParseIssueDoctorArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<issue-id>]") {
 		t.Fatalf("expected doctor usage error, got %v", err)
 	}
 }

@@ -3595,6 +3595,68 @@ func daemonTaskDeleteRuntimeBlockers(task domain.Task) []string {
 	return blockers
 }
 
+func (d *Daemon) handleTaskSQLiteWAL(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	var cmd protocol.TaskSQLiteWALRequest
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &cmd); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+		}
+	}
+	mode := strings.ToUpper(strings.TrimSpace(cmd.CheckpointMode))
+	switch mode {
+	case "", string(issues.SQLiteWALCheckpointPassive), string(issues.SQLiteWALCheckpointTruncate):
+	default:
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "checkpoint_mode must be PASSIVE or TRUNCATE"), nil
+	}
+	client := d.issueClientForProject(projectID)
+	if client == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
+	diag, err := client.SQLiteWALDiagnostics(ctx)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	out := protocol.TaskSQLiteWALResponse{
+		DBPath:              diag.DBPath,
+		WALPath:             diag.WALPath,
+		WALBytes:            diag.WALBytes,
+		CheckpointThreshold: diag.CheckpointThreshold,
+		LargeThreshold:      diag.LargeThreshold,
+		Large:               diag.Large,
+		OpenConnections:     diag.DBStats.OpenConnections,
+		InUse:               diag.DBStats.InUse,
+		Idle:                diag.DBStats.Idle,
+	}
+	switch mode {
+	case "":
+	case string(issues.SQLiteWALCheckpointPassive), string(issues.SQLiteWALCheckpointTruncate):
+		stats, err := client.CheckpointSQLiteWAL(ctx, issues.SQLiteWALCheckpointMode(mode))
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		out.WALBytes = stats.WALBytesAfter
+		out.Large = stats.WALBytesAfter >= out.LargeThreshold
+		out.Checkpoint = &protocol.TaskSQLiteWALCheckpointInfo{
+			Mode:                string(stats.Mode),
+			Busy:                stats.Busy,
+			LogFrames:           stats.LogFrames,
+			CheckpointedFrames:  stats.CheckpointedFrame,
+			WALBytesBefore:      stats.WALBytesBefore,
+			WALBytesAfter:       stats.WALBytesAfter,
+			DurationMillisecond: stats.Duration.Milliseconds(),
+		}
+	}
+	body, err := json.Marshal(out)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = body
+	resp.Revision = d.currentRevision(projectID)
+	return resp, nil
+}
+
 func (d *Daemon) handleTaskGraphReadiness(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
 	startedAt := time.Now()

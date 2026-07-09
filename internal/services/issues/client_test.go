@@ -4495,6 +4495,104 @@ func TestClient_UpdateRetriesAfterSQLiteBusyTimeout(t *testing.T) {
 	assert.Equal(t, domain.StatusInReview, task.Status)
 }
 
+func TestClient_UpsertExternalSyncStateRetriesAfterSQLiteBusyTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	client := newTestClient(t)
+	_, err := client.Create(ctx, CreateTaskParams{
+		Title:    "sync-state-retry-warmup",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+
+	lockDB, err := sql.Open("sqlite", "file:"+client.dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lockDB.Close() })
+
+	_, err = lockDB.Exec(`BEGIN IMMEDIATE`)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		done <- client.UpsertExternalSyncState(ctx, ExternalSyncState{
+			Provider:  "linear",
+			ProjectID: "project-1",
+			Cursor:    "cursor-1",
+		})
+	}()
+
+	time.Sleep(5500 * time.Millisecond)
+	_, err = lockDB.Exec(`COMMIT`)
+	require.NoError(t, err)
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("external sync state upsert did not complete after retrying past busy timeout")
+	}
+
+	assert.GreaterOrEqual(t, time.Since(start), 5*time.Second)
+	state, ok, err := client.GetExternalSyncState(ctx, "linear", "project-1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "cursor-1", state.Cursor)
+}
+
+func TestClient_SQLiteWALDiagnosticsAndCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	_, err := client.Create(ctx, CreateTaskParams{
+		Title:    "wal diagnostics",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+
+	diag, err := client.SQLiteWALDiagnostics(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, client.dbPath, diag.DBPath)
+	assert.Equal(t, client.dbPath+"-wal", diag.WALPath)
+	assert.GreaterOrEqual(t, diag.WALBytes, int64(0))
+
+	stats, err := client.CheckpointSQLiteWAL(ctx, SQLiteWALCheckpointPassive)
+	require.NoError(t, err)
+	assert.Equal(t, SQLiteWALCheckpointPassive, stats.Mode)
+	assert.GreaterOrEqual(t, stats.LogFrames, 0)
+	assert.GreaterOrEqual(t, stats.CheckpointedFrame, 0)
+}
+
+func TestClient_MutationMaintainsLargeSQLiteWAL(t *testing.T) {
+	oldInterval := sqliteWALMaintenanceInterval
+	oldCheckpointThreshold := sqliteWALCheckpointThreshold
+	oldLargeThreshold := sqliteWALLargeThreshold
+	sqliteWALMaintenanceInterval = 0
+	sqliteWALCheckpointThreshold = 0
+	sqliteWALLargeThreshold = 0
+	t.Cleanup(func() {
+		sqliteWALMaintenanceInterval = oldInterval
+		sqliteWALCheckpointThreshold = oldCheckpointThreshold
+		sqliteWALLargeThreshold = oldLargeThreshold
+	})
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	client := newTestClientWithLogger(t, logger)
+	_, err := client.Create(context.Background(), CreateTaskParams{
+		Title:    "wal maintenance",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+
+	got := logs.String()
+	assert.Contains(t, got, `"event":"sqlite.wal_checkpoint.completed"`)
+	assert.Contains(t, got, `"wal_bytes_after"`)
+}
+
 func explainQueryPlan(t *testing.T, ctx context.Context, db *sql.DB, query string, args ...any) string {
 	t.Helper()
 	rows, err := db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query, args...)
