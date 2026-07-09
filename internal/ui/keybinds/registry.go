@@ -49,6 +49,7 @@ const (
 	ActionOpenRecovery            ActionID = "open_recovery"
 	ActionOpenNotificationHistory ActionID = "open_notification_history"
 	ActionOpenOperationQueue      ActionID = "open_operation_queue"
+	ActionOpenBoardViews          ActionID = "open_board_views"
 	ActionToggleView              ActionID = "toggle_view"
 	ActionRefresh                 ActionID = "refresh"
 	ActionPullBase                ActionID = "pull_base"
@@ -96,6 +97,7 @@ var registry = []ActionSpec{
 	{ID: ActionOpenRecovery, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "n", Display: "n"}}, Hint: "recover"},
 	{ID: ActionOpenNotificationHistory, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "N", Display: "N"}}},
 	{ID: ActionOpenOperationQueue, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "Q", Display: "Q"}}, Hint: "ops"},
+	{ID: ActionOpenBoardViews, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "B", Display: "B"}}, Hint: "board view"},
 	{ID: ActionToggleView, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "tab", Display: "Tab"}}, Hint: "view"},
 	{ID: ActionPullBase, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "p", Display: "p"}}, Hint: "pull base"},
 	{ID: ActionQuit, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "q", Display: "q"}}, Hint: "quit"},
@@ -160,6 +162,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "?", Help: "Open this help reference"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "Space", Help: "Open task workspace"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "Q", Help: "Open operation queue"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "B", Help: "Open board view selector"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "L", Help: "Open event log"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "N", Help: "Open notification action center"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "O", Help: "Open tmux sessions"},
@@ -215,6 +218,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "Q", Help: "Open operation queue"},
 
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "Tab", Help: "Toggle compact/kanban view"},
+	{Mode: types.ModeNormal, Category: "Other", HelpKey: "B", Help: "Choose board view"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "esc", Help: "Close overlay / exit mode"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "ctrl+g", Help: "Close all stacked overlays"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "q", Help: "Quit"},

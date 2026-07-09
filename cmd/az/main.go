@@ -116,6 +116,12 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "board":
+		if err := runBoardCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "worktree":
 		if len(commandArgs) == 0 {
 			fmt.Fprintf(os.Stderr, "Usage: az worktree <create|delete> [arguments]\n")
