@@ -143,12 +143,13 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 	typeBadge := renderTaskTypeBadge(task.Type, s)
 	headerTitle := strings.Join(headerParts, " ")
 	headerTokens := []struct {
-		full    string
-		compact string
+		full              string
+		compact           string
+		compactWhenNarrow bool
 	}{
 		{full: sessionRow, compact: sessionCompact},
 		{full: runtimeRow, compact: runtimeCompact},
-		{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s)},
+		{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s), compactWhenNarrow: true},
 		{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
 		{full: typeBadge, compact: typeBadge},
 	}
@@ -160,6 +161,11 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 		cardHeight += narrowCardExtraLines
 	}
 	for _, token := range headerTokens {
+		if token.compactWhenNarrow && preferCompact {
+			if appendHeaderToken(headerLines, maxLineLen, token.full, token.compact, true) {
+				continue
+			}
+		}
 		if appendHeaderToken(headerLines, maxLineLen, token.full, token.full, false) {
 			continue
 		}
@@ -267,13 +273,8 @@ func renderPullRequestBadge(pr *domain.PullRequest, s *styles.Styles) string {
 		return ""
 	}
 	label := pullRequestLabel(pr)
-	state := strings.TrimSpace(strings.ToLower(pr.State))
-	checks := strings.TrimSpace(strings.ToLower(pr.ChecksStatus))
-	if state != "" {
-		label += " " + state
-	}
-	if checks != "" {
-		label += "/" + checks
+	if status := pullRequestBadgeStatus(pr); status != "" {
+		label += "/" + status
 	}
 	return s.Card.Foreground(styles.Mauve).Bold(true).Render(label)
 }
@@ -282,11 +283,70 @@ func renderPullRequestBadgeCompact(pr *domain.PullRequest, s *styles.Styles) str
 	if pr == nil {
 		return ""
 	}
-	label := pullRequestLabel(pr)
-	if checks := strings.TrimSpace(strings.ToLower(pr.ChecksStatus)); checks != "" {
-		label += "/" + compactChecksStatus(checks)
-	}
+	label := "PR" + pullRequestCompactStatusIcon(pr)
 	return s.Card.Foreground(styles.Mauve).Bold(true).Render(label)
+}
+
+func pullRequestBadgeStatus(pr *domain.PullRequest) string {
+	if pr == nil {
+		return ""
+	}
+	if pr.Draft {
+		return "dr"
+	}
+	if state := compactTerminalPullRequestState(pr.State); state != "" {
+		return state
+	}
+	if checks := compactChecksStatus(pr.ChecksStatus); checks != "" {
+		return checks
+	}
+	return compactPullRequestState(pr.State)
+}
+
+func pullRequestCompactStatusIcon(pr *domain.PullRequest) string {
+	if pr == nil {
+		return ""
+	}
+	if pr.Draft {
+		return "D"
+	}
+	if icon := compactTerminalPullRequestStateIcon(pr.State); icon != "" {
+		return icon
+	}
+	status := strings.TrimSpace(strings.ToLower(pr.ChecksStatus))
+	if status == "" {
+		status = strings.TrimSpace(strings.ToLower(pr.State))
+	}
+	switch status {
+	case "pass", "passing", "success", "succeeded":
+		return "✓"
+	case "fail", "failing", "failure", "failed", "error":
+		return "✗"
+	case "pending", "queued", "in_progress", "inprogress", "running", "waiting", "expected", "action_required":
+		return "…"
+	case "cancelled", "canceled", "skipped", "neutral":
+		return "-"
+	default:
+		return ""
+	}
+}
+
+func compactTerminalPullRequestState(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "merged":
+		return "mrg"
+	default:
+		return ""
+	}
+}
+
+func compactTerminalPullRequestStateIcon(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "merged":
+		return "M"
+	default:
+		return ""
+	}
 }
 
 func pullRequestLabel(pr *domain.PullRequest) string {
@@ -307,14 +367,35 @@ func pullRequestLabel(pr *domain.PullRequest) string {
 
 func compactChecksStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "pass", "passing", "success":
+	case "":
+		return ""
+	case "pass", "passing", "success", "succeeded":
 		return "ok"
-	case "fail", "failing", "failure":
+	case "fail", "failing", "failure", "failed", "error":
 		return "fail"
-	case "pending":
+	case "pending", "queued", "in_progress", "inprogress", "running", "waiting", "expected", "action_required":
 		return "pend"
+	case "cancelled", "canceled":
+		return "can"
+	case "skipped", "neutral":
+		return "skip"
 	default:
 		return status
+	}
+}
+
+func compactPullRequestState(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "":
+		return ""
+	case "open":
+		return "open"
+	case "closed":
+		return "cls"
+	case "merged":
+		return "mrg"
+	default:
+		return state
 	}
 }
 

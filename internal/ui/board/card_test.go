@@ -138,8 +138,74 @@ func TestRenderCard_WithPullRequestSummary(t *testing.T) {
 	}
 
 	stripped := stripANSI(RenderCard(task, false, false, 72, s))
-	if !strings.Contains(stripped, "PR#42") || !strings.Contains(stripped, "open/pending") {
+	if !strings.Contains(stripped, "PR#42/pend") || strings.Contains(stripped, "open/pending") {
 		t.Fatalf("card should contain PR summary, got: %s", stripped)
+	}
+}
+
+func TestRenderCard_CompactPullRequestSummary(t *testing.T) {
+	s := styles.New()
+	task := domain.Task{
+		ID:       "az-pr",
+		Title:    "Task with PR",
+		Status:   domain.StatusInReview,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		PullRequest: &domain.PullRequest{
+			Number:       42,
+			DisplayKey:   "#42",
+			State:        "open",
+			ChecksStatus: "pending",
+		},
+	}
+
+	stripped := stripANSI(RenderCard(task, false, false, 35, s))
+	if !strings.Contains(stripped, "PR…") {
+		t.Fatalf("compact card should contain PR status icon, got: %s", stripped)
+	}
+	if strings.Contains(stripped, "PR#42") || strings.Contains(stripped, "pend") {
+		t.Fatalf("compact card should omit PR number and text status, got: %s", stripped)
+	}
+}
+
+func TestRenderPullRequestBadgeCompactStatusIcons(t *testing.T) {
+	s := styles.New()
+	tests := []struct {
+		name string
+		pr   domain.PullRequest
+		want string
+	}{
+		{name: "passing checks", pr: domain.PullRequest{ChecksStatus: "passing"}, want: "PR✓"},
+		{name: "failing checks", pr: domain.PullRequest{ChecksStatus: "failing"}, want: "PR✗"},
+		{name: "pending checks", pr: domain.PullRequest{ChecksStatus: "pending"}, want: "PR…"},
+		{name: "draft", pr: domain.PullRequest{Draft: true, ChecksStatus: "passing"}, want: "PRD"},
+		{name: "merged without checks", pr: domain.PullRequest{State: "merged"}, want: "PRM"},
+		{name: "merged with passing checks", pr: domain.PullRequest{State: "merged", ChecksStatus: "passing"}, want: "PRM"},
+		{name: "open without checks", pr: domain.PullRequest{State: "open"}, want: "PR"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripANSI(renderPullRequestBadgeCompact(&tt.pr, s)); !strings.Contains(got, tt.want) {
+				t.Fatalf("compact badge = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderPullRequestBadgeFullPrefersMergedOverPassingChecks(t *testing.T) {
+	s := styles.New()
+	pr := domain.PullRequest{
+		Number:       42,
+		DisplayKey:   "#42",
+		State:        "merged",
+		ChecksStatus: "passing",
+	}
+	got := stripANSI(renderPullRequestBadge(&pr, s))
+	if !strings.Contains(got, "PR#42/mrg") {
+		t.Fatalf("full badge = %q, want merged state", got)
+	}
+	if strings.Contains(got, "PR#42/ok") {
+		t.Fatalf("full badge should not collapse merged into passing checks: %q", got)
 	}
 }
 
