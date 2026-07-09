@@ -1258,26 +1258,48 @@ func main() {
 		}
 
 	case "daemon":
-		if len(commandArgs) != 1 {
-			fmt.Fprintf(os.Stderr, "Usage: az daemon <start|stop|restart>\n")
+		if len(commandArgs) < 1 {
+			fmt.Fprintf(os.Stderr, "Usage: az daemon <start|stop|restart|watch-clients>\n")
 			os.Exit(1)
 		}
 		var err error
 		switch commandArgs[0] {
 		case "start":
+			if len(commandArgs) != 1 {
+				fmt.Fprintf(os.Stderr, "Usage: az daemon start\n")
+				os.Exit(1)
+			}
 			err = runCommand(cfg, func(deps *cli.Dependencies) error {
 				return cli.StartDaemonCommand(deps)
 			})
 		case "stop":
+			if len(commandArgs) != 1 {
+				fmt.Fprintf(os.Stderr, "Usage: az daemon stop\n")
+				os.Exit(1)
+			}
 			err = runCommand(cfg, func(deps *cli.Dependencies) error {
 				return cli.StopDaemonCommand(deps)
 			})
 		case "restart":
+			if len(commandArgs) != 1 {
+				fmt.Fprintf(os.Stderr, "Usage: az daemon restart\n")
+				os.Exit(1)
+			}
 			err = runCommand(cfg, func(deps *cli.Dependencies) error {
 				return cli.RestartDaemonCommand(deps)
 			})
+		case "watch-clients":
+			opts, parseErr := cli.ParseDaemonWatchClientsArgs(commandArgs[1:])
+			if parseErr != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az daemon watch-clients [--json] [--all]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", parseErr)
+				os.Exit(1)
+			}
+			err = runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.DaemonWatchClientsCommand(deps, opts)
+			})
 		default:
-			fmt.Fprintf(os.Stderr, "Usage: az daemon <start|stop|restart>\n")
+			fmt.Fprintf(os.Stderr, "Usage: az daemon <start|stop|restart|watch-clients>\n")
 			os.Exit(1)
 		}
 		if err != nil {

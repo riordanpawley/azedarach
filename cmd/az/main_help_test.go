@@ -46,6 +46,7 @@ func TestMaybePrintCommandHelpUsesSpecificUsage(t *testing.T) {
 		{name: "orchestrate group leaf", args: []string{"orchestrate", "group", "--help"}, want: orchestrateGroupUsage},
 		{name: "orchestrate observe leaf", args: []string{"orchestrate", "observe", "--help"}, want: orchestrateObserveUsage},
 		{name: "daemon leaf", args: []string{"daemon", "restart", "--help"}, want: "Usage: az daemon restart"},
+		{name: "daemon watch clients leaf", args: []string{"daemon", "watch-clients", "--help"}, want: "Usage: az daemon watch-clients [--json] [--all]"},
 	}
 
 	for _, tt := range tests {
@@ -239,6 +240,7 @@ func TestMaybePrintCommandHelpCoversRoutedCommandSurface(t *testing.T) {
 		{"daemon", "start"},
 		{"daemon", "stop"},
 		{"daemon", "restart"},
+		{"daemon", "watch-clients"},
 	}
 
 	for _, path := range paths {

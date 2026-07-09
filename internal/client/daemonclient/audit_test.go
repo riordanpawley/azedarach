@@ -46,6 +46,33 @@ func TestCommandPopulatesClientAuditMetadataFromEnv(t *testing.T) {
 	}
 }
 
+func TestCommandRefreshesWatchParentPID(t *testing.T) {
+	oldPID := auditCurrentPID
+	oldPPID := auditCurrentPPID
+	t.Cleanup(func() {
+		auditCurrentPID = oldPID
+		auditCurrentPPID = oldPPID
+	})
+	auditCurrentPID = func() int { return 123 }
+	auditCurrentPPID = func() int { return 1 }
+	t.Setenv(auditEnvCommandShape, "orchestrate watch --root az-root --jsonl")
+	t.Setenv(auditEnvPID, "123")
+	t.Setenv(auditEnvPPID, "45")
+
+	var got protocol.RequestEnvelope
+	client := New(&fakeTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		got = req
+		return protocol.ResponseEnvelope{OK: true}, nil
+	}})
+	if _, err := client.Command(context.Background(), protocol.RequestEnvelope{Command: protocol.CommandMailWatch}); err != nil {
+		t.Fatalf("Command() error = %v", err)
+	}
+
+	if got.Meta.ClientPID != 123 || got.Meta.ClientPPID != 1 {
+		t.Fatalf("watch audit pid/ppid = %d/%d, want live 123/1", got.Meta.ClientPID, got.Meta.ClientPPID)
+	}
+}
+
 func TestCommandPreservesExplicitClientAuditMetadata(t *testing.T) {
 	t.Setenv(auditEnvInvocationID, "env-inv")
 	var got protocol.RequestEnvelope

@@ -70,6 +70,7 @@ Commands:
   daemon start         Start daemon and verify client attach
   daemon stop          Stop daemon for current runtime scope
   daemon restart       Force-restart the daemon and verify re-attach
+  daemon watch-clients [--json] [--all]  Show active/recent long-running watch clients
   help                 Show this help message
 
 Examples:
@@ -208,5 +209,6 @@ Examples:
   az daemon start
   az daemon stop
   az daemon restart
+  az daemon watch-clients
 
 For more information, see: https://github.com/riordanpawley/azedarach

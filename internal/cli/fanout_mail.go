@@ -619,7 +619,13 @@ func MailListCommand(deps *Dependencies, opts MailListOptions) error {
 }
 
 func MailWatchCommand(deps *Dependencies, opts MailWatchOptions) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	watchCtx, stopWatch := newWatchCommandContext("mail watch")
+	defer stopWatch()
+	if watchCtx.Err() != nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(watchCtx, 10*time.Second)
 	defer cancel()
 
 	lastSeq := opts.SinceSeq
@@ -658,8 +664,10 @@ func MailWatchCommand(deps *Dependencies, opts MailWatchOptions) error {
 
 	// Stream mode: no heartbeat frames; emit only when new events exist.
 	for {
-		time.Sleep(250 * time.Millisecond)
-		events, err := watchDaemonCommand(deps, func(ctx context.Context) ([]protocol.MailEvent, error) {
+		if err := sleepWatchPoll(watchCtx, 250*time.Millisecond); err != nil {
+			return nil
+		}
+		events, err := watchDaemonCommandContext(watchCtx, deps, func(ctx context.Context) ([]protocol.MailEvent, error) {
 			return deps.DaemonClient.MailWatch(ctx, protocol.MailWatchCommandBody{
 				RepoDir:     deps.RepoDir,
 				ParentIssue: opts.ParentIssueID,
@@ -667,6 +675,9 @@ func MailWatchCommand(deps *Dependencies, opts MailWatchOptions) error {
 			})
 		})
 		if err != nil {
+			if isWatchContextDone(watchCtx, err) {
+				return nil
+			}
 			return err
 		}
 		for _, evt := range events {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -206,6 +207,105 @@ func TestWatchDaemonCommandRestartsAfterTransientSocketLoss(t *testing.T) {
 	}
 	if calls != 3 {
 		t.Fatalf("calls = %d, want initial call, retry probe, and post-start call", calls)
+	}
+}
+
+func TestOrchestrateWatchCommandExitsWhenParentReparentedBeforePolling(t *testing.T) {
+	oldParentPID := currentParentPID
+	oldParentPollInterval := watchParentPollInterval
+	t.Cleanup(func() {
+		currentParentPID = oldParentPID
+		watchParentPollInterval = oldParentPollInterval
+	})
+	var parentChecks int32
+	currentParentPID = func() int {
+		if atomic.AddInt32(&parentChecks, 1) == 1 {
+			return 42
+		}
+		return 1
+	}
+	watchParentPollInterval = time.Millisecond
+
+	var mailWatchCalls int32
+	deps := &Dependencies{
+		RepoDir: "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: "az-root",
+						Blocked:     map[string]string{},
+					}), nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{}), nil
+				case protocol.CommandMailWatch:
+					atomic.AddInt32(&mailWatchCalls, 1)
+					return responseWithJSON(req, []protocol.MailEvent{}), nil
+				default:
+					t.Fatalf("unexpected daemon command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}),
+	}
+
+	err := OrchestrateWatchCommand(deps, OrchestrateWatchOptions{
+		RootIssueID:  "az-root",
+		JSONL:        true,
+		Compact:      true,
+		PollInterval: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("OrchestrateWatchCommand error = %v", err)
+	}
+	if got := atomic.LoadInt32(&mailWatchCalls); got != 0 {
+		t.Fatalf("mail.watch calls after parent disappearance = %d, want 0", got)
+	}
+}
+
+func TestOrchestrateWatchCommandCancelsInitialFrameWhenParentDisappears(t *testing.T) {
+	oldParentPID := currentParentPID
+	oldParentPollInterval := watchParentPollInterval
+	t.Cleanup(func() {
+		currentParentPID = oldParentPID
+		watchParentPollInterval = oldParentPollInterval
+	})
+	var parentChecks int32
+	currentParentPID = func() int {
+		if atomic.AddInt32(&parentChecks, 1) == 1 {
+			return 42
+		}
+		return 1
+	}
+	watchParentPollInterval = time.Millisecond
+
+	taskGraphCalls := int32(0)
+	deps := &Dependencies{
+		RepoDir: "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskGraphReadiness {
+					t.Fatalf("unexpected daemon command: %s", req.Command)
+				}
+				atomic.AddInt32(&taskGraphCalls, 1)
+				<-ctx.Done()
+				return protocol.ResponseEnvelope{}, ctx.Err()
+			},
+		}),
+	}
+
+	err := OrchestrateWatchCommand(deps, OrchestrateWatchOptions{
+		RootIssueID:  "az-root",
+		JSONL:        true,
+		Compact:      true,
+		PollInterval: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("OrchestrateWatchCommand error = %v", err)
+	}
+	if got := atomic.LoadInt32(&taskGraphCalls); got != 1 {
+		t.Fatalf("task.graph_readiness calls = %d, want 1", got)
 	}
 }
 

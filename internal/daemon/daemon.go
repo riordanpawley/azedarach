@@ -171,6 +171,8 @@ type Daemon struct {
 	taskListSnapshotLoads              map[string]*taskListSnapshotLoad
 	taskGraphReadinessMu               sync.Mutex
 	taskGraphReadinessLoads            map[string]*taskGraphReadinessLoad
+	watchClientsMu                     sync.Mutex
+	watchClients                       map[string]watchClientObservation
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -616,6 +618,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	req.Meta.ProjectID = naming.ProjectID(projectID)
 	ctx = withDaemonProjectIDContext(ctx, projectID)
 	ctx, endCommandSpan := latencytrace.StartSpan(ctx, "daemon", "command", "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
+	d.recordWatchClientRequest(projectID, req, startedAt.UTC())
 	defer func() {
 		switch {
 		case err != nil:
@@ -689,6 +692,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	switch req.Command {
 	case protocol.CommandDaemonShutdown:
 		return d.handleDaemonShutdown(req), nil
+	case protocol.CommandDaemonWatchClients:
+		return d.handleDaemonWatchClients(req), nil
 	case protocol.CommandIssueFanout:
 		return d.handleIssueFanout(ctx, req)
 	case protocol.CommandIssueFanoutDrift:
