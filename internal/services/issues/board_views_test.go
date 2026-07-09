@@ -40,6 +40,13 @@ func TestBoardViewsSeedDefaultsAndIsolateProjects(t *testing.T) {
 	if _, err := client.SaveBoardView(ctx, projectA, domain.DefaultBoardView()); !errors.Is(err, ErrBoardViewBuiltIn) {
 		t.Fatalf("SaveBoardView default error = %v, want ErrBoardViewBuiltIn", err)
 	}
+	legacyDefault, err := client.GetBoardView(ctx, projectA, "default")
+	if err != nil {
+		t.Fatalf("GetBoardView legacy default error: %v", err)
+	}
+	if legacyDefault.View.ID != domain.BoardViewCurrentID {
+		t.Fatalf("legacy default view id = %q, want %q", legacyDefault.View.ID, domain.BoardViewCurrentID)
+	}
 }
 
 func TestBoardViewCorruptDefinitionFailsSafely(t *testing.T) {

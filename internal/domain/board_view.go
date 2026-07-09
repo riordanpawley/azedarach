@@ -622,6 +622,9 @@ func validateBoardColumnPredicateCombination(predicates []BoardColumnPredicate) 
 func NormalizeBoardViewID(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	value = strings.ReplaceAll(value, " ", "-")
+	if value == "default" {
+		return string(BoardViewCurrentID)
+	}
 	return value
 }
 
