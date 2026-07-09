@@ -509,6 +509,40 @@ func TestView_OrchestrationOverviewShowsProgressAndGitWithoutDumpingEverything(t
 	}
 }
 
+func TestView_OrchestrationOverviewSummarizesWorkerEvidenceMail(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+	m.height = 24
+	m.loading = false
+	m.viewMode = ViewModeOverview
+	task := m.tasks[0]
+	task.HasTmuxSession = true
+	m.orchestrationOverview = []orchestrationProjectOverview{{
+		Name:  "alpha",
+		Tasks: []domain.Task{task},
+		MailByTask: map[string]protocol.MailEvent{
+			task.ID.String(): {
+				IssueID: naming.IssueID(task.ID.String()),
+				Type:    "worker-progress",
+				Body:    `{"schema":"worker_evidence.v1","summary":"Startup and investigation complete for fuo.","commands_run":["just test"],"key_assertions":["validation passed"],"review":{"status":"clean","findings":[]},"risks":["none"]}`,
+				Seq:     9,
+			},
+		},
+	}}
+
+	view := ansi.Strip(m.View())
+	for _, want := range []string{"mail", "worker-progress: evidence | Startup and investigation complete for fuo. | review clean | risks none"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("overview missing summarized evidence %q:\n%s", want, view)
+		}
+	}
+	for _, notWant := range []string{`"schema"`, `"worker_evidence.v1"`, `"commands_run"`} {
+		if strings.Contains(view, notWant) {
+			t.Fatalf("overview should not render raw evidence JSON %q:\n%s", notWant, view)
+		}
+	}
+}
+
 func TestView_OrchestrationOverviewGroupsObservationRowsByActionability(t *testing.T) {
 	m := newTestModel()
 	m.width = 140
@@ -599,11 +633,13 @@ func TestView_OrchestrationOverviewGroupsObservationRowsByActionability(t *testi
 		t.Fatalf("overview groups out of order:\n%s", view)
 	}
 	for _, want := range []string{
-		"ctn waiting_human age 2h0m0s evidence last,issue,evidence,action",
-		"reason: active session is waiting for input | action: answer worker prompt",
-		"signal: issue_event human.input_requested worker asks which backend to trust | session waiting git dirty +4/-1",
-		"ctp review_ready age unknown evidence evidence,action",
-		"reason: worker submitted integration evidence | action: validate evidence",
+		"attention: needs-you 1  review 1  blocked/stale 1  git 1",
+		"needs 1  review 1  blocked/stale 1  git 1",
+		"ctn needs-you age 2h0m0s session waiting git dirty +4/-1",
+		"active session is waiting for input | next: answer worker prompt | evidence: session waiting prompt",
+		"last: issue_event human.input_requested worker asks which backend to trust | Render observation-driven TUI overview",
+		"ctp review-ready age unknown session idle",
+		"worker submitted integration evidence | next: validate evidence | evidence: structured worker_evidence.v1",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("overview missing observation row detail %q:\n%s", want, view)
@@ -1090,7 +1126,7 @@ func TestView_OrchestrationOverviewObservationRowsFitNarrowViewport(t *testing.T
 		}
 	}
 	stripped := ansi.Strip(view)
-	for _, want := range []string{"Needs You", "age 15m0s", "action: answer prompt", "NORMAL"} {
+	for _, want := range []string{"Needs You", "age 15m0s", "next: answer prompt", "NORMAL"} {
 		if !strings.Contains(stripped, want) {
 			t.Fatalf("narrow overview missing %q:\n%s", want, stripped)
 		}

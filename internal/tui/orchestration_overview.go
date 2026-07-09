@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -789,11 +790,24 @@ func (m Model) renderOrchestrationOverview() string {
 		return lipgloss.NewStyle().Width(width).Height(height).Render(header)
 	}
 
+	signalBand := m.renderOverviewSignalBand(projects, width, counts)
+	if signalBand != "" {
+		availableHeight -= lipgloss.Height(signalBand)
+		if availableHeight < 1 {
+			return lipgloss.NewStyle().Width(width).Height(height).Render(lipgloss.JoinVertical(lipgloss.Left, header, signalBand))
+		}
+	}
+
 	hiddenLine := m.renderOverviewHiddenProjectsLine(width)
 	if hiddenLine != "" {
 		availableHeight -= lipgloss.Height(hiddenLine)
 		if availableHeight < 1 {
-			return lipgloss.NewStyle().Width(width).Height(height).Render(lipgloss.JoinVertical(lipgloss.Left, header, hiddenLine))
+			lines := []string{header}
+			if signalBand != "" {
+				lines = append(lines, signalBand)
+			}
+			lines = append(lines, hiddenLine)
+			return lipgloss.NewStyle().Width(width).Height(height).Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 		}
 	}
 
@@ -801,7 +815,12 @@ func (m Model) renderOrchestrationOverview() string {
 	if hiddenLine != "" {
 		cards = lipgloss.JoinVertical(lipgloss.Left, hiddenLine, cards)
 	}
-	content := lipgloss.JoinVertical(lipgloss.Left, header, cards)
+	contentLines := []string{header}
+	if signalBand != "" {
+		contentLines = append(contentLines, signalBand)
+	}
+	contentLines = append(contentLines, cards)
+	content := lipgloss.JoinVertical(lipgloss.Left, contentLines...)
 	return lipgloss.NewStyle().Width(width).Height(height).MaxHeight(height).Render(content)
 }
 
@@ -864,6 +883,19 @@ type orchestrationOverviewHeaderCounts struct {
 	hiddenProjects int
 	hiddenTasks    int
 	backendErrors  int
+}
+
+type overviewSignalCounts struct {
+	needsYou           int
+	reviewReady        int
+	blockedFailedStale int
+	working            int
+	cleanup            int
+	degraded           int
+	git                int
+	waiting            int
+	busy               int
+	idle               int
 }
 
 func (m Model) renderOverviewHeader(projects []orchestrationProjectOverview, width int, counts orchestrationOverviewHeaderCounts) string {
@@ -948,6 +980,84 @@ func overviewChip(text string, color lipgloss.Color) string {
 		Padding(0, 1).
 		Bold(true).
 		Render(text)
+}
+
+func (m Model) renderOverviewSignalBand(projects []orchestrationProjectOverview, width int, headerCounts orchestrationOverviewHeaderCounts) string {
+	if width < 36 {
+		return ""
+	}
+	counts := overviewSignalCountsForProjects(projects, headerCounts)
+	parts := make([]string, 0, 8)
+	add := func(label string, n int) {
+		if n > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", label, n))
+		}
+	}
+	add("needs-you", counts.needsYou)
+	add("review", counts.reviewReady)
+	add("blocked/stale", counts.blockedFailedStale)
+	add("degraded", counts.degraded)
+	add("git", counts.git)
+	add("waiting", counts.waiting)
+	add("busy", counts.busy)
+	add("idle", counts.idle)
+	add("cleanup", counts.cleanup)
+	if len(parts) == 0 {
+		return ""
+	}
+	line := " attention: " + strings.Join(parts, "  ")
+	return lipgloss.NewStyle().
+		Foreground(uistyles.Text).
+		Background(uistyles.Mantle).
+		Width(width).
+		MaxWidth(width).
+		Render(ansi.Truncate(line, width, ""))
+}
+
+func overviewSignalCountsForProjects(projects []orchestrationProjectOverview, headerCounts orchestrationOverviewHeaderCounts) overviewSignalCounts {
+	var counts overviewSignalCounts
+	visibleDegraded := 0
+	for _, project := range projects {
+		if project.Err != nil {
+			visibleDegraded++
+		}
+		for _, task := range project.Tasks {
+			if overviewGitSummary(task) != "" {
+				counts.git++
+			}
+			if task.Session == nil {
+				continue
+			}
+			switch task.Session.State {
+			case domain.SessionWaiting:
+				counts.waiting++
+			case domain.SessionBusy:
+				counts.busy++
+			default:
+				counts.idle++
+			}
+		}
+		sessionObservations := overviewSessionObservations(project.Observations, project.Tasks)
+		if len(sessionObservations) == 0 {
+			continue
+		}
+		for _, observation := range sessionObservations {
+			switch overviewObservationGroup(observation.State) {
+			case "needs_you":
+				counts.needsYou++
+			case "review_ready":
+				counts.reviewReady++
+			case "blocked_failed_stale":
+				counts.blockedFailedStale++
+			case "cleanup":
+				counts.cleanup++
+			default:
+				counts.working++
+			}
+		}
+	}
+	counts.degraded = max(headerCounts.backendErrors, visibleDegraded)
+	return counts
 }
 
 func (m Model) renderOverviewCards(projects []orchestrationProjectOverview, width, height int) string {
@@ -1078,6 +1188,9 @@ func (m Model) renderOverviewProjectCard(project orchestrationProjectOverview, w
 		lipgloss.NewStyle().Foreground(uistyles.Text).Bold(true).Render(titleLine),
 		m.styles.StatusHint.Render(ansi.Truncate(meta, innerWidth, "...")),
 	}
+	if summary := overviewProjectHealthSummary(project); summary != "" && innerHeight > len(lines) {
+		lines = append(lines, m.styles.StatusHint.Render(ansi.Truncate(summary, innerWidth, "...")))
+	}
 	if project.Err == nil && len(project.Tasks) == 0 && len(project.Observations) == 0 {
 		lines = append(lines, m.styles.StatusHint.Render("No active sessions"))
 	}
@@ -1173,14 +1286,17 @@ func (m Model) renderOverviewObservationLines(project orchestrationProjectOvervi
 		state = "unknown"
 	}
 	age := m.overviewObservationAge(observation)
-	flags := overviewObservationEvidenceFlags(observation)
+	label := overviewObservationAttentionLabel(observation.State)
+	if label == "" {
+		label = state
+	}
 	headParts := []string{
 		issueID,
-		state,
+		label,
 		"age " + age,
 	}
-	if len(flags) > 0 {
-		headParts = append(headParts, "evidence "+strings.Join(flags, ","))
+	if signal := overviewObservationSignal(task); signal != "" {
+		headParts = append(headParts, signal)
 	}
 	lineStyle := lipgloss.NewStyle()
 	prefix := "  "
@@ -1192,15 +1308,21 @@ func (m Model) renderOverviewObservationLines(project orchestrationProjectOvervi
 	if budget == 1 {
 		return lines
 	}
-	reason := strings.TrimSpace(observation.Reason)
-	if reason == "" {
-		reason = "no observation reason"
+	detailParts := make([]string, 0, 3)
+	if reason := strings.TrimSpace(observation.Reason); reason != "" {
+		detailParts = append(detailParts, reason)
 	}
 	action := overviewObservationPrimaryAction(observation)
-	reasonLine := "  reason: " + reason
 	if action != "" {
-		reasonLine += " | action: " + action
+		detailParts = append(detailParts, "next: "+action)
 	}
+	if evidence := overviewObservationEvidencePreview(observation); evidence != "" {
+		detailParts = append(detailParts, "evidence: "+evidence)
+	}
+	if len(detailParts) == 0 {
+		detailParts = append(detailParts, "no observation detail")
+	}
+	reasonLine := "  " + strings.Join(detailParts, " | ")
 	if selected {
 		reasonLine = lipgloss.NewStyle().Background(uistyles.Surface0).Width(width).MaxWidth(width).Render(ansi.Truncate(reasonLine, width, "..."))
 	} else {
@@ -1211,14 +1333,8 @@ func (m Model) renderOverviewObservationLines(project orchestrationProjectOvervi
 		return lines
 	}
 	signal := overviewObservationLastEventSignal(observation)
-	taskSignal := overviewObservationSignal(task)
-	if signal != "" && taskSignal != "" {
-		signal += " | " + taskSignal
-	} else if signal == "" {
-		signal = taskSignal
-	}
 	if signal != "" {
-		signalLine := "  signal: " + signal
+		signalLine := "  last: " + signal
 		if title := strings.TrimSpace(task.Title); title != "" && title != issueID {
 			signalLine += " | " + title
 		}
@@ -1230,6 +1346,50 @@ func (m Model) renderOverviewObservationLines(project orchestrationProjectOvervi
 		lines = append(lines, signalLine)
 	}
 	return lines
+}
+
+func overviewObservationAttentionLabel(state domain.WorkerObservationState) string {
+	switch state {
+	case domain.WorkerObservationWaitingHuman:
+		return "needs-you"
+	case domain.WorkerObservationReviewReady:
+		return "review-ready"
+	case domain.WorkerObservationBlocked:
+		return "blocked"
+	case domain.WorkerObservationFailed:
+		return "failed"
+	case domain.WorkerObservationStale:
+		return "stale"
+	case domain.WorkerObservationCleanupPending:
+		return "cleanup"
+	case domain.WorkerObservationDone:
+		return "done"
+	case domain.WorkerObservationWorking:
+		return "working"
+	case domain.WorkerObservationRunnable:
+		return "runnable"
+	default:
+		return strings.TrimSpace(string(state))
+	}
+}
+
+func overviewObservationEvidencePreview(observation domain.WorkerObservation) string {
+	for _, evidence := range observation.EvidenceSummary {
+		if trimmed := strings.TrimSpace(evidence); trimmed != "" {
+			return trimmed
+		}
+	}
+	if len(observation.Risks) > 0 {
+		for _, risk := range observation.Risks {
+			if trimmed := strings.TrimSpace(risk); trimmed != "" {
+				return "risk " + trimmed
+			}
+		}
+	}
+	if observation.LastEvent != nil {
+		return overviewObservationLastEventSignal(observation)
+	}
+	return ""
 }
 
 func (m Model) overviewObservationAge(observation domain.WorkerObservation) string {
@@ -1277,29 +1437,6 @@ func overviewObservationPrimaryAction(observation domain.WorkerObservation) stri
 	}
 }
 
-func overviewObservationEvidenceFlags(observation domain.WorkerObservation) []string {
-	flags := make([]string, 0, 6)
-	if observation.LastEvent != nil {
-		flags = append(flags, "last")
-		switch strings.TrimSpace(observation.LastEvent.Kind) {
-		case "mailbox":
-			flags = append(flags, "mail")
-		case "issue_event":
-			flags = append(flags, "issue")
-		}
-	}
-	if len(observation.EvidenceSummary) > 0 {
-		flags = append(flags, "evidence")
-	}
-	if len(observation.Risks) > 0 {
-		flags = append(flags, "risk")
-	}
-	if len(observation.NextActions) > 0 {
-		flags = append(flags, "action")
-	}
-	return flags
-}
-
 func overviewObservationSignal(task domain.Task) string {
 	parts := make([]string, 0, 3)
 	if task.Session != nil {
@@ -1337,6 +1474,28 @@ func overviewObservationLastEventSignal(observation domain.WorkerObservation) st
 		parts = append(parts, summary)
 	}
 	return strings.Join(parts, " ")
+}
+
+func overviewProjectHealthSummary(project orchestrationProjectOverview) string {
+	counts := overviewSignalCountsForProjects([]orchestrationProjectOverview{project}, orchestrationOverviewHeaderCounts{})
+	parts := make([]string, 0, 6)
+	add := func(label string, n int) {
+		if n > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", label, n))
+		}
+	}
+	add("needs", counts.needsYou)
+	add("review", counts.reviewReady)
+	add("blocked/stale", counts.blockedFailedStale)
+	add("git", counts.git)
+	add("waiting", counts.waiting)
+	add("busy", counts.busy)
+	add("idle", counts.idle)
+	add("cleanup", counts.cleanup)
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "  ")
 }
 
 func (m Model) renderOverviewTaskLines(project orchestrationProjectOverview, task domain.Task, width, budget int, selected bool) []string {
@@ -1504,7 +1663,7 @@ func overviewTaskContext(project orchestrationProjectOverview, task domain.Task)
 	if project.MailByTask != nil {
 		if evt, ok := project.MailByTask[taskID]; ok {
 			eventType := strings.TrimSpace(evt.Type)
-			body := firstNonEmptyLine(evt.Body)
+			body := overviewMailBodySummary(evt.Body)
 			if body != "" && eventType != "" {
 				return "mail", eventType + ": " + body
 			}
@@ -1534,6 +1693,67 @@ func overviewTaskContext(project orchestrationProjectOverview, task domain.Task)
 		return "activity", "session"
 	}
 	return "", ""
+}
+
+func overviewMailBodySummary(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return ""
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(body), &payload); err == nil {
+		if summary := overviewJSONSummary(payload); summary != "" {
+			return summary
+		}
+	}
+	return firstNonEmptyLine(body)
+}
+
+func overviewJSONSummary(payload map[string]interface{}) string {
+	schema, _ := payload["schema"].(string)
+	summary, _ := payload["summary"].(string)
+	parts := make([]string, 0, 4)
+	if strings.TrimSpace(schema) == "worker_evidence.v1" {
+		parts = append(parts, "evidence")
+	}
+	if trimmed := strings.TrimSpace(summary); trimmed != "" {
+		parts = append(parts, trimmed)
+	}
+	if review, ok := payload["review"].(map[string]interface{}); ok {
+		if status, _ := review["status"].(string); strings.TrimSpace(status) != "" {
+			parts = append(parts, "review "+strings.TrimSpace(status))
+		}
+	}
+	if risks := overviewJSONArrayStrings(payload["risks"]); len(risks) > 0 {
+		parts = append(parts, "risks "+strings.Join(risks, ", "))
+	}
+	if len(parts) > 0 {
+		return strings.Join(parts, " | ")
+	}
+	for _, key := range []string{"message", "body", "text"} {
+		if value, _ := payload[key].(string); strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func overviewJSONArrayStrings(value interface{}) []string {
+	values, ok := value.([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, item := range values {
+		text, ok := item.(string)
+		if !ok {
+			continue
+		}
+		if trimmed := strings.TrimSpace(text); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func overviewLatestMailByTask(ctx context.Context, client *daemonclient.Client, repoDir string, tasks []domain.Task) map[string]protocol.MailEvent {
