@@ -69,6 +69,10 @@ type issueResourceLifecycleResult struct {
 	Ran []string
 }
 
+type sessionStartIssueLifecycleUpdater interface {
+	Update(context.Context, string, domain.Status) error
+}
+
 type sessionInitReadyMarker struct {
 	RelativePath string
 	AbsolutePath string
@@ -738,7 +742,7 @@ func (d *Daemon) handleSessionStart(ctx context.Context, req protocol.RequestEnv
 	return d.handleSessionStartDirect(ctx, req)
 }
 
-func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.RequestEnvelope) (resp protocol.ResponseEnvelope, err error) {
 	cmd, _, ok := d.decodeSessionRequest(req, true)
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
@@ -800,7 +804,28 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	worktreeManager := d.worktreeManagerForProject(cmd.ProjectID)
+	originalIssueStatus := task.Status
+	if err := d.ensureSessionStartIssueLifecycle(ctx, issueClient, cmd.IssueID, originalIssueStatus); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare issue lifecycle for session start: %v", err)), nil
+	}
+	var (
+		worktreeManager             *git.WorktreeManager
+		startedWorktreePath         string
+		startedWorktreeReused       bool
+		worktreeProjectionPersisted bool
+	)
+	rollbackIssueLifecycle := originalIssueStatus != domain.StatusInProgress
+	defer func() {
+		if rollbackIssueLifecycle && (err != nil || !resp.OK) {
+			if worktreeProjectionPersisted && !startedWorktreeReused && startedWorktreePath != "" {
+				d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID)
+				_ = d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, startedWorktreePath, startedWorktreeReused)
+			}
+			d.rollbackSessionStartIssueLifecycle(ctx, issueClient, cmd.IssueID, originalIssueStatus)
+		}
+	}()
+	task.Status = domain.StatusInProgress
+	worktreeManager = d.worktreeManagerForProject(cmd.ProjectID)
 	if worktreeManager == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "worktree manager unavailable"), nil
 	}
@@ -868,6 +893,8 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 		}
 	}
+	startedWorktreePath = worktree.Path
+	startedWorktreeReused = reusedWorktree
 	if !reusedWorktree {
 		if len(d.runtimeConfigForProject(cmd.ProjectID).WorktreeInitCommands) > 0 {
 			reportSessionStartProgress(ctx, "worktree_preflight", "running worktree init commands", 35)
@@ -930,7 +957,14 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"image_paths", cmd.ImagePaths,
 		)
 	}
-	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
+	projectionWriter := d.runtimeProjectionStateWriter()
+	if err := projectionWriter.PersistWorktreeProjection(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch); err != nil {
+		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist worktree runtime projection for %s: %v%s%s", cmd.IssueID, err, cleanupNote, worktreeCleanupNote)), nil
+	}
+	worktreeProjectionPersisted = true
+	projectionWriter.PublishWorktreeProjectionEvent(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path)
 	sessionInitMarker := sessionInitReadyMarker{}
 	if cmd.StartWork {
 		var markerErr error
@@ -1019,8 +1053,11 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		initialActivity,
 		initialActivitySource,
 	); err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v", err)), nil
+		d.rollbackSessionStartLifecycle(cmd.ProjectID, cmd.SessionID, cmd.IssueID)
+		cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v%s", err, cleanupNote)), nil
 	}
+	rollbackIssueLifecycle = false
 	if cmd.StartWork && sessionInitMarker.AbsolutePath != "" {
 		if err := d.waitForSessionInitReady(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, sessionInitMarker); err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -1036,15 +1073,6 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
 		}
 	}
-	if updateErr := issueClient.Update(ctx, cmd.IssueID, domain.StatusInProgress); updateErr != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Warn("failed to update issue status to in_progress after session start",
-			"project_id", cmd.ProjectID,
-			"issue_id", cmd.IssueID,
-			"session_id", cmd.SessionID,
-			"error", updateErr,
-		)
-	}
-
 	worktreeLine := fmt.Sprintf("Worktree created: %s", worktree.Path)
 	if reusedWorktree {
 		worktreeLine = fmt.Sprintf("Worktree reused: %s", worktree.Path)
@@ -1086,6 +1114,46 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		)
 	}
 	return d.commandOutput(req, output), nil
+}
+
+func (d *Daemon) ensureSessionStartIssueLifecycle(ctx context.Context, issueClient sessionStartIssueLifecycleUpdater, issueID string, status domain.Status) error {
+	if issueClient == nil {
+		return errors.New("issue store unavailable")
+	}
+	if status == domain.StatusInProgress {
+		return nil
+	}
+	if err := issueClient.Update(ctx, issueID, domain.StatusInProgress); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (d *Daemon) rollbackSessionStartIssueLifecycle(ctx context.Context, issueClient sessionStartIssueLifecycleUpdater, issueID string, previousStatus domain.Status) {
+	if issueClient == nil || previousStatus == "" || previousStatus == domain.StatusInProgress {
+		return
+	}
+	if err := issueClient.Update(ctx, issueID, previousStatus); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("rollback session start issue lifecycle failed",
+			"issue_id", issueID,
+			"status", previousStatus,
+			"error", err,
+		)
+	}
+}
+
+func (d *Daemon) rollbackSessionStartLifecycle(projectID, sessionID, issueID string) {
+	if d == nil || d.sessionStore == nil {
+		return
+	}
+	if _, err := d.sessionStore.ForceUpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStopped); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("rollback session start lifecycle state failed",
+			"project_id", projectID,
+			"session_id", sessionID,
+			"issue_id", issueID,
+			"error", err,
+		)
+	}
 }
 
 func resolveSessionIssue(tasks []domain.Task, requestedIssueID string) (domain.Task, bool) {
