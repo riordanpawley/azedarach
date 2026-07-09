@@ -79,6 +79,7 @@ var registry = []ActionSpec{
 	{ID: ActionMoveRight, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "l", Display: "l"}, {Input: "right", Display: "right"}}},
 	{ID: ActionHalfPageUp, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "ctrl+u", Display: "ctrl+u"}}},
 	{ID: ActionHalfPageDown, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "ctrl+d", Display: "ctrl+d"}}},
+	{ID: ActionOpenHelp, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "?", Display: "?"}}, Hint: "help"},
 	{ID: ActionOpenWorkspace, Mode: types.ModeNormal, Keys: []KeySpec{{Input: " ", Display: "Space"}}, Hint: "task workspace"},
 	{ID: ActionEnterGoto, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "g", Display: "g"}}, Hint: "goto"},
 	{ID: ActionEnterSearch, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "/", Display: "/"}}, Hint: "search"},
@@ -97,7 +98,6 @@ var registry = []ActionSpec{
 	{ID: ActionOpenOperationQueue, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "Q", Display: "Q"}}, Hint: "ops"},
 	{ID: ActionToggleView, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "tab", Display: "Tab"}}, Hint: "view"},
 	{ID: ActionPullBase, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "p", Display: "p"}}, Hint: "pull base"},
-	{ID: ActionOpenHelp, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "?", Display: "?"}}, Hint: "help"},
 	{ID: ActionQuit, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "q", Display: "q"}}, Hint: "quit"},
 
 	// Select mode lookup + status hints.

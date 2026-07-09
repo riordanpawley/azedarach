@@ -11,7 +11,7 @@ import (
 
 func TestStatusBar_RenderNormalMode(t *testing.T) {
 	style := styles.New()
-	sb := New(types.ModeNormal, 200, style)
+	sb := New(types.ModeNormal, 240, style)
 
 	result := sb.Render()
 
@@ -21,8 +21,16 @@ func TestStatusBar_RenderNormalMode(t *testing.T) {
 	}
 
 	// Should contain normal mode hints
-	if !strings.Contains(result, "Space: task workspace") {
+	helpIdx := strings.Index(result, "?: help")
+	workspaceIdx := strings.Index(result, "Space: task workspace")
+	if helpIdx < 0 {
+		t.Errorf("Expected status bar to contain help hint, got: %s", result)
+	}
+	if workspaceIdx < 0 {
 		t.Errorf("Expected status bar to contain workspace hint, got: %s", result)
+	}
+	if helpIdx > workspaceIdx {
+		t.Errorf("Expected help hint to render before workspace hint, got: %s", result)
 	}
 	if !strings.Contains(result, "g: goto") {
 		t.Errorf("Expected status bar to contain goto hint, got: %s", result)
@@ -360,7 +368,7 @@ func TestGetHints_AllModes(t *testing.T) {
 		mode     types.Mode
 		expected string
 	}{
-		{types.ModeNormal, "Space: task workspace  g: goto  /: search  f: filter  t: session tree  ,: sort  v: select  Enter: drill  a: attach  c: create  s: settings  r: refresh  n: recover  Q: ops  Tab: view  p: pull base  ?: help  q: quit"},
+		{types.ModeNormal, "?: help  Space: task workspace  g: goto  /: search  f: filter  t: session tree  ,: sort  v: select  Enter: drill  a: attach  c: create  s: settings  r: refresh  n: recover  Q: ops  Tab: view  p: pull base  q: quit"},
 		{types.ModeSelect, "a/5: toggle  A: column  %: all  *: invert  x: clear  Enter: drill  Space: bulk  v/Esc: exit"},
 		{types.ModeSearch, "Type: search  Enter: confirm  Esc: cancel"},
 		{types.ModeGoto, "g g: top  g e: bottom  g h: first col  g l: last col  g w: labels  g p: projects  g s: spec  Esc: cancel"},
