@@ -47,7 +47,7 @@ func NewServer(socketPath string, handlers Handlers) *Server {
 
 // Serve starts listening and blocks until context cancellation or fatal error.
 func (s *Server) Serve(ctx context.Context) error {
-	ctx, endSpan := latencytrace.StartSpan(ctx, "daemon", "ipc.serve_start", "transport", "unix")
+	serveTraceCtx, endSpan := latencytrace.StartSpan(latencytrace.DetachedSpanContext(ctx), "daemon", "ipc.serve_start", "transport", "unix")
 	var spanErr error
 	defer func() { endSpan(spanErr) }()
 	if s.handlers.Handshake == nil || s.handlers.Command == nil || s.handlers.Subscribe == nil {
@@ -58,7 +58,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		spanErr = err
 		return fmt.Errorf("create socket dir: %w", err)
 	}
-	if err := clearStaleSocketPath(ctx, s.socketPath); err != nil {
+	if err := clearStaleSocketPath(serveTraceCtx, s.socketPath); err != nil {
 		spanErr = err
 		return err
 	}
@@ -152,7 +152,7 @@ func (s *Server) Close() error {
 }
 
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
-	ctx, endConnSpan := latencytrace.StartSpan(ctx, "daemon", "ipc.connection", "transport", "unix")
+	connTraceCtx, endConnSpan := latencytrace.StartSpan(latencytrace.DetachedSpanContext(ctx), "daemon", "ipc.connection", "transport", "unix")
 	var connSpanErr error
 	defer func() { endConnSpan(connSpanErr) }()
 	defer conn.Close()
@@ -172,7 +172,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	_ = conn.SetReadDeadline(time.Time{})
 	switch first.Type {
 	case frameTypeHello:
-		helloCtx, endSpan := latencytrace.StartSpan(ctx, "daemon", "ipc.handshake", "transport", "unix")
+		helloCtx, endSpan := latencytrace.StartSpan(connTraceCtx, "daemon", "ipc.handshake", "transport", "unix")
 		var spanErr error
 		defer func() {
 			if r := recover(); r != nil {
@@ -225,7 +225,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			})
 			return
 		}
-		commandCtx, cancelCommand := context.WithCancel(ctx)
+		commandCtx, cancelCommand := context.WithCancel(latencytrace.DetachedSpanContext(ctx))
 		commandCtx = observability.ExtractMetadata(commandCtx, first.Request.Meta)
 		commandCtx, endSpan := latencytrace.StartSpan(commandCtx, "daemon", "ipc.command", "command", first.Request.Command, "request_id", first.Request.RequestID, "project_id", first.Request.Meta.ProjectID.String())
 		var spanErr error
@@ -275,7 +275,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		if first.Subscribe != nil {
 			subscribeProjectID = first.Subscribe.ProjectID
 		}
-		subscribeCtx, endSpan := latencytrace.StartSpan(ctx, "daemon", "ipc.subscribe", "project_id", subscribeProjectID, "transport", "unix")
+		subscribeCtx, endSpan := latencytrace.StartSpan(connTraceCtx, "daemon", "ipc.subscribe", "project_id", subscribeProjectID, "transport", "unix")
 		var spanErr error
 		defer func() {
 			if r := recover(); r != nil {

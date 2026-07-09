@@ -148,6 +148,15 @@ func StartSpan(ctx context.Context, component, phase string, attrs ...any) (cont
 	}
 }
 
+// DetachedSpanContext preserves context cancellation and values while forcing
+// the next span started from the context to become a new trace root.
+func DetachedSpanContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return oteltrace.ContextWithSpanContext(ctx, oteltrace.SpanContext{})
+}
+
 // StartSpanWithEndAttributes starts a safe, bounded span and allows callers to
 // add final low-cardinality attributes once the operation outcome is known.
 func StartSpanWithEndAttributes(ctx context.Context, component, phase string, attrs ...any) (context.Context, func(error, ...any)) {

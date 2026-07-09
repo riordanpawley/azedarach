@@ -14,6 +14,14 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
+	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/observability"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 func TestClientServerHandshakeAndCommand(t *testing.T) {
@@ -176,6 +184,180 @@ func TestSubscribeContextCancelClosesServerSubscriber(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("client event channel did not close after context cancellation")
 	}
+}
+
+func TestServerLifecycleSpansDoNotShareCommandTraceRoots(t *testing.T) {
+	t.Setenv(observability.EnvVar, "true")
+	t.Setenv(latencytrace.EnvVar, "")
+	latencytrace.SetConfigEnabled(false)
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(provider)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() {
+		otel.SetTracerProvider(oteltrace.NewNoopTracerProvider())
+		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
+		latencytrace.SetConfigEnabled(false)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	socket := tempSocketPath(t)
+	defer os.Remove(socket)
+	subscribed := make(chan struct{})
+	serverSubscriberCanceled := make(chan struct{})
+	events := make(chan protocol.EventEnvelope)
+	srv := NewServer(socket, Handlers{
+		Handshake: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+			return protocol.HelloAck{Accepted: true}, nil
+		},
+		Command: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				CompletedAt:     time.Now().UTC(),
+				OK:              true,
+			}, nil
+		},
+		Subscribe: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, func(), error) {
+			select {
+			case <-subscribed:
+			default:
+				close(subscribed)
+			}
+			return events, func() {
+				select {
+				case <-serverSubscriberCanceled:
+				default:
+					close(serverSubscriberCanceled)
+				}
+			}, nil
+		},
+	})
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ctx) }()
+	waitForSocket(t, socket, errCh)
+
+	client := NewClient(socket)
+	subCtx, subCancel := context.WithCancel(context.Background())
+	ch, err := client.Subscribe(subCtx, "proj", 1)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	select {
+	case <-subscribed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server subscriber did not attach")
+	}
+
+	for _, requestID := range []string{"req-trace-a", "req-trace-b"} {
+		resp, err := client.Command(context.Background(), protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       naming.RequestID(requestID),
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         "task.list",
+			SentAt:          time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatalf("command %s: %v", requestID, err)
+		}
+		if !resp.OK {
+			t.Fatalf("command %s response not OK: %+v", requestID, resp)
+		}
+	}
+	propagatedCtx, propagatedSpan := otel.Tracer("transport_test").Start(context.Background(), "cli.command.propagated")
+	propagatedTraceID := propagatedSpan.SpanContext().TraceID().String()
+	var propagatedMeta protocol.Metadata
+	observability.InjectMetadata(propagatedCtx, &propagatedMeta)
+	resp, err := client.Command(propagatedCtx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       naming.RequestID("req-propagated"),
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            propagatedMeta,
+		Command:         "task.list",
+		SentAt:          time.Now().UTC(),
+	})
+	propagatedSpan.End()
+	if err != nil {
+		t.Fatalf("propagated command: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("propagated command response not OK: %+v", resp)
+	}
+
+	subCancel()
+	select {
+	case <-serverSubscriberCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server subscriber was not canceled")
+	}
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("client subscribe channel should close after cancellation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("client subscribe channel did not close")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("server exit: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop")
+	}
+
+	commandTraceIDs := map[string]string{}
+	lifecycleTraceIDs := map[string][]string{}
+	for _, span := range recorder.Ended() {
+		traceID := span.SpanContext().TraceID().String()
+		switch span.Name() {
+		case "daemon.ipc.command":
+			requestID := spanStringAttr(span, "request_id")
+			if requestID != "" {
+				commandTraceIDs[requestID] = traceID
+			}
+		case "daemon.ipc.serve_start", "daemon.ipc.connection", "daemon.ipc.subscribe":
+			lifecycleTraceIDs[span.Name()] = append(lifecycleTraceIDs[span.Name()], traceID)
+		}
+	}
+	if len(commandTraceIDs) != 3 {
+		t.Fatalf("daemon command trace ids = %+v, want three request_id keyed spans", commandTraceIDs)
+	}
+	if commandTraceIDs["req-trace-a"] == commandTraceIDs["req-trace-b"] {
+		t.Fatalf("command trace ids should be isolated by request_id, got shared trace %s", commandTraceIDs["req-trace-a"])
+	}
+	if commandTraceIDs["req-propagated"] != propagatedTraceID {
+		t.Fatalf("propagated command trace id = %s, want %s", commandTraceIDs["req-propagated"], propagatedTraceID)
+	}
+	for _, name := range []string{"daemon.ipc.serve_start", "daemon.ipc.connection", "daemon.ipc.subscribe"} {
+		if len(lifecycleTraceIDs[name]) == 0 {
+			t.Fatalf("missing lifecycle span %s", name)
+		}
+	}
+	for lifecycleName, traceIDs := range lifecycleTraceIDs {
+		for _, traceID := range traceIDs {
+			for requestID, commandTraceID := range commandTraceIDs {
+				if traceID == commandTraceID {
+					t.Fatalf("%s span shared command trace root for %s: %s", lifecycleName, requestID, traceID)
+				}
+			}
+		}
+	}
+}
+
+func spanStringAttr(span sdktrace.ReadOnlySpan, key string) string {
+	for _, attr := range span.Attributes() {
+		if string(attr.Key) == key {
+			return attr.Value.AsString()
+		}
+	}
+	return ""
 }
 
 func TestCommandHonorsContextDeadlineOverDefaultTimeout(t *testing.T) {
