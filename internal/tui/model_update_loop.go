@@ -1755,7 +1755,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.markTaskMutationFailure(failure)
 			m.syncTaskWorkspaceOverlay()
 			expires := time.Now().Add(3 * time.Second)
-			if msg.newStatus == domain.StatusDone {
+			if terminalTaskStatusRequiresClose(msg.newStatus) {
 				expires = time.Now().Add(8 * time.Second)
 			}
 			m.addToast(Toast{
@@ -1768,7 +1768,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if msg.newStatus != domain.StatusDone {
+		if !terminalTaskStatusRequiresClose(msg.newStatus) {
 			m.clearPendingTaskStatus(msg.taskID)
 		}
 		m.clearTaskMutationFailure(msg.taskID)

@@ -1467,7 +1467,7 @@ func (m *Model) keepPendingStatusUntilCloseProjection(taskID, operationID, kind 
 	if strings.TrimSpace(operationID) == "" || strings.TrimSpace(pending.operationID) != strings.TrimSpace(operationID) {
 		return false
 	}
-	if pending.targetStatus != domain.StatusDone {
+	if !terminalTaskStatusRequiresClose(pending.targetStatus) {
 		return false
 	}
 	pending.state = protocol.OperationStateDone
@@ -4970,13 +4970,13 @@ func (m Model) updateTaskStatusWithTimeoutOptions(taskID string, status domain.S
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), taskStatusMutationTimeout(status, defaultTimeout))
 	defer cancel()
-	if status == domain.StatusDone {
+	if terminalTaskStatusRequiresClose(status) {
 		closeOpts := taskStatusOptionsForStatus(status)
 		closeOpts.ForceWorktree = opts.ForceWorktree
 		closeOpts.IgnoreAhead = opts.IgnoreAhead
 		closeOpts.CloseCleanChildren = opts.CloseCleanChildren
 		closeOpts.AllowActiveSession = opts.AllowActiveSession
-		return m.closeTaskWithIntegrationAndCleanup(ctx, taskID, closeOpts)
+		return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, status, closeOpts)
 	}
 	return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, status, opts)
 }
@@ -5043,7 +5043,7 @@ func formatReviewCascadeConfirmPrompt(pending pendingReviewCascadeConfirmation) 
 }
 
 func taskStatusMutationTimeout(status domain.Status, defaultTimeout time.Duration) time.Duration {
-	if status == domain.StatusDone {
+	if terminalTaskStatusRequiresClose(status) {
 		return taskCloseMutationTimeout
 	}
 	return defaultTimeout
@@ -5083,19 +5083,11 @@ func exactTaskStatusForKey(key string) (domain.Status, bool) {
 		return domain.StatusInReview, true
 	case "4":
 		return domain.StatusDone, true
+	case "5":
+		return domain.StatusCancelled, true
 	default:
 		return "", false
 	}
-}
-
-func (m Model) closeTaskWithIntegrationAndCleanup(ctx context.Context, taskID string, opts daemonclient.TaskStatusOptions) error {
-	if m.daemonClient == nil {
-		return fmt.Errorf("daemon client unavailable")
-	}
-	if !opts.IntegrateBeforeClose {
-		opts.IntegrateBeforeClose = true
-	}
-	return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, domain.StatusDone, opts)
 }
 
 func statusDisplayName(status domain.Status) string {
@@ -5108,16 +5100,26 @@ func statusDisplayName(status domain.Status) string {
 		return "In Review"
 	case domain.StatusDone:
 		return "Done"
+	case domain.StatusCancelled:
+		return "Cancelled"
 	default:
 		return status.String()
 	}
 }
 
 func taskStatusOptionsForStatus(status domain.Status) daemonclient.TaskStatusOptions {
-	if status != domain.StatusDone {
+	switch status {
+	case domain.StatusDone:
+		return daemonclient.TaskStatusOptions{IntegrateBeforeClose: true, CloseOutcome: domain.IssueCloseCompleted}
+	case domain.StatusCancelled:
+		return daemonclient.TaskStatusOptions{CloseOutcome: domain.IssueCloseCancelled}
+	default:
 		return daemonclient.TaskStatusOptions{}
 	}
-	return daemonclient.TaskStatusOptions{IntegrateBeforeClose: true}
+}
+
+func terminalTaskStatusRequiresClose(status domain.Status) bool {
+	return status == domain.StatusDone || status == domain.StatusCancelled
 }
 
 func (m Model) closeFailureOperationContext(taskID string) closeFailureOperationContext {
@@ -5153,7 +5155,7 @@ func (m Model) projectActionContext() overlay.ProjectActionContext {
 }
 
 func (m Model) closeFailureDialogCmd(msg taskStatusResultMsg) tea.Cmd {
-	if msg.err == nil || msg.newStatus != domain.StatusDone {
+	if msg.err == nil || !terminalTaskStatusRequiresClose(msg.newStatus) {
 		return nil
 	}
 	closeContext := msg.closeContext
@@ -5173,7 +5175,7 @@ func (m Model) closeFailureDialogCmd(msg taskStatusResultMsg) tea.Cmd {
 		ForceWorktree:           msg.opts.ForceWorktree,
 		CloseCleanChildren:      msg.opts.CloseCleanChildren,
 		AllowActiveSession:      msg.opts.AllowActiveSession,
-		AllowAIMerge:            true,
+		AllowAIMerge:            msg.newStatus == domain.StatusDone,
 		AllowForceWorktree:      closeFailureSupportsForceWorktree(msg.err),
 		AllowActiveSessionRetry: closeFailureSupportsActiveSessionRetry(msg.err),
 		AllowCloseCleanChildren: closeFailureSupportsCloseCleanChildren(msg.err),
@@ -5226,7 +5228,7 @@ func (m Model) bulkMoveCloseCleanupTaskIDs(taskIDs []string, delta int) []string
 			continue
 		}
 		next, ok := shiftedTaskStatus(status, delta)
-		if ok && next == domain.StatusDone {
+		if ok && terminalTaskStatusRequiresClose(next) {
 			closeTaskIDs = append(closeTaskIDs, taskID)
 		}
 	}
@@ -5235,8 +5237,14 @@ func (m Model) bulkMoveCloseCleanupTaskIDs(taskIDs []string, delta int) []string
 
 func (m Model) confirmCloseCleanupCmd(pending pendingCloseCleanupConfirmation) tea.Cmd {
 	title := "Confirm integrate and close?"
+	if pending.targetStatus == domain.StatusCancelled {
+		title = "Confirm cancel and close?"
+	}
 	if pendingCloseCleanupCount(pending) > 1 {
 		title = "Confirm bulk integrate and close?"
+		if pending.targetStatus == domain.StatusCancelled {
+			title = "Confirm bulk cancel and close?"
+		}
 	}
 	return m.openOverlay(overlay.NewConfirmDialogExplicitYNWithExtraKeys(title, formatCloseCleanupConfirmPrompt(pending), map[string]overlay.SelectionMsg{
 		"c": {Key: "close_clean_children", Value: overlay.ConfirmResult{Confirmed: true}},
@@ -5325,6 +5333,9 @@ func formatCloseCleanupConfirmPrompt(pending pendingCloseCleanupConfirmation) st
 	}
 	target := strings.TrimSpace(pending.taskID)
 	statusLine := "Status: closed"
+	if pending.targetStatus == domain.StatusCancelled {
+		statusLine = "Status: cancelled"
+	}
 	if pending.bulkMode == "move" && selectedCount > 0 {
 		switch {
 		case closeCount == selectedCount:
@@ -5342,8 +5353,12 @@ func formatCloseCleanupConfirmPrompt(pending pendingCloseCleanupConfirmation) st
 	if target == "" {
 		target = "selected task"
 	}
+	intro := "Closing issues integrates their branch, then cleans up sessions and worktrees."
+	if pending.targetStatus == domain.StatusCancelled {
+		intro = "Cancelling issues skips branch integration, then cleans up sessions and worktrees."
+	}
 	lines := []string{
-		"Closing issues integrates their branch, then cleans up sessions and worktrees.",
+		intro,
 		"",
 		fmt.Sprintf("Target: %s", target),
 		statusLine,
@@ -5352,7 +5367,7 @@ func formatCloseCleanupConfirmPrompt(pending pendingCloseCleanupConfirmation) st
 	lines = append(lines, formatCloseCleanupGitStateLines(pending.summaries, count, len(pending.taskIDs) > 0)...)
 	lines = append(lines,
 		"",
-		"This may merge into the closest ancestor worktree branch, stop active sessions, and remove issue worktrees before closing.",
+		terminalCloseEffectLine(pending.targetStatus),
 		"Dirty or conflicted worktrees must be cleaned before close; daemon guards still block unmerged or unresolved child work.",
 		"Press C to also close clean child issues with no projected session, dirty state, or diff.",
 		"",
@@ -5366,6 +5381,13 @@ func formatCloseCleanupConfirmPrompt(pending pendingCloseCleanupConfirmation) st
 		lines = append(lines, "Proceed? Y closes only the target; C closes the target plus clean children.")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func terminalCloseEffectLine(status domain.Status) string {
+	if status == domain.StatusCancelled {
+		return "This may stop active sessions and remove issue worktrees before writing the cancelled close outcome."
+	}
+	return "This may merge into the closest ancestor worktree branch, stop active sessions, and remove issue worktrees before closing."
 }
 
 func pendingCloseCleanupBlockedReason(pending pendingCloseCleanupConfirmation) string {

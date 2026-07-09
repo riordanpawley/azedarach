@@ -465,8 +465,8 @@ func parseApplyStatus(value string) (domain.Status, error) {
 		return domain.StatusInProgress, nil
 	case "in_review":
 		return domain.StatusInReview, nil
-	case "done", "closed", "complete", "completed":
-		return "", fmt.Errorf("closed status must be applied with task.close")
+	case "done", "closed", "complete", "completed", "cancelled", "canceled":
+		return "", fmt.Errorf("terminal status must be applied with task.close")
 	default:
 		return "", fmt.Errorf("unsupported status: %s", value)
 	}

@@ -805,7 +805,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		previousStatus := task.Status
-		if newStatus == domain.StatusDone {
+		if terminalTaskStatusRequiresClose(newStatus) {
 			pending := pendingCloseCleanupConfirmation{
 				taskID:         task.ID.String(),
 				previousStatus: previousStatus,
@@ -839,7 +839,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		previousStatus := task.Status
-		if newStatus == domain.StatusDone {
+		if terminalTaskStatusRequiresClose(newStatus) {
 			pending := pendingCloseCleanupConfirmation{
 				taskID:         task.ID.String(),
 				previousStatus: previousStatus,
@@ -852,7 +852,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		m.beginTaskStatusMoveFeedback(task.ID.String(), previousStatus, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
-	case "1", "2", "3", "4":
+	case "1", "2", "3", "4", "5":
 		newStatus, ok := exactTaskStatusForKey(msg.Key)
 		if !ok {
 			return m, nil
@@ -866,7 +866,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		previousStatus := task.Status
-		if newStatus == domain.StatusDone {
+		if terminalTaskStatusRequiresClose(newStatus) {
 			pending := pendingCloseCleanupConfirmation{
 				taskID:         task.ID.String(),
 				previousStatus: previousStatus,

@@ -3139,6 +3139,86 @@ func TestTaskCloseCommandUpdatesStatusThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestTaskCloseCommandCancelledSkipsIntegrationAndWritesOutcome(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-task-close-cancelled"
+	repoDir := t.TempDir()
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Cancel me",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger},
+		hub: publish.NewHub(16, 8, logger),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+		revision: map[string]uint64{},
+	}
+	body, err := json.Marshal(taskCloseRequest{
+		TaskID:               taskID,
+		IntegrateBeforeClose: true,
+		CloseOutcome:         string(domain.IssueCloseCancelled),
+	})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-cancelled",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.close",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("handleTaskClose response = %+v", resp)
+	}
+	var result taskCloseResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal close response: %v", err)
+	}
+	if result.Status != string(domain.StatusCancelled) || result.IntegrationRequested || result.Integrated {
+		t.Fatalf("close result = %+v, want cancelled without integration", result)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get cancelled task: %v", err)
+	}
+	if task.Status != domain.StatusCancelled {
+		t.Fatalf("task status = %s, want %s", task.Status, domain.StatusCancelled)
+	}
+	db, err := sql.Open("sqlite", issuesDBPath)
+	if err != nil {
+		t.Fatalf("open issues db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var lifecycle, outcome string
+	if err := db.QueryRowContext(ctx, `SELECT lifecycle_state, closed_outcome FROM issues WHERE id = ?`, taskID).Scan(&lifecycle, &outcome); err != nil {
+		t.Fatalf("read issue state columns: %v", err)
+	}
+	if lifecycle != string(domain.IssueWorkflowClosed) || outcome != string(domain.IssueCloseCancelled) {
+		t.Fatalf("issue state = lifecycle %q outcome %q, want closed/cancelled", lifecycle, outcome)
+	}
+}
+
 func TestTaskCloseBlocksUnresolvedChildrenByDefault(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-task-close-child-default"
@@ -3169,23 +3249,33 @@ func TestTaskCloseBlocksUnresolvedChildrenByDefault(t *testing.T) {
 		},
 		revision: map[string]uint64{},
 	}
-	body, err := json.Marshal(taskCloseRequest{TaskID: parentID})
-	if err != nil {
-		t.Fatalf("marshal close request: %v", err)
-	}
-	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-close-child-default",
-		Kind:            protocol.EnvelopeKindCommand,
-		Command:         "task.close",
-		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Body:            body,
-	})
-	if err != nil {
-		t.Fatalf("handleTaskClose error: %v", err)
-	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain: "+childID+" (open)") {
-		t.Fatalf("handleTaskClose response = %+v, want unresolved child guard", resp)
+	for _, tc := range []struct {
+		name    string
+		outcome string
+	}{
+		{name: "completed"},
+		{name: "cancelled", outcome: string(domain.IssueCloseCancelled)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := json.Marshal(taskCloseRequest{TaskID: parentID, CloseOutcome: tc.outcome})
+			if err != nil {
+				t.Fatalf("marshal close request: %v", err)
+			}
+			resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				RequestID:       naming.RequestID("req-close-child-default-" + tc.name),
+				Kind:            protocol.EnvelopeKindCommand,
+				Command:         "task.close",
+				Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+				Body:            body,
+			})
+			if err != nil {
+				t.Fatalf("handleTaskClose error: %v", err)
+			}
+			if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain: "+childID+" (open)") {
+				t.Fatalf("handleTaskClose response = %+v, want unresolved child guard", resp)
+			}
+		})
 	}
 }
 
@@ -4215,6 +4305,28 @@ func TestTaskUpdateStatusRejectsRawCloseActiveRuntime(t *testing.T) {
 	}
 	if strings.Contains(resp.Error.Message, "Moved closed blockers back for cleanup") {
 		t.Fatalf("task.update_status response = %q, did not expect status repair for reachable active issue", resp.Error.Message)
+	}
+
+	body, err = json.Marshal(map[string]any{
+		"task_id": taskID,
+		"status":  domain.StatusCancelled,
+	})
+	if err != nil {
+		t.Fatalf("marshal cancelled task update request: %v", err)
+	}
+	resp, err = d.handleTaskUpdateStatus(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-cancel-guard-reopen-target",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.update_status",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskUpdateStatus cancelled error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "status cancelled must be applied with task.close") {
+		t.Fatalf("task.update_status cancelled response = %+v, want raw cancel rejection", resp)
 	}
 }
 

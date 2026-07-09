@@ -326,18 +326,28 @@ func TestCloseTaskRejectsHighContextRiskWithoutCloseoutEvidence(t *testing.T) {
 	}
 
 	d := newContextRiskTestDaemon(projectID, repoDir, issuesClient)
-	result, err := d.closeTask(ctx, projectID, taskCloseRequest{TaskID: targetID}, protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-close-risk",
-		Kind:            protocol.EnvelopeKindCommand,
-		Command:         "task.close",
-		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-	})
-	if err == nil || !strings.Contains(err.Error(), "context risk is high") {
-		t.Fatalf("closeTask error = %v, want context risk rejection", err)
-	}
-	if result.ContextRisk == nil || !domain.IssueContextRiskRequiresStructuredCloseout(*result.ContextRisk) {
-		t.Fatalf("result.ContextRisk = %+v, want blocking context risk packet", result.ContextRisk)
+	for _, tc := range []struct {
+		name    string
+		outcome string
+	}{
+		{name: "completed"},
+		{name: "cancelled", outcome: string(domain.IssueCloseCancelled)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := d.closeTask(ctx, projectID, taskCloseRequest{TaskID: targetID, CloseOutcome: tc.outcome}, protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				RequestID:       naming.RequestID("req-close-risk-" + tc.name),
+				Kind:            protocol.EnvelopeKindCommand,
+				Command:         "task.close",
+				Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			})
+			if err == nil || !strings.Contains(err.Error(), "context risk is high") {
+				t.Fatalf("closeTask error = %v, want context risk rejection", err)
+			}
+			if result.ContextRisk == nil || !domain.IssueContextRiskRequiresStructuredCloseout(*result.ContextRisk) {
+				t.Fatalf("result.ContextRisk = %+v, want blocking context risk packet", result.ContextRisk)
+			}
+		})
 	}
 }
 
