@@ -841,7 +841,7 @@ func TestDaemonDrainInFlightCommandsStopsIntakeCancelsQueuedAndDrainsRunning(t *
 	waitForRuntimeState(t, runtime, queuedResult.Record.ID, daemonops.StateCancelled)
 }
 
-func TestBuildSubmitRequestRoutesSessionStartByIssueOnly(t *testing.T) {
+func TestBuildSubmitRequestRoutesSessionStartByIssueAndSession(t *testing.T) {
 	runtime := newSessionStartOperationRuntime(t)
 
 	startReq := runtime.buildSubmitRequestForTest(
@@ -852,6 +852,9 @@ func TestBuildSubmitRequestRoutesSessionStartByIssueOnly(t *testing.T) {
 	)
 	if !hasResourceKey(startReq.ResourceKeys, "issue:proj-1:AZ-10") {
 		t.Fatalf("session.start resource keys = %v, want issue key", startReq.ResourceKeys)
+	}
+	if !hasResourceKey(startReq.ResourceKeys, "session:"+naming.CanonicalSessionID("proj-1", "AZ-10")) {
+		t.Fatalf("session.start resource keys = %v, want session key", startReq.ResourceKeys)
 	}
 	if hasResourceKey(startReq.ResourceKeys, heavySessionStartResourceKey("proj-1")) {
 		t.Fatalf("session.start resource keys = %v, did not want project heavy-start key", startReq.ResourceKeys)
@@ -881,6 +884,9 @@ func TestBuildSubmitRequestUsesPayloadProjectForSessionStartIssueResource(t *tes
 	if !hasResourceKey(req.ResourceKeys, "issue:payload-proj:AZ-10") {
 		t.Fatalf("session.start resource keys = %v, want payload project issue key", req.ResourceKeys)
 	}
+	if !hasResourceKey(req.ResourceKeys, "session:"+naming.CanonicalSessionID("payload-proj", "AZ-10")) {
+		t.Fatalf("session.start resource keys = %v, want payload project session key", req.ResourceKeys)
+	}
 	if hasResourceKey(req.ResourceKeys, heavySessionStartResourceKey("payload-proj")) {
 		t.Fatalf("session.start resource keys = %v, did not want payload project heavy-start key", req.ResourceKeys)
 	}
@@ -902,13 +908,55 @@ func TestBuildSubmitRequestPreservesExplicitSessionStartKeys(t *testing.T) {
 		t.Fatalf("build submit request: %v", err)
 	}
 
-	for _, key := range []string{"session:AZ-11", "worktree:AZ-11"} {
+	for _, key := range []string{"issue:proj-1:AZ-11", "session:" + naming.CanonicalSessionID("proj-1", "AZ-11"), "session:AZ-11", "worktree:AZ-11"} {
 		if !hasResourceKey(req.ResourceKeys, key) {
 			t.Fatalf("resource keys = %v, want %s", req.ResourceKeys, key)
 		}
 	}
 	if hasResourceKey(req.ResourceKeys, heavySessionStartResourceKey("proj-1")) {
 		t.Fatalf("resource keys = %v, did not want project heavy-start key", req.ResourceKeys)
+	}
+}
+
+func TestBuildSubmitRequestAddsSessionStartMinimumKeysToExplicitKeys(t *testing.T) {
+	runtime := newSessionStartOperationRuntime(t)
+	payload := mustJSON(t, map[string]string{"project_id": "proj-1", "session_id": "AZ-13"})
+
+	req, err := runtime.buildSubmitRequest(daemonhandlers.CommandSessionStart, "proj-1", payload, operationSubmitOverrides{
+		IssueID:      naming.IssueID("AZ-13"),
+		ResourceKeys: []string{"issue:proj-1:AZ-13", "worktree:AZ-13"},
+	})
+	if err != nil {
+		t.Fatalf("build submit request: %v", err)
+	}
+
+	for _, key := range []string{"issue:proj-1:AZ-13", "session:" + naming.CanonicalSessionID("proj-1", "AZ-13"), "worktree:AZ-13"} {
+		if !hasResourceKey(req.ResourceKeys, key) {
+			t.Fatalf("resource keys = %v, want %s", req.ResourceKeys, key)
+		}
+	}
+}
+
+func TestBuildSubmitRequestPreservesCustomSessionStartID(t *testing.T) {
+	runtime := newSessionStartOperationRuntime(t)
+	payload := mustJSON(t, map[string]string{
+		"project_id": "proj-1",
+		"issue_id":   "AZ-12",
+		"session_id": "custom-AZ-12",
+	})
+
+	req := runtime.buildSubmitRequestForTest(t, daemonhandlers.CommandSessionStart, "proj-1", payload)
+
+	if req.IssueID != "AZ-12" {
+		t.Fatalf("issue id = %q, want AZ-12", req.IssueID)
+	}
+	if req.DedupeKey != daemonhandlers.CommandSessionStart+":AZ-12" {
+		t.Fatalf("dedupe key = %q, want custom session start issue dedupe", req.DedupeKey)
+	}
+	for _, key := range []string{"issue:proj-1:AZ-12", "session:custom-AZ-12"} {
+		if !hasResourceKey(req.ResourceKeys, key) {
+			t.Fatalf("resource keys = %v, want %s", req.ResourceKeys, key)
+		}
 	}
 }
 

@@ -57,6 +57,7 @@ type operationRuntime struct {
 	gitHandler             *daemonhandlers.GitHandler
 	worktreeHandler        *daemonhandlers.WorktreeHandler
 	pollInterval           time.Duration
+	repoDir                string
 	repoNameProject        string
 	canonicalProject       string
 }
@@ -154,6 +155,7 @@ func newOperationRuntime(cfg operationRuntimeConfig) *operationRuntime {
 		gitHandler:             cfg.gitHandler,
 		worktreeHandler:        cfg.worktreeHandler,
 		pollInterval:           defaultOperationPollDelay,
+		repoDir:                repoDir,
 		repoNameProject:        repoNameProjectID,
 		canonicalProject:       canonicalProjectID,
 	}
@@ -665,7 +667,7 @@ func (r *operationRuntime) buildSubmitRequest(kind, projectID string, payload []
 		issueID = overrideIssueID
 	}
 	if len(overrides.ResourceKeys) > 0 {
-		resourceKeys = normalizeOperationResourceKeys(overrides.ResourceKeys)
+		resourceKeys = overriddenOperationResourceKeys(kind, resourceKeys, overrides.ResourceKeys)
 	}
 	if overrideDedupeKey := strings.TrimSpace(overrides.DedupeKey); overrideDedupeKey != "" {
 		dedupeKey = overrideDedupeKey
@@ -687,6 +689,17 @@ func heavySessionStartResourceKey(projectID string) string {
 	return heavySessionStartResourcePrefix + coalesceProjectID(projectID)
 }
 
+func (r *operationRuntime) sessionNamingScope(projectID string) string {
+	projectID = r.coalesceProjectID(projectID, "")
+	switch projectID {
+	case "", protocol.DefaultProjectID, r.canonicalProject, r.repoNameProject:
+		if repoDir := strings.TrimSpace(r.repoDir); repoDir != "" {
+			return repoDir
+		}
+	}
+	return projectID
+}
+
 func (r *operationRuntime) deriveOperationRouting(kind, projectID string, payload []byte) (issueID string, resourceKeys []string, dedupeKey string, err error) {
 	projectID = r.coalesceProjectID(projectID, "")
 	switch kind {
@@ -694,17 +707,20 @@ func (r *operationRuntime) deriveOperationRouting(kind, projectID string, payloa
 		var body struct {
 			ProjectID string `json:"project_id"`
 			SessionID string `json:"session_id"`
+			IssueID   string `json:"issue_id"`
 		}
 		if err = json.Unmarshal(payload, &body); err != nil {
 			return "", nil, "", fmt.Errorf("decode %s payload: %w", kind, err)
 		}
 		projectID = r.coalesceProjectID(body.ProjectID, projectID)
-		parsedIssueID, parseErr := naming.ParseIssueID(strings.TrimSpace(body.SessionID))
+		issueID, sessionID, parseErr := r.sessionOperationIDs(kind, projectID, body.SessionID, body.IssueID)
 		if parseErr != nil {
 			return "", nil, "", errors.New("missing required fields: project_id/session_id")
 		}
-		issueID = parsedIssueID.String()
 		resourceKeys = []string{"issue:" + projectID + ":" + issueID}
+		if kind == "session.start" {
+			resourceKeys = append(resourceKeys, "session:"+sessionID)
+		}
 		dedupeKey = kind + ":" + issueID
 		return issueID, resourceKeys, dedupeKey, nil
 	case protocol.CommandSessionResolveConflict:
@@ -819,6 +835,49 @@ func (r *operationRuntime) deriveOperationRouting(kind, projectID string, payloa
 	default:
 		return "", nil, "", fmt.Errorf("unsupported operation kind: %s", kind)
 	}
+}
+
+func (r *operationRuntime) sessionOperationIDs(kind, projectID, sessionInput, issueInput string) (issueID, sessionID string, err error) {
+	sessionInput = strings.TrimSpace(sessionInput)
+	if sessionInput == "" {
+		return "", "", errors.New("missing session_id")
+	}
+	issueInput = strings.TrimSpace(issueInput)
+	namingScope := r.sessionNamingScope(projectID)
+	if issueInput != "" {
+		parsedIssueID, parseErr := naming.ParseIssueID(issueInput)
+		if parseErr != nil {
+			return "", "", parseErr
+		}
+		if _, sessionErr := naming.ParseSessionIDLoose(sessionInput); sessionErr != nil {
+			return "", "", sessionErr
+		}
+		issueID = parsedIssueID.String()
+		sessionID = sessionInput
+		return issueID, sessionID, nil
+	}
+	if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(sessionInput, namingScope); ok {
+		sessionInput = parsedIssueID
+	}
+	parsedIssueID, parseErr := naming.ParseIssueID(sessionInput)
+	if parseErr != nil {
+		return "", "", parseErr
+	}
+	issueID = parsedIssueID.String()
+	if kind == "session.start" {
+		sessionID = naming.CanonicalSessionIDForIssue(namingScope, parsedIssueID).String()
+	} else {
+		sessionID = strings.TrimSpace(sessionInput)
+	}
+	return issueID, sessionID, nil
+}
+
+func overriddenOperationResourceKeys(kind string, derived, override []string) []string {
+	override = normalizeOperationResourceKeys(override)
+	if strings.TrimSpace(kind) != "session.start" {
+		return override
+	}
+	return normalizeOperationResourceKeys(append(append([]string(nil), derived...), override...))
 }
 
 func normalizeOperationWorktree(worktree string) string {
