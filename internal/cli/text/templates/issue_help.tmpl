@@ -15,7 +15,7 @@ Commands:
   doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Run integrity checks for one issue
   create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an issue; auto-parents to AZEDARACH_ISSUE_ID when set
   split [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create a child issue and launch it with az orchestrate start
-  update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields (`--status closed` integrates, cleans, then closes)
+  update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields (`--status closed` integrates; `cancelled` cleans without integration)
   close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]  Integrate, clean up, and close an issue
   delete [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]  Permanently delete an issue
   unarchive [--project <project-id>] [--id <issue-id>] [--json] [--with-parents] [--cascade-children] [<issue-id>]  Restore archived issues to active reads

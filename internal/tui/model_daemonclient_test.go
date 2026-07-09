@@ -1653,6 +1653,89 @@ func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
 	}
 }
 
+func TestTaskStatusCancelledRequiresCloseCleanupConfirmation(t *testing.T) {
+	var closeBody struct {
+		TaskID               string `json:"task_id"`
+		IntegrateBeforeClose bool   `json:"integrate_before_close"`
+		CloseOutcome         string `json:"closed_outcome"`
+	}
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskClose {
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			if err := json.Unmarshal(req.Body, &closeBody); err != nil {
+				t.Fatalf("unmarshal close request: %v", err)
+			}
+			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
+				TaskID: "az-4",
+				Status: string(domain.StatusCancelled),
+			})
+			if err != nil {
+				t.Fatalf("marshal close response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{ID: "az-4", Status: domain.StatusInReview}}
+	m.nav.SelectTask("az-4", domain.StatusInReview.Column())
+
+	updatedAny, promptCmd := m.handleSelection(overlay.SelectionMsg{Key: "5"})
+	if promptCmd == nil {
+		t.Fatal("expected confirmation overlay command")
+	}
+	prompted := updatedAny.(Model)
+	if prompted.pendingClose == nil || prompted.pendingClose.targetStatus != domain.StatusCancelled {
+		t.Fatalf("pending close = %+v, want cancelled target", prompted.pendingClose)
+	}
+	if prompted.tasks[0].Status != domain.StatusInReview {
+		t.Fatalf("status before confirmation = %s, want %s", prompted.tasks[0].Status, domain.StatusInReview)
+	}
+	if len(transport.requests) != 0 {
+		t.Fatalf("daemon requests before confirmation = %v, want none", transport.requests)
+	}
+
+	confirmedAny, statusCmd := prompted.handleSelection(overlay.SelectionMsg{Key: "yes"})
+	if statusCmd == nil {
+		t.Fatal("expected status update command after confirmation")
+	}
+	confirmed := confirmedAny.(Model)
+	if confirmed.tasks[0].Status != domain.StatusCancelled {
+		t.Fatalf("optimistic status after confirmation = %s, want %s", confirmed.tasks[0].Status, domain.StatusCancelled)
+	}
+	pending, ok := confirmed.pendingStatuses[taskIDKey("az-4")]
+	if !ok {
+		t.Fatal("expected pending status marker immediately after cancel confirmation")
+	}
+	if pending.previousStatus != domain.StatusInReview || pending.targetStatus != domain.StatusCancelled || pending.state != protocol.OperationStateQueued {
+		t.Fatalf("pending status = %+v, want review -> cancelled queued", pending)
+	}
+
+	msg := statusCmd()
+	status, ok := msg.(taskStatusResultMsg)
+	if !ok {
+		t.Fatalf("result = %T, want taskStatusResultMsg", msg)
+	}
+	if status.previousStatus != domain.StatusInReview || status.newStatus != domain.StatusCancelled || status.err != nil {
+		t.Fatalf("status result = %#v", status)
+	}
+	if closeBody.TaskID != "az-4" || closeBody.IntegrateBeforeClose || closeBody.CloseOutcome != string(domain.IssueCloseCancelled) {
+		t.Fatalf("close body = %+v, want cancelled close without integration", closeBody)
+	}
+	if got := transport.requests; len(got) != 1 ||
+		got[0] != daemonclient.CommandTaskClose {
+		t.Fatalf("daemon requests after confirmation = %v", got)
+	}
+}
+
 func TestTaskStatusDoneCloseCleanChildrenConfirmationSetsDaemonOption(t *testing.T) {
 	var closeBody struct {
 		TaskID               string `json:"task_id"`
@@ -11846,6 +11929,58 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 		if got := updated.tasks[0].Status; got != domain.StatusDone {
 			t.Fatalf("optimistic status = %s, want done", got)
+		}
+	})
+
+	t.Run("bulk status cancelled closes without integration", func(t *testing.T) {
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskClose {
+					t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskClose)
+				}
+				var body struct {
+					TaskID               string `json:"task_id"`
+					IntegrateBeforeClose bool   `json:"integrate_before_close"`
+					CloseOutcome         string `json:"closed_outcome"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal close request: %v", err)
+				}
+				if body.TaskID != "az-1" || body.IntegrateBeforeClose || body.CloseOutcome != string(domain.IssueCloseCancelled) {
+					t.Fatalf("close body = %+v, want az-1 cancelled without integration", body)
+				}
+				respBody, err := json.Marshal(daemonclient.TaskCloseResult{
+					TaskID: "az-1",
+					Status: string(domain.StatusCancelled),
+				})
+				if err != nil {
+					t.Fatalf("marshal cancelled close response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			},
+		}
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{{ID: "az-1", Status: domain.StatusInReview}}
+
+		msg := m.bulkSetStatusCmd([]string{"az-1"}, domain.StatusCancelled)()
+		result, ok := msg.(bulkStatusResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want bulkStatusResultMsg", msg)
+		}
+		if result.updated != 1 || result.failed != 0 || len(result.pending) != 0 {
+			t.Fatalf("bulk status result = %+v, want cancelled update success", result)
+		}
+		if got := transport.requests; len(got) != 1 || got[0] != daemonclient.CommandTaskClose {
+			t.Fatalf("requests = %v, want one task.close", got)
+		}
+		if got := len(transport.commandBudgets); got != 1 || transport.commandBudgets[0] < taskCloseMutationTimeout-10*time.Second {
+			t.Fatalf("command budgets = %v, want close timeout", transport.commandBudgets)
 		}
 	})
 

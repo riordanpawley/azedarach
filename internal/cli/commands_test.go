@@ -5774,6 +5774,18 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 			}(),
 		},
 		{
+			name: "cancelled status",
+			args: []string{"az-1", "--status", "cancelled", "--force-worktree"},
+			want: func() IssueUpdateOptions {
+				status := domain.StatusCancelled
+				return IssueUpdateOptions{
+					IssueID:       "az-1",
+					Status:        &status,
+					ForceWorktree: true,
+				}
+			}(),
+		},
+		{
 			name:        "cleanup flag removed",
 			args:        []string{"az-1", "--status", "closed", "--cleanup"},
 			errContains: "flag provided but not defined: -cleanup",
@@ -10253,6 +10265,86 @@ func TestIssueUpdateCommandPassesCascadeChildrenForInReviewStatus(t *testing.T) 
 	}
 	if body.TaskID.String() != "az-1" || body.Status != domain.StatusInReview || !body.CascadeChildren {
 		t.Fatalf("status body = %+v, want cascade in_review for az-1", body)
+	}
+}
+
+func TestIssueUpdateCommandRoutesCancelledThroughCloseWithoutIntegration(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	commands := make([]string, 0, 3)
+	var gotCloseReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskGet:
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:        "az-1",
+							Title:     "Cancel",
+							Type:      domain.TypeTask,
+							Priority:  domain.P2,
+							Status:    domain.StatusInReview,
+							CreatedAt: now,
+							UpdatedAt: now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskClose:
+					gotCloseReq = req
+					return responseWithJSON(req, daemonclient.TaskCloseResult{
+						TaskID: "az-1",
+						Status: string(domain.StatusCancelled),
+					}), nil
+				default:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+	status := domain.StatusCancelled
+	output := captureStdout(t, func() error {
+		return IssueUpdateCommand(deps, IssueUpdateOptions{IssueID: "az-1", Status: &status, ForceWorktree: true})
+	})
+	if !strings.Contains(output, "Updated issue: az-1") {
+		t.Fatalf("output = %q, want update message", output)
+	}
+	if strings.Join(commands, ",") != strings.Join([]string{daemonclient.CommandTaskGet, daemonclient.CommandTaskUpdate, daemonclient.CommandTaskClose}, ",") {
+		t.Fatalf("commands = %v, want get/update/close", commands)
+	}
+	var body struct {
+		TaskID               string `json:"task_id"`
+		ForceWorktree        bool   `json:"force_worktree"`
+		IntegrateBeforeClose bool   `json:"integrate_before_close"`
+		CloseOutcome         string `json:"closed_outcome"`
+	}
+	if err := json.Unmarshal(gotCloseReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal close body: %v", err)
+	}
+	if body.TaskID != "az-1" || !body.ForceWorktree || body.IntegrateBeforeClose || body.CloseOutcome != string(domain.IssueCloseCancelled) {
+		t.Fatalf("close body = %+v, want cancelled close without integration", body)
 	}
 }
 
