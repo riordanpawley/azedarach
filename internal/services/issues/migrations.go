@@ -4,10 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
 //go:embed migrations/*.sql
@@ -51,10 +57,29 @@ var orderedMigrations = []migration{
 	{id: "0026_decision_search_fts", path: "migrations/0026_decision_search_fts.sql", apply: applyDecisionSearchFTSMigration},
 	{id: "0027_issue_id_allocations", path: "migrations/0027_issue_id_allocations.sql"},
 	{id: "0028_runtime_projection_order_indexes", path: "migrations/0028_runtime_projection_order_indexes.sql"},
+	{id: "0029_issue_state_model_v2"},
+}
+
+const (
+	issueStateModelV2MigrationID      = "0029_issue_state_model_v2"
+	issueStateModelVersionMetaKey     = "issue:state_model_version"
+	issueStateModelV2CutoverMarkerKey = "issue:state_model_v2_cutover"
+	issueStateModelV2Version          = "2"
+)
+
+type issueStateModelV2CutoverMarker struct {
+	State       string `json:"state"`
+	StartedAt   string `json:"started_at,omitempty"`
+	CompletedAt string `json:"completed_at,omitempty"`
+	BackupPath  string `json:"backup_path,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := ensureMigrationTable(ctx, db); err != nil {
+		return err
+	}
+	if err := refusePartialIssueStateModelV2Cutover(ctx, db); err != nil {
 		return err
 	}
 	if err := repairIssueBaseSchema(db); err != nil {
@@ -97,6 +122,12 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		}
 
 		if shouldApply {
+			if m.id == issueStateModelV2MigrationID {
+				if err := c.applyIssueStateModelV2Migration(ctx, db, m.id); err != nil {
+					return err
+				}
+				continue
+			}
 			if m.apply != nil {
 				if err := m.apply(ctx, db, m.id); err != nil {
 					return err
@@ -433,6 +464,418 @@ func (c *Client) applyMigration(ctx context.Context, db *sql.DB, id, sqlText str
 	}
 
 	return nil
+}
+
+func refusePartialIssueStateModelV2Cutover(ctx context.Context, db *sql.DB) error {
+	marker, ok, err := readIssueStateModelV2CutoverMarker(ctx, db)
+	if err != nil {
+		return fmt.Errorf("inspect issue state-model v2 cutover marker: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	switch marker.State {
+	case "complete", "":
+		return nil
+	default:
+		return issueStateModelV2CutoverError("refusing startup after partial issue state-model v2 cutover", marker.BackupPath, marker.Error)
+	}
+}
+
+func (c *Client) applyIssueStateModelV2Migration(ctx context.Context, db *sql.DB, id string) error {
+	issuesExists, err := tableExists(db, "issues")
+	if err != nil {
+		return fmt.Errorf("inspect migration %s issues table: %w", id, err)
+	}
+	if !issuesExists {
+		return recordAppliedMigration(ctx, db, id)
+	}
+
+	columns, err := tableColumns(db, "issues")
+	if err != nil {
+		return fmt.Errorf("inspect migration %s issues columns: %w", id, err)
+	}
+	targetColumns := []string{"lifecycle_state", "closed_outcome", "review_state", "archived_at"}
+	existingTargetColumns := 0
+	for _, column := range targetColumns {
+		if _, ok := columns[column]; ok {
+			existingTargetColumns++
+		}
+	}
+	if existingTargetColumns > 0 && existingTargetColumns != len(targetColumns) {
+		return issueStateModelV2CutoverError("refusing startup after partial issue state-model v2 schema cutover", "", "")
+	}
+	if existingTargetColumns == len(targetColumns) {
+		if err := validateIssueStateModelV2Rows(ctx, db); err != nil {
+			return fmt.Errorf("validate existing issue state-model v2 rows: %w", err)
+		}
+		if err := setIssueStateModelV2CompleteMarker(ctx, db, ""); err != nil {
+			return fmt.Errorf("mark existing issue state-model v2 migration complete: %w", err)
+		}
+		return recordAppliedMigration(ctx, db, id)
+	}
+
+	backupPath, err := c.backupIssueDBForStateModelV2(ctx, db)
+	if err != nil {
+		return fmt.Errorf("backup issue DB before migration %s: %w", id, err)
+	}
+	startedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := writeIssueStateModelV2CutoverMarker(ctx, db, issueStateModelV2CutoverMarker{
+		State:      "in_progress",
+		StartedAt:  startedAt,
+		BackupPath: backupPath,
+	}); err != nil {
+		return fmt.Errorf("mark migration %s in progress: %w", id, err)
+	}
+
+	if err := c.runIssueStateModelV2CutoverTransaction(ctx, db, id, backupPath, startedAt); err != nil {
+		marker := issueStateModelV2CutoverMarker{
+			State:      "failed",
+			StartedAt:  startedAt,
+			BackupPath: backupPath,
+			Error:      err.Error(),
+		}
+		if markerErr := writeIssueStateModelV2CutoverMarker(context.Background(), db, marker); markerErr != nil {
+			return issueStateModelV2CutoverError(
+				fmt.Sprintf("migration %s failed and failed to record rollback details: %v", id, markerErr),
+				backupPath,
+				err.Error(),
+			)
+		}
+		return issueStateModelV2CutoverError(fmt.Sprintf("migration %s rolled back", id), backupPath, err.Error())
+	}
+
+	return nil
+}
+
+func (c *Client) runIssueStateModelV2CutoverTransaction(ctx context.Context, db *sql.DB, id, backupPath, startedAt string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if err := c.issueStateModelV2FailurePoint("after_begin"); err != nil {
+		return err
+	}
+
+	for _, column := range []struct {
+		name string
+		ddl  string
+	}{
+		{name: "lifecycle_state", ddl: "TEXT"},
+		{name: "closed_outcome", ddl: "TEXT"},
+		{name: "review_state", ddl: "TEXT"},
+		{name: "archived_at", ddl: "TEXT"},
+	} {
+		exists, err := txColumnExists(ctx, tx, "issues", column.name)
+		if err != nil {
+			return fmt.Errorf("inspect migration %s column %s: %w", id, column.name, err)
+		}
+		if exists {
+			return issueStateModelV2CutoverError("refusing startup after partial issue state-model v2 schema cutover", backupPath, "")
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE issues ADD COLUMN %s %s`, column.name, column.ddl)); err != nil {
+			return fmt.Errorf("apply migration %s: add %s: %w", id, column.name, err)
+		}
+	}
+
+	if err := c.issueStateModelV2FailurePoint("after_columns"); err != nil {
+		return err
+	}
+
+	if err := mapIssueStateModelV2Rows(ctx, tx); err != nil {
+		return fmt.Errorf("apply migration %s: map v1 statuses: %w", id, err)
+	}
+
+	if err := c.issueStateModelV2FailurePoint("after_mapping"); err != nil {
+		return err
+	}
+	if err := validateIssueStateModelV2Rows(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s: %w", id, err)
+	}
+
+	completedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := writeIssueStateModelV2CutoverMarkerTx(ctx, tx, issueStateModelV2CutoverMarker{
+		State:       "complete",
+		StartedAt:   startedAt,
+		CompletedAt: completedAt,
+		BackupPath:  backupPath,
+	}); err != nil {
+		return fmt.Errorf("mark migration %s complete: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO meta (key, value)
+		VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, issueStateModelVersionMetaKey, issueStateModelV2Version); err != nil {
+		return fmt.Errorf("record migration %s state model version: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO schema_migrations (id, applied_at)
+		VALUES (?, ?)
+	`, id, completedAt); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+
+	if err := c.issueStateModelV2FailurePoint("before_commit"); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	tx = nil
+	return nil
+}
+
+func (c *Client) backupIssueDBForStateModelV2(ctx context.Context, db *sql.DB) (string, error) {
+	if strings.TrimSpace(c.dbPath) == "" || c.dbPath == ":memory:" {
+		return "", fmt.Errorf("cannot create SQLite backup for empty or in-memory issue DB path")
+	}
+	if err := c.issueStateModelV2FailurePoint("before_backup"); err != nil {
+		return "", err
+	}
+	dbPath, err := filepath.Abs(c.dbPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve DB path: %w", err)
+	}
+	backupPath := fmt.Sprintf("%s.state-model-v1.%s.bak", dbPath, time.Now().UTC().Format("20060102T150405.000000000Z"))
+	for i := 1; ; i++ {
+		if _, err := os.Stat(backupPath); err != nil {
+			if os.IsNotExist(err) {
+				break
+			}
+			return "", fmt.Errorf("inspect backup path: %w", err)
+		}
+		backupPath = fmt.Sprintf("%s.state-model-v1.%s.%d.bak", dbPath, time.Now().UTC().Format("20060102T150405.000000000Z"), i)
+	}
+	if _, err := db.ExecContext(ctx, `VACUUM INTO `+quoteSQLiteStringLiteral(backupPath)); err != nil {
+		return "", fmt.Errorf("vacuum into %s: %w", backupPath, err)
+	}
+	if err := c.issueStateModelV2FailurePoint("after_backup"); err != nil {
+		return "", err
+	}
+	return backupPath, nil
+}
+
+func validateIssueStateModelV2Rows(ctx context.Context, db sqlIssueQueryer) error {
+	checks := []struct {
+		name  string
+		query string
+	}{
+		{
+			name: "missing lifecycle_state",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE COALESCE(lifecycle_state, '') = ''`,
+		},
+		{
+			name: "invalid lifecycle_state",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE lifecycle_state NOT IN ('backlog', 'open', 'active', 'closed')`,
+		},
+		{
+			name: "missing closed_outcome for closed lifecycle",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE lifecycle_state = 'closed' AND COALESCE(closed_outcome, '') = ''`,
+		},
+		{
+			name: "missing closed_outcome for non-closed lifecycle",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE lifecycle_state <> 'closed' AND COALESCE(closed_outcome, '') = ''`,
+		},
+		{
+			name: "invalid closed_outcome",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE closed_outcome NOT IN ('none', 'completed', 'cancelled')`,
+		},
+		{
+			name: "missing review_state",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE COALESCE(review_state, '') = ''`,
+		},
+		{
+			name: "invalid review_state",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE review_state NOT IN ('none', 'requested')`,
+		},
+		{
+			name: "archive timestamp drift",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE COALESCE(archived_at, '') <> COALESCE(deleted_at, '')`,
+		},
+	}
+	for _, check := range checks {
+		var count int
+		if err := db.QueryRowContext(ctx, check.query).Scan(&count); err != nil {
+			return fmt.Errorf("%s: %w", check.name, err)
+		}
+		if count > 0 {
+			return fmt.Errorf("%s: %d rows", check.name, count)
+		}
+	}
+	return nil
+}
+
+func mapIssueStateModelV2Rows(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, status, priority, deleted_at
+		FROM issues
+		ORDER BY id
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type update struct {
+		id             string
+		lifecycleState string
+		closedOutcome  string
+		reviewState    string
+		archivedAt     sql.NullString
+	}
+	updates := []update{}
+	for rows.Next() {
+		var (
+			id        string
+			status    string
+			priority  int
+			deletedAt sql.NullString
+		)
+		if err := rows.Scan(&id, &status, &priority, &deletedAt); err != nil {
+			return err
+		}
+		state, err := domain.IssueStateFromLegacy(domain.LegacyIssueStateInput{
+			Status:   domain.Status(status),
+			Priority: domain.Priority(priority),
+			Archived: deletedAt.Valid && strings.TrimSpace(deletedAt.String) != "",
+		})
+		if err != nil {
+			return fmt.Errorf("issue %s: %w", id, err)
+		}
+		updates = append(updates, update{
+			id:             id,
+			lifecycleState: string(state.Workflow()),
+			closedOutcome:  string(state.CloseOutcome()),
+			reviewState:    string(state.Review()),
+			archivedAt:     deletedAt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, update := range updates {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE issues
+			SET lifecycle_state = ?,
+				closed_outcome = ?,
+				review_state = ?,
+				archived_at = ?
+			WHERE id = ?
+		`, update.lifecycleState, update.closedOutcome, update.reviewState, update.archivedAt, update.id); err != nil {
+			return fmt.Errorf("issue %s: %w", update.id, err)
+		}
+	}
+	return nil
+}
+
+func readIssueStateModelV2CutoverMarker(ctx context.Context, db *sql.DB) (issueStateModelV2CutoverMarker, bool, error) {
+	metaExists, err := tableExists(db, "meta")
+	if err != nil {
+		return issueStateModelV2CutoverMarker{}, false, err
+	}
+	if !metaExists {
+		return issueStateModelV2CutoverMarker{}, false, nil
+	}
+	var raw string
+	err = db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, issueStateModelV2CutoverMarkerKey).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return issueStateModelV2CutoverMarker{}, false, nil
+	}
+	if err != nil {
+		return issueStateModelV2CutoverMarker{}, false, err
+	}
+	var marker issueStateModelV2CutoverMarker
+	if err := json.Unmarshal([]byte(raw), &marker); err != nil {
+		return issueStateModelV2CutoverMarker{}, true, fmt.Errorf("decode marker: %w", err)
+	}
+	return marker, true, nil
+}
+
+func writeIssueStateModelV2CutoverMarker(ctx context.Context, db *sql.DB, marker issueStateModelV2CutoverMarker) error {
+	payload, err := json.Marshal(marker)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO meta (key, value)
+		VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, issueStateModelV2CutoverMarkerKey, string(payload))
+	return err
+}
+
+func writeIssueStateModelV2CutoverMarkerTx(ctx context.Context, tx *sql.Tx, marker issueStateModelV2CutoverMarker) error {
+	payload, err := json.Marshal(marker)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO meta (key, value)
+		VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, issueStateModelV2CutoverMarkerKey, string(payload))
+	return err
+}
+
+func setIssueStateModelV2CompleteMarker(ctx context.Context, db *sql.DB, backupPath string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := writeIssueStateModelV2CutoverMarker(ctx, db, issueStateModelV2CutoverMarker{
+		State:       "complete",
+		StartedAt:   now,
+		CompletedAt: now,
+		BackupPath:  backupPath,
+	}); err != nil {
+		return err
+	}
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO meta (key, value)
+		VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, issueStateModelVersionMetaKey, issueStateModelV2Version)
+	return err
+}
+
+func issueStateModelV2CutoverError(message, backupPath, cause string) error {
+	detail := strings.TrimSpace(message)
+	if strings.TrimSpace(backupPath) != "" {
+		detail += fmt.Sprintf("; backup=%s", backupPath)
+	}
+	if strings.TrimSpace(cause) != "" {
+		detail += fmt.Sprintf("; restore the backup before retrying; cause=%s", cause)
+	} else if strings.TrimSpace(backupPath) != "" {
+		detail += "; restore the backup before retrying"
+	}
+	return fmt.Errorf("%s", detail)
+}
+
+func (c *Client) issueStateModelV2FailurePoint(stage string) error {
+	if c.stateModelV2MigrationFailureHook == nil {
+		return nil
+	}
+	if err := c.stateModelV2MigrationFailureHook(stage); err != nil {
+		return fmt.Errorf("injected issue state-model v2 migration failure at %s: %w", stage, err)
+	}
+	return nil
+}
+
+func quoteSQLiteStringLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func applyDecisionSearchFTSMigration(ctx context.Context, db *sql.DB, id string) error {

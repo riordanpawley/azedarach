@@ -209,6 +209,8 @@ type Client struct {
 	db             *sql.DB
 	walMu          sync.Mutex
 	lastWALCheckAt time.Time
+
+	stateModelV2MigrationFailureHook func(stage string) error
 }
 
 type sqlIssueExecer interface {

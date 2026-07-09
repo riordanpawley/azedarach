@@ -3645,6 +3645,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0026_issue_ownership",
 		"0027_issue_id_allocations",
 		"0028_runtime_projection_order_indexes",
+		"0029_issue_state_model_v2",
 	}, got)
 }
 
