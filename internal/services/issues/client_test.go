@@ -154,6 +154,137 @@ func TestClient_CRUDLifecycle(t *testing.T) {
 	assert.Empty(t, tasks)
 }
 
+func TestClient_V2StateAuthorityDrivesLifecycleAndBacklogReadiness(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	backlogID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Later backlog task",
+		Type:     domain.TypeTask,
+		Priority: domain.P4,
+		Status:   domain.StatusOpen,
+	})
+	require.NoError(t, err)
+
+	db, err := sql.Open("sqlite", client.dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	var lifecycle, closedOutcome, reviewState, status string
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT lifecycle_state, closed_outcome, review_state, status
+		FROM issues
+		WHERE id = ?
+	`, backlogID).Scan(&lifecycle, &closedOutcome, &reviewState, &status))
+	assert.Equal(t, string(domain.IssueWorkflowBacklog), lifecycle)
+	assert.Equal(t, string(domain.IssueCloseNone), closedOutcome)
+	assert.Equal(t, string(domain.IssueReviewNone), reviewState)
+	assert.Equal(t, string(domain.StatusOpen), status)
+
+	ready, err := client.Ready(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, ready, "backlog issues must not be startable")
+
+	require.NoError(t, client.UpdateDetails(ctx, backlogID, UpdateTaskParams{
+		Title:    "Promoted backlog task",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	}))
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT lifecycle_state FROM issues WHERE id = ?`, backlogID).Scan(&lifecycle))
+	assert.Equal(t, string(domain.IssueWorkflowOpen), lifecycle)
+	ready, err = client.Ready(ctx)
+	require.NoError(t, err)
+	require.Len(t, ready, 1)
+	assert.Equal(t, backlogID, ready[0].ID.String())
+
+	require.NoError(t, client.Update(ctx, backlogID, domain.StatusInReview))
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT lifecycle_state, closed_outcome, review_state, status
+		FROM issues
+		WHERE id = ?
+	`, backlogID).Scan(&lifecycle, &closedOutcome, &reviewState, &status))
+	assert.Equal(t, string(domain.IssueWorkflowActive), lifecycle)
+	assert.Equal(t, string(domain.IssueCloseNone), closedOutcome)
+	assert.Equal(t, string(domain.IssueReviewRequested), reviewState)
+	assert.Equal(t, string(domain.StatusInReview), status)
+}
+
+func TestClient_CancelledOutcomeCountsAsClosedForParentClosure(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	parentID, err := client.Create(ctx, CreateTaskParams{Title: "Parent", Type: domain.TypeEpic, Priority: domain.P2})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{Title: "Cancelled child", Type: domain.TypeTask, Priority: domain.P2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, childID, parentID, string(domain.DependencyParentChild)))
+
+	require.NoError(t, client.Update(ctx, childID, domain.StatusCancelled))
+
+	db, err := sql.Open("sqlite", client.dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	var lifecycle, outcome, status string
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT lifecycle_state, closed_outcome, status
+		FROM issues
+		WHERE id = ?
+	`, childID).Scan(&lifecycle, &outcome, &status))
+	assert.Equal(t, string(domain.IssueWorkflowClosed), lifecycle)
+	assert.Equal(t, string(domain.IssueCloseCancelled), outcome)
+	assert.Equal(t, string(domain.StatusCancelled), status)
+
+	require.NoError(t, client.Update(ctx, parentID, domain.StatusDone))
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT lifecycle_state, closed_outcome
+		FROM issues
+		WHERE id = ?
+	`, parentID).Scan(&lifecycle, &outcome))
+	assert.Equal(t, string(domain.IssueWorkflowClosed), lifecycle)
+	assert.Equal(t, string(domain.IssueCloseCompleted), outcome)
+}
+
+func TestClient_ArchiveVisibilityUsesArchivedAtAuthority(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-v2-archive"
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:       "Archived by v2 state",
+		Description: "archive visibility body",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Archive(ctx, issueID))
+
+	db, err := sql.Open("sqlite", client.dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	var archivedAt sql.NullString
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT archived_at FROM issues WHERE id = ?`, issueID).Scan(&archivedAt))
+	require.True(t, archivedAt.Valid)
+	require.NotEmpty(t, strings.TrimSpace(archivedAt.String))
+
+	_, err = db.ExecContext(ctx, `UPDATE issues SET deleted_at = NULL WHERE id = ?`, issueID)
+	require.NoError(t, err)
+
+	active, err := client.ListWithRuntime(ctx, projectID)
+	require.NoError(t, err)
+	assert.NotContains(t, taskIDStrings(active), issueID)
+
+	archivedOnly, err := client.ListSummariesWithRuntimeArchiveMode(ctx, projectID, ArchiveOnly)
+	require.NoError(t, err)
+	assert.Contains(t, taskIDStrings(archivedOnly), issueID)
+
+	require.NoError(t, client.Unarchive(ctx, issueID))
+	active, err = client.ListWithRuntime(ctx, projectID)
+	require.NoError(t, err)
+	assert.Contains(t, taskIDStrings(active), issueID)
+}
+
 func TestClient_UpdateDetailsPreservesImplementationsWhenUnset(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -3646,6 +3777,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0027_issue_id_allocations",
 		"0028_runtime_projection_order_indexes",
 		"0029_issue_state_model_v2",
+		"0030_issue_closed_runtime_v2_triggers",
 	}, got)
 }
 

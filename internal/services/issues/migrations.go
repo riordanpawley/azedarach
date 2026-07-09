@@ -58,6 +58,7 @@ var orderedMigrations = []migration{
 	{id: "0027_issue_id_allocations", path: "migrations/0027_issue_id_allocations.sql"},
 	{id: "0028_runtime_projection_order_indexes", path: "migrations/0028_runtime_projection_order_indexes.sql"},
 	{id: "0029_issue_state_model_v2"},
+	{id: "0030_issue_closed_runtime_v2_triggers", apply: applyIssueClosedRuntimeV2TriggersMigration},
 }
 
 const (
@@ -547,6 +548,473 @@ func (c *Client) applyIssueStateModelV2Migration(ctx context.Context, db *sql.DB
 
 	return nil
 }
+
+func applyIssueClosedRuntimeV2TriggersMigration(ctx context.Context, db *sql.DB, id string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.ExecContext(ctx, issueClosedRuntimeProjectionTablesSQL); err != nil {
+		return fmt.Errorf("ensure migration %s runtime projection tables: %w", id, err)
+	}
+
+	for _, triggerName := range []string{
+		"issue_closed_runtime_guard_insert",
+		"issue_closed_runtime_guard_update",
+		"daemon_worktree_closed_issue_guard_insert",
+		"daemon_worktree_closed_issue_guard_update",
+		"daemon_session_closed_issue_guard_insert",
+		"daemon_session_closed_issue_guard_update",
+		"issue_dependency_closed_runtime_guard_insert",
+		"issue_dependency_closed_runtime_guard_update",
+		"issue_descendant_closed_ancestor_guard_update",
+	} {
+		if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+triggerName); err != nil {
+			return fmt.Errorf("drop trigger %s: %w", triggerName, err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, issueClosedRuntimeV2TriggersSQL); err != nil {
+		return fmt.Errorf("apply migration %s triggers: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO schema_migrations (id, applied_at)
+		VALUES (?, ?)
+	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	tx = nil
+	return nil
+}
+
+const issueClosedRuntimeProjectionTablesSQL = `
+CREATE TABLE IF NOT EXISTS daemon_session_projections (
+	project_id TEXT NOT NULL,
+	session_id TEXT NOT NULL,
+	issue_id TEXT NOT NULL,
+	state TEXT NOT NULL,
+	started_at TEXT,
+	updated_at TEXT NOT NULL,
+	tmux_attached_count INTEGER NOT NULL DEFAULT 0,
+	observed_state TEXT,
+	activity TEXT,
+	activity_source TEXT,
+	PRIMARY KEY (project_id, session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daemon_session_projections_project_issue
+	ON daemon_session_projections (project_id, issue_id);
+
+CREATE INDEX IF NOT EXISTS idx_daemon_session_projections_project_issue_updated
+	ON daemon_session_projections (project_id, issue_id, updated_at DESC, session_id DESC);
+
+CREATE TABLE IF NOT EXISTS daemon_worktree_projections (
+	project_id TEXT NOT NULL,
+	issue_id TEXT NOT NULL,
+	path TEXT NOT NULL,
+	branch TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	git_status_json TEXT,
+	git_status_updated_at TEXT,
+	PRIMARY KEY (project_id, issue_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daemon_worktree_projections_project_path
+	ON daemon_worktree_projections (project_id, path);
+`
+
+const issueClosedRuntimeV2TriggersSQL = `
+CREATE TRIGGER issue_closed_runtime_guard_insert
+BEFORE INSERT ON issues
+WHEN NEW.lifecycle_state = 'closed'
+BEGIN
+	SELECT RAISE(ABORT, 'closed issue cannot have active runtime attachments')
+	WHERE
+		EXISTS (
+			SELECT 1
+			FROM daemon_worktree_projections w
+			WHERE
+				w.issue_id = NEW.id
+				AND TRIM(COALESCE(w.path, '')) <> ''
+		)
+		OR EXISTS (
+			SELECT 1
+			FROM daemon_session_projections s
+			WHERE
+				s.issue_id = NEW.id
+				AND LOWER(TRIM(COALESCE(s.state, ''))) <> 'stopped'
+		)
+		OR EXISTS (
+			WITH RECURSIVE descendants(issue_id) AS (
+				SELECT d.issue_id
+				FROM issue_dependencies d
+				WHERE
+					d.depends_on_id = NEW.id
+					AND d.tombstoned_at IS NULL
+					AND d.dependency_type IN ('parent-child', 'parent_child')
+				UNION
+				SELECT d.issue_id
+				FROM descendants
+				JOIN issue_dependencies d ON d.depends_on_id = descendants.issue_id
+				WHERE
+					d.tombstoned_at IS NULL
+					AND d.dependency_type IN ('parent-child', 'parent_child')
+			)
+			SELECT 1
+			FROM descendants
+			JOIN issues child ON child.id = descendants.issue_id
+			WHERE
+				child.archived_at IS NULL
+				AND (
+					child.lifecycle_state <> 'closed'
+					OR
+					EXISTS (
+						SELECT 1
+						FROM daemon_worktree_projections w
+						WHERE
+							w.issue_id = child.id
+							AND TRIM(COALESCE(w.path, '')) <> ''
+					)
+					OR EXISTS (
+						SELECT 1
+						FROM daemon_session_projections s
+						WHERE
+							s.issue_id = child.id
+							AND LOWER(TRIM(COALESCE(s.state, ''))) <> 'stopped'
+					)
+				)
+		);
+END;
+
+CREATE TRIGGER issue_closed_runtime_guard_update
+BEFORE UPDATE OF lifecycle_state ON issues
+WHEN NEW.lifecycle_state = 'closed'
+BEGIN
+	SELECT RAISE(ABORT, 'closed issue cannot have active runtime attachments')
+	WHERE
+		EXISTS (
+			SELECT 1
+			FROM daemon_worktree_projections w
+			WHERE
+				w.issue_id = NEW.id
+				AND TRIM(COALESCE(w.path, '')) <> ''
+		)
+		OR EXISTS (
+			SELECT 1
+			FROM daemon_session_projections s
+			WHERE
+				s.issue_id = NEW.id
+				AND LOWER(TRIM(COALESCE(s.state, ''))) <> 'stopped'
+		)
+		OR EXISTS (
+			WITH RECURSIVE descendants(issue_id) AS (
+				SELECT d.issue_id
+				FROM issue_dependencies d
+				WHERE
+					d.depends_on_id = NEW.id
+					AND d.tombstoned_at IS NULL
+					AND d.dependency_type IN ('parent-child', 'parent_child')
+				UNION
+				SELECT d.issue_id
+				FROM descendants
+				JOIN issue_dependencies d ON d.depends_on_id = descendants.issue_id
+				WHERE
+					d.tombstoned_at IS NULL
+					AND d.dependency_type IN ('parent-child', 'parent_child')
+			)
+			SELECT 1
+			FROM descendants
+			JOIN issues child ON child.id = descendants.issue_id
+			WHERE
+				child.archived_at IS NULL
+				AND (
+					child.lifecycle_state <> 'closed'
+					OR
+					EXISTS (
+						SELECT 1
+						FROM daemon_worktree_projections w
+						WHERE
+							w.issue_id = child.id
+							AND TRIM(COALESCE(w.path, '')) <> ''
+					)
+					OR EXISTS (
+						SELECT 1
+						FROM daemon_session_projections s
+						WHERE
+							s.issue_id = child.id
+							AND LOWER(TRIM(COALESCE(s.state, ''))) <> 'stopped'
+					)
+				)
+		);
+END;
+
+CREATE TRIGGER daemon_worktree_closed_issue_guard_insert
+BEFORE INSERT ON daemon_worktree_projections
+WHEN TRIM(COALESCE(NEW.path, '')) <> ''
+BEGIN
+	SELECT RAISE(ABORT, 'cannot attach worktree to closed issue or closed ancestor')
+	WHERE EXISTS (
+		WITH RECURSIVE ancestors(issue_id) AS (
+			SELECT NEW.issue_id
+			UNION
+			SELECT d.depends_on_id
+			FROM ancestors
+			JOIN issue_dependencies d ON d.issue_id = ancestors.issue_id
+			WHERE
+				d.tombstoned_at IS NULL
+				AND d.dependency_type IN ('parent-child', 'parent_child')
+		)
+		SELECT 1
+		FROM ancestors
+		JOIN issues i ON i.id = ancestors.issue_id
+		WHERE
+			i.lifecycle_state = 'closed'
+			AND i.archived_at IS NULL
+	);
+END;
+
+CREATE TRIGGER daemon_worktree_closed_issue_guard_update
+BEFORE UPDATE OF issue_id, path ON daemon_worktree_projections
+WHEN TRIM(COALESCE(NEW.path, '')) <> ''
+BEGIN
+	SELECT RAISE(ABORT, 'cannot attach worktree to closed issue or closed ancestor')
+	WHERE EXISTS (
+		WITH RECURSIVE ancestors(issue_id) AS (
+			SELECT NEW.issue_id
+			UNION
+			SELECT d.depends_on_id
+			FROM ancestors
+			JOIN issue_dependencies d ON d.issue_id = ancestors.issue_id
+			WHERE
+				d.tombstoned_at IS NULL
+				AND d.dependency_type IN ('parent-child', 'parent_child')
+		)
+		SELECT 1
+		FROM ancestors
+		JOIN issues i ON i.id = ancestors.issue_id
+		WHERE
+			i.lifecycle_state = 'closed'
+			AND i.archived_at IS NULL
+	);
+END;
+
+CREATE TRIGGER daemon_session_closed_issue_guard_insert
+BEFORE INSERT ON daemon_session_projections
+WHEN LOWER(TRIM(COALESCE(NEW.state, ''))) <> 'stopped'
+BEGIN
+	SELECT RAISE(ABORT, 'cannot attach active session to closed issue or closed ancestor')
+	WHERE EXISTS (
+		WITH RECURSIVE ancestors(issue_id) AS (
+			SELECT NEW.issue_id
+			UNION
+			SELECT d.depends_on_id
+			FROM ancestors
+			JOIN issue_dependencies d ON d.issue_id = ancestors.issue_id
+			WHERE
+				d.tombstoned_at IS NULL
+				AND d.dependency_type IN ('parent-child', 'parent_child')
+		)
+		SELECT 1
+		FROM ancestors
+		JOIN issues i ON i.id = ancestors.issue_id
+		WHERE
+			i.lifecycle_state = 'closed'
+			AND i.archived_at IS NULL
+	);
+END;
+
+CREATE TRIGGER daemon_session_closed_issue_guard_update
+BEFORE UPDATE OF issue_id, state ON daemon_session_projections
+WHEN LOWER(TRIM(COALESCE(NEW.state, ''))) <> 'stopped'
+BEGIN
+	SELECT RAISE(ABORT, 'cannot attach active session to closed issue or closed ancestor')
+	WHERE EXISTS (
+		WITH RECURSIVE ancestors(issue_id) AS (
+			SELECT NEW.issue_id
+			UNION
+			SELECT d.depends_on_id
+			FROM ancestors
+			JOIN issue_dependencies d ON d.issue_id = ancestors.issue_id
+			WHERE
+				d.tombstoned_at IS NULL
+				AND d.dependency_type IN ('parent-child', 'parent_child')
+		)
+		SELECT 1
+		FROM ancestors
+		JOIN issues i ON i.id = ancestors.issue_id
+		WHERE
+			i.lifecycle_state = 'closed'
+			AND i.archived_at IS NULL
+	);
+END;
+
+CREATE TRIGGER issue_dependency_closed_runtime_guard_insert
+BEFORE INSERT ON issue_dependencies
+WHEN
+	NEW.tombstoned_at IS NULL
+	AND NEW.dependency_type IN ('parent-child', 'parent_child')
+BEGIN
+	SELECT RAISE(ABORT, 'cannot place unresolved descendant under closed issue')
+	WHERE
+		EXISTS (
+			WITH RECURSIVE ancestors(issue_id) AS (
+				SELECT NEW.depends_on_id
+				UNION
+				SELECT d.depends_on_id
+				FROM ancestors
+				JOIN issue_dependencies d ON d.issue_id = ancestors.issue_id
+				WHERE
+					d.tombstoned_at IS NULL
+					AND d.dependency_type IN ('parent-child', 'parent_child')
+			)
+			SELECT 1
+			FROM ancestors
+			JOIN issues i ON i.id = ancestors.issue_id
+			WHERE
+				i.lifecycle_state = 'closed'
+				AND i.archived_at IS NULL
+		)
+		AND EXISTS (
+			WITH RECURSIVE descendants(issue_id) AS (
+				SELECT NEW.issue_id
+				UNION
+				SELECT d.issue_id
+				FROM descendants
+				JOIN issue_dependencies d ON d.depends_on_id = descendants.issue_id
+				WHERE
+					d.tombstoned_at IS NULL
+					AND d.dependency_type IN ('parent-child', 'parent_child')
+			)
+			SELECT 1
+			FROM descendants
+			LEFT JOIN issues child ON child.id = descendants.issue_id
+			WHERE
+				(
+					child.id IS NOT NULL
+					AND child.archived_at IS NULL
+					AND child.lifecycle_state <> 'closed'
+				)
+				OR
+				EXISTS (
+					SELECT 1
+					FROM daemon_worktree_projections w
+					WHERE
+						w.issue_id = descendants.issue_id
+						AND TRIM(COALESCE(w.path, '')) <> ''
+				)
+				OR EXISTS (
+					SELECT 1
+					FROM daemon_session_projections s
+					WHERE
+						s.issue_id = descendants.issue_id
+						AND LOWER(TRIM(COALESCE(s.state, ''))) <> 'stopped'
+				)
+		);
+END;
+
+CREATE TRIGGER issue_dependency_closed_runtime_guard_update
+BEFORE UPDATE OF issue_id, depends_on_id, dependency_type, tombstoned_at ON issue_dependencies
+WHEN
+	NEW.tombstoned_at IS NULL
+	AND NEW.dependency_type IN ('parent-child', 'parent_child')
+BEGIN
+	SELECT RAISE(ABORT, 'cannot place unresolved descendant under closed issue')
+	WHERE
+		EXISTS (
+			WITH RECURSIVE ancestors(issue_id) AS (
+				SELECT NEW.depends_on_id
+				UNION
+				SELECT d.depends_on_id
+				FROM ancestors
+				JOIN issue_dependencies d ON d.issue_id = ancestors.issue_id
+				WHERE
+					d.tombstoned_at IS NULL
+					AND d.dependency_type IN ('parent-child', 'parent_child')
+			)
+			SELECT 1
+			FROM ancestors
+			JOIN issues i ON i.id = ancestors.issue_id
+			WHERE
+				i.lifecycle_state = 'closed'
+				AND i.archived_at IS NULL
+		)
+		AND EXISTS (
+			WITH RECURSIVE descendants(issue_id) AS (
+				SELECT NEW.issue_id
+				UNION
+				SELECT d.issue_id
+				FROM descendants
+				JOIN issue_dependencies d ON d.depends_on_id = descendants.issue_id
+				WHERE
+					d.tombstoned_at IS NULL
+					AND d.dependency_type IN ('parent-child', 'parent_child')
+			)
+			SELECT 1
+			FROM descendants
+			LEFT JOIN issues child ON child.id = descendants.issue_id
+			WHERE
+				(
+					child.id IS NOT NULL
+					AND child.archived_at IS NULL
+					AND child.lifecycle_state <> 'closed'
+				)
+				OR
+				EXISTS (
+					SELECT 1
+					FROM daemon_worktree_projections w
+					WHERE
+						w.issue_id = descendants.issue_id
+						AND TRIM(COALESCE(w.path, '')) <> ''
+				)
+				OR EXISTS (
+					SELECT 1
+					FROM daemon_session_projections s
+					WHERE
+						s.issue_id = descendants.issue_id
+						AND LOWER(TRIM(COALESCE(s.state, ''))) <> 'stopped'
+				)
+		);
+END;
+
+CREATE TRIGGER issue_descendant_closed_ancestor_guard_update
+BEFORE UPDATE OF lifecycle_state, archived_at ON issues
+WHEN NEW.lifecycle_state <> 'closed' AND NEW.archived_at IS NULL
+BEGIN
+	SELECT RAISE(ABORT, 'cannot move descendant out of closed under closed ancestor')
+	WHERE EXISTS (
+		WITH RECURSIVE ancestors(issue_id) AS (
+			SELECT d.depends_on_id
+			FROM issue_dependencies d
+			WHERE
+				d.issue_id = NEW.id
+				AND d.tombstoned_at IS NULL
+				AND d.dependency_type IN ('parent-child', 'parent_child')
+			UNION
+			SELECT d.depends_on_id
+			FROM ancestors
+			JOIN issue_dependencies d ON d.issue_id = ancestors.issue_id
+			WHERE
+				d.tombstoned_at IS NULL
+				AND d.dependency_type IN ('parent-child', 'parent_child')
+		)
+		SELECT 1
+		FROM ancestors
+		JOIN issues i ON i.id = ancestors.issue_id
+		WHERE
+			i.lifecycle_state = 'closed'
+			AND i.archived_at IS NULL
+	);
+END;
+`
 
 func (c *Client) runIssueStateModelV2CutoverTransaction(ctx context.Context, db *sql.DB, id, backupPath, startedAt string) error {
 	tx, err := db.BeginTx(ctx, nil)
