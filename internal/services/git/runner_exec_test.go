@@ -65,6 +65,27 @@ func TestGitOperationSkipsGlobalOptions(t *testing.T) {
 	}
 }
 
+func TestGitEnvWithOverridesReplacesExistingKeys(t *testing.T) {
+	got := gitEnvWithOverrides([]string{
+		"PATH=/bin",
+		"GIT_TRACE2_EVENT=/tmp/user-trace",
+		"GIT_DIR=/tmp/repo/.git",
+	}, []string{
+		"GIT_TRACE2_EVENT=/tmp/az-trace",
+	})
+
+	joined := strings.Join(got, "\n")
+	if strings.Contains(joined, "/tmp/user-trace") {
+		t.Fatalf("env = %v, still contains overridden trace2 value", got)
+	}
+	if !strings.Contains(joined, "GIT_TRACE2_EVENT=/tmp/az-trace") {
+		t.Fatalf("env = %v, missing replacement trace2 value", got)
+	}
+	if !strings.Contains(joined, "PATH=/bin") || !strings.Contains(joined, "GIT_DIR=/tmp/repo/.git") {
+		t.Fatalf("env = %v, want unrelated entries preserved", got)
+	}
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

@@ -29,6 +29,8 @@ var spanStringAttributeKeys = map[string]struct{}{
 	"dependency.name":      {},
 	"dependency.operation": {},
 	"freshness":            {},
+	"hook":                 {},
+	"hook_command_shape":   {},
 	"issue_id":             {},
 	"operation":            {},
 	"outcome":              {},

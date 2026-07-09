@@ -16,6 +16,10 @@ type CommandRunner interface {
 	Run(ctx context.Context, args ...string) (string, error)
 }
 
+type envCommandRunner interface {
+	RunWithEnv(ctx context.Context, extraEnv []string, args ...string) (string, error)
+}
+
 // ExecRunner implements CommandRunner using os/exec.
 type ExecRunner struct {
 	workDir string // Working directory for git commands
@@ -30,6 +34,14 @@ func NewExecRunner(workDir string) *ExecRunner {
 
 // Run executes a git command with the given arguments.
 func (e *ExecRunner) Run(ctx context.Context, args ...string) (out string, err error) {
+	return e.run(ctx, nil, args...)
+}
+
+func (e *ExecRunner) RunWithEnv(ctx context.Context, extraEnv []string, args ...string) (out string, err error) {
+	return e.run(ctx, extraEnv, args...)
+}
+
+func (e *ExecRunner) run(ctx context.Context, extraEnv []string, args ...string) (out string, err error) {
 	operation := gitOperation(args)
 	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "git",
 		"dependency.name", "git",
@@ -40,7 +52,7 @@ func (e *ExecRunner) Run(ctx context.Context, args ...string) (out string, err e
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = e.workDir
-	cmd.Env = sanitizedGitEnv(os.Environ())
+	cmd.Env = gitEnvWithOverrides(sanitizedGitEnv(os.Environ()), extraEnv)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -110,4 +122,29 @@ func sanitizedGitEnv(env []string) []string {
 		filtered = append(filtered, entry)
 	}
 	return filtered
+}
+
+func gitEnvWithOverrides(base, extra []string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	keys := make(map[string]struct{}, len(extra))
+	for _, entry := range extra {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && key != "" {
+			keys[key] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(base)+len(extra))
+	for _, entry := range base {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok {
+			if _, overridden := keys[key]; overridden {
+				continue
+			}
+		}
+		out = append(out, entry)
+	}
+	out = append(out, extra...)
+	return out
 }

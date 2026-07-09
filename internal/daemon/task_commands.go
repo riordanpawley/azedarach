@@ -175,6 +175,7 @@ type taskClosePhaseTiming struct {
 	Command    string `json:"command,omitempty"`
 	ExitStatus *int   `json:"exit_status,omitempty"`
 	Blocking   *bool  `json:"blocking,omitempty"`
+	TimedOut   *bool  `json:"timed_out,omitempty"`
 }
 
 type taskDeleteResult struct {
@@ -2508,6 +2509,8 @@ type taskCloseIntegrationResult struct {
 	HookDiagnostics []git.GitHookDiagnostic
 }
 
+const taskCloseSlowGitHookThreshold = 1 * time.Second
+
 func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID string, requested bool) (taskCloseIntegrationResult, error) {
 	if !requested {
 		return taskCloseIntegrationResult{}, nil
@@ -2636,6 +2639,7 @@ func recordTaskCloseHookPhases(ctx context.Context, result *taskCloseResult, log
 		}
 		exitStatus := hook.ExitStatus
 		blocking := hook.Blocking
+		timedOut := hook.TimedOut
 		phase := taskClosePhaseTiming{
 			Name:       name,
 			Hook:       hookName,
@@ -2643,6 +2647,7 @@ func recordTaskCloseHookPhases(ctx context.Context, result *taskCloseResult, log
 			ElapsedMS:  hook.ElapsedMS,
 			ExitStatus: &exitStatus,
 			Blocking:   &blocking,
+			TimedOut:   &timedOut,
 		}
 		result.Phases = append(result.Phases, phase)
 		startedAt := time.Now().Add(-time.Duration(hook.ElapsedMS) * time.Millisecond)
@@ -2652,10 +2657,27 @@ func recordTaskCloseHookPhases(ctx context.Context, result *taskCloseResult, log
 			"project_id", projectID,
 			"task_id", taskID,
 			"hook", hookName,
-			"hook_command", phase.Command,
+			"hook_command_shape", phase.Command,
+			"command_shape", phase.Command,
 			"exit_status", exitStatus,
 			"blocking", blocking,
+			"timed_out", timedOut,
 		)
+		if logger != nil && time.Duration(hook.ElapsedMS)*time.Millisecond >= taskCloseSlowGitHookThreshold {
+			logger.WarnContext(ctx, "slow task close git hook",
+				"event", "task.close.githook.slow",
+				"operation", "task.close",
+				"request_id", req.RequestID,
+				"project_id", projectID,
+				"task_id", taskID,
+				"hook", hookName,
+				"hook_command_shape", phase.Command,
+				"elapsed_ms", hook.ElapsedMS,
+				"exit_status", exitStatus,
+				"blocking", blocking,
+				"timed_out", timedOut,
+			)
+		}
 	}
 }
 

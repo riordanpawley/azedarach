@@ -26,6 +26,7 @@ import (
 type recordingGitRunner struct {
 	runFn            func(args ...string) (string, error)
 	runWithContextFn func(context.Context, ...string) (string, error)
+	runWithEnvFn     func(context.Context, []string, ...string) (string, error)
 }
 
 func cleanGitStatus() *git.GitStatus {
@@ -47,6 +48,13 @@ func (r *recordingGitRunner) Run(ctx context.Context, args ...string) (string, e
 		return "", nil
 	}
 	return r.runFn(args...)
+}
+
+func (r *recordingGitRunner) RunWithEnv(ctx context.Context, extraEnv []string, args ...string) (string, error) {
+	if r.runWithEnvFn != nil {
+		return r.runWithEnvFn(ctx, extraEnv, args...)
+	}
+	return r.Run(ctx, args...)
 }
 
 func newGitAdapterStore(t *testing.T, projectID, issueID, worktree string, status *git.GitStatus) *daemonstate.RuntimeStateStore {
