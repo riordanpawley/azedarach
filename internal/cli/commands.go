@@ -5726,20 +5726,36 @@ func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	ctx, cancel := context.WithTimeout(commandTraceContext(deps), daemonCommandTimeout)
 	defer cancel()
+	var commandErr error
+	ctx, endCommandSpan := latencytrace.StartSpan(ctx, "cli", "issue_doctor", "issue_id", opts.IssueID)
+	defer func() { endCommandSpan(commandErr) }()
+
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		commandErr = err
 		return err
 	}
 
-	task, _, ok, err := loadIssueMetadataTask(ctx, deps, opts.IssueID)
+	loadCtx, endLoadSpan := latencytrace.StartSpanWithEndAttributes(ctx, "cli", "issue_doctor.load_issue", "issue_id", opts.IssueID)
+	task, _, ok, err := loadIssueMetadataTask(loadCtx, deps, opts.IssueID)
+	loadOutcome := "found"
 	if err != nil {
-		return fmt.Errorf("failed to inspect issue %s: %w", opts.IssueID, err)
+		loadOutcome = "error"
+	} else if !ok {
+		loadOutcome = "not_found"
+	}
+	endLoadSpan(err, "outcome", loadOutcome)
+	if err != nil {
+		commandErr = fmt.Errorf("failed to inspect issue %s: %w", opts.IssueID, err)
+		return commandErr
 	}
 	if !ok {
-		return fmt.Errorf("issue not found: %s", opts.IssueID)
+		commandErr = fmt.Errorf("issue not found: %s", opts.IssueID)
+		return commandErr
 	}
 
+	_, endLocalSpan := latencytrace.StartSpanWithEndAttributes(ctx, "cli", "issue_doctor.local_checks", "issue_id", task.ID.String())
 	diagnostics := make([]string, 0, 4)
 	if strings.TrimSpace(task.Title) == "" {
 		diagnostics = append(diagnostics, "missing title")
@@ -5750,40 +5766,63 @@ func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
 	if strings.TrimSpace(task.Status.String()) == "" {
 		diagnostics = append(diagnostics, "missing status")
 	}
-	if mixedIssueResourceLifecycleHooksConfigured(deps) {
+	mixedLifecycleHooks := mixedIssueResourceLifecycleHooksConfigured(deps)
+	if mixedLifecycleHooks {
 		diagnostics = append(diagnostics, "issueResources config mixes reconcileCommand with one-shot prepare/cleanup hooks; verify lifecycle ownership is intentional")
 	}
-	diagnostics = append(diagnostics, issueDoctorRuntimeDiagnostics(ctx, deps, task)...)
-	walSummary, walPayload, walDiagnostics := issueDoctorSQLiteWALDiagnostics(ctx, deps, opts)
+	endLocalSpan(nil, "diagnostic_ct", len(diagnostics), "mixed_lifecycle_hooks", mixedLifecycleHooks)
+
+	runtimeCtx, endRuntimeSpan := latencytrace.StartSpanWithEndAttributes(ctx, "cli", "issue_doctor.runtime_diagnostics", "issue_id", task.ID.String())
+	runtimeDiagnostics := issueDoctorRuntimeDiagnostics(runtimeCtx, deps, task)
+	endRuntimeSpan(nil, "diagnostic_ct", len(runtimeDiagnostics), "has_session_metadata", task.Session != nil || task.HasTmuxSession, "has_worktree", task.HasWorktree)
+	diagnostics = append(diagnostics, runtimeDiagnostics...)
+
+	walCtx, endWALSpan := latencytrace.StartSpanWithEndAttributes(ctx, "cli", "issue_doctor.sqlite_wal", "issue_id", task.ID.String(), "checkpoint_wal", opts.CheckpointWAL, "truncate_wal", opts.TruncateWAL)
+	walSummary, walPayload, walDiagnostics := issueDoctorSQLiteWALDiagnostics(walCtx, deps, opts)
+	var walSpanErr error
+	walOutcome := "ok"
+	if _, ok := walPayload["error"]; ok {
+		walSpanErr = errors.New("sqlite wal diagnostics unavailable")
+		walOutcome = "error"
+	}
+	endWALSpan(walSpanErr, "diagnostic_ct", len(walDiagnostics), "outcome", walOutcome)
 	diagnostics = append(diagnostics, walDiagnostics...)
 
+	dependencySummary := formatDependencySummary(task.Dependencies)
+
+	_, endRenderSpan := latencytrace.StartSpanWithEndAttributes(ctx, "cli", "issue_doctor.render", "issue_id", task.ID.String(), "json", opts.JSON)
 	if len(diagnostics) == 0 {
 		if opts.JSON {
-			return printJSON(map[string]any{
+			commandErr = printJSON(map[string]any{
 				"issue_id":      task.ID,
 				"status":        "ok",
-				"dependencies":  formatDependencySummary(task.Dependencies),
+				"dependencies":  dependencySummary,
 				"sqlite_wal":    walPayload,
 				"diagnostics":   []string{},
 				"diagnostic_ct": 0,
 			})
+			endRenderSpan(commandErr, "outcome", "ok")
+			return commandErr
 		}
 		fmt.Printf("Doctor: OK %s\n", task.ID)
-		fmt.Printf("Dependencies: %s\n", formatDependencySummary(task.Dependencies))
+		fmt.Printf("Dependencies: %s\n", dependencySummary)
 		if walSummary != "" {
 			fmt.Printf("SQLite WAL: %s\n", walSummary)
 		}
+		endRenderSpan(nil, "outcome", "ok")
 		return nil
 	}
 	if opts.JSON {
-		return printJSON(map[string]any{
+		commandErr = printJSON(map[string]any{
 			"issue_id":      task.ID,
 			"status":        "warn",
-			"dependencies":  formatDependencySummary(task.Dependencies),
+			"dependencies":  dependencySummary,
 			"sqlite_wal":    walPayload,
 			"diagnostics":   diagnostics,
 			"diagnostic_ct": len(diagnostics),
 		})
+		endRenderSpan(commandErr, "outcome", "warn", "diagnostic_ct", len(diagnostics))
+		return commandErr
 	}
 	fmt.Printf("Doctor: WARN %s\n", task.ID)
 	if walSummary != "" {
@@ -5792,7 +5831,15 @@ func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
 	for _, diagnostic := range diagnostics {
 		fmt.Printf("- %s\n", diagnostic)
 	}
+	endRenderSpan(nil, "outcome", "warn", "diagnostic_ct", len(diagnostics))
 	return nil
+}
+
+func commandTraceContext(deps *Dependencies) context.Context {
+	if deps == nil || deps.TraceContext == nil {
+		return context.Background()
+	}
+	return deps.TraceContext
 }
 
 func issueDoctorSQLiteWALDiagnostics(ctx context.Context, deps *Dependencies, opts IssueDoctorOptions) (string, map[string]any, []string) {

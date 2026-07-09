@@ -21,10 +21,17 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/observability"
 	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 	prservice "github.com/riordanpawley/azedarach/internal/services/pr"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	_ "modernc.org/sqlite"
 )
 
@@ -9638,6 +9645,167 @@ func TestIssueDoctorWarnsOnRuntimeSessionMetadata(t *testing.T) {
 	}
 }
 
+func TestIssueDoctorCommandEmitsDiagnosticPhaseSpans(t *testing.T) {
+	now := time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC)
+	traceCtx, recorder, parentSpanID, cleanup := newCommandTraceContext(t)
+	defer cleanup()
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-1")
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:        "az-1",
+							Title:     "Doctor trace target",
+							Type:      domain.TypeTask,
+							Priority:  domain.P2,
+							Status:    domain.StatusOpen,
+							CreatedAt: now,
+							UpdatedAt: now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return responseWithBody(req, body), nil
+				case daemonclient.CommandTaskSQLiteWAL:
+					return responseWithJSON(req, protocol.TaskSQLiteWALResponse{
+						DBPath:              "/repo/.azedarach/issues.db",
+						WALPath:             "/repo/.azedarach/issues.db-wal",
+						WALBytes:            12,
+						CheckpointThreshold: 1048576,
+						LargeThreshold:      67108864,
+					}), nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+		TraceContext: traceCtx,
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueDoctorCommand(deps, IssueDoctorOptions{IssueID: "az-1"})
+	})
+	if !strings.Contains(output, "Doctor: OK az-1") {
+		t.Fatalf("doctor output = %q", output)
+	}
+
+	doctorSpan := findCommandSpan(t, recorder, "cli.issue_doctor")
+	if doctorSpan.Parent().SpanID() != parentSpanID {
+		t.Fatalf("doctor parent span = %s, want %s", doctorSpan.Parent().SpanID(), parentSpanID)
+	}
+	doctorAttrs := commandSpanAttrs(doctorSpan)
+	if doctorAttrs.strings["issue_id"] != "az-1" {
+		t.Fatalf("doctor issue_id attr = %q, want az-1", doctorAttrs.strings["issue_id"])
+	}
+
+	for _, name := range []string{
+		"cli.issue_doctor.load_issue",
+		"cli.issue_doctor.local_checks",
+		"cli.issue_doctor.runtime_diagnostics",
+		"cli.issue_doctor.sqlite_wal",
+		"cli.issue_doctor.render",
+	} {
+		span := findCommandSpan(t, recorder, name)
+		if span.Parent().SpanID() != doctorSpan.SpanContext().SpanID() {
+			t.Fatalf("%s parent span = %s, want doctor span %s", name, span.Parent().SpanID(), doctorSpan.SpanContext().SpanID())
+		}
+		attrs := commandSpanAttrs(span)
+		if attrs.strings["issue_id"] != "az-1" {
+			t.Fatalf("%s issue_id attr = %q, want az-1", name, attrs.strings["issue_id"])
+		}
+	}
+
+	loadAttrs := commandSpanAttrs(findCommandSpan(t, recorder, "cli.issue_doctor.load_issue"))
+	if loadAttrs.strings["outcome"] != "found" {
+		t.Fatalf("load outcome attr = %q, want found", loadAttrs.strings["outcome"])
+	}
+	renderAttrs := commandSpanAttrs(findCommandSpan(t, recorder, "cli.issue_doctor.render"))
+	if renderAttrs.strings["outcome"] != "ok" {
+		t.Fatalf("render outcome attr = %q, want ok", renderAttrs.strings["outcome"])
+	}
+	if renderAttrs.bools["json"] {
+		t.Fatalf("render json attr = true, want false")
+	}
+}
+
+func TestIssueDoctorCommandMarksWALPhaseSpanWhenDiagnosticsUnavailable(t *testing.T) {
+	now := time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC)
+	traceCtx, recorder, _, cleanup := newCommandTraceContext(t)
+	defer cleanup()
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGetMany:
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:        "az-1",
+							Title:     "Doctor WAL trace target",
+							Type:      domain.TypeTask,
+							Priority:  domain.P2,
+							Status:    domain.StatusOpen,
+							CreatedAt: now,
+							UpdatedAt: now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return responseWithBody(req, body), nil
+				case daemonclient.CommandTaskSQLiteWAL:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              false,
+						CompletedAt:     req.SentAt,
+						Error: &protocol.ErrorEnvelope{
+							Code:    protocol.ErrorCodeUnsupportedCommand,
+							Message: "unsupported command",
+						},
+					}, nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+		TraceContext: traceCtx,
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueDoctorCommand(deps, IssueDoctorOptions{IssueID: "az-1"})
+	})
+	if !strings.Contains(output, "Doctor: WARN az-1") ||
+		!strings.Contains(output, "sqlite wal diagnostics unavailable") {
+		t.Fatalf("doctor output = %q", output)
+	}
+
+	doctorSpan := findCommandSpan(t, recorder, "cli.issue_doctor")
+	if got := doctorSpan.Status().Code; got == codes.Error {
+		t.Fatalf("doctor span status = Error, want non-fatal WAL diagnostic failure")
+	}
+	walSpan := findCommandSpan(t, recorder, "cli.issue_doctor.sqlite_wal")
+	if got := walSpan.Status().Code; got != codes.Error {
+		t.Fatalf("wal span status = %v, want Error", got)
+	}
+	walAttrs := commandSpanAttrs(walSpan)
+	if !walAttrs.bools["error"] {
+		t.Fatalf("wal span missing error=true attr")
+	}
+	if walAttrs.strings["outcome"] != "error" {
+		t.Fatalf("wal outcome attr = %q, want error", walAttrs.strings["outcome"])
+	}
+}
+
 func TestIssueDeleteCommandBlocksWhenRuntimeAttachmentsPresent(t *testing.T) {
 	deleteCalled := false
 	deps := &Dependencies{
@@ -13990,6 +14158,54 @@ func contextRiskTestPacket() domain.IssueContextRiskPacket {
 			{IssueID: "az-4", Relationship: "sibling", Files: []string{"internal/daemon/task_commands.go"}, RiskNotes: []string{"same failure"}},
 		},
 	}
+}
+
+func newCommandTraceContext(t *testing.T) (context.Context, *tracetest.SpanRecorder, oteltrace.SpanID, func()) {
+	t.Helper()
+	t.Setenv(latencytrace.EnvVar, "")
+	t.Setenv(observability.EnvVar, "true")
+	latencytrace.SetConfigEnabled(false)
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(provider)
+	ctx, span := otel.Tracer("cli_commands_test").Start(context.Background(), "cli.command")
+	return ctx, recorder, span.SpanContext().SpanID(), func() {
+		span.End()
+		otel.SetTracerProvider(oteltrace.NewNoopTracerProvider())
+		latencytrace.SetConfigEnabled(false)
+	}
+}
+
+func findCommandSpan(t *testing.T, recorder *tracetest.SpanRecorder, name string) sdktrace.ReadOnlySpan {
+	t.Helper()
+	for _, span := range recorder.Ended() {
+		if span.Name() == name {
+			return span
+		}
+	}
+	t.Fatalf("ended span %q not found; got %d spans", name, len(recorder.Ended()))
+	return nil
+}
+
+type commandRecordedSpanAttrs struct {
+	strings map[string]string
+	bools   map[string]bool
+}
+
+func commandSpanAttrs(span sdktrace.ReadOnlySpan) commandRecordedSpanAttrs {
+	out := commandRecordedSpanAttrs{
+		strings: map[string]string{},
+		bools:   map[string]bool{},
+	}
+	for _, attr := range span.Attributes() {
+		switch attr.Value.Type().String() {
+		case "STRING":
+			out.strings[string(attr.Key)] = attr.Value.AsString()
+		case "BOOL":
+			out.bools[string(attr.Key)] = attr.Value.AsBool()
+		}
+	}
+	return out
 }
 
 func responseWithBody(req protocol.RequestEnvelope, body []byte) protocol.ResponseEnvelope {
