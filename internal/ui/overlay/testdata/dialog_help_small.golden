@@ -6,6 +6,7 @@
 ││   ?                     Open this help reference                  │
 ││   Space                 Open task workspace                       │
 ││   Q                     Open operation queue                      │
+││   B                     Open board view selector                  │
 ││   L                     Open event log                            │
 ││   N                     Open notification action center           │
 ││   O                     Open tmux sessions                        │
@@ -14,7 +15,6 @@
 ││   s                     Open settings                             │
 ││   c                     Open create task form                     │
 ││   X                     Open bulk cleanup                         │
-││   f                     Open filter menu                          │
 ││                                                                   │
 ││ [j/k/ctrl+u/d to scroll, g/G to jump]                             │
 ╰────────────────────────────────────────────────────────────────────╯

@@ -67,6 +67,24 @@ func printHelpForPath(path []string) bool {
 		fmt.Println("usage: az branch merge [--project <project-id>] [issue-id]")
 	case "branch agent-merge":
 		fmt.Println("usage: az branch agent-merge [--project <project-id>] <issue-id> [--target base|<issue-id>]")
+	case "board":
+		printBoardUsage()
+	case "board view":
+		printBoardViewUsage()
+	case "board view list":
+		printBoardViewCommandUsage("list")
+	case "board view get":
+		printBoardViewCommandUsage("get")
+	case "board view select":
+		printBoardViewCommandUsage("select")
+	case "board view create":
+		printBoardViewCommandUsage("create")
+	case "board view update":
+		printBoardViewCommandUsage("update")
+	case "board view delete":
+		printBoardViewCommandUsage("delete")
+	case "board view explain":
+		printBoardViewCommandUsage("explain")
 	case "worktree":
 		printWorktreeUsage()
 	case "worktree create":

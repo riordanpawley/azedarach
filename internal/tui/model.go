@@ -235,6 +235,8 @@ type Model struct {
 	overlayStack                        *overlay.Stack
 	createTaskOverlay                   *overlay.CreateTaskOverlay
 	viewMode                            ViewMode
+	boardViews                          []domain.BoardViewRecord
+	selectedBoardViewID                 string
 	orchestrationOverview               []orchestrationProjectOverview
 	orchestrationOverviewLoadedAt       time.Time
 	orchestrationOverviewHiddenProjects int
@@ -403,6 +405,7 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 		editor:                      editor.NewService(),
 		overlayStack:                overlay.NewStack(),
 		viewMode:                    ViewModeBoard, // Start with board view
+		selectedBoardViewID:         domain.DefaultBoardViewID,
 		runtimeSignalsByTask:        make(map[string]board.RuntimeSignals),
 		runtimeSignalWorktreeByTask: make(map[string]string),
 		runtimeSignalBranchByTask:   make(map[string]string),
@@ -846,6 +849,9 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keybinds.ActionOpenOperationQueue:
 		return m.openOperationQueueOverlay()
 
+	case keybinds.ActionOpenBoardViews:
+		return m, m.loadBoardViewsCmd()
+
 	case keybinds.ActionPullBase:
 		baseBranch := strings.TrimSpace(m.resolveBaseBranch())
 		if baseBranch == "" {
@@ -1270,6 +1276,17 @@ type uiViewModeLoadedMsg struct {
 type uiViewModeSavedMsg struct {
 	viewMode ViewMode
 	err      error
+}
+
+type boardViewsLoadedMsg struct {
+	views          []domain.BoardViewRecord
+	selectedViewID string
+	err            error
+}
+
+type boardViewSelectedMsg struct {
+	viewID string
+	err    error
 }
 
 type orchestrationOverviewLoadedMsg struct {
@@ -1798,6 +1815,44 @@ func (m Model) persistUIViewModeCmd(mode ViewMode) tea.Cmd {
 		defer cancel()
 		_, err := client.SetUIStateForProject(ctx, protocol.DefaultProjectID, protocol.UIStateKeyUIViewMode, value)
 		return uiViewModeSavedMsg{viewMode: mode, err: err}
+	}
+}
+
+func (m Model) loadBoardViewsCmd() tea.Cmd {
+	client := m.daemonClient
+	if client == nil {
+		return func() tea.Msg { return boardViewsLoadedMsg{err: fmt.Errorf("daemon client unavailable")} }
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		resp, err := client.ListBoardViews(ctx)
+		if err != nil {
+			return boardViewsLoadedMsg{err: err}
+		}
+		return boardViewsLoadedMsg{
+			views:          resp.Views,
+			selectedViewID: resp.SelectedViewID,
+		}
+	}
+}
+
+func (m Model) selectBoardViewCmd(viewID string) tea.Cmd {
+	client := m.daemonClient
+	viewID = strings.TrimSpace(viewID)
+	if client == nil {
+		return func() tea.Msg {
+			return boardViewSelectedMsg{viewID: viewID, err: fmt.Errorf("daemon client unavailable")}
+		}
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		resp, err := client.SelectBoardView(ctx, viewID)
+		if err != nil {
+			return boardViewSelectedMsg{viewID: viewID, err: err}
+		}
+		return boardViewSelectedMsg{viewID: resp.ViewID}
 	}
 }
 
