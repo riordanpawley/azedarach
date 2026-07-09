@@ -2670,6 +2670,14 @@ func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, source 
 		result.NoChanges = true
 		return result, nil
 	}
+	contained, err := d.git.CommitContainedInRef(ctx, targetWorktree, source.Branch, remoteBaseRef)
+	if err != nil {
+		return result, fmt.Errorf("inspect origin-mode close ancestry for %s against %s: %w", source.IssueID, remoteBaseRef, err)
+	}
+	if contained {
+		result.NoChanges = true
+		return result, nil
+	}
 	return result, fmt.Errorf(
 		"origin workflow close will not merge %s into the local %s checkout; %s still differs from %s (%d file(s): %s). Next: integrate through the remote workflow, fetch %s, then retry close",
 		source.Branch,
