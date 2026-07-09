@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
 )
@@ -68,5 +69,25 @@ func TestRenderMarkdownLinesCachedReusesRenderedWidth(t *testing.T) {
 	}
 	if strings.Join(third, "\n") == strings.Join(first, "\n") {
 		t.Fatalf("width change should refresh rendered lines")
+	}
+}
+
+func TestRenderMarkdownLinesCachedBoundsSynchronousRender(t *testing.T) {
+	oldRenderer := renderMarkdownDocument
+	defer func() { renderMarkdownDocument = oldRenderer }()
+
+	renderMarkdownDocument = func(ctx context.Context, source string, width int) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	startedAt := time.Now()
+	lines := renderMarkdownLinesCached(make(map[string]markdownRenderCacheEntry), "Description", "slow renderer body", 20)
+
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("renderMarkdownLinesCached took %v, want bounded synchronous render", elapsed)
+	}
+	if strings.Join(lines, "\n") != "slow renderer body" {
+		t.Fatalf("fallback lines = %q, want plain wrapped source", lines)
 	}
 }

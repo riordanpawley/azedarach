@@ -19,6 +19,8 @@ type markdownRenderCacheEntry struct {
 
 var renderMarkdownDocument = renderMarkdownDocumentWithFallback
 
+const markdownInlineRenderTimeout = 200 * time.Millisecond
+
 func renderMarkdownDocumentWithFallback(ctx context.Context, source string, width int) (string, error) {
 	width = max(10, width)
 	if rendered, err := renderMarkdownWithLeaf(ctx, source, width); err == nil {
@@ -83,7 +85,9 @@ func renderMarkdownLinesCached(
 	if entry, ok := cache[key]; ok && entry.source == source && entry.width == width {
 		return append([]string(nil), entry.lines...)
 	}
-	rendered, err := renderMarkdownDocument(context.Background(), source, width)
+	ctx, cancel := context.WithTimeout(context.Background(), markdownInlineRenderTimeout)
+	defer cancel()
+	rendered, err := renderMarkdownDocument(ctx, source, width)
 	if err != nil {
 		rendered = strings.Join(wrapDescriptionLines(source, width), "\n")
 	}
