@@ -62,34 +62,35 @@ type TaskCreatedMsg struct {
 type CreateTaskOverlay struct {
 	twoPaneDialogChrome
 	dialogViewportState
-	id              string
-	title           textinput.Model
-	description     textarea.Model
-	acceptanceInput textarea.Model
-	implOptions     []string
-	implCombos      [][]string
-	implComboIndex  int
-	taskType        domain.TaskType
-	priority        domain.Priority
-	status          domain.Status
-	assignee        string
-	labels          []string
-	impls           []string
-	design          string
-	notes           string
-	acceptance      string
-	estimate        *int
-	parentID        *string
-	focusIndex      int
-	styles          *Styles
-	editorError     string
-	editorFlow      func(string) (string, error)
-	defaults        createTaskDefaults
-	attachmentSvc   ImageAttachmentService
-	attachments     []attachment.Attachment
-	attachmentIndex int
-	attachmentError string
-	draftIssueID    string
+	id                string
+	title             textinput.Model
+	description       textarea.Model
+	acceptanceInput   textarea.Model
+	implOptions       []string
+	implCombos        [][]string
+	implComboIndex    int
+	taskType          domain.TaskType
+	priority          domain.Priority
+	status            domain.Status
+	assignee          string
+	labels            []string
+	impls             []string
+	design            string
+	notes             string
+	acceptance        string
+	estimate          *int
+	parentID          *string
+	focusIndex        int
+	styles            *Styles
+	editorError       string
+	editorFlow        func(string) (string, error)
+	defaults          createTaskDefaults
+	attachmentSvc     ImageAttachmentService
+	attachments       []attachment.Attachment
+	attachmentIndex   int
+	attachmentPreview attachmentPreviewState
+	attachmentError   string
+	draftIssueID      string
 }
 
 type createTaskDefaults struct {
@@ -453,12 +454,12 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "j", "down":
 			if c.focusIndex == focusAttachments && len(c.attachments) > 0 {
 				c.attachmentIndex = min(c.attachmentIndex+1, len(c.attachments)-1)
-				return c, nil
+				return c, c.loadSelectedAttachmentPreview()
 			}
 		case "k", "up":
 			if c.focusIndex == focusAttachments && len(c.attachments) > 0 {
 				c.attachmentIndex = max(0, c.attachmentIndex-1)
-				return c, nil
+				return c, c.loadSelectedAttachmentPreview()
 			}
 		case "d", "x":
 			if c.focusIndex == focusAttachments && len(c.attachments) > 0 && c.attachmentSvc != nil {
@@ -537,8 +538,9 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if len(c.attachments) == 0 {
 			c.attachmentIndex = 0
+			c.attachmentPreview = attachmentPreviewState{}
 		}
-		return c, nil
+		return c, c.loadSelectedAttachmentPreview()
 	case attachmentAddedMsg:
 		c.attachmentError = ""
 		c.upsertAttachment(msg.attachment)
@@ -565,17 +567,35 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case attachmentDeletedMsg:
 		c.attachmentError = ""
 		c.removeAttachment(msg.AttachmentID)
+		if len(c.attachments) == 0 {
+			c.attachmentPreview = attachmentPreviewState{}
+		}
 		if strings.TrimSpace(c.id) == "" {
-			return c, c.loadAttachments()
+			return c, tea.Batch(c.loadAttachments(), c.loadSelectedAttachmentPreview())
 		}
 		return c, tea.Batch(
 			c.loadAttachments(),
+			c.loadSelectedAttachmentPreview(),
 			func() tea.Msg {
 				return AttachmentActionMsg{
 					Action: "deleted",
 				}
 			},
 		)
+	case attachmentPreviewLoadedMsg:
+		if msg.attachmentID != c.selectedAttachmentID() {
+			return c, nil
+		}
+		if msg.err != nil {
+			c.attachmentPreview = attachmentPreviewState{
+				attachmentID: msg.attachmentID,
+				title:        "Attachment Preview",
+				err:          compactOverlayError(msg.err),
+			}
+			return c, nil
+		}
+		c.attachmentPreview = msg.preview
+		return c, nil
 	case errorMsg:
 		c.attachmentError = compactOverlayError(msg.err)
 		return c, func() tea.Msg {
@@ -998,10 +1018,28 @@ func (c *CreateTaskOverlay) renderAttachmentList() string {
 		lines = append(lines, style.Render(entry))
 	}
 	lines = append(lines, c.styles.Footer.Render("Ctrl+P paste clipboard  j/k navigate  d/x delete"))
+	if c.attachmentIndex >= 0 && c.attachmentIndex < len(c.attachments) {
+		lines = append(lines, c.renderSelectedAttachmentPreview())
+	}
 	if c.attachmentError != "" {
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8")).Render("Error: "+c.attachmentError))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (c *CreateTaskOverlay) renderSelectedAttachmentPreview() string {
+	if c.attachmentIndex < 0 || c.attachmentIndex >= len(c.attachments) {
+		return ""
+	}
+	selected := c.attachments[c.attachmentIndex]
+	preview := c.attachmentPreview
+	if preview.attachmentID != selected.ID {
+		preview = attachmentPreviewState{
+			attachmentID: selected.ID,
+			title:        previewTitle(selected),
+		}
+	}
+	return renderAttachmentPreviewBlock(c.styles, preview, 44)
 }
 
 func (c *CreateTaskOverlay) loadAttachments() tea.Cmd {
@@ -1044,6 +1082,20 @@ func (c *CreateTaskOverlay) deleteSelectedAttachment() tea.Cmd {
 		}
 		return attachmentDeletedMsg{AttachmentID: selected.ID}
 	}
+}
+
+func (c *CreateTaskOverlay) loadSelectedAttachmentPreview() tea.Cmd {
+	if c.attachmentIndex < 0 || c.attachmentIndex >= len(c.attachments) {
+		return nil
+	}
+	return loadAttachmentPreview(c.attachments[c.attachmentIndex])
+}
+
+func (c *CreateTaskOverlay) selectedAttachmentID() string {
+	if c.attachmentIndex < 0 || c.attachmentIndex >= len(c.attachments) {
+		return ""
+	}
+	return c.attachments[c.attachmentIndex].ID
 }
 
 func (c *CreateTaskOverlay) upsertAttachment(att *attachment.Attachment) {

@@ -32,6 +32,7 @@ type ImageAttachOverlay struct {
 	mode        imageAttachMode
 	files       []attachment.Attachment
 	cursor      int
+	preview     attachmentPreviewState
 	pathInput   textinput.Model
 	inputActive bool
 	error       string
@@ -103,12 +104,14 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "j", "down":
 			if i.mode == imageAttachModeList && len(i.files) > 0 {
 				i.cursor = min(i.cursor+1, len(i.files)-1)
+				return i, i.loadSelectedPreview()
 			}
 			return i, nil
 
 		case "k", "up":
 			if i.mode == imageAttachModeList && len(i.files) > 0 {
 				i.cursor = max(0, i.cursor-1)
+				return i, i.loadSelectedPreview()
 			}
 			return i, nil
 
@@ -159,7 +162,10 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if i.cursor >= len(i.files) && len(i.files) > 0 {
 			i.cursor = len(i.files) - 1
 		}
-		return i, nil
+		if len(i.files) == 0 {
+			i.preview = attachmentPreviewState{}
+		}
+		return i, i.loadSelectedPreview()
 
 	case attachmentAddedMsg:
 		i.error = ""
@@ -177,6 +183,9 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case attachmentDeletedMsg:
 		i.error = ""
 		// Reload attachments
+		if len(i.files) == 0 {
+			i.preview = attachmentPreviewState{}
+		}
 		return i, tea.Batch(
 			i.loadAttachments(),
 			func() tea.Msg {
@@ -185,6 +194,21 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			},
 		)
+
+	case attachmentPreviewLoadedMsg:
+		if msg.attachmentID != i.selectedAttachmentID() {
+			return i, nil
+		}
+		if msg.err != nil {
+			i.preview = attachmentPreviewState{
+				attachmentID: msg.attachmentID,
+				title:        "Attachment Preview",
+				err:          compactOverlayError(msg.err),
+			}
+			return i, nil
+		}
+		i.preview = msg.preview
+		return i, nil
 
 	case errorMsg:
 		i.error = compactOverlayError(msg.err)
@@ -266,7 +290,7 @@ func (i *ImageAttachOverlay) View() string {
 			minRight:          32,
 			leftFocused:       true,
 			renderLeft: func(mode dialogLayoutMode, width, height int) string {
-				return i.renderListContent()
+				return i.renderListContent(width, height)
 			},
 			renderRight: func(mode dialogLayoutMode, width, height int) string {
 				return i.renderListActions(width)
@@ -296,11 +320,11 @@ func (i *ImageAttachOverlay) View() string {
 			},
 		})
 	default:
-		return i.renderListContent()
+		return i.renderListContent(60, i.listModeHeight())
 	}
 }
 
-func (i *ImageAttachOverlay) renderListContent() string {
+func (i *ImageAttachOverlay) renderListContent(width, height int) string {
 	var content strings.Builder
 
 	if len(i.files) == 0 {
@@ -328,6 +352,12 @@ func (i *ImageAttachOverlay) renderListContent() string {
 			content.WriteString("\n")
 		}
 		content.WriteString(errorStyle.Render("Error: " + i.error))
+	}
+	if len(i.files) > 0 && i.cursor >= 0 && i.cursor < len(i.files) && height >= 13 {
+		if content.Len() > 0 {
+			content.WriteString("\n\n")
+		}
+		content.WriteString(i.renderSelectedPreview(max(20, min(44, width-4))))
 	}
 	return strings.TrimRight(content.String(), "\n")
 }
@@ -399,8 +429,25 @@ func (i *ImageAttachOverlay) renderPreviewContent() string {
 	b.WriteString(labelStyle.Render("Path:"))
 	b.WriteString("  ")
 	b.WriteString(valueStyle.Render(file.Path))
+	b.WriteString("\n\n")
+	b.WriteString(i.renderSelectedPreview(46))
 
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func (i *ImageAttachOverlay) renderSelectedPreview(width int) string {
+	if i.cursor < 0 || i.cursor >= len(i.files) {
+		return ""
+	}
+	selected := i.files[i.cursor]
+	preview := i.preview
+	if preview.attachmentID != selected.ID {
+		preview = attachmentPreviewState{
+			attachmentID: selected.ID,
+			title:        previewTitle(selected),
+		}
+	}
+	return renderAttachmentPreviewBlock(i.styles, preview, width)
 }
 
 func (i *ImageAttachOverlay) renderFileInputContent() string {
@@ -501,6 +548,20 @@ func (i *ImageAttachOverlay) deleteAttachment() tea.Cmd {
 		}
 		return attachmentDeletedMsg{AttachmentID: file.ID}
 	}
+}
+
+func (i *ImageAttachOverlay) loadSelectedPreview() tea.Cmd {
+	if i.cursor < 0 || i.cursor >= len(i.files) {
+		return nil
+	}
+	return loadAttachmentPreview(i.files[i.cursor])
+}
+
+func (i *ImageAttachOverlay) selectedAttachmentID() string {
+	if i.cursor < 0 || i.cursor >= len(i.files) {
+		return ""
+	}
+	return i.files[i.cursor].ID
 }
 
 func (i *ImageAttachOverlay) openInViewer() tea.Cmd {
