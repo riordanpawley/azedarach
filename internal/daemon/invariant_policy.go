@@ -41,6 +41,7 @@ const (
 	daemonInvariantOrchestrationSingleton  daemonInvariantID = "orchestration.scope_singleton"
 	daemonInvariantOrchestrationCompletion daemonInvariantID = "orchestration.project_completion"
 	daemonInvariantOrchestrationCandidates daemonInvariantID = "orchestration.project_candidates"
+	daemonInvariantOrchestrationReview     daemonInvariantID = "orchestration.project_review"
 	daemonInvariantOrchestrationClaimStart daemonInvariantID = "orchestration.claim_start"
 )
 
@@ -63,14 +64,15 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantTaskMergeBaseTarget:     daemonInvariantSourceProjection,
 	daemonInvariantTaskFollowOnMerge:       daemonInvariantSourceProjection,
 	daemonInvariantWorkerObservation:       daemonInvariantSourceHybrid,
-	daemonInvariantInteractionWaiting:     daemonInvariantSourceProjection,
-	daemonInvariantInteractionStaleness:   daemonInvariantSourceProjection,
+	daemonInvariantInteractionWaiting:      daemonInvariantSourceProjection,
+	daemonInvariantInteractionStaleness:    daemonInvariantSourceProjection,
 	daemonInvariantRuntimeKnownProjectIDs:  daemonInvariantSourceProjection,
 	daemonInvariantIssueResourceLifecycle:  daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationScope:      daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationSingleton:  daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationCompletion: daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationCandidates: daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationReview:     daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationClaimStart: daemonInvariantSourceHybrid,
 }
 
