@@ -152,6 +152,7 @@ fd "filename" -t f internal cmd
 6. Mutations remain write-through: update in-memory authority and durable projection, then publish events.
 7. Example matrix:
    - `session.start`/`session.attach`/`session.pause`/`session.resume`/`session.stop` runtime-presence checks -> `tmux`
+   - advisor-session singleton per interaction request -> `hybrid` (refreshed durable request/session-role projection + live tmux runtime)
    - session recovery/reconcile -> `hybrid`
    - `task.close`/`task.close_preflight`/`task.delete`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle and orchestration checks -> `hybrid` (read v2 issue lifecycle projection first, then compare with live runtime)
    - `task.review_handoff` external busy-equivalent session activity gate before moving to `in_review` -> `projection` (durable issue v2 lifecycle/review projection + session activity projection; active issue self-handoff remains allowed)

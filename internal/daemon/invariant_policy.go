@@ -18,6 +18,7 @@ const (
 	daemonInvariantSessionLifecycleTarget daemonInvariantID = "session.lifecycle_target"
 	daemonInvariantSessionStopTargets     daemonInvariantID = "session.stop_targets"
 	daemonInvariantSessionReconcile       daemonInvariantID = "session.reconcile"
+	daemonInvariantAdvisorSingleton       daemonInvariantID = "session.advisor_singleton"
 
 	daemonInvariantTaskListFreshness   daemonInvariantID = "task.list_freshness"
 	daemonInvariantTaskClose           daemonInvariantID = "task.close"
@@ -47,6 +48,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantSessionLifecycleTarget:  daemonInvariantSourceTmux,
 	daemonInvariantSessionStopTargets:      daemonInvariantSourceTmux,
 	daemonInvariantSessionReconcile:        daemonInvariantSourceHybrid,
+	daemonInvariantAdvisorSingleton:        daemonInvariantSourceHybrid,
 	daemonInvariantTaskListFreshness:       daemonInvariantSourceProjection,
 	daemonInvariantTaskClose:               daemonInvariantSourceHybrid,
 	daemonInvariantTaskClosePreflight:      daemonInvariantSourceHybrid,

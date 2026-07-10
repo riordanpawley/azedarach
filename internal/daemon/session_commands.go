@@ -264,6 +264,9 @@ func sessionProjectionLatestByIssueKey(sessions []daemonstate.Session, namingSco
 func sessionProjectionAggregateByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
 	byIssueKey := make(map[string]daemonstate.Session, len(sessions))
 	for _, session := range sessions {
+		if session.Role == daemonstate.SessionRoleAdvisor {
+			continue
+		}
 		if isAgentScopedSessionID(session.ID) {
 			continue
 		}
@@ -316,6 +319,9 @@ func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingSco
 	byIssueKey := make(map[string]sessionProjectionCounts, len(sessions))
 	liveAgentRowsByKey := make(map[string]int, len(sessions))
 	for _, session := range sessions {
+		if session.Role == daemonstate.SessionRoleAdvisor {
+			continue
+		}
 		if !isAgentScopedSessionID(session.ID) {
 			continue
 		}
@@ -333,6 +339,9 @@ func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingSco
 		}
 	}
 	for _, session := range sessions {
+		if session.Role == daemonstate.SessionRoleAdvisor {
+			continue
+		}
 		state := session.State
 		observed := session.ObservedState
 		if strings.TrimSpace(string(observed)) == "" {
@@ -3430,6 +3439,9 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 		}
 		tasks[i].Session = &domain.Session{
 			IssueID:           naming.IssueID(taskID),
+			Role:              string(session.Role),
+			ScopeKind:         string(session.ScopeKind),
+			ScopeID:           session.ScopeID,
 			State:             state,
 			Activity:          activity,
 			ActivitySource:    activitySource,
@@ -3450,6 +3462,9 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 func activeSessionIssueKeysFromProjection(sessions []daemonstate.Session, namingScope string) map[string]struct{} {
 	active := make(map[string]struct{}, len(sessions))
 	for _, session := range sessions {
+		if session.Role == daemonstate.SessionRoleAdvisor {
+			continue
+		}
 		state := session.State
 		observed := session.ObservedState
 		if strings.TrimSpace(string(observed)) == "" {

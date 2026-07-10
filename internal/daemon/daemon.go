@@ -1695,6 +1695,9 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 		Session: protocol.SessionProjection{
 			SessionID: parseSessionIDOrZero(session.ID),
 			IssueID:   parseIssueIDOrZero(session.IssueID),
+			Role:      protocol.SessionRole(session.Role),
+			ScopeKind: protocol.SessionScopeKind(session.ScopeKind),
+			ScopeID:   strings.TrimSpace(session.ScopeID),
 			State:     protocol.SessionLifecycleState(session.State),
 			UpdatedAt: session.UpdatedAt,
 		},

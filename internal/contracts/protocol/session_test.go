@@ -32,6 +32,15 @@ func TestSessionProjectionContractConstants(t *testing.T) {
 	}
 }
 
+func TestSessionRoleContractConstants(t *testing.T) {
+	if SessionRoleWorker != "worker" || SessionRoleOrchestrator != "orchestrator" || SessionRoleAdvisor != "advisor" {
+		t.Fatalf("unexpected session roles: %q %q %q", SessionRoleWorker, SessionRoleOrchestrator, SessionRoleAdvisor)
+	}
+	if SessionScopeIssue != "issue" || SessionScopeOrchestration != "orchestration" || SessionScopeInteraction != "interaction" {
+		t.Fatalf("unexpected session scopes: %q %q %q", SessionScopeIssue, SessionScopeOrchestration, SessionScopeInteraction)
+	}
+}
+
 func TestSessionProjectionEventBodyJSONShapeIsDeterministic(t *testing.T) {
 	updatedAt := time.Date(2026, time.March, 31, 1, 2, 3, 456789000, time.UTC)
 	payload := SessionProjectionEventBody{

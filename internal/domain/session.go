@@ -10,6 +10,9 @@ import (
 // Session represents an active Claude session
 type Session struct {
 	IssueID           naming.IssueID `json:"issue_id"`
+	Role              string         `json:"role,omitempty"`
+	ScopeKind         string         `json:"scope_kind,omitempty"`
+	ScopeID           string         `json:"scope_id,omitempty"`
 	State             SessionState   `json:"state"`
 	Activity          string         `json:"activity,omitempty"`
 	ActivitySource    string         `json:"activity_source,omitempty"`
