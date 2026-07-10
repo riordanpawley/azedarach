@@ -3333,7 +3333,11 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 		return tasks
 	}
 	defer func() {
-		waiting, err := d.issueClientForProject(projectID).UnresolvedInteractionIssueIDs(ctx)
+		issueClient := d.issueClientForProject(projectID)
+		if issueClient == nil {
+			return
+		}
+		waiting, err := issueClient.UnresolvedInteractionIssueIDs(ctx)
 		if err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("refresh interaction projection while enriching tasks failed", "project_id", projectID, "error", err)
