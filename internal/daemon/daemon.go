@@ -771,6 +771,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskCreate(ctx, req)
 	case "task.close":
 		return d.handleTaskClose(ctx, req)
+	case "task.bulk_cleanup":
+		return d.handleTaskBulkCleanup(ctx, req)
 	case "task.close_preflight":
 		return d.handleTaskClosePreflight(ctx, req)
 	case "task.delete_preflight":

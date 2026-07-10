@@ -267,6 +267,19 @@ type IssueCloseOptions struct {
 	CloseCleanChildren bool
 }
 
+type IssueCleanupOptions struct {
+	Project         string
+	IDs             []string
+	Statuses        []string
+	Query           string
+	UpdatedBefore   *time.Time
+	Limit           int
+	Action          string
+	DryRun          bool
+	JSON            bool
+	PerIssueTimeout time.Duration
+}
+
 type IssueUpdateOptions struct {
 	Project         string
 	IssueID         string
@@ -3710,6 +3723,64 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	return opts, nil
 }
 
+func ParseIssueCleanupArgs(args []string) (IssueCleanupOptions, error) {
+	opts := IssueCleanupOptions{Action: "closed", PerIssueTimeout: issueCloseCleanupTimeout}
+	var idsCSV, statusesCSV, updatedBefore string
+	fs := flag.NewFlagSet("issue cleanup", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.Func("id", "issue id (repeatable)", func(v string) error { opts.IDs = append(opts.IDs, v); return nil })
+	fs.StringVar(&idsCSV, "ids", "", "comma-separated issue ids")
+	fs.Func("status", "candidate status (repeatable)", func(v string) error { opts.Statuses = append(opts.Statuses, v); return nil })
+	fs.StringVar(&statusesCSV, "statuses", "", "comma-separated candidate statuses")
+	fs.StringVar(&opts.Query, "query", "", "case-insensitive candidate text query")
+	fs.StringVar(&updatedBefore, "updated-before", "", "candidate update cutoff")
+	fs.IntVar(&opts.Limit, "limit", 0, "maximum candidates (0 means unlimited)")
+	fs.StringVar(&opts.Action, "action", "closed", "lifecycle action: closed or cancelled")
+	fs.BoolVar(&opts.DryRun, "dry-run", false, "preview ordered actions without changing issues")
+	fs.BoolVar(&opts.JSON, "json", false, "output structured per-issue results")
+	fs.DurationVar(&opts.PerIssueTimeout, "per-issue-timeout", issueCloseCleanupTimeout, "maximum time for each issue cleanup")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueCleanupOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return IssueCleanupOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	if idsCSV != "" {
+		opts.IDs = append(opts.IDs, strings.Split(idsCSV, ",")...)
+	}
+	if statusesCSV != "" {
+		opts.Statuses = append(opts.Statuses, strings.Split(statusesCSV, ",")...)
+	}
+	opts.IDs = dedupeOrderedIDs(opts.IDs)
+	for i := range opts.Statuses {
+		opts.Statuses[i] = strings.ToLower(strings.TrimSpace(opts.Statuses[i]))
+	}
+	opts.Statuses = dedupeOrderedIDs(opts.Statuses)
+	opts.Action = strings.ToLower(strings.TrimSpace(opts.Action))
+	if opts.Action != "closed" && opts.Action != "cancelled" {
+		return IssueCleanupOptions{}, fmt.Errorf("action must be closed or cancelled")
+	}
+	if opts.Limit < 0 {
+		return IssueCleanupOptions{}, fmt.Errorf("limit must be >= 0")
+	}
+	if opts.PerIssueTimeout <= 0 {
+		return IssueCleanupOptions{}, fmt.Errorf("per-issue-timeout must be positive")
+	}
+	if strings.TrimSpace(opts.Query) != "" && len(domain.ContentQueryTerms(opts.Query)) == 0 {
+		return IssueCleanupOptions{}, fmt.Errorf("query must contain a searchable term")
+	}
+	var err error
+	if opts.UpdatedBefore, err = parseIssueListDateFilter(updatedBefore, true); err != nil {
+		return IssueCleanupOptions{}, fmt.Errorf("invalid --updated-before: %w", err)
+	}
+	if len(opts.IDs) == 0 && len(opts.Statuses) == 0 && strings.TrimSpace(opts.Query) == "" && opts.UpdatedBefore == nil {
+		return IssueCleanupOptions{}, fmt.Errorf("at least one --id/--ids or candidate filter is required")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
 func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 	opts := IssueDeleteOptions{}
 	issueIDFlag := ""
@@ -6303,6 +6374,67 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 	}
 	printTaskClosePhases(result.Phases)
 	return nil
+}
+
+func IssueCleanupCommand(deps *Dependencies, opts IssueCleanupOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+	startupCtx, startupCancel := context.WithTimeout(context.Background(), issueCloseCleanupTimeout)
+	if err := ensureDaemon(startupCtx, deps, "cli"); err != nil {
+		startupCancel()
+		return err
+	}
+	startupCancel()
+	// The daemon applies an independent deadline to every selected issue. A
+	// batch-wide deadline derived from that same duration would starve later
+	// items in a sequential batch, so the transport parent remains cancellable
+	// but intentionally has no deadline of its own.
+	ctx, cancel := newIssueCleanupBatchContext()
+	defer cancel()
+	result, err := deps.DaemonClient.BulkCleanupTasks(ctx, daemonclient.TaskBulkCleanupRequest{
+		TaskIDs: opts.IDs, Statuses: opts.Statuses, Query: opts.Query, UpdatedBefore: opts.UpdatedBefore,
+		Limit: opts.Limit, DryRun: opts.DryRun, CloseOutcome: opts.Action, PerIssueTimeout: opts.PerIssueTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("bulk issue cleanup failed: %w", err)
+	}
+	failures := 0
+	for _, item := range result.Items {
+		if item.Error != "" {
+			failures++
+		}
+	}
+	if opts.JSON {
+		if err := printJSON(result); err != nil {
+			return err
+		}
+		if failures > 0 {
+			return fmt.Errorf("%d issue cleanup operation(s) failed", failures)
+		}
+		return nil
+	}
+	verb := "Cleanup"
+	if opts.DryRun {
+		verb = "Would clean up"
+	}
+	for _, item := range result.Items {
+		state := "ok"
+		if item.Skipped {
+			state = "already " + item.Action
+		}
+		if item.Error != "" {
+			state = "failed: " + item.Error
+		}
+		fmt.Printf("%s %s as %s: %s\n", verb, item.TaskID, item.Action, state)
+	}
+	if failures > 0 {
+		return fmt.Errorf("%d issue cleanup operation(s) failed", failures)
+	}
+	return nil
+}
+
+func newIssueCleanupBatchContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(context.Background())
 }
 
 func taskClosePhaseJSON(phases []daemonclient.TaskClosePhaseTiming) []map[string]any {

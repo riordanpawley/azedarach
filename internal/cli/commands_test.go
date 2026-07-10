@@ -5661,6 +5661,33 @@ func TestParseIssueCloseArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueCleanupArgs(t *testing.T) {
+	opts, err := ParseIssueCleanupArgs([]string{"--id", "az-1", "--statuses", "open,in_review", "--action", "cancelled", "--dry-run", "--per-issue-timeout", "2s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opts.IDs) != 1 || len(opts.Statuses) != 2 || opts.Action != "cancelled" || !opts.DryRun || opts.PerIssueTimeout != 2*time.Second {
+		t.Fatalf("opts = %+v", opts)
+	}
+	if _, err := ParseIssueCleanupArgs(nil); err == nil || !strings.Contains(err.Error(), "at least one") {
+		t.Fatalf("missing selector error = %v", err)
+	}
+	if _, err := ParseIssueCleanupArgs([]string{"--id", "az-1", "--action", "deleted"}); err == nil {
+		t.Fatal("invalid action accepted")
+	}
+	if _, err := ParseIssueCleanupArgs([]string{"--query", "--"}); err == nil || !strings.Contains(err.Error(), "searchable term") {
+		t.Fatalf("punctuation-only query error = %v", err)
+	}
+}
+
+func TestIssueCleanupBatchParentDoesNotConsumePerIssueBudget(t *testing.T) {
+	ctx, cancel := newIssueCleanupBatchContext()
+	defer cancel()
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("batch parent has deadline; later items can lose their per-issue budget")
+	}
+}
+
 func TestParseIssueDeleteArgs(t *testing.T) {
 	got, err := ParseIssueDeleteArgs([]string{"--confirm", "az-1"})
 	if err != nil {

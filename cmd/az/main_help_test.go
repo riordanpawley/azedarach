@@ -205,6 +205,7 @@ func TestMaybePrintCommandHelpCoversRoutedCommandSurface(t *testing.T) {
 		{"issue", "split"},
 		{"issue", "update"},
 		{"issue", "close"},
+		{"issue", "cleanup"},
 		{"issue", "delete"},
 		{"issue", "image"},
 		{"issue", "image", "add"},
