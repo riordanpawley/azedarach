@@ -26,8 +26,10 @@ type CodexDaemonController interface {
 }
 
 type systemCodexDaemonController struct {
-	scan   func(context.Context) ([]codexDaemonProcess, bool, error)
-	signal func(int) error
+	scan          func(context.Context) ([]codexDaemonProcess, bool, error)
+	signal        func(int) error
+	nativeRunning func(context.Context, string) bool
+	nativeRestart func(context.Context, string) error
 }
 
 type codexDaemonProcess struct {
@@ -39,7 +41,9 @@ type codexDaemonProcess struct {
 
 func newSystemCodexDaemonController() CodexDaemonController {
 	return systemCodexDaemonController{
-		scan: scanCodexDaemonProcesses,
+		scan:          scanCodexDaemonProcesses,
+		nativeRunning: nativeCodexDaemonRunning,
+		nativeRestart: restartNativeCodexDaemon,
 		signal: func(pid int) error {
 			process, err := os.FindProcess(pid)
 			if err != nil {
@@ -51,6 +55,18 @@ func newSystemCodexDaemonController() CodexDaemonController {
 }
 
 func (c systemCodexDaemonController) Reload(ctx context.Context, codexHome string, reload bool) (protocol.AIAccountCodexDaemonReload, error) {
+	if c.nativeRunning != nil && c.nativeRunning(ctx, codexHome) {
+		result := protocol.AIAccountCodexDaemonReload{Supported: true, NativeDaemon: true}
+		if !reload {
+			return result, nil
+		}
+		if c.nativeRestart != nil && c.nativeRestart(ctx, codexHome) == nil {
+			result.NativeRestarted = true
+			return result, nil
+		}
+		// A failed native lifecycle operation falls through to the conservative
+		// legacy detector rather than making a completed credential swap fail.
+	}
 	processes, supported, err := c.scan(ctx)
 	if err != nil {
 		return protocol.AIAccountCodexDaemonReload{}, err
@@ -96,6 +112,34 @@ func (c systemCodexDaemonController) Reload(ctx context.Context, codexHome strin
 	sort.Ints(result.FailedPIDs)
 	sort.Strings(result.Subcommands)
 	return result, nil
+}
+
+func nativeCodexDaemonRunning(ctx context.Context, codexHome string) bool {
+	command := exec.CommandContext(ctx, "codex", "app-server", "daemon", "version")
+	command.Env = environmentWithCodexHome(codexHome)
+	return command.Run() == nil
+}
+
+func restartNativeCodexDaemon(ctx context.Context, codexHome string) error {
+	command := exec.CommandContext(ctx, "codex", "app-server", "daemon", "restart")
+	command.Env = environmentWithCodexHome(codexHome)
+	command.Stdout = io.Discard
+	command.Stderr = io.Discard
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("native daemon restart failed: %w", err)
+	}
+	return nil
+}
+
+func environmentWithCodexHome(codexHome string) []string {
+	env := os.Environ()
+	out := make([]string, 0, len(env)+1)
+	for _, value := range env {
+		if !strings.HasPrefix(value, "CODEX_HOME=") {
+			out = append(out, value)
+		}
+	}
+	return append(out, "CODEX_HOME="+codexHome)
 }
 
 func scanCodexDaemonProcesses(ctx context.Context) ([]codexDaemonProcess, bool, error) {

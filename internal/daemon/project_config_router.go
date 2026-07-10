@@ -14,6 +14,7 @@ type daemonProjectRuntimeConfig struct {
 	CLITool                    string
 	IssueTracker               appconfig.IssueTrackerConfig
 	DangerouslySkipPermissions bool
+	CodexAppServer             bool
 	SessionShell               string
 	SessionSyncInitCommands    []string
 	SessionAsyncInitCommands   []string
@@ -48,6 +49,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		CLITool:                    strings.TrimSpace(d.cfg.CLITool),
 		IssueTracker:               appconfig.DefaultConfig().IssueTracker,
 		DangerouslySkipPermissions: d.cfg.DangerouslySkipPermissions,
+		CodexAppServer:             d.cfg.CodexAppServer,
 		SessionShell:               strings.TrimSpace(d.cfg.SessionShell),
 		SessionSyncInitCommands:    append([]string(nil), d.cfg.SessionSyncInitCommands...),
 		SessionAsyncInitCommands:   append([]string(nil), d.cfg.SessionAsyncInitCommands...),
@@ -94,6 +96,12 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	}
 	if d.sessionShellByRoot == nil {
 		d.sessionShellByRoot = map[string]string{}
+	}
+	if d.codexAppServerByProject == nil {
+		d.codexAppServerByProject = map[string]bool{}
+	}
+	if d.codexAppServerByRoot == nil {
+		d.codexAppServerByRoot = map[string]bool{}
 	}
 	if d.sessionSyncInitCommandsByProject == nil {
 		d.sessionSyncInitCommandsByProject = map[string][]string{}
@@ -149,6 +157,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		if shell, ok := d.sessionShellByProject[projectID]; ok && strings.TrimSpace(shell) != "" {
 			cfg.SessionShell = shell
 		}
+		cfg.CodexAppServer = d.codexAppServerByProject[projectID]
 		if cmds, ok := d.sessionSyncInitCommandsByProject[projectID]; ok {
 			cfg.SessionSyncInitCommands = append([]string(nil), cmds...)
 		}
@@ -191,6 +200,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			if shell, ok := d.sessionShellByRoot[repoDir]; ok && strings.TrimSpace(shell) != "" {
 				cfg.SessionShell = shell
 			}
+			cfg.CodexAppServer = d.codexAppServerByRoot[repoDir]
 			if cmds, ok := d.sessionSyncInitCommandsByRoot[repoDir]; ok {
 				cfg.SessionSyncInitCommands = append([]string(nil), cmds...)
 			}
@@ -216,6 +226,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			d.workflowModeByProject[projectID] = cfg.WorkflowMode
 			d.cliToolByProject[projectID] = cfg.CLITool
 			d.sessionShellByProject[projectID] = cfg.SessionShell
+			d.codexAppServerByProject[projectID] = cfg.CodexAppServer
 			d.sessionSyncInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionSyncInitCommands...)
 			d.sessionAsyncInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionAsyncInitCommands...)
 			d.worktreeInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeInitCommands...)
@@ -241,6 +252,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 				}
 				cfg.IssueTracker = loaded.IssueTracker
 				cfg.DangerouslySkipPermissions = loaded.Session.DangerouslySkipPermissions
+				cfg.CodexAppServer = loaded.Session.CodexAppServer
 				if shell := strings.TrimSpace(loaded.Session.Shell); shell != "" {
 					cfg.SessionShell = shell
 				}
@@ -263,6 +275,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	d.workflowModeByProject[projectID] = cfg.WorkflowMode
 	d.cliToolByProject[projectID] = cfg.CLITool
 	d.sessionShellByProject[projectID] = cfg.SessionShell
+	d.codexAppServerByProject[projectID] = cfg.CodexAppServer
 	d.sessionSyncInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionSyncInitCommands...)
 	d.sessionAsyncInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionAsyncInitCommands...)
 	d.worktreeInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeInitCommands...)
@@ -278,6 +291,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		d.workflowModeByRoot[repoDir] = cfg.WorkflowMode
 		d.cliToolByRoot[repoDir] = cfg.CLITool
 		d.sessionShellByRoot[repoDir] = cfg.SessionShell
+		d.codexAppServerByRoot[repoDir] = cfg.CodexAppServer
 		d.sessionSyncInitCommandsByRoot[repoDir] = append([]string(nil), cfg.SessionSyncInitCommands...)
 		d.sessionAsyncInitCommandsByRoot[repoDir] = append([]string(nil), cfg.SessionAsyncInitCommands...)
 		d.worktreeInitCommandsByRoot[repoDir] = append([]string(nil), cfg.WorktreeInitCommands...)

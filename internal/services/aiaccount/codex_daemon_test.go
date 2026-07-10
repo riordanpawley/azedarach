@@ -66,6 +66,48 @@ func TestSystemCodexDaemonControllerScopesAndFailsSafe(t *testing.T) {
 	}
 }
 
+func TestSystemCodexDaemonControllerPrefersNativeLifecycle(t *testing.T) {
+	scanned := false
+	restarted := false
+	controller := systemCodexDaemonController{
+		nativeRunning: func(context.Context, string) bool { return true },
+		nativeRestart: func(_ context.Context, home string) error {
+			restarted = home == "/profiles/work"
+			return nil
+		},
+		scan: func(context.Context) ([]codexDaemonProcess, bool, error) {
+			scanned = true
+			return nil, true, nil
+		},
+	}
+	result, err := controller.Reload(context.Background(), "/profiles/work", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.NativeDaemon || !result.NativeRestarted || !restarted || scanned {
+		t.Fatalf("native result=%+v restarted=%v scanned=%v", result, restarted, scanned)
+	}
+}
+
+func TestSystemCodexDaemonControllerFallsBackAfterNativeRestartFailure(t *testing.T) {
+	var signaled []int
+	controller := systemCodexDaemonController{
+		nativeRunning: func(context.Context, string) bool { return true },
+		nativeRestart: func(context.Context, string) error { return errors.New("restart failed") },
+		scan: func(context.Context) ([]codexDaemonProcess, bool, error) {
+			return []codexDaemonProcess{{pid: 42, subcommand: "app-server", codexHome: "/profiles/work", attributed: true}}, true, nil
+		},
+		signal: func(pid int) error { signaled = append(signaled, pid); return nil },
+	}
+	result, err := controller.Reload(context.Background(), "/profiles/work", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NativeRestarted || !reflect.DeepEqual(signaled, []int{42}) || !reflect.DeepEqual(result.ReloadedPIDs, []int{42}) {
+		t.Fatalf("fallback result=%+v signaled=%v", result, signaled)
+	}
+}
+
 func TestCodexHomeFromEnvironment(t *testing.T) {
 	tests := []struct {
 		name       string

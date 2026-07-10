@@ -176,6 +176,11 @@ func AIAccountCommand(deps *Dependencies, opts AIAccountOptions) error {
 				fmt.Println("Codex daemon reload is not supported on this platform; restart it manually.")
 			} else if !opts.ReloadDaemon && len(reload.DetectedPIDs) > 0 {
 				fmt.Printf("Detected %d scoped Codex daemon process(es); re-run with --reload-daemon to switch them.\n", len(reload.DetectedPIDs))
+			} else if !opts.ReloadDaemon && reload.NativeDaemon {
+				fmt.Println("Detected the native Codex app-server daemon; re-run with --reload-daemon to switch it.")
+			}
+			if reload.NativeRestarted {
+				fmt.Println("Restarted the native Codex app-server daemon.")
 			}
 			if len(reload.ReloadedPIDs) > 0 {
 				fmt.Printf("Reloaded %d scoped Codex daemon process(es).\n", len(reload.ReloadedPIDs))
@@ -188,11 +193,15 @@ func AIAccountCommand(deps *Dependencies, opts AIAccountOptions) error {
 			}
 		}
 		if result.RestartExistingProcesses {
-			qualifier := ""
-			if result.CodexDaemonReload != nil && len(result.CodexDaemonReload.ReloadedPIDs) > 0 {
-				qualifier = "other "
+			if result.CodexDaemonReload != nil && result.CodexDaemonReload.NativeRestarted {
+				fmt.Println("Restart any legacy standalone Codex processes still using the previous account.")
+			} else {
+				qualifier := ""
+				if result.CodexDaemonReload != nil && len(result.CodexDaemonReload.ReloadedPIDs) > 0 {
+					qualifier = "other "
+				}
+				fmt.Printf("Restart any %sexisting %s processes to use the activated profile.\n", qualifier, result.Profile.Provider)
 			}
-			fmt.Printf("Restart any %sexisting %s processes to use the activated profile.\n", qualifier, result.Profile.Provider)
 		}
 	case AIAccountDelete:
 		result, err := deps.DaemonClient.DeleteAIAccount(ctx, protocol.AIAccountDeleteRequestBody{Provider: opts.Provider, Name: opts.Name, Confirm: opts.Confirm})

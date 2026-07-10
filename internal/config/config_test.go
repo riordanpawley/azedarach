@@ -89,6 +89,15 @@ func TestDefaultConfig(t *testing.T) {
 	assert.NotNil(t, cfg.GitHooks.Commands)
 	assert.False(t, cfg.GitHooks.Restage.Enabled)
 	assert.NotNil(t, cfg.GitHooks.Restage.Paths)
+	assert.False(t, cfg.Session.CodexAppServer)
+}
+
+func TestLoadConfigEnablesCodexAppServer(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFile(t, root, `{"$schema":"./config.schema.json","$version":11,"cliTool":"codex","session":{"codexAppServer":true}}`)
+	cfg, err := LoadConfig(root)
+	require.NoError(t, err)
+	assert.True(t, cfg.Session.CodexAppServer)
 }
 
 func TestConfigSchemaVersionMatchesCurrentConfigVersion(t *testing.T) {

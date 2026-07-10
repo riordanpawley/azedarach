@@ -70,6 +70,7 @@ type Config struct {
 	GitWorkflowMode            string
 	CLITool                    string
 	DangerouslySkipPermissions bool
+	CodexAppServer             bool
 	SessionShell               string
 	SessionSyncInitCommands    []string
 	SessionAsyncInitCommands   []string
@@ -109,6 +110,8 @@ type Daemon struct {
 	cliToolByRoot                      map[string]string
 	sessionShellByProject              map[string]string
 	sessionShellByRoot                 map[string]string
+	codexAppServerByProject            map[string]bool
+	codexAppServerByRoot               map[string]bool
 	sessionSyncInitCommandsByProject   map[string][]string
 	sessionSyncInitCommandsByRoot      map[string][]string
 	sessionAsyncInitCommandsByProject  map[string][]string
@@ -276,6 +279,8 @@ func New(cfg Config) *Daemon {
 		cliToolByRoot:                      map[string]string{},
 		sessionShellByProject:              map[string]string{},
 		sessionShellByRoot:                 map[string]string{},
+		codexAppServerByProject:            map[string]bool{},
+		codexAppServerByRoot:               map[string]bool{},
 		sessionSyncInitCommandsByProject:   map[string][]string{},
 		sessionSyncInitCommandsByRoot:      map[string][]string{},
 		sessionAsyncInitCommandsByProject:  map[string][]string{},

@@ -94,6 +94,7 @@ func main() {
 		GitWorkflowMode:            cfg.Git.WorkflowMode,
 		CLITool:                    cfg.CLITool,
 		DangerouslySkipPermissions: cfg.Session.DangerouslySkipPermissions,
+		CodexAppServer:             cfg.Session.CodexAppServer,
 		SessionShell:               cfg.Session.Shell,
 		SessionSyncInitCommands:    cfg.Session.SyncInitCommands,
 		SessionAsyncInitCommands:   cfg.Session.AsyncInitCommands,

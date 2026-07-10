@@ -66,6 +66,8 @@ type AIAccountActivateRequestBody struct {
 
 type AIAccountCodexDaemonReload struct {
 	Supported         bool     `json:"supported" msgpack:"supported"`
+	NativeDaemon      bool     `json:"native_daemon,omitempty" msgpack:"native_daemon,omitempty"`
+	NativeRestarted   bool     `json:"native_restarted,omitempty" msgpack:"native_restarted,omitempty"`
 	InspectionFailed  bool     `json:"inspection_failed,omitempty" msgpack:"inspection_failed,omitempty"`
 	DetectedPIDs      []int    `json:"detected_pids,omitempty" msgpack:"detected_pids,omitempty"`
 	ReloadedPIDs      []int    `json:"reloaded_pids,omitempty" msgpack:"reloaded_pids,omitempty"`
