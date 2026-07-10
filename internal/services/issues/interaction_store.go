@@ -239,15 +239,17 @@ func (c *Client) ResolveInteraction(ctx context.Context, in InteractionResolutio
 			return fmt.Errorf("interaction identity and creation audit are immutable")
 		}
 		ch := in.IssueChanges
-		res, err := tx.ExecContext(ctx, `UPDATE issues SET title=CASE WHEN ? THEN ? ELSE title END,description=CASE WHEN ? THEN ? ELSE description END,design=CASE WHEN ? THEN ? ELSE design END,acceptance=CASE WHEN ? THEN ? ELSE acceptance END,priority=CASE WHEN ? THEN ? ELSE priority END,updated_at=? WHERE id=?`, ch.Title != nil, valueString(ch.Title), ch.Description != nil, valueString(ch.Description), ch.Design != nil, valueString(ch.Design), ch.Acceptance != nil, valueString(ch.Acceptance), ch.Priority != nil, valueInt(ch.Priority), in.Request.UpdatedAt.UTC().Format(time.RFC3339Nano), in.Request.IssueID)
-		if err != nil {
-			return err
-		}
-		if n, _ := res.RowsAffected(); n != 1 {
-			return domain.ErrNotFound
-		}
-		if err := c.appendIssueObservationEvent(ctx, tx, in.Request.IssueID, domain.IssueEventIssueDetailsChanged, map[string]any{"source": "interaction.resolve", "interaction_id": in.Request.ID}); err != nil {
-			return err
+		if interactionIssueChangesApproved(ch) {
+			res, err := tx.ExecContext(ctx, `UPDATE issues SET title=CASE WHEN ? THEN ? ELSE title END,description=CASE WHEN ? THEN ? ELSE description END,design=CASE WHEN ? THEN ? ELSE design END,acceptance=CASE WHEN ? THEN ? ELSE acceptance END,priority=CASE WHEN ? THEN ? ELSE priority END,updated_at=? WHERE id=?`, ch.Title != nil, valueString(ch.Title), ch.Description != nil, valueString(ch.Description), ch.Design != nil, valueString(ch.Design), ch.Acceptance != nil, valueString(ch.Acceptance), ch.Priority != nil, valueInt(ch.Priority), in.Request.UpdatedAt.UTC().Format(time.RFC3339Nano), in.Request.IssueID)
+			if err != nil {
+				return err
+			}
+			if n, _ := res.RowsAffected(); n != 1 {
+				return domain.ErrNotFound
+			}
+			if err := c.appendIssueObservationEvent(ctx, tx, in.Request.IssueID, domain.IssueEventIssueDetailsChanged, map[string]any{"source": "interaction.resolve", "interaction_id": in.Request.ID}); err != nil {
+				return err
+			}
 		}
 		if in.Decision != nil {
 			d := in.Decision
@@ -287,6 +289,9 @@ func (c *Client) ResolveInteraction(ctx context.Context, in InteractionResolutio
 		}
 		return c.RefreshInteractionProjection(ctx)
 	})
+}
+func interactionIssueChangesApproved(ch InteractionIssueChanges) bool {
+	return ch.Title != nil || ch.Description != nil || ch.Design != nil || ch.Acceptance != nil || ch.Priority != nil
 }
 func valueString(v *string) string {
 	if v == nil {
