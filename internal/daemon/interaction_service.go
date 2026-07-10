@@ -101,19 +101,22 @@ func (s issueInteractionService) MutateInteraction(ctx context.Context, command 
 		return protocol.InteractionResponseBody{}, domain.ErrNotFound
 	}
 	now := time.Now().UTC()
-	discussAttached := false
+	runtimeResult := advisorSessionRuntimeResult{}
 	switch command {
 	case protocol.CommandInteractionDiscuss:
+		if !interactionRuntimeActor(in.Actor) {
+			return protocol.InteractionResponseBody{}, fmt.Errorf("advisor sessions have no discussion lifecycle authority")
+		}
 		projectID := daemonProjectIDFromContext(ctx)
 		priorSessionID := strings.TrimSpace(r.SessionID)
-		advisor, attached, acquireErr := s.daemon.ensureAdvisorSessionRuntime(ctx, projectID, r)
+		var acquireErr error
+		runtimeResult, acquireErr = s.daemon.ensureAdvisorSessionRuntime(ctx, projectID, r)
 		if acquireErr != nil {
 			return protocol.InteractionResponseBody{}, acquireErr
 		}
-		discussAttached = attached
-		r.SessionID = advisor.SessionID
-		if attached && r.State == domain.InteractionDiscussing && priorSessionID == advisor.SessionID {
-			return protocol.InteractionResponseBody{Request: r, SessionAttached: true}, nil
+		r.SessionID = runtimeResult.Session.SessionID
+		if r.State == domain.InteractionDiscussing && priorSessionID == runtimeResult.Session.SessionID {
+			return s.runtimeResponse(r, now, runtimeResult), nil
 		}
 		r, e = r.Transition(domain.InteractionDiscussing, in.ExpectedRevision, now)
 	case protocol.CommandInteractionPropose:
@@ -140,9 +143,20 @@ func (s issueInteractionService) MutateInteraction(ctx context.Context, command 
 		r.Disposition = &domain.InteractionDispositionAudit{Actor: strings.TrimSpace(in.Actor), Reason: strings.TrimSpace(in.Reason), ReplacementID: strings.TrimSpace(in.ReplacementID), CreatedAt: now}
 		r, e = r.Transition(domain.InteractionSuperseded, in.ExpectedRevision, now)
 	case protocol.CommandInteractionRecover:
-		r, e = r.Recover(in.Actor, in.SessionID, in.ExpectedRevision, now)
+		if !interactionRuntimeActor(in.Actor) {
+			return protocol.InteractionResponseBody{}, fmt.Errorf("advisor sessions have no recovery authority")
+		}
+		var recoverErr error
+		runtimeResult, recoverErr = s.daemon.ensureAdvisorSessionRuntime(ctx, daemonProjectIDFromContext(ctx), r)
+		if recoverErr != nil {
+			return protocol.InteractionResponseBody{}, recoverErr
+		}
+		r, e = r.Recover(in.Actor, runtimeResult.Session.SessionID, in.ExpectedRevision, now)
 	}
 	if e != nil {
+		if runtimeResult.Started {
+			s.cleanupAdvisorAfterFailedInteractionMutation(ctx, c, in.ID, runtimeResult.Session.SessionID)
+		}
 		return protocol.InteractionResponseBody{}, e
 	}
 	if command == protocol.CommandInteractionRecover {
@@ -151,6 +165,9 @@ func (s issueInteractionService) MutateInteraction(ctx context.Context, command 
 		e = c.UpdateInteraction(ctx, r, in.ExpectedRevision)
 	}
 	if e != nil {
+		if runtimeResult.Started {
+			s.cleanupAdvisorAfterFailedInteractionMutation(ctx, c, in.ID, runtimeResult.Session.SessionID)
+		}
 		return protocol.InteractionResponseBody{}, e
 	}
 	switch command {
@@ -164,9 +181,8 @@ func (s issueInteractionService) MutateInteraction(ctx context.Context, command 
 		s.publishLifecycle(ctx, protocol.EventInteractionRecovered, r, 0, "")
 	}
 	response := s.response(r, now)
-	if command == protocol.CommandInteractionDiscuss {
-		response.SessionStarted = !discussAttached
-		response.SessionAttached = discussAttached
+	if command == protocol.CommandInteractionDiscuss || command == protocol.CommandInteractionRecover {
+		response = s.runtimeResponse(r, now, runtimeResult)
 	}
 	return response, nil
 }
@@ -241,6 +257,22 @@ func (s issueInteractionService) cleanupAdvisorAfterTerminalInteraction(ctx cont
 	}
 }
 
+func (s issueInteractionService) cleanupAdvisorAfterFailedInteractionMutation(ctx context.Context, c *issues.Client, requestID, sessionID string) {
+	current, found, err := c.GetInteraction(ctx, requestID)
+	if err == nil && found && current.Unresolved() && strings.TrimSpace(current.SessionID) == strings.TrimSpace(sessionID) {
+		return
+	}
+	s.cleanupAdvisorAfterTerminalInteraction(ctx, requestID)
+}
+
+func (s issueInteractionService) runtimeResponse(r domain.InteractionRequest, now time.Time, runtime advisorSessionRuntimeResult) protocol.InteractionResponseBody {
+	response := s.response(r, now)
+	response.SessionStarted = runtime.Started
+	response.SessionAttached = runtime.Attached
+	response.SessionResumed = runtime.Resumed
+	return response
+}
+
 func (s issueInteractionService) response(r domain.InteractionRequest, now time.Time) protocol.InteractionResponseBody {
 	return protocol.InteractionResponseBody{Request: r, Age: r.AgeView(now, interactionStalenessPolicy(r.Significance))}
 }
@@ -304,4 +336,9 @@ func interactionResolutionEffects(in protocol.InteractionResolveRequestBody) []d
 func humanActor(actor string) bool {
 	a := strings.ToLower(strings.TrimSpace(actor))
 	return a == "human" || strings.HasPrefix(a, "human:")
+}
+
+func interactionRuntimeActor(actor string) bool {
+	a := strings.ToLower(strings.TrimSpace(actor))
+	return humanActor(a) || strings.HasPrefix(a, "orchestrator") || strings.HasPrefix(a, "daemon:")
 }

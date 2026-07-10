@@ -75,9 +75,6 @@ func (h *InteractionHandler) Handle(ctx context.Context, req protocol.RequestEnv
 		if req.Command == protocol.CommandInteractionSupersede && strings.TrimSpace(cmd.ReplacementID) == "" {
 			return specInvalidRequest(resp, "missing required field: replacement_id")
 		}
-		if req.Command == protocol.CommandInteractionRecover && strings.TrimSpace(cmd.SessionID) == "" {
-			return specInvalidRequest(resp, "missing required field: session_id")
-		}
 		if req.Command == protocol.CommandInteractionAnswer && !interactionHumanActor(cmd.Actor) {
 			return specInvalidRequest(resp, "only the human respondent may answer interaction requests")
 		}

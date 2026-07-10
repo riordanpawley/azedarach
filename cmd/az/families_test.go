@@ -332,6 +332,13 @@ func TestRunProjectCommands(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o755); err != nil {
 		t.Fatalf("create project git dir: %v", err)
 	}
+	previousCleanup := cleanupProjectAdvisorSessions
+	t.Cleanup(func() { cleanupProjectAdvisorSessions = previousCleanup })
+	var cleanedPath string
+	cleanupProjectAdvisorSessions = func(_ *config.Config, projectPath string) error {
+		cleanedPath = projectPath
+		return nil
+	}
 
 	addOut := captureMainStdout(t, func() error {
 		return runProjectCommand(config.DefaultConfig(), []string{"add", "--name", "azedarach", projectDir})
@@ -363,6 +370,9 @@ func TestRunProjectCommands(t *testing.T) {
 	})
 	if !strings.Contains(removeOut, "Removed project azedarach") {
 		t.Fatalf("remove output = %q", removeOut)
+	}
+	if cleanedPath != projectDir {
+		t.Fatalf("advisor cleanup path = %q, want %q", cleanedPath, projectDir)
 	}
 }
 

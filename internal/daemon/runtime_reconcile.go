@@ -71,7 +71,7 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 		return result, nil
 	}
 	ctx = withDaemonProjectIDContext(ctx, result.ProjectID.String())
-	shouldReconcileInteractionStaleness := d.issues != nil
+	shouldReconcileInteractionStaleness := d.reconcileInteractionStalenessFn != nil || d.hasConfiguredInteractionStore()
 	var errs []error
 	hasSessionRuntime := d.tmux != nil && d.sessionStore != nil && d.sessionRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil
 	if hasSessionRuntime && d.worktreeRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil && d.worktreeManagerForProject(result.ProjectID.String()) != nil {
@@ -90,6 +90,14 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 	if shouldReconcileInteractionStaleness {
 		if err := d.reconcileInteractionStaleness(ctx, result.ProjectID.String()); err != nil {
 			errs = append(errs, fmt.Errorf("reconcile interaction staleness: %w", err))
+		}
+	}
+	if shouldReconcileInteractionStaleness && hasSessionRuntime {
+		recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, result.ProjectID.String())
+		result.AdvisorSessionsRecovered += recovered
+		result.AdvisorSessionsCleaned += cleaned
+		if err != nil {
+			errs = append(errs, fmt.Errorf("reconcile advisor sessions: %w", err))
 		}
 	}
 	if !hasSessionRuntime {
@@ -119,7 +127,7 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 		return result, nil
 	}
 	ctx = withDaemonProjectIDContext(ctx, result.ProjectID.String())
-	shouldReconcileInteractionStaleness := d.issues != nil
+	shouldReconcileInteractionStaleness := d.reconcileInteractionStalenessFn != nil || d.hasConfiguredInteractionStore()
 	issueIDs = normalizeRuntimeReconcileIssueIDs(issueIDs)
 	if len(issueIDs) == 0 {
 		return result, fmt.Errorf("at least one issue id is required")
@@ -153,6 +161,14 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 			errs = append(errs, fmt.Errorf("reconcile interaction staleness: %w", err))
 		}
 	}
+	if shouldReconcileInteractionStaleness && d.tmux != nil && d.sessionRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil {
+		recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, result.ProjectID.String())
+		result.AdvisorSessionsRecovered += recovered
+		result.AdvisorSessionsCleaned += cleaned
+		if err != nil {
+			errs = append(errs, fmt.Errorf("reconcile advisor sessions: %w", err))
+		}
+	}
 	if err := d.materializeSessionActivityEvidence(ctx, protocol.Metadata{ProjectID: result.ProjectID}, result.ProjectID.String(), issueIDs); err != nil {
 		errs = append(errs, fmt.Errorf("materialize session activity evidence: %w", err))
 	}
@@ -165,14 +181,26 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 }
 
 func (d *Daemon) reconcileInteractionStaleness(ctx context.Context, projectID string) error {
-	if d == nil || d.issues == nil {
+	if d == nil {
 		return nil
 	}
 	if d.reconcileInteractionStalenessFn != nil {
 		return d.reconcileInteractionStalenessFn(ctx, projectID)
 	}
+	if !d.hasConfiguredInteractionStore() {
+		return nil
+	}
 	_, err := (issueInteractionService{daemon: d}).ListInteractions(ctx, protocol.InteractionListRequestBody{})
 	return err
+}
+
+func (d *Daemon) hasConfiguredInteractionStore() bool {
+	if d == nil {
+		return false
+	}
+	d.issueClientsMu.Lock()
+	defer d.issueClientsMu.Unlock()
+	return d.issues != nil || len(d.issueClientsByProject) > 0 || len(d.issueClientsByRoot) > 0
 }
 
 func shouldRunIssueResourceReconcileForRuntimeRequest(ctx context.Context) bool {
@@ -735,6 +763,8 @@ func (d *Daemon) runRuntimeReconcileCycle(ctx context.Context) {
 			"worktrees_refreshed", result.WorktreesRefreshed,
 			"recreated_tmux_sessions", result.RecreatedTmuxSessions,
 			"aligned_daemon_sessions", result.AlignedDaemonSessions,
+			"advisor_sessions_recovered", result.AdvisorSessionsRecovered,
+			"advisor_sessions_cleaned", result.AdvisorSessionsCleaned,
 			"processed_tasks", metrics.Processed,
 			"skipped_tasks", metrics.Skipped,
 			"deferred_tasks", metrics.Deferred,
@@ -970,6 +1000,8 @@ func summarizeRuntimeReconcileSweep(results []protocol.RuntimeReconcileResponseB
 		summary.WorktreesRefreshed += result.WorktreesRefreshed
 		summary.RecreatedTmuxSessions += result.RecreatedTmuxSessions
 		summary.AlignedDaemonSessions += result.AlignedDaemonSessions
+		summary.AdvisorSessionsRecovered += result.AdvisorSessionsRecovered
+		summary.AdvisorSessionsCleaned += result.AdvisorSessionsCleaned
 	}
 	return summary
 }

@@ -65,7 +65,8 @@ type InteractionResponseBody struct {
 	Request         domain.InteractionRequest `json:"request" msgpack:"request"`
 	SessionStarted  bool                      `json:"session_started,omitempty" msgpack:"session_started,omitempty"`
 	SessionAttached bool                      `json:"session_attached,omitempty" msgpack:"session_attached,omitempty"`
-	Age     domain.InteractionAgeView `json:"age" msgpack:"age"`
+	SessionResumed  bool                      `json:"session_resumed,omitempty" msgpack:"session_resumed,omitempty"`
+	Age             domain.InteractionAgeView `json:"age" msgpack:"age"`
 }
 type InteractionListResponseBody struct {
 	Requests []domain.InteractionRequest          `json:"requests" msgpack:"requests"`

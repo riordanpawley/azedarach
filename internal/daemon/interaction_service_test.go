@@ -2,20 +2,24 @@ package daemon
 
 import (
 	"context"
+	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
 func TestInteractionStalenessReconcilePersistsAndPublishesOnce(t *testing.T) {
 	ctx := context.Background()
-	projectID := "proj-interaction-stale"
-	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	projectID := protocol.DefaultProjectID
+	repoDir := t.TempDir()
+	dbPath := filepath.Join(repoDir, "issues.db")
 	client := issues.NewClientAtPath(dbPath, nil)
 	if _, err := client.List(ctx); err != nil {
 		t.Fatal(err)
@@ -36,7 +40,10 @@ func TestInteractionStalenessReconcilePersistsAndPublishesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	hub := publish.NewHub(16, 8, nil)
-	d := &Daemon{hub: hub, revision: map[string]uint64{}, issueClientsByProject: map[string]*issues.Client{projectID: client}}
+	runner := newSessionStartTmuxRunner()
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, hub: hub, revision: map[string]uint64{}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore()}
+	projectID = d.canonicalProjectID(projectID)
+	d.issueClientsByProject = map[string]*issues.Client{projectID: client}
 	service := issueInteractionService{daemon: d}
 	ctx = withDaemonProjectIDContext(ctx, projectID)
 	first, err := service.ListInteractions(ctx, protocol.InteractionListRequestBody{})
@@ -53,16 +60,16 @@ func TestInteractionStalenessReconcilePersistsAndPublishesOnce(t *testing.T) {
 	if second.Requests[0].Revision != first.Requests[0].Revision || len(second.Requests[0].Reminders) != 1 {
 		t.Fatalf("second reconcile was not idempotent: first=%+v second=%+v", first.Requests[0], second.Requests[0])
 	}
-	recovered, err := service.MutateInteraction(ctx, protocol.CommandInteractionRecover, protocol.InteractionMutationRequestBody{ID: r.ID, ExpectedRevision: second.Requests[0].Revision, Actor: "orchestrator", SessionID: "session-recovered"})
+	recovered, err := service.MutateInteraction(ctx, protocol.CommandInteractionRecover, protocol.InteractionMutationRequestBody{ID: r.ID, ExpectedRevision: second.Requests[0].Revision, Actor: "orchestrator"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovered.Request.State != domain.InteractionOpen || recovered.Request.SessionID != "session-recovered" || recovered.Request.Recovery == nil || !recovered.Age.Stale {
+	if recovered.Request.State != domain.InteractionOpen || recovered.Request.SessionID == "" || recovered.Request.Recovery == nil || recovered.Request.Recovery.SessionID != recovered.Request.SessionID || !recovered.SessionStarted || !recovered.Age.Stale {
 		t.Fatalf("recovery response = %+v", recovered)
 	}
 	durable := issues.NewClientAtPath(dbPath, nil)
 	got, found, err := durable.GetInteraction(context.Background(), r.ID)
-	if err != nil || !found || got.StaleAt == nil || len(got.Reminders) != 1 || !got.Unresolved() || got.SessionID != "session-recovered" {
+	if err != nil || !found || got.StaleAt == nil || len(got.Reminders) != 1 || !got.Unresolved() || got.SessionID != recovered.Request.SessionID {
 		t.Fatalf("restart projection = %+v found=%t err=%v", got, found, err)
 	}
 	events, cancel := hub.Subscribe(projectID, 0)
