@@ -111,6 +111,20 @@ func TestTaskContextRiskReportsRepeatedSiblingFileCluster(t *testing.T) {
 	}
 }
 
+func TestIssueContextRiskObservationEvidenceMapsRelatedConsumersAudited(t *testing.T) {
+	evidence := issueContextRiskObservationEvidence(domain.IssueObservationEvent{
+		IssueID: naming.IssueID("az-target"),
+		Type:    domain.IssueEventRiskRecorded,
+		Payload: map[string]any{
+			"related_consumers_audited": []any{"task close", "review handoff"},
+		},
+	})
+
+	if got, want := strings.Join(evidence.RelatedConsumersAudited, ","), "task close,review handoff"; got != want {
+		t.Fatalf("RelatedConsumersAudited = %q, want %q", got, want)
+	}
+}
+
 func TestTaskContextRiskMarksRelatedConsumersAuditedFromObservation(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-context-risk-related-consumers"
