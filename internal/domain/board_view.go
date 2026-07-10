@@ -562,7 +562,11 @@ func (p BoardColumnPredicate) MatchTask(task Task) (bool, string) {
 		}
 		return false, fmt.Sprintf("closed_outcome=%s not in %s", state.CloseOutcome(), joinStringers(p.ClosedOutcomes))
 	case BoardPredicateWaitingHuman:
-		if sessionWaitingOnHuman(task.Session) {
+		facts := task.IssueFacts()
+		if facts.WaitingHuman {
+			if facts.WaitingHumanSource != "" {
+				return true, "waiting_human=true source=" + string(facts.WaitingHumanSource)
+			}
 			return true, "waiting_human=true"
 		}
 		return false, "waiting_human=false"

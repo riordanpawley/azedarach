@@ -23,6 +23,7 @@ type daemonProjectRuntimeConfig struct {
 	IssueResources             appconfig.IssueResourcesConfig
 	IssueAutoArchive           appconfig.IssueAutoArchiveConfig
 	ScheduledScripts           appconfig.ScheduledScriptsConfig
+	Orchestration              appconfig.OrchestrationConfig
 }
 
 func (d *Daemon) baseBranchForProject(projectID string) string {
@@ -58,6 +59,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		IssueResources:             cloneIssueResourcesConfig(d.cfg.IssueResources),
 		IssueAutoArchive:           cloneIssueAutoArchiveConfig(d.cfg.IssueAutoArchive),
 		ScheduledScripts:           cloneScheduledScriptsConfig(d.cfg.ScheduledScripts),
+		Orchestration:              d.cfg.Orchestration,
 	}
 	if defaultConfig.BaseBranch == "" {
 		defaultConfig.BaseBranch = "main"
@@ -145,6 +147,12 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	if d.scheduledScriptsByRoot == nil {
 		d.scheduledScriptsByRoot = map[string]appconfig.ScheduledScriptsConfig{}
 	}
+	if d.orchestrationByProject == nil {
+		d.orchestrationByProject = map[string]appconfig.OrchestrationConfig{}
+	}
+	if d.orchestrationByRoot == nil {
+		d.orchestrationByRoot = map[string]appconfig.OrchestrationConfig{}
+	}
 	if cached, ok := d.baseBranchByProject[projectID]; ok && strings.TrimSpace(cached) != "" {
 		cfg := defaultConfig
 		cfg.BaseBranch = cached
@@ -178,6 +186,9 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		}
 		if scripts, ok := d.scheduledScriptsByProject[projectID]; ok {
 			cfg.ScheduledScripts = cloneScheduledScriptsConfig(scripts)
+		}
+		if orchestration, ok := d.orchestrationByProject[projectID]; ok {
+			cfg.Orchestration = orchestration
 		}
 		d.projectConfigMu.Unlock()
 		return cfg
@@ -222,6 +233,9 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			if scripts, ok := d.scheduledScriptsByRoot[repoDir]; ok {
 				cfg.ScheduledScripts = cloneScheduledScriptsConfig(scripts)
 			}
+			if orchestration, ok := d.orchestrationByRoot[repoDir]; ok {
+				cfg.Orchestration = orchestration
+			}
 			d.baseBranchByProject[projectID] = cfg.BaseBranch
 			d.workflowModeByProject[projectID] = cfg.WorkflowMode
 			d.cliToolByProject[projectID] = cfg.CLITool
@@ -234,6 +248,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			d.issueResourcesByProject[projectID] = cloneIssueResourcesConfig(cfg.IssueResources)
 			d.issueAutoArchiveByProject[projectID] = cloneIssueAutoArchiveConfig(cfg.IssueAutoArchive)
 			d.scheduledScriptsByProject[projectID] = cloneScheduledScriptsConfig(cfg.ScheduledScripts)
+			d.orchestrationByProject[projectID] = cfg.Orchestration
 			d.projectConfigMu.Unlock()
 			return cfg
 		}
@@ -263,6 +278,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 				cfg.IssueResources = cloneIssueResourcesConfig(loaded.IssueResources)
 				cfg.IssueAutoArchive = cloneIssueAutoArchiveConfig(loaded.Issues.AutoArchive)
 				cfg.ScheduledScripts = cloneScheduledScriptsConfig(loaded.ScheduledScripts)
+				cfg.Orchestration = loaded.Orchestration
 			}
 		}
 	}
@@ -283,6 +299,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	d.issueResourcesByProject[projectID] = cloneIssueResourcesConfig(cfg.IssueResources)
 	d.issueAutoArchiveByProject[projectID] = cloneIssueAutoArchiveConfig(cfg.IssueAutoArchive)
 	d.scheduledScriptsByProject[projectID] = cloneScheduledScriptsConfig(cfg.ScheduledScripts)
+	d.orchestrationByProject[projectID] = cfg.Orchestration
 	if repoDir != "" {
 		if d.baseBranchByRoot == nil {
 			d.baseBranchByRoot = map[string]string{}
@@ -299,6 +316,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		d.issueResourcesByRoot[repoDir] = cloneIssueResourcesConfig(cfg.IssueResources)
 		d.issueAutoArchiveByRoot[repoDir] = cloneIssueAutoArchiveConfig(cfg.IssueAutoArchive)
 		d.scheduledScriptsByRoot[repoDir] = cloneScheduledScriptsConfig(cfg.ScheduledScripts)
+		d.orchestrationByRoot[repoDir] = cfg.Orchestration
 	}
 	d.projectConfigMu.Unlock()
 

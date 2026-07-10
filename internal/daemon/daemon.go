@@ -127,6 +127,8 @@ type Daemon struct {
 	issueAutoArchiveByRoot             map[string]appconfig.IssueAutoArchiveConfig
 	scheduledScriptsByProject          map[string]appconfig.ScheduledScriptsConfig
 	scheduledScriptsByRoot             map[string]appconfig.ScheduledScriptsConfig
+	orchestrationByProject             map[string]appconfig.OrchestrationConfig
+	orchestrationByRoot                map[string]appconfig.OrchestrationConfig
 	worktreeManagersMu                 sync.Mutex
 	worktreeManagersByProject          map[string]*git.WorktreeManager
 	worktreeManagersByRoot             map[string]*git.WorktreeManager
@@ -191,8 +193,9 @@ type Daemon struct {
 	shutdownReqOnce  sync.Once
 	inFlightCommands sync.WaitGroup
 
-	syncBootstrapState syncBootstrapState
-	syncBootstrapFn    func(context.Context) error
+	syncBootstrapState              syncBootstrapState
+	syncBootstrapFn                 func(context.Context) error
+	reconcileInteractionStalenessFn func(context.Context, string) error
 }
 
 // New constructs a runnable daemon runtime.
@@ -341,6 +344,7 @@ func New(cfg Config) *Daemon {
 	specService.daemon = d
 	specHandler := daemonhandlers.NewSpecHandler(specService)
 	decisionHandler := daemonhandlers.NewDecisionHandler(issueDecisionService{daemon: d})
+	interactionHandler := daemonhandlers.NewInteractionHandler(issueInteractionService{daemon: d})
 	learnHandler := daemonhandlers.NewLearnHandler(issueLearnService{daemon: d})
 	var accountService daemonhandlers.AIAccountService
 	if service, err := aiaccount.New(aiaccount.Config{}); err != nil {
@@ -456,6 +460,7 @@ func New(cfg Config) *Daemon {
 		prHandler,
 		specHandler,
 		decisionHandler,
+		interactionHandler,
 		learnHandler,
 		accountHandler,
 		runtime,
