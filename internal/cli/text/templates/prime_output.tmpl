@@ -102,6 +102,34 @@ Evidence And Coordination
 {{ end }}- Missing optional issue fields are valid; do not invent content to fill them.
 - For overlay behavior changes, align linked requirements first, keep `View()`/`Size()` geometry consistent, validate default and narrow viewports, and update affected goldens.
 
+Workflow Playbook
+
+- Intake and selection: use `az issue list`, `az issue search`, `az issue get`, `az issue get-many`, `az issue check`, and `az issue doctor` to find and inspect work before changing it. Search/list filters can narrow by status, dates, IDs, parent, and dependencies; request `--deps`, `--with-notes`, or `--json` only when that detail is needed.
+- Creation and decomposition: `az issue create` records tracking work; `--deferred` creates standalone backlog work; `az issue split` creates a child and isolated execution context; `az issue bulk-create` and `az issue fanout` shape larger graphs. Every created issue needs executable context, scope, and acceptance evidence.
+- Ownership: `az issue claim`, `takeover`, and `release` manage durable human/agent/orchestrator leases. Do not bypass a conflicting live owner; inspect or coordinate before takeover.
+- Lifecycle: `az issue update --status backlog|open|in_progress|in_review|closed|cancelled` applies lifecycle/review actions. Prefer `az issue close` for accepted completion because it owns integration and cleanup. Use `az issue delete --confirm` only for permanent deletion, and `az issue unarchive` to restore archived work.
+- Graphs: `az issue dep add` and `az issue dep remove` own `blocks`, `parent-child`, `related`, `discovered-from`, and `created-in` edges. `az issue dep bulk apply`, `az issue fanout ready`, and `az issue fanout drift` support larger plans. Parent-child defines containment; `blocks` defines readiness.
+- Evidence and resources: `az issue record`, `az issue events`, `az issue context-risk`, `az observe`, and `az evidence validate` carry durable execution and closeout facts. `az issue image` and `az issue document` attach inspectable artifacts. Mail is for active coordination, not routine notes.
+- Execution: `az session start|attach|status|diagnose|stop|restart-all|resolve-conflict` controls managed tmux sessions. `az worktree create` materializes an integration target without starting an agent. The short aliases `az start`, `az attach`, `az status`, and `az stop` map to session operations.
+- Integration: accepted child work normally closes through `az issue close`. `az branch merge` and `az branch agent-merge` are low-level conflict/repair tools. `az pr list|status|checks|open|create|merge` covers remote pull-request workflows when configured.
+- Orchestration: `az orchestrate status|start|group|watch|observe|prompt|message|complete-check|integrate|close-session` runs tracked graphs. `az mail send|list|watch|validate-evidence` carries worker events, and `az evidence validate` checks `worker_evidence.v1` before delivery.
+- Board views: `az board view list|get|select|create|update|delete|explain` manages persistent typed projections. Use `explain` to understand first-match placement rather than inferring durable state from a column title.
+- Requirements and decisions: `az spec req|link|read|pack|lint|parity` owns behavioral traceability. `az decision list|get|record|update|delete|revisit|sync|import|link` owns durable rationale and relationships.
+- Learning: `az learn add|recall|show|review|promote|relate` captures evidence-backed discoveries, controls their review lifecycle, and promotes accepted guidance into rules, skills, specs, or decisions.
+- Validation and development: `az gate` and `az dev gate` run configured checks. `az dev start|stop|restart|status|list` manages issue-scoped development servers. `az githooks install|update|run|notify|hook` manages repository hook integration.
+- Projects and implementations: `az project list|add|remove` manages registered repositories, and `az project scripts status` inspects project scripts. `az impl list|delete|migrate` manages implementation assignments; implementation identity never implies hierarchy.
+- Runtime and diagnostics: `az daemon start|stop|restart|watch-clients`, `az operation get|list|logs|cancel`, and `az log` inspect or control daemon work. `az sync` refreshes tracker/worktree state; `az export` writes a project snapshot.
+- Agent integration: `az ai install|status|uninstall|migrate|hook run` manages harness hooks and agent event reporting. `az tmux selector|install-selector|uninstall-selector` manages the tmux chooser integration.
+- Configuration and discovery: `az config set` changes project configuration; `az prime` emits this session contract; `az help` and command-specific `--help` provide exact current flags.
+
+Operational Rules Across Commands
+
+- Put flags before positional arguments. Prefer typed `--json` output for automation and text output for direct human inspection.
+- Use the daemon-backed command path rather than editing SQLite, killing tmux panes, moving worktrees, or invoking backend trackers directly. Repair commands are exceptional paths, not substitutes for normal lifecycle operations.
+- Start with read commands, make one authoritative mutation, then read back the resulting issue/session/graph projection. For destructive or terminal operations, inspect preflight output and preserve rollback evidence.
+- Keep project scope explicit when operating outside the current worktree. Check command help and returned project IDs before assuming an operation is current-project or cross-project.
+- Discover exact syntax at the point of use. The primer explains command ownership and workflow; `az <group> --help` remains authoritative for optional flags and rarely used variants.
+
 Useful Discovery Commands
 
 - `az issue --help`, `az spec --help`, `az orchestrate --help`, `az board view --help`, `az decision --help`, `az learn --help`
