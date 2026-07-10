@@ -5793,6 +5793,14 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 			}(),
 		},
 		{
+			name: "update investigation type",
+			args: []string{"--type", "investigation", "az-1"},
+			want: func() IssueUpdateOptions {
+				tt := domain.TypeInvestigation
+				return IssueUpdateOptions{IssueID: "az-1", Type: &tt}
+			}(),
+		},
+		{
 			name: "append notes",
 			args: []string{"--append-notes", "Follow-up", "az-1"},
 			want: IssueUpdateOptions{
@@ -12101,8 +12109,19 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if output == "" {
 		t.Fatal("prime output is empty")
 	}
+	if !strings.Contains(output, "your first action must always be to encode the approved plan into Azedarach before editing code") {
+		t.Fatalf("prime output missing approved-plan encoding order: %q", output)
+	}
+	if !strings.Contains(output, "Do not create needless decomposition for a single-scope plan") {
+		t.Fatalf("prime output missing single-scope plan guidance: %q", output)
+	}
 	if strings.Contains(output, "Active issue ID:") || strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=") {
 		t.Fatalf("prime without issue rendered active issue context: %q", output)
+	}
+	for _, want := range []string{"Issue Types", "`investigation` for research", "az issue update --type <type>", "explicit, issue-specific human acceptance"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("prime output missing investigation guidance %q: %q", want, output)
+		}
 	}
 }
 

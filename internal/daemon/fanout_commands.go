@@ -273,7 +273,7 @@ func buildFanoutPlan(parentIssue string, flat []fanoutFlatNode, warnings []strin
 		switch node.Kind {
 		case "group":
 			issueType = "epic"
-		case "bug", "feature", "chore", "task", "epic":
+		case "bug", "feature", "chore", "task", "epic", "investigation":
 			issueType = node.Kind
 		}
 		create = append(create, protocol.FanoutCreatePlan{
@@ -398,6 +398,8 @@ func mapKindToTaskType(kind string) domain.TaskType {
 		return domain.TypeBug
 	case "chore":
 		return domain.TypeChore
+	case "investigation":
+		return domain.TypeInvestigation
 	default:
 		return domain.TypeTask
 	}

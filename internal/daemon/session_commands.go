@@ -1900,10 +1900,6 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record conflict session projection: %v", err)), nil
 	}
 
-	reusedWindow, err := d.tmux.EnsureWindow(ctx, sessionName, sessionConflictWindowName, worktreePath)
-	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-	}
 	prompt := strings.TrimSpace(body.Prompt)
 	if prompt == "" {
 		prompt = buildConflictResolutionPrompt(issueIDString, conflictFiles)
@@ -1916,8 +1912,9 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 	}
 	targetPane := sessionName + ":" + sessionConflictWindowName
 	launchCommand := d.buildSessionLaunchCommand(projectID, issueIDString, canonicalSessionID, body.Yolo, body.ImagePaths, launchPrompt)
-	if err := d.tmux.PasteTextAndSubmit(ctx, targetPane, launchCommand); err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	reusedWindow, err := d.tmux.EnsureWindowWithCommand(ctx, sessionName, sessionConflictWindowName, worktreePath, launchCommand)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("launch conflict resolver window: %v", err)), nil
 	}
 	if strings.TrimSpace(postLaunchPrompt) != "" {
 		if err := waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {

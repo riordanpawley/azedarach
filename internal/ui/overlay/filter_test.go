@@ -195,6 +195,7 @@ func TestFilterMenu_TypeToggle(t *testing.T) {
 		{'F', domain.TypeFeature},
 		{'E', domain.TypeEpic},
 		{'C', domain.TypeChore},
+		{'I', domain.TypeInvestigation},
 	}
 
 	for _, tt := range types {

@@ -146,6 +146,38 @@ func newTestModel() Model {
 	return m
 }
 
+func TestBoardViewSaveSelectionRoutesThroughDaemonMutationCommand(t *testing.T) {
+	m := newTestModel()
+	m.overlayStack.Push(overlay.NewBoardViewOverlay(nil, ""))
+	view := domain.DefaultBoardView()
+	view.ID = "custom"
+	view.Title = "Custom"
+	updatedAny, cmd := m.Update(overlay.SelectionMsg{Key: overlay.BoardViewSaveKey, Value: overlay.BoardViewSaveMsg{View: view}})
+	updated := updatedAny.(Model)
+	if !updated.overlayStack.IsEmpty() {
+		t.Fatal("management overlay was not closed during mutation")
+	}
+	if cmd == nil {
+		t.Fatal("save mutation command = nil")
+	}
+	msg := cmd().(boardViewMutatedMsg)
+	if msg.action != "save" || msg.viewID != "custom" {
+		t.Fatalf("mutation result=%+v", msg)
+	}
+}
+
+func TestBoardViewMutationSuccessRefreshesViewsAndBoard(t *testing.T) {
+	m := newTestModel()
+	updatedAny, cmd := m.Update(boardViewMutatedMsg{action: "save", viewID: "custom"})
+	updated := updatedAny.(Model)
+	if !updated.boardRefreshing || cmd == nil {
+		t.Fatalf("refreshing=%v cmd=%v", updated.boardRefreshing, cmd)
+	}
+	if len(updated.toasts) == 0 || updated.toasts[len(updated.toasts)-1].Level != ToastSuccess {
+		t.Fatal("success toast missing")
+	}
+}
+
 // Helper to get cursor position in a model
 func getCursorPosition(m Model) Position {
 	columns := m.buildColumns()
@@ -253,7 +285,7 @@ func TestBoardViewportSupportsOrchestrationViewColumns(t *testing.T) {
 	lastColumn := len(columns) - 1
 	m.nav.SelectTask(tasks[lastColumn].ID.String(), lastColumn)
 	m.ensureCursorVisible(columns)
-	start, end := m.boardVisibleColumnRange(columns)
+	start, end := m.boardColumnLayout(columns).Range()
 	if got, want := start, 2; got != want {
 		t.Fatalf("visible column start=%d want=%d", got, want)
 	}
@@ -1803,8 +1835,7 @@ func TestRuntimeSignalRefreshTasks_BoardUsesRenderedWindow(t *testing.T) {
 	columns := m.buildColumns()
 	openColumn := columns[domain.StatusOpen.Column()].Tasks
 	bodyHeight := board.ColumnBodyHeight(board.BoardContentHeight(m.height))
-	columnCount := m.boardVisibleColumnCount(len(columns))
-	columnWidth := m.width / columnCount
+	columnWidth := m.boardColumnLayout(columns).WidthForColumn(0)
 	linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
 	start, end := board.VisibleTaskWindow(len(openColumn), m.viewportStarts[0], bodyHeight, linesPerCard)
 
@@ -2862,11 +2893,7 @@ func TestNormalModeUpFromBottom_DoesNotTopSnapViewport(t *testing.T) {
 
 	columns := m.buildColumns()
 	availableHeight := board.ColumnBodyHeight(board.BoardContentHeight(m.height))
-	columnCount := board.VisibleColumnCount(len(columns), m.width)
-	if columnCount < 1 {
-		columnCount = board.DefaultColumnCount
-	}
-	columnWidth := m.width / columnCount
+	columnWidth := m.boardColumnLayout(columns).WidthForColumn(0)
 	linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
 	initialStart, initialEnd := board.VisibleTaskWindow(len(columns[0].Tasks), m.viewportStarts[0], availableHeight, linesPerCard)
 	if initialEnd-initialStart < 2 {
@@ -2910,11 +2937,7 @@ func TestNormalModeDown_KeepsCursorVisibleWithIndicators(t *testing.T) {
 	}
 
 	availableHeight := board.ColumnBodyHeight(board.BoardContentHeight(m.height))
-	columnCount := board.VisibleColumnCount(len(columns), m.width)
-	if columnCount < 1 {
-		columnCount = board.DefaultColumnCount
-	}
-	columnWidth := m.width / columnCount
+	columnWidth := m.boardColumnLayout(columns).WidthForColumn(0)
 	linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
 
 	start := len(columns[0].Tasks) / 2
@@ -2964,7 +2987,7 @@ func TestNormalModeDown_NarrowShortSingleColumnKeepsFinalIssueVisible(t *testing
 	}
 
 	columns := m.buildColumns()
-	columnCount := m.boardVisibleColumnCount(len(columns))
+	columnCount := m.boardColumnLayout(columns).VisibleCount
 	if columnCount != 1 {
 		t.Fatalf("expected single-column board at width %d, got %d columns", m.width, columnCount)
 	}
@@ -3051,6 +3074,29 @@ func TestHorizontalColumnViewportFollowsCursorOnNarrowWidth(t *testing.T) {
 	}
 	if m5.columnViewportStart != 1 {
 		t.Fatalf("expected viewport to move back to 1 when crossing left edge, got %d", m5.columnViewportStart)
+	}
+}
+
+func TestHorizontalColumnViewportFollowsCursorOnMediumWidth(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+
+	columns := m.buildColumns()
+	if got := m.boardColumnLayout(columns).VisibleCount; got != 3 {
+		t.Fatalf("visible columns at medium width = %d, want 3", got)
+	}
+
+	m.nav.SelectTask("az-1", 0)
+	m.ensureCursorVisible(columns)
+	m.nav.SelectTask("az-5", 3)
+	m.ensureCursorVisible(columns)
+
+	if m.columnViewportStart != 1 {
+		t.Fatalf("viewport start after selecting fourth column = %d, want 1", m.columnViewportStart)
+	}
+	start, end := m.boardColumnLayout(columns).Range()
+	if start != 1 || end != 4 {
+		t.Fatalf("visible range after selecting fourth column = [%d,%d), want [1,4)", start, end)
 	}
 }
 
@@ -4762,7 +4808,7 @@ func TestIssuesLoadedKeepsSelectedIssueInViewportAfterResort(t *testing.T) {
 	if availableHeight < 1 {
 		availableHeight = 1
 	}
-	columnCount := newModel.boardVisibleColumnCount(len(columns))
+	columnCount := newModel.boardColumnLayout(columns).VisibleCount
 	if columnCount < 1 {
 		columnCount = board.DefaultColumnCount
 	}

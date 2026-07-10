@@ -13,6 +13,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/diagnostics"
+	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
 func TestDialogs_View_Golden(t *testing.T) {
@@ -28,6 +29,7 @@ func TestDialogs_View_Golden(t *testing.T) {
 		{name: "close_failure", view: goldenCloseFailureView},
 		{name: "confirm", view: goldenConfirmView},
 		{name: "gitpull", view: goldenGitPullView},
+		{name: "git_pane", view: goldenGitPaneView},
 		{name: "mergechoice", view: goldenMergeChoiceView},
 		{name: "merge_upstream", view: goldenMergeUpstreamView},
 		{name: "devserver", view: goldenDevServerView},
@@ -45,6 +47,7 @@ func TestDialogs_View_Golden(t *testing.T) {
 		{name: "imagepreview_confirm_delete", view: goldenImagePreviewConfirmDeleteView},
 		{name: "orchestration", view: goldenOrchestrationView},
 		{name: "orchestration_empty", view: goldenOrchestrationEmptyView},
+		{name: "board_view", view: goldenBoardView},
 	}
 
 	for _, tc := range cases {
@@ -66,6 +69,7 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 	}{
 		{name: "confirm_small", view: goldenConfirmSmallView},
 		{name: "gitpull_small", view: goldenGitPullSmallView},
+		{name: "git_pane_small", view: goldenGitPaneSmallView},
 		{name: "conflict_small", view: goldenConflictSmallView},
 		{name: "cleanup_small", view: goldenCleanupSmallView},
 		{name: "close_failure_small", view: goldenCloseFailureSmallView},
@@ -84,6 +88,7 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 		{name: "spec_workspace_small", view: goldenSpecWorkspaceSmallView},
 		{name: "create_task_attachments_small", view: goldenCreateTaskAttachmentsSmallView},
 		{name: "orchestration_small", view: goldenOrchestrationSmallView},
+		{name: "board_view_small", view: goldenBoardViewSmall},
 	}
 
 	for _, tc := range cases {
@@ -94,6 +99,32 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 			assertGolden(t, filepath.Join("testdata", "dialog_"+tc.name+".golden"), got)
 		})
 	}
+}
+
+func goldenBoardView(t *testing.T) string {
+	o := NewBoardViewOverlay([]domain.BoardViewRecord{{View: domain.DefaultBoardView(), BuiltIn: true}, {View: domain.ActivityBoardView(), BuiltIn: true}}, "current")
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*BoardViewOverlay).View()
+}
+
+func goldenGitPaneView(t *testing.T) string {
+	o := NewGitPaneOverlay("main")
+	o.SetStatus(git.GitStatus{HasChanges: true, Modified: []string{"README.md"}, Untracked: []string{"notes.txt"}, GitAheadCount: 2, GitBehindCount: 1}, nil)
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*GitPaneOverlay).View()
+}
+
+func goldenGitPaneSmallView(t *testing.T) string {
+	o := NewGitPaneOverlay("main")
+	o.SetStatus(git.GitStatus{GitBehindCount: 1}, nil)
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 54, Height: 18})
+	return model.(*GitPaneOverlay).View()
+}
+
+func goldenBoardViewSmall(t *testing.T) string {
+	o := NewBoardViewOverlay([]domain.BoardViewRecord{{View: domain.DefaultBoardView(), BuiltIn: true}, {View: domain.ActivityBoardView(), BuiltIn: true}}, "current")
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 54, Height: 18})
+	return model.(*BoardViewOverlay).View()
 }
 
 func assertGolden(t *testing.T, path string, got string) {

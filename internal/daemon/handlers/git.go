@@ -15,6 +15,7 @@ import (
 const (
 	CommandGitFetch             = "git.fetch"
 	CommandGitPullBase          = "git.pull_base"
+	CommandGitPush              = "git.push"
 	CommandGitMerge             = "git.merge"
 	CommandGitCheckout          = "git.checkout"
 	CommandGitAbortMerge        = "git.abort_merge"
@@ -31,6 +32,7 @@ const (
 type GitService interface {
 	Fetch(ctx context.Context, projectID, worktree, remote string) error
 	PullBase(ctx context.Context, projectID, worktree, remote, baseBranch string) error
+	Push(ctx context.Context, projectID, worktree, remote, branch string) error
 	Merge(ctx context.Context, projectID, worktree, branch string) (*git.MergeResult, error)
 	Checkout(ctx context.Context, projectID, worktree, branch string) error
 	AbortMerge(ctx context.Context, projectID, worktree string) error
@@ -224,6 +226,12 @@ func (h *GitHandler) HandleDirect(ctx context.Context, req protocol.RequestEnvel
 			return resp
 		}
 		return h.handlePullBase(ctx, resp, cmd)
+	case CommandGitPush:
+		cmd, ok := decodeGitCommandBody(&resp, req)
+		if !ok {
+			return resp
+		}
+		return h.handlePush(ctx, resp, cmd)
 	case CommandGitMerge:
 		cmd, ok := decodeGitCommandBody(&resp, req)
 		if !ok {
@@ -284,7 +292,7 @@ func (h *GitHandler) HandleDirect(ctx context.Context, req protocol.RequestEnvel
 
 func isGitLongRunningCommand(command string) bool {
 	switch command {
-	case CommandGitFetch, CommandGitPullBase, CommandGitMerge, CommandGitCheckout, CommandGitAbortMerge, CommandGitDiscardChanges, CommandGitCheckpoint:
+	case CommandGitFetch, CommandGitPullBase, CommandGitPush, CommandGitMerge, CommandGitCheckout, CommandGitAbortMerge, CommandGitDiscardChanges, CommandGitCheckpoint:
 		return true
 	default:
 		return false
@@ -378,6 +386,30 @@ func (h *GitHandler) handlePullBase(ctx context.Context, resp protocol.ResponseE
 
 	resp.OK = true
 	resp.Body = body
+	return resp
+}
+
+func (h *GitHandler) handlePush(ctx context.Context, resp protocol.ResponseEnvelope, cmd gitCommandBody) protocol.ResponseEnvelope {
+	cmd.Worktree = strings.TrimSpace(cmd.Worktree)
+	cmd.Remote = strings.TrimSpace(cmd.Remote)
+	cmd.Branch = strings.TrimSpace(cmd.Branch)
+	if cmd.Worktree == "" || cmd.Branch == "" {
+		resp.Error = &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInvalidRequest, Message: "missing required fields: worktree/branch", Retryable: false}
+		return resp
+	}
+	if cmd.Remote == "" {
+		cmd.Remote = "origin"
+	}
+	if err := h.service.Push(ctx, cmd.ProjectID, cmd.Worktree, cmd.Remote, cmd.Branch); err != nil {
+		resp.Error = mapGitError(err)
+		return resp
+	}
+	body, err := json.Marshal(gitActionResultBody{Worktree: cmd.Worktree, Remote: cmd.Remote, Branch: cmd.Branch})
+	if err != nil {
+		resp.Error = &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInternal, Message: fmt.Sprintf("marshal response body: %v", err)}
+		return resp
+	}
+	resp.OK, resp.Body = true, body
 	return resp
 }
 

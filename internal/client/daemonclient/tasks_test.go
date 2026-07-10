@@ -1793,28 +1793,48 @@ func TestTaskCommandErrors(t *testing.T) {
 	}
 }
 
-func TestBulkCleanupTasksUsesOneStructuredDaemonCommand(t *testing.T) {
+func TestBulkCleanupTasksUsesDurableOperationAndReturnsStructuredResult(t *testing.T) {
 	commandCount := 0
 	transport := &taskRecordingTransport{replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 		commandCount++
-		if req.Command != CommandTaskBulkCleanup {
-			t.Fatalf("command = %q, want %q", req.Command, CommandTaskBulkCleanup)
+		switch req.Command {
+		case protocol.CommandOperationSubmit:
+			var submit protocol.OperationSubmitRequestBody
+			if err := json.Unmarshal(req.Body, &submit); err != nil {
+				t.Fatal(err)
+			}
+			if submit.Kind != CommandTaskBulkCleanup {
+				t.Fatalf("operation kind = %q, want %q", submit.Kind, CommandTaskBulkCleanup)
+			}
+			var body TaskBulkCleanupRequest
+			if err := json.Unmarshal(submit.Payload, &body); err != nil {
+				t.Fatal(err)
+			}
+			if len(body.TaskIDs) != 2 || body.CloseOutcome != "cancelled" || !body.DryRun {
+				t.Fatalf("body = %+v", body)
+			}
+			return responseWithJSON(t, req, protocol.OperationSubmitResponseBody{Operation: protocol.OperationRecord{
+				OperationID: "op-bulk-cleanup", State: protocol.OperationStateRunning,
+			}}), nil
+		case protocol.CommandOperationGet:
+			result, err := json.Marshal(TaskBulkCleanupResult{DryRun: true, Action: "cancelled", Items: []TaskBulkCleanupItem{{TaskID: "az-1", Success: true}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return responseWithJSON(t, req, protocol.OperationGetResponseBody{Operation: protocol.OperationRecord{
+				OperationID: "op-bulk-cleanup", State: protocol.OperationStateDone, Result: result,
+			}}), nil
+		default:
+			t.Fatalf("unexpected command %q", req.Command)
+			return protocol.ResponseEnvelope{}, nil
 		}
-		var body TaskBulkCleanupRequest
-		if err := json.Unmarshal(req.Body, &body); err != nil {
-			t.Fatal(err)
-		}
-		if len(body.TaskIDs) != 2 || body.CloseOutcome != "cancelled" || !body.DryRun {
-			t.Fatalf("body = %+v", body)
-		}
-		return responseWithJSON(t, req, TaskBulkCleanupResult{DryRun: true, Action: "cancelled", Items: []TaskBulkCleanupItem{{TaskID: "az-1", Success: true}}}), nil
 	}}
 	client := New(transport).WithProjectID("project")
 	result, err := client.BulkCleanupTasks(context.Background(), TaskBulkCleanupRequest{TaskIDs: []string{"az-1", "az-2"}, CloseOutcome: "cancelled", DryRun: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if commandCount != 1 || len(result.Items) != 1 {
+	if commandCount != 2 || len(result.Items) != 1 {
 		t.Fatalf("commands = %d result = %+v", commandCount, result)
 	}
 }
