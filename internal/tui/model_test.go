@@ -154,7 +154,7 @@ func getCursorPosition(m Model) Position {
 
 func TestBuildColumnsUsesConfiguredBoardSnapshotColumns(t *testing.T) {
 	m := newTestModel()
-	view := domain.ActivityBoardView()
+	view := domain.OrchestrationBoardView()
 	m.boardView = view
 	m.boardColumns = []domain.BoardViewColumnSnapshot{
 		{
@@ -190,7 +190,7 @@ func TestBuildColumnsUsesConfiguredBoardSnapshotColumns(t *testing.T) {
 
 func TestBuildColumnsHonorsConfiguredHiddenEmptyColumns(t *testing.T) {
 	m := newTestModel()
-	view := domain.ActivityBoardView()
+	view := domain.OrchestrationBoardView()
 	view.Options.HideEmptyColumns = true
 	m.boardView = view
 	m.boardColumns = []domain.BoardViewColumnSnapshot{
@@ -212,9 +212,9 @@ func TestBuildColumnsHonorsConfiguredHiddenEmptyColumns(t *testing.T) {
 	}
 }
 
-func TestBoardViewportSupportsActivityViewColumns(t *testing.T) {
+func TestBoardViewportSupportsOrchestrationViewColumns(t *testing.T) {
 	m := newTestModel()
-	view := domain.ActivityBoardView()
+	view := domain.OrchestrationBoardView()
 	tasks := make([]domain.Task, len(view.Columns))
 	snapshots := make([]domain.BoardViewColumnSnapshot, len(view.Columns))
 	for i, column := range view.Columns {

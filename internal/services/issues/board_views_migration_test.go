@@ -27,10 +27,9 @@ func TestClient_BoardViewsMigrationSeedsDefaultsOnFreshDBAndRestartsIdempotently
 
 	views, err := client.ListBoardViews(ctx, "default")
 	require.NoError(t, err)
-	assert.True(t, boardViewTestHasView(views, string(domain.BoardViewCurrentID)))
-	assert.True(t, boardViewTestHasView(views, string(domain.BoardViewActivityID)))
+	assertPromisedBuiltInBoardViews(t, views)
 	assertBoardViewsMigrationApplied(t, ctx, db)
-	assertBoardViewsDefaultCount(t, ctx, db, 2)
+	assertBoardViewsDefaultCount(t, ctx, db, 3)
 	require.NoError(t, client.CloseDB())
 
 	reopened := NewClientAtPath(dbPath, slog.Default())
@@ -38,7 +37,7 @@ func TestClient_BoardViewsMigrationSeedsDefaultsOnFreshDBAndRestartsIdempotently
 	reopenedDB, err := reopened.dbHandle()
 	require.NoError(t, err)
 	assertBoardViewsMigrationApplied(t, ctx, reopenedDB)
-	assertBoardViewsDefaultCount(t, ctx, reopenedDB, 2)
+	assertBoardViewsDefaultCount(t, ctx, reopenedDB, 3)
 }
 
 func TestClient_BoardViewsMigrationSeedsDefaultsForExistingDBAndKeepsCustomViews(t *testing.T) {
@@ -53,11 +52,10 @@ func TestClient_BoardViewsMigrationSeedsDefaultsForExistingDBAndKeepsCustomViews
 
 	views, err := client.ListBoardViews(ctx, "default")
 	require.NoError(t, err)
-	assert.True(t, boardViewTestHasView(views, string(domain.BoardViewCurrentID)))
-	assert.True(t, boardViewTestHasView(views, string(domain.BoardViewActivityID)))
+	assertPromisedBuiltInBoardViews(t, views)
 	assert.True(t, boardViewTestHasView(views, "custom-active"))
 	assertBoardViewsMigrationApplied(t, ctx, db)
-	assertBoardViewsDefaultCount(t, ctx, db, 3)
+	assertBoardViewsDefaultCount(t, ctx, db, 4)
 }
 
 func TestClient_RefusesPartialBoardViewsSchema(t *testing.T) {
@@ -215,4 +213,13 @@ func assertBoardViewsDefaultCount(t *testing.T, ctx context.Context, db *sql.DB,
 		WHERE project_id = 'default' AND deleted_at IS NULL
 	`).Scan(&count))
 	assert.Equal(t, want, count)
+}
+
+func assertPromisedBuiltInBoardViews(t *testing.T, views []domain.BoardViewRecord) {
+	t.Helper()
+	for _, id := range []domain.BoardViewID{domain.BoardViewDefaultID, domain.BoardViewOrchestrationID, domain.BoardViewCloseoutID} {
+		assert.True(t, boardViewTestHasView(views, string(id)), "missing built-in view %s", id)
+	}
+	assert.False(t, boardViewTestHasView(views, string(domain.BoardViewCurrentID)))
+	assert.False(t, boardViewTestHasView(views, string(domain.BoardViewActivityID)))
 }
