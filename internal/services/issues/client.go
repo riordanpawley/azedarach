@@ -314,6 +314,8 @@ type Client struct {
 
 	stateModelV2MigrationFailureHook func(stage string) error
 	boardViewsMigrationFailureHook   func(stage string) error
+	interactionMu                    sync.RWMutex
+	interactionCache                 map[string]domain.InteractionRequest
 }
 
 type sqlIssueExecer interface {
@@ -1257,10 +1259,11 @@ func (c *Client) HydrateRuntime(ctx context.Context, projectID string, tasks []d
 	return out, nil
 }
 
-// ListGraphReadinessWithRuntime fetches the root graph plus direct dependency
-// context needed by daemon graph-readiness checks. The read scales with the
-// requested root graph instead of all active issues in the project.
-func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, rootID string) ([]domain.Task, error) {
+// ListGraphReadinessWithRuntime is the single indexed candidate read for rooted
+// and project orchestration. A root selects its graph closure; an empty root
+// selects a bounded project candidate window. Final semantics are always
+// applied by domain.AssessOrchestrationCandidate after hydration.
+func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, rootID string, projectLimit ...int) ([]domain.Task, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return nil, err
@@ -1271,7 +1274,24 @@ func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, r
 	}
 	rootID = strings.TrimSpace(rootID)
 	if rootID == "" {
-		return []domain.Task{}, nil
+		limit := 50
+		if len(projectLimit) > 0 && projectLimit[0] > 0 {
+			limit = projectLimit[0]
+		}
+		issueIDs, err := c.projectGraphReadinessContextIDs(ctx, db, limit)
+		if err != nil {
+			return nil, c.wrapError("list-graph-readiness-with-runtime", projectID, err)
+		}
+		if len(issueIDs) == 0 {
+			return []domain.Task{}, nil
+		}
+		// Project stewardship is bounded and needs contract fields for
+		// executability assessment. Rooted graph reads remain summary-only.
+		tasks, err := c.queryTasksWithRuntimeProjection(ctx, db, projectID, true, taskDependencyLoadAll, ArchiveExclude, issueIDs...)
+		if err != nil {
+			return nil, c.wrapError("list-graph-readiness-with-runtime", projectID, err)
+		}
+		return tasks, nil
 	}
 	issueIDs, err := c.graphReadinessContextIDs(ctx, db, rootID)
 	if err != nil {
@@ -1285,6 +1305,63 @@ func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, r
 		return nil, c.wrapError("list-graph-readiness-with-runtime", rootID, err)
 	}
 	return tasks, nil
+}
+
+// CountOpenOrchestrationIssues returns the project-wide durable lifecycle count
+// used by the rootless safety threshold. It deliberately does not hydrate
+// candidates or duplicate candidate-selection semantics.
+func (c *Client) CountOpenOrchestrationIssues(ctx context.Context) (int, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return 0, err
+	}
+	var count int
+	err = db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM issues INDEXED BY idx_issues_status_deleted_priority_updated
+		WHERE archived_at IS NULL AND deleted_at IS NULL
+		  AND status IN ('open', 'in_progress', 'in_review')
+	`).Scan(&count)
+	if err != nil {
+		return 0, c.wrapError("count-open-orchestration-issues", "", err)
+	}
+	return count, nil
+}
+
+func (c *Client) projectGraphReadinessContextIDs(ctx context.Context, db *sql.DB, limit int) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		WITH candidates(id) AS (
+			SELECT id FROM issues INDEXED BY idx_issues_status_deleted_priority_updated
+			WHERE archived_at IS NULL AND deleted_at IS NULL
+			  AND status IN ('open', 'in_progress', 'in_review')
+			ORDER BY priority ASC, updated_at ASC, id ASC
+			LIMIT ?
+		), context(id) AS (
+			SELECT id FROM candidates
+			UNION SELECT closure.ancestor_id FROM candidates c
+			JOIN issue_graph_closure closure INDEXED BY idx_issue_graph_closure_descendant
+			  ON closure.descendant_id = c.id
+			WHERE closure.project_id = ? AND closure.dependency_type = ?
+			UNION SELECT dep.depends_on_id FROM candidates c
+			JOIN issue_dependencies dep INDEXED BY idx_dependencies_issue_active_type
+			  ON dep.issue_id = c.id AND dep.tombstoned_at IS NULL
+		)
+		SELECT id FROM context ORDER BY id
+	`, limit, issueGraphClosureProjectID, string(domain.DependencyParentChild))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0, limit*2)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if id = strings.TrimSpace(id); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, rows.Err()
 }
 
 // ListParentChildSubtreeWithRuntime fetches the requested issue and active
@@ -2179,6 +2256,7 @@ type OwnershipClaimParams struct {
 	TTL        time.Duration
 	Force      bool
 	ReleasedBy string
+	Purpose    domain.CoordinationLeasePurpose
 }
 
 func (c *Client) ClaimOwnershipWithRuntime(ctx context.Context, projectID, issueID string, params OwnershipClaimParams) (domain.Task, error) {
@@ -2205,6 +2283,13 @@ func (c *Client) claimOwnership(ctx context.Context, issueID string, params Owne
 	if ownerKind == "" {
 		ownerKind = "agent"
 	}
+	purpose := params.Purpose
+	if purpose == "" {
+		purpose = domain.CoordinationLeaseExecution
+	}
+	if !purpose.Valid() {
+		return c.wrapError("claim-ownership", issueID, fmt.Errorf("invalid ownership purpose %q", purpose))
+	}
 	return c.withMutationLock(ctx, func(ctx context.Context) error {
 		return sqliteutil.WithWriteLock(c.dbPath, func() error {
 			db, err := c.dbHandle()
@@ -2226,8 +2311,17 @@ func (c *Client) claimOwnership(ctx context.Context, issueID string, params Owne
 				return c.wrapError("claim-ownership", issueID, err)
 			}
 			now := time.Now().UTC()
-			if task.Ownership != nil && task.Ownership.BlocksActor(ownerID, now) && !params.Force {
-				return c.wrapError("claim-ownership", issueID, fmt.Errorf("%w: issue owned by %s", domain.ErrConflict, task.Ownership.OwnerID))
+			var lease *domain.CoordinationLease
+			if purpose == domain.CoordinationLeaseExecution && task.Ownership != nil {
+				lease = &domain.CoordinationLease{Purpose: purpose, OwnerID: task.Ownership.OwnerID, OwnerKind: task.Ownership.OwnerKind, ClaimedAt: task.Ownership.ClaimedAt, ExpiresAt: task.Ownership.ExpiresAt}
+			} else {
+				lease, err = coordinationLeaseForUpdate(ctx, tx, issueID, purpose)
+				if err != nil {
+					return c.wrapError("claim-ownership", issueID, err)
+				}
+			}
+			if lease != nil && !lease.IsExpired(now) && !strings.EqualFold(lease.OwnerID, ownerID) && !params.Force {
+				return c.wrapError("claim-ownership", issueID, fmt.Errorf("%w: %s lease owned by %s", domain.ErrConflict, purpose, lease.OwnerID))
 			}
 			var expiresAt any
 			var expiresPayload any
@@ -2237,12 +2331,22 @@ func (c *Client) claimOwnership(ctx context.Context, issueID string, params Owne
 				expiresPayload = expiresAt
 			}
 			nowRaw := now.Format(time.RFC3339Nano)
-			if _, err := tx.ExecContext(ctx, `
+			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_coordination_leases
+				(issue_id, purpose, owner_id, owner_kind, claimed_at, expires_at)
+				VALUES (?, ?, ?, ?, ?, ?)
+				ON CONFLICT(issue_id, purpose) DO UPDATE SET owner_id=excluded.owner_id,
+				owner_kind=excluded.owner_kind, claimed_at=excluded.claimed_at, expires_at=excluded.expires_at`,
+				issueID, purpose, ownerID, ownerKind, nowRaw, expiresAt); err != nil {
+				return c.wrapError("claim-ownership", issueID, err)
+			}
+			if purpose == domain.CoordinationLeaseExecution {
+				if _, err := tx.ExecContext(ctx, `
 				UPDATE issues
 				SET owner_id = ?, owner_kind = ?, owner_claimed_at = ?, owner_expires_at = ?, updated_at = ?
 				WHERE id = ? AND archived_at IS NULL
 			`, ownerID, ownerKind, nowRaw, expiresAt, nowRaw, issueID); err != nil {
-				return c.wrapError("claim-ownership", issueID, err)
+					return c.wrapError("claim-ownership", issueID, err)
+				}
 			}
 			if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, map[string]any{
 				"action":           "claimed",
@@ -2250,6 +2354,7 @@ func (c *Client) claimOwnership(ctx context.Context, issueID string, params Owne
 				"owner_kind":       ownerKind,
 				"owner_expires_at": expiresPayload,
 				"forced":           params.Force,
+				"purpose":          purpose,
 			}); err != nil {
 				return c.wrapError("claim-ownership", issueID, err)
 			}
@@ -2267,6 +2372,13 @@ func (c *Client) releaseOwnership(ctx context.Context, issueID string, params Ow
 	actorID := strings.TrimSpace(params.OwnerID)
 	if actorID == "" {
 		actorID = strings.TrimSpace(params.ReleasedBy)
+	}
+	purpose := params.Purpose
+	if purpose == "" {
+		purpose = domain.CoordinationLeaseExecution
+	}
+	if !purpose.Valid() {
+		return c.wrapError("release-ownership", issueID, fmt.Errorf("invalid ownership purpose %q", purpose))
 	}
 	return c.withMutationLock(ctx, func(ctx context.Context) error {
 		return sqliteutil.WithWriteLock(c.dbPath, func() error {
@@ -2289,21 +2401,36 @@ func (c *Client) releaseOwnership(ctx context.Context, issueID string, params Ow
 				return c.wrapError("release-ownership", issueID, err)
 			}
 			now := time.Now().UTC()
-			if task.Ownership != nil && task.Ownership.BlocksActor(actorID, now) && !params.Force {
-				return c.wrapError("release-ownership", issueID, fmt.Errorf("%w: issue owned by %s", domain.ErrConflict, task.Ownership.OwnerID))
+			var lease *domain.CoordinationLease
+			if purpose == domain.CoordinationLeaseExecution && task.Ownership != nil {
+				lease = &domain.CoordinationLease{Purpose: purpose, OwnerID: task.Ownership.OwnerID, OwnerKind: task.Ownership.OwnerKind, ClaimedAt: task.Ownership.ClaimedAt, ExpiresAt: task.Ownership.ExpiresAt}
+			} else {
+				lease, err = coordinationLeaseForUpdate(ctx, tx, issueID, purpose)
+				if err != nil {
+					return c.wrapError("release-ownership", issueID, err)
+				}
+			}
+			if lease != nil && !lease.IsExpired(now) && !strings.EqualFold(lease.OwnerID, actorID) && !params.Force {
+				return c.wrapError("release-ownership", issueID, fmt.Errorf("%w: %s lease owned by %s", domain.ErrConflict, purpose, lease.OwnerID))
 			}
 			nowRaw := now.Format(time.RFC3339Nano)
-			if _, err := tx.ExecContext(ctx, `
+			if _, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases WHERE issue_id = ? AND purpose = ?`, issueID, purpose); err != nil {
+				return c.wrapError("release-ownership", issueID, err)
+			}
+			if purpose == domain.CoordinationLeaseExecution {
+				if _, err := tx.ExecContext(ctx, `
 				UPDATE issues
 				SET owner_id = NULL, owner_kind = NULL, owner_claimed_at = NULL, owner_expires_at = NULL, updated_at = ?
 				WHERE id = ? AND archived_at IS NULL
 			`, nowRaw, issueID); err != nil {
-				return c.wrapError("release-ownership", issueID, err)
+					return c.wrapError("release-ownership", issueID, err)
+				}
 			}
 			if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, map[string]any{
 				"action":      "released",
 				"released_by": actorID,
 				"forced":      params.Force,
+				"purpose":     purpose,
 			}); err != nil {
 				return c.wrapError("release-ownership", issueID, err)
 			}
@@ -2337,6 +2464,23 @@ func (c *Client) issueOwnershipForUpdate(ctx context.Context, tx *sql.Tx, issueI
 	}
 	task.Ownership = parseIssueOwnership(ownerIDRaw, ownerKindRaw, ownerClaimedRaw, ownerExpiresRaw)
 	return task, nil
+}
+
+func coordinationLeaseForUpdate(ctx context.Context, tx *sql.Tx, issueID string, purpose domain.CoordinationLeasePurpose) (*domain.CoordinationLease, error) {
+	var lease domain.CoordinationLease
+	var claimedRaw, expiresRaw string
+	err := tx.QueryRowContext(ctx, `SELECT purpose, owner_id, owner_kind, claimed_at, COALESCE(expires_at, '')
+		FROM issue_coordination_leases WHERE issue_id = ? AND purpose = ?`, issueID, purpose).
+		Scan(&lease.Purpose, &lease.OwnerID, &lease.OwnerKind, &claimedRaw, &expiresRaw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	lease.ClaimedAt = parseTimestamp(claimedRaw)
+	lease.ExpiresAt = parseOptionalTimestamp(expiresRaw)
+	return &lease, nil
 }
 
 func (c *Client) countOpenChildren(ctx context.Context, db sqlIssueQueryer, parentID string) (int, error) {
@@ -4169,8 +4313,45 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 		c.logSQLiteRead(ctx, "issue.metadata_runtime_projection", startedAt, len(tasks), err, "issue_count", len(ids))
 		return nil, err
 	}
+	if err := c.loadCoordinationLeasesForTasks(ctx, db, tasks); err != nil {
+		c.logSQLiteRead(ctx, "issue.metadata_runtime_projection", startedAt, len(tasks), err, "issue_count", len(ids))
+		return nil, err
+	}
 	c.logSQLiteRead(ctx, "issue.metadata_runtime_projection", startedAt, len(tasks), nil, "issue_count", len(ids))
 	return tasks, nil
+}
+
+func (c *Client) loadCoordinationLeasesForTasks(ctx context.Context, db *sql.DB, tasks []domain.Task) error {
+	if len(tasks) == 0 {
+		return nil
+	}
+	indexes := make(map[string]int, len(tasks))
+	args := make([]any, 0, len(tasks))
+	for i := range tasks {
+		id := tasks[i].ID.String()
+		indexes[id] = i
+		args = append(args, id)
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")
+	rows, err := db.QueryContext(ctx, `SELECT issue_id, purpose, owner_id, owner_kind, claimed_at, COALESCE(expires_at, '')
+		FROM issue_coordination_leases WHERE issue_id IN (`+placeholders+`) ORDER BY issue_id, purpose`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var issueID, claimedRaw, expiresRaw string
+		var lease domain.CoordinationLease
+		if err := rows.Scan(&issueID, &lease.Purpose, &lease.OwnerID, &lease.OwnerKind, &claimedRaw, &expiresRaw); err != nil {
+			return err
+		}
+		lease.ClaimedAt = parseTimestamp(claimedRaw)
+		lease.ExpiresAt = parseOptionalTimestamp(expiresRaw)
+		if i, ok := indexes[issueID]; ok {
+			tasks[i].CoordinationLeases = append(tasks[i].CoordinationLeases, lease)
+		}
+	}
+	return rows.Err()
 }
 
 func taskMetadataRuntimeProjectionQuery(projectID string, issueIDs ...string) (string, []any) {
@@ -4423,6 +4604,10 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 		return nil, err
 	}
 	if err := c.loadPullRequestsForTasks(ctx, db, tasks); err != nil {
+		c.logSQLiteRead(ctx, "issue.runtime_projection", startedAt, len(tasks), err, "include_details", includeDetails, "issue_count", issueCount)
+		return nil, err
+	}
+	if err := c.loadCoordinationLeasesForTasks(ctx, db, tasks); err != nil {
 		c.logSQLiteRead(ctx, "issue.runtime_projection", startedAt, len(tasks), err, "include_details", includeDetails, "issue_count", issueCount)
 		return nil, err
 	}

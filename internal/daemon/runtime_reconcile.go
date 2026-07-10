@@ -70,12 +70,11 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 	if d == nil {
 		return result, nil
 	}
-	if d.tmux == nil || d.sessionStore == nil || d.sessionRuntimeStateStoreIfConfigured(result.ProjectID.String()) == nil {
-		return result, nil
-	}
-
+	ctx = withDaemonProjectIDContext(ctx, result.ProjectID.String())
+	shouldReconcileInteractionStaleness := d.issues != nil
 	var errs []error
-	if d.worktreeRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil && d.worktreeManagerForProject(result.ProjectID.String()) != nil {
+	hasSessionRuntime := d.tmux != nil && d.sessionStore != nil && d.sessionRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil
+	if hasSessionRuntime && d.worktreeRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil && d.worktreeManagerForProject(result.ProjectID.String()) != nil {
 		if worktreeCount, err := d.refreshWorktreeRuntimeState(ctx, result.ProjectID.String()); err != nil {
 			errs = append(errs, fmt.Errorf("refresh worktree runtime state: %w", err))
 		} else {
@@ -88,12 +87,23 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 			result.AlignedDaemonSessions = sessionResult.AlignedDaemonSessions
 		}
 	}
+	if shouldReconcileInteractionStaleness {
+		if err := d.reconcileInteractionStaleness(ctx, result.ProjectID.String()); err != nil {
+			errs = append(errs, fmt.Errorf("reconcile interaction staleness: %w", err))
+		}
+	}
+	if !hasSessionRuntime {
+		return result, errors.Join(errs...)
+	}
 
 	if err := d.materializeSessionActivityEvidence(ctx, protocol.Metadata{ProjectID: result.ProjectID}, result.ProjectID.String(), nil); err != nil {
 		errs = append(errs, fmt.Errorf("materialize session activity evidence: %w", err))
 	}
 	if err := d.refreshSessionRuntimeState(ctx, result.ProjectID.String()); err != nil {
 		errs = append(errs, fmt.Errorf("refresh session runtime state: %w", err))
+	}
+	if err := d.reconcileOrchestratorLifecycles(ctx, result.ProjectID.String(), timeNow().UTC()); err != nil {
+		errs = append(errs, fmt.Errorf("reconcile orchestrator lifecycles: %w", err))
 	}
 	if err := d.reconcileIssueResourcesPresent(ctx, result.ProjectID.String(), nil); err != nil {
 		errs = append(errs, fmt.Errorf("reconcile issue resources present: %w", err))
@@ -111,6 +121,8 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 	if d == nil {
 		return result, nil
 	}
+	ctx = withDaemonProjectIDContext(ctx, result.ProjectID.String())
+	shouldReconcileInteractionStaleness := d.issues != nil
 	issueIDs = normalizeRuntimeReconcileIssueIDs(issueIDs)
 	if len(issueIDs) == 0 {
 		return result, fmt.Errorf("at least one issue id is required")
@@ -139,6 +151,11 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 			}
 		}
 	}
+	if shouldReconcileInteractionStaleness {
+		if err := d.reconcileInteractionStaleness(ctx, result.ProjectID.String()); err != nil {
+			errs = append(errs, fmt.Errorf("reconcile interaction staleness: %w", err))
+		}
+	}
 	if err := d.materializeSessionActivityEvidence(ctx, protocol.Metadata{ProjectID: result.ProjectID}, result.ProjectID.String(), issueIDs); err != nil {
 		errs = append(errs, fmt.Errorf("materialize session activity evidence: %w", err))
 	}
@@ -148,6 +165,17 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 		}
 	}
 	return result, errors.Join(errs...)
+}
+
+func (d *Daemon) reconcileInteractionStaleness(ctx context.Context, projectID string) error {
+	if d == nil || d.issues == nil {
+		return nil
+	}
+	if d.reconcileInteractionStalenessFn != nil {
+		return d.reconcileInteractionStalenessFn(ctx, projectID)
+	}
+	_, err := (issueInteractionService{daemon: d}).ListInteractions(ctx, protocol.InteractionListRequestBody{})
+	return err
 }
 
 func shouldRunIssueResourceReconcileForRuntimeRequest(ctx context.Context) bool {

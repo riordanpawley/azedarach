@@ -53,11 +53,13 @@ type NoticeScope struct {
 }
 
 type NoticeSource struct {
-	OperationID    naming.OperationID `json:"operation_id,omitempty" msgpack:"operation_id,omitempty"`
-	OperationKind  string             `json:"operation_kind,omitempty" msgpack:"operation_kind,omitempty"`
-	OperationState OperationState     `json:"operation_state,omitempty" msgpack:"operation_state,omitempty"`
-	RequestID      naming.RequestID   `json:"request_id,omitempty" msgpack:"request_id,omitempty"`
-	Producer       string             `json:"producer,omitempty" msgpack:"producer,omitempty"`
+	OperationID         naming.OperationID `json:"operation_id,omitempty" msgpack:"operation_id,omitempty"`
+	OperationKind       string             `json:"operation_kind,omitempty" msgpack:"operation_kind,omitempty"`
+	OperationState      OperationState     `json:"operation_state,omitempty" msgpack:"operation_state,omitempty"`
+	RequestID           naming.RequestID   `json:"request_id,omitempty" msgpack:"request_id,omitempty"`
+	InteractionID       string             `json:"interaction_id,omitempty" msgpack:"interaction_id,omitempty"`
+	InteractionRevision int64              `json:"interaction_revision,omitempty" msgpack:"interaction_revision,omitempty"`
+	Producer            string             `json:"producer,omitempty" msgpack:"producer,omitempty"`
 }
 
 type NoticeCause struct {

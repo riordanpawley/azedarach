@@ -23,6 +23,7 @@ const (
 	CommandDispatchWorktree
 	CommandDispatchDevServer
 	CommandDispatchAIAccount
+	CommandDispatchInteraction
 )
 
 // CommandSpec describes daemon policy metadata and dispatch ownership.
@@ -43,6 +44,8 @@ const (
 	commandTaskClosePreflight    = "task.close_preflight"
 	commandTaskDeletePreflight   = "task.delete_preflight"
 	commandTaskGraphReadiness    = "task.graph_readiness"
+	commandOrchestrationSnapshot = protocol.CommandOrchestrationSnapshot
+	commandOrchestrationIntent   = protocol.CommandOrchestrationIntent
 	commandTaskCompleteCheck     = "task.complete_check"
 	commandTaskIntegrationReady  = "task.integration_readiness"
 	commandTaskContextRisk       = "task.context_risk"
@@ -69,6 +72,8 @@ const (
 )
 
 var commandSpecRegistry = map[string]CommandSpec{
+	commandOrchestrationSnapshot:           {Command: commandOrchestrationSnapshot, RequiresProjectID: true},
+	commandOrchestrationIntent:             {Command: commandOrchestrationIntent, RequiresProjectID: true},
 	commandTaskBulkCleanup:                 {Command: commandTaskBulkCleanup, RequiresProjectID: true},
 	CommandSessionStart:                    {Command: CommandSessionStart, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
 	CommandSessionAttach:                   {Command: CommandSessionAttach, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
@@ -120,6 +125,16 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandDecisionLinkRemove:     {Command: protocol.CommandDecisionLinkRemove, DispatchTarget: CommandDispatchDecision},
 	protocol.CommandDecisionSyncMD:         {Command: protocol.CommandDecisionSyncMD, DispatchTarget: CommandDispatchDecision},
 	protocol.CommandDecisionImportMD:       {Command: protocol.CommandDecisionImportMD, DispatchTarget: CommandDispatchDecision},
+	protocol.CommandInteractionCreate:      {Command: protocol.CommandInteractionCreate, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
+	protocol.CommandInteractionList:        {Command: protocol.CommandInteractionList, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
+	protocol.CommandInteractionGet:         {Command: protocol.CommandInteractionGet, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
+	protocol.CommandInteractionDiscuss:     {Command: protocol.CommandInteractionDiscuss, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
+	protocol.CommandInteractionPropose:     {Command: protocol.CommandInteractionPropose, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
+	protocol.CommandInteractionAnswer:      {Command: protocol.CommandInteractionAnswer, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
+	protocol.CommandInteractionResolve:     {Command: protocol.CommandInteractionResolve, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
+	protocol.CommandInteractionWithdraw:    {Command: protocol.CommandInteractionWithdraw, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
+	protocol.CommandInteractionSupersede:   {Command: protocol.CommandInteractionSupersede, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
+	protocol.CommandInteractionRecover:     {Command: protocol.CommandInteractionRecover, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
 	protocol.CommandLearnAdd:               {Command: protocol.CommandLearnAdd, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnRecall:            {Command: protocol.CommandLearnRecall, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnShow:              {Command: protocol.CommandLearnShow, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
@@ -240,7 +255,7 @@ func DaemonRoutesThroughDispatcher(command string) bool {
 		return false
 	}
 	switch target {
-	case CommandDispatchOperation, CommandDispatchPR, CommandDispatchSpec, CommandDispatchDecision, CommandDispatchLearn, CommandDispatchGit, CommandDispatchWorktree, CommandDispatchDevServer, CommandDispatchAIAccount:
+	case CommandDispatchOperation, CommandDispatchPR, CommandDispatchSpec, CommandDispatchDecision, CommandDispatchLearn, CommandDispatchGit, CommandDispatchWorktree, CommandDispatchDevServer, CommandDispatchAIAccount, CommandDispatchInteraction:
 		return true
 	default:
 		return false
@@ -274,7 +289,7 @@ func ValidateCommandSpecs() error {
 			return fmt.Errorf("command spec %q declares mismatched Command value %q", key, spec.Command)
 		}
 		switch spec.DispatchTarget {
-		case CommandDispatchNone, CommandDispatchSession, CommandDispatchOperation, CommandDispatchPR, CommandDispatchSpec, CommandDispatchDecision, CommandDispatchLearn, CommandDispatchGit, CommandDispatchWorktree, CommandDispatchDevServer, CommandDispatchAIAccount:
+		case CommandDispatchNone, CommandDispatchSession, CommandDispatchOperation, CommandDispatchPR, CommandDispatchSpec, CommandDispatchDecision, CommandDispatchLearn, CommandDispatchGit, CommandDispatchWorktree, CommandDispatchDevServer, CommandDispatchAIAccount, CommandDispatchInteraction:
 		default:
 			return fmt.Errorf("command spec %q declares unknown dispatch target %d", key, spec.DispatchTarget)
 		}
@@ -329,6 +344,10 @@ func ValidateDispatcherWiring(d *Dispatcher) error {
 		case CommandDispatchAIAccount:
 			if d.aiAccount == nil {
 				return fmt.Errorf("command %q dispatches to AI account handler but dispatcher AI account handler is nil", command)
+			}
+		case CommandDispatchInteraction:
+			if d.interaction == nil {
+				return fmt.Errorf("command %q dispatches to interaction handler but dispatcher interaction handler is nil", command)
 			}
 		default:
 			return fmt.Errorf("command %q has unknown dispatch target %d", command, spec.DispatchTarget)

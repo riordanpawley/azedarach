@@ -63,8 +63,8 @@ func TestParseOrchestrateStartArgs_DefaultLimitAndIssues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseOrchestrateStartArgs error = %v", err)
 	}
-	if opts.Limit != 4 {
-		t.Fatalf("Limit = %d, want 4", opts.Limit)
+	if opts.Limit != 3 {
+		t.Fatalf("Limit = %d, want 3", opts.Limit)
 	}
 	if len(opts.IssueIDs) != 2 || opts.IssueIDs[0] != "az-2" || opts.IssueIDs[1] != "az-3" {
 		t.Fatalf("IssueIDs = %+v, want [az-2 az-3]", opts.IssueIDs)

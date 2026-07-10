@@ -19,45 +19,59 @@ const (
 	daemonInvariantSessionStopTargets     daemonInvariantID = "session.stop_targets"
 	daemonInvariantSessionReconcile       daemonInvariantID = "session.reconcile"
 
-	daemonInvariantTaskListFreshness   daemonInvariantID = "task.list_freshness"
-	daemonInvariantTaskClose           daemonInvariantID = "task.close"
-	daemonInvariantTaskClosePreflight  daemonInvariantID = "task.close_preflight"
-	daemonInvariantTaskDelete          daemonInvariantID = "task.delete"
-	daemonInvariantTaskDeletePreflight daemonInvariantID = "task.delete_preflight"
-	daemonInvariantTaskGraphReadiness  daemonInvariantID = "task.graph_readiness"
-	daemonInvariantTaskCompleteCheck   daemonInvariantID = "task.complete_check"
-	daemonInvariantTaskReviewHandoff   daemonInvariantID = "task.review_handoff"
-	daemonInvariantTaskIntegration     daemonInvariantID = "task.integration_readiness"
-	daemonInvariantTaskContextRisk     daemonInvariantID = "task.context_risk_closeout"
-	daemonInvariantTaskMergeBaseTarget daemonInvariantID = "task.merge_base_target"
-	daemonInvariantTaskFollowOnMerge   daemonInvariantID = "task.follow_on_merge_candidates"
-	daemonInvariantWorkerObservation   daemonInvariantID = "worker.observation_projection"
+	daemonInvariantTaskListFreshness    daemonInvariantID = "task.list_freshness"
+	daemonInvariantTaskClose            daemonInvariantID = "task.close"
+	daemonInvariantTaskClosePreflight   daemonInvariantID = "task.close_preflight"
+	daemonInvariantTaskDelete           daemonInvariantID = "task.delete"
+	daemonInvariantTaskDeletePreflight  daemonInvariantID = "task.delete_preflight"
+	daemonInvariantTaskGraphReadiness   daemonInvariantID = "task.graph_readiness"
+	daemonInvariantTaskCompleteCheck    daemonInvariantID = "task.complete_check"
+	daemonInvariantTaskReviewHandoff    daemonInvariantID = "task.review_handoff"
+	daemonInvariantTaskIntegration      daemonInvariantID = "task.integration_readiness"
+	daemonInvariantTaskContextRisk      daemonInvariantID = "task.context_risk_closeout"
+	daemonInvariantTaskMergeBaseTarget  daemonInvariantID = "task.merge_base_target"
+	daemonInvariantTaskFollowOnMerge    daemonInvariantID = "task.follow_on_merge_candidates"
+	daemonInvariantWorkerObservation    daemonInvariantID = "worker.observation_projection"
+	daemonInvariantInteractionWaiting   daemonInvariantID = "interaction.waiting_human"
+	daemonInvariantInteractionStaleness daemonInvariantID = "interaction.staleness"
 
-	daemonInvariantRuntimeKnownProjectIDs daemonInvariantID = "runtime.known_project_ids"
-	daemonInvariantIssueResourceLifecycle daemonInvariantID = "issue_resources.lifecycle"
+	daemonInvariantRuntimeKnownProjectIDs  daemonInvariantID = "runtime.known_project_ids"
+	daemonInvariantIssueResourceLifecycle  daemonInvariantID = "issue_resources.lifecycle"
+	daemonInvariantOrchestrationScope      daemonInvariantID = "orchestration.scope_identity"
+	daemonInvariantOrchestrationSingleton  daemonInvariantID = "orchestration.scope_singleton"
+	daemonInvariantOrchestrationCompletion daemonInvariantID = "orchestration.project_completion"
+	daemonInvariantOrchestrationCandidates daemonInvariantID = "orchestration.project_candidates"
+	daemonInvariantOrchestrationClaimStart daemonInvariantID = "orchestration.claim_start"
 )
 
 var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
-	daemonInvariantSessionStartConflict:   daemonInvariantSourceTmux,
-	daemonInvariantSessionAttachTarget:    daemonInvariantSourceTmux,
-	daemonInvariantSessionLifecycleTarget: daemonInvariantSourceTmux,
-	daemonInvariantSessionStopTargets:     daemonInvariantSourceTmux,
-	daemonInvariantSessionReconcile:       daemonInvariantSourceHybrid,
-	daemonInvariantTaskListFreshness:      daemonInvariantSourceProjection,
-	daemonInvariantTaskClose:              daemonInvariantSourceHybrid,
-	daemonInvariantTaskClosePreflight:     daemonInvariantSourceHybrid,
-	daemonInvariantTaskDelete:             daemonInvariantSourceHybrid,
-	daemonInvariantTaskDeletePreflight:    daemonInvariantSourceHybrid,
-	daemonInvariantTaskGraphReadiness:     daemonInvariantSourceHybrid,
-	daemonInvariantTaskCompleteCheck:      daemonInvariantSourceHybrid,
-	daemonInvariantTaskReviewHandoff:      daemonInvariantSourceProjection,
-	daemonInvariantTaskIntegration:        daemonInvariantSourceProjection,
-	daemonInvariantTaskContextRisk:        daemonInvariantSourceProjection,
-	daemonInvariantTaskMergeBaseTarget:    daemonInvariantSourceProjection,
-	daemonInvariantTaskFollowOnMerge:      daemonInvariantSourceProjection,
-	daemonInvariantWorkerObservation:      daemonInvariantSourceHybrid,
-	daemonInvariantRuntimeKnownProjectIDs: daemonInvariantSourceProjection,
-	daemonInvariantIssueResourceLifecycle: daemonInvariantSourceProjection,
+	daemonInvariantSessionStartConflict:    daemonInvariantSourceTmux,
+	daemonInvariantSessionAttachTarget:     daemonInvariantSourceTmux,
+	daemonInvariantSessionLifecycleTarget:  daemonInvariantSourceTmux,
+	daemonInvariantSessionStopTargets:      daemonInvariantSourceTmux,
+	daemonInvariantSessionReconcile:        daemonInvariantSourceHybrid,
+	daemonInvariantTaskListFreshness:       daemonInvariantSourceProjection,
+	daemonInvariantTaskClose:               daemonInvariantSourceHybrid,
+	daemonInvariantTaskClosePreflight:      daemonInvariantSourceHybrid,
+	daemonInvariantTaskDelete:              daemonInvariantSourceHybrid,
+	daemonInvariantTaskDeletePreflight:     daemonInvariantSourceHybrid,
+	daemonInvariantTaskGraphReadiness:      daemonInvariantSourceHybrid,
+	daemonInvariantTaskCompleteCheck:       daemonInvariantSourceHybrid,
+	daemonInvariantTaskReviewHandoff:       daemonInvariantSourceProjection,
+	daemonInvariantTaskIntegration:         daemonInvariantSourceProjection,
+	daemonInvariantTaskContextRisk:         daemonInvariantSourceProjection,
+	daemonInvariantTaskMergeBaseTarget:     daemonInvariantSourceProjection,
+	daemonInvariantTaskFollowOnMerge:       daemonInvariantSourceProjection,
+	daemonInvariantWorkerObservation:       daemonInvariantSourceHybrid,
+	daemonInvariantInteractionWaiting:     daemonInvariantSourceProjection,
+	daemonInvariantInteractionStaleness:   daemonInvariantSourceProjection,
+	daemonInvariantRuntimeKnownProjectIDs:  daemonInvariantSourceProjection,
+	daemonInvariantIssueResourceLifecycle:  daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationScope:      daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationSingleton:  daemonInvariantSourceHybrid,
+	daemonInvariantOrchestrationCompletion: daemonInvariantSourceHybrid,
+	daemonInvariantOrchestrationCandidates: daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationClaimStart: daemonInvariantSourceHybrid,
 }
 
 func sourceForInvariant(id daemonInvariantID) daemonInvariantSource {

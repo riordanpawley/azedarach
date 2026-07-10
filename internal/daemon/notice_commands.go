@@ -22,6 +22,9 @@ func (d *Daemon) handleNoticeList(ctx context.Context, req protocol.RequestEnvel
 	if body.ProjectID != "" {
 		projectID = d.canonicalProjectID(body.ProjectID.String())
 	}
+	if err := d.reconcileInteractionNotices(ctx, projectID); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error())
+	}
 	records, err := d.noticeService.List(ctx, daemonnotices.Query{
 		ProjectID:    projectID,
 		States:       mapNoticeStates(body.States),
