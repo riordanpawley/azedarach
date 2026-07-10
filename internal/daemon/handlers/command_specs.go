@@ -44,6 +44,8 @@ const (
 	commandTaskClosePreflight    = "task.close_preflight"
 	commandTaskDeletePreflight   = "task.delete_preflight"
 	commandTaskGraphReadiness    = "task.graph_readiness"
+	commandOrchestrationSnapshot = protocol.CommandOrchestrationSnapshot
+	commandOrchestrationIntent   = protocol.CommandOrchestrationIntent
 	commandTaskCompleteCheck     = "task.complete_check"
 	commandTaskIntegrationReady  = "task.integration_readiness"
 	commandTaskContextRisk       = "task.context_risk"
@@ -70,6 +72,8 @@ const (
 )
 
 var commandSpecRegistry = map[string]CommandSpec{
+	commandOrchestrationSnapshot:           {Command: commandOrchestrationSnapshot, RequiresProjectID: true},
+	commandOrchestrationIntent:             {Command: commandOrchestrationIntent, RequiresProjectID: true},
 	commandTaskBulkCleanup:                 {Command: commandTaskBulkCleanup, RequiresProjectID: true},
 	CommandSessionStart:                    {Command: CommandSessionStart, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
 	CommandSessionAttach:                   {Command: CommandSessionAttach, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},

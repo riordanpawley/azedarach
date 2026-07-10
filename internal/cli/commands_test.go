@@ -35,8 +35,10 @@ import (
 )
 
 type fakeDaemonTransport struct {
-	handshakeFn func(context.Context, protocol.Hello) (protocol.HelloAck, error)
-	commandFn   func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	handshakeFn             func(context.Context, protocol.Hello) (protocol.HelloAck, error)
+	commandFn               func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	passOrchestrationIntent bool
+	lastGraphReadiness      daemonclient.TaskGraphReadiness
 }
 
 func openSQLiteDB(t *testing.T, dbPath string) *sql.DB {
@@ -547,10 +549,108 @@ func (f *fakeDaemonTransport) Handshake(ctx context.Context, hello protocol.Hell
 }
 
 func (f *fakeDaemonTransport) Command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	if req.Command == protocol.CommandOrchestrationIntent && !f.passOrchestrationIntent {
+		return f.emulateOrchestrationIntent(ctx, req)
+	}
 	if f.commandFn != nil {
-		return f.commandFn(ctx, req)
+		resp, err := f.commandFn(ctx, req)
+		if err == nil && req.Command == daemonclient.CommandTaskGraphReadiness && resp.OK {
+			_ = json.Unmarshal(resp.Body, &f.lastGraphReadiness)
+		}
+		return resp, err
 	}
 	return protocol.ResponseEnvelope{}, nil
+}
+
+func (f *fakeDaemonTransport) emulateOrchestrationIntent(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	var intent protocol.OrchestrationIntentRequest
+	if err := json.Unmarshal(req.Body, &intent); err != nil {
+		return protocol.ResponseEnvelope{}, err
+	}
+	requested := append([]string(nil), intent.IssueIDs...)
+	if len(requested) == 0 {
+		requested = append(requested, f.lastGraphReadiness.Runnable...)
+	}
+	runnable := make(map[string]struct{}, len(f.lastGraphReadiness.Runnable))
+	active := make(map[string]struct{}, len(f.lastGraphReadiness.Active))
+	nestedRoots := make(map[string]struct{}, len(f.lastGraphReadiness.NestedRoots))
+	for _, id := range f.lastGraphReadiness.Runnable {
+		runnable[id] = struct{}{}
+	}
+	for _, id := range f.lastGraphReadiness.Active {
+		active[id] = struct{}{}
+	}
+	for _, nested := range f.lastGraphReadiness.NestedRoots {
+		nestedRoots[nested.IssueID] = struct{}{}
+	}
+	result := protocol.OrchestrationIntentResult{Scope: intent.Scope, Kind: intent.Kind, IntentKey: intent.IntentKey, Requested: requested, Skipped: map[string]string{}, Failed: map[string]string{}}
+	limit := intent.Limit
+	if limit <= 0 {
+		limit = 3
+	}
+	for _, issueID := range requested {
+		if _, ok := runnable[issueID]; !ok {
+			if _, ok := nestedRoots[issueID]; ok {
+				result.Skipped[issueID] = fmt.Sprintf("nested-root-start-orchestrator-session: az session start %s", issueID)
+			} else if _, ok := active[issueID]; ok {
+				result.Skipped[issueID] = "session-already-running"
+			} else if reason := f.lastGraphReadiness.Blocked[issueID]; reason != "" {
+				result.Skipped[issueID] = reason
+			} else {
+				result.Skipped[issueID] = "not-runnable"
+			}
+			continue
+		}
+		if len(result.Launched) >= limit {
+			result.Skipped[issueID] = "limit-reached"
+			continue
+		}
+		claimBody, _ := json.Marshal(daemonclient.TaskOwnershipRequest{TaskID: naming.IssueID(issueID), OwnerID: intent.ActorID, OwnerKind: "agent"})
+		claimReq := req
+		claimReq.Command, claimReq.Body = daemonclient.CommandTaskClaimOwnership, claimBody
+		claimResp, err := f.commandFn(ctx, claimReq)
+		if err != nil {
+			result.Failed[issueID] = err.Error()
+			continue
+		}
+		if !claimResp.OK {
+			if claimResp.Error != nil && claimResp.Error.Code == protocol.ErrorCodeConflict {
+				result.Skipped[issueID] = claimResp.Error.Message
+			} else if claimResp.Error != nil {
+				result.Failed[issueID] = claimResp.Error.Message
+			} else {
+				result.Failed[issueID] = "ownership claim failed"
+			}
+			continue
+		}
+		parsed := naming.IssueID(issueID)
+		sessionID := naming.CanonicalSessionID(intent.RepoDir, issueID)
+		payload, _ := json.Marshal(sessionRequestBody{ProjectID: req.Meta.ProjectID.String(), SessionID: sessionID, BaseBranch: intent.BaseBranch})
+		submitBody, _ := json.Marshal(protocol.OperationSubmitRequestBody{ProjectID: req.Meta.ProjectID, Kind: commandSessionStart, IssueID: parsed, DedupeKey: commandSessionStart + ":" + issueID, ResourceKeys: []string{"issue:" + req.Meta.ProjectID.String() + ":" + issueID, "worktree:" + issueID, "session:" + sessionID}, Payload: payload})
+		submitReq := req
+		submitReq.Command, submitReq.Body = protocol.CommandOperationSubmit, submitBody
+		submitResp, err := f.commandFn(ctx, submitReq)
+		if err != nil {
+			result.Failed[issueID] = err.Error()
+			continue
+		}
+		if !submitResp.OK {
+			if submitResp.Error != nil {
+				result.Failed[issueID] = submitResp.Error.Message
+			} else {
+				result.Failed[issueID] = "operation submit failed"
+			}
+			continue
+		}
+		var submitted protocol.OperationSubmitResponseBody
+		if err := json.Unmarshal(submitResp.Body, &submitted); err != nil {
+			return protocol.ResponseEnvelope{}, err
+		}
+		launch := protocol.OrchestrationLaunch{IssueID: issueID, SessionID: sessionID, OperationID: submitted.Operation.OperationID.String(), OperationState: string(submitted.Operation.State)}
+		result.Started = append(result.Started, issueID)
+		result.Launched = append(result.Launched, launch)
+	}
+	return responseWithJSON(req, result), nil
 }
 
 func (f *fakeDaemonTransport) Subscribe(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
@@ -9079,7 +9179,7 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	child := naming.IssueID("az-child")
 	var requests []protocol.RequestEnvelope
 	var createReq daemonclient.TaskCreateParams
-	var submitted protocol.OperationSubmitRequestBody
+	var intentReq protocol.OrchestrationIntentRequest
 	taskListCalls := 0
 	deps := &Dependencies{
 		Config:    config.DefaultConfig(),
@@ -9087,6 +9187,7 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: protocol.DefaultProjectID,
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			passOrchestrationIntent: true,
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				requests = append(requests, req)
 				switch req.Command {
@@ -9095,6 +9196,23 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 						RootIssueID: root.String(),
 						Runnable:    []string{child.String()},
 						Blocked:     map[string]string{},
+					}), nil
+				case protocol.CommandOrchestrationIntent:
+					if err := json.Unmarshal(req.Body, &intentReq); err != nil {
+						t.Fatalf("decode orchestration intent: %v", err)
+					}
+					return responseWithJSON(req, protocol.OrchestrationIntentResult{
+						Scope:     intentReq.Scope,
+						Kind:      protocol.OrchestrationIntentStart,
+						IntentKey: intentReq.IntentKey,
+						Requested: []string{child.String()},
+						Started:   []string{child.String()},
+						Launched: []protocol.OrchestrationLaunch{{
+							IssueID:        child.String(),
+							SessionID:      child.String(),
+							OperationID:    "op-split",
+							OperationState: string(protocol.OperationStateQueued),
+						}},
 					}), nil
 				case daemonclient.CommandTaskList:
 					taskListCalls++
@@ -9197,22 +9315,6 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 						BranchAttached: true,
 						AncestorChain:  []string{root.String()},
 					}), nil
-				case daemonclient.CommandTaskClaimOwnership:
-					return responseWithTaskOwnershipMutation(t, req), nil
-				case protocol.CommandOperationSubmit:
-					if err := json.Unmarshal(req.Body, &submitted); err != nil {
-						t.Fatalf("decode operation submit: %v", err)
-					}
-					return responseWithJSON(req, protocol.OperationSubmitResponseBody{
-						Created: true,
-						Operation: protocol.OperationRecord{
-							OperationID: "op-split",
-							ProjectID:   protocol.DefaultProjectID,
-							Kind:        commandSessionStart,
-							IssueID:     child,
-							State:       protocol.OperationStateQueued,
-						},
-					}), nil
 				case protocol.CommandOperationGet:
 					return responseWithJSON(req, protocol.OperationGetResponseBody{
 						Operation: protocol.OperationRecord{
@@ -9256,15 +9358,11 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	if !reflect.DeepEqual(createReq.Implementations, []string{"go-bubbletea"}) {
 		t.Fatalf("create implementations = %+v, want inherited parent impl", createReq.Implementations)
 	}
-	if submitted.Kind != commandSessionStart || submitted.IssueID != child {
-		t.Fatalf("submitted = %+v", submitted)
+	if intentReq.Kind != protocol.OrchestrationIntentStart || !reflect.DeepEqual(intentReq.IssueIDs, []string{child.String()}) {
+		t.Fatalf("intent = %+v", intentReq)
 	}
-	var sessionReq sessionRequestBody
-	if err := json.Unmarshal(submitted.Payload, &sessionReq); err != nil {
-		t.Fatalf("decode submitted session payload: %v", err)
-	}
-	if sessionReq.BaseBranch != "user/az-parent/parent-work" {
-		t.Fatalf("submitted base_branch = %q, want parent worktree branch", sessionReq.BaseBranch)
+	if intentReq.BaseBranch != "user/az-parent/parent-work" {
+		t.Fatalf("intent base_branch = %q, want parent worktree branch", intentReq.BaseBranch)
 	}
 	if !strings.Contains(result.Advice.IntegrateCommand, child.String()) {
 		t.Fatalf("advice = %+v, want child integration command", result.Advice)
@@ -9273,8 +9371,8 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 		t.Fatalf("advice = %+v, want explicit review/close guidance", result.Advice)
 	}
 	commands := commandNames(requests)
-	if !containsString(commands, protocol.CommandOperationSubmit) || containsString(commands, protocol.CommandMailSend) {
-		t.Fatalf("commands = %+v, want operation submit without immediate mail send", commands)
+	if !containsString(commands, protocol.CommandOrchestrationIntent) || containsString(commands, protocol.CommandOperationSubmit) || containsString(commands, protocol.CommandMailSend) {
+		t.Fatalf("commands = %+v, want daemon orchestration intent without client-side operation submit or immediate mail send", commands)
 	}
 }
 

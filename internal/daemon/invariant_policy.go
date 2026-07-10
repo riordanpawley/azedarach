@@ -34,32 +34,38 @@ const (
 	daemonInvariantWorkerObservation   daemonInvariantID = "worker.observation_projection"
 	daemonInvariantInteractionWaiting  daemonInvariantID = "interaction.waiting_human"
 
-	daemonInvariantRuntimeKnownProjectIDs daemonInvariantID = "runtime.known_project_ids"
-	daemonInvariantIssueResourceLifecycle daemonInvariantID = "issue_resources.lifecycle"
+	daemonInvariantRuntimeKnownProjectIDs  daemonInvariantID = "runtime.known_project_ids"
+	daemonInvariantIssueResourceLifecycle  daemonInvariantID = "issue_resources.lifecycle"
+	daemonInvariantOrchestrationScope      daemonInvariantID = "orchestration.scope_identity"
+	daemonInvariantOrchestrationSingleton  daemonInvariantID = "orchestration.scope_singleton"
+	daemonInvariantOrchestrationCompletion daemonInvariantID = "orchestration.project_completion"
 )
 
 var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
-	daemonInvariantSessionStartConflict:   daemonInvariantSourceTmux,
-	daemonInvariantSessionAttachTarget:    daemonInvariantSourceTmux,
-	daemonInvariantSessionLifecycleTarget: daemonInvariantSourceTmux,
-	daemonInvariantSessionStopTargets:     daemonInvariantSourceTmux,
-	daemonInvariantSessionReconcile:       daemonInvariantSourceHybrid,
-	daemonInvariantTaskListFreshness:      daemonInvariantSourceProjection,
-	daemonInvariantTaskClose:              daemonInvariantSourceHybrid,
-	daemonInvariantTaskClosePreflight:     daemonInvariantSourceHybrid,
-	daemonInvariantTaskDelete:             daemonInvariantSourceHybrid,
-	daemonInvariantTaskDeletePreflight:    daemonInvariantSourceHybrid,
-	daemonInvariantTaskGraphReadiness:     daemonInvariantSourceHybrid,
-	daemonInvariantTaskCompleteCheck:      daemonInvariantSourceHybrid,
-	daemonInvariantTaskReviewHandoff:      daemonInvariantSourceProjection,
-	daemonInvariantTaskIntegration:        daemonInvariantSourceProjection,
-	daemonInvariantTaskContextRisk:        daemonInvariantSourceProjection,
-	daemonInvariantTaskMergeBaseTarget:    daemonInvariantSourceProjection,
-	daemonInvariantTaskFollowOnMerge:      daemonInvariantSourceProjection,
-	daemonInvariantWorkerObservation:      daemonInvariantSourceHybrid,
+	daemonInvariantSessionStartConflict:    daemonInvariantSourceTmux,
+	daemonInvariantSessionAttachTarget:     daemonInvariantSourceTmux,
+	daemonInvariantSessionLifecycleTarget:  daemonInvariantSourceTmux,
+	daemonInvariantSessionStopTargets:      daemonInvariantSourceTmux,
+	daemonInvariantSessionReconcile:        daemonInvariantSourceHybrid,
+	daemonInvariantTaskListFreshness:       daemonInvariantSourceProjection,
+	daemonInvariantTaskClose:               daemonInvariantSourceHybrid,
+	daemonInvariantTaskClosePreflight:      daemonInvariantSourceHybrid,
+	daemonInvariantTaskDelete:              daemonInvariantSourceHybrid,
+	daemonInvariantTaskDeletePreflight:     daemonInvariantSourceHybrid,
+	daemonInvariantTaskGraphReadiness:      daemonInvariantSourceHybrid,
+	daemonInvariantTaskCompleteCheck:       daemonInvariantSourceHybrid,
+	daemonInvariantTaskReviewHandoff:       daemonInvariantSourceProjection,
+	daemonInvariantTaskIntegration:         daemonInvariantSourceProjection,
+	daemonInvariantTaskContextRisk:         daemonInvariantSourceProjection,
+	daemonInvariantTaskMergeBaseTarget:     daemonInvariantSourceProjection,
+	daemonInvariantTaskFollowOnMerge:       daemonInvariantSourceProjection,
+	daemonInvariantWorkerObservation:       daemonInvariantSourceHybrid,
 	daemonInvariantInteractionWaiting:     daemonInvariantSourceProjection,
-	daemonInvariantRuntimeKnownProjectIDs: daemonInvariantSourceProjection,
-	daemonInvariantIssueResourceLifecycle: daemonInvariantSourceProjection,
+	daemonInvariantRuntimeKnownProjectIDs:  daemonInvariantSourceProjection,
+	daemonInvariantIssueResourceLifecycle:  daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationScope:      daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationSingleton:  daemonInvariantSourceHybrid,
+	daemonInvariantOrchestrationCompletion: daemonInvariantSourceHybrid,
 }
 
 func sourceForInvariant(id daemonInvariantID) daemonInvariantSource {

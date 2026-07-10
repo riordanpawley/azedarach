@@ -1,0 +1,202 @@
+package state
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"path/filepath"
+	"sync"
+	"testing"
+
+	"github.com/riordanpawley/azedarach/internal/domain"
+)
+
+func TestOrchestratorScopeLeaseExactScopeIdentity(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	project := mustOrchestratorIdentity(t, "proj-a", domain.ProjectOrchestrationScope())
+	rootA := mustRootedOrchestratorIdentity(t, "proj-a", "root-a")
+	rootB := mustRootedOrchestratorIdentity(t, "proj-a", "root-b")
+	probe := func(context.Context, string) (bool, error) { return true, nil }
+
+	for _, tc := range []struct {
+		identity  domain.OrchestratorIdentity
+		sessionID string
+	}{
+		{project, "project-session"},
+		{rootA, "root-a-session"},
+		{rootB, "root-b-session"},
+	} {
+		result, err := store.AcquireOrchestratorScopeLease(ctx, tc.identity, tc.sessionID, probe)
+		if err != nil {
+			t.Fatalf("AcquireOrchestratorScopeLease(%s): %v", tc.sessionID, err)
+		}
+		if result.Disposition != OrchestratorLeaseAcquired {
+			t.Fatalf("disposition = %q, want acquired", result.Disposition)
+		}
+	}
+
+	leases, err := store.ListOrchestratorScopeLeases(ctx, "proj-a")
+	if err != nil {
+		t.Fatalf("ListOrchestratorScopeLeases: %v", err)
+	}
+	if len(leases) != 3 {
+		t.Fatalf("leases = %d, want 3", len(leases))
+	}
+	attached, err := store.AcquireOrchestratorScopeLease(ctx, rootA, "root-a-session", probe)
+	if err != nil {
+		t.Fatalf("attach equivalent lease: %v", err)
+	}
+	if attached.Disposition != OrchestratorLeaseAttached || attached.Lease.SessionID != "root-a-session" {
+		t.Fatalf("attach result = %+v", attached)
+	}
+	_, err = store.AcquireOrchestratorScopeLease(ctx, rootA, "duplicate", probe)
+	if !errors.Is(err, ErrOrchestratorLeaseConflict) {
+		t.Fatalf("duplicate acquire error = %v, want conflict", err)
+	}
+	var conflict *OrchestratorLeaseConflictError
+	if !errors.As(err, &conflict) || conflict.Lease.SessionID != "root-a-session" {
+		t.Fatalf("typed conflict = %+v, %v", conflict, err)
+	}
+}
+
+func TestOrchestratorScopeLeaseStaleRecoveryAndLifecyclePersistence(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	ctx := context.Background()
+	identity := mustRootedOrchestratorIdentity(t, "proj-a", "root-a")
+	storeA := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	result, err := storeA.AcquireOrchestratorScopeLease(ctx, identity, "stale-session", func(context.Context, string) (bool, error) { return false, nil })
+	if err != nil || result.Disposition != OrchestratorLeaseAcquired {
+		t.Fatalf("initial acquire = %+v, %v", result, err)
+	}
+	if err := storeA.Close(); err != nil {
+		t.Fatalf("close first store: %v", err)
+	}
+
+	storeB := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = storeB.Close() })
+	recovered, err := storeB.AcquireOrchestratorScopeLease(ctx, identity, "replacement", func(_ context.Context, sessionID string) (bool, error) {
+		if sessionID != "stale-session" {
+			t.Fatalf("probed session = %q", sessionID)
+		}
+		return false, nil
+	})
+	if err != nil {
+		t.Fatalf("recover stale lease: %v", err)
+	}
+	if recovered.Disposition != OrchestratorLeaseRecoveredStale || recovered.Lease.SessionID != "replacement" {
+		t.Fatalf("recovered = %+v", recovered)
+	}
+	paused, err := storeB.SetOrchestratorScopeLeaseLifecycle(ctx, identity, "replacement", domain.OrchestratorPaused)
+	if err != nil || paused.Lifecycle != domain.OrchestratorPaused {
+		t.Fatalf("pause lease = %+v, %v", paused, err)
+	}
+	probeCalled := false
+	_, err = storeB.AcquireOrchestratorScopeLease(ctx, identity, "other-session", func(context.Context, string) (bool, error) {
+		probeCalled = true
+		return false, nil
+	})
+	if !errors.Is(err, ErrOrchestratorLeaseConflict) || probeCalled {
+		t.Fatalf("paused replacement error/probe = %v/%t, want conflict/false", err, probeCalled)
+	}
+	woken, err := storeB.SetOrchestratorScopeLeaseLifecycle(ctx, identity, "replacement", domain.OrchestratorWorking)
+	if err != nil || woken.Lifecycle != domain.OrchestratorWorking {
+		t.Fatalf("wake lease = %+v, %v", woken, err)
+	}
+	if err := storeB.ReleaseOrchestratorScopeLease(ctx, identity, "other-session"); !errors.Is(err, ErrOrchestratorLeaseConflict) {
+		t.Fatalf("foreign release error = %v, want conflict", err)
+	}
+}
+
+func TestOrchestratorScopeLeaseDuplicateAcquireAcrossStoresHasSingleWinner(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	storeA := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	storeB := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = storeA.Close(); _ = storeB.Close() })
+	identity := mustOrchestratorIdentity(t, "proj-a", domain.ProjectOrchestrationScope())
+	probe := func(context.Context, string) (bool, error) { return true, nil }
+
+	start := make(chan struct{})
+	type outcome struct {
+		result OrchestratorLeaseAcquireResult
+		err    error
+	}
+	outcomes := make(chan outcome, 2)
+	var wg sync.WaitGroup
+	for i, store := range []*RuntimeStateStore{storeA, storeB} {
+		wg.Add(1)
+		go func(sessionID string, store *RuntimeStateStore) {
+			defer wg.Done()
+			<-start
+			result, err := store.AcquireOrchestratorScopeLease(context.Background(), identity, sessionID, probe)
+			outcomes <- outcome{result: result, err: err}
+		}([]string{"session-a", "session-b"}[i], store)
+	}
+	close(start)
+	wg.Wait()
+	close(outcomes)
+
+	winners, conflicts := 0, 0
+	for outcome := range outcomes {
+		switch {
+		case outcome.err == nil && outcome.result.Disposition == OrchestratorLeaseAcquired:
+			winners++
+		case errors.Is(outcome.err, ErrOrchestratorLeaseConflict):
+			conflicts++
+		default:
+			t.Fatalf("unexpected outcome: %+v", outcome)
+		}
+	}
+	if winners != 1 || conflicts != 1 {
+		t.Fatalf("winners/conflicts = %d/%d, want 1/1", winners, conflicts)
+	}
+}
+
+func TestOrchestratorLeaseAuthorityRefreshesStaleCacheBeforeAcquire(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	storeA := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	storeB := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = storeA.Close(); _ = storeB.Close() })
+	authorityA := NewOrchestratorLeaseAuthority(storeA)
+	authorityB := NewOrchestratorLeaseAuthority(storeB)
+	identity := mustOrchestratorIdentity(t, "proj-a", domain.ProjectOrchestrationScope())
+	ctx := context.Background()
+	if err := authorityB.Refresh(ctx, "proj-a"); err != nil {
+		t.Fatalf("seed empty cache: %v", err)
+	}
+	if _, err := authorityA.Acquire(ctx, identity, "session-a", func(context.Context, string) (bool, error) { return true, nil }); err != nil {
+		t.Fatalf("authority A acquire: %v", err)
+	}
+	_, err := authorityB.Acquire(ctx, identity, "session-b", func(_ context.Context, sessionID string) (bool, error) {
+		if sessionID != "session-a" {
+			t.Fatalf("runtime probe session = %q, want session-a", sessionID)
+		}
+		return true, nil
+	})
+	if !errors.Is(err, ErrOrchestratorLeaseConflict) {
+		t.Fatalf("authority B acquire error = %v, want conflict", err)
+	}
+	lease, found, err := authorityB.Get(ctx, identity)
+	if err != nil || !found || lease.SessionID != "session-a" {
+		t.Fatalf("authority B refreshed lease = %+v, found=%t, err=%v", lease, found, err)
+	}
+}
+
+func mustRootedOrchestratorIdentity(t *testing.T, projectID, rootID string) domain.OrchestratorIdentity {
+	t.Helper()
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatalf("RootedOrchestrationScope: %v", err)
+	}
+	return mustOrchestratorIdentity(t, projectID, scope)
+}
+
+func mustOrchestratorIdentity(t *testing.T, projectID string, scope domain.OrchestrationScope) domain.OrchestratorIdentity {
+	t.Helper()
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatalf("NewOrchestratorIdentity: %v", err)
+	}
+	return identity
+}

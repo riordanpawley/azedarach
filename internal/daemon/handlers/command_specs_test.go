@@ -223,6 +223,8 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		commandTaskClosePreflight,
 		commandTaskDeletePreflight,
 		commandTaskGraphReadiness,
+		commandOrchestrationSnapshot,
+		commandOrchestrationIntent,
 		commandTaskCompleteCheck,
 		commandTaskIntegrationReady,
 		commandTaskContextRisk,

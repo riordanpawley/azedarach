@@ -62,6 +62,8 @@ var orderedMigrations = []migration{
 	{id: "0030_issue_closed_runtime_v2_triggers", apply: applyIssueClosedRuntimeV2TriggersMigration},
 	{id: "0031_board_views", path: "migrations/0031_board_views.sql"},
 	{id: "0032_interaction_requests", path: "migrations/0032_interaction_requests.sql"},
+	{id: "0032_coordination_leases", path: "migrations/0032_coordination_leases.sql"},
+	{id: "0033_orchestrator_scope_leases", path: "migrations/0033_orchestrator_scope_leases.sql"},
 }
 
 const (

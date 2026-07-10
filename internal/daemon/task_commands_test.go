@@ -7604,6 +7604,42 @@ func TestTaskOwnershipClaimConflictReturnsProtocolConflict(t *testing.T) {
 	}
 }
 
+func TestTaskOwnershipClaimCommandKeepsReviewSeparateFromExecution(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-scoped-ownership"
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "worker under review", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{OwnerID: "worker-a"}); err != nil {
+		t.Fatalf("seed execution ownership: %v", err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, hub: publish.NewHub(16, 8, slog.Default()), issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{}}
+	body, err := json.Marshal(taskOwnershipRequest{TaskID: taskID, OwnerID: "reviewer-a", Purpose: domain.CoordinationLeaseReview})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	resp, err := d.handleTaskOwnershipClaim(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "req-review-lease", Kind: protocol.EnvelopeKindCommand, Command: "task.ownership.claim", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body})
+	if err != nil {
+		t.Fatalf("handle claim: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("response = %+v, want success", resp)
+	}
+	var task domain.Task
+	if err := json.Unmarshal(resp.Body, &task); err != nil {
+		t.Fatalf("decode task: %v", err)
+	}
+	if task.Ownership == nil || task.Ownership.OwnerID != "worker-a" {
+		t.Fatalf("execution ownership = %+v, want worker-a", task.Ownership)
+	}
+	if len(task.CoordinationLeases) != 2 {
+		t.Fatalf("coordination leases = %+v, want execution and review", task.CoordinationLeases)
+	}
+}
+
 func TestTaskGraphReadinessReportsMissingDependencyAndActiveSession(t *testing.T) {
 	root := naming.IssueID("az-root")
 	missingLeaf := naming.IssueID("az-leaf")
