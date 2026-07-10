@@ -3920,6 +3920,49 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 	}, got)
 }
 
+func TestClient_RenumberedInteractionMigrationsUpgradeLegacyHistories(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+
+	client := NewClientAtPath(dbPath, slog.Default())
+	_, err := client.Create(ctx, CreateTaskParams{
+		Title:    "migration seed",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.CloseDB())
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.ExecContext(ctx, `
+		DELETE FROM schema_migrations
+		WHERE id IN ('0035_interaction_requests', '0036_advisor_sessions');
+		INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES
+			('0032_interaction_requests', ?),
+			('0034_interaction_requests', ?),
+			('0035_advisor_sessions', ?);
+	`, now, now, now)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	upgraded := NewClientAtPath(dbPath, slog.Default())
+	_, err = upgraded.List(ctx)
+	require.NoError(t, err)
+	require.NoError(t, upgraded.CloseDB())
+
+	db, err = sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+	var applied int
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM schema_migrations
+		WHERE id IN ('0035_interaction_requests', '0036_advisor_sessions')
+	`).Scan(&applied))
+	assert.Equal(t, 2, applied)
+}
+
 func TestClient_RepairsLegacyIssueColumnsBeforeSearchFTSMigration(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
