@@ -3592,7 +3592,8 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 		sessionStore: store,
 		revision:     map[string]uint64{},
 	}
-	worktreePath := filepath.Join(t.TempDir(), "project-"+issueID)
+	worktreePath := filepath.Join(t.TempDir(), "project-'quoted'\nand-newline-"+issueID)
+	largePrompt := "Resolve 'quoted' conflict\n" + strings.Repeat("inspect this conflict carefully\n", 1024) + "finish"
 	req := protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-resolve-conflict",
@@ -3607,6 +3608,7 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 			Worktree:      worktreePath,
 			ConflictFiles: []string{"README.md", " README.md ", "sub/../main.go"},
 			Yolo:          true,
+			Prompt:        largePrompt,
 		}),
 	}
 
@@ -3638,22 +3640,28 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 	if !tmuxRunner.windows[sessionID][sessionConflictWindowName] {
 		t.Fatalf("expected conflict window to be created in session %q", sessionID)
 	}
-	targetPane := sessionID + ":" + sessionConflictWindowName
-	if tmuxRunner.sendKeysCalls != 1 {
-		t.Fatalf("send-keys calls = %d, want launch submit key", tmuxRunner.sendKeysCalls)
+	if tmuxRunner.sendKeysCalls != 1 || len(tmuxRunner.inputPayloads) != 1 {
+		t.Fatalf("post-launch prompt transport: send-keys=%d inputs=%d, want one literal paste and submit", tmuxRunner.sendKeysCalls, len(tmuxRunner.inputPayloads))
 	}
+	targetPane := sessionID + ":" + sessionConflictWindowName
 	if gotTarget := tmuxRunner.sendKeysTargets[0]; gotTarget != targetPane {
-		t.Fatalf("send-keys target = %q, want %q", gotTarget, targetPane)
+		t.Fatalf("post-launch submit target = %q, want %q", gotTarget, targetPane)
 	}
 	if gotKey := tmuxRunner.sendKeysPayloads[0]; gotKey != "Enter" {
-		t.Fatalf("launch submit payload = %q, want Enter submit", gotKey)
+		t.Fatalf("post-launch submit payload = %q, want Enter", gotKey)
 	}
-	if len(tmuxRunner.inputPayloads) != 1 {
-		t.Fatalf("input payloads = %+v, want only launch command payload", tmuxRunner.inputPayloads)
+	if got := tmuxRunner.inputPayloads[0]; got != largePrompt {
+		t.Fatalf("post-launch prompt was not preserved: got %d bytes, want %d", len(got), len(largePrompt))
 	}
-	launchCommand := tmuxRunner.inputPayloads[0]
+	var launchCommand string
+	for _, command := range tmuxRunner.commands {
+		if len(command) > 0 && command[0] == "new-window" {
+			launchCommand = command[len(command)-1]
+			break
+		}
+	}
 	if launchCommand == "" {
-		t.Fatalf("missing launch command input payload in tmux commands: %+v", tmuxRunner.commands)
+		t.Fatalf("missing atomic launch command in tmux commands: %+v", tmuxRunner.commands)
 	}
 	if strings.Contains(launchCommand, "Resolve merge conflicts for issue "+issueID) ||
 		strings.Contains(launchCommand, "README.md") ||
@@ -3661,10 +3669,9 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 		t.Fatalf("launch command contains raw conflict prompt text: %s", launchCommand)
 	}
 	if !strings.Contains(launchCommand, `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) ||
-		!strings.Contains(launchCommand, initialPromptShellVariable+`=$(printf`) ||
-		!strings.Contains(launchCommand, "--dangerously-bypass-approvals-and-sandbox") ||
-		!strings.Contains(launchCommand, `-- "$`+initialPromptShellVariable+`"`) {
-		t.Fatalf("launch command missing small codex launch shape or yolo flag: %s", launchCommand)
+		strings.Contains(launchCommand, initialPromptShellVariable) ||
+		!strings.Contains(launchCommand, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("launch command missing bounded codex launch shape or yolo flag: %s", launchCommand)
 	}
 
 	snapshot := store.ReadSnapshot(projectID)
