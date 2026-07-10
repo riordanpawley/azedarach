@@ -8206,7 +8206,7 @@ func PrimeCommand(deps *Dependencies) error {
 	questionFirstGuardrails := ""
 	orchestratorExitContract := ""
 	implementationSection := ""
-	implementationGuardrails := "- Implementation guardrails: `--impl` assigns implementation/spec variants only; it is not graph/root membership or parent selection. To parent new work under the active issue, run `az issue create \"Child task\"` from the correct `AZEDARACH_ISSUE_ID` context; for another parent/root, add an explicit `parent-child` edge. In multi-implementation repos, include explicit `--impl <impl>` only on implementation-specific new issue writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status, title, and description updates do not require it."
+	implementationGuardrails := "- `--impl` selects implementation/spec variants; it never establishes parentage or graph membership. Use the active issue context or an explicit parent-child edge for hierarchy."
 	learningSection := ""
 	specEnabled := deps != nil && deps.Config != nil && deps.Config.Spec.Enabled
 	orchestrationVia := primeOrchestrationVia(deps)
@@ -8221,18 +8221,11 @@ func PrimeCommand(deps *Dependencies) error {
   - MUST record unknowns/open questions in the issue description so scope is explicit.`
 	}
 	if specEnabled {
-		specGuardrails = `  - In this repo, when guidance says ` + "`spec`" + `, it means records managed by ` + "`az spec req ...`" + ` and ` + "`az spec link ...`" + `, not README.md, AGENTS.md, or other internal docs.
-  - ALWAYS run ` + "`az spec read --issue <issue-id>`" + ` before starting behavior work; use ` + "`az spec link list --issue <issue-id>`" + ` when you need link-only detail.
-  - To choose spec traceability, first inspect linked requirements, then use ` + "`az spec req list --query \"<issue title and feature terms>\" --match any --limit 10`" + ` and ` + "`az spec read --req <req-id>`" + ` to find nearby requirements across naming variants; avoid unbounded requirement lists during session startup.
-  - Link an existing requirement when it already defines the intended behavior; create or update a requirement before implementation when work adds behavior, changes user-visible behavior, changes a CLI/API/TUI contract, alters persistence/daemon semantics, or reveals an underspecified contract.
-  - Contract-preserving work usually does not need a new requirement: refactors, tests, formatting, tooling, observability, dependency/internal cleanup, docs/process-only edits, or fixes that restore already-specified behavior.
-  - For contract-preserving work, record explicit issue-note evidence such as ` + "`Spec impact: none (contract-preserving refactor)`" + `, ` + "`Spec impact: none (tests/tooling only)`" + `, or ` + "`Spec impact: none (fix restores existing behavior)`" + `.
-  - If behavior work has no linked requirements after that check, do not treat missing links as permission to skip spec alignment.
-  - If implementation is not aligned with spec, update spec first, then implement.
-  - Ensure implementation issue(s) are linked to relevant spec requirement(s) before execution.
-  - Treat ` + "`az spec link`" + ` records as required traceability for behavior work.
-  - Before implementing behavior changes, inspect relevant ` + "`az spec read --issue <issue-id>`" + ` output and align the plan.
-  - If this project should not use spec workflows, disable them with ` + "`az config set spec.enabled false`" + ` (or set ` + "`spec.enabled`" + ` to false in ` + "`.azedarach/config.json`" + `).`
+		specGuardrails = `- Specs are daemon-backed ` + "`az spec req`" + `/` + "`az spec link`" + ` records, not repository prose.
+- Read linked requirements before behavior work. Search nearby requirements when links are missing; link an existing contract or create/update one before implementation.
+- Update the spec before code when behavior, persistence, CLI/API/TUI contracts, or invariants change.
+- Contract-preserving refactors, tests, tooling, docs, and repairs normally need explicit ` + "`Spec impact: none (...)`" + ` evidence rather than a new requirement.
+- Keep implementation issues linked to the requirements they implement or verify.`
 	}
 
 	var snapshot daemonclient.TaskSnapshot
@@ -8595,16 +8588,10 @@ func renderPrimeImplementationSection(implementations []string) string {
 	for _, impl := range implementations {
 		quoted = append(quoted, fmt.Sprintf("`%s`", impl))
 	}
-	exampleImpl := implementations[0]
 	return fmt.Sprintf("- Implementation selection (multi-implementation project):\n"+
 		"  - Available implementations: %s\n"+
-		"  - Use `az impl list` to refresh the available options.\n"+
-		"  - If you mean \"make this a child of the active issue\", run `az issue create \"Child task\"`; auto-parenting uses `AZEDARACH_ISSUE_ID`, not `--impl`.\n"+
-		"  - If you mean \"attach this to another parent/root\", run `az issue create --parent <issue-id> \"Child task\"`.\n"+
-		"  - `--impl` selects implementation/spec variant assignment only; it does not attach an issue to a parent/root graph.\n"+
-		"  - New issue writes for a specific implementation must choose one, for example `az issue create --impl %s \"Implementation-specific task\"`; this still relies on auto-parenting, `--parent`, or parent-child edges for graph membership.\n"+
-		"  - Repeat `--impl` only for intentionally shared implementation work. Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.\n",
-		strings.Join(quoted, ", "), exampleImpl)
+		"  - Choose with `--impl` on creation; repeat it only for intentionally shared work. Use `--update-impl` only when changing an existing issue's assignments.\n",
+		strings.Join(quoted, ", "))
 }
 
 func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Task, observations []domain.WorkerObservation, containmentRisks []daemonclient.TaskContainmentRisk, tmuxAvailable bool) string {
@@ -8615,7 +8602,7 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 	if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
 		parentID := strings.TrimSpace(task.ParentID.String())
 		parent = fmt.Sprintf("\nParent: %s", parentID)
-		mailbox = fmt.Sprintf("- Worker mailbox: receive orchestrator messages with `az mail list --parent %s --since 0 --json`; use `az mail watch --parent %s --since <seq> --jsonl` only when explicitly asked to monitor continuously. Send `worker-integration-ready` with a complete JSON `worker_evidence.v1` body containing `summary`, `commands_run`, `key_assertions`, `files_changed`, `review`, and `risks`. Omit `artifact_links` unless needed; when present use objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array. Preflight with `az mail validate-evidence --body '<json>'`; use `az mail validate-evidence --fix --body '<json>'` for repairable schema aliases or `az mail validate-evidence --template` for the canonical template.\n", parentID, parentID)
+		mailbox = fmt.Sprintf("- Worker coordination parent: `%s`. Read inbound events with `az mail list --parent %s --since 0 --json`; report validated `worker_evidence.v1` only when the parent watch is active.\n", parentID, parentID)
 	}
 	childWorkRecommendation := renderPrimeChildWorkRecommendation(task, tasks, tmuxAvailable)
 	observationSection := renderPrimeWorkerObservationSection(observations)
@@ -8642,12 +8629,9 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 
 func renderPrimeOrchestratorExitContract(rootIssueID string) string {
 	return fmt.Sprintf(`Orchestrator Exit Contract (root %s):
-- Keep running the status/start/watch/integrate loop until `+"`az orchestrate complete-check --root %s`"+` passes, then run final validation and request human review by setting the root `+"`in_review`"+`.
-- Treat `+"`worker-integration-ready`"+` and `+"`in_review`"+` as evidence to inspect and validate; if accepted, run `+"`az issue close --id <worker>`"+` instead of handing off to the user.
-- Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `+"`az issue close --id <child-issue>`"+`, and leave any child `+"`open`"+` or `+"`in_progress`"+` only with an explicit blocker, dependency, or remaining-scope rationale.
-- Root review handoff is non-terminal: keep the root tmux session and worktree alive. Do not run `+"`az session stop`"+`, `+"`az orchestrate close-session`"+`, or `+"`az issue close`"+` merely because the root is waiting for human review.
-- Close/integrate the root only after explicit human acceptance; `+"`az issue close`"+` then owns terminal session and worktree cleanup.
-- Send the final assistant response after the root is handed off for human review, a named hard blocker, or an explicit user pause.
+- Integrate accepted children until `+"`az orchestrate complete-check --root %s`"+` passes, then run root validation.
+- Set the root `+"`in_review`"+` and report to the human without stopping its session or cleaning its worktree.
+- Close/integrate the root only after explicit human acceptance.
 `, rootIssueID, rootIssueID)
 }
 
@@ -8843,13 +8827,11 @@ func renderPrimeChildWorkRecommendation(task domain.Task, tasks []domain.Task, t
 	if task.Type != domain.TypeEpic && !issueHasChildren(task.ID, tasks) {
 		return ""
 	}
-	commands := "`az issue create \"Child task\"` for tracking-only child work"
-	sessionCommands := "`az session start <child-issue>`"
+	commands := "`az issue create \"Child task\"` for tracking-only work"
 	if tmuxAvailable {
-		commands += "; use `az issue split \"Child task\"` only when that child should launch immediately in its own session"
-		sessionCommands += " or `az issue split \"Child task\"`"
+		commands += " or `az issue split \"Child task\"` for an immediate isolated worker"
 	}
-	return fmt.Sprintf("- Parent-context recommendation: `%s` is an epic or already has child issues; keep implementation/subtask work in child issues with %s instead of accumulating detailed work on the parent. Do the child implementation from the child issue execution context: preferably a child session (%s) and at minimum the child worktree (`az worktree create <child-issue>`). Parent/tracker completion includes child lifecycle cleanup: before reporting the parent complete, inspect child statuses, close accepted completed children with `az issue close --id <child-issue>`, and leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale.\n", task.ID, commands, sessionCommands)
+	return fmt.Sprintf("- Parent context: `%s` is an epic or has children. Keep implementation-sized scope in child issues using %s; execute each child from its own worktree/session and account for every child before root handoff.\n", task.ID, commands)
 }
 
 func issueHasChildren(issueID naming.IssueID, tasks []domain.Task) bool {
