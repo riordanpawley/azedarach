@@ -41,3 +41,11 @@ func TestInteractionHandlerValidatesTypedAuthorityShape(t *testing.T) {
 		t.Fatalf("response=%+v", resp)
 	}
 }
+
+func TestInteractionDiscussAllowsDaemonOwnedSessionIdentity(t *testing.T) {
+	body, _ := json.Marshal(protocol.InteractionMutationRequestBody{ID: "req", ExpectedRevision: 1, Actor: "human"})
+	resp := NewInteractionHandler(fakeInteractionService{}).Handle(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, Command: protocol.CommandInteractionDiscuss, Body: body})
+	if resp.Error != nil {
+		t.Fatalf("response error = %+v", resp.Error)
+	}
+}

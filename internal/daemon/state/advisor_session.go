@@ -19,6 +19,9 @@ type AdvisorSession struct {
 	UpdatedAt time.Time
 }
 
+type AdvisorRuntimeProbe func(context.Context, string) (bool, error)
+type AdvisorRuntimeLaunch func(context.Context, AdvisorSession) error
+
 // AcquireAdvisorSession atomically reserves the singleton session identity for
 // an interaction request. Existing reservations attach regardless of the
 // candidate identity, which makes concurrent discussion opens deterministic.
@@ -35,30 +38,72 @@ func (s *RuntimeStateStore) AcquireAdvisorSession(ctx context.Context, projectID
 		if openErr != nil {
 			return openErr
 		}
-		row := db.QueryRowContext(ctx, `SELECT issue_id, session_id, created_at, updated_at FROM `+advisorSessionTable+` WHERE project_id = ? AND request_id = ?`, projectID, requestID)
-		var createdRaw, updatedRaw string
-		if scanErr := row.Scan(&session.IssueID, &session.SessionID, &createdRaw, &updatedRaw); scanErr == nil {
-			session.ProjectID, session.RequestID = projectID, requestID
-			if session.IssueID != issueID {
-				return fmt.Errorf("advisor session request %s belongs to issue %s, not %s", requestID, session.IssueID, issueID)
-			}
-			if session.CreatedAt, scanErr = time.Parse(time.RFC3339Nano, createdRaw); scanErr != nil {
-				return fmt.Errorf("decode advisor created_at: %w", scanErr)
-			}
-			if session.UpdatedAt, scanErr = time.Parse(time.RFC3339Nano, updatedRaw); scanErr != nil {
-				return fmt.Errorf("decode advisor updated_at: %w", scanErr)
-			}
+		var acquireErr error
+		session, attached, acquireErr = s.acquireAdvisorSessionLocked(ctx, db, projectID, requestID, issueID, candidateSessionID)
+		return acquireErr
+	})
+	return session, attached, err
+}
+
+func (s *RuntimeStateStore) acquireAdvisorSessionLocked(ctx context.Context, db *sql.DB, projectID, requestID, issueID, candidateSessionID string) (session AdvisorSession, attached bool, err error) {
+	row := db.QueryRowContext(ctx, `SELECT issue_id, session_id, created_at, updated_at FROM `+advisorSessionTable+` WHERE project_id = ? AND request_id = ?`, projectID, requestID)
+	var createdRaw, updatedRaw string
+	if scanErr := row.Scan(&session.IssueID, &session.SessionID, &createdRaw, &updatedRaw); scanErr == nil {
+		session.ProjectID, session.RequestID = projectID, requestID
+		if session.IssueID != issueID {
+			return session, false, fmt.Errorf("advisor session request %s belongs to issue %s, not %s", requestID, session.IssueID, issueID)
+		}
+		if session.CreatedAt, scanErr = time.Parse(time.RFC3339Nano, createdRaw); scanErr != nil {
+			return session, false, fmt.Errorf("decode advisor created_at: %w", scanErr)
+		}
+		if session.UpdatedAt, scanErr = time.Parse(time.RFC3339Nano, updatedRaw); scanErr != nil {
+			return session, false, fmt.Errorf("decode advisor updated_at: %w", scanErr)
+		}
+		attached = true
+		return session, true, nil
+	} else if scanErr != sql.ErrNoRows {
+		return session, false, fmt.Errorf("get advisor session: %w", scanErr)
+	}
+	now := time.Now().UTC()
+	_, writeErr := db.ExecContext(ctx, `INSERT INTO `+advisorSessionTable+` (project_id, request_id, issue_id, session_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`, projectID, requestID, issueID, candidateSessionID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	if writeErr != nil {
+		return session, false, fmt.Errorf("insert advisor session: %w", writeErr)
+	}
+	session = AdvisorSession{ProjectID: projectID, RequestID: requestID, IssueID: issueID, SessionID: candidateSessionID, CreatedAt: now, UpdatedAt: now}
+	return session, false, nil
+}
+
+// EnsureAdvisorSession serializes durable reservation, live-runtime probing,
+// and launch so concurrent daemons cannot create duplicate advisor runtimes.
+func (s *RuntimeStateStore) EnsureAdvisorSession(ctx context.Context, projectID, requestID, issueID, candidateSessionID string, probe AdvisorRuntimeProbe, launch AdvisorRuntimeLaunch) (session AdvisorSession, attached bool, err error) {
+	if probe == nil || launch == nil {
+		return session, false, fmt.Errorf("ensure advisor session: runtime probe and launch are required")
+	}
+	projectID, requestID, issueID, candidateSessionID = normalizedProjectID(projectID), strings.TrimSpace(requestID), strings.TrimSpace(issueID), strings.TrimSpace(candidateSessionID)
+	if requestID == "" || issueID == "" || candidateSessionID == "" {
+		return session, false, fmt.Errorf("ensure advisor session: project, request, issue, and session ids are required")
+	}
+	err = sqliteutil.WithWriteLock(s.dbPath, func() error {
+		db, openErr := s.dbHandle()
+		if openErr != nil {
+			return openErr
+		}
+		reserved, _, acquireErr := s.acquireAdvisorSessionLocked(ctx, db, projectID, requestID, issueID, candidateSessionID)
+		if acquireErr != nil {
+			return acquireErr
+		}
+		session = reserved
+		live, probeErr := probe(ctx, reserved.SessionID)
+		if probeErr != nil {
+			return fmt.Errorf("probe advisor runtime: %w", probeErr)
+		}
+		if live {
 			attached = true
 			return nil
-		} else if scanErr != sql.ErrNoRows {
-			return fmt.Errorf("get advisor session: %w", scanErr)
 		}
-		now := time.Now().UTC()
-		_, writeErr := db.ExecContext(ctx, `INSERT INTO `+advisorSessionTable+` (project_id, request_id, issue_id, session_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`, projectID, requestID, issueID, candidateSessionID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
-		if writeErr != nil {
-			return fmt.Errorf("insert advisor session: %w", writeErr)
+		if launchErr := launch(ctx, reserved); launchErr != nil {
+			return fmt.Errorf("launch advisor runtime: %w", launchErr)
 		}
-		session = AdvisorSession{ProjectID: projectID, RequestID: requestID, IssueID: issueID, SessionID: candidateSessionID, CreatedAt: now, UpdatedAt: now}
 		return nil
 	})
 	return session, attached, err
@@ -89,4 +134,19 @@ func (s *RuntimeStateStore) GetAdvisorSession(ctx context.Context, projectID, re
 		return AdvisorSession{}, false, fmt.Errorf("decode advisor updated_at: %w", err)
 	}
 	return out, true, nil
+}
+
+func (s *RuntimeStateStore) DeleteAdvisorSession(ctx context.Context, projectID, requestID string) error {
+	projectID, requestID = normalizedProjectID(projectID), strings.TrimSpace(requestID)
+	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+		db, err := s.dbHandle()
+		if err != nil {
+			return err
+		}
+		_, err = db.ExecContext(ctx, `DELETE FROM `+advisorSessionTable+` WHERE project_id = ? AND request_id = ?`, projectID, requestID)
+		if err != nil {
+			return fmt.Errorf("delete advisor session: %w", err)
+		}
+		return nil
+	})
 }

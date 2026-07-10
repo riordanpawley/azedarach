@@ -2,10 +2,10 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
-	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
@@ -76,41 +76,19 @@ func (s issueInteractionService) MutateInteraction(ctx context.Context, command 
 		return protocol.InteractionResponseBody{}, domain.ErrNotFound
 	}
 	now := time.Now().UTC()
+	discussAttached := false
 	switch command {
 	case protocol.CommandInteractionDiscuss:
 		projectID := daemonProjectIDFromContext(ctx)
 		priorSessionID := strings.TrimSpace(r.SessionID)
-		candidateID := strings.TrimSpace(in.SessionID)
-		if candidateID == "" {
-			candidateID = advisorSessionID(r.ID)
-		}
-		runtimeStore := s.daemon.sessionRuntimeStateStore(projectID)
-		if runtimeStore == nil {
-			return protocol.InteractionResponseBody{}, fmt.Errorf("advisor session runtime store unavailable for project %s", projectID)
-		}
-		advisor, attached, acquireErr := runtimeStore.AcquireAdvisorSession(ctx, projectID, r.ID, r.IssueID, candidateID)
+		advisor, attached, acquireErr := s.daemon.ensureAdvisorSessionRuntime(ctx, projectID, r)
 		if acquireErr != nil {
 			return protocol.InteractionResponseBody{}, acquireErr
 		}
+		discussAttached = attached
 		r.SessionID = advisor.SessionID
-		projection, found, projectionErr := runtimeStore.GetSessionState(ctx, projectID, advisor.SessionID)
-		if projectionErr != nil {
-			return protocol.InteractionResponseBody{}, projectionErr
-		}
-		if !found {
-			projection = daemonstate.Session{ID: advisor.SessionID, IssueID: r.IssueID, State: daemonstate.SessionStateStarting, ObservedState: daemonstate.SessionStateStarting, UpdatedAt: time.Now().UTC()}
-		}
-		projection.Role = daemonstate.SessionRoleAdvisor
-		projection.ScopeKind = daemonstate.SessionScopeInteraction
-		projection.ScopeID = r.ID
-		if projection.UpdatedAt.IsZero() {
-			projection.UpdatedAt = time.Now().UTC()
-		}
-		if err := s.daemon.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, projection); err != nil {
-			return protocol.InteractionResponseBody{}, err
-		}
 		if attached && r.State == domain.InteractionDiscussing && priorSessionID == advisor.SessionID {
-			return protocol.InteractionResponseBody{Request: r}, nil
+			return protocol.InteractionResponseBody{Request: r, SessionAttached: true}, nil
 		}
 		r, e = r.Transition(domain.InteractionDiscussing, in.ExpectedRevision, now)
 	case protocol.CommandInteractionPropose:
@@ -133,20 +111,34 @@ func (s issueInteractionService) MutateInteraction(ctx context.Context, command 
 	if e = c.UpdateInteraction(ctx, r, in.ExpectedRevision); e != nil {
 		return protocol.InteractionResponseBody{}, e
 	}
-	return protocol.InteractionResponseBody{Request: r}, nil
+	if command == protocol.CommandInteractionWithdraw {
+		s.cleanupAdvisorAfterTerminalInteraction(ctx, r.ID)
+	}
+	response := protocol.InteractionResponseBody{Request: r}
+	if command == protocol.CommandInteractionDiscuss {
+		response.SessionStarted = !discussAttached
+		response.SessionAttached = discussAttached
+	}
+	return response, nil
 }
 
 func advisorSessionID(requestID string) string {
+	raw := strings.TrimSpace(requestID)
 	var b strings.Builder
 	b.WriteString("advisor-")
-	for _, r := range strings.ToLower(strings.TrimSpace(requestID)) {
+	for _, r := range strings.ToLower(raw) {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
 			b.WriteRune(r)
 		} else {
 			b.WriteByte('-')
 		}
 	}
-	return strings.TrimRight(b.String(), "-")
+	prefix := strings.TrimRight(b.String(), "-")
+	if len(prefix) > 48 {
+		prefix = prefix[:48]
+	}
+	digest := sha256.Sum256([]byte(raw))
+	return fmt.Sprintf("%s-%x", prefix, digest[:6])
 }
 func (s issueInteractionService) ResolveInteraction(ctx context.Context, in protocol.InteractionResolveRequestBody) (protocol.InteractionResponseBody, error) {
 	c, e := s.client(ctx)
@@ -186,11 +178,18 @@ func (s issueInteractionService) resolve(ctx context.Context, c *issues.Client, 
 	if e = c.ResolveInteraction(ctx, resolution); e != nil {
 		return protocol.InteractionResponseBody{}, e
 	}
+	s.cleanupAdvisorAfterTerminalInteraction(ctx, next.ID)
 	projectID := daemonProjectIDFromContext(ctx)
 	rev := s.daemon.nextRevision(projectID)
 	body, _ := json.Marshal(protocol.InteractionResolvedEventBody{ID: next.ID, IssueID: next.IssueID, Revision: next.Revision, ResolvedAt: now})
 	s.daemon.hub.Publish(protocol.EventEnvelope{ProtocolVersion: protocol.CurrentVersion, ProjectID: naming.ProjectID(projectID), Revision: rev, Event: protocol.EventInteractionResolved, Kind: protocol.EnvelopeKindEvent, EmittedAt: now, Body: body})
 	return protocol.InteractionResponseBody{Request: next}, nil
+}
+
+func (s issueInteractionService) cleanupAdvisorAfterTerminalInteraction(ctx context.Context, requestID string) {
+	if err := s.daemon.cleanupAdvisorSessionRuntime(ctx, daemonProjectIDFromContext(ctx), requestID); err != nil && s.daemon.cfg.Logger != nil {
+		s.daemon.cfg.Logger.Warn("advisor session cleanup after terminal interaction failed", "request_id", requestID, "error", err)
+	}
 }
 
 func interactionResolutionEffects(in protocol.InteractionResolveRequestBody) []domain.InteractionResolutionEffect {

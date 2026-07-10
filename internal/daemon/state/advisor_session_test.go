@@ -74,3 +74,56 @@ func TestAdvisorSessionMetadataSurvivesProjectionRoundTrip(t *testing.T) {
 		t.Fatalf("metadata after untyped refresh = role=%q scope=%q/%q", got.Role, got.ScopeKind, got.ScopeID)
 	}
 }
+
+func TestEnsureAdvisorSessionSerializesLiveLaunchAcrossStores(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	stores := []*RuntimeStateStore{NewRuntimeStateStoreAtPath(dbPath, nil), NewRuntimeStateStoreAtPath(dbPath, nil)}
+	var runtimeMu sync.Mutex
+	live, launches := false, 0
+	probe := func(context.Context, string) (bool, error) {
+		runtimeMu.Lock()
+		defer runtimeMu.Unlock()
+		return live, nil
+	}
+	launch := func(context.Context, AdvisorSession) error {
+		runtimeMu.Lock()
+		defer runtimeMu.Unlock()
+		launches++
+		live = true
+		return nil
+	}
+	var wg sync.WaitGroup
+	attached := make(chan bool, 2)
+	errs := make(chan error, 2)
+	for _, store := range stores {
+		wg.Add(1)
+		go func(store *RuntimeStateStore) {
+			defer wg.Done()
+			_, reused, err := store.EnsureAdvisorSession(ctx, "project", "request", "issue", "advisor-request", probe, launch)
+			if err != nil {
+				errs <- err
+				return
+			}
+			attached <- reused
+		}(store)
+	}
+	wg.Wait()
+	close(attached)
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	if launches != 1 {
+		t.Fatalf("launches = %d, want 1", launches)
+	}
+	attachedCount := 0
+	for reused := range attached {
+		if reused {
+			attachedCount++
+		}
+	}
+	if attachedCount != 1 {
+		t.Fatalf("attached results = %d, want 1", attachedCount)
+	}
+}

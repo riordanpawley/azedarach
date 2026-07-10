@@ -53,7 +53,9 @@ type InteractionResolveRequestBody struct {
 	Decision     *InteractionDecisionEffect `json:"decision,omitempty" msgpack:"decision,omitempty"`
 }
 type InteractionResponseBody struct {
-	Request domain.InteractionRequest `json:"request" msgpack:"request"`
+	Request         domain.InteractionRequest `json:"request" msgpack:"request"`
+	SessionStarted  bool                      `json:"session_started,omitempty" msgpack:"session_started,omitempty"`
+	SessionAttached bool                      `json:"session_attached,omitempty" msgpack:"session_attached,omitempty"`
 }
 type InteractionListResponseBody struct {
 	Requests []domain.InteractionRequest `json:"requests" msgpack:"requests"`
