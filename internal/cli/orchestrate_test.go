@@ -365,6 +365,8 @@ func TestBuildOrchestrateWatchFrameIncludesPendingAndCleanupMarkers(t *testing.T
 					return responseWithJSON(req, []protocol.MailEvent{
 						{Seq: 9, ParentIssue: root.String(), IssueID: pending, Type: "session-started"},
 					}), nil
+				case protocol.CommandOrchestrationSnapshot:
+					return responseWithJSON(req, protocol.OrchestrationSnapshot{}), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 				}
@@ -379,6 +381,9 @@ func TestBuildOrchestrateWatchFrameIncludesPendingAndCleanupMarkers(t *testing.T
 	}
 	if len(frame.Pending) != 1 || frame.Pending[0].IssueID != pending.String() || frame.Pending[0].OperationState != string(protocol.OperationStateRunning) {
 		t.Fatalf("pending = %+v", frame.Pending)
+	}
+	if !strings.Contains(frame.PersistenceGuard, "Daemon-enforced") || !strings.Contains(frame.PersistenceGuard, "durable cursor") {
+		t.Fatalf("persistence guard = %q", frame.PersistenceGuard)
 	}
 	if len(frame.ActiveSessions) != 1 || frame.ActiveSessions[0].Status != "cleanup-pending" {
 		t.Fatalf("active_sessions = %+v", frame.ActiveSessions)
@@ -1367,6 +1372,8 @@ func TestBuildOrchestrateWatchFrameIncludesActiveSessionActivity(t *testing.T) {
 					}), nil
 				case protocol.CommandMailList:
 					return responseWithJSON(req, []protocol.MailEvent{{Seq: 7, ParentIssue: root.String(), IssueID: idle, Type: "worker-progress"}}), nil
+				case protocol.CommandOrchestrationSnapshot:
+					return responseWithJSON(req, protocol.OrchestrationSnapshot{}), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 				}

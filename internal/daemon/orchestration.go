@@ -55,6 +55,12 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 	if _, err := domain.NewOrchestratorIdentity(d.projectID(req.Meta), body.Scope); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 	}
+	if found && body.ObservedCursor > lease.Cursor {
+		lease, err = daemonstate.NewOrchestratorLeaseAuthority(d.sessionRuntimeStateStoreIfConfigured(d.projectID(req.Meta))).AdvanceCursor(ctx, lease.Identity, body.ObservedCursor)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("advance orchestration cursor: %v", err)), nil
+		}
+	}
 	if strings.TrimSpace(body.ActorID) == "" {
 		body.ActorID = strings.TrimSpace(req.Meta.ClientActor)
 	}
@@ -82,9 +88,11 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 	snapshot.SessionID = strings.TrimSpace(body.SessionID)
 	if found {
 		snapshot.Lifecycle = lease.Lifecycle
+		snapshot.Cursor = lease.Cursor
+		applyOrchestratorContinuationProjection(&snapshot, lease)
 	}
 	snapshot.Revision = snapshotRevision
-	if snapshot.Cursor == 0 {
+	if snapshot.Cursor == 0 && !found {
 		snapshot.Cursor = int64(snapshotRevision)
 	}
 	encoded, err := json.Marshal(snapshot)
@@ -94,6 +102,30 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 	resp := d.successResponse(req)
 	resp.Body, resp.Revision = encoded, snapshot.Revision
 	return resp, nil
+}
+
+func applyOrchestratorContinuationProjection(snapshot *protocol.OrchestrationSnapshot, lease daemonstate.OrchestratorScopeLease) {
+	if snapshot == nil || lease.Identity.Scope.Kind != domain.OrchestrationScopeRooted || !rootedOrchestratorContinuationRequired(false, *snapshot) {
+		return
+	}
+	snapshot.ContinuationRequired = true
+	snapshot.ContinuationReason = "root complete-check has not passed while direct nested roots still require orchestration"
+	snapshot.ContinuationContract = orchestratorContinuationPrompt(lease, snapshot.NestedRoots)
+}
+
+func rootedOrchestratorContinuationRequired(completeCheckPassed bool, snapshot protocol.OrchestrationSnapshot) bool {
+	return !completeCheckPassed && len(snapshot.Interactions) == 0 && len(snapshot.NestedRoots) > 0
+}
+
+func orchestratorContinuationPrompt(lease daemonstate.OrchestratorScopeLease, nested []protocol.OrchestrationNestedRoot) string {
+	ids := make([]string, 0, len(nested))
+	for _, item := range nested {
+		if id := strings.TrimSpace(item.IssueID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return fmt.Sprintf("Persistent parent orchestration wake (root=%s cursor=%d). Continue now: consume `az orchestrate watch --root %s --since %d --jsonl`; coordinate only direct nested roots [%s] without flattening their descendants; review and integrate accepted epic results; advance cross-epic dependencies; repeat status/start/watch/review until `az orchestrate complete-check --root %s` passes, then validate and set the root in_review for human handoff. Do not emit a handoff response while this continuation remains required.", lease.Identity.Scope.RootIssueID, lease.Cursor, lease.Identity.Scope.RootIssueID, lease.Cursor, strings.Join(ids, ","), lease.Identity.Scope.RootIssueID)
 }
 
 func (d *Daemon) resolveOrchestratorSession(ctx context.Context, projectID, sessionID string) (daemonstate.OrchestratorScopeLease, bool, error) {

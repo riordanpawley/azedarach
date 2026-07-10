@@ -1519,6 +1519,7 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 			complete_since TEXT,
 			last_wake_at TEXT,
 			last_wake_reason TEXT NOT NULL DEFAULT '',
+			cursor INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (project_id, scope_kind, root_issue_id),
 			UNIQUE (project_id, session_id),
 			CHECK ((scope_kind = 'project' AND root_issue_id = '') OR (scope_kind = 'rooted' AND root_issue_id <> ''))
@@ -1569,6 +1570,9 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := ensureColumn(ctx, db, orchestratorLeaseTable, "last_wake_reason", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, orchestratorLeaseTable, "cursor", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := ensureColumn(ctx, db, sessionStateTable, "observed_state", "TEXT"); err != nil {

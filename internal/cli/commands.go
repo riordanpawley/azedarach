@@ -8926,6 +8926,11 @@ func renderPrimeOrchestrationSection(snapshot protocol.OrchestrationSnapshot) st
 		scope = "rooted:" + snapshot.Scope.RootIssueID.String()
 	}
 	fmt.Fprintf(&b, "Daemon orchestration context (role=orchestrator scope=%s lifecycle=%s revision=%d cursor=%d):\n", scope, snapshot.Lifecycle, snapshot.Revision, snapshot.Cursor)
+	if snapshot.ContinuationRequired {
+		fmt.Fprintf(&b, "- Runtime persistence guard: wake-required (%s). Durable continuation: %s\n", snapshot.ContinuationReason, snapshot.ContinuationContract)
+	} else if snapshot.Scope.Kind == domain.OrchestrationScopeRooted {
+		b.WriteString("- Runtime persistence guard: daemon-enforced; idle/turn completion wakes this parent while direct nested roots remain, except after complete-check passes or while explicit human acceptance is pending.\n")
+	}
 	fmt.Fprintf(&b, "- Capacity: active=%d runnable=%d total=%d/%d; wave limit=%d.\n", snapshot.Capacity.DirectActiveCount, snapshot.Capacity.DirectRunnableCount, snapshot.Capacity.TotalCountingCapacityCount, snapshot.Constraints.AgentCapacity, snapshot.Constraints.StartLimit)
 	renderCandidates := func(label string, candidates []protocol.OrchestrationCandidate) {
 		if len(candidates) == 0 {
