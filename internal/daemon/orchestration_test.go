@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"log/slog"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 func TestMergeOrchestrationSnapshotOrdersProjectResultsDeterministically(t *testing.T) {
@@ -145,11 +148,74 @@ func TestCandidateOwnershipAllowsSameActor(t *testing.T) {
 	}
 }
 
+func TestExplainOrchestrationCandidatesPreservesReviewAndDecisionClasses(t *testing.T) {
+	snapshot := protocol.OrchestrationSnapshot{
+		Runnable: []string{"review", "decision", "open"},
+		Blocked:  map[string]string{},
+		Candidates: []protocol.OrchestrationCandidate{
+			{IssueID: "review", Classification: string(domain.OrchestrationCandidateReviewReady)},
+			{IssueID: "decision", Classification: string(domain.OrchestrationCandidateDecisionWaiting)},
+			{IssueID: "open", Classification: string(domain.OrchestrationCandidateOpen)},
+		},
+	}
+	explainOrchestrationCandidates(&snapshot)
+	if got := candidateClass(snapshot.Candidates, "review"); got != string(domain.OrchestrationCandidateReviewReady) {
+		t.Fatalf("review class = %q", got)
+	}
+	if got := candidateClass(snapshot.Candidates, "decision"); got != string(domain.OrchestrationCandidateDecisionWaiting) {
+		t.Fatalf("decision class = %q", got)
+	}
+	if got := candidateClass(snapshot.Candidates, "open"); got != "runnable" {
+		t.Fatalf("open class = %q", got)
+	}
+}
+
 func TestOrchestrationGlobalActiveCountIncludesUninspectedRoots(t *testing.T) {
 	tasks := []domain.Task{{ID: "visible", HasTmuxSession: true}, {ID: "outside-limit", HasTmuxSession: true}, {ID: "inactive"}}
 	if got := orchestrationGlobalActiveCount(tasks); got != 2 {
 		t.Fatalf("active count = %d, want 2", got)
 	}
+}
+
+func TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	reader := issues.NewClientAtPath(path, slog.Default())
+	writer := issues.NewClientAtPath(path, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
+	id, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Description: "Executable", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
+	authority := daemonOrchestrationAuthority{daemon: d}
+	before, err := authority.Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := candidateClass(before.Candidates, id); got != "runnable" {
+		t.Fatalf("before class = %q, want runnable", got)
+	}
+	_, err = writer.ClaimOwnershipWithRuntime(ctx, "proj", id, issues.OwnershipClaimParams{OwnerID: "other", OwnerKind: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := authority.Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := candidateClass(after.Candidates, id); got != string(domain.OrchestrationCandidateOwnedElsewhere) {
+		t.Fatalf("after class = %q, want owned-elsewhere", got)
+	}
+}
+
+func candidateClass(candidates []protocol.OrchestrationCandidate, issueID string) string {
+	for _, candidate := range candidates {
+		if candidate.IssueID == issueID {
+			return candidate.Classification
+		}
+	}
+	return ""
 }
 
 func issueIDPtr(value string) *naming.IssueID { id := naming.IssueID(value); return &id }

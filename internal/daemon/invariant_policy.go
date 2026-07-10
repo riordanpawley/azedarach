@@ -38,6 +38,7 @@ const (
 	daemonInvariantOrchestrationScope      daemonInvariantID = "orchestration.scope_identity"
 	daemonInvariantOrchestrationSingleton  daemonInvariantID = "orchestration.scope_singleton"
 	daemonInvariantOrchestrationCompletion daemonInvariantID = "orchestration.project_completion"
+	daemonInvariantOrchestrationCandidates daemonInvariantID = "orchestration.project_candidates"
 )
 
 var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
@@ -64,6 +65,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantOrchestrationScope:      daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationSingleton:  daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationCompletion: daemonInvariantSourceHybrid,
+	daemonInvariantOrchestrationCandidates: daemonInvariantSourceProjection,
 }
 
 func sourceForInvariant(id daemonInvariantID) daemonInvariantSource {
