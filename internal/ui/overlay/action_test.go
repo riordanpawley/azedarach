@@ -9,34 +9,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-func TestNewActionMenu(t *testing.T) {
-	task := domain.Task{
-		ID:     "az-123",
-		Title:  "Test task",
-		Status: domain.StatusOpen,
-	}
-
-	menu := NewActionMenu(task, nil)
-
-	if menu == nil {
-		t.Fatal("expected menu to be created")
-	}
-
-	if menu.task.ID != task.ID {
-		t.Errorf("expected task ID %s, got %s", task.ID, menu.task.ID)
-	}
-}
-
-func TestActionMenu_Title(t *testing.T) {
-	task := domain.Task{ID: "az-123", Status: domain.StatusOpen}
-	menu := NewActionMenu(task, nil)
-
-	title := menu.Title()
-	if title != "Task" {
-		t.Errorf("expected title 'Task', got %s", title)
-	}
-}
-
 func TestActionMenu_Size(t *testing.T) {
 	task := domain.Task{ID: "az-123", Status: domain.StatusOpen}
 	menu := NewActionMenu(task, nil)

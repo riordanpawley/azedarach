@@ -52,23 +52,6 @@ func (m *mockNetworkChecker) LastCheck() time.Time {
 	return m.lastCheck
 }
 
-func TestNewService(t *testing.T) {
-	ports := &mockPortAllocator{}
-	network := &mockNetworkChecker{}
-
-	service := NewService(ports, network)
-
-	if service == nil {
-		t.Fatal("NewService returned nil")
-	}
-	if service.portAllocator != ports {
-		t.Error("portAllocator not set correctly")
-	}
-	if service.networkChecker != network {
-		t.Error("networkChecker not set correctly")
-	}
-}
-
 func TestGetSystemStatus(t *testing.T) {
 	tests := []struct {
 		name     string

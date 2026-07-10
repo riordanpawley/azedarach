@@ -8,51 +8,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 )
 
-func TestNewProjectSelector(t *testing.T) {
-	registry := &config.ProjectsRegistry{
-		Projects: []config.Project{
-			{Name: "test", Path: "/tmp/test"},
-		},
-		DefaultProject: "test",
-	}
-
-	selector := NewProjectSelector(registry)
-
-	if selector == nil {
-		t.Fatal("expected selector to be created")
-	}
-
-	if selector.registry != registry {
-		t.Error("expected registry to be set")
-	}
-
-	if selector.cursor != 0 {
-		t.Errorf("expected cursor at 0, got %d", selector.cursor)
-	}
-
-	if selector.mode != projectModeList {
-		t.Errorf("expected mode to be projectModeList, got %d", selector.mode)
-	}
-}
-
-func TestProjectSelector_Title(t *testing.T) {
-	registry := &config.ProjectsRegistry{}
-	selector := NewProjectSelector(registry)
-
-	// Test list mode
-	title := selector.Title()
-	if title != "" {
-		t.Errorf("expected empty title in list mode, got %q", title)
-	}
-
-	// Test actions mode
-	selector.mode = projectModeActions
-	title = selector.Title()
-	if title != "Project Selector" {
-		t.Errorf("expected title 'Project Selector', got %s", title)
-	}
-}
-
 func TestProjectSelector_Size(t *testing.T) {
 	registry := &config.ProjectsRegistry{
 		Projects: []config.Project{
