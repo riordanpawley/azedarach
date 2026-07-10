@@ -248,6 +248,81 @@ func TestAdvisorRecoveryCleansRuntimeWhenTerminalRequestWinsCrossDaemonRace(t *t
 	}
 }
 
+func TestAdvisorRecoveryRetriesWhenNonTerminalMutationWinsCrossDaemonRace(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	clientA := issues.NewClient(repoDir, slog.Default())
+	clientB := issues.NewClient(repoDir, slog.Default())
+	issueID, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "recovery metadata race", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	request := domain.InteractionRequest{ID: "request-metadata-race", IssueID: issueID, DecisionKey: "choice", OrchestrationScope: "project", Question: "Which option?", Why: "Human judgment", Options: []domain.InteractionOption{{Key: "a", Label: "A"}}, Significance: domain.InteractionSignificanceRoutine, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose"}, State: domain.InteractionOpen, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := clientA.CreateInteraction(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	request.SessionID = advisorSessionID(request.ID)
+	request, err = request.Transition(domain.InteractionDiscussing, 1, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := clientA.UpdateInteraction(ctx, request, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	projectID := protocol.DefaultProjectID
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	runner := newSessionStartTmuxRunner()
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: clientA, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(), hub: publish.NewHub(16, 8, slog.Default()), revision: map[string]uint64{}}
+	projectID = d.canonicalProjectID(projectID)
+	d.issueClientsByProject = map[string]*issues.Client{projectID: clientA}
+	d.runtimeStoresByProject = map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore}
+	events, cancel := d.hub.Subscribe(projectID, 0)
+	defer cancel()
+	runner.onNewSession = func(string) {
+		current, found, getErr := clientB.GetInteraction(ctx, request.ID)
+		if getErr != nil || !found {
+			t.Errorf("load racing interaction: found=%t err=%v", found, getErr)
+			return
+		}
+		proposalAt := current.UpdatedAt.Add(time.Second)
+		current.Proposal = &domain.InteractionAnswerAudit{Answer: "A", Actor: "advisor", CreatedAt: proposalAt}
+		proposed, transitionErr := current.Transition(domain.InteractionAnswerProposed, current.Revision, proposalAt)
+		if transitionErr != nil {
+			t.Errorf("transition racing interaction: %v", transitionErr)
+			return
+		}
+		if updateErr := clientB.UpdateInteraction(ctx, proposed, current.Revision); updateErr != nil {
+			t.Errorf("persist racing interaction: %v", updateErr)
+		}
+	}
+
+	recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered != 1 || cleaned != 0 || !runner.sessions[request.SessionID] {
+		t.Fatalf("race result recovered=%d cleaned=%d sessions=%v", recovered, cleaned, runner.sessions)
+	}
+	current, found, err := clientA.GetInteraction(ctx, request.ID)
+	if err != nil || !found || current.State != domain.InteractionAnswerProposed || current.Recovery == nil || current.Recovery.SessionID != request.SessionID {
+		t.Fatalf("recovered request=%+v found=%t err=%v", current, found, err)
+	}
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case event := <-events:
+			if event.Event == protocol.EventInteractionRecovered {
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for interaction recovery event")
+		}
+	}
+}
+
 func TestAdvisorSessionIDDoesNotCollideAfterSanitization(t *testing.T) {
 	if advisorSessionID("request_a") == advisorSessionID("request-a") {
 		t.Fatal("distinct request IDs produced the same advisor session ID")

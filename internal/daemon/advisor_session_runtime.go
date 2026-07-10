@@ -223,30 +223,53 @@ func (d *Daemon) reconcileAdvisorSessionRuntimes(ctx context.Context, projectID 
 		if !runtime.Started && !runtime.Resumed {
 			continue
 		}
-		now := time.Now().UTC()
-		next, err := request.Recover("daemon:runtime.reconcile", runtime.Session.SessionID, request.Revision, now)
-		if err == nil {
-			err = client.UpdateInteractionMetadata(ctx, next, request.Revision)
-		}
-		if err != nil {
-			if errors.Is(err, domain.ErrStaleInteractionRevision) {
-				current, currentFound, getErr := client.GetInteraction(ctx, requestID)
-				if getErr == nil && currentFound && current.Unresolved() && current.SessionID == runtime.Session.SessionID {
-					continue
-				}
-				if getErr == nil && (!currentFound || !current.Unresolved() || current.SessionID != runtime.Session.SessionID) {
-					if cleanupErr := d.cleanupAdvisorSessionRuntime(ctx, projectID, requestID); cleanupErr != nil {
-						return recovered, cleaned, fmt.Errorf("clean stale advisor recovery %s: %w", requestID, cleanupErr)
-					}
-					cleaned++
-					continue
-				}
+		var next domain.InteractionRequest
+		var recoveryErr error
+		recorded := false
+		for attempt := 0; attempt < 4; attempt++ {
+			now := time.Now().UTC()
+			if now.Before(request.UpdatedAt) {
+				now = request.UpdatedAt
 			}
+			next, recoveryErr = request.Recover("daemon:runtime.reconcile", runtime.Session.SessionID, request.Revision, now)
+			if recoveryErr == nil {
+				recoveryErr = client.UpdateInteractionMetadata(ctx, next, request.Revision)
+			}
+			if recoveryErr == nil {
+				recorded = true
+				break
+			}
+			if !errors.Is(recoveryErr, domain.ErrStaleInteractionRevision) {
+				break
+			}
+			current, currentFound, getErr := client.GetInteraction(ctx, requestID)
+			if getErr != nil {
+				recoveryErr = errors.Join(recoveryErr, fmt.Errorf("refresh interaction after stale recovery: %w", getErr))
+				break
+			}
+			if !currentFound || !current.Unresolved() || current.SessionID != runtime.Session.SessionID {
+				if cleanupErr := d.cleanupAdvisorSessionRuntime(ctx, projectID, requestID); cleanupErr != nil {
+					return recovered, cleaned, fmt.Errorf("clean stale advisor recovery %s: %w", requestID, cleanupErr)
+				}
+				cleaned++
+				recoveryErr = nil
+				break
+			}
+			if current.Recovery != nil && current.Recovery.Actor == "daemon:runtime.reconcile" && current.Recovery.SessionID == runtime.Session.SessionID && current.Recovery.RecoveredAt.After(request.UpdatedAt) {
+				recoveryErr = nil
+				break
+			}
+			request = current
+		}
+		if recoveryErr != nil {
 			if cleanupErr := d.cleanupAdvisorSessionRuntime(ctx, projectID, requestID); cleanupErr != nil {
-				return recovered, cleaned, errors.Join(fmt.Errorf("record advisor recovery %s: %w", requestID, err), fmt.Errorf("rollback advisor recovery %s: %w", requestID, cleanupErr))
+				return recovered, cleaned, errors.Join(fmt.Errorf("record advisor recovery %s: %w", requestID, recoveryErr), fmt.Errorf("rollback advisor recovery %s: %w", requestID, cleanupErr))
 			}
 			cleaned++
-			return recovered, cleaned, fmt.Errorf("record advisor recovery %s: %w", requestID, err)
+			return recovered, cleaned, fmt.Errorf("record advisor recovery %s: %w", requestID, recoveryErr)
+		}
+		if !recorded {
+			continue
 		}
 		service.publishLifecycle(withDaemonProjectIDContext(ctx, projectID), protocol.EventInteractionRecovered, next, 0, "")
 		recovered++
