@@ -149,6 +149,14 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		protocol.CommandDecisionLinkRemove,
 		protocol.CommandDecisionSyncMD,
 		protocol.CommandDecisionImportMD,
+		protocol.CommandInteractionCreate,
+		protocol.CommandInteractionList,
+		protocol.CommandInteractionGet,
+		protocol.CommandInteractionDiscuss,
+		protocol.CommandInteractionPropose,
+		protocol.CommandInteractionAnswer,
+		protocol.CommandInteractionResolve,
+		protocol.CommandInteractionWithdraw,
 		protocol.CommandLearnAdd,
 		protocol.CommandLearnRecall,
 		protocol.CommandLearnShow,
@@ -278,16 +286,17 @@ func TestDispatcherWiringValidation(t *testing.T) {
 	}
 
 	complete := &Dispatcher{
-		session:   &SessionHandler{},
-		git:       &GitHandler{},
-		pr:        &PRHandler{},
-		spec:      &SpecHandler{},
-		decision:  &DecisionHandler{},
-		learn:     &LearnHandler{},
-		operation: &routeOperationHandler{},
-		worktree:  &WorktreeHandler{},
-		devserver: &DevServerHandler{},
-		aiAccount: &AIAccountHandler{},
+		session:     &SessionHandler{},
+		git:         &GitHandler{},
+		pr:          &PRHandler{},
+		spec:        &SpecHandler{},
+		decision:    &DecisionHandler{},
+		learn:       &LearnHandler{},
+		operation:   &routeOperationHandler{},
+		worktree:    &WorktreeHandler{},
+		devserver:   &DevServerHandler{},
+		aiAccount:   &AIAccountHandler{},
+		interaction: &InteractionHandler{},
 	}
 	if err := ValidateDispatcherWiring(complete); err != nil {
 		t.Fatalf("expected complete dispatcher wiring validation to pass: %v", err)

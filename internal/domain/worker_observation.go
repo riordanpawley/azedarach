@@ -40,12 +40,14 @@ type WorkerObservationEventSummary struct {
 
 // WorkerObservation is the daemon-owned projection consumed by CLI/TUI orchestration views.
 type WorkerObservation struct {
-	IssueID           string                         `json:"issue_id"`
-	State             WorkerObservationState         `json:"state"`
-	Reason            string                         `json:"reason"`
-	LastEvent         *WorkerObservationEventSummary `json:"last_meaningful_event,omitempty"`
-	EvidenceSummary   []string                       `json:"evidence_summary,omitempty"`
-	Risks             []string                       `json:"risks,omitempty"`
-	NextActions       []string                       `json:"next_actions,omitempty"`
-	SourceTruthPolicy WorkerObservationSourcePolicy  `json:"source_truth_policy"`
+	IssueID            string                         `json:"issue_id"`
+	State              WorkerObservationState         `json:"state"`
+	Reason             string                         `json:"reason"`
+	WaitingHumanSource WaitingHumanSource             `json:"waiting_human_source,omitempty"`
+	WaitingHumanReason string                         `json:"waiting_human_reason,omitempty"`
+	LastEvent          *WorkerObservationEventSummary `json:"last_meaningful_event,omitempty"`
+	EvidenceSummary    []string                       `json:"evidence_summary,omitempty"`
+	Risks              []string                       `json:"risks,omitempty"`
+	NextActions        []string                       `json:"next_actions,omitempty"`
+	SourceTruthPolicy  WorkerObservationSourcePolicy  `json:"source_truth_policy"`
 }

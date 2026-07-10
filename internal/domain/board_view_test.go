@@ -6,6 +6,18 @@ import (
 	"testing"
 )
 
+func TestWaitingHumanPredicateDistinguishesDecisionFromRuntimePrompt(t *testing.T) {
+	p := BoardColumnPredicate{Kind: BoardPredicateWaitingHuman}
+	decision := Task{Facts: DeriveIssueFacts(IssueFactsInput{Status: StatusOpen, Priority: P2, DecisionWaiting: true, DecisionWaitReason: "choose region"})}
+	if ok, reason := p.MatchTask(decision); !ok || reason != "waiting_human=true source=interaction_request" {
+		t.Fatalf("decision match = %v, %q", ok, reason)
+	}
+	runtime := Task{Status: StatusInProgress, Priority: P2, Session: &Session{Activity: "waiting-for-human"}}
+	if ok, reason := p.MatchTask(runtime); !ok || reason != "waiting_human=true source=runtime_prompt" {
+		t.Fatalf("runtime match = %v, %q", ok, reason)
+	}
+}
+
 func TestBuiltInBoardViewsValidate(t *testing.T) {
 	if err := BuiltInBoardViewSet().Validate(); err != nil {
 		t.Fatalf("BuiltInBoardViewSet().Validate() error = %v", err)
