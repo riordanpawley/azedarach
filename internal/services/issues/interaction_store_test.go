@@ -31,7 +31,9 @@ func TestResolveInteractionAtomicEffectsAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1, Decision: &InteractionDecisionEffect{Title: "bad"}})
+	missingDecision := "dec-999999"
+	r.FinalAnswer.Answer.ApprovedDecisionEffect = &domain.InteractionDecisionEffect{ExistingDecisionID: missingDecision}
+	_, err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1})
 	if err == nil {
 		t.Fatal("expected decision validation failure")
 	}
@@ -46,19 +48,20 @@ func TestResolveInteractionAtomicEffectsAndRollback(t *testing.T) {
 	if task.Title != "before" {
 		t.Fatalf("title changed after rollback: %q", task.Title)
 	}
-	err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1, Decision: &InteractionDecisionEffect{Title: "Proceed", Rationale: "Human approved"}})
+	r.FinalAnswer.Answer.ApprovedDecisionEffect = &domain.InteractionDecisionEffect{Title: "Proceed", Rationale: "Human approved"}
+	_, err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	got, _, _ = c.GetInteraction(ctx, "resolve")
-	if got.State != domain.InteractionResolved || got.FinalAnswer == nil {
+	if got.State != domain.InteractionResolved || got.FinalAnswer == nil || got.ResolutionTrace == nil || got.ResolutionTrace.DecisionID == "" {
 		t.Fatalf("request not resolved: %+v", got)
 	}
 	task = interactionTestTask(t, ctx, c, issueID)
 	if task.Title != title {
 		t.Fatalf("title=%q want %q", task.Title, title)
 	}
-	if err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1}); !errors.Is(err, domain.ErrStaleInteractionRevision) {
+	if _, err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1}); !errors.Is(err, domain.ErrStaleInteractionRevision) {
 		t.Fatalf("stale resolution error=%v", err)
 	}
 }
@@ -81,11 +84,12 @@ func TestResolveInteractionAnswerOnlyPreservesIssueMetadataAndObservations(t *te
 	}
 	now := r.UpdatedAt.Add(time.Second)
 	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: interactionStoreTestAnswer(1), Actor: "human", CreatedAt: now}
+	r.FinalAnswer.Answer.SignificanceRecommendation = domain.InteractionSignificanceRoutine
 	r, err = r.Transition(domain.InteractionResolved, 1, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1}); err != nil {
+	if _, err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1}); err != nil {
 		t.Fatal(err)
 	}
 	after := interactionTestTask(t, ctx, c, issueID)
@@ -102,6 +106,122 @@ func TestResolveInteractionAnswerOnlyPreservesIssueMetadataAndObservations(t *te
 	got, ok, err := c.GetInteraction(ctx, r.ID)
 	if err != nil || !ok || got.State != domain.InteractionResolved {
 		t.Fatalf("interaction not resolved: got=%+v ok=%v err=%v", got, ok, err)
+	}
+}
+
+func TestResolveInteractionUpdatesLinkedRequirementAndTracesSignificantAnswer(t *testing.T) {
+	ctx := context.Background()
+	c := NewClient(t.TempDir(), nil)
+	issueID, err := c.Create(ctx, CreateTaskParams{Title: "issue", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirement, err := c.CreateRequirement(ctx, CreateRequirementParams{LocalID: "fr-resolution", Title: "Old behavior", Description: "old", Status: RequirementStatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.AddSpecLink(ctx, AddSpecLinkParams{IssueID: issueID, RequirementID: requirement.LocalID, Role: LinkRoleImplements}); err != nil {
+		t.Fatal(err)
+	}
+	r := testInteractionRequest("significant", issueID, "behavior")
+	if err = c.CreateInteraction(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	now := r.UpdatedAt.Add(time.Second)
+	description := "new approved behavior"
+	answer := interactionStoreTestAnswer(1)
+	answer.ApprovedRequirementEffects = []domain.InteractionRequirementEffect{{RequirementID: requirement.LocalID, Description: &description}}
+	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: answer, Actor: "human", CreatedAt: now}
+	r, err = r.Transition(domain.InteractionResolved, 1, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := c.GetRequirement(ctx, requirement.LocalID)
+	if err != nil || updated.Description != description {
+		t.Fatalf("requirement = %+v, err=%v", updated, err)
+	}
+	decisions, err := c.ListDecisions(ctx, DecisionFilter{IssueID: issueID})
+	if err != nil || len(decisions) != 1 || decisions[0].Rationale != answer.Rationale {
+		t.Fatalf("issue decisions = %+v, err=%v", decisions, err)
+	}
+	requirementDecisions, err := c.ListDecisions(ctx, DecisionFilter{RequirementID: requirement.LocalID})
+	if err != nil || len(requirementDecisions) != 1 || requirementDecisions[0].LocalID != decisions[0].LocalID {
+		t.Fatalf("requirement decisions = %+v, err=%v", requirementDecisions, err)
+	}
+	resolved, found, err := c.GetInteraction(ctx, r.ID)
+	if err != nil || !found || resolved.ResolutionTrace == nil || resolved.ResolutionTrace.DecisionID != decisions[0].LocalID || len(resolved.ResolutionTrace.RequirementIDs) != 1 || resolved.ResolutionTrace.RequirementIDs[0] != requirement.LocalID {
+		t.Fatalf("resolution trace = %+v found=%v err=%v", resolved.ResolutionTrace, found, err)
+	}
+}
+
+func TestResolveInteractionLinksExistingDecision(t *testing.T) {
+	ctx := context.Background()
+	c := NewClient(t.TempDir(), nil)
+	issueID, err := c.Create(ctx, CreateTaskParams{Title: "issue", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := c.RecordDecision(ctx, RecordDecisionParams{Title: "Existing choice", Rationale: "Already accepted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := testInteractionRequest("link-existing", issueID, "existing")
+	if err = c.CreateInteraction(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	now := r.UpdatedAt.Add(time.Second)
+	answer := interactionStoreTestAnswer(1)
+	answer.ApprovedDecisionEffect = &domain.InteractionDecisionEffect{ExistingDecisionID: decision.LocalID}
+	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: answer, Actor: "human", CreatedAt: now}
+	r, err = r.Transition(domain.InteractionResolved, 1, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1}); err != nil {
+		t.Fatal(err)
+	}
+	linked, err := c.ListDecisions(ctx, DecisionFilter{IssueID: issueID})
+	if err != nil || len(linked) != 1 || linked[0].LocalID != decision.LocalID {
+		t.Fatalf("linked decisions = %+v, err=%v", linked, err)
+	}
+}
+
+func TestResolveInteractionSpecFailureRollsBackIssueAndResolution(t *testing.T) {
+	ctx := context.Background()
+	c := NewClient(t.TempDir(), nil)
+	issueID, err := c.Create(ctx, CreateTaskParams{Title: "before", Description: "before", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.CreateRequirement(ctx, CreateRequirementParams{LocalID: "fr-unlinked", Title: "Unlinked", Status: RequirementStatusOpen}); err != nil {
+		t.Fatal(err)
+	}
+	r := testInteractionRequest("spec-rollback", issueID, "spec")
+	if err = c.CreateInteraction(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	now := r.UpdatedAt.Add(time.Second)
+	issueDescription, requirementDescription := "must roll back", "also roll back"
+	answer := interactionStoreTestAnswer(1)
+	answer.ApprovedIssueFieldEffects.Description = &issueDescription
+	answer.ApprovedRequirementEffects = []domain.InteractionRequirementEffect{{RequirementID: "fr-unlinked", Description: &requirementDescription}}
+	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: answer, Actor: "human", CreatedAt: now}
+	r, err = r.Transition(domain.InteractionResolved, 1, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1}); err == nil {
+		t.Fatal("unlinked requirement effect succeeded")
+	}
+	got, found, err := c.GetInteraction(ctx, r.ID)
+	if err != nil || !found || got.State != domain.InteractionOpen || got.Revision != 1 {
+		t.Fatalf("interaction changed after spec rollback: %+v found=%v err=%v", got, found, err)
+	}
+	if task := interactionTestTask(t, ctx, c, issueID); task.Description != "before" {
+		t.Fatalf("issue description changed after spec rollback: %q", task.Description)
 	}
 }
 
@@ -251,7 +371,7 @@ func TestInteractionStoreReadsLegacyStringAnswerAuditAndRewritesStructuredFinal(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.ResolveInteraction(ctx, InteractionResolution{Request: got, ExpectedRevision: 2}); err != nil {
+	if _, err := c.ResolveInteraction(ctx, InteractionResolution{Request: got, ExpectedRevision: 2}); err != nil {
 		t.Fatal(err)
 	}
 	reloaded, _, err := c.GetInteraction(ctx, r.ID)

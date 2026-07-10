@@ -164,6 +164,13 @@ func (s issueInteractionService) resolve(ctx context.Context, c *issues.Client, 
 	if in.Answer.Revision != in.ExpectedRevision {
 		return protocol.InteractionResponseBody{}, fmt.Errorf("%w: answer authored at revision %d, current mutation expects %d", domain.ErrStaleInteractionRevision, in.Answer.Revision, in.ExpectedRevision)
 	}
+	if in.Decision != nil {
+		if in.Answer.ApprovedDecisionEffect != nil {
+			return protocol.InteractionResponseBody{}, fmt.Errorf("%w: decision effect supplied twice", domain.ErrInvalidInteractionAnswer)
+		}
+		decision := *in.Decision
+		in.Answer.ApprovedDecisionEffect = &decision
+	}
 	now := time.Now().UTC()
 	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: in.Answer, Actor: strings.TrimSpace(in.Actor), CreatedAt: now}
 	next, e := r.Transition(domain.InteractionResolved, in.ExpectedRevision, now)
@@ -176,10 +183,7 @@ func (s issueInteractionService) resolve(ctx context.Context, c *issues.Client, 
 		return protocol.InteractionResponseBody{}, e
 	}
 	resolution := issues.InteractionResolution{Request: next, ExpectedRevision: in.ExpectedRevision}
-	if in.Decision != nil {
-		resolution.Decision = &issues.InteractionDecisionEffect{Title: in.Decision.Title, Rationale: in.Decision.Rationale, Context: in.Decision.Context, Consequences: in.Decision.Consequences}
-	}
-	if e = c.ResolveInteraction(ctx, resolution); e != nil {
+	if next, e = c.ResolveInteraction(ctx, resolution); e != nil {
 		return protocol.InteractionResponseBody{}, e
 	}
 	s.cleanupAdvisorAfterTerminalInteraction(ctx, next.ID)
@@ -197,6 +201,5 @@ func (s issueInteractionService) cleanupAdvisorAfterTerminalInteraction(ctx cont
 }
 
 func humanActor(actor string) bool {
-	a := strings.ToLower(strings.TrimSpace(actor))
-	return a == "human" || strings.HasPrefix(a, "human:")
+	return domain.HumanInteractionActor(actor)
 }

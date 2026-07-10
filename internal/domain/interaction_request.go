@@ -54,16 +54,42 @@ type InteractionIssueFieldEffects struct {
 	Priority    *int    `json:"priority,omitempty" msgpack:"priority,omitempty"`
 }
 
+func (e InteractionIssueFieldEffects) Any() bool {
+	return e.Title != nil || e.Description != nil || e.Design != nil || e.Acceptance != nil || e.Priority != nil
+}
+
+// InteractionRequirementEffect is an explicitly human-approved behavioral
+// contract edit. RequirementID must identify a requirement already linked to
+// the interaction's issue; nil fields remain unchanged.
+type InteractionRequirementEffect struct {
+	RequirementID string  `json:"requirement_id" msgpack:"requirement_id"`
+	Title         *string `json:"title,omitempty" msgpack:"title,omitempty"`
+	Description   *string `json:"description,omitempty" msgpack:"description,omitempty"`
+}
+
+// InteractionDecisionEffect either links an existing decision or supplies
+// overrides for the decision derived from a significant final answer. An empty
+// ExistingDecisionID means a new decision should be recorded.
+type InteractionDecisionEffect struct {
+	ExistingDecisionID string `json:"existing_decision_id,omitempty" msgpack:"existing_decision_id,omitempty"`
+	Title              string `json:"title,omitempty" msgpack:"title,omitempty"`
+	Rationale          string `json:"rationale,omitempty" msgpack:"rationale,omitempty"`
+	Context            string `json:"context,omitempty" msgpack:"context,omitempty"`
+	Consequences       string `json:"consequences,omitempty" msgpack:"consequences,omitempty"`
+}
+
 // InteractionAnswerPayload is shared by advisor proposals and human final
 // answers. Revision identifies the request context the answer was authored
 // against; mutations must additionally pass the store's optimistic revision gate.
 type InteractionAnswerPayload struct {
-	SelectedOption             string                       `json:"selected_option" msgpack:"selected_option"`
-	Rationale                  string                       `json:"rationale" msgpack:"rationale"`
-	Constraints                []string                     `json:"constraints,omitempty" msgpack:"constraints,omitempty"`
-	ApprovedIssueFieldEffects  InteractionIssueFieldEffects `json:"approved_issue_field_effects,omitempty" msgpack:"approved_issue_field_effects,omitempty"`
-	SignificanceRecommendation InteractionSignificance      `json:"significance_recommendation" msgpack:"significance_recommendation"`
-	Revision                   int64                        `json:"revision" msgpack:"revision"`
+	SelectedOption             string                         `json:"selected_option" msgpack:"selected_option"`
+	Rationale                  string                         `json:"rationale" msgpack:"rationale"`
+	Constraints                []string                       `json:"constraints,omitempty" msgpack:"constraints,omitempty"`
+	ApprovedIssueFieldEffects  InteractionIssueFieldEffects   `json:"approved_issue_field_effects,omitempty" msgpack:"approved_issue_field_effects,omitempty"`
+	ApprovedRequirementEffects []InteractionRequirementEffect `json:"approved_requirement_effects,omitempty" msgpack:"approved_requirement_effects,omitempty"`
+	ApprovedDecisionEffect     *InteractionDecisionEffect     `json:"approved_decision_effect,omitempty" msgpack:"approved_decision_effect,omitempty"`
+	SignificanceRecommendation InteractionSignificance        `json:"significance_recommendation" msgpack:"significance_recommendation"`
+	Revision                   int64                          `json:"revision" msgpack:"revision"`
 }
 
 type InteractionAnswerAudit struct {
@@ -72,26 +98,35 @@ type InteractionAnswerAudit struct {
 	CreatedAt time.Time                `json:"created_at" msgpack:"created_at"`
 }
 
+// InteractionResolutionTrace records the authoritative durable artifacts
+// applied for one significant final answer. It is store-owned, not caller
+// supplied, so a decision remains directly traceable to its interaction.
+type InteractionResolutionTrace struct {
+	DecisionID     string   `json:"decision_id" msgpack:"decision_id"`
+	RequirementIDs []string `json:"requirement_ids,omitempty" msgpack:"requirement_ids,omitempty"`
+}
+
 type InteractionRequest struct {
-	ID                 string                    `json:"id" msgpack:"id"`
-	IssueID            string                    `json:"issue_id" msgpack:"issue_id"`
-	DecisionKey        string                    `json:"decision_key" msgpack:"decision_key"`
-	OrchestrationScope string                    `json:"orchestration_scope" msgpack:"orchestration_scope"`
-	Question           string                    `json:"question" msgpack:"question"`
-	Why                string                    `json:"why" msgpack:"why"`
-	Options            []InteractionOption       `json:"options,omitempty" msgpack:"options,omitempty"`
-	RequiredDecisions  []string                  `json:"required_decisions,omitempty" msgpack:"required_decisions,omitempty"`
-	Context            string                    `json:"context,omitempty" msgpack:"context,omitempty"`
-	Significance       InteractionSignificance   `json:"significance" msgpack:"significance"`
-	Respondent         string                    `json:"respondent" msgpack:"respondent"`
-	DecisionPacket     InteractionDecisionPacket `json:"decision_packet" msgpack:"decision_packet"`
-	Proposal           *InteractionAnswerAudit   `json:"proposal,omitempty" msgpack:"proposal,omitempty"`
-	FinalAnswer        *InteractionAnswerAudit   `json:"final_answer,omitempty" msgpack:"final_answer,omitempty"`
-	SessionID          string                    `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
-	State              InteractionState          `json:"state" msgpack:"state"`
-	Revision           int64                     `json:"revision" msgpack:"revision"`
-	CreatedAt          time.Time                 `json:"created_at" msgpack:"created_at"`
-	UpdatedAt          time.Time                 `json:"updated_at" msgpack:"updated_at"`
+	ID                 string                      `json:"id" msgpack:"id"`
+	IssueID            string                      `json:"issue_id" msgpack:"issue_id"`
+	DecisionKey        string                      `json:"decision_key" msgpack:"decision_key"`
+	OrchestrationScope string                      `json:"orchestration_scope" msgpack:"orchestration_scope"`
+	Question           string                      `json:"question" msgpack:"question"`
+	Why                string                      `json:"why" msgpack:"why"`
+	Options            []InteractionOption         `json:"options,omitempty" msgpack:"options,omitempty"`
+	RequiredDecisions  []string                    `json:"required_decisions,omitempty" msgpack:"required_decisions,omitempty"`
+	Context            string                      `json:"context,omitempty" msgpack:"context,omitempty"`
+	Significance       InteractionSignificance     `json:"significance" msgpack:"significance"`
+	Respondent         string                      `json:"respondent" msgpack:"respondent"`
+	DecisionPacket     InteractionDecisionPacket   `json:"decision_packet" msgpack:"decision_packet"`
+	Proposal           *InteractionAnswerAudit     `json:"proposal,omitempty" msgpack:"proposal,omitempty"`
+	FinalAnswer        *InteractionAnswerAudit     `json:"final_answer,omitempty" msgpack:"final_answer,omitempty"`
+	ResolutionTrace    *InteractionResolutionTrace `json:"resolution_trace,omitempty" msgpack:"resolution_trace,omitempty"`
+	SessionID          string                      `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
+	State              InteractionState            `json:"state" msgpack:"state"`
+	Revision           int64                       `json:"revision" msgpack:"revision"`
+	CreatedAt          time.Time                   `json:"created_at" msgpack:"created_at"`
+	UpdatedAt          time.Time                   `json:"updated_at" msgpack:"updated_at"`
 }
 
 func (r InteractionRequest) Unresolved() bool {
@@ -300,6 +335,26 @@ func (r InteractionRequest) validateAnswerPayload(name string, answer Interactio
 	}
 	if effects.Priority != nil && (*effects.Priority < 0 || *effects.Priority > 4) {
 		return fmt.Errorf("%w: interaction %s approved issue priority is invalid", ErrInvalidInteractionAnswer, name)
+	}
+	seenRequirements := make(map[string]struct{}, len(answer.ApprovedRequirementEffects))
+	for _, effect := range answer.ApprovedRequirementEffects {
+		requirementID := strings.TrimSpace(effect.RequirementID)
+		if requirementID == "" || (effect.Title == nil && effect.Description == nil) {
+			return fmt.Errorf("%w: interaction %s approved requirement effect requires an id and an edit", ErrInvalidInteractionAnswer, name)
+		}
+		if effect.Title != nil && strings.TrimSpace(*effect.Title) == "" {
+			return fmt.Errorf("%w: interaction %s approved requirement title must be non-empty", ErrInvalidInteractionAnswer, name)
+		}
+		if _, exists := seenRequirements[requirementID]; exists {
+			return fmt.Errorf("%w: interaction %s approved requirement is duplicated: %s", ErrInvalidInteractionAnswer, name, requirementID)
+		}
+		seenRequirements[requirementID] = struct{}{}
+	}
+	if effect := answer.ApprovedDecisionEffect; effect != nil {
+		existing := strings.TrimSpace(effect.ExistingDecisionID)
+		if existing != "" && (strings.TrimSpace(effect.Title) != "" || strings.TrimSpace(effect.Rationale) != "" || strings.TrimSpace(effect.Context) != "" || strings.TrimSpace(effect.Consequences) != "") {
+			return fmt.Errorf("%w: interaction %s existing decision link cannot include record overrides", ErrInvalidInteractionAnswer, name)
+		}
 	}
 	return nil
 }
