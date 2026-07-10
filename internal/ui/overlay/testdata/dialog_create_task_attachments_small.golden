@@ -1,0 +1,20 @@
+╭────────────────────────────────────────────────────────────────────╮
+│Create New Task                                                     │
+│────────────────────────────────────────────────────────────────────│
+││ ┃   1 Acceptance criteria (optional)...     Actions               │
+││ ┃                                           ──────────────────────│
+││ ┃                                            Tab / Shift+Tab      │
+││ Attachments:                                Switch fields         │
+││                                              Ctrl+C Clear focused │
+││ 1 attachment(s)                             field                 │
+││ ▶ task-context.md                 1.50 KB    T/B/F/E/C Set type   │
+││ md                                           0/1/2/3/4 Set        │
+││                                             priority              │
+││ Ctrl+P paste clipboard  j/k navigate  d/x    h/l or ←/→ Cycle impl│
+││ delete                                      combinations          │
+││ ┌────────────────────────────────────────    Ctrl+P Paste image   │
+││ ────                                         j/k + d Manage       │
+││ │ Markdown Preview                          attachments           │
+││ │ ## Context                                 Enter Create Task    │
+││ │ Keep attachment controls visible.          Ctrl+E Edit in       │
+╰────────────────────────────────────────────────────────────────────╯

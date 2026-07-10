@@ -2,10 +2,12 @@ package overlay
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 )
@@ -93,6 +95,55 @@ func TestImageAttachOverlay_UsesActionsSectionLayout(t *testing.T) {
 	}
 	if !strings.Contains(view, "Actions") {
 		t.Fatalf("expected actions section, got %q", view)
+	}
+}
+
+func TestImageAttachOverlay_DefaultViewportUsesContentHeight(t *testing.T) {
+	overlay := NewImageAttachOverlay("az-1", &mockAttachService{})
+	overlay.Update(tea.WindowSizeMsg{Width: 160, Height: 60})
+
+	if width, height := overlay.Size(); width != 84 || height != 14 {
+		t.Fatalf("expected content-sized attachment dialog 84x14, got %dx%d", width, height)
+	}
+}
+
+func TestImageAttachOverlay_LongListKeepsSelectionAndPreviewInBounds(t *testing.T) {
+	overlay := NewImageAttachOverlay("az-1", &mockAttachService{})
+	for idx := 1; idx <= 20; idx++ {
+		overlay.files = append(overlay.files, attachment.Attachment{
+			ID:       fmt.Sprintf("a%d", idx),
+			IssueID:  "az-1",
+			Filename: fmt.Sprintf("capture-%02d-with-a-long-name.png", idx),
+			MimeType: "image/png",
+		})
+	}
+	overlay.cursor = len(overlay.files) - 1
+	overlay.preview = attachmentPreviewState{
+		attachmentID: overlay.files[overlay.cursor].ID,
+		title:        "Image Preview",
+		lines:        []string{"Selected preview"},
+	}
+	overlay.Update(tea.WindowSizeMsg{Width: 160, Height: 60})
+
+	view := overlay.View()
+	_, height := overlay.Size()
+	if lipgloss.Height(view) > height {
+		t.Fatalf("view height = %d, dialog height = %d", lipgloss.Height(view), height)
+	}
+	if !strings.Contains(view, "capture-20") || !strings.Contains(view, "Selected preview") {
+		t.Fatalf("selected attachment and preview must remain visible:\n%s", view)
+	}
+}
+
+func TestImageAttachOverlay_NarrowViewportKeepsCompactPreview(t *testing.T) {
+	overlay := NewImageAttachOverlay("az-1", &mockAttachService{})
+	overlay.files = []attachment.Attachment{{ID: "a1", Filename: "capture.png", MimeType: "image/png"}}
+	overlay.preview = attachmentPreviewState{attachmentID: "a1", title: "Image Preview", lines: []string{"1200x800 PNG image with a deliberately long compact fallback description"}}
+	overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+
+	view := overlay.View()
+	if !strings.Contains(view, "Image Preview") || !strings.Contains(view, "1200x800") {
+		t.Fatalf("narrow dialog must retain compact selected preview:\n%s", view)
 	}
 }
 
