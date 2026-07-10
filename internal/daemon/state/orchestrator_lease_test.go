@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
@@ -180,6 +181,62 @@ func TestOrchestratorLeaseAuthorityRefreshesStaleCacheBeforeAcquire(t *testing.T
 	lease, found, err := authorityB.Get(ctx, identity)
 	if err != nil || !found || lease.SessionID != "session-a" {
 		t.Fatalf("authority B refreshed lease = %+v, found=%t, err=%v", lease, found, err)
+	}
+}
+
+func TestOrchestratorLifecycleGracePersistsAcrossRestartAndResets(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "lifecycle.db")
+	storeA := NewRuntimeStateStoreAtPath(dbPath, nil)
+	identity := mustOrchestratorIdentity(t, "proj-a", domain.ProjectOrchestrationScope())
+	if _, err := storeA.AcquireOrchestratorScopeLease(ctx, identity, "orch", func(context.Context, string) (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 7, 10, 1, 0, 0, 0, time.UTC)
+	policy := domain.OrchestratorLifecyclePolicy{CompleteGrace: 5 * time.Minute, WakeDebounce: time.Second}
+	lease, err := storeA.EvaluateOrchestratorScopeLease(ctx, identity, "orch", start, domain.OrchestratorLifecycleFacts{}, policy)
+	if err != nil || lease.Lifecycle != domain.OrchestratorCompleteGrace || lease.CompleteSince == nil || !lease.CompleteSince.Equal(start) {
+		t.Fatalf("initial grace = %+v, %v", lease, err)
+	}
+	if err := storeA.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storeB := NewRuntimeStateStoreAtPath(dbPath, nil)
+	lease, err = storeB.EvaluateOrchestratorScopeLease(ctx, identity, "orch", start.Add(6*time.Minute), domain.OrchestratorLifecycleFacts{}, policy)
+	if err != nil || lease.Lifecycle != domain.OrchestratorPaused {
+		t.Fatalf("persisted grace = %+v, %v", lease, err)
+	}
+	lease, err = storeB.EvaluateOrchestratorScopeLease(ctx, identity, "orch", start.Add(7*time.Minute), domain.OrchestratorLifecycleFacts{OpenIssues: 1}, policy)
+	if err != nil || lease.Lifecycle != domain.OrchestratorWorking || lease.CompleteSince != nil {
+		t.Fatalf("reset grace = %+v, %v", lease, err)
+	}
+}
+
+func TestOrchestratorWakeIsDurablyDebouncedAcrossStores(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "wake.db")
+	storeA := NewRuntimeStateStoreAtPath(dbPath, nil)
+	storeB := NewRuntimeStateStoreAtPath(dbPath, nil)
+	identity := mustOrchestratorIdentity(t, "proj-a", domain.ProjectOrchestrationScope())
+	if _, err := storeA.AcquireOrchestratorScopeLease(ctx, identity, "orch", func(context.Context, string) (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 10, 2, 0, 0, 0, time.UTC)
+	policy := domain.OrchestratorLifecyclePolicy{WakeDebounce: 2 * time.Second}
+	first, changed, err := storeA.WakeOrchestratorScopeLease(ctx, identity, now, domain.OrchestratorWakeOpenWork, policy)
+	if err != nil || !changed || first.LastWakeAt == nil {
+		t.Fatalf("first wake = %+v, %t, %v", first, changed, err)
+	}
+	duplicate, changed, err := storeB.WakeOrchestratorScopeLease(ctx, identity, now.Add(time.Second), domain.OrchestratorWakeReviewRequest, policy)
+	if err != nil || changed || duplicate.LastWakeReason != domain.OrchestratorWakeOpenWork {
+		t.Fatalf("duplicate wake = %+v, %t, %v", duplicate, changed, err)
+	}
+	accepted, changed, err := storeB.WakeOrchestratorScopeLease(ctx, identity, now.Add(2*time.Second), domain.OrchestratorWakeHumanAnswer, policy)
+	if err != nil || !changed || accepted.LastWakeReason != domain.OrchestratorWakeHumanAnswer {
+		t.Fatalf("accepted wake = %+v, %t, %v", accepted, changed, err)
+	}
+	if _, _, err := storeB.WakeOrchestratorScopeLease(ctx, identity, now.Add(3*time.Second), "", policy); err == nil {
+		t.Fatal("invalid wake reason unexpectedly accepted")
 	}
 }
 

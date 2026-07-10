@@ -87,6 +87,10 @@ func (d *Daemon) bootstrapSyncOrchestrator(ctx context.Context) error {
 		d.syncBootstrapState.markFailed(err)
 		return fmt.Errorf("sync bootstrap: %w", err)
 	}
+	if err := d.wakePausedOrchestratorsForRecovery(ctx, protocol.DefaultProjectID, timeNow().UTC()); err != nil {
+		d.syncBootstrapState.markFailed(err)
+		return fmt.Errorf("wake orchestrators after recovery: %w", err)
+	}
 	d.syncBootstrapState.markReady()
 	return nil
 }

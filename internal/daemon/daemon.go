@@ -127,6 +127,8 @@ type Daemon struct {
 	issueAutoArchiveByRoot             map[string]appconfig.IssueAutoArchiveConfig
 	scheduledScriptsByProject          map[string]appconfig.ScheduledScriptsConfig
 	scheduledScriptsByRoot             map[string]appconfig.ScheduledScriptsConfig
+	orchestrationByProject             map[string]appconfig.OrchestrationConfig
+	orchestrationByRoot                map[string]appconfig.OrchestrationConfig
 	worktreeManagersMu                 sync.Mutex
 	worktreeManagersByProject          map[string]*git.WorktreeManager
 	worktreeManagersByRoot             map[string]*git.WorktreeManager
