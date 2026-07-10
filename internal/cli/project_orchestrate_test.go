@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
@@ -24,6 +28,31 @@ func TestRootlessOrchestrateParsersAcceptProjectScope(t *testing.T) {
 				t.Fatalf("rootless parse: %v", err)
 			}
 		})
+	}
+}
+
+func TestOrchestratorSessionAttachIsDeclarativeCLICommand(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	var gotCommand string
+	deps := &Dependencies{DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		gotCommand = req.Command
+		var body protocol.OrchestratorSessionRequest
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Scope.Kind != domain.OrchestrationScopeProject {
+			t.Fatalf("scope = %+v", body.Scope)
+		}
+		return responseWithJSON(req, protocol.OrchestratorSessionResult{Scope: body.Scope, SessionID: "az-orchestrator-project", Disposition: "attached", Lifecycle: domain.OrchestratorWorking, Live: true}), nil
+	}})}
+	output := captureStdout(t, func() error { return OrchestratorSessionCommand(deps, "attach", OrchestratorSessionOptions{}) })
+	if gotCommand != protocol.CommandOrchestratorSessionAttach {
+		t.Fatalf("command = %q", gotCommand)
+	}
+	for _, want := range []string{"Orchestrator session: az-orchestrator-project", "Disposition: attached", "Live: true"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q: %s", want, output)
+		}
 	}
 }
 

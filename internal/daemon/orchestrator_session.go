@@ -122,10 +122,12 @@ func (d *Daemon) handleOrchestratorSession(ctx context.Context, req protocol.Req
 			if !result.Live {
 				return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "orchestrator session runtime is not live"), nil
 			}
-			result.Disposition = "attached"
-			if err := d.tmux.AttachSession(ctx, lease.SessionID); err != nil {
-				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			lease, err = authority.SetLifecycle(ctx, identity, lease.SessionID, domain.OrchestratorWorking)
+			if err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record orchestrator session attach transition: %v", err)), nil
 			}
+			result.Lifecycle = lease.Lifecycle
+			result.Disposition = "attached"
 		}
 	}
 	encoded, encodeErr := json.Marshal(result)

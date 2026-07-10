@@ -77,6 +77,35 @@ func TestProjectOrchestratorSessionStartAttachesExactScopeSingleton(t *testing.T
 	if second.Disposition != string(daemonstate.OrchestratorLeaseAttached) || second.SessionID != first.SessionID {
 		t.Fatalf("second result = %+v, first = %+v", second, first)
 	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, domain.ProjectOrchestrationScope())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).SetLifecycle(ctx, identity, first.SessionID, domain.OrchestratorPaused); err != nil {
+		t.Fatal(err)
+	}
+	attachRequest := request
+	attachRequest.Command = protocol.CommandOrchestratorSessionAttach
+	attachResponse, err := d.handleOrchestratorSession(ctx, attachRequest)
+	if err != nil || attachResponse.Error != nil {
+		t.Fatalf("attach declaration: response=%+v err=%v", attachResponse.Error, err)
+	}
+	var attached protocol.OrchestratorSessionResult
+	if err := json.Unmarshal(attachResponse.Body, &attached); err != nil {
+		t.Fatal(err)
+	}
+	if attached.Disposition != "attached" || !attached.Live || attached.SessionID != first.SessionID || attached.Lifecycle != domain.OrchestratorWorking {
+		t.Fatalf("attached result = %+v", attached)
+	}
+	persistedLease, found, err := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity)
+	if err != nil || !found || persistedLease.Lifecycle != domain.OrchestratorWorking {
+		t.Fatalf("persisted attach lifecycle = %+v found=%t err=%v", persistedLease, found, err)
+	}
+	for _, command := range runner.commands {
+		if len(command) > 0 && command[0] == "attach-session" {
+			t.Fatalf("daemon attach handler invoked blocking terminal operation: %+v", command)
+		}
+	}
 
 	newSessions := 0
 	for _, command := range runner.commands {
