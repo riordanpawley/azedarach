@@ -108,7 +108,8 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 	}{
 		{name: "codex", tool: "codex", want: []string{"--sandbox read-only", "--ask-for-approval never"}},
 		{name: "claude", tool: "claude", want: []string{"--permission-mode plan", `--tools "Read,Glob,Grep"`}},
-		{name: "unsupported", tool: "opencode", wantErr: true},
+		{name: "opencode", tool: "opencode", want: []string{"OPENCODE_CONFIG_CONTENT=", `"*":"deny"`, `"read":"allow"`, `"edit":"deny"`, `"bash":"deny"`, "--pure", "--prompt"}},
+		{name: "unsupported", tool: "unknown", wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			d := &Daemon{cfg: Config{CLITool: test.tool, DangerouslySkipPermissions: true, CodexAppServer: true, SessionShell: "sh"}}
@@ -134,6 +135,13 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 			}
 			if !strings.Contains(command, "AZEDARACH_SESSION_ID=") || !strings.Contains(command, "advisor-request-1") {
 				t.Fatalf("command = %q, missing advisor session identity", command)
+			}
+			promptEnd := strings.Index(command, "; AZEDARACH_SESSION_ROLE=advisor")
+			if test.tool == "opencode" {
+				promptEnd = strings.Index(command, "; OPENCODE_CONFIG_CONTENT=")
+			}
+			if promptEnd < 0 || strings.Index(command[promptEnd:], test.tool) < 0 {
+				t.Fatalf("command = %q, advisor environment is not attached to tool invocation", command)
 			}
 		})
 	}

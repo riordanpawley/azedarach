@@ -61,18 +61,21 @@ func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate
 	}
 	promptAssignment := initialPromptShellAssignment(prompt)
 	promptArg := `"$` + initialPromptShellVariable + `"`
+	envPrefix := "AZEDARACH_SESSION_ROLE=advisor AZEDARACH_INTERACTION_ID=" + singleQuoteForShell(advisor.RequestID) + " AZEDARACH_SESSION_ID=" + singleQuoteForShell(advisor.SessionID) + ` AZEDARACH_ISSUE_ID="" `
 	var toolCommand string
 	// Build this command independently from implementation-session settings so
 	// project-wide bypass and remote/app-server modes cannot weaken the advisor.
 	switch tool {
 	case "codex":
-		toolCommand = promptAssignment + `; AZEDARACH_ISSUE_ID="" codex --sandbox read-only --ask-for-approval never -- ` + promptArg
+		toolCommand = promptAssignment + `; ` + envPrefix + `codex --sandbox read-only --ask-for-approval never -- ` + promptArg
 	case "claude":
-		toolCommand = promptAssignment + `; AZEDARACH_ISSUE_ID="" claude --permission-mode plan --tools "Read,Glob,Grep" ` + promptArg
+		toolCommand = promptAssignment + `; ` + envPrefix + `claude --permission-mode plan --tools "Read,Glob,Grep" ` + promptArg
+	case "opencode":
+		permissions := `{"permission":{"*":"deny","edit":"deny","bash":"deny","task":"deny","external_directory":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","question":"allow"}}`
+		toolCommand = promptAssignment + `; OPENCODE_CONFIG_CONTENT=` + singleQuoteForShell(permissions) + ` ` + envPrefix + `opencode --pure --prompt ` + promptArg
 	default:
 		return "", fmt.Errorf("advisor read-only permissions are unsupported for CLI tool %q", tool)
 	}
-	toolCommand = "AZEDARACH_SESSION_ROLE=advisor AZEDARACH_INTERACTION_ID=" + singleQuoteForShell(advisor.RequestID) + " AZEDARACH_SESSION_ID=" + singleQuoteForShell(advisor.SessionID) + " " + toolCommand
 	shell := strings.TrimSpace(projectCfg.SessionShell)
 	if shell == "" {
 		shell = "zsh"
