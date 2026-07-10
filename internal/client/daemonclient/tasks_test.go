@@ -1792,3 +1792,29 @@ func TestTaskCommandErrors(t *testing.T) {
 		t.Fatalf("command error code = %q", cmdErr.Code)
 	}
 }
+
+func TestBulkCleanupTasksUsesOneStructuredDaemonCommand(t *testing.T) {
+	commandCount := 0
+	transport := &taskRecordingTransport{replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		commandCount++
+		if req.Command != CommandTaskBulkCleanup {
+			t.Fatalf("command = %q, want %q", req.Command, CommandTaskBulkCleanup)
+		}
+		var body TaskBulkCleanupRequest
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.TaskIDs) != 2 || body.CloseOutcome != "cancelled" || !body.DryRun {
+			t.Fatalf("body = %+v", body)
+		}
+		return responseWithJSON(t, req, TaskBulkCleanupResult{DryRun: true, Action: "cancelled", Items: []TaskBulkCleanupItem{{TaskID: "az-1", Success: true}}}), nil
+	}}
+	client := New(transport).WithProjectID("project")
+	result, err := client.BulkCleanupTasks(context.Background(), TaskBulkCleanupRequest{TaskIDs: []string{"az-1", "az-2"}, CloseOutcome: "cancelled", DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commandCount != 1 || len(result.Items) != 1 {
+		t.Fatalf("commands = %d result = %+v", commandCount, result)
+	}
+}

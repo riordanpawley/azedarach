@@ -311,6 +311,8 @@ func printHelpForPath(path []string) bool {
 		printIssueUpdateUsage(os.Stdout)
 	case "issue close":
 		printIssueCloseUsage(os.Stdout)
+	case "issue cleanup":
+		fmt.Println("Usage: az issue cleanup [--project <project-id>] [--id <issue-id> ...|--ids a,b] [--status <status> ...] [--query text] [--updated-before date] [--limit N] [--action closed|cancelled] [--dry-run] [--per-issue-timeout duration] [--json]")
 	case "issue delete":
 		fmt.Println(issueDeleteUsage)
 	case "issue unarchive":
@@ -408,7 +410,7 @@ func printHelpForPath(path []string) bool {
 func printIssueHelp() {
 	helpText, err := clitext.Render("issue_help", nil)
 	if err != nil {
-		fmt.Println("Usage: az issue <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|delete|unarchive|image|document|dep|bulk-create|bulk-update|fanout> [arguments]")
+		fmt.Println("Usage: az issue <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|cleanup|delete|unarchive|image|document|dep|bulk-create|bulk-update|fanout> [arguments]")
 		return
 	}
 	fmt.Print(helpText)

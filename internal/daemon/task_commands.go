@@ -2161,7 +2161,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 
 func daemonTaskCloseOutcomeStatus(raw string) (domain.IssueCloseOutcome, domain.Status, error) {
 	switch domain.IssueCloseOutcome(strings.ToLower(strings.TrimSpace(raw))) {
-	case "", domain.IssueCloseCompleted:
+	case "", domain.IssueCloseCompleted, domain.IssueCloseOutcome(domain.StatusDone):
 		return domain.IssueCloseCompleted, domain.StatusDone, nil
 	case domain.IssueCloseCancelled:
 		return domain.IssueCloseCancelled, domain.StatusCancelled, nil
