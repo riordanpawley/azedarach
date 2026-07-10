@@ -13,6 +13,7 @@ import (
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
@@ -141,10 +142,17 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 	if err := d.materializeSessionActivityEvidence(ctx, protocol.Metadata{ProjectID: result.ProjectID}, result.ProjectID.String(), issueIDs); err != nil {
 		errs = append(errs, fmt.Errorf("materialize session activity evidence: %w", err))
 	}
-	if err := d.reconcileIssueResourcesPresent(ctx, result.ProjectID.String(), issueIDs); err != nil {
-		errs = append(errs, fmt.Errorf("reconcile issue resources present: %w", err))
+	if shouldRunIssueResourceReconcileForRuntimeRequest(ctx) {
+		if err := d.reconcileIssueResourcesPresent(ctx, result.ProjectID.String(), issueIDs); err != nil {
+			errs = append(errs, fmt.Errorf("reconcile issue resources present: %w", err))
+		}
 	}
 	return result, errors.Join(errs...)
+}
+
+func shouldRunIssueResourceReconcileForRuntimeRequest(ctx context.Context) bool {
+	request := runtimeReconcileRequestFromContext(ctx)
+	return strings.TrimSpace(request.Reason) != "mutation-issue:"+daemonhandlers.CommandSessionStart
 }
 
 func (d *Daemon) reconcileIssueResourcesPresent(ctx context.Context, projectID string, issueIDs []string) error {

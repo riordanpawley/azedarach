@@ -4481,10 +4481,14 @@ func (d *Daemon) runIssueResourceReconcileCommand(ctx context.Context, projectID
 		return issueResourceLifecycleResult{}, nil
 	}
 	resourceCtx.DesiredState = normalizeIssueResourceDesiredState(desiredState)
-	return d.runIssueResourceCommands(ctx, projectID, resourceCtx, []string{command})
+	return d.runIssueResourceCommandsWithDir(ctx, projectID, resourceCtx, []string{command}, issueResourceReconcileCommandDir(resourceCtx))
 }
 
 func (d *Daemon) runIssueResourceCommands(ctx context.Context, projectID string, resourceCtx issueResourceLifecycleContext, commands []string) (issueResourceLifecycleResult, error) {
+	return d.runIssueResourceCommandsWithDir(ctx, projectID, resourceCtx, commands, issueResourceCommandDir(resourceCtx))
+}
+
+func (d *Daemon) runIssueResourceCommandsWithDir(ctx context.Context, projectID string, resourceCtx issueResourceLifecycleContext, commands []string, commandDir string) (issueResourceLifecycleResult, error) {
 	result := issueResourceLifecycleResult{}
 	if len(commands) == 0 {
 		return result, nil
@@ -4507,7 +4511,7 @@ func (d *Daemon) runIssueResourceCommands(ctx context.Context, projectID string,
 			"arg_count", 2,
 		)
 		cmd := exec.CommandContext(commandCtx, shell, "-lc", trimmed)
-		cmd.Dir = issueResourceCommandDir(resourceCtx)
+		cmd.Dir = commandDir
 		cmd.Env = append(os.Environ(), env...)
 		output, err := cmd.CombinedOutput()
 		endSpan(err)
@@ -4634,6 +4638,13 @@ func issueResourceCommandDir(resourceCtx issueResourceLifecycleContext) string {
 		return dir
 	}
 	return "."
+}
+
+func issueResourceReconcileCommandDir(resourceCtx issueResourceLifecycleContext) string {
+	if dir := strings.TrimSpace(resourceCtx.RootPath); dir != "" {
+		return dir
+	}
+	return issueResourceCommandDir(resourceCtx)
 }
 
 func issueResourceContextValues(resourceCtx issueResourceLifecycleContext) map[string]string {

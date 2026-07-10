@@ -1607,6 +1607,84 @@ func TestReconcileIssueResourcesPresentRunsForActiveRuntimeAttachmentsOnly(t *te
 	}
 }
 
+func TestRuntimeReconcileIssuesSkipsIssueResourceHookForSessionStartFreshness(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-resource-start-freshness"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	activeID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Active resources",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create active issue: %v", err)
+	}
+	activeWorktree := filepath.Join(repoDir, "wt-"+activeID)
+	if err := os.MkdirAll(activeWorktree, 0o755); err != nil {
+		t.Fatalf("mkdir worktree %s: %v", activeWorktree, err)
+	}
+	if err := runtimeStateStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   activeID,
+		Path:      activeWorktree,
+		Branch:    "riordan/" + activeID + "/resources",
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree state: %v", err)
+	}
+
+	marker := filepath.Join(repoDir, "resource-reconcile")
+	d := &Daemon{
+		cfg: Config{
+			SessionShell: "sh",
+			IssueResources: appconfig.IssueResourcesConfig{
+				ReconcileCommand: fmt.Sprintf("printf 'ran' > %q", marker),
+			},
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+	}
+
+	startCtx := context.WithValue(ctx, runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
+		Priority: reconcilePriorityManual,
+		Reason:   "mutation-issue:" + daemonhandlers.CommandSessionStart,
+	})
+	if _, err := newRuntimeReconcileService(d).ReconcileIssues(startCtx, projectID, []string{activeID}); err != nil {
+		t.Fatalf("ReconcileIssues session.start freshness error: %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("session.start freshness marker stat error = %v, want not exist", err)
+	}
+
+	pauseCtx := context.WithValue(ctx, runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
+		Priority: reconcilePriorityManual,
+		Reason:   "mutation-issue:" + daemonhandlers.CommandSessionPause,
+	})
+	if _, err := newRuntimeReconcileService(d).ReconcileIssues(pauseCtx, projectID, []string{activeID}); err != nil {
+		t.Fatalf("ReconcileIssues session.pause freshness error: %v", err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "ran" {
+		t.Fatalf("marker = %q, want ran", strings.TrimSpace(string(data)))
+	}
+}
+
 func TestRuntimeReconcileRefreshesSessionProjectionWithoutWorktreeManager(t *testing.T) {
 	const projectID = "proj-runtime"
 	const issueID = "az-1"
