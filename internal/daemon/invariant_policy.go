@@ -43,6 +43,9 @@ const (
 	daemonInvariantOrchestrationCompletion daemonInvariantID = "orchestration.project_completion"
 	daemonInvariantOrchestrationCandidates daemonInvariantID = "orchestration.project_candidates"
 	daemonInvariantOrchestrationParentWake daemonInvariantID = "orchestration.parent_continuation"
+	daemonInvariantOrchestrationReview     daemonInvariantID = "orchestration.project_review"
+	daemonInvariantOrchestrationClaimStart daemonInvariantID = "orchestration.claim_start"
+	daemonInvariantOrchestrationLoop       daemonInvariantID = "orchestration.project_loop"
 )
 
 var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
@@ -74,6 +77,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantInteractionWaiting:      daemonInvariantSourceProjection,
 	daemonInvariantAdvisorSingleton:        daemonInvariantSourceHybrid,
 	daemonInvariantInteractionStaleness:   daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationLoop:       daemonInvariantSourceProjection,
 }
 
 func sourceForInvariant(id daemonInvariantID) daemonInvariantSource {
