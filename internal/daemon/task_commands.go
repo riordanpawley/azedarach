@@ -1874,11 +1874,12 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 }
 
 type taskOwnershipRequest struct {
-	TaskID    string `json:"task_id"`
-	OwnerID   string `json:"owner_id,omitempty"`
-	OwnerKind string `json:"owner_kind,omitempty"`
-	TTL       string `json:"ttl,omitempty"`
-	Force     bool   `json:"force,omitempty"`
+	TaskID    string                          `json:"task_id"`
+	OwnerID   string                          `json:"owner_id,omitempty"`
+	OwnerKind string                          `json:"owner_kind,omitempty"`
+	TTL       string                          `json:"ttl,omitempty"`
+	Force     bool                            `json:"force,omitempty"`
+	Purpose   domain.CoordinationLeasePurpose `json:"purpose,omitempty"`
 }
 
 func (d *Daemon) handleTaskOwnershipClaim(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -1900,6 +1901,7 @@ func (d *Daemon) handleTaskOwnershipClaim(ctx context.Context, req protocol.Requ
 		OwnerKind: cmd.OwnerKind,
 		TTL:       ttl,
 		Force:     cmd.Force,
+		Purpose:   cmd.Purpose,
 	})
 	if err != nil {
 		return d.errorResponse(req, taskOwnershipErrorCode(err), err.Error()), nil
@@ -1920,6 +1922,7 @@ func (d *Daemon) handleTaskOwnershipRelease(ctx context.Context, req protocol.Re
 	task, err := issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, cmd.TaskID, issues.OwnershipClaimParams{
 		OwnerID: cmd.OwnerID,
 		Force:   cmd.Force,
+		Purpose: cmd.Purpose,
 	})
 	if err != nil {
 		return d.errorResponse(req, taskOwnershipErrorCode(err), err.Error()), nil

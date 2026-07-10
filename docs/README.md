@@ -33,6 +33,7 @@ This directory primarily contains **developer/internal documentation**.
 - [22-event-sourcing-detailed-map-and-risk-register.md](22-event-sourcing-detailed-map-and-risk-register.md)
 - [23-sqlite-wal-policy.md](23-sqlite-wal-policy.md)
 - [24-issue-state-model-v2-rollout.md](24-issue-state-model-v2-rollout.md)
+- [25-rootless-orchestrator-contracts.md](25-rootless-orchestrator-contracts.md)
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 - [adr/2-daemon-owned-async-notices.md](adr/2-daemon-owned-async-notices.md)
 
@@ -56,6 +57,9 @@ This directory primarily contains **developer/internal documentation**.
 - `task.follow_on_merge_candidates`: `projection` (durable issue graph + worktree projection).
 - `issue_resources.lifecycle`: `projection` (durable issue status + runtime attachment projection).
 - `task.list` freshness/session timestamps: `projection` (refresh-then-cache).
+- `orchestration.scope_identity`: `projection` (durable project plus typed rooted/project scope; startup environment is not authority).
+- `orchestration.scope_singleton`: `hybrid` (refreshed durable scope lease compared with live tmux runtime).
+- `orchestration.project_completion`: `hybrid` (refreshed issue/review/interaction/session projections compared with live tmux runtime).
 - `runtime.reconcile` includes `invariant_sources` debug output reflecting the active source-policy matrix.
 - Treat this as the required cross-daemon safety contract for session/worktree/runtime invariants.
 

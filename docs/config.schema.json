@@ -493,6 +493,32 @@
           "type": "string",
           "enum": ["az", "native"],
           "default": "az"
+        },
+        "completeGrace": {
+          "type": "string",
+          "description": "Duration a complete project orchestrator remains wakeable before pausing.",
+          "default": "5m"
+        },
+        "wakeDebounce": {
+          "type": "string",
+          "description": "Minimum interval used to coalesce repeated idempotent orchestrator wake events.",
+          "default": "2s"
+        },
+        "inspectLimit": {
+          "type": "integer", "minimum": 1, "default": 50,
+          "description": "Maximum project orchestration candidates inspected per snapshot."
+        },
+        "startLimit": {
+          "type": "integer", "minimum": 1, "default": 3,
+          "description": "Maximum workers started in one orchestration wave."
+        },
+        "agentCapacity": {
+          "type": "integer", "minimum": 1, "default": 12,
+          "description": "Maximum active or pending workers across a project."
+        },
+        "openIssueLimit": {
+          "type": "integer", "minimum": 1, "default": 100,
+          "description": "Open-issue threshold above which project-wide autostart requires an explicit override."
         }
       }
     },

@@ -2343,6 +2343,43 @@ func TestClient_IssueOwnershipClaimConflictReleaseAndExpiredTakeover(t *testing.
 	assert.Equal(t, "agent-b", events[3].Payload["owner_id"])
 }
 
+func TestClient_CoordinationLeasesArePurposeScopedAndPreserveExecutionOwner(t *testing.T) {
+	ctx := context.Background()
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { require.NoError(t, client.CloseDB()) })
+	taskID, err := client.Create(ctx, CreateTaskParams{Title: "scoped leases", Type: domain.TypeTask, Priority: domain.P1})
+	require.NoError(t, err)
+
+	worker, err := client.ClaimOwnershipWithRuntime(ctx, "project-1", taskID, OwnershipClaimParams{
+		OwnerID: "worker-a", OwnerKind: "agent", Purpose: domain.CoordinationLeaseExecution,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, worker.Ownership)
+	assert.Equal(t, "worker-a", worker.Ownership.OwnerID)
+
+	reviewed, err := client.ClaimOwnershipWithRuntime(ctx, "project-1", taskID, OwnershipClaimParams{
+		OwnerID: "reviewer-a", OwnerKind: "agent", Purpose: domain.CoordinationLeaseReview,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, reviewed.Ownership)
+	assert.Equal(t, "worker-a", reviewed.Ownership.OwnerID, "review must not overwrite execution ownership")
+	require.Len(t, reviewed.CoordinationLeases, 2)
+
+	_, err = client.ClaimOwnershipWithRuntime(ctx, "project-1", taskID, OwnershipClaimParams{
+		OwnerID: "reviewer-b", Purpose: domain.CoordinationLeaseReview,
+	})
+	require.ErrorIs(t, err, domain.ErrConflict)
+
+	handback, err := client.ReleaseOwnershipWithRuntime(ctx, "project-1", taskID, OwnershipClaimParams{
+		OwnerID: "reviewer-a", Purpose: domain.CoordinationLeaseReview,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, handback.Ownership)
+	assert.Equal(t, "worker-a", handback.Ownership.OwnerID)
+	require.Len(t, handback.CoordinationLeases, 1)
+	assert.Equal(t, domain.CoordinationLeaseExecution, handback.CoordinationLeases[0].Purpose)
+}
+
 func TestClient_AppendIssueObservationEventRecordsSourceMetadata(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -3832,6 +3869,9 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0029_issue_state_model_v2",
 		"0030_issue_closed_runtime_v2_triggers",
 		"0031_board_views",
+		"0032_coordination_leases",
+		"0033_orchestrator_scope_leases",
+		"0034_orchestrator_lifecycle_clock",
 	}, got)
 }
 

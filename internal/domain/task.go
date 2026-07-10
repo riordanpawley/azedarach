@@ -27,39 +27,40 @@ type Dependency struct {
 
 // Task represents a issue
 type Task struct {
-	ID                    naming.IssueID  `json:"id"`
-	Title                 string          `json:"title"`
-	Description           string          `json:"description,omitempty"`
-	Notes                 string          `json:"notes,omitempty"`
-	Design                string          `json:"design,omitempty"`
-	Acceptance            string          `json:"acceptance,omitempty"`
-	Assignee              string          `json:"assignee,omitempty"`
-	Labels                []string        `json:"labels,omitempty"`
-	Estimate              *int            `json:"estimate,omitempty"`
-	Status                Status          `json:"status"`
-	State                 IssueState      `json:"issue_state,omitzero" msgpack:"issue_state,omitempty"`
-	Facts                 IssueFacts      `json:"issue_facts,omitzero" msgpack:"issue_facts,omitempty"`
-	Priority              Priority        `json:"priority"`
-	Type                  TaskType        `json:"issue_type"`
-	ParentID              *naming.IssueID `json:"parent_id,omitempty"`
-	Dependencies          []Dependency    `json:"dependencies,omitempty"`
-	Implementations       []string        `json:"implementations,omitempty"`
-	Session               *Session        `json:"session,omitempty"`
-	HasTmuxSession        bool            `json:"has_tmux_session,omitempty"`
-	HasWorktree           bool            `json:"has_worktree,omitempty"`
-	GitAheadCount         int             `json:"git_ahead_count,omitempty"`
-	GitBehindCount        int             `json:"git_behind_count,omitempty"`
-	HasUncommittedChanges bool            `json:"has_uncommitted_changes,omitempty"`
-	HasConflicts          bool            `json:"has_conflicts,omitempty"`
-	ConflictFiles         []string        `json:"conflict_files,omitempty"`
-	GitAdditions          int             `json:"git_additions,omitempty"`
-	GitDeletions          int             `json:"git_deletions,omitempty"`
-	Origin                string          `json:"origin,omitempty"`
-	PullRequest           *PullRequest    `json:"pull_request,omitempty"`
-	RuntimeUpdatedAt      time.Time       `json:"runtime_updated_at,omitempty,omitzero"`
-	Ownership             *IssueOwnership `json:"ownership,omitempty"`
-	CreatedAt             time.Time       `json:"created_at"`
-	UpdatedAt             time.Time       `json:"updated_at"`
+	ID                    naming.IssueID      `json:"id"`
+	Title                 string              `json:"title"`
+	Description           string              `json:"description,omitempty"`
+	Notes                 string              `json:"notes,omitempty"`
+	Design                string              `json:"design,omitempty"`
+	Acceptance            string              `json:"acceptance,omitempty"`
+	Assignee              string              `json:"assignee,omitempty"`
+	Labels                []string            `json:"labels,omitempty"`
+	Estimate              *int                `json:"estimate,omitempty"`
+	Status                Status              `json:"status"`
+	State                 IssueState          `json:"issue_state,omitzero" msgpack:"issue_state,omitempty"`
+	Facts                 IssueFacts          `json:"issue_facts,omitzero" msgpack:"issue_facts,omitempty"`
+	Priority              Priority            `json:"priority"`
+	Type                  TaskType            `json:"issue_type"`
+	ParentID              *naming.IssueID     `json:"parent_id,omitempty"`
+	Dependencies          []Dependency        `json:"dependencies,omitempty"`
+	Implementations       []string            `json:"implementations,omitempty"`
+	Session               *Session            `json:"session,omitempty"`
+	HasTmuxSession        bool                `json:"has_tmux_session,omitempty"`
+	HasWorktree           bool                `json:"has_worktree,omitempty"`
+	GitAheadCount         int                 `json:"git_ahead_count,omitempty"`
+	GitBehindCount        int                 `json:"git_behind_count,omitempty"`
+	HasUncommittedChanges bool                `json:"has_uncommitted_changes,omitempty"`
+	HasConflicts          bool                `json:"has_conflicts,omitempty"`
+	ConflictFiles         []string            `json:"conflict_files,omitempty"`
+	GitAdditions          int                 `json:"git_additions,omitempty"`
+	GitDeletions          int                 `json:"git_deletions,omitempty"`
+	Origin                string              `json:"origin,omitempty"`
+	PullRequest           *PullRequest        `json:"pull_request,omitempty"`
+	RuntimeUpdatedAt      time.Time           `json:"runtime_updated_at,omitempty,omitzero"`
+	Ownership             *IssueOwnership     `json:"ownership,omitempty"`
+	CoordinationLeases    []CoordinationLease `json:"coordination_leases,omitempty"`
+	CreatedAt             time.Time           `json:"created_at"`
+	UpdatedAt             time.Time           `json:"updated_at"`
 }
 
 // PullRequest is compact GitHub PR metadata attached to an issue for board
@@ -80,6 +81,37 @@ type IssueOwnership struct {
 	OwnerKind string     `json:"owner_kind"`
 	ClaimedAt time.Time  `json:"claimed_at"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+type CoordinationLeasePurpose string
+
+const (
+	CoordinationLeaseExecution     CoordinationLeasePurpose = "execution"
+	CoordinationLeaseOrchestration CoordinationLeasePurpose = "orchestration"
+	CoordinationLeaseReview        CoordinationLeasePurpose = "review"
+)
+
+func (p CoordinationLeasePurpose) Valid() bool {
+	switch p {
+	case CoordinationLeaseExecution, CoordinationLeaseOrchestration, CoordinationLeaseReview:
+		return true
+	default:
+		return false
+	}
+}
+
+// CoordinationLease is one purpose-scoped ownership claim. Execution is also
+// projected through Ownership for compatibility with existing consumers.
+type CoordinationLease struct {
+	Purpose   CoordinationLeasePurpose `json:"purpose"`
+	OwnerID   string                   `json:"owner_id"`
+	OwnerKind string                   `json:"owner_kind"`
+	ClaimedAt time.Time                `json:"claimed_at"`
+	ExpiresAt *time.Time               `json:"expires_at,omitempty"`
+}
+
+func (l CoordinationLease) IsExpired(now time.Time) bool {
+	return l.ExpiresAt != nil && !l.ExpiresAt.IsZero() && !now.Before(*l.ExpiresAt)
 }
 
 func (o IssueOwnership) IsExpired(now time.Time) bool {

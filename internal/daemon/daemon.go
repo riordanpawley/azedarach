@@ -79,6 +79,7 @@ type Config struct {
 	IssueResources             appconfig.IssueResourcesConfig
 	IssueAutoArchive           appconfig.IssueAutoArchiveConfig
 	ScheduledScripts           appconfig.ScheduledScriptsConfig
+	Orchestration              appconfig.OrchestrationConfig
 	Logger                     *slog.Logger
 	IdleTimeout                time.Duration
 	RuntimeReconcileInterval   time.Duration
@@ -126,6 +127,8 @@ type Daemon struct {
 	issueAutoArchiveByRoot             map[string]appconfig.IssueAutoArchiveConfig
 	scheduledScriptsByProject          map[string]appconfig.ScheduledScriptsConfig
 	scheduledScriptsByRoot             map[string]appconfig.ScheduledScriptsConfig
+	orchestrationByProject             map[string]appconfig.OrchestrationConfig
+	orchestrationByRoot                map[string]appconfig.OrchestrationConfig
 	worktreeManagersMu                 sync.Mutex
 	worktreeManagersByProject          map[string]*git.WorktreeManager
 	worktreeManagersByRoot             map[string]*git.WorktreeManager
@@ -175,6 +178,7 @@ type Daemon struct {
 	taskListSnapshotLoads              map[string]*taskListSnapshotLoad
 	taskGraphReadinessMu               sync.Mutex
 	taskGraphReadinessLoads            map[string]*taskGraphReadinessLoad
+	orchestrationMu                    sync.Mutex
 	watchClientsMu                     sync.Mutex
 	watchClients                       map[string]watchClientObservation
 	terminalFailureProbeMu             sync.Mutex
@@ -796,6 +800,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskDeletePreflight(ctx, req)
 	case "task.graph_readiness":
 		return d.handleTaskGraphReadiness(ctx, req)
+	case protocol.CommandOrchestrationSnapshot:
+		return d.handleOrchestrationSnapshot(ctx, req)
+	case protocol.CommandOrchestrationIntent:
+		return d.handleOrchestrationIntent(ctx, req)
 	case "task.complete_check":
 		return d.handleTaskCompleteCheck(ctx, req)
 	case "task.integration_readiness":
