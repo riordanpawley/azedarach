@@ -9789,6 +9789,76 @@ func TestDurableBaseIntegrationAcceptanceRequiresIssueScopedHumanInput(t *testin
 	}
 }
 
+func TestTaskMergeBaseTargetHandlerGatesExplicitBaseOnDurableHumanAcceptance(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-handler-base-acceptance"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
+			return "worktree " + repoDir + "\nbranch refs/heads/main\n", nil
+		}
+		return "", fmt.Errorf("unexpected git args: %v", args)
+	}}
+	d := &Daemon{
+		cfg:                       Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		issueClientsByProject:     map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject:    map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(runner, repoDir, slog.Default())},
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return d.worktreeManagerForProject(projectID) },
+		runtimeStateStore: store,
+		logger:            slog.Default(),
+		pollers:           map[string]context.CancelFunc{normalizedProjectID(projectID): func() {}},
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	request := testRequest("task.merge_base_target", map[string]any{
+		"task_id": issueID, "base_branch": "main", "require_human_acceptance": true,
+	})
+	request.Meta.ProjectID = naming.ProjectID(projectID)
+	blocked, err := d.handleTaskMergeBaseTarget(ctx, request)
+	if err != nil {
+		t.Fatalf("blocked handler error: %v", err)
+	}
+	if blocked.OK || blocked.Error == nil || blocked.Error.Code != protocol.ErrorCodeInvalidRequest || !strings.Contains(blocked.Error.Message, "without durable human acceptance") {
+		t.Fatalf("blocked response = %+v, want acceptance refusal", blocked)
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventHumanInputProvided, Payload: map[string]any{"base_integration_accepted": true},
+	}); err != nil {
+		t.Fatalf("append acceptance: %v", err)
+	}
+	allowed, err := d.handleTaskMergeBaseTarget(ctx, request)
+	if err != nil || !allowed.OK {
+		t.Fatalf("allowed response = %+v, err = %v", allowed, err)
+	}
+	var result taskMergeBaseTargetResult
+	if err := json.Unmarshal(allowed.Body, &result); err != nil {
+		t.Fatalf("decode allowed response: %v", err)
+	}
+	if result.TargetID != "base" || result.Branch != "main" {
+		t.Fatalf("allowed target = %+v, want base/main", result)
+	}
+}
+
 func TestTaskGraphReadinessReportsPendingStartupAndCleanupTranscriptStates(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

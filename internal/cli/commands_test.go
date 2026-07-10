@@ -2467,6 +2467,82 @@ func TestBranchMergeToBaseCommandUsesAttachedTargetBranchWorktree(t *testing.T) 
 	}
 }
 
+func TestBranchMergeCommandExplicitDescendantTargetIgnoresCallerWorktree(t *testing.T) {
+	sourceWorktree := t.TempDir()
+	descendantWorktree := t.TempDir()
+	t.Chdir(sourceWorktree)
+	var mergeBody daemonclient.GitCommandRequest
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				return responseWithJSON(req, map[string]any{"worktrees": []map[string]any{
+					{"path": sourceWorktree, "branch": "riordan/ancestor/work", "issue_id": "ancestor"},
+					{"path": descendantWorktree, "branch": "riordan/descendant/work", "issue_id": "descendant"},
+				}}), nil
+			case daemonclient.CommandTaskMergeBaseTarget:
+				t.Fatal("explicit issue target must not invoke inferred merge-base resolution")
+			case daemonclient.CommandGitStatus:
+				return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{HasChanges: false}}), nil
+			case daemonclient.CommandGitMerge:
+				if err := json.Unmarshal(req.Body, &mergeBody); err != nil {
+					t.Fatalf("unmarshal merge body: %v", err)
+				}
+				return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
+					Worktree: descendantWorktree,
+					Branch:   "riordan/ancestor/work",
+					Result:   gitservice.MergeResult{Success: true, Message: "merged"},
+				}), nil
+			default:
+				return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		}}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	if err := BranchMergeToBaseCommandWithOptions(deps, BranchMergeToBaseOptions{IssueID: "ancestor", Target: "descendant"}); err != nil {
+		t.Fatalf("explicit descendant merge: %v", err)
+	}
+	if mergeBody.Worktree != descendantWorktree || mergeBody.Branch != "riordan/ancestor/work" {
+		t.Fatalf("merge body = %+v, want source branch merged in named descendant worktree %q", mergeBody, descendantWorktree)
+	}
+}
+
+func TestBranchMergeCommandExplicitBaseRequiresDaemonHumanAcceptance(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				return responseWithJSON(req, map[string]any{"worktrees": []map[string]any{{
+					"path": t.TempDir(), "branch": "riordan/root/work", "issue_id": "root",
+				}}}), nil
+			case daemonclient.CommandTaskMergeBaseTarget:
+				var body map[string]any
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal merge target body: %v", err)
+				}
+				if required, _ := body["require_human_acceptance"].(bool); !required {
+					t.Fatalf("merge target request = %#v, want require_human_acceptance=true", body)
+				}
+				return protocol.ResponseEnvelope{}, fmt.Errorf("refusing root issue root integration into base without durable human acceptance")
+			default:
+				t.Fatalf("command %s must not run after acceptance refusal", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		}}).WithProjectID("proj"),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), ProjectID: "proj", RepoDir: t.TempDir(),
+	}
+	err := BranchMergeToBaseCommandWithOptions(deps, BranchMergeToBaseOptions{IssueID: "root", Target: "base"})
+	if err == nil || !strings.Contains(err.Error(), "without durable human acceptance") {
+		t.Fatalf("error = %v, want daemon acceptance refusal", err)
+	}
+}
+
 func TestBranchMergeToBaseCommandFailsOnDirtyPreflight(t *testing.T) {
 	commands := make([]string, 0, 8)
 	deps := &Dependencies{
