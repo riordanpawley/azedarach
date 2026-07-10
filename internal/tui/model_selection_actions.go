@@ -822,8 +822,9 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, m.confirmCloseCleanupCmd(pending)
 		}
 		if newAction.IsLifecycleOnly() {
+			previousTask := *task
 			m.applyOptimisticTaskLifecycle(task.ID.String(), newAction.Lifecycle)
-			return m, m.moveTaskLifecycleCmd(*task, newAction)
+			return m, m.moveTaskLifecycleCmd(previousTask, newAction)
 		}
 		m.beginTaskStatusMoveFeedback(task.ID.String(), previousStatus, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
@@ -853,8 +854,9 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, m.confirmCloseCleanupCmd(pending)
 		}
 		if newAction.IsLifecycleOnly() {
+			previousTask := *task
 			m.applyOptimisticTaskLifecycle(task.ID.String(), newAction.Lifecycle)
-			return m, m.moveTaskLifecycleCmd(*task, newAction)
+			return m, m.moveTaskLifecycleCmd(previousTask, newAction)
 		}
 		m.beginTaskStatusMoveFeedback(task.ID.String(), previousStatus, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
@@ -885,8 +887,9 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, m.confirmCloseCleanupCmd(pending)
 		}
 		if newAction.IsLifecycleOnly() {
+			previousTask := *task
 			m.applyOptimisticTaskLifecycle(task.ID.String(), newAction.Lifecycle)
-			return m, m.moveTaskLifecycleCmd(*task, newAction)
+			return m, m.moveTaskLifecycleCmd(previousTask, newAction)
 		}
 		m.beginTaskStatusMoveFeedback(task.ID.String(), previousStatus, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)

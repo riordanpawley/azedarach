@@ -3,11 +3,13 @@ package overlay
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 
+	termimg "github.com/blacktop/go-termimg"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
@@ -29,6 +31,8 @@ type ImagePreviewOverlay struct {
 	markdownAttachment string
 	markdownRendered   string
 	markdownScroll     int
+	fullImage          fullScreenImagePreviewState
+	fullImageRequest   uint64
 }
 
 // ImageDeletedMsg is sent when an image is deleted
@@ -63,7 +67,7 @@ func (i *ImagePreviewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return i.handleNormalMode(msg)
 	case tea.WindowSizeMsg:
 		i.ApplyWindowSize(msg)
-		return i, nil
+		return i, i.loadCurrentFullImage()
 
 	case imagesLoadedMsg:
 		i.images = msg.images
@@ -76,7 +80,7 @@ func (i *ImagePreviewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			i.currentIndex = 0
 		}
 		i.markdownScroll = 0
-		return i, i.loadCurrentMarkdown()
+		return i, tea.Batch(i.loadCurrentMarkdown(), i.loadCurrentFullImage())
 
 	case imageDeletedMsg:
 		i.error = ""
@@ -108,6 +112,16 @@ func (i *ImagePreviewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			i.error = compactOverlayError(msg.err)
 		}
 		return i, nil
+
+	case fullScreenImagePreviewLoadedMsg:
+		if msg.requestID != i.fullImageRequest {
+			return i, nil
+		}
+		if msg.preview.attachmentID != i.currentAttachmentID() {
+			return i, nil
+		}
+		i.fullImage = msg.preview
+		return i, nil
 	}
 
 	return i, nil
@@ -117,6 +131,9 @@ func (i *ImagePreviewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (i *ImagePreviewOverlay) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "esc":
+		if i.currentIsFullScreenImage() {
+			return i, tea.Batch(clearTerminalImagesCmd(), tea.ClearScreen, func() tea.Msg { return CloseOverlayMsg{} })
+		}
 		return i, func() tea.Msg { return CloseOverlayMsg{} }
 
 	case "h", "left":
@@ -124,7 +141,7 @@ func (i *ImagePreviewOverlay) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.C
 		if len(i.images) > 0 && i.currentIndex > 0 {
 			i.currentIndex--
 			i.markdownScroll = 0
-			return i, i.loadCurrentMarkdown()
+			return i, tea.Batch(clearTerminalImagesCmd(), i.loadCurrentMarkdown(), i.loadCurrentFullImage())
 		}
 		return i, nil
 
@@ -133,7 +150,7 @@ func (i *ImagePreviewOverlay) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.C
 		if len(i.images) > 0 && i.currentIndex < len(i.images)-1 {
 			i.currentIndex++
 			i.markdownScroll = 0
-			return i, i.loadCurrentMarkdown()
+			return i, tea.Batch(clearTerminalImagesCmd(), i.loadCurrentMarkdown(), i.loadCurrentFullImage())
 		}
 		return i, nil
 
@@ -166,7 +183,7 @@ func (i *ImagePreviewOverlay) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.C
 		if len(i.images) > 0 {
 			i.currentIndex = 0
 			i.markdownScroll = 0
-			return i, i.loadCurrentMarkdown()
+			return i, tea.Batch(clearTerminalImagesCmd(), i.loadCurrentMarkdown(), i.loadCurrentFullImage())
 		}
 		return i, nil
 
@@ -175,7 +192,7 @@ func (i *ImagePreviewOverlay) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.C
 		if len(i.images) > 0 {
 			i.currentIndex = len(i.images) - 1
 			i.markdownScroll = 0
-			return i, i.loadCurrentMarkdown()
+			return i, tea.Batch(clearTerminalImagesCmd(), i.loadCurrentMarkdown(), i.loadCurrentFullImage())
 		}
 		return i, nil
 
@@ -189,12 +206,19 @@ func (i *ImagePreviewOverlay) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.C
 	case "d":
 		// Delete current image (show confirmation)
 		if len(i.images) > 0 {
+			wasFullScreenImage := i.currentIsFullScreenImage()
 			i.confirmDelete = true
+			if wasFullScreenImage {
+				return i, tea.Batch(clearTerminalImagesCmd(), tea.ClearScreen)
+			}
 		}
 		return i, nil
 
 	case "r":
 		// Refresh list
+		if i.currentIsFullScreenImage() {
+			return i, tea.Batch(clearTerminalImagesCmd(), i.loadImages())
+		}
 		return i, i.loadImages()
 	}
 
@@ -221,6 +245,9 @@ func (i *ImagePreviewOverlay) handleConfirmMode(msg tea.KeyMsg) (tea.Model, tea.
 // View renders the overlay
 func (i *ImagePreviewOverlay) View() string {
 	width, height := i.Size()
+	if i.currentIsFullScreenImage() && !i.confirmDelete {
+		return i.renderFullScreenImageContent(width, height)
+	}
 	if i.confirmDelete {
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
@@ -263,6 +290,73 @@ func (i *ImagePreviewOverlay) View() string {
 			return i.renderPreviewActions(width)
 		},
 	})
+}
+
+func (i *ImagePreviewOverlay) renderFullScreenImageContent(width, height int) string {
+	var b strings.Builder
+	b.WriteString(termimg.ClearAllString())
+
+	file := i.images[i.currentIndex]
+	headerStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#89b4fa")).
+		Bold(true)
+	footerStyle := i.styles.Footer
+	errorStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#f38ba8")).
+		Bold(true)
+
+	position := fmt.Sprintf("Attachment %d/%d", i.currentIndex+1, len(i.images))
+	title := fmt.Sprintf("%s  %s  %s", position, file.Filename, formatFileSize(file.Size))
+	b.WriteString(headerStyle.Render(truncateToCellWidth(title, max(12, width-2))))
+	b.WriteString("\n")
+
+	if i.error != "" {
+		b.WriteString(errorStyle.Render(truncateToCellWidth("Error: "+i.error, max(12, width-2))))
+		b.WriteString("\n")
+	}
+
+	if i.fullImage.attachmentID != file.ID {
+		b.WriteString(footerStyle.Render("Loading image preview..."))
+		b.WriteString("\n")
+	} else if i.fullImage.output != "" && i.fullImage.err == "" {
+		b.WriteString(i.fullImage.output)
+		if !strings.HasSuffix(i.fullImage.output, "\n") {
+			b.WriteString("\n")
+		}
+		if i.fullImage.height > 0 && !strings.Contains(i.fullImage.output, "\n") {
+			b.WriteString(strings.Repeat("\n", max(0, i.fullImage.height-1)))
+		}
+	} else {
+		lines := i.fullImage.lines
+		if len(lines) == 0 {
+			lines = imagePreviewLines(file, fmt.Errorf("preview unavailable"))
+		}
+		if i.fullImage.err != "" {
+			lines = append([]string{"Terminal image render unavailable: " + i.fullImage.err}, lines...)
+		}
+		for _, line := range lines {
+			b.WriteString(footerStyle.Render(truncateToCellWidth(line, max(12, width-2))))
+			b.WriteString("\n")
+		}
+	}
+
+	protocol := strings.TrimSpace(i.fullImage.protocol)
+	if protocol == "" {
+		protocol = "auto"
+	}
+	meta := fmt.Sprintf("Protocol: %s  Size: %dx%d cells", protocol, i.fullImage.width, i.fullImage.height)
+	b.WriteString(footerStyle.Render(truncateToCellWidth(meta, max(12, width-2))))
+	b.WriteString("\n")
+	b.WriteString(footerStyle.Render(truncateToCellWidth(i.fullScreenActionsText(), max(12, width-2))))
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (i *ImagePreviewOverlay) fullScreenActionsText() string {
+	parts := []string{"Esc/q close", "o open", "d delete", "r refresh"}
+	if len(i.images) > 1 {
+		parts = append([]string{"h/l navigate", "g/G first/last"}, parts...)
+	}
+	return strings.Join(parts, "  ")
 }
 
 func (i *ImagePreviewOverlay) renderPreviewContent(width, height int) string {
@@ -471,7 +565,19 @@ func (i *ImagePreviewOverlay) Size() (width, height int) {
 	if i.confirmDelete {
 		return i.Clamp(72, 22)
 	}
+	if i.currentIsFullScreenImage() {
+		// Full-screen image preview is an intentional sizing exception: it uses
+		// the complete current viewport instead of responsive dialog clamping.
+		return i.fullScreenSize()
+	}
 	return i.Clamp(82, 28)
+}
+
+func (i *ImagePreviewOverlay) fullScreenSize() (width, height int) {
+	if i.dialogViewportState.width > 0 && i.dialogViewportState.height > 0 {
+		return i.dialogViewportState.width, i.dialogViewportState.height
+	}
+	return 100, 34
 }
 
 // Commands
@@ -492,6 +598,18 @@ type markdownPreviewLoadedMsg struct {
 	attachmentID string
 	rendered     string
 	err          error
+}
+
+type fullScreenImagePreviewLoadedMsg struct {
+	requestID uint64
+	preview   fullScreenImagePreviewState
+}
+
+type terminalImagesClearedMsg struct{}
+
+var clearTerminalImagesOutput = func() tea.Msg {
+	_, _ = io.WriteString(os.Stdout, termimg.ClearAllString())
+	return terminalImagesClearedMsg{}
 }
 
 func (i *ImagePreviewOverlay) loadImages() tea.Cmd {
@@ -527,6 +645,23 @@ func (i *ImagePreviewOverlay) loadCurrentMarkdown() tea.Cmd {
 	}
 }
 
+func (i *ImagePreviewOverlay) loadCurrentFullImage() tea.Cmd {
+	i.fullImageRequest++
+	if !i.currentIsFullScreenImage() {
+		i.fullImage = fullScreenImagePreviewState{}
+		return nil
+	}
+	file := i.images[i.currentIndex]
+	width, height := i.fullScreenSize()
+	requestID := i.fullImageRequest
+	return func() tea.Msg {
+		return fullScreenImagePreviewLoadedMsg{
+			requestID: requestID,
+			preview:   buildFullScreenImagePreview(file, width, height),
+		}
+	}
+}
+
 func (i *ImagePreviewOverlay) currentIsMarkdown() bool {
 	if i.currentIndex < 0 || i.currentIndex >= len(i.images) {
 		return false
@@ -534,11 +669,25 @@ func (i *ImagePreviewOverlay) currentIsMarkdown() bool {
 	return attachment.IsMarkdown(i.images[i.currentIndex])
 }
 
+func (i *ImagePreviewOverlay) currentIsFullScreenImage() bool {
+	if i.currentIndex < 0 || i.currentIndex >= len(i.images) {
+		return false
+	}
+	file := i.images[i.currentIndex]
+	return strings.TrimSpace(file.Path) != "" && isPreviewableImageAttachment(file) && !attachment.IsMarkdown(file)
+}
+
 func (i *ImagePreviewOverlay) currentAttachmentID() string {
 	if i.currentIndex < 0 || i.currentIndex >= len(i.images) {
 		return ""
 	}
 	return i.images[i.currentIndex].ID
+}
+
+func clearTerminalImagesCmd() tea.Cmd {
+	return func() tea.Msg {
+		return clearTerminalImagesOutput()
+	}
 }
 
 func (i *ImagePreviewOverlay) deleteCurrentImage() tea.Cmd {

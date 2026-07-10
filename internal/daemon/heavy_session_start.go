@@ -64,24 +64,5 @@ func (d *Daemon) hasActiveHeavySessionStart(ctx context.Context, projectID strin
 	if err != nil {
 		return false, err
 	}
-	resourceKey := heavySessionStartResourceKey(projectID)
-	for _, record := range records {
-		if operationResourceKeysContain(record.ResourceKeys, resourceKey) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func operationResourceKeysContain(keys []string, want string) bool {
-	want = strings.TrimSpace(want)
-	if want == "" {
-		return false
-	}
-	for _, key := range keys {
-		if strings.TrimSpace(key) == want {
-			return true
-		}
-	}
-	return false
+	return len(records) > 0, nil
 }
