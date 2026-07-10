@@ -790,7 +790,15 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		return err
 	}
 
-	ready, err := deps.DaemonClient.TaskGraphReadinessForActor(ctx, opts.RootIssueID, orchestrateOwnerID())
+	scope, err := domain.RootedOrchestrationScope(opts.RootIssueID)
+	if err != nil {
+		return err
+	}
+	snapshot, err := deps.DaemonClient.OrchestrationSnapshot(ctx, protocol.OrchestrationSnapshotRequest{Scope: scope, ActorID: orchestrateOwnerID()})
+	if err != nil {
+		return err
+	}
+	ready, err := taskReadinessFromOrchestrationSnapshot(snapshot)
 	if err != nil {
 		return err
 	}
@@ -1189,62 +1197,38 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		return orchestrateStartResult{}, err
 	}
 	ownerID := orchestrateOwnerID()
-	ready, err := deps.DaemonClient.TaskGraphReadinessForActor(ctx, opts.RootIssueID, ownerID)
+	scope, err := domain.RootedOrchestrationScope(opts.RootIssueID)
 	if err != nil {
 		return orchestrateStartResult{}, err
 	}
-
-	runnableSet := make(map[string]struct{}, len(ready.Runnable))
-	for _, id := range ready.Runnable {
-		runnableSet[id] = struct{}{}
+	snapshot, err := deps.DaemonClient.OrchestrationSnapshot(ctx, protocol.OrchestrationSnapshotRequest{Scope: scope, ActorID: ownerID})
+	if err != nil {
+		return orchestrateStartResult{}, err
 	}
-	nestedRootSet := make(map[string]struct{}, len(ready.NestedRoots))
+	ready, err := taskReadinessFromOrchestrationSnapshot(snapshot)
+	if err != nil {
+		return orchestrateStartResult{}, err
+	}
+	intentKey := fmt.Sprintf("start:%s:%d:%d:%s", opts.RootIssueID, snapshot.Revision, opts.Limit, strings.Join(opts.IssueIDs, ","))
+	applied, err := deps.DaemonClient.ApplyOrchestrationIntent(ctx, protocol.OrchestrationIntentRequest{Scope: scope, Kind: protocol.OrchestrationIntentStart, IntentKey: intentKey, ActorID: ownerID, IssueIDs: opts.IssueIDs, Limit: opts.Limit, RepoDir: deps.RepoDir, BaseBranch: opts.BaseBranchOverride})
+	if err != nil {
+		return orchestrateStartResult{}, err
+	}
 	nestedRootIDs := make([]string, 0, len(ready.NestedRoots))
 	for _, nested := range ready.NestedRoots {
-		nestedRootSet[nested.IssueID] = struct{}{}
 		nestedRootIDs = append(nestedRootIDs, nested.IssueID)
-	}
-	activeSet := make(map[string]struct{}, len(ready.Active))
-	for _, id := range ready.Active {
-		activeSet[id] = struct{}{}
-	}
-
-	requested := make([]string, 0, len(ready.Runnable))
-	skipped := map[string]string{}
-	if len(opts.IssueIDs) == 0 {
-		requested = append(requested, ready.Runnable...)
-	} else {
-		for _, id := range opts.IssueIDs {
-			if _, ok := runnableSet[id]; !ok {
-				if _, nested := nestedRootSet[id]; nested {
-					skipped[id] = fmt.Sprintf("nested-root-start-orchestrator-session: az session start %s", id)
-					continue
-				}
-				if _, active := activeSet[id]; active {
-					skipped[id] = "session-already-running"
-					continue
-				}
-				if reason := strings.TrimSpace(ready.Blocked[id]); reason != "" {
-					skipped[id] = reason
-					continue
-				}
-				skipped[id] = "not-runnable"
-				continue
-			}
-			requested = append(requested, id)
-		}
 	}
 
 	result := orchestrateStartResult{
 		RootIssueID: opts.RootIssueID,
 		Limit:       opts.Limit,
-		Requested:   append([]string(nil), requested...),
+		Requested:   append([]string(nil), applied.Requested...),
 		NestedRoots: nestedRootIDs,
-		Started:     make([]string, 0, len(requested)),
-		Launched:    make([]orchestrateStartLaunch, 0, len(requested)),
-		Skipped:     skipped,
-		Failed:      map[string]string{},
-		Warnings:    orchestrateStartWarnings(ctx, deps, ready, plannedOrchestrateStartLaunchCount(len(requested), opts.Limit)),
+		Started:     make([]string, 0, len(applied.Launched)),
+		Launched:    make([]orchestrateStartLaunch, 0, len(applied.Launched)),
+		Skipped:     applied.Skipped,
+		Failed:      applied.Failed,
+		Warnings:    orchestrateStartWarnings(ctx, deps, ready, len(applied.Launched)),
 		Advice: orchestrateStartAdvice{
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", opts.RootIssueID),
 			StatusCommand:    fmt.Sprintf("az orchestrate status --root %s --json", opts.RootIssueID),
@@ -1252,34 +1236,9 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		},
 	}
 
-	count := 0
-	pendingLaunches := make([]orchestrateStartLaunch, 0, len(requested))
-	for _, issueID := range requested {
-		if count >= opts.Limit {
-			result.Skipped[issueID] = "limit-reached"
-			continue
-		}
-		emitOrchestrateStartProgress(opts, "preparing", issueID)
-		claimed, reason, err := claimOrchestrateStartIssue(ctx, deps, issueID, ownerID)
-		if err != nil {
-			result.Failed[issueID] = err.Error()
-			continue
-		}
-		if !claimed {
-			result.Skipped[issueID] = reason
-			continue
-		}
-		launch, err := submitSessionStartForIssueWithBaseBranch(deps, issueID, opts.BaseBranchOverride)
-		if err != nil {
-			result.Failed[issueID] = releaseOrchestrateStartClaimAfterSubmitFailure(ctx, deps, issueID, ownerID, err)
-			continue
-		}
+	for _, daemonLaunch := range applied.Launched {
+		launch := orchestrateStartLaunch{IssueID: daemonLaunch.IssueID, SessionID: daemonLaunch.SessionID, OperationID: daemonLaunch.OperationID, OperationState: daemonLaunch.OperationState}
 		emitOrchestrateStartProgressWithLaunch(opts, "submitted", launch)
-		pendingLaunches = append(pendingLaunches, launch)
-		count++
-	}
-
-	for _, launch := range pendingLaunches {
 		issueID := launch.IssueID
 		launch, pending, err := waitForOrchestrateStartLaunch(deps, opts, launch)
 		if err != nil {
@@ -1302,38 +1261,26 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	return result, nil
 }
 
+func taskReadinessFromOrchestrationSnapshot(snapshot protocol.OrchestrationSnapshot) (daemonclient.TaskGraphReadiness, error) {
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		return daemonclient.TaskGraphReadiness{}, err
+	}
+	var ready daemonclient.TaskGraphReadiness
+	if err := json.Unmarshal(encoded, &ready); err != nil {
+		return daemonclient.TaskGraphReadiness{}, err
+	}
+	if snapshot.Scope.Kind == domain.OrchestrationScopeRooted {
+		ready.RootIssueID = snapshot.Scope.RootIssueID.String()
+	}
+	return ready, nil
+}
+
 func orchestrateOwnerID() string {
 	if ownerID := defaultIssueOwnerID(); ownerID != "" {
 		return ownerID
 	}
 	return "orchestrate"
-}
-
-func claimOrchestrateStartIssue(ctx context.Context, deps *Dependencies, issueID, ownerID string) (bool, string, error) {
-	_, err := deps.DaemonClient.ClaimTaskOwnership(ctx, issueID, daemonclient.TaskOwnershipRequest{
-		OwnerID:   ownerID,
-		OwnerKind: "agent",
-	})
-	if err == nil {
-		return true, "", nil
-	}
-	var commandErr *daemonclient.CommandError
-	if errors.As(err, &commandErr) && commandErr.Code == protocol.ErrorCodeConflict {
-		reason := strings.TrimSpace(commandErr.Message)
-		if reason == "" {
-			reason = "owned by another actor"
-		}
-		return false, reason, nil
-	}
-	return false, "", fmt.Errorf("claim ownership before launch: %w", err)
-}
-
-func releaseOrchestrateStartClaimAfterSubmitFailure(ctx context.Context, deps *Dependencies, issueID, ownerID string, submitErr error) string {
-	_, releaseErr := deps.DaemonClient.ReleaseTaskOwnership(ctx, issueID, daemonclient.TaskOwnershipRequest{OwnerID: ownerID})
-	if releaseErr == nil {
-		return submitErr.Error()
-	}
-	return fmt.Sprintf("%s; release ownership after failed submit: %v", submitErr.Error(), releaseErr)
 }
 
 func waitForOrchestrateStartLaunch(deps *Dependencies, opts OrchestrateStartOptions, launch orchestrateStartLaunch) (orchestrateStartLaunch, *orchestrateStartPending, error) {
@@ -3196,47 +3143,6 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 		Prompt:       b.String(),
 		Commands:     commands,
 	}
-}
-
-func submitSessionStartForIssue(deps *Dependencies, issueID string) (orchestrateStartLaunch, error) {
-	return submitSessionStartForIssueWithBaseBranch(deps, issueID, "")
-}
-
-func submitSessionStartForIssueWithBaseBranch(deps *Dependencies, issueID, baseBranchOverride string) (orchestrateStartLaunch, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
-	defer cancel()
-	task, err := validateSessionIssueID(ctx, deps, issueID)
-	if err != nil {
-		return orchestrateStartLaunch{}, err
-	}
-	baseBranch := strings.TrimSpace(baseBranchOverride)
-	if baseBranch == "" {
-		resolvedBaseBranch, err := resolveSessionStartBaseBranch(ctx, deps, task)
-		if err != nil {
-			return orchestrateStartLaunch{}, err
-		}
-		baseBranch = resolvedBaseBranch
-	}
-	parsedIssueID, err := naming.ParseIssueID(issueID)
-	if err != nil {
-		return orchestrateStartLaunch{}, fmt.Errorf("invalid issue id %q: %w", issueID, err)
-	}
-	sessionID := naming.CanonicalSessionIDForIssue(deps.RepoDir, parsedIssueID).String()
-	record, err := deps.DaemonClient.StartSessionOperation(ctx, daemonclient.StartSessionParams{
-		IssueID:    issueID,
-		RepoDir:    deps.RepoDir,
-		BaseBranch: baseBranch,
-	})
-	if err != nil {
-		return orchestrateStartLaunch{}, fmt.Errorf("submit session start operation: %w", err)
-	}
-	launch := orchestrateStartLaunch{
-		IssueID:        issueID,
-		SessionID:      sessionID,
-		OperationID:    record.OperationID.String(),
-		OperationState: string(record.State),
-	}
-	return launch, nil
 }
 
 func orchestrateStartWarnings(ctx context.Context, deps *Dependencies, ready daemonclient.TaskGraphReadiness, launchCount int) []string {
