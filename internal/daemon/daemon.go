@@ -374,6 +374,7 @@ func New(cfg Config) *Daemon {
 		sessionStart:           d.handleSessionStartDirect,
 		sessionStop:            d.handleSessionStopDirect,
 		sessionResolveConflict: d.handleSessionResolveConflictDirect,
+		taskBulkCleanup:        d.handleTaskBulkCleanup,
 		recoverInterrupted:     d.recoverInterruptedOperation,
 		noticeService:          noticeService,
 	})
@@ -771,7 +772,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskCreate(ctx, req)
 	case "task.close":
 		return d.handleTaskClose(ctx, req)
-	case "task.bulk_cleanup":
+	case protocol.CommandTaskBulkCleanup:
 		return d.handleTaskBulkCleanup(ctx, req)
 	case "task.close_preflight":
 		return d.handleTaskClosePreflight(ctx, req)

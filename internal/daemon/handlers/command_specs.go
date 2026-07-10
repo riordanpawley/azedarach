@@ -38,6 +38,7 @@ const (
 	commandTaskGetMany           = "task.get_many"
 	commandTaskCreate            = "task.create"
 	commandTaskClose             = "task.close"
+	commandTaskBulkCleanup       = protocol.CommandTaskBulkCleanup
 	commandTaskClosePreflight    = "task.close_preflight"
 	commandTaskDeletePreflight   = "task.delete_preflight"
 	commandTaskGraphReadiness    = "task.graph_readiness"
@@ -67,6 +68,7 @@ const (
 )
 
 var commandSpecRegistry = map[string]CommandSpec{
+	commandTaskBulkCleanup:                 {Command: commandTaskBulkCleanup, RequiresProjectID: true},
 	CommandSessionStart:                    {Command: CommandSessionStart, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
 	CommandSessionAttach:                   {Command: CommandSessionAttach, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
 	CommandSessionPause:                    {Command: CommandSessionPause, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},

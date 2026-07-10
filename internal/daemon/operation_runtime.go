@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,7 @@ type operationRuntimeConfig struct {
 	sessionStart           func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	sessionStop            func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	sessionResolveConflict func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	taskBulkCleanup        func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	recoverInterrupted     func(context.Context, daemonops.Record) (interruptedOperationRecovery, bool)
 	gitHandler             *daemonhandlers.GitHandler
 	worktreeHandler        *daemonhandlers.WorktreeHandler
@@ -54,6 +56,7 @@ type operationRuntime struct {
 	sessionStart           func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	sessionStop            func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	sessionResolveConflict func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	taskBulkCleanup        func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	gitHandler             *daemonhandlers.GitHandler
 	worktreeHandler        *daemonhandlers.WorktreeHandler
 	pollInterval           time.Duration
@@ -675,13 +678,19 @@ func (r *operationRuntime) buildSubmitRequest(kind, projectID string, payload []
 	if len(resourceKeys) == 0 {
 		resourceKeys = []string{"operation:" + kind}
 	}
+	recentDedupeWindow := 30 * time.Second
+	if kind == protocol.CommandTaskBulkCleanup {
+		// Coalesce identical concurrent submissions, but let a completed batch be
+		// retried immediately so per-item failures can make progress.
+		recentDedupeWindow = 0
+	}
 	return daemonops.SubmitRequest{
 		ProjectID:          projectID,
 		IssueID:            issueID,
 		Kind:               kind,
 		DedupeKey:          dedupeKey,
 		ResourceKeys:       resourceKeys,
-		RecentDedupeWindow: 30 * time.Second,
+		RecentDedupeWindow: recentDedupeWindow,
 	}, nil
 }
 
@@ -832,6 +841,14 @@ func (r *operationRuntime) deriveOperationRouting(kind, projectID string, payloa
 		resourceKeys = []string{"project:" + projectID + ":worktree.cleanup"}
 		dedupeKey = kind + ":" + projectID
 		return "", resourceKeys, dedupeKey, nil
+	case protocol.CommandTaskBulkCleanup:
+		if len(payload) == 0 {
+			return "", nil, "", errors.New("missing required fields: payload")
+		}
+		resourceKeys = []string{"project:" + projectID + ":issue-lifecycle-cleanup"}
+		digest := sha256.Sum256(payload)
+		dedupeKey = fmt.Sprintf("%s:%x", kind, digest)
+		return "", resourceKeys, dedupeKey, nil
 	default:
 		return "", nil, "", fmt.Errorf("unsupported operation kind: %s", kind)
 	}
@@ -925,6 +942,11 @@ func (r *operationRuntime) directRunnerForKind(kind string) (operationDirectRunn
 		return func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			return r.worktreeHandler.HandleDirect(ctx, req), nil
 		}, nil
+	case protocol.CommandTaskBulkCleanup:
+		if r.taskBulkCleanup == nil {
+			return nil, errors.New("task.bulk_cleanup handler unavailable")
+		}
+		return r.taskBulkCleanup, nil
 	default:
 		return nil, fmt.Errorf("unsupported operation kind: %s", kind)
 	}
