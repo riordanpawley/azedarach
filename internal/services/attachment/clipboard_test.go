@@ -101,6 +101,13 @@ func TestRunMacOSClipboardReadAttemptsTimesOutOneAttemptThenUsesNextFallback(t *
 	}
 }
 
+func TestClipboardReadTimeoutCoversMacOSFallbackChain(t *testing.T) {
+	minimum := macOSClipboardAttemptTimeout * time.Duration(len(macOSClipboardFallbackAttempts())+2)
+	if clipboardReadTimeout < minimum {
+		t.Fatalf("clipboard read timeout = %s, want at least %s to cover bounded macOS attempts", clipboardReadTimeout, minimum)
+	}
+}
+
 func TestRunMacOSClipboardReadAttemptsRecordsEmptyAttempt(t *testing.T) {
 	got, attempts := runMacOSClipboardReadAttempts(context.Background(), time.Second, []macOSClipboardAttempt{
 		{

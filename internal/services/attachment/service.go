@@ -22,7 +22,7 @@ import (
 const (
 	legacyImageCollection = "images"
 	attachmentCollection  = "attachments"
-	clipboardReadTimeout  = 8 * time.Second
+	clipboardReadTimeout  = 20 * time.Second
 )
 
 var errAttachmentNotFound = errors.New("attachment not found")
