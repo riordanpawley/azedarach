@@ -102,6 +102,16 @@ func (a *gitServiceAdapter) PullBase(ctx context.Context, projectID, worktree, r
 	return nil
 }
 
+func (a *gitServiceAdapter) Push(ctx context.Context, projectID, worktree, remote, branch string) error {
+	if err := a.client.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
+		return a.client.Push(ctx, worktree, remote, branch)
+	}); err != nil {
+		return err
+	}
+	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, true)
+	return nil
+}
+
 func (a *gitServiceAdapter) Merge(ctx context.Context, projectID, worktree, branch string) (*git.MergeResult, error) {
 	result, err := a.client.MergeCleanlyTransactional(ctx, worktree, branch)
 	if err != nil {
