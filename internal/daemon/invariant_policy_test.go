@@ -26,6 +26,7 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantRuntimeKnownProjectIDs:  daemonInvariantSourceProjection,
 		daemonInvariantIssueResourceLifecycle:  daemonInvariantSourceProjection,
 		daemonInvariantOrchestrationScope:      daemonInvariantSourceProjection,
+		daemonInvariantOrchestrationSingleton:  daemonInvariantSourceHybrid,
 		daemonInvariantOrchestrationCompletion: daemonInvariantSourceHybrid,
 	}
 	for id, want := range expected {
