@@ -159,6 +159,7 @@ fd "filename" -t f internal cmd
    - `task.merge_base_target` branch integration target gate -> `projection` (durable issue graph + worktree projection)
    - `task.follow_on_merge_candidates` follow-on merge source gate -> `projection` (durable issue graph + worktree projection)
    - `orchestration.project_candidates` bounded project candidate classification -> `projection` (durable issue graph/lifecycle, ownership, session activity, and interaction projections)
+   - `orchestration.claim_start` bounded worker-wave claim/start and compensation -> `hybrid` (durable ownership/start-attempt projection + daemon session-start operation/runtime)
    - `issue_resources.lifecycle` issue resource desired-state gate -> `projection` (durable issue status + runtime attachment projection)
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
    - orchestration scope identity -> `projection` (durable project + typed rooted/project scope)

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 const (
@@ -473,22 +475,15 @@ func (a daemonOrchestrationAuthority) claimAndSubmitStart(ctx context.Context, p
 	if err != nil {
 		return protocol.OrchestrationLaunch{}, err
 	}
-	claimBody, err := json.Marshal(taskOwnershipRequest{TaskID: issueID, OwnerID: request.ActorID, OwnerKind: "agent"})
-	if err != nil {
-		return protocol.OrchestrationLaunch{}, fmt.Errorf("marshal ownership claim: %w", err)
-	}
 	baseReq := protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID("orchestration-" + request.IntentKey + "-" + issueID), Kind: protocol.EnvelopeKindCommand, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID), ClientActor: request.ActorID}}
-	claimReq := baseReq
-	claimReq.Command, claimReq.Body = "task.ownership.claim", claimBody
-	claimResp, err := a.daemon.handleTaskOwnershipClaim(ctx, claimReq)
-	if err != nil {
-		return protocol.OrchestrationLaunch{}, err
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return protocol.OrchestrationLaunch{}, fmt.Errorf("issue store unavailable")
 	}
-	if !claimResp.OK {
-		if claimResp.Error != nil {
-			return protocol.OrchestrationLaunch{}, fmt.Errorf("claim ownership: %s", claimResp.Error.Message)
-		}
-		return protocol.OrchestrationLaunch{}, fmt.Errorf("claim ownership failed")
+	dedupeKey := "session.start:" + issueID
+	attempt, err := issueClient.BeginOrchestrationStart(ctx, projectID, issueID, request.IntentKey, request.ActorID, dedupeKey)
+	if err != nil {
+		return protocol.OrchestrationLaunch{}, fmt.Errorf("claim orchestration start: %w", err)
 	}
 	sessionID := parsed.String()
 	if repoDir := strings.TrimSpace(request.RepoDir); repoDir != "" {
@@ -496,40 +491,38 @@ func (a daemonOrchestrationAuthority) claimAndSubmitStart(ctx context.Context, p
 	}
 	payload, err := json.Marshal(sessionCommandBody{ProjectID: projectID, SessionID: sessionID, BaseBranch: request.BaseBranch})
 	if err != nil {
-		a.releaseStartClaim(ctx, baseReq, issueID, request.ActorID)
-		return protocol.OrchestrationLaunch{}, fmt.Errorf("marshal session start: %w", err)
+		return protocol.OrchestrationLaunch{}, a.compensateStartFailure(ctx, issueClient, attempt, fmt.Errorf("marshal session start: %w", err))
 	}
 	resources := []string{"issue:" + projectID + ":" + issueID, "worktree:" + issueID, "session:" + sessionID}
-	submitBody, err := json.Marshal(protocol.OperationSubmitRequestBody{ProjectID: naming.ProjectID(projectID), Kind: "session.start", IssueID: parsed, DedupeKey: "session.start:" + issueID, ResourceKeys: resources, Payload: payload})
+	submitBody, err := json.Marshal(protocol.OperationSubmitRequestBody{ProjectID: naming.ProjectID(projectID), Kind: "session.start", IssueID: parsed, DedupeKey: dedupeKey, ResourceKeys: resources, Payload: payload})
 	if err != nil {
-		a.releaseStartClaim(ctx, baseReq, issueID, request.ActorID)
-		return protocol.OrchestrationLaunch{}, fmt.Errorf("marshal operation submit: %w", err)
+		return protocol.OrchestrationLaunch{}, a.compensateStartFailure(ctx, issueClient, attempt, fmt.Errorf("marshal operation submit: %w", err))
 	}
 	submitReq := baseReq
 	submitReq.Command, submitReq.Body = protocol.CommandOperationSubmit, submitBody
 	submitResp := a.daemon.operationRuntime.handleOperationSubmit(ctx, submitReq)
 	if !submitResp.OK {
-		a.releaseStartClaim(ctx, baseReq, issueID, request.ActorID)
+		failure := errors.New("submit session start failed")
 		if submitResp.Error != nil {
-			return protocol.OrchestrationLaunch{}, fmt.Errorf("submit session start: %s", submitResp.Error.Message)
+			failure = fmt.Errorf("submit session start: %s", submitResp.Error.Message)
 		}
-		return protocol.OrchestrationLaunch{}, fmt.Errorf("submit session start failed")
+		return protocol.OrchestrationLaunch{}, a.compensateStartFailure(ctx, issueClient, attempt, failure)
 	}
 	var submitted protocol.OperationSubmitResponseBody
 	if err := json.Unmarshal(submitResp.Body, &submitted); err != nil {
 		return protocol.OrchestrationLaunch{}, err
 	}
+	if err := issueClient.CompleteOrchestrationStart(ctx, attempt, submitted.Operation.OperationID.String()); err != nil {
+		return protocol.OrchestrationLaunch{}, fmt.Errorf("record submitted orchestration start: %w", err)
+	}
 	return protocol.OrchestrationLaunch{IssueID: issueID, SessionID: sessionID, OperationID: submitted.Operation.OperationID.String(), OperationState: string(submitted.Operation.State)}, nil
 }
 
-func (a daemonOrchestrationAuthority) releaseStartClaim(ctx context.Context, baseReq protocol.RequestEnvelope, issueID, actorID string) {
-	releaseBody, err := json.Marshal(taskOwnershipRequest{TaskID: issueID, OwnerID: actorID})
-	if err != nil {
-		return
+func (a daemonOrchestrationAuthority) compensateStartFailure(ctx context.Context, issueClient *issues.Client, attempt issues.OrchestrationStartAttempt, cause error) error {
+	if err := issueClient.CompensateOrchestrationStart(ctx, attempt, cause); err != nil {
+		return fmt.Errorf("%v; persist orchestration start compensation: %w", cause, err)
 	}
-	releaseReq := baseReq
-	releaseReq.Command, releaseReq.Body = "task.ownership.release", releaseBody
-	_, _ = a.daemon.handleTaskOwnershipRelease(ctx, releaseReq)
+	return cause
 }
 
 func orchestrationTranscode(in, out any) error {
