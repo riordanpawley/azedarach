@@ -21,6 +21,8 @@ recovery events. They are idempotent and coalesced by
 `orchestration.wakeDebounce`.
 
 `orchestration.scope_identity` uses refreshed durable projection state.
+`orchestration.scope_singleton` is hybrid: refresh the durable exact-scope
+lease, then compare its session identity with live tmux runtime.
 `orchestration.project_completion` is hybrid: refresh durable issue, review,
 interaction, orchestration, and session projections, then compare runtime
 presence with live tmux. `runtime.reconcile` exposes both mappings.

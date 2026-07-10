@@ -36,6 +36,7 @@ const (
 	daemonInvariantRuntimeKnownProjectIDs  daemonInvariantID = "runtime.known_project_ids"
 	daemonInvariantIssueResourceLifecycle  daemonInvariantID = "issue_resources.lifecycle"
 	daemonInvariantOrchestrationScope      daemonInvariantID = "orchestration.scope_identity"
+	daemonInvariantOrchestrationSingleton  daemonInvariantID = "orchestration.scope_singleton"
 	daemonInvariantOrchestrationCompletion daemonInvariantID = "orchestration.project_completion"
 )
 
@@ -61,6 +62,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantRuntimeKnownProjectIDs:  daemonInvariantSourceProjection,
 	daemonInvariantIssueResourceLifecycle:  daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationScope:      daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationSingleton:  daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationCompletion: daemonInvariantSourceHybrid,
 }
 

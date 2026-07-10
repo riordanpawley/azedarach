@@ -9079,7 +9079,7 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	child := naming.IssueID("az-child")
 	var requests []protocol.RequestEnvelope
 	var createReq daemonclient.TaskCreateParams
-	var submitted protocol.OperationSubmitRequestBody
+	var intentReq protocol.OrchestrationIntentRequest
 	taskListCalls := 0
 	deps := &Dependencies{
 		Config:    config.DefaultConfig(),
@@ -9090,11 +9090,29 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				requests = append(requests, req)
 				switch req.Command {
-				case daemonclient.CommandTaskGraphReadiness:
-					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
-						RootIssueID: root.String(),
-						Runnable:    []string{child.String()},
-						Blocked:     map[string]string{},
+				case protocol.CommandOrchestrationSnapshot:
+					return responseWithJSON(req, protocol.OrchestrationSnapshot{
+						Scope:    domain.OrchestrationScope{Kind: domain.OrchestrationScopeRooted, RootIssueID: root},
+						Revision: 1,
+						Runnable: []string{child.String()},
+						Blocked:  map[string]string{},
+					}), nil
+				case protocol.CommandOrchestrationIntent:
+					if err := json.Unmarshal(req.Body, &intentReq); err != nil {
+						t.Fatalf("decode orchestration intent: %v", err)
+					}
+					return responseWithJSON(req, protocol.OrchestrationIntentResult{
+						Scope:     intentReq.Scope,
+						Kind:      protocol.OrchestrationIntentStart,
+						IntentKey: intentReq.IntentKey,
+						Requested: []string{child.String()},
+						Started:   []string{child.String()},
+						Launched: []protocol.OrchestrationLaunch{{
+							IssueID:        child.String(),
+							SessionID:      child.String(),
+							OperationID:    "op-split",
+							OperationState: string(protocol.OperationStateQueued),
+						}},
 					}), nil
 				case daemonclient.CommandTaskList:
 					taskListCalls++
@@ -9197,22 +9215,6 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 						BranchAttached: true,
 						AncestorChain:  []string{root.String()},
 					}), nil
-				case daemonclient.CommandTaskClaimOwnership:
-					return responseWithTaskOwnershipMutation(t, req), nil
-				case protocol.CommandOperationSubmit:
-					if err := json.Unmarshal(req.Body, &submitted); err != nil {
-						t.Fatalf("decode operation submit: %v", err)
-					}
-					return responseWithJSON(req, protocol.OperationSubmitResponseBody{
-						Created: true,
-						Operation: protocol.OperationRecord{
-							OperationID: "op-split",
-							ProjectID:   protocol.DefaultProjectID,
-							Kind:        commandSessionStart,
-							IssueID:     child,
-							State:       protocol.OperationStateQueued,
-						},
-					}), nil
 				case protocol.CommandOperationGet:
 					return responseWithJSON(req, protocol.OperationGetResponseBody{
 						Operation: protocol.OperationRecord{
@@ -9256,15 +9258,11 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	if !reflect.DeepEqual(createReq.Implementations, []string{"go-bubbletea"}) {
 		t.Fatalf("create implementations = %+v, want inherited parent impl", createReq.Implementations)
 	}
-	if submitted.Kind != commandSessionStart || submitted.IssueID != child {
-		t.Fatalf("submitted = %+v", submitted)
+	if intentReq.Kind != protocol.OrchestrationIntentStart || !reflect.DeepEqual(intentReq.IssueIDs, []string{child.String()}) {
+		t.Fatalf("intent = %+v", intentReq)
 	}
-	var sessionReq sessionRequestBody
-	if err := json.Unmarshal(submitted.Payload, &sessionReq); err != nil {
-		t.Fatalf("decode submitted session payload: %v", err)
-	}
-	if sessionReq.BaseBranch != "user/az-parent/parent-work" {
-		t.Fatalf("submitted base_branch = %q, want parent worktree branch", sessionReq.BaseBranch)
+	if intentReq.BaseBranch != "user/az-parent/parent-work" {
+		t.Fatalf("intent base_branch = %q, want parent worktree branch", intentReq.BaseBranch)
 	}
 	if !strings.Contains(result.Advice.IntegrateCommand, child.String()) {
 		t.Fatalf("advice = %+v, want child integration command", result.Advice)
@@ -9273,8 +9271,8 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 		t.Fatalf("advice = %+v, want explicit review/close guidance", result.Advice)
 	}
 	commands := commandNames(requests)
-	if !containsString(commands, protocol.CommandOperationSubmit) || containsString(commands, protocol.CommandMailSend) {
-		t.Fatalf("commands = %+v, want operation submit without immediate mail send", commands)
+	if !containsString(commands, protocol.CommandOrchestrationIntent) || containsString(commands, protocol.CommandOperationSubmit) || containsString(commands, protocol.CommandMailSend) {
+		t.Fatalf("commands = %+v, want daemon orchestration intent without client-side operation submit or immediate mail send", commands)
 	}
 }
 

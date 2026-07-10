@@ -58,6 +58,7 @@ This directory primarily contains **developer/internal documentation**.
 - `issue_resources.lifecycle`: `projection` (durable issue status + runtime attachment projection).
 - `task.list` freshness/session timestamps: `projection` (refresh-then-cache).
 - `orchestration.scope_identity`: `projection` (durable project plus typed rooted/project scope; startup environment is not authority).
+- `orchestration.scope_singleton`: `hybrid` (refreshed durable scope lease compared with live tmux runtime).
 - `orchestration.project_completion`: `hybrid` (refreshed issue/review/interaction/session projections compared with live tmux runtime).
 - `runtime.reconcile` includes `invariant_sources` debug output reflecting the active source-policy matrix.
 - Treat this as the required cross-daemon safety contract for session/worktree/runtime invariants.
