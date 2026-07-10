@@ -15,6 +15,7 @@ type BoardViewID string
 
 const (
 	BoardViewDefaultID       BoardViewID = "default"
+	BoardViewPlanningID      BoardViewID = "planning"
 	BoardViewOrchestrationID BoardViewID = "orchestration"
 	BoardViewCloseoutID      BoardViewID = "closeout"
 	// Legacy IDs remain exported so callers can recognize pre-catalog selections.
@@ -152,6 +153,7 @@ func BuiltInBoardViewSet() BoardViewSet {
 		DefaultViewID: BoardViewDefaultID,
 		Views: []BoardView{
 			DefaultBoardView(),
+			PlanningBoardView(),
 			OrchestrationBoardView(),
 			CloseoutBoardView(),
 		},
@@ -178,14 +180,6 @@ func CurrentBoardView() BoardView {
 
 func defaultBoardViewColumns() []BoardColumn {
 	return []BoardColumn{
-		{
-			ID:    BoardColumnBacklog,
-			Title: "Backlog",
-			Predicates: []BoardColumnPredicate{{
-				Kind:      BoardPredicateLifecycle,
-				Lifecycle: []IssueWorkflow{IssueWorkflowBacklog},
-			}},
-		},
 		{
 			ID:    BoardColumnOpen,
 			Title: "Open",
@@ -217,13 +211,26 @@ func defaultBoardViewColumns() []BoardColumn {
 				ClosedOutcomes: []IssueCloseOutcome{IssueCloseCompleted},
 			}},
 		},
-		{
-			ID:    BoardColumnCancelled,
-			Title: "Cancelled",
-			Predicates: []BoardColumnPredicate{{
-				Kind:           BoardPredicateClosedOutcome,
-				ClosedOutcomes: []IssueCloseOutcome{IssueCloseCancelled},
-			}},
+	}
+}
+
+func PlanningBoardView() BoardView {
+	view := DefaultBoardView()
+	return BoardView{
+		ID:    BoardViewPlanningID,
+		Title: "Planning",
+		Columns: []BoardColumn{
+			{
+				ID:    BoardColumnBacklog,
+				Title: "Backlog",
+				Predicates: []BoardColumnPredicate{{
+					Kind:      BoardPredicateLifecycle,
+					Lifecycle: []IssueWorkflow{IssueWorkflowBacklog},
+				}},
+			},
+			view.Columns[0],
+			view.Columns[1],
+			view.Columns[2],
 		},
 	}
 }
@@ -238,8 +245,6 @@ func OrchestrationBoardView() BoardView {
 	view.ID = BoardViewOrchestrationID
 	view.Title = "Orchestration"
 	view.Columns = []BoardColumn{
-		view.Columns[0],
-		view.Columns[1],
 		{
 			ID:    BoardColumnWaitingHuman,
 			Title: "Waiting Human",
@@ -254,10 +259,12 @@ func OrchestrationBoardView() BoardView {
 				Kind: BoardPredicateWaitingAIDelegated,
 			}},
 		},
+		{
+			ID:         BoardColumnActive,
+			Title:      "Working",
+			Predicates: view.Columns[1].Predicates,
+		},
 		view.Columns[2],
-		view.Columns[3],
-		view.Columns[4],
-		view.Columns[5],
 	}
 	return view
 }
@@ -268,9 +275,16 @@ func CloseoutBoardView() BoardView {
 		ID:    BoardViewCloseoutID,
 		Title: "Closeout",
 		Columns: []BoardColumn{
+			view.Columns[2],
 			view.Columns[3],
-			view.Columns[4],
-			view.Columns[5],
+			{
+				ID:    BoardColumnCancelled,
+				Title: "Cancelled",
+				Predicates: []BoardColumnPredicate{{
+					Kind:           BoardPredicateClosedOutcome,
+					ClosedOutcomes: []IssueCloseOutcome{IssueCloseCancelled},
+				}},
+			},
 		},
 	}
 }

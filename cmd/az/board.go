@@ -64,7 +64,7 @@ func printBoardViewUsage() {
 	fmt.Println("  az board view delete [--project <project-id>] --confirm [--json] <view-id>")
 	fmt.Println("  az board view explain [--project <project-id>] [--view <view-id>] [--json] <issue-id>")
 	fmt.Println()
-	fmt.Println("Built-in views: default, orchestration, closeout (legacy current/activity aliases are accepted).")
+	fmt.Println("Built-in views: default, planning, orchestration, closeout (legacy current/activity aliases are accepted).")
 }
 
 func printBoardViewCommandUsage(command string) bool {

@@ -17,7 +17,7 @@ func TestBuiltInBoardViewCatalogAndLegacyAliases(t *testing.T) {
 	if set.DefaultViewID != BoardViewDefaultID {
 		t.Fatalf("default view id = %q, want %q", set.DefaultViewID, BoardViewDefaultID)
 	}
-	want := []BoardViewID{BoardViewDefaultID, BoardViewOrchestrationID, BoardViewCloseoutID}
+	want := []BoardViewID{BoardViewDefaultID, BoardViewPlanningID, BoardViewOrchestrationID, BoardViewCloseoutID}
 	if len(set.Views) != len(want) {
 		t.Fatalf("built-in views = %d, want %d", len(set.Views), len(want))
 	}
@@ -31,6 +31,69 @@ func TestBuiltInBoardViewCatalogAndLegacyAliases(t *testing.T) {
 	}
 	if got := NormalizeBoardViewID("activity"); got != string(BoardViewOrchestrationID) {
 		t.Fatalf("activity alias = %q", got)
+	}
+}
+
+func TestBuiltInBoardViewsUseFocusedFourColumnWorkflows(t *testing.T) {
+	tests := []struct {
+		view BoardView
+		want []BoardColumnID
+	}{
+		{DefaultBoardView(), []BoardColumnID{BoardColumnOpen, BoardColumnActive, BoardColumnReviewReady, BoardColumnDone}},
+		{PlanningBoardView(), []BoardColumnID{BoardColumnBacklog, BoardColumnOpen, BoardColumnActive, BoardColumnReviewReady}},
+		{OrchestrationBoardView(), []BoardColumnID{BoardColumnWaitingHuman, BoardColumnWaitingAI, BoardColumnActive, BoardColumnReviewReady}},
+		{CloseoutBoardView(), []BoardColumnID{BoardColumnReviewReady, BoardColumnDone, BoardColumnCancelled}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.view.Title, func(t *testing.T) {
+			if len(tt.view.Columns) != len(tt.want) {
+				t.Fatalf("columns = %d, want %d", len(tt.view.Columns), len(tt.want))
+			}
+			for i, want := range tt.want {
+				if got := tt.view.Columns[i].ID; got != want {
+					t.Fatalf("column[%d] = %q, want %q", i, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestOrchestrationBoardViewPlacesWaitingBeforeWorking(t *testing.T) {
+	task := Task{ID: "az-waiting", Status: StatusInProgress, Session: &Session{Activity: "waiting-for-human"}, HasTmuxSession: true}
+	placement, err := OrchestrationBoardView().PlaceTask(task)
+	if err != nil {
+		t.Fatalf("PlaceTask error: %v", err)
+	}
+	if placement.ColumnID != BoardColumnWaitingHuman {
+		t.Fatalf("column = %q, want %q", placement.ColumnID, BoardColumnWaitingHuman)
+	}
+}
+
+func TestFocusedBoardViewsLeaveOutOfScopeIssuesUnmatched(t *testing.T) {
+	backlogState, err := NewIssueState(IssueStateParts{Workflow: IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatalf("NewIssueState backlog error: %v", err)
+	}
+	tests := []struct {
+		name string
+		view BoardView
+		task Task
+	}{
+		{name: "default backlog", view: DefaultBoardView(), task: Task{ID: "az-backlog", Status: StatusOpen, State: backlogState}},
+		{name: "default cancelled", view: DefaultBoardView(), task: Task{ID: "az-cancelled", Status: StatusCancelled}},
+		{name: "planning done", view: PlanningBoardView(), task: Task{ID: "az-done", Status: StatusDone}},
+		{name: "planning cancelled", view: PlanningBoardView(), task: Task{ID: "az-cancelled", Status: StatusCancelled}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			placement, err := tt.view.PlaceTask(tt.task)
+			if err != nil {
+				t.Fatalf("PlaceTask error: %v", err)
+			}
+			if placement.Matched {
+				t.Fatalf("placement = %+v, want unmatched", placement)
+			}
+		})
 	}
 }
 

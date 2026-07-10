@@ -11,12 +11,13 @@ import (
 func TestBoardViewOverlaySelectsCurrentView(t *testing.T) {
 	records := []domain.BoardViewRecord{
 		{ProjectID: "proj", View: domain.DefaultBoardView(), BuiltIn: true},
+		{ProjectID: "proj", View: domain.PlanningBoardView(), BuiltIn: true},
 		{ProjectID: "proj", View: domain.OrchestrationBoardView(), BuiltIn: true},
 	}
 	o := NewBoardViewOverlay(records, "orchestration")
 
 	view := o.View()
-	if !strings.Contains(view, "Orchestration") || !strings.Contains(view, "built-in") {
+	if !strings.Contains(view, "Planning") || !strings.Contains(view, "Orchestration") || !strings.Contains(view, "built-in") {
 		t.Fatalf("overlay view missing board view rows:\n%s", view)
 	}
 
