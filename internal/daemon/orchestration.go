@@ -39,6 +39,7 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
+	requestedScope := body.Scope
 	lease, found, err := d.resolveOrchestratorSession(ctx, d.projectID(req.Meta), body.SessionID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -55,7 +56,7 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 	if _, err := domain.NewOrchestratorIdentity(d.projectID(req.Meta), body.Scope); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 	}
-	if found && body.ObservedCursor > lease.Cursor {
+	if found && body.ObservedCursor > lease.Cursor && requestedScope == lease.Identity.Scope {
 		lease, err = daemonstate.NewOrchestratorLeaseAuthority(d.sessionRuntimeStateStoreIfConfigured(d.projectID(req.Meta))).AdvanceCursor(ctx, lease.Identity, body.ObservedCursor)
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("advance orchestration cursor: %v", err)), nil

@@ -15,6 +15,7 @@ import (
 // issue and session projections are refreshed first, then session presence is
 // compared with live tmux before durable lifecycle state is changed.
 func (d *Daemon) reconcileOrchestratorLifecycles(ctx context.Context, projectID string, now time.Time) error {
+	projectID = d.canonicalProjectID(projectID)
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	if store == nil || d.tmux == nil {
 		return nil
@@ -110,6 +111,7 @@ func orchestratorActivityWakeRequired(activity string) bool {
 }
 
 func (d *Daemon) wakePausedOrchestratorsForRecovery(ctx context.Context, projectID string, now time.Time) error {
+	projectID = d.canonicalProjectID(projectID)
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	if store == nil {
 		return nil
