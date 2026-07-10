@@ -119,6 +119,26 @@ func TestClient_NewSessionWithCommand(t *testing.T) {
 	assert.Equal(t, [][]string{{"new-session", "-d", "-s", "az", "-c", "/repo", "az"}}, runner.commands)
 }
 
+func TestClient_NewSessionWithArgs(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(runner, slog.Default())
+
+	err := client.NewSessionWithArgs(context.Background(), "az", "/repo", "/usr/bin/env", "-u", "BASH_ENV", "/bin/sh", "-c", "run advisor")
+
+	require.NoError(t, err)
+	assert.Equal(t, [][]string{{"new-session", "-d", "-s", "az", "-c", "/repo", "--", "/usr/bin/env", "-u", "BASH_ENV", "/bin/sh", "-c", "run advisor"}}, runner.commands)
+}
+
+func TestClient_NewSessionWithArgsRejectsSingleShellCommand(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(runner, slog.Default())
+
+	err := client.NewSessionWithArgs(context.Background(), "az", "/repo", "run advisor")
+
+	require.Error(t, err)
+	assert.Empty(t, runner.commands)
+}
+
 func TestClient_EnsureWindow(t *testing.T) {
 	tests := []struct {
 		name        string
