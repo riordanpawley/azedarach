@@ -173,6 +173,8 @@ type Daemon struct {
 	taskGraphReadinessLoads            map[string]*taskGraphReadinessLoad
 	watchClientsMu                     sync.Mutex
 	watchClients                       map[string]watchClientObservation
+	terminalFailureProbeMu             sync.Mutex
+	terminalFailureProbes              map[string]terminalFailureProbeState
 
 	revMu    sync.Mutex
 	revision map[string]uint64
