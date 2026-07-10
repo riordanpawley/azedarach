@@ -119,7 +119,11 @@ func AIAccountCommand(deps *Dependencies, opts AIAccountOptions) error {
 			if profile.Active {
 				active = " (active)"
 			}
-			fmt.Printf("%s/%s%s\n", profile.Provider, profile.Name, active)
+			system := ""
+			if profile.System {
+				system = " [system]"
+			}
+			fmt.Printf("%s/%s%s%s\n", profile.Provider, profile.Name, active, system)
 		}
 	case AIAccountStatus:
 		result, err := deps.DaemonClient.StatusAIAccounts(ctx, protocol.AIAccountStatusRequestBody{Provider: opts.Provider})
@@ -148,6 +152,15 @@ func AIAccountCommand(deps *Dependencies, opts AIAccountOptions) error {
 			return printJSON(result)
 		}
 		fmt.Printf("Activated %s account profile %q.\n", result.Profile.Provider, result.Profile.Name)
+		if result.SafetyBackupProfile != "" {
+			fmt.Printf("Preserved previous credentials as %s.\n", result.SafetyBackupProfile)
+		}
+		if result.OutgoingResnapshotted != "" {
+			fmt.Printf("Re-snapshotted outgoing profile %q.\n", result.OutgoingResnapshotted)
+		}
+		if result.FreshLivePreserved {
+			fmt.Println("Preserved newer live Codex tokens for the same account.")
+		}
 		if result.RestartExistingProcesses {
 			fmt.Printf("Restart existing %s processes to use the activated profile.\n", result.Profile.Provider)
 		}

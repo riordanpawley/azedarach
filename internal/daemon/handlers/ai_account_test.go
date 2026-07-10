@@ -71,6 +71,14 @@ func TestAIAccountHandlerRoutesAndValidates(t *testing.T) {
 	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
 		t.Fatalf("unsafe profile response = %+v", resp)
 	}
+
+	resp = handler.Handle(context.Background(), aiAccountRequest(t, protocol.CommandAIAccountBackup, protocol.AIAccountBackupRequestBody{
+		Provider: protocol.AIAccountProviderClaude,
+		Name:     "_original",
+	}))
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("reserved profile response = %+v", resp)
+	}
 }
 
 func TestAIAccountHandlerUnavailable(t *testing.T) {

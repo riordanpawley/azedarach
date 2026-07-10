@@ -2,10 +2,14 @@ package aiaccount
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
@@ -182,6 +186,213 @@ func TestServiceRejectsOversizedCredential(t *testing.T) {
 	})
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("oversized backup error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestServiceClaudeCompleteStateRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	claudeConfig := filepath.Join(home, "custom-claude-config")
+	vault := filepath.Join(t.TempDir(), "vault")
+	service, err := New(Config{HomeDir: home, ClaudeConfigDir: claudeConfig, VaultDir: vault})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paths := map[string]string{
+		"primary":  filepath.Join(home, ".claude", ".credentials.json"),
+		"state":    filepath.Join(home, ".claude.json"),
+		"config":   filepath.Join(claudeConfig, "auth.json"),
+		"settings": filepath.Join(home, ".claude", "settings.json"),
+		"desktop":  filepath.Join(home, "Library", "Application Support", "Claude", "config.json"),
+	}
+	writeTestCredential(t, paths["primary"], `{"claudeAiOauth":{"accountUuid":"alice","accessToken":"a1"}}`)
+	writeTestCredential(t, paths["state"], `{"oauthAccount":"alice@example.com","numStartups":1}`)
+	writeTestCredential(t, paths["config"], `{"account":"alice-config"}`)
+	writeTestCredential(t, paths["settings"], `{"apiKeyHelper":"alice-helper","theme":"alice-theme"}`)
+	writeTestCredential(t, paths["desktop"], `{"theme":"dark","oauth:tokenCache":"alice-cache"}`)
+	if _, err := service.Backup(context.Background(), protocol.AIAccountBackupRequestBody{Provider: protocol.AIAccountProviderClaude, Name: "alice"}); err != nil {
+		t.Fatalf("Backup: %v", err)
+	}
+
+	writeTestCredential(t, paths["primary"], `{"claudeAiOauth":{"accountUuid":"bob","accessToken":"b1"}}`)
+	writeTestCredential(t, paths["state"], `{"oauthAccount":"bob@example.com","numStartups":9}`)
+	writeTestCredential(t, paths["config"], `{"account":"bob-config"}`)
+	writeTestCredential(t, paths["settings"], `{"apiKeyHelper":"bob-helper","theme":"bob-theme"}`)
+	writeTestCredential(t, paths["desktop"], `{"theme":"light","oauth:tokenCache":"bob-cache","window":2}`)
+
+	activated, err := service.Activate(context.Background(), protocol.AIAccountActivateRequestBody{Provider: protocol.AIAccountProviderClaude, Name: "alice"})
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if activated.SafetyBackupProfile != originalProfileName {
+		t.Fatalf("safety backup = %q, want %q", activated.SafetyBackupProfile, originalProfileName)
+	}
+	assertFileContent(t, paths["primary"], `{"claudeAiOauth":{"accountUuid":"alice","accessToken":"a1"}}`)
+	stateRaw, err := os.ReadFile(paths["state"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateRaw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state["oauthAccount"] != "alice@example.com" || state["numStartups"] != float64(9) {
+		t.Fatalf("Claude state merge = %+v", state)
+	}
+	assertFileContent(t, paths["config"], `{"account":"alice-config"}`)
+	settingsRaw, err := os.ReadFile(paths["settings"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(settingsRaw, &settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings["apiKeyHelper"] != "alice-helper" || settings["theme"] != "bob-theme" {
+		t.Fatalf("Claude settings merge = %+v", settings)
+	}
+	desktopRaw, err := os.ReadFile(paths["desktop"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var desktop map[string]any
+	if err := json.Unmarshal(desktopRaw, &desktop); err != nil {
+		t.Fatal(err)
+	}
+	if desktop["oauth:tokenCache"] != "alice-cache" || desktop["theme"] != "light" || desktop["window"] != float64(2) {
+		t.Fatalf("desktop merge = %+v", desktop)
+	}
+
+	profiles, err := service.List(context.Background(), protocol.AIAccountListRequestBody{Provider: protocol.AIAccountProviderClaude})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles.Profiles) != 2 || !profiles.Profiles[0].System {
+		t.Fatalf("profiles = %+v, want protected original plus alice", profiles.Profiles)
+	}
+}
+
+func TestServiceCodexResnapshotFreshnessAndFileStore(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	service, err := New(Config{HomeDir: home, CodexHome: codexHome, VaultDir: filepath.Join(t.TempDir(), "vault")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(codexHome, "config.toml")
+	writeTestCredential(t, configPath, "# user config\n[mcp_servers.demo]\ncommand = \"demo\"\ncli_auth_credentials_store = \"keyring\"\n")
+	old := codexAuthJSON(t, "alice@example.com", time.Date(2026, 7, 1, 1, 0, 0, 0, time.UTC))
+	newer := codexAuthJSON(t, "alice@example.com", time.Date(2026, 7, 1, 2, 0, 0, 0, time.UTC))
+	authPath := filepath.Join(codexHome, "auth.json")
+	writeTestCredential(t, authPath, string(old))
+	if _, err := service.Backup(context.Background(), protocol.AIAccountBackupRequestBody{Provider: protocol.AIAccountProviderCodex, Name: "outgoing"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.writeProfileState(protocol.AIAccountProviderCodex, "target", authState{vaultPrimaryCredential: old}); err != nil {
+		t.Fatal(err)
+	}
+	writeTestCredential(t, authPath, string(newer))
+
+	listed, err := service.List(context.Background(), protocol.AIAccountListRequestBody{Provider: protocol.AIAccountProviderCodex})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range listed.Profiles {
+		if !profile.Active {
+			t.Fatalf("rotated-token profile not detected as active: %+v", listed.Profiles)
+		}
+	}
+	activated, err := service.Activate(context.Background(), protocol.AIAccountActivateRequestBody{Provider: protocol.AIAccountProviderCodex, Name: "target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activated.OutgoingResnapshotted != "outgoing" || !activated.FreshLivePreserved {
+		t.Fatalf("activation = %+v", activated)
+	}
+	assertFileContent(t, authPath, string(newer))
+	assertFileContent(t, filepath.Join(service.vaultDir, "codex", "outgoing", vaultPrimaryCredential), string(newer))
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settingIndex := strings.Index(string(config), `cli_auth_credentials_store = "file"`)
+	tableIndex := strings.Index(string(config), "[mcp_servers.demo]")
+	if settingIndex < 0 || settingIndex > tableIndex {
+		t.Fatalf("credential store setting is not top-level before table: %s", config)
+	}
+	if !strings.Contains(string(config[tableIndex:]), `cli_auth_credentials_store = "keyring"`) {
+		t.Fatalf("nested user setting was unexpectedly rewritten: %s", config)
+	}
+}
+
+func TestServiceProtectsSystemProfiles(t *testing.T) {
+	home := t.TempDir()
+	service, err := New(Config{HomeDir: home, VaultDir: filepath.Join(t.TempDir(), "vault")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestCredential(t, filepath.Join(home, ".claude", ".credentials.json"), `{"claudeAiOauth":{"accountUuid":"alice"}}`)
+	if _, err := service.Backup(context.Background(), protocol.AIAccountBackupRequestBody{Provider: protocol.AIAccountProviderClaude, Name: originalProfileName}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("system-name backup error = %v", err)
+	}
+	if err := service.writeProfileState(protocol.AIAccountProviderClaude, originalProfileName, authState{vaultPrimaryCredential: []byte(`{"claudeAiOauth":{"accountUuid":"alice"}}`)}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Delete(context.Background(), protocol.AIAccountDeleteRequestBody{Provider: protocol.AIAccountProviderClaude, Name: originalProfileName, Confirm: true})
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("system delete error = %v", err)
+	}
+}
+
+func TestServiceClaudeOptionalAPIKeyState(t *testing.T) {
+	home := t.TempDir()
+	service, err := New(Config{HomeDir: home, VaultDir: filepath.Join(t.TempDir(), "vault")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	writeTestCredential(t, settingsPath, `{"apiKeyHelper":"security find-generic-password -w"}`)
+	writeTestCredential(t, filepath.Join(home, ".claude.json"), `{"oauthAccount":"stale-oauth@example.com"}`)
+	if _, err := service.Backup(context.Background(), protocol.AIAccountBackupRequestBody{Provider: protocol.AIAccountProviderClaude, Name: "api-key"}); err != nil {
+		t.Fatalf("Backup optional-only Claude auth: %v", err)
+	}
+	writeTestCredential(t, settingsPath, `{"apiKeyHelper":"different-helper"}`)
+	if _, err := service.Activate(context.Background(), protocol.AIAccountActivateRequestBody{Provider: protocol.AIAccountProviderClaude, Name: "api-key"}); err != nil {
+		t.Fatalf("Activate optional-only Claude auth: %v", err)
+	}
+	assertFileContent(t, settingsPath, `{"apiKeyHelper":"security find-generic-password -w"}`)
+	status, err := service.Status(context.Background(), protocol.AIAccountStatusRequestBody{Provider: protocol.AIAccountProviderClaude})
+	if err != nil || status.Providers[0].ActiveProfile != "api-key" {
+		t.Fatalf("API-key profile status = %+v, err=%v", status, err)
+	}
+}
+
+func codexAuthJSON(t *testing.T, email string, refreshed time.Time) []byte {
+	t.Helper()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	claims, err := json.Marshal(map[string]any{"email": email, "sub": "user-" + email, "iat": refreshed.Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := header + "." + base64.RawURLEncoding.EncodeToString(claims) + ".sig"
+	data, err := json.Marshal(map[string]any{
+		"last_refresh": refreshed.Format(time.RFC3339),
+		"tokens":       map[string]any{"id_token": token, "refresh_token": "rt-" + refreshed.Format("150405")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func assertFileContent(t *testing.T, path, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("%s = %q, want %q", path, got, want)
 	}
 }
 

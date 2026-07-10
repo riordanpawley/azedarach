@@ -52,6 +52,9 @@ func (h *AIAccountHandler) Handle(ctx context.Context, req protocol.RequestEnvel
 		if !validateAIAccountProfile(cmd.Provider, cmd.Name, &resp) {
 			return resp
 		}
+		if strings.HasPrefix(cmd.Name, "_") {
+			return specInvalidRequest(resp, "AI account profile names beginning with underscore are reserved")
+		}
 		return aiAccountJSONResponse(ctx, resp, h.service.Backup, cmd)
 	case protocol.CommandAIAccountList:
 		var cmd protocol.AIAccountListRequestBody
@@ -86,6 +89,9 @@ func (h *AIAccountHandler) Handle(ctx context.Context, req protocol.RequestEnvel
 		}
 		if !cmd.Confirm {
 			return specInvalidRequest(resp, "AI account delete requires confirm=true")
+		}
+		if strings.HasPrefix(cmd.Name, "_") {
+			return specInvalidRequest(resp, "protected AI account system profiles cannot be deleted")
 		}
 		return aiAccountJSONResponse(ctx, resp, h.service.Delete, cmd)
 	default:

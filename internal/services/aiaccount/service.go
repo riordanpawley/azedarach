@@ -2,7 +2,6 @@ package aiaccount
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -27,16 +26,18 @@ var (
 )
 
 type Config struct {
-	HomeDir   string
-	CodexHome string
-	VaultDir  string
+	HomeDir         string
+	CodexHome       string
+	ClaudeConfigDir string
+	VaultDir        string
 }
 
 type Service struct {
-	homeDir   string
-	codexHome string
-	vaultDir  string
-	mu        sync.Mutex
+	homeDir         string
+	codexHome       string
+	claudeConfigDir string
+	vaultDir        string
+	mu              sync.Mutex
 }
 
 func New(cfg Config) (*Service, error) {
@@ -55,11 +56,22 @@ func New(cfg Config) (*Service, error) {
 	if codexHome == "" {
 		codexHome = filepath.Join(homeDir, ".codex")
 	}
+	claudeConfigDir := strings.TrimSpace(cfg.ClaudeConfigDir)
+	if claudeConfigDir == "" {
+		claudeConfigDir = strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
+	}
+	if claudeConfigDir == "" {
+		xdgConfig := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME"))
+		if xdgConfig == "" {
+			xdgConfig = filepath.Join(homeDir, ".config")
+		}
+		claudeConfigDir = filepath.Join(xdgConfig, "claude-code")
+	}
 	vaultDir := strings.TrimSpace(cfg.VaultDir)
 	if vaultDir == "" {
 		vaultDir = filepath.Join(homeDir, ".local", "share", "azedarach", "accounts")
 	}
-	return &Service{homeDir: homeDir, codexHome: codexHome, vaultDir: vaultDir}, nil
+	return &Service{homeDir: homeDir, codexHome: codexHome, claudeConfigDir: claudeConfigDir, vaultDir: vaultDir}, nil
 }
 
 func (s *Service) Backup(ctx context.Context, req protocol.AIAccountBackupRequestBody) (protocol.AIAccountBackupResponseBody, error) {
@@ -72,30 +84,29 @@ func (s *Service) Backup(ctx context.Context, req protocol.AIAccountBackupReques
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	credential, err := readCredentialFile(s.credentialPath(req.Provider))
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return protocol.AIAccountBackupResponseBody{}, fmt.Errorf("%w: %s has no current credentials", ErrNotFound, req.Provider)
+	if isSystemProfile(req.Name) {
+		return protocol.AIAccountBackupResponseBody{}, fmt.Errorf("%w: profile names beginning with underscore are reserved", ErrInvalid)
+	}
+	if req.Provider == protocol.AIAccountProviderCodex {
+		if err := s.ensureCodexFileCredentialStore(); err != nil {
+			return protocol.AIAccountBackupResponseBody{}, err
 		}
+	}
+	state, authenticated, err := s.readCurrentState(req.Provider)
+	if err != nil {
 		return protocol.AIAccountBackupResponseBody{}, fmt.Errorf("read current %s credentials: %w", req.Provider, err)
 	}
-	if err := s.ensureVaultProfileDir(req.Provider, req.Name); err != nil {
-		return protocol.AIAccountBackupResponseBody{}, fmt.Errorf("prepare account vault: %w", err)
+	if !authenticated {
+		return protocol.AIAccountBackupResponseBody{}, fmt.Errorf("%w: %s has no current credentials", ErrNotFound, req.Provider)
 	}
-	root, err := s.openVaultRoot()
-	if err != nil {
-		return protocol.AIAccountBackupResponseBody{}, fmt.Errorf("open account vault: %w", err)
-	}
-	defer root.Close()
-	profilePath := profileRelativePath(req.Provider, req.Name)
 	if !req.Force {
-		if _, err := root.Lstat(profilePath); err == nil {
+		if _, err := os.Lstat(filepath.Join(s.vaultDir, string(req.Provider), req.Name)); err == nil {
 			return protocol.AIAccountBackupResponseBody{}, fmt.Errorf("%w: %s/%s", ErrConflict, req.Provider, req.Name)
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return protocol.AIAccountBackupResponseBody{}, fmt.Errorf("inspect profile: %w", err)
 		}
 	}
-	if err := atomicWrite(s.profilePath(req.Provider, req.Name), credential); err != nil {
+	if err := s.writeProfileState(req.Provider, req.Name, state); err != nil {
 		return protocol.AIAccountBackupResponseBody{}, fmt.Errorf("save %s profile %q: %w", req.Provider, req.Name, err)
 	}
 	return protocol.AIAccountBackupResponseBody{Profile: protocol.AIAccountProfile{
@@ -129,10 +140,11 @@ func (s *Service) listLocked(providerFilter protocol.AIAccountProvider) (protoco
 	}
 	defer root.Close()
 	for _, provider := range providers {
-		activeHash, hasActive, err := hashFile(s.credentialPath(provider))
+		currentState, authenticated, err := s.readCurrentState(provider)
 		if err != nil {
-			return protocol.AIAccountListResponseBody{}, fmt.Errorf("hash current %s credentials: %w", provider, err)
+			return protocol.AIAccountListResponseBody{}, fmt.Errorf("inspect current %s credentials: %w", provider, err)
 		}
+		activeIdentity, hasIdentity := stateIdentity(provider, currentState)
 		providerDir := string(provider)
 		if err := validateRootDir(root, providerDir); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
@@ -151,17 +163,19 @@ func (s *Service) listLocked(providerFilter protocol.AIAccountProvider) (protoco
 			if !entry.IsDir() || validateName(entry.Name()) != nil {
 				continue
 			}
-			profileData, exists, err := readRootProfile(root, provider, entry.Name())
+			profileState, exists, err := s.readProfileState(root, provider, entry.Name())
 			if err != nil {
 				return protocol.AIAccountListResponseBody{}, fmt.Errorf("hash %s profile %q: %w", provider, entry.Name(), err)
 			}
 			if !exists {
 				continue
 			}
+			profileIdentity, profileHasIdentity := stateIdentity(provider, profileState)
 			profiles = append(profiles, protocol.AIAccountProfile{
 				Provider: provider,
 				Name:     entry.Name(),
-				Active:   hasActive && sha256.Sum256(profileData) == activeHash,
+				Active:   authenticated && hasIdentity && profileHasIdentity && profileIdentity == activeIdentity,
+				System:   isSystemProfile(entry.Name()),
 			})
 		}
 	}
@@ -191,16 +205,26 @@ func (s *Service) Status(ctx context.Context, req protocol.AIAccountStatusReques
 	providers := requestedProviders(req.Provider)
 	statuses := make([]protocol.AIAccountProviderStatus, 0, len(providers))
 	for _, provider := range providers {
-		_, authenticated, err := hashFile(s.credentialPath(provider))
+		_, authenticated, err := s.readCurrentState(provider)
 		if err != nil {
 			return protocol.AIAccountStatusResponseBody{}, fmt.Errorf("inspect current %s credentials: %w", provider, err)
 		}
 		status := protocol.AIAccountProviderStatus{Provider: provider, Authenticated: authenticated}
+		var systemMatch string
 		for _, profile := range listed.Profiles {
-			if profile.Provider == provider && profile.Active {
+			if profile.Provider != provider || !profile.Active {
+				continue
+			}
+			if !profile.System {
 				status.ActiveProfile = profile.Name
 				break
 			}
+			if systemMatch == "" {
+				systemMatch = profile.Name
+			}
+		}
+		if status.ActiveProfile == "" {
+			status.ActiveProfile = systemMatch
 		}
 		statuses = append(statuses, status)
 	}
@@ -218,6 +242,11 @@ func (s *Service) Activate(ctx context.Context, req protocol.AIAccountActivateRe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if req.Provider == protocol.AIAccountProviderCodex {
+		if err := s.ensureCodexFileCredentialStore(); err != nil {
+			return protocol.AIAccountActivateResponseBody{}, err
+		}
+	}
 	root, err := s.openVaultRoot()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -226,21 +255,69 @@ func (s *Service) Activate(ctx context.Context, req protocol.AIAccountActivateRe
 		return protocol.AIAccountActivateResponseBody{}, fmt.Errorf("inspect account vault: %w", err)
 	}
 	defer root.Close()
-	credential, exists, err := readRootProfile(root, req.Provider, req.Name)
+	targetState, exists, err := s.readProfileState(root, req.Provider, req.Name)
 	if err != nil {
 		return protocol.AIAccountActivateResponseBody{}, fmt.Errorf("read profile %s/%s: %w", req.Provider, req.Name, err)
 	}
 	if !exists {
 		return protocol.AIAccountActivateResponseBody{}, fmt.Errorf("%w: %s/%s", ErrNotFound, req.Provider, req.Name)
 	}
-	if err := atomicWrite(s.credentialPath(req.Provider), credential); err != nil {
+	liveState, authenticated, err := s.readCurrentState(req.Provider)
+	if err != nil {
+		return protocol.AIAccountActivateResponseBody{}, fmt.Errorf("read current %s credentials: %w", req.Provider, err)
+	}
+	listed, err := s.listLocked(req.Provider)
+	if err != nil {
+		return protocol.AIAccountActivateResponseBody{}, err
+	}
+	activeProfile := ""
+	anyActiveProfile := ""
+	for _, profile := range listed.Profiles {
+		if !profile.Active {
+			continue
+		}
+		if anyActiveProfile == "" {
+			anyActiveProfile = profile.Name
+		}
+		if !profile.System && activeProfile == "" {
+			activeProfile = profile.Name
+		}
+	}
+
+	result := protocol.AIAccountActivateResponseBody{
+		Profile:                  protocol.AIAccountProfile{Provider: req.Provider, Name: req.Name, Active: true, System: isSystemProfile(req.Name)},
+		RestartExistingProcesses: true,
+	}
+	if authenticated && anyActiveProfile == "" {
+		safetyName := originalProfileName
+		if _, err := os.Lstat(filepath.Join(s.vaultDir, string(req.Provider), safetyName)); err == nil {
+			safetyName = safetyBackupName()
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return protocol.AIAccountActivateResponseBody{}, fmt.Errorf("inspect safety profile: %w", err)
+		}
+		if err := s.writeProfileState(req.Provider, safetyName, liveState); err != nil {
+			return protocol.AIAccountActivateResponseBody{}, fmt.Errorf("preserve current credentials: %w", err)
+		}
+		if err := s.rotateSafetyBackups(req.Provider); err != nil {
+			return protocol.AIAccountActivateResponseBody{}, fmt.Errorf("rotate safety profiles: %w", err)
+		}
+		result.SafetyBackupProfile = safetyName
+	}
+	if authenticated && activeProfile != "" {
+		if err := s.writeProfileState(req.Provider, activeProfile, liveState); err != nil {
+			return protocol.AIAccountActivateResponseBody{}, fmt.Errorf("re-snapshot outgoing profile %s: %w", activeProfile, err)
+		}
+		result.OutgoingResnapshotted = activeProfile
+		if activeProfile == req.Name {
+			targetState = liveState
+		}
+	}
+	preservePrimary := req.Provider == protocol.AIAccountProviderCodex && authenticated && codexLiveNewer(liveState, targetState)
+	if err := s.restoreState(req.Provider, targetState, preservePrimary); err != nil {
 		return protocol.AIAccountActivateResponseBody{}, fmt.Errorf("activate profile %s/%s: %w", req.Provider, req.Name, err)
 	}
-	return protocol.AIAccountActivateResponseBody{Profile: protocol.AIAccountProfile{
-		Provider: req.Provider,
-		Name:     req.Name,
-		Active:   true,
-	}, RestartExistingProcesses: true}, nil
+	result.FreshLivePreserved = preservePrimary
+	return result, nil
 }
 
 func (s *Service) Delete(ctx context.Context, req protocol.AIAccountDeleteRequestBody) (protocol.AIAccountDeleteResponseBody, error) {
@@ -252,6 +329,9 @@ func (s *Service) Delete(ctx context.Context, req protocol.AIAccountDeleteReques
 	}
 	if !req.Confirm {
 		return protocol.AIAccountDeleteResponseBody{}, fmt.Errorf("%w: delete requires confirmation", ErrInvalid)
+	}
+	if isSystemProfile(req.Name) {
+		return protocol.AIAccountDeleteResponseBody{}, fmt.Errorf("%w: protected system profiles cannot be deleted", ErrInvalid)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -279,13 +359,6 @@ func (s *Service) Delete(ctx context.Context, req protocol.AIAccountDeleteReques
 		return protocol.AIAccountDeleteResponseBody{}, fmt.Errorf("delete profile: %w", err)
 	}
 	return protocol.AIAccountDeleteResponseBody{Provider: req.Provider, Name: req.Name, Deleted: true}, nil
-}
-
-func (s *Service) credentialPath(provider protocol.AIAccountProvider) string {
-	if provider == protocol.AIAccountProviderCodex {
-		return filepath.Join(s.codexHome, "auth.json")
-	}
-	return filepath.Join(s.homeDir, ".claude", ".credentials.json")
 }
 
 func profileRelativePath(provider protocol.AIAccountProvider, name string) string {
@@ -340,43 +413,6 @@ func validateRootDir(root *os.Root, path string) error {
 		return fmt.Errorf("%w: account vault path is not a regular directory", ErrInvalid)
 	}
 	return nil
-}
-
-func readRootProfile(root *os.Root, provider protocol.AIAccountProvider, name string) ([]byte, bool, error) {
-	profileDir := filepath.Join(string(provider), name)
-	if err := validateRootDir(root, string(provider)); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	if err := validateRootDir(root, profileDir); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	path := profileRelativePath(provider, name)
-	info, err := root.Lstat(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, false, fmt.Errorf("%w: credential profile is not a regular file", ErrInvalid)
-	}
-	file, err := root.Open(path)
-	if err != nil {
-		return nil, false, err
-	}
-	defer file.Close()
-	data, err := readBoundedCredential(file)
-	if err != nil {
-		return nil, false, err
-	}
-	return data, true, nil
 }
 
 func requestedProviders(provider protocol.AIAccountProvider) []protocol.AIAccountProvider {
@@ -456,17 +492,6 @@ func ensurePrivateDir(path string) error {
 		return fmt.Errorf("%w: account vault path is not a regular directory", ErrInvalid)
 	}
 	return os.Chmod(path, 0o700)
-}
-
-func hashFile(path string) ([sha256.Size]byte, bool, error) {
-	data, err := readCredentialFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return [sha256.Size]byte{}, false, nil
-		}
-		return [sha256.Size]byte{}, false, err
-	}
-	return sha256.Sum256(data), true, nil
 }
 
 func readCredentialFile(path string) ([]byte, error) {

@@ -23,6 +23,7 @@ type AIAccountProfile struct {
 	Provider AIAccountProvider `json:"provider" msgpack:"provider"`
 	Name     string            `json:"name" msgpack:"name"`
 	Active   bool              `json:"active" msgpack:"active"`
+	System   bool              `json:"system,omitempty" msgpack:"system,omitempty"`
 }
 
 type AIAccountProviderStatus struct {
@@ -65,6 +66,9 @@ type AIAccountActivateRequestBody struct {
 type AIAccountActivateResponseBody struct {
 	Profile                  AIAccountProfile `json:"profile" msgpack:"profile"`
 	RestartExistingProcesses bool             `json:"restart_existing_processes" msgpack:"restart_existing_processes"`
+	SafetyBackupProfile      string           `json:"safety_backup_profile,omitempty" msgpack:"safety_backup_profile,omitempty"`
+	OutgoingResnapshotted    string           `json:"outgoing_resnapshotted,omitempty" msgpack:"outgoing_resnapshotted,omitempty"`
+	FreshLivePreserved       bool             `json:"fresh_live_preserved,omitempty" msgpack:"fresh_live_preserved,omitempty"`
 }
 
 type AIAccountDeleteRequestBody struct {

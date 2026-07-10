@@ -92,6 +92,13 @@ azd --help
   repositories, and support bundles unless those systems are encrypted.
 - Activation applies to new provider processes. Restart existing Claude or Codex
   sessions because long-running processes may retain credentials in memory.
+- Claude profiles include the primary credentials, account state, config auth,
+  API-key settings, and the field-scoped macOS Desktop OAuth cache when present.
+- Before switching, Azedarach preserves unmatched live credentials in protected
+  `_original`/rotating safety profiles and re-snapshots a matched outgoing
+  profile so provider token refreshes are not lost.
+- Codex account commands enforce file-backed credential storage and refuse to
+  replace newer live tokens with an older snapshot of the same identity.
 
 ### Issue Tracker Workflows
 
