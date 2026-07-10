@@ -43,12 +43,7 @@ type InteractionMutationRequestBody struct {
 	Reason           string                          `json:"reason,omitempty" msgpack:"reason,omitempty"`
 	ReplacementID    string                          `json:"replacement_id,omitempty" msgpack:"replacement_id,omitempty"`
 }
-type InteractionDecisionEffect struct {
-	Title        string `json:"title" msgpack:"title"`
-	Rationale    string `json:"rationale" msgpack:"rationale"`
-	Context      string `json:"context,omitempty" msgpack:"context,omitempty"`
-	Consequences string `json:"consequences,omitempty" msgpack:"consequences,omitempty"`
-}
+type InteractionDecisionEffect = domain.InteractionDecisionEffect
 type InteractionResolveRequestBody struct {
 	InteractionMutationRequestBody
 	Decision *InteractionDecisionEffect `json:"decision,omitempty" msgpack:"decision,omitempty"`
