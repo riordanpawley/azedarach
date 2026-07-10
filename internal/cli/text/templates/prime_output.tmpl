@@ -20,6 +20,8 @@ Start here:
 
 - `AZEDARACH_ISSUE_ID` selects the default issue scope. Refresh stale context with `az issue get <issue-id>`; do not silently switch issues.
 - Use `az issue` as the task authority. Record non-trivial work in issues and perform implementation in the issue worktree/session.
+- When the user asks to start an issue, start or attach its session; changing lifecycle state alone does not start execution. Agents start sessions only on explicit user or orchestrator direction.
+- Create issues with enough description and acceptance context to execute; a title alone is not a usable handoff.
 - Keep the issue state aligned with what is happening now. Resume active work before editing; do not leave an issue review-ready while making follow-up changes.
 - Record progress, validation, review facts, risks, blockers, and closeout with `az issue record`. Notes are terse human scratchpad, not the automation source of truth.
 
@@ -53,7 +55,9 @@ Parent And Child Scope
 
 - Parent/epic issues hold the overarching goal and acceptance contract. Put implementation-sized scope and detailed decisions on child issues.
 - `az issue create "Child task"` creates tracking-only child work and auto-parents under `AZEDARACH_ISSUE_ID`; pass `--parent <issue-id>` when targeting another root. Use `az issue split` only when the child should launch in an isolated session.
+- After launching a child session, the parent observes, coordinates, and integrates it; do not also implement that child's scope in the parent session.
 - Graph membership comes from parent-child edges, never `--impl`. Verify returned `parent_id` before launching a worker.
+- If work starts under the wrong parent, stop that worker and create a fresh correctly parented child; session and worktree identity make an active worker unsafe to reparent in place.
 - Parent-child edges express hierarchy, not readiness. Pause/supersede work by changing lifecycle intent and adding a blocker; do not orphan active work by removing its parent edge.
 - Before using `--deferred`, ask whether the parent can land correctly without the work. Required work belongs in the parent's merge unit; only independently landable later work is deferred.
 - Child integration targets the closest active ancestor worktree. Materialize a missing ancestor with `az worktree create <ancestor-issue>`; do not route normal child completion directly to the base branch.
@@ -67,6 +71,7 @@ Orchestration
 {{ end }}{{ else if and .OrchestrationViaAz .TmuxAvailable }}- Mode is `az`: `az orchestrate` is the worker launch and coordination authority for this graph.
 - Shape independently actionable leaves, inspect `az orchestrate status --root <root> --json --summary`, then start a bounded wave with `az orchestrate start --root <root> --limit <n>`.
 - Keep `az orchestrate watch --root <root> --since <seq> --jsonl` running while workers are active. Use status/watch activity before sparse pane inspection; do not poll panes continuously.
+- Trust hook-backed activity. If activity is `unknown`, inspect `az ai status --target=auto` and repair missing or outdated hooks before treating the worker as idle.
 - Workers report `worker-progress`, `worker-blocked`, or `worker-integration-ready`. The orchestrator uses `az orchestrate message` only for evidence-backed intervention.
 - Review worker evidence and context risk, return non-trivial findings to live worker sessions, and close accepted children with `az issue close --id <child>`.
 - Start nested epic/root sessions as their own orchestrators; do not flatten their descendants unless explicitly requested.
@@ -81,6 +86,7 @@ Evidence And Coordination
 - Worker handoff evidence uses `worker_evidence.v1`: summary, commands run, key assertions, files changed, review status/findings, and risks. Validate it with `az evidence validate` before recording or sending.
 - Before accepting repeated-locality work, inspect `az issue context-risk --since 14d <issue-id>`; treat low risk as advisory and require structured diagnosis/invariant/consumer/test evidence for high risk.
 - Capture reusable discoveries with `az learn add`; use `az decision` for durable architecture/product choices and link them to issues or requirements.
+- When the implementation design changes, update the issue's durable design field and keep child-level detail on the relevant child issue.
 - Pre-commit hooks may sync decision markdown. Run `az decision sync --check` before scoped commits when unrelated decision drift would be harmful.
 
 {{ if .LearningSection }}{{ .LearningSection }}
