@@ -113,6 +113,70 @@ func TestOrchestrationAuthorityInterfaceStaysDeep(t *testing.T) {
 	var _ orchestrationAuthority = daemonOrchestrationAuthority{}
 }
 
+func TestResolveOrchestratorSessionUsesDurableLeaseScope(t *testing.T) {
+	projectID := "project"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	rooted, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, rooted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AcquireOrchestratorScopeLease(context.Background(), identity, "az-root-orchestrator", func(context.Context, string) (bool, error) { return true, nil }); err != nil {
+		t.Fatalf("acquire lease: %v", err)
+	}
+	d := &Daemon{runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}}
+	lease, found, err := d.resolveOrchestratorSession(context.Background(), projectID, "az-root-orchestrator")
+	if err != nil || !found {
+		t.Fatalf("resolve = found %v err %v", found, err)
+	}
+	if lease.Identity.Scope != rooted {
+		t.Fatalf("scope = %+v, want %+v", lease.Identity.Scope, rooted)
+	}
+	if _, found, err := d.resolveOrchestratorSession(context.Background(), projectID, "worker"); err != nil || found {
+		t.Fatalf("worker resolve = found %v err %v, want no orchestrator role", found, err)
+	}
+}
+
+func TestOrchestrationScopeCommandsKeepRootAuthorityExplicit(t *testing.T) {
+	rooted, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range orchestrationScopeCommands(rooted) {
+		if !strings.Contains(command, "--root az-root") {
+			t.Fatalf("rooted command lost scope: %q", command)
+		}
+	}
+	for _, command := range orchestrationScopeCommands(domain.ProjectOrchestrationScope()) {
+		if strings.Contains(command, "--root") {
+			t.Fatalf("project command invented root: %q", command)
+		}
+	}
+}
+
+func TestProjectStewardshipContextCollectsRecentRootMailboxEvents(t *testing.T) {
+	repoDir := t.TempDir()
+	created := time.Date(2026, 7, 10, 4, 0, 0, 0, time.UTC)
+	for _, event := range []daemonMailEvent{
+		{Seq: 1, ParentIssue: "az-a", IssueID: "az-worker-a", Type: "worker-progress", Body: "a", CreatedAt: created},
+		{Seq: 1, ParentIssue: "az-b", IssueID: "az-worker-b", Type: "worker-integration-ready", Body: "b", CreatedAt: created.Add(time.Second)},
+	} {
+		if err := appendMailboxEvent(repoDir, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot := protocol.OrchestrationSnapshot{Scope: domain.ProjectOrchestrationScope(), Roots: []string{"az-a", "az-b"}}
+	authority := daemonOrchestrationAuthority{daemon: &Daemon{cfg: Config{RepoDir: repoDir}}}
+	authority.enrichStewardshipContext(context.Background(), protocol.DefaultProjectID, &snapshot)
+	if len(snapshot.RecentEvents) != 2 || snapshot.RecentEvents[0].ParentIssue != "az-a" || snapshot.RecentEvents[1].ParentIssue != "az-b" {
+		t.Fatalf("recent events = %+v", snapshot.RecentEvents)
+	}
+}
+
 func TestOrchestrationSkipReasonPreservesNestedRootAuthority(t *testing.T) {
 	nested := map[string]struct{}{"az-nested": {}}
 	active := map[string]struct{}{"az-active": {}}

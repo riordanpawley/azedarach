@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
@@ -38,17 +39,54 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
+	lease, found, err := d.resolveOrchestratorSession(ctx, d.projectID(req.Meta), body.SessionID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if found {
+		body.Scope = lease.Identity.Scope
+	} else if strings.TrimSpace(body.SessionID) != "" && body.Scope.Kind == "" {
+		// A normal worker session deliberately receives no orchestration context.
+		encoded, _ := json.Marshal(protocol.OrchestrationSnapshot{Role: "worker", SessionID: body.SessionID})
+		resp := d.successResponse(req)
+		resp.Body = encoded
+		return resp, nil
+	}
 	if _, err := domain.NewOrchestratorIdentity(d.projectID(req.Meta), body.Scope); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 	}
 	if strings.TrimSpace(body.ActorID) == "" {
 		body.ActorID = strings.TrimSpace(req.Meta.ClientActor)
 	}
-	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, d.projectID(req.Meta), body)
-	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	projectID := d.projectID(req.Meta)
+	var snapshot protocol.OrchestrationSnapshot
+	var snapshotRevision uint64
+	stable := false
+	for attempt := 0; attempt < 3; attempt++ {
+		before := d.currentRevision(projectID)
+		snapshot, err = d.orchestrationAuthority().Snapshot(ctx, projectID, body)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		after := d.currentRevision(projectID)
+		if before == after {
+			snapshotRevision = after
+			stable = true
+			break
+		}
 	}
-	snapshot.Revision = d.currentRevision(d.projectID(req.Meta))
+	if !stable {
+		return d.errorResponse(req, protocol.ErrorCodeConflict, "orchestration projection changed while building snapshot; retry"), nil
+	}
+	snapshot.Role = "orchestrator"
+	snapshot.SessionID = strings.TrimSpace(body.SessionID)
+	if found {
+		snapshot.Lifecycle = lease.Lifecycle
+	}
+	snapshot.Revision = snapshotRevision
+	if snapshot.Cursor == 0 {
+		snapshot.Cursor = int64(snapshotRevision)
+	}
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -56,6 +94,27 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 	resp := d.successResponse(req)
 	resp.Body, resp.Revision = encoded, snapshot.Revision
 	return resp, nil
+}
+
+func (d *Daemon) resolveOrchestratorSession(ctx context.Context, projectID, sessionID string) (daemonstate.OrchestratorScopeLease, bool, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return daemonstate.OrchestratorScopeLease{}, false, nil
+	}
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return daemonstate.OrchestratorScopeLease{}, false, nil
+	}
+	leases, err := store.ListOrchestratorScopeLeases(ctx, projectID)
+	if err != nil {
+		return daemonstate.OrchestratorScopeLease{}, false, fmt.Errorf("refresh orchestrator session projection: %w", err)
+	}
+	for _, lease := range leases {
+		if lease.SessionID == sessionID {
+			return lease, true, nil
+		}
+	}
+	return daemonstate.OrchestratorScopeLease{}, false, nil
 }
 
 func (d *Daemon) handleOrchestrationIntent(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -98,7 +157,14 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	if limit <= 0 {
 		limit = a.inspectLimit()
 	}
-	snapshot := protocol.OrchestrationSnapshot{Scope: identity.Scope, GeneratedAt: time.Now().UTC(), Blocked: map[string]string{}}
+	snapshot := protocol.OrchestrationSnapshot{
+		Scope: identity.Scope, GeneratedAt: time.Now().UTC(), Blocked: map[string]string{},
+		Constraints: protocol.OrchestrationConstraints{
+			InspectLimit: limit, StartLimit: a.startLimit(), AgentCapacity: a.agentCapacity(),
+			Commands:       orchestrationScopeCommands(identity.Scope),
+			RoleGuardrails: []string{"remain in the active orchestration loop", "do not implement worker issue scope", "preserve sessions during review handoff"},
+		},
+	}
 	if identity.Scope.Kind == domain.OrchestrationScopeRooted {
 		root := identity.Scope.RootIssueID.String()
 		ready, err := a.daemon.taskGraphReadinessForActor(ctx, projectID, root, request.ActorID)
@@ -109,6 +175,7 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 			return protocol.OrchestrationSnapshot{}, err
 		}
 		snapshot.Scope, snapshot.Roots, snapshot.GeneratedAt = identity.Scope, []string{root}, time.Now().UTC()
+		a.enrichStewardshipContext(ctx, projectID, &snapshot)
 		return snapshot, nil
 	}
 
@@ -177,8 +244,78 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		snapshot.Capacity.TotalCountingCapacityCount = globalActive
 	}
 	explainOrchestrationCandidates(&snapshot)
+	a.enrichStewardshipContext(ctx, projectID, &snapshot)
 	sortOrchestrationSnapshot(&snapshot, tasksByID)
 	return snapshot, nil
+}
+
+func orchestrationScopeCommands(scope domain.OrchestrationScope) []string {
+	rootFlag := ""
+	if scope.Kind == domain.OrchestrationScopeRooted {
+		rootFlag = " --root " + scope.RootIssueID.String()
+	}
+	return []string{
+		"az orchestrate status" + rootFlag,
+		"az orchestrate start" + rootFlag,
+		"az orchestrate watch" + rootFlag + " --since <cursor> --jsonl",
+		"az orchestrate complete-check" + rootFlag,
+	}
+}
+
+func (a daemonOrchestrationAuthority) enrichStewardshipContext(ctx context.Context, projectID string, snapshot *protocol.OrchestrationSnapshot) {
+	for _, candidate := range snapshot.Candidates {
+		switch candidate.Classification {
+		case string(domain.OrchestrationCandidateReviewReady):
+			snapshot.Reviews = append(snapshot.Reviews, candidate)
+		case string(domain.OrchestrationCandidateOwnedElsewhere):
+			snapshot.OwnershipConflicts = append(snapshot.OwnershipConflicts, candidate)
+		}
+	}
+	if issueClient := a.daemon.issueClientForProject(projectID); issueClient != nil {
+		if interactions, err := issueClient.ListInteractions(ctx); err == nil {
+			for _, interaction := range interactions {
+				if interaction.Unresolved() && orchestrationInteractionInScope(interaction, snapshot.Scope) {
+					snapshot.Interactions = append(snapshot.Interactions, interaction)
+				}
+			}
+		}
+	}
+	repoDir := strings.TrimSpace(a.daemon.resolveRepoDirForProject(projectID))
+	if repoDir != "" {
+		parents := append([]string(nil), snapshot.Roots...)
+		if snapshot.Scope.Kind == domain.OrchestrationScopeRooted {
+			parents = []string{snapshot.Scope.RootIssueID.String()}
+		}
+		var recent []daemonMailEvent
+		for _, parent := range parents {
+			if events, err := readMailboxEvents(repoDir, parent); err == nil {
+				recent = append(recent, events...)
+			}
+		}
+		sort.SliceStable(recent, func(i, j int) bool {
+			if recent[i].CreatedAt.Equal(recent[j].CreatedAt) {
+				return recent[i].ParentIssue < recent[j].ParentIssue
+			}
+			return recent[i].CreatedAt.Before(recent[j].CreatedAt)
+		})
+		const recentLimit = 20
+		if len(recent) > recentLimit {
+			recent = recent[len(recent)-recentLimit:]
+		}
+		for _, event := range recent {
+			snapshot.RecentEvents = append(snapshot.RecentEvents, mailEventToProtocol(event))
+			if event.Seq > snapshot.Cursor {
+				snapshot.Cursor = event.Seq
+			}
+		}
+	}
+}
+
+func orchestrationInteractionInScope(interaction domain.InteractionRequest, scope domain.OrchestrationScope) bool {
+	if scope.Kind == domain.OrchestrationScopeProject {
+		return true
+	}
+	return interaction.OrchestrationScope == scope.RootIssueID.String() || interaction.IssueID == scope.RootIssueID.String()
 }
 
 func explainOrchestrationCandidates(snapshot *protocol.OrchestrationSnapshot) {

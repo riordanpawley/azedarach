@@ -12223,6 +12223,85 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 }
 
+func TestPrimeCommandRendersPersistedProjectOrchestratorSnapshotOnly(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "stale-worker-scope")
+	setPrimeTmuxAvailable(t, true)
+	previous := tmuxPaneSessionName
+	tmuxPaneSessionName = func(context.Context) (string, error) { return "az-project-orchestrator", nil }
+	t.Cleanup(func() { tmuxPaneSessionName = previous })
+	commands := []string{}
+	deps := &Dependencies{
+		ProjectID: "proj",
+		Config:    config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			commands = append(commands, req.Command)
+			if req.Command != daemonclient.CommandOrchestrationSnapshot {
+				t.Fatalf("unexpected daemon command %q", req.Command)
+			}
+			return responseWithJSON(req, protocol.OrchestrationSnapshot{
+				Role: "orchestrator", SessionID: "az-project-orchestrator", Lifecycle: domain.OrchestratorWorking,
+				Scope: domain.ProjectOrchestrationScope(), Revision: 41, Cursor: 9,
+				Capacity:           protocol.OrchestrationCapacity{DirectRunnableCount: 2, DirectActiveCount: 1, TotalCountingCapacityCount: 3},
+				Candidates:         []protocol.OrchestrationCandidate{{IssueID: "az-ready", Classification: "runnable", Reason: "included: ready for worker start"}},
+				Reviews:            []protocol.OrchestrationCandidate{{IssueID: "az-review", Classification: "review-ready", Reason: "excluded: review requested"}},
+				OwnershipConflicts: []protocol.OrchestrationCandidate{{IssueID: "az-owned", Classification: "owned-elsewhere", Reason: "excluded: owned by another actor"}},
+				Blocked:            map[string]string{"az-blocked": "dependency open"},
+				Interactions:       []domain.InteractionRequest{{ID: "int-1", IssueID: "az-wait", Question: "Choose rollout?"}},
+				RecentEvents:       []protocol.MailEvent{{Seq: 9, IssueID: "az-ready", Type: "worker-progress", Body: "tests running"}},
+				Constraints:        protocol.OrchestrationConstraints{StartLimit: 4, AgentCapacity: 12, Commands: []string{"az orchestrate status"}, RoleGuardrails: []string{"remain in the active orchestration loop"}},
+			}), nil
+		}}),
+	}
+	output := captureStdout(t, func() error { return PrimeCommand(deps) })
+	if !reflect.DeepEqual(commands, []string{daemonclient.CommandOrchestrationSnapshot}) {
+		t.Fatalf("commands = %v, want one coherent orchestration snapshot", commands)
+	}
+	for _, want := range []string{
+		"role=orchestrator scope=project lifecycle=working revision=41 cursor=9",
+		"daemon identifies this session as the project orchestrator",
+		"az-ready: runnable", "az-review: review-ready", "az-owned: owned-elsewhere",
+		"az-blocked: dependency open", "int-1 (az-wait): Choose rollout?", "#9 worker-progress az-ready: tests running",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("prime output missing %q: %s", want, output)
+		}
+	}
+	if strings.Contains(output, "stale-worker-scope") {
+		t.Fatalf("project orchestrator output leaked environment worker scope: %s", output)
+	}
+}
+
+func TestPrimeCommandRendersPersistedRootedOrchestratorScope(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "stale-root")
+	setPrimeTmuxAvailable(t, true)
+	previous := tmuxPaneSessionName
+	tmuxPaneSessionName = func(context.Context) (string, error) { return "az-root-orchestrator", nil }
+	t.Cleanup(func() { tmuxPaneSessionName = previous })
+	rooted, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := &Dependencies{ProjectID: "proj", Config: config.DefaultConfig(), DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		if req.Command != daemonclient.CommandOrchestrationSnapshot {
+			t.Fatalf("unexpected daemon command %q", req.Command)
+		}
+		return responseWithJSON(req, protocol.OrchestrationSnapshot{
+			Role: "orchestrator", Scope: rooted, Lifecycle: domain.OrchestratorWorking, Revision: 7,
+			Roots: []string{"az-root"}, Blocked: map[string]string{},
+			Constraints: protocol.OrchestrationConstraints{Commands: []string{"az orchestrate status --root az-root"}},
+		}), nil
+	}})}
+	output := captureStdout(t, func() error { return PrimeCommand(deps) })
+	for _, want := range []string{"Active issue ID: `az-root`", "scope=rooted:az-root", "rooted orchestrator for `az-root`", "az orchestrate status --root az-root", "Orchestrator Exit Contract (root az-root)"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("rooted prime output missing %q: %s", want, output)
+		}
+	}
+	if strings.Contains(output, "stale-root") {
+		t.Fatalf("rooted prime leaked environment scope: %s", output)
+	}
+}
+
 func TestPrimeCommandDoesNotEmitDiagnosticsToStderr(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
 	setPrimeTmuxAvailable(t, false)

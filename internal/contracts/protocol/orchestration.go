@@ -12,29 +12,49 @@ const (
 )
 
 type OrchestrationSnapshotRequest struct {
-	Scope   domain.OrchestrationScope `json:"scope"`
-	ActorID string                    `json:"actor_id,omitempty"`
-	Limit   int                       `json:"limit,omitempty"`
+	Scope domain.OrchestrationScope `json:"scope"`
+	// SessionID lets presentation clients recover the daemon-persisted role and
+	// scope without reconstructing authority from environment variables.
+	SessionID string `json:"session_id,omitempty"`
+	ActorID   string `json:"actor_id,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
 }
 
 type OrchestrationSnapshot struct {
-	Scope                  domain.OrchestrationScope  `json:"scope"`
-	Revision               uint64                     `json:"revision"`
-	GeneratedAt            time.Time                  `json:"generated_at"`
-	Roots                  []string                   `json:"roots,omitempty"`
-	Capacity               OrchestrationCapacity      `json:"capacity"`
-	Runnable               []string                   `json:"runnable"`
-	NestedRoots            []OrchestrationNestedRoot  `json:"nested_roots,omitempty"`
-	Pending                []OrchestrationPending     `json:"pending,omitempty"`
-	Active                 []string                   `json:"active,omitempty"`
-	ActiveSessions         []OrchestrationSession     `json:"active_sessions,omitempty"`
-	SessionStartProgress   []OrchestrationProgress    `json:"session_start_progress,omitempty"`
-	StaleCloseableChildren []OrchestrationCloseable   `json:"stale_closeable_children,omitempty"`
-	ContainmentRisks       []OrchestrationRisk        `json:"containment_risks,omitempty"`
-	WorkerObservations     []domain.WorkerObservation `json:"worker_observations,omitempty"`
-	Blocked                map[string]string          `json:"blocked"`
-	Candidates             []OrchestrationCandidate   `json:"candidates,omitempty"`
-	Health                 OrchestrationHealth        `json:"health"`
+	Role                   string                       `json:"role,omitempty"`
+	SessionID              string                       `json:"session_id,omitempty"`
+	Lifecycle              domain.OrchestratorLifecycle `json:"lifecycle,omitempty"`
+	Scope                  domain.OrchestrationScope    `json:"scope"`
+	Revision               uint64                       `json:"revision"`
+	GeneratedAt            time.Time                    `json:"generated_at"`
+	Roots                  []string                     `json:"roots,omitempty"`
+	Capacity               OrchestrationCapacity        `json:"capacity"`
+	Runnable               []string                     `json:"runnable"`
+	NestedRoots            []OrchestrationNestedRoot    `json:"nested_roots,omitempty"`
+	Pending                []OrchestrationPending       `json:"pending,omitempty"`
+	Active                 []string                     `json:"active,omitempty"`
+	ActiveSessions         []OrchestrationSession       `json:"active_sessions,omitempty"`
+	SessionStartProgress   []OrchestrationProgress      `json:"session_start_progress,omitempty"`
+	StaleCloseableChildren []OrchestrationCloseable     `json:"stale_closeable_children,omitempty"`
+	ContainmentRisks       []OrchestrationRisk          `json:"containment_risks,omitempty"`
+	WorkerObservations     []domain.WorkerObservation   `json:"worker_observations,omitempty"`
+	Blocked                map[string]string            `json:"blocked"`
+	Candidates             []OrchestrationCandidate     `json:"candidates,omitempty"`
+	Reviews                []OrchestrationCandidate     `json:"reviews,omitempty"`
+	OwnershipConflicts     []OrchestrationCandidate     `json:"ownership_conflicts,omitempty"`
+	Interactions           []domain.InteractionRequest  `json:"interactions,omitempty"`
+	RecentEvents           []MailEvent                  `json:"recent_events,omitempty"`
+	Cursor                 int64                        `json:"cursor,omitempty"`
+	Constraints            OrchestrationConstraints     `json:"constraints"`
+	Health                 OrchestrationHealth          `json:"health"`
+}
+
+type OrchestrationConstraints struct {
+	InspectLimit   int      `json:"inspect_limit"`
+	StartLimit     int      `json:"start_limit"`
+	AgentCapacity  int      `json:"agent_capacity"`
+	Commands       []string `json:"commands"`
+	RoleGuardrails []string `json:"role_guardrails"`
 }
 
 type OrchestrationCandidate struct {
