@@ -60,6 +60,48 @@ func TestResolveInteractionAtomicEffectsAndRollback(t *testing.T) {
 	}
 }
 
+func TestResolveInteractionAnswerOnlyPreservesIssueMetadataAndObservations(t *testing.T) {
+	ctx := context.Background()
+	c := NewClient(t.TempDir(), nil)
+	issueID, err := c.Create(ctx, CreateTaskParams{Title: "unchanged", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := interactionTestTask(t, ctx, c, issueID)
+	beforeEvents, err := c.ListIssueObservationEvents(ctx, issueID, IssueObservationEventListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := testInteractionRequest("answer-only", issueID, "answer-only")
+	if err = c.CreateInteraction(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	now := r.UpdatedAt.Add(time.Second)
+	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: "yes", Actor: "human", CreatedAt: now}
+	r, err = r.Transition(domain.InteractionResolved, 1, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1}); err != nil {
+		t.Fatal(err)
+	}
+	after := interactionTestTask(t, ctx, c, issueID)
+	if !after.UpdatedAt.Equal(before.UpdatedAt) || after.Title != before.Title {
+		t.Fatalf("answer-only resolution changed issue metadata: before=%+v after=%+v", before, after)
+	}
+	afterEvents, err := c.ListIssueObservationEvents(ctx, issueID, IssueObservationEventListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterEvents) != len(beforeEvents) {
+		t.Fatalf("answer-only resolution appended issue observation: before=%d after=%d", len(beforeEvents), len(afterEvents))
+	}
+	got, ok, err := c.GetInteraction(ctx, r.ID)
+	if err != nil || !ok || got.State != domain.InteractionResolved {
+		t.Fatalf("interaction not resolved: got=%+v ok=%v err=%v", got, ok, err)
+	}
+}
+
 func interactionTestTask(t *testing.T, ctx context.Context, c *Client, id string) domain.Task {
 	t.Helper()
 	tasks, err := c.List(ctx)
