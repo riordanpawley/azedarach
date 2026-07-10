@@ -14,6 +14,7 @@ func TestAssessIssueExecutability(t *testing.T) {
 		want     IssueExecutabilityDisposition
 	}{
 		{name: "complete", task: Task{Description: "Scope", Acceptance: "Done when tested"}, want: IssueExecutable},
+		{name: "legacy description acceptance", task: Task{Description: "Implement daemon/domain assessment without inventing product choices. Acceptance: assessments are explainable and deterministic; uncertain work routes to interaction or backlog policy."}, want: IssueExecutable},
 		{name: "missing contract", task: Task{}, want: IssuePremature},
 		{name: "blocked", task: Task{Description: "Scope", Acceptance: "Done"}, blockers: []string{"dep-b", "dep-a"}, want: IssuePremature},
 		{name: "safe enrichment", task: Task{}, proposal: IssueContractProposal{Description: "Observed scope", Acceptance: "Observed check", Evidence: []string{"spec:req-1"}}, want: IssueNeedsEnrichment},
@@ -29,6 +30,29 @@ func TestAssessIssueExecutability(t *testing.T) {
 			}
 			if tt.want == IssueNeedsInteraction && (len(got.Changes) != 0 || len(got.Children) != 0) {
 				t.Fatalf("interaction assessment proposed unsafe changes: %+v", got)
+			}
+		})
+	}
+}
+
+func TestHasIssueAcceptanceContextIsConservative(t *testing.T) {
+	tests := []struct {
+		name string
+		task Task
+		want bool
+	}{
+		{name: "dedicated field", task: Task{Acceptance: "Done"}, want: true},
+		{name: "legacy inline marker", task: Task{Description: "Scope. Acceptance: focused tests pass."}, want: true},
+		{name: "legacy section marker", task: Task{Description: "Scope\n\nAcceptance:\n- focused tests pass"}, want: true},
+		{name: "empty marker", task: Task{Description: "Scope. Acceptance:"}, want: false},
+		{name: "embedded word", task: Task{Description: "Scope describes NonAcceptance: behavior."}, want: false},
+		{name: "hyphenated negation", task: Task{Description: "Scope. Non-Acceptance: performance guarantees."}, want: false},
+		{name: "ordinary mention", task: Task{Description: "Scope mentions acceptance criteria without an explicit contract marker."}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HasIssueAcceptanceContext(tt.task); got != tt.want {
+				t.Fatalf("HasIssueAcceptanceContext() = %v, want %v", got, tt.want)
 			}
 		})
 	}

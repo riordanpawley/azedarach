@@ -53,7 +53,7 @@ type IssueExecutabilityAssessment struct {
 func AssessIssueExecutability(task Task, blockers []string, proposal IssueContractProposal) IssueExecutabilityAssessment {
 	a := IssueExecutabilityAssessment{Disposition: IssueExecutable, Executable: true}
 	descriptionPresent := strings.TrimSpace(task.Description) != ""
-	acceptancePresent := strings.TrimSpace(task.Acceptance) != ""
+	acceptancePresent := HasIssueAcceptanceContext(task)
 
 	if descriptionPresent {
 		a.Signals = append(a.Signals, "scope-present")
@@ -127,6 +127,36 @@ func AssessIssueExecutability(task Task, blockers []string, proposal IssueContra
 		a.Disposition, a.Executable = IssuePremature, false
 	}
 	return a
+}
+
+// HasIssueAcceptanceContext preserves the legacy issue representation where
+// acceptance criteria were stored after an explicit "Acceptance:" marker in
+// Description. The dedicated field remains authoritative when present.
+func HasIssueAcceptanceContext(task Task) bool {
+	if strings.TrimSpace(task.Acceptance) != "" {
+		return true
+	}
+	description := strings.TrimSpace(task.Description)
+	for {
+		marker := strings.Index(description, "Acceptance:")
+		if marker < 0 {
+			return false
+		}
+		beforeOK := marker == 0 || isIssueContractMarkerBoundary(description[marker-1])
+		if beforeOK && strings.TrimSpace(description[marker+len("Acceptance:"):]) != "" {
+			return true
+		}
+		description = description[marker+len("Acceptance:"):]
+	}
+}
+
+func isIssueContractMarkerBoundary(value byte) bool {
+	switch value {
+	case ' ', '\t', '\r', '\n', '(', '[', '{', '#', '*', '_':
+		return true
+	default:
+		return false
+	}
 }
 
 func childrenValid(children []IssueChildProposal) bool {

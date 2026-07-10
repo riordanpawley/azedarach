@@ -26,7 +26,7 @@ func TestAssessOrchestrationCandidateClasses(t *testing.T) {
 		blockers []string
 		want     OrchestrationCandidateClass
 	}{
-		{name: "open", task: Task{ID: "open", Title: "Open", Description: "Executable", Acceptance: "Done", Status: StatusOpen}, want: OrchestrationCandidateOpen},
+		{name: "open legacy contract", task: Task{ID: "open", Title: "Open", Description: "Executable scope. Acceptance: worker completes the scoped change.", Status: StatusOpen}, want: OrchestrationCandidateOpen},
 		{name: "active", task: Task{ID: "active", Title: "Active", Description: "Executable", Status: StatusInProgress}, want: OrchestrationCandidateActive},
 		{name: "review", task: Task{ID: "review", Title: "Review", Description: "Executable", Status: StatusInReview, State: review}, want: OrchestrationCandidateReviewReady},
 		{name: "decision", task: Task{ID: "decision", Title: "Decision", Description: "Executable", Status: StatusInProgress, Session: waiting}, want: OrchestrationCandidateDecisionWaiting},
