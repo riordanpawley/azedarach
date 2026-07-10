@@ -376,6 +376,8 @@ func runtimeSignalAgentLifecycle(cmd protocol.RuntimeSignalIngestCommandBody) (s
 		return daemonhandlers.CommandSessionPause, "idle", true
 	case "waiting":
 		return daemonhandlers.CommandSessionPause, "waiting", true
+	case "error":
+		return daemonhandlers.CommandSessionPause, "error", true
 	}
 	switch strings.TrimSpace(cmd.Event) {
 	case "idle_prompt", "permission_request":

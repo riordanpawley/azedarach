@@ -91,8 +91,10 @@ type sessionHookActivity struct {
 	Total          int
 	Active         int
 	Paused         int
+	Error          int
 	LatestActiveAt time.Time
 	LatestPausedAt time.Time
+	LatestErrorAt  time.Time
 }
 
 type sessionDisplayActivity struct {
@@ -351,7 +353,7 @@ func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingSco
 			counts.PaneScoped++
 		}
 		switch sessionActivityState(session) {
-		case domain.SessionPaused, domain.SessionIdle, domain.SessionWaiting:
+		case domain.SessionError, domain.SessionPaused, domain.SessionIdle, domain.SessionWaiting:
 			counts.Paused++
 		default:
 			counts.Active++
@@ -2459,6 +2461,11 @@ func sessionHookActivityByIssueKeyFromSessions(sessions []daemonstate.Session, n
 		activity.Total++
 		updatedAt := session.UpdatedAt.UTC()
 		switch sessionActivityState(session) {
+		case domain.SessionError:
+			activity.Error++
+			if activity.LatestErrorAt.IsZero() || updatedAt.After(activity.LatestErrorAt) {
+				activity.LatestErrorAt = updatedAt
+			}
 		case domain.SessionPaused, domain.SessionIdle, domain.SessionWaiting:
 			activity.Paused++
 			if activity.LatestPausedAt.IsZero() || updatedAt.After(activity.LatestPausedAt) {
@@ -2479,6 +2486,8 @@ func sessionActivityState(session daemonstate.Session) domain.SessionState {
 	switch normalizeSessionActivity(session.Activity) {
 	case string(domain.SessionBusy), "starting", "working":
 		return domain.SessionBusy
+	case string(domain.SessionError):
+		return domain.SessionError
 	case string(domain.SessionIdle), string(domain.SessionPaused), string(domain.SessionWaiting):
 		return domain.SessionPaused
 	}
@@ -2505,6 +2514,9 @@ func sessionActivityLabel(activity sessionHookActivity) (string, string) {
 	if activity.Active > 0 {
 		return "busy", "hooks"
 	}
+	if activity.Error > 0 {
+		return "error", "hooks"
+	}
 	return "idle", "hooks"
 }
 
@@ -2514,6 +2526,9 @@ func sessionHookActivityUpdatedAt(activity sessionHookActivity) time.Time {
 	}
 	if activity.Active > 0 {
 		return activity.LatestActiveAt
+	}
+	if activity.Error > 0 {
+		return activity.LatestErrorAt
 	}
 	return activity.LatestPausedAt
 }
