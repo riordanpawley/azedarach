@@ -68,8 +68,11 @@ func (d *Daemon) handleOrchestrationIntent(ctx context.Context, req protocol.Req
 	if _, err := domain.NewOrchestratorIdentity(d.projectID(req.Meta), body.Scope); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 	}
-	if body.Kind != protocol.OrchestrationIntentStart || strings.TrimSpace(body.IntentKey) == "" {
-		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "start orchestration intent with intent_key is required"), nil
+	if !validOrchestrationIntentKind(body.Kind) || strings.TrimSpace(body.IntentKey) == "" {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "supported orchestration intent with intent_key is required"), nil
+	}
+	if err := validateOrchestrationReviewIntent(body); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 	}
 	if strings.TrimSpace(body.ActorID) == "" {
 		body.ActorID = strings.TrimSpace(req.Meta.ClientActor)
@@ -111,6 +114,15 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 			return protocol.OrchestrationSnapshot{}, err
 		}
 		snapshot.Scope, snapshot.Roots, snapshot.GeneratedAt = identity.Scope, []string{root}, time.Now().UTC()
+		issueClient := a.daemon.issueClientForProject(projectID)
+		if issueClient == nil {
+			return protocol.OrchestrationSnapshot{}, fmt.Errorf("issue store unavailable")
+		}
+		tasks, err := issueClient.ListParentChildSubtreeWithRuntime(ctx, projectID, root)
+		if err != nil {
+			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load rooted review queue: %w", err)
+		}
+		snapshot.ReviewQueue = a.reviewQueue(ctx, projectID, request, tasks)
 		return snapshot, nil
 	}
 
@@ -123,6 +135,7 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("load project orchestration projection: %w", err)
 	}
 	tasks = a.daemon.enrichTasksWithSessionState(ctx, projectID, tasks)
+	snapshot.ReviewQueue = a.reviewQueue(ctx, projectID, request, tasks)
 	roots := make([]domain.Task, 0)
 	tasksByID := make(map[string]domain.Task, len(tasks))
 	for _, task := range tasks {
@@ -220,11 +233,17 @@ func explainOrchestrationCandidates(snapshot *protocol.OrchestrationSnapshot) {
 }
 
 func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest) (protocol.OrchestrationIntentResult, error) {
-	if request.Kind != protocol.OrchestrationIntentStart {
+	if !validOrchestrationIntentKind(request.Kind) {
 		return protocol.OrchestrationIntentResult{}, fmt.Errorf("unsupported orchestration intent %q", request.Kind)
 	}
 	if strings.TrimSpace(request.IntentKey) == "" {
 		return protocol.OrchestrationIntentResult{}, fmt.Errorf("orchestration intent_key is required")
+	}
+	if err := validateOrchestrationReviewIntent(request); err != nil {
+		return protocol.OrchestrationIntentResult{}, err
+	}
+	if request.Kind != protocol.OrchestrationIntentStart {
+		return a.applyReviewIntent(ctx, projectID, request)
 	}
 	// Keep readiness, capacity selection, claims, and operation submission in
 	// one daemon-authoritative critical section. Ownership claims remain the
@@ -259,6 +278,14 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		requested = stableRequestedCandidates(requested, snapshot.Runnable)
 	}
 	result := protocol.OrchestrationIntentResult{Scope: request.Scope, Kind: request.Kind, IntentKey: request.IntentKey, Requested: requested, Skipped: map[string]string{}, Failed: map[string]string{}}
+	if request.Scope.Kind == domain.OrchestrationScopeProject {
+		if reviewID := firstActionableReview(snapshot.ReviewQueue); reviewID != "" {
+			for _, issueID := range requested {
+				result.Skipped[issueID] = "review-priority:" + reviewID
+			}
+			return result, nil
+		}
+	}
 	limit := request.Limit
 	if limit <= 0 {
 		limit = a.startLimit()
@@ -475,6 +502,10 @@ func orchestrationSkipReason(issueID string, nestedRoots, active map[string]stru
 }
 
 func (a daemonOrchestrationAuthority) claimAndSubmitStart(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string) (protocol.OrchestrationLaunch, error) {
+	return a.claimAndSubmitStartWithPrompt(ctx, projectID, request, issueID, "")
+}
+
+func (a daemonOrchestrationAuthority) claimAndSubmitStartWithPrompt(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID, prompt string) (protocol.OrchestrationLaunch, error) {
 	parsed, err := naming.ParseIssueID(issueID)
 	if err != nil {
 		return protocol.OrchestrationLaunch{}, err
@@ -493,7 +524,7 @@ func (a daemonOrchestrationAuthority) claimAndSubmitStart(ctx context.Context, p
 	if repoDir := strings.TrimSpace(request.RepoDir); repoDir != "" {
 		sessionID = naming.CanonicalSessionIDForIssue(repoDir, parsed).String()
 	}
-	payload, err := json.Marshal(sessionCommandBody{ProjectID: projectID, SessionID: sessionID, BaseBranch: request.BaseBranch})
+	payload, err := json.Marshal(sessionCommandBody{ProjectID: projectID, SessionID: sessionID, BaseBranch: request.BaseBranch, Prompt: strings.TrimSpace(prompt)})
 	if err != nil {
 		return protocol.OrchestrationLaunch{}, a.compensateStartFailure(ctx, issueClient, attempt, fmt.Errorf("marshal session start: %w", err))
 	}
