@@ -54,6 +54,10 @@ const (
 	ActionRefresh                 ActionID = "refresh"
 	ActionPullBase                ActionID = "pull_base"
 	ActionAttachSession           ActionID = "attach_session"
+	ActionBoardViewMoveUp         ActionID = "board_view_move_up"
+	ActionBoardViewMoveDown       ActionID = "board_view_move_down"
+	ActionBoardViewSelect         ActionID = "board_view_select"
+	ActionBoardViewClose          ActionID = "board_view_close"
 
 	ActionSelectToggle     ActionID = "select_toggle"
 	ActionSelectColumnAll  ActionID = "select_column_all"
@@ -80,7 +84,7 @@ var registry = []ActionSpec{
 	{ID: ActionMoveRight, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "l", Display: "l"}, {Input: "right", Display: "right"}}},
 	{ID: ActionHalfPageUp, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "ctrl+u", Display: "ctrl+u"}}},
 	{ID: ActionHalfPageDown, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "ctrl+d", Display: "ctrl+d"}}},
-	{ID: ActionOpenHelp, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "?", Display: "?"}}, Hint: "help"},
+	{ID: ActionOpenHelp, Mode: types.ModeNormal, Category: "Panes", Keys: []KeySpec{{Input: "?", Display: "?"}}, Hint: "help", Help: "Open this help reference"},
 	{ID: ActionOpenWorkspace, Mode: types.ModeNormal, Keys: []KeySpec{{Input: " ", Display: "Space"}}, Hint: "task workspace"},
 	{ID: ActionEnterGoto, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "g", Display: "g"}}, Hint: "goto"},
 	{ID: ActionEnterSearch, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "/", Display: "/"}}, Hint: "search"},
@@ -97,7 +101,7 @@ var registry = []ActionSpec{
 	{ID: ActionOpenRecovery, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "n", Display: "n"}}, Hint: "recover"},
 	{ID: ActionOpenNotificationHistory, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "N", Display: "N"}}},
 	{ID: ActionOpenOperationQueue, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "Q", Display: "Q"}}, Hint: "ops"},
-	{ID: ActionOpenBoardViews, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "B", Display: "B"}}, Hint: "board view"},
+	{ID: ActionOpenBoardViews, Mode: types.ModeNormal, Category: "Panes", Keys: []KeySpec{{Input: "B", Display: "B"}}, Hint: "board view", Help: "Open board view selector"},
 	{ID: ActionToggleView, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "tab", Display: "Tab"}}, Hint: "view"},
 	{ID: ActionPullBase, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "p", Display: "p"}}, Hint: "pull base"},
 	{ID: ActionQuit, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "q", Display: "q"}}, Hint: "quit"},
@@ -161,10 +165,8 @@ var registry = []ActionSpec{
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "Esc/q"}}, Hint: "cancel"},
 
 	// Help catalog (canonical board-focused reference).
-	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "?", Help: "Open this help reference"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "Space", Help: "Open task workspace"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "Q", Help: "Open operation queue"},
-	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "B", Help: "Open board view selector"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "L", Help: "Open event log"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "N", Help: "Open notification action center"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "O", Help: "Open tmux sessions"},
@@ -225,9 +227,28 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "q", Help: "Quit"},
 }
 
+var boardViewRegistry = []ActionSpec{
+	{ID: ActionBoardViewMoveUp, Keys: []KeySpec{{Input: "k", Display: "k"}, {Input: "up", Display: "up"}}},
+	{ID: ActionBoardViewMoveDown, Keys: []KeySpec{{Input: "j", Display: "j"}, {Input: "down", Display: "down"}}, Hint: "view", HintKey: "j/k", Category: "Board Views", Help: "Move through saved board views", HelpKey: "j/k"},
+	{ID: ActionBoardViewSelect, Keys: []KeySpec{{Input: "enter", Display: "Enter"}}, Hint: "select", Category: "Board Views", Help: "Select highlighted board view"},
+	{ID: ActionBoardViewClose, Keys: []KeySpec{{Input: "esc", Display: "Esc"}, {Input: "q", Display: "q"}}, Hint: "close", HintKey: "Esc", Category: "Board Views", Help: "Close board view selector", HelpKey: "Esc/q"},
+	{Category: "Board Views", HelpKey: "CLI create", Help: "az board view create --file PATH"},
+	{Category: "Board Views", HelpKey: "CLI edit", Help: "az board view update --file PATH"},
+	{Category: "Board Views", HelpKey: "CLI delete", Help: "az board view delete --confirm VIEW"},
+}
+
 func LookupAction(mode types.Mode, input string) (ActionID, bool) {
-	for _, spec := range registry {
-		if spec.Mode != mode {
+	return lookupAction(registry, mode, input, true)
+}
+
+// LookupBoardViewAction resolves keys handled by the board-view selector.
+func LookupBoardViewAction(input string) (ActionID, bool) {
+	return lookupAction(boardViewRegistry, 0, input, false)
+}
+
+func lookupAction(specs []ActionSpec, mode types.Mode, input string, matchMode bool) (ActionID, bool) {
+	for _, spec := range specs {
+		if matchMode && spec.Mode != mode {
 			continue
 		}
 		for _, key := range spec.Keys {
@@ -243,29 +264,13 @@ func LookupAction(mode types.Mode, input string) (ActionID, bool) {
 }
 
 func HintBindings(mode types.Mode) []Binding {
-	specs := specsForMode(mode)
-	out := make([]Binding, 0, len(specs))
-	for _, spec := range specs {
-		hint := strings.TrimSpace(spec.Hint)
-		if hint == "" {
-			continue
-		}
-		key := strings.TrimSpace(spec.HintKey)
-		if key == "" {
-			key = joinDisplays(spec.Keys)
-		}
-		if key == "" {
-			continue
-		}
-		out = append(out, Binding{Key: key, Description: hint})
-	}
-	return out
+	return hintBindings(specsForMode(mode))
 }
 
 func HelpCategories() []Category {
 	ordered := make([]string, 0, 8)
 	byCategory := map[string][]Binding{}
-	for _, spec := range registry {
+	for _, spec := range helpSpecs() {
 		category := strings.TrimSpace(spec.Category)
 		help := strings.TrimSpace(spec.Help)
 		if category == "" || help == "" {
@@ -290,11 +295,52 @@ func HelpCategories() []Category {
 	return out
 }
 
+func helpSpecs() []ActionSpec {
+	specs := append([]ActionSpec(nil), registry...)
+	if opener, ok := actionSpec(ActionOpenBoardViews); ok {
+		opener.Category = "Board Views"
+		specs = append(specs, opener)
+	}
+	return append(specs, boardViewRegistry...)
+}
+
+func actionSpec(id ActionID) (ActionSpec, bool) {
+	for _, spec := range registry {
+		if spec.ID == id {
+			return spec, true
+		}
+	}
+	return ActionSpec{}, false
+}
+
+// BoardViewHintBindings returns the selector's canonical contextual hints.
+func BoardViewHintBindings() []Binding {
+	return hintBindings(boardViewRegistry)
+}
+
 func specsForMode(mode types.Mode) []ActionSpec {
 	out := make([]ActionSpec, 0, 16)
 	for _, spec := range registry {
 		if spec.Mode == mode {
 			out = append(out, spec)
+		}
+	}
+	return out
+}
+
+func hintBindings(specs []ActionSpec) []Binding {
+	out := make([]Binding, 0, len(specs))
+	for _, spec := range specs {
+		hint := strings.TrimSpace(spec.Hint)
+		if hint == "" {
+			continue
+		}
+		key := strings.TrimSpace(spec.HintKey)
+		if key == "" {
+			key = joinDisplays(spec.Keys)
+		}
+		if key != "" {
+			out = append(out, Binding{Key: key, Description: hint})
 		}
 	}
 	return out

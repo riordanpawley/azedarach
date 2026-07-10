@@ -55,7 +55,7 @@ func TestHelpOverlay_View_ContainsKeyBindings(t *testing.T) {
 	view := collectScrolledViews(help)
 
 	// Check that view contains expected category names
-	expectedCategories := []string{"Card Header Legend", "Panes", "Navigation", "Workspace", "Modes", "Selection", "Task Actions", "Other"}
+	expectedCategories := []string{"Card Header Legend", "Panes", "Board Views", "Navigation", "Workspace", "Modes", "Selection", "Task Actions", "Other"}
 	for _, category := range expectedCategories {
 		if !strings.Contains(view, category) {
 			t.Errorf("view should contain category '%s'", category)
@@ -73,6 +73,11 @@ func TestHelpOverlay_View_ContainsKeyBindings(t *testing.T) {
 		"Open tmux sessions",       // Panes
 		"Open system diagnostics",  // Panes
 		"Open project selector",    // Panes
+		"Open board view selector", // Board views
+		"Select highlighted board", // Board views
+		"az board view create",     // Board view management
+		"az board view update",     // Board view management
+		"az board view delete",     // Board view management
 		"h/l",                      // Navigation
 		"j/k",                      // Navigation
 		"Open task workspace",      // Workspace
@@ -108,6 +113,8 @@ func TestHelpOverlay_SmallViewportShowsPaneOpenersFirst(t *testing.T) {
 		"Panes:",
 		"Open this help reference",
 		"Open operation queue",
+		"B",
+		"Open board view selector",
 		"Open event log",
 		"Open notification action center",
 	}
@@ -119,6 +126,19 @@ func TestHelpOverlay_SmallViewportShowsPaneOpenersFirst(t *testing.T) {
 
 	if strings.Contains(view, "Card Header Legend:") {
 		t.Fatalf("small help view should prioritize pane openers before the card legend:\n%s", view)
+	}
+}
+
+func TestHelpOverlay_DefaultViewportShowsBoardViewOpenerBeforeScrolling(t *testing.T) {
+	help := NewHelpOverlay()
+	model, _ := help.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	help = model.(*HelpOverlay)
+
+	view := help.View()
+	for _, want := range []string{"B", "Open board view selector"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("default help should expose board-view opener %q before scrolling:\n%s", want, view)
+		}
 	}
 }
 
