@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,11 +18,25 @@ import (
 
 const openCodeAdvisorPermissions = `{"permission":{"*":"deny","edit":"deny","bash":"deny","task":"deny","external_directory":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","question":"allow"},"agent":{"advisor":{"description":"Read-only decision advisor","mode":"primary","permission":{"*":"deny","edit":"deny","bash":"deny","task":"deny","external_directory":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","question":"allow"}}}}`
 
+const (
+	advisorEnvExecutable   = "/usr/bin/env"
+	advisorShellExecutable = "/bin/sh"
+)
+
 type advisorSessionRuntimeResult struct {
 	Session  daemonstate.AdvisorSession
 	Started  bool
 	Attached bool
 	Resumed  bool
+}
+
+type advisorLaunchCommand struct {
+	Executable string
+	Args       []string
+}
+
+func (c advisorLaunchCommand) String() string {
+	return strings.Join(append([]string{c.Executable}, c.Args...), " ")
 }
 
 func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID string, request domain.InteractionRequest) (advisorSessionRuntimeResult, error) {
@@ -65,7 +82,7 @@ func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID stri
 			if buildErr != nil {
 				return buildErr
 			}
-			return d.tmux.NewSessionWithCommand(ctx, advisor.SessionID, workdir, command)
+			return d.tmux.NewSessionWithArgs(ctx, advisor.SessionID, workdir, command.Executable, command.Args...)
 		})
 	if err != nil {
 		return advisorSessionRuntimeResult{Session: advisor, Attached: attached}, err
@@ -75,15 +92,25 @@ func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID stri
 	return advisorSessionRuntimeResult{Session: advisor, Started: !attached, Attached: attached, Resumed: attached && resumed}, nil
 }
 
-func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate.AdvisorSession, prompt string) (string, error) {
+func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate.AdvisorSession, prompt string) (advisorLaunchCommand, error) {
 	projectCfg := d.runtimeConfigForProject(projectID)
 	tool := strings.ToLower(strings.TrimSpace(projectCfg.CLITool))
 	if tool == "" {
 		tool = "claude"
 	}
+	switch tool {
+	case "codex", "claude", "opencode":
+	default:
+		return advisorLaunchCommand{}, fmt.Errorf("advisor read-only permissions are unsupported for CLI tool %q", tool)
+	}
+	toolPath, err := resolveAdvisorExecutable(tool)
+	if err != nil {
+		return advisorLaunchCommand{}, err
+	}
 	promptAssignment := initialPromptShellAssignment(prompt)
 	promptArg := `"$` + initialPromptShellVariable + `"`
 	envPrefix := "AZEDARACH_SESSION_ROLE=advisor AZEDARACH_INTERACTION_ID=" + singleQuoteForShell(advisor.RequestID) + " AZEDARACH_SESSION_ID=" + singleQuoteForShell(advisor.SessionID) + ` AZEDARACH_ISSUE_ID="" `
+	toolInvocation := singleQuoteForShell(toolPath)
 	var toolCommand string
 	// Build this command independently from implementation-session settings so
 	// project-wide bypass and remote/app-server modes cannot weaken the advisor.
@@ -92,7 +119,7 @@ func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate
 		// The filesystem sandbox does not govern MCP servers, apps, hooks, or
 		// other extension surfaces. Disable those separately so a user's normal
 		// Codex configuration cannot give an advisor external mutation authority.
-		toolCommand = promptAssignment + `; ` + envPrefix + `command codex --sandbox read-only --ask-for-approval never` +
+		toolCommand = promptAssignment + `; ` + envPrefix + toolInvocation + ` --sandbox read-only --ask-for-approval never` +
 			` --disable plugins --disable remote_plugin --disable plugin_sharing` +
 			` --disable apps --disable computer_use --disable browser_use --disable browser_use_external --disable browser_use_full_cdp_access --disable in_app_browser` +
 			` --disable hooks --disable multi_agent --disable goals --disable image_generation` +
@@ -102,22 +129,56 @@ func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate
 	case "claude":
 		// An explicit empty settings/MCP surface prevents project or user hooks,
 		// plugins, and connected services from bypassing the built-in tool list.
-		toolCommand = promptAssignment + `; ` + envPrefix + `command claude --permission-mode plan --tools "Read,Glob,Grep"` +
+		toolCommand = promptAssignment + `; ` + envPrefix + toolInvocation + ` --permission-mode plan --tools "Read,Glob,Grep"` +
 			` --disallowed-tools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,Agent,mcp__*"` +
 			` --setting-sources "" --strict-mcp-config --mcp-config '{"mcpServers":{}}'` +
 			` --disable-slash-commands --no-chrome ` + promptArg
 	case "opencode":
-		toolCommand = promptAssignment + `; ` + buildIsolatedOpenCodeAdvisorCommand(envPrefix+`command opencode --pure --agent advisor --prompt `+promptArg)
-	default:
-		return "", fmt.Errorf("advisor read-only permissions are unsupported for CLI tool %q", tool)
+		toolCommand = promptAssignment + `; ` + buildIsolatedOpenCodeAdvisorCommand(envPrefix+toolInvocation+` --pure --agent advisor --prompt `+promptArg)
 	}
-	shell := strings.TrimSpace(projectCfg.SessionShell)
-	if shell == "" {
-		shell = "zsh"
+	for _, path := range []string{advisorEnvExecutable, advisorShellExecutable} {
+		if err := requireAdvisorSystemExecutable(path); err != nil {
+			return advisorLaunchCommand{}, err
+		}
 	}
-	// Do not leave a writable interactive shell behind after the advisor exits.
+	// tmux must receive this as a multi-argument command. That makes it exec env
+	// directly rather than starting the configured default shell with -c. env
+	// removes non-interactive startup hooks before the minimal POSIX shell starts.
 	inner := toolCommand + "; " + sessionAgentProcessExitCommand(projectCfg.CLITool)
-	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner)), nil
+	return advisorLaunchCommand{
+		Executable: advisorEnvExecutable,
+		Args: []string{
+			"-u", "BASH_ENV",
+			"-u", "ENV",
+			"-u", "ZDOTDIR",
+			"-u", "ZSH_ENV",
+			"-u", "FISH_CONFIG_DIR",
+			advisorShellExecutable, "-c", inner,
+		},
+	}, nil
+}
+
+func resolveAdvisorExecutable(name string) (string, error) {
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return "", fmt.Errorf("resolve advisor executable %q: %w", name, err)
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve absolute advisor executable %q: %w", name, err)
+	}
+	return path, nil
+}
+
+func requireAdvisorSystemExecutable(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("resolve advisor system executable %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("resolve advisor system executable %q: not an executable regular file", path)
+	}
+	return nil
 }
 
 // buildIsolatedOpenCodeAdvisorCommand keeps OpenCode outside the repository
