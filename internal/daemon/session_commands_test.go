@@ -9139,6 +9139,21 @@ func TestActiveSessionIssueKeysIgnoreDesiredStoppedWithStaleObservedRunning(t *t
 	}
 }
 
+func TestImplementationSessionAggregatesIgnoreAdvisorSessions(t *testing.T) {
+	const issueID = "biz"
+	sessions := []daemonstate.Session{{
+		ID: "advisor-request-1", IssueID: issueID, Role: daemonstate.SessionRoleAdvisor,
+		ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: "request-1",
+		State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning,
+	}}
+	if counts := sessionProjectionCountsByIssueKey(sessions, "project")[sessionKey(issueID)]; counts.Total != 0 || counts.Active != 0 {
+		t.Fatalf("advisor session leaked into implementation counts: %+v", counts)
+	}
+	if _, active := activeSessionIssueKeysFromProjection(sessions, "project")[sessionKey(issueID)]; active {
+		t.Fatal("advisor session made its attached implementation issue active")
+	}
+}
+
 func TestActiveSessionIDsFromProjectionIgnoreDesiredStoppedWithStaleObservedRunning(t *testing.T) {
 	const issueID = "biy"
 	sessionID := naming.CanonicalSessionID("proj-stale-observed", issueID)

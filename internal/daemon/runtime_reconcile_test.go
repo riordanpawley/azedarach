@@ -315,15 +315,19 @@ func (r *dedupedTimeoutRuntimeReconciler) snapshot() int {
 }
 
 type runtimeReconcileTestServer struct {
-	served chan struct{}
+	served        chan struct{}
+	waitForCancel bool
 }
 
-func (s *runtimeReconcileTestServer) Serve(context.Context) error {
+func (s *runtimeReconcileTestServer) Serve(ctx context.Context) error {
 	if s.served != nil {
 		select {
 		case s.served <- struct{}{}:
 		default:
 		}
+	}
+	if s.waitForCancel {
+		<-ctx.Done()
 	}
 	return nil
 }
@@ -345,6 +349,16 @@ func (emptyTmuxRunner) Run(_ context.Context, args ...string) (string, error) {
 		return "", errors.New("no tmux sessions")
 	}
 	return "", nil
+}
+
+type signalingTmuxRunner struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (r *signalingTmuxRunner) Run(ctx context.Context, args ...string) (string, error) {
+	r.once.Do(func() { close(r.started) })
+	return emptyTmuxRunner{}.Run(ctx, args...)
 }
 
 func TestCommandRuntimeReconcileRoutesToManualRepair(t *testing.T) {
@@ -470,6 +484,81 @@ func TestRunInvokesStartupRuntimeReconcileWithBoundedTimeout(t *testing.T) {
 	}
 	if len(projectIDs) != 1 || projectIDs[0] != protocol.DefaultProjectID {
 		t.Fatalf("startup reconcile project ids = %v, want [%s]", projectIDs, protocol.DefaultProjectID)
+	}
+}
+
+func TestStartupRuntimeReconcileBeginsSessionRecoveryBeforeInteractionStaleness(t *testing.T) {
+	const waitForSessionRecovery = 5 * time.Second
+
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("project id for root: %v", err)
+	}
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	interactionStarted := make(chan struct{})
+	releaseInteraction := make(chan struct{})
+	var releaseInteractionOnce sync.Once
+	release := func() { releaseInteractionOnce.Do(func() { close(releaseInteraction) }) }
+	t.Cleanup(release)
+	sessionRecoveryStarted := make(chan struct{})
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:                 repoDir,
+			Logger:                  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			RuntimeReconcileTimeout: 20 * time.Second,
+		},
+		issues:       issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default()),
+		tmux:         tmux.NewClient(&signalingTmuxRunner{started: sessionRecoveryStarted}, slog.Default()),
+		sessionStore: daemonstate.NewStore(),
+		lock:         runtimeReconcileTestLock{},
+		serve:        &runtimeReconcileTestServer{served: make(chan struct{}, 1), waitForCancel: true},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+	}
+	t.Cleanup(func() { _ = d.issues.CloseDB() })
+	d.reconcileInteractionStalenessFn = func(ctx context.Context, _ string) error {
+		close(interactionStarted)
+		select {
+		case <-releaseInteraction:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	d.syncBootstrapFn = func(context.Context) error { return nil }
+	d.runtimeReconciler = newRuntimeReconcileService(d)
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	t.Cleanup(cancelRun)
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- d.Run(runCtx)
+	}()
+
+	select {
+	case <-sessionRecoveryStarted:
+	case <-time.After(waitForSessionRecovery):
+		t.Fatal("timed out waiting for startup session recovery to begin")
+	}
+	select {
+	case <-interactionStarted:
+	case <-time.After(waitForSessionRecovery):
+		t.Fatal("timed out waiting for interaction reconciliation to begin")
+	}
+
+	release()
+	cancelRun()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+	case <-time.After(waitForSessionRecovery):
+		t.Fatal("timed out waiting for Run to finish")
 	}
 }
 

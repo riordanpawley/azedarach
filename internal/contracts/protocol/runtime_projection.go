@@ -61,6 +61,9 @@ type RuntimeOperationProjection struct {
 type RuntimeSessionProjection struct {
 	HasSession        bool                  `json:"has_session" msgpack:"has_session"`
 	SessionID         naming.SessionID      `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
+	Role              SessionRole           `json:"role,omitempty" msgpack:"role,omitempty"`
+	ScopeKind         SessionScopeKind      `json:"scope_kind,omitempty" msgpack:"scope_kind,omitempty"`
+	ScopeID           string                `json:"scope_id,omitempty" msgpack:"scope_id,omitempty"`
 	State             SessionLifecycleState `json:"state,omitempty" msgpack:"state,omitempty"`
 	TmuxAttached      bool                  `json:"tmux_attached,omitempty" msgpack:"tmux_attached,omitempty"`
 	TmuxAttachedCount int                   `json:"tmux_attached_count,omitempty" msgpack:"tmux_attached_count,omitempty"`

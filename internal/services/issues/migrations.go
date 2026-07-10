@@ -65,6 +65,7 @@ var orderedMigrations = []migration{
 	{id: "0033_orchestrator_scope_leases", path: "migrations/0033_orchestrator_scope_leases.sql"},
 	{id: "0034_orchestrator_lifecycle_clock", apply: applyOrchestratorLifecycleClockMigration},
 	{id: "0032_interaction_requests", path: "migrations/0032_interaction_requests.sql"},
+	{id: "0035_advisor_sessions", path: "migrations/0035_advisor_sessions.sql"},
 }
 
 const (

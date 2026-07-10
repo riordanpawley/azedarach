@@ -193,8 +193,9 @@ type Daemon struct {
 	shutdownReqOnce  sync.Once
 	inFlightCommands sync.WaitGroup
 
-	syncBootstrapState syncBootstrapState
-	syncBootstrapFn    func(context.Context) error
+	syncBootstrapState              syncBootstrapState
+	syncBootstrapFn                 func(context.Context) error
+	reconcileInteractionStalenessFn func(context.Context, string) error
 }
 
 // New constructs a runnable daemon runtime.
@@ -1697,6 +1698,9 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 		Session: protocol.SessionProjection{
 			SessionID: parseSessionIDOrZero(session.ID),
 			IssueID:   parseIssueIDOrZero(session.IssueID),
+			Role:      protocol.SessionRole(session.Role),
+			ScopeKind: protocol.SessionScopeKind(session.ScopeKind),
+			ScopeID:   strings.TrimSpace(session.ScopeID),
 			State:     protocol.SessionLifecycleState(session.State),
 			UpdatedAt: session.UpdatedAt,
 		},
