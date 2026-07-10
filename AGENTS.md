@@ -13,6 +13,7 @@ Agent instructions for this repository. This file is the canonical source of age
 1. Optimize for the strongest durable outcome, not the smallest, fastest, or most locally convenient change. The size of the required implementation, migration, or refactor is not by itself a reason to accept a weaker design.
 2. Before committing to an approach, actively look beyond the obvious patch: examine root causes, adjacent constraints, architectural opportunities, and unconventional options that could produce a materially better result.
 3. When the best path substantially expands the requested scope, make that expansion and its benefits explicit. Pursue it when it remains within the task's authority; otherwise, ask for the authority or decision needed rather than silently substituting an inferior shortcut.
+4. **Hotfix exception:** Apply a speed-first approach only when the user explicitly identifies the task as a hotfix. In that case, prioritize the fastest safe, targeted correction, avoid unrelated scope expansion, and record broader improvements as follow-up work instead of delaying the fix.
 
 ## Working Directory
 
