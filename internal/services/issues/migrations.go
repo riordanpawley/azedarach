@@ -63,6 +63,7 @@ var orderedMigrations = []migration{
 	{id: "0031_board_views", path: "migrations/0031_board_views.sql"},
 	{id: "0032_coordination_leases", path: "migrations/0032_coordination_leases.sql"},
 	{id: "0033_orchestrator_scope_leases", path: "migrations/0033_orchestrator_scope_leases.sql"},
+	{id: "0034_orchestration_start_attempts", path: "migrations/0034_orchestration_start_attempts.sql"},
 }
 
 const (

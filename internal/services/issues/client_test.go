@@ -3913,6 +3913,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0031_board_views",
 		"0032_coordination_leases",
 		"0033_orchestrator_scope_leases",
+		"0034_orchestration_start_attempts",
 	}, got)
 }
 
