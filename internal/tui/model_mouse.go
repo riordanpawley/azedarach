@@ -129,14 +129,8 @@ func (m Model) handleMouseDrag(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	step := 1
 	if !m.mouseDrag.compact {
 		columns := m.buildColumns()
-		columnCount := m.boardVisibleColumnCount(len(columns))
-		if columnCount < 1 {
-			columnCount = board.DefaultColumnCount
-		}
-		columnWidth := m.width / columnCount
-		if columnWidth < 1 {
-			columnWidth = 1
-		}
+		layout := m.boardColumnLayout(columns)
+		columnWidth := layout.WidthForColumn(m.mouseDrag.column)
 		step = board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
 	}
 	if step < 1 {
@@ -298,15 +292,8 @@ func (m Model) boardTaskAtMouse(msg tea.MouseMsg, columns []board.Column) boardM
 		return boardMouseHit{}
 	}
 
-	columnCount := m.boardVisibleColumnCount(len(columns))
-	if columnCount < 1 {
-		columnCount = board.DefaultColumnCount
-	}
-	columnWidth := m.width / columnCount
-	if columnWidth < 1 {
-		columnWidth = 1
-	}
-	cardWidth := board.CardContentWidth(columnWidth)
+	layout := m.boardColumnLayout(columns)
+	cardWidth := board.CardContentWidth(layout.WidthForColumn(col))
 	linesPerCard := board.CardLineFootprint(m.styles, cardWidth)
 	if linesPerCard < 1 {
 		linesPerCard = 1
@@ -361,20 +348,7 @@ func (m Model) boardColumnAtMouse(msg tea.MouseMsg, columns []board.Column) (int
 		return 0, false
 	}
 
-	start, end := m.boardVisibleColumnRange(columns)
-	visibleColumns := end - start
-	if visibleColumns < 1 {
-		return 0, false
-	}
-	columnWidth := m.width / visibleColumns
-	if columnWidth < 1 {
-		columnWidth = 1
-	}
-	localColumn := msg.X / columnWidth
-	if localColumn >= visibleColumns {
-		localColumn = visibleColumns - 1
-	}
-	return start + localColumn, true
+	return m.boardColumnLayout(columns).ColumnAt(msg.X)
 }
 
 func (m Model) boardMouseLayout() (toolbarHeight int, boardTop int, boardHeight int) {

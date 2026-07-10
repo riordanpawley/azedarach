@@ -11,8 +11,7 @@ import (
 func TestMousePressFocusesBoardCard(t *testing.T) {
 	m := newTestModel()
 	columns := m.buildColumns()
-	columnCount := m.boardVisibleColumnCount(len(columns))
-	columnWidth := m.width / columnCount
+	columnWidth := m.boardColumnLayout(columns).WidthForColumn(0)
 	linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
 
 	updatedAny, cmd := m.Update(tea.MouseMsg{
@@ -54,8 +53,7 @@ func TestMouseWheelMovesBoardCursorUnderPointer(t *testing.T) {
 func TestMouseDragScrollsBoardColumn(t *testing.T) {
 	m := newTestModel()
 	columns := m.buildColumns()
-	columnCount := m.boardVisibleColumnCount(len(columns))
-	columnWidth := m.width / columnCount
+	columnWidth := m.boardColumnLayout(columns).WidthForColumn(0)
 	linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
 
 	pressedAny, _ := m.Update(tea.MouseMsg{
@@ -85,8 +83,7 @@ func TestMouseDragScrollsBoardColumn(t *testing.T) {
 func TestRightMousePressAttachesBoardCard(t *testing.T) {
 	m := newTestModel()
 	columns := m.buildColumns()
-	columnCount := m.boardVisibleColumnCount(len(columns))
-	columnWidth := m.width / columnCount
+	columnWidth := m.boardColumnLayout(columns).WidthForColumn(0)
 	linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
 
 	updatedAny, cmd := m.Update(tea.MouseMsg{
@@ -119,8 +116,7 @@ func TestDoubleTapAttachesBoardCard(t *testing.T) {
 
 	m := newTestModel()
 	columns := m.buildColumns()
-	columnCount := m.boardVisibleColumnCount(len(columns))
-	columnWidth := m.width / columnCount
+	columnWidth := m.boardColumnLayout(columns).WidthForColumn(0)
 	linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
 	msg := tea.MouseMsg{
 		X:      2,
@@ -159,8 +155,7 @@ func TestSlowSecondTapDoesNotAttachBoardCard(t *testing.T) {
 
 	m := newTestModel()
 	columns := m.buildColumns()
-	columnCount := m.boardVisibleColumnCount(len(columns))
-	columnWidth := m.width / columnCount
+	columnWidth := m.boardColumnLayout(columns).WidthForColumn(0)
 	linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
 	msg := tea.MouseMsg{
 		X:      2,

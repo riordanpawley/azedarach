@@ -662,7 +662,8 @@ func (m Model) boardRenderedTasks() []domain.Task {
 	if len(columns) == 0 {
 		return nil
 	}
-	visibleStart, visibleEnd := m.boardVisibleColumnRange(columns)
+	layout := m.boardColumnLayout(columns)
+	visibleStart, visibleEnd := layout.Range()
 	visibleColumns := columns[visibleStart:visibleEnd]
 	if len(visibleColumns) == 0 {
 		return nil
@@ -672,24 +673,15 @@ func (m Model) boardRenderedTasks() []domain.Task {
 	if bodyHeight < 1 {
 		bodyHeight = 1
 	}
-	columnCount := m.boardVisibleColumnCount(len(columns))
-	if columnCount < 1 {
-		columnCount = board.DefaultColumnCount
-	}
-	columnWidth := m.width / columnCount
-	if columnWidth < 1 {
-		columnWidth = 1
-	}
-	cardWidth := board.CardContentWidth(columnWidth)
-	linesPerCard := board.CardLineFootprint(m.styles, cardWidth)
-	if linesPerCard < 1 {
-		linesPerCard = 1
-	}
-
 	rendered := make([]domain.Task, 0, len(m.tasks))
 	seen := make(map[string]struct{}, len(m.tasks))
 	for localColumn, col := range visibleColumns {
 		globalColumn := visibleStart + localColumn
+		cardWidth := board.CardContentWidth(layout.WidthForColumn(globalColumn))
+		linesPerCard := board.CardLineFootprint(m.styles, cardWidth)
+		if linesPerCard < 1 {
+			linesPerCard = 1
+		}
 		viewportStart := 0
 		if globalColumn >= 0 && globalColumn < len(m.viewportStarts) {
 			viewportStart = m.viewportStarts[globalColumn]
@@ -788,7 +780,8 @@ func (m Model) renderBoardView() string {
 	if len(columns) == 0 {
 		return ""
 	}
-	visibleStart, visibleEnd := m.boardVisibleColumnRange(columns)
+	layout := m.boardColumnLayout(columns)
+	visibleStart, visibleEnd := layout.Range()
 	visibleColumns := columns[visibleStart:visibleEnd]
 
 	// Create cursor for board package using computed position
