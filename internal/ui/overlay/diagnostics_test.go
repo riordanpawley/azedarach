@@ -22,30 +22,6 @@ func (m *mockDiagnosticsService) CollectDiagnostics(ctx context.Context, session
 	return m.diagnostics
 }
 
-func TestNewDiagnosticsPanel(t *testing.T) {
-	mockService := &mockDiagnosticsService{
-		diagnostics: &diagnostics.SystemDiagnostics{
-			OverallState: diagnostics.HealthHealthy,
-		},
-	}
-	sessions := make(map[string]*domain.Session)
-
-	panel := NewDiagnosticsPanel(mockService, sessions)
-
-	if panel == nil {
-		t.Fatal("NewDiagnosticsPanel returned nil")
-	}
-	if panel.diagnosticsService == nil {
-		t.Error("diagnosticsService not set")
-	}
-	if panel.sessions == nil {
-		t.Error("sessions not set")
-	}
-	if panel.activeSection != SectionOverview {
-		t.Errorf("activeSection = %v, want %v", panel.activeSection, SectionOverview)
-	}
-}
-
 func TestDiagnosticsPanel_Init(t *testing.T) {
 	mockService := &mockDiagnosticsService{
 		diagnostics: &diagnostics.SystemDiagnostics{

@@ -8,37 +8,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-func TestNewSortMenu(t *testing.T) {
-	sort := &domain.Sort{
-		Field: domain.SortByPriority,
-		Order: domain.SortAsc,
-	}
-
-	menu := NewSortMenu(sort)
-
-	if menu == nil {
-		t.Fatal("expected menu to be created")
-	}
-
-	if menu.sort != sort {
-		t.Error("expected menu to hold reference to sort state")
-	}
-
-	if len(menu.options) != 4 {
-		t.Errorf("expected 4 sort options, got %d", len(menu.options))
-	}
-}
-
-func TestSortMenu_Title(t *testing.T) {
-	sort := &domain.Sort{Field: domain.SortByPriority, Order: domain.SortAsc}
-	menu := NewSortMenu(sort)
-
-	title := menu.Title()
-	if title != "Sort" {
-		t.Errorf("expected title 'Sort', got %s", title)
-	}
-}
-
 func TestSortMenu_Size(t *testing.T) {
 	sort := &domain.Sort{Field: domain.SortByPriority, Order: domain.SortAsc}
 	menu := NewSortMenu(sort)

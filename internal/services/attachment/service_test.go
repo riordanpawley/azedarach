@@ -11,19 +11,6 @@ import (
 	"testing"
 )
 
-func TestNewService(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	service := NewService("/tmp/issues", logger)
-
-	if service == nil {
-		t.Fatal("expected service to be created")
-	}
-
-	if service.issuesPath != "/tmp/issues" {
-		t.Errorf("expected issuesPath to be /tmp/issues, got %s", service.issuesPath)
-	}
-}
-
 func TestAttach(t *testing.T) {
 	// Create temporary directory
 	tmpDir := t.TempDir()

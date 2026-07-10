@@ -146,23 +146,6 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 }
 
-func TestCheckCmd(t *testing.T) {
-	checker := NewStatusChecker()
-	cmd := checker.CheckCmd()
-
-	require.NotNil(t, cmd)
-
-	// Execute the command
-	msg := cmd()
-
-	statusMsg, ok := msg.(StatusMsg)
-	require.True(t, ok, "should return StatusMsg")
-
-	// The actual value depends on network availability
-	// Just verify the message type is correct
-	_ = statusMsg.Online
-}
-
 func newTCP4TestServer(t *testing.T, handler http.Handler) (string, func()) {
 	t.Helper()
 

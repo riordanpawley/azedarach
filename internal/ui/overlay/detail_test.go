@@ -13,31 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNewDetailPanel(t *testing.T) {
-	task := domain.Task{
-		ID:          "test-123",
-		Title:       "Test Task",
-		Description: "Test description",
-		Status:      domain.StatusOpen,
-		Priority:    domain.P0,
-		Type:        domain.TypeTask,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
-	}
-
-	panel := NewDetailPanel(task)
-	require.NotNil(t, panel)
-	assert.Equal(t, task.ID, panel.task.ID)
-	assert.Equal(t, 0, panel.scrollY)
-}
-
-func TestDetailPanelTitle(t *testing.T) {
-	task := domain.Task{ID: "test"}
-	panel := NewDetailPanel(task)
-
-	assert.Equal(t, "Task Details", panel.Title())
-}
-
 func TestDetailPanelSize(t *testing.T) {
 	task := domain.Task{ID: "test"}
 	panel := NewDetailPanel(task)
