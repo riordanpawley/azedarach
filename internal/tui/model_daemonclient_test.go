@@ -290,6 +290,23 @@ func newDaemonTestModel(transport *recordingDaemonTransport) Model {
 	return m
 }
 
+func daemonTestLifecycleTask(t *testing.T, lifecycle domain.IssueWorkflow) domain.Task {
+	t.Helper()
+	state, err := domain.NewIssueState(domain.IssueStateParts{Workflow: lifecycle})
+	if err != nil {
+		t.Fatalf("build %s issue state: %v", lifecycle, err)
+	}
+	return domain.Task{
+		ID:       "az-1",
+		Title:    "Task 1",
+		Status:   domain.StatusOpen,
+		State:    state,
+		Facts:    domain.DeriveIssueFacts(domain.IssueFactsInput{Status: domain.StatusOpen, State: state, Priority: domain.P2}),
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	}
+}
+
 func TestMoveTaskStatusCascadeChildrenCmdSendsDaemonCascadeOption(t *testing.T) {
 	var statusBody daemonclient.TaskStatusRequest
 	transport := &recordingDaemonTransport{
@@ -1616,37 +1633,30 @@ func TestTaskLifecycleKeysUseDaemonDetailsUpdate(t *testing.T) {
 		wantPhase     domain.IssueDisplayPhase
 	}{
 		{
-			name: "exact backlog key writes backlog lifecycle",
-			key:  "0",
-			task: domain.Task{
-				ID:       "az-1",
-				Title:    "Task 1",
-				Status:   domain.StatusOpen,
-				Facts:    domain.IssueFacts{DisplayPhase: domain.IssueDisplayOpen},
-				Type:     domain.TypeTask,
-				Priority: domain.P2,
-			},
+			name:          "exact backlog key writes backlog lifecycle",
+			key:           "0",
+			task:          daemonTestLifecycleTask(t, domain.IssueWorkflowOpen),
 			wantLifecycle: domain.IssueWorkflowBacklog,
 			wantPhase:     domain.IssueDisplayBacklog,
 		},
 		{
-			name: "next from backlog writes open lifecycle",
-			key:  "l",
-			task: func() domain.Task {
-				state, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowBacklog})
-				if err != nil {
-					t.Fatalf("build backlog issue state: %v", err)
-				}
-				return domain.Task{
-					ID:       "az-1",
-					Title:    "Task 1",
-					Status:   domain.StatusOpen,
-					State:    state,
-					Facts:    domain.IssueFacts{DisplayPhase: domain.IssueDisplayBacklog},
-					Type:     domain.TypeTask,
-					Priority: domain.P2,
-				}
-			}(),
+			name:          "previous from open writes backlog lifecycle",
+			key:           "h",
+			task:          daemonTestLifecycleTask(t, domain.IssueWorkflowOpen),
+			wantLifecycle: domain.IssueWorkflowBacklog,
+			wantPhase:     domain.IssueDisplayBacklog,
+		},
+		{
+			name:          "exact open key writes open lifecycle",
+			key:           "1",
+			task:          daemonTestLifecycleTask(t, domain.IssueWorkflowBacklog),
+			wantLifecycle: domain.IssueWorkflowOpen,
+			wantPhase:     domain.IssueDisplayOpen,
+		},
+		{
+			name:          "next from backlog writes open lifecycle",
+			key:           "l",
+			task:          daemonTestLifecycleTask(t, domain.IssueWorkflowBacklog),
 			wantLifecycle: domain.IssueWorkflowOpen,
 			wantPhase:     domain.IssueDisplayOpen,
 		},
@@ -1704,6 +1714,77 @@ func TestTaskLifecycleKeysUseDaemonDetailsUpdate(t *testing.T) {
 			}
 			if got := transport.requests; len(got) != 1 || got[0] != daemonclient.CommandTaskUpdate {
 				t.Fatalf("requests = %v, want task.update", got)
+			}
+		})
+	}
+}
+
+func TestTaskLifecycleFailureRollsBackOriginalLifecycleSnapshot(t *testing.T) {
+	tests := []struct {
+		name           string
+		key            string
+		task           domain.Task
+		optimisticWant domain.IssueDisplayPhase
+		rollbackWant   domain.IssueDisplayPhase
+	}{
+		{
+			name:           "exact backlog action restores open on failure",
+			key:            "0",
+			task:           daemonTestLifecycleTask(t, domain.IssueWorkflowOpen),
+			optimisticWant: domain.IssueDisplayBacklog,
+			rollbackWant:   domain.IssueDisplayOpen,
+		},
+		{
+			name:           "previous from open restores open on failure",
+			key:            "h",
+			task:           daemonTestLifecycleTask(t, domain.IssueWorkflowOpen),
+			optimisticWant: domain.IssueDisplayBacklog,
+			rollbackWant:   domain.IssueDisplayOpen,
+		},
+		{
+			name:           "exact open action restores backlog on failure",
+			key:            "1",
+			task:           daemonTestLifecycleTask(t, domain.IssueWorkflowBacklog),
+			optimisticWant: domain.IssueDisplayOpen,
+			rollbackWant:   domain.IssueDisplayBacklog,
+		},
+		{
+			name:           "next from backlog restores backlog on failure",
+			key:            "l",
+			task:           daemonTestLifecycleTask(t, domain.IssueWorkflowBacklog),
+			optimisticWant: domain.IssueDisplayOpen,
+			rollbackWant:   domain.IssueDisplayBacklog,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &recordingDaemonTransport{
+				replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					if req.Command != daemonclient.CommandTaskUpdate {
+						t.Fatalf("unexpected command: %s", req.Command)
+					}
+					return protocol.ResponseEnvelope{}, errors.New("daemon rejected lifecycle update")
+				},
+			}
+
+			m := newDaemonTestModel(transport)
+			m.tasks = []domain.Task{tt.task}
+			m.nav.SelectTask("az-1", 0)
+
+			updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: tt.key})
+			if cmd == nil {
+				t.Fatal("expected lifecycle command")
+			}
+			optimistic := updated.(Model)
+			if got := optimistic.tasks[0].IssueDisplayPhase(); got != tt.optimisticWant {
+				t.Fatalf("optimistic phase = %s, want %s", got, tt.optimisticWant)
+			}
+
+			rolledBack, _ := optimistic.Update(cmd())
+			rollbackModel := rolledBack.(Model)
+			if got := rollbackModel.tasks[0].IssueDisplayPhase(); got != tt.rollbackWant {
+				t.Fatalf("rollback phase = %s, want %s", got, tt.rollbackWant)
 			}
 		})
 	}
