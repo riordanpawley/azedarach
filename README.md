@@ -84,14 +84,20 @@ azd --help
 - Save the current provider credentials: `az ai account backup <provider> <profile>`
 - Inspect saved and active profiles: `az ai account list` and `az ai account status`
 - Switch credentials atomically: `az ai account activate <provider> <profile>`
+- Switch Codex credentials and gracefully reload attributable persistent servers:
+  `az ai account activate --reload-daemon codex <profile>`
 - Remove a saved profile: `az ai account delete --confirm <provider> <profile>`
 - Supported providers are `claude` and `codex`; commands accept `--json` for agent use.
 - Credentials remain in a permission-restricted user-local vault under
   `~/.local/share/azedarach/accounts/`. Profile output never includes credential
   contents. Treat vault files as bearer secrets and keep them out of backups,
   repositories, and support bundles unless those systems are encrypted.
-- Activation applies to new provider processes. Restart existing Claude or Codex
-  sessions because long-running processes may retain credentials in memory.
+- Activation applies immediately to new provider processes. Codex activation
+  detects persistent `app-server`/`mcp-server` processes; `--reload-daemon`
+  sends `SIGTERM` only when the process environment positively matches the
+  configured `CODEX_HOME`. Unattributable or differently scoped processes are
+  left running. Existing Claude and interactive Codex sessions still require
+  `az session restart-all` or a manual restart.
 - Claude profiles include the primary credentials, account state, config auth,
   API-key settings, and the field-scoped macOS Desktop OAuth cache when present.
 - Before switching, Azedarach preserves unmatched live credentials in protected

@@ -367,6 +367,80 @@ func TestServiceClaudeOptionalAPIKeyState(t *testing.T) {
 	}
 }
 
+type fakeCodexDaemonController struct {
+	result    protocol.AIAccountCodexDaemonReload
+	err       error
+	codexHome string
+	reload    bool
+}
+
+func (f *fakeCodexDaemonController) Reload(_ context.Context, codexHome string, reload bool) (protocol.AIAccountCodexDaemonReload, error) {
+	f.codexHome = codexHome
+	f.reload = reload
+	return f.result, f.err
+}
+
+func TestServiceCodexActivationReloadsScopedDaemon(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, "custom-codex")
+	controller := &fakeCodexDaemonController{result: protocol.AIAccountCodexDaemonReload{
+		Supported: true, DetectedPIDs: []int{101}, ReloadedPIDs: []int{101}, Subcommands: []string{"app-server"},
+	}}
+	service, err := New(Config{HomeDir: home, CodexHome: codexHome, VaultDir: filepath.Join(t.TempDir(), "vault"), CodexDaemons: controller})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestCredential(t, filepath.Join(codexHome, "auth.json"), string(codexAuthJSON(t, "alice@example.com", time.Now().Add(-time.Hour))))
+	if _, err := service.Backup(context.Background(), protocol.AIAccountBackupRequestBody{Provider: protocol.AIAccountProviderCodex, Name: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Activate(context.Background(), protocol.AIAccountActivateRequestBody{
+		Provider: protocol.AIAccountProviderCodex, Name: "alice", ReloadCodexDaemon: true,
+	})
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if !controller.reload || controller.codexHome != codexHome {
+		t.Fatalf("reload call = home %q reload %v", controller.codexHome, controller.reload)
+	}
+	if result.CodexDaemonReload == nil || len(result.CodexDaemonReload.ReloadedPIDs) != 1 {
+		t.Fatalf("daemon reload = %+v", result.CodexDaemonReload)
+	}
+}
+
+func TestServiceCodexActivationDoesNotFailAfterProcessInspectionError(t *testing.T) {
+	home := t.TempDir()
+	controller := &fakeCodexDaemonController{err: errors.New("process scan unavailable")}
+	service, err := New(Config{HomeDir: home, VaultDir: filepath.Join(t.TempDir(), "vault"), CodexDaemons: controller})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestCredential(t, filepath.Join(home, ".codex", "auth.json"), string(codexAuthJSON(t, "alice@example.com", time.Now())))
+	if _, err := service.Backup(context.Background(), protocol.AIAccountBackupRequestBody{Provider: protocol.AIAccountProviderCodex, Name: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Activate(context.Background(), protocol.AIAccountActivateRequestBody{Provider: protocol.AIAccountProviderCodex, Name: "alice", ReloadCodexDaemon: true})
+	if err != nil {
+		t.Fatalf("activation must remain successful after credential mutation: %v", err)
+	}
+	if result.CodexDaemonReload == nil || !result.CodexDaemonReload.InspectionFailed {
+		t.Fatalf("inspection failure not reported: %+v", result.CodexDaemonReload)
+	}
+}
+
+func TestServiceRejectsClaudeDaemonReload(t *testing.T) {
+	service, err := New(Config{HomeDir: t.TempDir(), VaultDir: filepath.Join(t.TempDir(), "vault")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Activate(context.Background(), protocol.AIAccountActivateRequestBody{
+		Provider: protocol.AIAccountProviderClaude, Name: "alice", ReloadCodexDaemon: true,
+	})
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("error = %v, want ErrInvalid", err)
+	}
+}
+
 func codexAuthJSON(t *testing.T, email string, refreshed time.Time) []byte {
 	t.Helper()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))

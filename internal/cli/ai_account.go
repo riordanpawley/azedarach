@@ -21,12 +21,13 @@ const (
 )
 
 type AIAccountOptions struct {
-	Action   AIAccountAction
-	Provider protocol.AIAccountProvider
-	Name     string
-	Force    bool
-	Confirm  bool
-	JSON     bool
+	Action       AIAccountAction
+	Provider     protocol.AIAccountProvider
+	Name         string
+	Force        bool
+	Confirm      bool
+	JSON         bool
+	ReloadDaemon bool
 }
 
 func ParseAIAccountArgs(args []string) (AIAccountOptions, error) {
@@ -41,6 +42,7 @@ func ParseAIAccountArgs(args []string) (AIAccountOptions, error) {
 	fs.BoolVar(&opts.Force, "force", false, "replace an existing profile")
 	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm destructive deletion")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
+	fs.BoolVar(&opts.ReloadDaemon, "reload-daemon", false, "reload persistent Codex daemons after activation")
 	if err := fs.Parse(args[1:]); err != nil {
 		return AIAccountOptions{}, err
 	}
@@ -67,6 +69,12 @@ func ParseAIAccountArgs(args []string) (AIAccountOptions, error) {
 	if opts.Action != AIAccountDelete && opts.Confirm {
 		return AIAccountOptions{}, fmt.Errorf("--confirm is only valid with AI account delete")
 	}
+	if opts.Action != AIAccountActivate && opts.ReloadDaemon {
+		return AIAccountOptions{}, fmt.Errorf("--reload-daemon is only valid with AI account activate")
+	}
+	if opts.ReloadDaemon && opts.Provider != protocol.AIAccountProviderCodex {
+		return AIAccountOptions{}, fmt.Errorf("--reload-daemon requires the codex provider")
+	}
 	if opts.Provider != "" && !opts.Provider.Valid() {
 		return AIAccountOptions{}, fmt.Errorf("unsupported AI account provider %q (want claude or codex)", opts.Provider)
 	}
@@ -80,7 +88,7 @@ func PrintAIAccountUsage() {
 	fmt.Println("Usage: az ai account backup [--force] [--json] <provider> <profile>")
 	fmt.Println("       az ai account list [--provider claude|codex] [--json]")
 	fmt.Println("       az ai account status [--provider claude|codex] [--json]")
-	fmt.Println("       az ai account activate [--json] <provider> <profile>")
+	fmt.Println("       az ai account activate [--reload-daemon] [--json] <provider> <profile>")
 	fmt.Println("       az ai account delete --confirm [--json] <provider> <profile>")
 	fmt.Println("Manage local Claude and Codex credential profiles through the Azedarach daemon.")
 }
@@ -144,7 +152,7 @@ func AIAccountCommand(deps *Dependencies, opts AIAccountOptions) error {
 			fmt.Printf("%s: %s\n", status.Provider, summary)
 		}
 	case AIAccountActivate:
-		result, err := deps.DaemonClient.ActivateAIAccount(ctx, protocol.AIAccountActivateRequestBody{Provider: opts.Provider, Name: opts.Name})
+		result, err := deps.DaemonClient.ActivateAIAccount(ctx, protocol.AIAccountActivateRequestBody{Provider: opts.Provider, Name: opts.Name, ReloadCodexDaemon: opts.ReloadDaemon})
 		if err != nil {
 			return err
 		}
@@ -161,8 +169,30 @@ func AIAccountCommand(deps *Dependencies, opts AIAccountOptions) error {
 		if result.FreshLivePreserved {
 			fmt.Println("Preserved newer live Codex tokens for the same account.")
 		}
+		if reload := result.CodexDaemonReload; reload != nil {
+			if reload.InspectionFailed {
+				fmt.Println("Could not inspect Codex daemon processes; restart existing Codex sessions manually.")
+			} else if opts.ReloadDaemon && !reload.Supported {
+				fmt.Println("Codex daemon reload is not supported on this platform; restart it manually.")
+			} else if !opts.ReloadDaemon && len(reload.DetectedPIDs) > 0 {
+				fmt.Printf("Detected %d scoped Codex daemon process(es); re-run with --reload-daemon to switch them.\n", len(reload.DetectedPIDs))
+			}
+			if len(reload.ReloadedPIDs) > 0 {
+				fmt.Printf("Reloaded %d scoped Codex daemon process(es).\n", len(reload.ReloadedPIDs))
+			}
+			if len(reload.FailedPIDs) > 0 {
+				fmt.Printf("Could not reload %d scoped Codex daemon process(es); restart them manually.\n", len(reload.FailedPIDs))
+			}
+			if reload.UnattributedCount > 0 {
+				fmt.Printf("Left %d unattributable Codex daemon process(es) running for safety.\n", reload.UnattributedCount)
+			}
+		}
 		if result.RestartExistingProcesses {
-			fmt.Printf("Restart existing %s processes to use the activated profile.\n", result.Profile.Provider)
+			qualifier := ""
+			if result.CodexDaemonReload != nil && len(result.CodexDaemonReload.ReloadedPIDs) > 0 {
+				qualifier = "other "
+			}
+			fmt.Printf("Restart any %sexisting %s processes to use the activated profile.\n", qualifier, result.Profile.Provider)
 		}
 	case AIAccountDelete:
 		result, err := deps.DaemonClient.DeleteAIAccount(ctx, protocol.AIAccountDeleteRequestBody{Provider: opts.Provider, Name: opts.Name, Confirm: opts.Confirm})

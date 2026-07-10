@@ -30,6 +30,7 @@ type Config struct {
 	CodexHome       string
 	ClaudeConfigDir string
 	VaultDir        string
+	CodexDaemons    CodexDaemonController
 }
 
 type Service struct {
@@ -38,6 +39,7 @@ type Service struct {
 	claudeConfigDir string
 	vaultDir        string
 	mu              sync.Mutex
+	codexDaemons    CodexDaemonController
 }
 
 func New(cfg Config) (*Service, error) {
@@ -71,7 +73,11 @@ func New(cfg Config) (*Service, error) {
 	if vaultDir == "" {
 		vaultDir = filepath.Join(homeDir, ".local", "share", "azedarach", "accounts")
 	}
-	return &Service{homeDir: homeDir, codexHome: codexHome, claudeConfigDir: claudeConfigDir, vaultDir: vaultDir}, nil
+	controller := cfg.CodexDaemons
+	if controller == nil {
+		controller = newSystemCodexDaemonController()
+	}
+	return &Service{homeDir: homeDir, codexHome: codexHome, claudeConfigDir: claudeConfigDir, vaultDir: vaultDir, codexDaemons: controller}, nil
 }
 
 func (s *Service) Backup(ctx context.Context, req protocol.AIAccountBackupRequestBody) (protocol.AIAccountBackupResponseBody, error) {
@@ -239,6 +245,9 @@ func (s *Service) Activate(ctx context.Context, req protocol.AIAccountActivateRe
 	if err := validate(req.Provider, req.Name); err != nil {
 		return protocol.AIAccountActivateResponseBody{}, err
 	}
+	if req.ReloadCodexDaemon && req.Provider != protocol.AIAccountProviderCodex {
+		return protocol.AIAccountActivateResponseBody{}, fmt.Errorf("%w: daemon reload is only supported for Codex", ErrInvalid)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -317,6 +326,13 @@ func (s *Service) Activate(ctx context.Context, req protocol.AIAccountActivateRe
 		return protocol.AIAccountActivateResponseBody{}, fmt.Errorf("activate profile %s/%s: %w", req.Provider, req.Name, err)
 	}
 	result.FreshLivePreserved = preservePrimary
+	if req.Provider == protocol.AIAccountProviderCodex {
+		reload, err := s.codexDaemons.Reload(ctx, s.codexHome, req.ReloadCodexDaemon)
+		if err != nil {
+			reload = protocol.AIAccountCodexDaemonReload{InspectionFailed: true}
+		}
+		result.CodexDaemonReload = &reload
+	}
 	return result, nil
 }
 

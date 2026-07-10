@@ -13,6 +13,11 @@ func TestParseAIAccountArgs(t *testing.T) {
 		want AIAccountOptions
 	}{
 		{
+			name: "activate and reload",
+			args: []string{"activate", "--reload-daemon", "--json", "codex", "personal"},
+			want: AIAccountOptions{Action: AIAccountActivate, Provider: protocol.AIAccountProviderCodex, Name: "personal", ReloadDaemon: true, JSON: true},
+		},
+		{
 			name: "backup",
 			args: []string{"backup", "--force", "--json", "claude", "work@example.com"},
 			want: AIAccountOptions{Action: AIAccountBackup, Provider: protocol.AIAccountProviderClaude, Name: "work@example.com", Force: true, JSON: true},
@@ -49,6 +54,8 @@ func TestParseAIAccountArgsRejectsUnsafeShapes(t *testing.T) {
 		{"bogus"},
 		{"activate", "--force", "claude", "personal"},
 		{"status", "--confirm"},
+		{"activate", "--reload-daemon", "claude", "personal"},
+		{"list", "--reload-daemon"},
 	} {
 		if _, err := ParseAIAccountArgs(args); err == nil {
 			t.Fatalf("ParseAIAccountArgs(%v) succeeded, want error", args)
