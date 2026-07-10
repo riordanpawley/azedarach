@@ -12,6 +12,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
+const openCodeAdvisorPermissions = `{"permission":{"*":"deny","edit":"deny","bash":"deny","task":"deny","external_directory":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","question":"allow"},"agent":{"advisor":{"description":"Read-only decision advisor","mode":"primary","permission":{"*":"deny","edit":"deny","bash":"deny","task":"deny","external_directory":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","question":"allow"}}}}`
+
 func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID string, request domain.InteractionRequest) (daemonstate.AdvisorSession, bool, error) {
 	if d == nil || d.tmux == nil {
 		return daemonstate.AdvisorSession{}, false, fmt.Errorf("advisor tmux runtime unavailable")
@@ -85,8 +87,7 @@ func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate
 			` --setting-sources "" --strict-mcp-config --mcp-config '{"mcpServers":{}}'` +
 			` --disable-slash-commands --no-chrome ` + promptArg
 	case "opencode":
-		permissions := `{"permission":{"*":"deny","edit":"deny","bash":"deny","task":"deny","external_directory":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","question":"allow"},"agent":{"advisor":{"description":"Read-only decision advisor","mode":"primary","permission":{"*":"deny","edit":"deny","bash":"deny","task":"deny","external_directory":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","question":"allow"}}}}`
-		toolCommand = promptAssignment + `; OPENCODE_CONFIG_CONTENT=` + singleQuoteForShell(permissions) + ` ` + envPrefix + `opencode --pure --agent advisor --prompt ` + promptArg
+		toolCommand = promptAssignment + `; ` + buildIsolatedOpenCodeAdvisorCommand(envPrefix+`command opencode --pure --agent advisor --prompt `+promptArg)
 	default:
 		return "", fmt.Errorf("advisor read-only permissions are unsupported for CLI tool %q", tool)
 	}
@@ -97,6 +98,25 @@ func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate
 	// Do not leave a writable interactive shell behind after the advisor exits.
 	inner := toolCommand + "; " + sessionAgentProcessExitCommand(projectCfg.CLITool)
 	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner)), nil
+}
+
+// buildIsolatedOpenCodeAdvisorCommand keeps OpenCode outside the repository
+// tree while it loads configuration. OpenCode merges project and user config
+// even in --pure mode, so permissions alone cannot prevent invalid or
+// authority-expanding project configuration from affecting advisor startup.
+func buildIsolatedOpenCodeAdvisorCommand(invocation string) string {
+	return `__azedarach_advisor_dir="$(command mktemp -d "${TMPDIR:-/tmp}/azedarach-opencode.XXXXXX")" || exit 1` +
+		`; trap 'command rm -rf "$__azedarach_advisor_dir"' EXIT` +
+		`; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM` +
+		`; command mkdir -p "$__azedarach_advisor_dir/config/opencode" || exit 1` +
+		`; printf '%s\n' '{}' > "$__azedarach_advisor_dir/config/opencode.json" || exit 1` +
+		`; printf '%s\n' '{}' > "$__azedarach_advisor_dir/config/tui.json" || exit 1` +
+		`; cd "$__azedarach_advisor_dir" || exit 1` +
+		`; XDG_CONFIG_HOME="$__azedarach_advisor_dir/config"` +
+		` OPENCODE_CONFIG="$__azedarach_advisor_dir/config/opencode.json"` +
+		` OPENCODE_CONFIG_DIR="$__azedarach_advisor_dir/config/opencode"` +
+		` OPENCODE_TUI_CONFIG="$__azedarach_advisor_dir/config/tui.json"` +
+		` OPENCODE_CONFIG_CONTENT=` + singleQuoteForShell(openCodeAdvisorPermissions) + ` ` + invocation
 }
 
 func buildAdvisorSessionPrompt(request domain.InteractionRequest, pack advisorContextPack) string {

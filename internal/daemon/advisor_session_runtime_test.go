@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -108,7 +109,7 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 	}{
 		{name: "codex", tool: "codex", want: []string{"--sandbox read-only", "--ask-for-approval never", "--disable plugins", "--disable apps", "--disable hooks", "--disable multi_agent", "--disable computer_use", "--disable browser_use", "--disable goals", "--disable workspace_dependencies", "mcp_servers={}", `web_search="disabled"`, `history.persistence="none"`, "project_doc_max_bytes=0", "project_doc_fallback_filenames=[]"}},
 		{name: "claude", tool: "claude", want: []string{"--permission-mode plan", `--tools "Read,Glob,Grep"`, `--disallowed-tools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,Agent,mcp__*"`, `--setting-sources ""`, "--strict-mcp-config", `--mcp-config`, `{"mcpServers":{}}`, "--disable-slash-commands", "--no-chrome"}},
-		{name: "opencode", tool: "opencode", want: []string{"OPENCODE_CONFIG_CONTENT=", `"*":"deny"`, `"read":"allow"`, `"edit":"deny"`, `"bash":"deny"`, `"advisor"`, `"mode":"primary"`, "--pure", "--agent advisor", "--prompt"}},
+		{name: "opencode", tool: "opencode", want: []string{"command mktemp -d", "XDG_CONFIG_HOME=", "OPENCODE_CONFIG=", "OPENCODE_CONFIG_DIR=", "OPENCODE_TUI_CONFIG=", "OPENCODE_CONFIG_CONTENT=", `cd "$__azedarach_advisor_dir"`, "command rm -rf", "command opencode", `"*":"deny"`, `"read":"allow"`, `"edit":"deny"`, `"bash":"deny"`, `"advisor"`, `"mode":"primary"`, "--pure", "--agent advisor", "--prompt"}},
 		{name: "unsupported", tool: "unknown", wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -138,12 +139,55 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 			}
 			promptEnd := strings.Index(command, "; AZEDARACH_SESSION_ROLE=advisor")
 			if test.tool == "opencode" {
-				promptEnd = strings.Index(command, "; OPENCODE_CONFIG_CONTENT=")
+				promptEnd = strings.Index(command, "OPENCODE_CONFIG_CONTENT=")
 			}
 			if promptEnd < 0 || strings.Index(command[promptEnd:], test.tool) < 0 {
 				t.Fatalf("command = %q, advisor environment is not attached to tool invocation", command)
 			}
 		})
+	}
+}
+
+func TestOpenCodeAdvisorExactLaunchIgnoresInvalidProjectAndInheritedConfig(t *testing.T) {
+	opencode, err := exec.LookPath("opencode")
+	if err != nil {
+		t.Skip("opencode is not installed")
+	}
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "opencode.json"), []byte(`{"plugins":["project-plugin"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inheritedConfig := filepath.Join(t.TempDir(), "invalid-inherited.json")
+	if err := os.WriteFile(inheritedConfig, []byte(`{"plugins":["inherited-plugin"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	// Execute the exact generated launch shell while replacing only the final
+	// interactive process with the installed CLI's config/agent parser.
+	wrapper := "#!/bin/sh\nexec " + singleQuoteForShell(opencode) + " --pure agent list\n"
+	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: "opencode", SessionShell: "sh"}}
+	command, err := d.buildAdvisorLaunchCommand(protocol.DefaultProjectID, daemonstate.AdvisorSession{RequestID: "request-1", SessionID: "advisor-request-1"}, "prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Dir = repoDir
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"OPENCODE_CONFIG="+inheritedConfig,
+		"OPENCODE_TUI_CONFIG="+inheritedConfig,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("exact OpenCode advisor launch failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "advisor (primary)") {
+		t.Fatalf("exact OpenCode advisor launch did not load isolated advisor profile:\n%s", output)
 	}
 }
 
