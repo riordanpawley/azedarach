@@ -106,9 +106,9 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{name: "codex", tool: "codex", want: []string{"--sandbox read-only", "--ask-for-approval never"}},
-		{name: "claude", tool: "claude", want: []string{"--permission-mode plan", `--tools "Read,Glob,Grep"`}},
-		{name: "opencode", tool: "opencode", want: []string{"OPENCODE_CONFIG_CONTENT=", `"*":"deny"`, `"read":"allow"`, `"edit":"deny"`, `"bash":"deny"`, "--pure", "--prompt"}},
+		{name: "codex", tool: "codex", want: []string{"--sandbox read-only", "--ask-for-approval never", "--disable plugins", "--disable apps", "--disable hooks", "--disable multi_agent", "--disable computer_use", "--disable browser_use", "--disable goals", "--disable workspace_dependencies", "mcp_servers={}", `web_search="disabled"`, `history.persistence="none"`, "project_doc_max_bytes=0", "project_doc_fallback_filenames=[]"}},
+		{name: "claude", tool: "claude", want: []string{"--permission-mode plan", `--tools "Read,Glob,Grep"`, `--disallowed-tools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,Agent,mcp__*"`, `--setting-sources ""`, "--strict-mcp-config", `--mcp-config`, `{"mcpServers":{}}`, "--disable-slash-commands", "--no-chrome"}},
+		{name: "opencode", tool: "opencode", want: []string{"OPENCODE_CONFIG_CONTENT=", `"*":"deny"`, `"read":"allow"`, `"edit":"deny"`, `"bash":"deny"`, `"advisor"`, `"mode":"primary"`, "--pure", "--agent advisor", "--prompt"}},
 		{name: "unsupported", tool: "unknown", wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -128,7 +128,7 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 					t.Fatalf("command = %q, want %q", command, want)
 				}
 			}
-			for _, forbidden := range []string{"dangerously-bypass", "dangerously-skip", "--remote", "; exec sh", "; exec zsh"} {
+			for _, forbidden := range []string{"dangerously-bypass", "dangerously-skip", "--remote", "--chrome", "; exec sh", "; exec zsh"} {
 				if strings.Contains(command, forbidden) {
 					t.Fatalf("command = %q, contains forbidden %q", command, forbidden)
 				}

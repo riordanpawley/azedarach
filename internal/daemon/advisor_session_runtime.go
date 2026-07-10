@@ -67,12 +67,26 @@ func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate
 	// project-wide bypass and remote/app-server modes cannot weaken the advisor.
 	switch tool {
 	case "codex":
-		toolCommand = promptAssignment + `; ` + envPrefix + `codex --sandbox read-only --ask-for-approval never -- ` + promptArg
+		// The filesystem sandbox does not govern MCP servers, apps, hooks, or
+		// other extension surfaces. Disable those separately so a user's normal
+		// Codex configuration cannot give an advisor external mutation authority.
+		toolCommand = promptAssignment + `; ` + envPrefix + `codex --sandbox read-only --ask-for-approval never` +
+			` --disable plugins --disable remote_plugin --disable plugin_sharing` +
+			` --disable apps --disable computer_use --disable browser_use --disable browser_use_external --disable browser_use_full_cdp_access --disable in_app_browser` +
+			` --disable hooks --disable multi_agent --disable goals --disable image_generation` +
+			` --disable workspace_dependencies --disable skill_mcp_dependency_install` +
+			` -c 'mcp_servers={}' -c 'web_search="disabled"' -c 'history.persistence="none"'` +
+			` -c 'project_doc_max_bytes=0' -c 'project_doc_fallback_filenames=[]' -- ` + promptArg
 	case "claude":
-		toolCommand = promptAssignment + `; ` + envPrefix + `claude --permission-mode plan --tools "Read,Glob,Grep" ` + promptArg
+		// An explicit empty settings/MCP surface prevents project or user hooks,
+		// plugins, and connected services from bypassing the built-in tool list.
+		toolCommand = promptAssignment + `; ` + envPrefix + `claude --permission-mode plan --tools "Read,Glob,Grep"` +
+			` --disallowed-tools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,Agent,mcp__*"` +
+			` --setting-sources "" --strict-mcp-config --mcp-config '{"mcpServers":{}}'` +
+			` --disable-slash-commands --no-chrome ` + promptArg
 	case "opencode":
-		permissions := `{"permission":{"*":"deny","edit":"deny","bash":"deny","task":"deny","external_directory":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","question":"allow"}}`
-		toolCommand = promptAssignment + `; OPENCODE_CONFIG_CONTENT=` + singleQuoteForShell(permissions) + ` ` + envPrefix + `opencode --pure --prompt ` + promptArg
+		permissions := `{"permission":{"*":"deny","edit":"deny","bash":"deny","task":"deny","external_directory":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","question":"allow"},"agent":{"advisor":{"description":"Read-only decision advisor","mode":"primary","permission":{"*":"deny","edit":"deny","bash":"deny","task":"deny","external_directory":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","question":"allow"}}}}`
+		toolCommand = promptAssignment + `; OPENCODE_CONFIG_CONTENT=` + singleQuoteForShell(permissions) + ` ` + envPrefix + `opencode --pure --agent advisor --prompt ` + promptArg
 	default:
 		return "", fmt.Errorf("advisor read-only permissions are unsupported for CLI tool %q", tool)
 	}
