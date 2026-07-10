@@ -12,6 +12,38 @@ func TestBuiltInBoardViewsValidate(t *testing.T) {
 	}
 }
 
+func TestBuiltInBoardViewCatalogAndLegacyAliases(t *testing.T) {
+	set := BuiltInBoardViewSet()
+	if set.DefaultViewID != BoardViewDefaultID {
+		t.Fatalf("default view id = %q, want %q", set.DefaultViewID, BoardViewDefaultID)
+	}
+	want := []BoardViewID{BoardViewDefaultID, BoardViewOrchestrationID, BoardViewCloseoutID}
+	if len(set.Views) != len(want) {
+		t.Fatalf("built-in views = %d, want %d", len(set.Views), len(want))
+	}
+	for i, id := range want {
+		if set.Views[i].ID != id {
+			t.Fatalf("built-in view[%d] = %q, want %q", i, set.Views[i].ID, id)
+		}
+	}
+	if got := NormalizeBoardViewID("current"); got != string(BoardViewDefaultID) {
+		t.Fatalf("current alias = %q", got)
+	}
+	if got := NormalizeBoardViewID("activity"); got != string(BoardViewOrchestrationID) {
+		t.Fatalf("activity alias = %q", got)
+	}
+}
+
+func TestCloseoutBoardViewLeavesNonCloseoutIssuesUnmatched(t *testing.T) {
+	placement, err := CloseoutBoardView().PlaceTask(Task{ID: "az-open", Status: StatusOpen, Priority: P2, Type: TypeTask})
+	if err != nil {
+		t.Fatalf("PlaceTask error: %v", err)
+	}
+	if placement.Matched {
+		t.Fatalf("open placement = %+v, want unmatched", placement)
+	}
+}
+
 func TestBoardViewValidationRejectsUnknownPredicate(t *testing.T) {
 	view := DefaultBoardView()
 	view.ID = "custom"
