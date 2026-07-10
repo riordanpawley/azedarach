@@ -92,7 +92,7 @@ func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate
 		// The filesystem sandbox does not govern MCP servers, apps, hooks, or
 		// other extension surfaces. Disable those separately so a user's normal
 		// Codex configuration cannot give an advisor external mutation authority.
-		toolCommand = promptAssignment + `; ` + envPrefix + `codex --sandbox read-only --ask-for-approval never` +
+		toolCommand = promptAssignment + `; ` + envPrefix + `command codex --sandbox read-only --ask-for-approval never` +
 			` --disable plugins --disable remote_plugin --disable plugin_sharing` +
 			` --disable apps --disable computer_use --disable browser_use --disable browser_use_external --disable browser_use_full_cdp_access --disable in_app_browser` +
 			` --disable hooks --disable multi_agent --disable goals --disable image_generation` +
@@ -102,7 +102,7 @@ func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate
 	case "claude":
 		// An explicit empty settings/MCP surface prevents project or user hooks,
 		// plugins, and connected services from bypassing the built-in tool list.
-		toolCommand = promptAssignment + `; ` + envPrefix + `claude --permission-mode plan --tools "Read,Glob,Grep"` +
+		toolCommand = promptAssignment + `; ` + envPrefix + `command claude --permission-mode plan --tools "Read,Glob,Grep"` +
 			` --disallowed-tools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,Agent,mcp__*"` +
 			` --setting-sources "" --strict-mcp-config --mcp-config '{"mcpServers":{}}'` +
 			` --disable-slash-commands --no-chrome ` + promptArg

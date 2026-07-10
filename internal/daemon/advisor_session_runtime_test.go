@@ -406,8 +406,8 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{name: "codex", tool: "codex", want: []string{"--sandbox read-only", "--ask-for-approval never", "--disable plugins", "--disable apps", "--disable hooks", "--disable multi_agent", "--disable computer_use", "--disable browser_use", "--disable goals", "--disable workspace_dependencies", "mcp_servers={}", `web_search="disabled"`, `history.persistence="none"`, "project_doc_max_bytes=0", "project_doc_fallback_filenames=[]"}},
-		{name: "claude", tool: "claude", want: []string{"--permission-mode plan", `--tools "Read,Glob,Grep"`, `--disallowed-tools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,Agent,mcp__*"`, `--setting-sources ""`, "--strict-mcp-config", `--mcp-config`, `{"mcpServers":{}}`, "--disable-slash-commands", "--no-chrome"}},
+		{name: "codex", tool: "codex", want: []string{"command codex", "--sandbox read-only", "--ask-for-approval never", "--disable plugins", "--disable apps", "--disable hooks", "--disable multi_agent", "--disable computer_use", "--disable browser_use", "--disable goals", "--disable workspace_dependencies", "mcp_servers={}", `web_search="disabled"`, `history.persistence="none"`, "project_doc_max_bytes=0", "project_doc_fallback_filenames=[]"}},
+		{name: "claude", tool: "claude", want: []string{"command claude", "--permission-mode plan", `--tools "Read,Glob,Grep"`, `--disallowed-tools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,Agent,mcp__*"`, `--setting-sources ""`, "--strict-mcp-config", `--mcp-config`, `{"mcpServers":{}}`, "--disable-slash-commands", "--no-chrome"}},
 		{name: "opencode", tool: "opencode", want: []string{"command mktemp -d", "XDG_CONFIG_HOME=", "OPENCODE_CONFIG=", "OPENCODE_CONFIG_DIR=", "OPENCODE_TUI_CONFIG=", "OPENCODE_CONFIG_CONTENT=", `cd "$__azedarach_advisor_dir"`, "command rm -rf", "command opencode", `"*":"deny"`, `"read":"allow"`, `"edit":"deny"`, `"bash":"deny"`, `"advisor"`, `"mode":"primary"`, "--pure", "--agent advisor", "--prompt"}},
 		{name: "unsupported", tool: "unknown", wantErr: true},
 	} {
@@ -442,6 +442,47 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 			}
 			if promptEnd < 0 || strings.Index(command[promptEnd:], test.tool) < 0 {
 				t.Fatalf("command = %q, advisor environment is not attached to tool invocation", command)
+			}
+		})
+	}
+}
+
+func TestAdvisorExactLaunchBypassesInteractiveShellAliasesAndFunctions(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh is not installed")
+	}
+	repoDir := t.TempDir()
+	binDir := t.TempDir()
+	zdotDir := t.TempDir()
+	startup := "alias codex='printf alias-redirected'\nclaude() { printf function-redirected; }\n"
+	if err := os.WriteFile(filepath.Join(zdotDir, ".zshrc"), []byte(startup), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tool := range []string{"codex", "claude"} {
+		t.Run(tool, func(t *testing.T) {
+			wrapper := "#!/bin/sh\nprintf 'trusted-" + tool + "\\n'\n"
+			if err := os.WriteFile(filepath.Join(binDir, tool), []byte(wrapper), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: tool, SessionShell: zsh}}
+			command, err := d.buildAdvisorLaunchCommand(protocol.DefaultProjectID, daemonstate.AdvisorSession{RequestID: "request-1", SessionID: "advisor-request-1"}, "prompt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(zsh, "-c", command)
+			cmd.Dir = repoDir
+			cmd.Env = append(os.Environ(),
+				"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"ZDOTDIR="+zdotDir,
+			)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("exact %s advisor launch failed: %v\n%s", tool, err, output)
+			}
+			if !strings.Contains(string(output), "trusted-"+tool) || strings.Contains(string(output), "redirected") {
+				t.Fatalf("exact %s advisor launch used shell alias/function:\n%s", tool, output)
 			}
 		})
 	}
