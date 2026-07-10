@@ -166,7 +166,6 @@ func TestResolveInteractionUpdatesLinkedRequirementAndTracesSignificantAnswer(t 
 	description := "new approved behavior"
 	answer := interactionStoreTestAnswer(1)
 	answer.ApprovedRequirementEffects = []domain.InteractionRequirementEffect{{RequirementID: requirement.LocalID, Description: &description}}
-	answer.ApprovedDecisionEffect = &domain.InteractionDecisionEffect{}
 	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: answer, Actor: "human", CreatedAt: now}
 	r, err = r.Transition(domain.InteractionResolved, 1, now)
 	if err != nil {
@@ -180,16 +179,44 @@ func TestResolveInteractionUpdatesLinkedRequirementAndTracesSignificantAnswer(t 
 		t.Fatalf("requirement = %+v, err=%v", updated, err)
 	}
 	decisions, err := c.ListDecisions(ctx, DecisionFilter{IssueID: issueID})
-	if err != nil || len(decisions) != 1 || decisions[0].Rationale != answer.Rationale {
+	if err != nil || len(decisions) != 0 {
 		t.Fatalf("issue decisions = %+v, err=%v", decisions, err)
 	}
-	requirementDecisions, err := c.ListDecisions(ctx, DecisionFilter{RequirementID: requirement.LocalID})
-	if err != nil || len(requirementDecisions) != 1 || requirementDecisions[0].LocalID != decisions[0].LocalID {
-		t.Fatalf("requirement decisions = %+v, err=%v", requirementDecisions, err)
-	}
 	resolved, found, err := c.GetInteraction(ctx, r.ID)
-	if err != nil || !found || resolved.ResolutionTrace == nil || resolved.ResolutionTrace.DecisionID != decisions[0].LocalID || len(resolved.ResolutionTrace.RequirementIDs) != 1 || resolved.ResolutionTrace.RequirementIDs[0] != requirement.LocalID {
+	if err != nil || !found || resolved.ResolutionTrace == nil || resolved.ResolutionTrace.DecisionID != "" || len(resolved.ResolutionTrace.RequirementIDs) != 1 || resolved.ResolutionTrace.RequirementIDs[0] != requirement.LocalID {
 		t.Fatalf("resolution trace = %+v found=%v err=%v", resolved.ResolutionTrace, found, err)
+	}
+}
+
+func TestResolveInteractionCreatesExplicitDecision(t *testing.T) {
+	ctx := context.Background()
+	c := NewClient(t.TempDir(), nil)
+	issueID, err := c.Create(ctx, CreateTaskParams{Title: "issue", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := testInteractionRequest("create-explicit", issueID, "create-explicit")
+	if err = c.CreateInteraction(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	now := r.UpdatedAt.Add(time.Second)
+	answer := interactionStoreTestAnswer(1)
+	answer.ApprovedDecisionEffect = &domain.InteractionDecisionEffect{}
+	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: answer, Actor: "human", CreatedAt: now}
+	r, err = r.Transition(domain.InteractionResolved, 1, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := c.ListDecisions(ctx, DecisionFilter{IssueID: issueID})
+	if err != nil || len(decisions) != 1 || decisions[0].Title != r.DecisionPacket.Summary || decisions[0].Rationale != answer.Rationale {
+		t.Fatalf("explicitly created decisions = %+v err=%v", decisions, err)
+	}
+	if resolved.ResolutionTrace == nil || resolved.ResolutionTrace.DecisionID != decisions[0].LocalID {
+		t.Fatalf("explicit create resolution trace = %+v", resolved.ResolutionTrace)
 	}
 }
 
