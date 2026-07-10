@@ -3464,6 +3464,147 @@ func TestTaskCloseBlocksUnresolvedChildrenByDefault(t *testing.T) {
 	}
 }
 
+func TestTaskClosePreflightBlocksFiveOpenDescendantsBeforeIntegration(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-task-close-atomic-preflight"
+	repoDir := t.TempDir()
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Root with unresolved descendants",
+		Type:   domain.TypeEpic,
+		Status: domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	childIDs := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+			Title:    fmt.Sprintf("Open descendant %d", i+1),
+			Type:     domain.TypeTask,
+			Status:   domain.StatusOpen,
+			ParentID: &rootID,
+		})
+		if err != nil {
+			t.Fatalf("create child %d: %v", i+1, err)
+		}
+		childIDs = append(childIDs, childID)
+	}
+
+	sourceWorktree := filepath.Join(repoDir, "wt-"+rootID)
+	sourceBranch := "riordan/" + rootID + "/atomic-preflight"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   rootID,
+		Path:      sourceWorktree,
+		Branch:    sourceBranch,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed source worktree: %v", err)
+	}
+
+	targetHead := "target-head-before-close"
+	integrationAdapterCalls := 0
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		integrationAdapterCalls++
+		targetHead = "target-head-mutated"
+		return "", fmt.Errorf("integration adapter must not be invoked before close preflight: %s", strings.Join(args, " "))
+	}}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		hub: publish.NewHub(16, 8, logger),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		git:      git.NewClient(runner, logger),
+		revision: map[string]uint64{projectID: 1},
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
+		logger:                  logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	body, err := json.Marshal(taskCloseRequest{
+		TaskID:               rootID,
+		IntegrateBeforeClose: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-atomic-preflight",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.close",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") {
+		t.Fatalf("handleTaskClose response = %+v, want descendant preflight failure", resp)
+	}
+	for _, childID := range childIDs {
+		if !strings.Contains(resp.Error.Message, childID+" (open)") {
+			t.Fatalf("close error = %q, missing open descendant %s", resp.Error.Message, childID)
+		}
+	}
+	if integrationAdapterCalls != 0 {
+		t.Fatalf("integration adapter calls = %d, want zero", integrationAdapterCalls)
+	}
+	if targetHead != "target-head-before-close" {
+		t.Fatalf("target HEAD = %q, want unchanged", targetHead)
+	}
+
+	root, err := issuesClient.GetWithRuntime(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("get root after failed close: %v", err)
+	}
+	if root.Status != domain.StatusInReview {
+		t.Fatalf("root status = %s, want unchanged %s", root.Status, domain.StatusInReview)
+	}
+	for _, childID := range childIDs {
+		child, err := issuesClient.GetWithRuntime(ctx, projectID, childID)
+		if err != nil {
+			t.Fatalf("get child %s after failed close: %v", childID, err)
+		}
+		if child.Status != domain.StatusOpen {
+			t.Fatalf("child %s status = %s, want unchanged %s", childID, child.Status, domain.StatusOpen)
+		}
+	}
+	worktrees, err := runtimeStore.ListWorktreeStates(ctx, projectID)
+	if err != nil {
+		t.Fatalf("list source worktrees after failed close: %v", err)
+	}
+	if len(worktrees) != 1 || worktrees[0].IssueID != rootID || worktrees[0].Path != sourceWorktree || worktrees[0].Branch != sourceBranch {
+		t.Fatalf("source worktrees = %+v, want unchanged", worktrees)
+	}
+}
+
 func TestTaskCloseCanAutoCloseCleanUnresolvedChildren(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-task-close-clean-children"
