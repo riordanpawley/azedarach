@@ -41,6 +41,7 @@ func TestBuiltInDecisionCommandsForHook(t *testing.T) {
 }
 
 func TestGitHooksRunCommandRunsBuiltInDecisionSyncAndRestageOutsideMerge(t *testing.T) {
+	isolateNestedGitEnvironment(t)
 	projectDir := t.TempDir()
 	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -70,6 +71,7 @@ func TestGitHooksRunCommandRunsBuiltInDecisionSyncAndRestageOutsideMerge(t *test
 }
 
 func TestGitHooksRunCommandSkipsBuiltInDecisionSyncAndRestageWhenEnvSet(t *testing.T) {
+	isolateNestedGitEnvironment(t)
 	projectDir := t.TempDir()
 	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -112,6 +114,7 @@ func TestGitHooksRunCommandSkipsBuiltInDecisionSyncAndRestageWhenEnvSet(t *testi
 }
 
 func TestGitHooksHookCommandDecisionSyncSkipDoesNotDisableImportHooks(t *testing.T) {
+	isolateNestedGitEnvironment(t)
 	projectDir := t.TempDir()
 	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -136,6 +139,7 @@ func TestGitHooksHookCommandDecisionSyncSkipDoesNotDisableImportHooks(t *testing
 }
 
 func TestGitHooksRunCommandRestagesDecisionsIntoHookIndex(t *testing.T) {
+	isolateNestedGitEnvironment(t)
 	projectDir := t.TempDir()
 	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -198,6 +202,7 @@ func TestGitHooksRunCommandRestagesDecisionsIntoHookIndex(t *testing.T) {
 }
 
 func TestGitHooksRunCommandUsesCurrentWorktreeForImplicitProjectDir(t *testing.T) {
+	isolateNestedGitEnvironment(t)
 	baseDir := t.TempDir()
 	if err := runGitCommandIsolated(baseDir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -303,6 +308,7 @@ fi
 }
 
 func TestGitHooksRunCommandSkipsBuiltInDecisionSyncAndRestageDuringMerge(t *testing.T) {
+	isolateNestedGitEnvironment(t)
 	projectDir := t.TempDir()
 	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -356,6 +362,35 @@ func TestGitHooksRunCommandSkipsBuiltInDecisionSyncAndRestageDuringMerge(t *test
 	}
 	if got := strings.TrimSpace(string(out)); got != "?? docs/decisions/generated.md" {
 		t.Fatalf("generated decision git status = %q, want untracked", got)
+	}
+}
+
+func isolateNestedGitEnvironment(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"GIT_DIR",
+		"GIT_WORK_TREE",
+		"GIT_COMMON_DIR",
+		"GIT_INDEX_FILE",
+		"GIT_OBJECT_DIRECTORY",
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_PREFIX",
+	} {
+		value, present := os.LookupEnv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unset %s: %v", key, err)
+		}
+		t.Cleanup(func() {
+			if present {
+				if err := os.Setenv(key, value); err != nil {
+					t.Errorf("restore %s: %v", key, err)
+				}
+				return
+			}
+			if err := os.Unsetenv(key); err != nil {
+				t.Errorf("clear %s: %v", key, err)
+			}
+		})
 	}
 }
 
