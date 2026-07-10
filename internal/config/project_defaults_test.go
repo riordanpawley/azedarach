@@ -37,7 +37,7 @@ func TestProjectDefaultsDoNotCreateStaleWorktreeArtifacts(t *testing.T) {
 	assertFileExcludesText(t, filepath.Join(repoRoot, ".gitignore"), "/reference-effect")
 }
 
-func TestEnvrcUsesExternalWorktreeSpecificDirenvLayouts(t *testing.T) {
+func TestEnvrcSharesExternalDirenvLayoutAcrossWorktrees(t *testing.T) {
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	require.NoError(t, err)
 	envrc, err := os.ReadFile(filepath.Join(repoRoot, ".envrc"))
@@ -58,7 +58,7 @@ func TestEnvrcUsesExternalWorktreeSpecificDirenvLayouts(t *testing.T) {
 	mainLayout := evaluateEnvrcLayout(t, mainCheckout, cacheRoot, goCacheRoot)
 	linkedLayout := evaluateEnvrcLayout(t, linkedCheckout, cacheRoot, goCacheRoot)
 
-	assert.NotEqual(t, mainLayout, linkedLayout)
+	assert.Equal(t, mainLayout, linkedLayout)
 	assert.True(t, strings.HasPrefix(mainLayout, cacheRoot+string(os.PathSeparator)))
 	assert.True(t, strings.HasPrefix(linkedLayout, cacheRoot+string(os.PathSeparator)))
 	assert.NoDirExists(t, filepath.Join(mainCheckout, ".direnv"))
