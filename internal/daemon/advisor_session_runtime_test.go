@@ -14,6 +14,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
@@ -63,6 +64,22 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 	}
 	if projection.Role != daemonstate.SessionRoleAdvisor || projection.ScopeKind != daemonstate.SessionScopeInteraction || projection.ScopeID != request.ID {
 		t.Fatalf("reconcile lost advisor metadata: %+v", projection)
+	}
+	authCtx := withDaemonProjectIDContext(context.Background(), canonicalProjectID)
+	if err := service.AuthorizeInteractionCommand(authCtx, protocol.Metadata{SessionID: naming.SessionID(first.Request.SessionID)}, protocol.CommandInteractionResolve); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("advisor mutation authorization error = %v", err)
+	}
+	if err := d.sessionRuntimeStateStore(canonicalProjectID).DeleteSessionState(ctx, canonicalProjectID, first.Request.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AuthorizeInteractionCommand(authCtx, protocol.Metadata{SessionID: naming.SessionID(first.Request.SessionID)}, protocol.CommandInteractionResolve); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("advisor reservation fallback authorization error = %v", err)
+	}
+	if err := d.sessionRuntimeStateStore(canonicalProjectID).UpsertSessionState(ctx, canonicalProjectID, projection); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AuthorizeInteractionCommand(authCtx, protocol.Metadata{}, protocol.CommandInteractionResolve); err != nil {
+		t.Fatalf("human CLI without advisor session metadata rejected: %v", err)
 	}
 
 	second, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: request.ID, ExpectedRevision: first.Request.Revision, Actor: "human"})

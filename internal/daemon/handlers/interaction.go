@@ -8,6 +8,7 @@ import (
 )
 
 type InteractionService interface {
+	AuthorizeInteractionCommand(context.Context, protocol.Metadata, string) error
 	CreateInteraction(context.Context, protocol.InteractionCreateRequestBody) (protocol.InteractionResponseBody, error)
 	ListInteractions(context.Context, protocol.InteractionListRequestBody) (protocol.InteractionListResponseBody, error)
 	GetInteraction(context.Context, protocol.InteractionGetRequestBody) (protocol.InteractionResponseBody, error)
@@ -24,6 +25,11 @@ func (h *InteractionHandler) Handle(ctx context.Context, req protocol.RequestEnv
 	if h.service == nil {
 		resp.Error = &protocol.ErrorEnvelope{Code: protocol.ErrorCodeUnavailable, Message: "interaction service unavailable", Retryable: true}
 		return resp
+	}
+	if req.Command != protocol.CommandInteractionList && req.Command != protocol.CommandInteractionGet {
+		if err := h.service.AuthorizeInteractionCommand(ctx, req.Meta, req.Command); err != nil {
+			return specInvalidRequest(resp, err.Error())
+		}
 	}
 	switch req.Command {
 	case protocol.CommandInteractionCreate:

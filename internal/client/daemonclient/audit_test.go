@@ -19,6 +19,7 @@ func TestCommandPopulatesClientAuditMetadataFromEnv(t *testing.T) {
 	t.Setenv(auditEnvActor, "riordan")
 	t.Setenv(auditEnvUID, "501")
 	t.Setenv(auditEnvActiveIssue, "ckf")
+	t.Setenv(auditEnvSessionID, "advisor-req-1")
 
 	var got protocol.RequestEnvelope
 	client := New(&fakeTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -38,7 +39,8 @@ func TestCommandPopulatesClientAuditMetadataFromEnv(t *testing.T) {
 		got.Meta.ClientPWD != "/logical/wt" ||
 		got.Meta.ClientActor != "riordan" ||
 		got.Meta.ClientUID != "501" ||
-		got.Meta.ClientActiveIssue != "ckf" {
+		got.Meta.ClientActiveIssue != "ckf" ||
+		got.Meta.SessionID != "advisor-req-1" {
 		t.Fatalf("audit metadata = %+v", got.Meta)
 	}
 	if len(got.Meta.ClientArgv) != 3 || got.Meta.ClientArgv[0] != "session" || got.Meta.ClientArgv[2] != "ckf" {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
@@ -15,6 +16,37 @@ import (
 )
 
 type issueInteractionService struct{ daemon *Daemon }
+
+func (s issueInteractionService) AuthorizeInteractionCommand(ctx context.Context, meta protocol.Metadata, command string) error {
+	sessionID := strings.TrimSpace(meta.SessionID.String())
+	if sessionID == "" {
+		return nil
+	}
+	projectID := daemonProjectIDFromContext(ctx)
+	store := s.daemon.sessionRuntimeStateStore(projectID)
+	if store == nil {
+		return nil
+	}
+	session, found, err := store.GetSessionState(ctx, projectID, sessionID)
+	if err != nil {
+		return fmt.Errorf("verify interaction caller session %s: %w", sessionID, err)
+	}
+	if found && session.Role == daemonstate.SessionRoleAdvisor {
+		return fmt.Errorf("advisor session %s is read-only and cannot run %s", sessionID, command)
+	}
+	if !found {
+		advisors, err := store.ListAdvisorSessions(ctx, projectID)
+		if err != nil {
+			return fmt.Errorf("verify advisor session reservation %s: %w", sessionID, err)
+		}
+		for _, advisor := range advisors {
+			if strings.TrimSpace(advisor.SessionID) == sessionID {
+				return fmt.Errorf("advisor session %s is read-only and cannot run %s", sessionID, command)
+			}
+		}
+	}
+	return nil
+}
 
 func interactionStalenessPolicy(significance domain.InteractionSignificance) domain.InteractionStalenessPolicy {
 	switch significance {

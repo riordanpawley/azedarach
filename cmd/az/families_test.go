@@ -90,6 +90,22 @@ func TestRunAICommandHelpAndDispatch(t *testing.T) {
 	}
 }
 
+func TestRunInteractionCommandHelpDocumentsAuthority(t *testing.T) {
+	output := captureMainStdout(t, func() error {
+		return runInteractionCommand(config.DefaultConfig(), []string{"--help"})
+	})
+	for _, want := range []string{
+		"Usage: az interaction <list|get|discuss|answer|resolve|withdraw>",
+		"singleton read-only advisor session",
+		"Advisor sessions may propose answers but cannot answer, resolve, withdraw",
+		"routine answers are evidence-only",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("help output missing %q: %q", want, output)
+		}
+	}
+}
+
 func TestRunTmuxCommandHelpAndDispatch(t *testing.T) {
 	output := captureMainStdout(t, func() error {
 		return runTmuxCommand(config.DefaultConfig(), []string{"--help"})

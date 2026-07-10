@@ -175,6 +175,8 @@ func printHelpForPath(path []string) bool {
 		fmt.Println("Usage: az decision link remove --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--json]")
 	case "learn":
 		printLearnUsage()
+	case "interaction", "interaction list", "interaction get", "interaction discuss", "interaction answer", "interaction resolve", "interaction withdraw":
+		cli.PrintInteractionUsage()
 	case "learn add":
 		fmt.Println("Usage: az learn add --evidence <text> [--summary <text>] [--private] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--json]")
 	case "learn recall":

@@ -235,6 +235,21 @@ func runAICommand(cfg *config.Config, args []string) error {
 	}
 }
 
+func runInteractionCommand(cfg *config.Config, args []string) error {
+	if len(args) == 0 || isHelpArg(args[0]) {
+		cli.PrintInteractionUsage()
+		return nil
+	}
+	opts, err := cli.ParseInteractionArgs(args)
+	if err != nil {
+		cli.PrintInteractionUsage()
+		return err
+	}
+	return runCommand(cfg, func(deps *cli.Dependencies) error {
+		return cli.InteractionCommand(deps, opts)
+	})
+}
+
 func runTmuxCommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		cli.PrintTmuxUsage()

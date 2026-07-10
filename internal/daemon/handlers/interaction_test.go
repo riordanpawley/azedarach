@@ -6,13 +6,29 @@ import (
 	"fmt"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"strings"
 	"testing"
 )
 
-type fakeInteractionService struct{ err error }
+type fakeInteractionService struct {
+	err     error
+	authErr error
+}
 
+func (f fakeInteractionService) AuthorizeInteractionCommand(context.Context, protocol.Metadata, string) error {
+	return f.authErr
+}
 func (f fakeInteractionService) CreateInteraction(context.Context, protocol.InteractionCreateRequestBody) (protocol.InteractionResponseBody, error) {
 	return protocol.InteractionResponseBody{}, f.err
+}
+
+func TestInteractionHandlerRejectsAdvisorSessionBeforeMutation(t *testing.T) {
+	body, _ := json.Marshal(protocol.InteractionMutationRequestBody{ID: "req", ExpectedRevision: 1, Answer: handlerTestAnswer(), Actor: "human"})
+	h := NewInteractionHandler(fakeInteractionService{authErr: fmt.Errorf("advisor session is read-only")})
+	resp := h.Handle(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, Command: protocol.CommandInteractionAnswer, Body: body})
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest || !strings.Contains(resp.Error.Message, "advisor session") {
+		t.Fatalf("response=%+v", resp)
+	}
 }
 func (f fakeInteractionService) ListInteractions(context.Context, protocol.InteractionListRequestBody) (protocol.InteractionListResponseBody, error) {
 	return protocol.InteractionListResponseBody{}, f.err
