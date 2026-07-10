@@ -181,15 +181,7 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	started := 0
 	for _, issueID := range requested {
 		if _, ok := runnable[issueID]; !ok {
-			if _, ok := nestedRoots[issueID]; ok {
-				result.Skipped[issueID] = fmt.Sprintf("nested-root-start-orchestrator-session: az session start %s", issueID)
-			} else if _, ok := active[issueID]; ok {
-				result.Skipped[issueID] = "session-already-running"
-			} else if reason := snapshot.Blocked[issueID]; reason != "" {
-				result.Skipped[issueID] = reason
-			} else {
-				result.Skipped[issueID] = "not-runnable"
-			}
+			result.Skipped[issueID] = orchestrationSkipReason(issueID, nestedRoots, active, snapshot.Blocked)
 			continue
 		}
 		if started >= limit {
@@ -209,6 +201,19 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		started++
 	}
 	return result, nil
+}
+
+func orchestrationSkipReason(issueID string, nestedRoots, active map[string]struct{}, blocked map[string]string) string {
+	if _, ok := nestedRoots[issueID]; ok {
+		return fmt.Sprintf("nested-root-start-orchestrator-session: az session start %s", issueID)
+	}
+	if _, ok := active[issueID]; ok {
+		return "session-already-running"
+	}
+	if reason := blocked[issueID]; reason != "" {
+		return reason
+	}
+	return "not-runnable"
 }
 
 func (a daemonOrchestrationAuthority) claimAndSubmitStart(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string) (protocol.OrchestrationLaunch, error) {

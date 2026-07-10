@@ -62,3 +62,19 @@ func TestOrchestrationIntentRejectsInvalidShapeBeforeMutation(t *testing.T) {
 func TestOrchestrationAuthorityInterfaceStaysDeep(t *testing.T) {
 	var _ orchestrationAuthority = daemonOrchestrationAuthority{}
 }
+
+func TestOrchestrationSkipReasonPreservesNestedRootAuthority(t *testing.T) {
+	nested := map[string]struct{}{"az-nested": {}}
+	active := map[string]struct{}{"az-active": {}}
+	blocked := map[string]string{"az-blocked": "dependency remains open"}
+
+	if got := orchestrationSkipReason("az-nested", nested, active, blocked); got != "nested-root-start-orchestrator-session: az session start az-nested" {
+		t.Fatalf("nested skip reason = %q", got)
+	}
+	if got := orchestrationSkipReason("az-active", nested, active, blocked); got != "session-already-running" {
+		t.Fatalf("active skip reason = %q", got)
+	}
+	if got := orchestrationSkipReason("az-blocked", nested, active, blocked); got != "dependency remains open" {
+		t.Fatalf("blocked skip reason = %q", got)
+	}
+}
