@@ -19,17 +19,18 @@ const (
 )
 
 type IssueContextRiskEvidence struct {
-	IssueID       string    `json:"issue_id"`
-	Relationship  string    `json:"relationship,omitempty"`
-	Files         []string  `json:"files,omitempty"`
-	Symbols       []string  `json:"symbols,omitempty"`
-	Tests         []string  `json:"tests,omitempty"`
-	RootCause     string    `json:"root_cause,omitempty"`
-	Invariant     string    `json:"invariant,omitempty"`
-	Validation    string    `json:"validation,omitempty"`
-	RiskNotes     []string  `json:"risk_notes,omitempty"`
-	EvidenceKinds []string  `json:"evidence_kinds,omitempty"`
-	ObservedAt    time.Time `json:"observed_at,omitempty,omitzero"`
+	IssueID                 string    `json:"issue_id"`
+	Relationship            string    `json:"relationship,omitempty"`
+	Files                   []string  `json:"files,omitempty"`
+	Symbols                 []string  `json:"symbols,omitempty"`
+	Tests                   []string  `json:"tests,omitempty"`
+	RelatedConsumersAudited []string  `json:"related_consumers_audited,omitempty"`
+	RootCause               string    `json:"root_cause,omitempty"`
+	Invariant               string    `json:"invariant,omitempty"`
+	Validation              string    `json:"validation,omitempty"`
+	RiskNotes               []string  `json:"risk_notes,omitempty"`
+	EvidenceKinds           []string  `json:"evidence_kinds,omitempty"`
+	ObservedAt              time.Time `json:"observed_at,omitempty,omitzero"`
 }
 
 type IssueContextRiskInput struct {
@@ -187,6 +188,7 @@ func normalizeRiskEvidence(e IssueContextRiskEvidence) IssueContextRiskEvidence 
 	e.Files = normalizeEvidenceValues(e.Files)
 	e.Symbols = normalizeEvidenceValues(e.Symbols)
 	e.Tests = normalizeEvidenceValues(e.Tests)
+	e.RelatedConsumersAudited = normalizeEvidenceValues(e.RelatedConsumersAudited)
 	e.RootCause = strings.TrimSpace(e.RootCause)
 	e.Invariant = strings.TrimSpace(e.Invariant)
 	e.Validation = strings.TrimSpace(e.Validation)
@@ -212,6 +214,9 @@ func issueContextHandoffFields(target IssueContextRiskEvidence) IssueContextHand
 	}
 	if len(target.Tests) > 0 {
 		presentSet["tests_changed"] = true
+	}
+	if len(target.RelatedConsumersAudited) > 0 {
+		presentSet["related_consumers_audited"] = true
 	}
 	if target.Validation != "" {
 		presentSet["regression_validation"] = true
