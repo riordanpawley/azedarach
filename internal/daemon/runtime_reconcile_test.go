@@ -315,14 +315,21 @@ func (r *dedupedTimeoutRuntimeReconciler) snapshot() int {
 }
 
 type runtimeReconcileTestServer struct {
-	served chan struct{}
+	served  chan struct{}
+	release <-chan struct{}
 }
 
-func (s *runtimeReconcileTestServer) Serve(context.Context) error {
+func (s *runtimeReconcileTestServer) Serve(ctx context.Context) error {
 	if s.served != nil {
 		select {
 		case s.served <- struct{}{}:
 		default:
+		}
+	}
+	if s.release != nil {
+		select {
+		case <-s.release:
+		case <-ctx.Done():
 		}
 	}
 	return nil
@@ -507,7 +514,7 @@ func TestStartupRuntimeReconcileBeginsSessionRecoveryBeforeInteractionStaleness(
 		tmux:         tmux.NewClient(&signalingTmuxRunner{started: sessionRecoveryStarted}, slog.Default()),
 		sessionStore: daemonstate.NewStore(),
 		lock:         runtimeReconcileTestLock{},
-		serve:        &runtimeReconcileTestServer{served: make(chan struct{}, 1)},
+		serve:        &runtimeReconcileTestServer{served: make(chan struct{}, 1), release: releaseInteraction},
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
 			projectID: runtimeStateStore,
 		},
