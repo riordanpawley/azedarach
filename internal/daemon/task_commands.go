@@ -5038,7 +5038,7 @@ func (d *Daemon) daemonTaskGraphNestedRoots(
 				item.StartFailure = &copyFailure
 				item.Status = "blocked_start_failed"
 				item.FallbackPolicy = "keep_children_blocked_or_create_replacement_direct_work"
-				item.Advice = fmt.Sprintf("nested root session start failed; inspect operation %s, retry `az session start %s`, or create replacement direct work under the parent without flattening %s descendants", failure.OperationID, item.IssueID, item.IssueID)
+				item.Advice = fmt.Sprintf("nested root session start failed; inspect operation %s, retry `az orchestrator-session start --root %s`, or create replacement direct work under the parent without flattening %s descendants", failure.OperationID, item.IssueID, item.IssueID)
 			}
 		}
 		if item.Status == "" || item.Status == "startable" || item.Status == string(domain.StatusOpen) || item.Status == string(domain.StatusInProgress) || item.Status == string(domain.StatusInReview) {
@@ -5052,7 +5052,7 @@ func (d *Daemon) daemonTaskGraphNestedRoots(
 			}
 		}
 		if strings.TrimSpace(item.Advice) == "" {
-			item.Advice = fmt.Sprintf("start nested root orchestrator: az session start %s", item.IssueID)
+			item.Advice = fmt.Sprintf("start nested root orchestrator: az orchestrator-session start --root %s", item.IssueID)
 		}
 		out = append(out, item)
 	}
@@ -5934,7 +5934,7 @@ func daemonTaskGraphNestedRootSummaries(root naming.IssueID, byID map[naming.Iss
 				IssueStatus: string(task.Status),
 				Type:        string(task.Type),
 				ChildCount:  len(daemonTaskGraphDescendants(id, children)),
-				Advice:      fmt.Sprintf("start nested root orchestrator: az session start %s", id.String()),
+				Advice:      fmt.Sprintf("start nested root orchestrator: az orchestrator-session start --root %s", id.String()),
 			})
 			return
 		}
@@ -6170,7 +6170,7 @@ func daemonTaskCompletionAdvice(rootIssueID string, runnable []string, nestedRoo
 		if strings.TrimSpace(nested.Advice) != "" {
 			advice = append(advice, nested.Advice)
 		} else {
-			advice = append(advice, fmt.Sprintf("start nested root orchestrator: az session start %s", nested.IssueID))
+			advice = append(advice, fmt.Sprintf("start nested root orchestrator: az orchestrator-session start --root %s", nested.IssueID))
 		}
 	}
 	if len(staleCloseable) > 0 {

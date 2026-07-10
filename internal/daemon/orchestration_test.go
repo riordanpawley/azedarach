@@ -187,6 +187,27 @@ func TestRootedOrchestratorContinuationSuppressesCompleteAndHumanWait(t *testing
 	}
 }
 
+func TestProjectOrchestrationCompletionIsDaemonOwned(t *testing.T) {
+	complete := projectOrchestrationCompletion(protocol.OrchestrationSnapshot{Health: protocol.OrchestrationHealth{Healthy: true}})
+	if !complete.Pass || len(complete.Reasons) != 0 {
+		t.Fatalf("complete = %+v", complete)
+	}
+	incomplete := projectOrchestrationCompletion(protocol.OrchestrationSnapshot{
+		Health:       protocol.OrchestrationHealth{Healthy: false, OpenIssueCount: 2, Diagnostics: []string{"inspection truncated"}},
+		Reviews:      []protocol.OrchestrationCandidate{{IssueID: "review"}},
+		Interactions: []domain.InteractionRequest{{ID: "human"}},
+	})
+	if incomplete.Pass {
+		t.Fatalf("incomplete = %+v", incomplete)
+	}
+	joined := strings.Join(incomplete.Reasons, "\n")
+	for _, want := range []string{"2 open issues remain", "1 review requests remain", "1 human interactions remain unresolved", "inspection truncated"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("reasons missing %q: %s", want, joined)
+		}
+	}
+}
+
 func TestAcquireRootedOrchestratorLeasePersistsSessionAuthority(t *testing.T) {
 	projectID := "proj-acquire-root"
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
@@ -420,7 +441,7 @@ func TestOrchestrationSkipReasonPreservesNestedRootAuthority(t *testing.T) {
 	active := map[string]struct{}{"az-active": {}}
 	blocked := map[string]string{"az-blocked": "dependency remains open"}
 
-	if got := orchestrationSkipReason("az-nested", nested, active, blocked); got != "nested-root-start-orchestrator-session: az session start az-nested" {
+	if got := orchestrationSkipReason("az-nested", nested, active, blocked); got != "nested-root-start-orchestrator-session: az orchestrator-session start --root az-nested" {
 		t.Fatalf("nested skip reason = %q", got)
 	}
 	if got := orchestrationSkipReason("az-active", nested, active, blocked); got != "session-already-running" {

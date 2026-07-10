@@ -79,6 +79,26 @@ func main() {
 	commandArgs := args[1:]
 
 	switch command {
+	case "orchestrator-session":
+		if len(commandArgs) == 0 {
+			fmt.Fprintln(os.Stderr, "Usage: az orchestrator-session <start|attach|status> [--root <issue-id>] [--project <project-id>] [--json]")
+			os.Exit(1)
+		}
+		subcommand := commandArgs[0]
+		if subcommand != "start" && subcommand != "attach" && subcommand != "status" {
+			fmt.Fprintf(os.Stderr, "Unknown orchestrator-session command: %s\n", subcommand)
+			os.Exit(1)
+		}
+		opts, err := cli.ParseOrchestratorSessionArgs(subcommand, commandArgs[1:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Usage: az orchestrator-session <start|attach|status> [--root <issue-id>] [--project <project-id>] [--json]")
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := runCommand(cfg, func(deps *cli.Dependencies) error { return cli.OrchestratorSessionCommand(deps, subcommand, opts) }); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	case "session":
 		if len(commandArgs) == 0 {
 			fmt.Fprintf(os.Stderr, "Usage: az session <start|attach|stop|status|capture|diagnose|restart-all|resolve-conflict> [arguments]\n")
@@ -1171,7 +1191,7 @@ func main() {
 		case "status":
 			opts, err := cli.ParseOrchestrateStatusArgs(commandArgs[1:])
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az orchestrate status --root <issue-id> [--project <project-id>] [--since <seq>] [--limit <n>] [--json] [--summary|--full]\n")
+				fmt.Fprintln(os.Stderr, orchestrateStatusUsage)
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -1184,7 +1204,7 @@ func main() {
 		case "start":
 			opts, err := cli.ParseOrchestrateStartArgs(commandArgs[1:])
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az orchestrate start --root <issue-id> [--project <project-id>] [--limit <n>] [--issue <issue-id> ...] [--json]\n")
+				fmt.Fprintln(os.Stderr, orchestrateStartUsage)
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -1210,7 +1230,7 @@ func main() {
 		case "watch":
 			opts, err := cli.ParseOrchestrateWatchArgs(commandArgs[1:])
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az orchestrate watch --root <issue-id> [--project <project-id>] [--since <seq>] [--jsonl] [--once] [--verbose|--full]\n")
+				fmt.Fprintln(os.Stderr, orchestrateWatchUsage)
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -1275,7 +1295,7 @@ func main() {
 		case "complete-check":
 			opts, err := cli.ParseOrchestrateCompleteCheckArgs(commandArgs[1:])
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az orchestrate complete-check --root <issue-id> [--project <project-id>] [--json]\n")
+				fmt.Fprintln(os.Stderr, orchestrateCompleteCheckUsage)
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

@@ -7,9 +7,24 @@ import (
 )
 
 const (
-	CommandOrchestrationSnapshot = "orchestration.snapshot"
-	CommandOrchestrationIntent   = "orchestration.intent"
+	CommandOrchestrationSnapshot     = "orchestration.snapshot"
+	CommandOrchestrationIntent       = "orchestration.intent"
+	CommandOrchestratorSessionStart  = "orchestration.session.start"
+	CommandOrchestratorSessionAttach = "orchestration.session.attach"
+	CommandOrchestratorSessionStatus = "orchestration.session.status"
 )
+
+type OrchestratorSessionRequest struct {
+	Scope domain.OrchestrationScope `json:"scope"`
+}
+
+type OrchestratorSessionResult struct {
+	Scope       domain.OrchestrationScope    `json:"scope"`
+	SessionID   string                       `json:"session_id,omitempty"`
+	Disposition string                       `json:"disposition,omitempty"`
+	Lifecycle   domain.OrchestratorLifecycle `json:"lifecycle,omitempty"`
+	Live        bool                         `json:"live"`
+}
 
 type OrchestrationSnapshotRequest struct {
 	Scope domain.OrchestrationScope `json:"scope"`
@@ -51,6 +66,14 @@ type OrchestrationSnapshot struct {
 	ContinuationContract   string                       `json:"continuation_contract,omitempty"`
 	Constraints            OrchestrationConstraints     `json:"constraints"`
 	Health                 OrchestrationHealth          `json:"health"`
+	Completion             OrchestrationCompletion      `json:"completion"`
+}
+
+type OrchestrationCompletion struct {
+	Scope   domain.OrchestrationScope    `json:"scope"`
+	State   domain.OrchestratorLifecycle `json:"state,omitempty"`
+	Pass    bool                         `json:"pass"`
+	Reasons []string                     `json:"reasons,omitempty"`
 }
 
 type OrchestrationConstraints struct {

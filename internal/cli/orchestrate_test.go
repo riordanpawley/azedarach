@@ -52,9 +52,13 @@ func TestParseOrchestrateStatusArgsRejectsSummaryFull(t *testing.T) {
 	}
 }
 
-func TestParseOrchestrateStatusArgs_RequiresRoot(t *testing.T) {
-	if _, err := ParseOrchestrateStatusArgs([]string{"--since", "10"}); err == nil {
-		t.Fatal("expected error for missing --root")
+func TestParseOrchestrateStatusArgs_AllowsResolvedScope(t *testing.T) {
+	opts, err := ParseOrchestrateStatusArgs([]string{"--since", "10"})
+	if err != nil {
+		t.Fatalf("rootless parse: %v", err)
+	}
+	if opts.RootIssueID != "" || opts.SinceSeq != 10 {
+		t.Fatalf("options = %#v", opts)
 	}
 }
 
@@ -2379,7 +2383,7 @@ func TestOrchestrateStartSkipsNestedRootWithSessionStartAdvice(t *testing.T) {
 	if !slices.Equal(result.NestedRoots, []string{nested.String()}) {
 		t.Fatalf("nested roots = %+v, want %s", result.NestedRoots, nested.String())
 	}
-	if got := result.Skipped[nested.String()]; !strings.Contains(got, "nested-root-start-orchestrator-session") || !strings.Contains(got, "az session start "+nested.String()) {
+	if got := result.Skipped[nested.String()]; !strings.Contains(got, "nested-root-start-orchestrator-session") || !strings.Contains(got, "az orchestrator-session start --root "+nested.String()) {
 		t.Fatalf("skipped[%s] = %q, want session start advice", nested.String(), got)
 	}
 

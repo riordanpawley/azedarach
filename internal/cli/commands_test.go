@@ -608,7 +608,7 @@ func (f *fakeDaemonTransport) emulateOrchestrationIntent(ctx context.Context, re
 	for _, issueID := range requested {
 		if _, ok := runnable[issueID]; !ok {
 			if _, ok := nestedRoots[issueID]; ok {
-				result.Skipped[issueID] = fmt.Sprintf("nested-root-start-orchestrator-session: az session start %s", issueID)
+				result.Skipped[issueID] = fmt.Sprintf("nested-root-start-orchestrator-session: az orchestrator-session start --root %s", issueID)
 			} else if _, ok := active[issueID]; ok {
 				result.Skipped[issueID] = "session-already-running"
 			} else if reason := f.lastGraphReadiness.Blocked[issueID]; reason != "" {

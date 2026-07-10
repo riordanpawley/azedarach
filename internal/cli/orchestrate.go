@@ -499,9 +499,6 @@ func ParseOrchestrateStatusArgs(args []string) (OrchestrateStatusOptions, error)
 	if fs.NArg() != 0 {
 		return OrchestrateStatusOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
-	if strings.TrimSpace(opts.RootIssueID) == "" {
-		return OrchestrateStatusOptions{}, fmt.Errorf("missing required flag: --root")
-	}
 	if opts.Limit < 1 {
 		return OrchestrateStatusOptions{}, fmt.Errorf("limit must be >= 1")
 	}
@@ -534,9 +531,6 @@ func ParseOrchestrateStartArgs(args []string) (OrchestrateStartOptions, error) {
 	}
 	if fs.NArg() != 0 {
 		return OrchestrateStartOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
-	}
-	if strings.TrimSpace(opts.RootIssueID) == "" {
-		return OrchestrateStartOptions{}, fmt.Errorf("missing required flag: --root")
 	}
 	if opts.Limit < 1 {
 		return OrchestrateStartOptions{}, fmt.Errorf("limit must be >= 1")
@@ -604,9 +598,6 @@ func ParseOrchestrateWatchArgs(args []string) (OrchestrateWatchOptions, error) {
 	if fs.NArg() != 0 {
 		return OrchestrateWatchOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
-	if strings.TrimSpace(opts.RootIssueID) == "" {
-		return OrchestrateWatchOptions{}, fmt.Errorf("missing required flag: --root")
-	}
 	if explicitFlags["compact"] && opts.Compact && (opts.Full || opts.Verbose) {
 		return OrchestrateWatchOptions{}, fmt.Errorf("--compact cannot be combined with --verbose or --full")
 	}
@@ -668,9 +659,6 @@ func ParseOrchestrateCompleteCheckArgs(args []string) (OrchestrateCompleteCheckO
 	}
 	if fs.NArg() != 0 {
 		return OrchestrateCompleteCheckOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
-	}
-	if strings.TrimSpace(opts.RootIssueID) == "" {
-		return OrchestrateCompleteCheckOptions{}, fmt.Errorf("missing required flag: --root")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -784,8 +772,16 @@ func ParseOrchestrateMessageArgs(args []string) (OrchestrateMessageOptions, erro
 }
 
 func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject := applyOrchestrationProjectOverride(deps, opts.Project)
 	defer restoreProject()
+	scope, err := resolveCLIOrchestrationScope(opts.RootIssueID)
+	if err != nil {
+		return err
+	}
+	if scope.Kind == domain.OrchestrationScopeProject {
+		return projectOrchestrateStatusCommand(deps, opts, scope)
+	}
+	opts.RootIssueID = scope.RootIssueID.String()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
@@ -1010,8 +1006,16 @@ func ObserveCommand(deps *Dependencies, opts ObserveOptions) error {
 }
 
 func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject := applyOrchestrationProjectOverride(deps, opts.Project)
 	defer restoreProject()
+	scope, err := resolveCLIOrchestrationScope(opts.RootIssueID)
+	if err != nil {
+		return err
+	}
+	if scope.Kind == domain.OrchestrationScopeProject {
+		return projectOrchestrateStartCommand(deps, opts, scope)
+	}
+	opts.RootIssueID = scope.RootIssueID.String()
 
 	result, err := orchestrateStart(deps, opts)
 	if err != nil {
@@ -1165,7 +1169,7 @@ func orchestrateGroup(deps *Dependencies, opts OrchestrateGroupOptions) (orchest
 		Grouped:       grouped,
 		Advice: []string{
 			fmt.Sprintf("inspect updated root: az orchestrate status --root %s --json", rootID.String()),
-			fmt.Sprintf("start nested root orchestrator when ready: az session start %s", nestedID.String()),
+			fmt.Sprintf("start nested root orchestrator when ready: az orchestrator-session start --root %s", nestedID.String()),
 		},
 	}
 	if len(nested) > 0 && nestedAfter.IssueID != "" {
@@ -1845,7 +1849,7 @@ func printOrchestrateStartResult(result orchestrateStartResult) {
 	if len(result.NestedRoots) > 0 {
 		fmt.Println("Nested roots:")
 		for _, id := range result.NestedRoots {
-			fmt.Printf("- %s: start its orchestrator session with `az session start %s`\n", id, id)
+			fmt.Printf("- %s: start its orchestrator session with `az orchestrator-session start --root %s`\n", id, id)
 		}
 	}
 	if len(result.Launched) > 0 {
@@ -1890,8 +1894,16 @@ func printOrchestrateStartResult(result orchestrateStartResult) {
 }
 
 func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject := applyOrchestrationProjectOverride(deps, opts.Project)
 	defer restoreProject()
+	scope, err := resolveCLIOrchestrationScope(opts.RootIssueID)
+	if err != nil {
+		return err
+	}
+	if scope.Kind == domain.OrchestrationScopeProject {
+		return projectOrchestrateWatchCommand(deps, opts, scope)
+	}
+	opts.RootIssueID = scope.RootIssueID.String()
 
 	watchCtx, stopWatch := newWatchCommandContext("orchestrate watch")
 	defer stopWatch()
@@ -2175,8 +2187,16 @@ func shouldContinueOrchestrateWatchAfterError(err error) bool {
 }
 
 func OrchestrateCompleteCheckCommand(deps *Dependencies, opts OrchestrateCompleteCheckOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject := applyOrchestrationProjectOverride(deps, opts.Project)
 	defer restoreProject()
+	scope, err := resolveCLIOrchestrationScope(opts.RootIssueID)
+	if err != nil {
+		return err
+	}
+	if scope.Kind == domain.OrchestrationScopeProject {
+		return projectOrchestrateCompleteCheckCommand(deps, opts, scope)
+	}
+	opts.RootIssueID = scope.RootIssueID.String()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()

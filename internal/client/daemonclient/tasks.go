@@ -1207,6 +1207,26 @@ func (c *Client) ApplyOrchestrationIntent(ctx context.Context, request protocol.
 	return out, nil
 }
 
+func (c *Client) StartOrchestratorSession(ctx context.Context, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+	return c.orchestratorSession(ctx, protocol.CommandOrchestratorSessionStart, request)
+}
+
+func (c *Client) AttachOrchestratorSession(ctx context.Context, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+	return c.orchestratorSession(ctx, protocol.CommandOrchestratorSessionAttach, request)
+}
+
+func (c *Client) OrchestratorSessionStatus(ctx context.Context, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+	return c.orchestratorSession(ctx, protocol.CommandOrchestratorSessionStatus, request)
+}
+
+func (c *Client) orchestratorSession(ctx context.Context, command string, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+	var out protocol.OrchestratorSessionResult
+	if err := c.commandJSON(ctx, command, request, &out); err != nil {
+		return protocol.OrchestratorSessionResult{}, err
+	}
+	return out, nil
+}
+
 // TaskCompleteCheck returns the daemon-owned completion gate for a root issue.
 func (c *Client) TaskCompleteCheck(ctx context.Context, rootIssueID string) (TaskCompleteCheckResult, error) {
 	parsedRootID, err := naming.ParseIssueID(rootIssueID)

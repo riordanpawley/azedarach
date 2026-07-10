@@ -41,6 +41,7 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 	}
 	requestedScope := body.Scope
 	lease, found, err := d.resolveOrchestratorSession(ctx, d.projectID(req.Meta), body.SessionID)
+	leaseResolvedFromSession := found
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -56,7 +57,14 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 	if _, err := domain.NewOrchestratorIdentity(d.projectID(req.Meta), body.Scope); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 	}
-	if found && body.ObservedCursor > lease.Cursor && requestedScope == lease.Identity.Scope {
+	if !found && strings.TrimSpace(body.SessionID) == "" && d.sessionRuntimeStateStoreIfConfigured(d.projectID(req.Meta)) != nil {
+		identity, _ := domain.NewOrchestratorIdentity(d.projectID(req.Meta), body.Scope)
+		lease, found, err = daemonstate.NewOrchestratorLeaseAuthority(d.sessionRuntimeStateStoreIfConfigured(d.projectID(req.Meta))).Get(ctx, identity)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("load orchestration scope lease: %v", err)), nil
+		}
+	}
+	if leaseResolvedFromSession && body.ObservedCursor > lease.Cursor && requestedScope == lease.Identity.Scope {
 		lease, err = daemonstate.NewOrchestratorLeaseAuthority(d.sessionRuntimeStateStoreIfConfigured(d.projectID(req.Meta))).AdvanceCursor(ctx, lease.Identity, body.ObservedCursor)
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("advance orchestration cursor: %v", err)), nil
@@ -88,7 +96,9 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 	snapshot.Role = "orchestrator"
 	snapshot.SessionID = strings.TrimSpace(body.SessionID)
 	if found {
+		snapshot.SessionID = lease.SessionID
 		snapshot.Lifecycle = lease.Lifecycle
+		snapshot.Completion.State = lease.Lifecycle
 		snapshot.Cursor = lease.Cursor
 		applyOrchestratorContinuationProjection(&snapshot, lease)
 	}
@@ -279,7 +289,31 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	explainOrchestrationCandidates(&snapshot)
 	a.enrichStewardshipContext(ctx, projectID, &snapshot)
 	sortOrchestrationSnapshot(&snapshot, tasksByID)
+	snapshot.Completion = projectOrchestrationCompletion(snapshot)
 	return snapshot, nil
+}
+
+func projectOrchestrationCompletion(snapshot protocol.OrchestrationSnapshot) protocol.OrchestrationCompletion {
+	reasons := make([]string, 0, 6)
+	checks := []struct {
+		count int
+		label string
+	}{
+		{snapshot.Health.OpenIssueCount, "open issues remain"},
+		{len(snapshot.ActiveSessions), "active worker sessions remain"},
+		{len(snapshot.Pending), "session starts remain pending"},
+		{len(snapshot.Reviews), "review requests remain"},
+		{len(snapshot.Interactions), "human interactions remain unresolved"},
+	}
+	for _, check := range checks {
+		if check.count > 0 {
+			reasons = append(reasons, fmt.Sprintf("%d %s", check.count, check.label))
+		}
+	}
+	if !snapshot.Health.Healthy {
+		reasons = append(reasons, "board health is not healthy: "+strings.Join(snapshot.Health.Diagnostics, "; "))
+	}
+	return protocol.OrchestrationCompletion{Scope: snapshot.Scope, State: snapshot.Lifecycle, Pass: len(reasons) == 0, Reasons: reasons}
 }
 
 func orchestrationScopeCommands(scope domain.OrchestrationScope) []string {
@@ -627,7 +661,7 @@ func uniqueStrings(values []string) []string {
 
 func orchestrationSkipReason(issueID string, nestedRoots, active map[string]struct{}, blocked map[string]string) string {
 	if _, ok := nestedRoots[issueID]; ok {
-		return fmt.Sprintf("nested-root-start-orchestrator-session: az session start %s", issueID)
+		return fmt.Sprintf("nested-root-start-orchestrator-session: az orchestrator-session start --root %s", issueID)
 	}
 	if _, ok := active[issueID]; ok {
 		return "session-already-running"

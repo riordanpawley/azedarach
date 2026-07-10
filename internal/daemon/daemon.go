@@ -807,6 +807,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleOrchestrationSnapshot(ctx, req)
 	case protocol.CommandOrchestrationIntent:
 		return d.handleOrchestrationIntent(ctx, req)
+	case protocol.CommandOrchestratorSessionStart, protocol.CommandOrchestratorSessionAttach, protocol.CommandOrchestratorSessionStatus:
+		return d.handleOrchestratorSession(ctx, req)
 	case "task.complete_check":
 		return d.handleTaskCompleteCheck(ctx, req)
 	case "task.integration_readiness":

@@ -374,6 +374,10 @@ func printHelpForPath(path []string) bool {
 		fmt.Println(observeUsage)
 	case "orchestrate":
 		fmt.Println("Usage: az orchestrate <status|start|group|watch|observe|prompt|message|capture|complete-check|integrate|close-session> [arguments]")
+	case "orchestrator-session":
+		fmt.Println(orchestratorSessionUsage)
+	case "orchestrator-session start", "orchestrator-session attach", "orchestrator-session status":
+		fmt.Println(orchestratorSessionUsage)
 	case "orchestrate status":
 		fmt.Println(orchestrateStatusUsage)
 	case "orchestrate start":
@@ -477,15 +481,16 @@ const (
 	mailValidateEvidenceUsage     = "Usage: az mail validate-evidence [--body <json>|--file <path>] [--fix] [--template] [--json]"
 	evidenceValidateUsage         = "Usage: az evidence validate [--body <json>|--file <path>] [--fix] [--template] [--json]"
 	observeUsage                  = "Usage: az observe [--root <issue-id>] [--project <project-id>] [--json]"
-	orchestrateStatusUsage        = "Usage: az orchestrate status --root <issue-id> [--project <project-id>] [--since <seq>] [--limit <n>] [--json] [--summary|--full]"
-	orchestrateStartUsage         = "Usage: az orchestrate start --root <issue-id> [--project <project-id>] [--limit <n>] [--issue <issue-id> ...] [--json]"
+	orchestrateStatusUsage        = "Usage: az orchestrate status [--root <issue-id>] [--project <project-id>] [--since <seq>] [--limit <n>] [--json] [--summary|--full]"
+	orchestrateStartUsage         = "Usage: az orchestrate start [--root <issue-id>] [--project <project-id>] [--limit <n>] [--issue <issue-id> ...] [--override-board-health] [--json]"
 	orchestrateGroupUsage         = "Usage: az orchestrate group --root <issue-id> --nested <issue-id> --issue <issue-id> ... [--project <project-id>] [--json]"
-	orchestrateWatchUsage         = "Usage: az orchestrate watch --root <issue-id> [--project <project-id>] [--since <seq>] [--jsonl] [--once] [--verbose|--full]"
+	orchestrateWatchUsage         = "Usage: az orchestrate watch [--root <issue-id>] [--project <project-id>] [--since <seq>] [--jsonl] [--once] [--verbose|--full]"
 	orchestrateObserveUsage       = "Usage: az orchestrate observe --root <issue-id> [--project <project-id>] [--json]"
 	orchestratePromptUsage        = "Usage: az orchestrate prompt --issue <issue-id> [--root <issue-id>] [--coordination native|mailbox] [--project <project-id>] [--json]"
 	orchestrateMessageUsage       = "Usage: az orchestrate message --root <issue-id> --issue <issue-id> --body <text> [--type <event-type>] [--force-self-delivery] [--project <project-id>] [--json]"
 	orchestrateCaptureUsage       = "Usage: az orchestrate capture --issue <issue-id> [--project <project-id>] [--lines N] [--json]"
-	orchestrateCompleteCheckUsage = "Usage: az orchestrate complete-check --root <issue-id> [--project <project-id>] [--json]"
+	orchestrateCompleteCheckUsage = "Usage: az orchestrate complete-check [--root <issue-id>] [--project <project-id>] [--json]"
+	orchestratorSessionUsage      = "Usage: az orchestrator-session <start|attach|status> [--root <issue-id>] [--project <project-id>] [--json]"
 	orchestrateIntegrateUsage     = "Usage: az orchestrate integrate --issue <issue-id> [--apply] [--project <project-id>] [--json]"
 	orchestrateCloseSessionUsage  = "Usage: az orchestrate close-session --issue <issue-id> [--project <project-id>] [--json]"
 )
