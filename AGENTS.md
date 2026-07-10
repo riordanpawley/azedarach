@@ -8,6 +8,12 @@ Agent instructions for this repository. This file is the canonical source of age
 - Stack: Go + Bubble Tea + Lip Gloss
 - Purpose: TUI Kanban board for orchestrating parallel AI sessions with issue tracking
 
+## Best-Outcome Development Principle
+
+1. Optimize for the strongest durable outcome, not the smallest, fastest, or most locally convenient change. The size of the required implementation, migration, or refactor is not by itself a reason to accept a weaker design.
+2. Before committing to an approach, actively look beyond the obvious patch: examine root causes, adjacent constraints, architectural opportunities, and unconventional options that could produce a materially better result.
+3. When the best path substantially expands the requested scope, make that expansion and its benefits explicit. Pursue it when it remains within the task's authority; otherwise, ask for the authority or decision needed rather than silently substituting an inferior shortcut.
+
 ## Working Directory
 
 Run commands from repo root:
