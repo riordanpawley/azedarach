@@ -1168,6 +1168,9 @@ func (c *Client) runIssueStateModelV2CutoverTransaction(ctx context.Context, db 
 		return err
 	}
 
+	if err := normalizeResidualBlockedStatusesForStateModelV2(ctx, tx); err != nil {
+		return fmt.Errorf("apply migration %s: normalize residual blocked statuses: %w", id, err)
+	}
 	if err := mapIssueStateModelV2Rows(ctx, tx); err != nil {
 		return fmt.Errorf("apply migration %s: map v1 statuses: %w", id, err)
 	}
@@ -1301,6 +1304,17 @@ func validateIssueStateModelV2Rows(ctx context.Context, db sqlIssueQueryer) erro
 		if count > 0 {
 			return fmt.Errorf("%s: %d rows", check.name, count)
 		}
+	}
+	return nil
+}
+
+func normalizeResidualBlockedStatusesForStateModelV2(ctx context.Context, tx *sql.Tx) error {
+	script, err := fs.ReadFile(migrationFiles, "migrations/0012_blocked_status_to_open.sql")
+	if err != nil {
+		return fmt.Errorf("read blocked status migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, string(script)); err != nil {
+		return fmt.Errorf("run blocked status migration: %w", err)
 	}
 	return nil
 }

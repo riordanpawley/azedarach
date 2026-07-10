@@ -96,6 +96,63 @@ func TestClient_MigratesIssueStateModelV2WithBackup(t *testing.T) {
 	assert.True(t, applied)
 }
 
+func TestClient_IssueStateModelV2MigratesResidualBlockedStatus(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedIssueStateModelV1DB(t, dbPath)
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO issues (id, title, status, priority, issue_type, created_at, updated_at)
+		VALUES ('az-blocked', 'Residual blocked issue', 'blocked', 2, 'task', ?, ?)
+	`, now, now)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	client := NewClientAtPath(dbPath, slog.Default())
+	db, err = client.dbHandle()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, client.CloseDB()) })
+
+	var (
+		status        string
+		lifecycle     string
+		closedOutcome string
+		reviewState   string
+	)
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT status, lifecycle_state, closed_outcome, review_state
+		FROM issues
+		WHERE id = 'az-blocked'
+	`).Scan(&status, &lifecycle, &closedOutcome, &reviewState))
+	assert.Equal(t, "open", status)
+	assert.Equal(t, "open", lifecycle)
+	assert.Equal(t, "none", closedOutcome)
+	assert.Equal(t, "none", reviewState)
+
+	var blockerStatus, blockerLifecycle string
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT status, lifecycle_state
+		FROM issues
+		WHERE id = 'az-blocked-legacy-blocker'
+	`).Scan(&blockerStatus, &blockerLifecycle))
+	assert.Equal(t, "open", blockerStatus)
+	assert.Equal(t, "open", blockerLifecycle)
+
+	var depCount int
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM issue_dependencies
+		WHERE issue_id = 'az-blocked'
+			AND depends_on_id = 'az-blocked-legacy-blocker'
+			AND dependency_type = 'blocks'
+			AND tombstoned_at IS NULL
+	`).Scan(&depCount))
+	assert.Equal(t, 1, depCount)
+}
+
 func TestClient_IssueStateModelV2MigrationFailureRollsBackLiveSchema(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
