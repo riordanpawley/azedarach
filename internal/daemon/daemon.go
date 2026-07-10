@@ -343,6 +343,7 @@ func New(cfg Config) *Daemon {
 	specService.daemon = d
 	specHandler := daemonhandlers.NewSpecHandler(specService)
 	decisionHandler := daemonhandlers.NewDecisionHandler(issueDecisionService{daemon: d})
+	interactionHandler := daemonhandlers.NewInteractionHandler(issueInteractionService{daemon: d})
 	learnHandler := daemonhandlers.NewLearnHandler(issueLearnService{daemon: d})
 	var accountService daemonhandlers.AIAccountService
 	if service, err := aiaccount.New(aiaccount.Config{}); err != nil {
@@ -458,6 +459,7 @@ func New(cfg Config) *Daemon {
 		prHandler,
 		specHandler,
 		decisionHandler,
+		interactionHandler,
 		learnHandler,
 		accountHandler,
 		runtime,
