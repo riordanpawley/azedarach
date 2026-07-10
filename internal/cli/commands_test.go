@@ -12101,6 +12101,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if output == "" {
 		t.Fatal("prime output is empty")
 	}
+	if !strings.Contains(output, "your first action must always be to encode the approved plan into Azedarach before editing code") {
+		t.Fatalf("prime output missing approved-plan encoding order: %q", output)
+	}
+	if !strings.Contains(output, "Do not create needless decomposition for a single-scope plan") {
+		t.Fatalf("prime output missing single-scope plan guidance: %q", output)
+	}
 	if strings.Contains(output, "Active issue ID:") || strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=") {
 		t.Fatalf("prime without issue rendered active issue context: %q", output)
 	}

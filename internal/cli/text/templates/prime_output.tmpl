@@ -8,7 +8,8 @@ Primer evidence key: `{{ .PrimeEvidenceKey }}`
 Start here:
 1. {{ if .ActiveIssueID }}Run `az issue get {{ .ActiveIssueID }}`.{{ else }}Identify the issue with `az issue get <issue-id>` or create a fully described issue.{{ end }}
 2. {{ if .SpecEnabled }}{{ if .ActiveIssueID }}Run `az spec read --issue {{ .ActiveIssueID }}`{{ else }}Run `az spec read --issue <issue-id>`{{ end }} before behavior changes.{{ else }}Spec workflows are disabled for this project.{{ end }}
-3. Continue the requested work. Do not stop after restating the issue or proposing a plan unless the user asked for planning only.
+3. When the user approves an implementation plan, your first action must always be to encode the approved plan into Azedarach before editing code: update the active issue's executable context and create any child issues, dependency edges, or requirement links the plan calls for. Do not create needless decomposition for a single-scope plan.
+4. Continue the requested work. Do not stop after restating the issue or proposing a plan unless the user asked for planning only.
 
 {{ if .ActiveIssueClosedWarning }}{{ .ActiveIssueClosedWarning }}
 
@@ -22,6 +23,7 @@ Start here:
 - Use `az issue` as the task authority. Record non-trivial work in issues and perform implementation in the issue worktree/session.
 - When the user asks to start an issue, start or attach its session; changing lifecycle state alone does not start execution. Agents start sessions only on explicit user or orchestrator direction.
 - Create issues with enough description and acceptance context to execute; a title alone is not a usable handoff.
+- Plan approval is the transition from discussion to durable execution state. Encode the approved plan in `az issue` and the relevant graph/spec records before implementation begins.
 - Keep the issue state aligned with what is happening now. Resume active work before editing; do not leave an issue review-ready while making follow-up changes.
 - Record progress, validation, review facts, risks, blockers, and closeout with `az issue record`. Notes are terse human scratchpad, not the automation source of truth.
 
