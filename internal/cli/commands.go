@@ -8642,10 +8642,12 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 
 func renderPrimeOrchestratorExitContract(rootIssueID string) string {
 	return fmt.Sprintf(`Orchestrator Exit Contract (root %s):
-- Keep running the status/start/watch/integrate/close loop until `+"`az orchestrate complete-check --root %s`"+` passes, then run final validation and close the root.
+- Keep running the status/start/watch/integrate loop until `+"`az orchestrate complete-check --root %s`"+` passes, then run final validation and request human review by setting the root `+"`in_review`"+`.
 - Treat `+"`worker-integration-ready`"+` and `+"`in_review`"+` as evidence to inspect and validate; if accepted, run `+"`az issue close --id <worker>`"+` instead of handing off to the user.
 - Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `+"`az issue close --id <child-issue>`"+`, and leave any child `+"`open`"+` or `+"`in_progress`"+` only with an explicit blocker, dependency, or remaining-scope rationale.
-- Send the final assistant response only after root completion, a named hard blocker, or an explicit user pause.
+- Root review handoff is non-terminal: keep the root tmux session and worktree alive. Do not run `+"`az session stop`"+`, `+"`az orchestrate close-session`"+`, or `+"`az issue close`"+` merely because the root is waiting for human review.
+- Close/integrate the root only after explicit human acceptance; `+"`az issue close`"+` then owns terminal session and worktree cleanup.
+- Send the final assistant response after the root is handed off for human review, a named hard blocker, or an explicit user pause.
 `, rootIssueID, rootIssueID)
 }
 

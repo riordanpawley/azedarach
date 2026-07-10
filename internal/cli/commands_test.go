@@ -12362,14 +12362,26 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "close accepted child issues with `az issue close --id <issue-id>`; that command owns merge, session stop, worktree cleanup, and issue closure") {
 		t.Fatalf("prime output missing worker integration guidance: %q", output)
 	}
-	if !strings.Contains(output, "Status semantics: use `open` for not-yet-active work, `in_progress` while actively working, `in_review` when implementation is complete") {
-		t.Fatalf("prime output missing status semantics guidance: %q", output)
+	if !strings.Contains(output, "Durable issue state is a discriminated model: lifecycle is `backlog`, `open`, `active`, or `closed`") {
+		t.Fatalf("prime output missing durable lifecycle guidance: %q", output)
 	}
-	if !strings.Contains(output, "before starting or resuming implementation, review, re-review, or follow-up fixes, move the issue to `in_progress` even if it was `in_review`") {
+	if !strings.Contains(output, "closed outcome is `completed` or `cancelled`; review readiness, archive, and tombstone/delete are separate dimensions") {
+		t.Fatalf("prime output missing orthogonal issue-state guidance: %q", output)
+	}
+	if !strings.Contains(output, "Review handoff is non-terminal: `az issue update <issue-id> --status in_review` records review readiness and must preserve the issue's tmux session and worktree") {
+		t.Fatalf("prime output missing review handoff resource-preservation guidance: %q", output)
+	}
+	if !strings.Contains(output, "Do not stop the session, clean up the worktree, or run `az issue close` merely to request human/orchestrator review") {
+		t.Fatalf("prime output missing review handoff destructive-command guardrail: %q", output)
+	}
+	if !strings.Contains(output, "before starting or resuming implementation, review, re-review, or follow-up fixes, move the issue to `in_progress`") {
 		t.Fatalf("prime output missing agent-active status transition guidance: %q", output)
 	}
-	if !strings.Contains(output, "reserve `in_review` for the waiting-for-human/orchestrator handoff") {
+	if !strings.Contains(output, "use `in_review` only when the requested work is complete and waiting for human/orchestrator review or integration") {
 		t.Fatalf("prime output missing in-review handoff guidance: %q", output)
+	}
+	if !strings.Contains(output, "Board views are configurable projections over issue facts") || !strings.Contains(output, "Derived columns such as In Review, Waiting Human, and Waiting AI are not persisted statuses") {
+		t.Fatalf("prime output missing configurable board projection guidance: %q", output)
 	}
 	if !strings.Contains(output, "Blocked is not an issue status. Represent blocked work with dependency edges") {
 		t.Fatalf("prime output missing blocked-as-graph guidance: %q", output)
@@ -13046,15 +13058,27 @@ func TestPrimeCommandShowsRootExitContractForAzOrchestrationRoot(t *testing.T) {
 	}
 	for _, want := range []string{
 		"az orchestrate complete-check --root az-root",
+		"request human review by setting the root `in_review`",
 		"Treat `worker-integration-ready` and `in_review` as evidence to inspect and validate",
 		"run `az issue close --id <worker>` instead of handing off to the user",
 		"Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `az issue close --id <child-issue>`",
 		"leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale",
-		"final assistant response only after root completion, a named hard blocker, or an explicit user pause",
+		"Root review handoff is non-terminal: keep the root tmux session and worktree alive",
+		"Do not run `az session stop`, `az orchestrate close-session`, or `az issue close` merely because the root is waiting for human review",
+		"Close/integrate the root only after explicit human acceptance",
+		"final assistant response after the root is handed off for human review, a named hard blocker, or an explicit user pause",
 		"az-child: review_ready - worker reported integration-ready evidence",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("prime output missing %q: %q", want, output)
+		}
+	}
+	for _, stale := range []string{
+		"then run final validation and close the root",
+		"final assistant response only after root completion",
+	} {
+		if strings.Contains(output, stale) {
+			t.Fatalf("prime output retained stale root close guidance %q: %q", stale, output)
 		}
 	}
 	if strings.Contains(output, "notes are not the exit contract source") {

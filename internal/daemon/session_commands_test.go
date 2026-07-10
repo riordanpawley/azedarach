@@ -7888,7 +7888,7 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 	if !strings.Contains(prompt, "use `az issue record az-42 --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant") {
 		t.Fatalf("prompt = %q, want concrete issue evidence command", prompt)
 	}
-	if !strings.Contains(prompt, "Before handing off, run the relevant validation/review checks, build the final `worker_evidence.v1` packet from actual results, run `az evidence validate --body '<json>'`, record or send that exact JSON packet, then set/leave the issue `in_review`. Do not rely on a prose-only final response as the handoff.") {
+	if !strings.Contains(prompt, "Before handing off, run the relevant validation/review checks, build the final `worker_evidence.v1` packet from actual results, run `az evidence validate --body '<json>'`, record or send that exact JSON packet, then set/leave the issue `in_review`. Review handoff is non-terminal: preserve this tmux session and worktree for orchestrator feedback; do not stop or close them yourself.") {
 		t.Fatalf("prompt = %q, want validated handoff sequence", prompt)
 	}
 	if !strings.Contains(prompt, "Omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array") {
@@ -7925,8 +7925,14 @@ func TestBuildStartWorkPromptOmitsMailboxGuidanceForStandaloneTask(t *testing.T)
 	if !strings.Contains(prompt, "Keep issue status current; record progress, follow-ups, validation, blockers, review facts, risks, and closeout evidence with `az issue record`; keep notes as terse human audit scratchpad only.") {
 		t.Fatalf("prompt = %q, want contributor evidence-first status guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Use `in_progress` while actively working, `in_review` when complete and awaiting review/integration") {
+	if !strings.Contains(prompt, "Use `in_progress` while actively working and `in_review` when complete and awaiting review/integration") {
 		t.Fatalf("prompt = %q, want contributor status semantics", prompt)
+	}
+	if !strings.Contains(prompt, "Review handoff is non-terminal: preserve the tmux session and worktree; do not stop or close them while waiting for human feedback") {
+		t.Fatalf("prompt = %q, want contributor review handoff resource preservation", prompt)
+	}
+	if !strings.Contains(prompt, "Use `closed` only after explicit acceptance/integration and `cancelled` only for a terminal non-integrated outcome") {
+		t.Fatalf("prompt = %q, want contributor terminal lifecycle semantics", prompt)
 	}
 	if !strings.Contains(prompt, "Represent blocked work with dependency edges and issue record evidence, not by using `in_review`") {
 		t.Fatalf("prompt = %q, want contributor blocked-as-graph guidance", prompt)
@@ -7962,6 +7968,15 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "az orchestrate complete-check --root <issue-id>") {
 		t.Fatalf("prompt = %q, want complete-check instruction", prompt)
+	}
+	if !strings.Contains(prompt, "set the root `in_review` and keep its tmux session/worktree alive for human review") {
+		t.Fatalf("prompt = %q, want non-terminal root review handoff", prompt)
+	}
+	if !strings.Contains(prompt, "Close/integrate the root only after explicit human acceptance") {
+		t.Fatalf("prompt = %q, want explicit root acceptance gate", prompt)
+	}
+	if strings.Contains(prompt, "Close only when `az orchestrate complete-check") {
+		t.Fatalf("prompt = %q, retained stale complete-check-implies-close guidance", prompt)
 	}
 	if !strings.Contains(prompt, "Start this root's direct runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`") {
 		t.Fatalf("prompt = %q, want direct leaf start guidance", prompt)
