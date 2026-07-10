@@ -16,8 +16,8 @@ type InteractionResolutionPlan struct {
 
 // PlanInteractionResolution converts the final answer audit into durable
 // effects. Routine answers remain interaction evidence only. Material and
-// critical answers always become traceable through either a new or existing
-// decision record.
+// critical significance permits explicitly approved durable effects but never
+// implies that a decision or requirement mutation was approved.
 func PlanInteractionResolution(request InteractionRequest) (InteractionResolutionPlan, error) {
 	if request.State != InteractionResolved || request.FinalAnswer == nil {
 		return InteractionResolutionPlan{}, fmt.Errorf("interaction resolution plan requires a resolved request with a final answer")
@@ -36,17 +36,16 @@ func PlanInteractionResolution(request InteractionRequest) (InteractionResolutio
 	}
 
 	plan.RequirementEffects = append([]InteractionRequirementEffect(nil), answer.ApprovedRequirementEffects...)
-	if answer.ApprovedDecisionEffect != nil {
-		decision := *answer.ApprovedDecisionEffect
-		decision.ExistingDecisionID = strings.TrimSpace(decision.ExistingDecisionID)
-		decision.Title = strings.TrimSpace(decision.Title)
-		decision.Rationale = strings.TrimSpace(decision.Rationale)
-		decision.Context = strings.TrimSpace(decision.Context)
-		decision.Consequences = strings.TrimSpace(decision.Consequences)
-		plan.Decision = &decision
-	} else {
-		plan.Decision = &InteractionDecisionEffect{}
+	if answer.ApprovedDecisionEffect == nil {
+		return plan, nil
 	}
+	decision := *answer.ApprovedDecisionEffect
+	decision.ExistingDecisionID = strings.TrimSpace(decision.ExistingDecisionID)
+	decision.Title = strings.TrimSpace(decision.Title)
+	decision.Rationale = strings.TrimSpace(decision.Rationale)
+	decision.Context = strings.TrimSpace(decision.Context)
+	decision.Consequences = strings.TrimSpace(decision.Consequences)
+	plan.Decision = &decision
 	if plan.Decision.ExistingDecisionID == "" {
 		if plan.Decision.Title == "" {
 			plan.Decision.Title = strings.TrimSpace(request.DecisionPacket.Summary)

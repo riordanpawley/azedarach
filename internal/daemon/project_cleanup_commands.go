@@ -19,6 +19,7 @@ const (
 	projectCleanupCategoryArchiveDone        = "archive_done"
 	projectCleanupCategoryRemoveOrphaned     = "remove_orphaned_worktrees"
 	projectCleanupCategoryCleanStaleSessions = "clean_stale_sessions"
+	projectCleanupCategoryAdvisorSessions    = protocol.ProjectCleanupCategoryAdvisorSessions
 	projectCleanupDoneRetentionDays          = 30
 	projectCleanupStaleSessionRetentionHours = 24
 )
@@ -86,6 +87,12 @@ func (d *Daemon) handleProjectCleanup(ctx context.Context, req protocol.RequestE
 				d.cfg.Logger.Warn("daemon project cleanup stale sessions failed", "project_id", projectID, "error", err)
 			}
 			result.SessionsCleaned += cleaned
+		case projectCleanupCategoryAdvisorSessions:
+			cleaned, err := d.cleanupAdvisorSessionsForProject(ctx, projectID)
+			if err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("cleanup advisor sessions: %v", err)), nil
+			}
+			result.AdvisorSessionsCleaned += cleaned
 		default:
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("daemon project cleanup ignored unknown category", "project_id", projectID, "category", category)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -14,6 +15,17 @@ import (
 )
 
 type issueInteractionService struct{ daemon *Daemon }
+
+func interactionStalenessPolicy(significance domain.InteractionSignificance) domain.InteractionStalenessPolicy {
+	switch significance {
+	case domain.InteractionSignificanceCritical:
+		return domain.InteractionStalenessPolicy{StaleAfter: 4 * time.Hour, ReminderInterval: 4 * time.Hour}
+	case domain.InteractionSignificanceMaterial:
+		return domain.InteractionStalenessPolicy{StaleAfter: 24 * time.Hour, ReminderInterval: 24 * time.Hour}
+	default:
+		return domain.InteractionStalenessPolicy{StaleAfter: 72 * time.Hour, ReminderInterval: 48 * time.Hour}
+	}
+}
 
 func (s issueInteractionService) client(ctx context.Context) (*issues.Client, error) {
 	projectID := daemonProjectIDFromContext(ctx)
@@ -34,7 +46,7 @@ func (s issueInteractionService) CreateInteraction(ctx context.Context, in proto
 	if e = c.CreateInteraction(ctx, in.Request); e != nil {
 		return protocol.InteractionResponseBody{}, e
 	}
-	return protocol.InteractionResponseBody{Request: in.Request}, nil
+	return s.response(in.Request, time.Now().UTC()), nil
 }
 func (s issueInteractionService) ListInteractions(ctx context.Context, in protocol.InteractionListRequestBody) (protocol.InteractionListResponseBody, error) {
 	c, e := s.client(ctx)
@@ -47,7 +59,15 @@ func (s issueInteractionService) ListInteractions(ctx context.Context, in protoc
 	} else {
 		rs, e = c.ListInteractions(ctx)
 	}
-	return protocol.InteractionListResponseBody{Requests: rs}, e
+	if e == nil {
+		rs, e = s.reconcileStaleness(ctx, c, rs, time.Now().UTC())
+	}
+	ages := make(map[string]domain.InteractionAgeView, len(rs))
+	now := time.Now().UTC()
+	for _, r := range rs {
+		ages[r.ID] = r.AgeView(now, interactionStalenessPolicy(r.Significance))
+	}
+	return protocol.InteractionListResponseBody{Requests: rs, Ages: ages}, e
 }
 func (s issueInteractionService) GetInteraction(ctx context.Context, in protocol.InteractionGetRequestBody) (protocol.InteractionResponseBody, error) {
 	c, e := s.client(ctx)
@@ -61,7 +81,12 @@ func (s issueInteractionService) GetInteraction(ctx context.Context, in protocol
 	if !ok {
 		return protocol.InteractionResponseBody{}, domain.ErrNotFound
 	}
-	return protocol.InteractionResponseBody{Request: r}, nil
+	rs, e := s.reconcileStaleness(ctx, c, []domain.InteractionRequest{r}, time.Now().UTC())
+	if e != nil {
+		return protocol.InteractionResponseBody{}, e
+	}
+	r = rs[0]
+	return s.response(r, time.Now().UTC()), nil
 }
 func (s issueInteractionService) MutateInteraction(ctx context.Context, command string, in protocol.InteractionMutationRequestBody) (protocol.InteractionResponseBody, error) {
 	c, e := s.client(ctx)
@@ -76,19 +101,22 @@ func (s issueInteractionService) MutateInteraction(ctx context.Context, command 
 		return protocol.InteractionResponseBody{}, domain.ErrNotFound
 	}
 	now := time.Now().UTC()
-	discussAttached := false
+	runtimeResult := advisorSessionRuntimeResult{}
 	switch command {
 	case protocol.CommandInteractionDiscuss:
+		if !interactionRuntimeActor(in.Actor) {
+			return protocol.InteractionResponseBody{}, fmt.Errorf("advisor sessions have no discussion lifecycle authority")
+		}
 		projectID := daemonProjectIDFromContext(ctx)
 		priorSessionID := strings.TrimSpace(r.SessionID)
-		advisor, attached, acquireErr := s.daemon.ensureAdvisorSessionRuntime(ctx, projectID, r)
+		var acquireErr error
+		runtimeResult, acquireErr = s.daemon.ensureAdvisorSessionRuntime(ctx, projectID, r)
 		if acquireErr != nil {
 			return protocol.InteractionResponseBody{}, acquireErr
 		}
-		discussAttached = attached
-		r.SessionID = advisor.SessionID
-		if attached && r.State == domain.InteractionDiscussing && priorSessionID == advisor.SessionID {
-			return protocol.InteractionResponseBody{Request: r, SessionAttached: true}, nil
+		r.SessionID = runtimeResult.Session.SessionID
+		if r.State == domain.InteractionDiscussing && priorSessionID == runtimeResult.Session.SessionID {
+			return s.runtimeResponse(r, now, runtimeResult), nil
 		}
 		r, e = r.Transition(domain.InteractionDiscussing, in.ExpectedRevision, now)
 	case protocol.CommandInteractionPropose:
@@ -106,21 +134,58 @@ func (s issueInteractionService) MutateInteraction(ctx context.Context, command 
 		if !humanActor(in.Actor) && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(in.Actor)), "orchestrator") {
 			return protocol.InteractionResponseBody{}, fmt.Errorf("advisor sessions have no withdrawal authority")
 		}
+		r.Disposition = &domain.InteractionDispositionAudit{Actor: strings.TrimSpace(in.Actor), Reason: strings.TrimSpace(in.Reason), CreatedAt: now}
 		r, e = r.Transition(domain.InteractionWithdrawn, in.ExpectedRevision, now)
+	case protocol.CommandInteractionSupersede:
+		if !humanActor(in.Actor) && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(in.Actor)), "orchestrator") {
+			return protocol.InteractionResponseBody{}, fmt.Errorf("advisor sessions have no supersession authority")
+		}
+		if strings.TrimSpace(in.ReplacementID) == r.ID {
+			return protocol.InteractionResponseBody{}, fmt.Errorf("superseding interaction replacement must differ from the current request")
+		}
+		r.Disposition = &domain.InteractionDispositionAudit{Actor: strings.TrimSpace(in.Actor), Reason: strings.TrimSpace(in.Reason), ReplacementID: strings.TrimSpace(in.ReplacementID), CreatedAt: now}
+		r, e = r.Transition(domain.InteractionSuperseded, in.ExpectedRevision, now)
+	case protocol.CommandInteractionRecover:
+		if !interactionRuntimeActor(in.Actor) {
+			return protocol.InteractionResponseBody{}, fmt.Errorf("advisor sessions have no recovery authority")
+		}
+		var recoverErr error
+		runtimeResult, recoverErr = s.daemon.ensureAdvisorSessionRuntime(ctx, daemonProjectIDFromContext(ctx), r)
+		if recoverErr != nil {
+			return protocol.InteractionResponseBody{}, recoverErr
+		}
+		r, e = r.Recover(in.Actor, runtimeResult.Session.SessionID, in.ExpectedRevision, now)
 	}
 	if e != nil {
+		if runtimeResult.Started {
+			s.cleanupAdvisorAfterFailedInteractionMutation(ctx, c, in.ID, runtimeResult.Session.SessionID)
+		}
 		return protocol.InteractionResponseBody{}, e
 	}
-	if e = c.UpdateInteraction(ctx, r, in.ExpectedRevision); e != nil {
+	if command == protocol.CommandInteractionRecover {
+		e = c.UpdateInteractionMetadata(ctx, r, in.ExpectedRevision)
+	} else {
+		e = c.UpdateInteraction(ctx, r, in.ExpectedRevision)
+	}
+	if e != nil {
+		if runtimeResult.Started {
+			s.cleanupAdvisorAfterFailedInteractionMutation(ctx, c, in.ID, runtimeResult.Session.SessionID)
+		}
 		return protocol.InteractionResponseBody{}, e
 	}
-	if command == protocol.CommandInteractionWithdraw {
+	switch command {
+	case protocol.CommandInteractionWithdraw:
 		s.cleanupAdvisorAfterTerminalInteraction(ctx, r.ID)
+		s.publishLifecycle(ctx, protocol.EventInteractionWithdrawn, r, 0, "")
+	case protocol.CommandInteractionSupersede:
+		s.cleanupAdvisorAfterTerminalInteraction(ctx, r.ID)
+		s.publishLifecycle(ctx, protocol.EventInteractionSuperseded, r, 0, in.ReplacementID)
+	case protocol.CommandInteractionRecover:
+		s.publishLifecycle(ctx, protocol.EventInteractionRecovered, r, 0, "")
 	}
-	response := protocol.InteractionResponseBody{Request: r}
-	if command == protocol.CommandInteractionDiscuss {
-		response.SessionStarted = !discussAttached
-		response.SessionAttached = discussAttached
+	response := s.response(r, now)
+	if command == protocol.CommandInteractionDiscuss || command == protocol.CommandInteractionRecover {
+		response = s.runtimeResponse(r, now, runtimeResult)
 	}
 	return response, nil
 }
@@ -191,7 +256,7 @@ func (s issueInteractionService) resolve(ctx context.Context, c *issues.Client, 
 	rev := s.daemon.nextRevision(projectID)
 	body, _ := json.Marshal(protocol.InteractionResolvedEventBody{ID: next.ID, IssueID: next.IssueID, Revision: next.Revision, ResolvedAt: now})
 	s.daemon.hub.Publish(protocol.EventEnvelope{ProtocolVersion: protocol.CurrentVersion, ProjectID: naming.ProjectID(projectID), Revision: rev, Event: protocol.EventInteractionResolved, Kind: protocol.EnvelopeKindEvent, EmittedAt: now, Body: body})
-	return protocol.InteractionResponseBody{Request: next}, nil
+	return s.response(next, now), nil
 }
 
 func (s issueInteractionService) cleanupAdvisorAfterTerminalInteraction(ctx context.Context, requestID string) {
@@ -200,6 +265,72 @@ func (s issueInteractionService) cleanupAdvisorAfterTerminalInteraction(ctx cont
 	}
 }
 
+func (s issueInteractionService) cleanupAdvisorAfterFailedInteractionMutation(ctx context.Context, c *issues.Client, requestID, sessionID string) {
+	current, found, err := c.GetInteraction(ctx, requestID)
+	if err == nil && found && current.Unresolved() && strings.TrimSpace(current.SessionID) == strings.TrimSpace(sessionID) {
+		return
+	}
+	s.cleanupAdvisorAfterTerminalInteraction(ctx, requestID)
+}
+
+func (s issueInteractionService) runtimeResponse(r domain.InteractionRequest, now time.Time, runtime advisorSessionRuntimeResult) protocol.InteractionResponseBody {
+	response := s.response(r, now)
+	response.SessionStarted = runtime.Started
+	response.SessionAttached = runtime.Attached
+	response.SessionResumed = runtime.Resumed
+	return response
+}
+
+func (s issueInteractionService) response(r domain.InteractionRequest, now time.Time) protocol.InteractionResponseBody {
+	return protocol.InteractionResponseBody{Request: r, Age: r.AgeView(now, interactionStalenessPolicy(r.Significance))}
+}
+
+func (s issueInteractionService) reconcileStaleness(ctx context.Context, c *issues.Client, requests []domain.InteractionRequest, now time.Time) ([]domain.InteractionRequest, error) {
+	for i := range requests {
+		next, marked, reminded, err := requests[i].ReconcileStaleness(now, interactionStalenessPolicy(requests[i].Significance))
+		if err != nil {
+			return nil, err
+		}
+		if !marked && !reminded {
+			continue
+		}
+		if err := c.UpdateInteractionMetadata(ctx, next, requests[i].Revision); err != nil {
+			if !errors.Is(err, domain.ErrStaleInteractionRevision) {
+				return nil, err
+			}
+			current, found, refreshErr := c.GetInteraction(ctx, next.ID)
+			if refreshErr != nil || !found {
+				if refreshErr != nil {
+					return nil, refreshErr
+				}
+				return nil, domain.ErrNotFound
+			}
+			requests[i] = current
+			continue
+		}
+		requests[i] = next
+		if marked {
+			s.publishLifecycle(ctx, protocol.EventInteractionStale, next, 0, "")
+		}
+		if reminded {
+			s.publishLifecycle(ctx, protocol.EventInteractionReminder, next, len(next.Reminders), "")
+		}
+	}
+	return requests, nil
+}
+
+func (s issueInteractionService) publishLifecycle(ctx context.Context, event string, r domain.InteractionRequest, sequence int, replacementID string) {
+	projectID := daemonProjectIDFromContext(ctx)
+	now := r.UpdatedAt
+	body, _ := json.Marshal(protocol.InteractionLifecycleEventBody{ID: r.ID, IssueID: r.IssueID, Revision: r.Revision, Sequence: sequence, ReplacementID: strings.TrimSpace(replacementID), OccurredAt: now})
+	s.daemon.hub.Publish(protocol.EventEnvelope{ProtocolVersion: protocol.CurrentVersion, ProjectID: naming.ProjectID(projectID), Revision: s.daemon.nextRevision(projectID), Event: event, Kind: protocol.EnvelopeKindEvent, EmittedAt: now, Body: body})
+}
+
 func humanActor(actor string) bool {
 	return domain.HumanInteractionActor(actor)
+}
+
+func interactionRuntimeActor(actor string) bool {
+	a := strings.ToLower(strings.TrimSpace(actor))
+	return humanActor(a) || strings.HasPrefix(a, "orchestrator") || strings.HasPrefix(a, "daemon:")
 }

@@ -70,6 +70,9 @@ func TestInteractionRequestTransitions(t *testing.T) {
 		{"open to proposed", InteractionOpen, InteractionAnswerProposed, func(r *InteractionRequest) { r.Proposal = proposal }, true},
 		{"proposed to discussing", InteractionAnswerProposed, InteractionDiscussing, func(r *InteractionRequest) { r.Proposal = proposal }, true},
 		{"proposed to resolved", InteractionAnswerProposed, InteractionResolved, func(r *InteractionRequest) { r.Proposal = proposal; r.FinalAnswer = final }, true},
+		{"open to withdrawn with evidence", InteractionOpen, InteractionWithdrawn, func(r *InteractionRequest) {
+			r.Disposition = &InteractionDispositionAudit{Actor: "orchestrator", Reason: "obsolete", CreatedAt: now.Add(3 * time.Minute)}
+		}, true},
 		{"resolved terminal", InteractionResolved, InteractionDiscussing, func(r *InteractionRequest) { r.FinalAnswer = final }, false},
 		{"withdrawn terminal", InteractionWithdrawn, InteractionOpen, nil, false},
 		{"cannot skip backwards", InteractionDiscussing, InteractionOpen, nil, false},
@@ -144,6 +147,57 @@ func TestProjectInteractionPredicates(t *testing.T) {
 	p.HasExecutableWork = true
 	if p.Quiescent() || p.Complete() {
 		t.Fatal("executable work prevents quiescence and completion")
+	}
+}
+
+func TestInteractionStalenessReminderIsIdempotentAndNeverResolves(t *testing.T) {
+	r := validInteractionRequest()
+	policy := InteractionStalenessPolicy{StaleAfter: time.Hour, ReminderInterval: 30 * time.Minute}
+	now := r.CreatedAt.Add(2 * time.Hour)
+	next, marked, reminded, err := r.ReconcileStaleness(now, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !marked || !reminded || next.State != InteractionOpen || !next.Unresolved() || next.Revision != r.Revision+1 || len(next.Reminders) != 1 {
+		t.Fatalf("first reconcile = %+v marked=%t reminded=%t", next, marked, reminded)
+	}
+	again, marked, reminded, err := next.ReconcileStaleness(now.Add(time.Minute), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marked || reminded || again.Revision != next.Revision || len(again.Reminders) != 1 {
+		t.Fatalf("idempotent reconcile = %+v marked=%t reminded=%t", again, marked, reminded)
+	}
+	third, marked, reminded, err := again.ReconcileStaleness(now.Add(31*time.Minute), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marked || !reminded || third.Revision != again.Revision+1 || len(third.Reminders) != 2 || third.State != InteractionOpen {
+		t.Fatalf("second reminder = %+v marked=%t reminded=%t", third, marked, reminded)
+	}
+	view := third.AgeView(now.Add(31*time.Minute), policy)
+	if !view.Stale || view.AgeSeconds <= 0 || view.NextReminderAt == nil {
+		t.Fatalf("age view = %+v", view)
+	}
+}
+
+func TestInteractionDispositionAndRecoveryAudit(t *testing.T) {
+	r := validInteractionRequest()
+	recovered, err := r.Recover("orchestrator", "session-new", r.Revision, r.UpdatedAt.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.SessionID != "session-new" || recovered.Recovery == nil || recovered.State != InteractionOpen {
+		t.Fatalf("recovered = %+v", recovered)
+	}
+	at := recovered.UpdatedAt.Add(time.Minute)
+	recovered.Disposition = &InteractionDispositionAudit{Actor: "orchestrator", Reason: "replaced by clearer question", ReplacementID: "req-2", CreatedAt: at}
+	superseded, err := recovered.Transition(InteractionSuperseded, recovered.Revision, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if superseded.Unresolved() || superseded.FinalAnswer != nil || superseded.Disposition.ReplacementID != "req-2" {
+		t.Fatalf("superseded = %+v", superseded)
 	}
 }
 

@@ -100,7 +100,7 @@ func TestInteractionStructuredAnswerRejectsStaleOrMalformedEffectsWithoutMutatio
 }
 
 func TestInteractionDirectHumanStructuredAnswerNeedsNoProposal(t *testing.T) {
-	ctx, service, _, request := newInteractionAnswerTestService(t, "direct-answer")
+	ctx, service, client, request := newInteractionAnswerTestService(t, "direct-answer")
 	answer := interactionAnswerTestPayload("yes", 1)
 	resolved, err := service.MutateInteraction(ctx, protocol.CommandInteractionAnswer, protocol.InteractionMutationRequestBody{
 		ID: request.ID, ExpectedRevision: 1, Actor: "human", Answer: answer,
@@ -111,8 +111,12 @@ func TestInteractionDirectHumanStructuredAnswerNeedsNoProposal(t *testing.T) {
 	if resolved.Request.State != domain.InteractionResolved || resolved.Request.Proposal != nil || resolved.Request.FinalAnswer == nil {
 		t.Fatalf("direct answer result = %+v", resolved.Request)
 	}
-	if resolved.Request.ResolutionTrace == nil || resolved.Request.ResolutionTrace.DecisionID == "" {
-		t.Fatalf("significant answer resolution trace missing: %+v", resolved.Request.ResolutionTrace)
+	if resolved.Request.ResolutionTrace != nil {
+		t.Fatalf("significant answer without approved effects gained artifact trace: %+v", resolved.Request.ResolutionTrace)
+	}
+	decisions, err := client.ListDecisions(ctx, issues.DecisionFilter{IssueID: request.IssueID})
+	if err != nil || len(decisions) != 0 {
+		t.Fatalf("significant answer without decision approval created decisions: %+v err=%v", decisions, err)
 	}
 }
 

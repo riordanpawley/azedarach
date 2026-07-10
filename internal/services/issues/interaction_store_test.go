@@ -109,6 +109,41 @@ func TestResolveInteractionAnswerOnlyPreservesIssueMetadataAndObservations(t *te
 	}
 }
 
+func TestResolveInteractionSignificantAnswerWithoutDurableEffects(t *testing.T) {
+	ctx := context.Background()
+	c := NewClient(t.TempDir(), nil)
+	issueID, err := c.Create(ctx, CreateTaskParams{Title: "unchanged", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := interactionTestTask(t, ctx, c, issueID)
+	r := testInteractionRequest("significant-no-effects", issueID, "significant-no-effects")
+	if err = c.CreateInteraction(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	now := r.UpdatedAt.Add(time.Second)
+	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: interactionStoreTestAnswer(1), Actor: "human", CreatedAt: now}
+	r, err = r.Transition(domain.InteractionResolved, 1, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.FinalAnswer == nil || resolved.ResolutionTrace != nil {
+		t.Fatalf("significant answer audit/trace = final=%+v trace=%+v", resolved.FinalAnswer, resolved.ResolutionTrace)
+	}
+	decisions, err := c.ListDecisions(ctx, DecisionFilter{IssueID: issueID})
+	if err != nil || len(decisions) != 0 {
+		t.Fatalf("significant answer without approval created decisions: %+v err=%v", decisions, err)
+	}
+	after := interactionTestTask(t, ctx, c, issueID)
+	if after.Title != before.Title || !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("significant answer without approval mutated issue: before=%+v after=%+v", before, after)
+	}
+}
+
 func TestResolveInteractionUpdatesLinkedRequirementAndTracesSignificantAnswer(t *testing.T) {
 	ctx := context.Background()
 	c := NewClient(t.TempDir(), nil)
@@ -131,6 +166,7 @@ func TestResolveInteractionUpdatesLinkedRequirementAndTracesSignificantAnswer(t 
 	description := "new approved behavior"
 	answer := interactionStoreTestAnswer(1)
 	answer.ApprovedRequirementEffects = []domain.InteractionRequirementEffect{{RequirementID: requirement.LocalID, Description: &description}}
+	answer.ApprovedDecisionEffect = &domain.InteractionDecisionEffect{}
 	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: answer, Actor: "human", CreatedAt: now}
 	r, err = r.Transition(domain.InteractionResolved, 1, now)
 	if err != nil {
@@ -186,6 +222,10 @@ func TestResolveInteractionLinksExistingDecision(t *testing.T) {
 	linked, err := c.ListDecisions(ctx, DecisionFilter{IssueID: issueID})
 	if err != nil || len(linked) != 1 || linked[0].LocalID != decision.LocalID {
 		t.Fatalf("linked decisions = %+v, err=%v", linked, err)
+	}
+	resolved, found, err := c.GetInteraction(ctx, r.ID)
+	if err != nil || !found || resolved.ResolutionTrace == nil || resolved.ResolutionTrace.DecisionID != decision.LocalID {
+		t.Fatalf("existing decision resolution trace = %+v found=%v err=%v", resolved.ResolutionTrace, found, err)
 	}
 }
 
@@ -268,7 +308,9 @@ func TestInteractionStoreDurabilityDecisionKeyAndStaleCache(t *testing.T) {
 	if err := writer.CreateInteraction(ctx, testInteractionRequest("req-2", r.IssueID, r.DecisionKey)); !errors.Is(err, domain.ErrDuplicateUnresolvedDecision) {
 		t.Fatalf("duplicate error = %v", err)
 	}
-	next, err := r.Transition(domain.InteractionWithdrawn, r.Revision, r.UpdatedAt.Add(time.Second))
+	withdrawnAt := r.UpdatedAt.Add(time.Second)
+	r.Disposition = &domain.InteractionDispositionAudit{Actor: "orchestrator", Reason: "obsolete", CreatedAt: withdrawnAt}
+	next, err := r.Transition(domain.InteractionWithdrawn, r.Revision, withdrawnAt)
 	if err != nil {
 		t.Fatal(err)
 	}

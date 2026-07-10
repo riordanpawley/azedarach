@@ -68,7 +68,12 @@ func (c *Client) UpdateInteraction(ctx context.Context, request domain.Interacti
 	}
 	transitionCandidate := current
 	transitionCandidate.Proposal = request.Proposal
+	transitionCandidate.FinalAnswer = request.FinalAnswer
+	transitionCandidate.Disposition = request.Disposition
+	transitionCandidate.StaleAt = request.StaleAt
+	transitionCandidate.Reminders = request.Reminders
 	transitionCandidate.SessionID = request.SessionID
+	transitionCandidate.Recovery = request.Recovery
 	if _, err := transitionCandidate.Transition(request.State, expectedRevision, request.UpdatedAt); err != nil {
 		return fmt.Errorf("validate interaction transition: %w", err)
 	}
@@ -97,6 +102,50 @@ func (c *Client) UpdateInteraction(ctx context.Context, request domain.Interacti
 	return c.RefreshInteractionProjection(ctx)
 }
 
+// UpdateInteractionMetadata persists an orthogonal lifecycle audit mutation
+// without changing the request's decision state.
+func (c *Client) UpdateInteractionMetadata(ctx context.Context, request domain.InteractionRequest, expectedRevision int64) error {
+	if expectedRevision < 1 || request.Revision != expectedRevision+1 {
+		return fmt.Errorf("%w: expected replacement revision %d", domain.ErrStaleInteractionRevision, expectedRevision+1)
+	}
+	if err := request.Validate(); err != nil {
+		return fmt.Errorf("validate interaction metadata: %w", err)
+	}
+	current, found, err := c.GetInteraction(ctx, request.ID)
+	if err != nil {
+		return err
+	}
+	if !found || current.Revision != expectedRevision {
+		return fmt.Errorf("%w: interaction %s expected revision %d", domain.ErrStaleInteractionRevision, request.ID, expectedRevision)
+	}
+	expected := current
+	expected.SessionID = request.SessionID
+	expected.StaleAt = request.StaleAt
+	expected.Reminders = request.Reminders
+	expected.Recovery = request.Recovery
+	expected.Revision = request.Revision
+	expected.UpdatedAt = request.UpdatedAt
+	if !current.Unresolved() || !reflect.DeepEqual(expected, request) {
+		return fmt.Errorf("interaction decision content is immutable during metadata update")
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("marshal interaction metadata: %w", err)
+	}
+	db, err := c.dbHandle()
+	if err != nil {
+		return err
+	}
+	result, err := db.ExecContext(ctx, `UPDATE interaction_requests SET revision=?,request_json=?,updated_at=? WHERE id=? AND revision=?`, request.Revision, raw, request.UpdatedAt.UTC().Format(time.RFC3339Nano), request.ID, expectedRevision)
+	if err != nil {
+		return fmt.Errorf("update interaction metadata %s: %w", request.ID, err)
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return fmt.Errorf("%w: interaction %s expected revision %d", domain.ErrStaleInteractionRevision, request.ID, expectedRevision)
+	}
+	return c.RefreshInteractionProjection(ctx)
+}
+
 func interactionDefinitionEqual(current, replacement domain.InteractionRequest) bool {
 	current.State, replacement.State = "", ""
 	current.Revision, replacement.Revision = 0, 0
@@ -104,6 +153,10 @@ func interactionDefinitionEqual(current, replacement domain.InteractionRequest) 
 	current.Proposal, replacement.Proposal = nil, nil
 	current.FinalAnswer, replacement.FinalAnswer = nil, nil
 	current.SessionID, replacement.SessionID = "", ""
+	current.StaleAt, replacement.StaleAt = nil, nil
+	current.Reminders, replacement.Reminders = nil, nil
+	current.Disposition, replacement.Disposition = nil, nil
+	current.Recovery, replacement.Recovery = nil, nil
 	return reflect.DeepEqual(current, replacement)
 }
 
@@ -266,6 +319,7 @@ func (c *Client) ResolveInteraction(ctx context.Context, in InteractionResolutio
 			}
 			requirementIDs = append(requirementIDs, requirementID)
 		}
+		decisionID := ""
 		if plan.Decision != nil {
 			decision, err := c.resolveInteractionDecision(WithSpecAuditActorSource(ctx, "interaction.resolve"), tx, in.Request.UpdatedAt, *plan.Decision)
 			if err != nil {
@@ -279,7 +333,10 @@ func (c *Client) ResolveInteraction(ctx context.Context, in InteractionResolutio
 					return err
 				}
 			}
-			in.Request.ResolutionTrace = &domain.InteractionResolutionTrace{DecisionID: decision.LocalID, RequirementIDs: append([]string(nil), requirementIDs...)}
+			decisionID = decision.LocalID
+		}
+		if decisionID != "" || len(requirementIDs) > 0 {
+			in.Request.ResolutionTrace = &domain.InteractionResolutionTrace{DecisionID: decisionID, RequirementIDs: append([]string(nil), requirementIDs...)}
 		}
 		nextRaw, err := json.Marshal(in.Request)
 		if err != nil {
@@ -450,6 +507,26 @@ func valueInt(v *int) int {
 		return 0
 	}
 	return *v
+}
+
+// Interactions returns the complete durable request projection in stable order.
+func (c *Client) Interactions(ctx context.Context) ([]domain.InteractionRequest, error) {
+	if err := c.RefreshInteractionProjection(ctx); err != nil {
+		return nil, err
+	}
+	c.interactionMu.RLock()
+	defer c.interactionMu.RUnlock()
+	out := make([]domain.InteractionRequest, 0, len(c.interactionCache))
+	for _, request := range c.interactionCache {
+		out = append(out, request)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	return out, nil
 }
 
 func (c *Client) IssueHasUnresolvedInteraction(ctx context.Context, issueID string) (bool, error) {

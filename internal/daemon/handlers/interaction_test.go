@@ -62,3 +62,11 @@ func TestInteractionDiscussAllowsDaemonOwnedSessionIdentity(t *testing.T) {
 func handlerTestAnswer() domain.InteractionAnswerPayload {
 	return domain.InteractionAnswerPayload{SelectedOption: "yes", Rationale: "Proceed.", SignificanceRecommendation: domain.InteractionSignificanceRoutine, Revision: 1}
 }
+
+func TestInteractionRecoverAllowsDaemonOwnedSessionIdentity(t *testing.T) {
+	body, _ := json.Marshal(protocol.InteractionMutationRequestBody{ID: "req", ExpectedRevision: 1, Actor: "orchestrator"})
+	resp := NewInteractionHandler(fakeInteractionService{}).Handle(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, Command: protocol.CommandInteractionRecover, Body: body})
+	if resp.Error != nil {
+		t.Fatalf("response error = %+v", resp.Error)
+	}
+}

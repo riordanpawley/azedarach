@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -12,24 +13,44 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
-func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID string, request domain.InteractionRequest) (daemonstate.AdvisorSession, bool, error) {
+type advisorSessionRuntimeResult struct {
+	Session  daemonstate.AdvisorSession
+	Started  bool
+	Attached bool
+	Resumed  bool
+}
+
+func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID string, request domain.InteractionRequest) (advisorSessionRuntimeResult, error) {
 	if d == nil || d.tmux == nil {
-		return daemonstate.AdvisorSession{}, false, fmt.Errorf("advisor tmux runtime unavailable")
+		return advisorSessionRuntimeResult{}, fmt.Errorf("advisor tmux runtime unavailable")
 	}
 	projectID = d.canonicalProjectID(projectID)
 	store := d.sessionRuntimeStateStore(projectID)
 	if store == nil {
-		return daemonstate.AdvisorSession{}, false, fmt.Errorf("advisor session runtime store unavailable for project %s", projectID)
+		return advisorSessionRuntimeResult{}, fmt.Errorf("advisor session runtime store unavailable for project %s", projectID)
 	}
-	sessionID := advisorSessionID(request.ID)
+	sessionID := strings.TrimSpace(request.SessionID)
+	if sessionID == "" {
+		sessionID = advisorSessionID(request.ID)
+	}
+	if reserved, found, err := store.GetAdvisorSession(ctx, projectID, request.ID); err != nil {
+		return advisorSessionRuntimeResult{}, err
+	} else if found {
+		sessionID = reserved.SessionID
+	}
 	workdir := strings.TrimSpace(d.resolveRepoDirForProject(projectID))
 	if workdir == "" {
-		return daemonstate.AdvisorSession{}, false, fmt.Errorf("advisor project workdir unavailable for project %s", projectID)
+		return advisorSessionRuntimeResult{}, fmt.Errorf("advisor project workdir unavailable for project %s", projectID)
 	}
 	prompt := buildAdvisorSessionPrompt(request)
-	projection := daemonstate.Session{ID: sessionID, IssueID: request.IssueID, Role: daemonstate.SessionRoleAdvisor, ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: request.ID, State: daemonstate.SessionStateStarting, ObservedState: daemonstate.SessionStateStarting, UpdatedAt: time.Now().UTC()}
-	if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, projection); err != nil {
-		return daemonstate.AdvisorSession{}, false, err
+	priorProjection, projected, err := store.GetSessionState(ctx, projectID, sessionID)
+	if err != nil {
+		return advisorSessionRuntimeResult{}, err
+	}
+	resumed := projected && (priorProjection.State == daemonstate.SessionStatePaused || priorProjection.ObservedState == daemonstate.SessionStatePaused)
+	starting := daemonstate.Session{ID: sessionID, IssueID: request.IssueID, Role: daemonstate.SessionRoleAdvisor, ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: request.ID, State: daemonstate.SessionStateStarting, ObservedState: daemonstate.SessionStateStarting, UpdatedAt: time.Now().UTC()}
+	if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, starting); err != nil {
+		return advisorSessionRuntimeResult{}, err
 	}
 	advisor, attached, err := store.EnsureAdvisorSession(ctx, projectID, request.ID, request.IssueID, sessionID,
 		func(ctx context.Context, sessionID string) (bool, error) { return d.tmux.HasSession(ctx, sessionID) },
@@ -37,12 +58,11 @@ func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID stri
 			return d.tmux.NewSessionWithCommand(ctx, advisor.SessionID, workdir, d.buildAdvisorLaunchCommand(projectID, advisor, prompt))
 		})
 	if err != nil {
-		return advisor, attached, err
+		return advisorSessionRuntimeResult{Session: advisor, Attached: attached}, err
 	}
-	projection.ID, projection.IssueID, projection.ScopeID = advisor.SessionID, advisor.IssueID, advisor.RequestID
-	projection.State, projection.ObservedState, projection.Activity, projection.ActivitySource, projection.UpdatedAt = daemonstate.SessionStateRunning, daemonstate.SessionStateRunning, "busy", "runtime", time.Now().UTC()
+	projection := daemonstate.Session{ID: advisor.SessionID, IssueID: advisor.IssueID, Role: daemonstate.SessionRoleAdvisor, ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: advisor.RequestID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "runtime", UpdatedAt: time.Now().UTC()}
 	d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(protocol.NormalizeProjectID(projectID))}, projection)
-	return advisor, attached, nil
+	return advisorSessionRuntimeResult{Session: advisor, Started: !attached, Attached: attached, Resumed: attached && resumed}, nil
 }
 
 func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate.AdvisorSession, prompt string) string {
@@ -70,27 +90,212 @@ func (d *Daemon) cleanupAdvisorSessionRuntime(ctx context.Context, projectID, re
 		return fmt.Errorf("advisor session runtime store unavailable for project %s", projectID)
 	}
 	advisor, found, err := store.GetAdvisorSession(ctx, projectID, requestID)
-	if err != nil || !found {
-		return err
-	}
-	if d.tmux != nil {
-		live, probeErr := d.tmux.HasSession(ctx, advisor.SessionID)
-		if probeErr != nil {
-			return probeErr
-		}
-		if live {
-			if killErr := d.tmux.KillSession(ctx, advisor.SessionID); killErr != nil {
-				return killErr
-			}
-		}
-	}
-	projection, projected, err := store.GetSessionState(ctx, projectID, advisor.SessionID)
 	if err != nil {
 		return err
 	}
-	if projected {
+	projections, err := store.ListSessionStates(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	targets := make(map[string]daemonstate.Session)
+	if found {
+		targets[advisor.SessionID] = daemonstate.Session{ID: advisor.SessionID, IssueID: advisor.IssueID, Role: daemonstate.SessionRoleAdvisor, ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: requestID}
+	}
+	for _, projection := range projections {
+		if projection.Role == daemonstate.SessionRoleAdvisor && projection.ScopeKind == daemonstate.SessionScopeInteraction && projection.ScopeID == requestID {
+			targets[projection.ID] = projection
+		}
+	}
+	for sessionID, projection := range targets {
+		if d.tmux != nil {
+			live, probeErr := d.tmux.HasSession(ctx, sessionID)
+			if probeErr != nil {
+				return probeErr
+			}
+			if live {
+				if killErr := d.tmux.KillSession(ctx, sessionID); killErr != nil {
+					return killErr
+				}
+			}
+		}
 		projection.State, projection.ObservedState, projection.Activity, projection.ActivitySource, projection.UpdatedAt = daemonstate.SessionStateStopped, daemonstate.SessionStateStopped, "", "", time.Now().UTC()
 		d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(protocol.NormalizeProjectID(projectID))}, projection)
+		if err := store.DeleteSessionState(ctx, projectID, sessionID); err != nil {
+			return fmt.Errorf("delete advisor session projection %s: %w", sessionID, err)
+		}
 	}
 	return store.DeleteAdvisorSession(ctx, projectID, requestID)
+}
+
+func (d *Daemon) cleanupAdvisorSessionsForProject(ctx context.Context, projectID string) (int, error) {
+	projectID = d.canonicalProjectID(projectID)
+	store := d.sessionRuntimeStateStore(projectID)
+	if store == nil {
+		return 0, fmt.Errorf("advisor session runtime store unavailable for project %s", projectID)
+	}
+	reservations, err := store.ListAdvisorSessions(ctx, projectID)
+	if err != nil {
+		return 0, err
+	}
+	requestIDs := make(map[string]struct{}, len(reservations))
+	for _, advisor := range reservations {
+		requestIDs[advisor.RequestID] = struct{}{}
+	}
+	projections, err := store.ListSessionStates(ctx, projectID)
+	if err != nil {
+		return 0, err
+	}
+	for _, projection := range projections {
+		if projection.Role == daemonstate.SessionRoleAdvisor && projection.ScopeKind == daemonstate.SessionScopeInteraction && strings.TrimSpace(projection.ScopeID) != "" {
+			requestIDs[projection.ScopeID] = struct{}{}
+		}
+	}
+	cleaned := 0
+	for requestID := range requestIDs {
+		if err := d.cleanupAdvisorSessionRuntime(ctx, projectID, requestID); err != nil {
+			return cleaned, err
+		}
+		cleaned++
+	}
+	return cleaned, nil
+}
+
+func (d *Daemon) reconcileAdvisorSessionRuntimes(ctx context.Context, projectID string, issueIDs []string) (int, int, error) {
+	projectID = d.canonicalProjectID(projectID)
+	client := d.issueClientForProject(projectID)
+	store := d.sessionRuntimeStateStore(projectID)
+	if client == nil || store == nil || d.tmux == nil {
+		return 0, 0, nil
+	}
+	requests, err := client.ListInteractions(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("list durable interactions: %w", err)
+	}
+	issueInScope := advisorIssueScopePredicate(issueIDs)
+	requestByID := make(map[string]domain.InteractionRequest, len(requests))
+	requestIDs := make(map[string]struct{}, len(requests))
+	for _, request := range requests {
+		if !issueInScope(request.IssueID) {
+			continue
+		}
+		requestByID[request.ID] = request
+		if strings.TrimSpace(request.SessionID) != "" {
+			requestIDs[request.ID] = struct{}{}
+		}
+	}
+	reservations, err := store.ListAdvisorSessions(ctx, projectID)
+	if err != nil {
+		return 0, 0, err
+	}
+	reservationByRequest := make(map[string]daemonstate.AdvisorSession, len(reservations))
+	for _, advisor := range reservations {
+		if !issueInScope(advisor.IssueID) {
+			continue
+		}
+		reservationByRequest[advisor.RequestID] = advisor
+		requestIDs[advisor.RequestID] = struct{}{}
+	}
+	projections, err := store.ListSessionStates(ctx, projectID)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, projection := range projections {
+		if issueInScope(projection.IssueID) && projection.Role == daemonstate.SessionRoleAdvisor && projection.ScopeKind == daemonstate.SessionScopeInteraction && strings.TrimSpace(projection.ScopeID) != "" {
+			requestIDs[projection.ScopeID] = struct{}{}
+		}
+	}
+
+	recovered, cleaned := 0, 0
+	service := issueInteractionService{daemon: d}
+	for requestID := range requestIDs {
+		request, found := requestByID[requestID]
+		advisor, reserved := reservationByRequest[requestID]
+		if !found || !request.Unresolved() || strings.TrimSpace(request.SessionID) == "" {
+			if err := d.cleanupAdvisorSessionRuntime(ctx, projectID, requestID); err != nil {
+				return recovered, cleaned, fmt.Errorf("clean advisor session %s: %w", requestID, err)
+			}
+			cleaned++
+			continue
+		}
+		if reserved && strings.TrimSpace(advisor.SessionID) != strings.TrimSpace(request.SessionID) {
+			if err := d.cleanupAdvisorSessionRuntime(ctx, projectID, requestID); err != nil {
+				return recovered, cleaned, fmt.Errorf("replace drifted advisor session %s: %w", requestID, err)
+			}
+			cleaned++
+		}
+		runtime, err := d.ensureAdvisorSessionRuntime(ctx, projectID, request)
+		if err != nil {
+			return recovered, cleaned, fmt.Errorf("recover advisor session %s: %w", requestID, err)
+		}
+		if !runtime.Started && !runtime.Resumed {
+			continue
+		}
+		var next domain.InteractionRequest
+		var recoveryErr error
+		recorded := false
+		for attempt := 0; attempt < 4; attempt++ {
+			now := time.Now().UTC()
+			if now.Before(request.UpdatedAt) {
+				now = request.UpdatedAt
+			}
+			next, recoveryErr = request.Recover("daemon:runtime.reconcile", runtime.Session.SessionID, request.Revision, now)
+			if recoveryErr == nil {
+				recoveryErr = client.UpdateInteractionMetadata(ctx, next, request.Revision)
+			}
+			if recoveryErr == nil {
+				recorded = true
+				break
+			}
+			if !errors.Is(recoveryErr, domain.ErrStaleInteractionRevision) {
+				break
+			}
+			current, currentFound, getErr := client.GetInteraction(ctx, requestID)
+			if getErr != nil {
+				recoveryErr = errors.Join(recoveryErr, fmt.Errorf("refresh interaction after stale recovery: %w", getErr))
+				break
+			}
+			if !currentFound || !current.Unresolved() || current.SessionID != runtime.Session.SessionID {
+				if cleanupErr := d.cleanupAdvisorSessionRuntime(ctx, projectID, requestID); cleanupErr != nil {
+					return recovered, cleaned, fmt.Errorf("clean stale advisor recovery %s: %w", requestID, cleanupErr)
+				}
+				cleaned++
+				recoveryErr = nil
+				break
+			}
+			if current.Recovery != nil && current.Recovery.Actor == "daemon:runtime.reconcile" && current.Recovery.SessionID == runtime.Session.SessionID && current.Recovery.RecoveredAt.After(request.UpdatedAt) {
+				recoveryErr = nil
+				break
+			}
+			request = current
+		}
+		if recoveryErr != nil {
+			if cleanupErr := d.cleanupAdvisorSessionRuntime(ctx, projectID, requestID); cleanupErr != nil {
+				return recovered, cleaned, errors.Join(fmt.Errorf("record advisor recovery %s: %w", requestID, recoveryErr), fmt.Errorf("rollback advisor recovery %s: %w", requestID, cleanupErr))
+			}
+			cleaned++
+			return recovered, cleaned, fmt.Errorf("record advisor recovery %s: %w", requestID, recoveryErr)
+		}
+		if !recorded {
+			continue
+		}
+		service.publishLifecycle(withDaemonProjectIDContext(ctx, projectID), protocol.EventInteractionRecovered, next, 0, "")
+		recovered++
+	}
+	return recovered, cleaned, nil
+}
+
+func advisorIssueScopePredicate(issueIDs []string) func(string) bool {
+	if len(issueIDs) == 0 {
+		return func(string) bool { return true }
+	}
+	scope := make(map[string]struct{}, len(issueIDs))
+	for _, issueID := range issueIDs {
+		if key := strings.ToLower(strings.TrimSpace(issueID)); key != "" {
+			scope[key] = struct{}{}
+		}
+	}
+	return func(issueID string) bool {
+		_, found := scope[strings.ToLower(strings.TrimSpace(issueID))]
+		return found
+	}
 }

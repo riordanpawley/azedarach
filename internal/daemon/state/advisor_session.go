@@ -136,6 +136,42 @@ func (s *RuntimeStateStore) GetAdvisorSession(ctx context.Context, projectID, re
 	return out, true, nil
 }
 
+func (s *RuntimeStateStore) ListAdvisorSessions(ctx context.Context, projectID string) ([]AdvisorSession, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	projectID = normalizedProjectID(projectID)
+	rows, err := db.QueryContext(ctx, `SELECT request_id, issue_id, session_id, created_at, updated_at FROM `+advisorSessionTable+` WHERE project_id = ? ORDER BY request_id`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("list advisor sessions: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]AdvisorSession, 0)
+	for rows.Next() {
+		var session AdvisorSession
+		var createdRaw, updatedRaw string
+		if err := rows.Scan(&session.RequestID, &session.IssueID, &session.SessionID, &createdRaw, &updatedRaw); err != nil {
+			return nil, fmt.Errorf("scan advisor session: %w", err)
+		}
+		session.ProjectID = projectID
+		session.CreatedAt, err = time.Parse(time.RFC3339Nano, createdRaw)
+		if err != nil {
+			return nil, fmt.Errorf("decode advisor created_at: %w", err)
+		}
+		session.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedRaw)
+		if err != nil {
+			return nil, fmt.Errorf("decode advisor updated_at: %w", err)
+		}
+		out = append(out, session)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate advisor sessions: %w", err)
+	}
+	return out, nil
+}
+
 func (s *RuntimeStateStore) DeleteAdvisorSession(ctx context.Context, projectID, requestID string) error {
 	projectID, requestID = normalizedProjectID(projectID), strings.TrimSpace(requestID)
 	return sqliteutil.WithWriteLock(s.dbPath, func() error {

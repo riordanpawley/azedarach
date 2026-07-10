@@ -16,8 +16,32 @@ func TestPlanInteractionResolutionSignificanceGate(t *testing.T) {
 
 	r.FinalAnswer.Answer.SignificanceRecommendation = InteractionSignificanceMaterial
 	plan, err = PlanInteractionResolution(r)
-	if err != nil || plan.Decision == nil || plan.Decision.Title != r.DecisionPacket.Summary || plan.Decision.Rationale != answer.Rationale {
-		t.Fatalf("significant plan = %+v, err=%v", plan, err)
+	if err != nil || plan.Decision != nil || len(plan.RequirementEffects) != 0 || plan.IssueEffects.Any() {
+		t.Fatalf("significant no-effect plan = %+v, err=%v", plan, err)
+	}
+}
+
+func TestPlanInteractionResolutionExplicitDecisionCreate(t *testing.T) {
+	r := validInteractionRequest()
+	answer := interactionTestAnswer("squash", 1)
+	answer.ApprovedDecisionEffect = &InteractionDecisionEffect{}
+	r.FinalAnswer = &InteractionAnswerAudit{Answer: answer, Actor: "human", CreatedAt: r.UpdatedAt}
+	r.State, r.Revision = InteractionResolved, 2
+	plan, err := PlanInteractionResolution(r)
+	if err != nil || plan.Decision == nil || plan.Decision.Title != r.DecisionPacket.Summary || plan.Decision.Rationale != answer.Rationale || plan.Decision.ExistingDecisionID != "" {
+		t.Fatalf("explicit create plan = %+v, err=%v", plan, err)
+	}
+}
+
+func TestPlanInteractionResolutionExplicitExistingDecisionLink(t *testing.T) {
+	r := validInteractionRequest()
+	answer := interactionTestAnswer("squash", 1)
+	answer.ApprovedDecisionEffect = &InteractionDecisionEffect{ExistingDecisionID: " dec-7 "}
+	r.FinalAnswer = &InteractionAnswerAudit{Answer: answer, Actor: "human", CreatedAt: r.UpdatedAt}
+	r.State, r.Revision = InteractionResolved, 2
+	plan, err := PlanInteractionResolution(r)
+	if err != nil || plan.Decision == nil || plan.Decision.ExistingDecisionID != "dec-7" {
+		t.Fatalf("explicit existing link plan = %+v, err=%v", plan, err)
 	}
 }
 
