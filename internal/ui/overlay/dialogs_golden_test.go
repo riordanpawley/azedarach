@@ -102,7 +102,7 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 }
 
 func goldenBoardView(t *testing.T) string {
-	o := NewBoardViewOverlay([]domain.BoardViewRecord{{View: domain.DefaultBoardView(), BuiltIn: true}, {View: domain.ActivityBoardView(), BuiltIn: true}}, "current")
+	o := NewBoardViewOverlay(goldenBuiltInBoardViews(), domain.DefaultBoardViewID)
 	model, _ := o.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
 	return model.(*BoardViewOverlay).View()
 }
@@ -122,9 +122,18 @@ func goldenGitPaneSmallView(t *testing.T) string {
 }
 
 func goldenBoardViewSmall(t *testing.T) string {
-	o := NewBoardViewOverlay([]domain.BoardViewRecord{{View: domain.DefaultBoardView(), BuiltIn: true}, {View: domain.ActivityBoardView(), BuiltIn: true}}, "current")
+	o := NewBoardViewOverlay(goldenBuiltInBoardViews(), domain.DefaultBoardViewID)
 	model, _ := o.Update(tea.WindowSizeMsg{Width: 54, Height: 18})
 	return model.(*BoardViewOverlay).View()
+}
+
+func goldenBuiltInBoardViews() []domain.BoardViewRecord {
+	return []domain.BoardViewRecord{
+		{View: domain.DefaultBoardView(), BuiltIn: true},
+		{View: domain.PlanningBoardView(), BuiltIn: true},
+		{View: domain.OrchestrationBoardView(), BuiltIn: true},
+		{View: domain.CloseoutBoardView(), BuiltIn: true},
+	}
 }
 
 func assertGolden(t *testing.T, path string, got string) {
