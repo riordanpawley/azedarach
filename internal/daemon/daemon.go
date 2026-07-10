@@ -79,6 +79,7 @@ type Config struct {
 	IssueResources             appconfig.IssueResourcesConfig
 	IssueAutoArchive           appconfig.IssueAutoArchiveConfig
 	ScheduledScripts           appconfig.ScheduledScriptsConfig
+	Orchestration              appconfig.OrchestrationConfig
 	Logger                     *slog.Logger
 	IdleTimeout                time.Duration
 	RuntimeReconcileInterval   time.Duration

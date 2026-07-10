@@ -30,12 +30,13 @@ type OrchestrateStatusOptions struct {
 }
 
 type OrchestrateStartOptions struct {
-	Project            string
-	RootIssueID        string
-	Limit              int
-	IssueIDs           []string
-	JSON               bool
-	BaseBranchOverride string
+	Project             string
+	RootIssueID         string
+	Limit               int
+	IssueIDs            []string
+	JSON                bool
+	BaseBranchOverride  string
+	OverrideBoardHealth bool
 }
 
 type OrchestrateGroupOptions struct {
@@ -511,12 +512,13 @@ func ParseOrchestrateStatusArgs(args []string) (OrchestrateStatusOptions, error)
 }
 
 func ParseOrchestrateStartArgs(args []string) (OrchestrateStartOptions, error) {
-	opts := OrchestrateStartOptions{Limit: 4}
+	opts := OrchestrateStartOptions{Limit: 3}
 	fs := flag.NewFlagSet("orchestrate start", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&opts.RootIssueID, "root", "", "root issue id")
-	fs.IntVar(&opts.Limit, "limit", 4, "maximum runnable issues to start")
+	fs.IntVar(&opts.Limit, "limit", 3, "maximum runnable issues to start")
+	fs.BoolVar(&opts.OverrideBoardHealth, "override-board-health", false, "allow project-wide start despite board health refusal")
 	fs.Func("issue", "specific runnable issue id (repeatable)", func(value string) error {
 		trimmed := strings.TrimSpace(value)
 		if trimmed == "" {
@@ -1198,7 +1200,7 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		return orchestrateStartResult{}, err
 	}
 	intentKey := fmt.Sprintf("start:%s:%d:%s", opts.RootIssueID, opts.Limit, strings.Join(opts.IssueIDs, ","))
-	applied, err := deps.DaemonClient.ApplyOrchestrationIntent(ctx, protocol.OrchestrationIntentRequest{Scope: scope, Kind: protocol.OrchestrationIntentStart, IntentKey: intentKey, ActorID: ownerID, IssueIDs: opts.IssueIDs, Limit: opts.Limit, RepoDir: deps.RepoDir, BaseBranch: opts.BaseBranchOverride})
+	applied, err := deps.DaemonClient.ApplyOrchestrationIntent(ctx, protocol.OrchestrationIntentRequest{Scope: scope, Kind: protocol.OrchestrationIntentStart, IntentKey: intentKey, ActorID: ownerID, IssueIDs: opts.IssueIDs, Limit: opts.Limit, RepoDir: deps.RepoDir, BaseBranch: opts.BaseBranchOverride, OverrideBoardHealth: opts.OverrideBoardHealth})
 	if err != nil {
 		return orchestrateStartResult{}, err
 	}

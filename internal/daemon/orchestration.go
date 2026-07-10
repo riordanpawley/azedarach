@@ -13,7 +13,12 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
-const defaultOrchestrationInspectLimit = 50
+const (
+	defaultOrchestrationInspectLimit   = 50
+	defaultOrchestrationStartLimit     = 3
+	defaultOrchestrationAgentCapacity  = 12
+	defaultOrchestrationOpenIssueLimit = 100
+)
 
 // orchestrationAuthority is the deliberately small daemon boundary for all
 // rooted and project-wide orchestration clients.
@@ -91,7 +96,7 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	}
 	limit := request.Limit
 	if limit <= 0 {
-		limit = defaultOrchestrationInspectLimit
+		limit = a.inspectLimit()
 	}
 	snapshot := protocol.OrchestrationSnapshot{Scope: identity.Scope, GeneratedAt: time.Now().UTC(), Blocked: map[string]string{}}
 	if identity.Scope.Kind == domain.OrchestrationScopeRooted {
@@ -119,6 +124,21 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 			roots = append(roots, task)
 		}
 	}
+	snapshot.Health = orchestrationBoardHealth(tasks, tasksByID, limit, a.openIssueLimit())
+	for _, task := range tasks {
+		if task.Status == domain.StatusDone {
+			continue
+		}
+		snapshot.Candidates = append(snapshot.Candidates, orchestrationCandidateForTask(task, request.ActorID, snapshot.GeneratedAt, snapshot.Health.Diagnostics))
+	}
+	sort.SliceStable(snapshot.Candidates, func(i, j int) bool {
+		left, right := snapshot.Candidates[i], snapshot.Candidates[j]
+		return orchestrationCandidateLess(left, right, tasksByID)
+	})
+	if len(snapshot.Candidates) > limit {
+		snapshot.Candidates = snapshot.Candidates[:limit]
+	}
+	snapshot.Health.InspectedCount = len(snapshot.Candidates)
 	sort.SliceStable(roots, func(i, j int) bool { return orchestrationTaskLess(roots[i], roots[j]) })
 	if len(roots) > limit {
 		roots = roots[:limit]
@@ -137,8 +157,39 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		}
 		mergeOrchestrationSnapshot(&snapshot, part)
 	}
+	if globalActive := orchestrationGlobalActiveCount(tasks); globalActive > snapshot.Capacity.TotalCountingCapacityCount {
+		snapshot.Capacity.TotalCountingCapacityCount = globalActive
+	}
+	explainOrchestrationCandidates(&snapshot)
 	sortOrchestrationSnapshot(&snapshot, tasksByID)
 	return snapshot, nil
+}
+
+func explainOrchestrationCandidates(snapshot *protocol.OrchestrationSnapshot) {
+	runnable := make(map[string]bool, len(snapshot.Runnable))
+	active := make(map[string]bool, len(snapshot.Active))
+	for _, id := range snapshot.Runnable {
+		runnable[id] = true
+	}
+	for _, id := range snapshot.Active {
+		active[id] = true
+	}
+	for i := range snapshot.Candidates {
+		candidate := &snapshot.Candidates[i]
+		if candidate.Classification == "malformed" || candidate.Classification == "owned-elsewhere" {
+			continue
+		}
+		switch {
+		case runnable[candidate.IssueID]:
+			candidate.Included, candidate.Classification, candidate.Reason = true, "runnable", "included: ready for worker start"
+		case active[candidate.IssueID]:
+			candidate.Included, candidate.Classification, candidate.Reason = false, "active", "excluded: session already active"
+		case snapshot.Blocked[candidate.IssueID] != "":
+			candidate.Included, candidate.Classification, candidate.Reason = false, "blocked", "excluded: "+snapshot.Blocked[candidate.IssueID]
+		default:
+			candidate.Included, candidate.Classification, candidate.Reason = false, "not-runnable", "excluded: not ready in current graph projection"
+		}
+	}
 }
 
 func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest) (protocol.OrchestrationIntentResult, error) {
@@ -157,6 +208,11 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	if err != nil {
 		return protocol.OrchestrationIntentResult{}, err
 	}
+	if request.Scope.Kind == domain.OrchestrationScopeProject && !snapshot.Health.Healthy {
+		if !request.OverrideBoardHealth || !orchestrationHealthOverrideAllowed(snapshot.Health) {
+			return protocol.OrchestrationIntentResult{}, fmt.Errorf("project board health refused start: %s (only the open-issue threshold may be explicitly overridden)", strings.Join(snapshot.Health.Diagnostics, "; "))
+		}
+	}
 	runnable := make(map[string]struct{}, len(snapshot.Runnable))
 	active := make(map[string]struct{}, len(snapshot.Active))
 	nestedRoots := make(map[string]struct{}, len(snapshot.NestedRoots))
@@ -172,11 +228,24 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	requested := append([]string(nil), request.IssueIDs...)
 	if len(requested) == 0 {
 		requested = append(requested, snapshot.Runnable...)
+	} else {
+		requested = stableRequestedCandidates(requested, snapshot.Runnable)
 	}
 	result := protocol.OrchestrationIntentResult{Scope: request.Scope, Kind: request.Kind, IntentKey: request.IntentKey, Requested: requested, Skipped: map[string]string{}, Failed: map[string]string{}}
 	limit := request.Limit
 	if limit <= 0 {
-		limit = 3
+		limit = a.startLimit()
+	}
+	if configured := a.startLimit(); limit > configured {
+		limit = configured
+	}
+	remainingCapacity := a.agentCapacity() - snapshot.Capacity.TotalCountingCapacityCount
+	capacityLimit := remainingCapacity
+	if remainingCapacity < limit {
+		limit = remainingCapacity
+	}
+	if limit < 0 {
+		limit = 0
 	}
 	started := 0
 	for _, issueID := range requested {
@@ -185,7 +254,11 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 			continue
 		}
 		if started >= limit {
-			result.Skipped[issueID] = "limit-reached"
+			if started >= capacityLimit {
+				result.Skipped[issueID] = "global-agent-capacity-reached"
+			} else {
+				result.Skipped[issueID] = "wave-limit-reached"
+			}
 			continue
 		}
 		launch, err := a.claimAndSubmitStart(ctx, projectID, request, issueID)
@@ -201,6 +274,166 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		started++
 	}
 	return result, nil
+}
+
+func orchestrationGlobalActiveCount(tasks []domain.Task) int {
+	count := 0
+	for _, task := range tasks {
+		if task.HasTmuxSession {
+			count++
+		}
+	}
+	return count
+}
+
+func orchestrationHealthOverrideAllowed(health protocol.OrchestrationHealth) bool {
+	if len(health.Diagnostics) == 0 {
+		return true
+	}
+	for _, diagnostic := range health.Diagnostics {
+		if !strings.HasPrefix(diagnostic, "open issue count ") {
+			return false
+		}
+	}
+	return true
+}
+
+func stableRequestedCandidates(requested, orderedRunnable []string) []string {
+	wanted := make(map[string]bool, len(requested))
+	for _, id := range requested {
+		wanted[id] = true
+	}
+	out := make([]string, 0, len(requested))
+	seen := make(map[string]bool, len(requested))
+	for _, id := range orderedRunnable {
+		if wanted[id] && !seen[id] {
+			out, seen[id] = append(out, id), true
+		}
+	}
+	remainder := make([]string, 0)
+	for _, id := range requested {
+		if !seen[id] {
+			remainder, seen[id] = append(remainder, id), true
+		}
+	}
+	sort.Strings(remainder)
+	return append(out, remainder...)
+}
+
+func (a daemonOrchestrationAuthority) inspectLimit() int {
+	if n := a.daemon.cfg.Orchestration.InspectLimit; n > 0 {
+		return n
+	}
+	return defaultOrchestrationInspectLimit
+}
+func (a daemonOrchestrationAuthority) startLimit() int {
+	if n := a.daemon.cfg.Orchestration.StartLimit; n > 0 {
+		return n
+	}
+	return defaultOrchestrationStartLimit
+}
+func (a daemonOrchestrationAuthority) agentCapacity() int {
+	if n := a.daemon.cfg.Orchestration.AgentCapacity; n > 0 {
+		return n
+	}
+	return defaultOrchestrationAgentCapacity
+}
+func (a daemonOrchestrationAuthority) openIssueLimit() int {
+	if n := a.daemon.cfg.Orchestration.OpenIssueLimit; n > 0 {
+		return n
+	}
+	return defaultOrchestrationOpenIssueLimit
+}
+
+func orchestrationBoardHealth(tasks []domain.Task, byID map[string]domain.Task, inspectLimit, openLimit int) protocol.OrchestrationHealth {
+	health := protocol.OrchestrationHealth{Healthy: true, InspectLimit: inspectLimit, OpenIssueLimit: openLimit}
+	for _, task := range tasks {
+		if task.Status == domain.StatusDone {
+			continue
+		}
+		health.OpenIssueCount++
+		id := task.ID.String()
+		if task.ParentID != nil && !task.ParentID.IsZero() {
+			parent := task.ParentID.String()
+			if parent == id {
+				health.Diagnostics = append(health.Diagnostics, "malformed graph: "+id+" is its own parent")
+			} else if _, ok := byID[parent]; !ok {
+				health.Diagnostics = append(health.Diagnostics, "malformed graph: "+id+" has missing parent "+parent)
+			}
+		}
+		if task.Ownership != nil && (strings.TrimSpace(task.Ownership.OwnerID) == "" || strings.TrimSpace(task.Ownership.OwnerKind) == "") {
+			health.Diagnostics = append(health.Diagnostics, "malformed ownership: "+id+" has incomplete owner identity")
+		}
+	}
+	for id := range byID {
+		seen := map[string]bool{}
+		for current := id; current != ""; {
+			if seen[current] {
+				health.Diagnostics = append(health.Diagnostics, "malformed graph: parent cycle contains "+current)
+				break
+			}
+			seen[current] = true
+			task, ok := byID[current]
+			if !ok || task.ParentID == nil || task.ParentID.IsZero() {
+				break
+			}
+			current = task.ParentID.String()
+		}
+	}
+	if health.OpenIssueCount > openLimit {
+		health.Diagnostics = append(health.Diagnostics, fmt.Sprintf("open issue count %d exceeds refusal threshold %d", health.OpenIssueCount, openLimit))
+	}
+	sort.Strings(health.Diagnostics)
+	health.Diagnostics = uniqueStrings(health.Diagnostics)
+	health.Healthy = len(health.Diagnostics) == 0
+	return health
+}
+
+func orchestrationCandidateForTask(task domain.Task, actorID string, now time.Time, diagnostics []string) protocol.OrchestrationCandidate {
+	c := protocol.OrchestrationCandidate{IssueID: task.ID.String(), Classification: "open", Reason: "eligible for bounded readiness inspection", Included: true}
+	if task.ParentID != nil && !task.ParentID.IsZero() {
+		c.Classification, c.Reason = "child", "included through root graph readiness"
+	}
+	if task.Status == domain.StatusInProgress || task.Status == domain.StatusInReview {
+		c.Included, c.Classification, c.Reason = false, "active", "already active or review-ready"
+	}
+	if task.Ownership != nil && task.Ownership.BlocksActor(actorID, now) {
+		c.Included, c.Classification, c.Reason = false, "owned-elsewhere", "durable ownership already exists"
+	}
+	for _, diagnostic := range diagnostics {
+		if strings.Contains(diagnostic, ": "+task.ID.String()+" ") {
+			c.Included, c.Classification, c.Reason = false, "malformed", diagnostic
+			break
+		}
+	}
+	return c
+}
+
+func orchestrationCandidateLess(left, right protocol.OrchestrationCandidate, byID map[string]domain.Task) bool {
+	l, r := byID[left.IssueID], byID[right.IssueID]
+	if l.Priority != r.Priority {
+		return l.Priority < r.Priority
+	}
+	if left.Included != right.Included {
+		return left.Included
+	}
+	if !l.UpdatedAt.Equal(r.UpdatedAt) {
+		return l.UpdatedAt.Before(r.UpdatedAt)
+	}
+	return left.IssueID < right.IssueID
+}
+
+func uniqueStrings(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	out := values[:1]
+	for _, value := range values[1:] {
+		if value != out[len(out)-1] {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func orchestrationSkipReason(issueID string, nestedRoots, active map[string]struct{}, blocked map[string]string) string {

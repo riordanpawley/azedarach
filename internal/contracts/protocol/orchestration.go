@@ -33,6 +33,24 @@ type OrchestrationSnapshot struct {
 	ContainmentRisks       []OrchestrationRisk        `json:"containment_risks,omitempty"`
 	WorkerObservations     []domain.WorkerObservation `json:"worker_observations,omitempty"`
 	Blocked                map[string]string          `json:"blocked"`
+	Candidates             []OrchestrationCandidate   `json:"candidates,omitempty"`
+	Health                 OrchestrationHealth        `json:"health"`
+}
+
+type OrchestrationCandidate struct {
+	IssueID        string `json:"issue_id"`
+	Included       bool   `json:"included"`
+	Classification string `json:"classification"`
+	Reason         string `json:"reason"`
+}
+
+type OrchestrationHealth struct {
+	Healthy        bool     `json:"healthy"`
+	OpenIssueCount int      `json:"open_issue_count"`
+	InspectedCount int      `json:"inspected_count"`
+	InspectLimit   int      `json:"inspect_limit"`
+	OpenIssueLimit int      `json:"open_issue_limit"`
+	Diagnostics    []string `json:"diagnostics,omitempty"`
 }
 
 type OrchestrationCapacity struct {
@@ -118,14 +136,15 @@ type OrchestrationIntentKind string
 const OrchestrationIntentStart OrchestrationIntentKind = "start"
 
 type OrchestrationIntentRequest struct {
-	Scope      domain.OrchestrationScope `json:"scope"`
-	Kind       OrchestrationIntentKind   `json:"kind"`
-	IntentKey  string                    `json:"intent_key"`
-	ActorID    string                    `json:"actor_id,omitempty"`
-	IssueIDs   []string                  `json:"issue_ids,omitempty"`
-	Limit      int                       `json:"limit,omitempty"`
-	RepoDir    string                    `json:"repo_dir,omitempty"`
-	BaseBranch string                    `json:"base_branch,omitempty"`
+	Scope               domain.OrchestrationScope `json:"scope"`
+	Kind                OrchestrationIntentKind   `json:"kind"`
+	IntentKey           string                    `json:"intent_key"`
+	ActorID             string                    `json:"actor_id,omitempty"`
+	IssueIDs            []string                  `json:"issue_ids,omitempty"`
+	Limit               int                       `json:"limit,omitempty"`
+	RepoDir             string                    `json:"repo_dir,omitempty"`
+	BaseBranch          string                    `json:"base_branch,omitempty"`
+	OverrideBoardHealth bool                      `json:"override_board_health,omitempty"`
 }
 
 type OrchestrationIntentResult struct {

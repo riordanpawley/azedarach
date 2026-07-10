@@ -3,11 +3,14 @@ package daemon
 import (
 	"context"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 func TestMergeOrchestrationSnapshotOrdersProjectResultsDeterministically(t *testing.T) {
@@ -78,3 +81,75 @@ func TestOrchestrationSkipReasonPreservesNestedRootAuthority(t *testing.T) {
 		t.Fatalf("blocked skip reason = %q", got)
 	}
 }
+
+func TestOrchestrationBoardHealthDiagnosesUnsafeProject(t *testing.T) {
+	parent := domain.Task{ID: "parent", Status: domain.StatusOpen}
+	missing := domain.Task{ID: "missing-child", Status: domain.StatusOpen, ParentID: issueIDPtr("absent")}
+	malformedOwner := domain.Task{ID: "owned", Status: domain.StatusOpen, Ownership: &domain.IssueOwnership{OwnerKind: "agent"}}
+	tasks := []domain.Task{parent, missing, malformedOwner}
+	health := orchestrationBoardHealth(tasks, map[string]domain.Task{"parent": parent, "missing-child": missing, "owned": malformedOwner}, 2, 2)
+	if health.Healthy {
+		t.Fatal("unsafe board reported healthy")
+	}
+	if health.OpenIssueCount != 3 || health.InspectLimit != 2 || health.OpenIssueLimit != 2 {
+		t.Fatalf("health counts = %+v", health)
+	}
+	joined := strings.Join(health.Diagnostics, "\n")
+	for _, want := range []string{"missing parent absent", "incomplete owner identity", "exceeds refusal threshold"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("diagnostics %q missing %q", joined, want)
+		}
+	}
+}
+
+func TestOrchestrationCandidateOrderingIsStable(t *testing.T) {
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	tasks := map[string]domain.Task{
+		"excluded": {ID: "excluded", Priority: domain.P1, UpdatedAt: old},
+		"b":        {ID: "b", Priority: domain.P1, UpdatedAt: old},
+		"a":        {ID: "a", Priority: domain.P1, UpdatedAt: old},
+		"p2":       {ID: "p2", Priority: domain.P2, UpdatedAt: old},
+	}
+	candidates := []protocol.OrchestrationCandidate{{IssueID: "p2", Included: true}, {IssueID: "excluded"}, {IssueID: "b", Included: true}, {IssueID: "a", Included: true}}
+	sort.SliceStable(candidates, func(i, j int) bool { return orchestrationCandidateLess(candidates[i], candidates[j], tasks) })
+	got := []string{candidates[0].IssueID, candidates[1].IssueID, candidates[2].IssueID, candidates[3].IssueID}
+	if want := []string{"a", "b", "excluded", "p2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+}
+
+func TestStableRequestedCandidatesFollowsPolicyOrder(t *testing.T) {
+	got := stableRequestedCandidates([]string{"p2", "unknown", "p1", "p2"}, []string{"p1", "p2", "p3"})
+	if want := []string{"p1", "p2", "unknown"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("requested = %v, want %v", got, want)
+	}
+}
+
+func TestBoardHealthOverrideOnlyAllowsOpenIssueThreshold(t *testing.T) {
+	if !orchestrationHealthOverrideAllowed(protocol.OrchestrationHealth{Diagnostics: []string{"open issue count 101 exceeds refusal threshold 100"}}) {
+		t.Fatal("threshold override rejected")
+	}
+	if orchestrationHealthOverrideAllowed(protocol.OrchestrationHealth{Diagnostics: []string{"malformed graph: x has missing parent y"}}) {
+		t.Fatal("malformed graph override allowed")
+	}
+}
+
+func TestCandidateOwnershipAllowsSameActor(t *testing.T) {
+	now := time.Now().UTC()
+	task := domain.Task{ID: "x", Ownership: &domain.IssueOwnership{OwnerID: "worker", OwnerKind: "agent"}}
+	if got := orchestrationCandidateForTask(task, "worker", now, nil); got.Classification == "owned-elsewhere" {
+		t.Fatalf("same actor excluded: %+v", got)
+	}
+	if got := orchestrationCandidateForTask(task, "other", now, nil); got.Classification != "owned-elsewhere" {
+		t.Fatalf("other actor not excluded: %+v", got)
+	}
+}
+
+func TestOrchestrationGlobalActiveCountIncludesUninspectedRoots(t *testing.T) {
+	tasks := []domain.Task{{ID: "visible", HasTmuxSession: true}, {ID: "outside-limit", HasTmuxSession: true}, {ID: "inactive"}}
+	if got := orchestrationGlobalActiveCount(tasks); got != 2 {
+		t.Fatalf("active count = %d, want 2", got)
+	}
+}
+
+func issueIDPtr(value string) *naming.IssueID { id := naming.IssueID(value); return &id }

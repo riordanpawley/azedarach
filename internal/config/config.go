@@ -212,9 +212,13 @@ type SpecConfig struct {
 }
 
 type OrchestrationConfig struct {
-	Via           string `json:"via"`
-	CompleteGrace string `json:"completeGrace"`
-	WakeDebounce  string `json:"wakeDebounce"`
+	Via            string `json:"via"`
+	CompleteGrace  string `json:"completeGrace"`
+	WakeDebounce   string `json:"wakeDebounce"`
+	InspectLimit   int    `json:"inspectLimit"`
+	StartLimit     int    `json:"startLimit"`
+	AgentCapacity  int    `json:"agentCapacity"`
+	OpenIssueLimit int    `json:"openIssueLimit"`
 }
 
 type DiagnosticsConfig struct {
@@ -338,9 +342,13 @@ func DefaultConfig() *Config {
 			Enabled: true,
 		},
 		Orchestration: OrchestrationConfig{
-			Via:           "az",
-			CompleteGrace: "5m",
-			WakeDebounce:  "2s",
+			Via:            "az",
+			CompleteGrace:  "5m",
+			WakeDebounce:   "2s",
+			InspectLimit:   50,
+			StartLimit:     3,
+			AgentCapacity:  12,
+			OpenIssueLimit: 100,
 		},
 		Diagnostics: DiagnosticsConfig{
 			LatencyTrace: false,
@@ -789,6 +797,18 @@ func MergeWithDefaults(cfg *Config) *Config {
 	}
 	if strings.TrimSpace(cfg.Orchestration.Via) == "" {
 		cfg.Orchestration.Via = defaults.Orchestration.Via
+	}
+	if cfg.Orchestration.InspectLimit <= 0 {
+		cfg.Orchestration.InspectLimit = defaults.Orchestration.InspectLimit
+	}
+	if cfg.Orchestration.StartLimit <= 0 {
+		cfg.Orchestration.StartLimit = defaults.Orchestration.StartLimit
+	}
+	if cfg.Orchestration.AgentCapacity <= 0 {
+		cfg.Orchestration.AgentCapacity = defaults.Orchestration.AgentCapacity
+	}
+	if cfg.Orchestration.OpenIssueLimit <= 0 {
+		cfg.Orchestration.OpenIssueLimit = defaults.Orchestration.OpenIssueLimit
 	}
 
 	// Merge Notifications config

@@ -104,6 +104,7 @@ func main() {
 		IssueResources:             cfg.IssueResources,
 		IssueAutoArchive:           cfg.Issues.AutoArchive,
 		ScheduledScripts:           cfg.ScheduledScripts,
+		Orchestration:              cfg.Orchestration,
 	})
 	if err := d.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon failed: %v\n", err)
