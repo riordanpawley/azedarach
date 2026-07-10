@@ -1,0 +1,19 @@
+╭──────────────────────────────────────────────────╮
+│Board View                                        │
+│──────────────────────────────────────────────────│
+│▸ * Default default  6 cols  built-in             │
+│    Orchestration orchestration  8 cols  built-in │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│Columns                                           │
+│──────────────────────────────────────────────────│
+│default                                           │
+│                                                  │
+│Columns are query predicates over issue facts.    │
+│hide empty columns: false                         │
+│                                                  │
+│Backlog: lifecycle=backlog                        │
+╰──────────────────────────────────────────────────╯

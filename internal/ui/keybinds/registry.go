@@ -57,6 +57,11 @@ const (
 	ActionBoardViewMoveUp         ActionID = "board_view_move_up"
 	ActionBoardViewMoveDown       ActionID = "board_view_move_down"
 	ActionBoardViewSelect         ActionID = "board_view_select"
+	ActionBoardViewCreate         ActionID = "board_view_create"
+	ActionBoardViewDuplicate      ActionID = "board_view_duplicate"
+	ActionBoardViewEdit           ActionID = "board_view_edit"
+	ActionBoardViewDelete         ActionID = "board_view_delete"
+	ActionBoardViewToggleEmpty    ActionID = "board_view_toggle_empty"
 	ActionBoardViewClose          ActionID = "board_view_close"
 
 	ActionSelectToggle     ActionID = "select_toggle"
@@ -231,6 +236,11 @@ var boardViewRegistry = []ActionSpec{
 	{ID: ActionBoardViewMoveUp, Keys: []KeySpec{{Input: "k", Display: "k"}, {Input: "up", Display: "up"}}},
 	{ID: ActionBoardViewMoveDown, Keys: []KeySpec{{Input: "j", Display: "j"}, {Input: "down", Display: "down"}}, Hint: "view", HintKey: "j/k", Category: "Board Views", Help: "Move through saved board views", HelpKey: "j/k"},
 	{ID: ActionBoardViewSelect, Keys: []KeySpec{{Input: "enter", Display: "Enter"}}, Hint: "select", Category: "Board Views", Help: "Select highlighted board view"},
+	{ID: ActionBoardViewCreate, Keys: []KeySpec{{Input: "c", Display: "c"}}, Hint: "create", Category: "Board Views", Help: "Create a board view"},
+	{ID: ActionBoardViewDuplicate, Keys: []KeySpec{{Input: "d", Display: "d"}}, Hint: "duplicate", Category: "Board Views", Help: "Duplicate highlighted board view"},
+	{ID: ActionBoardViewEdit, Keys: []KeySpec{{Input: "e", Display: "e"}}, Hint: "edit", Category: "Board Views", Help: "Edit highlighted custom board view"},
+	{ID: ActionBoardViewDelete, Keys: []KeySpec{{Input: "x", Display: "x"}}, Hint: "delete", Category: "Board Views", Help: "Delete highlighted custom board view"},
+	{ID: ActionBoardViewToggleEmpty, Keys: []KeySpec{{Input: "h", Display: "h"}}, Hint: "hide empty", Category: "Board Views", Help: "Toggle empty columns for highlighted custom view"},
 	{ID: ActionBoardViewClose, Keys: []KeySpec{{Input: "esc", Display: "Esc"}, {Input: "q", Display: "q"}}, Hint: "close", HintKey: "Esc", Category: "Board Views", Help: "Close board view selector", HelpKey: "Esc/q"},
 	{Category: "Board Views", HelpKey: "CLI create", Help: "az board view create --file PATH"},
 	{Category: "Board Views", HelpKey: "CLI edit", Help: "az board view update --file PATH"},

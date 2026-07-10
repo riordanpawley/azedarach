@@ -1,0 +1,27 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────╮
+│Board View                                                                                    │
+│──────────────────────────────────────────────────────────────────────────────────────────────│
+││ ▸ * Default default  6 cols  built-in                        Columns                        │
+││     Orchestration orchestration  8 cols  built-in            ───────────────────────────────│
+││                                                              default                        │
+││                                                                                             │
+││                                                              Columns are query predicates   │
+││                                                              over issue facts.              │
+││                                                              hide empty columns: false      │
+││                                                                                             │
+││                                                              Backlog: lifecycle=backlog     │
+││                                                              Open: lifecycle=open           │
+││                                                              In Progress: phase=active      │
+││                                                              In Review: review_ready        │
+││                                                              Done: outcome=completed        │
+││                                                              Cancelled: outcome=cancelled   │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯

@@ -1289,6 +1289,12 @@ type boardViewSelectedMsg struct {
 	err    error
 }
 
+type boardViewMutatedMsg struct {
+	action string
+	viewID string
+	err    error
+}
+
 type orchestrationOverviewLoadedMsg struct {
 	projects       []orchestrationProjectOverview
 	hiddenProjects int
@@ -1853,6 +1859,30 @@ func (m Model) selectBoardViewCmd(viewID string) tea.Cmd {
 			return boardViewSelectedMsg{viewID: viewID, err: err}
 		}
 		return boardViewSelectedMsg{viewID: resp.ViewID}
+	}
+}
+
+func (m Model) saveBoardViewCmd(view domain.BoardView) tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return boardViewMutatedMsg{action: "save", viewID: string(view.ID), err: fmt.Errorf("daemon client unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		resp, err := m.daemonClient.SaveBoardView(ctx, view)
+		return boardViewMutatedMsg{action: "save", viewID: string(resp.View.View.ID), err: err}
+	}
+}
+
+func (m Model) deleteBoardViewCmd(viewID string) tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return boardViewMutatedMsg{action: "delete", viewID: viewID, err: fmt.Errorf("daemon client unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err := m.daemonClient.DeleteBoardView(ctx, viewID)
+		return boardViewMutatedMsg{action: "delete", viewID: viewID, err: err}
 	}
 }
 
