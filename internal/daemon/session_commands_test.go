@@ -8077,7 +8077,7 @@ func TestSessionCaptureCapturesPaneThroughDaemonTmuxClient(t *testing.T) {
 	sessionID := naming.CanonicalSessionIDForIssue(repoDir, issueID).String()
 	tmuxRunner := newSessionStartTmuxRunner()
 	tmuxRunner.sessions[sessionID] = true
-	tmuxRunner.captureOutput = "line one\nline two\n"
+	tmuxRunner.captureOutput = "line one\nline two\nline three\nline four\n"
 	daemon := &Daemon{
 		cfg:  Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
 		tmux: tmux.NewClient(tmuxRunner, slog.New(slog.NewTextHandler(io.Discard, nil))),
@@ -8085,7 +8085,7 @@ func TestSessionCaptureCapturesPaneThroughDaemonTmuxClient(t *testing.T) {
 	body, err := json.Marshal(sessionCommandBody{
 		ProjectID: projectID,
 		SessionID: issueID.String(),
-		Lines:     25,
+		Lines:     2,
 	})
 	if err != nil {
 		t.Fatalf("marshal body: %v", err)
@@ -8107,7 +8107,7 @@ func TestSessionCaptureCapturesPaneThroughDaemonTmuxClient(t *testing.T) {
 	}
 	wantCommands := [][]string{
 		{"has-session", "-t", sessionID},
-		{"capture-pane", "-t", sessionID, "-p", "-S", "-25"},
+		{"capture-pane", "-t", sessionID, "-p", "-S", "-2"},
 	}
 	if !reflect.DeepEqual(tmuxRunner.commands, wantCommands) {
 		t.Fatalf("tmux commands = %#v, want %#v", tmuxRunner.commands, wantCommands)
@@ -8116,7 +8116,7 @@ func TestSessionCaptureCapturesPaneThroughDaemonTmuxClient(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &got); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	if got.ProjectID != naming.ProjectID(daemon.canonicalProjectID(projectID)) || got.IssueID != issueID || got.SessionID != naming.SessionID(sessionID) || got.Lines != 25 || got.Output != tmuxRunner.captureOutput {
+	if got.ProjectID != naming.ProjectID(daemon.canonicalProjectID(projectID)) || got.IssueID != issueID || got.SessionID != naming.SessionID(sessionID) || got.Lines != 2 || got.Output != "line three\nline four\n" {
 		t.Fatalf("response = %+v, want project issue session lines output", got)
 	}
 }
