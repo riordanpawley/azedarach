@@ -41,6 +41,23 @@ func TestRuntimeConfigForProjectLoadsWorkflowMode(t *testing.T) {
 	}
 }
 
+func TestRuntimeConfigForProjectLoadsCodexAppServer(t *testing.T) {
+	t.Parallel()
+	repoDir := t.TempDir()
+	configDir := filepath.Join(repoDir, ".azedarach")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configJSON := `{"$version":11,"cliTool":"codex","session":{"codexAppServer":true}}`
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := New(Config{RepoDir: repoDir, CLITool: "codex"})
+	if cfg := d.runtimeConfigForProject(filepath.Base(repoDir)); !cfg.CodexAppServer {
+		t.Fatal("CodexAppServer = false, want true")
+	}
+}
+
 func TestRuntimeConfigForProjectSplitsWorktreeSyncAndAsyncInitCommands(t *testing.T) {
 	t.Parallel()
 

@@ -79,6 +79,40 @@ azd --help
 - Runs quality gates: `az gate <issue-id>` and `az dev gate <issue-id>`
 - Manages per-issue dev servers: `az dev start|stop|restart|status` and `az dev list`
 
+### AI Account Profiles
+
+- Save the current provider credentials: `az ai account backup <provider> <profile>`
+- Inspect saved and active profiles: `az ai account list` and `az ai account status`
+- Switch credentials atomically: `az ai account activate <provider> <profile>`
+- Switch Codex credentials and gracefully reload attributable persistent servers:
+  `az ai account activate --reload-daemon codex <profile>`
+- Remove a saved profile: `az ai account delete --confirm <provider> <profile>`
+- Supported providers are `claude` and `codex`; commands accept `--json` for agent use.
+- Credentials remain in a permission-restricted user-local vault under
+  `~/.local/share/azedarach/accounts/`. Profile output never includes credential
+  contents. Treat vault files as bearer secrets and keep them out of backups,
+  repositories, and support bundles unless those systems are encrypted.
+- Activation applies immediately to new provider processes. Codex activation
+  detects persistent `app-server`/`mcp-server` processes; `--reload-daemon`
+  sends `SIGTERM` only when the process environment positively matches the
+  configured `CODEX_HOME`. Unattributable or differently scoped processes are
+  left running. Existing Claude and interactive Codex sessions still require
+  `az session restart-all` or a manual restart.
+- Projects can opt into Codex's native client/server runtime with
+  `session.codexAppServer: true`. Azedarach ensures the managed app-server is
+  running, launches the stock TUI with `--remote unix://`, and supervises an
+  exact-worktree `resume --last` when a daemon restart disconnects the thin
+  client. Account activation prefers Codex's official scoped
+  `app-server daemon restart`; PID scanning remains a fallback for standalone
+  legacy sessions.
+- Claude profiles include the primary credentials, account state, config auth,
+  API-key settings, and the field-scoped macOS Desktop OAuth cache when present.
+- Before switching, Azedarach preserves unmatched live credentials in protected
+  `_original`/rotating safety profiles and re-snapshots a matched outgoing
+  profile so provider token refreshes are not lost.
+- Codex account commands enforce file-backed credential storage and refuse to
+  replace newer live tokens with an older snapshot of the same identity.
+
 ### Issue Tracker Workflows
 
 - CRUD and query: `az issue list|get|get-many|create|split|update|close|delete`

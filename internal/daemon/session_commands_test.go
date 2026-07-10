@@ -43,6 +43,54 @@ type testTmuxRunner struct {
 	killRelease         chan struct{}
 }
 
+func TestCodexAppServerLaunchUsesNativeDaemonAndSupervisedRemoteResume(t *testing.T) {
+	d := &Daemon{cfg: Config{
+		CLITool:                    "codex",
+		CodexAppServer:             true,
+		DangerouslySkipPermissions: true,
+		SessionShell:               "sh",
+	}}
+	command := d.buildSessionLaunchCommand(protocol.DefaultProjectID, "dbc", "az-dbc", true, nil, "start here")
+	for _, want := range []string{
+		"codex app-server daemon start",
+		"codex --remote unix:// --dangerously-bypass-approvals-and-sandbox",
+		"codex resume --remote unix:// --dangerously-bypass-approvals-and-sandbox --last",
+		"__az_codex_remote_failures",
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("launch command missing %q: %s", want, command)
+		}
+	}
+
+	supervisor := codexAppServerSupervisedCommand("codex", "codex --remote unix://", "codex resume --remote unix:// --last")
+	if out, err := exec.Command("sh", "-n", "-c", supervisor).CombinedOutput(); err != nil {
+		t.Fatalf("supervisor shell syntax: %v\n%s\n%s", err, out, supervisor)
+	}
+	trace := filepath.Join(t.TempDir(), "trace")
+	fakeCodex := `codex() { printf '%s\n' "$*" >> "$TRACE"; case "$*" in "app-server daemon start") return 0 ;; "--remote unix://") return 1 ;; "resume --remote unix:// --last") return 0 ;; *) return 2 ;; esac; }; `
+	cmd := exec.Command("sh", "-c", fakeCodex+supervisor)
+	cmd.Env = append(os.Environ(), "TRACE="+trace)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("supervisor execution: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "--remote unix://") || !strings.Contains(got, "resume --remote unix:// --last") {
+		t.Fatalf("supervisor trace = %q", got)
+	}
+}
+
+func TestCodexAppServerDisabledPreservesStandaloneLaunch(t *testing.T) {
+	d := &Daemon{cfg: Config{CLITool: "codex", SessionShell: "sh"}}
+	command := d.buildSessionLaunchCommand(protocol.DefaultProjectID, "dbc", "az-dbc", false, nil, "start here")
+	if strings.Contains(command, "app-server") || strings.Contains(command, "--remote") {
+		t.Fatalf("standalone launch unexpectedly uses app-server: %s", command)
+	}
+}
+
 func newTestTmuxRunner(initialSession string) *testTmuxRunner {
 	return &testTmuxRunner{
 		sessions: map[string]bool{

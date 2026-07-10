@@ -107,6 +107,7 @@ type KeyboardConfig struct {
 // SessionConfig contains session management settings
 type SessionConfig struct {
 	DangerouslySkipPermissions bool   `json:"dangerouslySkipPermissions"`
+	CodexAppServer             bool   `json:"codexAppServer"`
 	Shell                      string `json:"shell"`
 	TimeoutMs                  int    `json:"timeoutMs"`
 	LogDir                     string `json:"logDir"`
@@ -397,7 +398,7 @@ const (
 	LocalConfigFileName  = "config.local.json"
 	ConfigSchemaFileName = "config.schema.json"
 	ConfigSchemaURL      = "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json"
-	CurrentConfigVersion = 10
+	CurrentConfigVersion = 11
 )
 
 type configFileMetadata struct {

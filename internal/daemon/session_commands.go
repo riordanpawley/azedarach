@@ -4019,6 +4019,9 @@ func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string,
 		tool,
 		"resume",
 	}
+	if projectCfg.CodexAppServer {
+		parts = append(parts, "--remote", "unix://")
+	}
 	for _, imagePath := range imagePaths {
 		trimmedPath := strings.TrimSpace(imagePath)
 		if trimmedPath == "" {
@@ -4032,7 +4035,11 @@ func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string,
 	// Azedarach tracks tmux session IDs, not Codex conversation UUIDs.
 	// Codex's cwd filter makes --last target this worktree's latest session.
 	parts = append(parts, "--last")
-	return strings.Join(parts, " ")
+	command := strings.Join(parts, " ")
+	if projectCfg.CodexAppServer {
+		return codexAppServerSupervisedCommand(tool, command, command)
+	}
+	return command
 }
 
 func (d *Daemon) sessionRestartNeedsPostLaunchPrompt(projectID string) bool {
@@ -4903,6 +4910,9 @@ func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo 
 		// override with the file config and every event fired twice (double
 		// daemon notify, double hook-log row, double guard mutation, double
 		// shell spawn). The single source of truth is now the install file.
+		if projectCfg.CodexAppServer {
+			parts = append(parts, "--remote", "unix://")
+		}
 		for _, imagePath := range imagePaths {
 			trimmedPath := strings.TrimSpace(imagePath)
 			if trimmedPath == "" {
@@ -4933,10 +4943,52 @@ func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo 
 		default:
 			parts = append(parts, promptArg)
 		}
-		return promptAssignment + "; " + strings.Join(parts, " ")
+		command := promptAssignment + "; " + strings.Join(parts, " ")
+		if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
+			resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
+			return codexAppServerSupervisedCommand(tool, command, resume)
+		}
+		return command
 	}
 
+	command := strings.Join(parts, " ")
+	if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
+		resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
+		return codexAppServerSupervisedCommand(tool, command, resume)
+	}
+	return command
+}
+
+func (d *Daemon) codexAppServerResumeCommand(projectID, issueID string, yolo bool) string {
+	projectCfg := d.runtimeConfigForProject(projectID)
+	parts := []string{
+		fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)),
+		strings.TrimSpace(projectCfg.CLITool),
+		"resume",
+		"--remote",
+		"unix://",
+	}
+	if yolo || projectCfg.DangerouslySkipPermissions {
+		parts = append(parts, "--dangerously-bypass-approvals-and-sandbox")
+	}
+	parts = append(parts, "--last")
 	return strings.Join(parts, " ")
+}
+
+func codexAppServerSupervisedCommand(tool, firstCommand, resumeCommand string) string {
+	startDaemon := tool + " app-server daemon start >/dev/null"
+	steps := []string{
+		"__az_codex_remote_started=$(date +%s)",
+		"if [ \"$__az_codex_remote_first\" -eq 1 ]; then __az_codex_remote_first=0; " + firstCommand + "; else " + resumeCommand + "; fi",
+		"__az_codex_remote_status=$?",
+		"[ \"$__az_codex_remote_status\" -eq 0 ] && break",
+		"__az_codex_remote_elapsed=$(($(date +%s)-__az_codex_remote_started))",
+		"if [ \"$__az_codex_remote_elapsed\" -lt 5 ]; then __az_codex_remote_failures=$((__az_codex_remote_failures+1)); else __az_codex_remote_failures=1; fi",
+		"[ \"$__az_codex_remote_failures\" -ge 3 ] && exit \"$__az_codex_remote_status\"",
+		startDaemon + " || exit $?",
+		"sleep 1",
+	}
+	return startDaemon + " || exit $?; __az_codex_remote_first=1; __az_codex_remote_failures=0; while :; do " + strings.Join(steps, "; ") + "; done"
 }
 
 const initialPromptShellVariable = "__AZEDARACH_INITIAL_PROMPT"

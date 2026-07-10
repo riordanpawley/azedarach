@@ -10,7 +10,7 @@
     },
     "$version": {
       "type": "integer",
-      "const": 10
+      "const": 11
     },
     "cliTool": {
       "type": "string",
@@ -138,6 +138,11 @@
         "dangerouslySkipPermissions": {
           "type": "boolean",
           "default": false
+        },
+        "codexAppServer": {
+          "type": "boolean",
+          "default": false,
+          "description": "Launch Codex TUI sessions through the native app-server daemon and supervise thin-client resume across daemon restarts."
         },
         "shell": {
           "type": "string",

@@ -255,8 +255,11 @@ func printHelpForPath(path []string) bool {
 		cli.PrintAIStatusUsage()
 		cli.PrintAIUninstallUsage()
 		cli.PrintAIMigrateUsage()
+		cli.PrintAIAccountUsage()
 	case "ai install":
 		cli.PrintAIInstallUsage()
+	case "ai account", "ai account backup", "ai account list", "ai account status", "ai account activate", "ai account delete":
+		cli.PrintAIAccountUsage()
 	case "ai status":
 		cli.PrintAIStatusUsage()
 	case "ai uninstall":

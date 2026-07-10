@@ -26,6 +26,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/aiaccount"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
@@ -69,6 +70,7 @@ type Config struct {
 	GitWorkflowMode            string
 	CLITool                    string
 	DangerouslySkipPermissions bool
+	CodexAppServer             bool
 	SessionShell               string
 	SessionSyncInitCommands    []string
 	SessionAsyncInitCommands   []string
@@ -108,6 +110,8 @@ type Daemon struct {
 	cliToolByRoot                      map[string]string
 	sessionShellByProject              map[string]string
 	sessionShellByRoot                 map[string]string
+	codexAppServerByProject            map[string]bool
+	codexAppServerByRoot               map[string]bool
 	sessionSyncInitCommandsByProject   map[string][]string
 	sessionSyncInitCommandsByRoot      map[string][]string
 	sessionAsyncInitCommandsByProject  map[string][]string
@@ -277,6 +281,8 @@ func New(cfg Config) *Daemon {
 		cliToolByRoot:                      map[string]string{},
 		sessionShellByProject:              map[string]string{},
 		sessionShellByRoot:                 map[string]string{},
+		codexAppServerByProject:            map[string]bool{},
+		codexAppServerByRoot:               map[string]bool{},
 		sessionSyncInitCommandsByProject:   map[string][]string{},
 		sessionSyncInitCommandsByRoot:      map[string][]string{},
 		sessionAsyncInitCommandsByProject:  map[string][]string{},
@@ -334,6 +340,13 @@ func New(cfg Config) *Daemon {
 	specHandler := daemonhandlers.NewSpecHandler(specService)
 	decisionHandler := daemonhandlers.NewDecisionHandler(issueDecisionService{daemon: d})
 	learnHandler := daemonhandlers.NewLearnHandler(issueLearnService{daemon: d})
+	var accountService daemonhandlers.AIAccountService
+	if service, err := aiaccount.New(aiaccount.Config{}); err != nil {
+		cfg.Logger.Error("initialize AI account service", "error", err)
+	} else {
+		accountService = service
+	}
+	accountHandler := daemonhandlers.NewAIAccountHandler(accountService)
 	d.syncBootstrapFn = d.defaultSyncBootstrap
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
 	d.runtimeProjectionCoalescer = newRuntimeProjectionEventCoalescer(d, defaultRuntimeProjectionCoalesceWindow)
@@ -442,6 +455,7 @@ func New(cfg Config) *Daemon {
 		specHandler,
 		decisionHandler,
 		learnHandler,
+		accountHandler,
 		runtime,
 	)
 	d.apply = daemonhandlers.NewApplyHandler(d, applyRevisionAdapter{daemon: d})
