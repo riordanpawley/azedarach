@@ -10,7 +10,9 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonnotices "github.com/riordanpawley/azedarach/internal/daemon/notices"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 func TestNoticeCommandsListGetUpdateAndAction(t *testing.T) {
@@ -114,5 +116,57 @@ func TestNoticeCommandsListGetUpdateAndAction(t *testing.T) {
 	}
 	if actionBody.Notice.State != protocol.NoticeStateDismissed || actionResp.Revision <= updateResp.Revision {
 		t.Fatalf("action notice state=%s revision=%d, want dismissed after update rev %d", actionBody.Notice.State, actionResp.Revision, updateResp.Revision)
+	}
+}
+
+func TestNoticeListReconcilesDurableInteractionProjectionAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "azedarach.db")
+	issueClient := issues.NewClientAtPath(dbPath, nil)
+	defer issueClient.CloseDB()
+	request := testInteractionNoticeRequest()
+	issueID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "Needs decision", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	request.IssueID = issueID
+	if err := issueClient.CreateInteraction(ctx, request); err != nil {
+		t.Fatalf("create interaction: %v", err)
+	}
+
+	newDaemon := func() *Daemon {
+		d := &Daemon{issues: issueClient, hub: publish.NewHub(16, 8, nil), revision: map[string]uint64{}}
+		d.noticeService = daemonnotices.NewService(daemonnotices.ServiceConfig{
+			Repository: daemonnotices.NewAtPath(dbPath, nil), Hub: d.hub, NextRevision: d.nextRevision,
+		})
+		return d
+	}
+	list := func(d *Daemon) protocol.NoticeRecord {
+		resp := d.handleNoticeList(ctx, testRequest(protocol.CommandNoticeList, protocol.NoticeListRequestBody{ProjectID: "proj-1"}))
+		if !resp.OK {
+			t.Fatalf("list response = %+v", resp)
+		}
+		var body protocol.NoticeListResponseBody
+		if err := json.Unmarshal(resp.Body, &body); err != nil || len(body.Notices) != 1 {
+			t.Fatalf("list body = %+v err=%v", body, err)
+		}
+		return body.Notices[0]
+	}
+
+	firstDaemon := newDaemon()
+	first := list(firstDaemon)
+	if _, _, _, err := firstDaemon.noticeService.Update(ctx, daemonnotices.UpdateParams{ProjectID: "proj-1", NoticeID: first.NoticeID, State: daemonnotices.StateDismissed, Now: request.UpdatedAt.Add(time.Minute)}); err != nil {
+		t.Fatalf("dismiss projected notice: %v", err)
+	}
+	if err := firstDaemon.noticeService.Close(); err != nil {
+		t.Fatalf("close first daemon notice service: %v", err)
+	}
+
+	restarted := newDaemon()
+	defer restarted.noticeService.Close()
+	afterRestart := list(restarted)
+	if afterRestart.NoticeID != first.NoticeID || afterRestart.State != protocol.NoticeStateDismissed || afterRestart.OccurrenceCount != 1 || afterRestart.Source == nil || afterRestart.Source.InteractionID != request.ID || afterRestart.Source.InteractionRevision != request.Revision {
+		t.Fatalf("restart projection = %+v, want same dismissed singleton as %+v", afterRestart, first)
 	}
 }

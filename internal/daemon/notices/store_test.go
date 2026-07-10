@@ -70,6 +70,36 @@ func TestSQLiteStoreUpsertActiveDedupesWithinProject(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreProjectPreservesPresentationLifecycle(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "azedarach.db"), nil)
+	defer store.Close()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	candidate := noticeCandidate("interaction-req-1", "proj-1", "az-1", now)
+	record, created, changed, err := store.Project(ctx, candidate)
+	if err != nil || !created || !changed {
+		t.Fatalf("initial project = record %+v created=%v changed=%v err=%v", record, created, changed, err)
+	}
+	read := true
+	dismissed, _, err := store.Update(ctx, UpdateParams{ProjectID: "proj-1", NoticeID: record.NoticeID, Read: &read, State: StateDismissed, Now: now.Add(time.Minute)})
+	if err != nil {
+		t.Fatalf("dismiss: %v", err)
+	}
+	candidate.Summary = "revised question"
+	candidate.OccurredAt = now.Add(2 * time.Minute)
+	projected, created, changed, err := store.Project(ctx, candidate)
+	if err != nil {
+		t.Fatalf("refresh projection: %v", err)
+	}
+	if created || !changed || projected.State != StateDismissed || !projected.Read || projected.Summary != "revised question" {
+		t.Fatalf("refreshed projection = %+v created=%v changed=%v, want revised dismissed/read singleton (was %+v)", projected, created, changed, dismissed)
+	}
+	again, created, changed, err := store.Project(ctx, candidate)
+	if err != nil || created || changed || again.OccurrenceCount != 1 {
+		t.Fatalf("idempotent projection = %+v created=%v changed=%v err=%v", again, created, changed, err)
+	}
+}
+
 func TestSQLiteStoreUpdateLifecycleAndRejectsInvalidTransition(t *testing.T) {
 	ctx := context.Background()
 	store := NewAtPath(filepath.Join(t.TempDir(), "azedarach.db"), nil)

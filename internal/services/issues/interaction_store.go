@@ -162,6 +162,26 @@ func (c *Client) InteractionsForIssue(ctx context.Context, issueID string) ([]do
 	return out, nil
 }
 
+// Interactions returns the complete durable request projection in stable order.
+func (c *Client) Interactions(ctx context.Context) ([]domain.InteractionRequest, error) {
+	if err := c.RefreshInteractionProjection(ctx); err != nil {
+		return nil, err
+	}
+	c.interactionMu.RLock()
+	defer c.interactionMu.RUnlock()
+	out := make([]domain.InteractionRequest, 0, len(c.interactionCache))
+	for _, request := range c.interactionCache {
+		out = append(out, request)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	return out, nil
+}
+
 func (c *Client) IssueHasUnresolvedInteraction(ctx context.Context, issueID string) (bool, error) {
 	requests, err := c.InteractionsForIssue(ctx, issueID)
 	if err != nil {
