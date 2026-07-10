@@ -53,6 +53,7 @@ const (
 	ActionToggleView              ActionID = "toggle_view"
 	ActionRefresh                 ActionID = "refresh"
 	ActionPullBase                ActionID = "pull_base"
+	ActionOpenGitPane             ActionID = "open_git_pane"
 	ActionAttachSession           ActionID = "attach_session"
 	ActionBoardViewMoveUp         ActionID = "board_view_move_up"
 	ActionBoardViewMoveDown       ActionID = "board_view_move_down"
@@ -107,6 +108,7 @@ var registry = []ActionSpec{
 	{ID: ActionOpenNotificationHistory, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "N", Display: "N"}}},
 	{ID: ActionOpenOperationQueue, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "Q", Display: "Q"}}, Hint: "ops"},
 	{ID: ActionOpenBoardViews, Mode: types.ModeNormal, Category: "Panes", Keys: []KeySpec{{Input: "B", Display: "B"}}, Hint: "board view", Help: "Open board view selector"},
+	{ID: ActionOpenGitPane, Mode: types.ModeNormal, Category: "Panes", Keys: []KeySpec{{Input: "G", Display: "G"}}, Hint: "git", Help: "Open project root Git pane"},
 	{ID: ActionToggleView, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "tab", Display: "Tab"}}, Hint: "view"},
 	{ID: ActionPullBase, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "p", Display: "p"}}, Hint: "pull base"},
 	{ID: ActionQuit, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "q", Display: "q"}}, Hint: "quit"},

@@ -5,6 +5,7 @@
 ││ ────────────────────────────────────────────────                  │
 ││   ?                     Open this help reference                  │
 ││   B                     Open board view selector                  │
+││   G                     Open project root Git pane                │
 ││   Space                 Open task workspace                       │
 ││   Q                     Open operation queue                      │
 ││   L                     Open event log                            │
@@ -14,7 +15,6 @@
 ││   n                     Open async failure recovery               │
 ││   s                     Open settings                             │
 ││   c                     Open create task form                     │
-││   X                     Open bulk cleanup                         │
 ││                                                                   │
 ││ [j/k/ctrl+u/d to scroll, g/G to jump]                             │
 ╰────────────────────────────────────────────────────────────────────╯

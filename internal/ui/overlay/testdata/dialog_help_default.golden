@@ -5,6 +5,7 @@
 ││ ────────────────────────────────────────────────                                            │
 ││   ?                     Open this help reference                                            │
 ││   B                     Open board view selector                                            │
+││   G                     Open project root Git pane                                          │
 ││   Space                 Open task workspace                                                 │
 ││   Q                     Open operation queue                                                │
 ││   L                     Open event log                                                      │
@@ -21,7 +22,6 @@
 ││   g then p              Open project selector                                               │
 ││   g then s              Open spec workspace                                                 │
 ││                                                                                             │
-││ Navigation:                                                                                 │
 ││                                                                                             │
 ││ [j/k/ctrl+u/d to scroll, g/G to jump]                                                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
