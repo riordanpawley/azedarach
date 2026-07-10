@@ -64,7 +64,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantTaskFollowOnMerge:       daemonInvariantSourceProjection,
 	daemonInvariantWorkerObservation:       daemonInvariantSourceHybrid,
 	daemonInvariantInteractionWaiting:      daemonInvariantSourceProjection,
-	daemonInvariantInteractionStaleness:   daemonInvariantSourceProjection,
+	daemonInvariantInteractionStaleness:    daemonInvariantSourceProjection,
 	daemonInvariantRuntimeKnownProjectIDs:  daemonInvariantSourceProjection,
 	daemonInvariantIssueResourceLifecycle:  daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationScope:      daemonInvariantSourceProjection,
