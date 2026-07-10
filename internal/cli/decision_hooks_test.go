@@ -367,7 +367,7 @@ func TestGitHooksRunCommandSkipsBuiltInDecisionSyncAndRestageDuringMerge(t *test
 
 func TestGitHooksRunCommandNestedRepositoriesIgnoreFullOuterGitEnvironment(t *testing.T) {
 	localVars := gitLocalEnvironmentVariableNames(t)
-	poisoned := make(map[string]string, len(localVars)+4)
+	poisoned := make(map[string]string, len(localVars)+5)
 	for _, key := range localVars {
 		poisoned[key] = "outer-hook-value"
 	}
@@ -375,6 +375,7 @@ func TestGitHooksRunCommandNestedRepositoriesIgnoreFullOuterGitEnvironment(t *te
 	poisoned["GIT_CONFIG_VALUE_0"] = "/outer/worktree"
 	poisoned["GIT_QUARANTINE_PATH"] = "/outer/quarantine"
 	poisoned["GIT_REFLOG_ACTION"] = "outer merge hook"
+	poisoned["AZEDARACH_SKIP_DECISION_SYNC"] = "1"
 
 	cmd := exec.Command(os.Args[0],
 		"-test.run", "^TestGitHooksRunCommand(RunsBuiltInDecisionSyncAndRestageOutsideMerge|RestagesDecisionsIntoHookIndex|UsesCurrentWorktreeForImplicitProjectDir)$",
@@ -393,6 +394,7 @@ func isolateNestedGitEnvironment(t *testing.T) {
 	for _, key := range gitLocalEnvironmentVariableNames(t) {
 		keys[key] = struct{}{}
 	}
+	keys["AZEDARACH_SKIP_DECISION_SYNC"] = struct{}{}
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
 		if strings.HasPrefix(key, "GIT_") {
