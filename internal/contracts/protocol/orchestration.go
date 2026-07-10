@@ -15,9 +15,10 @@ type OrchestrationSnapshotRequest struct {
 	Scope domain.OrchestrationScope `json:"scope"`
 	// SessionID lets presentation clients recover the daemon-persisted role and
 	// scope without reconstructing authority from environment variables.
-	SessionID string `json:"session_id,omitempty"`
-	ActorID   string `json:"actor_id,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
+	SessionID      string `json:"session_id,omitempty"`
+	ActorID        string `json:"actor_id,omitempty"`
+	Limit          int    `json:"limit,omitempty"`
+	ObservedCursor int64  `json:"observed_cursor,omitempty"`
 }
 
 type OrchestrationSnapshot struct {
@@ -45,6 +46,9 @@ type OrchestrationSnapshot struct {
 	Interactions           []domain.InteractionRequest  `json:"interactions,omitempty"`
 	RecentEvents           []MailEvent                  `json:"recent_events,omitempty"`
 	Cursor                 int64                        `json:"cursor,omitempty"`
+	ContinuationRequired   bool                         `json:"continuation_required,omitempty"`
+	ContinuationReason     string                       `json:"continuation_reason,omitempty"`
+	ContinuationContract   string                       `json:"continuation_contract,omitempty"`
 	Constraints            OrchestrationConstraints     `json:"constraints"`
 	Health                 OrchestrationHealth          `json:"health"`
 }

@@ -42,6 +42,7 @@ const (
 	daemonInvariantOrchestrationSingleton  daemonInvariantID = "orchestration.scope_singleton"
 	daemonInvariantOrchestrationCompletion daemonInvariantID = "orchestration.project_completion"
 	daemonInvariantOrchestrationCandidates daemonInvariantID = "orchestration.project_candidates"
+	daemonInvariantOrchestrationParentWake daemonInvariantID = "orchestration.parent_continuation"
 )
 
 var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
@@ -69,7 +70,8 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantOrchestrationSingleton:  daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationCompletion: daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationCandidates: daemonInvariantSourceProjection,
-	daemonInvariantInteractionWaiting:     daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationParentWake: daemonInvariantSourceHybrid,
+	daemonInvariantInteractionWaiting:      daemonInvariantSourceProjection,
 	daemonInvariantAdvisorSingleton:        daemonInvariantSourceHybrid,
 	daemonInvariantInteractionStaleness:   daemonInvariantSourceProjection,
 }

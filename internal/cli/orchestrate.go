@@ -291,6 +291,7 @@ type orchestrateWatchFrame struct {
 	ContainmentRisks       []orchestrateContainmentRisk         `json:"containment_risks,omitempty"`
 	Blocked                map[string]string                    `json:"blocked"`
 	Events                 []mailEvent                          `json:"events"`
+	PersistenceGuard       string                               `json:"persistence_guard"`
 }
 
 type orchestrateCompactFrame struct {
@@ -806,6 +807,9 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 	if err != nil {
 		return err
 	}
+	if next := nextMailboxSeq(events, opts.SinceSeq); next > opts.SinceSeq {
+		checkpointRootOrchestratorCursor(ctx, deps, opts.RootIssueID, next)
+	}
 
 	result := orchestrateStatusResult{
 		RootIssueID:            ready.RootIssueID,
@@ -825,6 +829,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		Advice: map[string]interface{}{
 			"watch":             fmt.Sprintf("az orchestrate watch --root %s --since %d --jsonl", ready.RootIssueID, nextMailboxSeq(events, opts.SinceSeq)),
 			"watch_instruction": "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
+			"persistence_guard": "Daemon-enforced: parent idle/turn completion is wake-required while direct nested roots remain and complete-check has not passed; the durable cursor is resumed after restart or session replacement.",
 		},
 	}
 	if opts.Summary {
@@ -1952,6 +1957,9 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 			watchEvents = append(watchEvents, protocolToLocalMailEvent(event))
 		}
 		nextSince := nextMailboxSeq(events, lastSeq)
+		if nextSince > lastSeq {
+			checkpointRootOrchestratorCursor(watchCtx, deps, opts.RootIssueID, nextSince)
+		}
 		now := time.Now()
 		refreshReadiness, refreshReason := readinessCache.shouldRefresh(now, len(events))
 		if deps.Logger != nil {
@@ -2075,6 +2083,7 @@ func orchestrateWatchFrameFromReadiness(ready daemonclient.TaskGraphReadiness, e
 		ContainmentRisks:       orchestrateContainmentRisksFromDaemon(ready.ContainmentRisks),
 		Blocked:                ready.Blocked,
 		Events:                 events,
+		PersistenceGuard:       "Daemon-enforced: parent idle/turn completion is wake-required while direct nested roots remain and complete-check has not passed; the durable cursor is resumed after restart or session replacement.",
 	}
 }
 
@@ -2587,11 +2596,30 @@ func buildOrchestrateWatchFrameContext(ctx context.Context, deps *Dependencies, 
 	if err != nil {
 		return orchestrateWatchFrame{}, err
 	}
+	nextSince := nextMailboxSeq(events, since)
+	if nextSince > since {
+		checkpointRootOrchestratorCursor(ctx, deps, rootIssueID, nextSince)
+	}
 	watchEvents := make([]mailEvent, 0, len(events))
 	for _, event := range events {
 		watchEvents = append(watchEvents, protocolToLocalMailEvent(event))
 	}
-	return orchestrateWatchFrameFromReadiness(ready, watchEvents, since, nextMailboxSeq(events, since)), nil
+	return orchestrateWatchFrameFromReadiness(ready, watchEvents, since, nextSince), nil
+}
+
+func checkpointRootOrchestratorCursor(ctx context.Context, deps *Dependencies, rootIssueID string, cursor int64) {
+	if cursor <= 0 || strings.TrimSpace(os.Getenv("TMUX_PANE")) == "" {
+		return
+	}
+	sessionID, err := tmuxPaneSessionName(ctx)
+	if err != nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	scope, err := domain.RootedOrchestrationScope(rootIssueID)
+	if err != nil {
+		return
+	}
+	_, _ = deps.DaemonClient.OrchestrationSnapshot(ctx, protocol.OrchestrationSnapshotRequest{Scope: scope, SessionID: sessionID, ObservedCursor: cursor})
 }
 
 func compactFrameFromStatusResult(result orchestrateStatusResult, since, nextSince int64) orchestrateCompactFrame {
@@ -2631,7 +2659,7 @@ func copyAdvice(advice map[string]interface{}) map[string]interface{} {
 }
 
 func compactFrameFromWatchFrame(frame orchestrateWatchFrame) orchestrateCompactFrame {
-	return orchestrateCompactFrame{
+	compact := orchestrateCompactFrame{
 		RootIssueID: frame.RootIssueID,
 		SinceSeq:    frame.SinceSeq,
 		NextSince:   frame.NextSince,
@@ -2654,6 +2682,10 @@ func compactFrameFromWatchFrame(frame orchestrateWatchFrame) orchestrateCompactF
 		Events:     compactEvents(frame.Events),
 		EventCount: len(frame.Events),
 	}
+	if frame.PersistenceGuard != "" {
+		compact.Advice = map[string]interface{}{"persistence_guard": frame.PersistenceGuard}
+	}
+	return compact
 }
 
 func compactActivityCounts(activeSessions []orchestrateActiveSession) map[string]int {
@@ -2858,6 +2890,7 @@ func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool, compact 
 		return nil
 	}
 	fmt.Printf("root=%s since=%d next=%d\n", frame.RootIssueID, frame.SinceSeq, frame.NextSince)
+	fmt.Printf("persistence_guard: %s\n", frame.PersistenceGuard)
 	fmt.Printf("capacity: direct_runnable=%d direct_active=%d pending_starts=%d nested_startable=%d nested_active=%d blocked_nested_roots=%d not_counting=%d total_counting=%d\n",
 		frame.Capacity.DirectRunnableCount,
 		frame.Capacity.DirectActiveCount,

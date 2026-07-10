@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"log/slog"
 	"path/filepath"
 	"reflect"
@@ -15,7 +17,198 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
+
+func TestRootedOrchestratorIdleWakeCarriesDurableCursorAndDirectNestedRoots(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-continuation"
+	repoDir := t.TempDir()
+	issueClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	rootID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nestedID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "Nested", Type: domain.TypeEpic, Status: domain.StatusInProgress, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "Nested leaf", Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &nestedID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const parentSession = "root-orchestrator"
+	if _, err := store.AcquireOrchestratorScopeLease(ctx, identity, parentSession, func(context.Context, string) (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AdvanceOrchestratorScopeCursor(ctx, identity, 7); err != nil {
+		t.Fatal(err)
+	}
+	for _, session := range []daemonstate.Session{
+		{ID: parentSession, IssueID: rootID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: time.Now().UTC()},
+		{ID: "nested-orchestrator", IssueID: nestedID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: time.Now().UTC()},
+		{ID: "nested-leaf", IssueID: leafID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: time.Now().UTC()},
+	} {
+		if err := store.UpsertSessionState(ctx, projectID, session); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runner := newSessionStartTmuxRunner()
+	runner.sessions[parentSession] = true
+	runner.sessions["nested-orchestrator"] = true
+	runner.sessions["nested-leaf"] = true
+	d := &Daemon{
+		cfg:                    Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:                 issueClient,
+		issueClientsByProject:  map[string]*issues.Client{projectID: issueClient},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		tmux:                   tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
+	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.inputPayloads) != 1 {
+		t.Fatalf("continuation payloads = %d, want 1", len(runner.inputPayloads))
+	}
+	prompt := runner.inputPayloads[0]
+	for _, want := range []string{"cursor=7", "--since 7", nestedID, "without flattening"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q: %s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "direct nested roots ["+leafID+"]") || strings.Contains(prompt, ","+leafID+"]") {
+		t.Fatalf("prompt flattened nested descendant %s: %s", leafID, prompt)
+	}
+}
+
+func TestBootstrapRecoveryResumesReplacedRootedOrchestratorOnceWithDurableCursor(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	issueClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
+	projectID := d.canonicalProjectID(protocol.DefaultProjectID)
+
+	rootID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "Recovered root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nestedID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "Recovered nested root", Type: domain.TypeEpic, Status: domain.StatusInProgress, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "Recovered nested leaf", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &nestedID}); err != nil {
+		t.Fatal(err)
+	}
+
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(repoDir, "runtime.db")
+	storeA := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	if _, err := storeA.AcquireOrchestratorScopeLease(ctx, identity, "expired-auth-session", func(context.Context, string) (bool, error) { return false, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storeA.AdvanceOrchestratorScopeCursor(ctx, identity, 23); err != nil {
+		t.Fatal(err)
+	}
+	if err := storeA.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	storeB := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = storeB.Close() })
+	replaced, err := storeB.AcquireOrchestratorScopeLease(ctx, identity, "replacement-session", func(_ context.Context, sessionID string) (bool, error) {
+		if sessionID != "expired-auth-session" {
+			t.Fatalf("replacement probed %q", sessionID)
+		}
+		return false, nil
+	})
+	if err != nil || replaced.Disposition != daemonstate.OrchestratorLeaseRecoveredStale || replaced.Lease.Cursor != 23 {
+		t.Fatalf("replacement = %+v err=%v", replaced, err)
+	}
+	if err := storeB.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID: "replacement-session", IssueID: rootID, State: daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := newSessionStartTmuxRunner()
+	runner.sessions["replacement-session"] = true
+	d.issueClientsByProject = map[string]*issues.Client{projectID: issueClient}
+	d.runtimeStoresByProject = map[string]*daemonstate.RuntimeStateStore{projectID: storeB}
+	d.tmux = tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d.syncBootstrapFn = func(context.Context) error { return nil }
+	if err := d.bootstrapSyncOrchestrator(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.bootstrapSyncOrchestrator(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.inputPayloads) != 1 {
+		t.Fatalf("recovery continuation payloads = %d, want exactly 1", len(runner.inputPayloads))
+	}
+	prompt := runner.inputPayloads[0]
+	for _, want := range []string{"cursor=23", "--since 23", nestedID} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("recovery prompt missing %q: %s", want, prompt)
+		}
+	}
+}
+
+func TestRootedOrchestratorContinuationSuppressesCompleteAndHumanWait(t *testing.T) {
+	nested := protocol.OrchestrationSnapshot{NestedRoots: []protocol.OrchestrationNestedRoot{{IssueID: "nested"}}}
+	if rootedOrchestratorContinuationRequired(true, nested) {
+		t.Fatal("complete-check pass still requires continuation")
+	}
+	nested.Interactions = []domain.InteractionRequest{{ID: "human-acceptance"}}
+	if rootedOrchestratorContinuationRequired(false, nested) {
+		t.Fatal("unresolved human acceptance still requires continuation")
+	}
+}
+
+func TestAcquireRootedOrchestratorLeasePersistsSessionAuthority(t *testing.T) {
+	projectID := "proj-acquire-root"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	runner.sessions["root-session"] = true
+	d := &Daemon{
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		tmux:                   tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
+	if err := d.acquireRootedOrchestratorLease(context.Background(), projectID, "az-root", "root-session"); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, domain.OrchestrationScope{Kind: domain.OrchestrationScopeRooted, RootIssueID: "az-root"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, found, err := store.GetOrchestratorScopeLease(context.Background(), identity)
+	if err != nil || !found || lease.SessionID != "root-session" {
+		t.Fatalf("lease = %+v, found=%v err=%v", lease, found, err)
+	}
+}
 
 func TestMergeOrchestrationSnapshotOrdersProjectResultsDeterministically(t *testing.T) {
 	dst := protocol.OrchestrationSnapshot{Blocked: map[string]string{}, Runnable: []string{"z"}, Active: []string{"c"}}
@@ -138,6 +331,51 @@ func TestResolveOrchestratorSessionUsesDurableLeaseScope(t *testing.T) {
 	}
 	if _, found, err := d.resolveOrchestratorSession(context.Background(), projectID, "worker"); err != nil || found {
 		t.Fatalf("worker resolve = found %v err %v, want no orchestrator role", found, err)
+	}
+}
+
+func TestOrchestrationSnapshotAdvancesCursorOnlyForOwningSessionAndScope(t *testing.T) {
+	projectID := "project"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	scope, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AcquireOrchestratorScopeLease(context.Background(), identity, "owner-session", func(context.Context, string) (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}}
+
+	request := func(sessionID string, requestedScope domain.OrchestrationScope, cursor int64) {
+		body, marshalErr := json.Marshal(protocol.OrchestrationSnapshotRequest{Scope: requestedScope, SessionID: sessionID, ObservedCursor: cursor})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		_, _ = d.handleOrchestrationSnapshot(context.Background(), protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body})
+	}
+	request("worker-session", scope, 99)
+	lease, _, err := store.GetOrchestratorScopeLease(context.Background(), identity)
+	if err != nil || lease.Cursor != 0 {
+		t.Fatalf("foreign cursor = %d, err=%v", lease.Cursor, err)
+	}
+	otherScope, err := domain.RootedOrchestrationScope("az-nested")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request("owner-session", otherScope, 99)
+	lease, _, err = store.GetOrchestratorScopeLease(context.Background(), identity)
+	if err != nil || lease.Cursor != 0 {
+		t.Fatalf("cross-scope owner cursor = %d, err=%v", lease.Cursor, err)
+	}
+	request("owner-session", scope, 41)
+	lease, _, err = store.GetOrchestratorScopeLease(context.Background(), identity)
+	if err != nil || lease.Cursor != 41 {
+		t.Fatalf("owner cursor = %d, err=%v", lease.Cursor, err)
 	}
 }
 

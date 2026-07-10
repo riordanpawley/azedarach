@@ -1083,6 +1083,14 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v%s", err, cleanupNote)), nil
 	}
+	if task.Type == domain.TypeEpic {
+		if err := d.acquireRootedOrchestratorLease(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
+			d.rollbackSessionStartLifecycle(cmd.ProjectID, cmd.SessionID, cmd.IssueID)
+			_ = d.tmux.KillSession(ctx, cmd.SessionID)
+			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("acquire rooted orchestrator lease: %v%s", err, cleanupNote)), nil
+		}
+	}
 	rollbackIssueLifecycle = false
 	if cmd.StartWork && sessionInitMarker.AbsolutePath != "" {
 		if err := d.waitForSessionInitReady(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, sessionInitMarker); err != nil {
@@ -1140,6 +1148,23 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		)
 	}
 	return d.commandOutput(req, output), nil
+}
+
+func (d *Daemon) acquireRootedOrchestratorLease(ctx context.Context, projectID, issueID, sessionID string) error {
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil || d.tmux == nil {
+		return nil
+	}
+	scope, err := domain.RootedOrchestrationScope(issueID)
+	if err != nil {
+		return err
+	}
+	identity, err := domain.NewOrchestratorIdentity(d.canonicalProjectID(projectID), scope)
+	if err != nil {
+		return err
+	}
+	_, err = daemonstate.NewOrchestratorLeaseAuthority(store).Acquire(ctx, identity, sessionID, d.tmux.HasSession)
+	return err
 }
 
 func (d *Daemon) ensureSessionStartIssueLifecycle(ctx context.Context, issueClient sessionStartIssueLifecycleUpdater, issueID string, status domain.Status) error {

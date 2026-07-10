@@ -91,6 +91,11 @@ func (d *Daemon) bootstrapSyncOrchestrator(ctx context.Context) error {
 		d.syncBootstrapState.markFailed(err)
 		return fmt.Errorf("wake orchestrators after recovery: %w", err)
 	}
+	if err := d.reconcileOrchestratorLifecycles(ctx, protocol.DefaultProjectID, timeNow().UTC()); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("resume rooted orchestrator continuations after recovery failed; periodic reconcile will retry", "error", err)
+		}
+	}
 	d.syncBootstrapState.markReady()
 	return nil
 }

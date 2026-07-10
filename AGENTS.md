@@ -166,6 +166,7 @@ fd "filename" -t f internal cmd
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
    - orchestration scope identity -> `projection` (durable project + typed rooted/project scope)
    - orchestration scope singleton -> `hybrid` (refreshed durable scope lease + live tmux runtime)
+   - rooted parent orchestration continuation -> `hybrid` (durable rooted lease/cursor + refreshed direct nested-root, interaction, completion, and session projections + live tmux wake delivery)
    - project orchestration completion -> `hybrid` (refreshed issue/review/interaction/session projections + live tmux runtime)
 
 ### Adding New Invariants (Required Checklist)

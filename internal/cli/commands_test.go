@@ -41,6 +41,23 @@ type fakeDaemonTransport struct {
 	lastGraphReadiness      daemonclient.TaskGraphReadiness
 }
 
+func TestRenderPrimeOrchestrationSectionExplainsRuntimeContinuationGuard(t *testing.T) {
+	scope, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	section := renderPrimeOrchestrationSection(protocol.OrchestrationSnapshot{
+		Scope: scope, Cursor: 17, ContinuationRequired: true,
+		ContinuationReason:   "direct nested root active",
+		ContinuationContract: "consume the durable cursor and continue",
+	})
+	for _, want := range []string{"Runtime persistence guard: wake-required", "direct nested root active", "consume the durable cursor and continue", "cursor=17"} {
+		if !strings.Contains(section, want) {
+			t.Fatalf("prime orchestration section missing %q:\n%s", want, section)
+		}
+	}
+}
+
 func openSQLiteDB(t *testing.T, dbPath string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+dbPath)
