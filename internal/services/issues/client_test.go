@@ -3832,6 +3832,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0029_issue_state_model_v2",
 		"0030_issue_closed_runtime_v2_triggers",
 		"0031_board_views",
+		"0032_interaction_requests",
 	}, got)
 }
 

@@ -10,6 +10,71 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
+func TestResolveInteractionAtomicEffectsAndRollback(t *testing.T) {
+	ctx := context.Background()
+	c := NewClient(t.TempDir(), nil)
+	issueID, err := c.Create(ctx, CreateTaskParams{Title: "before", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := testInteractionRequest("resolve", issueID, "atomic")
+	if err = c.CreateInteraction(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	now := r.UpdatedAt.Add(time.Second)
+	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: "yes", Actor: "human", CreatedAt: now}
+	r, err = r.Transition(domain.InteractionResolved, 1, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	title := "must roll back"
+	err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1, IssueChanges: InteractionIssueChanges{Title: &title}, Decision: &InteractionDecisionEffect{Title: "bad"}})
+	if err == nil {
+		t.Fatal("expected decision validation failure")
+	}
+	got, ok, err := c.GetInteraction(ctx, "resolve")
+	if err != nil || !ok {
+		t.Fatalf("get interaction: %v %v", ok, err)
+	}
+	if got.State != domain.InteractionOpen || got.Revision != 1 {
+		t.Fatalf("request changed after rollback: %+v", got)
+	}
+	task := interactionTestTask(t, ctx, c, issueID)
+	if task.Title != "before" {
+		t.Fatalf("title changed after rollback: %q", task.Title)
+	}
+	err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1, IssueChanges: InteractionIssueChanges{Title: &title}, Decision: &InteractionDecisionEffect{Title: "Proceed", Rationale: "Human approved"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ = c.GetInteraction(ctx, "resolve")
+	if got.State != domain.InteractionResolved || got.FinalAnswer == nil {
+		t.Fatalf("request not resolved: %+v", got)
+	}
+	task = interactionTestTask(t, ctx, c, issueID)
+	if task.Title != title {
+		t.Fatalf("title=%q want %q", task.Title, title)
+	}
+	if err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1}); !errors.Is(err, domain.ErrStaleInteractionRevision) {
+		t.Fatalf("stale resolution error=%v", err)
+	}
+}
+
+func interactionTestTask(t *testing.T, ctx context.Context, c *Client, id string) domain.Task {
+	t.Helper()
+	tasks, err := c.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range tasks {
+		if task.ID.String() == id {
+			return task
+		}
+	}
+	t.Fatalf("task %s not found", id)
+	return domain.Task{}
+}
+
 func TestInteractionStoreDurabilityDecisionKeyAndStaleCache(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")

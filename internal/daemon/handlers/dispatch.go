@@ -9,16 +9,17 @@ import (
 
 // Dispatcher composes daemon command handlers and routes by command namespace.
 type Dispatcher struct {
-	session   *SessionHandler
-	git       *GitHandler
-	pr        *PRHandler
-	spec      *SpecHandler
-	decision  *DecisionHandler
-	learn     *LearnHandler
-	operation OperationHandler
-	worktree  *WorktreeHandler
-	devserver *DevServerHandler
-	aiAccount *AIAccountHandler
+	session     *SessionHandler
+	git         *GitHandler
+	pr          *PRHandler
+	spec        *SpecHandler
+	decision    *DecisionHandler
+	learn       *LearnHandler
+	operation   OperationHandler
+	worktree    *WorktreeHandler
+	devserver   *DevServerHandler
+	aiAccount   *AIAccountHandler
+	interaction *InteractionHandler
 }
 
 // OperationHandler is a marker interface so operation routes can be injected
@@ -51,19 +52,22 @@ func NewDispatcher(session *SessionHandler, handlers ...any) *Dispatcher {
 			d.devserver = h
 		case *AIAccountHandler:
 			d.aiAccount = h
+		case *InteractionHandler:
+			d.interaction = h
 		}
 	}
 	return &Dispatcher{
-		session:   d.session,
-		git:       d.git,
-		pr:        d.pr,
-		spec:      d.spec,
-		decision:  d.decision,
-		learn:     d.learn,
-		operation: d.operation,
-		worktree:  d.worktree,
-		devserver: d.devserver,
-		aiAccount: d.aiAccount,
+		session:     d.session,
+		git:         d.git,
+		pr:          d.pr,
+		spec:        d.spec,
+		decision:    d.decision,
+		learn:       d.learn,
+		operation:   d.operation,
+		worktree:    d.worktree,
+		devserver:   d.devserver,
+		aiAccount:   d.aiAccount,
+		interaction: d.interaction,
 	}
 }
 
@@ -125,6 +129,11 @@ func (d *Dispatcher) Handle(ctx context.Context, req protocol.RequestEnvelope) p
 			return unsupportedCommandResponse(req)
 		}
 		return d.aiAccount.Handle(ctx, req)
+	case CommandDispatchInteraction:
+		if d.interaction == nil {
+			return unsupportedCommandResponse(req)
+		}
+		return d.interaction.Handle(ctx, req)
 	default:
 		return unsupportedCommandResponse(req)
 	}
