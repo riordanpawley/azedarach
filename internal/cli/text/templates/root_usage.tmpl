@@ -83,7 +83,9 @@ Examples:
   az session stop az-123    # Stop issue az-123's session
   az session status         # Show all active sessions
   az session status az-123  # Show status for az-123
-  az branch merge az-123    # Repair/manual merge into resolved target branch (normal close uses az issue close)
+  az branch merge --source az-123 --target az-parent  # Explicit child-to-parent repair merge
+  az branch merge --source az-parent --target az-123  # Explicit ancestor-to-descendant materialization
+  az branch merge --source az-root --target base      # Root-to-base; durable human acceptance required
   az board view list
   az board view select current
   az board view explain az-123

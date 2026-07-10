@@ -68,7 +68,8 @@ Parent And Child Scope
 - If work starts under the wrong parent, stop that worker and create a fresh correctly parented child; session and worktree identity make an active worker unsafe to reparent in place.
 - Parent-child edges express hierarchy, not readiness. Pause/supersede work by changing lifecycle intent and adding a blocker; do not orphan active work by removing its parent edge.
 - Before using `--deferred`, ask whether the parent can land correctly without the work. Required work belongs in the parent's merge unit; only independently landable later work is deferred.
-- Child integration targets the closest active ancestor worktree. Materialize a missing ancestor with `az worktree create <ancestor-issue>`; do not route normal child completion directly to the base branch.
+- Child integration targets the closest active ancestor worktree. Materialize a missing ancestor with `az worktree create <ancestor-issue>`; do not route normal child completion directly to the base branch. Low-level repair merges require both endpoints: `az branch merge --source <child> --target <ancestor>`.
+- Ancestor-to-descendant materialization is a distinct explicit flow: `az branch merge --source <ancestor> --target <descendant>`. Root-to-base uses `--target base` and is refused until the root has durable, issue-specific human acceptance.
 
 Orchestration
 
@@ -119,7 +120,7 @@ Workflow Playbook
 - Graphs: `az issue dep add` and `az issue dep remove` own `blocks`, `parent-child`, `related`, `discovered-from`, and `created-in` edges. `az issue dep bulk apply`, `az issue fanout ready`, and `az issue fanout drift` support larger plans. Parent-child defines containment; `blocks` defines readiness.
 - Evidence and resources: `az issue record`, `az issue events`, `az issue context-risk`, `az observe`, and `az evidence validate` carry durable execution and closeout facts. `az issue image` and `az issue document` attach inspectable artifacts. Mail is for active coordination, not routine notes.
 - Execution: `az session start|attach|status|diagnose|stop|restart-all|resolve-conflict` controls managed tmux sessions. `az worktree create` materializes an integration target without starting an agent. The short aliases `az start`, `az attach`, `az status`, and `az stop` map to session operations.
-- Integration: accepted child work normally closes through `az issue close`. `az branch merge` and `az branch agent-merge` are low-level conflict/repair tools. `az pr list|status|checks|open|create|merge` covers remote pull-request workflows when configured.
+- Integration: accepted child work normally closes through `az issue close`. `az branch merge --source <issue> --target <issue|base>` and `az branch agent-merge` are low-level conflict/repair tools; merge never infers its target from the caller's worktree. `az pr list|status|checks|open|create|merge` covers remote pull-request workflows when configured.
 - Orchestration: `az orchestrate status|start|group|watch|observe|capture|prompt|message|complete-check|integrate|close-session` runs tracked graphs. `az mail send|list|watch|validate-evidence` carries worker events, and `az evidence validate` checks `worker_evidence.v1` before delivery.
 - Board views: `az board view list|get|select|create|update|delete|explain` manages persistent typed projections. Use `explain` to understand first-match placement rather than inferring durable state from a column title.
 - Requirements and decisions: `az spec req|link|read|pack|lint|parity` owns behavioral traceability. `az decision list|get|record|update|delete|revisit|sync|import|link` owns durable rationale and relationships.

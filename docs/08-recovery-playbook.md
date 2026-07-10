@@ -144,7 +144,7 @@ If merge guidance is blocked, recover with:
    `artifact_links`.
 4. Re-run `az orchestrate integrate --issue <issue-id>`.
 
-Use `az branch merge <issue-id>` only for manual conflict or close-repair
+Use `az branch merge --source <issue-id> --target <ancestor-issue-id|base>` only for manual conflict or close-repair. Use `--source <ancestor> --target <descendant>` when materializing accepted ancestor work into a follow-on worktree; the current worktree is never an implicit target. Root-to-base merges require durable human acceptance recorded on the root issue.
 recovery. When it targets a branch that is already checked out in another Git
 worktree, the merge runs in that attached worktree. This avoids Git's
 single-checkout guard for branches while keeping the target branch as the merge

@@ -4114,9 +4114,10 @@ func daemonWorkerIntegrationReadyMailType(eventType string) bool {
 func (d *Daemon) handleTaskMergeBaseTarget(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
 	var cmd struct {
-		TaskID            string `json:"task_id"`
-		BaseBranch        string `json:"base_branch,omitempty"`
-		AllowBaseForChild bool   `json:"allow_base_for_child,omitempty"`
+		TaskID                 string `json:"task_id"`
+		BaseBranch             string `json:"base_branch,omitempty"`
+		AllowBaseForChild      bool   `json:"allow_base_for_child,omitempty"`
+		RequireHumanAcceptance bool   `json:"require_human_acceptance,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -4124,6 +4125,15 @@ func (d *Daemon) handleTaskMergeBaseTarget(ctx context.Context, req protocol.Req
 	result, err := d.taskMergeBaseTarget(ctx, projectID, cmd.TaskID, cmd.BaseBranch, cmd.AllowBaseForChild)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if cmd.RequireHumanAcceptance && result.TargetID == "base" {
+		accepted, acceptErr := d.hasDurableBaseIntegrationAcceptance(ctx, projectID, cmd.TaskID)
+		if acceptErr != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, acceptErr.Error()), nil
+		}
+		if !accepted {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("refusing root issue %s integration into base without durable human acceptance; record `human.input_provided` with data {\"base_integration_accepted\":true}", cmd.TaskID)), nil
+		}
 	}
 	body, err := json.Marshal(result)
 	if err != nil {
@@ -4133,6 +4143,23 @@ func (d *Daemon) handleTaskMergeBaseTarget(ctx context.Context, req protocol.Req
 	resp.Body = body
 	resp.Revision = d.currentRevision(projectID)
 	return resp, nil
+}
+
+func (d *Daemon) hasDurableBaseIntegrationAcceptance(ctx context.Context, projectID, issueID string) (bool, error) {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return false, fmt.Errorf("issue store unavailable")
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventHumanInputProvided}, Limit: 100})
+	if err != nil {
+		return false, fmt.Errorf("read durable human acceptance for %s: %w", issueID, err)
+	}
+	for _, event := range events {
+		if accepted, ok := event.Payload["base_integration_accepted"].(bool); ok && accepted {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (d *Daemon) handleTaskFollowOnMergeCandidates(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

@@ -9762,6 +9762,33 @@ func TestTaskMergeBaseTargetDefaultUsesProjectBaseBranch(t *testing.T) {
 	}
 }
 
+func TestDurableBaseIntegrationAcceptanceRequiresIssueScopedHumanInput(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj-base-acceptance"
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}}
+	accepted, err := d.hasDurableBaseIntegrationAcceptance(ctx, projectID, issueID)
+	if err != nil || accepted {
+		t.Fatalf("acceptance before event = %v, %v; want false, nil", accepted, err)
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type:    domain.IssueEventHumanInputProvided,
+		Payload: map[string]any{"base_integration_accepted": true},
+	}); err != nil {
+		t.Fatalf("append acceptance: %v", err)
+	}
+	accepted, err = d.hasDurableBaseIntegrationAcceptance(ctx, projectID, issueID)
+	if err != nil || !accepted {
+		t.Fatalf("acceptance after event = %v, %v; want true, nil", accepted, err)
+	}
+}
+
 func TestTaskGraphReadinessReportsPendingStartupAndCleanupTranscriptStates(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

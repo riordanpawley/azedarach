@@ -130,9 +130,9 @@ func issueGetCommandForProject(issueID, projectID string) string {
 func branchMergeCommandForProject(issueID, projectID string) string {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
-		return fmt.Sprintf("az branch merge %s", issueID)
+		return fmt.Sprintf("az branch merge --source %s --target <issue-id|base>", issueID)
 	}
-	return fmt.Sprintf("az branch merge --project %s %s", projectID, issueID)
+	return fmt.Sprintf("az branch merge --project %s --source %s --target <issue-id|base>", projectID, issueID)
 }
 
 func orchestrateIntegrateApplyCommandForProject(issueID, projectID string) string {

@@ -18,7 +18,7 @@ func TestMaybePrintCommandHelpUsesSpecificUsage(t *testing.T) {
 		{name: "session leaf", args: []string{"session", "start", "--help"}, want: "usage: az session start [--project <project-id>] <issue-id> [--wait]"},
 		{name: "alias leaf", args: []string{"start", "--help"}, want: "usage: az start <issue-id> [--wait]"},
 		{name: "branch leaf", args: []string{"branch", "agent-merge", "--help"}, want: "usage: az branch agent-merge [--project <project-id>] <issue-id> [--target base|<issue-id>]"},
-		{name: "branch merge alias", args: []string{"branch", "merge-to-base", "--help"}, want: "usage: az branch merge [--project <project-id>] [issue-id]"},
+		{name: "branch merge alias", args: []string{"branch", "merge-to-base", "--help"}, want: "usage: az branch merge [--project <project-id>] --source <issue-id> --target base|<issue-id>"},
 		{name: "operation leaf", args: []string{"operation", "cancel", "--help"}, want: "Usage: az operation cancel --id <operation-id> [--reason <reason>]"},
 		{name: "operation queue leaf", args: []string{"operation", "queue", "--help"}, want: "Usage: az operation queue [--issue <issue-id>]"},
 		{name: "config leaf", args: []string{"config", "set", "--help"}, want: "Usage: az config set <key> <value> [--project-dir <dir>]"},

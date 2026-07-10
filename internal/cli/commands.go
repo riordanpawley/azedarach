@@ -672,6 +672,7 @@ type BranchAgentMergeOptions struct {
 type BranchMergeToBaseOptions struct {
 	IssueID           string
 	Project           string
+	Target            string
 	AllowBaseForChild bool
 }
 
@@ -1967,7 +1968,7 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 	recordPhase("resolve_source", phaseStartedAt)
 
 	phaseStartedAt = time.Now()
-	target, decision, err := resolveMergeToBaseTarget(ctx, deps, source.IssueID, opts.AllowBaseForChild)
+	target, decision, err := resolveExplicitBranchMergeTarget(ctx, deps, source, opts)
 	if err != nil {
 		recordPhase("resolve_target", phaseStartedAt)
 		return branchMergeToBaseCommandResult{}, wrapPhaseErr("resolve_target", err)
@@ -1999,6 +2000,7 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 		"ancestor_chain", strings.Join(decision.AncestorChain, " -> "),
 		"allow_base_for_child", opts.AllowBaseForChild,
 	)
+	fmt.Printf("Merge plan: source %s (%s) -> target %s (%s)\n", source.IssueID, source.Branch, target.TargetID, baseBranch)
 
 	phaseStartedAt = time.Now()
 	if err := checkMergeToBasePreflight(ctx, deps, source, baseWorktree); err != nil {
@@ -2066,6 +2068,42 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 		Message:      result.Result.Message,
 		Phases:       phases,
 	}, nil
+}
+
+func resolveExplicitBranchMergeTarget(ctx context.Context, deps *Dependencies, source daemonclient.Worktree, opts BranchMergeToBaseOptions) (mergeBaseTarget, mergeTargetDecision, error) {
+	targetID := strings.TrimSpace(opts.Target)
+	if targetID == "" {
+		return resolveMergeToBaseTarget(ctx, deps, source.IssueID, opts.AllowBaseForChild)
+	}
+	if isBaseMergeTarget(targetID) {
+		defaultBase := resolveCLIBaseBranch(deps.Config)
+		targetResult, err := deps.DaemonClient.TaskMergeBaseTarget(ctx, source.IssueID, defaultBase, opts.AllowBaseForChild, true)
+		if err != nil {
+			return mergeBaseTarget{}, mergeTargetDecision{}, err
+		}
+		target := mergeBaseTarget{TargetID: targetResult.TargetID, Branch: targetResult.Branch, WorktreePath: targetResult.WorktreePath, BranchAttached: targetResult.BranchAttached}
+		decision := mergeTargetDecision{Reason: targetResult.Reason, AncestorChain: append([]string(nil), targetResult.AncestorChain...)}
+		if target.TargetID != "base" {
+			return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("refusing target base for %s: daemon selected active ancestor %s; use --target %s", source.IssueID, target.TargetID, target.TargetID)
+		}
+		return target, decision, nil
+	}
+	targetWorktree, err := resolveWorktreeForIssue(ctx, deps, targetID)
+	if err != nil {
+		return mergeBaseTarget{}, mergeTargetDecision{}, err
+	}
+	if naming.IssueIDsEqual(source.IssueID, targetWorktree.IssueID) {
+		return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("source and target issue must be different: %s", source.IssueID)
+	}
+	if strings.TrimSpace(targetWorktree.Branch) == "" {
+		return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("target issue %s has no branch", targetWorktree.IssueID)
+	}
+	return mergeBaseTarget{
+		TargetID:       targetWorktree.IssueID,
+		Branch:         targetWorktree.Branch,
+		WorktreePath:   targetWorktree.Path,
+		BranchAttached: true,
+	}, mergeTargetDecision{Reason: "selected explicit issue target"}, nil
 }
 
 func printBranchMergeToBaseResult(result branchMergeToBaseCommandResult) {
@@ -2253,7 +2291,7 @@ func BranchAgentMergeCommand(deps *Dependencies, opts BranchAgentMergeOptions) e
 	if preflight.Clean {
 		fmt.Printf("Merge preflight clean for %s -> %s; no agent needed.\n", source.IssueID, displayTargetID)
 		if requestedBaseTarget {
-			fmt.Printf("Run: az branch merge %s\n", source.IssueID)
+			fmt.Printf("Run: az branch merge --source %s --target %s\n", source.IssueID, targetID)
 		}
 		return nil
 	}
@@ -2320,7 +2358,7 @@ func buildBranchAgentMergePrompt(source daemonclient.Worktree, targetID, targetW
 	fmt.Fprintf(&b, "Auto-merge the blocked preflight for %s -> %s.\n\n", source.IssueID, targetID)
 	b.WriteString("Start by running `az prime`. Inspect the predicted conflict files, perform the merge in the appropriate worktree, resolve conflicts, commit the resolution, and run focused validation.\n\n")
 	if isBaseMergeTarget(targetID) {
-		fmt.Fprintf(&b, "This preflight blocked merging source branch %s into base ref %s. Work in source issue %s at %s: merge %s into %s, resolve conflicts there, and leave the source branch clean so `az branch merge %s` can be retried.\n", source.Branch, targetRef, source.IssueID, source.Path, targetRef, source.Branch, source.IssueID)
+		fmt.Fprintf(&b, "This preflight blocked merging source branch %s into base ref %s. Work in source issue %s at %s: merge %s into %s, resolve conflicts there, and leave the source branch clean so `az branch merge --source %s --target base` can be retried after durable human acceptance.\n", source.Branch, targetRef, source.IssueID, source.Path, targetRef, source.Branch, source.IssueID)
 	} else {
 		fmt.Fprintf(&b, "This preflight blocked merging source branch %s from %s into target issue %s at %s. Work in the target worktree, merge %s, resolve conflicts there, and leave the target branch clean.\n", source.Branch, source.Path, targetID, targetWorktree, source.Branch)
 	}
@@ -2370,7 +2408,7 @@ func resolveMergeToBaseSourceWorktree(ctx context.Context, deps *Dependencies, i
 			return wt, nil
 		}
 	}
-	return daemonclient.Worktree{}, fmt.Errorf("could not infer issue from current worktree %q; pass issue ID: az branch merge <issue-id>", absCWD)
+	return daemonclient.Worktree{}, fmt.Errorf("could not infer issue from current worktree %q; pass an explicit source: az branch merge --source <issue-id> --target <issue-id|base>", absCWD)
 }
 
 func samePath(left, right string) bool {

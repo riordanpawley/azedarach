@@ -66,7 +66,7 @@ func printHelpForPath(path []string) bool {
 	case "branch":
 		fmt.Println("Usage: az branch <merge|agent-merge> [arguments]")
 	case "branch merge", "branch merge-to-base":
-		fmt.Println("usage: az branch merge [--project <project-id>] [issue-id]")
+		fmt.Println("usage: az branch merge [--project <project-id>] --source <issue-id> --target base|<issue-id>")
 	case "branch agent-merge":
 		fmt.Println("usage: az branch agent-merge [--project <project-id>] <issue-id> [--target base|<issue-id>]")
 	case "board":
