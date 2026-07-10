@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -72,6 +73,14 @@ func (c *Client) UpdateInteraction(ctx context.Context, request domain.Interacti
 	if current.IssueID != request.IssueID || current.DecisionKey != request.DecisionKey || !current.CreatedAt.Equal(request.CreatedAt) {
 		return fmt.Errorf("interaction identity and creation audit are immutable")
 	}
+	current.Proposal = request.Proposal
+	current.FinalAnswer = request.FinalAnswer
+	current.Effects = request.Effects
+	current.Disposition = request.Disposition
+	current.StaleAt = request.StaleAt
+	current.Reminders = request.Reminders
+	current.SessionID = request.SessionID
+	current.Recovery = request.Recovery
 	if _, err := current.Transition(request.State, expectedRevision, request.UpdatedAt); err != nil {
 		return fmt.Errorf("validate interaction transition: %w", err)
 	}
@@ -95,6 +104,50 @@ func (c *Client) UpdateInteraction(ctx context.Context, request domain.Interacti
 		return err
 	}
 	if n != 1 {
+		return fmt.Errorf("%w: interaction %s expected revision %d", domain.ErrStaleInteractionRevision, request.ID, expectedRevision)
+	}
+	return c.RefreshInteractionProjection(ctx)
+}
+
+// UpdateInteractionMetadata persists an orthogonal lifecycle audit mutation
+// without changing the request's decision state.
+func (c *Client) UpdateInteractionMetadata(ctx context.Context, request domain.InteractionRequest, expectedRevision int64) error {
+	if expectedRevision < 1 || request.Revision != expectedRevision+1 {
+		return fmt.Errorf("%w: expected replacement revision %d", domain.ErrStaleInteractionRevision, expectedRevision+1)
+	}
+	if err := request.Validate(); err != nil {
+		return fmt.Errorf("validate interaction metadata: %w", err)
+	}
+	current, found, err := c.GetInteraction(ctx, request.ID)
+	if err != nil {
+		return err
+	}
+	if !found || current.Revision != expectedRevision {
+		return fmt.Errorf("%w: interaction %s expected revision %d", domain.ErrStaleInteractionRevision, request.ID, expectedRevision)
+	}
+	expected := current
+	expected.SessionID = request.SessionID
+	expected.StaleAt = request.StaleAt
+	expected.Reminders = request.Reminders
+	expected.Recovery = request.Recovery
+	expected.Revision = request.Revision
+	expected.UpdatedAt = request.UpdatedAt
+	if !current.Unresolved() || !reflect.DeepEqual(expected, request) {
+		return fmt.Errorf("interaction decision content is immutable during metadata update")
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("marshal interaction metadata: %w", err)
+	}
+	db, err := c.dbHandle()
+	if err != nil {
+		return err
+	}
+	result, err := db.ExecContext(ctx, `UPDATE interaction_requests SET revision=?,request_json=?,updated_at=? WHERE id=? AND revision=?`, request.Revision, raw, request.UpdatedAt.UTC().Format(time.RFC3339Nano), request.ID, expectedRevision)
+	if err != nil {
+		return fmt.Errorf("update interaction metadata %s: %w", request.ID, err)
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
 		return fmt.Errorf("%w: interaction %s expected revision %d", domain.ErrStaleInteractionRevision, request.ID, expectedRevision)
 	}
 	return c.RefreshInteractionProjection(ctx)

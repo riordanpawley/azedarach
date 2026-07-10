@@ -61,7 +61,7 @@ func (h *InteractionHandler) Handle(ctx context.Context, req protocol.RequestEnv
 			return specInvalidRequest(resp, "only the human respondent may resolve interaction requests")
 		}
 		return specJSONResponse(ctx, resp, h.service.ResolveInteraction, cmd)
-	case protocol.CommandInteractionDiscuss, protocol.CommandInteractionPropose, protocol.CommandInteractionAnswer, protocol.CommandInteractionWithdraw:
+	case protocol.CommandInteractionDiscuss, protocol.CommandInteractionPropose, protocol.CommandInteractionAnswer, protocol.CommandInteractionWithdraw, protocol.CommandInteractionSupersede, protocol.CommandInteractionRecover:
 		var cmd protocol.InteractionMutationRequestBody
 		if !decodeSpecRequest(req.Body, &cmd, &resp) {
 			return resp
@@ -70,6 +70,15 @@ func (h *InteractionHandler) Handle(ctx context.Context, req protocol.RequestEnv
 			return specInvalidRequest(resp, err)
 		}
 		if req.Command == protocol.CommandInteractionDiscuss && strings.TrimSpace(cmd.SessionID) == "" {
+			return specInvalidRequest(resp, "missing required field: session_id")
+		}
+		if (req.Command == protocol.CommandInteractionWithdraw || req.Command == protocol.CommandInteractionSupersede) && strings.TrimSpace(cmd.Reason) == "" {
+			return specInvalidRequest(resp, "missing required field: reason")
+		}
+		if req.Command == protocol.CommandInteractionSupersede && strings.TrimSpace(cmd.ReplacementID) == "" {
+			return specInvalidRequest(resp, "missing required field: replacement_id")
+		}
+		if req.Command == protocol.CommandInteractionRecover && strings.TrimSpace(cmd.SessionID) == "" {
 			return specInvalidRequest(resp, "missing required field: session_id")
 		}
 		if req.Command == protocol.CommandInteractionAnswer && !interactionHumanActor(cmd.Actor) {

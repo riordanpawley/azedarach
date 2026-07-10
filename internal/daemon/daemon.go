@@ -193,8 +193,9 @@ type Daemon struct {
 	shutdownReqOnce  sync.Once
 	inFlightCommands sync.WaitGroup
 
-	syncBootstrapState syncBootstrapState
-	syncBootstrapFn    func(context.Context) error
+	syncBootstrapState              syncBootstrapState
+	syncBootstrapFn                 func(context.Context) error
+	reconcileInteractionStalenessFn func(context.Context, string) error
 }
 
 // New constructs a runnable daemon runtime.

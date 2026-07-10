@@ -145,7 +145,9 @@ func TestInteractionStoreDurabilityDecisionKeyAndStaleCache(t *testing.T) {
 	if err := writer.CreateInteraction(ctx, testInteractionRequest("req-2", r.IssueID, r.DecisionKey)); !errors.Is(err, domain.ErrDuplicateUnresolvedDecision) {
 		t.Fatalf("duplicate error = %v", err)
 	}
-	next, err := r.Transition(domain.InteractionWithdrawn, r.Revision, r.UpdatedAt.Add(time.Second))
+	withdrawnAt := r.UpdatedAt.Add(time.Second)
+	r.Disposition = &domain.InteractionDispositionAudit{Actor: "orchestrator", Reason: "obsolete", CreatedAt: withdrawnAt}
+	next, err := r.Transition(domain.InteractionWithdrawn, r.Revision, withdrawnAt)
 	if err != nil {
 		t.Fatal(err)
 	}
