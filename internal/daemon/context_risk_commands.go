@@ -261,6 +261,7 @@ func issueContextRiskObservationEvidence(event domain.IssueObservationEvent) dom
 	evidence.Files = append(evidence.Files, issueContextRiskStringList(payload, "files_changed", "changed_files", "files")...)
 	evidence.Symbols = append(evidence.Symbols, issueContextRiskStringList(payload, "changed_symbols", "symbols")...)
 	evidence.Tests = append(evidence.Tests, issueContextRiskStringList(payload, "tests_changed", "tests")...)
+	evidence.RelatedConsumersAudited = append(evidence.RelatedConsumersAudited, issueContextRiskStringList(payload, "related_consumers_audited")...)
 	evidence.RootCause = issueContextRiskString(payload, "root_cause")
 	evidence.Invariant = issueContextRiskString(payload, "invariant")
 	evidence.Validation = issueContextRiskString(payload, "regression_validation", "validation")
@@ -317,6 +318,7 @@ func mergeIssueContextRiskEvidence(left, right domain.IssueContextRiskEvidence) 
 	left.Files = append(left.Files, right.Files...)
 	left.Symbols = append(left.Symbols, right.Symbols...)
 	left.Tests = append(left.Tests, right.Tests...)
+	left.RelatedConsumersAudited = append(left.RelatedConsumersAudited, right.RelatedConsumersAudited...)
 	if strings.TrimSpace(left.RootCause) == "" {
 		left.RootCause = right.RootCause
 	}

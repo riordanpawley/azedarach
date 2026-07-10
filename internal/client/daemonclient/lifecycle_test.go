@@ -80,6 +80,51 @@ func TestSessionLifecycleCommandsRouteThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestCaptureSessionRoutesThroughDaemon(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != CommandSessionCapture {
+				t.Fatalf("command = %q, want %q", req.Command, CommandSessionCapture)
+			}
+			var body protocol.SessionCaptureRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal request: %v", err)
+			}
+			if body.ProjectID != "proj-a" || body.SessionID != "az-1" || body.Lines != 44 {
+				t.Fatalf("request body = %+v, want project session lines", body)
+			}
+			respBody, err := json.Marshal(protocol.SessionCaptureResponseBody{
+				ProjectID: "proj-a",
+				IssueID:   "az-1",
+				SessionID: "proj-a-az-1",
+				Lines:     44,
+				Output:    "recent output\n",
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	got, err := New(transport).WithProjectID("proj-a").CaptureSession(context.Background(), "az-1", CaptureSessionOptions{Lines: 44})
+	if err != nil {
+		t.Fatalf("CaptureSession error: %v", err)
+	}
+	if got.Output != "recent output\n" || got.Lines != 44 {
+		t.Fatalf("CaptureSession result = %+v, want output lines", got)
+	}
+	if transport.lastReq.Meta.ProjectID != "proj-a" {
+		t.Fatalf("meta project_id = %q, want proj-a", transport.lastReq.Meta.ProjectID)
+	}
+}
+
 func TestRestartAllSessionsRoutesThroughDaemon(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

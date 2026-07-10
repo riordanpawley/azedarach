@@ -406,7 +406,7 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 						Active:      []string{busy.String(), unknown.String(), noAgent.String()},
 						ActiveSessions: []daemonclient.TaskActiveSession{
 							{IssueID: busy.String(), Activity: "busy", ActivitySource: "hooks", State: string(domain.SessionBusy), TmuxAttachedCount: 1},
-							{IssueID: unknown.String(), Activity: "unknown", ActivitySource: "none", State: string(domain.SessionBusy), TmuxAttachedCount: 1, Advice: "activity unknown: inspect hooks with az ai status --target=auto; run az ai install --target=auto only if hooks are missing, outdated, or not installed; use sparse pane capture only if status/watch looks stale, failed, or contradictory for az-3"},
+							{IssueID: unknown.String(), Activity: "unknown", ActivitySource: "none", State: string(domain.SessionBusy), TmuxAttachedCount: 1, Advice: "activity unknown: inspect hooks with az ai status --target=auto; run az ai install --target=auto only if hooks are missing, outdated, or not installed; use `az orchestrate capture --issue az-3` only if status/watch looks stale, failed, or contradictory"},
 							{IssueID: noAgent.String(), Activity: "no-agent", ActivitySource: "session", State: string(domain.SessionBusy), TmuxAttachedCount: 1},
 						},
 					}), nil

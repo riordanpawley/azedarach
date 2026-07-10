@@ -66,6 +66,11 @@
     }
   },
   "issues": {
+    "autoArchive": {
+      "closedAfterDays": 30,
+      "enabled": true,
+      "interval": "24h"
+    },
     "path": ".azedarach",
     "syncInterval": 300
   },

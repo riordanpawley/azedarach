@@ -51,6 +51,7 @@ const (
 	commandSessionResume        = "session.resume"
 	commandSessionStop          = "session.stop"
 	commandSessionStatus        = "session.status"
+	commandSessionCapture       = daemonclient.CommandSessionCapture
 	commandTaskSnapshotExport   = "task.snapshot.export"
 	defaultExportFormat         = "json"
 	defaultIssueListLimit       = 200
@@ -418,6 +419,13 @@ type SessionRestartAllOptions struct {
 	JSON      bool
 }
 
+type SessionCaptureOptions struct {
+	Project string
+	IssueID string
+	Lines   int
+	JSON    bool
+}
+
 type WorktreeCreateOptions struct {
 	Project    string
 	IssueID    string
@@ -584,6 +592,38 @@ func ParseSessionRestartAllArgs(args []string) (SessionRestartAllOptions, error)
 	if fs.NArg() != 0 {
 		return SessionRestartAllOptions{}, fmt.Errorf("usage: az session restart-all [--force-busy] [--yolo] [--json]")
 	}
+	return opts, nil
+}
+
+func ParseSessionCaptureArgs(args []string) (SessionCaptureOptions, error) {
+	opts := SessionCaptureOptions{Lines: 120}
+	fs := flag.NewFlagSet("session capture", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&opts.IssueID, "issue", "", "issue id")
+	fs.StringVar(&opts.IssueID, "id", "", "issue id")
+	fs.IntVar(&opts.Lines, "lines", opts.Lines, "number of recent pane lines to capture")
+	fs.BoolVar(&opts.JSON, "json", false, "print JSON output")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return SessionCaptureOptions{}, err
+	}
+	if fs.NArg() > 1 {
+		return SessionCaptureOptions{}, fmt.Errorf("usage: az session capture [--project <project-id>] [--lines N] [--json] <issue-id>")
+	}
+	if fs.NArg() == 1 {
+		if strings.TrimSpace(opts.IssueID) != "" {
+			return SessionCaptureOptions{}, fmt.Errorf("usage: az session capture [--project <project-id>] [--lines N] [--json] <issue-id>")
+		}
+		opts.IssueID = strings.TrimSpace(fs.Arg(0))
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return SessionCaptureOptions{}, fmt.Errorf("usage: az session capture [--project <project-id>] [--lines N] [--json] <issue-id>")
+	}
+	if opts.Lines < 0 {
+		return SessionCaptureOptions{}, fmt.Errorf("--lines must be greater than or equal to zero")
+	}
+	opts.Project = strings.TrimSpace(opts.Project)
+	opts.IssueID = strings.TrimSpace(opts.IssueID)
 	return opts, nil
 }
 
@@ -1254,6 +1294,47 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 	}
 
 	return printCommandOutput(resp)
+}
+
+func SessionCaptureCommand(deps *Dependencies, opts SessionCaptureOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	var target sessionIssueTarget
+	var err error
+	if strings.TrimSpace(opts.Project) != "" {
+		target, err = resolveExplicitSessionStatusTarget(deps, opts.IssueID, opts.Project, opts.IssueID)
+	} else {
+		target, err = resolveSessionStatusTarget(deps, opts.IssueID)
+	}
+	if err != nil {
+		return err
+	}
+	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
+	defer restoreProject()
+
+	deps.Logger.Info("capturing session pane", "project_id", target.ProjectID, "issue_id", target.IssueID, "lines", opts.Lines)
+	result, err := deps.DaemonClient.CaptureSession(ctx, target.IssueID, daemonclient.CaptureSessionOptions{Lines: opts.Lines})
+	if err != nil {
+		return fmt.Errorf("failed to capture session pane: %w", err)
+	}
+	if opts.JSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+	fmt.Print(result.Output)
+	if result.Output != "" && !strings.HasSuffix(result.Output, "\n") {
+		fmt.Println()
+	}
+	return nil
+}
+
+func OrchestrateCaptureCommand(deps *Dependencies, opts SessionCaptureOptions) error {
+	return SessionCaptureCommand(deps, opts)
 }
 
 func SessionDiagnoseCommand(deps *Dependencies, issueID string) error {

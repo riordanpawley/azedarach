@@ -70,7 +70,7 @@ Orchestration
 {{ else }}- CLI-managed worker fanout requires `tmux`; it is unavailable. Native delegation remains available.
 {{ end }}{{ else if and .OrchestrationViaAz .TmuxAvailable }}- Mode is `az`: `az orchestrate` is the worker launch and coordination authority for this graph.
 - Shape independently actionable leaves, inspect `az orchestrate status --root <root> --json --summary`, then start a bounded wave with `az orchestrate start --root <root> --limit <n>`.
-- Keep `az orchestrate watch --root <root> --since <seq> --jsonl` running while workers are active. Use status/watch activity before sparse pane inspection; do not poll panes continuously.
+- Keep `az orchestrate watch --root <root> --since <seq> --jsonl` running while workers are active. Use `az orchestrate capture --issue <worker>` only when status/watch is stale or contradictory; do not poll panes continuously.
 - Trust hook-backed activity. If activity is `unknown`, inspect `az ai status --target=auto` and repair missing or outdated hooks before treating the worker as idle.
 - Workers report `worker-progress`, `worker-blocked`, or `worker-integration-ready`. The orchestrator uses `az orchestrate message` only for evidence-backed intervention.
 - Review worker evidence and context risk, return non-trivial findings to live worker sessions, and close accepted children with `az issue close --id <child>`.
@@ -112,7 +112,7 @@ Workflow Playbook
 - Evidence and resources: `az issue record`, `az issue events`, `az issue context-risk`, `az observe`, and `az evidence validate` carry durable execution and closeout facts. `az issue image` and `az issue document` attach inspectable artifacts. Mail is for active coordination, not routine notes.
 - Execution: `az session start|attach|status|diagnose|stop|restart-all|resolve-conflict` controls managed tmux sessions. `az worktree create` materializes an integration target without starting an agent. The short aliases `az start`, `az attach`, `az status`, and `az stop` map to session operations.
 - Integration: accepted child work normally closes through `az issue close`. `az branch merge` and `az branch agent-merge` are low-level conflict/repair tools. `az pr list|status|checks|open|create|merge` covers remote pull-request workflows when configured.
-- Orchestration: `az orchestrate status|start|group|watch|observe|prompt|message|complete-check|integrate|close-session` runs tracked graphs. `az mail send|list|watch|validate-evidence` carries worker events, and `az evidence validate` checks `worker_evidence.v1` before delivery.
+- Orchestration: `az orchestrate status|start|group|watch|observe|capture|prompt|message|complete-check|integrate|close-session` runs tracked graphs. `az mail send|list|watch|validate-evidence` carries worker events, and `az evidence validate` checks `worker_evidence.v1` before delivery.
 - Board views: `az board view list|get|select|create|update|delete|explain` manages persistent typed projections. Use `explain` to understand first-match placement rather than inferring durable state from a column title.
 - Requirements and decisions: `az spec req|link|read|pack|lint|parity` owns behavioral traceability. `az decision list|get|record|update|delete|revisit|sync|import|link` owns durable rationale and relationships.
 - Learning: `az learn add|recall|show|review|promote|relate` captures evidence-backed discoveries, controls their review lifecycle, and promotes accepted guidance into rules, skills, specs, or decisions.
