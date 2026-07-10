@@ -70,6 +70,12 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 	if d == nil {
 		return result, nil
 	}
+	ctx = withDaemonProjectIDContext(ctx, result.ProjectID.String())
+	if d.issues != nil {
+		if _, err := (issueInteractionService{daemon: d}).ListInteractions(ctx, protocol.InteractionListRequestBody{}); err != nil {
+			return result, fmt.Errorf("reconcile interaction staleness: %w", err)
+		}
+	}
 	if d.tmux == nil || d.sessionStore == nil || d.sessionRuntimeStateStoreIfConfigured(result.ProjectID.String()) == nil {
 		return result, nil
 	}
@@ -110,6 +116,12 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 	d := s.daemon
 	if d == nil {
 		return result, nil
+	}
+	ctx = withDaemonProjectIDContext(ctx, result.ProjectID.String())
+	if d.issues != nil {
+		if _, err := (issueInteractionService{daemon: d}).ListInteractions(ctx, protocol.InteractionListRequestBody{}); err != nil {
+			return result, fmt.Errorf("reconcile interaction staleness: %w", err)
+		}
 	}
 	issueIDs = normalizeRuntimeReconcileIssueIDs(issueIDs)
 	if len(issueIDs) == 0 {
