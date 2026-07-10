@@ -124,7 +124,7 @@ func TestBoardViewOverlayProtectsBuiltInAndConfirmsCustomDelete(t *testing.T) {
 	custom := domain.DefaultBoardView()
 	custom.ID = "custom"
 	custom.Title = "Custom"
-	o := NewBoardViewOverlay([]domain.BoardViewRecord{{View: domain.DefaultBoardView(), BuiltIn: true}, {View: custom}}, "current")
+	o := NewBoardViewOverlay([]domain.BoardViewRecord{{View: domain.DefaultBoardView(), BuiltIn: true}, {View: custom}}, domain.DefaultBoardViewID)
 	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
 	if o.mode != boardViewBrowse || !strings.Contains(o.errorText, "Built-in") {
 		t.Fatal("built-in delete was not protected")
