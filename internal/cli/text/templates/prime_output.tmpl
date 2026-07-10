@@ -33,6 +33,12 @@ Issue State
 - Blocked is graph state, not a status. Add a `blocks` dependency and record blocker evidence; do not use `in_review` to mean blocked.
 - `cancelled` is a terminal closed outcome without integration. Archive and tombstone/delete do not substitute for cancellation.
 
+Issue Types
+
+- Use `task` for bounded implementation work, `bug` for defects, `feature` for new user-facing capability, `epic` for orchestration roots, `chore` for maintenance, and `investigation` for research, discovery, spikes, analysis, experiments, audits, findings, options, or recommendations.
+- Check that an issue's durable type matches its actual intent whenever you read or materially reshape it. Correct discrepancies with `az issue update --type <type> <issue-id>` and record why; do not preserve a misleading type merely because it already exists.
+- Investigation issues may intentionally have no code diff. Their Agent Band/session discussion, findings, and attached evidence are deliverables for human inspection. Keep them in review/waiting-human state until explicit, issue-specific human acceptance is durably recorded; agent review, an integration sweep, or lack of repository changes is insufficient for terminal close, cancellation, session stop, worktree cleanup, or integration.
+
 Execution Loop
 
 1. Read the issue, linked requirements, dependencies, recent evidence, and relevant existing code paths.

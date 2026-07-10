@@ -81,6 +81,7 @@ func TestTaskType_Short(t *testing.T) {
 		{TypeFeature, "F"},
 		{TypeEpic, "E"},
 		{TypeChore, "C"},
+		{TypeInvestigation, "I"},
 		{TaskType("unknown"), "?"},
 	}
 

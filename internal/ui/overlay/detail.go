@@ -1029,6 +1029,8 @@ func (d *DetailPanel) formatIssueCardSummary() string {
 		typeColor = uistyles.Blue
 	case domain.TypeChore:
 		typeColor = uistyles.Yellow
+	case domain.TypeInvestigation:
+		typeColor = uistyles.Mauve
 	}
 	typeBadge := lipgloss.NewStyle().
 		Foreground(uistyles.Base).

@@ -194,6 +194,14 @@ For architecture or boundary work, only close when notes include:
 
 If any are missing, keep issue state `in_progress` or `open`.
 
+## Investigation Review Gate (Required)
+
+1. Use the durable `investigation` issue type for research, discovery, spikes, analysis, experiments, audits, and issues whose primary deliverable is findings, options, recommendations, or an AI Agent Band/session discussion, even when they have no code diff or repository artifact.
+2. Whenever issue intent and type disagree, correct the type with `az issue update --type <type>` and record why. Until corrected, apply this gate based on actual intent so legacy or misclassified work is not closed accidentally.
+3. Investigation-like issues require explicit, issue-specific human acceptance before integration, terminal close, cancellation, session stop, or worktree cleanup. An integration-sweep request, `in_review` state, agent/reviewer approval, or lack of a diff does not satisfy this gate.
+4. Before asking for human review, surface the findings and identify all artifacts plus the relevant Agent Band/session location. Preserve the issue, session, and worktree in review/waiting-human state and record durable evidence that human review is pending.
+5. Immediately before any terminal action, re-check the issue's type, intent, and durable evidence. Proceed only when explicit human acceptance of the investigation findings and disposition is recorded for that issue.
+
 ## CLI/Binary Rules
 
 1. In this repo, PATH `az` is the Go implementation.

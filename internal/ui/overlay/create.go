@@ -505,6 +505,9 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "c", "C":
 				c.taskType = domain.TypeChore
 				return c, nil
+			case "i", "I":
+				c.taskType = domain.TypeInvestigation
+				return c, nil
 			}
 		}
 
@@ -953,6 +956,7 @@ func (c *CreateTaskOverlay) renderTypeSelector() string {
 		{"F", domain.TypeFeature, "Feature"},
 		{"E", domain.TypeEpic, "Epic"},
 		{"C", domain.TypeChore, "Chore"},
+		{"I", domain.TypeInvestigation, "Investigation"},
 	}
 
 	var parts []string
@@ -1425,7 +1429,7 @@ func serializeTaskTemplate(
 		"# " + title,
 		taskTemplateDivider,
 		"",
-		fmt.Sprintf("Type:     %s        (task | bug | feature | epic | chore)", string(taskType)),
+		fmt.Sprintf("Type:     %s        (task | bug | feature | epic | chore | investigation)", string(taskType)),
 		fmt.Sprintf("Priority: P%d          (P0 = highest, P4 = lowest)", int(priority)),
 		fmt.Sprintf("Status:   %s        (backlog | open | in_progress | in_review | closed)", displayStatus),
 		"Assignee: " + strings.TrimSpace(assignee),
@@ -1499,6 +1503,8 @@ func parseTaskTemplate(markdown, id string, parentID *string) (TaskCreatedMsg, e
 				taskType = domain.TypeEpic
 			case "chore":
 				taskType = domain.TypeChore
+			case "investigation":
+				taskType = domain.TypeInvestigation
 			default:
 				return TaskCreatedMsg{}, fmt.Errorf("invalid type %q", raw)
 			}
