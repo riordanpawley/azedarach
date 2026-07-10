@@ -163,6 +163,10 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
+	if err := c.reconcileIssueStateModelV2Drift(ctx, db); err != nil {
+		return err
+	}
+
 	if err := repairAgentLearningBaseSchema(ctx, db); err != nil {
 		return fmt.Errorf("repair agent learning base schema: %w", err)
 	}
@@ -1216,6 +1220,10 @@ func (c *Client) runIssueStateModelV2CutoverTransaction(ctx context.Context, db 
 }
 
 func (c *Client) backupIssueDBForStateModelV2(ctx context.Context, db *sql.DB) (string, error) {
+	return c.backupIssueDB(ctx, db, "state-model-v1")
+}
+
+func (c *Client) backupIssueDB(ctx context.Context, db *sql.DB, label string) (string, error) {
 	if strings.TrimSpace(c.dbPath) == "" || c.dbPath == ":memory:" {
 		return "", fmt.Errorf("cannot create SQLite backup for empty or in-memory issue DB path")
 	}
@@ -1226,7 +1234,7 @@ func (c *Client) backupIssueDBForStateModelV2(ctx context.Context, db *sql.DB) (
 	if err != nil {
 		return "", fmt.Errorf("resolve DB path: %w", err)
 	}
-	backupPath := fmt.Sprintf("%s.state-model-v1.%s.bak", dbPath, time.Now().UTC().Format("20060102T150405.000000000Z"))
+	backupPath := fmt.Sprintf("%s.%s.%s.bak", dbPath, label, time.Now().UTC().Format("20060102T150405.000000000Z"))
 	for i := 1; ; i++ {
 		if _, err := os.Stat(backupPath); err != nil {
 			if os.IsNotExist(err) {
@@ -1234,7 +1242,7 @@ func (c *Client) backupIssueDBForStateModelV2(ctx context.Context, db *sql.DB) (
 			}
 			return "", fmt.Errorf("inspect backup path: %w", err)
 		}
-		backupPath = fmt.Sprintf("%s.state-model-v1.%s.%d.bak", dbPath, time.Now().UTC().Format("20060102T150405.000000000Z"), i)
+		backupPath = fmt.Sprintf("%s.%s.%s.%d.bak", dbPath, label, time.Now().UTC().Format("20060102T150405.000000000Z"), i)
 	}
 	if _, err := db.ExecContext(ctx, `VACUUM INTO `+quoteSQLiteStringLiteral(backupPath)); err != nil {
 		return "", fmt.Errorf("vacuum into %s: %w", backupPath, err)
@@ -1243,6 +1251,167 @@ func (c *Client) backupIssueDBForStateModelV2(ctx context.Context, db *sql.DB) (
 		return "", err
 	}
 	return backupPath, nil
+}
+
+type issueStateModelV2Reconciliation struct {
+	id             string
+	legacyStatus   string
+	lifecycleState string
+	closedOutcome  string
+	reviewState    string
+}
+
+func (c *Client) reconcileIssueStateModelV2Drift(ctx context.Context, db *sql.DB) error {
+	applied, err := isMigrationApplied(ctx, db, issueStateModelV2MigrationID)
+	if err != nil {
+		return fmt.Errorf("check issue state-model v2 migration before reconciliation: %w", err)
+	}
+	if !applied {
+		return nil
+	}
+	updates, err := issueStateModelV2Reconciliations(ctx, db)
+	if err != nil {
+		return fmt.Errorf("inspect issue state-model v2 compatibility mirror: %w", err)
+	}
+	if len(updates) == 0 {
+		return validateIssueStateModelV2LegacyMirror(ctx, db)
+	}
+
+	backupPath, err := c.backupIssueDB(ctx, db, "state-model-v2-reconcile")
+	if err != nil {
+		return fmt.Errorf("backup issue DB before state-model v2 reconciliation: %w", err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin issue state-model v2 reconciliation: %w", err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	updates, err = issueStateModelV2Reconciliations(ctx, tx)
+	if err != nil {
+		return issueStateModelV2CutoverError("issue state-model v2 reconciliation rolled back", backupPath, err.Error())
+	}
+	for _, update := range updates {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE issues
+			SET status = ?,
+				lifecycle_state = ?,
+				closed_outcome = ?,
+				review_state = ?
+			WHERE id = ?
+		`, update.legacyStatus, update.lifecycleState, update.closedOutcome, update.reviewState, update.id); err != nil {
+			return issueStateModelV2CutoverError("issue state-model v2 reconciliation rolled back", backupPath, fmt.Sprintf("issue %s: %v", update.id, err))
+		}
+	}
+	if err := c.issueStateModelV2FailurePoint("after_reconciliation"); err != nil {
+		return issueStateModelV2CutoverError("issue state-model v2 reconciliation rolled back", backupPath, err.Error())
+	}
+	if err := validateIssueStateModelV2Rows(ctx, tx); err != nil {
+		return issueStateModelV2CutoverError("issue state-model v2 reconciliation rolled back", backupPath, err.Error())
+	}
+	if err := validateIssueStateModelV2LegacyMirror(ctx, tx); err != nil {
+		return issueStateModelV2CutoverError("issue state-model v2 reconciliation rolled back", backupPath, err.Error())
+	}
+	if err := tx.Commit(); err != nil {
+		return issueStateModelV2CutoverError("commit issue state-model v2 reconciliation", backupPath, err.Error())
+	}
+	tx = nil
+	return nil
+}
+
+func issueStateModelV2Reconciliations(ctx context.Context, db sqlIssueQueryer) ([]issueStateModelV2Reconciliation, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, status, priority, lifecycle_state, closed_outcome, review_state, archived_at
+		FROM issues
+		ORDER BY id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	updates := make([]issueStateModelV2Reconciliation, 0)
+	for rows.Next() {
+		var (
+			id           string
+			legacyStatus string
+			priority     int
+			lifecycleRaw sql.NullString
+			outcomeRaw   sql.NullString
+			reviewRaw    sql.NullString
+			archivedAt   sql.NullString
+		)
+		if err := rows.Scan(&id, &legacyStatus, &priority, &lifecycleRaw, &outcomeRaw, &reviewRaw, &archivedAt); err != nil {
+			return nil, err
+		}
+		lifecycleState := lifecycleRaw.String
+		closedOutcome := outcomeRaw.String
+		reviewState := reviewRaw.String
+		legacyState, legacyErr := domain.IssueStateFromLegacy(domain.LegacyIssueStateInput{
+			Status:   domain.Status(legacyStatus),
+			Priority: domain.Priority(priority),
+			Archived: nonEmptyNullString(archivedAt),
+		})
+		var v2State domain.IssueState
+		if strings.TrimSpace(lifecycleState) == "" {
+			if legacyErr != nil {
+				return nil, fmt.Errorf("issue %s legacy state: %w", id, legacyErr)
+			}
+			v2State = legacyState
+		} else {
+			var err error
+			v2State, err = domain.NewIssueState(domain.IssueStateParts{
+				Workflow:     domain.IssueWorkflow(lifecycleState),
+				Review:       domain.IssueReviewState(reviewState),
+				CloseOutcome: domain.IssueCloseOutcome(closedOutcome),
+				Archive:      issueArchiveStateFromTimestamp(archivedAt),
+				Deletion:     domain.IssueDeletionPresent,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("issue %s v2 state: %w", id, err)
+			}
+		}
+		authoritativeState := v2State
+		// Closing is monotonic across the cutover boundary. A legacy terminal
+		// write therefore wins over a non-terminal v2 value; every other
+		// disagreement is repaired from the v2 authority into the mirror.
+		if legacyErr == nil && legacyState.IsClosed() && !v2State.IsClosed() {
+			authoritativeState = legacyState
+		}
+		expectedStatus := string(legacyStatusFromIssueState(authoritativeState))
+		if legacyStatus == expectedStatus &&
+			lifecycleState == string(authoritativeState.Workflow()) &&
+			closedOutcome == string(authoritativeState.CloseOutcome()) &&
+			reviewState == string(authoritativeState.Review()) {
+			continue
+		}
+		updates = append(updates, issueStateModelV2Reconciliation{
+			id:             id,
+			legacyStatus:   expectedStatus,
+			lifecycleState: string(authoritativeState.Workflow()),
+			closedOutcome:  string(authoritativeState.CloseOutcome()),
+			reviewState:    string(authoritativeState.Review()),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return updates, nil
+}
+
+func validateIssueStateModelV2LegacyMirror(ctx context.Context, db sqlIssueQueryer) error {
+	updates, err := issueStateModelV2Reconciliations(ctx, db)
+	if err != nil {
+		return err
+	}
+	if len(updates) > 0 {
+		return fmt.Errorf("legacy status mirror drift: %d rows", len(updates))
+	}
+	return nil
 }
 
 func validateIssueStateModelV2Rows(ctx context.Context, db sqlIssueQueryer) error {
