@@ -12,32 +12,9 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-type taskBulkCleanupRequest struct {
-	TaskIDs         []string      `json:"task_ids,omitempty"`
-	Statuses        []string      `json:"statuses,omitempty"`
-	Query           string        `json:"query,omitempty"`
-	UpdatedBefore   *time.Time    `json:"updated_before,omitempty"`
-	Limit           int           `json:"limit,omitempty"`
-	DryRun          bool          `json:"dry_run,omitempty"`
-	CloseOutcome    string        `json:"closed_outcome,omitempty"`
-	PerIssueTimeout time.Duration `json:"per_issue_timeout,omitempty"`
-}
-
-type taskBulkCleanupItem struct {
-	TaskID  string           `json:"task_id"`
-	Action  string           `json:"action"`
-	Status  string           `json:"status,omitempty"`
-	Success bool             `json:"success"`
-	Skipped bool             `json:"skipped,omitempty"`
-	Error   string           `json:"error,omitempty"`
-	Result  *taskCloseResult `json:"result,omitempty"`
-}
-
-type taskBulkCleanupResult struct {
-	DryRun bool                  `json:"dry_run"`
-	Action string                `json:"action"`
-	Items  []taskBulkCleanupItem `json:"items"`
-}
+type taskBulkCleanupRequest = protocol.TaskBulkCleanupRequest
+type taskBulkCleanupItem = protocol.TaskBulkCleanupItem
+type taskBulkCleanupResult = protocol.TaskBulkCleanupResult
 
 const (
 	taskBulkCleanupDefaultPerIssueTimeout = 10 * time.Minute

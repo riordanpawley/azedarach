@@ -28,7 +28,7 @@ const (
 	CommandTaskEventAppend      = "task.event.append"
 	CommandTaskCreate           = "task.create"
 	CommandTaskClose            = "task.close"
-	CommandTaskBulkCleanup      = "task.bulk_cleanup"
+	CommandTaskBulkCleanup      = protocol.CommandTaskBulkCleanup
 	CommandTaskGraphReadiness   = "task.graph_readiness"
 	CommandTaskCompleteCheck    = "task.complete_check"
 	CommandTaskIntegrationReady = "task.integration_readiness"
@@ -132,32 +132,9 @@ type taskCloseRequest struct {
 }
 
 // TaskBulkCleanupRequest selects and closes multiple issues in one daemon operation.
-type TaskBulkCleanupRequest struct {
-	TaskIDs         []string      `json:"task_ids,omitempty"`
-	Statuses        []string      `json:"statuses,omitempty"`
-	Query           string        `json:"query,omitempty"`
-	UpdatedBefore   *time.Time    `json:"updated_before,omitempty"`
-	Limit           int           `json:"limit,omitempty"`
-	DryRun          bool          `json:"dry_run,omitempty"`
-	CloseOutcome    string        `json:"closed_outcome,omitempty"`
-	PerIssueTimeout time.Duration `json:"per_issue_timeout,omitempty"`
-}
-
-type TaskBulkCleanupItem struct {
-	TaskID  string           `json:"task_id"`
-	Action  string           `json:"action"`
-	Status  string           `json:"status,omitempty"`
-	Success bool             `json:"success"`
-	Skipped bool             `json:"skipped,omitempty"`
-	Error   string           `json:"error,omitempty"`
-	Result  *TaskCloseResult `json:"result,omitempty"`
-}
-
-type TaskBulkCleanupResult struct {
-	DryRun bool                  `json:"dry_run"`
-	Action string                `json:"action"`
-	Items  []TaskBulkCleanupItem `json:"items"`
-}
+type TaskBulkCleanupRequest = protocol.TaskBulkCleanupRequest
+type TaskBulkCleanupItem = protocol.TaskBulkCleanupItem
+type TaskBulkCleanupResult = protocol.TaskBulkCleanupResult
 
 type taskDeleteRequest struct {
 	TaskID         naming.IssueID `json:"task_id"`
@@ -167,40 +144,8 @@ type taskDeleteRequest struct {
 	ForceWorktree  bool           `json:"force_worktree,omitempty"`
 }
 
-type TaskCloseResult struct {
-	TaskID                     string                         `json:"task_id"`
-	Status                     string                         `json:"status"`
-	ContextRisk                *domain.IssueContextRiskPacket `json:"context_risk,omitempty"`
-	IntegrationRequested       bool                           `json:"integration_requested,omitempty"`
-	Integrated                 bool                           `json:"integrated,omitempty"`
-	IntegratedSourceBranch     string                         `json:"integrated_source_branch,omitempty"`
-	IntegratedTargetBranch     string                         `json:"integrated_target_branch,omitempty"`
-	SessionStopped             bool                           `json:"session_stopped,omitempty"`
-	WorktreeRemoved            bool                           `json:"worktree_removed,omitempty"`
-	WorktreeCleanupDeferred    bool                           `json:"worktree_cleanup_deferred,omitempty"`
-	WorktreeCleanupOperationID string                         `json:"worktree_cleanup_operation_id,omitempty"`
-	WorktreeForced             bool                           `json:"worktree_forced,omitempty"`
-	Revision                   uint64                         `json:"revision,omitempty"`
-	Phases                     []TaskClosePhaseTiming         `json:"phases,omitempty"`
-	AutoClosedChildren         []string                       `json:"auto_closed_children,omitempty"`
-}
-
-type TaskClosePhaseTiming struct {
-	Name       string `json:"name"`
-	ElapsedMS  int64  `json:"elapsed_ms"`
-	Skipped    bool   `json:"skipped,omitempty"`
-	Hook       string `json:"hook,omitempty"`
-	Command    string `json:"command,omitempty"`
-	ExitStatus *int   `json:"exit_status,omitempty"`
-	Blocking   *bool  `json:"blocking,omitempty"`
-}
-
-func (p TaskClosePhaseTiming) Elapsed() time.Duration {
-	if p.ElapsedMS <= 0 {
-		return 0
-	}
-	return time.Duration(p.ElapsedMS) * time.Millisecond
-}
+type TaskCloseResult = protocol.TaskCloseResult
+type TaskClosePhaseTiming = protocol.TaskClosePhaseTiming
 
 type TaskDeleteResult struct {
 	TaskID          string `json:"task_id"`
@@ -1073,9 +1018,34 @@ func (c *Client) CloseTask(ctx context.Context, taskID string, opts TaskStatusOp
 }
 
 func (c *Client) BulkCleanupTasks(ctx context.Context, req TaskBulkCleanupRequest) (TaskBulkCleanupResult, error) {
-	var out TaskBulkCleanupResult
-	if err := c.commandJSON(ctx, CommandTaskBulkCleanup, req, &out); err != nil {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return TaskBulkCleanupResult{}, fmt.Errorf("marshal %s request: %w", CommandTaskBulkCleanup, err)
+	}
+	var submitted protocol.OperationSubmitResponseBody
+	if err := c.commandJSON(ctx, protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID: c.projectID,
+		Kind:      CommandTaskBulkCleanup,
+		Payload:   payload,
+	}, &submitted); err != nil {
 		return TaskBulkCleanupResult{}, err
+	}
+	record := submitted.Operation
+	if !isTerminalOperationState(record.State) {
+		record, err = c.WaitForOperation(ctx, record.OperationID.String(), 0)
+		if err != nil {
+			return TaskBulkCleanupResult{}, fmt.Errorf("wait for bulk cleanup operation %s: %w", record.OperationID, err)
+		}
+	}
+	if record.State != protocol.OperationStateDone {
+		if record.Error != nil && strings.TrimSpace(record.Error.Message) != "" {
+			return TaskBulkCleanupResult{}, fmt.Errorf("bulk cleanup operation %s %s: %s", record.OperationID, record.State, record.Error.Message)
+		}
+		return TaskBulkCleanupResult{}, fmt.Errorf("bulk cleanup operation %s %s", record.OperationID, record.State)
+	}
+	var out TaskBulkCleanupResult
+	if err := json.Unmarshal(record.Result, &out); err != nil {
+		return TaskBulkCleanupResult{}, fmt.Errorf("decode bulk cleanup operation %s result: %w", record.OperationID, err)
 	}
 	return out, nil
 }

@@ -147,6 +147,52 @@ func TestOperationRuntimeSubmitGetListPublishesLifecycleEvents(t *testing.T) {
 	}
 }
 
+func TestOperationRuntimeBulkCleanupPersistsStructuredResultAndAllowsCompletedRetry(t *testing.T) {
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir()})
+	runtime.taskBulkCleanup = func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		return testResponse(req, taskBulkCleanupResult{
+			Action: "cancelled",
+			Items:  []taskBulkCleanupItem{{TaskID: "az-1", Action: "cancelled", Success: true}},
+		}), nil
+	}
+	payload := mustJSON(t, taskBulkCleanupRequest{TaskIDs: []string{"az-1"}, CloseOutcome: "cancelled"})
+	request := testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID: "proj-1",
+		Kind:      protocol.CommandTaskBulkCleanup,
+		Payload:   payload,
+	})
+
+	firstResp := runtime.Handle(context.Background(), request)
+	if !firstResp.OK {
+		t.Fatalf("first submit response = %+v", firstResp)
+	}
+	var first protocol.OperationSubmitResponseBody
+	if err := json.Unmarshal(firstResp.Body, &first); err != nil {
+		t.Fatalf("unmarshal first submit: %v", err)
+	}
+	record := waitForRuntimeState(t, runtime, first.Operation.OperationID.String(), daemonops.StateDone)
+	var result taskBulkCleanupResult
+	if err := json.Unmarshal(record.ResultPayload, &result); err != nil {
+		t.Fatalf("unmarshal persisted result: %v", err)
+	}
+	if len(result.Items) != 1 || !result.Items[0].Success {
+		t.Fatalf("persisted result = %+v", result)
+	}
+
+	secondResp := runtime.Handle(context.Background(), request)
+	if !secondResp.OK {
+		t.Fatalf("retry submit response = %+v", secondResp)
+	}
+	var second protocol.OperationSubmitResponseBody
+	if err := json.Unmarshal(secondResp.Body, &second); err != nil {
+		t.Fatalf("unmarshal retry submit: %v", err)
+	}
+	if !second.Created || second.Operation.OperationID == first.Operation.OperationID {
+		t.Fatalf("retry operation = %+v, first = %+v", second, first)
+	}
+	waitForRuntimeState(t, runtime, second.Operation.OperationID.String(), daemonops.StateDone)
+}
+
 func TestOperationRuntimeGitMergePublishesLifecycleEvents(t *testing.T) {
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), hub: publish.NewHub(32, 16, nil), nextRevision: sequentialRevision()})
 	runtime.gitHandler = daemonhandlers.NewGitHandler(runtimeGitService{})
@@ -916,6 +962,34 @@ func TestBuildSubmitRequestPreservesExplicitSessionStartKeys(t *testing.T) {
 	}
 	if hasResourceKey(req.ResourceKeys, heavySessionStartResourceKey("proj-1")) {
 		t.Fatalf("resource keys = %v, did not want project heavy-start key", req.ResourceKeys)
+	}
+}
+
+func TestBuildSubmitRequestRoutesBulkCleanupAsProjectOperation(t *testing.T) {
+	runtime := &operationRuntime{
+		taskBulkCleanup: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			return protocol.ResponseEnvelope{OK: true}, nil
+		},
+	}
+	payload := mustJSON(t, map[string]any{"task_ids": []string{"az-1", "az-2"}, "closed_outcome": "cancelled"})
+
+	first, err := runtime.buildSubmitRequest(protocol.CommandTaskBulkCleanup, "proj-1", payload, operationSubmitOverrides{})
+	if err != nil {
+		t.Fatalf("build submit request: %v", err)
+	}
+	second, err := runtime.buildSubmitRequest(protocol.CommandTaskBulkCleanup, "proj-1", payload, operationSubmitOverrides{})
+	if err != nil {
+		t.Fatalf("build duplicate submit request: %v", err)
+	}
+
+	if !hasResourceKey(first.ResourceKeys, "project:proj-1:issue-lifecycle-cleanup") {
+		t.Fatalf("resource keys = %v", first.ResourceKeys)
+	}
+	if first.DedupeKey == "" || first.DedupeKey != second.DedupeKey {
+		t.Fatalf("dedupe keys = %q, %q", first.DedupeKey, second.DedupeKey)
+	}
+	if first.RecentDedupeWindow != 0 {
+		t.Fatalf("recent dedupe window = %s, want immediate completed retry", first.RecentDedupeWindow)
 	}
 }
 
