@@ -129,6 +129,17 @@ func TestBuildTaskSnapshotExportBodyIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestWorkerObservationDecisionWaitingIsDistinctFromRuntimePrompt(t *testing.T) {
+	taskID, err := naming.ParseIssueID("abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := daemonWorkerObservationFromInputs(workerObservationInputs{Task: domain.Task{ID: taskID, Status: domain.StatusOpen, Priority: domain.P2}, Runnable: true, DecisionWaiting: true})
+	if got.State != domain.WorkerObservationWaitingHuman || got.WaitingHumanSource != "interaction_request" {
+		t.Fatalf("observation = %+v", got)
+	}
+}
+
 func TestProjectIssueStoreMigrationFailureSuppressesRepeatedPolls(t *testing.T) {
 	originalNow := timeNow
 	now := time.Date(2026, 7, 7, 6, 0, 0, 0, time.UTC)

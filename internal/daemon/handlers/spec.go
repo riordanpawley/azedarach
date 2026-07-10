@@ -369,6 +369,8 @@ func mapSpecError(err error) *protocol.ErrorEnvelope {
 			Message:   err.Error(),
 			Retryable: false,
 		}
+	case errors.Is(err, domain.ErrStaleInteractionRevision), errors.Is(err, domain.ErrDuplicateUnresolvedDecision):
+		return &protocol.ErrorEnvelope{Code: protocol.ErrorCodeConflict, Message: err.Error(), Retryable: false}
 	case errors.Is(err, errSpecNotFound):
 		return &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeInvalidRequest,
