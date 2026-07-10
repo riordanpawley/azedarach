@@ -91,11 +91,12 @@ type TaskStatusRequest struct {
 }
 
 type TaskOwnershipRequest struct {
-	TaskID    naming.IssueID `json:"task_id"`
-	OwnerID   string         `json:"owner_id,omitempty"`
-	OwnerKind string         `json:"owner_kind,omitempty"`
-	TTL       string         `json:"ttl,omitempty"`
-	Force     bool           `json:"force,omitempty"`
+	TaskID    naming.IssueID                  `json:"task_id"`
+	OwnerID   string                          `json:"owner_id,omitempty"`
+	OwnerKind string                          `json:"owner_kind,omitempty"`
+	TTL       string                          `json:"ttl,omitempty"`
+	Force     bool                            `json:"force,omitempty"`
+	Purpose   domain.CoordinationLeasePurpose `json:"purpose,omitempty"`
 }
 
 // TaskStatusOptions controls client-side status transition behavior.
