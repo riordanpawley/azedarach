@@ -93,7 +93,7 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 		}
 	}
 	if shouldReconcileInteractionStaleness && hasSessionRuntime {
-		recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, result.ProjectID.String())
+		recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, result.ProjectID.String(), nil)
 		result.AdvisorSessionsRecovered += recovered
 		result.AdvisorSessionsCleaned += cleaned
 		if err != nil {
@@ -162,7 +162,7 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 		}
 	}
 	if shouldReconcileInteractionStaleness && d.tmux != nil && d.sessionRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil {
-		recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, result.ProjectID.String())
+		recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, result.ProjectID.String(), issueIDs)
 		result.AdvisorSessionsRecovered += recovered
 		result.AdvisorSessionsCleaned += cleaned
 		if err != nil {

@@ -181,6 +181,70 @@ func TestRuntimeReconcileRecoversAndCleansAdvisorSessionsFromDurableRequests(t *
 	}
 }
 
+func TestRuntimeReconcileIssuesLeavesUnrelatedAdvisorSessionsUntouched(t *testing.T) {
+	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
+	repoDir := t.TempDir()
+	client := issues.NewClient(repoDir, slog.Default())
+	createRequest := func(title, requestID string) domain.InteractionRequest {
+		t.Helper()
+		issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: title, Type: domain.TypeTask, Status: domain.StatusOpen})
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now().UTC()
+		request := domain.InteractionRequest{ID: requestID, IssueID: issueID, DecisionKey: "choice", OrchestrationScope: "project", Question: "Which option?", Why: "Human judgment", Options: []domain.InteractionOption{{Key: "a", Label: "A"}}, Significance: domain.InteractionSignificanceRoutine, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose"}, State: domain.InteractionOpen, Revision: 1, CreatedAt: now, UpdatedAt: now}
+		if err := client.CreateInteraction(ctx, request); err != nil {
+			t.Fatal(err)
+		}
+		return request
+	}
+	target := createRequest("target advisor recovery", "request-target-reconcile")
+	unrelated := createRequest("unrelated advisor cleanup", "request-unrelated-reconcile")
+	runner := newSessionStartTmuxRunner()
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(), hub: publish.NewHub(32, 8, slog.Default()), revision: map[string]uint64{}}
+	service := issueInteractionService{daemon: d}
+	targetDiscussed, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: target.ID, ExpectedRevision: target.Revision, Actor: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelatedDiscussed, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: unrelated.ID, ExpectedRevision: unrelated.Revision, Actor: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(runner.sessions, targetDiscussed.Request.SessionID)
+	terminalAt := unrelatedDiscussed.Request.UpdatedAt.Add(time.Second)
+	unrelatedDiscussed.Request.Disposition = &domain.InteractionDispositionAudit{Actor: "orchestrator", Reason: "terminal outside targeted repair", CreatedAt: terminalAt}
+	terminal, err := unrelatedDiscussed.Request.Transition(domain.InteractionWithdrawn, unrelatedDiscussed.Request.Revision, terminalAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.UpdateInteraction(ctx, terminal, unrelatedDiscussed.Request.Revision); err != nil {
+		t.Fatal(err)
+	}
+	projectID := d.canonicalProjectID(protocol.DefaultProjectID)
+	manager := git.NewWorktreeManager(&testGitRunner{worktreePath: repoDir, branchName: "main"}, repoDir, slog.Default())
+	d.worktreeManagersByRoot = map[string]*git.WorktreeManager{repoDir: manager}
+	d.worktreeManagersByProject = map[string]*git.WorktreeManager{projectID: manager}
+
+	result, err := newRuntimeReconcileService(d).ReconcileIssues(ctx, protocol.DefaultProjectID, []string{target.IssueID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AdvisorSessionsRecovered != 1 || result.AdvisorSessionsCleaned != 0 || !runner.sessions[targetDiscussed.Request.SessionID] {
+		t.Fatalf("targeted reconcile result=%+v sessions=%v", result, runner.sessions)
+	}
+	if !runner.sessions[unrelatedDiscussed.Request.SessionID] {
+		t.Fatal("targeted reconcile cleaned unrelated advisor runtime")
+	}
+	if _, found, err := d.sessionRuntimeStateStore(projectID).GetAdvisorSession(ctx, projectID, unrelated.ID); err != nil || !found {
+		t.Fatalf("unrelated advisor reservation changed: found=%t err=%v", found, err)
+	}
+	current, found, err := client.GetInteraction(ctx, unrelated.ID)
+	if err != nil || !found || current.Revision != terminal.Revision || current.State != domain.InteractionWithdrawn {
+		t.Fatalf("unrelated interaction changed: request=%+v found=%t err=%v", current, found, err)
+	}
+}
+
 func TestImplementationSessionReconcileNeverRecreatesAdvisorProjection(t *testing.T) {
 	if sessionProjectionCanRecreateTmuxSession(daemonstate.Session{ID: "advisor-request", Role: daemonstate.SessionRoleAdvisor, State: daemonstate.SessionStateRunning}) {
 		t.Fatal("generic implementation reconciliation accepted advisor projection")
@@ -236,7 +300,7 @@ func TestAdvisorRecoveryCleansRuntimeWhenTerminalRequestWinsCrossDaemonRace(t *t
 		}
 	}
 
-	recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, projectID)
+	recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, projectID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +363,7 @@ func TestAdvisorRecoveryRetriesWhenNonTerminalMutationWinsCrossDaemonRace(t *tes
 		}
 	}
 
-	recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, projectID)
+	recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, projectID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

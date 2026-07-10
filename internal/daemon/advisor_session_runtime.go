@@ -160,7 +160,7 @@ func (d *Daemon) cleanupAdvisorSessionsForProject(ctx context.Context, projectID
 	return cleaned, nil
 }
 
-func (d *Daemon) reconcileAdvisorSessionRuntimes(ctx context.Context, projectID string) (int, int, error) {
+func (d *Daemon) reconcileAdvisorSessionRuntimes(ctx context.Context, projectID string, issueIDs []string) (int, int, error) {
 	projectID = d.canonicalProjectID(projectID)
 	client := d.issueClientForProject(projectID)
 	store := d.sessionRuntimeStateStore(projectID)
@@ -171,9 +171,13 @@ func (d *Daemon) reconcileAdvisorSessionRuntimes(ctx context.Context, projectID 
 	if err != nil {
 		return 0, 0, fmt.Errorf("list durable interactions: %w", err)
 	}
+	issueInScope := advisorIssueScopePredicate(issueIDs)
 	requestByID := make(map[string]domain.InteractionRequest, len(requests))
 	requestIDs := make(map[string]struct{}, len(requests))
 	for _, request := range requests {
+		if !issueInScope(request.IssueID) {
+			continue
+		}
 		requestByID[request.ID] = request
 		if strings.TrimSpace(request.SessionID) != "" {
 			requestIDs[request.ID] = struct{}{}
@@ -185,6 +189,9 @@ func (d *Daemon) reconcileAdvisorSessionRuntimes(ctx context.Context, projectID 
 	}
 	reservationByRequest := make(map[string]daemonstate.AdvisorSession, len(reservations))
 	for _, advisor := range reservations {
+		if !issueInScope(advisor.IssueID) {
+			continue
+		}
 		reservationByRequest[advisor.RequestID] = advisor
 		requestIDs[advisor.RequestID] = struct{}{}
 	}
@@ -193,7 +200,7 @@ func (d *Daemon) reconcileAdvisorSessionRuntimes(ctx context.Context, projectID 
 		return 0, 0, err
 	}
 	for _, projection := range projections {
-		if projection.Role == daemonstate.SessionRoleAdvisor && projection.ScopeKind == daemonstate.SessionScopeInteraction && strings.TrimSpace(projection.ScopeID) != "" {
+		if issueInScope(projection.IssueID) && projection.Role == daemonstate.SessionRoleAdvisor && projection.ScopeKind == daemonstate.SessionScopeInteraction && strings.TrimSpace(projection.ScopeID) != "" {
 			requestIDs[projection.ScopeID] = struct{}{}
 		}
 	}
@@ -275,4 +282,20 @@ func (d *Daemon) reconcileAdvisorSessionRuntimes(ctx context.Context, projectID 
 		recovered++
 	}
 	return recovered, cleaned, nil
+}
+
+func advisorIssueScopePredicate(issueIDs []string) func(string) bool {
+	if len(issueIDs) == 0 {
+		return func(string) bool { return true }
+	}
+	scope := make(map[string]struct{}, len(issueIDs))
+	for _, issueID := range issueIDs {
+		if key := strings.ToLower(strings.TrimSpace(issueID)); key != "" {
+			scope[key] = struct{}{}
+		}
+	}
+	return func(issueID string) bool {
+		_, found := scope[strings.ToLower(strings.TrimSpace(issueID))]
+		return found
+	}
 }
