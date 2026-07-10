@@ -7645,6 +7645,26 @@ func TestBuildSessionLaunchCommandDoesNotSerializeAsyncInitCommandsBeforeToolLau
 	}
 }
 
+func TestBuildSessionLaunchCommandReportsAgentProcessExitBeforeFallbackShell(t *testing.T) {
+	d := &Daemon{cfg: Config{CLITool: "codex", SessionShell: "zsh"}}
+
+	command := d.buildSessionLaunchCommand(protocol.DefaultProjectID, "az-42", "codex-az-42", false, nil, "")
+
+	wrapper := sessionAgentProcessExitCommand("codex")
+	if !strings.Contains(command, "__azedarach_agent_exit_status=$?") ||
+		!strings.Contains(command, "az ai hook run --agent=codex session_end") ||
+		!strings.Contains(command, "|| true; exec zsh") {
+		t.Fatalf("launch command = %q, want process-exit wrapper %q before fallback shell", command, wrapper)
+	}
+}
+
+func TestSessionAgentProcessExitCommandConstrainsAgentArgument(t *testing.T) {
+	command := sessionAgentProcessExitCommand(`codex; touch /tmp/unsafe`)
+	if strings.Contains(command, "touch") || !strings.Contains(command, "--agent=claude") {
+		t.Fatalf("sessionAgentProcessExitCommand() = %q, want safe fallback agent", command)
+	}
+}
+
 func TestBuildSessionLaunchCommandWritesInitReadyMarkerAfterInitCommands(t *testing.T) {
 	d := &Daemon{
 		cfg: Config{
@@ -7752,12 +7772,14 @@ func TestBuildSessionLaunchCommandDoesNotInjectCodexHookOverrides(t *testing.T) 
 		`hooks.PostToolUse=`,
 		`hooks.PermissionRequest=`,
 		`hooks.Stop=`,
-		`az ai hook run`,
 		`az notify`,
 	} {
 		if strings.Contains(command, mustNotContain) {
 			t.Fatalf("command = %q, must NOT contain %q (hook injection removed; rely on .codex/hooks.json)", command, mustNotContain)
 		}
+	}
+	if strings.Count(command, "az ai hook run") != 1 || !strings.Contains(command, "session_end") {
+		t.Fatalf("command = %q, want only the process-exit lifecycle wrapper", command)
 	}
 
 	// Surrounding launch behaviour stays intact: env prefix, image flags, and
