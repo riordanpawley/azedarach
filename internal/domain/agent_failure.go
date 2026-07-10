@@ -18,6 +18,7 @@ const (
 	maxAgentHookPayloadTextBytes  = 8 * 1024
 	maxAgentHookPayloadNodes      = 256
 	maxAgentHookPayloadDepth      = 8
+	maxAgentTerminalOutputBytes   = 8 * 1024
 )
 
 var terminalAgentFailurePatterns = []struct {
@@ -29,6 +30,22 @@ var terminalAgentFailurePatterns = []struct {
 	{reason: AgentTerminalFailureUsageLimit, pattern: regexp.MustCompile(`(?i)\b(?:usage|rate)\s+limit\b.{0,80}\b(?:reached|exceeded|exhausted)\b`)},
 	{reason: AgentTerminalFailureQuotaExhausted, pattern: regexp.MustCompile(`(?i)\b(?:quota|credits?)\b.{0,80}\b(?:exceeded|exhausted|depleted)\b`)},
 	{reason: AgentTerminalFailureAuthentication, pattern: regexp.MustCompile(`(?i)\b(?:authentication\s+failed|not\s+authenticated|invalid\s+(?:api\s+)?(?:key|token))\b`)},
+}
+
+// ClassifyAgentTerminalOutput classifies the bounded tail of an agent pane.
+// It is intentionally independent of lifecycle event shape because some agents
+// render terminal failures without emitting a corresponding hook.
+func ClassifyAgentTerminalOutput(output string) (AgentTerminalFailureReason, bool) {
+	if len(output) > maxAgentTerminalOutputBytes {
+		output = output[len(output)-maxAgentTerminalOutputBytes:]
+	}
+	text := strings.Join(strings.Fields(output), " ")
+	for _, candidate := range terminalAgentFailurePatterns {
+		if candidate.pattern.MatchString(text) {
+			return candidate.reason, true
+		}
+	}
+	return "", false
 }
 
 func ClassifyAgentTerminalFailure(event string, payload map[string]any) (AgentTerminalFailureReason, bool) {

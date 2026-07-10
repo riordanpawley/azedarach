@@ -2657,7 +2657,8 @@ func (d *Daemon) sessionActivityByIssueKey(ctx context.Context, projectID string
 			sessions = append(sessions, session)
 		}
 	}
-	return sessionDisplayActivityByIssueKeyFromSessionsWithOptions(sessions, namingScope, opts)
+	activity := sessionDisplayActivityByIssueKeyFromSessionsWithOptions(sessions, namingScope, opts)
+	return d.applyTerminalFailureProbes(ctx, projectID, sessions, namingScope, activity)
 }
 
 func unknownActivityAdvice(issueID string) string {
@@ -3303,6 +3304,10 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 		activeIssueKeys = activeSessionIssueKeysFromProjection(snapshotSessions, namingScope)
 		countsByKey = sessionProjectionCountsByIssueKey(snapshotSessions, namingScope)
 		activityByKey = sessionDisplayActivityByIssueKeyFromSessions(snapshotSessions, namingScope)
+	}
+	activityByKey = d.applyTerminalFailureProbes(ctx, projectID, projectionSessions, namingScope, activityByKey)
+	if len(projectionSessions) == 0 {
+		activityByKey = d.applyTerminalFailureProbes(ctx, projectID, snapshotSessions, namingScope, activityByKey)
 	}
 
 	for i := range tasks {

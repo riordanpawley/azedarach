@@ -6,6 +6,30 @@ import (
 	"testing"
 )
 
+func TestClassifyAgentTerminalOutput(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		output string
+		want   AgentTerminalFailureReason
+		ok     bool
+	}{
+		{name: "capacity screen", output: "⚠ Selected model is at capacity. Please try a different model.", want: AgentTerminalFailureModelCapacity, ok: true},
+		{name: "ordinary prompt", output: "Tests passed.\n› Continue", ok: false},
+		{name: "bounded tail ignores old failure", output: "Selected model is at capacity.\n" + strings.Repeat("x", maxAgentTerminalOutputBytes+1), ok: false},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := ClassifyAgentTerminalOutput(tt.output)
+			if ok != tt.ok || got != tt.want {
+				t.Fatalf("ClassifyAgentTerminalOutput() = (%q, %v), want (%q, %v)", got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
 func TestClassifyAgentTerminalFailurePreservesOrdinaryIdleNotifications(t *testing.T) {
 	tests := []struct {
 		name    string
