@@ -47,6 +47,7 @@ func TestCommandPopulatesClientAuditMetadataFromEnv(t *testing.T) {
 }
 
 func TestCommandFallsBackToActiveIssueIDEnv(t *testing.T) {
+	t.Setenv(auditEnvActiveIssue, "")
 	t.Setenv(auditEnvIssueID, "cyk")
 
 	var got protocol.RequestEnvelope
