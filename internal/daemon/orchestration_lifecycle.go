@@ -41,8 +41,14 @@ func (d *Daemon) reconcileOrchestratorLifecycles(ctx context.Context, projectID 
 				}
 			}
 		}
-		if _, err := authority.Evaluate(ctx, lease.Identity, lease.SessionID, now, facts, policy); err != nil {
+		evaluated, err := authority.Evaluate(ctx, lease.Identity, lease.SessionID, now, facts, policy)
+		if err != nil {
 			return err
+		}
+		if evaluated.Identity.Scope.Kind == domain.OrchestrationScopeProject && evaluated.Lifecycle == domain.OrchestratorWorking {
+			if _, err := d.runProjectOrchestratorLoopStep(ctx, evaluated, now); err != nil {
+				return fmt.Errorf("run project orchestrator loop: %w", err)
+			}
 		}
 	}
 	return nil
@@ -111,6 +117,18 @@ func (d *Daemon) orchestratorLifecycleFacts(ctx context.Context, lease daemonsta
 		}
 		if task.Facts.WaitingHuman {
 			facts.UnresolvedInteractions++
+		}
+	}
+	interactions, err := issueClient.Interactions(ctx)
+	if err != nil {
+		return facts, latestChange, fmt.Errorf("refresh orchestrator interaction projection: %w", err)
+	}
+	for _, interaction := range interactions {
+		if _, scoped := issueIDs[interaction.IssueID]; !scoped {
+			continue
+		}
+		if interaction.UpdatedAt.After(latestChange) {
+			latestChange = interaction.UpdatedAt
 		}
 	}
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)

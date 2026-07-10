@@ -32,6 +32,48 @@ type IssueObservationEventListOptions struct {
 	NewestFirst bool
 }
 
+// ListProjectIssueObservationEvents returns the durable project event stream
+// after a cursor. Each issues.Client is already scoped to one project database,
+// so the global event id is a stable project watch cursor across daemon restarts.
+func (c *Client) ListProjectIssueObservationEvents(ctx context.Context, afterID int64, limit int) ([]domain.IssueObservationEvent, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	if afterID < 0 {
+		afterID = 0
+	}
+	if limit <= 0 {
+		limit = defaultIssueObservationEventLimit
+	}
+	if limit > 5000 {
+		limit = 5000
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM issue_observation_events
+		WHERE id > ?
+		ORDER BY id ASC
+		LIMIT ?
+	`, afterID, limit)
+	if err != nil {
+		return nil, c.wrapError("list-project-observation-events", "", err)
+	}
+	defer rows.Close()
+	events := make([]domain.IssueObservationEvent, 0, min(limit, 64))
+	for rows.Next() {
+		event, scanErr := scanIssueObservationEvent(rows)
+		if scanErr != nil {
+			return nil, c.wrapError("list-project-observation-events", "", scanErr)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-project-observation-events", "", err)
+	}
+	return events, nil
+}
+
 func (c *Client) AppendIssueObservationEvent(ctx context.Context, issueID string, params IssueObservationEventParams) (domain.IssueObservationEvent, error) {
 	var eventID int64
 	err := retrySQLiteBusy(ctx, func() error {
