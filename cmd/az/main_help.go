@@ -69,6 +69,24 @@ func printHelpForPath(path []string) bool {
 		fmt.Println("usage: az branch merge [--project <project-id>] [issue-id]")
 	case "branch agent-merge":
 		fmt.Println("usage: az branch agent-merge [--project <project-id>] <issue-id> [--target base|<issue-id>]")
+	case "board":
+		printBoardUsage()
+	case "board view":
+		printBoardViewUsage()
+	case "board view list":
+		printBoardViewCommandUsage("list")
+	case "board view get":
+		printBoardViewCommandUsage("get")
+	case "board view select":
+		printBoardViewCommandUsage("select")
+	case "board view create":
+		printBoardViewCommandUsage("create")
+	case "board view update":
+		printBoardViewCommandUsage("update")
+	case "board view delete":
+		printBoardViewCommandUsage("delete")
+	case "board view explain":
+		printBoardViewCommandUsage("explain")
 	case "worktree":
 		printWorktreeUsage()
 	case "worktree create":
@@ -405,7 +423,7 @@ func printImplUsage() {
 
 func printIssueUpdateUsage(w *os.File) {
 	fmt.Fprintln(w, issueUpdateUsage)
-	fmt.Fprintln(w, "Note: setting --status closed integrates the issue branch, cleans session/worktree attachments, then closes; --force-worktree only applies to closed status.")
+	fmt.Fprintln(w, "Note: setting --status closed integrates the issue branch, cleans session/worktree attachments, then closes; --status cancelled runs close cleanup without integration; --force-worktree only applies to terminal close statuses.")
 	fmt.Fprintln(w, "Note: --cascade-children only applies to --status in_review and moves open/in_progress descendants to in_review first.")
 	fmt.Fprintln(w, "Note: --update-impl is only for changing implementation assignments; normal field updates do not require it.")
 }
@@ -429,7 +447,7 @@ const (
 	issueGetManyUsage             = "Usage: az issue get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]"
 	issueCheckUsage               = "Usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]"
 	issueDoctorUsage              = "Usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<issue-id>]"
-	issueUpdateUsage              = "Usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]"
+	issueUpdateUsage              = "Usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]"
 	issueCloseUsage               = "Usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]"
 	issueDeleteUsage              = "Usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [<issue-id>]"
 	issueUnarchiveUsage           = "Usage: az issue unarchive [--project <project-id>] [--id <issue-id>] [--json] [--with-parents] [--cascade-children] [<issue-id>]"

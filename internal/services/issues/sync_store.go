@@ -106,7 +106,7 @@ func (c *Client) upsertSyncedTaskOnce(ctx context.Context, task domain.Task) (bo
 		estimate = *task.Estimate
 	}
 	var closedAt any
-	if task.Status == domain.StatusDone {
+	if task.IssueClosed() {
 		closedAt = task.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
 	res, err := db.ExecContext(ctx, `

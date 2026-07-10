@@ -81,6 +81,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case overlay.SelectionMsg:
+		if msg.Key == overlay.BoardViewSelectKey {
+			m.overlayStack.Pop()
+			selected, _ := msg.Value.(overlay.BoardViewSelectMsg)
+			if strings.TrimSpace(selected.ViewID) == "" {
+				return m, nil
+			}
+			m.boardRefreshing = true
+			return m, m.selectBoardViewCmd(selected.ViewID)
+		}
 		if msg.Key == "operation_queue_refresh" {
 			return m, m.loadOperationQueueCmd()
 		}
@@ -253,6 +262,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
 		}
+		m.boardView = msg.boardView
+		m.boardColumns = cloneBoardViewColumnSnapshots(msg.boardColumns)
+		if msg.boardView.ID != "" {
+			m.selectedBoardViewID = string(msg.boardView.ID)
+		}
 		for i := range m.tasks {
 			m.tasks[i].Session = cloneSession(m.tasks[i].Session)
 		}
@@ -381,6 +395,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logger.Debug("ui view-mode persist failed", "error", msg.err)
 		}
 		return m, nil
+
+	case boardViewsLoadedMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Could not load board views: %v", msg.err),
+				Expires: time.Now().Add(6 * time.Second),
+			})
+			return m, nil
+		}
+		m.boardViews = append([]domain.BoardViewRecord(nil), msg.views...)
+		if strings.TrimSpace(msg.selectedViewID) != "" {
+			m.selectedBoardViewID = domain.NormalizeBoardViewID(msg.selectedViewID)
+		}
+		return m, m.openOverlay(overlay.NewBoardViewOverlay(m.boardViews, m.selectedBoardViewID))
+
+	case boardViewSelectedMsg:
+		m.boardRefreshing = false
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Could not select board view: %v", msg.err),
+				Expires: time.Now().Add(6 * time.Second),
+			})
+			return m, nil
+		}
+		m.selectedBoardViewID = domain.NormalizeBoardViewID(msg.viewID)
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: fmt.Sprintf("Selected board view %s", m.selectedBoardViewID),
+			Expires: time.Now().Add(2 * time.Second),
+		})
+		m.boardRefreshing = true
+		return m, m.scheduleIssuesRefreshCmd()
 
 	case orchestrationOverviewLoadedMsg:
 		m.orchestrationOverview = msg.projects
@@ -1112,6 +1160,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reuse the normal loaded-state reducer path.
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
+		m.boardView = msg.boardView
+		m.boardColumns = cloneBoardViewColumnSnapshots(msg.boardColumns)
 		for i := range m.tasks {
 			m.tasks[i].Session = cloneSession(m.tasks[i].Session)
 		}
@@ -1760,7 +1810,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.markTaskMutationFailure(failure)
 			m.syncTaskWorkspaceOverlay()
 			expires := time.Now().Add(3 * time.Second)
-			if msg.newStatus == domain.StatusDone {
+			if terminalTaskStatusRequiresClose(msg.newStatus) {
 				expires = time.Now().Add(8 * time.Second)
 			}
 			m.addToast(Toast{
@@ -1773,7 +1823,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if msg.newStatus != domain.StatusDone {
+		if !terminalTaskStatusRequiresClose(msg.newStatus) {
 			m.clearPendingTaskStatus(msg.taskID)
 		}
 		m.clearTaskMutationFailure(msg.taskID)
@@ -1784,6 +1834,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(2 * time.Second),
 		})
 
+		return m, m.scheduleIssuesRefreshCmd()
+
+	case taskLifecycleResultMsg:
+		if msg.err != nil {
+			m.rollbackOptimisticTask(msg.previousTask)
+			failure := statusMutationFailureDetails(msg.taskID, msg.previousTask.Status, msg.targetLegacy, msg.err)
+			userMessage := failure.Message
+			if m.logger != nil {
+				m.logger.Warn("task lifecycle mutation failed",
+					"task_id", msg.taskID,
+					"target_lifecycle", msg.targetAction.Lifecycle,
+					"error", msg.err,
+					"user_message", userMessage,
+				)
+			}
+			m.markTaskMutationFailure(failure)
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: userMessage,
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		m.clearTaskMutationFailure(msg.taskID)
+		m.syncTaskWorkspaceOverlay()
+		m.addToast(Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Task moved to %s", msg.targetDisplay),
+			Expires: time.Now().Add(2 * time.Second),
+		})
 		return m, m.scheduleIssuesRefreshCmd()
 
 	case closeCleanupConfirmPreflightMsg:
@@ -2180,6 +2260,20 @@ func reconcileScopedChildBoardTasks(current, scoped []domain.Task, parentID stri
 		}
 	}
 	return reconciled
+}
+
+func cloneBoardViewColumnSnapshots(columns []domain.BoardViewColumnSnapshot) []domain.BoardViewColumnSnapshot {
+	if len(columns) == 0 {
+		return nil
+	}
+	cloned := make([]domain.BoardViewColumnSnapshot, len(columns))
+	for i, column := range columns {
+		cloned[i].Definition = column.Definition
+		if len(column.Tasks) > 0 {
+			cloned[i].Tasks = append([]domain.Task(nil), column.Tasks...)
+		}
+	}
+	return cloned
 }
 
 func (m Model) refreshOpenDiffOverlayFromProjectionBody(body protocol.ProjectionUpdateEventBody) tea.Cmd {

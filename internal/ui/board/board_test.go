@@ -29,7 +29,7 @@ func normalizeBoardOutput(s string) string {
 	for i, line := range lines {
 		lines[i] = strings.TrimRight(line, " \t\r")
 	}
-	return strings.Join(lines, "\n")
+	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
 }
 
 func TestRender(t *testing.T) {

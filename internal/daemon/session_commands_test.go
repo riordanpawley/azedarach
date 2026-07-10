@@ -1213,6 +1213,7 @@ type sessionStartTmuxRunner struct {
 	sendKeysTargets      []string
 	sendKeysPayloads     []string
 	newSessionErr        error
+	onNewSession         func(string)
 	maxNewSessionCommand int
 	sendKeysErr          error
 	sendKeysErrOnCall    int
@@ -1274,6 +1275,9 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 		}
 		if r.newSessionErr != nil {
 			return "", r.newSessionErr
+		}
+		if r.onNewSession != nil {
+			r.onNewSession(args[3])
 		}
 		r.sessions[args[3]] = true
 		if r.windows[args[3]] == nil {
@@ -8404,15 +8408,16 @@ func TestIssueResourceCommandsReceiveContextAndConfiguredEnv(t *testing.T) {
 
 func TestIssueResourceReconcileCommandReceivesDesiredState(t *testing.T) {
 	worktree := t.TempDir()
+	root := t.TempDir()
 	d := &Daemon{
 		cfg: Config{
-			RepoDir:      "/repo/root",
+			RepoDir:      root,
 			SessionShell: "sh",
 			IssueResources: appconfig.IssueResourcesConfig{
 				Env: map[string]string{
 					"AZEDARACH_RESOURCE_DESIRED_STATE": "wrong",
 				},
-				ReconcileCommand: "printf '%s|%s|%s' \"$AZEDARACH_ISSUE_ID\" \"$AZEDARACH_RESOURCE_DESIRED_STATE\" \"$(pwd)\" > reconcile-env",
+				ReconcileCommand: "printf '%s|%s|%s|%s' \"$AZEDARACH_ISSUE_ID\" \"$AZEDARACH_RESOURCE_DESIRED_STATE\" \"$AZEDARACH_WORKTREE_PATH\" \"$(pwd)\" > reconcile-env",
 			},
 		},
 	}
@@ -8421,7 +8426,7 @@ func TestIssueResourceReconcileCommandReceivesDesiredState(t *testing.T) {
 		IssueID:      "az-123",
 		SessionID:    "proj-az-123",
 		WorktreePath: worktree,
-		RootPath:     "/repo/root",
+		RootPath:     root,
 		Branch:       "user/az-123/demo",
 	}
 
@@ -8432,15 +8437,15 @@ func TestIssueResourceReconcileCommandReceivesDesiredState(t *testing.T) {
 	if len(result.Ran) != 1 {
 		t.Fatalf("commands ran = %+v, want one reconcile command", result.Ran)
 	}
-	data, err := os.ReadFile(filepath.Join(worktree, "reconcile-env"))
+	data, err := os.ReadFile(filepath.Join(root, "reconcile-env"))
 	if err != nil {
 		t.Fatalf("read reconcile env marker: %v", err)
 	}
-	wantWorktree, err := filepath.EvalSymlinks(worktree)
+	wantRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
-		t.Fatalf("eval worktree symlink: %v", err)
+		t.Fatalf("eval root symlink: %v", err)
 	}
-	want := "az-123|present|" + wantWorktree
+	want := "az-123|present|" + worktree + "|" + wantRoot
 	if strings.TrimSpace(string(data)) != want {
 		t.Fatalf("reconcile env marker = %q, want %q", strings.TrimSpace(string(data)), want)
 	}
@@ -8536,6 +8541,132 @@ func TestIssueResourceSessionEnvExportUsesStableContext(t *testing.T) {
 	}
 	if strings.Contains(payload, "bad-name") {
 		t.Fatalf("export payload = %q, want invalid env name ignored", payload)
+	}
+}
+
+func TestSessionStartWaitsForWorktreeSyncInitBeforeCreatingTmuxSession(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Wait for worktree sync init",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	initStartedPath := filepath.Join(worktreePath, "init-started")
+	initReleasePath := filepath.Join(worktreePath, "init-release")
+	initStatePath := filepath.Join(worktreePath, "init-state")
+	worktreeRunner := &worktreeCreateRunner{
+		worktreePath: worktreePath,
+		branchName:   "testuser/" + issueID + "/wait-for-sync-init",
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxCreated := make(chan struct{}, 1)
+	tmuxRunner.onNewSession = func(string) {
+		tmuxCreated <- struct{}{}
+	}
+	store := daemonstate.NewStore()
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "sh",
+			WorktreeInitCommands: []string{
+				"printf started > init-started; while [ ! -f init-release ]; do sleep 0.01; done; printf finished > init-state",
+			},
+			Logger: slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	type startResult struct {
+		resp protocol.ResponseEnvelope
+		err  error
+	}
+	resultCh := make(chan startResult, 1)
+	go func() {
+		resp, startErr := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-start-wait-worktree-init",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         "session.start",
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			Body: marshalJSON(map[string]any{
+				"project_id": projectID,
+				"session_id": issueID,
+				"start_work": false,
+			}),
+		})
+		resultCh <- startResult{resp: resp, err: startErr}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, statErr := os.Stat(initStartedPath); statErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("worktree sync init did not start before deadline: %s", initStartedPath)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	tmuxCreatedBeforeRelease := false
+	select {
+	case <-tmuxCreated:
+		tmuxCreatedBeforeRelease = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := os.WriteFile(initReleasePath, []byte("release"), 0o644); err != nil {
+		t.Fatalf("release worktree sync init: %v", err)
+	}
+
+	var result startResult
+	select {
+	case result = <-resultCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session start did not finish after worktree sync init was released")
+	}
+	if result.err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", result.err)
+	}
+	if !result.resp.OK || result.resp.Error != nil {
+		t.Fatalf("session start response = %+v, want success", result.resp)
+	}
+	if tmuxCreatedBeforeRelease {
+		t.Fatal("tmux session was created while worktree sync init was still blocked")
+	}
+	select {
+	case <-tmuxCreated:
+	default:
+		t.Fatal("tmux session was not created after worktree sync init finished")
+	}
+	state, err := os.ReadFile(initStatePath)
+	if err != nil || strings.TrimSpace(string(state)) != "finished" {
+		t.Fatalf("worktree sync init state = %q, err = %v, want finished", strings.TrimSpace(string(state)), err)
 	}
 }
 

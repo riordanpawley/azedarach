@@ -147,7 +147,7 @@ type IssueListOptions struct {
 	Query         string
 	Archived      string
 	IDs           []string
-	States        []domain.Status
+	States        []domain.IssueDisplayPhase
 	ParentIDs     []string
 	DependsOnIDs  []string
 	CreatedAfter  *time.Time
@@ -228,6 +228,7 @@ type IssueCreateOptions struct {
 	Type                   domain.TaskType
 	Priority               domain.Priority
 	PriorityExplicit       bool
+	Lifecycle              domain.IssueWorkflow
 	Deferred               bool
 	Implementations        []string
 	AutoParentFromIssueID  *string
@@ -278,6 +279,7 @@ type IssueUpdateOptions struct {
 	Type            *domain.TaskType
 	Priority        *domain.Priority
 	Status          *domain.Status
+	Lifecycle       *domain.IssueWorkflow
 	ForceWorktree   bool
 	CascadeChildren bool
 	UpdateImpls     []string
@@ -3150,9 +3152,9 @@ func parseIssueListArgs(args []string, allowQueryArgs bool) (IssueListOptions, e
 		stateInputs = append(stateInputs, v)
 		return nil
 	}
-	fs.Func("status", "restrict to a specific issue status (repeatable)", addStatusInput)
+	fs.Func("status", "restrict to a specific issue display status or phase (repeatable)", addStatusInput)
 	fs.Func("state", "deprecated alias for --status", addStatusInput)
-	fs.StringVar(&statesCSV, "statuses", "", "comma-separated issue statuses")
+	fs.StringVar(&statesCSV, "statuses", "", "comma-separated issue display statuses or phases")
 	fs.StringVar(&statesCSV, "states", "", "deprecated alias for --statuses")
 	fs.Func("id", "restrict list to specific issue ids (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
@@ -3601,6 +3603,9 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	} else {
 		opts.Priority = domain.P2
 	}
+	if opts.Deferred {
+		opts.Lifecycle = domain.IssueWorkflowBacklog
+	}
 	opts.Type = taskType
 	opts.Implementations = dedupeOrderedIDs(impls)
 	parentFlag = strings.TrimSpace(parentFlag)
@@ -3802,9 +3807,9 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	fs.StringVar(&opts.AppendNotes, "append-notes", "", "append a note line to issue notes")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue update result as JSON")
-	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal when setting closed")
-	fs.BoolVar(&opts.CascadeChildren, "cascade-children", false, "when setting in_review, move open/in_progress descendants to in_review first")
-	fs.StringVar(&statusRaw, "status", "", "updated status (open|in_progress|in_review|closed)")
+	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal when setting closed or cancelled")
+	fs.BoolVar(&opts.CascadeChildren, "cascade-children", false, "when requesting review, move open/in_progress descendants to in_review first")
+	fs.StringVar(&statusRaw, "status", "", "durable lifecycle action (backlog|open|in_progress|in_review|closed|cancelled)")
 	fs.Func("update-impl", "set implementation assignment (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {
@@ -3819,7 +3824,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		return IssueUpdateOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update (it is create-only); normal field updates do not need --update-impl, and --update-impl is only for changing issue implementations")
@@ -3831,7 +3836,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if typeRaw != "" {
 		tt, err := parseTaskType(typeRaw)
@@ -3848,14 +3853,18 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.Priority = &p
 	}
 	if strings.TrimSpace(statusRaw) != "" {
-		status, err := parseStatus(statusRaw)
+		status, lifecycle, err := parseIssueUpdateStatus(statusRaw)
 		if err != nil {
 			return IssueUpdateOptions{}, err
 		}
-		opts.Status = &status
+		if lifecycle != nil {
+			opts.Lifecycle = lifecycle
+		} else {
+			opts.Status = &status
+		}
 	}
-	if opts.ForceWorktree && (opts.Status == nil || *opts.Status != domain.StatusDone) {
-		return IssueUpdateOptions{}, fmt.Errorf("--force-worktree is only supported with --status closed")
+	if opts.ForceWorktree && (opts.Status == nil || (*opts.Status != domain.StatusDone && *opts.Status != domain.StatusCancelled)) {
+		return IssueUpdateOptions{}, fmt.Errorf("--force-worktree is only supported with --status closed or --status cancelled")
 	}
 	if opts.CascadeChildren && (opts.Status == nil || *opts.Status != domain.StatusInReview) {
 		return IssueUpdateOptions{}, fmt.Errorf("--cascade-children is only supported with --status in_review")
@@ -3869,7 +3878,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		}
 	})
 	opts.UpdateImpls = dedupeOrderedIDs(updateImpls)
-	if opts.Title == "" && !opts.DescriptionSet && opts.Notes == nil && opts.AppendNotes == "" && opts.Type == nil && opts.Priority == nil && opts.Status == nil && len(opts.UpdateImpls) == 0 {
+	if opts.Title == "" && !opts.DescriptionSet && opts.Notes == nil && opts.AppendNotes == "" && opts.Type == nil && opts.Priority == nil && opts.Status == nil && opts.Lifecycle == nil && len(opts.UpdateImpls) == 0 {
 		return IssueUpdateOptions{}, fmt.Errorf("no update fields provided")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
@@ -4842,7 +4851,7 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		tasks = filterTasksByIDs(tasks, opts.IDs)
 	}
 	if len(opts.States) > 0 {
-		tasks = filterTasksByStatus(tasks, opts.States)
+		tasks = filterTasksByIssueDisplayPhase(tasks, opts.States)
 	}
 	if len(opts.ParentIDs) > 0 {
 		tasks = filterTasksByParentIDs(tasks, opts.ParentIDs)
@@ -4920,7 +4929,7 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 				w,
 				"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				task.ID,
-				task.Status,
+				task.IssueDisplayStatusText(),
 				task.Priority.String(),
 				task.Type,
 				assigneeSummary,
@@ -4932,7 +4941,7 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 			)
 			continue
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", task.ID, task.Status, task.Priority.String(), task.Type, assigneeSummary, ownerSummary, estimateSummary, implSummary, task.Title)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", task.ID, task.IssueDisplayStatusText(), task.Priority.String(), task.Type, assigneeSummary, ownerSummary, estimateSummary, implSummary, task.Title)
 	}
 	if err := w.Flush(); err != nil {
 		return err
@@ -5097,7 +5106,7 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 
 	fmt.Printf("ID: %s\n", task.ID)
 	fmt.Printf("Title: %s\n", task.Title)
-	fmt.Printf("Status: %s\n", task.Status)
+	fmt.Printf("Status: %s\n", task.IssueDisplayStatusText())
 	fmt.Printf("Priority: %s\n", task.Priority.String())
 	fmt.Printf("Type: %s\n", task.Type)
 	if task.ParentID != nil {
@@ -6106,6 +6115,9 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 	if parentCtx == nil {
 		parentCtx = context.Background()
 	}
+	if opts.Deferred && opts.Lifecycle == "" {
+		opts.Lifecycle = domain.IssueWorkflowBacklog
+	}
 	ctx, cancel := context.WithTimeout(parentCtx, issueCreateCommandTimeout)
 	defer cancel()
 
@@ -6145,6 +6157,7 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 			Description:     opts.Description,
 			Type:            opts.Type,
 			Priority:        opts.Priority,
+			Lifecycle:       opts.Lifecycle,
 			ParentID:        parentID,
 			Implementations: dedupeOrderedIDs(implementations),
 		})
@@ -6479,6 +6492,7 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		Notes:       opts.Notes,
 		Type:        task.Type,
 		Priority:    task.Priority,
+		Lifecycle:   opts.Lifecycle,
 	}
 	if opts.Title != "" {
 		update.Title = opts.Title
@@ -6532,11 +6546,15 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		if *opts.Status == domain.StatusDone {
 			statusOptions = cleanupCloseTaskStatusOptions(opts.ForceWorktree)
 		}
+		if *opts.Status == domain.StatusCancelled {
+			statusOptions.ForceWorktree = opts.ForceWorktree
+			statusOptions.CloseOutcome = domain.IssueCloseCancelled
+		}
 		if *opts.Status == domain.StatusInReview {
 			statusOptions.CascadeChildren = opts.CascadeChildren
 		}
 		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, *opts.Status, statusOptions); err != nil {
-			return fmt.Errorf("failed to set status for issue %s: %w", opts.IssueID, err)
+			return fmt.Errorf("failed to apply lifecycle action for issue %s: %w", opts.IssueID, err)
 		}
 		if updateContextRisk != nil && !opts.JSON {
 			printIssueContextRiskCloseout(updateContextRisk)
@@ -7399,17 +7417,17 @@ func filterTasksByIDs(tasks []domain.Task, ids []string) []domain.Task {
 	return filtered
 }
 
-func filterTasksByStatus(tasks []domain.Task, statuses []domain.Status) []domain.Task {
-	if len(statuses) == 0 {
+func filterTasksByIssueDisplayPhase(tasks []domain.Task, phases []domain.IssueDisplayPhase) []domain.Task {
+	if len(phases) == 0 {
 		return tasks
 	}
-	statusSet := make(map[domain.Status]struct{}, len(statuses))
-	for _, status := range statuses {
-		statusSet[status] = struct{}{}
+	phaseSet := make(map[domain.IssueDisplayPhase]struct{}, len(phases))
+	for _, phase := range phases {
+		phaseSet[phase] = struct{}{}
 	}
 	filtered := make([]domain.Task, 0, len(tasks))
 	for _, task := range tasks {
-		if _, ok := statusSet[task.Status]; ok {
+		if _, ok := phaseSet[task.IssueFacts().DisplayPhase]; ok {
 			filtered = append(filtered, task)
 		}
 	}
@@ -8154,7 +8172,7 @@ func parsePriority(raw string) (domain.Priority, error) {
 }
 
 func parseStatus(raw string) (domain.Status, error) {
-	switch raw {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "open":
 		return domain.StatusOpen, nil
 	case "in_progress":
@@ -8163,8 +8181,24 @@ func parseStatus(raw string) (domain.Status, error) {
 		return domain.StatusInReview, nil
 	case "closed":
 		return domain.StatusDone, nil
+	case "cancelled", "canceled":
+		return domain.StatusCancelled, nil
 	default:
 		return "", fmt.Errorf("invalid status: %s", raw)
+	}
+}
+
+func parseIssueUpdateStatus(raw string) (domain.Status, *domain.IssueWorkflow, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "backlog":
+		lifecycle := domain.IssueWorkflowBacklog
+		return "", &lifecycle, nil
+	case "open":
+		lifecycle := domain.IssueWorkflowOpen
+		return "", &lifecycle, nil
+	default:
+		status, err := parseStatus(raw)
+		return status, nil, err
 	}
 }
 
@@ -8330,7 +8364,7 @@ func PrimeCommand(deps *Dependencies) error {
 					task = detailTask
 				}
 			}
-			if task.Status != domain.StatusDone {
+			if !task.IssueClosed() {
 				if err := claimPrimeActiveIssue(context.Background(), deps, issueID, ownerID, task.Ownership); err != nil {
 					return err
 				}
@@ -8350,8 +8384,8 @@ func PrimeCommand(deps *Dependencies) error {
 				orchestratorExitContract = renderPrimeOrchestratorExitContract(issueID)
 			}
 			issueSection = renderPrimeIssueSection(issueID, task, snapshot.Tasks, observations, containmentRisks, tmuxAvailable)
-			if task.Status == domain.StatusDone {
-				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `closed`; start by picking/opening actionable work (for example `az issue list --limit 20` or `az issue create \"Next task\"`). Use `--deferred` only for standalone backlog work.", task.ID)
+			if task.IssueClosed() {
+				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `%s`; start by picking/opening actionable work (for example `az issue list --limit 20` or `az issue create \"Next task\"`). Use `--deferred` only for standalone backlog work.", task.ID, task.IssueDisplayStatusText())
 			}
 		} else {
 			readiness, hasReadiness := loadPrimeTaskGraphReadiness(context.Background(), deps, issueID, ownerID)
@@ -8395,16 +8429,10 @@ func PrimeCommand(deps *Dependencies) error {
 
 func primePhase(deps *Dependencies, phase, message string) func(error) {
 	startedAt := time.Now()
-	if strings.TrimSpace(message) != "" {
-		fmt.Fprintf(os.Stderr, "az prime: %s...\n", message)
-	}
 	return func(err error) {
 		attrs := []any{"phase", phase}
 		if err != nil {
 			attrs = append(attrs, "error", err)
-			fmt.Fprintf(os.Stderr, "az prime: %s unavailable after %s: %v\n", phase, time.Since(startedAt).Round(time.Millisecond), err)
-		} else {
-			fmt.Fprintf(os.Stderr, "az prime: %s ready in %s\n", phase, time.Since(startedAt).Round(time.Millisecond))
 		}
 		latencytrace.LogPhaseContext(primeTraceContext(deps), primeLogger(deps), "cli", "prime."+phase, startedAt, attrs...)
 	}
@@ -9506,15 +9534,15 @@ func parseIssueListDateFilter(raw string, endOfDay bool) (*time.Time, error) {
 	return &parsed, nil
 }
 
-func parseIssueStatuses(values []string) ([]domain.Status, error) {
+func parseIssueStatuses(values []string) ([]domain.IssueDisplayPhase, error) {
 	if len(values) == 0 {
 		return nil, nil
 	}
-	statuses := make([]domain.Status, 0, len(values))
-	seen := make(map[domain.Status]struct{}, len(values))
+	statuses := make([]domain.IssueDisplayPhase, 0, len(values))
+	seen := make(map[domain.IssueDisplayPhase]struct{}, len(values))
 	for _, value := range values {
 		for _, part := range strings.Split(value, ",") {
-			status, err := parseStatus(strings.TrimSpace(part))
+			status, err := parseIssueDisplayPhase(strings.TrimSpace(part))
 			if err != nil {
 				return nil, err
 			}
@@ -9526,6 +9554,25 @@ func parseIssueStatuses(values []string) ([]domain.Status, error) {
 		}
 	}
 	return statuses, nil
+}
+
+func parseIssueDisplayPhase(raw string) (domain.IssueDisplayPhase, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "backlog":
+		return domain.IssueDisplayBacklog, nil
+	case "open":
+		return domain.IssueDisplayOpen, nil
+	case "in_progress", "active", "working":
+		return domain.IssueDisplayActive, nil
+	case "in_review", "review", "review_ready", "review-ready":
+		return domain.IssueDisplayReview, nil
+	case "closed", "done", "completed", "complete":
+		return domain.IssueDisplayDone, nil
+	case "cancelled", "canceled":
+		return domain.IssueDisplayCancelled, nil
+	default:
+		return "", fmt.Errorf("invalid status: %s", raw)
+	}
 }
 
 func operationStateFromString(raw string) protocol.OperationState {

@@ -97,6 +97,26 @@ go test ./internal/cli -run TestApplyPartialFailureIntegrationPreservesOutcomeOr
 - Do not reapply operations that already succeeded in a partial batch.
 - Keep recovery loops bounded: one refresh, one retry, then stop and inspect.
 
+## Issue State-Model V2 Startup Cutover
+
+The issue database startup migration `0029_issue_state_model_v2` creates a
+timestamped SQLite backup before adding v2 lifecycle columns. It records an
+`issue:state_model_v2_cutover` marker with the backup path before schema changes
+begin and marks the cutover complete only after row validation and version
+metadata are committed.
+
+If startup reports a partial or failed state-model v2 cutover:
+
+1. Treat the live issue database as unsafe for automatic repair.
+2. Read the error for the recorded backup path and original migration failure.
+3. Restore the backup database before retrying startup.
+4. Keep the failed live database for inspection until the restored database has
+   passed startup and validation.
+
+Do not delete the cutover marker to force startup. The marker refusal happens
+before generic schema repair so later migrations cannot run against a partially
+upgraded issue schema.
+
 ## Orchestration Integrate Safety Gate
 
 Accepted worker completion should normally use `az issue close --id <issue-id>`.

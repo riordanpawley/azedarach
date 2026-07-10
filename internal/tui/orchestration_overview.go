@@ -244,7 +244,7 @@ func sessionOverviewTasks(tasks []domain.Task) ([]domain.Task, int) {
 	active := make([]domain.Task, 0, len(tasks))
 	hidden := 0
 	for _, task := range tasks {
-		if task.Status == domain.StatusDone {
+		if task.IssueClosed() {
 			continue
 		}
 		if !overviewTaskHasRuntimeSession(task) {
@@ -504,7 +504,7 @@ func parseOverviewSessionStatusTasks(status string) []domain.Task {
 			continue
 		}
 		taskStatus := domain.Status(statusRaw)
-		if taskStatus == "" || taskStatus == domain.StatusDone {
+		if taskStatus == "" || (domain.Task{Status: taskStatus}).IssueClosed() {
 			continue
 		}
 		state := overviewSessionStateFromActivity(activity)

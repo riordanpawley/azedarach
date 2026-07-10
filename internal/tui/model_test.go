@@ -152,6 +152,113 @@ func getCursorPosition(m Model) Position {
 	return m.nav.GetPosition(columns)
 }
 
+func TestBuildColumnsUsesConfiguredBoardSnapshotColumns(t *testing.T) {
+	m := newTestModel()
+	view := domain.ActivityBoardView()
+	m.boardView = view
+	m.boardColumns = []domain.BoardViewColumnSnapshot{
+		{
+			Definition: domain.BoardColumn{ID: domain.BoardColumnWaitingAI, Title: "Waiting AI"},
+			Tasks:      []domain.Task{m.tasks[0]},
+		},
+		{
+			Definition: domain.BoardColumn{ID: domain.BoardColumnOpen, Title: "Open"},
+			Tasks:      []domain.Task{m.tasks[1]},
+		},
+		{
+			Definition: domain.BoardColumn{ID: domain.BoardColumnWaitingHuman, Title: "Waiting Human"},
+		},
+	}
+
+	columns := m.buildColumns()
+	if got, want := len(columns), 3; got != want {
+		t.Fatalf("columns=%d want=%d: %+v", got, want, columns)
+	}
+	if got, want := columns[0].Title, "Waiting AI"; got != want {
+		t.Fatalf("first column title=%q want=%q", got, want)
+	}
+	if got, want := columns[0].Tasks[0].ID.String(), "az-1"; got != want {
+		t.Fatalf("first column task=%q want=%q", got, want)
+	}
+	if got, want := columns[1].Title, "Open"; got != want {
+		t.Fatalf("second column title=%q want=%q", got, want)
+	}
+	if got, want := columns[2].Title, "Waiting Human"; got != want {
+		t.Fatalf("third column title=%q want=%q", got, want)
+	}
+}
+
+func TestBuildColumnsHonorsConfiguredHiddenEmptyColumns(t *testing.T) {
+	m := newTestModel()
+	view := domain.ActivityBoardView()
+	view.Options.HideEmptyColumns = true
+	m.boardView = view
+	m.boardColumns = []domain.BoardViewColumnSnapshot{
+		{
+			Definition: domain.BoardColumn{ID: domain.BoardColumnWaitingHuman, Title: "Waiting Human"},
+		},
+		{
+			Definition: domain.BoardColumn{ID: domain.BoardColumnOpen, Title: "Open"},
+			Tasks:      []domain.Task{m.tasks[0]},
+		},
+	}
+
+	columns := m.buildColumns()
+	if got, want := len(columns), 1; got != want {
+		t.Fatalf("columns=%d want=%d: %+v", got, want, columns)
+	}
+	if got, want := columns[0].Title, "Open"; got != want {
+		t.Fatalf("remaining column title=%q want=%q", got, want)
+	}
+}
+
+func TestBoardViewportSupportsActivityViewColumns(t *testing.T) {
+	m := newTestModel()
+	view := domain.ActivityBoardView()
+	tasks := make([]domain.Task, len(view.Columns))
+	snapshots := make([]domain.BoardViewColumnSnapshot, len(view.Columns))
+	for i, column := range view.Columns {
+		tasks[i] = domain.Task{
+			ID:       naming.IssueID(fmt.Sprintf("az-%d", i+1)),
+			Title:    fmt.Sprintf("Task %d", i+1),
+			Status:   domain.StatusOpen,
+			Priority: domain.P1,
+			Type:     domain.TypeTask,
+		}
+		snapshots[i] = domain.BoardViewColumnSnapshot{
+			Definition: column,
+			Tasks:      []domain.Task{tasks[i]},
+		}
+	}
+	m.tasks = tasks
+	m.boardView = view
+	m.boardColumns = snapshots
+	m.width = 80
+	m.height = 24
+
+	columns := m.buildColumns()
+	if got, want := len(columns), len(view.Columns); got != want {
+		t.Fatalf("columns=%d want=%d", got, want)
+	}
+	if got, want := columns[2].Title, "Waiting Human"; got != want {
+		t.Fatalf("activity column 2 title=%q want=%q", got, want)
+	}
+	if got, want := columns[3].Title, "Waiting AI"; got != want {
+		t.Fatalf("activity column 3 title=%q want=%q", got, want)
+	}
+
+	lastColumn := len(columns) - 1
+	m.nav.SelectTask(tasks[lastColumn].ID.String(), lastColumn)
+	m.ensureCursorVisible(columns)
+	start, end := m.boardVisibleColumnRange(columns)
+	if got, want := start, 6; got != want {
+		t.Fatalf("visible column start=%d want=%d", got, want)
+	}
+	if got, want := end, len(columns); got != want {
+		t.Fatalf("visible column end=%d want=%d", got, want)
+	}
+}
+
 func TestHelperMethods(t *testing.T) {
 	m := newTestModel()
 
@@ -232,6 +339,54 @@ func TestHelperMethods(t *testing.T) {
 			t.Errorf("Expected minimum of 1, got %d", half)
 		}
 	})
+}
+
+func TestBuildColumnsUsesIssueDisplayPhases(t *testing.T) {
+	m := New(&config.Config{CLITool: "claude"})
+	m.tasks = []domain.Task{
+		{ID: "az-backlog", Title: "Backlog", Status: domain.StatusOpen, State: mustModelIssueState(t, domain.IssueWorkflowBacklog), Priority: domain.P0, Type: domain.TypeTask},
+		{ID: "az-open", Title: "Open", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-waiting-review", Title: "Waiting review", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeTask, Session: &domain.Session{Activity: string(domain.SessionWaiting)}},
+		{ID: "az-idle-review", Title: "Idle review", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeTask, Session: &domain.Session{Activity: string(domain.SessionIdle)}},
+		{ID: "az-done", Title: "Done", Status: domain.StatusDone, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-cancelled", Title: "Cancelled", Status: domain.StatusCancelled, Priority: domain.P2, Type: domain.TypeTask},
+	}
+
+	columns := m.buildColumns()
+	titles := make([]string, 0, len(columns))
+	tasksByTitle := map[string][]domain.Task{}
+	for _, col := range columns {
+		titles = append(titles, col.Title)
+		tasksByTitle[col.Title] = col.Tasks
+	}
+	wantTitles := []string{"Backlog", "Open", "In Progress", "In Review", "Done", "Cancelled"}
+	if !reflect.DeepEqual(titles, wantTitles) {
+		t.Fatalf("column titles = %#v, want %#v", titles, wantTitles)
+	}
+	if got := tasksByTitle["Backlog"]; len(got) != 1 || got[0].ID.String() != "az-backlog" {
+		t.Fatalf("backlog column tasks = %+v", got)
+	}
+	if got := tasksByTitle["Open"]; len(got) != 1 || got[0].ID.String() != "az-open" {
+		t.Fatalf("open column tasks = %+v", got)
+	}
+	if got := tasksByTitle["In Progress"]; len(got) != 1 || got[0].ID.String() != "az-waiting-review" {
+		t.Fatalf("in progress column tasks = %+v", got)
+	}
+	if got := tasksByTitle["In Review"]; len(got) != 1 || got[0].ID.String() != "az-idle-review" {
+		t.Fatalf("in review column tasks = %+v", got)
+	}
+	if got := tasksByTitle["Cancelled"]; len(got) != 1 || got[0].ID.String() != "az-cancelled" {
+		t.Fatalf("cancelled column tasks = %+v", got)
+	}
+}
+
+func mustModelIssueState(t *testing.T, workflow domain.IssueWorkflow) domain.IssueState {
+	t.Helper()
+	state, err := domain.NewIssueState(domain.IssueStateParts{Workflow: workflow})
+	if err != nil {
+		t.Fatalf("NewIssueState(%s): %v", workflow, err)
+	}
+	return state
 }
 
 func TestRuntimeEventSummary_CompactsAndTruncates(t *testing.T) {
@@ -6724,6 +6879,7 @@ func TestReviewCascadeChildIDsIncludesUnreadyDescendants(t *testing.T) {
 			{ID: "az-grandchild", Status: domain.StatusOpen, ParentID: &childID},
 			{ID: "az-ready", Status: domain.StatusInReview, ParentID: &parentID},
 			{ID: "az-closed", Status: domain.StatusDone, ParentID: &parentID},
+			{ID: "az-cancelled", Status: domain.StatusCancelled, ParentID: &parentID},
 			{
 				ID:     legacyChildID,
 				Status: domain.StatusOpen,
@@ -7132,11 +7288,12 @@ func TestHandleBulkActionShowsImmediateFeedback(t *testing.T) {
 		action    string
 		wantToast string
 	}{
-		{name: "move left", action: "h", wantToast: "Bulk move queued for 2 task(s)"},
-		{name: "move right", action: "l", wantToast: "Bulk move queued for 2 task(s)"},
-		{name: "open", action: "1", wantToast: "Bulk status update queued for 2 task(s)"},
-		{name: "in progress", action: "2", wantToast: "Bulk status update queued for 2 task(s)"},
-		{name: "in review", action: "3", wantToast: "Bulk status update queued for 2 task(s)"},
+		{name: "move left", action: "h", wantToast: "Bulk lifecycle action queued for 2 task(s)"},
+		{name: "move right", action: "l", wantToast: "Bulk lifecycle action queued for 2 task(s)"},
+		{name: "backlog", action: "0", wantToast: "Bulk backlog update queued for 2 task(s)"},
+		{name: "open", action: "1", wantToast: "Bulk open update queued for 2 task(s)"},
+		{name: "in progress", action: "2", wantToast: "Bulk active update queued for 2 task(s)"},
+		{name: "in review", action: "3", wantToast: "Bulk review request queued for 2 task(s)"},
 		{name: "delete", action: "d", wantToast: "Bulk delete queued for 2 task(s)"},
 		{name: "archive", action: "a", wantToast: "Bulk archive queued for 2 task(s)"},
 		{name: "cleanup", action: "w", wantToast: "Bulk cleanup preflight queued for 2 task(s)"},

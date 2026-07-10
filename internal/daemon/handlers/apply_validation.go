@@ -364,7 +364,7 @@ func statusDiagnostics(index int, payload applyTaskStatusBody) []protocol.ApplyV
 			Index:   index,
 			Code:    protocol.ApplyValidationCodeInvalidOperationBody,
 			Field:   "status",
-			Message: "closed status must be applied with task.close",
+			Message: "terminal status must be applied with task.close",
 		})
 	}
 	return diagnostics
@@ -372,7 +372,7 @@ func statusDiagnostics(index int, payload applyTaskStatusBody) []protocol.ApplyV
 
 func isApplyCloseStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "done", "closed", "complete", "completed":
+	case "done", "closed", "complete", "completed", "cancelled", "canceled":
 		return true
 	default:
 		return false

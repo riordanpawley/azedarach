@@ -12,7 +12,7 @@ import (
 )
 
 // TaskListSnapshotSchemaVersion identifies the joined task-list snapshot payload contract.
-const TaskListSnapshotSchemaVersion uint16 = 2
+const TaskListSnapshotSchemaVersion uint16 = 3
 
 // TaskListFreshness describes whether the daemon's joined runtime projection is current enough for UI display.
 type TaskListFreshness string

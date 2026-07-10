@@ -113,8 +113,8 @@ func TestStatusBar_RenderActionMode(t *testing.T) {
 	if !strings.Contains(result, "ACTION") {
 		t.Errorf("Expected status bar to contain 'ACTION', got: %s", result)
 	}
-	if !strings.Contains(result, "h/l: move") {
-		t.Errorf("Expected status bar to contain move hint, got: %s", result)
+	if !strings.Contains(result, "h/l: lifecycle") {
+		t.Errorf("Expected status bar to contain lifecycle hint, got: %s", result)
 	}
 	if !strings.Contains(result, "m/b: merge") {
 		t.Errorf("Expected status bar to contain merge hint, got: %s", result)
@@ -352,8 +352,8 @@ func TestStatusBar_RenderTruncatesRichHints(t *testing.T) {
 	if !strings.Contains(result, "ACTION") {
 		t.Fatalf("Expected action mode badge, got: %s", result)
 	}
-	if !strings.Contains(result, "h/l: move") {
-		t.Fatalf("Expected rich action hints to start with move shortcut, got: %s", result)
+	if !strings.Contains(result, "h/l: lifecycle") {
+		t.Fatalf("Expected rich action hints to start with lifecycle shortcut, got: %s", result)
 	}
 	if !strings.Contains(result, "…") {
 		t.Fatalf("Expected narrow status bar to truncate rich hints, got: %q", result)
@@ -368,11 +368,11 @@ func TestGetHints_AllModes(t *testing.T) {
 		mode     types.Mode
 		expected string
 	}{
-		{types.ModeNormal, "?: help  Space: task workspace  g: goto  /: search  f: filter  t: session tree  ,: sort  v: select  Enter: drill  a: attach  c: create  s: settings  r: refresh  n: recover  Q: ops  Tab: view  p: pull base  q: quit"},
+		{types.ModeNormal, "?: help  Space: task workspace  g: goto  /: search  f: filter  t: session tree  ,: sort  v: select  Enter: drill  a: attach  c: create  s: settings  r: refresh  n: recover  Q: ops  B: board view  Tab: view  p: pull base  q: quit"},
 		{types.ModeSelect, "a/5: toggle  A: column  %: all  *: invert  x: clear  Enter: drill  Space: bulk  v/Esc: exit"},
 		{types.ModeSearch, "Type: search  Enter: confirm  Esc: cancel"},
 		{types.ModeGoto, "g g: top  g e: bottom  g h: first col  g l: last col  g w: labels  g p: projects  g s: spec  Esc: cancel"},
-		{types.ModeAction, "h/l: move  s: AI start  t: tmux only  !: yolo AI  a: attach  p: pause  R: resume  r: refresh  V: dev  x: stop  u: update  m/b: merge  P/O: PR  M: abort  H: helix  i: attachments  f: diff  w/W: cleanup  e: edit  c: child  T/d: tombstone/delete  Esc/q: cancel"},
+		{types.ModeAction, "h/l: lifecycle  s: AI start  t: tmux only  !: yolo AI  a: attach  p: pause  R: resume  r: refresh  V: dev  x: stop  u: update  m/b: merge  P/O: PR  M: abort  H: helix  i: attachments  f: diff  w/W: cleanup  e: edit  c: child  0: backlog  3: request review  5: cancel issue  T/d: tombstone/delete  Esc/q: cancel"},
 	}
 
 	for _, tt := range tests {

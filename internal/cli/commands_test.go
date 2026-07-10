@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -5007,12 +5006,17 @@ func TestParseIssueListArgs(t *testing.T) {
 		{
 			name: "status filters",
 			args: []string{"--status", "open", "--status", "in_review", "--statuses", "in_progress,open"},
-			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, States: []domain.Status{domain.StatusOpen, domain.StatusInReview, domain.StatusInProgress}},
+			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, States: []domain.IssueDisplayPhase{domain.IssueDisplayOpen, domain.IssueDisplayReview, domain.IssueDisplayActive}},
+		},
+		{
+			name: "v2 status filter aliases",
+			args: []string{"--status", "backlog", "--status", "cancelled", "--statuses", "done,review"},
+			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, States: []domain.IssueDisplayPhase{domain.IssueDisplayBacklog, domain.IssueDisplayCancelled, domain.IssueDisplayDone, domain.IssueDisplayReview}},
 		},
 		{
 			name: "state aliases",
 			args: []string{"--state", "open", "--states", "in_review"},
-			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, States: []domain.Status{domain.StatusOpen, domain.StatusInReview}},
+			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, States: []domain.IssueDisplayPhase{domain.IssueDisplayOpen, domain.IssueDisplayReview}},
 		},
 		{
 			name: "id filters",
@@ -5341,7 +5345,7 @@ func TestParseIssueSearchArgs(t *testing.T) {
 			want: IssueListOptions{
 				Limit:        defaultIssueListLimit,
 				Query:        "runtime cache",
-				States:       []domain.Status{domain.StatusOpen},
+				States:       []domain.IssueDisplayPhase{domain.IssueDisplayOpen},
 				UpdatedAfter: &updatedAfter,
 			},
 		},
@@ -5498,6 +5502,20 @@ func TestParseIssueCreateArgs(t *testing.T) {
 				Title:                  "Title",
 				Type:                   domain.TypeTask,
 				Priority:               domain.P4,
+				Lifecycle:              domain.IssueWorkflowBacklog,
+				Deferred:               true,
+				AutoCreatedFromIssueID: ptrToString("az-parent"),
+			},
+		},
+		{
+			name: "deferred explicit priority keeps backlog lifecycle",
+			args: []string{"--deferred", "--priority", "P0", "Title"},
+			want: IssueCreateOptions{
+				Title:                  "Title",
+				Type:                   domain.TypeTask,
+				Priority:               domain.P0,
+				PriorityExplicit:       true,
+				Lifecycle:              domain.IssueWorkflowBacklog,
 				Deferred:               true,
 				AutoCreatedFromIssueID: ptrToString("az-parent"),
 			},
@@ -5812,6 +5830,28 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 			}(),
 		},
 		{
+			name: "backlog status is lifecycle mutation",
+			args: []string{"az-1", "--status", "backlog"},
+			want: func() IssueUpdateOptions {
+				lifecycle := domain.IssueWorkflowBacklog
+				return IssueUpdateOptions{
+					IssueID:   "az-1",
+					Lifecycle: &lifecycle,
+				}
+			}(),
+		},
+		{
+			name: "open status is lifecycle mutation",
+			args: []string{"az-1", "--status", "open"},
+			want: func() IssueUpdateOptions {
+				lifecycle := domain.IssueWorkflowOpen
+				return IssueUpdateOptions{
+					IssueID:   "az-1",
+					Lifecycle: &lifecycle,
+				}
+			}(),
+		},
+		{
 			name: "cascade children on in_review status",
 			args: []string{"az-1", "--status", "in_review", "--cascade-children"},
 			want: func() IssueUpdateOptions {
@@ -5833,6 +5873,18 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 			args: []string{"az-1", "--status", "closed", "--force-worktree"},
 			want: func() IssueUpdateOptions {
 				status := domain.StatusDone
+				return IssueUpdateOptions{
+					IssueID:       "az-1",
+					Status:        &status,
+					ForceWorktree: true,
+				}
+			}(),
+		},
+		{
+			name: "cancelled status",
+			args: []string{"az-1", "--status", "cancelled", "--force-worktree"},
+			want: func() IssueUpdateOptions {
+				status := domain.StatusCancelled
 				return IssueUpdateOptions{
 					IssueID:       "az-1",
 					Status:        &status,
@@ -6489,8 +6541,9 @@ func TestIssueListCommand_StatusFilter(t *testing.T) {
 	now := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
 	tasks := []domain.Task{
 		{ID: "az-1", Title: "Open", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(3 * time.Hour)},
-		{ID: "az-2", Title: "Blocked", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
+		{ID: "az-2", Title: "Review", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
 		{ID: "az-3", Title: "Closed", Status: domain.StatusDone, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(1 * time.Hour)},
+		{ID: "az-4", Title: "Backlog", Status: domain.StatusOpen, State: mustCLICommandIssueState(t, domain.IssueWorkflowBacklog), Priority: domain.P0, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(4 * time.Hour)},
 	}
 
 	deps := &Dependencies{
@@ -6518,13 +6571,42 @@ func TestIssueListCommand_StatusFilter(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() error {
-		return IssueListCommand(deps, IssueListOptions{States: []domain.Status{domain.StatusOpen, domain.StatusInReview}})
+		return IssueListCommand(deps, IssueListOptions{States: []domain.IssueDisplayPhase{domain.IssueDisplayOpen, domain.IssueDisplayReview}})
 	})
-	if strings.Contains(output, "az-3") {
-		t.Fatalf("status filter should exclude az-3: %q", output)
+	if strings.Contains(output, "az-3") || strings.Contains(output, "az-4") {
+		t.Fatalf("status filter should exclude closed and backlog issues: %q", output)
 	}
 	if !strings.Contains(output, "az-1") || !strings.Contains(output, "az-2") {
 		t.Fatalf("status filter should include matching issues: %q", output)
+	}
+}
+
+func TestIssueListCommand_StatusFilterBacklogDisplaysStateDerivedStatus(t *testing.T) {
+	now := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{ID: "az-1", Title: "Open", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(1 * time.Hour)},
+		{ID: "az-2", Title: "Backlog", Status: domain.StatusOpen, State: mustCLICommandIssueState(t, domain.IssueWorkflowBacklog), Priority: domain.P0, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
+	}
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := marshalTaskListBody(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return responseWithBody(req, body), nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueListCommand(deps, IssueListOptions{States: []domain.IssueDisplayPhase{domain.IssueDisplayBacklog}})
+	})
+	if strings.Contains(output, "az-1") || !strings.Contains(output, "az-2") || !strings.Contains(output, "backlog") {
+		t.Fatalf("backlog filter output = %q, want only az-2 with state-derived backlog status", output)
 	}
 }
 
@@ -8697,6 +8779,9 @@ func TestIssueCreateCommandDeferredIgnoresAutoParentFromIssueID(t *testing.T) {
 	if createReq.ParentID != nil {
 		t.Fatalf("create parent = %+v, want nil", createReq.ParentID)
 	}
+	if createReq.Lifecycle != domain.IssueWorkflowBacklog {
+		t.Fatalf("create lifecycle = %q, want backlog", createReq.Lifecycle)
+	}
 	if !reflect.DeepEqual(createReq.Implementations, []string{"default"}) {
 		t.Fatalf("create implementations = %+v, want [default]", createReq.Implementations)
 	}
@@ -10140,6 +10225,86 @@ func TestIssueUpdateCommandUsesDaemonTaskUpdateCommand(t *testing.T) {
 	}
 }
 
+func TestIssueUpdateCommandSendsLifecycleMutation(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	var gotUpdateReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGet:
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:          "az-1",
+							Title:       "Old",
+							Description: "OldDesc",
+							Type:        domain.TypeTask,
+							Priority:    domain.P0,
+							Status:      domain.StatusOpen,
+							State:       mustCLICommandIssueState(t, domain.IssueWorkflowOpen),
+							CreatedAt:   now,
+							UpdatedAt:   now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskUpdate:
+					gotUpdateReq = req
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	lifecycle := domain.IssueWorkflowBacklog
+	if err := IssueUpdateCommand(deps, IssueUpdateOptions{IssueID: "az-1", Lifecycle: &lifecycle}); err != nil {
+		t.Fatalf("IssueUpdateCommand() error = %v", err)
+	}
+	var updateBody struct {
+		TaskID string `json:"task_id"`
+		daemonclient.TaskUpdateParams
+	}
+	if err := json.Unmarshal(gotUpdateReq.Body, &updateBody); err != nil {
+		t.Fatalf("unmarshal update body: %v", err)
+	}
+	if updateBody.Lifecycle == nil || *updateBody.Lifecycle != domain.IssueWorkflowBacklog {
+		t.Fatalf("update lifecycle = %+v, want backlog", updateBody.Lifecycle)
+	}
+	if updateBody.Priority != domain.P0 {
+		t.Fatalf("update priority = %s, want preserved P0", updateBody.Priority)
+	}
+}
+
+func mustCLICommandIssueState(t *testing.T, workflow domain.IssueWorkflow) domain.IssueState {
+	t.Helper()
+	state, err := domain.NewIssueState(domain.IssueStateParts{Workflow: workflow})
+	if err != nil {
+		t.Fatalf("NewIssueState(%s): %v", workflow, err)
+	}
+	return state
+}
+
 func TestIssueUpdateCommandRejectsUnknownImplementationAssignment(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	updateCalled := false
@@ -10290,6 +10455,86 @@ func TestIssueUpdateCommandPassesCascadeChildrenForInReviewStatus(t *testing.T) 
 	}
 	if body.TaskID.String() != "az-1" || body.Status != domain.StatusInReview || !body.CascadeChildren {
 		t.Fatalf("status body = %+v, want cascade in_review for az-1", body)
+	}
+}
+
+func TestIssueUpdateCommandRoutesCancelledThroughCloseWithoutIntegration(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	commands := make([]string, 0, 3)
+	var gotCloseReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskGet:
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:        "az-1",
+							Title:     "Cancel",
+							Type:      domain.TypeTask,
+							Priority:  domain.P2,
+							Status:    domain.StatusInReview,
+							CreatedAt: now,
+							UpdatedAt: now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskClose:
+					gotCloseReq = req
+					return responseWithJSON(req, daemonclient.TaskCloseResult{
+						TaskID: "az-1",
+						Status: string(domain.StatusCancelled),
+					}), nil
+				default:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+	status := domain.StatusCancelled
+	output := captureStdout(t, func() error {
+		return IssueUpdateCommand(deps, IssueUpdateOptions{IssueID: "az-1", Status: &status, ForceWorktree: true})
+	})
+	if !strings.Contains(output, "Updated issue: az-1") {
+		t.Fatalf("output = %q, want update message", output)
+	}
+	if strings.Join(commands, ",") != strings.Join([]string{daemonclient.CommandTaskGet, daemonclient.CommandTaskUpdate, daemonclient.CommandTaskClose}, ",") {
+		t.Fatalf("commands = %v, want get/update/close", commands)
+	}
+	var body struct {
+		TaskID               string `json:"task_id"`
+		ForceWorktree        bool   `json:"force_worktree"`
+		IntegrateBeforeClose bool   `json:"integrate_before_close"`
+		CloseOutcome         string `json:"closed_outcome"`
+	}
+	if err := json.Unmarshal(gotCloseReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal close body: %v", err)
+	}
+	if body.TaskID != "az-1" || !body.ForceWorktree || body.IntegrateBeforeClose || body.CloseOutcome != string(domain.IssueCloseCancelled) {
+		t.Fatalf("close body = %+v, want cancelled close without integration", body)
 	}
 }
 
@@ -12417,28 +12662,16 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 }
 
-func TestPrimeCommandEmitsProgressBeforeBlockedSnapshotReturns(t *testing.T) {
+func TestPrimeCommandDoesNotEmitDiagnosticsToStderr(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
 	setPrimeTmuxAvailable(t, false)
 
-	previousTimeout := primeDaemonReadTimeout
-	primeDaemonReadTimeout = time.Second
-	t.Cleanup(func() {
-		primeDaemonReadTimeout = previousTimeout
-	})
-
-	blockSnapshot := make(chan struct{})
-	snapshotEntered := make(chan struct{})
 	taskListCalls := 0
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				if req.Command == daemonclient.CommandTaskGet {
 					taskListCalls++
-					if taskListCalls == 1 {
-						close(snapshotEntered)
-					}
-					<-blockSnapshot
 					return protocol.ResponseEnvelope{}, errors.New("snapshot still blocked")
 				}
 				return responseWithJSON(req, map[string]any{}), nil
@@ -12448,84 +12681,18 @@ func TestPrimeCommandEmitsProgressBeforeBlockedSnapshotReturns(t *testing.T) {
 		Config:    config.DefaultConfig(),
 	}
 
-	oldStdout := os.Stdout
-	stdoutR, stdoutW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("stdout pipe: %v", err)
-	}
-	os.Stdout = stdoutW
-	stdoutDone := make(chan struct{})
-	go func() {
-		_, _ = io.Copy(io.Discard, stdoutR)
-		close(stdoutDone)
-	}()
-
-	oldStderr := os.Stderr
-	stderrR, stderrW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("stderr pipe: %v", err)
-	}
-	os.Stderr = stderrW
-	lineCh := make(chan string, 1)
-	readErrCh := make(chan error, 1)
-	go func() {
-		line, err := bufio.NewReader(stderrR).ReadString('\n')
-		lineCh <- line
-		readErrCh <- err
-	}()
-
-	done := make(chan error, 1)
-	go func() {
-		done <- PrimeCommand(deps)
-		_ = stdoutW.Close()
-		_ = stderrW.Close()
-	}()
-	t.Cleanup(func() {
-		os.Stdout = oldStdout
-		os.Stderr = oldStderr
-		_ = stdoutR.Close()
-		_ = stderrR.Close()
+	stderr := captureStderr(t, func() error {
+		_ = captureStdout(t, func() error {
+			return PrimeCommand(deps)
+		})
+		return nil
 	})
-
-	select {
-	case <-snapshotEntered:
-	case err := <-done:
-		t.Fatalf("PrimeCommand returned before entering blocked snapshot call: %v", err)
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("PrimeCommand did not enter snapshot call")
+	if stderr != "" {
+		t.Fatalf("PrimeCommand stderr = %q, want no diagnostics", stderr)
 	}
-
-	var line string
-	select {
-	case line = <-lineCh:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("PrimeCommand did not emit progress while snapshot call was blocked")
+	if taskListCalls != 1 {
+		t.Fatalf("task snapshot calls = %d, want 1", taskListCalls)
 	}
-	if err := <-readErrCh; err != nil {
-		t.Fatalf("read stderr progress: %v", err)
-	}
-	if !strings.Contains(line, "az prime: loading active issue snapshot for az-1") {
-		t.Fatalf("first progress line = %q, want issue snapshot phase", line)
-	}
-
-	select {
-	case err := <-done:
-		t.Fatalf("PrimeCommand returned before blocked snapshot was released: %v", err)
-	default:
-	}
-
-	close(blockSnapshot)
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("PrimeCommand error: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("PrimeCommand did not finish after snapshot release")
-	}
-	_ = stdoutW.Close()
-	_ = stderrW.Close()
-	<-stdoutDone
 }
 
 func TestPrimeCommandWithActiveIssueUsesTargetedSnapshot(t *testing.T) {
@@ -13556,64 +13723,78 @@ func TestPrimeCommandTruncatesLargeIssueDescription(t *testing.T) {
 }
 
 func TestPrimeCommandWarnsWhenActiveIssueClosed(t *testing.T) {
-	t.Setenv("AZEDARACH_ISSUE_ID", "az-closed")
 	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
 
-	deps := &Dependencies{
-		DaemonClient: daemonclient.New(&fakeDaemonTransport{
-			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command == daemonclient.CommandTaskClaimOwnership {
-					t.Fatal("prime must not claim a closed active issue")
-				}
-				if req.Command != daemonclient.CommandTaskGet {
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						Meta:            req.Meta,
-						OK:              true,
-						CompletedAt:     req.SentAt,
-					}, nil
-				}
-				body, err := marshalTaskListBody([]domain.Task{{
-					ID:              "az-closed",
-					Title:           "Closed issue",
-					Status:          domain.StatusDone,
-					Priority:        domain.P2,
-					Type:            domain.TypeTask,
-					Implementations: []string{"go-bubbletea"},
-					CreatedAt:       now,
-					UpdatedAt:       now,
-				}})
-				if err != nil {
-					t.Fatalf("marshal task list: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					Meta:            req.Meta,
-					OK:              true,
-					CompletedAt:     req.SentAt,
-					Body:            body,
-				}, nil
-			},
-		}),
-		ProjectID: "proj",
+	tests := []struct {
+		name   string
+		id     naming.IssueID
+		status domain.Status
+		want   string
+	}{
+		{name: "completed", id: "az-closed", status: domain.StatusDone, want: "Active issue `az-closed` is currently `closed`"},
+		{name: "cancelled", id: "az-cancelled", status: domain.StatusCancelled, want: "Active issue `az-cancelled` is currently `cancelled`"},
 	}
 
-	output := captureStdout(t, func() error {
-		return PrimeCommand(deps)
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AZEDARACH_ISSUE_ID", tt.id.String())
+			deps := &Dependencies{
+				DaemonClient: daemonclient.New(&fakeDaemonTransport{
+					commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+						if req.Command == daemonclient.CommandTaskClaimOwnership {
+							t.Fatal("prime must not claim a closed active issue")
+						}
+						if req.Command != daemonclient.CommandTaskGet {
+							return protocol.ResponseEnvelope{
+								ProtocolVersion: req.ProtocolVersion,
+								RequestID:       req.RequestID,
+								Kind:            protocol.EnvelopeKindResponse,
+								Meta:            req.Meta,
+								OK:              true,
+								CompletedAt:     req.SentAt,
+							}, nil
+						}
+						body, err := marshalTaskListBody([]domain.Task{{
+							ID:              tt.id,
+							Title:           "Closed issue",
+							Status:          tt.status,
+							Priority:        domain.P2,
+							Type:            domain.TypeTask,
+							Implementations: []string{"go-bubbletea"},
+							CreatedAt:       now,
+							UpdatedAt:       now,
+						}})
+						if err != nil {
+							t.Fatalf("marshal task list: %v", err)
+						}
+						return protocol.ResponseEnvelope{
+							ProtocolVersion: req.ProtocolVersion,
+							RequestID:       req.RequestID,
+							Kind:            protocol.EnvelopeKindResponse,
+							Meta:            req.Meta,
+							OK:              true,
+							CompletedAt:     req.SentAt,
+							Body:            body,
+						}, nil
+					},
+				}),
+				ProjectID: "proj",
+			}
 
-	if !strings.Contains(output, "Active issue `az-closed` is currently `closed`") {
-		t.Fatalf("prime output missing closed-issue warning: %q", output)
-	}
-	if !strings.Contains(output, "`az issue list --limit 20` or `az issue create \"Next task\"") {
-		t.Fatalf("prime output missing closed-issue next-step guidance: %q", output)
-	}
-	if !strings.Contains(output, "Use `--deferred` only for standalone backlog work.") {
-		t.Fatalf("prime output missing closed-issue deferred caveat: %q", output)
+			output := captureStdout(t, func() error {
+				return PrimeCommand(deps)
+			})
+
+			if !strings.Contains(output, tt.want) {
+				t.Fatalf("prime output missing closed-issue warning: %q", output)
+			}
+			if !strings.Contains(output, "`az issue list --limit 20` or `az issue create \"Next task\"") {
+				t.Fatalf("prime output missing closed-issue next-step guidance: %q", output)
+			}
+			if !strings.Contains(output, "Use `--deferred` only for standalone backlog work.") {
+				t.Fatalf("prime output missing closed-issue deferred caveat: %q", output)
+			}
+		})
 	}
 }
 

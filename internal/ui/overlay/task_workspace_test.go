@@ -159,8 +159,8 @@ func TestTaskWorkspaceOverlay_StatusBindingsIncludeScroll(t *testing.T) {
 	if !strings.Contains(joined, "ctrl+u/d") {
 		t.Fatalf("expected status bindings to include ctrl+u/d hint, got %q", joined)
 	}
-	if !strings.Contains(joined, "1/2/3/4") {
-		t.Fatalf("expected status bindings to include exact status hint, got %q", joined)
+	if !strings.Contains(joined, "0/1/2/3/4") {
+		t.Fatalf("expected status bindings to include lifecycle action hint, got %q", joined)
 	}
 	if !strings.Contains(joined, "Tab focus") {
 		t.Fatalf("expected status bindings to show Tab as pane focus switch, got %q", joined)
@@ -184,8 +184,8 @@ func TestTaskWorkspaceOverlay_StatusBindingsIncludeScroll(t *testing.T) {
 	if !strings.Contains(graphJoined, "open relation") {
 		t.Fatalf("expected graph status bindings to include graph open hint, got %q", graphJoined)
 	}
-	if !strings.Contains(graphJoined, "1/2/3/4") {
-		t.Fatalf("expected graph status bindings to preserve exact status hint, got %q", graphJoined)
+	if !strings.Contains(graphJoined, "0/1/2/3/4") {
+		t.Fatalf("expected graph status bindings to preserve lifecycle action hint, got %q", graphJoined)
 	}
 	if !strings.Contains(joined, "r refresh issue") {
 		t.Fatalf("expected status bindings to include refresh hint, got %q", joined)
@@ -377,10 +377,14 @@ func TestTaskWorkspaceOverlay_ActionsPaneHidesReservedMoveRows(t *testing.T) {
 	view := overlay.View()
 
 	if strings.Contains(view, "[h] Move left") || strings.Contains(view, "[l] Move right") {
-		t.Fatalf("workspace actions should not advertise reserved h/l status movement, got %q", view)
+		t.Fatalf("workspace actions should not advertise column movement, got %q", view)
 	}
-	if !strings.Contains(view, "[1] Set status: Open") || !strings.Contains(view, "[3] Set status: In Review") || !strings.Contains(view, "[4] Set status: Done") {
-		t.Fatalf("workspace actions should keep explicit status keys, got %q", view)
+	actions := map[string]string{}
+	for _, action := range overlay.actions.actions {
+		actions[action.Key] = action.Label
+	}
+	if actions["0"] != "Move to backlog" || actions["3"] != "Request review" || actions["4"] != "Integrate and close" {
+		t.Fatalf("workspace actions should keep explicit lifecycle keys, got %+v", actions)
 	}
 }
 

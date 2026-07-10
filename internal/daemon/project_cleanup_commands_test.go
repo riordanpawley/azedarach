@@ -28,7 +28,7 @@ func TestDoneTasksInArchiveOrderSortsDescendantsBeforeAncestors(t *testing.T) {
 	tasks := []domain.Task{
 		{ID: rootID, Status: domain.StatusDone},
 		{ID: childID, Status: domain.StatusDone, ParentID: &rootID},
-		{ID: grandchildID, Status: domain.StatusDone, ParentID: &childID},
+		{ID: grandchildID, Status: domain.StatusCancelled, ParentID: &childID},
 		{ID: openChildID, Status: domain.StatusOpen, ParentID: &rootID},
 	}
 

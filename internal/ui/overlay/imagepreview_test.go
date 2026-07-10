@@ -2,12 +2,15 @@ package overlay
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	termimg "github.com/blacktop/go-termimg"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
@@ -276,11 +279,11 @@ func TestImagePreviewOverlay_View(t *testing.T) {
 		t.Error("View should contain position indicator showing 1/2")
 	}
 
-	if !strings.Contains(view, "Filename:") {
-		t.Error("View should contain filename label")
+	if !strings.Contains(view, "test.png") {
+		t.Error("View should contain image filename in full-screen header")
 	}
 
-	if !strings.Contains(view, "h/l") || !strings.Contains(view, "Navigate") {
+	if !strings.Contains(view, "h/l") || !strings.Contains(view, "navigate") {
 		t.Error("View should contain navigation hints")
 	}
 
@@ -401,6 +404,166 @@ func TestImagePreviewOverlay_ShowsMarkdownReadError(t *testing.T) {
 	view := overlay.View()
 	if !strings.Contains(ansi.Strip(view), "Error: read markdown:") {
 		t.Fatalf("view missing markdown read error: %q", view)
+	}
+}
+
+func TestImagePreviewOverlay_RendersFullScreenImagePreview(t *testing.T) {
+	restore := stubFullScreenImageRenderer(t, "rich-image-output", "Kitty", 32, 12, nil)
+	defer restore()
+
+	overlay := NewImagePreviewOverlay("test-issue", nil, 0)
+	overlay.images = []attachment.Attachment{{
+		ID:       "img-1",
+		Filename: "screen.png",
+		MimeType: "image/png",
+		Path:     filepath.Join(t.TempDir(), "screen.png"),
+		Size:     2048,
+	}}
+	overlay.currentIndex = 0
+	overlay.ApplyWindowSize(tea.WindowSizeMsg{Width: 90, Height: 30})
+
+	cmd := overlay.loadCurrentFullImage()
+	if cmd == nil {
+		t.Fatal("expected full-screen image render command")
+	}
+	model, _ := overlay.Update(cmd())
+	overlay = model.(*ImagePreviewOverlay)
+
+	view := overlay.View()
+	if !strings.Contains(view, "rich-image-output") {
+		t.Fatalf("view missing rendered image output: %q", view)
+	}
+	if !strings.Contains(ansi.Strip(view), "Protocol: Kitty") {
+		t.Fatalf("view missing protocol metadata: %q", view)
+	}
+	if !strings.Contains(ansi.Strip(view), "Esc/q close") || !strings.Contains(ansi.Strip(view), "o open") {
+		t.Fatalf("view missing full-screen actions: %q", view)
+	}
+}
+
+func TestBuildFullScreenImagePreviewFailureShowsExternalFallback(t *testing.T) {
+	restore := stubFullScreenImageRenderer(t, "", "Kitty", 32, 12, errors.New("render failed"))
+	defer restore()
+
+	preview := buildFullScreenImagePreview(attachment.Attachment{
+		ID:       "img-1",
+		Filename: "screen.png",
+		MimeType: "image/png",
+		Path:     filepath.Join(t.TempDir(), "screen.png"),
+	}, 90, 30)
+
+	guidance := strings.Join(preview.lines, "\n")
+	if !strings.Contains(guidance, "Press o to open externally") {
+		t.Fatalf("fallback guidance = %q, want external-open action", guidance)
+	}
+	if strings.Contains(guidance, "full preview") {
+		t.Fatalf("fallback guidance offered already-open full preview: %q", guidance)
+	}
+}
+
+func TestImagePreviewOverlay_IgnoresStaleFullScreenRender(t *testing.T) {
+	original := renderFullScreenImagePreview
+	renderFullScreenImagePreview = func(_ string, width, height int) (string, string, int, int, error) {
+		return fmt.Sprintf("render-%dx%d", width, height), "Kitty", width, height, nil
+	}
+	defer func() { renderFullScreenImagePreview = original }()
+
+	overlay := NewImagePreviewOverlay("test-issue", nil, 0)
+	overlay.images = []attachment.Attachment{{
+		ID:       "img-1",
+		Filename: "screen.png",
+		MimeType: "image/png",
+		Path:     filepath.Join(t.TempDir(), "screen.png"),
+	}}
+
+	overlay.ApplyWindowSize(tea.WindowSizeMsg{Width: 80, Height: 24})
+	staleCmd := overlay.loadCurrentFullImage()
+	overlay.ApplyWindowSize(tea.WindowSizeMsg{Width: 120, Height: 40})
+	currentCmd := overlay.loadCurrentFullImage()
+
+	model, _ := overlay.Update(currentCmd())
+	overlay = model.(*ImagePreviewOverlay)
+	currentOutput := overlay.fullImage.output
+	model, _ = overlay.Update(staleCmd())
+	overlay = model.(*ImagePreviewOverlay)
+
+	if overlay.fullImage.output != currentOutput {
+		t.Fatalf("stale render replaced current output: got %q, want %q", overlay.fullImage.output, currentOutput)
+	}
+	if currentOutput != "render-120x40" {
+		t.Fatalf("current render output = %q, want dimensions from latest request", currentOutput)
+	}
+}
+
+func TestImagePreviewOverlay_FullScreenCloseClearsImages(t *testing.T) {
+	originalClear := clearTerminalImagesOutput
+	clearTerminalImagesOutput = func() tea.Msg { return terminalImagesClearedMsg{} }
+	defer func() { clearTerminalImagesOutput = originalClear }()
+
+	overlay := NewImagePreviewOverlay("test-issue", nil, 0)
+	overlay.images = []attachment.Attachment{{
+		ID:       "img-1",
+		Filename: "screen.png",
+		MimeType: "image/png",
+		Path:     filepath.Join(t.TempDir(), "screen.png"),
+	}}
+	overlay.currentIndex = 0
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("expected close command")
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected batch close command for full-screen image, got %T", msg)
+	}
+	if len(batch) != 3 {
+		t.Fatalf("batch command count = %d, want clear, clear-screen, close", len(batch))
+	}
+	clearMsg := batch[0]()
+	if _, ok := clearMsg.(terminalImagesClearedMsg); !ok {
+		t.Fatalf("first batch command = %T, want terminalImagesClearedMsg", clearMsg)
+	}
+	closeMsg := batch[2]()
+	if _, ok := closeMsg.(CloseOverlayMsg); !ok {
+		t.Fatalf("last batch command = %T, want CloseOverlayMsg", closeMsg)
+	}
+}
+
+func TestImagePreviewOverlay_FullScreenDeleteConfirmationClearsImages(t *testing.T) {
+	originalClear := clearTerminalImagesOutput
+	clearTerminalImagesOutput = func() tea.Msg { return terminalImagesClearedMsg{} }
+	defer func() { clearTerminalImagesOutput = originalClear }()
+
+	overlay := NewImagePreviewOverlay("test-issue", nil, 0)
+	overlay.images = []attachment.Attachment{{
+		ID:       "img-1",
+		Filename: "screen.png",
+		MimeType: "image/png",
+		Path:     filepath.Join(t.TempDir(), "screen.png"),
+	}}
+	overlay.currentIndex = 0
+
+	model, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	overlay = model.(*ImagePreviewOverlay)
+	if !overlay.confirmDelete {
+		t.Fatal("expected delete confirmation mode")
+	}
+	if cmd == nil {
+		t.Fatal("expected clear command when entering delete confirmation from full-screen image")
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected batch clear command, got %T", msg)
+	}
+	if len(batch) != 2 {
+		t.Fatalf("batch command count = %d, want clear and clear-screen", len(batch))
+	}
+	clearMsg := batch[0]()
+	if _, ok := clearMsg.(terminalImagesClearedMsg); !ok {
+		t.Fatalf("first batch command = %T, want terminalImagesClearedMsg", clearMsg)
 	}
 }
 
@@ -566,5 +729,59 @@ func TestImagePreviewOverlay_WindowSizeFitsNarrowViewport(t *testing.T) {
 	width, _ := overlay.Size()
 	if width > 58 {
 		t.Fatalf("expected preview width to fit narrow viewport, got width=%d", width)
+	}
+}
+
+func TestImagePreviewOverlay_FullScreenViewUsesSizeAtDefaultAndNarrowViewport(t *testing.T) {
+	tests := []struct {
+		name       string
+		window     *tea.WindowSizeMsg
+		wantWidth  int
+		wantHeight int
+	}{
+		{name: "default", wantWidth: 100, wantHeight: 34},
+		{name: "narrow", window: &tea.WindowSizeMsg{Width: 58, Height: 16}, wantWidth: 58, wantHeight: 16},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			overlay := NewImagePreviewOverlay("test-issue", nil, 0)
+			overlay.images = []attachment.Attachment{{
+				ID:       "img-1",
+				Filename: strings.Repeat("wide-name-", 20) + ".png",
+				MimeType: "image/png",
+				Path:     filepath.Join(t.TempDir(), "screen.png"),
+			}}
+			overlay.fullImage = fullScreenImagePreviewState{
+				attachmentID: "img-1",
+				lines:        []string{"Press o to open externally."},
+				err:          "preview unavailable",
+			}
+			if tt.window != nil {
+				overlay.ApplyWindowSize(*tt.window)
+			}
+
+			width, height := overlay.Size()
+			if width != tt.wantWidth || height != tt.wantHeight {
+				t.Fatalf("Size() = %dx%d, want %dx%d", width, height, tt.wantWidth, tt.wantHeight)
+			}
+			view := strings.TrimPrefix(overlay.View(), termimg.ClearAllString())
+			for _, line := range strings.Split(view, "\n") {
+				if got := ansi.StringWidth(line); got > width {
+					t.Fatalf("View() line width = %d, exceeds Size() width %d: %q", got, width, line)
+				}
+			}
+		})
+	}
+}
+
+func stubFullScreenImageRenderer(t *testing.T, output, protocol string, width, height int, err error) func() {
+	t.Helper()
+	original := renderFullScreenImagePreview
+	renderFullScreenImagePreview = func(string, int, int) (string, string, int, int, error) {
+		return output, protocol, width, height, err
+	}
+	return func() {
+		renderFullScreenImagePreview = original
 	}
 }

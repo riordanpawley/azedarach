@@ -4,10 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
 //go:embed migrations/*.sql
@@ -51,10 +58,32 @@ var orderedMigrations = []migration{
 	{id: "0026_decision_search_fts", path: "migrations/0026_decision_search_fts.sql", apply: applyDecisionSearchFTSMigration},
 	{id: "0027_issue_id_allocations", path: "migrations/0027_issue_id_allocations.sql"},
 	{id: "0028_runtime_projection_order_indexes", path: "migrations/0028_runtime_projection_order_indexes.sql"},
+	{id: "0029_issue_state_model_v2"},
+	{id: "0030_issue_closed_runtime_v2_triggers", apply: applyIssueClosedRuntimeV2TriggersMigration},
+	{id: "0031_board_views", path: "migrations/0031_board_views.sql"},
+}
+
+const (
+	issueStateModelV2MigrationID      = "0029_issue_state_model_v2"
+	issueStateModelVersionMetaKey     = "issue:state_model_version"
+	issueStateModelV2CutoverMarkerKey = "issue:state_model_v2_cutover"
+	issueStateModelV2Version          = "2"
+	boardViewsMigrationID             = "0031_board_views"
+)
+
+type issueStateModelV2CutoverMarker struct {
+	State       string `json:"state"`
+	StartedAt   string `json:"started_at,omitempty"`
+	CompletedAt string `json:"completed_at,omitempty"`
+	BackupPath  string `json:"backup_path,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := ensureMigrationTable(ctx, db); err != nil {
+		return err
+	}
+	if err := refusePartialIssueStateModelV2Cutover(ctx, db); err != nil {
 		return err
 	}
 	if err := repairIssueBaseSchema(db); err != nil {
@@ -97,6 +126,22 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		}
 
 		if shouldApply {
+			if m.id == issueStateModelV2MigrationID {
+				if err := c.applyIssueStateModelV2Migration(ctx, db, m.id); err != nil {
+					return err
+				}
+				continue
+			}
+			if m.id == boardViewsMigrationID {
+				sqlText, err := loadMigrationSQL(m.path)
+				if err != nil {
+					return fmt.Errorf("load migration %s: %w", m.id, err)
+				}
+				if err := c.applyBoardViewsMigration(ctx, db, m.id, sqlText); err != nil {
+					return err
+				}
+				continue
+			}
 			if m.apply != nil {
 				if err := m.apply(ctx, db, m.id); err != nil {
 					return err
@@ -123,6 +168,9 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	}
 	if err := repairIssueIDAllocationSchema(ctx, db); err != nil {
 		return fmt.Errorf("repair issue id allocation schema: %w", err)
+	}
+	if err := c.seedBuiltInBoardViews(ctx, db, "default"); err != nil {
+		return fmt.Errorf("seed built-in board views: %w", err)
 	}
 
 	return nil
@@ -433,6 +481,1000 @@ func (c *Client) applyMigration(ctx context.Context, db *sql.DB, id, sqlText str
 	}
 
 	return nil
+}
+
+func (c *Client) applyBoardViewsMigration(ctx context.Context, db *sql.DB, id, sqlText string) error {
+	if err := refusePartialBoardViewsSchema(db); err != nil {
+		return fmt.Errorf("migration %s: %w", id, err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	beforeCount, countErr := dependencyCount(tx)
+	if countErr != nil {
+		return fmt.Errorf("count dependencies before migration %s: %w", id, countErr)
+	}
+	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+		return fmt.Errorf("apply migration %s: %w", id, err)
+	}
+	if err := c.runBoardViewsMigrationFailureHook("after_schema"); err != nil {
+		return fmt.Errorf("migration %s rolled back: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO schema_migrations (id, applied_at)
+		VALUES (?, ?)
+	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+
+	afterCount, countErr := dependencyCount(tx)
+	if countErr != nil {
+		return fmt.Errorf("count dependencies after migration %s: %w", id, countErr)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	tx = nil
+
+	if id == boardViewsMigrationID && beforeCount != afterCount {
+		c.logger.Warn("unexpected dependency count change during board view migration", "before", beforeCount, "after", afterCount)
+	}
+	return nil
+}
+
+func (c *Client) runBoardViewsMigrationFailureHook(stage string) error {
+	if c.boardViewsMigrationFailureHook == nil {
+		return nil
+	}
+	if err := c.boardViewsMigrationFailureHook(stage); err != nil {
+		return fmt.Errorf("injected board views migration failure at %s: %w", stage, err)
+	}
+	return nil
+}
+
+func refusePartialBoardViewsSchema(db *sql.DB) error {
+	exists, err := tableExists(db, "board_views")
+	if err != nil {
+		return fmt.Errorf("inspect board_views table: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	columns, err := tableColumns(db, "board_views")
+	if err != nil {
+		return fmt.Errorf("inspect board_views columns: %w", err)
+	}
+	missing := missingBoardViewsColumns(columns)
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("refusing startup with partial board_views schema: missing columns %s; restore the database from backup before retrying", strings.Join(missing, ", "))
+}
+
+func missingBoardViewsColumns(columns map[string]struct{}) []string {
+	required := []string{
+		"project_id",
+		"id",
+		"name",
+		"definition_json",
+		"built_in",
+		"created_at",
+		"updated_at",
+		"deleted_at",
+	}
+	missing := make([]string, 0)
+	for _, column := range required {
+		if _, ok := columns[column]; !ok {
+			missing = append(missing, column)
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+func refusePartialIssueStateModelV2Cutover(ctx context.Context, db *sql.DB) error {
+	marker, ok, err := readIssueStateModelV2CutoverMarker(ctx, db)
+	if err != nil {
+		return fmt.Errorf("inspect issue state-model v2 cutover marker: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	switch marker.State {
+	case "complete", "":
+		return nil
+	default:
+		return issueStateModelV2CutoverError("refusing startup after partial issue state-model v2 cutover", marker.BackupPath, marker.Error)
+	}
+}
+
+func (c *Client) applyIssueStateModelV2Migration(ctx context.Context, db *sql.DB, id string) error {
+	issuesExists, err := tableExists(db, "issues")
+	if err != nil {
+		return fmt.Errorf("inspect migration %s issues table: %w", id, err)
+	}
+	if !issuesExists {
+		return recordAppliedMigration(ctx, db, id)
+	}
+
+	columns, err := tableColumns(db, "issues")
+	if err != nil {
+		return fmt.Errorf("inspect migration %s issues columns: %w", id, err)
+	}
+	targetColumns := []string{"lifecycle_state", "closed_outcome", "review_state", "archived_at"}
+	existingTargetColumns := 0
+	for _, column := range targetColumns {
+		if _, ok := columns[column]; ok {
+			existingTargetColumns++
+		}
+	}
+	if existingTargetColumns > 0 && existingTargetColumns != len(targetColumns) {
+		return issueStateModelV2CutoverError("refusing startup after partial issue state-model v2 schema cutover", "", "")
+	}
+	if existingTargetColumns == len(targetColumns) {
+		if err := validateIssueStateModelV2Rows(ctx, db); err != nil {
+			return fmt.Errorf("validate existing issue state-model v2 rows: %w", err)
+		}
+		if err := setIssueStateModelV2CompleteMarker(ctx, db, ""); err != nil {
+			return fmt.Errorf("mark existing issue state-model v2 migration complete: %w", err)
+		}
+		return recordAppliedMigration(ctx, db, id)
+	}
+
+	backupPath, err := c.backupIssueDBForStateModelV2(ctx, db)
+	if err != nil {
+		return fmt.Errorf("backup issue DB before migration %s: %w", id, err)
+	}
+	startedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := writeIssueStateModelV2CutoverMarker(ctx, db, issueStateModelV2CutoverMarker{
+		State:      "in_progress",
+		StartedAt:  startedAt,
+		BackupPath: backupPath,
+	}); err != nil {
+		return fmt.Errorf("mark migration %s in progress: %w", id, err)
+	}
+
+	if err := c.runIssueStateModelV2CutoverTransaction(ctx, db, id, backupPath, startedAt); err != nil {
+		marker := issueStateModelV2CutoverMarker{
+			State:      "failed",
+			StartedAt:  startedAt,
+			BackupPath: backupPath,
+			Error:      err.Error(),
+		}
+		if markerErr := writeIssueStateModelV2CutoverMarker(context.Background(), db, marker); markerErr != nil {
+			return issueStateModelV2CutoverError(
+				fmt.Sprintf("migration %s failed and failed to record rollback details: %v", id, markerErr),
+				backupPath,
+				err.Error(),
+			)
+		}
+		return issueStateModelV2CutoverError(fmt.Sprintf("migration %s rolled back", id), backupPath, err.Error())
+	}
+
+	return nil
+}
+
+func applyIssueClosedRuntimeV2TriggersMigration(ctx context.Context, db *sql.DB, id string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.ExecContext(ctx, issueClosedRuntimeProjectionTablesSQL); err != nil {
+		return fmt.Errorf("ensure migration %s runtime projection tables: %w", id, err)
+	}
+
+	for _, triggerName := range []string{
+		"issue_closed_runtime_guard_insert",
+		"issue_closed_runtime_guard_update",
+		"daemon_worktree_closed_issue_guard_insert",
+		"daemon_worktree_closed_issue_guard_update",
+		"daemon_session_closed_issue_guard_insert",
+		"daemon_session_closed_issue_guard_update",
+		"issue_dependency_closed_runtime_guard_insert",
+		"issue_dependency_closed_runtime_guard_update",
+		"issue_descendant_closed_ancestor_guard_update",
+	} {
+		if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+triggerName); err != nil {
+			return fmt.Errorf("drop trigger %s: %w", triggerName, err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, issueClosedRuntimeV2TriggersSQL); err != nil {
+		return fmt.Errorf("apply migration %s triggers: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO schema_migrations (id, applied_at)
+		VALUES (?, ?)
+	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	tx = nil
+	return nil
+}
+
+const issueClosedRuntimeProjectionTablesSQL = `
+CREATE TABLE IF NOT EXISTS daemon_session_projections (
+	project_id TEXT NOT NULL,
+	session_id TEXT NOT NULL,
+	issue_id TEXT NOT NULL,
+	state TEXT NOT NULL,
+	started_at TEXT,
+	updated_at TEXT NOT NULL,
+	tmux_attached_count INTEGER NOT NULL DEFAULT 0,
+	observed_state TEXT,
+	activity TEXT,
+	activity_source TEXT,
+	PRIMARY KEY (project_id, session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daemon_session_projections_project_issue
+	ON daemon_session_projections (project_id, issue_id);
+
+CREATE INDEX IF NOT EXISTS idx_daemon_session_projections_project_issue_updated
+	ON daemon_session_projections (project_id, issue_id, updated_at DESC, session_id DESC);
+
+CREATE TABLE IF NOT EXISTS daemon_worktree_projections (
+	project_id TEXT NOT NULL,
+	issue_id TEXT NOT NULL,
+	path TEXT NOT NULL,
+	branch TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	git_status_json TEXT,
+	git_status_updated_at TEXT,
+	PRIMARY KEY (project_id, issue_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daemon_worktree_projections_project_path
+	ON daemon_worktree_projections (project_id, path);
+`
+
+const issueClosedRuntimeV2TriggersSQL = `
+CREATE TRIGGER issue_closed_runtime_guard_insert
+BEFORE INSERT ON issues
+WHEN NEW.lifecycle_state = 'closed'
+BEGIN
+	SELECT RAISE(ABORT, 'closed issue cannot have active runtime attachments')
+	WHERE
+		EXISTS (
+			SELECT 1
+			FROM daemon_worktree_projections w
+			WHERE
+				w.issue_id = NEW.id
+				AND TRIM(COALESCE(w.path, '')) <> ''
+		)
+		OR EXISTS (
+			SELECT 1
+			FROM daemon_session_projections s
+			WHERE
+				s.issue_id = NEW.id
+				AND LOWER(TRIM(COALESCE(s.state, ''))) <> 'stopped'
+		)
+		OR EXISTS (
+			WITH RECURSIVE descendants(issue_id) AS (
+				SELECT d.issue_id
+				FROM issue_dependencies d
+				WHERE
+					d.depends_on_id = NEW.id
+					AND d.tombstoned_at IS NULL
+					AND d.dependency_type IN ('parent-child', 'parent_child')
+				UNION
+				SELECT d.issue_id
+				FROM descendants
+				JOIN issue_dependencies d ON d.depends_on_id = descendants.issue_id
+				WHERE
+					d.tombstoned_at IS NULL
+					AND d.dependency_type IN ('parent-child', 'parent_child')
+			)
+			SELECT 1
+			FROM descendants
+			JOIN issues child ON child.id = descendants.issue_id
+			WHERE
+				child.archived_at IS NULL
+				AND (
+					child.lifecycle_state <> 'closed'
+					OR
+					EXISTS (
+						SELECT 1
+						FROM daemon_worktree_projections w
+						WHERE
+							w.issue_id = child.id
+							AND TRIM(COALESCE(w.path, '')) <> ''
+					)
+					OR EXISTS (
+						SELECT 1
+						FROM daemon_session_projections s
+						WHERE
+							s.issue_id = child.id
+							AND LOWER(TRIM(COALESCE(s.state, ''))) <> 'stopped'
+					)
+				)
+		);
+END;
+
+CREATE TRIGGER issue_closed_runtime_guard_update
+BEFORE UPDATE OF lifecycle_state ON issues
+WHEN NEW.lifecycle_state = 'closed'
+BEGIN
+	SELECT RAISE(ABORT, 'closed issue cannot have active runtime attachments')
+	WHERE
+		EXISTS (
+			SELECT 1
+			FROM daemon_worktree_projections w
+			WHERE
+				w.issue_id = NEW.id
+				AND TRIM(COALESCE(w.path, '')) <> ''
+		)
+		OR EXISTS (
+			SELECT 1
+			FROM daemon_session_projections s
+			WHERE
+				s.issue_id = NEW.id
+				AND LOWER(TRIM(COALESCE(s.state, ''))) <> 'stopped'
+		)
+		OR EXISTS (
+			WITH RECURSIVE descendants(issue_id) AS (
+				SELECT d.issue_id
+				FROM issue_dependencies d
+				WHERE
+					d.depends_on_id = NEW.id
+					AND d.tombstoned_at IS NULL
+					AND d.dependency_type IN ('parent-child', 'parent_child')
+				UNION
+				SELECT d.issue_id
+				FROM descendants
+				JOIN issue_dependencies d ON d.depends_on_id = descendants.issue_id
+				WHERE
+					d.tombstoned_at IS NULL
+					AND d.dependency_type IN ('parent-child', 'parent_child')
+			)
+			SELECT 1
+			FROM descendants
+			JOIN issues child ON child.id = descendants.issue_id
+			WHERE
+				child.archived_at IS NULL
+				AND (
+					child.lifecycle_state <> 'closed'
+					OR
+					EXISTS (
+						SELECT 1
+						FROM daemon_worktree_projections w
+						WHERE
+							w.issue_id = child.id
+							AND TRIM(COALESCE(w.path, '')) <> ''
+					)
+					OR EXISTS (
+						SELECT 1
+						FROM daemon_session_projections s
+						WHERE
+							s.issue_id = child.id
+							AND LOWER(TRIM(COALESCE(s.state, ''))) <> 'stopped'
+					)
+				)
+		);
+END;
+
+CREATE TRIGGER daemon_worktree_closed_issue_guard_insert
+BEFORE INSERT ON daemon_worktree_projections
+WHEN TRIM(COALESCE(NEW.path, '')) <> ''
+BEGIN
+	SELECT RAISE(ABORT, 'cannot attach worktree to closed issue or closed ancestor')
+	WHERE EXISTS (
+		WITH RECURSIVE ancestors(issue_id) AS (
+			SELECT NEW.issue_id
+			UNION
+			SELECT d.depends_on_id
+			FROM ancestors
+			JOIN issue_dependencies d ON d.issue_id = ancestors.issue_id
+			WHERE
+				d.tombstoned_at IS NULL
+				AND d.dependency_type IN ('parent-child', 'parent_child')
+		)
+		SELECT 1
+		FROM ancestors
+		JOIN issues i ON i.id = ancestors.issue_id
+		WHERE
+			i.lifecycle_state = 'closed'
+			AND i.archived_at IS NULL
+	);
+END;
+
+CREATE TRIGGER daemon_worktree_closed_issue_guard_update
+BEFORE UPDATE OF issue_id, path ON daemon_worktree_projections
+WHEN TRIM(COALESCE(NEW.path, '')) <> ''
+BEGIN
+	SELECT RAISE(ABORT, 'cannot attach worktree to closed issue or closed ancestor')
+	WHERE EXISTS (
+		WITH RECURSIVE ancestors(issue_id) AS (
+			SELECT NEW.issue_id
+			UNION
+			SELECT d.depends_on_id
+			FROM ancestors
+			JOIN issue_dependencies d ON d.issue_id = ancestors.issue_id
+			WHERE
+				d.tombstoned_at IS NULL
+				AND d.dependency_type IN ('parent-child', 'parent_child')
+		)
+		SELECT 1
+		FROM ancestors
+		JOIN issues i ON i.id = ancestors.issue_id
+		WHERE
+			i.lifecycle_state = 'closed'
+			AND i.archived_at IS NULL
+	);
+END;
+
+CREATE TRIGGER daemon_session_closed_issue_guard_insert
+BEFORE INSERT ON daemon_session_projections
+WHEN LOWER(TRIM(COALESCE(NEW.state, ''))) <> 'stopped'
+BEGIN
+	SELECT RAISE(ABORT, 'cannot attach active session to closed issue or closed ancestor')
+	WHERE EXISTS (
+		WITH RECURSIVE ancestors(issue_id) AS (
+			SELECT NEW.issue_id
+			UNION
+			SELECT d.depends_on_id
+			FROM ancestors
+			JOIN issue_dependencies d ON d.issue_id = ancestors.issue_id
+			WHERE
+				d.tombstoned_at IS NULL
+				AND d.dependency_type IN ('parent-child', 'parent_child')
+		)
+		SELECT 1
+		FROM ancestors
+		JOIN issues i ON i.id = ancestors.issue_id
+		WHERE
+			i.lifecycle_state = 'closed'
+			AND i.archived_at IS NULL
+	);
+END;
+
+CREATE TRIGGER daemon_session_closed_issue_guard_update
+BEFORE UPDATE OF issue_id, state ON daemon_session_projections
+WHEN LOWER(TRIM(COALESCE(NEW.state, ''))) <> 'stopped'
+BEGIN
+	SELECT RAISE(ABORT, 'cannot attach active session to closed issue or closed ancestor')
+	WHERE EXISTS (
+		WITH RECURSIVE ancestors(issue_id) AS (
+			SELECT NEW.issue_id
+			UNION
+			SELECT d.depends_on_id
+			FROM ancestors
+			JOIN issue_dependencies d ON d.issue_id = ancestors.issue_id
+			WHERE
+				d.tombstoned_at IS NULL
+				AND d.dependency_type IN ('parent-child', 'parent_child')
+		)
+		SELECT 1
+		FROM ancestors
+		JOIN issues i ON i.id = ancestors.issue_id
+		WHERE
+			i.lifecycle_state = 'closed'
+			AND i.archived_at IS NULL
+	);
+END;
+
+CREATE TRIGGER issue_dependency_closed_runtime_guard_insert
+BEFORE INSERT ON issue_dependencies
+WHEN
+	NEW.tombstoned_at IS NULL
+	AND NEW.dependency_type IN ('parent-child', 'parent_child')
+BEGIN
+	SELECT RAISE(ABORT, 'cannot place unresolved descendant under closed issue')
+	WHERE
+		EXISTS (
+			WITH RECURSIVE ancestors(issue_id) AS (
+				SELECT NEW.depends_on_id
+				UNION
+				SELECT d.depends_on_id
+				FROM ancestors
+				JOIN issue_dependencies d ON d.issue_id = ancestors.issue_id
+				WHERE
+					d.tombstoned_at IS NULL
+					AND d.dependency_type IN ('parent-child', 'parent_child')
+			)
+			SELECT 1
+			FROM ancestors
+			JOIN issues i ON i.id = ancestors.issue_id
+			WHERE
+				i.lifecycle_state = 'closed'
+				AND i.archived_at IS NULL
+		)
+		AND EXISTS (
+			WITH RECURSIVE descendants(issue_id) AS (
+				SELECT NEW.issue_id
+				UNION
+				SELECT d.issue_id
+				FROM descendants
+				JOIN issue_dependencies d ON d.depends_on_id = descendants.issue_id
+				WHERE
+					d.tombstoned_at IS NULL
+					AND d.dependency_type IN ('parent-child', 'parent_child')
+			)
+			SELECT 1
+			FROM descendants
+			LEFT JOIN issues child ON child.id = descendants.issue_id
+			WHERE
+				(
+					child.id IS NOT NULL
+					AND child.archived_at IS NULL
+					AND child.lifecycle_state <> 'closed'
+				)
+				OR
+				EXISTS (
+					SELECT 1
+					FROM daemon_worktree_projections w
+					WHERE
+						w.issue_id = descendants.issue_id
+						AND TRIM(COALESCE(w.path, '')) <> ''
+				)
+				OR EXISTS (
+					SELECT 1
+					FROM daemon_session_projections s
+					WHERE
+						s.issue_id = descendants.issue_id
+						AND LOWER(TRIM(COALESCE(s.state, ''))) <> 'stopped'
+				)
+		);
+END;
+
+CREATE TRIGGER issue_dependency_closed_runtime_guard_update
+BEFORE UPDATE OF issue_id, depends_on_id, dependency_type, tombstoned_at ON issue_dependencies
+WHEN
+	NEW.tombstoned_at IS NULL
+	AND NEW.dependency_type IN ('parent-child', 'parent_child')
+BEGIN
+	SELECT RAISE(ABORT, 'cannot place unresolved descendant under closed issue')
+	WHERE
+		EXISTS (
+			WITH RECURSIVE ancestors(issue_id) AS (
+				SELECT NEW.depends_on_id
+				UNION
+				SELECT d.depends_on_id
+				FROM ancestors
+				JOIN issue_dependencies d ON d.issue_id = ancestors.issue_id
+				WHERE
+					d.tombstoned_at IS NULL
+					AND d.dependency_type IN ('parent-child', 'parent_child')
+			)
+			SELECT 1
+			FROM ancestors
+			JOIN issues i ON i.id = ancestors.issue_id
+			WHERE
+				i.lifecycle_state = 'closed'
+				AND i.archived_at IS NULL
+		)
+		AND EXISTS (
+			WITH RECURSIVE descendants(issue_id) AS (
+				SELECT NEW.issue_id
+				UNION
+				SELECT d.issue_id
+				FROM descendants
+				JOIN issue_dependencies d ON d.depends_on_id = descendants.issue_id
+				WHERE
+					d.tombstoned_at IS NULL
+					AND d.dependency_type IN ('parent-child', 'parent_child')
+			)
+			SELECT 1
+			FROM descendants
+			LEFT JOIN issues child ON child.id = descendants.issue_id
+			WHERE
+				(
+					child.id IS NOT NULL
+					AND child.archived_at IS NULL
+					AND child.lifecycle_state <> 'closed'
+				)
+				OR
+				EXISTS (
+					SELECT 1
+					FROM daemon_worktree_projections w
+					WHERE
+						w.issue_id = descendants.issue_id
+						AND TRIM(COALESCE(w.path, '')) <> ''
+				)
+				OR EXISTS (
+					SELECT 1
+					FROM daemon_session_projections s
+					WHERE
+						s.issue_id = descendants.issue_id
+						AND LOWER(TRIM(COALESCE(s.state, ''))) <> 'stopped'
+				)
+		);
+END;
+
+CREATE TRIGGER issue_descendant_closed_ancestor_guard_update
+BEFORE UPDATE OF lifecycle_state, archived_at ON issues
+WHEN NEW.lifecycle_state <> 'closed' AND NEW.archived_at IS NULL
+BEGIN
+	SELECT RAISE(ABORT, 'cannot move descendant out of closed under closed ancestor')
+	WHERE EXISTS (
+		WITH RECURSIVE ancestors(issue_id) AS (
+			SELECT d.depends_on_id
+			FROM issue_dependencies d
+			WHERE
+				d.issue_id = NEW.id
+				AND d.tombstoned_at IS NULL
+				AND d.dependency_type IN ('parent-child', 'parent_child')
+			UNION
+			SELECT d.depends_on_id
+			FROM ancestors
+			JOIN issue_dependencies d ON d.issue_id = ancestors.issue_id
+			WHERE
+				d.tombstoned_at IS NULL
+				AND d.dependency_type IN ('parent-child', 'parent_child')
+		)
+		SELECT 1
+		FROM ancestors
+		JOIN issues i ON i.id = ancestors.issue_id
+		WHERE
+			i.lifecycle_state = 'closed'
+			AND i.archived_at IS NULL
+	);
+END;
+`
+
+func (c *Client) runIssueStateModelV2CutoverTransaction(ctx context.Context, db *sql.DB, id, backupPath, startedAt string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if err := c.issueStateModelV2FailurePoint("after_begin"); err != nil {
+		return err
+	}
+
+	for _, column := range []struct {
+		name string
+		ddl  string
+	}{
+		{name: "lifecycle_state", ddl: "TEXT"},
+		{name: "closed_outcome", ddl: "TEXT"},
+		{name: "review_state", ddl: "TEXT"},
+		{name: "archived_at", ddl: "TEXT"},
+	} {
+		exists, err := txColumnExists(ctx, tx, "issues", column.name)
+		if err != nil {
+			return fmt.Errorf("inspect migration %s column %s: %w", id, column.name, err)
+		}
+		if exists {
+			return issueStateModelV2CutoverError("refusing startup after partial issue state-model v2 schema cutover", backupPath, "")
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE issues ADD COLUMN %s %s`, column.name, column.ddl)); err != nil {
+			return fmt.Errorf("apply migration %s: add %s: %w", id, column.name, err)
+		}
+	}
+
+	if err := c.issueStateModelV2FailurePoint("after_columns"); err != nil {
+		return err
+	}
+
+	if err := normalizeResidualBlockedStatusesForStateModelV2(ctx, tx); err != nil {
+		return fmt.Errorf("apply migration %s: normalize residual blocked statuses: %w", id, err)
+	}
+	if err := mapIssueStateModelV2Rows(ctx, tx); err != nil {
+		return fmt.Errorf("apply migration %s: map v1 statuses: %w", id, err)
+	}
+
+	if err := c.issueStateModelV2FailurePoint("after_mapping"); err != nil {
+		return err
+	}
+	if err := validateIssueStateModelV2Rows(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s: %w", id, err)
+	}
+
+	completedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := writeIssueStateModelV2CutoverMarkerTx(ctx, tx, issueStateModelV2CutoverMarker{
+		State:       "complete",
+		StartedAt:   startedAt,
+		CompletedAt: completedAt,
+		BackupPath:  backupPath,
+	}); err != nil {
+		return fmt.Errorf("mark migration %s complete: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO meta (key, value)
+		VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, issueStateModelVersionMetaKey, issueStateModelV2Version); err != nil {
+		return fmt.Errorf("record migration %s state model version: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO schema_migrations (id, applied_at)
+		VALUES (?, ?)
+	`, id, completedAt); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+
+	if err := c.issueStateModelV2FailurePoint("before_commit"); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	tx = nil
+	return nil
+}
+
+func (c *Client) backupIssueDBForStateModelV2(ctx context.Context, db *sql.DB) (string, error) {
+	if strings.TrimSpace(c.dbPath) == "" || c.dbPath == ":memory:" {
+		return "", fmt.Errorf("cannot create SQLite backup for empty or in-memory issue DB path")
+	}
+	if err := c.issueStateModelV2FailurePoint("before_backup"); err != nil {
+		return "", err
+	}
+	dbPath, err := filepath.Abs(c.dbPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve DB path: %w", err)
+	}
+	backupPath := fmt.Sprintf("%s.state-model-v1.%s.bak", dbPath, time.Now().UTC().Format("20060102T150405.000000000Z"))
+	for i := 1; ; i++ {
+		if _, err := os.Stat(backupPath); err != nil {
+			if os.IsNotExist(err) {
+				break
+			}
+			return "", fmt.Errorf("inspect backup path: %w", err)
+		}
+		backupPath = fmt.Sprintf("%s.state-model-v1.%s.%d.bak", dbPath, time.Now().UTC().Format("20060102T150405.000000000Z"), i)
+	}
+	if _, err := db.ExecContext(ctx, `VACUUM INTO `+quoteSQLiteStringLiteral(backupPath)); err != nil {
+		return "", fmt.Errorf("vacuum into %s: %w", backupPath, err)
+	}
+	if err := c.issueStateModelV2FailurePoint("after_backup"); err != nil {
+		return "", err
+	}
+	return backupPath, nil
+}
+
+func validateIssueStateModelV2Rows(ctx context.Context, db sqlIssueQueryer) error {
+	checks := []struct {
+		name  string
+		query string
+	}{
+		{
+			name: "missing lifecycle_state",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE COALESCE(lifecycle_state, '') = ''`,
+		},
+		{
+			name: "invalid lifecycle_state",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE lifecycle_state NOT IN ('backlog', 'open', 'active', 'closed')`,
+		},
+		{
+			name: "invalid closed_outcome for closed lifecycle",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE lifecycle_state = 'closed' AND COALESCE(closed_outcome, '') NOT IN ('completed', 'cancelled')`,
+		},
+		{
+			name: "invalid closed_outcome for non-closed lifecycle",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE lifecycle_state <> 'closed' AND COALESCE(closed_outcome, '') <> 'none'`,
+		},
+		{
+			name: "invalid closed_outcome",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE closed_outcome NOT IN ('none', 'completed', 'cancelled')`,
+		},
+		{
+			name: "missing review_state",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE COALESCE(review_state, '') = ''`,
+		},
+		{
+			name: "invalid review_state",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE review_state NOT IN ('none', 'requested')`,
+		},
+		{
+			name: "review requested for non-active lifecycle",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE review_state = 'requested' AND lifecycle_state <> 'active'`,
+		},
+		{
+			name: "archive timestamp drift",
+			query: `SELECT COUNT(*) FROM issues
+				WHERE COALESCE(archived_at, '') <> COALESCE(deleted_at, '')`,
+		},
+	}
+	for _, check := range checks {
+		var count int
+		if err := db.QueryRowContext(ctx, check.query).Scan(&count); err != nil {
+			return fmt.Errorf("%s: %w", check.name, err)
+		}
+		if count > 0 {
+			return fmt.Errorf("%s: %d rows", check.name, count)
+		}
+	}
+	return nil
+}
+
+func normalizeResidualBlockedStatusesForStateModelV2(ctx context.Context, tx *sql.Tx) error {
+	script, err := fs.ReadFile(migrationFiles, "migrations/0012_blocked_status_to_open.sql")
+	if err != nil {
+		return fmt.Errorf("read blocked status migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, string(script)); err != nil {
+		return fmt.Errorf("run blocked status migration: %w", err)
+	}
+	return nil
+}
+
+func mapIssueStateModelV2Rows(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, status, priority, deleted_at
+		FROM issues
+		ORDER BY id
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type update struct {
+		id             string
+		lifecycleState string
+		closedOutcome  string
+		reviewState    string
+		archivedAt     sql.NullString
+	}
+	updates := []update{}
+	for rows.Next() {
+		var (
+			id        string
+			status    string
+			priority  int
+			deletedAt sql.NullString
+		)
+		if err := rows.Scan(&id, &status, &priority, &deletedAt); err != nil {
+			return err
+		}
+		state, err := domain.IssueStateFromLegacy(domain.LegacyIssueStateInput{
+			Status:   domain.Status(status),
+			Priority: domain.Priority(priority),
+			Archived: deletedAt.Valid && strings.TrimSpace(deletedAt.String) != "",
+		})
+		if err != nil {
+			return fmt.Errorf("issue %s: %w", id, err)
+		}
+		updates = append(updates, update{
+			id:             id,
+			lifecycleState: string(state.Workflow()),
+			closedOutcome:  string(state.CloseOutcome()),
+			reviewState:    string(state.Review()),
+			archivedAt:     deletedAt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, update := range updates {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE issues
+			SET lifecycle_state = ?,
+				closed_outcome = ?,
+				review_state = ?,
+				archived_at = ?
+			WHERE id = ?
+		`, update.lifecycleState, update.closedOutcome, update.reviewState, update.archivedAt, update.id); err != nil {
+			return fmt.Errorf("issue %s: %w", update.id, err)
+		}
+	}
+	return nil
+}
+
+func readIssueStateModelV2CutoverMarker(ctx context.Context, db *sql.DB) (issueStateModelV2CutoverMarker, bool, error) {
+	metaExists, err := tableExists(db, "meta")
+	if err != nil {
+		return issueStateModelV2CutoverMarker{}, false, err
+	}
+	if !metaExists {
+		return issueStateModelV2CutoverMarker{}, false, nil
+	}
+	var raw string
+	err = db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, issueStateModelV2CutoverMarkerKey).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return issueStateModelV2CutoverMarker{}, false, nil
+	}
+	if err != nil {
+		return issueStateModelV2CutoverMarker{}, false, err
+	}
+	var marker issueStateModelV2CutoverMarker
+	if err := json.Unmarshal([]byte(raw), &marker); err != nil {
+		return issueStateModelV2CutoverMarker{}, true, fmt.Errorf("decode marker: %w", err)
+	}
+	return marker, true, nil
+}
+
+func writeIssueStateModelV2CutoverMarker(ctx context.Context, db *sql.DB, marker issueStateModelV2CutoverMarker) error {
+	payload, err := json.Marshal(marker)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO meta (key, value)
+		VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, issueStateModelV2CutoverMarkerKey, string(payload))
+	return err
+}
+
+func writeIssueStateModelV2CutoverMarkerTx(ctx context.Context, tx *sql.Tx, marker issueStateModelV2CutoverMarker) error {
+	payload, err := json.Marshal(marker)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO meta (key, value)
+		VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, issueStateModelV2CutoverMarkerKey, string(payload))
+	return err
+}
+
+func setIssueStateModelV2CompleteMarker(ctx context.Context, db *sql.DB, backupPath string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := writeIssueStateModelV2CutoverMarker(ctx, db, issueStateModelV2CutoverMarker{
+		State:       "complete",
+		StartedAt:   now,
+		CompletedAt: now,
+		BackupPath:  backupPath,
+	}); err != nil {
+		return err
+	}
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO meta (key, value)
+		VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, issueStateModelVersionMetaKey, issueStateModelV2Version)
+	return err
+}
+
+func issueStateModelV2CutoverError(message, backupPath, cause string) error {
+	detail := strings.TrimSpace(message)
+	if strings.TrimSpace(backupPath) != "" {
+		detail += fmt.Sprintf("; backup=%s", backupPath)
+	}
+	if strings.TrimSpace(cause) != "" {
+		detail += fmt.Sprintf("; restore the backup before retrying; cause=%s", cause)
+	} else if strings.TrimSpace(backupPath) != "" {
+		detail += "; restore the backup before retrying"
+	}
+	return fmt.Errorf("%s", detail)
+}
+
+func (c *Client) issueStateModelV2FailurePoint(stage string) error {
+	if c.stateModelV2MigrationFailureHook == nil {
+		return nil
+	}
+	if err := c.stateModelV2MigrationFailureHook(stage); err != nil {
+		return fmt.Errorf("injected issue state-model v2 migration failure at %s: %w", stage, err)
+	}
+	return nil
+}
+
+func quoteSQLiteStringLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func applyDecisionSearchFTSMigration(ctx context.Context, db *sql.DB, id string) error {

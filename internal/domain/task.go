@@ -37,6 +37,8 @@ type Task struct {
 	Labels                []string        `json:"labels,omitempty"`
 	Estimate              *int            `json:"estimate,omitempty"`
 	Status                Status          `json:"status"`
+	State                 IssueState      `json:"issue_state,omitzero" msgpack:"issue_state,omitempty"`
+	Facts                 IssueFacts      `json:"issue_facts,omitzero" msgpack:"issue_facts,omitempty"`
 	Priority              Priority        `json:"priority"`
 	Type                  TaskType        `json:"issue_type"`
 	ParentID              *naming.IssueID `json:"parent_id,omitempty"`
@@ -127,6 +129,13 @@ func (s Status) String() string {
 	return string(s)
 }
 
+func BoardStatusForTask(task Task) Status {
+	if status := task.IssueFacts().DisplayStatus; status != "" {
+		return status
+	}
+	return task.Status
+}
+
 // Priority represents task priority (0 = highest)
 type Priority int
 
@@ -135,7 +144,7 @@ const (
 	P1                 // High
 	P2                 // Medium
 	P3                 // Low
-	P4                 // Backlog
+	P4                 // Lowest
 )
 
 // String returns priority as string

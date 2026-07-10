@@ -16,6 +16,11 @@ import (
 
 const (
 	CommandBoardFetch           = protocol.CommandBoardFetch
+	CommandBoardViewList        = protocol.CommandBoardViewList
+	CommandBoardViewGet         = protocol.CommandBoardViewGet
+	CommandBoardViewSave        = protocol.CommandBoardViewSave
+	CommandBoardViewDelete      = protocol.CommandBoardViewDelete
+	CommandBoardViewSelect      = protocol.CommandBoardViewSelect
 	CommandTaskList             = "task.list"
 	CommandTaskGet              = "task.get"
 	CommandTaskGetMany          = "task.get_many"
@@ -46,33 +51,35 @@ const (
 
 // TaskCreateParams contains the payload used to create a task through the shared daemon client.
 type TaskCreateParams struct {
-	Title           string          `json:"title"`
-	Description     string          `json:"description"`
-	Type            domain.TaskType `json:"type"`
-	Priority        domain.Priority `json:"priority"`
-	Status          domain.Status   `json:"status,omitempty"`
-	Assignee        string          `json:"assignee,omitempty"`
-	Labels          []string        `json:"labels,omitempty"`
-	Implementations []string        `json:"implementations,omitempty"`
-	Design          string          `json:"design,omitempty"`
-	Notes           string          `json:"notes,omitempty"`
-	Acceptance      string          `json:"acceptance,omitempty"`
-	Estimate        *int            `json:"estimate,omitempty"`
-	ParentID        *naming.IssueID `json:"parent_id,omitempty"`
+	Title           string               `json:"title"`
+	Description     string               `json:"description"`
+	Type            domain.TaskType      `json:"type"`
+	Priority        domain.Priority      `json:"priority"`
+	Status          domain.Status        `json:"status,omitempty"`
+	Lifecycle       domain.IssueWorkflow `json:"lifecycle_state,omitempty"`
+	Assignee        string               `json:"assignee,omitempty"`
+	Labels          []string             `json:"labels,omitempty"`
+	Implementations []string             `json:"implementations,omitempty"`
+	Design          string               `json:"design,omitempty"`
+	Notes           string               `json:"notes,omitempty"`
+	Acceptance      string               `json:"acceptance,omitempty"`
+	Estimate        *int                 `json:"estimate,omitempty"`
+	ParentID        *naming.IssueID      `json:"parent_id,omitempty"`
 }
 
 // TaskUpdateParams contains the payload used to update task details through the shared daemon client.
 type TaskUpdateParams struct {
-	Title           string          `json:"title"`
-	Description     string          `json:"description"`
-	Design          *string         `json:"design,omitempty"`
-	Notes           *string         `json:"notes,omitempty"`
-	Acceptance      *string         `json:"acceptance,omitempty"`
-	Estimate        *int            `json:"estimate,omitempty"`
-	EstimateSet     bool            `json:"estimate_set,omitempty"`
-	Type            domain.TaskType `json:"type"`
-	Priority        domain.Priority `json:"priority"`
-	Implementations []string        `json:"implementations"`
+	Title           string                `json:"title"`
+	Description     string                `json:"description"`
+	Design          *string               `json:"design,omitempty"`
+	Notes           *string               `json:"notes,omitempty"`
+	Acceptance      *string               `json:"acceptance,omitempty"`
+	Estimate        *int                  `json:"estimate,omitempty"`
+	EstimateSet     bool                  `json:"estimate_set,omitempty"`
+	Type            domain.TaskType       `json:"type"`
+	Priority        domain.Priority       `json:"priority"`
+	Lifecycle       *domain.IssueWorkflow `json:"lifecycle_state,omitempty"`
+	Implementations []string              `json:"implementations"`
 }
 
 // TaskStatusRequest contains the payload used to update a task status.
@@ -98,6 +105,7 @@ type TaskStatusOptions struct {
 	CloseCleanChildren   bool
 	CascadeChildren      bool
 	AllowActiveSession   bool
+	CloseOutcome         domain.IssueCloseOutcome
 }
 
 type TaskDeleteOptions struct {
@@ -119,6 +127,7 @@ type taskCloseRequest struct {
 	IntegrateBeforeClose bool           `json:"integrate_before_close,omitempty"`
 	CloseCleanChildren   bool           `json:"close_clean_children,omitempty"`
 	AllowActiveSession   bool           `json:"allow_active_session,omitempty"`
+	CloseOutcome         string         `json:"closed_outcome,omitempty"`
 }
 
 type taskDeleteRequest struct {
@@ -426,6 +435,8 @@ type TaskIDResponse struct {
 // TaskSnapshot captures a task list snapshot and the revision it was read at.
 type TaskSnapshot struct {
 	Tasks         []domain.Task
+	View          domain.BoardView
+	Columns       []domain.BoardViewColumnSnapshot
 	Revision      uint64
 	LastCheckedAt time.Time
 	Freshness     protocol.TaskListFreshness
@@ -880,10 +891,19 @@ func (c *Client) BoardSnapshot(ctx context.Context) (TaskSnapshot, error) {
 
 // BoardSnapshotWithMode fetches a board snapshot with the requested bounded read budget.
 func (c *Client) BoardSnapshotWithMode(ctx context.Context, mode ReadWaitMode) (TaskSnapshot, error) {
+	return c.BoardSnapshotForViewWithMode(ctx, "", mode)
+}
+
+// BoardSnapshotForViewWithMode fetches a board snapshot grouped by the requested view.
+func (c *Client) BoardSnapshotForViewWithMode(ctx context.Context, viewID string, mode ReadWaitMode) (TaskSnapshot, error) {
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
-	resp, err := c.commandJSONResponse(waitCtx, CommandBoardFetch, nil)
+	var body any
+	if strings.TrimSpace(viewID) != "" {
+		body = protocol.BoardSnapshotRequestBody{ViewID: strings.TrimSpace(viewID)}
+	}
+	resp, err := c.commandJSONResponse(waitCtx, CommandBoardFetch, body)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
@@ -934,11 +954,27 @@ func (c *Client) decodeBoardSnapshotResponse(resp protocol.ResponseEnvelope) (Ta
 	}
 	return TaskSnapshot{
 		Tasks:         protocol.DomainTasksFromBoardSummaries(payload.Tasks),
+		View:          payload.View,
+		Columns:       boardSnapshotColumnsToDomain(payload.Columns),
 		Revision:      revision,
 		LastCheckedAt: payload.LastCheckedAt,
 		Freshness:     payload.Freshness,
 		SummariesOnly: true,
 	}, nil
+}
+
+func boardSnapshotColumnsToDomain(columns []protocol.BoardSnapshotColumn) []domain.BoardViewColumnSnapshot {
+	if len(columns) == 0 {
+		return nil
+	}
+	out := make([]domain.BoardViewColumnSnapshot, 0, len(columns))
+	for _, column := range columns {
+		out = append(out, domain.BoardViewColumnSnapshot{
+			Definition: column.Definition,
+			Tasks:      protocol.DomainTasksFromBoardSummaries(column.Tasks),
+		})
+	}
+	return out
 }
 
 // CreateTask creates a task through the daemon client boundary.
@@ -954,21 +990,29 @@ func (c *Client) CreateTask(ctx context.Context, params TaskCreateParams) (strin
 }
 
 // UpdateTaskStatus updates a task's status through the daemon client boundary.
-// Done transitions are always routed through task.close so durable close
-// invariants stay daemon-owned even when callers omit close options.
+// Done and cancelled transitions are always routed through task.close so
+// durable close invariants stay daemon-owned even when callers omit close
+// options.
 func (c *Client) UpdateTaskStatus(ctx context.Context, taskID string, status domain.Status) error {
 	return c.UpdateTaskStatusWithOptions(ctx, taskID, status, TaskStatusOptions{})
 }
 
-// UpdateTaskStatusWithOptions updates a task's status. Done transitions are
-// represented by the daemon-owned close command; other status moves use the
-// lightweight status mutation command.
+// UpdateTaskStatusWithOptions updates a task's status. Terminal close
+// transitions are represented by the daemon-owned close command; other status
+// moves use the lightweight status mutation command.
 func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string, status domain.Status, opts TaskStatusOptions) error {
 	parsedTaskID, err := naming.ParseIssueID(taskID)
 	if err != nil {
 		return fmt.Errorf("invalid task id: %w", err)
 	}
 	if status == domain.StatusDone {
+		opts.CloseOutcome = domain.IssueCloseCompleted
+		_, err := c.CloseTask(ctx, parsedTaskID.String(), opts)
+		return err
+	}
+	if status == domain.StatusCancelled {
+		opts.CloseOutcome = domain.IssueCloseCancelled
+		opts.IntegrateBeforeClose = false
 		_, err := c.CloseTask(ctx, parsedTaskID.String(), opts)
 		return err
 	}
@@ -992,6 +1036,7 @@ func (c *Client) CloseTask(ctx context.Context, taskID string, opts TaskStatusOp
 		IntegrateBeforeClose: opts.IntegrateBeforeClose,
 		CloseCleanChildren:   opts.CloseCleanChildren,
 		AllowActiveSession:   opts.AllowActiveSession,
+		CloseOutcome:         string(opts.CloseOutcome),
 	}, &out); err != nil {
 		return TaskCloseResult{}, err
 	}

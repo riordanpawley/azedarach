@@ -733,6 +733,16 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleUIStateGet(ctx, req)
 	case protocol.CommandUIStateSet:
 		return d.handleUIStateSet(ctx, req)
+	case protocol.CommandBoardViewList:
+		return d.handleBoardViewList(ctx, req)
+	case protocol.CommandBoardViewGet:
+		return d.handleBoardViewGet(ctx, req)
+	case protocol.CommandBoardViewSave:
+		return d.handleBoardViewSave(ctx, req)
+	case protocol.CommandBoardViewDelete:
+		return d.handleBoardViewDelete(ctx, req)
+	case protocol.CommandBoardViewSelect:
+		return d.handleBoardViewSelect(ctx, req)
 	case protocol.CommandProjectCleanup:
 		return d.handleProjectCleanup(ctx, req)
 	case protocol.CommandNoticeList:
@@ -1224,7 +1234,7 @@ func (d *Daemon) recoverInterruptedDeferredWorktreeCleanup(ctx context.Context, 
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient != nil {
 		task, err := issueClient.GetWithRuntime(ctx, projectID, taskID)
-		if err == nil && task.Status != domain.StatusDone {
+		if err == nil && !task.IssueClosed() {
 			if fallbackPath != "" {
 				d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, fallbackPath, fallbackBranch)
 			} else {

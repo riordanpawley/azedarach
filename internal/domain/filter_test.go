@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -108,6 +109,43 @@ func TestFilter_Matches_EmptyFilter(t *testing.T) {
 
 	if !f.Matches(task) {
 		t.Error("Empty filter should match all tasks")
+	}
+}
+
+func TestFilter_MatchesStatusAgainstIssueDisplayPhase(t *testing.T) {
+	tasks := []Task{
+		{ID: issueID("az-open"), Title: "Open", Status: StatusOpen, Priority: P2, Type: TypeTask},
+		{ID: issueID("az-backlog"), Title: "Backlog", Status: StatusOpen, State: mustIssueState(t, IssueStateParts{Workflow: IssueWorkflowBacklog}), Priority: P0, Type: TypeTask},
+		{ID: issueID("az-waiting-review"), Title: "Waiting review", Status: StatusInReview, Priority: P2, Type: TypeTask, Session: &Session{Activity: "waiting-for-human"}},
+		{ID: issueID("az-idle-review"), Title: "Idle review", Status: StatusInReview, Priority: P2, Type: TypeTask, Session: &Session{Activity: string(SessionIdle)}},
+		{ID: issueID("az-done"), Title: "Done", Status: StatusDone, Priority: P2, Type: TypeTask},
+		{ID: issueID("az-cancelled"), Title: "Cancelled", Status: StatusCancelled, Priority: P2, Type: TypeTask},
+	}
+	tests := []struct {
+		name   string
+		status Status
+		want   []string
+	}{
+		{name: "open excludes backlog", status: StatusOpen, want: []string{"az-open"}},
+		{name: "in progress includes waiting review", status: StatusInProgress, want: []string{"az-waiting-review"}},
+		{name: "in review excludes waiting review", status: StatusInReview, want: []string{"az-idle-review"}},
+		{name: "done excludes cancelled", status: StatusDone, want: []string{"az-done"}},
+		{name: "cancelled is independently filterable", status: StatusCancelled, want: []string{"az-cancelled"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := NewFilter()
+			f.ToggleStatus(tt.status)
+			gotTasks := f.Apply(tasks)
+			got := make([]string, 0, len(gotTasks))
+			for _, task := range gotTasks {
+				got = append(got, task.ID.String())
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("filtered IDs = %#v, want %#v", got, tt.want)
+			}
+		})
 	}
 }
 

@@ -128,6 +128,7 @@ type taskCloseRequest struct {
 	IntegrateBeforeClose bool   `json:"integrate_before_close,omitempty"`
 	CloseCleanChildren   bool   `json:"close_clean_children,omitempty"`
 	AllowActiveSession   bool   `json:"allow_active_session,omitempty"`
+	CloseOutcome         string `json:"closed_outcome,omitempty"`
 }
 
 type taskStatusUpdateOptions struct {
@@ -386,8 +387,23 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	resp := d.successResponse(req)
 	projectID := d.projectID(req.Meta)
+	var boardReq protocol.BoardSnapshotRequestBody
+	if err := decodeOptionalJSON(req.Body, &boardReq); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	if strings.TrimSpace(boardReq.ProjectID.String()) != "" {
+		projectID = d.canonicalProjectID(boardReq.ProjectID.String())
+	}
+	viewID := strings.TrimSpace(boardReq.ViewID)
+	if viewID == "" {
+		viewID = d.selectedBoardViewID(projectID)
+	}
 	if err, unhealthy := d.projectIssueStoreHealthError(projectID); unhealthy {
 		return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+	}
+	viewRecord, err := d.boardViewRecord(ctx, projectID, viewID)
+	if err != nil {
+		return d.boardViewErrorResponse(req, err), nil
 	}
 	startedAt := time.Now()
 	cacheStartedAt := time.Now()
@@ -398,7 +414,10 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 		} else {
 			cached.Tasks = hydrated
 			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", true)
-			payload := buildBoardSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks)
+			payload, err := buildBoardSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks, viewRecord.View)
+			if err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			}
 			marshalStartedAt := time.Now()
 			body, err := json.Marshal(payload)
 			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(cached.Tasks), "cache_hit", true)
@@ -418,7 +437,10 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 	if err != nil {
 		return d.errorResponse(req, projectIssueStoreHealthErrorCode(err), err.Error()), nil
 	}
-	payload := buildBoardSnapshotPayload(projectID, result.Revision, result.LastCheckedAt, result.Freshness, result.Tasks)
+	payload, err := buildBoardSnapshotPayload(projectID, result.Revision, result.LastCheckedAt, result.Freshness, result.Tasks, viewRecord.View)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
 	marshalStartedAt := time.Now()
 	body, err := json.Marshal(payload)
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(result.Tasks), "cache_hit", false, "shared_load", shared)
@@ -1147,12 +1169,20 @@ func buildTaskListSnapshotPayload(projectID string, revision uint64, lastChecked
 	}
 }
 
-func buildBoardSnapshotPayload(projectID string, revision uint64, lastCheckedAt time.Time, freshness protocol.TaskListFreshness, tasks []domain.Task) protocol.BoardSnapshotPayload {
+func buildBoardSnapshotPayload(projectID string, revision uint64, lastCheckedAt time.Time, freshness protocol.TaskListFreshness, tasks []domain.Task, view domain.BoardView) (protocol.BoardSnapshotPayload, error) {
 	if lastCheckedAt.IsZero() {
 		lastCheckedAt = timeNow()
 	}
 	if !freshness.Valid() {
 		freshness = protocol.TaskListFreshnessFresh
+	}
+	view = view.Normalized()
+	if view.ID == "" {
+		view = domain.DefaultBoardView()
+	}
+	columns, err := domain.GroupTasksByBoardView(view, tasks)
+	if err != nil {
+		return protocol.BoardSnapshotPayload{}, err
 	}
 	return protocol.BoardSnapshotPayload{
 		SchemaVersion:    protocol.BoardSnapshotSchemaVersion,
@@ -1161,8 +1191,10 @@ func buildBoardSnapshotPayload(projectID string, revision uint64, lastCheckedAt 
 		ProjectID:        naming.ProjectID(projectID),
 		LastCheckedAt:    lastCheckedAt.UTC(),
 		Freshness:        freshness,
+		View:             view,
+		Columns:          protocol.BoardSnapshotColumnsFromDomain(columns),
 		Tasks:            protocol.BoardTaskSummariesFromDomain(tasks),
-	}
+	}, nil
 }
 
 func (d *Daemon) taskEventBody(ctx context.Context, projectID, taskID string) protocol.TaskEventBody {
@@ -1460,7 +1492,7 @@ func runtimeWorktreeIssueEligible(issueID string, taskByIssue map[string]domain.
 	if !ok {
 		return true
 	}
-	if task.Status == domain.StatusDone {
+	if task.IssueClosed() {
 		return false
 	}
 	seen := map[string]struct{}{strings.ToLower(issueID): {}}
@@ -1474,7 +1506,7 @@ func runtimeWorktreeIssueEligible(issueID string, taskByIssue map[string]domain.
 		if !ok {
 			return true
 		}
-		if parent.Status == domain.StatusDone {
+		if parent.IssueClosed() {
 			return false
 		}
 		parentID = domain.TaskParentIssueID(parent)
@@ -1755,19 +1787,20 @@ func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvel
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
 	var cmd struct {
-		Title           string          `json:"title"`
-		Description     string          `json:"description"`
-		Type            domain.TaskType `json:"type"`
-		Priority        domain.Priority `json:"priority"`
-		Status          domain.Status   `json:"status,omitempty"`
-		Assignee        string          `json:"assignee,omitempty"`
-		Labels          []string        `json:"labels,omitempty"`
-		Implementations []string        `json:"implementations,omitempty"`
-		Design          string          `json:"design,omitempty"`
-		Notes           string          `json:"notes,omitempty"`
-		Acceptance      string          `json:"acceptance,omitempty"`
-		Estimate        *int            `json:"estimate,omitempty"`
-		ParentID        *string         `json:"parent_id,omitempty"`
+		Title           string               `json:"title"`
+		Description     string               `json:"description"`
+		Type            domain.TaskType      `json:"type"`
+		Priority        domain.Priority      `json:"priority"`
+		Status          domain.Status        `json:"status,omitempty"`
+		Lifecycle       domain.IssueWorkflow `json:"lifecycle_state,omitempty"`
+		Assignee        string               `json:"assignee,omitempty"`
+		Labels          []string             `json:"labels,omitempty"`
+		Implementations []string             `json:"implementations,omitempty"`
+		Design          string               `json:"design,omitempty"`
+		Notes           string               `json:"notes,omitempty"`
+		Acceptance      string               `json:"acceptance,omitempty"`
+		Estimate        *int                 `json:"estimate,omitempty"`
+		ParentID        *string              `json:"parent_id,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -1787,6 +1820,7 @@ func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvel
 		Type:            cmd.Type,
 		Priority:        cmd.Priority,
 		Status:          cmd.Status,
+		Lifecycle:       cmd.Lifecycle,
 		Assignee:        cmd.Assignee,
 		Labels:          cmd.Labels,
 		Implementations: cmd.Implementations,
@@ -1984,9 +2018,16 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	if taskID == "" {
 		return taskCloseResult{}, fmt.Errorf("task id is required")
 	}
+	closeOutcome, closeStatus, err := daemonTaskCloseOutcomeStatus(cmd.CloseOutcome)
+	if err != nil {
+		return taskCloseResult{}, err
+	}
+	if closeOutcome == domain.IssueCloseCancelled {
+		cmd.IntegrateBeforeClose = false
+	}
 	result := taskCloseResult{
 		TaskID:         taskID,
-		Status:         string(domain.StatusDone),
+		Status:         string(closeStatus),
 		WorktreeForced: cmd.ForceWorktree,
 	}
 	result.ContextRisk = d.taskContextRiskForCloseout(ctx, projectID, taskID, d.cfg.RepoDir)
@@ -2099,7 +2140,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	recordPhase("runtime_projection_repair", phaseStartedAt, false)
 
 	phaseStartedAt = time.Now()
-	task, err := issueClient.UpdateWithRuntime(ctx, projectID, taskID, domain.StatusDone)
+	task, err := issueClient.UpdateWithRuntime(ctx, projectID, taskID, closeStatus)
 	if err != nil {
 		recordPhase("status_write", phaseStartedAt, false)
 		return result, taskClosePostIntegrationPhaseError(taskID, "status_write", integration, err)
@@ -2116,6 +2157,17 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	}
 	d.publishTaskEvent(req, protocol.EventTaskUpdated, rev, taskEventBodyFromTask(projectID, task))
 	return result, nil
+}
+
+func daemonTaskCloseOutcomeStatus(raw string) (domain.IssueCloseOutcome, domain.Status, error) {
+	switch domain.IssueCloseOutcome(strings.ToLower(strings.TrimSpace(raw))) {
+	case "", domain.IssueCloseCompleted:
+		return domain.IssueCloseCompleted, domain.StatusDone, nil
+	case domain.IssueCloseCancelled:
+		return domain.IssueCloseCancelled, domain.StatusCancelled, nil
+	default:
+		return "", "", fmt.Errorf("invalid close outcome: %s", raw)
+	}
 }
 
 func (d *Daemon) repairStaleSessionRuntimeProjections(ctx context.Context, projectID, taskID string) error {
@@ -2361,7 +2413,7 @@ func (d *Daemon) deferredTaskWorktreeCleanupShouldSkip(ctx context.Context, proj
 		return false
 	}
 	task, err := issueClient.GetWithRuntime(ctx, projectID, taskID)
-	if err != nil || task.Status == domain.StatusDone {
+	if err != nil || task.IssueClosed() {
 		return false
 	}
 	if fallbackPath != "" {
@@ -3037,7 +3089,7 @@ func (d *Daemon) updateTaskStatusExcludingClose(ctx context.Context, projectID, 
 		return domain.Task{}, nil, fmt.Errorf("issue store unavailable")
 	}
 	taskID = strings.TrimSpace(taskID)
-	if status == domain.StatusDone {
+	if status == domain.StatusDone || status == domain.StatusCancelled {
 		return domain.Task{}, nil, fmt.Errorf("status %s must be applied with task.close", status)
 	}
 	if opts.CascadeChildren && status != domain.StatusInReview {
@@ -3087,8 +3139,7 @@ func (d *Daemon) validateTaskActivityForReview(ctx context.Context, projectID, t
 	if task.Session == nil {
 		return nil
 	}
-	displayState, ok := task.Session.DisplayState()
-	if !ok || displayState != domain.SessionBusy {
+	if !task.Session.BlocksReviewHandoff() {
 		return nil
 	}
 	if allowBusy {
@@ -3105,7 +3156,7 @@ func (d *Daemon) validateTaskActivityForReview(ctx context.Context, projectID, t
 	if activitySource != "" {
 		activitySource = " (source: " + activitySource + ")"
 	}
-	return fmt.Errorf("cannot move issue %s to in_review: session activity is %s%s. Next: leave it in_progress until the session reports idle/waiting/done/terminal activity, or intentionally stop the session before handoff", taskID, activity, activitySource)
+	return fmt.Errorf("cannot move issue %s to in_review: session activity is %s%s. Next: leave it in_progress until the session reports idle/done/no-agent activity, or intentionally stop the session before handoff", taskID, activity, activitySource)
 }
 
 func taskForReviewActivityInvariant(ctx context.Context, issueClient *issues.Client, projectID, taskID string, source daemonInvariantSource) (domain.Task, error) {
@@ -3173,10 +3224,10 @@ func daemonReviewGuardChildBlockers(parentID naming.IssueID, tasks []domain.Task
 	blocked := make([]string, 0, len(descendants))
 	for _, childID := range descendants {
 		child, ok := byID[childID]
-		if !ok || child.Status == domain.StatusInReview || child.Status == domain.StatusDone {
+		if !ok || daemonReviewGuardChildReady(child) {
 			continue
 		}
-		blocked = append(blocked, fmt.Sprintf("%s (%s)", child.ID.String(), child.Status))
+		blocked = append(blocked, fmt.Sprintf("%s (%s)", child.ID.String(), child.IssueDisplayStatusText()))
 	}
 	return blocked
 }
@@ -3194,12 +3245,21 @@ func daemonReviewGuardChildIDsToCascade(parentID naming.IssueID, tasks []domain.
 	out := make([]naming.IssueID, 0, len(descendants))
 	for _, childID := range descendants {
 		child, ok := byID[childID]
-		if !ok || child.Status == domain.StatusInReview || child.Status == domain.StatusDone {
+		if !ok || daemonReviewGuardChildReady(child) {
 			continue
 		}
 		out = append(out, childID)
 	}
 	return out
+}
+
+func daemonReviewGuardChildReady(child domain.Task) bool {
+	switch child.IssueDisplayPhase() {
+	case domain.IssueDisplayReview, domain.IssueDisplayDone, domain.IssueDisplayCancelled:
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *Daemon) handleTaskClosePreflight(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -3309,7 +3369,7 @@ func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectI
 	for i := len(descendants) - 1; i >= 0; i-- {
 		childID := descendants[i]
 		child, ok := byID[childID]
-		if !ok || child.Status == domain.StatusDone {
+		if !ok || child.Status == domain.StatusDone || child.Status == domain.StatusCancelled {
 			continue
 		}
 		if !daemonCloseGuardCleanChildAutoCloseEligible(child) {
@@ -3321,6 +3381,7 @@ func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectI
 			IgnoreAhead:          false,
 			IntegrateBeforeClose: false,
 			CloseCleanChildren:   true,
+			CloseOutcome:         cmd.CloseOutcome,
 		}, req)
 		if err != nil {
 			return closed, fmt.Errorf("close clean child %s: %w", child.ID.String(), err)
@@ -3368,7 +3429,7 @@ func daemonCloseGuardStatusRepairs(target domain.Task, tasks []domain.Task, reas
 	repairs := make([]daemonCloseGuardStatusRepair, 0, 2)
 	seen := make(map[naming.IssueID]struct{})
 	add := func(task domain.Task) {
-		if task.Status != domain.StatusDone {
+		if !task.IssueClosed() {
 			return
 		}
 		if _, ok := seen[task.ID]; ok {
@@ -3630,7 +3691,7 @@ func daemonCloseGuardChildBlockers(parentID naming.IssueID, tasks []domain.Task,
 }
 
 func daemonCloseGuardCleanChildAutoCloseEligible(task domain.Task) bool {
-	if task.Status == domain.StatusDone {
+	if task.IssueClosed() {
 		return true
 	}
 	if daemonCloseGuardTaskHasSession(task) {
@@ -3693,7 +3754,7 @@ func daemonCloseGuardDescendants(rootID naming.IssueID, children map[naming.Issu
 
 func daemonCloseGuardChildReasons(task domain.Task) []string {
 	reasons := make([]string, 0, 3)
-	if task.Status != domain.StatusDone {
+	if !task.IssueClosed() {
 		reasons = append(reasons, string(task.Status))
 	}
 	if daemonCloseGuardTaskHasSession(task) {
@@ -4321,7 +4382,7 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 	activeSessions := make([]string, 0, len(desc))
 	for _, id := range desc {
 		task := byID[id]
-		if task.Status != domain.StatusDone {
+		if !task.IssueClosed() {
 			if _, closeable := staleCloseableSet[id.String()]; closeable {
 				continue
 			}
@@ -4578,7 +4639,7 @@ func daemonTaskGraphReadinessFromIndexesForActor(rootID naming.IssueID, byID map
 			continue
 		}
 		task := byID[id]
-		if task.Status == domain.StatusDone {
+		if task.IssueClosed() {
 			continue
 		}
 		if daemonCloseGuardTaskHasSession(task) {
@@ -4668,7 +4729,7 @@ func daemonTaskGraphStaleCloseableCandidates(rootID naming.IssueID, byID map[nam
 }
 
 func daemonTaskStaleCloseableCandidate(task domain.Task) bool {
-	if task.Status == domain.StatusDone {
+	if task.IssueClosed() {
 		return false
 	}
 	if !daemonCloseGuardCleanChildAutoCloseEligible(task) {
@@ -4727,7 +4788,7 @@ func (d *Daemon) daemonTaskGraphContainmentRisks(
 		if task.ID.IsZero() || task.Type == domain.TypeEpic {
 			continue
 		}
-		if task.Status == domain.StatusDone {
+		if task.IssueClosed() {
 			closedChildIDs = append(closedChildIDs, id)
 			continue
 		}
@@ -4938,7 +4999,7 @@ func (d *Daemon) daemonTaskGraphNestedRoots(
 			}
 		}
 		if item.Status == "" || item.Status == "startable" || item.Status == string(domain.StatusOpen) || item.Status == string(domain.StatusInProgress) || item.Status == string(domain.StatusInReview) {
-			if item.IssueStatus == string(domain.StatusDone) {
+			if (domain.Task{Status: domain.Status(item.IssueStatus)}).IssueClosed() {
 				item.Status = "not_counting_capacity"
 				item.FallbackPolicy = "repair_or_close_remaining_descendants"
 				item.Advice = fmt.Sprintf("nested root %s is closed; repair or close remaining descendants before parent completion", item.IssueID)
@@ -5186,24 +5247,24 @@ func daemonWorkerObservationFromInputs(in workerObservationInputs) domain.Worker
 	}
 
 	switch {
-	case in.Task.Status == domain.StatusDone && (daemonCloseGuardTaskHasSession(in.Task) || daemonCloseGuardTaskHasWorktree(in.Task) || in.Active != nil):
+	case in.Task.IssueClosed() && (daemonCloseGuardTaskHasSession(in.Task) || daemonCloseGuardTaskHasWorktree(in.Task) || in.Active != nil):
 		observation.State = domain.WorkerObservationCleanupPending
 		observation.Reason = "issue is closed but runtime projection remains"
-	case in.Task.Status == domain.StatusDone:
+	case in.Task.IssueClosed():
 		observation.State = domain.WorkerObservationDone
 		observation.Reason = "issue is closed"
 	case in.Active != nil && daemonWorkerObservationActiveFailed(*in.Active):
 		observation.State = domain.WorkerObservationFailed
 		observation.Reason = "active session reports failed runtime state"
+	case in.Task.Status == domain.StatusInReview && daemonWorkerObservationReviewReadyPhaseAllowed(in):
+		observation.State = domain.WorkerObservationReviewReady
+		observation.Reason = "review-ready handoff is idle"
 	case in.Active != nil && daemonWorkerObservationActiveWaiting(*in.Active):
 		observation.State = domain.WorkerObservationWaitingHuman
 		observation.Reason = "active session is waiting for human input"
 	case in.Active != nil:
 		observation.State = domain.WorkerObservationWorking
 		observation.Reason = "active worker session is present"
-	case in.Task.Status == domain.StatusInReview:
-		observation.State = domain.WorkerObservationReviewReady
-		observation.Reason = "issue is in_review"
 	case strings.TrimSpace(in.BlockedReason) != "":
 		observation.State = domain.WorkerObservationBlocked
 		observation.Reason = in.BlockedReason
@@ -5246,7 +5307,27 @@ func daemonWorkerObservationActiveFailed(active taskGraphActiveSession) bool {
 
 func daemonWorkerObservationActiveWaiting(active taskGraphActiveSession) bool {
 	activity := strings.ToLower(strings.TrimSpace(active.Activity))
-	return activity == "waiting" || activity == "waiting_human"
+	switch activity {
+	case "waiting", "waiting_human", "waiting_ai", "waiting_tool", "waiting-for-human", "waiting-for-ai", "waiting-for-tool":
+		return true
+	default:
+		return false
+	}
+}
+
+func daemonWorkerObservationReviewReadyPhaseAllowed(in workerObservationInputs) bool {
+	if in.Task.Status != domain.StatusInReview {
+		return false
+	}
+	if in.Active == nil {
+		return in.Task.Session.AllowsReviewReadyPhase(in.Task.HasTmuxSession)
+	}
+	session := &domain.Session{
+		State:          domain.SessionState(strings.TrimSpace(in.Active.State)),
+		Activity:       strings.TrimSpace(in.Active.Activity),
+		ActivitySource: strings.TrimSpace(in.Active.ActivitySource),
+	}
+	return session.AllowsReviewReadyPhase(true)
 }
 
 func daemonWorkerObservationEvidenceSummary(in workerObservationInputs) []string {
@@ -5825,11 +5906,11 @@ func daemonTaskGraphRequiresNestedRootOrchestration(root, id naming.IssueID, tas
 	if task.Type != domain.TypeEpic && len(children[id]) == 0 {
 		return false
 	}
-	if task.Status != domain.StatusDone {
+	if !task.IssueClosed() {
 		return true
 	}
 	for _, descID := range daemonTaskGraphDescendants(id, children) {
-		if byID[descID].Status != domain.StatusDone {
+		if !byID[descID].IssueClosed() {
 			return true
 		}
 	}
@@ -5847,7 +5928,7 @@ func daemonTaskGraphUnresolvedBlockers(task domain.Task, byID map[naming.IssueID
 			out = append(out, dep.ID.String()+"(missing)")
 			continue
 		}
-		if depTask.Status != domain.StatusDone {
+		if !depTask.IssueClosed() {
 			out = append(out, dep.ID.String())
 		}
 	}
@@ -5898,7 +5979,7 @@ func daemonTaskGraphCleanupPendingSessions(rootID naming.IssueID, byID map[namin
 	out := make([]taskGraphActiveSession, 0)
 	for _, id := range desc {
 		task := byID[id]
-		if task.Status != domain.StatusDone || !daemonCloseGuardTaskHasSession(task) {
+		if !task.IssueClosed() || !daemonCloseGuardTaskHasSession(task) {
 			continue
 		}
 		active := taskGraphActiveSession{
@@ -6086,17 +6167,18 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
 	var cmd struct {
-		TaskID          string          `json:"task_id"`
-		Title           string          `json:"title"`
-		Description     string          `json:"description"`
-		Design          *string         `json:"design,omitempty"`
-		Notes           *string         `json:"notes,omitempty"`
-		Acceptance      *string         `json:"acceptance,omitempty"`
-		Estimate        *int            `json:"estimate,omitempty"`
-		EstimateSet     bool            `json:"estimate_set,omitempty"`
-		Type            domain.TaskType `json:"type"`
-		Priority        domain.Priority `json:"priority"`
-		Implementations []string        `json:"implementations,omitempty"`
+		TaskID          string                `json:"task_id"`
+		Title           string                `json:"title"`
+		Description     string                `json:"description"`
+		Design          *string               `json:"design,omitempty"`
+		Notes           *string               `json:"notes,omitempty"`
+		Acceptance      *string               `json:"acceptance,omitempty"`
+		Estimate        *int                  `json:"estimate,omitempty"`
+		EstimateSet     bool                  `json:"estimate_set,omitempty"`
+		Type            domain.TaskType       `json:"type"`
+		Priority        domain.Priority       `json:"priority"`
+		Lifecycle       *domain.IssueWorkflow `json:"lifecycle_state,omitempty"`
+		Implementations []string              `json:"implementations,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -6114,6 +6196,7 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 		EstimateSet:     cmd.EstimateSet,
 		Type:            cmd.Type,
 		Priority:        cmd.Priority,
+		Lifecycle:       cmd.Lifecycle,
 		Implementations: cmd.Implementations,
 	})
 	if err != nil {

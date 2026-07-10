@@ -457,7 +457,7 @@ func TestBuildTaskSnapshotExportBody_ProjectScopedSessionPrefixMatchesIssue(t *t
 }
 
 func TestBuildBoardSnapshotPayloadOmitsDetailFields(t *testing.T) {
-	payload := buildBoardSnapshotPayload(
+	payload, err := buildBoardSnapshotPayload(
 		"proj-board",
 		12,
 		time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC),
@@ -473,7 +473,11 @@ func TestBuildBoardSnapshotPayloadOmitsDetailFields(t *testing.T) {
 			Priority:    domain.P1,
 			Type:        domain.TypeTask,
 		}},
+		domain.DefaultBoardView(),
 	)
+	if err != nil {
+		t.Fatalf("build board payload: %v", err)
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal board payload: %v", err)
@@ -494,8 +498,181 @@ func TestBuildBoardSnapshotPayloadOmitsDetailFields(t *testing.T) {
 	if got, want := len(decoded.Tasks), 1; got != want {
 		t.Fatalf("task count = %d, want %d", got, want)
 	}
+	if got, want := string(decoded.View.ID), domain.DefaultBoardViewID; got != want {
+		t.Fatalf("view id = %q, want %q", got, want)
+	}
+	if got := len(decoded.Columns); got == 0 {
+		t.Fatal("expected grouped board columns")
+	}
 	if got, want := decoded.Tasks[0].Title, "Board task"; got != want {
 		t.Fatalf("title = %q, want %q", got, want)
+	}
+}
+
+func TestHandleBoardFetchGroupsBySelectedView(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	t.Cleanup(func() {
+		if err := issuesClient.CloseDB(); err != nil {
+			t.Fatalf("CloseDB error: %v", err)
+		}
+	})
+	projectID := "proj-board-selected"
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Open issue",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		Priority: domain.P2,
+	}); err != nil {
+		t.Fatalf("create open issue: %v", err)
+	}
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Active issue",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusInProgress,
+		Priority: domain.P1,
+	}); err != nil {
+		t.Fatalf("create active issue: %v", err)
+	}
+	customView := domain.BoardView{
+		ID:    "active-only",
+		Title: "Active Only",
+		Columns: []domain.BoardColumn{{
+			ID:    domain.BoardColumnActive,
+			Title: "Active",
+			Predicates: []domain.BoardColumnPredicate{{
+				Kind:          domain.BoardPredicateDisplayPhase,
+				DisplayPhases: []domain.IssueDisplayPhase{domain.IssueDisplayActive},
+			}},
+		}},
+	}
+	if _, err := issuesClient.SaveBoardView(ctx, projectID, customView); err != nil {
+		t.Fatalf("SaveBoardView error: %v", err)
+	}
+	repoDir := t.TempDir()
+	d := &Daemon{
+		cfg: Config{
+			Logger:  logger,
+			RepoDir: repoDir,
+		},
+		issues:                issuesClient,
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		uiState:               map[string]string{},
+		revision:              map[string]uint64{},
+	}
+	if err := d.setSelectedBoardViewID(projectID, "active-only"); err != nil {
+		t.Fatalf("setSelectedBoardViewID error: %v", err)
+	}
+	d = &Daemon{
+		cfg: Config{
+			Logger:  logger,
+			RepoDir: repoDir,
+		},
+		issues:                issuesClient,
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		uiState:               map[string]string{},
+		revision:              map[string]uint64{},
+	}
+
+	resp, err := d.handleBoardFetch(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       naming.RequestID("board-fetch-selected"),
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         protocol.CommandBoardFetch,
+		SentAt:          time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("handleBoardFetch error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("handleBoardFetch response = %+v", resp.Error)
+	}
+	payload, err := protocol.DecodeBoardSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("DecodeBoardSnapshotPayload error: %v", err)
+	}
+	if got, want := string(payload.View.ID), "active-only"; got != want {
+		t.Fatalf("payload view id = %q, want %q", got, want)
+	}
+	if got, want := len(payload.Columns), 1; got != want {
+		t.Fatalf("len(columns) = %d, want %d", got, want)
+	}
+	if got, want := len(payload.Columns[0].Tasks), 1; got != want {
+		t.Fatalf("len(active tasks) = %d, want %d", got, want)
+	}
+	if got, want := payload.Columns[0].Tasks[0].Title, "Active issue"; got != want {
+		t.Fatalf("active task title = %q, want %q", got, want)
+	}
+	if payload.Tasks[0].Facts.DisplayPhase != domain.IssueDisplayActive {
+		t.Fatalf("issue facts display phase = %s, want %s", payload.Tasks[0].Facts.DisplayPhase, domain.IssueDisplayActive)
+	}
+	if !slices.Contains(payload.Tasks[0].Facts.ReasonMessages(), "lifecycle is active") {
+		t.Fatalf("issue facts reasons = %#v, want lifecycle reason", payload.Tasks[0].Facts.ReasonMessages())
+	}
+}
+
+func TestHandleBoardFetchFallsBackToDefaultWhenSelectedViewPreferenceIsCorrupt(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	t.Cleanup(func() {
+		if err := issuesClient.CloseDB(); err != nil {
+			t.Fatalf("CloseDB error: %v", err)
+		}
+	})
+	projectID := "proj-board-corrupt-pref"
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Open issue",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		Priority: domain.P2,
+	}); err != nil {
+		t.Fatalf("create open issue: %v", err)
+	}
+	repoDir := t.TempDir()
+	prefPath := filepath.Join(repoDir, ".azedarach", boardViewPreferenceFileName)
+	if err := os.MkdirAll(filepath.Dir(prefPath), 0o755); err != nil {
+		t.Fatalf("mkdir pref dir: %v", err)
+	}
+	if err := os.WriteFile(prefPath, []byte(`{"selected_view_by_project":`), 0o644); err != nil {
+		t.Fatalf("write corrupt preference: %v", err)
+	}
+	d := &Daemon{
+		cfg: Config{
+			Logger:  logger,
+			RepoDir: repoDir,
+		},
+		issues:                issuesClient,
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		uiState:               map[string]string{},
+		revision:              map[string]uint64{},
+	}
+
+	resp, err := d.handleBoardFetch(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       naming.RequestID("board-fetch-corrupt-pref"),
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         protocol.CommandBoardFetch,
+		SentAt:          time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("handleBoardFetch error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("handleBoardFetch response = %+v", resp.Error)
+	}
+	payload, err := protocol.DecodeBoardSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("DecodeBoardSnapshotPayload error: %v", err)
+	}
+	if got, want := string(payload.View.ID), domain.DefaultBoardViewID; got != want {
+		t.Fatalf("payload view id = %q, want %q", got, want)
+	}
+	if got, want := len(payload.Columns), len(domain.DefaultBoardView().Columns); got != want {
+		t.Fatalf("len(columns) = %d, want default view column count %d", got, want)
 	}
 }
 
@@ -1968,6 +2145,103 @@ func TestHandleBoardFetchComposesRuntimeProjectionOverCachedTaskSnapshot(t *test
 	}
 }
 
+func TestHandleBoardFetchDerivesInReviewPhaseFromSessionActivity(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-board-derived-review"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	busyID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Busy handoff",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create busy issue: %v", err)
+	}
+	idleID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Idle handoff",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create idle issue: %v", err)
+	}
+	for _, seed := range []struct {
+		issueID  string
+		activity string
+	}{
+		{issueID: busyID, activity: "busy"},
+		{issueID: idleID, activity: "idle"},
+	} {
+		if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			ID:             naming.CanonicalSessionID(projectID, seed.issueID),
+			IssueID:        seed.issueID,
+			State:          daemonstate.SessionStateRunning,
+			ObservedState:  daemonstate.SessionStateRunning,
+			Activity:       seed.activity,
+			ActivitySource: "hooks",
+			UpdatedAt:      time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("seed %s session projection: %v", seed.issueID, err)
+		}
+	}
+
+	d := &Daemon{
+		cfg: Config{Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		revision: map[string]uint64{projectID: 11},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+
+	resp, err := d.handleBoardFetch(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-board-fetch-derived-review",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "board.fetch",
+	})
+	if err != nil {
+		t.Fatalf("handleBoardFetch error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("board.fetch response = %+v", resp.Error)
+	}
+	payload, err := protocol.DecodeBoardSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("decode board.fetch body: %v", err)
+	}
+	statusByID := map[string]domain.Status{}
+	factsByID := map[string]domain.IssueFacts{}
+	for _, task := range payload.Tasks {
+		statusByID[task.ID.String()] = task.Status
+		factsByID[task.ID.String()] = task.Facts
+	}
+	if got := statusByID[busyID]; got != domain.StatusInProgress {
+		t.Fatalf("busy handoff board status = %s, want %s", got, domain.StatusInProgress)
+	}
+	if got := statusByID[idleID]; got != domain.StatusInReview {
+		t.Fatalf("idle handoff board status = %s, want %s", got, domain.StatusInReview)
+	}
+	if got := factsByID[busyID]; got.DisplayPhase != domain.IssueDisplayActive || got.ReviewReadyVisible {
+		t.Fatalf("busy handoff facts = %+v, want active and not review-ready", got)
+	}
+	if got := factsByID[idleID]; got.DisplayPhase != domain.IssueDisplayReview || !got.ReviewReadyVisible {
+		t.Fatalf("idle handoff facts = %+v, want review-ready", got)
+	}
+}
+
 func TestHandleTaskListReadsSQLiteProjection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -3050,6 +3324,86 @@ func TestTaskCloseCommandUpdatesStatusThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestTaskCloseCommandCancelledSkipsIntegrationAndWritesOutcome(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-task-close-cancelled"
+	repoDir := t.TempDir()
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Cancel me",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger},
+		hub: publish.NewHub(16, 8, logger),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+		revision: map[string]uint64{},
+	}
+	body, err := json.Marshal(taskCloseRequest{
+		TaskID:               taskID,
+		IntegrateBeforeClose: true,
+		CloseOutcome:         string(domain.IssueCloseCancelled),
+	})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-cancelled",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.close",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("handleTaskClose response = %+v", resp)
+	}
+	var result taskCloseResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal close response: %v", err)
+	}
+	if result.Status != string(domain.StatusCancelled) || result.IntegrationRequested || result.Integrated {
+		t.Fatalf("close result = %+v, want cancelled without integration", result)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get cancelled task: %v", err)
+	}
+	if task.Status != domain.StatusCancelled {
+		t.Fatalf("task status = %s, want %s", task.Status, domain.StatusCancelled)
+	}
+	db, err := sql.Open("sqlite", issuesDBPath)
+	if err != nil {
+		t.Fatalf("open issues db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var lifecycle, outcome string
+	if err := db.QueryRowContext(ctx, `SELECT lifecycle_state, closed_outcome FROM issues WHERE id = ?`, taskID).Scan(&lifecycle, &outcome); err != nil {
+		t.Fatalf("read issue state columns: %v", err)
+	}
+	if lifecycle != string(domain.IssueWorkflowClosed) || outcome != string(domain.IssueCloseCancelled) {
+		t.Fatalf("issue state = lifecycle %q outcome %q, want closed/cancelled", lifecycle, outcome)
+	}
+}
+
 func TestTaskCloseBlocksUnresolvedChildrenByDefault(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-task-close-child-default"
@@ -3080,23 +3434,33 @@ func TestTaskCloseBlocksUnresolvedChildrenByDefault(t *testing.T) {
 		},
 		revision: map[string]uint64{},
 	}
-	body, err := json.Marshal(taskCloseRequest{TaskID: parentID})
-	if err != nil {
-		t.Fatalf("marshal close request: %v", err)
-	}
-	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-close-child-default",
-		Kind:            protocol.EnvelopeKindCommand,
-		Command:         "task.close",
-		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Body:            body,
-	})
-	if err != nil {
-		t.Fatalf("handleTaskClose error: %v", err)
-	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain: "+childID+" (open)") {
-		t.Fatalf("handleTaskClose response = %+v, want unresolved child guard", resp)
+	for _, tc := range []struct {
+		name    string
+		outcome string
+	}{
+		{name: "completed"},
+		{name: "cancelled", outcome: string(domain.IssueCloseCancelled)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := json.Marshal(taskCloseRequest{TaskID: parentID, CloseOutcome: tc.outcome})
+			if err != nil {
+				t.Fatalf("marshal close request: %v", err)
+			}
+			resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				RequestID:       naming.RequestID("req-close-child-default-" + tc.name),
+				Kind:            protocol.EnvelopeKindCommand,
+				Command:         "task.close",
+				Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+				Body:            body,
+			})
+			if err != nil {
+				t.Fatalf("handleTaskClose error: %v", err)
+			}
+			if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain: "+childID+" (open)") {
+				t.Fatalf("handleTaskClose response = %+v, want unresolved child guard", resp)
+			}
+		})
 	}
 }
 
@@ -4126,6 +4490,28 @@ func TestTaskUpdateStatusRejectsRawCloseActiveRuntime(t *testing.T) {
 	}
 	if strings.Contains(resp.Error.Message, "Moved closed blockers back for cleanup") {
 		t.Fatalf("task.update_status response = %q, did not expect status repair for reachable active issue", resp.Error.Message)
+	}
+
+	body, err = json.Marshal(map[string]any{
+		"task_id": taskID,
+		"status":  domain.StatusCancelled,
+	})
+	if err != nil {
+		t.Fatalf("marshal cancelled task update request: %v", err)
+	}
+	resp, err = d.handleTaskUpdateStatus(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-cancel-guard-reopen-target",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.update_status",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskUpdateStatus cancelled error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "status cancelled must be applied with task.close") {
+		t.Fatalf("task.update_status cancelled response = %+v, want raw cancel rejection", resp)
 	}
 }
 
@@ -8268,6 +8654,27 @@ func TestWorkerObservationStateDerivationPrecedence(t *testing.T) {
 			want: domain.WorkerObservationDone,
 		},
 		{
+			name: "cancelled with runtime cleanup pending wins over active",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task: func() domain.Task {
+					task := baseTask("az-cancelled-cleanup", domain.StatusCancelled)
+					task.HasTmuxSession = true
+					return task
+				}(),
+				Active: &taskGraphActiveSession{IssueID: "az-cancelled-cleanup", Activity: "busy", Status: "active"},
+			},
+			want: domain.WorkerObservationCleanupPending,
+		},
+		{
+			name: "plain cancelled is terminal done observation",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task:        baseTask("az-cancelled", domain.StatusCancelled),
+			},
+			want: domain.WorkerObservationDone,
+		},
+		{
 			name: "failed active session wins over review",
 			in: workerObservationInputs{
 				RootIssueID: rootID,
@@ -8300,6 +8707,33 @@ func TestWorkerObservationStateDerivationPrecedence(t *testing.T) {
 				RootIssueID:   rootID,
 				Task:          baseTask("az-review", domain.StatusInReview),
 				BlockedReason: "waiting on az-blocker",
+			},
+			want: domain.WorkerObservationReviewReady,
+		},
+		{
+			name: "busy review handoff remains working",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task:        baseTask("az-review-busy", domain.StatusInReview),
+				Active:      &taskGraphActiveSession{IssueID: "az-review-busy", Activity: "busy", Status: "active"},
+			},
+			want: domain.WorkerObservationWorking,
+		},
+		{
+			name: "waiting review handoff remains waiting",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task:        baseTask("az-review-waiting", domain.StatusInReview),
+				Active:      &taskGraphActiveSession{IssueID: "az-review-waiting", Activity: "waiting_tool", Status: "active"},
+			},
+			want: domain.WorkerObservationWaitingHuman,
+		},
+		{
+			name: "idle review handoff is review ready",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task:        baseTask("az-review-idle", domain.StatusInReview),
+				Active:      &taskGraphActiveSession{IssueID: "az-review-idle", Activity: "idle", Status: "active"},
 			},
 			want: domain.WorkerObservationReviewReady,
 		},
@@ -10532,6 +10966,47 @@ func TestTaskUpdateStatusRejectsInReviewWithUnreadyChildren(t *testing.T) {
 	}
 }
 
+func TestTaskUpdateStatusRejectsInReviewWithBusyReviewChild(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-guard-busy-review-child"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Busy review child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusInReview,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	seedReviewGuardSessionProjection(t, d, projectID, childID, daemonstate.Session{
+		ID:             naming.CanonicalSessionID(projectID, childID),
+		IssueID:        childID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
+	})
+
+	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "child issues are not review-ready") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") {
+		t.Fatalf("task.update_status response = %+v, want busy in-review child guard", resp)
+	}
+	parent, err := issuesClient.GetWithRuntime(ctx, projectID, parentID)
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	if parent.Status != domain.StatusOpen {
+		t.Fatalf("parent status = %s, want open", parent.Status)
+	}
+}
+
 func TestTaskUpdateStatusRejectsInReviewWithBusyActivity(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-review-guard-busy"
@@ -10558,6 +11033,42 @@ func TestTaskUpdateStatusRejectsInReviewWithBusyActivity(t *testing.T) {
 	resp := updateStatusForTest(t, d, projectID, taskID, domain.StatusInReview, false)
 	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "session activity is busy (source: hooks)") || !strings.Contains(resp.Error.Message, "leave it in_progress") {
 		t.Fatalf("task.update_status response = %+v, want busy activity guard", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if task.Status != domain.StatusInProgress {
+		t.Fatalf("task status = %s, want in_progress", task.Status)
+	}
+}
+
+func TestTaskUpdateStatusRejectsInReviewWithWaitingActivity(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-guard-waiting"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Waiting handoff",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	seedReviewGuardSessionProjection(t, d, projectID, taskID, daemonstate.Session{
+		ID:             naming.CanonicalSessionID(projectID, taskID),
+		IssueID:        taskID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "waiting_tool",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
+	})
+
+	resp := updateStatusForTest(t, d, projectID, taskID, domain.StatusInReview, false)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "session activity is waiting_tool (source: hooks)") || !strings.Contains(resp.Error.Message, "leave it in_progress") {
+		t.Fatalf("task.update_status response = %+v, want waiting activity guard", resp)
 	}
 	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
 	if err != nil {
@@ -12299,22 +12810,34 @@ func TestRefreshWorktreeRuntimeStateForIssuesDeletesClosedIssueWorktreeProjectio
 func TestRuntimeWorktreeIssueEligibleRejectsClosedAncestor(t *testing.T) {
 	parentID := naming.IssueID("az-parent")
 	childID := naming.IssueID("az-child")
-	taskByIssue := map[string]domain.Task{
-		parentID.String(): {
-			ID:     parentID,
-			Status: domain.StatusDone,
-			Type:   domain.TypeTask,
-		},
-		childID.String(): {
-			ID:       childID,
-			Status:   domain.StatusInProgress,
-			Type:     domain.TypeTask,
-			ParentID: &parentID,
-		},
+	tests := []struct {
+		name         string
+		parentStatus domain.Status
+	}{
+		{name: "completed", parentStatus: domain.StatusDone},
+		{name: "cancelled", parentStatus: domain.StatusCancelled},
 	}
 
-	if runtimeWorktreeIssueEligible(childID.String(), taskByIssue) {
-		t.Fatal("child under closed ancestor should not be runtime-worktree eligible")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			taskByIssue := map[string]domain.Task{
+				parentID.String(): {
+					ID:     parentID,
+					Status: tt.parentStatus,
+					Type:   domain.TypeTask,
+				},
+				childID.String(): {
+					ID:       childID,
+					Status:   domain.StatusInProgress,
+					Type:     domain.TypeTask,
+					ParentID: &parentID,
+				},
+			}
+
+			if runtimeWorktreeIssueEligible(childID.String(), taskByIssue) {
+				t.Fatal("child under closed ancestor should not be runtime-worktree eligible")
+			}
+		})
 	}
 }
 

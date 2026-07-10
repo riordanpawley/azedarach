@@ -84,6 +84,7 @@ fd "filename" -t f internal cmd
 - Operational references:
   - [docs/08-recovery-playbook.md](docs/08-recovery-playbook.md)
   - [docs/10-go-release-and-homebrew.md](docs/10-go-release-and-homebrew.md)
+  - [docs/24-issue-state-model-v2-rollout.md](docs/24-issue-state-model-v2-rollout.md)
 
 ## Go/Bubbletea Engineering Rules
 
@@ -100,11 +101,12 @@ fd "filename" -t f internal cmd
 ## Azedarach Architecture Placement (Critical)
 
 1. Before adding behavior, inspect the analogous existing path and match its layer boundaries, data flow, naming, and tests.
-2. Put durable business semantics in the daemon/domain layer, not in entrypoints, presentation code, handlers, adapters, or ad-hoc SQL. This includes query/search matching rules, lifecycle/status decisions, graph/readiness policy, invariant predicates, and issue/spec relationship rules.
-3. Keep stores and migrations responsible for persistence, indexes, ordering, and candidate selection. When storage uses indexes such as FTS, keep the query expression and final semantic filtering aligned with shared domain helpers so indexed behavior cannot drift from domain behavior.
-4. Keep daemon handlers and protocol adapters thin: validate transport shape, call application/domain services, and translate typed requests/responses. Do not bury policy decisions there.
-5. Keep CLI and TUI as clients: parse flags, render state, and call daemon/client contracts. Do not duplicate daemon/domain logic client-side for convenience.
-6. Tests should lock the layer contract: focused domain tests for semantic rules, store/service tests for persistence/index behavior, and active-path tests for CLI/protocol/daemon wiring when user-visible behavior changes.
+2. Choose the model-correct path over the locally convenient patch. If the right fix requires changing a shared domain concept, migration, protocol, or invariant, do that deliberately and validate the blast radius instead of preserving an awkward legacy shape because it is easier in the current file.
+3. Put durable business semantics in the daemon/domain layer, not in entrypoints, presentation code, handlers, adapters, or ad-hoc SQL. This includes query/search matching rules, lifecycle/status decisions, graph/readiness policy, invariant predicates, and issue/spec relationship rules.
+4. Keep stores and migrations responsible for persistence, indexes, ordering, and candidate selection. When storage uses indexes such as FTS, keep the query expression and final semantic filtering aligned with shared domain helpers so indexed behavior cannot drift from domain behavior.
+5. Keep daemon handlers and protocol adapters thin: validate transport shape, call application/domain services, and translate typed requests/responses. Do not bury policy decisions there.
+6. Keep CLI and TUI as clients: parse flags, render state, and call daemon/client contracts. Do not duplicate daemon/domain logic client-side for convenience.
+7. Tests should lock the layer contract: focused domain tests for semantic rules, store/service tests for persistence/index behavior, and active-path tests for CLI/protocol/daemon wiring when user-visible behavior changes.
 
 ## Overlay Sizing Contract
 
@@ -144,8 +146,8 @@ fd "filename" -t f internal cmd
 7. Example matrix:
    - `session.start`/`session.attach`/`session.pause`/`session.resume`/`session.stop` runtime-presence checks -> `tmux`
    - session recovery/reconcile -> `hybrid`
-   - `task.close`/`task.close_preflight`/`task.delete`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle and orchestration checks -> `hybrid`
-   - `task.review_handoff` external busy-equivalent session activity gate before moving to `in_review` -> `projection` (durable issue projection + session activity projection; active issue self-handoff remains allowed)
+   - `task.close`/`task.close_preflight`/`task.delete`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle and orchestration checks -> `hybrid` (read v2 issue lifecycle projection first, then compare with live runtime)
+   - `task.review_handoff` external busy-equivalent session activity gate before moving to `in_review` -> `projection` (durable issue v2 lifecycle/review projection + session activity projection; active issue self-handoff remains allowed)
    - `task.integration_readiness` worker evidence gate and `task.context_risk_closeout` repeated-local-failure gate -> `projection` (durable issue projection + mailbox/observation evidence)
    - `task.merge_base_target` branch integration target gate -> `projection` (durable issue graph + worktree projection)
    - `task.follow_on_merge_candidates` follow-on merge source gate -> `projection` (durable issue graph + worktree projection)

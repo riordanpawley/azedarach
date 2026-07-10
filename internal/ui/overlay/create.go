@@ -47,6 +47,7 @@ type TaskCreatedMsg struct {
 	Type            domain.TaskType
 	Priority        domain.Priority
 	Status          domain.Status
+	Lifecycle       domain.IssueWorkflow
 	Assignee        string
 	Labels          []string
 	Implementations []string
@@ -62,16 +63,17 @@ type TaskCreatedMsg struct {
 type CreateTaskOverlay struct {
 	twoPaneDialogChrome
 	dialogViewportState
-	id              string
-	title           textinput.Model
-	description     textarea.Model
-	acceptanceInput textarea.Model
-	implOptions     []string
-	implCombos      [][]string
-	implComboIndex  int
+	id                string
+	title             textinput.Model
+	description       textarea.Model
+	acceptanceInput   textarea.Model
+	implOptions       []string
+	implCombos        [][]string
+	implComboIndex    int
 	taskType        domain.TaskType
 	priority        domain.Priority
 	status          domain.Status
+	lifecycle       domain.IssueWorkflow
 	assignee        string
 	labels          []string
 	impls           []string
@@ -79,17 +81,18 @@ type CreateTaskOverlay struct {
 	notes           string
 	acceptance      string
 	estimate        *int
-	parentID        *string
-	focusIndex      int
-	styles          *Styles
-	editorError     string
-	editorFlow      func(string) (string, error)
-	defaults        createTaskDefaults
-	attachmentSvc   ImageAttachmentService
-	attachments     []attachment.Attachment
-	attachmentIndex int
-	attachmentError string
-	draftIssueID    string
+	parentID          *string
+	focusIndex        int
+	styles            *Styles
+	editorError       string
+	editorFlow        func(string) (string, error)
+	defaults          createTaskDefaults
+	attachmentSvc     ImageAttachmentService
+	attachments       []attachment.Attachment
+	attachmentIndex   int
+	attachmentPreview attachmentPreviewState
+	attachmentError   string
+	draftIssueID      string
 }
 
 type createTaskDefaults struct {
@@ -98,6 +101,7 @@ type createTaskDefaults struct {
 	taskType    domain.TaskType
 	priority    domain.Priority
 	status      domain.Status
+	lifecycle   domain.IssueWorkflow
 	assignee    string
 	labels      []string
 	impls       []string
@@ -165,6 +169,7 @@ func NewEditTaskOverlayWithImplOptionsAndAttachmentService(task domain.Task, imp
 		taskType:        task.Type,
 		priority:        task.Priority,
 		status:          task.Status,
+		lifecycle:       taskWorkflowForOverlay(task),
 		impls:           task.Implementations,
 		design:          task.Design,
 		notes:           task.Notes,
@@ -179,6 +184,7 @@ func NewEditTaskOverlayWithImplOptionsAndAttachmentService(task domain.Task, imp
 			taskType:    task.Type,
 			priority:    task.Priority,
 			status:      task.Status,
+			lifecycle:   taskWorkflowForOverlay(task),
 			impls:       append([]string(nil), task.Implementations...),
 			design:      task.Design,
 			notes:       task.Notes,
@@ -189,6 +195,19 @@ func NewEditTaskOverlayWithImplOptionsAndAttachmentService(task domain.Task, imp
 	}
 	overlay.syncImplementationSelection()
 	return overlay
+}
+
+func taskWorkflowForOverlay(task domain.Task) domain.IssueWorkflow {
+	if !task.State.IsZero() {
+		if workflow := task.State.Workflow(); workflow != "" {
+			return workflow
+		}
+	}
+	state, err := task.IssueState()
+	if err != nil {
+		return domain.IssueWorkflowOpen
+	}
+	return state.Workflow()
 }
 
 func issueIDPtrToStringPtr(id *naming.IssueID) *string {
@@ -236,13 +255,15 @@ func NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(parentID *str
 		taskType:        domain.TypeTask,
 		priority:        domain.P2,
 		status:          domain.StatusOpen,
+		lifecycle:       domain.IssueWorkflowOpen,
 		parentID:        parentID,
 		focusIndex:      focusTitle,
 		styles:          New(),
 		defaults: createTaskDefaults{
-			taskType: domain.TypeTask,
-			priority: domain.P2,
-			status:   domain.StatusOpen,
+			taskType:  domain.TypeTask,
+			priority:  domain.P2,
+			status:    domain.StatusOpen,
+			lifecycle: domain.IssueWorkflowOpen,
 		},
 		attachmentSvc: attachmentSvc,
 	}
@@ -453,12 +474,12 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "j", "down":
 			if c.focusIndex == focusAttachments && len(c.attachments) > 0 {
 				c.attachmentIndex = min(c.attachmentIndex+1, len(c.attachments)-1)
-				return c, nil
+				return c, c.loadSelectedAttachmentPreview()
 			}
 		case "k", "up":
 			if c.focusIndex == focusAttachments && len(c.attachments) > 0 {
 				c.attachmentIndex = max(0, c.attachmentIndex-1)
-				return c, nil
+				return c, c.loadSelectedAttachmentPreview()
 			}
 		case "d", "x":
 			if c.focusIndex == focusAttachments && len(c.attachments) > 0 && c.attachmentSvc != nil {
@@ -516,6 +537,7 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.taskType = msg.msg.Type
 		c.priority = msg.msg.Priority
 		c.status = msg.msg.Status
+		c.lifecycle = msg.msg.Lifecycle
 		c.assignee = msg.msg.Assignee
 		c.labels = append([]string(nil), msg.msg.Labels...)
 		c.impls = append([]string(nil), msg.msg.Implementations...)
@@ -537,8 +559,9 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if len(c.attachments) == 0 {
 			c.attachmentIndex = 0
+			c.attachmentPreview = attachmentPreviewState{}
 		}
-		return c, nil
+		return c, c.loadSelectedAttachmentPreview()
 	case attachmentAddedMsg:
 		c.attachmentError = ""
 		c.upsertAttachment(msg.attachment)
@@ -565,17 +588,35 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case attachmentDeletedMsg:
 		c.attachmentError = ""
 		c.removeAttachment(msg.AttachmentID)
+		if len(c.attachments) == 0 {
+			c.attachmentPreview = attachmentPreviewState{}
+		}
 		if strings.TrimSpace(c.id) == "" {
-			return c, c.loadAttachments()
+			return c, tea.Batch(c.loadAttachments(), c.loadSelectedAttachmentPreview())
 		}
 		return c, tea.Batch(
 			c.loadAttachments(),
+			c.loadSelectedAttachmentPreview(),
 			func() tea.Msg {
 				return AttachmentActionMsg{
 					Action: "deleted",
 				}
 			},
 		)
+	case attachmentPreviewLoadedMsg:
+		if msg.attachmentID != c.selectedAttachmentID() {
+			return c, nil
+		}
+		if msg.err != nil {
+			c.attachmentPreview = attachmentPreviewState{
+				attachmentID: msg.attachmentID,
+				title:        "Attachment Preview",
+				err:          compactOverlayError(msg.err),
+			}
+			return c, nil
+		}
+		c.attachmentPreview = msg.preview
+		return c, nil
 	case errorMsg:
 		c.attachmentError = compactOverlayError(msg.err)
 		return c, func() tea.Msg {
@@ -697,6 +738,7 @@ func (c *CreateTaskOverlay) clearToDefaults() {
 	c.taskType = c.defaults.taskType
 	c.priority = c.defaults.priority
 	c.status = c.defaults.status
+	c.lifecycle = c.defaults.lifecycle
 	c.assignee = c.defaults.assignee
 	c.labels = append([]string(nil), c.defaults.labels...)
 	c.impls = append([]string(nil), c.defaults.impls...)
@@ -998,10 +1040,28 @@ func (c *CreateTaskOverlay) renderAttachmentList() string {
 		lines = append(lines, style.Render(entry))
 	}
 	lines = append(lines, c.styles.Footer.Render("Ctrl+P paste clipboard  j/k navigate  d/x delete"))
+	if c.attachmentIndex >= 0 && c.attachmentIndex < len(c.attachments) {
+		lines = append(lines, c.renderSelectedAttachmentPreview())
+	}
 	if c.attachmentError != "" {
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8")).Render("Error: "+c.attachmentError))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (c *CreateTaskOverlay) renderSelectedAttachmentPreview() string {
+	if c.attachmentIndex < 0 || c.attachmentIndex >= len(c.attachments) {
+		return ""
+	}
+	selected := c.attachments[c.attachmentIndex]
+	preview := c.attachmentPreview
+	if preview.attachmentID != selected.ID {
+		preview = attachmentPreviewState{
+			attachmentID: selected.ID,
+			title:        previewTitle(selected),
+		}
+	}
+	return renderAttachmentPreviewBlock(c.styles, preview, 44)
 }
 
 func (c *CreateTaskOverlay) loadAttachments() tea.Cmd {
@@ -1044,6 +1104,20 @@ func (c *CreateTaskOverlay) deleteSelectedAttachment() tea.Cmd {
 		}
 		return attachmentDeletedMsg{AttachmentID: selected.ID}
 	}
+}
+
+func (c *CreateTaskOverlay) loadSelectedAttachmentPreview() tea.Cmd {
+	if c.attachmentIndex < 0 || c.attachmentIndex >= len(c.attachments) {
+		return nil
+	}
+	return loadAttachmentPreview(c.attachments[c.attachmentIndex])
+}
+
+func (c *CreateTaskOverlay) selectedAttachmentID() string {
+	if c.attachmentIndex < 0 || c.attachmentIndex >= len(c.attachments) {
+		return ""
+	}
+	return c.attachments[c.attachmentIndex].ID
 }
 
 func (c *CreateTaskOverlay) upsertAttachment(att *attachment.Attachment) {
@@ -1126,7 +1200,8 @@ func (c *CreateTaskOverlay) submit() tea.Cmd {
 			Description:     strings.TrimSpace(c.description.Value()),
 			Type:            c.taskType,
 			Priority:        c.priority,
-			Status:          domain.StatusOpen,
+			Status:          c.status,
+			Lifecycle:       c.lifecycle,
 			Assignee:        strings.TrimSpace(c.assignee),
 			Labels:          append([]string(nil), c.labels...),
 			Implementations: append([]string(nil), implementations...),
@@ -1166,6 +1241,7 @@ func (c *CreateTaskOverlay) editInEditorCmd() tea.Cmd {
 		c.taskType,
 		c.priority,
 		c.status,
+		c.lifecycle,
 		c.assignee,
 		c.labels,
 		c.impls,
@@ -1236,6 +1312,7 @@ func serializeTaskTemplate(
 	taskType domain.TaskType,
 	priority domain.Priority,
 	status domain.Status,
+	lifecycle domain.IssueWorkflow,
 	assignee string,
 	labels []string,
 	implementations []string,
@@ -1255,6 +1332,13 @@ func serializeTaskTemplate(
 	}
 	if strings.TrimSpace(string(status)) == "" {
 		status = domain.StatusOpen
+	}
+	displayStatus := string(status)
+	switch lifecycle {
+	case domain.IssueWorkflowBacklog:
+		displayStatus = string(domain.IssueDisplayBacklog)
+	case domain.IssueWorkflowOpen:
+		displayStatus = string(domain.IssueDisplayOpen)
 	}
 	if strings.TrimSpace(design) == "" {
 		design = taskTemplateAnchorDesign
@@ -1280,7 +1364,7 @@ func serializeTaskTemplate(
 		"",
 		fmt.Sprintf("Type:     %s        (task | bug | feature | epic | chore)", string(taskType)),
 		fmt.Sprintf("Priority: P%d          (P0 = highest, P4 = lowest)", int(priority)),
-		fmt.Sprintf("Status:   %s        (open | in_progress | in_review | closed)", string(status)),
+		fmt.Sprintf("Status:   %s        (backlog | open | in_progress | in_review | closed)", displayStatus),
 		"Assignee: " + strings.TrimSpace(assignee),
 		"Labels:   " + labelsValue,
 		"Impl:     " + implValue,
@@ -1330,6 +1414,7 @@ func parseTaskTemplate(markdown, id string, parentID *string) (TaskCreatedMsg, e
 	taskType := domain.TypeTask
 	priority := domain.P2
 	status := domain.StatusOpen
+	lifecycle := domain.IssueWorkflowOpen
 	var estimate *int
 	var assignee string
 	var labels []string
@@ -1371,14 +1456,21 @@ func parseTaskTemplate(markdown, id string, parentID *string) (TaskCreatedMsg, e
 			raw = strings.SplitN(raw, "(", 2)[0]
 			raw = strings.TrimSpace(raw)
 			switch raw {
+			case "backlog":
+				status = domain.StatusOpen
+				lifecycle = domain.IssueWorkflowBacklog
 			case string(domain.StatusOpen):
 				status = domain.StatusOpen
+				lifecycle = domain.IssueWorkflowOpen
 			case string(domain.StatusInProgress):
 				status = domain.StatusInProgress
+				lifecycle = ""
 			case string(domain.StatusInReview):
 				status = domain.StatusInReview
+				lifecycle = ""
 			case string(domain.StatusDone):
 				status = domain.StatusDone
+				lifecycle = ""
 			default:
 				return TaskCreatedMsg{}, fmt.Errorf("invalid status %q", raw)
 			}
@@ -1430,6 +1522,7 @@ func parseTaskTemplate(markdown, id string, parentID *string) (TaskCreatedMsg, e
 		Type:            taskType,
 		Priority:        priority,
 		Status:          status,
+		Lifecycle:       lifecycle,
 		Assignee:        assignee,
 		Labels:          labels,
 		Implementations: implementations,

@@ -32,6 +32,7 @@ This directory primarily contains **developer/internal documentation**.
 - [21-event-sourcing-migration-plan.md](21-event-sourcing-migration-plan.md)
 - [22-event-sourcing-detailed-map-and-risk-register.md](22-event-sourcing-detailed-map-and-risk-register.md)
 - [23-sqlite-wal-policy.md](23-sqlite-wal-policy.md)
+- [24-issue-state-model-v2-rollout.md](24-issue-state-model-v2-rollout.md)
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 - [adr/2-daemon-owned-async-notices.md](adr/2-daemon-owned-async-notices.md)
 
@@ -48,8 +49,8 @@ This directory primarily contains **developer/internal documentation**.
 - Current source-policy examples:
 - `session.start` conflict / `session.attach` target / `session.pause` and `session.resume` lifecycle targets / `session.stop` targets: `tmux`.
 - `session.recover` reconciliation: `hybrid` (projection intent + tmux runtime).
-- `task.close`, `task.close_preflight`, `task.delete`, `task.delete_preflight`, `task.graph_readiness`, and `task.complete_check`: `hybrid` (durable issue graph/projection + live runtime attachment state).
-- `task.review_handoff`: `projection` (durable issue projection + session activity projection; active issue self-handoff remains allowed).
+- `task.close`, `task.close_preflight`, `task.delete`, `task.delete_preflight`, `task.graph_readiness`, and `task.complete_check`: `hybrid` (durable issue graph/v2 lifecycle projection + live runtime attachment state).
+- `task.review_handoff`: `projection` (durable issue v2 lifecycle/review projection + session activity projection; active issue self-handoff remains allowed).
 - `task.integration_readiness` and `task.context_risk_closeout`: `projection` (durable issue projection + mailbox/observation evidence).
 - `task.merge_base_target`: `projection` (durable issue graph + worktree projection).
 - `task.follow_on_merge_candidates`: `projection` (durable issue graph + worktree projection).

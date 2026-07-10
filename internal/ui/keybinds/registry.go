@@ -49,6 +49,7 @@ const (
 	ActionOpenRecovery            ActionID = "open_recovery"
 	ActionOpenNotificationHistory ActionID = "open_notification_history"
 	ActionOpenOperationQueue      ActionID = "open_operation_queue"
+	ActionOpenBoardViews          ActionID = "open_board_views"
 	ActionToggleView              ActionID = "toggle_view"
 	ActionRefresh                 ActionID = "refresh"
 	ActionPullBase                ActionID = "pull_base"
@@ -96,6 +97,7 @@ var registry = []ActionSpec{
 	{ID: ActionOpenRecovery, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "n", Display: "n"}}, Hint: "recover"},
 	{ID: ActionOpenNotificationHistory, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "N", Display: "N"}}},
 	{ID: ActionOpenOperationQueue, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "Q", Display: "Q"}}, Hint: "ops"},
+	{ID: ActionOpenBoardViews, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "B", Display: "B"}}, Hint: "board view"},
 	{ID: ActionToggleView, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "tab", Display: "Tab"}}, Hint: "view"},
 	{ID: ActionPullBase, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "p", Display: "p"}}, Hint: "pull base"},
 	{ID: ActionQuit, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "q", Display: "q"}}, Hint: "quit"},
@@ -132,7 +134,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeGoto, Keys: []KeySpec{{Input: "esc", Display: "Esc"}}, Hint: "cancel"},
 
 	// Action mode status hints.
-	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "h/l"}}, Hint: "move"},
+	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "h/l"}}, Hint: "lifecycle"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "s"}}, Hint: "AI start"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "t"}}, Hint: "tmux only"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "!"}}, Hint: "yolo AI"},
@@ -152,6 +154,9 @@ var registry = []ActionSpec{
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "w/W"}}, Hint: "cleanup"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "e"}}, Hint: "edit"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "c"}}, Hint: "child"},
+	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "0"}}, Hint: "backlog"},
+	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "3"}}, Hint: "request review"},
+	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "5"}}, Hint: "cancel issue"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "T/d"}}, Hint: "tombstone/delete"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "Esc/q"}}, Hint: "cancel"},
 
@@ -159,6 +164,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "?", Help: "Open this help reference"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "Space", Help: "Open task workspace"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "Q", Help: "Open operation queue"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "B", Help: "Open board view selector"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "L", Help: "Open event log"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "N", Help: "Open notification action center"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "O", Help: "Open tmux sessions"},

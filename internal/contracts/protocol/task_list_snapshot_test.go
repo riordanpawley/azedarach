@@ -12,7 +12,7 @@ import (
 )
 
 func TestTaskListSnapshotPayloadContractConstants(t *testing.T) {
-	if got, want := TaskListSnapshotSchemaVersion, uint16(2); got != want {
+	if got, want := TaskListSnapshotSchemaVersion, uint16(3); got != want {
 		t.Fatalf("TaskListSnapshotSchemaVersion = %d, want %d", got, want)
 	}
 }
@@ -43,8 +43,11 @@ func TestTaskListSnapshotPayloadJSONShapeIsDeterministic(t *testing.T) {
 				Title:       "Joined snapshot",
 				Description: "daemon-authored issue/session/worktree payload",
 				Status:      domain.StatusInProgress,
-				Priority:    domain.P1,
-				Type:        domain.TypeTask,
+				State: mustIssueStateForProtocolTest(t, domain.IssueStateParts{
+					Workflow: domain.IssueWorkflowActive,
+				}),
+				Priority: domain.P1,
+				Type:     domain.TypeTask,
 				Session: &domain.Session{
 					IssueID:   "az-1",
 					State:     domain.SessionBusy,
@@ -65,10 +68,19 @@ func TestTaskListSnapshotPayloadJSONShapeIsDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal task list snapshot: %v", err)
 	}
-	want := fmt.Sprintf(`{"schema_version":2,"protocol_version":%d,"snapshot_revision":17,"project_id":"proj-joined","last_checked_at":"2026-04-02T10:31:45Z","freshness":"fresh","tasks":[{"id":"az-1","title":"Joined snapshot","description":"daemon-authored issue/session/worktree payload","status":"in_progress","priority":1,"issue_type":"task","session":{"issue_id":"az-1","state":"busy","started_at":"2026-04-02T10:30:00Z","worktree":"/tmp/repo-az-1"},"has_worktree":true,"git_ahead_count":2,"git_behind_count":1,"has_uncommitted_changes":true,"git_additions":7,"git_deletions":3,"created_at":"0001-01-01T00:00:00Z","updated_at":"0001-01-01T00:00:00Z"}]}`, CurrentVersion)
+	want := fmt.Sprintf(`{"schema_version":3,"protocol_version":%d,"snapshot_revision":17,"project_id":"proj-joined","last_checked_at":"2026-04-02T10:31:45Z","freshness":"fresh","tasks":[{"id":"az-1","title":"Joined snapshot","description":"daemon-authored issue/session/worktree payload","status":"in_progress","issue_state":{"lifecycle_state":"active","review_state":"none","closed_outcome":"none","archive_state":"live","deletion_state":"present"},"priority":1,"issue_type":"task","session":{"issue_id":"az-1","state":"busy","started_at":"2026-04-02T10:30:00Z","worktree":"/tmp/repo-az-1"},"has_worktree":true,"git_ahead_count":2,"git_behind_count":1,"has_uncommitted_changes":true,"git_additions":7,"git_deletions":3,"created_at":"0001-01-01T00:00:00Z","updated_at":"0001-01-01T00:00:00Z"}]}`, CurrentVersion)
 	if string(got) != want {
 		t.Fatalf("json = %s, want %s", string(got), want)
 	}
+}
+
+func mustIssueStateForProtocolTest(t *testing.T, parts domain.IssueStateParts) domain.IssueState {
+	t.Helper()
+	state, err := domain.NewIssueState(parts)
+	if err != nil {
+		t.Fatalf("NewIssueState(%+v) error = %v", parts, err)
+	}
+	return state
 }
 
 func TestTaskListSnapshotPayloadMessagePackRoundTrip(t *testing.T) {
@@ -82,9 +94,13 @@ func TestTaskListSnapshotPayloadMessagePackRoundTrip(t *testing.T) {
 		Freshness:        TaskListFreshnessStale,
 		SummariesOnly:    true,
 		Tasks: []domain.Task{{
-			ID:       "az-7",
-			Title:    "Roundtrip",
-			Status:   domain.StatusInReview,
+			ID:     "az-7",
+			Title:  "Roundtrip",
+			Status: domain.StatusInReview,
+			State: mustIssueStateForProtocolTest(t, domain.IssueStateParts{
+				Workflow:     domain.IssueWorkflowClosed,
+				CloseOutcome: domain.IssueCloseCompleted,
+			}),
 			Priority: domain.P2,
 			Type:     domain.TypeBug,
 		}},
@@ -105,6 +121,9 @@ func TestTaskListSnapshotPayloadMessagePackRoundTrip(t *testing.T) {
 	if len(got.Tasks) != 1 || got.Tasks[0].ID != "az-7" || got.Tasks[0].Type != domain.TypeBug {
 		t.Fatalf("roundtrip tasks = %+v, want %+v", got.Tasks, payload.Tasks)
 	}
+	if got.Tasks[0].State.Workflow() != domain.IssueWorkflowClosed || got.Tasks[0].State.CloseOutcome() != domain.IssueCloseCompleted {
+		t.Fatalf("roundtrip issue state = %+v, want closed/completed", got.Tasks[0].State)
+	}
 }
 
 func TestDecodeTaskListSnapshotPayloadRejectsVersionMismatch(t *testing.T) {
@@ -115,13 +134,13 @@ func TestDecodeTaskListSnapshotPayloadRejectsVersionMismatch(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected schema version mismatch error")
 		}
-		if got := err.Error(); !strings.Contains(got, "schema_version mismatch: expected 2, actual 99") {
+		if got := err.Error(); !strings.Contains(got, "schema_version mismatch: expected 3, actual 99") {
 			t.Fatalf("error = %q, want expected/actual schema mismatch", got)
 		}
 	})
 
 	t.Run("protocol version", func(t *testing.T) {
-		body := []byte(`{"schema_version":2,"protocol_version":99,"snapshot_revision":1,"project_id":"proj","last_checked_at":"2026-04-02T10:31:45Z","freshness":"fresh","tasks":[]}`)
+		body := []byte(`{"schema_version":3,"protocol_version":99,"snapshot_revision":1,"project_id":"proj","last_checked_at":"2026-04-02T10:31:45Z","freshness":"fresh","tasks":[]}`)
 
 		_, err := DecodeTaskListSnapshotPayload(body)
 		if err == nil {
@@ -133,7 +152,7 @@ func TestDecodeTaskListSnapshotPayloadRejectsVersionMismatch(t *testing.T) {
 	})
 
 	t.Run("missing freshness metadata", func(t *testing.T) {
-		body := []byte(fmt.Sprintf(`{"schema_version":2,"protocol_version":%d,"snapshot_revision":1,"project_id":"proj","tasks":[]}`, CurrentVersion))
+		body := []byte(fmt.Sprintf(`{"schema_version":3,"protocol_version":%d,"snapshot_revision":1,"project_id":"proj","tasks":[]}`, CurrentVersion))
 
 		_, err := DecodeTaskListSnapshotPayload(body)
 		if err == nil {
@@ -145,7 +164,7 @@ func TestDecodeTaskListSnapshotPayloadRejectsVersionMismatch(t *testing.T) {
 	})
 
 	t.Run("invalid freshness", func(t *testing.T) {
-		body := []byte(fmt.Sprintf(`{"schema_version":2,"protocol_version":%d,"snapshot_revision":1,"project_id":"proj","last_checked_at":"2026-04-02T10:31:45Z","freshness":"unknown","tasks":[]}`, CurrentVersion))
+		body := []byte(fmt.Sprintf(`{"schema_version":3,"protocol_version":%d,"snapshot_revision":1,"project_id":"proj","last_checked_at":"2026-04-02T10:31:45Z","freshness":"unknown","tasks":[]}`, CurrentVersion))
 
 		_, err := DecodeTaskListSnapshotPayload(body)
 		if err == nil {
