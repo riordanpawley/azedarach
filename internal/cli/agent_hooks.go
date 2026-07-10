@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
@@ -25,22 +24,7 @@ const (
 	AgentCodex  AgentSource = "codex"
 
 	hookBestEffortDaemonTimeout = 2 * time.Second
-	maxHookPayloadTextValues    = 64
-	maxHookPayloadTextBytes     = 8 * 1024
-	maxHookPayloadNodes         = 256
-	maxHookPayloadDepth         = 8
 )
-
-var terminalAgentFailurePatterns = []struct {
-	reason  string
-	pattern *regexp.Regexp
-}{
-	{reason: "model_capacity", pattern: regexp.MustCompile(`(?i)\b(?:selected\s+)?model\b.{0,80}\b(?:at|reached|exceeded)\s+(?:its\s+)?capacity\b`)},
-	{reason: "model_capacity", pattern: regexp.MustCompile(`(?i)\btry\s+(?:using\s+)?a\s+different\s+model\b`)},
-	{reason: "usage_limit", pattern: regexp.MustCompile(`(?i)\b(?:usage|rate)\s+limit\b.{0,80}\b(?:reached|exceeded|exhausted)\b`)},
-	{reason: "quota_exhausted", pattern: regexp.MustCompile(`(?i)\b(?:quota|credits?)\b.{0,80}\b(?:exceeded|exhausted|depleted)\b`)},
-	{reason: "authentication", pattern: regexp.MustCompile(`(?i)\b(?:authentication\s+failed|not\s+authenticated|invalid\s+(?:api\s+)?(?:key|token))\b`)},
-}
 
 // IsKnown reports whether the agent source is one the port understands.
 func (a AgentSource) IsKnown() bool {
@@ -163,76 +147,11 @@ func ingestAgentHookRuntimeSignalBestEffort(ctx context.Context, deps *Dependenc
 		Message:   fmt.Sprintf("%s hook: %s", hookCtx.Agent, event),
 		Payload:   hookCtx.Payload,
 	}
-	if reason, ok := classifyTerminalAgentFailure(event, hookCtx.Payload); ok {
-		blocking := true
-		signal.Activity = "error"
-		signal.Level = "error"
-		signal.Blocking = &blocking
-		signal.Message = fmt.Sprintf("%s hook: %s (terminal agent failure: %s)", hookCtx.Agent, event, reason)
-	}
 	if issueID == "" {
 		signal.SessionID = ""
 	}
 	_, err := deps.DaemonClient.RuntimeSignalIngest(ctx, signal)
 	return err
-}
-
-func classifyTerminalAgentFailure(event string, payload map[string]any) (string, bool) {
-	if strings.TrimSpace(event) != hookEventIdlePrompt || len(payload) == 0 {
-		return "", false
-	}
-	for _, value := range boundedHookPayloadText(payload) {
-		for _, candidate := range terminalAgentFailurePatterns {
-			if candidate.pattern.MatchString(value) {
-				return candidate.reason, true
-			}
-		}
-	}
-	return "", false
-}
-
-func boundedHookPayloadText(payload map[string]any) []string {
-	values := make([]string, 0, min(len(payload), maxHookPayloadTextValues))
-	remaining := maxHookPayloadTextBytes
-	visited := 0
-	limitReached := func() bool {
-		return visited >= maxHookPayloadNodes || len(values) >= maxHookPayloadTextValues || remaining <= 0
-	}
-	var collect func(any, int)
-	collect = func(value any, depth int) {
-		if limitReached() || depth > maxHookPayloadDepth {
-			return
-		}
-		visited++
-		switch typed := value.(type) {
-		case string:
-			text := strings.Join(strings.Fields(typed), " ")
-			if text == "" {
-				return
-			}
-			if len(text) > remaining {
-				text = text[:remaining]
-			}
-			values = append(values, text)
-			remaining -= len(text)
-		case map[string]any:
-			for _, nested := range typed {
-				collect(nested, depth+1)
-				if limitReached() {
-					break
-				}
-			}
-		case []any:
-			for _, nested := range typed {
-				collect(nested, depth+1)
-				if limitReached() {
-					break
-				}
-			}
-		}
-	}
-	collect(payload, 0)
-	return values
 }
 
 func agentHookSessionID(projectID, issueID string) string {

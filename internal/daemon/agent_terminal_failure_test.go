@@ -36,7 +36,12 @@ func TestRuntimeSignalIngestProjectsTerminalAgentError(t *testing.T) {
 			Agent:     "codex",
 			Hook:      "idle_prompt",
 			Event:     "idle_prompt",
-			Activity:  "error",
+			Log:       true,
+			Payload: map[string]any{
+				"notification": map[string]any{
+					"message": "Selected model is at capacity. Please try a different model.",
+				},
+			},
 		}),
 	})
 	if err != nil {
@@ -52,6 +57,50 @@ func TestRuntimeSignalIngestProjectsTerminalAgentError(t *testing.T) {
 	}
 	if !found || canonical.Activity != "error" || canonical.ActivitySource != "hooks" {
 		t.Fatalf("canonical session projection = %+v found=%t, want error/hooks", canonical, found)
+	}
+	events := d.listHookLogEvents(projectID, 10)
+	if len(events) != 1 || events[0].Level != "error" || events[0].Blocking == nil || !*events[0].Blocking ||
+		events[0].Message != "codex hook: idle_prompt (terminal agent failure: model_capacity)" {
+		t.Fatalf("hook log events = %+v, want canonical terminal-failure metadata", events)
+	}
+}
+
+func TestRuntimeSignalIngestKeepsOrdinaryIdlePromptWaiting(t *testing.T) {
+	repoDir := initRuntimeSignalGitRepo(t)
+	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	projectID := "proj-signals-idle"
+	parentSessionID := "az-dae-idle"
+
+	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "runtime-signal-agent-ordinary-idle",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         protocol.CommandRuntimeSignalIngest,
+		Body: mustMarshal(t, protocol.RuntimeSignalIngestCommandBody{
+			Source:    protocol.RuntimeSignalSourceAgentHook,
+			Kind:      protocol.RuntimeSignalKindAgentActivityChanged,
+			IssueID:   "dae",
+			SessionID: parentSessionID + ".pane-42",
+			Agent:     "codex",
+			Hook:      "idle_prompt",
+			Event:     "idle_prompt",
+			Payload:   map[string]any{"message": "Codex is waiting for input"},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("runtime.signal.ingest command error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("runtime.signal.ingest response not ok: %+v", resp.Error)
+	}
+
+	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, parentSessionID)
+	if err != nil {
+		t.Fatalf("GetSessionState canonical: %v", err)
+	}
+	if !found || canonical.Activity != "waiting" || canonical.ActivitySource != "hooks" {
+		t.Fatalf("canonical session projection = %+v found=%t, want waiting/hooks", canonical, found)
 	}
 }
 
