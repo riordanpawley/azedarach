@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -13,15 +14,10 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-type InteractionIssueChanges struct {
-	Title, Description, Design, Acceptance *string
-	Priority                               *int
-}
 type InteractionDecisionEffect struct{ Title, Rationale, Context, Consequences string }
 type InteractionResolution struct {
 	Request          domain.InteractionRequest
 	ExpectedRevision int64
-	IssueChanges     InteractionIssueChanges
 	Decision         *InteractionDecisionEffect
 }
 
@@ -69,10 +65,18 @@ func (c *Client) UpdateInteraction(ctx context.Context, request domain.Interacti
 	if !found || current.Revision != expectedRevision {
 		return fmt.Errorf("%w: interaction %s expected revision %d", domain.ErrStaleInteractionRevision, request.ID, expectedRevision)
 	}
-	if current.IssueID != request.IssueID || current.DecisionKey != request.DecisionKey || !current.CreatedAt.Equal(request.CreatedAt) {
-		return fmt.Errorf("interaction identity and creation audit are immutable")
+	if !interactionDefinitionEqual(current, request) {
+		return fmt.Errorf("interaction request definition and creation audit are immutable")
 	}
-	if _, err := current.Transition(request.State, expectedRevision, request.UpdatedAt); err != nil {
+	transitionCandidate := current
+	transitionCandidate.Proposal = request.Proposal
+	transitionCandidate.FinalAnswer = request.FinalAnswer
+	transitionCandidate.Disposition = request.Disposition
+	transitionCandidate.StaleAt = request.StaleAt
+	transitionCandidate.Reminders = request.Reminders
+	transitionCandidate.SessionID = request.SessionID
+	transitionCandidate.Recovery = request.Recovery
+	if _, err := transitionCandidate.Transition(request.State, expectedRevision, request.UpdatedAt); err != nil {
 		return fmt.Errorf("validate interaction transition: %w", err)
 	}
 	raw, err := json.Marshal(request)
@@ -100,6 +104,64 @@ func (c *Client) UpdateInteraction(ctx context.Context, request domain.Interacti
 	return c.RefreshInteractionProjection(ctx)
 }
 
+// UpdateInteractionMetadata persists an orthogonal lifecycle audit mutation
+// without changing the request's decision state.
+func (c *Client) UpdateInteractionMetadata(ctx context.Context, request domain.InteractionRequest, expectedRevision int64) error {
+	if expectedRevision < 1 || request.Revision != expectedRevision+1 {
+		return fmt.Errorf("%w: expected replacement revision %d", domain.ErrStaleInteractionRevision, expectedRevision+1)
+	}
+	if err := request.Validate(); err != nil {
+		return fmt.Errorf("validate interaction metadata: %w", err)
+	}
+	current, found, err := c.GetInteraction(ctx, request.ID)
+	if err != nil {
+		return err
+	}
+	if !found || current.Revision != expectedRevision {
+		return fmt.Errorf("%w: interaction %s expected revision %d", domain.ErrStaleInteractionRevision, request.ID, expectedRevision)
+	}
+	expected := current
+	expected.SessionID = request.SessionID
+	expected.StaleAt = request.StaleAt
+	expected.Reminders = request.Reminders
+	expected.Recovery = request.Recovery
+	expected.Revision = request.Revision
+	expected.UpdatedAt = request.UpdatedAt
+	if !current.Unresolved() || !reflect.DeepEqual(expected, request) {
+		return fmt.Errorf("interaction decision content is immutable during metadata update")
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("marshal interaction metadata: %w", err)
+	}
+	db, err := c.dbHandle()
+	if err != nil {
+		return err
+	}
+	result, err := db.ExecContext(ctx, `UPDATE interaction_requests SET revision=?,request_json=?,updated_at=? WHERE id=? AND revision=?`, request.Revision, raw, request.UpdatedAt.UTC().Format(time.RFC3339Nano), request.ID, expectedRevision)
+	if err != nil {
+		return fmt.Errorf("update interaction metadata %s: %w", request.ID, err)
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return fmt.Errorf("%w: interaction %s expected revision %d", domain.ErrStaleInteractionRevision, request.ID, expectedRevision)
+	}
+	return c.RefreshInteractionProjection(ctx)
+}
+
+func interactionDefinitionEqual(current, replacement domain.InteractionRequest) bool {
+	current.State, replacement.State = "", ""
+	current.Revision, replacement.Revision = 0, 0
+	current.UpdatedAt, replacement.UpdatedAt = time.Time{}, time.Time{}
+	current.Proposal, replacement.Proposal = nil, nil
+	current.FinalAnswer, replacement.FinalAnswer = nil, nil
+	current.SessionID, replacement.SessionID = "", ""
+	current.StaleAt, replacement.StaleAt = nil, nil
+	current.Reminders, replacement.Reminders = nil, nil
+	current.Disposition, replacement.Disposition = nil, nil
+	current.Recovery, replacement.Recovery = nil, nil
+	return reflect.DeepEqual(current, replacement)
+}
+
 // RefreshInteractionProjection reloads the complete durable projection before evaluation.
 func (c *Client) RefreshInteractionProjection(ctx context.Context) error {
 	db, err := c.dbHandle()
@@ -117,8 +179,8 @@ func (c *Client) RefreshInteractionProjection(ctx context.Context) error {
 		if err := rows.Scan(&raw); err != nil {
 			return err
 		}
-		var r domain.InteractionRequest
-		if err := json.Unmarshal(raw, &r); err != nil {
+		r, err := decodeInteractionRequest(raw)
+		if err != nil {
 			return fmt.Errorf("decode interaction projection: %w", err)
 		}
 		next[r.ID] = r
@@ -198,12 +260,6 @@ func (c *Client) ResolveInteraction(ctx context.Context, in InteractionResolutio
 	if err := in.Request.Validate(); err != nil {
 		return fmt.Errorf("validate interaction: %w", err)
 	}
-	if in.IssueChanges.Title != nil && strings.TrimSpace(*in.IssueChanges.Title) == "" {
-		return fmt.Errorf("approved issue title must be non-empty")
-	}
-	if in.IssueChanges.Priority != nil && (*in.IssueChanges.Priority < 0 || *in.IssueChanges.Priority > 4) {
-		return fmt.Errorf("approved issue priority is invalid")
-	}
 	return c.withMutationLock(ctx, func(ctx context.Context) error {
 		db, err := c.dbHandle()
 		if err != nil {
@@ -225,20 +281,19 @@ func (c *Client) ResolveInteraction(ctx context.Context, in InteractionResolutio
 		if revision != in.ExpectedRevision {
 			return fmt.Errorf("%w: interaction %s expected revision %d", domain.ErrStaleInteractionRevision, in.Request.ID, in.ExpectedRevision)
 		}
-		var current domain.InteractionRequest
-		if err := json.Unmarshal(raw, &current); err != nil {
+		current, err := decodeInteractionRequest(raw)
+		if err != nil {
 			return err
 		}
 		current.FinalAnswer = in.Request.FinalAnswer
 		current.Proposal = in.Request.Proposal
-		current.Effects = in.Request.Effects
 		if _, err := current.Transition(domain.InteractionResolved, in.ExpectedRevision, in.Request.UpdatedAt); err != nil {
 			return err
 		}
-		if current.IssueID != in.Request.IssueID || current.DecisionKey != in.Request.DecisionKey || !current.CreatedAt.Equal(in.Request.CreatedAt) {
-			return fmt.Errorf("interaction identity and creation audit are immutable")
+		if !interactionDefinitionEqual(current, in.Request) {
+			return fmt.Errorf("interaction request definition and creation audit are immutable")
 		}
-		ch := in.IssueChanges
+		ch := in.Request.FinalAnswer.Answer.ApprovedIssueFieldEffects
 		if interactionIssueChangesApproved(ch) {
 			res, err := tx.ExecContext(ctx, `UPDATE issues SET title=CASE WHEN ? THEN ? ELSE title END,description=CASE WHEN ? THEN ? ELSE description END,design=CASE WHEN ? THEN ? ELSE design END,acceptance=CASE WHEN ? THEN ? ELSE acceptance END,priority=CASE WHEN ? THEN ? ELSE priority END,updated_at=? WHERE id=?`, ch.Title != nil, valueString(ch.Title), ch.Description != nil, valueString(ch.Description), ch.Design != nil, valueString(ch.Design), ch.Acceptance != nil, valueString(ch.Acceptance), ch.Priority != nil, valueInt(ch.Priority), in.Request.UpdatedAt.UTC().Format(time.RFC3339Nano), in.Request.IssueID)
 			if err != nil {
@@ -290,7 +345,62 @@ func (c *Client) ResolveInteraction(ctx context.Context, in InteractionResolutio
 		return c.RefreshInteractionProjection(ctx)
 	})
 }
-func interactionIssueChangesApproved(ch InteractionIssueChanges) bool {
+
+func decodeInteractionRequest(raw []byte) (domain.InteractionRequest, error) {
+	var request domain.InteractionRequest
+	if err := json.Unmarshal(raw, &request); err == nil {
+		return request, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return domain.InteractionRequest{}, err
+	}
+	proposalRaw, finalRaw := fields["proposal"], fields["final_answer"]
+	delete(fields, "proposal")
+	delete(fields, "final_answer")
+	base, err := json.Marshal(fields)
+	if err != nil {
+		return domain.InteractionRequest{}, err
+	}
+	if err := json.Unmarshal(base, &request); err != nil {
+		return domain.InteractionRequest{}, err
+	}
+	if request.Proposal, err = decodeLegacyInteractionAnswerAudit(proposalRaw, request.Significance); err != nil {
+		return domain.InteractionRequest{}, fmt.Errorf("decode proposal audit: %w", err)
+	}
+	if request.FinalAnswer, err = decodeLegacyInteractionAnswerAudit(finalRaw, request.Significance); err != nil {
+		return domain.InteractionRequest{}, fmt.Errorf("decode final answer audit: %w", err)
+	}
+	return request, nil
+}
+
+func decodeLegacyInteractionAnswerAudit(raw json.RawMessage, significance domain.InteractionSignificance) (*domain.InteractionAnswerAudit, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var current domain.InteractionAnswerAudit
+	if err := json.Unmarshal(raw, &current); err == nil {
+		return &current, nil
+	}
+	var legacy struct {
+		Answer    string    `json:"answer"`
+		Actor     string    `json:"actor"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		return nil, err
+	}
+	return &domain.InteractionAnswerAudit{
+		Answer: domain.InteractionAnswerPayload{
+			SelectedOption:             legacy.Answer,
+			Rationale:                  "Migrated from the legacy unstructured answer audit.",
+			SignificanceRecommendation: significance,
+			Revision:                   1,
+		},
+		Actor: legacy.Actor, CreatedAt: legacy.CreatedAt,
+	}, nil
+}
+func interactionIssueChangesApproved(ch domain.InteractionIssueFieldEffects) bool {
 	return ch.Title != nil || ch.Description != nil || ch.Design != nil || ch.Acceptance != nil || ch.Priority != nil
 }
 func valueString(v *string) string {
@@ -304,6 +414,26 @@ func valueInt(v *int) int {
 		return 0
 	}
 	return *v
+}
+
+// Interactions returns the complete durable request projection in stable order.
+func (c *Client) Interactions(ctx context.Context) ([]domain.InteractionRequest, error) {
+	if err := c.RefreshInteractionProjection(ctx); err != nil {
+		return nil, err
+	}
+	c.interactionMu.RLock()
+	defer c.interactionMu.RUnlock()
+	out := make([]domain.InteractionRequest, 0, len(c.interactionCache))
+	for _, request := range c.interactionCache {
+		out = append(out, request)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	return out, nil
 }
 
 func (c *Client) IssueHasUnresolvedInteraction(ctx context.Context, issueID string) (bool, error) {

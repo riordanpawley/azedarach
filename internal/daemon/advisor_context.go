@@ -151,7 +151,36 @@ func renderAdvisorRequest(request domain.InteractionRequest) string {
 		fmt.Fprintf(&b, "Requester's recommendation: %s\n", request.DecisionPacket.Recommendation)
 	}
 	if request.Proposal != nil {
-		fmt.Fprintf(&b, "Current proposal (%s at %s): %s\n", request.Proposal.Actor, request.Proposal.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"), request.Proposal.Answer)
+		fmt.Fprintf(&b, "Current proposal (%s at %s):\n%s", request.Proposal.Actor, request.Proposal.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"), renderAdvisorAnswerPayload(request.Proposal.Answer))
+	}
+	return b.String()
+}
+
+func renderAdvisorAnswerPayload(answer domain.InteractionAnswerPayload) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "  Selected option: %s\n  Rationale: %s\n", answer.SelectedOption, answer.Rationale)
+	if len(answer.Constraints) > 0 {
+		fmt.Fprintf(&b, "  Constraints: %s\n", strings.Join(answer.Constraints, "; "))
+	}
+	fmt.Fprintf(&b, "  Significance recommendation: %s\n  Source revision: %d\n", answer.SignificanceRecommendation, answer.Revision)
+	effects := answer.ApprovedIssueFieldEffects
+	if effects.Title != nil || effects.Description != nil || effects.Design != nil || effects.Acceptance != nil || effects.Priority != nil {
+		b.WriteString("  Approved issue effects:\n")
+		if effects.Title != nil {
+			fmt.Fprintf(&b, "  - title: %s\n", *effects.Title)
+		}
+		if effects.Description != nil {
+			fmt.Fprintf(&b, "  - description: %s\n", *effects.Description)
+		}
+		if effects.Design != nil {
+			fmt.Fprintf(&b, "  - design: %s\n", *effects.Design)
+		}
+		if effects.Acceptance != nil {
+			fmt.Fprintf(&b, "  - acceptance: %s\n", *effects.Acceptance)
+		}
+		if effects.Priority != nil {
+			fmt.Fprintf(&b, "  - priority: %d\n", *effects.Priority)
+		}
 	}
 	return b.String()
 }

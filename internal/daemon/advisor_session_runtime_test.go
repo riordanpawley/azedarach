@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
@@ -40,6 +42,9 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 	}
 	if !first.SessionStarted || first.SessionAttached || !runner.sessions[first.Request.SessionID] {
 		t.Fatalf("first discuss = %+v sessions=%v", first, runner.sessions)
+	}
+	if _, err := service.MutateInteraction(ctx, protocol.CommandInteractionRecover, protocol.InteractionMutationRequestBody{ID: request.ID, ExpectedRevision: first.Request.Revision, Actor: "advisor"}); err == nil {
+		t.Fatal("advisor unexpectedly received recovery authority")
 	}
 	launch := requireNewSessionLaunchCommand(t, runner, first.Request.SessionID)
 	if !strings.Contains(launch, "AZEDARACH_SESSION_ROLE=advisor") || !strings.Contains(launch, "AZEDARACH_INTERACTION_ID") || !strings.Contains(launch, "AZEDARACH_ISSUE_ID=\"\"") {
@@ -70,12 +75,34 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 	if got := len(runner.commands); got == 0 {
 		t.Fatal("expected tmux commands")
 	}
+	projection.State, projection.ObservedState = daemonstate.SessionStatePaused, daemonstate.SessionStatePaused
+	if err := d.sessionRuntimeStateStore(canonicalProjectID).UpsertSessionState(ctx, canonicalProjectID, projection); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: request.ID, ExpectedRevision: second.Request.Revision, Actor: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resumed.SessionAttached || !resumed.SessionResumed || resumed.SessionStarted {
+		t.Fatalf("paused discuss = %+v", resumed)
+	}
+	delete(runner.sessions, first.Request.SessionID)
+	restarted, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: request.ID, ExpectedRevision: second.Request.Revision, Actor: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !restarted.SessionStarted || restarted.SessionAttached || restarted.Request.Revision != second.Request.Revision || !runner.sessions[first.Request.SessionID] {
+		t.Fatalf("missing-runtime discuss = %+v sessions=%v", restarted, runner.sessions)
+	}
 
 	if err := d.cleanupAdvisorSessionRuntime(ctx, protocol.DefaultProjectID, request.ID); err != nil {
 		t.Fatal(err)
 	}
 	if runner.sessions[first.Request.SessionID] {
 		t.Fatal("advisor tmux session still live after cleanup")
+	}
+	if _, found, err := d.sessionRuntimeStateStore(canonicalProjectID).GetSessionState(ctx, canonicalProjectID, first.Request.SessionID); err != nil || found {
+		t.Fatalf("advisor projection remains after cleanup: found=%t err=%v", found, err)
 	}
 	unchanged, found, err := client.GetInteraction(ctx, request.ID)
 	if err != nil || !found {
@@ -90,6 +117,278 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 	}
 	if task.Status != domain.StatusOpen {
 		t.Fatalf("advisor discussion mutated implementation lifecycle: %s", task.Status)
+	}
+}
+
+func TestRuntimeReconcileRecoversAndCleansAdvisorSessionsFromDurableRequests(t *testing.T) {
+	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
+	repoDir := t.TempDir()
+	client := issues.NewClient(repoDir, slog.Default())
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "advisor recovery", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	request := domain.InteractionRequest{ID: "request-recover", IssueID: issueID, DecisionKey: "choice", OrchestrationScope: "project", Question: "Which option?", Why: "Human judgment", Options: []domain.InteractionOption{{Key: "a", Label: "A"}}, Significance: domain.InteractionSignificanceRoutine, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose"}, State: domain.InteractionOpen, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := client.CreateInteraction(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	runner := newSessionStartTmuxRunner()
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(), hub: publish.NewHub(32, 8, slog.Default()), revision: map[string]uint64{}}
+	service := issueInteractionService{daemon: d}
+	discussed, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: request.ID, ExpectedRevision: 1, Actor: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(runner.sessions, discussed.Request.SessionID)
+	canonicalProjectID := d.canonicalProjectID(protocol.DefaultProjectID)
+	manager := git.NewWorktreeManager(&testGitRunner{worktreePath: repoDir, branchName: "main"}, repoDir, slog.Default())
+	d.worktreeManagersByRoot = map[string]*git.WorktreeManager{repoDir: manager}
+	d.worktreeManagersByProject = map[string]*git.WorktreeManager{canonicalProjectID: manager}
+	events, cancel := d.hub.Subscribe(canonicalProjectID, d.currentRevision(canonicalProjectID))
+	defer cancel()
+
+	result, err := newRuntimeReconcileService(d).Reconcile(ctx, protocol.DefaultProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AdvisorSessionsRecovered != 1 || result.AdvisorSessionsCleaned != 0 || !runner.sessions[discussed.Request.SessionID] {
+		t.Fatalf("reconcile result=%+v sessions=%v", result, runner.sessions)
+	}
+	recovered, found, err := client.GetInteraction(ctx, request.ID)
+	if err != nil || !found || recovered.Recovery == nil || recovered.Recovery.SessionID != discussed.Request.SessionID || recovered.Revision != discussed.Request.Revision+1 {
+		t.Fatalf("recovered request=%+v found=%t err=%v", recovered, found, err)
+	}
+	select {
+	case event := <-events:
+		if event.Event != protocol.EventSessionUpdated && event.Event != protocol.EventInteractionRecovered {
+			t.Fatalf("unexpected recovery event: %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for advisor recovery event")
+	}
+
+	withdrawAt := time.Now().UTC()
+	recovered.Disposition = &domain.InteractionDispositionAudit{Actor: "orchestrator", Reason: "obsolete", CreatedAt: withdrawAt}
+	withdrawn, err := recovered.Transition(domain.InteractionWithdrawn, recovered.Revision, withdrawAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.UpdateInteraction(ctx, withdrawn, recovered.Revision); err != nil {
+		t.Fatal(err)
+	}
+	result, err = newRuntimeReconcileService(d).Reconcile(ctx, protocol.DefaultProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AdvisorSessionsRecovered != 0 || result.AdvisorSessionsCleaned != 1 || runner.sessions[discussed.Request.SessionID] {
+		t.Fatalf("terminal reconcile result=%+v sessions=%v", result, runner.sessions)
+	}
+}
+
+func TestRuntimeReconcileIssuesLeavesUnrelatedAdvisorSessionsUntouched(t *testing.T) {
+	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
+	repoDir := t.TempDir()
+	client := issues.NewClient(repoDir, slog.Default())
+	createRequest := func(title, requestID string) domain.InteractionRequest {
+		t.Helper()
+		issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: title, Type: domain.TypeTask, Status: domain.StatusOpen})
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now().UTC()
+		request := domain.InteractionRequest{ID: requestID, IssueID: issueID, DecisionKey: "choice", OrchestrationScope: "project", Question: "Which option?", Why: "Human judgment", Options: []domain.InteractionOption{{Key: "a", Label: "A"}}, Significance: domain.InteractionSignificanceRoutine, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose"}, State: domain.InteractionOpen, Revision: 1, CreatedAt: now, UpdatedAt: now}
+		if err := client.CreateInteraction(ctx, request); err != nil {
+			t.Fatal(err)
+		}
+		return request
+	}
+	target := createRequest("target advisor recovery", "request-target-reconcile")
+	unrelated := createRequest("unrelated advisor cleanup", "request-unrelated-reconcile")
+	runner := newSessionStartTmuxRunner()
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(), hub: publish.NewHub(32, 8, slog.Default()), revision: map[string]uint64{}}
+	service := issueInteractionService{daemon: d}
+	targetDiscussed, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: target.ID, ExpectedRevision: target.Revision, Actor: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelatedDiscussed, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: unrelated.ID, ExpectedRevision: unrelated.Revision, Actor: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(runner.sessions, targetDiscussed.Request.SessionID)
+	terminalAt := unrelatedDiscussed.Request.UpdatedAt.Add(time.Second)
+	unrelatedDiscussed.Request.Disposition = &domain.InteractionDispositionAudit{Actor: "orchestrator", Reason: "terminal outside targeted repair", CreatedAt: terminalAt}
+	terminal, err := unrelatedDiscussed.Request.Transition(domain.InteractionWithdrawn, unrelatedDiscussed.Request.Revision, terminalAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.UpdateInteraction(ctx, terminal, unrelatedDiscussed.Request.Revision); err != nil {
+		t.Fatal(err)
+	}
+	projectID := d.canonicalProjectID(protocol.DefaultProjectID)
+	manager := git.NewWorktreeManager(&testGitRunner{worktreePath: repoDir, branchName: "main"}, repoDir, slog.Default())
+	d.worktreeManagersByRoot = map[string]*git.WorktreeManager{repoDir: manager}
+	d.worktreeManagersByProject = map[string]*git.WorktreeManager{projectID: manager}
+
+	result, err := newRuntimeReconcileService(d).ReconcileIssues(ctx, protocol.DefaultProjectID, []string{target.IssueID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AdvisorSessionsRecovered != 1 || result.AdvisorSessionsCleaned != 0 || !runner.sessions[targetDiscussed.Request.SessionID] {
+		t.Fatalf("targeted reconcile result=%+v sessions=%v", result, runner.sessions)
+	}
+	if !runner.sessions[unrelatedDiscussed.Request.SessionID] {
+		t.Fatal("targeted reconcile cleaned unrelated advisor runtime")
+	}
+	if _, found, err := d.sessionRuntimeStateStore(projectID).GetAdvisorSession(ctx, projectID, unrelated.ID); err != nil || !found {
+		t.Fatalf("unrelated advisor reservation changed: found=%t err=%v", found, err)
+	}
+	current, found, err := client.GetInteraction(ctx, unrelated.ID)
+	if err != nil || !found || current.Revision != terminal.Revision || current.State != domain.InteractionWithdrawn {
+		t.Fatalf("unrelated interaction changed: request=%+v found=%t err=%v", current, found, err)
+	}
+}
+
+func TestImplementationSessionReconcileNeverRecreatesAdvisorProjection(t *testing.T) {
+	if sessionProjectionCanRecreateTmuxSession(daemonstate.Session{ID: "advisor-request", Role: daemonstate.SessionRoleAdvisor, State: daemonstate.SessionStateRunning}) {
+		t.Fatal("generic implementation reconciliation accepted advisor projection")
+	}
+}
+
+func TestAdvisorRecoveryCleansRuntimeWhenTerminalRequestWinsCrossDaemonRace(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	clientA := issues.NewClient(repoDir, slog.Default())
+	clientB := issues.NewClient(repoDir, slog.Default())
+	issueID, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "terminal race", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	request := domain.InteractionRequest{ID: "request-terminal-race", IssueID: issueID, DecisionKey: "choice", OrchestrationScope: "project", Question: "Which option?", Why: "Human judgment", Options: []domain.InteractionOption{{Key: "a", Label: "A"}}, Significance: domain.InteractionSignificanceRoutine, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose"}, State: domain.InteractionOpen, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := clientA.CreateInteraction(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	request.SessionID = advisorSessionID(request.ID)
+	request, err = request.Transition(domain.InteractionDiscussing, 1, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := clientA.UpdateInteraction(ctx, request, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	projectID := protocol.DefaultProjectID
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	runner := newSessionStartTmuxRunner()
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: clientA, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(), hub: publish.NewHub(16, 8, slog.Default()), revision: map[string]uint64{}}
+	projectID = d.canonicalProjectID(projectID)
+	d.issueClientsByProject = map[string]*issues.Client{projectID: clientA}
+	d.runtimeStoresByProject = map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore}
+	runner.onNewSession = func(string) {
+		current, found, getErr := clientB.GetInteraction(ctx, request.ID)
+		if getErr != nil || !found {
+			t.Errorf("load racing interaction: found=%t err=%v", found, getErr)
+			return
+		}
+		terminalAt := current.UpdatedAt.Add(time.Second)
+		current.Disposition = &domain.InteractionDispositionAudit{Actor: "orchestrator", Reason: "superseded during recovery", CreatedAt: terminalAt}
+		terminal, transitionErr := current.Transition(domain.InteractionWithdrawn, current.Revision, terminalAt)
+		if transitionErr != nil {
+			t.Errorf("transition racing interaction: %v", transitionErr)
+			return
+		}
+		if updateErr := clientB.UpdateInteraction(ctx, terminal, current.Revision); updateErr != nil {
+			t.Errorf("persist racing interaction: %v", updateErr)
+		}
+	}
+
+	recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, projectID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered != 0 || cleaned != 1 || runner.sessions[request.SessionID] {
+		t.Fatalf("race result recovered=%d cleaned=%d sessions=%v", recovered, cleaned, runner.sessions)
+	}
+	if _, found, err := runtimeStore.GetAdvisorSession(ctx, projectID, request.ID); err != nil || found {
+		t.Fatalf("advisor reservation survived terminal race: found=%t err=%v", found, err)
+	}
+}
+
+func TestAdvisorRecoveryRetriesWhenNonTerminalMutationWinsCrossDaemonRace(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	clientA := issues.NewClient(repoDir, slog.Default())
+	clientB := issues.NewClient(repoDir, slog.Default())
+	issueID, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "recovery metadata race", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	request := domain.InteractionRequest{ID: "request-metadata-race", IssueID: issueID, DecisionKey: "choice", OrchestrationScope: "project", Question: "Which option?", Why: "Human judgment", Options: []domain.InteractionOption{{Key: "a", Label: "A"}}, Significance: domain.InteractionSignificanceRoutine, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose"}, State: domain.InteractionOpen, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := clientA.CreateInteraction(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	request.SessionID = advisorSessionID(request.ID)
+	request, err = request.Transition(domain.InteractionDiscussing, 1, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := clientA.UpdateInteraction(ctx, request, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	projectID := protocol.DefaultProjectID
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	runner := newSessionStartTmuxRunner()
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: clientA, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(), hub: publish.NewHub(16, 8, slog.Default()), revision: map[string]uint64{}}
+	projectID = d.canonicalProjectID(projectID)
+	d.issueClientsByProject = map[string]*issues.Client{projectID: clientA}
+	d.runtimeStoresByProject = map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore}
+	events, cancel := d.hub.Subscribe(projectID, 0)
+	defer cancel()
+	runner.onNewSession = func(string) {
+		current, found, getErr := clientB.GetInteraction(ctx, request.ID)
+		if getErr != nil || !found {
+			t.Errorf("load racing interaction: found=%t err=%v", found, getErr)
+			return
+		}
+		proposalAt := current.UpdatedAt.Add(time.Second)
+		current.Proposal = &domain.InteractionAnswerAudit{Answer: domain.InteractionAnswerPayload{SelectedOption: "a", Rationale: "Prefer option A", SignificanceRecommendation: current.Significance, Revision: current.Revision}, Actor: "advisor", CreatedAt: proposalAt}
+		proposed, transitionErr := current.Transition(domain.InteractionAnswerProposed, current.Revision, proposalAt)
+		if transitionErr != nil {
+			t.Errorf("transition racing interaction: %v", transitionErr)
+			return
+		}
+		if updateErr := clientB.UpdateInteraction(ctx, proposed, current.Revision); updateErr != nil {
+			t.Errorf("persist racing interaction: %v", updateErr)
+		}
+	}
+
+	recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, projectID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered != 1 || cleaned != 0 || !runner.sessions[request.SessionID] {
+		t.Fatalf("race result recovered=%d cleaned=%d sessions=%v", recovered, cleaned, runner.sessions)
+	}
+	current, found, err := clientA.GetInteraction(ctx, request.ID)
+	if err != nil || !found || current.State != domain.InteractionAnswerProposed || current.Recovery == nil || current.Recovery.SessionID != request.SessionID {
+		t.Fatalf("recovered request=%+v found=%t err=%v", current, found, err)
+	}
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case event := <-events:
+			if event.Event == protocol.EventInteractionRecovered {
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for interaction recovery event")
+		}
 	}
 }
 
@@ -238,14 +537,14 @@ func TestAdvisorContextPackShowsBudgetProvenanceAndExclusions(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	request := domain.InteractionRequest{ID: "request-context", IssueID: issueID, DecisionKey: "advisor-design", OrchestrationScope: "project", Question: "Which design?", Why: "Need a safe choice", Context: "Review internal/daemon/relevant.go and /etc/passwd; leaked ghp_123456789012345678901234", Options: []domain.InteractionOption{{Key: "bounded", Label: "Bounded"}}, Significance: domain.InteractionSignificanceMaterial, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose context design"}, Proposal: &domain.InteractionAnswerAudit{Answer: "Use the bounded design", Actor: "advisor", CreatedAt: now}, State: domain.InteractionAnswerProposed, Revision: 2, CreatedAt: now, UpdatedAt: now}
+	request := domain.InteractionRequest{ID: "request-context", IssueID: issueID, DecisionKey: "advisor-design", OrchestrationScope: "project", Question: "Which design?", Why: "Need a safe choice", Context: "Review internal/daemon/relevant.go and /etc/passwd; leaked ghp_123456789012345678901234", Options: []domain.InteractionOption{{Key: "bounded", Label: "Bounded"}}, Significance: domain.InteractionSignificanceMaterial, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose context design"}, Proposal: &domain.InteractionAnswerAudit{Answer: domain.InteractionAnswerPayload{SelectedOption: "bounded", Rationale: "Use the bounded design", Constraints: []string{"preserve provenance"}, SignificanceRecommendation: domain.InteractionSignificanceMaterial, Revision: 1}, Actor: "advisor", CreatedAt: now}, State: domain.InteractionAnswerProposed, Revision: 2, CreatedAt: now, UpdatedAt: now}
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client}
 	pack, err := d.buildAdvisorContextPack(ctx, protocol.DefaultProjectID, request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rendered := pack.Render()
-	for _, want := range []string{"Approximate token budget:", "request request-context", "State: answer_proposed", "Revision: 2", "Current proposal (advisor", "Use the bounded design", "issue " + issueID, "requirements " + issueID, "decisions " + issueID, "history " + issueID, "from_status=open, to_status=in_progress", "repository-file internal/daemon/relevant.go", "repository-path /etc/passwd: excluded: absolute paths are excluded", "repository-path config/credentials.json: excluded", "[REDACTED sensitive line]", "[REDACTED secret value]", "fr-advisor", decision.LocalID} {
+	for _, want := range []string{"Approximate token budget:", "request request-context", "State: answer_proposed", "Revision: 2", "Current proposal (advisor", "Selected option: bounded", "Use the bounded design", "Constraints: preserve provenance", "Significance recommendation: material", "Source revision: 1", "issue " + issueID, "requirements " + issueID, "decisions " + issueID, "history " + issueID, "from_status=open, to_status=in_progress", "repository-file internal/daemon/relevant.go", "repository-path /etc/passwd: excluded: absolute paths are excluded", "repository-path config/credentials.json: excluded", "[REDACTED sensitive line]", "[REDACTED secret value]", "fr-advisor", decision.LocalID} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("context pack missing %q:\n%s", want, rendered)
 		}

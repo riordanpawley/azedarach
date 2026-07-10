@@ -75,6 +75,27 @@ func TestAdvisorSessionMetadataSurvivesProjectionRoundTrip(t *testing.T) {
 	}
 }
 
+func TestListAdvisorSessionsScopesAndOrdersByProject(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), nil)
+	for _, requestID := range []string{"request-b", "request-a"} {
+		if _, _, err := store.AcquireAdvisorSession(ctx, "project-a", requestID, "issue", "advisor-"+requestID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := store.AcquireAdvisorSession(ctx, "project-b", "request-c", "issue", "advisor-request-c"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.ListAdvisorSessions(ctx, "project-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].RequestID != "request-a" || got[1].RequestID != "request-b" {
+		t.Fatalf("advisor sessions = %+v", got)
+	}
+}
+
 func TestEnsureAdvisorSessionSerializesLiveLaunchAcrossStores(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "runtime.db")

@@ -10,6 +10,7 @@ import (
 var (
 	ErrDuplicateUnresolvedDecision = errors.New("duplicate unresolved interaction decision")
 	ErrStaleInteractionRevision    = errors.New("stale interaction revision")
+	ErrInvalidInteractionAnswer    = errors.New("invalid interaction answer")
 )
 
 type InteractionState string
@@ -43,39 +44,87 @@ type InteractionDecisionPacket struct {
 	Recommendation string   `json:"recommendation,omitempty" msgpack:"recommendation,omitempty"`
 }
 
+// InteractionIssueFieldEffects is the complete set of issue mutations explicitly
+// approved in an answer. Nil fields are not approved and must remain unchanged.
+type InteractionIssueFieldEffects struct {
+	Title       *string `json:"title,omitempty" msgpack:"title,omitempty"`
+	Description *string `json:"description,omitempty" msgpack:"description,omitempty"`
+	Design      *string `json:"design,omitempty" msgpack:"design,omitempty"`
+	Acceptance  *string `json:"acceptance,omitempty" msgpack:"acceptance,omitempty"`
+	Priority    *int    `json:"priority,omitempty" msgpack:"priority,omitempty"`
+}
+
+// InteractionAnswerPayload is shared by advisor proposals and human final
+// answers. Revision identifies the request context the answer was authored
+// against; mutations must additionally pass the store's optimistic revision gate.
+type InteractionAnswerPayload struct {
+	SelectedOption             string                       `json:"selected_option" msgpack:"selected_option"`
+	Rationale                  string                       `json:"rationale" msgpack:"rationale"`
+	Constraints                []string                     `json:"constraints,omitempty" msgpack:"constraints,omitempty"`
+	ApprovedIssueFieldEffects  InteractionIssueFieldEffects `json:"approved_issue_field_effects,omitempty" msgpack:"approved_issue_field_effects,omitempty"`
+	SignificanceRecommendation InteractionSignificance      `json:"significance_recommendation" msgpack:"significance_recommendation"`
+	Revision                   int64                        `json:"revision" msgpack:"revision"`
+}
+
 type InteractionAnswerAudit struct {
-	Answer    string    `json:"answer" msgpack:"answer"`
-	Actor     string    `json:"actor" msgpack:"actor"`
+	Answer    InteractionAnswerPayload `json:"answer" msgpack:"answer"`
+	Actor     string                   `json:"actor" msgpack:"actor"`
+	CreatedAt time.Time                `json:"created_at" msgpack:"created_at"`
+}
+
+type InteractionDispositionAudit struct {
+	Actor         string    `json:"actor" msgpack:"actor"`
+	Reason        string    `json:"reason" msgpack:"reason"`
+	ReplacementID string    `json:"replacement_id,omitempty" msgpack:"replacement_id,omitempty"`
+	CreatedAt     time.Time `json:"created_at" msgpack:"created_at"`
+}
+
+type InteractionReminderAudit struct {
+	Sequence  int       `json:"sequence" msgpack:"sequence"`
 	CreatedAt time.Time `json:"created_at" msgpack:"created_at"`
 }
 
-type InteractionResolutionEffect struct {
-	Kind    string `json:"kind" msgpack:"kind"`
-	Target  string `json:"target,omitempty" msgpack:"target,omitempty"`
-	Summary string `json:"summary" msgpack:"summary"`
+type InteractionRecoveryAudit struct {
+	Actor       string    `json:"actor" msgpack:"actor"`
+	SessionID   string    `json:"session_id" msgpack:"session_id"`
+	RecoveredAt time.Time `json:"recovered_at" msgpack:"recovered_at"`
+}
+
+type InteractionStalenessPolicy struct {
+	StaleAfter       time.Duration
+	ReminderInterval time.Duration
+}
+
+type InteractionAgeView struct {
+	AgeSeconds     int64      `json:"age_seconds" msgpack:"age_seconds"`
+	Stale          bool       `json:"stale" msgpack:"stale"`
+	NextReminderAt *time.Time `json:"next_reminder_at,omitempty" msgpack:"next_reminder_at,omitempty"`
 }
 
 type InteractionRequest struct {
-	ID                 string                        `json:"id" msgpack:"id"`
-	IssueID            string                        `json:"issue_id" msgpack:"issue_id"`
-	DecisionKey        string                        `json:"decision_key" msgpack:"decision_key"`
-	OrchestrationScope string                        `json:"orchestration_scope" msgpack:"orchestration_scope"`
-	Question           string                        `json:"question" msgpack:"question"`
-	Why                string                        `json:"why" msgpack:"why"`
-	Options            []InteractionOption           `json:"options,omitempty" msgpack:"options,omitempty"`
-	RequiredDecisions  []string                      `json:"required_decisions,omitempty" msgpack:"required_decisions,omitempty"`
-	Context            string                        `json:"context,omitempty" msgpack:"context,omitempty"`
-	Significance       InteractionSignificance       `json:"significance" msgpack:"significance"`
-	Respondent         string                        `json:"respondent" msgpack:"respondent"`
-	DecisionPacket     InteractionDecisionPacket     `json:"decision_packet" msgpack:"decision_packet"`
-	Proposal           *InteractionAnswerAudit       `json:"proposal,omitempty" msgpack:"proposal,omitempty"`
-	FinalAnswer        *InteractionAnswerAudit       `json:"final_answer,omitempty" msgpack:"final_answer,omitempty"`
-	Effects            []InteractionResolutionEffect `json:"effects,omitempty" msgpack:"effects,omitempty"`
-	SessionID          string                        `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
-	State              InteractionState              `json:"state" msgpack:"state"`
-	Revision           int64                         `json:"revision" msgpack:"revision"`
-	CreatedAt          time.Time                     `json:"created_at" msgpack:"created_at"`
-	UpdatedAt          time.Time                     `json:"updated_at" msgpack:"updated_at"`
+	ID                 string                       `json:"id" msgpack:"id"`
+	IssueID            string                       `json:"issue_id" msgpack:"issue_id"`
+	DecisionKey        string                       `json:"decision_key" msgpack:"decision_key"`
+	OrchestrationScope string                       `json:"orchestration_scope" msgpack:"orchestration_scope"`
+	Question           string                       `json:"question" msgpack:"question"`
+	Why                string                       `json:"why" msgpack:"why"`
+	Options            []InteractionOption          `json:"options,omitempty" msgpack:"options,omitempty"`
+	RequiredDecisions  []string                     `json:"required_decisions,omitempty" msgpack:"required_decisions,omitempty"`
+	Context            string                       `json:"context,omitempty" msgpack:"context,omitempty"`
+	Significance       InteractionSignificance      `json:"significance" msgpack:"significance"`
+	Respondent         string                       `json:"respondent" msgpack:"respondent"`
+	DecisionPacket     InteractionDecisionPacket    `json:"decision_packet" msgpack:"decision_packet"`
+	Proposal           *InteractionAnswerAudit      `json:"proposal,omitempty" msgpack:"proposal,omitempty"`
+	FinalAnswer        *InteractionAnswerAudit      `json:"final_answer,omitempty" msgpack:"final_answer,omitempty"`
+	SessionID          string                       `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
+	StaleAt            *time.Time                   `json:"stale_at,omitempty" msgpack:"stale_at,omitempty"`
+	Reminders          []InteractionReminderAudit   `json:"reminders,omitempty" msgpack:"reminders,omitempty"`
+	Disposition        *InteractionDispositionAudit `json:"disposition,omitempty" msgpack:"disposition,omitempty"`
+	Recovery           *InteractionRecoveryAudit    `json:"recovery,omitempty" msgpack:"recovery,omitempty"`
+	State              InteractionState             `json:"state" msgpack:"state"`
+	Revision           int64                        `json:"revision" msgpack:"revision"`
+	CreatedAt          time.Time                    `json:"created_at" msgpack:"created_at"`
+	UpdatedAt          time.Time                    `json:"updated_at" msgpack:"updated_at"`
 }
 
 func (r InteractionRequest) Unresolved() bool {
@@ -128,11 +177,6 @@ func (r InteractionRequest) Validate() error {
 			return fmt.Errorf("interaction required decision must not be empty")
 		}
 	}
-	for _, effect := range r.Effects {
-		if strings.TrimSpace(effect.Kind) == "" || strings.TrimSpace(effect.Summary) == "" {
-			return fmt.Errorf("interaction resolution effect kind and summary are required")
-		}
-	}
 	if strings.TrimSpace(r.DecisionPacket.Summary) == "" {
 		return fmt.Errorf("interaction decision packet summary is required")
 	}
@@ -158,7 +202,95 @@ func (r InteractionRequest) Validate() error {
 	if r.State != InteractionResolved && r.FinalAnswer != nil {
 		return fmt.Errorf("interaction final answer requires resolved state")
 	}
+	if r.StaleAt != nil && (r.StaleAt.Before(r.CreatedAt) || r.StaleAt.After(r.UpdatedAt)) {
+		return fmt.Errorf("interaction stale audit is invalid")
+	}
+	for i, reminder := range r.Reminders {
+		if reminder.Sequence != i+1 || reminder.CreatedAt.Before(r.CreatedAt) || reminder.CreatedAt.After(r.UpdatedAt) {
+			return fmt.Errorf("interaction reminder audit is invalid")
+		}
+		if i > 0 && !reminder.CreatedAt.After(r.Reminders[i-1].CreatedAt) {
+			return fmt.Errorf("interaction reminders must be strictly ordered")
+		}
+	}
+	if r.State == InteractionWithdrawn || r.State == InteractionSuperseded {
+		if r.Disposition == nil || strings.TrimSpace(r.Disposition.Actor) == "" || strings.TrimSpace(r.Disposition.Reason) == "" || r.Disposition.CreatedAt.Before(r.CreatedAt) || r.Disposition.CreatedAt.After(r.UpdatedAt) {
+			return fmt.Errorf("interaction disposition audit is required")
+		}
+		if r.State == InteractionSuperseded && strings.TrimSpace(r.Disposition.ReplacementID) == "" {
+			return fmt.Errorf("superseded interaction requires replacement id")
+		}
+	} else if r.Disposition != nil {
+		return fmt.Errorf("interaction disposition requires withdrawn or superseded state")
+	}
+	if r.Recovery != nil && (strings.TrimSpace(r.Recovery.Actor) == "" || strings.TrimSpace(r.Recovery.SessionID) == "" || r.Recovery.RecoveredAt.Before(r.CreatedAt) || r.Recovery.RecoveredAt.After(r.UpdatedAt)) {
+		return fmt.Errorf("interaction recovery audit is invalid")
+	}
 	return nil
+}
+
+func (r InteractionRequest) AgeView(now time.Time, policy InteractionStalenessPolicy) InteractionAgeView {
+	if now.Before(r.CreatedAt) {
+		now = r.CreatedAt
+	}
+	view := InteractionAgeView{AgeSeconds: int64(now.Sub(r.CreatedAt) / time.Second), Stale: r.Unresolved() && r.StaleAt != nil}
+	if !r.Unresolved() || policy.ReminderInterval <= 0 {
+		return view
+	}
+	base := r.CreatedAt.Add(policy.StaleAfter)
+	if len(r.Reminders) > 0 {
+		base = r.Reminders[len(r.Reminders)-1].CreatedAt.Add(policy.ReminderInterval)
+	}
+	view.NextReminderAt = &base
+	return view
+}
+
+// ReconcileStaleness returns a revision-safe metadata mutation. Staleness and
+// reminders never change decision state or issue lifecycle.
+func (r InteractionRequest) ReconcileStaleness(now time.Time, policy InteractionStalenessPolicy) (InteractionRequest, bool, bool, error) {
+	if !r.Unresolved() || policy.StaleAfter <= 0 || policy.ReminderInterval <= 0 || now.Before(r.CreatedAt) {
+		return r, false, false, nil
+	}
+	staleDue := !now.Before(r.CreatedAt.Add(policy.StaleAfter))
+	if !staleDue {
+		return r, false, false, nil
+	}
+	marked, reminded := false, false
+	if r.StaleAt == nil {
+		at := now
+		r.StaleAt, marked = &at, true
+	}
+	reminderDue := r.CreatedAt.Add(policy.StaleAfter)
+	if len(r.Reminders) > 0 {
+		reminderDue = r.Reminders[len(r.Reminders)-1].CreatedAt.Add(policy.ReminderInterval)
+	}
+	if !now.Before(reminderDue) {
+		r.Reminders = append(r.Reminders, InteractionReminderAudit{Sequence: len(r.Reminders) + 1, CreatedAt: now})
+		reminded = true
+	}
+	if !marked && !reminded {
+		return r, false, false, nil
+	}
+	r.Revision++
+	r.UpdatedAt = now
+	if err := r.Validate(); err != nil {
+		return InteractionRequest{}, false, false, err
+	}
+	return r, marked, reminded, nil
+}
+
+func (r InteractionRequest) Recover(actor, sessionID string, expectedRevision int64, now time.Time) (InteractionRequest, error) {
+	if expectedRevision != r.Revision || !r.Unresolved() || strings.TrimSpace(actor) == "" || strings.TrimSpace(sessionID) == "" || now.Before(r.UpdatedAt) {
+		return InteractionRequest{}, fmt.Errorf("%w: invalid interaction recovery", ErrStaleInteractionRevision)
+	}
+	r.SessionID = strings.TrimSpace(sessionID)
+	r.Recovery = &InteractionRecoveryAudit{Actor: strings.TrimSpace(actor), SessionID: r.SessionID, RecoveredAt: now}
+	r.Revision++
+	r.UpdatedAt = now
+	if err := r.Validate(); err != nil {
+		return InteractionRequest{}, err
+	}
+	return r, nil
 }
 
 func (r InteractionRequest) Transition(next InteractionState, expectedRevision int64, at time.Time) (InteractionRequest, error) {
@@ -237,11 +369,58 @@ func interactionTransitionAllowed(from, to InteractionState) bool {
 }
 
 func (r InteractionRequest) validateAnswerAudit(name string, audit *InteractionAnswerAudit) error {
-	if audit == nil || strings.TrimSpace(audit.Answer) == "" || strings.TrimSpace(audit.Actor) == "" || audit.CreatedAt.IsZero() {
+	if audit == nil || strings.TrimSpace(audit.Actor) == "" || audit.CreatedAt.IsZero() {
 		return fmt.Errorf("interaction %s audit is required", name)
 	}
 	if audit.CreatedAt.Before(r.CreatedAt) || audit.CreatedAt.After(r.UpdatedAt) {
 		return fmt.Errorf("interaction %s timestamp is outside the request audit window", name)
+	}
+	if err := r.validateAnswerPayload(name, audit.Answer); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r InteractionRequest) validateAnswerPayload(name string, answer InteractionAnswerPayload) error {
+	selected := strings.TrimSpace(answer.SelectedOption)
+	if selected == "" || strings.TrimSpace(answer.Rationale) == "" {
+		return fmt.Errorf("%w: interaction %s selected option and rationale are required", ErrInvalidInteractionAnswer, name)
+	}
+	if answer.Revision < 1 || answer.Revision >= r.Revision {
+		return fmt.Errorf("%w: interaction %s revision %d is outside the request audit window", ErrInvalidInteractionAnswer, name, answer.Revision)
+	}
+	if answer.SignificanceRecommendation != InteractionSignificanceRoutine && answer.SignificanceRecommendation != InteractionSignificanceMaterial && answer.SignificanceRecommendation != InteractionSignificanceCritical {
+		return fmt.Errorf("%w: interaction %s significance recommendation is invalid: %s", ErrInvalidInteractionAnswer, name, answer.SignificanceRecommendation)
+	}
+	if len(r.Options) > 0 {
+		found := false
+		for _, option := range r.Options {
+			if option.Key == selected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("%w: interaction %s selected option is not offered: %s", ErrInvalidInteractionAnswer, name, selected)
+		}
+	}
+	seenConstraints := make(map[string]struct{}, len(answer.Constraints))
+	for _, constraint := range answer.Constraints {
+		constraint = strings.TrimSpace(constraint)
+		if constraint == "" {
+			return fmt.Errorf("%w: interaction %s constraint must not be empty", ErrInvalidInteractionAnswer, name)
+		}
+		if _, exists := seenConstraints[constraint]; exists {
+			return fmt.Errorf("%w: interaction %s constraint is duplicated: %s", ErrInvalidInteractionAnswer, name, constraint)
+		}
+		seenConstraints[constraint] = struct{}{}
+	}
+	effects := answer.ApprovedIssueFieldEffects
+	if effects.Title != nil && strings.TrimSpace(*effects.Title) == "" {
+		return fmt.Errorf("%w: interaction %s approved issue title must be non-empty", ErrInvalidInteractionAnswer, name)
+	}
+	if effects.Priority != nil && (*effects.Priority < 0 || *effects.Priority > 4) {
+		return fmt.Errorf("%w: interaction %s approved issue priority is invalid", ErrInvalidInteractionAnswer, name)
 	}
 	return nil
 }
