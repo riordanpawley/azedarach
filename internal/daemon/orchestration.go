@@ -112,10 +112,15 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		return snapshot, nil
 	}
 
-	tasks, err := a.daemon.loadTaskGraphDomainTasks(ctx, projectID)
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return protocol.OrchestrationSnapshot{}, fmt.Errorf("issue store unavailable")
+	}
+	tasks, err := issueClient.ListGraphReadinessWithRuntime(ctx, projectID, "", limit)
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("load project orchestration projection: %w", err)
 	}
+	tasks = a.daemon.enrichTasksWithSessionState(ctx, projectID, tasks)
 	roots := make([]domain.Task, 0)
 	tasksByID := make(map[string]domain.Task, len(tasks))
 	for _, task := range tasks {
@@ -125,6 +130,17 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		}
 	}
 	snapshot.Health = orchestrationBoardHealth(tasks, tasksByID, limit, a.openIssueLimit())
+	openIssueCount, err := issueClient.CountOpenOrchestrationIssues(ctx)
+	if err != nil {
+		return protocol.OrchestrationSnapshot{}, fmt.Errorf("count project orchestration issues: %w", err)
+	}
+	snapshot.Health.OpenIssueCount = openIssueCount
+	if openIssueCount > snapshot.Health.OpenIssueLimit {
+		snapshot.Health.Diagnostics = append(snapshot.Health.Diagnostics, fmt.Sprintf("open issue count %d exceeds refusal threshold %d", openIssueCount, snapshot.Health.OpenIssueLimit))
+		sort.Strings(snapshot.Health.Diagnostics)
+		snapshot.Health.Diagnostics = uniqueStrings(snapshot.Health.Diagnostics)
+		snapshot.Health.Healthy = false
+	}
 	for _, task := range tasks {
 		if task.Status == domain.StatusDone {
 			continue
@@ -176,18 +192,23 @@ func explainOrchestrationCandidates(snapshot *protocol.OrchestrationSnapshot) {
 	}
 	for i := range snapshot.Candidates {
 		candidate := &snapshot.Candidates[i]
-		if candidate.Classification == "malformed" || candidate.Classification == "owned-elsewhere" {
+		if candidate.Classification == "malformed" || candidate.Classification == string(domain.OrchestrationCandidateOwnedElsewhere) {
 			continue
 		}
 		switch {
-		case runnable[candidate.IssueID]:
-			candidate.Included, candidate.Classification, candidate.Reason = true, "runnable", "included: ready for worker start"
-		case active[candidate.IssueID]:
-			candidate.Included, candidate.Classification, candidate.Reason = false, "active", "excluded: session already active"
 		case snapshot.Blocked[candidate.IssueID] != "":
-			candidate.Included, candidate.Classification, candidate.Reason = false, "blocked", "excluded: "+snapshot.Blocked[candidate.IssueID]
+			candidate.Included, candidate.Eligible, candidate.Classification, candidate.Reason = false, false, string(domain.OrchestrationCandidateBlocked), "excluded: "+snapshot.Blocked[candidate.IssueID]
+			candidate.ExclusionReasons = append(candidate.ExclusionReasons, snapshot.Blocked[candidate.IssueID])
+		case candidate.Classification != string(domain.OrchestrationCandidateOpen):
+			continue
+		case active[candidate.IssueID]:
+			candidate.Included, candidate.Eligible, candidate.Classification, candidate.Reason = false, false, string(domain.OrchestrationCandidateActive), "excluded: session already active"
+			candidate.ExclusionReasons = append(candidate.ExclusionReasons, "session-already-active")
+		case runnable[candidate.IssueID]:
+			candidate.Included, candidate.Eligible, candidate.Classification, candidate.Reason = true, true, "runnable", "included: ready for worker start"
 		default:
-			candidate.Included, candidate.Classification, candidate.Reason = false, "not-runnable", "excluded: not ready in current graph projection"
+			candidate.Included, candidate.Eligible, candidate.Classification, candidate.Reason = false, false, "not-runnable", "excluded: not ready in current graph projection"
+			candidate.ExclusionReasons = append(candidate.ExclusionReasons, "not-ready-in-current-graph")
 		}
 	}
 }
@@ -390,19 +411,17 @@ func orchestrationBoardHealth(tasks []domain.Task, byID map[string]domain.Task, 
 }
 
 func orchestrationCandidateForTask(task domain.Task, actorID string, now time.Time, diagnostics []string) protocol.OrchestrationCandidate {
-	c := protocol.OrchestrationCandidate{IssueID: task.ID.String(), Classification: "open", Reason: "eligible for bounded readiness inspection", Included: true}
-	if task.ParentID != nil && !task.ParentID.IsZero() {
-		c.Classification, c.Reason = "child", "included through root graph readiness"
-	}
-	if task.Status == domain.StatusInProgress || task.Status == domain.StatusInReview {
-		c.Included, c.Classification, c.Reason = false, "active", "already active or review-ready"
-	}
-	if task.Ownership != nil && task.Ownership.BlocksActor(actorID, now) {
-		c.Included, c.Classification, c.Reason = false, "owned-elsewhere", "durable ownership already exists"
+	assessment := domain.AssessOrchestrationCandidate(task, actorID, now, nil)
+	c := protocol.OrchestrationCandidate{IssueID: task.ID.String(), Included: assessment.Eligible, Eligible: assessment.Eligible, Sufficient: assessment.Sufficient, Classification: string(assessment.Classification), Sufficiency: assessment.Sufficiency, ExclusionReasons: assessment.ExclusionReasons}
+	if assessment.Eligible {
+		c.Reason = "included: eligible for bounded readiness inspection"
+	} else {
+		c.Reason = "excluded: " + strings.Join(assessment.ExclusionReasons, "; ")
 	}
 	for _, diagnostic := range diagnostics {
 		if strings.Contains(diagnostic, ": "+task.ID.String()+" ") {
-			c.Included, c.Classification, c.Reason = false, "malformed", diagnostic
+			c.Included, c.Eligible, c.Classification, c.Reason = false, false, "malformed", diagnostic
+			c.ExclusionReasons = append(c.ExclusionReasons, diagnostic)
 			break
 		}
 	}

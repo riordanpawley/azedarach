@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -1432,6 +1433,27 @@ func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
 	require.Len(t, taskByID[grandchildID].Dependencies, 1)
 	assert.Equal(t, blockerID, taskByID[grandchildID].Dependencies[0].ID.String())
 	assert.Equal(t, domain.DependencyBlocks, taskByID[grandchildID].Dependencies[0].Type)
+}
+
+func TestClient_ListGraphReadinessWithRuntimeBoundsProjectCandidatesAndCountsAllOpen(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	for i := 0; i < 12; i++ {
+		_, err := client.Create(ctx, CreateTaskParams{
+			Title:    fmt.Sprintf("Candidate %02d", i),
+			Type:     domain.TypeTask,
+			Priority: domain.P1,
+			Status:   domain.StatusOpen,
+		})
+		require.NoError(t, err)
+	}
+
+	tasks, err := client.ListGraphReadinessWithRuntime(ctx, "proj", "", 5)
+	require.NoError(t, err)
+	require.Len(t, tasks, 5)
+	count, err := client.CountOpenOrchestrationIssues(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 12, count)
 }
 
 func TestClient_ListParentChildSubtreeWithRuntimeScopesToTargetClosure(t *testing.T) {
