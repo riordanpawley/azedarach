@@ -480,6 +480,8 @@ func TestAdvisorExactLaunchDoesNotSourceStartupFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.RemoveAll(tmuxTmpDir) })
+			tmuxSocket := filepath.Join(tmuxTmpDir, "server.sock")
+			tmuxRunner := &isolatedTmuxTestRunner{tmuxPath: tmuxPath, socketPath: tmuxSocket}
 			sideEffect := filepath.Join(t.TempDir(), shellCase.name+"-startup-side-effect")
 			startupFile := filepath.Join(homeDir, "."+shellCase.name+"rc")
 			startup := fmt.Sprintf("printf sourced > %s\n", singleQuoteForShell(sideEffect))
@@ -493,14 +495,12 @@ func TestAdvisorExactLaunchDoesNotSourceStartupFiles(t *testing.T) {
 			t.Setenv("BASH_ENV", startupFile)
 			t.Setenv("ENV", startupFile)
 			t.Setenv("TMUX", "")
-			t.Setenv("TMUX_TMPDIR", tmuxTmpDir)
 			t.Setenv("AZEDARACH_ALLOW_REAL_TMUX_IN_TESTS", "1")
 
-			serverCommand := exec.Command(tmuxPath, "-f", "/dev/null", "new-session", "-d", "-s", "keeper", "sleep", "30")
-			if output, err := serverCommand.CombinedOutput(); err != nil {
+			if output, err := tmuxRunner.run(context.Background(), "-f", "/dev/null", "new-session", "-d", "-s", "keeper", "sleep", "30"); err != nil {
 				t.Fatalf("start isolated tmux server: %v\n%s", err, output)
 			}
-			defer exec.Command(tmuxPath, "kill-server").Run() //nolint:errcheck // best-effort isolated test cleanup
+			t.Cleanup(func() { _, _ = tmuxRunner.run(context.Background(), "kill-server") })
 			for _, args := range [][]string{
 				{"set-option", "-g", "default-shell", shellCase.path},
 				{"set-option", "-g", "remain-on-exit", "on"},
@@ -509,7 +509,7 @@ func TestAdvisorExactLaunchDoesNotSourceStartupFiles(t *testing.T) {
 				{"set-environment", "-g", "BASH_ENV", startupFile},
 				{"set-environment", "-g", "ENV", startupFile},
 			} {
-				if output, err := exec.Command(tmuxPath, args...).CombinedOutput(); err != nil {
+				if output, err := tmuxRunner.run(context.Background(), args...); err != nil {
 					t.Fatalf("configure isolated tmux server with %v: %v\n%s", args, err, output)
 				}
 			}
@@ -526,7 +526,7 @@ func TestAdvisorExactLaunchDoesNotSourceStartupFiles(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					client := tmux.NewClient(&tmux.ExecRunner{}, slog.Default())
+					client := tmux.NewClient(tmuxRunner, slog.Default())
 					sessionID := "advisor-" + shellCase.name + "-" + tool
 					if err := client.NewSessionWithArgs(context.Background(), sessionID, repoDir, command.Executable, command.Args...); err != nil {
 						t.Fatalf("start exact %s advisor launch: %v", tool, err)
@@ -538,8 +538,19 @@ func TestAdvisorExactLaunchDoesNotSourceStartupFiles(t *testing.T) {
 							break
 						}
 						if time.Now().After(deadline) {
-							output, _ := exec.Command(tmuxPath, "capture-pane", "-p", "-t", sessionID).CombinedOutput()
+							output, _ := tmuxRunner.run(context.Background(), "capture-pane", "-p", "-t", sessionID)
 							t.Fatalf("trusted %s executable was not launched; pane output:\n%s", tool, output)
+						}
+						time.Sleep(10 * time.Millisecond)
+					}
+					exitDeadline := time.Now().Add(10 * time.Second)
+					for {
+						dead, paneErr := tmuxRunner.run(context.Background(), "display-message", "-p", "-t", sessionID, "#{pane_dead}")
+						if paneErr == nil && strings.TrimSpace(dead) == "1" {
+							break
+						}
+						if time.Now().After(exitDeadline) {
+							t.Fatalf("trusted %s executable did not exit before cleanup: %v (%q)", tool, paneErr, dead)
 						}
 						time.Sleep(10 * time.Millisecond)
 					}
@@ -550,6 +561,21 @@ func TestAdvisorExactLaunchDoesNotSourceStartupFiles(t *testing.T) {
 			}
 		})
 	}
+}
+
+type isolatedTmuxTestRunner struct {
+	tmuxPath   string
+	socketPath string
+}
+
+func (r *isolatedTmuxTestRunner) Run(ctx context.Context, args ...string) (string, error) {
+	return r.run(ctx, args...)
+}
+
+func (r *isolatedTmuxTestRunner) run(ctx context.Context, args ...string) (string, error) {
+	commandArgs := append([]string{"-S", r.socketPath}, args...)
+	output, err := exec.CommandContext(ctx, r.tmuxPath, commandArgs...).CombinedOutput()
+	return string(output), err
 }
 
 func TestOpenCodeAdvisorExactLaunchIgnoresInvalidProjectAndInheritedConfig(t *testing.T) {
