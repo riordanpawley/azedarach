@@ -3051,6 +3051,29 @@ func TestHorizontalColumnViewportFollowsCursorOnNarrowWidth(t *testing.T) {
 	}
 }
 
+func TestHorizontalColumnViewportFollowsCursorOnMediumWidth(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+
+	columns := m.buildColumns()
+	if got := m.boardVisibleColumnCount(len(columns)); got != 3 {
+		t.Fatalf("visible columns at medium width = %d, want 3", got)
+	}
+
+	m.nav.SelectTask("az-1", 0)
+	m.ensureCursorVisible(columns)
+	m.nav.SelectTask("az-5", 3)
+	m.ensureCursorVisible(columns)
+
+	if m.columnViewportStart != 1 {
+		t.Fatalf("viewport start after selecting fourth column = %d, want 1", m.columnViewportStart)
+	}
+	start, end := m.boardVisibleColumnRange(columns)
+	if start != 1 || end != 4 {
+		t.Fatalf("visible range after selecting fourth column = [%d,%d), want [1,4)", start, end)
+	}
+}
+
 func TestRenderBoardView_NarrowWidthShowsVisibleColumnWindow(t *testing.T) {
 	m := newTestModel()
 	m.width = 80

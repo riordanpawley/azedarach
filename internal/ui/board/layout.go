@@ -5,8 +5,7 @@ const (
 	ColumnHeaderLines   = 1
 	ColumnContentInsetX = 2
 	DefaultColumnCount  = 4
-	MinVisibleColumns   = 2
-	MinColumnWidth      = 30
+	MinColumnWidth      = 40
 	SingleColumnWidth   = 72
 )
 
@@ -41,13 +40,9 @@ func VisibleColumnCount(totalColumns int, boardWidth int) int {
 	if boardWidth <= SingleColumnWidth {
 		return 1
 	}
-	if totalColumns <= MinVisibleColumns {
-		return totalColumns
-	}
-
 	visible := boardWidth / MinColumnWidth
-	if visible < MinVisibleColumns {
-		visible = MinVisibleColumns
+	if visible < 1 {
+		visible = 1
 	}
 	if visible > totalColumns {
 		visible = totalColumns
