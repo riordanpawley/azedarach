@@ -255,9 +255,29 @@ func (c *Client) CapturePane(ctx context.Context, name string, lines int) (strin
 	if err != nil {
 		return "", &domain.TmuxError{Op: "capture-pane", Session: name, Err: err}
 	}
+	out = tailPaneLines(out, lines)
 
 	c.logger.Debug("tmux pane captured", "name", name, "bytes", len(out))
 	return out, nil
+}
+
+// tailPaneLines enforces CapturePane's line-count contract. tmux interprets
+// -S -N as N history lines above the visible pane, so its raw output can
+// contain more than N lines once the visible pane is included.
+func tailPaneLines(output string, limit int) string {
+	if output == "" || limit <= 0 {
+		return output
+	}
+	hasTrailingNewline := strings.HasSuffix(output, "\n")
+	logicalLines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
+	if len(logicalLines) <= limit {
+		return output
+	}
+	output = strings.Join(logicalLines[len(logicalLines)-limit:], "\n")
+	if hasTrailingNewline {
+		output += "\n"
+	}
+	return output
 }
 
 // ListSessions returns a list of all tmux session names

@@ -75,6 +75,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	CommandSessionMessage:                  {Command: CommandSessionMessage, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
 	CommandSessionResolveConflict:          {Command: CommandSessionResolveConflict, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
 	CommandSessionRestartAll:               {Command: CommandSessionRestartAll, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
+	CommandSessionCapture:                  {Command: CommandSessionCapture, RequiresProjectID: true},
 	commandSessionStatus:                   {Command: commandSessionStatus, RequiresProjectID: true},
 	commandSessionRecover:                  {Command: commandSessionRecover, RequiresProjectID: true},
 	commandRuntimeReconcile:                {Command: commandRuntimeReconcile, RequiresProjectID: true},

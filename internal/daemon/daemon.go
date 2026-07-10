@@ -833,6 +833,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleSessionResolveConflict(ctx, req)
 	case protocol.CommandSessionRestartAll:
 		return d.handleSessionRestartAll(ctx, req)
+	case protocol.CommandSessionCapture:
+		return d.handleSessionCapture(ctx, req)
 	case "session.status":
 		return d.handleSessionStatus(ctx, req)
 	case "session.recover":

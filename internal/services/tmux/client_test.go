@@ -381,6 +381,20 @@ func TestClient_CapturePane(t *testing.T) {
 			wantOutput: "output here",
 		},
 		{
+			name:       "bounds output that includes visible pane",
+			session:    "test-session",
+			lines:      3,
+			output:     "line1\nline2\nline3\nline4\nline5\n",
+			wantOutput: "line3\nline4\nline5\n",
+		},
+		{
+			name:       "bounds output without trailing newline",
+			session:    "test-session",
+			lines:      2,
+			output:     "line1\nline2\nline3",
+			wantOutput: "line2\nline3",
+		},
+		{
 			name:    "runner error",
 			session: "test-session",
 			lines:   10,
