@@ -33,7 +33,7 @@ func Render(
 		opt(&cfg)
 	}
 
-	columnWidth := width / len(columns)
+	layout := NewVisibleColumnLayout(len(columns), width)
 
 	columnStrings := make([]string, len(columns))
 	for i, col := range columns {
@@ -58,7 +58,7 @@ func Render(
 			showPhases,
 			jumpLabelsByTask,
 			cfg.mergeCandidates,
-			columnWidth,
+			layout.WidthForLocalColumn(i),
 			height,
 			s,
 		)

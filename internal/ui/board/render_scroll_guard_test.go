@@ -88,7 +88,7 @@ func TestRender_UsesViewportOnlyOnActiveColumn(t *testing.T) {
 
 	width := 80
 	height := 12
-	columnWidth := width / len(columns)
+	columnWidth := NewVisibleColumnLayout(len(columns), width).WidthForLocalColumn(0)
 	linesPerCard := CardLineFootprint(s, CardContentWidth(columnWidth))
 	availableHeight := ColumnBodyHeight(height)
 

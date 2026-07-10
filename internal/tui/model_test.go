@@ -250,7 +250,7 @@ func TestBoardViewportSupportsOrchestrationViewColumns(t *testing.T) {
 	lastColumn := len(columns) - 1
 	m.nav.SelectTask(tasks[lastColumn].ID.String(), lastColumn)
 	m.ensureCursorVisible(columns)
-	start, end := m.boardVisibleColumnRange(columns)
+	start, end := m.boardColumnLayout(columns).Range()
 	if got, want := start, 6; got != want {
 		t.Fatalf("visible column start=%d want=%d", got, want)
 	}
@@ -1800,8 +1800,7 @@ func TestRuntimeSignalRefreshTasks_BoardUsesRenderedWindow(t *testing.T) {
 	columns := m.buildColumns()
 	openColumn := columns[domain.StatusOpen.Column()].Tasks
 	bodyHeight := board.ColumnBodyHeight(board.BoardContentHeight(m.height))
-	columnCount := m.boardVisibleColumnCount(len(columns))
-	columnWidth := m.width / columnCount
+	columnWidth := m.boardColumnLayout(columns).WidthForColumn(0)
 	linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
 	start, end := board.VisibleTaskWindow(len(openColumn), m.viewportStarts[0], bodyHeight, linesPerCard)
 
@@ -2859,11 +2858,7 @@ func TestNormalModeUpFromBottom_DoesNotTopSnapViewport(t *testing.T) {
 
 	columns := m.buildColumns()
 	availableHeight := board.ColumnBodyHeight(board.BoardContentHeight(m.height))
-	columnCount := board.VisibleColumnCount(len(columns), m.width)
-	if columnCount < 1 {
-		columnCount = board.DefaultColumnCount
-	}
-	columnWidth := m.width / columnCount
+	columnWidth := m.boardColumnLayout(columns).WidthForColumn(0)
 	linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
 	initialStart, initialEnd := board.VisibleTaskWindow(len(columns[0].Tasks), m.viewportStarts[0], availableHeight, linesPerCard)
 	if initialEnd-initialStart < 2 {
@@ -2907,11 +2902,7 @@ func TestNormalModeDown_KeepsCursorVisibleWithIndicators(t *testing.T) {
 	}
 
 	availableHeight := board.ColumnBodyHeight(board.BoardContentHeight(m.height))
-	columnCount := board.VisibleColumnCount(len(columns), m.width)
-	if columnCount < 1 {
-		columnCount = board.DefaultColumnCount
-	}
-	columnWidth := m.width / columnCount
+	columnWidth := m.boardColumnLayout(columns).WidthForColumn(0)
 	linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
 
 	start := len(columns[0].Tasks) / 2
@@ -2961,7 +2952,7 @@ func TestNormalModeDown_NarrowShortSingleColumnKeepsFinalIssueVisible(t *testing
 	}
 
 	columns := m.buildColumns()
-	columnCount := m.boardVisibleColumnCount(len(columns))
+	columnCount := m.boardColumnLayout(columns).VisibleCount
 	if columnCount != 1 {
 		t.Fatalf("expected single-column board at width %d, got %d columns", m.width, columnCount)
 	}
@@ -3056,7 +3047,7 @@ func TestHorizontalColumnViewportFollowsCursorOnMediumWidth(t *testing.T) {
 	m.width = 120
 
 	columns := m.buildColumns()
-	if got := m.boardVisibleColumnCount(len(columns)); got != 3 {
+	if got := m.boardColumnLayout(columns).VisibleCount; got != 3 {
 		t.Fatalf("visible columns at medium width = %d, want 3", got)
 	}
 
@@ -3068,7 +3059,7 @@ func TestHorizontalColumnViewportFollowsCursorOnMediumWidth(t *testing.T) {
 	if m.columnViewportStart != 1 {
 		t.Fatalf("viewport start after selecting fourth column = %d, want 1", m.columnViewportStart)
 	}
-	start, end := m.boardVisibleColumnRange(columns)
+	start, end := m.boardColumnLayout(columns).Range()
 	if start != 1 || end != 4 {
 		t.Fatalf("visible range after selecting fourth column = [%d,%d), want [1,4)", start, end)
 	}
@@ -4782,7 +4773,7 @@ func TestIssuesLoadedKeepsSelectedIssueInViewportAfterResort(t *testing.T) {
 	if availableHeight < 1 {
 		availableHeight = 1
 	}
-	columnCount := newModel.boardVisibleColumnCount(len(columns))
+	columnCount := newModel.boardColumnLayout(columns).VisibleCount
 	if columnCount < 1 {
 		columnCount = board.DefaultColumnCount
 	}
