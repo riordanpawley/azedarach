@@ -376,11 +376,18 @@ func runtimeSignalAgentLifecycle(cmd protocol.RuntimeSignalIngestCommandBody) (s
 		return daemonhandlers.CommandSessionPause, "idle", true
 	case "waiting":
 		return daemonhandlers.CommandSessionPause, "waiting", true
+	case "error":
+		return daemonhandlers.CommandSessionPause, "error", true
 	}
 	switch strings.TrimSpace(cmd.Event) {
 	case "idle_prompt", "permission_request":
 		return daemonhandlers.CommandSessionPause, "waiting", true
-	case "stop", "subagent_stop", "session_end":
+	case "session_end":
+		if cmd.ExitStatus != nil && *cmd.ExitStatus != 0 {
+			return daemonhandlers.CommandSessionPause, "error", true
+		}
+		return daemonhandlers.CommandSessionPause, "idle", true
+	case "stop", "subagent_stop":
 		return daemonhandlers.CommandSessionPause, "idle", true
 	case "session_start", "subagent_start", "user_prompt_submit", "pre_tool_use":
 		return daemonhandlers.CommandSessionResume, "busy", true

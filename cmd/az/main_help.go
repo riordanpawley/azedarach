@@ -264,9 +264,9 @@ func printHelpForPath(path []string) bool {
 	case "ai migrate":
 		cli.PrintAIMigrateUsage()
 	case "ai hook":
-		fmt.Println("Usage: az ai hook run --agent=<claude|codex> [--json] <event>")
+		fmt.Println("Usage: az ai hook run --agent=<claude|codex|opencode> [--json] <event>")
 	case "ai hook run":
-		fmt.Println("Usage: az ai hook run --agent=<claude|codex> [--json] <event>")
+		fmt.Println("Usage: az ai hook run --agent=<claude|codex|opencode> [--json] <event>")
 	case "tmux":
 		cli.PrintTmuxUsage()
 	case "tmux selector":

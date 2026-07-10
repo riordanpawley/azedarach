@@ -30,7 +30,7 @@ func TestMaybePrintCommandHelpUsesSpecificUsage(t *testing.T) {
 		{name: "githooks leaf", args: []string{"githooks", "hook", "--help"}, want: "Usage: az githooks hook --hook <name>"},
 		{name: "dev leaf", args: []string{"dev", "start", "--help"}, want: "Usage: az dev start <issue-id> [--project-dir <dir>] [--json] [--verbose]"},
 		{name: "project nested leaf", args: []string{"project", "scripts", "status", "--help"}, want: "Usage: az project scripts status [--project-dir <dir>] [--json] [<name> ...]"},
-		{name: "ai nested leaf", args: []string{"ai", "hook", "run", "--help"}, want: "Usage: az ai hook run --agent=<claude|codex> [--json] <event>"},
+		{name: "ai nested leaf", args: []string{"ai", "hook", "run", "--help"}, want: "Usage: az ai hook run --agent=<claude|codex|opencode> [--json] <event>"},
 		{name: "tmux leaf", args: []string{"tmux", "install-selector", "--help"}, want: "Usage: az tmux install-selector [--config <path>] [--project-dir <dir>] [--key <key>] [--az-command <command>] [--verbose]"},
 		{name: "prime leaf", args: []string{"prime", "--help"}, want: "Usage: az prime"},
 		{name: "issue root includes document", args: []string{"issue", "--help"}, want: "document add [--project <project-id>]"},

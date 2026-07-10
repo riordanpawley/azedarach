@@ -4090,8 +4090,18 @@ func (d *Daemon) buildSessionLaunchCommandWithInitReadyPathAndEnv(projectID, iss
 		shell = appconfig.DefaultSessionShell()
 	}
 	inner := strings.Join(commands, "; ")
-	inner = inner + "; exec " + shell
+	inner = inner + "; " + sessionAgentProcessExitCommand(projectCfg.CLITool) + "; exec " + shell
 	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner))
+}
+
+func sessionAgentProcessExitCommand(tool string) string {
+	agent := strings.ToLower(strings.TrimSpace(tool))
+	switch agent {
+	case "codex", "opencode":
+	default:
+		agent = "claude"
+	}
+	return `__azedarach_agent_exit_status=$?; printf '{"exit_status":%s}\n' "$__azedarach_agent_exit_status" | az ai hook run --agent=` + agent + ` session_end >/dev/null 2>&1 || true`
 }
 
 func sessionInitReadyMarkerCommand(initReadyPath string) string {

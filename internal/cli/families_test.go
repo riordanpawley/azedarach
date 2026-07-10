@@ -32,7 +32,7 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"ai install [--target=",
 		"ai status [--target=",
 		"ai migrate",
-		"ai hook run --agent=<claude|codex>",
+		"ai hook run --agent=<claude|codex|opencode>",
 		"tmux <selector|install-selector|uninstall-selector>",
 		"spec <subcommand>",
 		"az githooks install",
@@ -61,6 +61,16 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 	}
 	if strings.Contains(output, "az spec sync") {
 		t.Fatalf("usage should not mention disabled sync command: %q", output)
+	}
+}
+
+func TestAgentProcessExitStatusFromHookPayload(t *testing.T) {
+	status := agentProcessExitStatus(map[string]any{"exit_status": float64(137)})
+	if status == nil || *status != 137 {
+		t.Fatalf("agentProcessExitStatus() = %v, want 137", status)
+	}
+	if got := agentProcessExitStatus(map[string]any{"exit_status": 1.5}); got != nil {
+		t.Fatalf("agentProcessExitStatus() = %v, want nil for fractional status", *got)
 	}
 }
 
@@ -967,6 +977,35 @@ func TestAIHookRunCommandDoesNotAutostartRetryBestEffortLifecycleNotify(t *testi
 	}
 	if signalCalls != 1 {
 		t.Fatalf("runtime signal calls = %d, want exactly one best-effort attempt", signalCalls)
+	}
+}
+
+func TestRunAgentHookCarriesProcessExitStatus(t *testing.T) {
+	var signal protocol.RuntimeSignalIngestCommandBody
+	transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		if err := json.Unmarshal(req.Body, &signal); err != nil {
+			t.Fatalf("unmarshal runtime signal: %v", err)
+		}
+		return responseWithJSON(req, protocol.RuntimeSignalIngestResponseBody{Accepted: true}), nil
+	}}
+	deps := &Dependencies{
+		RepoDir:      t.TempDir(),
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+	}
+
+	_, err := RunAgentHook(context.Background(), deps, AgentHookContext{
+		Agent:      AgentOpenCode,
+		Event:      hookEventSessionEnd,
+		IssueID:    "az-42",
+		ProjectDir: deps.RepoDir,
+		Payload:    map[string]any{"exit_status": float64(137)},
+	})
+	if err != nil {
+		t.Fatalf("RunAgentHook() error: %v", err)
+	}
+	if signal.ExitStatus == nil || *signal.ExitStatus != 137 || signal.Level != "error" {
+		t.Fatalf("runtime signal = %+v, want exit_status=137 level=error", signal)
 	}
 }
 
