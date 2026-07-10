@@ -1259,6 +1259,7 @@ type issueStateModelV2Reconciliation struct {
 	lifecycleState string
 	closedOutcome  string
 	reviewState    string
+	archivedAt     sql.NullString
 }
 
 func (c *Client) reconcileIssueStateModelV2Drift(ctx context.Context, db *sql.DB) error {
@@ -1301,9 +1302,10 @@ func (c *Client) reconcileIssueStateModelV2Drift(ctx context.Context, db *sql.DB
 			SET status = ?,
 				lifecycle_state = ?,
 				closed_outcome = ?,
-				review_state = ?
+				review_state = ?,
+				archived_at = ?
 			WHERE id = ?
-		`, update.legacyStatus, update.lifecycleState, update.closedOutcome, update.reviewState, update.id); err != nil {
+		`, update.legacyStatus, update.lifecycleState, update.closedOutcome, update.reviewState, update.archivedAt, update.id); err != nil {
 			return issueStateModelV2CutoverError("issue state-model v2 reconciliation rolled back", backupPath, fmt.Sprintf("issue %s: %v", update.id, err))
 		}
 	}
@@ -1325,7 +1327,7 @@ func (c *Client) reconcileIssueStateModelV2Drift(ctx context.Context, db *sql.DB
 
 func issueStateModelV2Reconciliations(ctx context.Context, db sqlIssueQueryer) ([]issueStateModelV2Reconciliation, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, status, priority, lifecycle_state, closed_outcome, review_state, archived_at
+		SELECT id, status, priority, lifecycle_state, closed_outcome, review_state, archived_at, deleted_at
 		FROM issues
 		ORDER BY id
 	`)
@@ -1344,8 +1346,9 @@ func issueStateModelV2Reconciliations(ctx context.Context, db sqlIssueQueryer) (
 			outcomeRaw   sql.NullString
 			reviewRaw    sql.NullString
 			archivedAt   sql.NullString
+			deletedAt    sql.NullString
 		)
-		if err := rows.Scan(&id, &legacyStatus, &priority, &lifecycleRaw, &outcomeRaw, &reviewRaw, &archivedAt); err != nil {
+		if err := rows.Scan(&id, &legacyStatus, &priority, &lifecycleRaw, &outcomeRaw, &reviewRaw, &archivedAt, &deletedAt); err != nil {
 			return nil, err
 		}
 		lifecycleState := lifecycleRaw.String
@@ -1354,7 +1357,7 @@ func issueStateModelV2Reconciliations(ctx context.Context, db sqlIssueQueryer) (
 		legacyState, legacyErr := domain.IssueStateFromLegacy(domain.LegacyIssueStateInput{
 			Status:   domain.Status(legacyStatus),
 			Priority: domain.Priority(priority),
-			Archived: nonEmptyNullString(archivedAt),
+			Archived: nonEmptyNullString(deletedAt),
 		})
 		var v2State domain.IssueState
 		if strings.TrimSpace(lifecycleState) == "" {
@@ -1382,11 +1385,27 @@ func issueStateModelV2Reconciliations(ctx context.Context, db sqlIssueQueryer) (
 		if legacyErr == nil && legacyState.IsClosed() && !v2State.IsClosed() {
 			authoritativeState = legacyState
 		}
+		// Legacy writers only know deleted_at, while v2 writers update both
+		// archive columns atomically. Any disagreement therefore means a legacy
+		// archive or unarchive write happened after the last aligned state.
+		// Preserve the v2 lifecycle authority selected above, but mirror the
+		// legacy writer's latest archive intent into archived_at.
+		authoritativeState, err = domain.NewIssueState(domain.IssueStateParts{
+			Workflow:     authoritativeState.Workflow(),
+			Review:       authoritativeState.Review(),
+			CloseOutcome: authoritativeState.CloseOutcome(),
+			Archive:      issueArchiveStateFromTimestamp(deletedAt),
+			Deletion:     authoritativeState.Deletion(),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("issue %s reconciled state: %w", id, err)
+		}
 		expectedStatus := string(legacyStatusFromIssueState(authoritativeState))
 		if legacyStatus == expectedStatus &&
 			lifecycleState == string(authoritativeState.Workflow()) &&
 			closedOutcome == string(authoritativeState.CloseOutcome()) &&
-			reviewState == string(authoritativeState.Review()) {
+			reviewState == string(authoritativeState.Review()) &&
+			archivedAt == deletedAt {
 			continue
 		}
 		updates = append(updates, issueStateModelV2Reconciliation{
@@ -1395,6 +1414,7 @@ func issueStateModelV2Reconciliations(ctx context.Context, db sqlIssueQueryer) (
 			lifecycleState: string(authoritativeState.Workflow()),
 			closedOutcome:  string(authoritativeState.CloseOutcome()),
 			reviewState:    string(authoritativeState.Review()),
+			archivedAt:     deletedAt,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -1409,7 +1429,7 @@ func validateIssueStateModelV2LegacyMirror(ctx context.Context, db sqlIssueQuery
 		return err
 	}
 	if len(updates) > 0 {
-		return fmt.Errorf("legacy status mirror drift: %d rows", len(updates))
+		return fmt.Errorf("legacy compatibility mirror drift: %d rows", len(updates))
 	}
 	return nil
 }

@@ -262,9 +262,14 @@ func TestClient_ReconcilesMixedVersionIssueStateDriftAfterCompletedCutover(t *te
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `UPDATE issues SET status = 'unknown-old-writer' WHERE id = 'az-active'`)
 	require.NoError(t, err)
+	archiveTime := "2026-07-09T07:23:51.434526Z"
+	_, err = db.ExecContext(ctx, `UPDATE issues SET deleted_at = ? WHERE id = 'az-open'`, archiveTime)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `UPDATE issues SET deleted_at = NULL WHERE id = 'az-archived'`)
+	require.NoError(t, err)
 	err = validateIssueStateModelV2LegacyMirror(ctx, db)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "legacy status mirror drift: 7 rows")
+	assert.Contains(t, err.Error(), "legacy compatibility mirror drift: 9 rows")
 	require.NoError(t, db.Close())
 
 	reconciled := NewClientAtPath(dbPath, slog.Default())
@@ -297,6 +302,11 @@ func TestClient_ReconcilesMixedVersionIssueStateDriftAfterCompletedCutover(t *te
 	require.NoError(t, reconciledDB.QueryRowContext(ctx, `SELECT status FROM issues WHERE id = 'az-active'`).Scan(&repairedActiveMirror))
 	assert.Equal(t, "closed", repairedClosedMirror)
 	assert.Equal(t, "in_progress", repairedActiveMirror)
+	var archivedAt, unarchivedAt sql.NullString
+	require.NoError(t, reconciledDB.QueryRowContext(ctx, `SELECT archived_at FROM issues WHERE id = 'az-open'`).Scan(&archivedAt))
+	require.NoError(t, reconciledDB.QueryRowContext(ctx, `SELECT archived_at FROM issues WHERE id = 'az-archived'`).Scan(&unarchivedAt))
+	assert.Equal(t, sql.NullString{String: archiveTime, Valid: true}, archivedAt)
+	assert.False(t, unarchivedAt.Valid)
 	require.NoError(t, validateIssueStateModelV2LegacyMirror(ctx, reconciledDB))
 
 	markerAfter, ok, err := readIssueStateModelV2CutoverMarker(ctx, reconciledDB)
