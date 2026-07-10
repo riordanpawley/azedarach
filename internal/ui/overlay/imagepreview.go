@@ -244,10 +244,10 @@ func (i *ImagePreviewOverlay) handleConfirmMode(msg tea.KeyMsg) (tea.Model, tea.
 
 // View renders the overlay
 func (i *ImagePreviewOverlay) View() string {
-	if i.currentIsFullScreenImage() && !i.confirmDelete {
-		return i.renderFullScreenImageContent()
-	}
 	width, height := i.Size()
+	if i.currentIsFullScreenImage() && !i.confirmDelete {
+		return i.renderFullScreenImageContent(width, height)
+	}
 	if i.confirmDelete {
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
@@ -292,15 +292,7 @@ func (i *ImagePreviewOverlay) View() string {
 	})
 }
 
-func (i *ImagePreviewOverlay) renderFullScreenImageContent() string {
-	width, height := i.fullScreenSize()
-	if width <= 0 {
-		width = 80
-	}
-	if height <= 0 {
-		height = 24
-	}
-
+func (i *ImagePreviewOverlay) renderFullScreenImageContent(width, height int) string {
 	var b strings.Builder
 	b.WriteString(termimg.ClearAllString())
 
@@ -574,6 +566,8 @@ func (i *ImagePreviewOverlay) Size() (width, height int) {
 		return i.Clamp(72, 22)
 	}
 	if i.currentIsFullScreenImage() {
+		// Full-screen image preview is an intentional sizing exception: it uses
+		// the complete current viewport instead of responsive dialog clamping.
 		return i.fullScreenSize()
 	}
 	return i.Clamp(82, 28)

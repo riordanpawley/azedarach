@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	termimg "github.com/blacktop/go-termimg"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
@@ -728,6 +729,49 @@ func TestImagePreviewOverlay_WindowSizeFitsNarrowViewport(t *testing.T) {
 	width, _ := overlay.Size()
 	if width > 58 {
 		t.Fatalf("expected preview width to fit narrow viewport, got width=%d", width)
+	}
+}
+
+func TestImagePreviewOverlay_FullScreenViewUsesSizeAtDefaultAndNarrowViewport(t *testing.T) {
+	tests := []struct {
+		name       string
+		window     *tea.WindowSizeMsg
+		wantWidth  int
+		wantHeight int
+	}{
+		{name: "default", wantWidth: 100, wantHeight: 34},
+		{name: "narrow", window: &tea.WindowSizeMsg{Width: 58, Height: 16}, wantWidth: 58, wantHeight: 16},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			overlay := NewImagePreviewOverlay("test-issue", nil, 0)
+			overlay.images = []attachment.Attachment{{
+				ID:       "img-1",
+				Filename: strings.Repeat("wide-name-", 20) + ".png",
+				MimeType: "image/png",
+				Path:     filepath.Join(t.TempDir(), "screen.png"),
+			}}
+			overlay.fullImage = fullScreenImagePreviewState{
+				attachmentID: "img-1",
+				lines:        []string{"Press o to open externally."},
+				err:          "preview unavailable",
+			}
+			if tt.window != nil {
+				overlay.ApplyWindowSize(*tt.window)
+			}
+
+			width, height := overlay.Size()
+			if width != tt.wantWidth || height != tt.wantHeight {
+				t.Fatalf("Size() = %dx%d, want %dx%d", width, height, tt.wantWidth, tt.wantHeight)
+			}
+			view := strings.TrimPrefix(overlay.View(), termimg.ClearAllString())
+			for _, line := range strings.Split(view, "\n") {
+				if got := ansi.StringWidth(line); got > width {
+					t.Fatalf("View() line width = %d, exceeds Size() width %d: %q", got, width, line)
+				}
+			}
+		})
 	}
 }
 
