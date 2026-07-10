@@ -7,19 +7,9 @@ import (
 )
 
 const (
-	CommandOrchestrationSnapshot  = "orchestration.snapshot"
-	CommandOrchestrationIntent    = "orchestration.intent"
-	EventOrchestrationLoopUpdated = "orchestration.loop.updated"
+	CommandOrchestrationSnapshot = "orchestration.snapshot"
+	CommandOrchestrationIntent   = "orchestration.intent"
 )
-
-type OrchestrationLoopEventBody struct {
-	Scope        domain.OrchestrationScope `json:"scope" msgpack:"scope"`
-	WatchCursor  int64                     `json:"watch_cursor" msgpack:"watch_cursor"`
-	ActionKey    string                    `json:"action_key" msgpack:"action_key"`
-	ActionKind   string                    `json:"action_kind" msgpack:"action_kind"`
-	ActionStatus string                    `json:"action_status" msgpack:"action_status"`
-	UpdatedAt    time.Time                 `json:"updated_at" msgpack:"updated_at"`
-}
 
 type OrchestrationSnapshotRequest struct {
 	Scope domain.OrchestrationScope `json:"scope"`
