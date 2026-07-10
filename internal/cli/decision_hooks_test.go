@@ -365,17 +365,41 @@ func TestGitHooksRunCommandSkipsBuiltInDecisionSyncAndRestageDuringMerge(t *test
 	}
 }
 
+func TestGitHooksRunCommandNestedRepositoriesIgnoreFullOuterGitEnvironment(t *testing.T) {
+	localVars := gitLocalEnvironmentVariableNames(t)
+	poisoned := make(map[string]string, len(localVars)+4)
+	for _, key := range localVars {
+		poisoned[key] = "outer-hook-value"
+	}
+	poisoned["GIT_CONFIG_KEY_0"] = "core.worktree"
+	poisoned["GIT_CONFIG_VALUE_0"] = "/outer/worktree"
+	poisoned["GIT_QUARANTINE_PATH"] = "/outer/quarantine"
+	poisoned["GIT_REFLOG_ACTION"] = "outer merge hook"
+
+	cmd := exec.Command(os.Args[0],
+		"-test.run", "^TestGitHooksRunCommand(RunsBuiltInDecisionSyncAndRestageOutsideMerge|RestagesDecisionsIntoHookIndex|UsesCurrentWorktreeForImplicitProjectDir)$",
+		"-test.count=1",
+	)
+	cmd.Env = gitEnvironmentWithOverrides(poisoned)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("decision hook tests under full outer Git environment: %v\n%s", err, output)
+	}
+}
+
 func isolateNestedGitEnvironment(t *testing.T) {
 	t.Helper()
-	for _, key := range []string{
-		"GIT_DIR",
-		"GIT_WORK_TREE",
-		"GIT_COMMON_DIR",
-		"GIT_INDEX_FILE",
-		"GIT_OBJECT_DIRECTORY",
-		"GIT_ALTERNATE_OBJECT_DIRECTORIES",
-		"GIT_PREFIX",
-	} {
+	keys := make(map[string]struct{})
+	for _, key := range gitLocalEnvironmentVariableNames(t) {
+		keys[key] = struct{}{}
+	}
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "GIT_") {
+			keys[key] = struct{}{}
+		}
+	}
+	for key := range keys {
 		value, present := os.LookupEnv(key)
 		if err := os.Unsetenv(key); err != nil {
 			t.Fatalf("unset %s: %v", key, err)
@@ -392,6 +416,31 @@ func isolateNestedGitEnvironment(t *testing.T) {
 			}
 		})
 	}
+}
+
+func gitLocalEnvironmentVariableNames(t *testing.T) []string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--local-env-vars")
+	cmd.Env = gitEnvironmentWithOverrides(nil)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("list Git local environment variables: %v", err)
+	}
+	return strings.Fields(string(output))
+}
+
+func gitEnvironmentWithOverrides(overrides map[string]string) []string {
+	env := make([]string, 0, len(os.Environ())+len(overrides))
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if !strings.HasPrefix(key, "GIT_") {
+			env = append(env, entry)
+		}
+	}
+	for key, value := range overrides {
+		env = append(env, key+"="+value)
+	}
+	return env
 }
 
 func TestGitMergeInProgressReadsWorktreeGitDirPointer(t *testing.T) {
