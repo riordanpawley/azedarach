@@ -159,6 +159,7 @@ fd "filename" -t f internal cmd
    - `task.merge_base_target` branch integration target gate -> `projection` (durable issue graph + worktree projection)
    - `task.follow_on_merge_candidates` follow-on merge source gate -> `projection` (durable issue graph + worktree projection)
    - `issue_resources.lifecycle` issue resource desired-state gate -> `projection` (durable issue status + runtime attachment projection)
+   - `interaction.waiting_human` decision-waiting and pickup exclusion gate -> `projection` (durable interaction request projection refreshed before evaluation)
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
 
 ### Adding New Invariants (Required Checklist)

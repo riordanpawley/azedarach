@@ -3329,7 +3329,24 @@ func (d *Daemon) ensureSessionWorktreeProjection(ctx context.Context, projectID,
 }
 
 func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID string, tasks []domain.Task) []domain.Task {
-	if len(tasks) == 0 || d.sessionStore == nil {
+	if len(tasks) == 0 {
+		return tasks
+	}
+	defer func() {
+		waiting, err := d.issueClientForProject(projectID).UnresolvedInteractionIssueIDs(ctx)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("refresh interaction projection while enriching tasks failed", "project_id", projectID, "error", err)
+			}
+			return
+		}
+		for i := range tasks {
+			_, decisionWaiting := waiting[tasks[i].ID.String()]
+			base := tasks[i].IssueFacts()
+			tasks[i].Facts = domain.DeriveIssueFacts(domain.IssueFactsInput{Status: tasks[i].Status, Priority: tasks[i].Priority, State: tasks[i].State, Session: tasks[i].Session, HasTmuxSession: tasks[i].HasTmuxSession, OperationBlockers: base.OperationBlockers, DecisionWaiting: decisionWaiting, DecisionWaitReason: "unresolved interaction request requires human decision"})
+		}
+	}()
+	if d.sessionStore == nil {
 		return tasks
 	}
 

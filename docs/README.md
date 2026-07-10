@@ -55,6 +55,7 @@ This directory primarily contains **developer/internal documentation**.
 - `task.merge_base_target`: `projection` (durable issue graph + worktree projection).
 - `task.follow_on_merge_candidates`: `projection` (durable issue graph + worktree projection).
 - `issue_resources.lifecycle`: `projection` (durable issue status + runtime attachment projection).
+- `interaction.waiting_human`: `projection` (durable interaction requests refreshed before decision-waiting and pickup evaluation).
 - `task.list` freshness/session timestamps: `projection` (refresh-then-cache).
 - `runtime.reconcile` includes `invariant_sources` debug output reflecting the active source-policy matrix.
 - Treat this as the required cross-daemon safety contract for session/worktree/runtime invariants.
