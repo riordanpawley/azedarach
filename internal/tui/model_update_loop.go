@@ -90,6 +90,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.boardRefreshing = true
 			return m, m.selectBoardViewCmd(selected.ViewID)
 		}
+		if msg.Key == overlay.BoardViewSaveKey {
+			m.overlayStack.Pop()
+			saved, _ := msg.Value.(overlay.BoardViewSaveMsg)
+			return m, m.saveBoardViewCmd(saved.View)
+		}
+		if msg.Key == overlay.BoardViewDeleteKey {
+			m.overlayStack.Pop()
+			deleted, _ := msg.Value.(overlay.BoardViewDeleteMsg)
+			return m, m.deleteBoardViewCmd(deleted.ViewID)
+		}
 		if msg.Key == "operation_queue_refresh" {
 			return m, m.loadOperationQueueCmd()
 		}
@@ -429,6 +439,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		m.boardRefreshing = true
 		return m, m.scheduleIssuesRefreshCmd()
+
+	case boardViewMutatedMsg:
+		if msg.err != nil {
+			m.addToast(Toast{Level: ToastError, Message: fmt.Sprintf("Could not %s board view: %v", msg.action, msg.err), Expires: time.Now().Add(6 * time.Second)})
+			return m, m.loadBoardViewsCmd()
+		}
+		m.addToast(Toast{Level: ToastSuccess, Message: fmt.Sprintf("Board view %s: %s", msg.action, msg.viewID), Expires: time.Now().Add(3 * time.Second)})
+		m.boardRefreshing = true
+		return m, tea.Batch(m.scheduleIssuesRefreshCmd(), m.loadBoardViewsCmd())
 
 	case orchestrationOverviewLoadedMsg:
 		m.orchestrationOverview = msg.projects

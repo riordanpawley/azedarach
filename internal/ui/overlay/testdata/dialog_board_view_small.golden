@@ -1,0 +1,19 @@
+╭──────────────────────────────────────────────────╮
+│Board View                                        │
+│──────────────────────────────────────────────────│
+│▸ * Current current  6 cols  built-in             │
+│    Activity activity  8 cols  built-in           │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│Columns                                           │
+│──────────────────────────────────────────────────│
+│current                                           │
+│                                                  │
+│Columns are query predicates over issue facts.    │
+│hide empty columns: false                         │
+│                                                  │
+│Backlog: lifecycle=backlog                        │
+╰──────────────────────────────────────────────────╯

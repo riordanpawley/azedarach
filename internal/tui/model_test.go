@@ -146,6 +146,38 @@ func newTestModel() Model {
 	return m
 }
 
+func TestBoardViewSaveSelectionRoutesThroughDaemonMutationCommand(t *testing.T) {
+	m := newTestModel()
+	m.overlayStack.Push(overlay.NewBoardViewOverlay(nil, ""))
+	view := domain.DefaultBoardView()
+	view.ID = "custom"
+	view.Title = "Custom"
+	updatedAny, cmd := m.Update(overlay.SelectionMsg{Key: overlay.BoardViewSaveKey, Value: overlay.BoardViewSaveMsg{View: view}})
+	updated := updatedAny.(Model)
+	if !updated.overlayStack.IsEmpty() {
+		t.Fatal("management overlay was not closed during mutation")
+	}
+	if cmd == nil {
+		t.Fatal("save mutation command = nil")
+	}
+	msg := cmd().(boardViewMutatedMsg)
+	if msg.action != "save" || msg.viewID != "custom" {
+		t.Fatalf("mutation result=%+v", msg)
+	}
+}
+
+func TestBoardViewMutationSuccessRefreshesViewsAndBoard(t *testing.T) {
+	m := newTestModel()
+	updatedAny, cmd := m.Update(boardViewMutatedMsg{action: "save", viewID: "custom"})
+	updated := updatedAny.(Model)
+	if !updated.boardRefreshing || cmd == nil {
+		t.Fatalf("refreshing=%v cmd=%v", updated.boardRefreshing, cmd)
+	}
+	if len(updated.toasts) == 0 || updated.toasts[len(updated.toasts)-1].Level != ToastSuccess {
+		t.Fatal("success toast missing")
+	}
+}
+
 // Helper to get cursor position in a model
 func getCursorPosition(m Model) Position {
 	columns := m.buildColumns()
