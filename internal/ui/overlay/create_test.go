@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/stretchr/testify/assert"
@@ -863,6 +864,74 @@ func TestCreateTaskOverlayRenderAttachmentListShowsSelectedPreview(t *testing.T)
 	assert.Contains(t, view, "report.md")
 	assert.Contains(t, view, "Markdown Preview")
 	assert.Contains(t, view, "Report summary")
+}
+
+func TestCreateTaskOverlayKeepsAttachmentsWithinDialogBounds(t *testing.T) {
+	svc := &createTestAttachmentService{}
+	overlay := NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, nil, svc)
+	overlay.Update(tea.WindowSizeMsg{Width: 140, Height: 50})
+	overlay.attachments = []attachment.Attachment{
+		{
+			ID:       "doc-1",
+			IssueID:  "draft-1",
+			Filename: "report.md",
+			Path:     "/tmp/report.md",
+			MimeType: "text/markdown",
+			Size:     42,
+		},
+	}
+	overlay.attachmentPreview = attachmentPreviewState{
+		attachmentID: "doc-1",
+		title:        "Markdown Preview",
+		lines:        []string{"Report summary", "Risk: low"},
+	}
+
+	view := overlay.View()
+	_, height := overlay.Size()
+
+	assert.LessOrEqual(t, lipgloss.Height(view), height)
+	assert.Contains(t, view, "report.md")
+	assert.Contains(t, view, "Markdown Preview")
+	assert.Contains(t, view, "Create Task")
+}
+
+func TestCreateTaskOverlayNarrowViewportShowsFocusedAttachment(t *testing.T) {
+	svc := &createTestAttachmentService{}
+	overlay := NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, nil, svc)
+	overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	overlay.attachments = []attachment.Attachment{{
+		ID:       "doc-1",
+		IssueID:  "draft-1",
+		Filename: "report.md",
+		MimeType: "text/markdown",
+		Size:     42,
+	}}
+	overlay.focusIndex = focusAttachments
+
+	view := overlay.View()
+	_, height := overlay.Size()
+
+	assert.LessOrEqual(t, lipgloss.Height(view), height)
+	assert.Contains(t, view, "Attachments:")
+	assert.Contains(t, view, "report.md")
+}
+
+func TestCreateTaskOverlayKeepsAttachmentErrorVisibleWithLongList(t *testing.T) {
+	svc := &createTestAttachmentService{}
+	overlay := NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, nil, svc)
+	overlay.attachments = []attachment.Attachment{
+		{ID: "a1", Filename: "one.png", MimeType: "image/png"},
+		{ID: "a2", Filename: "two.png", MimeType: "image/png"},
+		{ID: "a3", Filename: "three.png", MimeType: "image/png"},
+		{ID: "a4", Filename: "four.png", MimeType: "image/png"},
+	}
+	overlay.attachmentIndex = 3
+	overlay.attachmentError = "clipboard read timed out"
+
+	view := overlay.renderAttachmentListWithin(9)
+
+	assert.Contains(t, view, "four.png")
+	assert.Contains(t, view, "clipboard read timed out")
 }
 
 func TestEditTaskOverlayPasteKeyVariantsAttachFromClipboard(t *testing.T) {

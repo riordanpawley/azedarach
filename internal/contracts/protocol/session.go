@@ -13,6 +13,7 @@ const (
 const (
 	CommandSessionResolveConflict = "session.resolve_conflict"
 	CommandSessionRestartAll      = "session.restart_all"
+	CommandSessionCapture         = "session.capture"
 )
 
 type SessionLifecycleState string
@@ -92,4 +93,20 @@ type SessionRestartAllResponseBody struct {
 	Skipped    int                     `json:"skipped" msgpack:"skipped"`
 	Failed     int                     `json:"failed" msgpack:"failed"`
 	Sessions   []SessionRestartAllItem `json:"sessions" msgpack:"sessions"`
+}
+
+type SessionCaptureRequestBody struct {
+	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	IssueID   naming.IssueID   `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
+	SessionID naming.SessionID `json:"session_id" msgpack:"session_id"`
+	Lines     int              `json:"lines,omitempty" msgpack:"lines,omitempty"`
+}
+
+type SessionCaptureResponseBody struct {
+	ProjectID  naming.ProjectID `json:"project_id" msgpack:"project_id"`
+	IssueID    naming.IssueID   `json:"issue_id" msgpack:"issue_id"`
+	SessionID  naming.SessionID `json:"session_id" msgpack:"session_id"`
+	Lines      int              `json:"lines" msgpack:"lines"`
+	Output     string           `json:"output" msgpack:"output"`
+	CapturedAt time.Time        `json:"captured_at" msgpack:"captured_at"`
 }

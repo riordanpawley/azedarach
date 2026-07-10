@@ -1,32 +1,38 @@
 ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│Edit Task                                                                                                           │
+│Create New Task                                                                                                     │
 │────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
-││ Title: > Replace top level functions                                        Actions                               │
+││ Title: > Task title...                                                      Actions                               │
 ││ Description:                                                                ──────────────────────────────────────│
-││ ┃   1 Review docs/src code of emdash.sh for improvements                     Tab / Shift+Tab Switch fields        │
+││ ┃   1 Task description (optional)...                                         Tab / Shift+Tab Switch fields        │
 ││ ┃                                                                            Ctrl+C Clear focused field           │
 ││ ┃                                                                            T/B/F/E/C Set type                   │
 ││ ┃                                                                            0/1/2/3/4 Set priority               │
 ││ ┃                                                                            h/l or ←/→ Cycle impl combinations   │
 ││ ┃                                                                            Ctrl+P Paste image                   │
 ││ ┃                                                                            j/k + d Manage attachments           │
-││ ┃                                                                            Enter Save Task                      │
+││ ┃                                                                            Enter Create Task                    │
 ││ ┃                                                                            Ctrl+E Edit in $EDITOR               │
 ││ Type: [●T] [ B] [ F] [ E] [ C]                                               Ctrl+K Clear form                    │
 ││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]                                           Esc Cancel                           │
-││ Impls: [<] go-bubbletea [>]                                                                                       │
+││ Impls: [<] (none) [>]                                                                                             │
 ││ Acceptance Criteria:                                                                                              │
-││ ┃   1                                                                                                             │
+││ ┃   1 Acceptance criteria (optional)...                                                                           │
 ││ ┃                                                                                                                 │
 ││ ┃                                                                                                                 │
 ││ ┃                                                                                                                 │
 ││ Attachments:                                                                                                      │
 ││                                                                                                                   │
-││ Attachment service unavailable.                                                                                   │
+││ 1 attachment(s)                                                                                                   │
+││ ▶ task-context.md                 1.50 KB  md                                                                     │
+││                                                                                                                   │
+││ Ctrl+P paste clipboard  j/k navigate  d/x delete                                                                  │
+││ ┌─────────────────────────────────────────────                                                                    │
+││ │ Markdown Preview                                                                                                │
+││ │ ## Context                                                                                                      │
+││ │ Keep attachment controls visible.                                                                               │
 ││                                                                                                                   │
 ││                                                                                                                   │
 ││ ─────────────────────────────────────────────────────────────────────────                                         │
 ││                                                                                                                   │
-││ [ Save Task ]                                                                                                     │
-││                                                                                                                   │
+││ [ Create Task ]                                                                                                   │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

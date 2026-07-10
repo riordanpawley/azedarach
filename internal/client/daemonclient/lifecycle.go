@@ -21,6 +21,7 @@ const (
 	CommandSessionStop            = "session.stop"
 	CommandSessionMessage         = "session.message"
 	CommandSessionStatus          = "session.status"
+	CommandSessionCapture         = protocol.CommandSessionCapture
 	CommandSessionResolveConflict = protocol.CommandSessionResolveConflict
 	CommandSessionRestartAll      = protocol.CommandSessionRestartAll
 	CommandRuntimeReconcile       = "runtime.reconcile"
@@ -70,6 +71,10 @@ type RestartAllSessionsParams struct {
 	ForceBusy  bool
 	Yolo       bool
 	ImagePaths []string
+}
+
+type CaptureSessionOptions struct {
+	Lines int
 }
 
 type commandOutputBody struct {
@@ -330,6 +335,23 @@ func (c *Client) SessionStatus(ctx context.Context, issueID string) (string, err
 		ProjectID: c.projectID,
 		SessionID: sessionID,
 	})
+}
+
+// CaptureSession asks the daemon to capture recent pane output for one issue session.
+func (c *Client) CaptureSession(ctx context.Context, issueID string, opts CaptureSessionOptions) (protocol.SessionCaptureResponseBody, error) {
+	parsedIssueID, err := parseIssueID(issueID)
+	if err != nil {
+		return protocol.SessionCaptureResponseBody{}, err
+	}
+	var out protocol.SessionCaptureResponseBody
+	if err := c.commandJSON(ctx, CommandSessionCapture, protocol.SessionCaptureRequestBody{
+		ProjectID: c.projectID,
+		SessionID: naming.SessionID(parsedIssueID),
+		Lines:     opts.Lines,
+	}, &out); err != nil {
+		return protocol.SessionCaptureResponseBody{}, err
+	}
+	return out, nil
 }
 
 // ResolveConflict asks the daemon to launch an agent in the issue session's

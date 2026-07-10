@@ -104,6 +104,22 @@ func TestIssueContextRiskRequiresStructuredCloseout(t *testing.T) {
 	}
 }
 
+func TestBuildIssueContextRiskMarksRelatedConsumersAuditedPresent(t *testing.T) {
+	packet := BuildIssueContextRisk(IssueContextRiskInput{
+		Target: IssueContextRiskEvidence{
+			IssueID:                 "az-target",
+			RelatedConsumersAudited: []string{"daemon closeout gate", "CLI summary output"},
+		},
+	})
+
+	if !containsString(packet.HandoffFields.Present, "related_consumers_audited") {
+		t.Fatalf("Present = %v, want related_consumers_audited", packet.HandoffFields.Present)
+	}
+	if containsString(packet.HandoffFields.Missing, "related_consumers_audited") {
+		t.Fatalf("Missing = %v, do not want related_consumers_audited", packet.HandoffFields.Missing)
+	}
+}
+
 func TestSummarizeIssueContextRiskBoundsEvidenceAndSignals(t *testing.T) {
 	candidates := make([]IssueContextRiskEvidence, 0, 8)
 	for i := 0; i < 8; i++ {
@@ -163,4 +179,13 @@ func TestCompactIssueContextRiskKeepsTargetEvidenceForCloseoutGate(t *testing.T)
 	if !IssueContextRiskRequiresStructuredCloseout(compact) {
 		t.Fatal("compact packet no longer blocks high risk without target evidence")
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

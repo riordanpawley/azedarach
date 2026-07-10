@@ -29,7 +29,7 @@ Commands:
   ai status [--target=auto|rulesync|claude|codex|opencode,...] [--project-dir <dir>] [--json]  Check Azedarach-managed AI hook installation
   ai uninstall [--target=auto|rulesync|claude|codex|opencode,...] [--project-dir <dir>] [--verbose]  Remove az-managed hook entries from AI agent harnesses
   ai migrate [--project-dir <dir>] [--verbose]  Strip legacy az notify/hook commands from existing hook configs
-  ai hook run --agent=<claude|codex> [--json] <event>  Run an agent hook through the shared internal port
+  ai hook run --agent=<claude|codex|opencode> [--json] <event>  Run an agent hook through the shared internal port
   tmux <selector|install-selector|uninstall-selector>  Manage tmux selector integration
   spec <subcommand>          Spec workflows (req|link|read|pack|lint|parity)
   decision <subcommand>      Decision records with rationale (list|get|record|update|delete|revisit|sync|import|link)

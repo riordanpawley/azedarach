@@ -61,7 +61,7 @@ func TestRunAICommandHelpAndDispatch(t *testing.T) {
 	output := captureMainStdout(t, func() error {
 		return runAICommand(config.DefaultConfig(), []string{"--help"})
 	})
-	if !strings.Contains(output, "az ai hook run --agent=<claude|codex>") {
+	if !strings.Contains(output, "az ai hook run --agent=<claude|codex|opencode>") {
 		t.Fatalf("help output = %q", output)
 	}
 	if !strings.Contains(output, "Usage: az ai status") {

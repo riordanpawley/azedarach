@@ -190,6 +190,30 @@ func TestRuntimeSignalIngestAgentHookPersistsActivityAndHookLog(t *testing.T) {
 	}
 }
 
+func TestRuntimeSignalAgentLifecycleClassifiesProcessExit(t *testing.T) {
+	zero := 0
+	nonzero := 137
+	tests := []struct {
+		name       string
+		exitStatus *int
+		want       string
+	}{
+		{name: "clean exit", exitStatus: &zero, want: "idle"},
+		{name: "process died", exitStatus: &nonzero, want: "error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, got, ok := runtimeSignalAgentLifecycle(protocol.RuntimeSignalIngestCommandBody{
+				Event:      "session_end",
+				ExitStatus: tt.exitStatus,
+			})
+			if !ok || got != tt.want {
+				t.Fatalf("runtimeSignalAgentLifecycle() = (%q, %v), want (%q, true)", got, ok, tt.want)
+			}
+		})
+	}
+}
+
 func TestRuntimeSignalIngestKeepsCanonicalBusyWhenAnotherPaneWaits(t *testing.T) {
 	repoDir := initRuntimeSignalGitRepo(t)
 	d := New(Config{

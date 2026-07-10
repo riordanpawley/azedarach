@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -251,7 +252,7 @@ func (i *ImageAttachOverlay) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd
 // View renders the overlay
 func (i *ImageAttachOverlay) View() string {
 	if i.inputActive {
-		width, height := i.ClampResponsive(84, 18)
+		width, height := i.Size()
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
 			width:             width,
@@ -277,7 +278,7 @@ func (i *ImageAttachOverlay) View() string {
 
 	switch i.mode {
 	case imageAttachModeList:
-		width, height := i.ClampResponsive(84, i.listModeHeight())
+		width, height := i.Size()
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
 			width:             width,
@@ -297,7 +298,7 @@ func (i *ImageAttachOverlay) View() string {
 			},
 		})
 	case imageAttachModePreview:
-		width, height := i.ClampResponsive(84, 24)
+		width, height := i.Size()
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
 			width:             width,
@@ -331,7 +332,16 @@ func (i *ImageAttachOverlay) renderListContent(width, height int) string {
 		content.WriteString(i.styles.Footer.Render("No attachments yet."))
 		content.WriteString("\n")
 	} else {
-		for idx, file := range i.files {
+		previewReserve := 0
+		if height >= 13 {
+			previewReserve = 9
+		}
+		entryBudget := max(1, height-previewReserve)
+		entryStart := max(0, min(i.cursor-entryBudget+1, len(i.files)-entryBudget))
+		entryEnd := min(len(i.files), entryStart+entryBudget)
+		nameWidth := max(8, width-24)
+		for idx := entryStart; idx < entryEnd; idx++ {
+			file := i.files[idx]
 			style := i.styles.MenuItem
 			indicator := "  "
 			if idx == i.cursor {
@@ -339,8 +349,8 @@ func (i *ImageAttachOverlay) renderListContent(width, height int) string {
 				indicator = "▶ "
 			}
 			sizeStr := formatFileSize(file.Size)
-			typeStr := strings.TrimPrefix(file.MimeType, "image/")
-			line := fmt.Sprintf("%s%-40s %8s  %s", indicator, truncate(file.Filename, 40), sizeStr, typeStr)
+			typeStr := truncate(attachmentTypeLabel(file), 8)
+			line := fmt.Sprintf("%s%-*s %8s  %s", indicator, nameWidth, truncate(file.Filename, nameWidth), sizeStr, typeStr)
 			content.WriteString(style.Render(line))
 			content.WriteString("\n")
 		}
@@ -353,13 +363,42 @@ func (i *ImageAttachOverlay) renderListContent(width, height int) string {
 		}
 		content.WriteString(errorStyle.Render("Error: " + i.error))
 	}
-	if len(i.files) > 0 && i.cursor >= 0 && i.cursor < len(i.files) && height >= 13 {
+	if len(i.files) > 0 && i.cursor >= 0 && i.cursor < len(i.files) && height >= 5 {
 		if content.Len() > 0 {
-			content.WriteString("\n\n")
+			content.WriteString("\n")
+			if height >= 13 {
+				content.WriteString("\n")
+			}
 		}
-		content.WriteString(i.renderSelectedPreview(max(20, min(44, width-4))))
+		if height < 13 {
+			remaining := max(1, height-lipgloss.Height(content.String()))
+			content.WriteString(i.renderCompactSelectedPreview(remaining, max(10, width-2)))
+		} else {
+			content.WriteString(i.renderSelectedPreview(max(20, min(44, width-4))))
+		}
 	}
 	return strings.TrimRight(content.String(), "\n")
+}
+
+func (i *ImageAttachOverlay) renderCompactSelectedPreview(height, width int) string {
+	if i.cursor < 0 || i.cursor >= len(i.files) || height <= 0 {
+		return ""
+	}
+	selected := i.files[i.cursor]
+	preview := i.preview
+	if preview.attachmentID != selected.ID {
+		preview = attachmentPreviewState{attachmentID: selected.ID, title: previewTitle(selected)}
+	}
+	lines := []string{i.styles.MenuItemActive.Render(preview.title)}
+	if preview.err != "" {
+		lines = append(lines, "Error: "+preview.err)
+	} else {
+		lines = append(lines, preview.lines...)
+	}
+	for idx := range lines {
+		lines[idx] = truncateToCellWidth(lines[idx], width)
+	}
+	return firstRenderedLines(strings.Join(lines, "\n"), height)
 }
 
 func (i *ImageAttachOverlay) renderListActions(width int) string {
@@ -464,14 +503,17 @@ func (i *ImageAttachOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (i *ImageAttachOverlay) Size() (width, height int) {
+	// Attachment management is content-sized so a short file list does not
+	// expand into an almost-fullscreen empty dialog. Clamp still promotes the
+	// dialog to fullscreen on constrained viewports.
 	if i.inputActive {
-		return i.ClampResponsive(84, 18)
+		return i.Clamp(84, 18)
 	}
 	switch i.mode {
 	case imageAttachModePreview:
-		return i.ClampResponsive(84, 24)
+		return i.Clamp(84, 24)
 	default:
-		return i.ClampResponsive(84, i.listModeHeight())
+		return i.Clamp(84, i.listModeHeight())
 	}
 }
 
@@ -479,7 +521,9 @@ func (i *ImageAttachOverlay) listModeHeight() int {
 	if len(i.files) == 0 && strings.TrimSpace(i.error) == "" {
 		return 14
 	}
-	rows := len(i.files) + 10
+	// Include enough body height for the selected attachment's bounded inline
+	// preview without expanding a short list to the full viewport.
+	rows := len(i.files) + 16
 	return max(14, min(26, rows))
 }
 
@@ -629,6 +673,26 @@ func formatFileSize(size int64) string {
 	default:
 		return fmt.Sprintf("%d B", size)
 	}
+}
+
+func attachmentTypeLabel(file attachment.Attachment) string {
+	mimeType := strings.ToLower(strings.TrimSpace(file.MimeType))
+	if subtype := strings.TrimPrefix(mimeType, "image/"); subtype != mimeType && subtype != "" {
+		return subtype
+	}
+	if attachment.IsMarkdown(file) {
+		return "md"
+	}
+	if mimeType != "" {
+		if slash := strings.LastIndex(mimeType, "/"); slash >= 0 && slash+1 < len(mimeType) {
+			return mimeType[slash+1:]
+		}
+		return mimeType
+	}
+	if ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(file.Filename)), "."); ext != "" {
+		return ext
+	}
+	return "file"
 }
 
 func truncate(s string, maxLen int) string {
