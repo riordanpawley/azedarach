@@ -35,6 +35,7 @@ const (
 	IssueEventBlockerReported         IssueObservationEventType = "blocker.reported"
 	IssueEventHumanInputRequested     IssueObservationEventType = "human.input_requested"
 	IssueEventHumanInputProvided      IssueObservationEventType = "human.input_provided"
+	IssueEventOrchestrationRouted     IssueObservationEventType = "orchestration.candidate_routed"
 )
 
 // IssueObservationEvent is an append-only fact associated with one issue.

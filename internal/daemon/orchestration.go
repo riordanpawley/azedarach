@@ -211,6 +211,10 @@ func explainOrchestrationCandidates(snapshot *protocol.OrchestrationSnapshot) {
 			continue
 		}
 		switch {
+		case candidate.Classification == string(domain.OrchestrationCandidateDecisionWaiting):
+			// A durable whole-issue interaction is the specific source of the
+			// block and must remain visible as Waiting Human.
+			continue
 		case snapshot.Blocked[candidate.IssueID] != "":
 			candidate.Included, candidate.Eligible, candidate.Classification, candidate.Reason = false, false, string(domain.OrchestrationCandidateBlocked), "excluded: "+snapshot.Blocked[candidate.IssueID]
 			candidate.ExclusionReasons = append(candidate.ExclusionReasons, snapshot.Blocked[candidate.IssueID])
@@ -245,6 +249,9 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	if request.Kind != protocol.OrchestrationIntentStart {
 		return a.applyReviewIntent(ctx, projectID, request)
 	}
+	if request.Scope.Kind != domain.OrchestrationScopeProject && len(request.Routes) > 0 {
+		return protocol.OrchestrationIntentResult{}, fmt.Errorf("candidate routing is available only for project orchestration scope")
+	}
 	// Keep readiness, capacity selection, claims, and operation submission in
 	// one daemon-authoritative critical section. Ownership claims remain the
 	// durable cross-process conflict gate for individual issues.
@@ -278,9 +285,49 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		requested = stableRequestedCandidates(requested, snapshot.Runnable)
 	}
 	result := protocol.OrchestrationIntentResult{Scope: request.Scope, Kind: request.Kind, IntentKey: request.IntentKey, Requested: requested, Skipped: map[string]string{}, Failed: map[string]string{}}
+	routedIssues := map[string]struct{}{}
 	if request.Scope.Kind == domain.OrchestrationScopeProject {
+		issueClient := a.daemon.issueClientForProject(projectID)
+		if issueClient == nil {
+			return protocol.OrchestrationIntentResult{}, fmt.Errorf("issue store unavailable")
+		}
+		candidateIDs := make(map[string]bool, len(snapshot.Candidates))
+		for _, candidate := range snapshot.Candidates {
+			candidateIDs[candidate.IssueID] = true
+		}
+		for _, route := range request.Routes {
+			if issueID := strings.TrimSpace(route.IssueID); !candidateIDs[issueID] {
+				result.Failed[issueID] = "route candidate: issue is outside the bounded project candidate snapshot"
+			}
+		}
+		for _, route := range projectCandidateRoutes(snapshot, request.Routes) {
+			issueID := strings.TrimSpace(route.IssueID)
+			routedIssues[issueID] = struct{}{}
+			routed, err := issueClient.RouteOrchestrationCandidate(ctx, projectID, request.ActorID, route)
+			if err != nil {
+				result.Failed[issueID] = "route candidate: " + err.Error()
+				continue
+			}
+			entry := protocol.OrchestrationRouteResult{IssueID: issueID, Kind: routed.Route.Kind, Reason: routed.Route.Reason, MissingDetails: append([]string(nil), routed.Route.MissingDetails...), InteractionCreated: routed.InteractionCreated}
+			if routed.Interaction != nil {
+				entry.InteractionID = routed.Interaction.ID
+			}
+			result.Routed = append(result.Routed, entry)
+			a.publishOrchestrationRoute(ctx, projectID, routed.Task)
+		}
+		if len(result.Routed) > 0 && a.daemon.noticeService != nil {
+			_ = a.daemon.reconcileInteractionNotices(ctx, projectID)
+		}
 		if reviewID := firstActionableReview(snapshot.ReviewQueue); reviewID != "" {
 			for _, issueID := range requested {
+				if _, routed := routedIssues[issueID]; routed {
+					if _, failed := result.Failed[issueID]; failed {
+						result.Skipped[issueID] = "candidate-route-failed"
+					} else {
+						result.Skipped[issueID] = "candidate-routed-" + routeKindForIssue(result.Routed, issueID)
+					}
+					continue
+				}
 				result.Skipped[issueID] = "review-priority:" + reviewID
 			}
 			return result, nil
@@ -303,6 +350,14 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	}
 	started := 0
 	for _, issueID := range requested {
+		if _, routed := routedIssues[issueID]; routed {
+			if _, failed := result.Failed[issueID]; failed {
+				result.Skipped[issueID] = "candidate-route-failed"
+			} else {
+				result.Skipped[issueID] = "candidate-routed-" + routeKindForIssue(result.Routed, issueID)
+			}
+			continue
+		}
 		if _, ok := runnable[issueID]; !ok {
 			result.Skipped[issueID] = orchestrationSkipReason(issueID, nestedRoots, active, snapshot.Blocked)
 			continue
@@ -328,6 +383,52 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		started++
 	}
 	return result, nil
+}
+
+func projectCandidateRoutes(snapshot protocol.OrchestrationSnapshot, explicit []domain.OrchestrationCandidateRoute) []domain.OrchestrationCandidateRoute {
+	byIssue := make(map[string]domain.OrchestrationCandidateRoute, len(explicit))
+	for _, route := range explicit {
+		byIssue[strings.TrimSpace(route.IssueID)] = route
+	}
+	ordered := make([]domain.OrchestrationCandidateRoute, 0, len(snapshot.Candidates)+len(explicit))
+	seen := make(map[string]bool)
+	for _, candidate := range snapshot.Candidates {
+		issueID := strings.TrimSpace(candidate.IssueID)
+		if route, ok := byIssue[issueID]; ok {
+			ordered, seen[issueID] = append(ordered, route), true
+			continue
+		}
+		if candidate.Classification != string(domain.IssuePremature) {
+			continue
+		}
+		guidance, ok := domain.PrematureRouteGuidance(candidate.Executability)
+		if !ok {
+			continue
+		}
+		ordered, seen[issueID] = append(ordered, domain.OrchestrationCandidateRoute{IssueID: issueID, Kind: domain.OrchestrationRouteBacklog, Reason: "project orchestration found an incomplete execution contract", MissingDetails: guidance}), true
+	}
+	return ordered
+}
+
+func (a daemonOrchestrationAuthority) publishOrchestrationRoute(ctx context.Context, projectID string, task domain.Task) {
+	if a.daemon.hub == nil {
+		return
+	}
+	if enriched := a.daemon.enrichTasksWithSessionState(ctx, projectID, []domain.Task{task}); len(enriched) == 1 {
+		task = enriched[0]
+	}
+	revision := a.daemon.nextRevision(projectID)
+	body, _ := json.Marshal(taskEventBodyFromTask(projectID, task))
+	a.daemon.hub.Publish(protocol.EventEnvelope{ProtocolVersion: protocol.CurrentVersion, ProjectID: naming.ProjectID(projectID), Revision: revision, Event: protocol.EventTaskUpdated, Kind: protocol.EnvelopeKindEvent, EmittedAt: time.Now().UTC(), Body: body})
+}
+
+func routeKindForIssue(routes []protocol.OrchestrationRouteResult, issueID string) string {
+	for _, route := range routes {
+		if route.IssueID == issueID {
+			return string(route.Kind)
+		}
+	}
+	return "unknown"
 }
 
 func orchestrationGlobalActiveCount(tasks []domain.Task) int {

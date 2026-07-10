@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"path/filepath"
 	"reflect"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -106,6 +108,110 @@ func TestOrchestrationIntentRejectsInvalidShapeBeforeMutation(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("invalid intent unexpectedly succeeded")
+	}
+}
+
+func TestProjectOrchestrationApplyAutomaticallyBacklogsPrematureCandidate(t *testing.T) {
+	ctx := context.Background()
+	client := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	id, err := client.Create(ctx, issues.CreateTaskParams{Title: "Thin candidate", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "proj", id, issues.OwnershipClaimParams{OwnerID: "steward", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseExecution}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	result, err := (daemonOrchestrationAuthority{daemon: d}).Apply(ctx, "proj", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "wave-1", ActorID: "steward"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Routed) != 1 || result.Routed[0].IssueID != id || result.Routed[0].Kind != domain.OrchestrationRouteBacklog {
+		t.Fatalf("routed = %+v", result.Routed)
+	}
+	task, err := client.GetWithRuntime(ctx, "proj", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.State.Workflow() != domain.IssueWorkflowBacklog || task.Ownership != nil {
+		t.Fatalf("routed task = %+v", task)
+	}
+}
+
+func TestProjectCandidateRoutesDoNotAutomaticallyRouteOwnedPrematureWork(t *testing.T) {
+	snapshot := protocol.OrchestrationSnapshot{Candidates: []protocol.OrchestrationCandidate{{
+		IssueID: "foreign", Classification: string(domain.OrchestrationCandidateOwnedElsewhere),
+		Executability: domain.IssueExecutabilityAssessment{Disposition: domain.IssuePremature, Reasons: []string{"missing-scope"}},
+	}}}
+	if routes := projectCandidateRoutes(snapshot, nil); len(routes) != 0 {
+		t.Fatalf("owned candidate routes = %+v", routes)
+	}
+}
+
+func TestProjectOrchestrationRoutesContinueAfterCandidateFailure(t *testing.T) {
+	ctx := context.Background()
+	client := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	foreignID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Foreign", Description: "Choose policy", Acceptance: "Policy chosen", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Ready", Description: "Choose policy", Acceptance: "Policy chosen", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "proj", foreignID, issues.OwnershipClaimParams{OwnerID: "other", OwnerKind: "agent", Purpose: domain.CoordinationLeaseExecution}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	interaction := func(id, issueID string) *domain.InteractionRequest {
+		return &domain.InteractionRequest{ID: id, IssueID: issueID, DecisionKey: "policy", OrchestrationScope: "project", Question: "Which policy?", Why: "Product judgment is required", RequiredDecisions: []string{"select policy"}, Significance: domain.InteractionSignificanceMaterial, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose policy"}, State: domain.InteractionOpen, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	}
+	routes := []domain.OrchestrationCandidateRoute{
+		{IssueID: foreignID, Kind: domain.OrchestrationRouteInteraction, Reason: "product judgment", Interaction: interaction("foreign-request", foreignID)},
+		{IssueID: readyID, Kind: domain.OrchestrationRouteInteraction, Reason: "product judgment", Interaction: interaction("ready-request", readyID)},
+	}
+	hub := publish.NewHub(16, 16, slog.Default())
+	events, cancel := hub.Subscribe("proj", 0)
+	defer cancel()
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, hub: hub, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	result, err := (daemonOrchestrationAuthority{daemon: d}).Apply(ctx, "proj", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "wave-2", ActorID: "steward", Routes: routes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Failed[foreignID] == "" {
+		t.Fatalf("foreign route failure missing: %+v", result)
+	}
+	if len(result.Routed) != 1 || result.Routed[0].IssueID != readyID || result.Routed[0].InteractionID != "ready-request" {
+		t.Fatalf("unrelated route did not continue: %+v", result)
+	}
+	requests, err := client.InteractionsForIssue(ctx, readyID)
+	if err != nil || !domain.IssueWaitingHuman(readyID, requests) {
+		t.Fatalf("waiting-human projection = requests %+v err %v", requests, err)
+	}
+	select {
+	case event := <-events:
+		var body protocol.TaskEventBody
+		if err := json.Unmarshal(event.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Task == nil || !body.Task.IssueFacts().WaitingHuman || body.Task.IssueFacts().WaitingHumanSource != domain.WaitingHumanSourceInteractionRequest {
+			t.Fatalf("task event does not project Waiting Human: %+v", body.Task)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for routed task event")
+	}
+}
+
+func TestRootedOrchestrationRejectsProjectCandidateRoutes(t *testing.T) {
+	scope, err := domain.RootedOrchestrationScope("root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = (daemonOrchestrationAuthority{daemon: &Daemon{}}).Apply(context.Background(), "proj", protocol.OrchestrationIntentRequest{Scope: scope, Kind: protocol.OrchestrationIntentStart, IntentKey: "wave", ActorID: "steward", Routes: []domain.OrchestrationCandidateRoute{{IssueID: "x"}}})
+	if err == nil || !strings.Contains(err.Error(), "only for project orchestration") {
+		t.Fatalf("rooted route error = %v", err)
 	}
 }
 
@@ -273,6 +379,55 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership(t *testing.T
 	}
 	if got := candidateClass(after.Candidates, id); got != string(domain.OrchestrationCandidateOwnedElsewhere) {
 		t.Fatalf("after class = %q, want owned-elsewhere", got)
+	}
+}
+
+func TestProjectOrchestrationSnapshotRefreshesCrossProcessInteractions(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	reader := issues.NewClientAtPath(path, slog.Default())
+	writer := issues.NewClientAtPath(path, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
+	id, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
+	authority := daemonOrchestrationAuthority{daemon: d}
+	before, err := authority.Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := candidateClass(before.Candidates, id); got != "runnable" {
+		t.Fatalf("before class = %q", got)
+	}
+	now := time.Now().UTC()
+	request := domain.InteractionRequest{ID: "cross-process", IssueID: id, DecisionKey: "policy", OrchestrationScope: "project", Question: "Which policy?", Why: "Human choice required", RequiredDecisions: []string{"select policy"}, Significance: domain.InteractionSignificanceMaterial, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose policy"}, State: domain.InteractionOpen, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := writer.CreateInteraction(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	after, err := authority.Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := candidateClass(after.Candidates, id); got != string(domain.OrchestrationCandidateDecisionWaiting) {
+		t.Fatalf("after class = %q, want decision-waiting", got)
+	}
+	resolvedAt := now.Add(time.Second)
+	request.FinalAnswer = &domain.InteractionAnswerAudit{Answer: "use the safe policy", Actor: "human", CreatedAt: resolvedAt}
+	resolved, err := request.Transition(domain.InteractionResolved, 1, resolvedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.UpdateInteraction(ctx, resolved, 1); err != nil {
+		t.Fatal(err)
+	}
+	woken, err := authority.Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := candidateClass(woken.Candidates, id); got != "runnable" {
+		t.Fatalf("resolved class = %q, want runnable", got)
 	}
 }
 

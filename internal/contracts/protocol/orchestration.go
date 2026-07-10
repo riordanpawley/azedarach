@@ -176,32 +176,43 @@ type OrchestrationReviewFinding struct {
 }
 
 type OrchestrationIntentRequest struct {
-	Scope               domain.OrchestrationScope    `json:"scope"`
-	Kind                OrchestrationIntentKind      `json:"kind"`
-	IntentKey           string                       `json:"intent_key"`
-	ActorID             string                       `json:"actor_id,omitempty"`
-	IssueIDs            []string                     `json:"issue_ids,omitempty"`
-	Limit               int                          `json:"limit,omitempty"`
-	RepoDir             string                       `json:"repo_dir,omitempty"`
-	BaseBranch          string                       `json:"base_branch,omitempty"`
-	OverrideBoardHealth bool                         `json:"override_board_health,omitempty"`
-	Findings            []OrchestrationReviewFinding `json:"findings,omitempty"`
-	RestartWorker       bool                         `json:"restart_worker,omitempty"`
+	Scope               domain.OrchestrationScope            `json:"scope"`
+	Kind                OrchestrationIntentKind              `json:"kind"`
+	IntentKey           string                               `json:"intent_key"`
+	ActorID             string                               `json:"actor_id,omitempty"`
+	IssueIDs            []string                             `json:"issue_ids,omitempty"`
+	Limit               int                                  `json:"limit,omitempty"`
+	RepoDir             string                               `json:"repo_dir,omitempty"`
+	BaseBranch          string                               `json:"base_branch,omitempty"`
+	OverrideBoardHealth bool                                 `json:"override_board_health,omitempty"`
+	Findings            []OrchestrationReviewFinding         `json:"findings,omitempty"`
+	RestartWorker       bool                                 `json:"restart_worker,omitempty"`
+	Routes              []domain.OrchestrationCandidateRoute `json:"routes,omitempty"`
 }
 
 type OrchestrationIntentResult struct {
-	Scope     domain.OrchestrationScope `json:"scope"`
-	Kind      OrchestrationIntentKind   `json:"kind"`
-	IntentKey string                    `json:"intent_key"`
-	Revision  uint64                    `json:"revision"`
-	Requested []string                  `json:"requested"`
-	Started   []string                  `json:"started,omitempty"`
-	Returned  []string                  `json:"returned,omitempty"`
-	Closed    []string                  `json:"closed,omitempty"`
-	Launched  []OrchestrationLaunch     `json:"launched,omitempty"`
-	Pending   []OrchestrationPending    `json:"pending,omitempty"`
-	Skipped   map[string]string         `json:"skipped,omitempty"`
-	Failed    map[string]string         `json:"failed,omitempty"`
+	Scope     domain.OrchestrationScope  `json:"scope"`
+	Kind      OrchestrationIntentKind    `json:"kind"`
+	IntentKey string                     `json:"intent_key"`
+	Revision  uint64                     `json:"revision"`
+	Requested []string                   `json:"requested"`
+	Started   []string                   `json:"started,omitempty"`
+	Returned  []string                   `json:"returned,omitempty"`
+	Closed    []string                   `json:"closed,omitempty"`
+	Launched  []OrchestrationLaunch      `json:"launched,omitempty"`
+	Pending   []OrchestrationPending     `json:"pending,omitempty"`
+	Routed    []OrchestrationRouteResult `json:"routed,omitempty"`
+	Skipped   map[string]string          `json:"skipped,omitempty"`
+	Failed    map[string]string          `json:"failed,omitempty"`
+}
+
+type OrchestrationRouteResult struct {
+	IssueID            string                        `json:"issue_id"`
+	Kind               domain.OrchestrationRouteKind `json:"kind"`
+	Reason             string                        `json:"reason"`
+	MissingDetails     []string                      `json:"missing_details,omitempty"`
+	InteractionID      string                        `json:"interaction_id,omitempty"`
+	InteractionCreated bool                          `json:"interaction_created,omitempty"`
 }
 
 type OrchestrationLaunch struct {

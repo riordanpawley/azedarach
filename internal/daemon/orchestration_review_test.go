@@ -78,6 +78,44 @@ func TestProjectStartIntentCannotBypassActionableReview(t *testing.T) {
 	}
 }
 
+func TestProjectStartIntentRoutesPrematureWorkBeforePrioritizingReview(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := issues.NewClientAtPath(filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	reviewID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	openID, err := client.Create(ctx, issues.CreateTaskParams{Title: "new work", Description: "Executable", Acceptance: "done", Type: domain.TypeTask, Priority: domain.P0, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prematureID, err := client.Create(ctx, issues.CreateTaskParams{Title: "thin work", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", prematureID, issues.OwnershipClaimParams{OwnerID: "orchestrator", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseExecution}); err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "route-before-review", ActorID: "orchestrator", IssueIDs: []string{openID, prematureID}, RepoDir: repoDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Started) != 0 || result.Skipped[openID] != "review-priority:"+reviewID {
+		t.Fatalf("result = %+v, want review to suppress runnable start", result)
+	}
+	if len(result.Routed) != 1 || result.Routed[0].IssueID != prematureID || result.Skipped[prematureID] != "candidate-routed-backlog" {
+		t.Fatalf("result = %+v, want premature candidate routed before review return", result)
+	}
+	premature, err := client.GetWithRuntime(ctx, "project", prematureID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if premature.State.Workflow() != domain.IssueWorkflowBacklog || premature.Ownership != nil {
+		t.Fatalf("premature task = %+v, want backlog with execution ownership released", premature)
+	}
+}
+
 func TestReviewIntentValidationRejectsNonActionableOrConflictingOutcomes(t *testing.T) {
 	tests := []struct {
 		name    string
