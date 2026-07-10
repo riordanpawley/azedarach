@@ -8348,16 +8348,10 @@ func PrimeCommand(deps *Dependencies) error {
 
 func primePhase(deps *Dependencies, phase, message string) func(error) {
 	startedAt := time.Now()
-	if strings.TrimSpace(message) != "" {
-		fmt.Fprintf(os.Stderr, "az prime: %s...\n", message)
-	}
 	return func(err error) {
 		attrs := []any{"phase", phase}
 		if err != nil {
 			attrs = append(attrs, "error", err)
-			fmt.Fprintf(os.Stderr, "az prime: %s unavailable after %s: %v\n", phase, time.Since(startedAt).Round(time.Millisecond), err)
-		} else {
-			fmt.Fprintf(os.Stderr, "az prime: %s ready in %s\n", phase, time.Since(startedAt).Round(time.Millisecond))
 		}
 		latencytrace.LogPhaseContext(primeTraceContext(deps), primeLogger(deps), "cli", "prime."+phase, startedAt, attrs...)
 	}
