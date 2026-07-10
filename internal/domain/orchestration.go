@@ -15,6 +15,15 @@ const (
 	OrchestrationScopeRooted  OrchestrationScopeKind = "rooted"
 )
 
+func (r OrchestratorWakeReason) Valid() bool {
+	switch r {
+	case OrchestratorWakeOpenWork, OrchestratorWakeReviewRequest, OrchestratorWakeHumanAnswer, OrchestratorWakeRecovery:
+		return true
+	default:
+		return false
+	}
+}
+
 // OrchestrationScope is the durable domain selector for one orchestrator.
 // Startup flags and environment variables resolve into this value but are not
 // themselves authority.

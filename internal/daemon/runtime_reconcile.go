@@ -95,6 +95,9 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 	if err := d.refreshSessionRuntimeState(ctx, result.ProjectID.String()); err != nil {
 		errs = append(errs, fmt.Errorf("refresh session runtime state: %w", err))
 	}
+	if err := d.reconcileOrchestratorLifecycles(ctx, result.ProjectID.String(), timeNow().UTC()); err != nil {
+		errs = append(errs, fmt.Errorf("reconcile orchestrator lifecycles: %w", err))
+	}
 	if err := d.reconcileIssueResourcesPresent(ctx, result.ProjectID.String(), nil); err != nil {
 		errs = append(errs, fmt.Errorf("reconcile issue resources present: %w", err))
 	}

@@ -79,6 +79,7 @@ type Config struct {
 	IssueResources             appconfig.IssueResourcesConfig
 	IssueAutoArchive           appconfig.IssueAutoArchiveConfig
 	ScheduledScripts           appconfig.ScheduledScriptsConfig
+	Orchestration              appconfig.OrchestrationConfig
 	Logger                     *slog.Logger
 	IdleTimeout                time.Duration
 	RuntimeReconcileInterval   time.Duration
@@ -126,6 +127,8 @@ type Daemon struct {
 	issueAutoArchiveByRoot             map[string]appconfig.IssueAutoArchiveConfig
 	scheduledScriptsByProject          map[string]appconfig.ScheduledScriptsConfig
 	scheduledScriptsByRoot             map[string]appconfig.ScheduledScriptsConfig
+	orchestrationByProject             map[string]appconfig.OrchestrationConfig
+	orchestrationByRoot                map[string]appconfig.OrchestrationConfig
 	worktreeManagersMu                 sync.Mutex
 	worktreeManagersByProject          map[string]*git.WorktreeManager
 	worktreeManagersByRoot             map[string]*git.WorktreeManager

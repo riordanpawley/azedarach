@@ -790,6 +790,12 @@ func MergeWithDefaults(cfg *Config) *Config {
 	if strings.TrimSpace(cfg.Orchestration.Via) == "" {
 		cfg.Orchestration.Via = defaults.Orchestration.Via
 	}
+	if strings.TrimSpace(cfg.Orchestration.CompleteGrace) == "" {
+		cfg.Orchestration.CompleteGrace = defaults.Orchestration.CompleteGrace
+	}
+	if strings.TrimSpace(cfg.Orchestration.WakeDebounce) == "" {
+		cfg.Orchestration.WakeDebounce = defaults.Orchestration.WakeDebounce
+	}
 
 	// Merge Notifications config
 	if cfg.Notifications.ErrorThreshold == 0 {
