@@ -33,9 +33,10 @@ type issueMutationLockKey struct{}
 type ArchiveMode string
 
 const (
-	ArchiveExclude ArchiveMode = "exclude"
-	ArchiveInclude ArchiveMode = "include"
-	ArchiveOnly    ArchiveMode = "only"
+	ArchiveExclude  ArchiveMode = "exclude"
+	ArchiveInclude  ArchiveMode = "include"
+	ArchiveOnly     ArchiveMode = "only"
+	refuseDBPathEnv             = "AZEDARACH_REFUSE_DB_PATH"
 )
 
 func NormalizeArchiveMode(value string) ArchiveMode {
@@ -415,6 +416,13 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 	if c.db != nil {
 		return c.db, nil
 	}
+	if refusedPath := strings.TrimSpace(os.Getenv(refuseDBPathEnv)); refusedPath != "" {
+		dbPath, dbPathErr := canonicalDBPath(c.dbPath)
+		refusedDBPath, refusedPathErr := canonicalDBPath(refusedPath)
+		if dbPathErr == nil && refusedPathErr == nil && dbPath == refusedDBPath {
+			return nil, c.wrapError("open-db", "", fmt.Errorf("refusing configured issue database path: %s", dbPath))
+		}
+	}
 
 	dbDir := filepath.Dir(c.dbPath)
 	if dbDir != "" && dbDir != "." {
@@ -507,6 +515,17 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		)
 	}
 	return c.db, nil
+}
+
+func canonicalDBPath(path string) (string, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if resolvedPath, err := filepath.EvalSymlinks(absPath); err == nil {
+		absPath = resolvedPath
+	}
+	return filepath.Clean(absPath), nil
 }
 
 func (c *Client) ensureIssueOwnershipSchema(db *sql.DB) error {

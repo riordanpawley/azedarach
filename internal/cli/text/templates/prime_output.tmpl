@@ -1,176 +1,137 @@
 Azedarach Session Primer
 
 Primer evidence key: `{{ .PrimeEvidenceKey }}`
-{{ if .ActiveIssueID }}
-Active issue ID: `{{ .ActiveIssueID }}`
+{{ if .ActiveIssueID }}Active issue ID: `{{ .ActiveIssueID }}`
 {{ end }}
 {{ if .OrchestratorExitContract }}{{ .OrchestratorExitContract }}
 {{ end }}
+Start here:
+1. {{ if .ActiveIssueID }}Run `az issue get {{ .ActiveIssueID }}`.{{ else }}Identify the issue with `az issue get <issue-id>` or create a fully described issue.{{ end }}
+2. {{ if .SpecEnabled }}{{ if .ActiveIssueID }}Run `az spec read --issue {{ .ActiveIssueID }}`{{ else }}Run `az spec read --issue <issue-id>`{{ end }} before behavior changes.{{ else }}Spec workflows are disabled for this project.{{ end }}
+3. Continue the requested work. Do not stop after restating the issue or proposing a plan unless the user asked for planning only.
 
-- First 3 commands for this session:
-  - {{ if .ActiveIssueID }}`az issue get {{ .ActiveIssueID }}`{{ else }}`az issue get <issue-id>`{{ end }}
-  - {{ if .SpecEnabled }}{{ if .ActiveIssueID }}`az spec read --issue {{ .ActiveIssueID }}`{{ else }}`az spec read --issue <issue-id>`{{ end }} (inspect linked requirements before behavior changes){{ else }}Spec workflows are disabled for this project (skip spec checks).{{ end }}
-  - Optional child-work setup: {{ if .TmuxAvailable }}`az issue split "Child task"` launches isolated worker fanout; use `az issue create "Child task"` or `az issue bulk-create --input issues.json` for tracking-only child issues{{ else }}`az issue create "Child task"` creates tracking-only child issues; worker fanout needs tmux and `az issue split`{{ end }}
-{{ if .ImplementationSection }}{{ .ImplementationSection }}{{ end }}
-- How to use `az` command map:
-  - Issue lifecycle:
-  - `az issue list --limit 20`, `az issue list --status in_progress --limit 20`, `az issue list --query "text" --updated-after YYYY-MM-DD --limit 20`, `az issue search --status open --limit 20 --query "text"` (or `az issue search --status open --limit 20 "text"`) searches title, description, notes, design, acceptance, labels, and implementations; `az issue get <issue-id>`, `az issue create "Child task" [--json]` (immediate child work; auto-parents under `AZEDARACH_ISSUE_ID`){{ if .TmuxAvailable }}, `az issue split "Child task" [--json]` (create isolated child session){{ end }}, `az issue create --deferred "Later backlog task" [--json]` (standalone backlog only; skips auto-parenting and is not a worktree/session control), `az issue record <issue-id> --summary "..." [--type progress.recorded|evidence.submitted|validation.passed|risk.recorded|blocker.reported] [--data '{"key":"value"}'] [--json]`, `az issue update <issue-id> --status in_review|in_progress|open [--json]`, `az issue close <issue-id> [--json]` (integrate, clean up, and close)
-  - Proper issue creation: never leave an issue as just a title. Use `az issue create --title "Specific outcome" --description "Context, scope, acceptance/validation notes"` or immediately follow title-only creation with `az issue update <issue-id> --description "..."` before starting work or fanout.
-  - Start-issue wording: when the user says "start an az issue", "add/start an issue", or "create and start an issue", create or identify the issue and then run `az session start <issue-id>`. Do not treat `az issue update <issue-id> --status in_progress` as starting a session unless the user explicitly asks to mark/update status.
-  - Child session handoff: after `az session start <child-issue>`{{ if .TmuxAvailable }} or `az issue split "Child task"`{{ end }} starts a child tmux/session, the current parent/orchestrator session should only observe, wait for, or coordinate that child session. Watching the child tmux/session is fine; continuing the child implementation locally in the parent session is not.
-  - `az issue update`: use `--update-impl` only when changing implementation assignments; status, title, and description updates do not need it.
-  - Status semantics: use `open` for not-yet-active work, `in_progress` while actively working, `in_review` when implementation is complete and waiting for human/orchestrator review or integration, and `closed` only after acceptance/integration is complete.
-  - Always align issue status with the agent's current action: before starting or resuming implementation, review, re-review, or follow-up fixes, move the issue to `in_progress` even if it was `in_review`; reserve `in_review` for the waiting-for-human/orchestrator handoff.
-  - Blocked is not an issue status. Represent blocked work with dependency edges (`az issue dep add <blocked-issue> <blocker-issue> --type blocks`) and record blocker evidence with `az issue record --type blocker.reported` unless an active orchestrator/watch needs a mailbox event.
-  - `az issue bulk-create --input issues.json --json` (create many issues, epics, or nested `children` trees from JSON when shaping a graph up front), `az issue bulk-update --input updates.json --json`, `az issue update <issue-id> --design "..."`
-  - `az issue record <issue-id> --summary "..." [--type <event-type>] [--data <json-object>] [--follow-up <issue-id> ...] [--json]` appends durable issue activity/evidence without mailbox delivery; use it for non-orchestrated progress, follow-up creation, validation facts, review facts, risks, and blockers.
-  - `az issue events <issue-id> [--type <event-type>] [--limit <n>] [--json]` shows durable observation/evidence events for audit and agent context without relying on free-form notes.
-  - `az issue context-risk <issue-id> --since 14d [--summary|--full] [--json]` shows repeated local failure risk from recent sibling/related overlap evidence; default/`--summary` output is bounded for closeout, and `--full` expands raw evidence; use it before accepting worker closeout, not as a blanket root-level gate.
-  - Reports and attachments:
-  - `az issue document add <issue-id> <file>`, `az issue document list <issue-id>`, `az issue document remove <issue-id> <attachment-id>`
-  - Markdown attachments render in the TUI; other file types can be opened externally.
-  - Child issue creation without worker launch:
-  - Batch planning/catalog fanout: `az issue bulk-create --input issues.json --json` with `parent_id` or nested `children` creates parented child issues without starting sessions or orchestration.
-  - Single tracking-only child: `az issue create "Child task" [--json]` auto-parents under `AZEDARACH_ISSUE_ID`; for another parent, pass `--parent <issue-id>`.
-  - Worker fanout/session launch: `az issue split --parent <issue-id> "Child task"` can create the child and start orchestration/session work; use `az issue split` only when you intentionally want isolated worker fanout.
-  - Issue dependency graph:
-  - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from|created-in] [--json]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--json]`
-  - Issue graph/root membership comes only from auto-parenting with `AZEDARACH_ISSUE_ID` or explicit `parent-child` dependency edges. Do not use `--impl <id>` when you mean "parent this under <id>"; `--impl` is implementation metadata only and never attaches an issue to a graph/root.
-  - If a child issue was requested and `az issue create --json` returns `parent_id: ""`, stop before launching work: verify the intended root with `az issue get <intended-root>`, then attach the child with `az issue dep add <child-id> <intended-root> --type parent-child` or create a fresh child from the correct active issue context.
-  - Parent-child edges are hierarchy/board-nesting edges, not readiness controls. Do not remove a parent-child edge to pause, derank, or supersede orchestration child work; keep the child under its parent, set it `open` when appropriate, and add a `blocks` edge to the blocker/design issue instead. Removing a parent-child edge from active child work requires explicit parent-orphan confirmation.
-  - Orchestration:
-  {{ if .OrchestrationViaNative }}- `orchestration.via` is `native`: use your harness-native subagent delegation commands/keywords to split and run child issues (for example "delegate", "spawn", or "subagent"). Keep using `az issue` for tracking state and dependencies.
-  {{ if .TmuxAvailable }}
-  - `az orchestrate` and `az issue fanout` commands are optional in this mode; prefer native delegation flow unless you explicitly need CLI-managed readiness/session starts.
-  - Use `az orchestrate prompt --issue <issue-id> [--root <issue-id>]` to generate a self-contained worker handoff prompt for native subagents. Add `--coordination mailbox` only when you explicitly want hybrid az-mail coordination.
-  - Use native delegation for short-lived ad hoc exploration or review where the result can be summarized back into the current session. Use `az orchestrate` for durable tracked task graphs that need issue dependencies, mailbox events, recoverable sessions, isolated worktrees, integration guidance, and `complete-check`.
-  {{ else }}
-  - CLI-managed worker fanout requires `tmux` on `PATH`; `tmux` is not available, so use native delegation for short-lived ad hoc exploration while keeping durable state in `az issue`. Install `tmux` and rerun `az prime` to see CLI-managed worker commands.
-  - Use `az orchestrate prompt --issue <issue-id> [--root <issue-id>]` to generate a self-contained worker handoff prompt for native subagents. Add `--coordination mailbox` only when you explicitly want hybrid az-mail coordination.
-  {{ end }}
-  {{ else if and .OrchestrationViaAz .TmuxAvailable }}
-  - `az orchestrate status --root <issue-id> [--since <seq>] [--limit <n>] [--json] [--summary|--full]`
-  - `az orchestrate watch --root <issue-id> --since <seq> [--jsonl] [--verbose|--full]` (start in another pane/session and leave running while workers are active; default output is compact for agent decision loops and `--verbose`/`--full` emits the full frame; reserve `--once` for diagnostic single polls only)
-  - `az orchestrate prompt --issue <issue-id> [--root <issue-id>] [--coordination native|mailbox] [--json]`
-  - `az orchestrate start --root <issue-id> [--limit <n>] [--issue <issue-id> ...] [--json]`
-  - `az orchestrate group --root <issue-id> --nested <nested-root-id> --issue <child-id> ... [--json]`
-  - `az orchestrate integrate --issue <issue-id> [--json]` (inspect worker evidence and repair guidance; normal accepted-worker integration uses `az issue close`)
-  - `az orchestrate close-session --issue <issue-id> [--json]` (repair-only session cleanup; daemon stop records stopped state before killing tmux)
-  - `az orchestrate message --root <issue-id> --issue <worker-issue> --body "..." [--json]` (orchestrator-to-worker only: persist a mailbox event and actively inject the message into the running worker session; rejects accidental self-delivery when the target matches `AZEDARACH_ISSUE_ID`)
-  - `az orchestrate complete-check --root <issue-id> [--json]`
-  - `orchestration.via` is `az`: use `az orchestrate` as the worker launch and coordination authority. Do not use harness-native subagent/delegation tooling for this graph unless the user explicitly overrides this or changes `orchestration.via` to `native`.
-  - Parent-orchestrator checklist for new roots:
-    1. Start the parent orchestrator session first: `az session start <root>` unless the current session is already that root's orchestrator session; session start creates or reuses the parent worktree.
-    2. From the parent worktree/session, run `az orchestrate status --root <root>` to verify the graph and runnable children.
-    3. Launch child workers only from that orchestrator context: `az orchestrate start --root <root> ...`.
-  - Nested epic/root rule: if the user asks the current session to start another epic/root issue, use `az orchestrate group --root <root> --nested <nested-root> --issue <child> ...` when child ownership needs to move under that nested root, then start that epic's own orchestrator session with `az session start <nested-root>` and let that session run `az prime` and manage `az orchestrate start --root <nested-root>`. Do not launch the nested root's child workers from the current/root session unless the user explicitly asks to flatten orchestration.
-  - If a user asks to create a new epic/root and start orchestration, do not rely on the original/current task session to own that new parent orchestration; start or enter the parent orchestrator session before child worker launch.
-  - Use `az orchestrate` for durable tracked task graphs that need issue dependencies, mailbox events, recoverable sessions, isolated worktrees, integration guidance, and `complete-check`. Native subagents are better for short-lived ad hoc exploration or review where the result can be summarized back into the current session; do not use them to execute this `az` graph unless the user explicitly overrides the mode.
-  - Use `az orchestrate status` for readiness snapshots including active worker `activity` (`busy|idle|waiting|no-agent|unknown`), `watch` for continuous observe-only mailbox/runnable/activity updates, `start` to launch runnable leaf workers, `message` for active orchestrator-to-worker delivery, `integrate` for worker result inspection/repair guidance, and `complete-check` before closing the root issue. Use `az issue close --id <worker>` to integrate accepted workers; reserve `close-session` for session cleanup repair when a worker must be stopped without closing the issue.
-  - Review/integration ownership: when reviewing or integrating an `in_review` worker that still has a live or paused session, do not patch non-trivial actionable findings directly in the reviewer/integration worktree. Send the finding back with `az orchestrate message --root <parent-issue> --issue <worker-issue> --body '{"type":"review-finding","severity":"medium","file":"path/to/file.go","line":123,"finding":"...","suggested_fix":"...","validation":["go test ./..."]}'` and let the issue session address it. Direct reviewer-side fixes are only for trivial integration hygiene, already-closed or no-session branches, or explicit human direction; record the exception with `az issue record <worker-issue> --type review.recorded --summary "<why reviewer fixed directly>"`.
-  - Worker integration evidence should be a structured JSON `worker_evidence.v1` packet with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`. Use a `worker-integration-ready` mailbox body when an active parent orchestrator/watch is coordinating delivery; otherwise use `az issue record <issue-id> --type evidence.submitted --data '<json>'` for durable closeout evidence without mailbox delivery. Omit `artifact_links` unless links are needed, and when present use objects like `[{"label":"CI","url":"https://example.test/run"}]`, not a string array. Run `az evidence validate --body '<json>'` before recording or sending, `az evidence validate --fix --body '<json>'` for repairable schema aliases, or `az evidence validate --template` for the canonical template.
-  - Orchestration readiness is graph-derived: open/in-progress/in-review leaves can be blocked by unresolved `blocks` dependencies; closing the blocker issue unblocks downstream work. Do not set `in_review` to mean blocked.
-  - When the user names a graph/root, verify it before starting workers: run `az issue get <intended-root>` and `az orchestrate status --root <intended-root> --json`, confirm the child appears under that root, then run `az orchestrate start --root <intended-root> --issue <child-id>`.
-  - If work was launched under the wrong parent, do not treat it as a simple move: the tmux session and worktree identity are already tied to the wrong issue/session. Stop the wrong worker, mark that issue superseded with notes, and create a fresh child under the correct root.
-  - Worker completion flow: workers should leave their issue `in_review` with structured worker evidence. Use mailbox evidence only when an active parent orchestrator/watch is coordinating delivery; otherwise use `az issue record --type evidence.submitted --data '<worker_evidence.v1 json>'`. Before accepting closeout, run `az issue context-risk <worker-issue> --since 14d` and treat `none`/`fyi` as advisory, ask the bounded prompts for `medium`, and require diagnosis or structured risk evidence for `high`; then close accepted worker issues with `az issue close --id <issue-id>` to integrate, clean up, and close. Parent/tracker completion includes child lifecycle cleanup: before reporting the parent complete, inspect child statuses, close accepted completed children with `az issue close --id <child-issue>`, and leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale. Do not use context-risk as a blanket root-level gate.
-  - After every `az orchestrate start`, immediately start `az orchestrate watch --root <issue-id> --since <seq> --jsonl` in another pane/session and keep it running until all active workers are integrated or intentionally stopped; use `--verbose`/`--full` only for debugging and do not add `--once` for orchestration monitoring.
-  - Prefer `az orchestrate watch`, `az orchestrate status`, and `az session status <issue-id>` for worker observation. Trust hook-backed `activity=busy|idle|waiting` for idleness checks and treat `activity=no-agent` as an intentional session-only shell; when activity is `unknown`, inspect hooks with `az ai status --target=auto` and run `az ai install --target=auto` only when hooks are missing, outdated, or not installed; use `az orchestrate capture --issue <worker-issue>` only when status/watch look stale, failed, or contradictory. Do not poll panes on a fixed interval.
-  - Az orchestration loop:
-    1. Shape the graph with child issues and dependency edges until each leaf is one-session-sized and independently mergeable.
-    2. Run `az orchestrate status --root <issue-id> --json --summary` to inspect runnable leaves, blocked leaves, active sessions with activity, and the next mailbox sequence.
-    3. Start only this root's direct runnable leaves with `az orchestrate start --root <issue-id> --limit <n>`; if a runnable child is itself an epic/root that should self-orchestrate, start its session with `az session start <child-root>` instead of launching its descendants here.
-    4. Watch progress continuously with `az orchestrate watch --root <issue-id> --since <seq> --jsonl` left running in another pane/session; use summarized activity to distinguish busy, idle, no-agent, and unknown workers, use `az orchestrate message` only for evidence-backed worker nudges when the intervention threshold is met, and handle `worker-blocked`, dependency-ready, failed sessions, and newly runnable leaves before starting the next wave.
-    5. For workers that are `in_review` or otherwise report completion, inspect evidence, run `az issue context-risk <worker-issue> --since 14d`, run parent validation, then close accepted child issues with `az issue close --id <issue-id>`; that command owns merge, session stop, worktree cleanup, and issue closure. Use `az orchestrate integrate --issue <issue-id>` only when you need extra inspection/repair guidance.
-    6. Repeat status -> start -> watch until `az orchestrate complete-check --root <issue-id>` passes, then run final validation and close the root.
-  - Small graph: 1-3 leaves, usually run `status`, then `start --limit 3`, then `complete-check` after workers finish.
-  - Medium graph: 4-10 leaves, run bounded waves (`--limit 2` to `--limit 4`), keep `az orchestrate watch` running between waves, and start newly unblocked leaves only after dependency-ready/complete signals.
-  - Large graph: 10+ leaves or multiple dependency phases, keep orchestration centralized inside each root session; start with a low limit, use `status --json` as the source of truth for readiness, start explicit nested epic/root sessions rather than flattening their workers into the current root, and do not close until complete-check and root validation both pass.
-  {{ else if .OrchestrationViaAz }}
-  - `orchestration.via` is `az`, but CLI-managed worker fanout requires `tmux` on `PATH`; `tmux` is not available. Install `tmux` and rerun `az prime` to see CLI-managed worker commands. Until then, keep work in the current session or use native delegation only for short-lived ad hoc exploration while tracking durable state with `az issue`.
-  {{ else }}
-  - Unsupported `orchestration.via` value: `{{ .OrchestrationVia }}`. Set `orchestration.via` to `az` for CLI-managed orchestration or `native` for harness-native delegation before fanning out work.
-  {{ end }}
-  - Worker intervention threshold: use status/watch/mailbox output for routine observation, and do not preemptively message, interrupt, or redirect child workers unless there is concrete, high-confidence evidence that the worker is about to violate scope, use the wrong parent/root, take a destructive action, or make a material mistake.
-  - Branch merge repair targeting: `az branch merge <issue-id>` and `az branch agent-merge <issue-id> --target base` are low-level repair tools for manual merge/conflict recovery. Normal accepted-worker completion should go through `az issue close --id <issue-id>` so merge, stopped session cleanup, worktree cleanup, and issue closure stay one authoritative operation.
-  - Child work should target the closest ancestor with an active worktree branch. If no ancestor worktree exists, run `az worktree create <ancestor-issue>` to materialize the parent/ancestor integration target before closing the child; do not route child work directly to base as a normal completion path.
-  - Mailbox coordination:
-  - Preferred mailbox event types for active coordination are `worker-progress`, `worker-blocked`, `worker-integration-ready`, and `dependency-ready`; `worker-ready` and `worker-complete` are legacy aliases for `worker-integration-ready`.
-  {{ if and .OrchestrationViaAz .TmuxAvailable }}
-  - Use `az orchestrate message --root <parent-issue> --issue <worker-issue> --body "..."` only for evidence-backed orchestrator-to-running-worker nudges when the intervention threshold is met. Workers reporting to an active parent orchestrator/watch should use `az mail send --parent <parent-issue> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body "..."` so they do not inject the event into their own session. For non-orchestrated progress, follow-ups, validation, risks, or completion evidence, use `az issue record` instead. Bare `az mail send` is durable mailbox-only and may not be seen until the worker next checks mail.
-  {{ end }}
-  - `az mail send --parent <parent-issue> --type dependency-ready --body "..."`, `az evidence validate --template`, `az evidence validate --body '{"schema":"worker_evidence.v1","summary":"Ready for integration.","commands_run":["just test"],"key_assertions":["validation passed"],"files_changed":["internal/daemon/mail_commands.go"],"review":{"status":"clean","findings":[]},"risks":["none"]}'`, `az issue record <issue-id> --type evidence.submitted --data '{"schema":"worker_evidence.v1","summary":"Ready for integration.","commands_run":["just test"],"key_assertions":["validation passed"],"files_changed":["internal/daemon/mail_commands.go"],"review":{"status":"clean","findings":[]},"risks":["none"]}'`, `az mail send --parent <parent-issue> --issue <worker-issue> --type worker-integration-ready --body '{"schema":"worker_evidence.v1","summary":"Ready for integration.","commands_run":["just test"],"key_assertions":["validation passed"],"files_changed":["internal/daemon/mail_commands.go"],"review":{"status":"clean","findings":[]},"risks":["none"]}'`, `az mail list --parent <parent-issue> --since <seq> --json`, `az mail watch --parent <parent-issue> --since <seq> --jsonl`
-  - For `worker_evidence.v1`, omit `artifact_links` unless links are needed; when present, encode it as objects like `[{"label":"CI","url":"https://example.test/run"}]`, not a string array.
-  - Spec traceability:
-  - {{ if .SpecEnabled }}`az spec req list --query "<issue title and feature terms>" --match any --limit 10`, `az spec req get/create/update/delete`, `az spec link list/add/remove`, `az spec read`, `az spec lint`, and `az spec parity` before behavior changes and after behavior edits to keep requirements/links aligned.{{ else }}Spec workflows disabled for this project (`az config set spec.enabled false`).{{ end }}
-  - Decision records:
-  - Use `az decision` to capture durable architecture/product choices and link them to issues, requirements, or prior decisions.
-  - `az decision list [--json] [--issue <id>] [--req <id>] [--id <id> ...] [--query <text>]`, `az decision get --id <id> [--with-links] [--json]`
-  - `az decision record --title <text> --rationale <text> [--context <text>] [--consequences <text>] [--issue <id> ...] [--req <id> ...] [--json]`
-  - `az decision update --id <id> [--title ...] [--rationale ...] [--context ...] [--consequences ...] [--json]`, `az decision delete --id <id> --confirm [--json]`
-  - `az decision revisit --id <old-id> (--new <existing-id> | --title <text> --rationale <text>) [--context ...] [--note ...] [--json]`
-  - `az decision link list [--json] [--id <decision-id>] [--kind <issue|requirement|decision>] [--target <id>]`, `az decision link add --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--relation <applies-to|revises|informs>] [--note <text>] [--json]`, `az decision link remove --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--json]`
-  - `az decision sync [--check] [--project-dir <dir>] [--json]` writes `docs/decisions/*.md` from the store; `az decision import [--check] [--force] [--project-dir <dir>] [--json]` reads markdown back into the store.
-  - Installed `az` pre-commit hooks run `az decision sync` and stage `docs/decisions`, so generated decision markdown can enter a commit even when your manual `git add` named only code files. Before a scoped code-only commit, run `az decision sync --check`; if it reports unrelated drift, either commit the decision export separately or use `AZEDARACH_SKIP_DECISION_SYNC=1 git commit ...` to skip only the built-in decision sync/restage path.
-  - Learning loop:
-  - `az learn add --issue <id> --tag <tag> --evidence <text> [--private]`, `az learn recall --query <text> [--limit N] [--include-private]`, `az learn show <learning-id>`, `az learn review [--queue-status <status>] [--older-than 30d] [--issue <id>]`, `az learn review --id <learning-id> [--id <learning-id> ...] --status accepted|rejected|stale --note <text>`, `az learn review --bulk-stale --older-than 30d --note <reason>`, `az learn promote --target rulesync|agents|skill|spec|decision --target-id <id-or-path> <learning-id>`, `az learn relate --type supersedes|conflicts --note <text> <source-learning-id> <target-learning-id>`
-  - Use `az learn` for evidence-backed observations and session discoveries. Use `az decision` for durable why/choice records; promoted learnings can become decisions, specs, AGENTS/.rulesync guidance, or skills.
-  - Session/runtime operations:
-  - `az session status [issue-id]`, `az worktree create <issue-id>` (prepare parent/ancestor integration target without starting a session), `az daemon start|stop|restart`, `az daemon watch-clients [--json] [--all]`, `az export --format json [--out <path>]`
-  - `az session start <issue-id>` is for explicit/manual orchestration; agents should not run it unless the user asks.
-- Use `az issue` commands as the task-tracker interface for this repo.
-- Prefer `az issue` operations over direct backend issue CLI commands in sessions.
-- Create follow-up/child work in the tracker instead of local TODOs.
-- Parent vs child issue scope:
-  - Parent/epic issues describe the overarching goal, scope, and success criteria; keep their description high-level and stable.
-  - Track subtask goals, implementation steps, and nitty-gritty decisions in child issues created with `az issue create "Child task"` for tracking-only child work{{ if .TmuxAvailable }} or `az issue split "Child task"` only when the child should launch immediately{{ end }}, not buried inside the parent's description or notes.
-  - Atomic-merge test before using `--deferred`: ask "would the parent be correct and complete if it lands in the base branch without this new piece?" If no, the new piece must land with the parent — track it as a child issue (child issues are part of the parent's merge unit and land in the same base-branch commit) or fold it into the parent's commit; do not use `--deferred`. If yes, it can land separately and `--deferred` (or a standalone issue) is appropriate. `--deferred` only changes issue bookkeeping: it skips active-issue auto-parenting and defaults priority lower; do not use it to avoid, force, or reason about worktree/session creation.
-  - When a new subtask surfaces mid-work, create a child issue immediately rather than expanding the parent's description; link extra dependencies with `az issue dep add` when needed.
 {{ if .ActiveIssueClosedWarning }}{{ .ActiveIssueClosedWarning }}
+
+{{ end }}{{ if .ImplementationSection }}{{ .ImplementationSection }}
+{{ end }}{{ if .IssueSection }}{{ .IssueSection }}
+{{ end }}{{ if .QuestionFirstGuardrails }}{{ .QuestionFirstGuardrails }}
+
+{{ end }}Session Contract
+
+- `AZEDARACH_ISSUE_ID` selects the default issue scope. Refresh stale context with `az issue get <issue-id>`; do not silently switch issues.
+- Use `az issue` as the task authority. Record non-trivial work in issues and perform implementation in the issue worktree/session.
+- When the user asks to start an issue, start or attach its session; changing lifecycle state alone does not start execution. Agents start sessions only on explicit user or orchestrator direction.
+- Create issues with enough description and acceptance context to execute; a title alone is not a usable handoff.
+- Keep the issue state aligned with what is happening now. Resume active work before editing; do not leave an issue review-ready while making follow-up changes.
+- Record progress, validation, review facts, risks, blockers, and closeout with `az issue record`. Notes are terse human scratchpad, not the automation source of truth.
+
+Issue State
+
+- Durable state is a discriminated model: lifecycle is `backlog`, `open`, `active`, or `closed`; a closed issue has outcome `completed` or `cancelled`. Review readiness, archive, and tombstone/delete are separate dimensions.
+- `backlog` means not ready to start. `open` means ready but inactive. `in_progress` enters or resumes active work. `in_review` requests review without leaving the active lifecycle.
+- Board columns are configurable projections over issue facts. In Review, Waiting Human, and Waiting AI are derived columns, not stored statuses. A review-ready issue with active runtime work may still display In Progress.
+- Blocked is graph state, not a status. Add a `blocks` dependency and record blocker evidence; do not use `in_review` to mean blocked.
+- `cancelled` is a terminal closed outcome without integration. Archive and tombstone/delete do not substitute for cancellation.
+
+Execution Loop
+
+1. Read the issue, linked requirements, dependencies, recent evidence, and relevant existing code paths.
+2. Move the issue to `in_progress` when starting or resuming implementation, review, re-review, or fixes.
+3. Keep changes scoped, create child issues for newly discovered required work, and maintain dependency edges.
+4. Run risk-appropriate tests and the repository review gate. Fix actionable findings and repeat until clean.
+5. Commit intended changes with the issue ID in the commit message; verify the worktree is clean.
+6. Record commands, assertions, files, acceptance results, risks, and follow-ups with `az issue record`.
+7. Request review with `az issue update --status in_review <issue-id>`.
+
+Review And Terminal Close
+
+- Review handoff is non-terminal. Setting `in_review` must preserve the tmux session and worktree for human/orchestrator feedback. Do not stop the session, clean the worktree, or close the issue merely because review was requested.
+- A worker leaves integration and terminal close to its orchestrator. A root/contributor waits for explicit human acceptance before integration and cleanup.
+- `az issue close --id <issue-id>` is the accepted-completion transaction: preflight, integrate, stop session, clean worktree, and close. Use it only after acceptance criteria, validation, and required integration are complete.
+- `az issue update --status cancelled <issue-id>` is the terminal non-integrated path. It performs close cleanup without integration.
+- If work is incomplete, keep it `in_progress`; record remaining scope and create required child/blocker issues.
+
+Parent And Child Scope
+
+- Parent/epic issues hold the overarching goal and acceptance contract. Put implementation-sized scope and detailed decisions on child issues.
+- `az issue create "Child task"` creates tracking-only child work and auto-parents under `AZEDARACH_ISSUE_ID`; pass `--parent <issue-id>` when targeting another root. Use `az issue split` only when the child should launch in an isolated session.
+- After launching a child session, the parent observes, coordinates, and integrates it; do not also implement that child's scope in the parent session.
+- Graph membership comes from parent-child edges, never `--impl`. Verify returned `parent_id` before launching a worker.
+- If work starts under the wrong parent, stop that worker and create a fresh correctly parented child; session and worktree identity make an active worker unsafe to reparent in place.
+- Parent-child edges express hierarchy, not readiness. Pause/supersede work by changing lifecycle intent and adding a blocker; do not orphan active work by removing its parent edge.
+- Before using `--deferred`, ask whether the parent can land correctly without the work. Required work belongs in the parent's merge unit; only independently landable later work is deferred.
+- Child integration targets the closest active ancestor worktree. Materialize a missing ancestor with `az worktree create <ancestor-issue>`; do not route normal child completion directly to the base branch.
+
+Orchestration
+
+{{ if .OrchestrationViaNative }}- Mode is `native`: use harness-native subagents for execution while keeping durable issue state and dependencies in `az`.
+- Use `az orchestrate prompt --issue <child> --root <parent>` for a self-contained handoff. Add `--coordination mailbox` only when an active parent watch needs durable coordination.
+{{ if .TmuxAvailable }}- Use CLI-managed `az orchestrate` only when its recoverable sessions, worktrees, or mailbox loop are specifically needed.
+{{ else }}- CLI-managed worker fanout requires `tmux`; it is unavailable. Native delegation remains available.
+{{ end }}{{ else if and .OrchestrationViaAz .TmuxAvailable }}- Mode is `az`: `az orchestrate` is the worker launch and coordination authority for this graph.
+- Shape independently actionable leaves, inspect `az orchestrate status --root <root> --json --summary`, then start a bounded wave with `az orchestrate start --root <root> --limit <n>`.
+- Keep `az orchestrate watch --root <root> --since <seq> --jsonl` running while workers are active. Use `az orchestrate capture --issue <worker>` only when status/watch is stale or contradictory; do not poll panes continuously.
+- Trust hook-backed activity. If activity is `unknown`, inspect `az ai status --target=auto` and repair missing or outdated hooks before treating the worker as idle.
+- Workers report `worker-progress`, `worker-blocked`, or `worker-integration-ready`. The orchestrator uses `az orchestrate message` only for evidence-backed intervention.
+- Review worker evidence and context risk, return non-trivial findings to live worker sessions, and close accepted children with `az issue close --id <child>`.
+- Start nested epic/root sessions as their own orchestrators; do not flatten their descendants unless explicitly requested.
+- Repeat status, start, watch, review, and accepted child close until `az orchestrate complete-check --root <root>` passes. Then validate and request human review of the root without stopping its session.
+{{ else if .OrchestrationViaAz }}- Mode is `az`, but CLI-managed worker fanout requires `tmux`; it is unavailable. Keep work in this session or use native delegation for disposable exploration while tracking durable state in `az issue`.
+{{ else }}- Unsupported `orchestration.via` value: `{{ .OrchestrationVia }}`. Set it to `az` or `native` before fanning out.
 {{ end }}
+Evidence And Coordination
+
+- Use `az issue record --type <event-type> --summary "..." --data '<json>' <issue-id>` for durable facts that do not require live delivery. Inspect with `az issue events` or `az observe`.
+- Use mailbox events only when an active parent orchestrator/watch needs coordination delivery. Bare `az mail send` is durable but may not be observed immediately.
+- Worker handoff evidence uses `worker_evidence.v1`: summary, commands run, key assertions, files changed, review status/findings, and risks. Validate it with `az evidence validate` before recording or sending.
+- Before accepting repeated-locality work, inspect `az issue context-risk --since 14d <issue-id>`; treat low risk as advisory and require structured diagnosis/invariant/consumer/test evidence for high risk.
+- Capture reusable discoveries with `az learn add`; use `az decision` for durable architecture/product choices and link them to issues or requirements.
+- When the implementation design changes, update the issue's durable design field and keep child-level detail on the relevant child issue.
+- Pre-commit hooks may sync decision markdown. Run `az decision sync --check` before scoped commits when unrelated decision drift would be harmful.
+
 {{ if .LearningSection }}{{ .LearningSection }}
 
-{{ end }}
-{{ if .IssueSection }}{{ .IssueSection }}
-{{ end }}{{ if .QuestionFirstGuardrails }}{{ .QuestionFirstGuardrails }}
-{{ end }}- Follow-up and dependency rules:
-  - Atomic-merge test before reaching for `--deferred`: if the parent would land incorrect or incomplete in the base branch without this new piece, the new piece is part of the parent's merge unit. Track it as a normal child issue (child issues land in the same base-branch commit as the parent) or include it in the parent's commit — never `--deferred`. Reserve `--deferred` for work that can land separately later.
-  - Create immediate child/blocking scope with `az issue create "Title"`; when `AZEDARACH_ISSUE_ID` is set this auto-creates a tracking-only child issue under that parent.{{ if .TmuxAvailable }} Use `az issue split "Title"` only when the child should also launch in its own az/tmux session/worktree.{{ end }}
-  {{ if .TmuxAvailable }}- If the user names a root other than the active issue, first run `az issue get <intended-root>`, then create/link the child with a `parent-child` edge and verify with `az orchestrate status --root <intended-root> --json` before `az orchestrate start`.
-  {{ else }}- If the user names a root other than the active issue, first run `az issue get <intended-root>`, then create/link the child with a `parent-child` edge before handing off or continuing work.
-  {{ end }}
-  - To pause or supersede child work inside an orchestration graph, keep the parent-child edge, move the child to `open` if it should stop being active, and add `az issue dep add <child> <blocker> --type blocks`; do not detach it from the parent.
-  - Use `az issue create --deferred "Title"` only for standalone later/backlog work that should be tracked now but not executed before the active issue closes. It is not a child-task shortcut and not a way to control worktree/session creation.
-  - Do not use `--deferred` for child tasks, blockers, or work required before closing the active issue; create normal child issues instead.
-  - When fanning out to subagents, split work until each child issue is independently actionable and fits within a single subagent context window.
-  {{ if .OrchestrationViaNative }}- `orchestration.via` is `native`: orchestrate the split using native subagent/delegation commands in your AI harness, while keeping issue bookkeeping in `az issue`.
-  - Shorthand: `single-window fanout (native)` means split until each child is ready for one subagent, then run `az orchestrate prompt --issue <child> --root <parent>` and pass that prompt to one native subagent at a time. Use `--coordination mailbox` only for explicit hybrid coordination.
-  {{ else if and .OrchestrationViaAz .TmuxAvailable }}- `orchestration.via=az` means do not spawn harness-native subagents yourself. Then run the az orchestration loop for the active root: `status` to identify direct runnable leaves and active worker activity, `start --limit <n>` to launch a bounded wave, leave `watch --since <seq>` running in another pane/session to observe worker/dependency/activity events, use `az orchestrate message --root <parent> --issue <worker> --body "..."` only for evidence-backed worker nudges when the intervention threshold is met, and `complete-check` before closing. If a runnable child is a nested epic/root, start that child root's own orchestrator session instead of launching its descendants from here. Tell each worker to use `az issue` and create/maintain its own child issue under the active parent.
-  - Shorthand: `single-window fanout` means split until each child is ready for one worker, then use `az orchestrate start` to launch runnable leaves in bounded batches.
-  {{ else if .OrchestrationViaAz }}- `orchestration.via=az` is configured, but `tmux` is not available. Do not start CLI-managed worker fanout in this environment; keep work in the current session or use native delegation for disposable side exploration while tracking durable state with `az issue`.
-  {{ else }}- Resolve unsupported `orchestration.via={{ .OrchestrationVia }}` before fanning out. Use `az` for CLI-managed orchestration or `native` for harness-native delegation.
-  {{ end }}
-- Issue-context guardrails:
-  {{ .ContextGuardrail }}
-  - Missing fields (for example description/notes) are valid. Treat absent or empty fields as intentional and continue execution.
-{{ if .ImplementationGuardrails }}{{ .ImplementationGuardrails }}
-{{ end }}- Keep issue context current as you work:
-  - Record non-orchestrated progress, follow-up creation, validation, risks, blockers, review facts, and closeout evidence with `az issue record`; read them with `az issue events <issue-id>` or `az observe`.
-  - Use mailbox `worker_evidence.v1` packets only when an active parent orchestrator/watch needs coordination delivery; otherwise record the same structured packet with `az issue record --type evidence.submitted --data '<json>'`.
-  - Keep notes terse and evidence-oriented: final commands run, key outputs/assertions, files changed, AC pass/fail, blockers, and remaining scope only.
-  - Do not use `az issue update --notes` or `az issue update --append-notes` for routine agent progress, validation, review facts, or worker closeout; use issue records or active-coordination mailbox evidence instead.
-  - Treat notes as a human scratchpad/audit trail, not as the automation source of truth or routine progress feed.
-  - Do not append raw logs, exploratory transcripts, routine progress narration, duplicate primer context, or speculative scratch work to notes.
-  - Update the active issue's design with `az issue update --design "..."` when design decisions change; capture subtask-level detail on the relevant child issue instead of bloating a parent/epic description.
-  - `az issue get` hides historical notes in text output by default; use `az issue get <issue-id> --with-notes` only when full note history is needed.
-  - Use status/priority/labels flags when state changes materially.
-  - Status update rule: move your active issue to `in_progress` when starting or resuming agent work, including agent-led review or re-review; use `in_review` only when the requested work is complete but awaiting human/orchestrator review or integration; use `closed` only when acceptance criteria are met and required integration/validation is done.
-- Overlay edits: check `az spec read --issue <issue-id>` before behavior changes, keep `View()` and `Size()` aligned, validate default and narrow viewports, and update goldens when rendered output changes. If the work is docs/process-only, record `Spec impact: none (docs/process-only)` in issue notes.
-- `az issue --help`
-{{ if .SpecGuardrails }}- Spec workflow:
+{{ end }}{{ if .SpecGuardrails }}Spec Workflow
+
 {{ .SpecGuardrails }}
 
-{{ end }}- When work is complete:
-  - Commit your changes first (`git add -A && git commit -m "<issue-id>: ..."`).
-  - Always include the issue ID in the commit message.
-  - Close the issue only when the issue scope and acceptance criteria are fully complete (`az issue close --id <issue-id>` integrates, cleans up, and closes). If work is partial, keep status `in_progress`, record remaining scope through evidence/audit scratchpad, and create child issues for unfinished required work.
-  - Do not close until the user has reviewed the work and explicitly asked to integrate/clean up the flow.
+{{ end }}Project Guardrails
+
+{{ .ContextGuardrail }}
+{{ if .ImplementationGuardrails }}{{ .ImplementationGuardrails }}
+{{ end }}- Missing optional issue fields are valid; do not invent content to fill them.
+- For overlay behavior changes, align linked requirements first, keep `View()`/`Size()` geometry consistent, validate default and narrow viewports, and update affected goldens.
+
+Workflow Playbook
+
+- Intake and selection: use `az issue list`, `az issue search`, `az issue get`, `az issue get-many`, `az issue check`, and `az issue doctor` to find and inspect work before changing it. Search/list filters can narrow by status, dates, IDs, parent, and dependencies; request `--deps`, `--with-notes`, or `--json` only when that detail is needed.
+- Creation and decomposition: `az issue create` records tracking work; `--deferred` creates standalone backlog work; `az issue split` creates a child and isolated execution context; `az issue bulk-create` and `az issue fanout` shape larger graphs. Every created issue needs executable context, scope, and acceptance evidence.
+- Ownership: `az issue claim`, `takeover`, and `release` manage durable human/agent/orchestrator leases. Do not bypass a conflicting live owner; inspect or coordinate before takeover.
+- Lifecycle: `az issue update --status backlog|open|in_progress|in_review|closed|cancelled` applies lifecycle/review actions. Prefer `az issue close` for accepted completion because it owns integration and cleanup. Use `az issue delete --confirm` only for permanent deletion, and `az issue unarchive` to restore archived work.
+- Graphs: `az issue dep add` and `az issue dep remove` own `blocks`, `parent-child`, `related`, `discovered-from`, and `created-in` edges. `az issue dep bulk apply`, `az issue fanout ready`, and `az issue fanout drift` support larger plans. Parent-child defines containment; `blocks` defines readiness.
+- Evidence and resources: `az issue record`, `az issue events`, `az issue context-risk`, `az observe`, and `az evidence validate` carry durable execution and closeout facts. `az issue image` and `az issue document` attach inspectable artifacts. Mail is for active coordination, not routine notes.
+- Execution: `az session start|attach|status|diagnose|stop|restart-all|resolve-conflict` controls managed tmux sessions. `az worktree create` materializes an integration target without starting an agent. The short aliases `az start`, `az attach`, `az status`, and `az stop` map to session operations.
+- Integration: accepted child work normally closes through `az issue close`. `az branch merge` and `az branch agent-merge` are low-level conflict/repair tools. `az pr list|status|checks|open|create|merge` covers remote pull-request workflows when configured.
+- Orchestration: `az orchestrate status|start|group|watch|observe|capture|prompt|message|complete-check|integrate|close-session` runs tracked graphs. `az mail send|list|watch|validate-evidence` carries worker events, and `az evidence validate` checks `worker_evidence.v1` before delivery.
+- Board views: `az board view list|get|select|create|update|delete|explain` manages persistent typed projections. Use `explain` to understand first-match placement rather than inferring durable state from a column title.
+- Requirements and decisions: `az spec req|link|read|pack|lint|parity` owns behavioral traceability. `az decision list|get|record|update|delete|revisit|sync|import|link` owns durable rationale and relationships.
+- Learning: `az learn add|recall|show|review|promote|relate` captures evidence-backed discoveries, controls their review lifecycle, and promotes accepted guidance into rules, skills, specs, or decisions.
+- Validation and development: `az gate` and `az dev gate` run configured checks. `az dev start|stop|restart|status|list` manages issue-scoped development servers. `az githooks install|update|run|notify|hook` manages repository hook integration.
+- Projects and implementations: `az project list|add|remove` manages registered repositories, and `az project scripts status` inspects project scripts. `az impl list|delete|migrate` manages implementation assignments; implementation identity never implies hierarchy.
+- Runtime and diagnostics: `az daemon start|stop|restart|watch-clients`, `az operation get|list|logs|cancel`, and `az log` inspect or control daemon work. `az sync` refreshes tracker/worktree state; `az export` writes a project snapshot.
+- Agent integration: `az ai install|status|uninstall|migrate|hook run` manages harness hooks and agent event reporting. `az tmux selector|install-selector|uninstall-selector` manages the tmux chooser integration.
+- Configuration and discovery: `az config set` changes project configuration; `az prime` emits this session contract; `az help` and command-specific `--help` provide exact current flags.
+
+Operational Rules Across Commands
+
+- Put flags before positional arguments. Prefer typed `--json` output for automation and text output for direct human inspection.
+- Use the daemon-backed command path rather than editing SQLite, killing tmux panes, moving worktrees, or invoking backend trackers directly. Repair commands are exceptional paths, not substitutes for normal lifecycle operations.
+- Start with read commands, make one authoritative mutation, then read back the resulting issue/session/graph projection. For destructive or terminal operations, inspect preflight output and preserve rollback evidence.
+- Keep project scope explicit when operating outside the current worktree. Check command help and returned project IDs before assuming an operation is current-project or cross-project.
+- Discover exact syntax at the point of use. The primer explains command ownership and workflow; `az <group> --help` remains authoritative for optional flags and rarely used variants.
+
+Useful Discovery Commands
+
+- `az issue --help`, `az spec --help`, `az orchestrate --help`, `az board view --help`, `az decision --help`, `az learn --help`
+- `az session status [issue-id]`, `az board view list`, `az board view explain <issue-id>`
+- Use flags before positional arguments in documented commands.

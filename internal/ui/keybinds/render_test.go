@@ -90,6 +90,68 @@ func TestNormalModeAttachShortcutLookup(t *testing.T) {
 	}
 }
 
+func TestBoardViewRegistryDrivesActionsHintsAndHelp(t *testing.T) {
+	tests := []struct {
+		key  string
+		want ActionID
+	}{
+		{key: "j", want: ActionBoardViewMoveDown},
+		{key: "down", want: ActionBoardViewMoveDown},
+		{key: "k", want: ActionBoardViewMoveUp},
+		{key: "up", want: ActionBoardViewMoveUp},
+		{key: "enter", want: ActionBoardViewSelect},
+		{key: "esc", want: ActionBoardViewClose},
+		{key: "q", want: ActionBoardViewClose},
+	}
+	for _, tt := range tests {
+		action, ok := LookupBoardViewAction(tt.key)
+		if !ok || action != tt.want {
+			t.Fatalf("LookupBoardViewAction(%q) = %q, %v; want %q, true", tt.key, action, ok, tt.want)
+		}
+	}
+
+	hints := RenderPlain(BoardViewHintBindings(), "  ")
+	for _, want := range []string{"j/k: view", "Enter: select", "Esc: close"} {
+		if !strings.Contains(hints, want) {
+			t.Fatalf("board view hints = %q, missing %q", hints, want)
+		}
+	}
+
+	categories := HelpCategories()
+	var boardViews Category
+	for _, category := range categories {
+		if category.Name == "Board Views" {
+			boardViews = category
+			break
+		}
+	}
+	boardHelp := RenderPlain(boardViews.Bindings, "  ")
+	for _, want := range []string{
+		"B: Open board view selector",
+		"CLI create: az board view create --file PATH",
+		"CLI edit: az board view update --file PATH",
+		"CLI delete: az board view delete --confirm VIEW",
+	} {
+		if !strings.Contains(boardHelp, want) {
+			t.Fatalf("Board Views category = %q, missing %q", boardHelp, want)
+		}
+	}
+
+	help := RenderCategories(categories, KeyColumnWidth(categories, 8), Theme{})
+	for _, want := range []string{
+		"Board Views:",
+		"B",
+		"Open board view selector",
+		"az board view create --file PATH",
+		"az board view update --file PATH",
+		"az board view delete --confirm VIEW",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("help = %q, missing %q", help, want)
+		}
+	}
+}
+
 func TestRenderKeyTable(t *testing.T) {
 	theme := Theme{
 		KeyStyle:         lipgloss.NewStyle(),

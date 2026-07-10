@@ -2562,15 +2562,16 @@ func TestOrchestratePromptCommandPrintsNativeWorkerHandoff(t *testing.T) {
 		"Coordination mode: native",
 		"az spec read --issue az-2",
 		"Current notes: present but omitted from worker prompt. Run `az issue get az-2 --with-notes` only if full note history is necessary.",
-		"Status semantics: use `in_progress` while actively working, `in_review` when your implementation is complete and ready for orchestrator review/integration",
+		"Status semantics: use `in_progress` while actively working and `in_review` when your implementation is complete and ready for orchestrator review/integration",
 		"Keep `az-2` status current; record progress, follow-ups, validation, review facts, risks, blockers, and closeout evidence with `az issue record` instead of routine notes.",
 		"Blocked work is represented by dependency edges, issue record evidence, or active-coordination `worker-blocked` mailbox events, not by setting issue status to `in_review`.",
 		"Do not append raw logs, exploratory transcripts, routine progress narration, duplicate prompt context, or speculative scratch work to notes.",
 		"Return progress, blockers, and final results through the native subagent result channel.",
 		"Do not use `az mail` unless the orchestrator explicitly asks for mailbox coordination; use `az issue record` for durable issue activity/evidence.",
 		"Before handing off, run the relevant validation/review checks and include the same facts expected in `worker_evidence.v1`: summary, commands run, key assertions, files changed, review status/findings, and risks.",
+		"Preserve any az-managed worker session/worktree for feedback; do not stop or close them as part of review handoff.",
 		"Do not rely on a prose-only status update.",
-		"Do not close root issue `az-1`",
+		"Do not close root issue `az-1` or your worker issue as part of handoff; leave integration and terminal close to the orchestrator unless the human explicitly instructs otherwise.",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
@@ -2580,6 +2581,9 @@ func TestOrchestratePromptCommandPrintsNativeWorkerHandoff(t *testing.T) {
 		if strings.Contains(output, unexpected) {
 			t.Fatalf("output unexpectedly contains %q:\n%s", unexpected, output)
 		}
+	}
+	if strings.Contains(output, "close only your worker issue") {
+		t.Fatalf("output retained stale worker self-close guidance:\n%s", output)
 	}
 	if strings.Contains(output, "Spec impact TBD") {
 		t.Fatalf("output should not include full historical notes by default:\n%s", output)
@@ -2603,6 +2607,7 @@ func TestOrchestratePromptCommandMailboxCoordinationOptIn(t *testing.T) {
 		"use `az issue record --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant",
 		"Omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array",
 		"Before handing off, run the relevant validation/review checks, build the final `worker_evidence.v1` packet from actual results, run `az evidence validate --body '<json>'`, record or send that exact JSON packet, then set/leave `az-2` `in_review`",
+		"Preserve the worker session/worktree for feedback; do not stop or close them as part of review handoff.",
 		"Do not rely on a prose-only final response as the handoff.",
 		"otherwise record it with `az issue record az-2 --type evidence.submitted --data '<json>'`",
 		"az mail list --parent az-1 --since 0 --json",
