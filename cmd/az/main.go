@@ -81,7 +81,7 @@ func main() {
 	switch command {
 	case "session":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az session <start|attach|stop|status|diagnose|restart-all|resolve-conflict> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az session <start|attach|stop|status|capture|diagnose|restart-all|resolve-conflict> [arguments]\n")
 			os.Exit(1)
 		}
 		sessionCommand := commandArgs[0]
@@ -542,7 +542,7 @@ func main() {
 
 	case "issue":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|delete|unarchive|image|document|dep|bulk-create|bulk-update|fanout> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|cleanup|delete|unarchive|image|document|dep|bulk-create|bulk-update|fanout> [arguments]\n")
 			os.Exit(1)
 		}
 		issueCommand := commandArgs[0]
@@ -744,7 +744,7 @@ func main() {
 		case "update":
 			opts, err := cli.ParseIssueUpdateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]\n")
 				fmt.Fprintf(os.Stderr, "Note: --status backlog/open writes durable lifecycle state; --status in_progress marks active work; --status in_review requests review and may still display active until runtime activity is idle/done/no-agent.\n")
 				fmt.Fprintf(os.Stderr, "Note: --status closed integrates the issue branch and closes with completed outcome; --status cancelled closes with cancelled outcome without integration; --force-worktree only applies to terminal close actions.\n")
 				fmt.Fprintf(os.Stderr, "Note: --cascade-children only applies to review requests and moves open/in_progress descendants to in_review first.\n")
@@ -775,6 +775,17 @@ func main() {
 				os.Exit(1)
 			}
 
+		case "cleanup":
+			opts, err := cli.ParseIssueCleanupArgs(issueArgs)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Usage: az issue cleanup [--project <project-id>] [--id <issue-id> ...|--ids a,b] [--status <status> ...] [--query text] [--updated-before date] [--limit N] [--action closed|cancelled] [--dry-run] [--per-issue-timeout duration] [--json]")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error { return cli.IssueCleanupCommand(deps, opts) }); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 		case "delete":
 			opts, err := cli.ParseIssueDeleteArgs(issueArgs)
 			if err != nil {
@@ -1041,7 +1052,7 @@ func main() {
 
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown issue command: %s\n", issueCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|delete|unarchive|image|document|dep|bulk-create|bulk-update|fanout> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|cleanup|delete|unarchive|image|document|dep|bulk-create|bulk-update|fanout> [arguments]\n")
 			os.Exit(1)
 		}
 
@@ -1147,7 +1158,7 @@ func main() {
 		}
 	case "orchestrate":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az orchestrate <status|start|group|watch|observe|prompt|message|complete-check|integrate|close-session> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az orchestrate <status|start|group|watch|observe|prompt|message|capture|complete-check|integrate|close-session> [arguments]\n")
 			os.Exit(1)
 		}
 		switch commandArgs[0] {
@@ -1242,6 +1253,19 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
+		case "capture":
+			opts, err := cli.ParseSessionCaptureArgs(commandArgs[1:])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az orchestrate capture --issue <issue-id> [--project <project-id>] [--lines N] [--json]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.OrchestrateCaptureCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 		case "complete-check":
 			opts, err := cli.ParseOrchestrateCompleteCheckArgs(commandArgs[1:])
 			if err != nil {
@@ -1283,7 +1307,7 @@ func main() {
 			}
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown orchestrate command: %s\n", commandArgs[0])
-			fmt.Fprintf(os.Stderr, "Usage: az orchestrate <status|start|group|watch|observe|prompt|message|complete-check|integrate|close-session> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az orchestrate <status|start|group|watch|observe|prompt|message|capture|complete-check|integrate|close-session> [arguments]\n")
 			os.Exit(1)
 		}
 
@@ -1485,13 +1509,14 @@ func printRootUsage() {
 }
 
 func printSessionUsage() {
-	fmt.Println("Usage: az session <start|attach|stop|status|diagnose|restart-all|resolve-conflict> [arguments]")
+	fmt.Println("Usage: az session <start|attach|stop|status|capture|diagnose|restart-all|resolve-conflict> [arguments]")
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  start <issue-id>      Start a session for an issue")
 	fmt.Println("  attach <issue-id>     Attach to an existing issue session")
 	fmt.Println("  stop <issue-id>       Stop an issue session")
 	fmt.Println("  status [issue-id]     Show all sessions or one issue session status")
+	fmt.Println("  capture <issue-id>    Capture recent pane output through the daemon")
 	fmt.Println("  diagnose <issue-id>   Collect session, worktree, operation, hook, and log diagnostics")
 	fmt.Println("  restart-all           Restart idle AI sessions and tell them to continue; use --force-busy to include busy sessions")
 	fmt.Println("  resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]")
@@ -1515,13 +1540,13 @@ func printWorktreeUsage() {
 }
 
 func printIssueCreateUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: az issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
+	fmt.Fprintln(w, "Usage: az issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
 	fmt.Fprintln(w, "Note: `az issue create \"Child task\"` auto-parents to AZEDARACH_ISSUE_ID when set; use `--parent <issue-id>` for another parent/root.")
 	fmt.Fprintln(w, "Note: --impl only assigns implementation/spec variant metadata; it is not parent/root selection.")
 }
 
 func printIssueSplitUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: az issue split [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
+	fmt.Fprintln(w, "Usage: az issue split [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
 	fmt.Fprintln(w, "Note: use --parent or AZEDARACH_ISSUE_ID for parentage; --impl only assigns implementation/spec variant metadata.")
 }
 
@@ -1561,6 +1586,11 @@ func sessionCommandUsage(command string, namespaced bool) (string, bool) {
 			return "usage: az session status [issue-id]", true
 		}
 		return "usage: az status [issue-id]", true
+	case "capture":
+		if namespaced {
+			return "usage: az session capture [--project <project-id>] [--lines N] [--json] <issue-id>", true
+		}
+		return "", false
 	case "diagnose":
 		if namespaced {
 			return "usage: az session diagnose <issue-id>", true
@@ -1745,6 +1775,20 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.StatusCommand(deps, issueID)
 		})
+	case "capture":
+		if !namespaced {
+			return fmt.Errorf("unknown session command: %s", command)
+		}
+		if sessionHelpRequested(args...) {
+			return fmt.Errorf("usage: az session capture [--project <project-id>] [--lines N] [--json] <issue-id>")
+		}
+		opts, err := cli.ParseSessionCaptureArgs(args)
+		if err != nil {
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.SessionCaptureCommand(deps, opts)
+		})
 	case "diagnose":
 		if !namespaced {
 			return fmt.Errorf("unknown session command: %s", command)
@@ -1785,7 +1829,7 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 		})
 	default:
 		if namespaced {
-			return fmt.Errorf("unknown session command: %s (usage: az session <start|attach|stop|status|diagnose|restart-all|resolve-conflict>)", command)
+			return fmt.Errorf("unknown session command: %s (usage: az session <start|attach|stop|status|capture|diagnose|restart-all|resolve-conflict>)", command)
 		}
 		return fmt.Errorf("unknown session command: %s", command)
 	}

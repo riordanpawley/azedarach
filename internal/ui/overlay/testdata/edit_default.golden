@@ -12,7 +12,7 @@
 ││ ┃                                                                            j/k + d Manage attachments           │
 ││ ┃                                                                            Enter Save Task                      │
 ││ ┃                                                                            Ctrl+E Edit in $EDITOR               │
-││ Type: [●T] [ B] [ F] [ E] [ C]                                               Ctrl+K Clear form                    │
+││ Type: [●T] [ B] [ F] [ E] [ C] [ I]                                          Ctrl+K Clear form                    │
 ││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]                                           Esc Cancel                           │
 ││ Impls: [<] go-bubbletea [>]                                                                                       │
 ││ Acceptance Criteria:                                                                                              │

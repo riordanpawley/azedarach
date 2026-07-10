@@ -41,6 +41,7 @@ func TestBuiltInDecisionCommandsForHook(t *testing.T) {
 }
 
 func TestGitHooksRunCommandRunsBuiltInDecisionSyncAndRestageOutsideMerge(t *testing.T) {
+	isolateNestedGitEnvironment(t)
 	projectDir := t.TempDir()
 	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -70,6 +71,7 @@ func TestGitHooksRunCommandRunsBuiltInDecisionSyncAndRestageOutsideMerge(t *test
 }
 
 func TestGitHooksRunCommandSkipsBuiltInDecisionSyncAndRestageWhenEnvSet(t *testing.T) {
+	isolateNestedGitEnvironment(t)
 	projectDir := t.TempDir()
 	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -112,6 +114,7 @@ func TestGitHooksRunCommandSkipsBuiltInDecisionSyncAndRestageWhenEnvSet(t *testi
 }
 
 func TestGitHooksHookCommandDecisionSyncSkipDoesNotDisableImportHooks(t *testing.T) {
+	isolateNestedGitEnvironment(t)
 	projectDir := t.TempDir()
 	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -136,6 +139,7 @@ func TestGitHooksHookCommandDecisionSyncSkipDoesNotDisableImportHooks(t *testing
 }
 
 func TestGitHooksRunCommandRestagesDecisionsIntoHookIndex(t *testing.T) {
+	isolateNestedGitEnvironment(t)
 	projectDir := t.TempDir()
 	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -198,6 +202,7 @@ func TestGitHooksRunCommandRestagesDecisionsIntoHookIndex(t *testing.T) {
 }
 
 func TestGitHooksRunCommandUsesCurrentWorktreeForImplicitProjectDir(t *testing.T) {
+	isolateNestedGitEnvironment(t)
 	baseDir := t.TempDir()
 	if err := runGitCommandIsolated(baseDir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -303,6 +308,7 @@ fi
 }
 
 func TestGitHooksRunCommandSkipsBuiltInDecisionSyncAndRestageDuringMerge(t *testing.T) {
+	isolateNestedGitEnvironment(t)
 	projectDir := t.TempDir()
 	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -357,6 +363,86 @@ func TestGitHooksRunCommandSkipsBuiltInDecisionSyncAndRestageDuringMerge(t *test
 	if got := strings.TrimSpace(string(out)); got != "?? docs/decisions/generated.md" {
 		t.Fatalf("generated decision git status = %q, want untracked", got)
 	}
+}
+
+func TestGitHooksRunCommandNestedRepositoriesIgnoreFullOuterGitEnvironment(t *testing.T) {
+	localVars := gitLocalEnvironmentVariableNames(t)
+	poisoned := make(map[string]string, len(localVars)+5)
+	for _, key := range localVars {
+		poisoned[key] = "outer-hook-value"
+	}
+	poisoned["GIT_CONFIG_KEY_0"] = "core.worktree"
+	poisoned["GIT_CONFIG_VALUE_0"] = "/outer/worktree"
+	poisoned["GIT_QUARANTINE_PATH"] = "/outer/quarantine"
+	poisoned["GIT_REFLOG_ACTION"] = "outer merge hook"
+	poisoned["AZEDARACH_SKIP_DECISION_SYNC"] = "1"
+
+	cmd := exec.Command(os.Args[0],
+		"-test.run", "^TestGitHooksRunCommand(RunsBuiltInDecisionSyncAndRestageOutsideMerge|RestagesDecisionsIntoHookIndex|UsesCurrentWorktreeForImplicitProjectDir)$",
+		"-test.count=1",
+	)
+	cmd.Env = gitEnvironmentWithOverrides(poisoned)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("decision hook tests under full outer Git environment: %v\n%s", err, output)
+	}
+}
+
+func isolateNestedGitEnvironment(t *testing.T) {
+	t.Helper()
+	keys := make(map[string]struct{})
+	for _, key := range gitLocalEnvironmentVariableNames(t) {
+		keys[key] = struct{}{}
+	}
+	keys["AZEDARACH_SKIP_DECISION_SYNC"] = struct{}{}
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "GIT_") {
+			keys[key] = struct{}{}
+		}
+	}
+	for key := range keys {
+		value, present := os.LookupEnv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unset %s: %v", key, err)
+		}
+		t.Cleanup(func() {
+			if present {
+				if err := os.Setenv(key, value); err != nil {
+					t.Errorf("restore %s: %v", key, err)
+				}
+				return
+			}
+			if err := os.Unsetenv(key); err != nil {
+				t.Errorf("clear %s: %v", key, err)
+			}
+		})
+	}
+}
+
+func gitLocalEnvironmentVariableNames(t *testing.T) []string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--local-env-vars")
+	cmd.Env = gitEnvironmentWithOverrides(nil)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("list Git local environment variables: %v", err)
+	}
+	return strings.Fields(string(output))
+}
+
+func gitEnvironmentWithOverrides(overrides map[string]string) []string {
+	env := make([]string, 0, len(os.Environ())+len(overrides))
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if !strings.HasPrefix(key, "GIT_") {
+			env = append(env, entry)
+		}
+	}
+	for key, value := range overrides {
+		env = append(env, key+"="+value)
+	}
+	return env
 }
 
 func TestGitMergeInProgressReadsWorktreeGitDirPointer(t *testing.T) {

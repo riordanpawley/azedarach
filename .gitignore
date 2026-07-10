@@ -88,7 +88,6 @@ coverage/
 /.gopath/
 /.agents/memories/overview.md
 /.azedarach.schema.json
-/reference-effect
 /go-bubbletea
 /ts-opentui
 /staged.txt

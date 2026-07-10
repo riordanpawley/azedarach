@@ -20,8 +20,9 @@ import (
 type AgentSource string
 
 const (
-	AgentClaude AgentSource = "claude"
-	AgentCodex  AgentSource = "codex"
+	AgentClaude   AgentSource = "claude"
+	AgentCodex    AgentSource = "codex"
+	AgentOpenCode AgentSource = "opencode"
 
 	hookBestEffortDaemonTimeout = 2 * time.Second
 )
@@ -29,7 +30,7 @@ const (
 // IsKnown reports whether the agent source is one the port understands.
 func (a AgentSource) IsKnown() bool {
 	switch a {
-	case AgentClaude, AgentCodex:
+	case AgentClaude, AgentCodex, AgentOpenCode:
 		return true
 	}
 	return false
@@ -147,11 +148,46 @@ func ingestAgentHookRuntimeSignalBestEffort(ctx context.Context, deps *Dependenc
 		Message:   fmt.Sprintf("%s hook: %s", hookCtx.Agent, event),
 		Payload:   hookCtx.Payload,
 	}
+	if event == hookEventSessionEnd {
+		signal.ExitStatus = agentProcessExitStatus(hookCtx.Payload)
+		if signal.ExitStatus != nil {
+			signal.Message = fmt.Sprintf("%s process exited with status %d", hookCtx.Agent, *signal.ExitStatus)
+			if *signal.ExitStatus != 0 {
+				signal.Level = "error"
+			}
+		}
+	}
 	if issueID == "" {
 		signal.SessionID = ""
 	}
 	_, err := deps.DaemonClient.RuntimeSignalIngest(ctx, signal)
 	return err
+}
+
+func agentProcessExitStatus(payload map[string]any) *int {
+	value, ok := payload["exit_status"]
+	if !ok {
+		return nil
+	}
+	var status int
+	switch typed := value.(type) {
+	case float64:
+		status = int(typed)
+		if float64(status) != typed {
+			return nil
+		}
+	case int:
+		status = typed
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return nil
+		}
+		status = int(parsed)
+	default:
+		return nil
+	}
+	return &status
 }
 
 func agentHookSessionID(projectID, issueID string) string {
@@ -226,13 +262,13 @@ func ParseAIHookRunArgs(args []string) (AIHookRunOptions, error) {
 	fs := flag.NewFlagSet("ai hook run", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	agent := ""
-	fs.StringVar(&agent, "agent", "", "agent source (claude|codex)")
+	fs.StringVar(&agent, "agent", "", "agent source (claude|codex|opencode)")
 	fs.BoolVar(&opts.JSON, "json", false, "hook-json output")
 	if err := fs.Parse(args); err != nil {
 		return AIHookRunOptions{}, err
 	}
 	if fs.NArg() != 1 {
-		return AIHookRunOptions{}, fmt.Errorf("usage: az ai hook run --agent=<claude|codex> [--json] <event>")
+		return AIHookRunOptions{}, fmt.Errorf("usage: az ai hook run --agent=<claude|codex|opencode> [--json] <event>")
 	}
 	agent = strings.ToLower(strings.TrimSpace(agent))
 	if agent == "" {
@@ -240,7 +276,7 @@ func ParseAIHookRunArgs(args []string) (AIHookRunOptions, error) {
 	}
 	source := AgentSource(agent)
 	if !source.IsKnown() {
-		return AIHookRunOptions{}, fmt.Errorf("unsupported agent: %q (want claude or codex)", agent)
+		return AIHookRunOptions{}, fmt.Errorf("unsupported agent: %q (want claude, codex, or opencode)", agent)
 	}
 	opts.Agent = source
 	opts.Event = strings.ReplaceAll(strings.TrimSpace(fs.Arg(0)), "-", "_")
@@ -305,6 +341,6 @@ func AIHookRunCommand(deps *Dependencies, opts AIHookRunOptions) error {
 // PrintAIUsage prints usage for the `az ai` family.
 func PrintAIUsage() {
 	fmt.Println("Usage: az ai <account|install|status|uninstall|migrate|hook> [arguments]")
-	fmt.Println("       az ai hook run --agent=<claude|codex> [--json] <event>")
+	fmt.Println("       az ai hook run --agent=<claude|codex|opencode> [--json] <event>")
 	fmt.Println("Manage AI accounts and agent hooks through Azedarach.")
 }

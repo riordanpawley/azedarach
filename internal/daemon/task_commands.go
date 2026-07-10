@@ -114,6 +114,7 @@ type taskClosePreflightOptions struct {
 	ForceWorktree       bool `json:"force_worktree,omitempty"`
 	IgnoreAhead         bool `json:"ignore_ahead,omitempty"`
 	CloseCleanChildren  bool `json:"close_clean_children,omitempty"`
+	SkipStatusRepairs   bool `json:"-"`
 }
 
 type taskClosePreflightRequest struct {
@@ -2044,13 +2045,46 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	}
 	var deferredCleanupPlan deferredTaskWorktreeCleanupPlan
 
+	preflightOptions := taskClosePreflightOptions{
+		AllowTargetSession:  true,
+		AllowActiveSession:  cmd.AllowActiveSession,
+		AllowTargetWorktree: true,
+		ForceWorktree:       cmd.ForceWorktree,
+		IgnoreAhead:         cmd.IgnoreAhead || cmd.IntegrateBeforeClose,
+		CloseCleanChildren:  cmd.CloseCleanChildren,
+		SkipStatusRepairs:   true,
+	}
 	phaseStartedAt := time.Now()
+	if err := d.repairStaleSessionRuntimeProjections(ctx, projectID, taskID); err != nil {
+		recordPhase("preflight_runtime_projection_repair", phaseStartedAt, false)
+		return result, fmt.Errorf("phase preflight_runtime_projection_repair for issue %s: %w", taskID, err)
+	}
+	recordPhase("preflight_runtime_projection_repair", phaseStartedAt, false)
+
+	phaseStartedAt = time.Now()
+	guard, err := d.validateTaskClosePreflight(ctx, projectID, taskID, preflightOptions, req)
+	recordPhase("preflight", phaseStartedAt, false)
+	if err != nil {
+		return result, fmt.Errorf("phase preflight for issue %s: %w", taskID, err)
+	}
+
+	phaseStartedAt = time.Now()
 	autoClosedChildren, err := d.closeCleanDescendantsBeforeParent(ctx, projectID, taskID, cmd, req)
 	recordPhase("close_clean_children", phaseStartedAt, !cmd.CloseCleanChildren)
 	if err != nil {
 		return result, fmt.Errorf("phase close_clean_children for issue %s: %w", taskID, err)
 	}
 	result.AutoClosedChildren = autoClosedChildren
+	if cmd.CloseCleanChildren {
+		phaseStartedAt = time.Now()
+		strictOptions := preflightOptions
+		strictOptions.CloseCleanChildren = false
+		guard, err = d.validateTaskClosePreflight(ctx, projectID, taskID, strictOptions, req)
+		recordPhase("preflight_after_child_close", phaseStartedAt, false)
+		if err != nil {
+			return result, fmt.Errorf("phase preflight_after_child_close for issue %s: %w", taskID, err)
+		}
+	}
 
 	phaseStartedAt = time.Now()
 	integration, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, cmd.IntegrateBeforeClose)
@@ -2064,26 +2098,6 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	result.IntegratedSourceBranch = integration.SourceBranch
 	result.IntegratedTargetBranch = integration.TargetBranch
 
-	phaseStartedAt = time.Now()
-	if err := d.repairStaleSessionRuntimeProjections(ctx, projectID, taskID); err != nil {
-		recordPhase("preflight_runtime_projection_repair", phaseStartedAt, false)
-		return result, taskClosePostIntegrationPhaseError(taskID, "preflight_runtime_projection_repair", integration, err)
-	}
-	recordPhase("preflight_runtime_projection_repair", phaseStartedAt, false)
-
-	phaseStartedAt = time.Now()
-	guard, err := d.validateTaskClosePreflight(ctx, projectID, taskID, taskClosePreflightOptions{
-		AllowTargetSession:  true,
-		AllowActiveSession:  cmd.AllowActiveSession,
-		AllowTargetWorktree: true,
-		ForceWorktree:       cmd.ForceWorktree,
-		IgnoreAhead:         cmd.IgnoreAhead || integration.Integrated || integration.NoChanges,
-		CloseCleanChildren:  cmd.CloseCleanChildren,
-	}, req)
-	recordPhase("preflight", phaseStartedAt, false)
-	if err != nil {
-		return result, fmt.Errorf("phase preflight for issue %s: %w", taskID, err)
-	}
 	deferWorktreeCleanup := daemonShouldDeferWorktreeCleanupForClose(cmd, integration, guard)
 
 	phaseStartedAt = time.Now()
@@ -2161,7 +2175,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 
 func daemonTaskCloseOutcomeStatus(raw string) (domain.IssueCloseOutcome, domain.Status, error) {
 	switch domain.IssueCloseOutcome(strings.ToLower(strings.TrimSpace(raw))) {
-	case "", domain.IssueCloseCompleted:
+	case "", domain.IssueCloseCompleted, domain.IssueCloseOutcome(domain.StatusDone):
 		return domain.IssueCloseCompleted, domain.StatusDone, nil
 	case domain.IssueCloseCancelled:
 		return domain.IssueCloseCancelled, domain.StatusCancelled, nil
@@ -3309,6 +3323,9 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 	reasons = append(reasons, daemonCloseGuardRuntimeBlockers(task, opts)...)
 	reasons = append(reasons, daemonCloseGuardChildBlockers(task.ID, tasks, opts)...)
 	if len(reasons) > 0 {
+		if opts.SkipStatusRepairs {
+			return taskClosePreflightResult{}, fmt.Errorf("%s", daemonCloseGuardFailureMessage(taskID, reasons, nil))
+		}
 		repairs, repairErr := d.reopenClosedCloseGuardBlockers(ctx, issueClient, projectID, req, task, tasks, reasons)
 		if repairErr != nil {
 			return taskClosePreflightResult{}, fmt.Errorf("%s. Failed to move closed blockers back for cleanup: %w", daemonCloseGuardFailureMessage(taskID, reasons, repairs), repairErr)
@@ -3331,6 +3348,9 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 		return taskClosePreflightResult{}, fmt.Errorf("inspect git status before closing %s: %w", taskID, err)
 	}
 	if reasons := daemonCloseGuardGitBlockers(*status, opts); len(reasons) > 0 {
+		if opts.SkipStatusRepairs {
+			return taskClosePreflightResult{}, fmt.Errorf("%s", daemonCloseGuardFailureMessage(taskID, reasons, nil))
+		}
 		repairs, repairErr := d.reopenClosedCloseGuardBlockers(ctx, issueClient, projectID, req, task, tasks, reasons)
 		if repairErr != nil {
 			return taskClosePreflightResult{}, fmt.Errorf("%s. Failed to move closed blockers back for cleanup: %w", daemonCloseGuardFailureMessage(taskID, reasons, repairs), repairErr)
@@ -3601,7 +3621,10 @@ func (d *Daemon) resolveTaskCloseWorktreePath(ctx context.Context, projectID, ta
 
 func (d *Daemon) refreshTaskCloseGitStatus(ctx context.Context, projectID, worktree string) (*git.GitStatus, error) {
 	if d.gitStatusAdapter == nil {
-		return nil, fmt.Errorf("git status service unavailable")
+		if d.git == nil {
+			return nil, fmt.Errorf("git status service unavailable")
+		}
+		return d.git.Status(ctx, worktree)
 	}
 	status, err := d.gitStatusAdapter.RefreshStatus(ctx, projectID, worktree)
 	if err != nil {

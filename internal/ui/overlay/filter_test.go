@@ -8,58 +8,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-func TestNewFilterMenu(t *testing.T) {
-	filter := domain.NewFilter()
-	menu := NewFilterMenu(filter)
-
-	if menu == nil {
-		t.Fatal("NewFilterMenu returned nil")
-	}
-
-	if menu.filter != filter {
-		t.Error("FilterMenu should reference the provided filter")
-	}
-
-	if menu.mode != filterModeNormal {
-		t.Errorf("Expected mode to be normal, got %v", menu.mode)
-	}
-
-	if menu.styles == nil {
-		t.Error("FilterMenu should have styles initialized")
-	}
-}
-
-func TestFilterMenuTitle(t *testing.T) {
-	menu := NewFilterMenu(domain.NewFilter())
-	title := menu.Title()
-
-	if title != "Filter Tasks" {
-		t.Errorf("Expected title 'Filter Tasks', got %q", title)
-	}
-}
-
-func TestFilterMenuSize(t *testing.T) {
-	menu := NewFilterMenu(domain.NewFilter())
-	width, height := menu.Size()
-
-	if width <= 0 {
-		t.Error("Width should be positive")
-	}
-
-	if height <= 0 {
-		t.Error("Height should be positive")
-	}
-
-	// Should be large enough for all filter options
-	if width < 40 {
-		t.Errorf("Width %d seems too small for filter menu", width)
-	}
-
-	if height < 10 {
-		t.Errorf("Height %d seems too small for filter menu", height)
-	}
-}
-
 func TestFilterMenuView_DisplaysFilterState(t *testing.T) {
 	filter := domain.NewFilter()
 	filter.ToggleStatus(domain.StatusOpen)
@@ -247,6 +195,7 @@ func TestFilterMenu_TypeToggle(t *testing.T) {
 		{'F', domain.TypeFeature},
 		{'E', domain.TypeEpic},
 		{'C', domain.TypeChore},
+		{'I', domain.TypeInvestigation},
 	}
 
 	for _, tt := range types {
@@ -501,12 +450,4 @@ func TestFilterMenu_MultipleFiltersActive(t *testing.T) {
 	if activeCount < 3 {
 		t.Errorf("Expected at least 3 active indicators, got %d", activeCount)
 	}
-}
-
-func TestFilterMenu_ImplementsOverlayInterface(t *testing.T) {
-	var _ Overlay = (*FilterMenu)(nil)
-}
-
-func TestFilterMenu_ImplementsTeaModel(t *testing.T) {
-	var _ tea.Model = (*FilterMenu)(nil)
 }

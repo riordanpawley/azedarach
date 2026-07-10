@@ -4897,6 +4897,20 @@ func TestResolveDBPathUsesEnvOverride(t *testing.T) {
 	assert.Equal(t, "/tmp/custom-azedarach.db", got)
 }
 
+func TestClientRefusesConfiguredDBPathThroughSymlink(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "azedarach.db")
+	aliasPath := filepath.Join(dir, "azedarach-alias.db")
+	require.NoError(t, os.WriteFile(dbPath, nil, 0o600))
+	require.NoError(t, os.Symlink(dbPath, aliasPath))
+	t.Setenv(refuseDBPathEnv, dbPath)
+
+	client := NewClientAtPath(aliasPath, slog.Default())
+	_, err := client.dbHandle()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing configured issue database path")
+}
+
 func TestResolveDBPathUsesBaseRepoForWorktree(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")

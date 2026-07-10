@@ -29,7 +29,7 @@ Commands:
   ai status [--target=auto|rulesync|claude|codex|opencode,...] [--project-dir <dir>] [--json]  Check Azedarach-managed AI hook installation
   ai uninstall [--target=auto|rulesync|claude|codex|opencode,...] [--project-dir <dir>] [--verbose]  Remove az-managed hook entries from AI agent harnesses
   ai migrate [--project-dir <dir>] [--verbose]  Strip legacy az notify/hook commands from existing hook configs
-  ai hook run --agent=<claude|codex> [--json] <event>  Run an agent hook through the shared internal port
+  ai hook run --agent=<claude|codex|opencode> [--json] <event>  Run an agent hook through the shared internal port
   tmux <selector|install-selector|uninstall-selector>  Manage tmux selector integration
   spec <subcommand>          Spec workflows (req|link|read|pack|lint|parity)
   decision <subcommand>      Decision records with rationale (list|get|record|update|delete|revisit|sync|import|link)
@@ -46,6 +46,7 @@ Commands:
   issue split [--project <project-id>] [--parent <id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an isolated child issue/session for later parent-side merge
   issue update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields and durable lifecycle actions (backlog/open/active/review/closed/cancelled)
   issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--force-worktree] [<id>]  Integrate, clean up, and close an issue
+  issue cleanup [--project <project-id>] [--id <id> ...|--ids a,b] [--status <status> ...] [--query text] [--updated-before date] [--limit N] [--action closed|cancelled] [--dry-run] [--json]  Safely clean up issue lifecycles
   issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]  Permanently delete an issue
   issue unarchive [--project <project-id>] [--id <id>] [--json] [--with-parents] [--cascade-children] [<id>]  Restore archived issues to active reads
   issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]  Attach an image to an issue

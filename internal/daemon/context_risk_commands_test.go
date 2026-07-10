@@ -111,6 +111,56 @@ func TestTaskContextRiskReportsRepeatedSiblingFileCluster(t *testing.T) {
 	}
 }
 
+func TestIssueContextRiskObservationEvidenceMapsRelatedConsumersAudited(t *testing.T) {
+	evidence := issueContextRiskObservationEvidence(domain.IssueObservationEvent{
+		IssueID: naming.IssueID("az-target"),
+		Type:    domain.IssueEventRiskRecorded,
+		Payload: map[string]any{
+			"related_consumers_audited": []any{"task close", "review handoff"},
+		},
+	})
+
+	if got, want := strings.Join(evidence.RelatedConsumersAudited, ","), "task close,review handoff"; got != want {
+		t.Fatalf("RelatedConsumersAudited = %q, want %q", got, want)
+	}
+}
+
+func TestTaskContextRiskMarksRelatedConsumersAuditedFromObservation(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-context-risk-related-consumers"
+	repoDir := t.TempDir()
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	targetID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Target", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, targetID, issues.IssueObservationEventParams{
+		Type:       domain.IssueEventRiskRecorded,
+		ObservedAt: now,
+		Payload: map[string]any{
+			"related_consumers_audited": []string{"daemon closeout gate", "CLI summary output"},
+			"summary":                   "structured closeout evidence",
+		},
+	}); err != nil {
+		t.Fatalf("append risk event: %v", err)
+	}
+
+	d := newContextRiskTestDaemon(projectID, repoDir, issuesClient)
+	packet, err := d.taskContextRisk(ctx, projectID, targetID, repoDir, now.Add(-14*24*time.Hour))
+	if err != nil {
+		t.Fatalf("taskContextRisk error: %v", err)
+	}
+	if !containsContextRiskField(packet.HandoffFields.Present, "related_consumers_audited") {
+		t.Fatalf("Present = %v, want related_consumers_audited", packet.HandoffFields.Present)
+	}
+	if containsContextRiskField(packet.HandoffFields.Missing, "related_consumers_audited") {
+		t.Fatalf("Missing = %v, do not want related_consumers_audited", packet.HandoffFields.Missing)
+	}
+}
+
 func TestTaskContextRiskCompactResponseBoundsReturnedEvidence(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-context-risk-compact"
@@ -398,4 +448,13 @@ func mustMarshalContextRiskFiles(t *testing.T, files []string) string {
 	}
 	data += "]"
 	return data
+}
+
+func containsContextRiskField(fields []string, want string) bool {
+	for _, field := range fields {
+		if field == want {
+			return true
+		}
+	}
+	return false
 }

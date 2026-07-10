@@ -21,6 +21,9 @@ Use this skill for an integration-owner session, not for a worker's local pre-co
    - Read recent evidence with `az issue events <issue-id> --type evidence.submitted --limit 5 --json`.
    - Run `az issue context-risk <issue-id> --since 14d`; treat `none` and `fyi` as advisory, investigate or record risk evidence for higher levels.
    - Check runtime ownership with `az session status <issue-id>` and, when a root is known, `az orchestrate status --root <root> --json --summary`.
+   - Check the durable issue type against its intent and submitted evidence before reviewing it as implementation work. Use `investigation` for research, discovery, spikes, analysis, experiments, audits, and any task whose primary deliverable is findings, options, recommendations, or an Agent Band/session discussion rather than a mergeable change. Correct a discrepant type with `az issue update <issue-id> --type investigation` (or the actual matching type) and record why.
+   - Investigation-like issues require explicit, issue-specific human acceptance before integration, terminal close, cancellation, session stop, or worktree cleanup. A request to run an integration sweep, an issue being `in_review`, reviewer agreement with the findings, or the absence of a diff is not human acceptance.
+   - For these issues, summarize the findings and link or identify every artifact and the relevant Agent Band/session location for the human. Preserve the issue, session, and worktree in review/waiting-human state, and record `review.recorded` evidence that human review is pending. Do not infer that an investigation produced nothing merely because it has no code diff.
 
 3. Review the submitted work.
    - Inspect the diff and nearby code before deciding. Use the repo's normal Git and test commands from the issue worktree or integration target.
@@ -45,7 +48,8 @@ az orchestrate message --root <root-issue> --issue <worker-issue> --type review-
    - If the direct fix changes behavior or adds risk, stop treating it as trivial and route it back to the worker or create a follow-up/blocker issue.
 
 6. Integrate accepted work.
-   - When evidence, review, and validation are acceptable, close through the authoritative path: `az issue close --id <issue-id>`.
+   - Immediately before any terminal action, re-check the durable issue type and intent-based classification. For `investigation` or investigation-like work, proceed only when durable issue evidence contains explicit, issue-specific human acceptance of the findings and disposition. If it does not, leave the issue unclosed for human review even when the reviewer considers the work complete.
+   - When evidence, review, and validation are acceptable, and every required human-acceptance gate has passed, close through the authoritative path: `az issue close --id <issue-id>`.
    - Use `az orchestrate integrate --issue <issue-id> --json` only when you need extra inspection or repair guidance; normal accepted-worker completion should use `az issue close`.
    - If close/integration fails, keep the issue `in_progress` or `in_review` according to the actual state, record the failure evidence, and repair through the daemon-backed workflow rather than ad-hoc branch surgery.
 

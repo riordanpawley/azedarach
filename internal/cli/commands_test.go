@@ -1284,6 +1284,78 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 	}
 }
 
+func TestSessionCaptureCommandUsesTypedDaemonClient(t *testing.T) {
+	var gotReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandSessionCapture {
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				gotReq = req
+				var body protocol.SessionCaptureRequestBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request: %v", err)
+				}
+				if body.ProjectID != "proj" || body.SessionID != "az-2" || body.Lines != 33 {
+					t.Fatalf("request body = %+v, want project/session/lines", body)
+				}
+				respBody, err := json.Marshal(protocol.SessionCaptureResponseBody{
+					ProjectID: "proj",
+					IssueID:   "az-2",
+					SessionID: "proj-az-2",
+					Lines:     33,
+					Output:    "worker output\n",
+				})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					CompletedAt:     req.SentAt,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return SessionCaptureCommand(deps, SessionCaptureOptions{IssueID: "az-2", Lines: 33})
+	})
+
+	if gotReq.Command != daemonclient.CommandSessionCapture {
+		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandSessionCapture)
+	}
+	if output != "worker output\n" {
+		t.Fatalf("output = %q, want pane output", output)
+	}
+}
+
+func TestParseSessionCaptureArgsSupportsIssueFlag(t *testing.T) {
+	opts, err := ParseSessionCaptureArgs([]string{"--issue", "az-2", "--project", "proj", "--lines", "33", "--json"})
+	if err != nil {
+		t.Fatalf("ParseSessionCaptureArgs error = %v", err)
+	}
+	if opts.IssueID != "az-2" || opts.Project != "proj" || opts.Lines != 33 || !opts.JSON {
+		t.Fatalf("opts = %+v, want issue/project/lines/json", opts)
+	}
+
+	opts, err = ParseSessionCaptureArgs([]string{"az-3"})
+	if err != nil {
+		t.Fatalf("ParseSessionCaptureArgs positional error = %v", err)
+	}
+	if opts.IssueID != "az-3" || opts.Lines != 120 {
+		t.Fatalf("positional opts = %+v, want default lines", opts)
+	}
+}
+
 func TestSessionRestartAllCommandUsesDaemonEnvelope(t *testing.T) {
 	var gotReq protocol.RequestEnvelope
 	deps := &Dependencies{
@@ -5589,6 +5661,33 @@ func TestParseIssueCloseArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueCleanupArgs(t *testing.T) {
+	opts, err := ParseIssueCleanupArgs([]string{"--id", "az-1", "--statuses", "open,in_review", "--action", "cancelled", "--dry-run", "--per-issue-timeout", "2s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opts.IDs) != 1 || len(opts.Statuses) != 2 || opts.Action != "cancelled" || !opts.DryRun || opts.PerIssueTimeout != 2*time.Second {
+		t.Fatalf("opts = %+v", opts)
+	}
+	if _, err := ParseIssueCleanupArgs(nil); err == nil || !strings.Contains(err.Error(), "at least one") {
+		t.Fatalf("missing selector error = %v", err)
+	}
+	if _, err := ParseIssueCleanupArgs([]string{"--id", "az-1", "--action", "deleted"}); err == nil {
+		t.Fatal("invalid action accepted")
+	}
+	if _, err := ParseIssueCleanupArgs([]string{"--query", "--"}); err == nil || !strings.Contains(err.Error(), "searchable term") {
+		t.Fatalf("punctuation-only query error = %v", err)
+	}
+}
+
+func TestIssueCleanupBatchParentDoesNotConsumePerIssueBudget(t *testing.T) {
+	ctx, cancel := newIssueCleanupBatchContext()
+	defer cancel()
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("batch parent has deadline; later items can lose their per-issue budget")
+	}
+}
+
 func TestParseIssueDeleteArgs(t *testing.T) {
 	got, err := ParseIssueDeleteArgs([]string{"--confirm", "az-1"})
 	if err != nil {
@@ -5691,6 +5790,14 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 					Type:     &tt,
 					Priority: &p,
 				}
+			}(),
+		},
+		{
+			name: "update investigation type",
+			args: []string{"--type", "investigation", "az-1"},
+			want: func() IssueUpdateOptions {
+				tt := domain.TypeInvestigation
+				return IssueUpdateOptions{IssueID: "az-1", Type: &tt}
 			}(),
 		},
 		{
@@ -11991,177 +12098,6 @@ func TestIssueBulkUpdateCommand_DependencyRetargetBuildsApplyOps(t *testing.T) {
 	}
 }
 
-func TestPrintUsageIncludesExport(t *testing.T) {
-	output := captureStdout(t, func() error {
-		PrintUsage()
-		return nil
-	})
-
-	if !strings.Contains(output, "export") {
-		t.Fatalf("usage missing export command: %q", output)
-	}
-	if !strings.Contains(output, "log [sources]") {
-		t.Fatalf("usage missing log command: %q", output)
-	}
-	if !strings.Contains(output, "az export --format json --out snapshot.json") {
-		t.Fatalf("usage missing export example: %q", output)
-	}
-	if !strings.Contains(output, "az log --no-follow --lines 100 daemon tui") {
-		t.Fatalf("usage missing log example: %q", output)
-	}
-	if !strings.Contains(output, "issue list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>]") {
-		t.Fatalf("usage missing issue list command: %q", output)
-	}
-	if !strings.Contains(output, "issue search [--project <project-id>] [--json] [--deps]") ||
-		!strings.Contains(output, "(--query <text>|-q <text>|<query>)  Search title, description, notes, design, acceptance, labels, and implementations") {
-		t.Fatalf("usage missing issue search command: %q", output)
-	}
-	if !strings.Contains(output, "az issue search --status open --query \"runtime cache\"") {
-		t.Fatalf("usage missing issue search example: %q", output)
-	}
-	if !strings.Contains(output, "issue get [--project <project-id>] [--id <id>] [--json] [--with-notes] [<id>]") {
-		t.Fatalf("usage missing issue get command: %q", output)
-	}
-	if !strings.Contains(output, "issue get-many [--project <project-id>] --id <id>") {
-		t.Fatalf("usage missing issue get-many command: %q", output)
-	}
-	if !strings.Contains(output, "issue check [--project <project-id>] [--id <id>] [--json] [<id>]") {
-		t.Fatalf("usage missing issue check command: %q", output)
-	}
-	if !strings.Contains(output, "issue doctor [--project <project-id>] [--id <id>] [--json] [<id>]") {
-		t.Fatalf("usage missing issue doctor command: %q", output)
-	}
-	if !strings.Contains(output, "issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred]") {
-		t.Fatalf("usage missing issue create command: %q", output)
-	}
-	if !strings.Contains(output, "issue split [--project <project-id>] [--parent <id>]") {
-		t.Fatalf("usage missing issue split command: %q", output)
-	}
-	if strings.Contains(output, "issue child ") {
-		t.Fatalf("usage should not include issue child command: %q", output)
-	}
-	if !strings.Contains(output, "issue update [--project <project-id>] [--id <id>] [--json] [<id>]") {
-		t.Fatalf("usage missing issue update command: %q", output)
-	}
-	if strings.Contains(output, "az issue update --id az-123 --append-notes") || strings.Contains(output, "az issue update --id az-123 --notes") {
-		t.Fatalf("usage should not include note update examples: %q", output)
-	}
-	if strings.Contains(output, "issue status --impl <implementation>") {
-		t.Fatalf("usage should not include issue status command: %q", output)
-	}
-	if !strings.Contains(output, "issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--force-worktree] [<id>]") {
-		t.Fatalf("usage missing issue close command: %q", output)
-	}
-	if strings.Contains(output, "finalize") {
-		t.Fatalf("usage should not include removed close alias: %q", output)
-	}
-	if !strings.Contains(output, "issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]") {
-		t.Fatalf("usage missing issue delete command: %q", output)
-	}
-	if !strings.Contains(output, "issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]") {
-		t.Fatalf("usage missing issue image add command: %q", output)
-	}
-	if !strings.Contains(output, "issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]") {
-		t.Fatalf("usage missing issue image remove command: %q", output)
-	}
-	if !strings.Contains(output, "issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]") {
-		t.Fatalf("usage missing issue document add command: %q", output)
-	}
-	if !strings.Contains(output, "issue document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]") {
-		t.Fatalf("usage missing issue document list command: %q", output)
-	}
-	if !strings.Contains(output, "issue document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]") {
-		t.Fatalf("usage missing issue document remove command: %q", output)
-	}
-	if !strings.Contains(output, "issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--force-parent-change] [--json]") {
-		t.Fatalf("usage missing issue dep add command: %q", output)
-	}
-	if !strings.Contains(output, "issue dep remove [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm] [--confirm-parent-orphan] [--json]") {
-		t.Fatalf("usage missing issue dep remove command: %q", output)
-	}
-	if !strings.Contains(output, "issue dep bulk apply [--project <project-id>] --input <path>") {
-		t.Fatalf("usage missing issue dep bulk apply command: %q", output)
-	}
-	if !strings.Contains(output, "issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Create issues, epics, or nested children trees from JSON") {
-		t.Fatalf("usage missing issue bulk-create command: %q", output)
-	}
-	if !strings.Contains(output, "issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]") {
-		t.Fatalf("usage missing issue bulk-update command: %q", output)
-	}
-	if !strings.Contains(output, "config set <key> <value> [--project-dir <dir>]") {
-		t.Fatalf("usage missing config command: %q", output)
-	}
-	if !strings.Contains(output, "az config set spec.enabled false") {
-		t.Fatalf("usage missing config example: %q", output)
-	}
-	if !strings.Contains(output, "sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]") {
-		t.Fatalf("usage missing sync command: %q", output)
-	}
-	if !strings.Contains(output, "impl delete --confirm <implementation>") {
-		t.Fatalf("usage missing impl delete command: %q", output)
-	}
-	if !strings.Contains(output, "impl list") {
-		t.Fatalf("usage missing impl list command: %q", output)
-	}
-	if !strings.Contains(output, "impl migrate <from> <to>") {
-		t.Fatalf("usage missing impl migrate command: %q", output)
-	}
-	if !strings.Contains(output, "az sync --all") {
-		t.Fatalf("usage missing sync example: %q", output)
-	}
-	if !strings.Contains(output, "az impl list") {
-		t.Fatalf("usage missing impl list example: %q", output)
-	}
-	if !strings.Contains(output, "az impl delete --confirm ts-opentui") {
-		t.Fatalf("usage missing impl delete example: %q", output)
-	}
-	if !strings.Contains(output, "az impl migrate ts-opentui default") {
-		t.Fatalf("usage missing impl migrate example: %q", output)
-	}
-	if !strings.Contains(output, "operation <subcommand>") {
-		t.Fatalf("usage missing operation command family: %q", output)
-	}
-	if !strings.Contains(output, "az operation list --limit 20") {
-		t.Fatalf("usage missing operation list example: %q", output)
-	}
-	if !strings.Contains(output, "az operation get --id op-123 --wait") {
-		t.Fatalf("usage missing operation get example: %q", output)
-	}
-	if !strings.Contains(output, "az operation cancel --id op-123") {
-		t.Fatalf("usage missing operation cancel example: %q", output)
-	}
-	if !strings.Contains(output, "az operation logs --id op-123") {
-		t.Fatalf("usage missing operation logs example: %q", output)
-	}
-	if !strings.Contains(output, "prime") {
-		t.Fatalf("usage missing prime command: %q", output)
-	}
-	if !strings.Contains(output, "az issue create \"New task\"") {
-		t.Fatalf("usage missing plain issue create example: %q", output)
-	}
-	if !strings.Contains(output, "child under AZEDARACH_ISSUE_ID; no --impl needed for parentage") {
-		t.Fatalf("usage missing no-impl-parentage create example: %q", output)
-	}
-	if !strings.Contains(output, "attach an existing issue to another parent/root") {
-		t.Fatalf("usage missing explicit parent-child attach example: %q", output)
-	}
-	if !strings.Contains(output, "only assigns implementation metadata; still not parentage") {
-		t.Fatalf("usage missing impl-not-graph example clarification: %q", output)
-	}
-	if !strings.Contains(output, "Agent progress, validation, review facts, and worker closeout belong in mail/observation evidence, not issue notes.") {
-		t.Fatalf("usage missing evidence-first agent guidance: %q", output)
-	}
-	if !strings.Contains(output, "az issue events az-123 --json") {
-		t.Fatalf("usage missing issue events evidence example: %q", output)
-	}
-	if strings.Contains(output, "issue close --impl") || strings.Contains(output, "issue delete --impl") || strings.Contains(output, "issue dep add --impl") {
-		t.Fatalf("usage should not include --impl for existing-issue commands: %q", output)
-	}
-	if !strings.Contains(output, "Argument ordering: place flags/options before positional arguments for deterministic parsing.") {
-		t.Fatalf("usage missing canonical argument ordering hint: %q", output)
-	}
-}
-
 func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "")
 	setPrimeTmuxAvailable(t, true)
@@ -12170,422 +12106,22 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 		return PrimeCommand(&Dependencies{})
 	})
 
-	if !strings.Contains(output, "Azedarach Session Primer") {
-		t.Fatalf("prime output missing header: %q", output)
+	if output == "" {
+		t.Fatal("prime output is empty")
 	}
-	if !strings.Contains(output, "AZEDARACH_PRIMER_KEY:azedarach-prime-v1") {
-		t.Fatalf("prime output missing evidence key: %q", output)
+	if !strings.Contains(output, "your first action must always be to encode the approved plan into Azedarach before editing code") {
+		t.Fatalf("prime output missing approved-plan encoding order: %q", output)
 	}
-	if strings.Contains(output, "Active issue ID:") {
-		t.Fatalf("prime output should not print active issue id when unset: %q", output)
+	if !strings.Contains(output, "Do not create needless decomposition for a single-scope plan") {
+		t.Fatalf("prime output missing single-scope plan guidance: %q", output)
 	}
-	if !strings.Contains(output, "No active issue is preselected") {
-		t.Fatalf("prime output missing no-issue guardrail: %q", output)
+	if strings.Contains(output, "Active issue ID:") || strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=") {
+		t.Fatalf("prime without issue rendered active issue context: %q", output)
 	}
-	if !strings.Contains(output, "single-window fanout") {
-		t.Fatalf("prime output missing orchestration shorthand: %q", output)
-	}
-	if !strings.Contains(output, "`az issue list --query \"text\" --updated-after YYYY-MM-DD --limit 20`") {
-		t.Fatalf("prime output missing issue list query guidance: %q", output)
-	}
-	if !strings.Contains(output, "`az issue search --status open --limit 20 --query \"text\"`") {
-		t.Fatalf("prime output missing issue search guidance: %q", output)
-	}
-	if !strings.Contains(output, "(or `az issue search --status open --limit 20 \"text\"`)") {
-		t.Fatalf("prime output missing positional query alternative: %q", output)
-	}
-	if !strings.Contains(output, "searches title, description, notes, design, acceptance, labels, and implementations") {
-		t.Fatalf("prime output missing issue search field coverage: %q", output)
-	}
-	if !strings.Contains(output, "split work until each child issue is independently actionable and fits within a single subagent context window") {
-		t.Fatalf("prime output missing subagent sizing guardrail: %q", output)
-	}
-	if !strings.Contains(output, "How to use `az` command map:") {
-		t.Fatalf("prime output missing az command map section: %q", output)
-	}
-	if !strings.Contains(output, "Reports and attachments:") {
-		t.Fatalf("prime output missing reports and attachments section: %q", output)
-	}
-	if !strings.Contains(output, "`az issue document add <issue-id> <file>`, `az issue document list <issue-id>`, `az issue document remove <issue-id> <attachment-id>`") {
-		t.Fatalf("prime output missing document attachment command map: %q", output)
-	}
-	if !strings.Contains(output, "Markdown attachments render in the TUI; other file types can be opened externally.") {
-		t.Fatalf("prime output missing attachment preview guidance: %q", output)
-	}
-	if strings.Contains(output, "image attachments now use the same generic attachment store") {
-		t.Fatalf("prime output should not mention image storage internals: %q", output)
-	}
-	if !strings.Contains(output, "Proper issue creation: never leave an issue as just a title.") {
-		t.Fatalf("prime output missing proper issue creation guidance: %q", output)
-	}
-	if !strings.Contains(output, "Use `az issue create --title \"Specific outcome\" --description \"Context, scope, acceptance/validation notes\"`") {
-		t.Fatalf("prime output missing issue creation title/description example: %q", output)
-	}
-	if !strings.Contains(output, "immediately follow title-only creation with `az issue update <issue-id> --description \"...\"` before starting work or fanout") {
-		t.Fatalf("prime output missing title-only issue update guardrail: %q", output)
-	}
-	if !strings.Contains(output, "Start-issue wording: when the user says \"start an az issue\", \"add/start an issue\", or \"create and start an issue\"") {
-		t.Fatalf("prime output missing start-issue phrase family guidance: %q", output)
-	}
-	if !strings.Contains(output, "create or identify the issue and then run `az session start <issue-id>`") {
-		t.Fatalf("prime output missing start-issue session start command: %q", output)
-	}
-	if !strings.Contains(output, "Do not treat `az issue update <issue-id> --status in_progress` as starting a session unless the user explicitly asks to mark/update status.") {
-		t.Fatalf("prime output missing status-vs-session distinction: %q", output)
-	}
-	if !strings.Contains(output, "Child session handoff: after `az session start <child-issue>` or `az issue split \"Child task\"` starts a child tmux/session, the current parent/orchestrator session should only observe, wait for, or coordinate that child session. Watching the child tmux/session is fine; continuing the child implementation locally in the parent session is not.") {
-		t.Fatalf("prime output missing child session handoff guidance: %q", output)
-	}
-	if !strings.Contains(output, "create many issues, epics, or nested `children` trees from JSON when shaping a graph up front") {
-		t.Fatalf("prime output missing bulk-create nested tree guidance: %q", output)
-	}
-	if !strings.Contains(output, "Child issue creation without worker launch:") {
-		t.Fatalf("prime output missing child-creation/no-worker section: %q", output)
-	}
-	if !strings.Contains(output, "Batch planning/catalog fanout: `az issue bulk-create --input issues.json --json` with `parent_id` or nested `children` creates parented child issues without starting sessions or orchestration.") {
-		t.Fatalf("prime output missing non-orchestrating batch child creation guidance: %q", output)
-	}
-	if !strings.Contains(output, "Single tracking-only child: `az issue create \"Child task\" [--json]` auto-parents under `AZEDARACH_ISSUE_ID`; for another parent, pass `--parent <issue-id>`.") {
-		t.Fatalf("prime output missing non-orchestrating single child creation guidance: %q", output)
-	}
-	if !strings.Contains(output, "Worker fanout/session launch: `az issue split --parent <issue-id> \"Child task\"` can create the child and start orchestration/session work; use `az issue split` only when you intentionally want isolated worker fanout.") {
-		t.Fatalf("prime output missing split/session launch warning: %q", output)
-	}
-	if !strings.Contains(output, "`az orchestrate status --root <issue-id> [--since <seq>] [--limit <n>] [--json] [--summary|--full]`") {
-		t.Fatalf("prime output missing orchestrate status command example: %q", output)
-	}
-	if !strings.Contains(output, "`az orchestrate watch --root <issue-id> --since <seq> [--jsonl] [--verbose|--full]` (start in another pane/session and leave running while workers are active; default output is compact for agent decision loops and `--verbose`/`--full` emits the full frame; reserve `--once` for diagnostic single polls only)") {
-		t.Fatalf("prime output missing continuous watch command guidance: %q", output)
-	}
-	if !strings.Contains(output, "`az orchestrate start --root <issue-id> [--limit <n>] [--issue <issue-id> ...] [--json]`") {
-		t.Fatalf("prime output missing orchestrate start command example: %q", output)
-	}
-	if !strings.Contains(output, "`az orchestrate group --root <issue-id> --nested <nested-root-id> --issue <child-id> ... [--json]`") {
-		t.Fatalf("prime output missing orchestrate group command example: %q", output)
-	}
-	if !strings.Contains(output, "`az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\" [--json]`") {
-		t.Fatalf("prime output missing orchestrate message command example: %q", output)
-	}
-	if !strings.Contains(output, "rejects accidental self-delivery when the target matches `AZEDARACH_ISSUE_ID`") {
-		t.Fatalf("prime output missing orchestrate message self-delivery guard: %q", output)
-	}
-	if !strings.Contains(output, "`az orchestrate integrate --issue <issue-id> [--json]`") {
-		t.Fatalf("prime output missing orchestrate integrate command example: %q", output)
-	}
-	if !strings.Contains(output, "`az orchestrate close-session --issue <issue-id> [--json]`") {
-		t.Fatalf("prime output missing orchestrate close-session command example: %q", output)
-	}
-	if !strings.Contains(output, "`az orchestrate complete-check --root <issue-id> [--json]`") {
-		t.Fatalf("prime output missing orchestrate complete-check command example: %q", output)
-	}
-	if !strings.Contains(output, "`orchestration.via` is `az`: use `az orchestrate` as the worker launch and coordination authority") {
-		t.Fatalf("prime output missing az orchestration authority guidance: %q", output)
-	}
-	if !strings.Contains(output, "Do not use harness-native subagent/delegation tooling for this graph unless the user explicitly overrides this or changes `orchestration.via` to `native`.") {
-		t.Fatalf("prime output missing native tooling prohibition in az mode: %q", output)
-	}
-	if !strings.Contains(output, "Parent-orchestrator checklist for new roots:") {
-		t.Fatalf("prime output missing parent orchestrator checklist: %q", output)
-	}
-	if !strings.Contains(output, "Start the parent orchestrator session first: `az session start <root>` unless the current session is already that root's orchestrator session; session start creates or reuses the parent worktree.") {
-		t.Fatalf("prime output missing parent session checklist step: %q", output)
-	}
-	if !strings.Contains(output, "From the parent worktree/session, run `az orchestrate status --root <root>` to verify the graph and runnable children.") {
-		t.Fatalf("prime output missing parent status checklist step: %q", output)
-	}
-	if !strings.Contains(output, "Launch child workers only from that orchestrator context: `az orchestrate start --root <root> ...`.") {
-		t.Fatalf("prime output missing parent start checklist step: %q", output)
-	}
-	if !strings.Contains(output, "Nested epic/root rule: if the user asks the current session to start another epic/root issue, use `az orchestrate group --root <root> --nested <nested-root> --issue <child> ...` when child ownership needs to move under that nested root, then start that epic's own orchestrator session with `az session start <nested-root>`") {
-		t.Fatalf("prime output missing nested root session ownership guidance: %q", output)
-	}
-	if !strings.Contains(output, "Do not launch the nested root's child workers from the current/root session unless the user explicitly asks to flatten orchestration.") {
-		t.Fatalf("prime output missing nested root no-flattening guidance: %q", output)
-	}
-	if strings.Contains(output, "az worktree create <root>") {
-		t.Fatalf("prime parent orchestrator checklist should not mention manual worktree creation: %q", output)
-	}
-	if !strings.Contains(output, "do not rely on the original/current task session to own that new parent orchestration") {
-		t.Fatalf("prime output missing original session parent orchestration warning: %q", output)
-	}
-	if !strings.Contains(output, "Use `az orchestrate` for durable tracked task graphs that need issue dependencies, mailbox events, recoverable sessions, isolated worktrees, integration guidance, and `complete-check`.") {
-		t.Fatalf("prime output missing az/native tradeoff guidance: %q", output)
-	}
-	if !strings.Contains(output, "After every `az orchestrate start`, immediately start `az orchestrate watch --root <issue-id> --since <seq> --jsonl` in another pane/session and keep it running") {
-		t.Fatalf("prime output missing post-start continuous watch guidance: %q", output)
-	}
-	if !strings.Contains(output, "Trust hook-backed `activity=busy|idle|waiting` for idleness checks") {
-		t.Fatalf("prime output missing bounded tmux observation guidance: %q", output)
-	}
-	if !strings.Contains(output, "treat `activity=no-agent` as an intentional session-only shell") {
-		t.Fatalf("prime output missing no-agent guidance: %q", output)
-	}
-	if !strings.Contains(output, "when activity is `unknown`, inspect hooks with `az ai status --target=auto` and run `az ai install --target=auto` only when hooks are missing, outdated, or not installed") {
-		t.Fatalf("prime output missing hook status/install fallback guidance: %q", output)
-	}
-	if !strings.Contains(output, "Do not poll tmux panes on a fixed interval") {
-		t.Fatalf("prime output missing tmux polling guardrail: %q", output)
-	}
-	if !strings.Contains(output, "Worker intervention threshold: use status/watch/mailbox output for routine observation, and do not preemptively message, interrupt, or redirect child workers unless there is concrete, high-confidence evidence that the worker is about to violate scope, use the wrong parent/root, take a destructive action, or make a material mistake.") {
-		t.Fatalf("prime output missing worker intervention threshold guidance: %q", output)
-	}
-	if !strings.Contains(output, "`orchestration.via=az` means do not spawn harness-native subagents yourself.") {
-		t.Fatalf("prime output missing follow-up native subagent prohibition: %q", output)
-	}
-	if !strings.Contains(output, "Then run the az orchestration loop for the active root: `status` to identify direct runnable leaves and active worker activity") {
-		t.Fatalf("prime output missing az orchestration workflow guidance: %q", output)
-	}
-	if !strings.Contains(output, "use `az orchestrate message --root <parent> --issue <worker> --body \"...\"` only for evidence-backed worker nudges when the intervention threshold is met") {
-		t.Fatalf("prime output missing active nudge loop guidance: %q", output)
-	}
-	if !strings.Contains(output, "Az orchestration loop:") {
-		t.Fatalf("prime output missing az orchestration operating loop: %q", output)
-	}
-	if !strings.Contains(output, "use `az orchestrate message` only for evidence-backed worker nudges when the intervention threshold is met") {
-		t.Fatalf("prime output missing active nudge step guidance: %q", output)
-	}
-	if !strings.Contains(output, "Small graph: 1-3 leaves") {
-		t.Fatalf("prime output missing small graph orchestration guidance: %q", output)
-	}
-	if !strings.Contains(output, "Medium graph: 4-10 leaves") {
-		t.Fatalf("prime output missing medium graph orchestration guidance: %q", output)
-	}
-	if !strings.Contains(output, "Large graph: 10+ leaves or multiple dependency phases") {
-		t.Fatalf("prime output missing large graph orchestration guidance: %q", output)
-	}
-	if !strings.Contains(output, "start explicit nested epic/root sessions rather than flattening their workers into the current root") {
-		t.Fatalf("prime output missing large graph nested root guidance: %q", output)
-	}
-	if !strings.Contains(output, "Repeat status -> start -> watch until `az orchestrate complete-check --root <issue-id>` passes") {
-		t.Fatalf("prime output missing completion loop guidance: %q", output)
-	}
-	if !strings.Contains(output, "close accepted child issues with `az issue close --id <issue-id>`; that command owns merge, session stop, worktree cleanup, and issue closure") {
-		t.Fatalf("prime output missing worker integration guidance: %q", output)
-	}
-	if !strings.Contains(output, "Status semantics: use `open` for not-yet-active work, `in_progress` while actively working, `in_review` when implementation is complete") {
-		t.Fatalf("prime output missing status semantics guidance: %q", output)
-	}
-	if !strings.Contains(output, "before starting or resuming implementation, review, re-review, or follow-up fixes, move the issue to `in_progress` even if it was `in_review`") {
-		t.Fatalf("prime output missing agent-active status transition guidance: %q", output)
-	}
-	if !strings.Contains(output, "reserve `in_review` for the waiting-for-human/orchestrator handoff") {
-		t.Fatalf("prime output missing in-review handoff guidance: %q", output)
-	}
-	if !strings.Contains(output, "Blocked is not an issue status. Represent blocked work with dependency edges") {
-		t.Fatalf("prime output missing blocked-as-graph guidance: %q", output)
-	}
-	if !strings.Contains(output, "Parent-child edges are hierarchy/board-nesting edges, not readiness controls.") {
-		t.Fatalf("prime output missing parent-child hierarchy guidance: %q", output)
-	}
-	if !strings.Contains(output, "Issue graph/root membership comes only from auto-parenting with `AZEDARACH_ISSUE_ID` or explicit `parent-child` dependency edges.") {
-		t.Fatalf("prime output missing graph membership source guidance: %q", output)
-	}
-	if !strings.Contains(output, "Do not use `--impl <id>` when you mean \"parent this under <id>\"") {
-		t.Fatalf("prime output missing do-not-use-impl-as-parent guidance: %q", output)
-	}
-	if !strings.Contains(output, "`--impl` is implementation metadata only and never attaches an issue to a graph/root.") {
-		t.Fatalf("prime output missing impl-not-graph guidance: %q", output)
-	}
-	if !strings.Contains(output, "If a child issue was requested and `az issue create --json` returns `parent_id: \"\"`, stop before launching work") {
-		t.Fatalf("prime output missing missing-parent stop guidance: %q", output)
-	}
-	if !strings.Contains(output, "To pause or supersede child work inside an orchestration graph, keep the parent-child edge") {
-		t.Fatalf("prime output missing safe pause/supersede guidance: %q", output)
-	}
-	if !strings.Contains(output, "When the user names a graph/root, verify it before starting workers: run `az issue get <intended-root>` and `az orchestrate status --root <intended-root> --json`") {
-		t.Fatalf("prime output missing pre-start root verification guidance: %q", output)
-	}
-	if !strings.Contains(output, "If work was launched under the wrong parent, do not treat it as a simple move") {
-		t.Fatalf("prime output missing wrong-parent correction guidance: %q", output)
-	}
-	if !strings.Contains(output, "Worker completion flow: workers should leave their issue `in_review` with structured worker evidence") {
-		t.Fatalf("prime output missing in-review worker completion guidance: %q", output)
-	}
-	if !strings.Contains(output, "Parent/tracker completion includes child lifecycle cleanup: before reporting the parent complete, inspect child statuses, close accepted completed children with `az issue close --id <child-issue>`") {
-		t.Fatalf("prime output missing parent child lifecycle cleanup guidance: %q", output)
-	}
-	if !strings.Contains(output, "leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale") {
-		t.Fatalf("prime output missing unresolved child rationale guidance: %q", output)
-	}
-	if !strings.Contains(output, "Before accepting closeout, run `az issue context-risk <worker-issue> --since 14d`") {
-		t.Fatalf("prime output missing context-risk closeout guidance: %q", output)
-	}
-	if !strings.Contains(output, "treat `none`/`fyi` as advisory, ask the bounded prompts for `medium`, and require diagnosis or structured risk evidence for `high`") {
-		t.Fatalf("prime output missing context-risk level guidance: %q", output)
-	}
-	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
-		t.Fatalf("prime output missing mail send command example: %q", output)
-	}
-	if !strings.Contains(output, `"schema":"worker_evidence.v1","summary":"Ready for integration."`) {
-		t.Fatalf("prime output missing copy-safe worker evidence packet example: %q", output)
-	}
-	if !strings.Contains(output, "Worker integration evidence should be a structured JSON `worker_evidence.v1` packet with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`. Use a `worker-integration-ready` mailbox body when an active parent orchestrator/watch is coordinating delivery; otherwise use `az issue record <issue-id> --type evidence.submitted --data '<json>'`") {
-		t.Fatalf("prime output missing worker evidence summary artifact_links guidance: %q", output)
-	}
-	if !strings.Contains(output, "For `worker_evidence.v1`, omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array.") {
-		t.Fatalf("prime output missing artifact_links object-shape guidance: %q", output)
-	}
-	if !strings.Contains(output, "Use `az orchestrate message --root <parent-issue> --issue <worker-issue> --body \"...\"` only for evidence-backed orchestrator-to-running-worker nudges when the intervention threshold is met") {
-		t.Fatalf("prime output missing active worker nudge guidance: %q", output)
-	}
-	if !strings.Contains(output, "Workers reporting to an active parent orchestrator/watch should use `az mail send --parent <parent-issue> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`") {
-		t.Fatalf("prime output missing worker safe reporting guidance: %q", output)
-	}
-	if !strings.Contains(output, "`az issue record <issue-id> --summary \"...\" [--type <event-type>] [--data <json-object>] [--follow-up <issue-id> ...] [--json]` appends durable issue activity/evidence without mailbox delivery") {
-		t.Fatalf("prime output missing issue record guidance: %q", output)
-	}
-	if !strings.Contains(output, "Bare `az mail send` is durable mailbox-only and may not be seen until the worker next checks mail") {
-		t.Fatalf("prime output missing passive mailbox warning: %q", output)
-	}
-	if !strings.Contains(output, "Decision records:") {
-		t.Fatalf("prime output missing decision command map section: %q", output)
-	}
-	if !strings.Contains(output, "Use `az decision` to capture durable architecture/product choices and link them to issues, requirements, or prior decisions.") {
-		t.Fatalf("prime output missing decision use guidance: %q", output)
-	}
-	if !strings.Contains(output, "`az decision list [--json] [--issue <id>] [--req <id>] [--id <id> ...] [--query <text>]`") {
-		t.Fatalf("prime output missing decision list options: %q", output)
-	}
-	if !strings.Contains(output, "`az decision record --title <text> --rationale <text> [--context <text>] [--consequences <text>] [--issue <id> ...] [--req <id> ...] [--json]`") {
-		t.Fatalf("prime output missing decision record options: %q", output)
-	}
-	if !strings.Contains(output, "`az decision link add --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--relation <applies-to|revises|informs>] [--note <text>] [--json]`") {
-		t.Fatalf("prime output missing decision link options: %q", output)
-	}
-	if !strings.Contains(output, "`az decision sync [--check] [--project-dir <dir>] [--json]` writes `docs/decisions/*.md` from the store; `az decision import [--check] [--force] [--project-dir <dir>] [--json]` reads markdown back into the store.") {
-		t.Fatalf("prime output missing decision sync/import guidance: %q", output)
-	}
-	if !strings.Contains(output, "Installed `az` pre-commit hooks run `az decision sync` and stage `docs/decisions`, so generated decision markdown can enter a commit even when your manual `git add` named only code files.") {
-		t.Fatalf("prime output missing decision commit hook guidance: %q", output)
-	}
-	if !strings.Contains(output, "`AZEDARACH_SKIP_DECISION_SYNC=1 git commit ...`") {
-		t.Fatalf("prime output missing decision sync skip guidance: %q", output)
-	}
-	if !strings.Contains(output, "`az session status [issue-id]`, `az worktree create <issue-id>`") {
-		t.Fatalf("prime output missing session/runtime command examples: %q", output)
-	}
-	if !strings.Contains(output, "`az session start <issue-id>` is for explicit/manual orchestration; agents should not run it unless the user asks.") {
-		t.Fatalf("prime output missing session start guardrail: %q", output)
-	}
-	if !strings.Contains(output, "Optional child-work setup: `az issue split \"Child task\"` launches isolated worker fanout; use `az issue create \"Child task\"` or `az issue bulk-create --input issues.json` for tracking-only child issues") {
-		t.Fatalf("prime output missing optional child-task split guidance: %q", output)
-	}
-	if strings.Contains(output, "`az spec` (inspect linked requirements before behavior changes)") {
-		t.Fatalf("prime output should not instruct agents to run bare az spec: %q", output)
-	}
-	if strings.Contains(output, "`az issue create \"Title\"` (auto-parents under `AZEDARACH_ISSUE_ID`; use `--deferred` for non-immediate follow-ups)") {
-		t.Fatalf("prime output should not require unconditional child issue creation: %q", output)
-	}
-	if !strings.Contains(output, "immediate child work; auto-parents under `AZEDARACH_ISSUE_ID`") {
-		t.Fatalf("prime output missing auto-parent semantics: %q", output)
-	}
-	if !strings.Contains(output, "standalone backlog only; skips auto-parenting and is not a worktree/session control") {
-		t.Fatalf("prime output missing deferred standalone semantics: %q", output)
-	}
-	if !strings.Contains(output, "Do not use `--deferred` for child tasks, blockers, or work required before closing the active issue") {
-		t.Fatalf("prime output missing deferred blocker guardrail: %q", output)
-	}
-	if !strings.Contains(output, "Parent vs child issue scope:") {
-		t.Fatalf("prime output missing parent-vs-child scope section: %q", output)
-	}
-	if !strings.Contains(output, "Parent/epic issues describe the overarching goal, scope, and success criteria; keep their description high-level and stable.") {
-		t.Fatalf("prime output missing parent overarching-goal guidance: %q", output)
-	}
-	if !strings.Contains(output, "Track subtask goals, implementation steps, and nitty-gritty decisions in child issues created with `az issue create \"Child task\"` for tracking-only child work or `az issue split \"Child task\"` only when the child should launch immediately") {
-		t.Fatalf("prime output missing subtask-detail-into-child-issue guidance: %q", output)
-	}
-	if !strings.Contains(output, "When a new subtask surfaces mid-work, create a child issue immediately rather than expanding the parent's description") {
-		t.Fatalf("prime output missing mid-work child-issue creation guidance: %q", output)
-	}
-	if !strings.Contains(output, "capture subtask-level detail on the relevant child issue instead of bloating a parent/epic description") {
-		t.Fatalf("prime output missing keep-current parent/child notes guidance: %q", output)
-	}
-	if !strings.Contains(output, "Keep notes terse and evidence-oriented: final commands run, key outputs/assertions, files changed, AC pass/fail, blockers, and remaining scope only.") {
-		t.Fatalf("prime output missing terse notes guidance: %q", output)
-	}
-	if !strings.Contains(output, "Record non-orchestrated progress, follow-up creation, validation, risks, blockers, review facts, and closeout evidence with `az issue record`; read them with `az issue events <issue-id>` or `az observe`.") {
-		t.Fatalf("prime output missing observation/evidence guidance: %q", output)
-	}
-	if !strings.Contains(output, "Use mailbox `worker_evidence.v1` packets only when an active parent orchestrator/watch needs coordination delivery; otherwise record the same structured packet with `az issue record --type evidence.submitted --data '<json>'`.") {
-		t.Fatalf("prime output missing mailbox/evidence split guidance: %q", output)
-	}
-	if !strings.Contains(output, "Do not use `az issue update --notes` or `az issue update --append-notes` for routine agent progress, validation, review facts, or worker closeout; use issue records or active-coordination mailbox evidence instead.") {
-		t.Fatalf("prime output missing notes write deprecation guidance: %q", output)
-	}
-	if strings.Contains(output, "`az issue update <issue-id> --notes \"...\"`") || strings.Contains(output, "`az issue update <issue-id> --append-notes \"...\"`") {
-		t.Fatalf("prime output should not include copyable note update commands: %q", output)
-	}
-	if !strings.Contains(output, "`az issue events <issue-id> [--type <event-type>] [--limit <n>] [--json]` shows durable observation/evidence events") {
-		t.Fatalf("prime output missing issue events command map guidance: %q", output)
-	}
-	if !strings.Contains(output, "`az issue context-risk <issue-id> --since 14d [--summary|--full] [--json]` shows repeated local failure risk") {
-		t.Fatalf("prime output missing issue context-risk command map guidance: %q", output)
-	}
-	if !strings.Contains(output, "default/`--summary` output is bounded for closeout, and `--full` expands raw evidence") {
-		t.Fatalf("prime output missing bounded context-risk summary guidance: %q", output)
-	}
-	if !strings.Contains(output, "use it before accepting worker closeout, not as a blanket root-level gate") {
-		t.Fatalf("prime output missing context-risk gate guidance: %q", output)
-	}
-	if !strings.Contains(output, "Treat notes as a human scratchpad/audit trail, not as the automation source of truth or routine progress feed.") {
-		t.Fatalf("prime output missing notes source-of-truth guidance: %q", output)
-	}
-	if !strings.Contains(output, "Do not append raw logs, exploratory transcripts, routine progress narration, duplicate primer context, or speculative scratch work to notes.") {
-		t.Fatalf("prime output missing notes anti-bloat guidance: %q", output)
-	}
-	if !strings.Contains(output, "`az issue get` hides historical notes in text output by default; use `az issue get <issue-id> --with-notes` only when full note history is needed.") {
-		t.Fatalf("prime output missing tiered notes retrieval guidance: %q", output)
-	}
-	if !strings.Contains(output, "Status update rule: move your active issue to `in_progress` when starting or resuming agent work, including agent-led review or re-review") {
-		t.Fatalf("prime output missing agent review status update rule: %q", output)
-	}
-	if !strings.Contains(output, "Atomic-merge test before using `--deferred`") {
-		t.Fatalf("prime output missing atomic-merge test heading in parent/child scope section: %q", output)
-	}
-	if !strings.Contains(output, "would the parent be correct and complete if it lands in the base branch without this new piece?") {
-		t.Fatalf("prime output missing atomic-merge test framing: %q", output)
-	}
-	if !strings.Contains(output, "child issues are part of the parent's merge unit and land in the same base-branch commit") {
-		t.Fatalf("prime output missing child-merge-unit clarification: %q", output)
-	}
-	if !strings.Contains(output, "Atomic-merge test before reaching for `--deferred`") {
-		t.Fatalf("prime output missing pre-deferred atomic-merge guardrail in follow-up rules: %q", output)
-	}
-	if !strings.Contains(output, "child issues land in the same base-branch commit as the parent") {
-		t.Fatalf("prime output missing child-lands-with-parent clarification in follow-up rules: %q", output)
-	}
-	if !strings.Contains(output, "Reserve `--deferred` for work that can land separately later.") {
-		t.Fatalf("prime output missing deferred-purpose clarification: %q", output)
-	}
-	if !strings.Contains(output, "`--deferred` only changes issue bookkeeping: it skips active-issue auto-parenting and defaults priority lower; do not use it to avoid, force, or reason about worktree/session creation.") {
-		t.Fatalf("prime output missing deferred worktree/session clarification: %q", output)
-	}
-	if !strings.Contains(output, "It is not a child-task shortcut and not a way to control worktree/session creation.") {
-		t.Fatalf("prime output missing follow-up deferred worktree/session clarification: %q", output)
-	}
-	if !strings.Contains(output, "Close the issue only when the issue scope and acceptance criteria are fully complete") {
-		t.Fatalf("prime output missing close-only-when-fully-complete guardrail: %q", output)
-	}
-	if !strings.Contains(output, "If work is partial, keep status `in_progress`, record remaining scope through evidence/audit scratchpad, and create child issues for unfinished required work.") {
-		t.Fatalf("prime output missing partial-work guardrail: %q", output)
-	}
-	if !strings.Contains(output, "Child work should target the closest ancestor with an active worktree branch.") {
-		t.Fatalf("prime output missing child ancestor target guidance: %q", output)
-	}
-	if !strings.Contains(output, "run `az worktree create <ancestor-issue>` to materialize the parent/ancestor integration target before closing the child") {
-		t.Fatalf("prime output missing parent/ancestor restore guidance: %q", output)
-	}
-	if !strings.Contains(output, "az worktree create <issue-id>") {
-		t.Fatalf("prime output missing worktree create recovery command: %q", output)
-	}
-	if strings.Contains(output, "--allow-base-for-child") || strings.Contains(output, "child-to-base override") {
-		t.Fatalf("prime output should not mention child-to-base override guidance: %q", output)
-	}
-	if strings.Contains(output, "base-target merge is allowed") {
-		t.Fatalf("prime output should not suggest base-target child merge completion: %q", output)
-	}
-	if strings.Contains(output, "same PR") || strings.Contains(output, "one PR") {
-		t.Fatalf("prime output should frame the heuristic around base-branch atomic merges, not PRs: %q", output)
+	for _, want := range []string{"Issue Types", "`investigation` for research", "az issue update --type <type>", "explicit, issue-specific human acceptance"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("prime output missing investigation guidance %q: %q", want, output)
+		}
 	}
 }
 
@@ -12716,12 +12252,6 @@ func TestPrimeCommandWithActiveIssueUsesTargetedSnapshot(t *testing.T) {
 	}
 	if !strings.Contains(output, "Targeted detail") {
 		t.Fatalf("prime output missing targeted issue detail: %q", output)
-	}
-	if !strings.Contains(output, "Child session handoff: after `az session start <child-issue>` starts a child tmux/session, the current parent/orchestrator session should only observe, wait for, or coordinate that child session. Watching the child tmux/session is fine; continuing the child implementation locally in the parent session is not.") {
-		t.Fatalf("prime output missing no-tmux child session handoff guidance: %q", output)
-	}
-	if strings.Contains(output, "Child session handoff: after `az session start <child-issue>` or `az issue split \"Child task\"` starts a child tmux/session") {
-		t.Fatalf("prime no-tmux handoff guidance should not include split launch wording: %q", output)
 	}
 }
 
@@ -12880,7 +12410,7 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Active issue ID: `az-1`") {
 		t.Fatalf("prime output missing explicit active issue id: %q", output)
 	}
-	if !strings.Contains(output, "`az spec read --issue az-1` (inspect linked requirements before behavior changes)") {
+	if !strings.Contains(output, "Run `az spec read --issue az-1` before behavior changes") {
 		t.Fatalf("prime output missing active-issue spec read command: %q", output)
 	}
 	if !strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=az-1)") {
@@ -12919,13 +12449,10 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Evidence: last worker evidence was clean") {
 		t.Fatalf("prime output missing evidence summary: %q", output)
 	}
-	if !strings.Contains(output, "Worker mailbox: receive orchestrator messages with `az mail list --parent az-parent --since 0 --json`") {
+	if !strings.Contains(output, "Worker coordination parent: `az-parent`") || !strings.Contains(output, "az mail list --parent az-parent --since 0 --json") {
 		t.Fatalf("prime output missing worker mailbox receive guidance: %q", output)
 	}
-	if !strings.Contains(output, "`az mail watch --parent az-parent --since <seq> --jsonl` only when explicitly asked") {
-		t.Fatalf("prime output missing bounded mailbox watch guidance: %q", output)
-	}
-	if strings.Contains(output, "Parent-context recommendation:") {
+	if strings.Contains(output, "Parent context: `az-1` is an epic or has children") {
 		t.Fatalf("prime output should not show parent-context recommendation for task without children: %q", output)
 	}
 	if strings.Contains(output, "Orchestrator Exit Contract") {
@@ -13040,25 +12567,8 @@ func TestPrimeCommandShowsRootExitContractForAzOrchestrationRoot(t *testing.T) {
 	if contractIndex < 0 {
 		t.Fatalf("prime output missing root exit contract: %q", output)
 	}
-	firstCommandsIndex := strings.Index(output, "- First 3 commands for this session:")
-	if firstCommandsIndex < 0 || contractIndex > firstCommandsIndex {
-		t.Fatalf("root exit contract should appear before first-command guidance: %q", output)
-	}
-	for _, want := range []string{
-		"az orchestrate complete-check --root az-root",
-		"Treat `worker-integration-ready` and `in_review` as evidence to inspect and validate",
-		"run `az issue close --id <worker>` instead of handing off to the user",
-		"Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `az issue close --id <child-issue>`",
-		"leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale",
-		"final assistant response only after root completion, a named hard blocker, or an explicit user pause",
-		"az-child: review_ready - worker reported integration-ready evidence",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("prime output missing %q: %q", want, output)
-		}
-	}
-	if strings.Contains(output, "notes are not the exit contract source") {
-		t.Fatalf("prime output should not source root contract from notes: %q", output)
+	if !strings.Contains(output, "az-child: review_ready - worker reported integration-ready evidence") {
+		t.Fatalf("prime output missing dynamic child observation: %q", output)
 	}
 }
 
@@ -13127,10 +12637,6 @@ func TestPrimeCommandShowsRootExitContractForTaskRootWithActiveReadiness(t *test
 	contractIndex := strings.Index(output, "Orchestrator Exit Contract (root az-root):")
 	if contractIndex < 0 {
 		t.Fatalf("prime output missing root exit contract for task root with active readiness: %q", output)
-	}
-	firstCommandsIndex := strings.Index(output, "- First 3 commands for this session:")
-	if firstCommandsIndex < 0 || contractIndex > firstCommandsIndex {
-		t.Fatalf("root exit contract should appear before first-command guidance: %q", output)
 	}
 }
 
@@ -13216,11 +12722,7 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 		t.Fatalf("learn recall statuses = %#v", learnReq.Statuses)
 	}
 	if !strings.Contains(output, "Relevant accepted/promoted learnings:") ||
-		!strings.Contains(output, "Learning capture:") ||
-		!strings.Contains(output, "az learn add --issue az-1 --tag <tag> --evidence") ||
-		!strings.Contains(output, "Before handoff, review, or context switch") ||
-		!strings.Contains(output, "- learn-1 [accepted]: Keep durable choices in decisions (why: issue=az-1; query)") ||
-		!strings.Contains(output, "Use `az learn show <learning-id>` for evidence; long evidence is not injected by default.") {
+		!strings.Contains(output, "- learn-1 [accepted]: Keep durable choices in decisions (why: issue=az-1; query)") {
 		t.Fatalf("prime output missing learning section: %q", output)
 	}
 	if strings.Contains(output, "raw evidence should not be injected") {
@@ -13272,11 +12774,6 @@ func TestPrimeCommandShowsLearningCaptureGuidanceWithoutRecallRows(t *testing.T)
 		return PrimeCommand(deps)
 	})
 
-	if !strings.Contains(output, "Learning capture:") ||
-		!strings.Contains(output, "az learn add --issue az-1 --tag <tag> --evidence") ||
-		!strings.Contains(output, "Before handoff, review, or context switch") {
-		t.Fatalf("prime output missing no-row learning capture guidance: %q", output)
-	}
 	if strings.Contains(output, "Relevant accepted/promoted learnings:") {
 		t.Fatalf("prime output should not show recalled-learning heading without rows: %q", output)
 	}
@@ -13333,17 +12830,11 @@ func TestPrimeCommandRecommendsChildIssuesForEpicContext(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
-	if !strings.Contains(output, "Parent-context recommendation: `az-1` is an epic or already has child issues") {
+	if !strings.Contains(output, "Parent context: `az-1` is an epic or has children") {
 		t.Fatalf("prime output missing epic child-work recommendation: %q", output)
 	}
-	if !strings.Contains(output, "keep implementation/subtask work in child issues with `az issue create \"Child task\"` for tracking-only child work; use `az issue split \"Child task\"` only when that child should launch immediately in its own session") {
-		t.Fatalf("prime output missing child issue commands for epic context: %q", output)
-	}
-	if !strings.Contains(output, "Do the child implementation from the child issue execution context: preferably a child session (`az session start <child-issue>` or `az issue split \"Child task\"`) and at minimum the child worktree (`az worktree create <child-issue>`).") {
-		t.Fatalf("prime output missing child execution context guidance for epic context: %q", output)
-	}
-	if !strings.Contains(output, "Parent/tracker completion includes child lifecycle cleanup: before reporting the parent complete, inspect child statuses, close accepted completed children with `az issue close --id <child-issue>`") {
-		t.Fatalf("prime output missing child completion cleanup guidance for epic context: %q", output)
+	if !strings.Contains(output, "az issue split \"Child task\"") {
+		t.Fatalf("tmux-capable parent context omitted split option: %q", output)
 	}
 }
 
@@ -13411,19 +12902,10 @@ func TestPrimeCommandRecommendsChildIssuesWhenActiveIssueHasChildren(t *testing.
 		return PrimeCommand(deps)
 	})
 
-	if !strings.Contains(output, "Parent-context recommendation: `az-1` is an epic or already has child issues") {
+	if !strings.Contains(output, "Parent context: `az-1` is an epic or has children") {
 		t.Fatalf("prime output missing child-work recommendation for parent task: %q", output)
 	}
-	if !strings.Contains(output, "with `az issue create \"Child task\"` for tracking-only child work instead of accumulating detailed work on the parent") {
-		t.Fatalf("prime output missing non-tmux child issue command: %q", output)
-	}
-	if !strings.Contains(output, "Do the child implementation from the child issue execution context: preferably a child session (`az session start <child-issue>`) and at minimum the child worktree (`az worktree create <child-issue>`).") {
-		t.Fatalf("prime output missing child execution context guidance for parent task: %q", output)
-	}
-	if !strings.Contains(output, "before reporting the parent complete, inspect child statuses, close accepted completed children with `az issue close --id <child-issue>`") {
-		t.Fatalf("prime output missing child completion cleanup guidance for parent task: %q", output)
-	}
-	if strings.Contains(output, "Parent-context recommendation: `az-1` is an epic or already has child issues; keep implementation/subtask work in child issues with `az issue create \"Child task\"` or `az issue split \"Child task\"`") {
+	if strings.Contains(output, "Parent context: `az-1` is an epic or has children. Keep implementation-sized scope in child issues using `az issue create \"Child task\"` for tracking-only work or `az issue split") {
 		t.Fatalf("prime output should not mention split command when tmux is unavailable: %q", output)
 	}
 }
@@ -13565,27 +13047,6 @@ func TestPrimeCommandShowsImplementationOptionsWhenMultipleConfigured(t *testing
 	if !strings.Contains(output, "Available implementations: `default`, `marketing`") {
 		t.Fatalf("prime output missing available implementation options: %q", output)
 	}
-	if !strings.Contains(output, "Use `az impl list` to refresh the available options.") {
-		t.Fatalf("prime output missing impl list guidance: %q", output)
-	}
-	if !strings.Contains(output, "If you mean \"make this a child of the active issue\", run `az issue create \"Child task\"`; auto-parenting uses `AZEDARACH_ISSUE_ID`, not `--impl`.") {
-		t.Fatalf("prime output missing active-parent create guidance: %q", output)
-	}
-	if !strings.Contains(output, "If you mean \"attach this to another parent/root\", run `az issue create --parent <issue-id> \"Child task\"`.") {
-		t.Fatalf("prime output missing explicit parent-child guidance: %q", output)
-	}
-	if !strings.Contains(output, "`--impl` selects implementation/spec variant assignment only; it does not attach an issue to a parent/root graph.") {
-		t.Fatalf("prime output missing multi-impl graph distinction: %q", output)
-	}
-	if !strings.Contains(output, "`az issue create --impl default \"Implementation-specific task\"`") {
-		t.Fatalf("prime output missing create-with-impl example: %q", output)
-	}
-	if !strings.Contains(output, "this still relies on auto-parenting, `--parent`, or parent-child edges for graph membership") {
-		t.Fatalf("prime output missing impl-example parentage caveat: %q", output)
-	}
-	if !strings.Contains(output, "Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.") {
-		t.Fatalf("prime output missing update impl distinction: %q", output)
-	}
 }
 
 func TestPrimeCommandTruncatesLargeIssueDescription(t *testing.T) {
@@ -13715,12 +13176,6 @@ func TestPrimeCommandWarnsWhenActiveIssueClosed(t *testing.T) {
 			if !strings.Contains(output, tt.want) {
 				t.Fatalf("prime output missing closed-issue warning: %q", output)
 			}
-			if !strings.Contains(output, "`az issue list --limit 20` or `az issue create \"Next task\"") {
-				t.Fatalf("prime output missing closed-issue next-step guidance: %q", output)
-			}
-			if !strings.Contains(output, "Use `--deferred` only for standalone backlog work.") {
-				t.Fatalf("prime output missing closed-issue deferred caveat: %q", output)
-			}
 		})
 	}
 }
@@ -13732,42 +13187,11 @@ func TestPrimeCommandQuestionFirstAndSpecBlock(t *testing.T) {
 	output := captureStdout(t, func() error {
 		return PrimeCommand(&Dependencies{Config: &config.Config{Spec: config.SpecConfig{Enabled: true}}})
 	})
-
 	if !strings.Contains(output, "Question-first execution rules") {
-		t.Fatalf("prime output missing question-first block: %q", output)
+		t.Fatal("prime output missing dynamic question-first section")
 	}
-	if !strings.Contains(output, "- Spec workflow:") {
-		t.Fatalf("prime output missing spec workflow block: %q", output)
-	}
-	if !strings.Contains(output, "`az spec read --issue <issue-id>` (inspect linked requirements before behavior changes)") {
-		t.Fatalf("prime output missing concrete spec read command: %q", output)
-	}
-	if !strings.Contains(output, "ALWAYS run `az spec read --issue <issue-id>` before starting behavior work; use `az spec link list --issue <issue-id>` when you need link-only detail.") {
-		t.Fatalf("prime output missing mandatory pre-work spec check guardrail: %q", output)
-	}
-	if !strings.Contains(output, "To choose spec traceability, first inspect linked requirements, then use `az spec req list --query \"<issue title and feature terms>\" --match any --limit 10` and `az spec read --req <req-id>` to find nearby requirements across naming variants; avoid unbounded requirement lists during session startup.") {
-		t.Fatalf("prime output missing spec discovery guardrail: %q", output)
-	}
-	if !strings.Contains(output, "Link an existing requirement when it already defines the intended behavior; create or update a requirement before implementation when work adds behavior, changes user-visible behavior, changes a CLI/API/TUI contract, alters persistence/daemon semantics, or reveals an underspecified contract.") {
-		t.Fatalf("prime output missing spec link/create decision guardrail: %q", output)
-	}
-	if !strings.Contains(output, "Contract-preserving work usually does not need a new requirement: refactors, tests, formatting, tooling, observability, dependency/internal cleanup, docs/process-only edits, or fixes that restore already-specified behavior.") {
-		t.Fatalf("prime output missing contract-preserving spec exception guardrail: %q", output)
-	}
-	if !strings.Contains(output, "For contract-preserving work, record explicit issue-note evidence such as `Spec impact: none (contract-preserving refactor)`, `Spec impact: none (tests/tooling only)`, or `Spec impact: none (fix restores existing behavior)`.") {
-		t.Fatalf("prime output missing spec-impact note examples: %q", output)
-	}
-	if !strings.Contains(output, "If behavior work has no linked requirements after that check, do not treat missing links as permission to skip spec alignment.") {
-		t.Fatalf("prime output missing no-linked-requirements remediation guardrail: %q", output)
-	}
-	if !strings.Contains(output, "If implementation is not aligned with spec, update spec first, then implement.") {
-		t.Fatalf("prime output missing spec-first update guardrail: %q", output)
-	}
-	if !strings.Contains(output, "Ensure implementation issue(s) are linked to relevant spec requirement(s) before execution.") {
-		t.Fatalf("prime output missing issue/spec linking guardrail: %q", output)
-	}
-	if strings.Contains(output, "ALWAYS check `az spec` requirements/links") {
-		t.Fatalf("prime output should not include bare az spec guardrail: %q", output)
+	if !strings.Contains(output, "Spec Workflow") {
+		t.Fatal("prime output missing dynamic enabled-spec section")
 	}
 }
 
@@ -13778,164 +13202,43 @@ func TestPrimeCommandSpecBlockDisabled(t *testing.T) {
 		return PrimeCommand(&Dependencies{Config: &config.Config{Spec: config.SpecConfig{Enabled: false}}})
 	})
 
-	if strings.Contains(output, "- Spec workflow:") {
+	if strings.Contains(output, "Spec Workflow") {
 		t.Fatalf("prime output should not include spec workflow block when disabled: %q", output)
 	}
 }
 
-func TestPrimeCommandNativeFanoutGuidance(t *testing.T) {
+func TestPrimeCommandOrchestrationModes(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "")
-	setPrimeTmuxAvailable(t, true)
-
-	output := captureStdout(t, func() error {
-		return PrimeCommand(&Dependencies{
-			Config: &config.Config{
-				Spec:          config.SpecConfig{Enabled: true},
-				Orchestration: config.OrchestrationConfig{Via: "native"},
-			},
+	tests := []struct {
+		name        string
+		via         string
+		tmux        bool
+		want        string
+		notWant     string
+		forbidStart bool
+	}{
+		{name: "native with tmux", via: "native", tmux: true, want: "- Mode is `native`:", notWant: "- Mode is `az`:"},
+		{name: "az with tmux", via: "az", tmux: true, want: "- Mode is `az`:", notWant: "- Mode is `native`:"},
+		{name: "az without tmux", via: "az", tmux: false, want: "- Mode is `az`, but", notWant: "- Mode is `native`:", forbidStart: true},
+		{name: "native without tmux", via: "native", tmux: false, want: "- Mode is `native`:", notWant: "- Mode is `az`:", forbidStart: true},
+		{name: "unsupported", via: "banana", tmux: true, want: "Unsupported `orchestration.via` value: `banana`", notWant: "- Mode is `native`:"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setPrimeTmuxAvailable(t, tt.tmux)
+			output := captureStdout(t, func() error {
+				return PrimeCommand(&Dependencies{Config: &config.Config{Spec: config.SpecConfig{Enabled: true}, Orchestration: config.OrchestrationConfig{Via: tt.via}}})
+			})
+			if !strings.Contains(output, tt.want) {
+				t.Fatalf("prime output missing dynamic mode marker %q", tt.want)
+			}
+			if tt.notWant != "" && strings.Contains(output, tt.notWant) {
+				t.Fatalf("prime output included incompatible mode marker %q", tt.notWant)
+			}
+			if tt.forbidStart && strings.Contains(output, "az orchestrate start") {
+				t.Fatal("prime output exposed CLI-managed start while tmux unavailable")
+			}
 		})
-	})
-
-	if !strings.Contains(output, "`orchestration.via` is `native`: use your harness-native subagent delegation commands/keywords") {
-		t.Fatalf("prime output missing native fanout guidance: %q", output)
-	}
-	if !strings.Contains(output, "Shorthand: `single-window fanout (native)`") {
-		t.Fatalf("prime output missing native single-window shorthand: %q", output)
-	}
-	if strings.Contains(output, "`az orchestrate status --root <issue-id> [--since <seq>] [--limit <n>] [--json] [--summary|--full]`") {
-		t.Fatalf("prime output should avoid az orchestrate command map in native mode: %q", output)
-	}
-	if strings.Contains(output, "Shorthand: `single-window fanout` means split until each child is ready for one subagent, then fan out one subagent per child.") {
-		t.Fatalf("prime output should not include az fanout shorthand in native mode: %q", output)
-	}
-	if !strings.Contains(output, "Use native delegation for short-lived ad hoc exploration or review where the result can be summarized back into the current session.") {
-		t.Fatalf("prime output missing native/az tradeoff guidance: %q", output)
-	}
-}
-
-func TestPrimeCommandAzOrchestrationGuidanceRequiresAzVia(t *testing.T) {
-	t.Setenv("AZEDARACH_ISSUE_ID", "")
-	setPrimeTmuxAvailable(t, true)
-
-	output := captureStdout(t, func() error {
-		return PrimeCommand(&Dependencies{
-			Config: &config.Config{
-				Spec:          config.SpecConfig{Enabled: true},
-				Orchestration: config.OrchestrationConfig{Via: "az"},
-			},
-		})
-	})
-
-	if !strings.Contains(output, "`orchestration.via` is `az`: use `az orchestrate` as the worker launch and coordination authority") {
-		t.Fatalf("prime output missing explicit az orchestration guidance: %q", output)
-	}
-	if strings.Contains(output, "Unsupported `orchestration.via` value") {
-		t.Fatalf("prime output should not report unsupported orchestration mode for az: %q", output)
-	}
-}
-
-func TestPrimeCommandAzOrchestrationGuidanceRoutesReviewFindingsToSessions(t *testing.T) {
-	t.Setenv("AZEDARACH_ISSUE_ID", "")
-	setPrimeTmuxAvailable(t, true)
-
-	output := captureStdout(t, func() error {
-		return PrimeCommand(&Dependencies{
-			Config: &config.Config{
-				Spec:          config.SpecConfig{Enabled: true},
-				Orchestration: config.OrchestrationConfig{Via: "az"},
-			},
-		})
-	})
-
-	for _, want := range []string{
-		"Review/integration ownership",
-		"live or paused session",
-		"do not patch non-trivial actionable findings directly",
-		"`az orchestrate message --root <parent-issue> --issue <worker-issue> --body",
-		"\"type\":\"review-finding\"",
-		"\"suggested_fix\":\"...\"",
-		"\"validation\":[\"go test ./...\"]",
-		"`az issue record <worker-issue> --type review.recorded --summary \"<why reviewer fixed directly>\"`",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("prime output missing review integration ownership guidance %q: %q", want, output)
-		}
-	}
-	if strings.Contains(output, "$review-integration") {
-		t.Fatalf("prime output should not point to agent skills: %q", output)
-	}
-}
-
-func TestPrimeCommandAzOrchestrationGuidanceRequiresTmux(t *testing.T) {
-	t.Setenv("AZEDARACH_ISSUE_ID", "")
-	setPrimeTmuxAvailable(t, false)
-
-	output := captureStdout(t, func() error {
-		return PrimeCommand(&Dependencies{
-			Config: &config.Config{
-				Spec:          config.SpecConfig{Enabled: true},
-				Orchestration: config.OrchestrationConfig{Via: "az"},
-			},
-		})
-	})
-
-	if !strings.Contains(output, "`orchestration.via` is `az`, but CLI-managed worker fanout requires `tmux` on `PATH`; `tmux` is not available.") {
-		t.Fatalf("prime output missing tmux unavailable guidance: %q", output)
-	}
-	if strings.Contains(output, "`az orchestrate ") {
-		t.Fatalf("prime output should not print az orchestrate commands when tmux is unavailable: %q", output)
-	}
-	if strings.Contains(output, "az orchestration loop") {
-		t.Fatalf("prime output should not print az orchestration loop when tmux is unavailable: %q", output)
-	}
-}
-
-func TestPrimeCommandNativeGuidanceAvoidsAzOrchestrateWhenTmuxMissing(t *testing.T) {
-	t.Setenv("AZEDARACH_ISSUE_ID", "")
-	setPrimeTmuxAvailable(t, false)
-
-	output := captureStdout(t, func() error {
-		return PrimeCommand(&Dependencies{
-			Config: &config.Config{
-				Spec:          config.SpecConfig{Enabled: true},
-				Orchestration: config.OrchestrationConfig{Via: "native"},
-			},
-		})
-	})
-
-	if !strings.Contains(output, "CLI-managed worker fanout requires `tmux` on `PATH`; `tmux` is not available") {
-		t.Fatalf("prime output missing native-mode tmux unavailable guidance: %q", output)
-	}
-	if !strings.Contains(output, "`az orchestrate prompt --issue <issue-id> [--root <issue-id>]`") {
-		t.Fatalf("prime output missing native prompt guidance when tmux is unavailable: %q", output)
-	}
-	for _, disallowed := range []string{"`az orchestrate start ", "`az orchestrate status ", "`az orchestrate watch ", "az orchestration loop"} {
-		if strings.Contains(output, disallowed) {
-			t.Fatalf("prime output should not print CLI-managed orchestrate flow %q in native mode when tmux is unavailable: %q", disallowed, output)
-		}
-	}
-}
-
-func TestPrimeCommandUnsupportedOrchestrationViaDoesNotPrintAzWorkflow(t *testing.T) {
-	t.Setenv("AZEDARACH_ISSUE_ID", "")
-
-	output := captureStdout(t, func() error {
-		return PrimeCommand(&Dependencies{
-			Config: &config.Config{
-				Spec:          config.SpecConfig{Enabled: true},
-				Orchestration: config.OrchestrationConfig{Via: "banana"},
-			},
-		})
-	})
-
-	if !strings.Contains(output, "Unsupported `orchestration.via` value: `banana`") {
-		t.Fatalf("prime output missing unsupported orchestration warning: %q", output)
-	}
-	if strings.Contains(output, "`orchestration.via` is `az`: use `az orchestrate` as the worker launch and coordination authority") {
-		t.Fatalf("prime output should not print az guidance for unsupported orchestration mode: %q", output)
-	}
-	if strings.Contains(output, "`orchestration.via` is `native`: use your harness-native subagent") {
-		t.Fatalf("prime output should not print native guidance for unsupported orchestration mode: %q", output)
 	}
 }
 

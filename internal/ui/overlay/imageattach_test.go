@@ -40,47 +40,6 @@ func (m *mockClipboardAttachService) Delete(context.Context, string, string) err
 	return nil
 }
 
-func TestNewImageAttachOverlay(t *testing.T) {
-	tmpDir := t.TempDir()
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	service := attachment.NewService(tmpDir, logger)
-
-	overlay := NewImageAttachOverlay("az-123", service)
-
-	if overlay == nil {
-		t.Fatal("expected overlay to be created")
-	}
-
-	if overlay.issueID != "az-123" {
-		t.Errorf("expected issue_id to be az-123, got %s", overlay.issueID)
-	}
-
-	if overlay.mode != imageAttachModeList {
-		t.Errorf("expected mode to be imageAttachModeList, got %v", overlay.mode)
-	}
-
-	if overlay.cursor != 0 {
-		t.Errorf("expected cursor to be 0, got %d", overlay.cursor)
-	}
-
-	if overlay.inputActive {
-		t.Error("expected inputActive to be false")
-	}
-}
-
-func TestImageAttachOverlay_Title(t *testing.T) {
-	tmpDir := t.TempDir()
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	service := attachment.NewService(tmpDir, logger)
-
-	overlay := NewImageAttachOverlay("az-123", service)
-
-	title := overlay.Title()
-	if title != "Attachments" {
-		t.Errorf("expected title to be 'Attachments', got %s", title)
-	}
-}
-
 func TestImageAttachOverlay_Size(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))

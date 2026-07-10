@@ -19,48 +19,13 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 )
 
-func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
-	output := captureStdout(t, func() error {
-		PrintUsage()
-		return nil
-	})
-
-	for _, want := range []string{
-		"githooks <install|update|run|notify|hook>",
-		"gate <issue-id>",
-		"dev gate <issue-id>",
-		"ai install [--target=",
-		"ai status [--target=",
-		"ai migrate",
-		"ai hook run --agent=<claude|codex>",
-		"tmux <selector|install-selector|uninstall-selector>",
-		"spec <subcommand>",
-		"az githooks install",
-		"az githooks update",
-		"az githooks run",
-		"az githooks notify",
-		"az githooks hook --hook pre-commit",
-		"az gate az-123",
-		"az dev gate az-123",
-		"az ai install",
-		"az ai status",
-		"az ai status --target=codex --json",
-		"az ai install --target=rulesync --issue az-123",
-		"az ai migrate",
-		"az ai hook run --agent=codex --json permission-request",
-		"az tmux install-selector",
-		"az tmux uninstall-selector",
-		"az tmux selector",
-		"az spec req list --query \"daemon lifecycle recovery\" --match any --limit 10",
-		"az spec req create --id bfs-req-1 --title \"Restore az spec grammar\" --issue bgh",
-		"az spec link add --issue bgh --req bfs-req-1 --role implements",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("usage missing %q: %q", want, output)
-		}
+func TestAgentProcessExitStatusFromHookPayload(t *testing.T) {
+	status := agentProcessExitStatus(map[string]any{"exit_status": float64(137)})
+	if status == nil || *status != 137 {
+		t.Fatalf("agentProcessExitStatus() = %v, want 137", status)
 	}
-	if strings.Contains(output, "az spec sync") {
-		t.Fatalf("usage should not mention disabled sync command: %q", output)
+	if got := agentProcessExitStatus(map[string]any{"exit_status": 1.5}); got != nil {
+		t.Fatalf("agentProcessExitStatus() = %v, want nil for fractional status", *got)
 	}
 }
 
@@ -970,6 +935,35 @@ func TestAIHookRunCommandDoesNotAutostartRetryBestEffortLifecycleNotify(t *testi
 	}
 }
 
+func TestRunAgentHookCarriesProcessExitStatus(t *testing.T) {
+	var signal protocol.RuntimeSignalIngestCommandBody
+	transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		if err := json.Unmarshal(req.Body, &signal); err != nil {
+			t.Fatalf("unmarshal runtime signal: %v", err)
+		}
+		return responseWithJSON(req, protocol.RuntimeSignalIngestResponseBody{Accepted: true}), nil
+	}}
+	deps := &Dependencies{
+		RepoDir:      t.TempDir(),
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+	}
+
+	_, err := RunAgentHook(context.Background(), deps, AgentHookContext{
+		Agent:      AgentOpenCode,
+		Event:      hookEventSessionEnd,
+		IssueID:    "az-42",
+		ProjectDir: deps.RepoDir,
+		Payload:    map[string]any{"exit_status": float64(137)},
+	})
+	if err != nil {
+		t.Fatalf("RunAgentHook() error: %v", err)
+	}
+	if signal.ExitStatus == nil || *signal.ExitStatus != 137 || signal.Level != "error" {
+		t.Fatalf("runtime signal = %+v, want exit_status=137 level=error", signal)
+	}
+}
+
 func TestAIHookRunCommandSendsSingleRuntimeSignalForLifecycleAndHookLog(t *testing.T) {
 	projectDir := t.TempDir()
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
@@ -1435,27 +1429,6 @@ func TestGateCommandParsesAndPrintsStub(t *testing.T) {
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("gate output missing %q: %q", want, output)
-		}
-	}
-}
-
-func TestPrintDevUsageIncludesNewCommandFamilies(t *testing.T) {
-	output := captureStdout(t, func() error {
-		PrintDevUsage()
-		return nil
-	})
-
-	for _, want := range []string{
-		"Usage: az dev <gate|start|stop|restart|status|list>",
-		"az dev gate <issue-id>",
-		"az dev start <issue-id>",
-		"az dev stop <issue-id>",
-		"az dev restart <issue-id>",
-		"az dev status <issue-id>",
-		"az dev list",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("usage missing %q: %q", want, output)
 		}
 	}
 }

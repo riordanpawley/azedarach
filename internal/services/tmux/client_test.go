@@ -178,6 +178,46 @@ func TestClient_EnsureWindow(t *testing.T) {
 	}
 }
 
+func TestClient_EnsureWindowWithCommand(t *testing.T) {
+	tests := []struct {
+		name        string
+		listOutput  string
+		wantReused  bool
+		wantCommand [][]string
+	}{
+		{
+			name:       "creates window with command",
+			listOutput: "shell\n",
+			wantCommand: [][]string{
+				{"list-windows", "-t", "test-session", "-F", "#{window_name}"},
+				{"new-window", "-d", "-t", "test-session", "-n", "resolve-conflict", "-c", "/tmp/with 'quotes'\nand-newline", "zsh -i -c 'codex'"},
+			},
+		},
+		{
+			name:       "respawns existing window with command",
+			listOutput: "shell\nresolve-conflict\n",
+			wantReused: true,
+			wantCommand: [][]string{
+				{"list-windows", "-t", "test-session", "-F", "#{window_name}"},
+				{"respawn-window", "-k", "-t", "test-session:resolve-conflict", "-c", "/tmp/with 'quotes'\nand-newline", "zsh -i -c 'codex'"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &recordingOutputRunner{outputs: []string{tt.listOutput}}
+			client := NewClient(runner, slog.Default())
+
+			reused, err := client.EnsureWindowWithCommand(context.Background(), "test-session", "resolve-conflict", "/tmp/with 'quotes'\nand-newline", "zsh -i -c 'codex'")
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantReused, reused)
+			assert.Equal(t, tt.wantCommand, runner.commands)
+		})
+	}
+}
+
 func TestClient_SendKey(t *testing.T) {
 	runner := &recordingRunner{}
 	client := NewClient(runner, slog.Default())
@@ -379,6 +419,20 @@ func TestClient_CapturePane(t *testing.T) {
 			lines:      100,
 			output:     "output here",
 			wantOutput: "output here",
+		},
+		{
+			name:       "bounds output that includes visible pane",
+			session:    "test-session",
+			lines:      3,
+			output:     "line1\nline2\nline3\nline4\nline5\n",
+			wantOutput: "line3\nline4\nline5\n",
+		},
+		{
+			name:       "bounds output without trailing newline",
+			session:    "test-session",
+			lines:      2,
+			output:     "line1\nline2\nline3",
+			wantOutput: "line2\nline3",
 		},
 		{
 			name:    "runner error",

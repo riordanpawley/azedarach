@@ -66,6 +66,11 @@
     }
   },
   "issues": {
+    "autoArchive": {
+      "closedAfterDays": 30,
+      "enabled": true,
+      "interval": "24h"
+    },
     "path": ".azedarach",
     "syncInterval": 300
   },
@@ -119,8 +124,6 @@
     "keepDays": 7,
     "nameFormat": "{project}-{issueID}",
     "syncInitCommands": [
-      "mkdir -p .gocache .gopath",
-      "base_repo=$(dirname \"$(dirname \"$(dirname \"$(git rev-parse --git-dir)\")\")\") \u0026\u0026 cp -R \"$base_repo/.gocache\" \"$base_repo/.gopath\" . 2\u003e/dev/null || true",
       "direnv allow"
     ]
   }

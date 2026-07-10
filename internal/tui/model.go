@@ -1289,6 +1289,12 @@ type boardViewSelectedMsg struct {
 	err    error
 }
 
+type boardViewMutatedMsg struct {
+	action string
+	viewID string
+	err    error
+}
+
 type orchestrationOverviewLoadedMsg struct {
 	projects       []orchestrationProjectOverview
 	hiddenProjects int
@@ -1853,6 +1859,30 @@ func (m Model) selectBoardViewCmd(viewID string) tea.Cmd {
 			return boardViewSelectedMsg{viewID: viewID, err: err}
 		}
 		return boardViewSelectedMsg{viewID: resp.ViewID}
+	}
+}
+
+func (m Model) saveBoardViewCmd(view domain.BoardView) tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return boardViewMutatedMsg{action: "save", viewID: string(view.ID), err: fmt.Errorf("daemon client unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		resp, err := m.daemonClient.SaveBoardView(ctx, view)
+		return boardViewMutatedMsg{action: "save", viewID: string(resp.View.View.ID), err: err}
+	}
+}
+
+func (m Model) deleteBoardViewCmd(viewID string) tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return boardViewMutatedMsg{action: "delete", viewID: viewID, err: fmt.Errorf("daemon client unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err := m.daemonClient.DeleteBoardView(ctx, viewID)
+		return boardViewMutatedMsg{action: "delete", viewID: viewID, err: err}
 	}
 }
 
@@ -3988,11 +4018,12 @@ func (m Model) boardVisibleCards(columns []board.Column) int {
 	if availableHeight < 1 {
 		return 1
 	}
-	columnCount := m.boardVisibleColumnCount(len(columns))
-	if columnCount < 1 {
-		columnCount = board.DefaultColumnCount
+	layout := m.boardColumnLayout(columns)
+	pos := m.nav.GetPosition(columns)
+	columnWidth := layout.ColumnWidth
+	if pos.Valid {
+		columnWidth = layout.WidthForColumn(pos.Column)
 	}
-	columnWidth := m.width / columnCount
 	cardWidth := board.CardContentWidth(columnWidth)
 	linesPerCard := board.CardLineFootprint(m.styles, cardWidth)
 	if linesPerCard < 1 {
@@ -4029,12 +4060,8 @@ func (m *Model) ensureCursorVisible(columns []board.Column) {
 	if availableHeight < 1 {
 		availableHeight = 1
 	}
-	columnCount := m.boardVisibleColumnCount(len(columns))
-	if columnCount < 1 {
-		columnCount = board.DefaultColumnCount
-	}
-	columnWidth := m.width / columnCount
-	cardWidth := board.CardContentWidth(columnWidth)
+	layout := m.boardColumnLayout(columns)
+	cardWidth := board.CardContentWidth(layout.WidthForColumn(pos.Column))
 	linesPerCard := board.CardLineFootprint(m.styles, cardWidth)
 	if linesPerCard < 1 {
 		linesPerCard = 1
@@ -4073,58 +4100,16 @@ func (m *Model) ensureCursorVisible(columns []board.Column) {
 	m.viewportStarts[pos.Column] = start
 }
 
-func (m Model) boardVisibleColumnCount(totalColumns int) int {
-	return board.VisibleColumnCount(totalColumns, m.width)
-}
-
-func (m Model) boardVisibleColumnRange(columns []board.Column) (int, int) {
-	totalColumns := len(columns)
-	if totalColumns == 0 {
-		return 0, 0
-	}
-	visibleColumns := m.boardVisibleColumnCount(totalColumns)
-	if visibleColumns < 1 {
-		visibleColumns = 1
-	}
-	start := m.columnViewportStart
-	maxStart := totalColumns - visibleColumns
-	if maxStart < 0 {
-		maxStart = 0
-	}
-	start = clampInt(start, 0, maxStart)
-	end := start + visibleColumns
-	if end > totalColumns {
-		end = totalColumns
-	}
-	return start, end
+func (m Model) boardColumnLayout(columns []board.Column) board.ColumnLayout {
+	return board.NewColumnLayout(len(columns), m.width, m.columnViewportStart)
 }
 
 func (m *Model) ensureColumnVisible(pos navigation.Position, totalColumns int) {
-	if totalColumns <= 0 {
-		m.columnViewportStart = 0
-		return
+	layout := board.NewColumnLayout(totalColumns, m.width, m.columnViewportStart)
+	if pos.Valid {
+		layout = layout.WithColumnVisible(pos.Column)
 	}
-
-	visibleColumns := m.boardVisibleColumnCount(totalColumns)
-	if visibleColumns < 1 {
-		visibleColumns = 1
-	}
-	maxStart := totalColumns - visibleColumns
-	if maxStart < 0 {
-		maxStart = 0
-	}
-	start := clampInt(m.columnViewportStart, 0, maxStart)
-	if !pos.Valid || pos.Column < 0 || pos.Column >= totalColumns {
-		m.columnViewportStart = start
-		return
-	}
-
-	if pos.Column < start {
-		start = pos.Column
-	} else if pos.Column >= start+visibleColumns {
-		start = pos.Column - visibleColumns + 1
-	}
-	m.columnViewportStart = clampInt(start, 0, maxStart)
+	m.columnViewportStart = layout.ViewportStart
 }
 
 func (m Model) selectionSummary() string {

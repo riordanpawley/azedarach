@@ -1265,6 +1265,7 @@ type sessionStartTmuxRunner struct {
 	maxNewSessionCommand int
 	sendKeysErr          error
 	sendKeysErrOnCall    int
+	captureOutput        string
 }
 
 func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
@@ -1402,6 +1403,8 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 			}
 		}
 		return strings.Join(lines, "\n"), nil
+	case "capture-pane":
+		return r.captureOutput, nil
 	default:
 		return "", nil
 	}
@@ -3637,7 +3640,8 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 		sessionStore: store,
 		revision:     map[string]uint64{},
 	}
-	worktreePath := filepath.Join(t.TempDir(), "project-"+issueID)
+	worktreePath := filepath.Join(t.TempDir(), "project-'quoted'\nand-newline-"+issueID)
+	largePrompt := "Resolve 'quoted' conflict\n" + strings.Repeat("inspect this conflict carefully\n", 1024) + "finish"
 	req := protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-resolve-conflict",
@@ -3652,6 +3656,7 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 			Worktree:      worktreePath,
 			ConflictFiles: []string{"README.md", " README.md ", "sub/../main.go"},
 			Yolo:          true,
+			Prompt:        largePrompt,
 		}),
 	}
 
@@ -3683,22 +3688,28 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 	if !tmuxRunner.windows[sessionID][sessionConflictWindowName] {
 		t.Fatalf("expected conflict window to be created in session %q", sessionID)
 	}
-	targetPane := sessionID + ":" + sessionConflictWindowName
-	if tmuxRunner.sendKeysCalls != 1 {
-		t.Fatalf("send-keys calls = %d, want launch submit key", tmuxRunner.sendKeysCalls)
+	if tmuxRunner.sendKeysCalls != 1 || len(tmuxRunner.inputPayloads) != 1 {
+		t.Fatalf("post-launch prompt transport: send-keys=%d inputs=%d, want one literal paste and submit", tmuxRunner.sendKeysCalls, len(tmuxRunner.inputPayloads))
 	}
+	targetPane := sessionID + ":" + sessionConflictWindowName
 	if gotTarget := tmuxRunner.sendKeysTargets[0]; gotTarget != targetPane {
-		t.Fatalf("send-keys target = %q, want %q", gotTarget, targetPane)
+		t.Fatalf("post-launch submit target = %q, want %q", gotTarget, targetPane)
 	}
 	if gotKey := tmuxRunner.sendKeysPayloads[0]; gotKey != "Enter" {
-		t.Fatalf("launch submit payload = %q, want Enter submit", gotKey)
+		t.Fatalf("post-launch submit payload = %q, want Enter", gotKey)
 	}
-	if len(tmuxRunner.inputPayloads) != 1 {
-		t.Fatalf("input payloads = %+v, want only launch command payload", tmuxRunner.inputPayloads)
+	if got := tmuxRunner.inputPayloads[0]; got != largePrompt {
+		t.Fatalf("post-launch prompt was not preserved: got %d bytes, want %d", len(got), len(largePrompt))
 	}
-	launchCommand := tmuxRunner.inputPayloads[0]
+	var launchCommand string
+	for _, command := range tmuxRunner.commands {
+		if len(command) > 0 && command[0] == "new-window" {
+			launchCommand = command[len(command)-1]
+			break
+		}
+	}
 	if launchCommand == "" {
-		t.Fatalf("missing launch command input payload in tmux commands: %+v", tmuxRunner.commands)
+		t.Fatalf("missing atomic launch command in tmux commands: %+v", tmuxRunner.commands)
 	}
 	if strings.Contains(launchCommand, "Resolve merge conflicts for issue "+issueID) ||
 		strings.Contains(launchCommand, "README.md") ||
@@ -3706,10 +3717,9 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 		t.Fatalf("launch command contains raw conflict prompt text: %s", launchCommand)
 	}
 	if !strings.Contains(launchCommand, `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) ||
-		!strings.Contains(launchCommand, initialPromptShellVariable+`=$(printf`) ||
-		!strings.Contains(launchCommand, "--dangerously-bypass-approvals-and-sandbox") ||
-		!strings.Contains(launchCommand, `-- "$`+initialPromptShellVariable+`"`) {
-		t.Fatalf("launch command missing small codex launch shape or yolo flag: %s", launchCommand)
+		strings.Contains(launchCommand, initialPromptShellVariable) ||
+		!strings.Contains(launchCommand, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("launch command missing bounded codex launch shape or yolo flag: %s", launchCommand)
 	}
 
 	snapshot := store.ReadSnapshot(projectID)
@@ -7690,6 +7700,26 @@ func TestBuildSessionLaunchCommandDoesNotSerializeAsyncInitCommandsBeforeToolLau
 	}
 }
 
+func TestBuildSessionLaunchCommandReportsAgentProcessExitBeforeFallbackShell(t *testing.T) {
+	d := &Daemon{cfg: Config{CLITool: "codex", SessionShell: "zsh"}}
+
+	command := d.buildSessionLaunchCommand(protocol.DefaultProjectID, "az-42", "codex-az-42", false, nil, "")
+
+	wrapper := sessionAgentProcessExitCommand("codex")
+	if !strings.Contains(command, "__azedarach_agent_exit_status=$?") ||
+		!strings.Contains(command, "az ai hook run --agent=codex session_end") ||
+		!strings.Contains(command, "|| true; exec zsh") {
+		t.Fatalf("launch command = %q, want process-exit wrapper %q before fallback shell", command, wrapper)
+	}
+}
+
+func TestSessionAgentProcessExitCommandConstrainsAgentArgument(t *testing.T) {
+	command := sessionAgentProcessExitCommand(`codex; touch /tmp/unsafe`)
+	if strings.Contains(command, "touch") || !strings.Contains(command, "--agent=claude") {
+		t.Fatalf("sessionAgentProcessExitCommand() = %q, want safe fallback agent", command)
+	}
+}
+
 func TestBuildSessionLaunchCommandWritesInitReadyMarkerAfterInitCommands(t *testing.T) {
 	d := &Daemon{
 		cfg: Config{
@@ -7797,12 +7827,14 @@ func TestBuildSessionLaunchCommandDoesNotInjectCodexHookOverrides(t *testing.T) 
 		`hooks.PostToolUse=`,
 		`hooks.PermissionRequest=`,
 		`hooks.Stop=`,
-		`az ai hook run`,
 		`az notify`,
 	} {
 		if strings.Contains(command, mustNotContain) {
 			t.Fatalf("command = %q, must NOT contain %q (hook injection removed; rely on .codex/hooks.json)", command, mustNotContain)
 		}
+	}
+	if strings.Count(command, "az ai hook run") != 1 || !strings.Contains(command, "session_end") {
+		t.Fatalf("command = %q, want only the process-exit lifecycle wrapper", command)
 	}
 
 	// Surrounding launch behaviour stays intact: env prefix, image flags, and
@@ -7936,7 +7968,7 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 	if !strings.Contains(prompt, "use `az issue record az-42 --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant") {
 		t.Fatalf("prompt = %q, want concrete issue evidence command", prompt)
 	}
-	if !strings.Contains(prompt, "Before handing off, run the relevant validation/review checks, build the final `worker_evidence.v1` packet from actual results, run `az evidence validate --body '<json>'`, record or send that exact JSON packet, then set/leave the issue `in_review`. Do not rely on a prose-only final response as the handoff.") {
+	if !strings.Contains(prompt, "Before handing off, run the relevant validation/review checks, build the final `worker_evidence.v1` packet from actual results, run `az evidence validate --body '<json>'`, record or send that exact JSON packet, then set/leave the issue `in_review`. Review handoff is non-terminal: preserve this tmux session and worktree for orchestrator feedback; do not stop or close them yourself.") {
 		t.Fatalf("prompt = %q, want validated handoff sequence", prompt)
 	}
 	if !strings.Contains(prompt, "Omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array") {
@@ -7973,8 +8005,14 @@ func TestBuildStartWorkPromptOmitsMailboxGuidanceForStandaloneTask(t *testing.T)
 	if !strings.Contains(prompt, "Keep issue status current; record progress, follow-ups, validation, blockers, review facts, risks, and closeout evidence with `az issue record`; keep notes as terse human audit scratchpad only.") {
 		t.Fatalf("prompt = %q, want contributor evidence-first status guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Use `in_progress` while actively working, `in_review` when complete and awaiting review/integration") {
+	if !strings.Contains(prompt, "Use `in_progress` while actively working and `in_review` when complete and awaiting review/integration") {
 		t.Fatalf("prompt = %q, want contributor status semantics", prompt)
+	}
+	if !strings.Contains(prompt, "Review handoff is non-terminal: preserve the tmux session and worktree; do not stop or close them while waiting for human feedback") {
+		t.Fatalf("prompt = %q, want contributor review handoff resource preservation", prompt)
+	}
+	if !strings.Contains(prompt, "Use `closed` only after explicit acceptance/integration and `cancelled` only for a terminal non-integrated outcome") {
+		t.Fatalf("prompt = %q, want contributor terminal lifecycle semantics", prompt)
 	}
 	if !strings.Contains(prompt, "Represent blocked work with dependency edges and issue record evidence, not by using `in_review`") {
 		t.Fatalf("prompt = %q, want contributor blocked-as-graph guidance", prompt)
@@ -8011,6 +8049,15 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "az orchestrate complete-check --root <issue-id>") {
 		t.Fatalf("prompt = %q, want complete-check instruction", prompt)
 	}
+	if !strings.Contains(prompt, "set the root `in_review` and keep its tmux session/worktree alive for human review") {
+		t.Fatalf("prompt = %q, want non-terminal root review handoff", prompt)
+	}
+	if !strings.Contains(prompt, "Close/integrate the root only after explicit human acceptance") {
+		t.Fatalf("prompt = %q, want explicit root acceptance gate", prompt)
+	}
+	if strings.Contains(prompt, "Close only when `az orchestrate complete-check") {
+		t.Fatalf("prompt = %q, retained stale complete-check-implies-close guidance", prompt)
+	}
 	if !strings.Contains(prompt, "Start this root's direct runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`") {
 		t.Fatalf("prompt = %q, want direct leaf start guidance", prompt)
 	}
@@ -8041,8 +8088,9 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "If activity is `unknown`, inspect hooks with `az ai status --target=auto`; run `az ai install --target=auto` only when hooks are missing, outdated, or not installed") {
 		t.Fatalf("prompt = %q, want hook status/install fallback guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Do not poll tmux panes on a fixed interval") {
-		t.Fatalf("prompt = %q, want tmux polling guardrail", prompt)
+	if !strings.Contains(prompt, "az orchestrate capture --issue <worker-issue>") ||
+		!strings.Contains(prompt, "Do not poll panes on a fixed interval") {
+		t.Fatalf("prompt = %q, want daemon-backed capture guardrail", prompt)
 	}
 	if !strings.Contains(prompt, "az orchestrate integrate --issue <issue-id>") {
 		t.Fatalf("prompt = %q, want integrate instruction", prompt)
@@ -8115,6 +8163,57 @@ func TestSessionMessagePastesTextAndSubmitsActiveIssueSession(t *testing.T) {
 	}
 	if !reflect.DeepEqual(tmuxRunner.inputPayloads, []string{"Orchestrator says proceed now.\n\nKeep notes current."}) {
 		t.Fatalf("input payloads = %#v, want session message payload", tmuxRunner.inputPayloads)
+	}
+}
+
+func TestSessionCaptureCapturesPaneThroughDaemonTmuxClient(t *testing.T) {
+	projectID := protocol.DefaultProjectID
+	issueID := naming.IssueID("az-42")
+	repoDir := "/repo"
+	sessionID := naming.CanonicalSessionIDForIssue(repoDir, issueID).String()
+	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.sessions[sessionID] = true
+	tmuxRunner.captureOutput = "line one\nline two\nline three\nline four\n"
+	daemon := &Daemon{
+		cfg:  Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		tmux: tmux.NewClient(tmuxRunner, slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
+	body, err := json.Marshal(sessionCommandBody{
+		ProjectID: projectID,
+		SessionID: issueID.String(),
+		Lines:     2,
+	})
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+
+	resp, err := daemon.handleSessionCapture(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-session-capture",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandSessionCapture,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleSessionCapture error = %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("response not OK: %+v", resp)
+	}
+	wantCommands := [][]string{
+		{"has-session", "-t", sessionID},
+		{"capture-pane", "-t", sessionID, "-p", "-S", "-2"},
+	}
+	if !reflect.DeepEqual(tmuxRunner.commands, wantCommands) {
+		t.Fatalf("tmux commands = %#v, want %#v", tmuxRunner.commands, wantCommands)
+	}
+	var got protocol.SessionCaptureResponseBody
+	if err := json.Unmarshal(resp.Body, &got); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got.ProjectID != naming.ProjectID(daemon.canonicalProjectID(projectID)) || got.IssueID != issueID || got.SessionID != naming.SessionID(sessionID) || got.Lines != 2 || got.Output != "line three\nline four\n" {
+		t.Fatalf("response = %+v, want project issue session lines output", got)
 	}
 }
 

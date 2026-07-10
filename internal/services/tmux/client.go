@@ -89,6 +89,17 @@ func (c *Client) NewSessionWithCommand(ctx context.Context, name, workdir, comma
 // EnsureWindow creates a named window in an existing session when it is absent.
 // It returns true when the window already existed.
 func (c *Client) EnsureWindow(ctx context.Context, sessionName, windowName, workdir string) (bool, error) {
+	return c.ensureWindow(ctx, sessionName, windowName, workdir, "")
+}
+
+// EnsureWindowWithCommand creates a named window running command, or replaces
+// the existing window's panes with command. Passing the command to tmux avoids
+// racing an interactive shell's startup before sending the first line.
+func (c *Client) EnsureWindowWithCommand(ctx context.Context, sessionName, windowName, workdir, command string) (bool, error) {
+	return c.ensureWindow(ctx, sessionName, windowName, workdir, command)
+}
+
+func (c *Client) ensureWindow(ctx context.Context, sessionName, windowName, workdir, command string) (bool, error) {
 	c.logger.Debug("ensuring tmux window", "session", sessionName, "window", windowName, "workdir", workdir)
 
 	out, err := c.runner.Run(ctx, "list-windows", "-t", sessionName, "-F", "#{window_name}")
@@ -97,6 +108,16 @@ func (c *Client) EnsureWindow(ctx context.Context, sessionName, windowName, work
 	}
 	for _, line := range strings.Split(out, "\n") {
 		if strings.TrimSpace(line) == windowName {
+			if strings.TrimSpace(command) != "" {
+				args := []string{"respawn-window", "-k", "-t", sessionName + ":" + windowName}
+				if workdir != "" {
+					args = append(args, "-c", workdir)
+				}
+				args = append(args, command)
+				if _, err := c.runner.Run(ctx, args...); err != nil {
+					return true, &domain.TmuxError{Op: "respawn-window", Session: sessionName, Err: err}
+				}
+			}
 			c.logger.Debug("tmux window exists", "session", sessionName, "window", windowName)
 			return true, nil
 		}
@@ -105,6 +126,9 @@ func (c *Client) EnsureWindow(ctx context.Context, sessionName, windowName, work
 	args := []string{"new-window", "-d", "-t", sessionName, "-n", windowName}
 	if workdir != "" {
 		args = append(args, "-c", workdir)
+	}
+	if strings.TrimSpace(command) != "" {
+		args = append(args, command)
 	}
 	if _, err := c.runner.Run(ctx, args...); err != nil {
 		return false, &domain.TmuxError{Op: "new-window", Session: sessionName, Err: err}
@@ -255,9 +279,29 @@ func (c *Client) CapturePane(ctx context.Context, name string, lines int) (strin
 	if err != nil {
 		return "", &domain.TmuxError{Op: "capture-pane", Session: name, Err: err}
 	}
+	out = tailPaneLines(out, lines)
 
 	c.logger.Debug("tmux pane captured", "name", name, "bytes", len(out))
 	return out, nil
+}
+
+// tailPaneLines enforces CapturePane's line-count contract. tmux interprets
+// -S -N as N history lines above the visible pane, so its raw output can
+// contain more than N lines once the visible pane is included.
+func tailPaneLines(output string, limit int) string {
+	if output == "" || limit <= 0 {
+		return output
+	}
+	hasTrailingNewline := strings.HasSuffix(output, "\n")
+	logicalLines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
+	if len(logicalLines) <= limit {
+		return output
+	}
+	output = strings.Join(logicalLines[len(logicalLines)-limit:], "\n")
+	if hasTrailingNewline {
+		output += "\n"
+	}
+	return output
 }
 
 // ListSessions returns a list of all tmux session names

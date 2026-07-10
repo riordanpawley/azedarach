@@ -36,6 +36,7 @@ type sessionCommandBody struct {
 	ImagePaths []string `json:"image_paths,omitempty"`
 	Prompt     string   `json:"initial_prompt,omitempty"`
 	Message    string   `json:"message,omitempty"`
+	Lines      int      `json:"lines,omitempty"`
 }
 
 type resolvedSessionTarget struct {
@@ -48,6 +49,7 @@ type resolvedSessionTarget struct {
 	ImagePaths []string
 	Prompt     string
 	Message    string
+	Lines      int
 }
 
 type sessionRecoveryResult struct {
@@ -91,8 +93,10 @@ type sessionHookActivity struct {
 	Total          int
 	Active         int
 	Paused         int
+	Error          int
 	LatestActiveAt time.Time
 	LatestPausedAt time.Time
+	LatestErrorAt  time.Time
 }
 
 type sessionDisplayActivity struct {
@@ -112,6 +116,8 @@ const (
 	sessionActivityStartupGrace       = 45 * time.Second
 	sessionRestartContinuePromptDelay = 500 * time.Millisecond
 	sessionRestartContinuePrompt      = "Continue your prior task. Start by running `az prime` if you need to refresh issue context, then keep working from the existing conversation without waiting for further instruction."
+	sessionCaptureDefaultLines        = 120
+	sessionCaptureMaxLines            = 1000
 	codexLaunchPromptArgMaxBytes      = 24 * 1024
 	codexLaunchCommandArgMaxBytes     = 16 * 1024
 )
@@ -351,7 +357,7 @@ func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingSco
 			counts.PaneScoped++
 		}
 		switch sessionActivityState(session) {
-		case domain.SessionPaused, domain.SessionIdle, domain.SessionWaiting:
+		case domain.SessionError, domain.SessionPaused, domain.SessionIdle, domain.SessionWaiting:
 			counts.Paused++
 		default:
 			counts.Active++
@@ -589,6 +595,7 @@ func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope, requireSessi
 		ImagePaths: cmd.ImagePaths,
 		Prompt:     cmd.Prompt,
 		Message:    strings.TrimSpace(cmd.Message),
+		Lines:      cmd.Lines,
 	}, protocol.ResponseEnvelope{}, true
 }
 
@@ -1893,10 +1900,6 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record conflict session projection: %v", err)), nil
 	}
 
-	reusedWindow, err := d.tmux.EnsureWindow(ctx, sessionName, sessionConflictWindowName, worktreePath)
-	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-	}
 	prompt := strings.TrimSpace(body.Prompt)
 	if prompt == "" {
 		prompt = buildConflictResolutionPrompt(issueIDString, conflictFiles)
@@ -1909,8 +1912,9 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 	}
 	targetPane := sessionName + ":" + sessionConflictWindowName
 	launchCommand := d.buildSessionLaunchCommand(projectID, issueIDString, canonicalSessionID, body.Yolo, body.ImagePaths, launchPrompt)
-	if err := d.tmux.PasteTextAndSubmit(ctx, targetPane, launchCommand); err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	reusedWindow, err := d.tmux.EnsureWindowWithCommand(ctx, sessionName, sessionConflictWindowName, worktreePath, launchCommand)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("launch conflict resolver window: %v", err)), nil
 	}
 	if strings.TrimSpace(postLaunchPrompt) != "" {
 		if err := waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
@@ -2231,6 +2235,61 @@ func (d *Daemon) handleSessionMessage(ctx context.Context, req protocol.RequestE
 	return d.commandOutput(req, fmt.Sprintf("Sent message to session: %s\n", cmd.IssueID)), nil
 }
 
+func (d *Daemon) handleSessionCapture(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	cmd, _, ok := d.decodeSessionRequest(req, true)
+	if !ok {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session capture request"), nil
+	}
+	lines := normalizeSessionCaptureLines(cmd.Lines)
+	if d.tmux == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "tmux client unavailable"), nil
+	}
+	exists, err := d.tmux.HasSession(ctx, cmd.SessionID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("check session exists: %v", err)), nil
+	}
+	if !exists {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found in tmux: %s", cmd.IssueID)), nil
+	}
+	output, err := d.tmux.CapturePane(ctx, cmd.SessionID, lines)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("capture session pane: %v", err)), nil
+	}
+	body, err := json.Marshal(protocol.SessionCaptureResponseBody{
+		ProjectID:  naming.ProjectID(cmd.ProjectID),
+		IssueID:    naming.IssueID(cmd.IssueID),
+		SessionID:  naming.SessionID(cmd.SessionID),
+		Lines:      lines,
+		Output:     output,
+		CapturedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal session capture response: %v", err)), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = body
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon session pane captured",
+			"project_id", cmd.ProjectID,
+			"issue_id", cmd.IssueID,
+			"session_id", cmd.SessionID,
+			"lines", lines,
+			"bytes", len(output),
+		)
+	}
+	return resp, nil
+}
+
+func normalizeSessionCaptureLines(lines int) int {
+	if lines <= 0 {
+		return sessionCaptureDefaultLines
+	}
+	if lines > sessionCaptureMaxLines {
+		return sessionCaptureMaxLines
+	}
+	return lines
+}
+
 func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	cmd, _, ok := d.decodeSessionRequest(req, false)
 	if !ok {
@@ -2459,6 +2518,11 @@ func sessionHookActivityByIssueKeyFromSessions(sessions []daemonstate.Session, n
 		activity.Total++
 		updatedAt := session.UpdatedAt.UTC()
 		switch sessionActivityState(session) {
+		case domain.SessionError:
+			activity.Error++
+			if activity.LatestErrorAt.IsZero() || updatedAt.After(activity.LatestErrorAt) {
+				activity.LatestErrorAt = updatedAt
+			}
 		case domain.SessionPaused, domain.SessionIdle, domain.SessionWaiting:
 			activity.Paused++
 			if activity.LatestPausedAt.IsZero() || updatedAt.After(activity.LatestPausedAt) {
@@ -2479,6 +2543,8 @@ func sessionActivityState(session daemonstate.Session) domain.SessionState {
 	switch normalizeSessionActivity(session.Activity) {
 	case string(domain.SessionBusy), "starting", "working":
 		return domain.SessionBusy
+	case string(domain.SessionError):
+		return domain.SessionError
 	case string(domain.SessionIdle), string(domain.SessionPaused), string(domain.SessionWaiting):
 		return domain.SessionPaused
 	}
@@ -2505,6 +2571,9 @@ func sessionActivityLabel(activity sessionHookActivity) (string, string) {
 	if activity.Active > 0 {
 		return "busy", "hooks"
 	}
+	if activity.Error > 0 {
+		return "error", "hooks"
+	}
 	return "idle", "hooks"
 }
 
@@ -2514,6 +2583,9 @@ func sessionHookActivityUpdatedAt(activity sessionHookActivity) time.Time {
 	}
 	if activity.Active > 0 {
 		return activity.LatestActiveAt
+	}
+	if activity.Error > 0 {
+		return activity.LatestErrorAt
 	}
 	return activity.LatestPausedAt
 }
@@ -2642,11 +2714,12 @@ func (d *Daemon) sessionActivityByIssueKey(ctx context.Context, projectID string
 			sessions = append(sessions, session)
 		}
 	}
-	return sessionDisplayActivityByIssueKeyFromSessionsWithOptions(sessions, namingScope, opts)
+	activity := sessionDisplayActivityByIssueKeyFromSessionsWithOptions(sessions, namingScope, opts)
+	return d.applyTerminalFailureProbes(ctx, projectID, sessions, namingScope, activity)
 }
 
 func unknownActivityAdvice(issueID string) string {
-	return fmt.Sprintf("activity unknown: inspect hooks with az ai status --target=auto; run az ai install --target=auto only if hooks are missing, outdated, or not installed; use sparse pane capture only if status/watch looks stale, failed, or contradictory for %s", issueID)
+	return fmt.Sprintf("activity unknown: inspect hooks with az ai status --target=auto; run az ai install --target=auto only if hooks are missing, outdated, or not installed; use `az orchestrate capture --issue %s` only if status/watch looks stale, failed, or contradictory", issueID)
 }
 
 func sessionActivityLabelForDisplay(activity sessionHookActivity, session daemonstate.Session) (string, string) {
@@ -3288,6 +3361,10 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 		activeIssueKeys = activeSessionIssueKeysFromProjection(snapshotSessions, namingScope)
 		countsByKey = sessionProjectionCountsByIssueKey(snapshotSessions, namingScope)
 		activityByKey = sessionDisplayActivityByIssueKeyFromSessions(snapshotSessions, namingScope)
+	}
+	activityByKey = d.applyTerminalFailureProbes(ctx, projectID, projectionSessions, namingScope, activityByKey)
+	if len(projectionSessions) == 0 {
+		activityByKey = d.applyTerminalFailureProbes(ctx, projectID, snapshotSessions, namingScope, activityByKey)
 	}
 
 	for i := range tasks {
@@ -4037,8 +4114,18 @@ func (d *Daemon) buildSessionLaunchCommandWithInitReadyPathAndEnv(projectID, iss
 		shell = appconfig.DefaultSessionShell()
 	}
 	inner := strings.Join(commands, "; ")
-	inner = inner + "; exec " + shell
+	inner = inner + "; " + sessionAgentProcessExitCommand(projectCfg.CLITool) + "; exec " + shell
 	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner))
+}
+
+func sessionAgentProcessExitCommand(tool string) string {
+	agent := strings.ToLower(strings.TrimSpace(tool))
+	switch agent {
+	case "codex", "opencode":
+	default:
+		agent = "claude"
+	}
+	return `__azedarach_agent_exit_status=$?; printf '{"exit_status":%s}\n' "$__azedarach_agent_exit_status" | az ai hook run --agent=` + agent + ` session_end >/dev/null 2>&1 || true`
 }
 
 func sessionInitReadyMarkerCommand(initReadyPath string) string {
@@ -4947,10 +5034,10 @@ func buildStartWorkPrompt(issueID, issueType, title string, orchestratedWorker b
 		safeTitle,
 	)
 	if strings.EqualFold(safeIssueType, string(domain.TypeEpic)) {
-		return base + "\n\nRole: orchestrator\n- Use `az orchestrate status --root <issue-id>` for readiness snapshots including active worker activity (`busy|idle|waiting|no-agent|unknown`).\n- Use `az orchestrate watch --root <issue-id> --since <seq> --jsonl` for continuous observe-only mailbox/runnable/activity updates; start it in another pane/session and leave it running while workers are active.\n- Do not use `--once` for orchestration monitoring; reserve it for diagnostic single polls.\n- Trust hook-backed `activity=busy|idle|waiting` for worker idleness checks and treat `activity=no-agent` as an intentional session-only shell. If activity is `unknown`, inspect hooks with `az ai status --target=auto`; run `az ai install --target=auto` only when hooks are missing, outdated, or not installed. Use direct tmux pane capture only when watch/status look stale, failed, or contradictory, or when you need a sparse progress spot-check. Do not poll tmux panes on a fixed interval.\n- Start this root's direct runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`, then immediately ensure the continuous watch is running.\n- Nested epic/root rule: if a runnable child is itself an epic/root that should self-orchestrate, start that child's own orchestrator session with `az session start <child-root>` and let that session run `az prime` and manage `az orchestrate start --root <child-root>`; do not launch the child root's descendants from this session unless the user explicitly asks to flatten orchestration.\n- Send running-worker nudges with `az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"`; workers reporting to this active parent orchestrator/watch should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; non-orchestrated progress, follow-ups, validation, risks, or completion evidence should use `az issue record` instead. Bare `az mail send` is durable mailbox-only.\n- Worker integration evidence should be a structured JSON `worker_evidence.v1` packet with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`; use `az issue record --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant, and use `worker-integration-ready` mail only for active parent coordination. Omit `artifact_links` unless needed, and when present use objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array. Run `az evidence validate --body '<json>'` before recording or sending, `az evidence validate --fix --body '<json>'` for repairable schema aliases, or `az evidence validate --template` for the canonical template.\n- Treat blocked work as graph state from unresolved `blocks` dependencies or active worker-blocked mailbox evidence, not as an issue status.\n- Treat `in_review` workers as ready for orchestrator validation; inspect evidence, run parent checks, then close accepted worker issues with `az issue close --id <issue-id>`.\n- Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `az issue close --id <child-issue>`, and leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale.\n- Use `az orchestrate integrate --issue <issue-id>` for worker result inspection or repair guidance, not as the normal merge authority.\n- Use `az orchestrate close-session --issue <issue-id>` only for session cleanup repair when a worker must be stopped without closing the issue; daemon stop records stopped state before killing tmux so recovery cannot resurrect it.\n- Keep orchestration centralized inside each root session; delegate explicit nested epic/root issues to their own orchestrator sessions rather than flattening their children into this session.\n- Close only when `az orchestrate complete-check --root <issue-id>` passes."
+		return base + "\n\nRole: orchestrator\n- Use `az orchestrate status --root <issue-id>` for readiness snapshots including active worker activity (`busy|idle|waiting|no-agent|unknown`).\n- Use `az orchestrate watch --root <issue-id> --since <seq> --jsonl` for continuous observe-only mailbox/runnable/activity updates; start it in another pane/session and leave it running while workers are active.\n- Do not use `--once` for orchestration monitoring; reserve it for diagnostic single polls.\n- Trust hook-backed `activity=busy|idle|waiting` for worker idleness checks and treat `activity=no-agent` as an intentional session-only shell. If activity is `unknown`, inspect hooks with `az ai status --target=auto`; run `az ai install --target=auto` only when hooks are missing, outdated, or not installed. Use `az orchestrate capture --issue <worker-issue>` only when watch/status look stale, failed, or contradictory, or when you need a sparse progress spot-check. Do not poll panes on a fixed interval.\n- Start this root's direct runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`, then immediately ensure the continuous watch is running.\n- Nested epic/root rule: if a runnable child is itself an epic/root that should self-orchestrate, start that child's own orchestrator session with `az session start <child-root>` and let that session run `az prime` and manage `az orchestrate start --root <child-root>`; do not launch the child root's descendants from this session unless the user explicitly asks to flatten orchestration.\n- Send running-worker nudges with `az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"`; workers reporting to this active parent orchestrator/watch should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; non-orchestrated progress, follow-ups, validation, risks, or completion evidence should use `az issue record` instead. Bare `az mail send` is durable mailbox-only.\n- Worker integration evidence should be a structured JSON `worker_evidence.v1` packet with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`; use `az issue record --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant, and use `worker-integration-ready` mail only for active parent coordination. Omit `artifact_links` unless needed, and when present use objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array. Run `az evidence validate --body '<json>'` before recording or sending, `az evidence validate --fix --body '<json>'` for repairable schema aliases, or `az evidence validate --template` for the canonical template.\n- Treat blocked work as graph state from unresolved `blocks` dependencies or active worker-blocked mailbox evidence, not as an issue status.\n- Treat `in_review` workers as ready for orchestrator validation; inspect evidence, run parent checks, then close accepted worker issues with `az issue close --id <issue-id>`.\n- Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `az issue close --id <child-issue>`, and leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale.\n- Use `az orchestrate integrate --issue <issue-id>` for worker result inspection or repair guidance, not as the normal merge authority.\n- Use `az orchestrate close-session --issue <issue-id>` only for exceptional session cleanup when a worker must be stopped without closing the issue; never use it for ordinary review handoff.\n- Keep orchestration centralized inside each root session; delegate explicit nested epic/root issues to their own orchestrator sessions rather than flattening their children into this session.\n- When `az orchestrate complete-check --root <issue-id>` and final validation pass, set the root `in_review` and keep its tmux session/worktree alive for human review. Close/integrate the root only after explicit human acceptance."
 	}
 	if !orchestratedWorker {
-		return base + "\n\nRole: contributor\n- Focus only on this issue scope unless the user explicitly expands it.\n- Keep issue status current; record progress, follow-ups, validation, blockers, review facts, risks, and closeout evidence with `az issue record`; keep notes as terse human audit scratchpad only.\n- Use `in_progress` while actively working, `in_review` when complete and awaiting review/integration, and `closed` only after acceptance criteria and validation are done.\n- Represent blocked work with dependency edges and issue record evidence, not by using `in_review`."
+		return base + "\n\nRole: contributor\n- Focus only on this issue scope unless the user explicitly expands it.\n- Keep issue status current; record progress, follow-ups, validation, blockers, review facts, risks, and closeout evidence with `az issue record`; keep notes as terse human audit scratchpad only.\n- Use `in_progress` while actively working and `in_review` when complete and awaiting review/integration. Review handoff is non-terminal: preserve the tmux session and worktree; do not stop or close them while waiting for human feedback.\n- Use `closed` only after explicit acceptance/integration and `cancelled` only for a terminal non-integrated outcome.\n- Represent blocked work with dependency edges and issue record evidence, not by using `in_review`."
 	}
 	mailboxGuidance := "- Check inbound orchestrator messages with `az mail list --parent <parent-issue> --since 0 --json` before declaring yourself blocked or idle; apply events for this issue and continue without waiting for a separate user prompt."
 	if strings.TrimSpace(parentIssueID) != "" {
@@ -4960,7 +5047,7 @@ func buildStartWorkPrompt(issueID, issueType, title string, orchestratedWorker b
 	if strings.TrimSpace(parentIssueID) != "" {
 		reportParentID = parentIssueID
 	}
-	return base + "\n\nRole: worker\n- Focus only on this issue scope unless the user explicitly expands it.\n" + mailboxGuidance + "\n- Report coordination state to an active parent orchestrator/watch with `az mail send --parent " + reportParentID + " --issue " + issueID + " --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; do not use `az orchestrate message` for your own status because it is an orchestrator-to-worker live delivery command.\n- Use mailbox event types only for active coordination: worker-progress, worker-blocked, and worker-integration-ready; worker-ready and worker-complete are accepted only as legacy aliases for worker-integration-ready. For non-orchestrated progress, follow-ups, validation, risks, blockers, or closeout evidence, use `az issue record` instead.\n- Evidence bodies should be JSON `worker_evidence.v1` packets with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`; use `\"none\"` entries when a required list has no findings or risks. Omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array. Preflight with `az evidence validate --body '<json>'`; use `az issue record " + issueID + " --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant.\n- Before handing off, run the relevant validation/review checks, build the final `worker_evidence.v1` packet from actual results, run `az evidence validate --body '<json>'`, record or send that exact JSON packet, then set/leave the issue `in_review`. Do not rely on a prose-only final response as the handoff.\n- Keep issue status current; report progress, blockers, risks, and readiness through issue records or active-coordination mailbox evidence, with notes as terse human audit scratchpad only.\n- Use `in_progress` while actively working and `in_review` when complete and ready for orchestrator integration; the orchestrator closes accepted work.\n- Report blockers via dependency edges, issue record evidence, or active worker-blocked mailbox events, not by setting `in_review`."
+	return base + "\n\nRole: worker\n- Focus only on this issue scope unless the user explicitly expands it.\n" + mailboxGuidance + "\n- Report coordination state to an active parent orchestrator/watch with `az mail send --parent " + reportParentID + " --issue " + issueID + " --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; do not use `az orchestrate message` for your own status because it is an orchestrator-to-worker live delivery command.\n- Use mailbox event types only for active coordination: worker-progress, worker-blocked, and worker-integration-ready; worker-ready and worker-complete are accepted only as legacy aliases for worker-integration-ready. For non-orchestrated progress, follow-ups, validation, risks, blockers, or closeout evidence, use `az issue record` instead.\n- Evidence bodies should be JSON `worker_evidence.v1` packets with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`; use `\"none\"` entries when a required list has no findings or risks. Omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array. Preflight with `az evidence validate --body '<json>'`; use `az issue record " + issueID + " --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant.\n- Before handing off, run the relevant validation/review checks, build the final `worker_evidence.v1` packet from actual results, run `az evidence validate --body '<json>'`, record or send that exact JSON packet, then set/leave the issue `in_review`. Review handoff is non-terminal: preserve this tmux session and worktree for orchestrator feedback; do not stop or close them yourself.\n- Keep issue status current; report progress, blockers, risks, and readiness through issue records or active-coordination mailbox evidence, with notes as terse human audit scratchpad only.\n- Use `in_progress` while actively working and `in_review` when complete and ready for orchestrator integration; the orchestrator closes accepted work.\n- Report blockers via dependency edges, issue record evidence, or active worker-blocked mailbox events, not by setting `in_review`."
 }
 
 func buildConflictResolutionPrompt(issueID string, conflictFiles []string) string {

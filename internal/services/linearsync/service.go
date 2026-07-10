@@ -653,6 +653,8 @@ func taskFromLinear(issue linearapi.Issue) (domain.Task, bool) {
 			taskType = domain.TypeFeature
 		case "chore":
 			taskType = domain.TypeChore
+		case "investigation":
+			taskType = domain.TypeInvestigation
 		}
 	}
 	assignee := issue.Assignee.Email

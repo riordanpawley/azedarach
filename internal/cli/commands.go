@@ -51,6 +51,7 @@ const (
 	commandSessionResume        = "session.resume"
 	commandSessionStop          = "session.stop"
 	commandSessionStatus        = "session.status"
+	commandSessionCapture       = daemonclient.CommandSessionCapture
 	commandTaskSnapshotExport   = "task.snapshot.export"
 	defaultExportFormat         = "json"
 	defaultIssueListLimit       = 200
@@ -266,6 +267,19 @@ type IssueCloseOptions struct {
 	CloseCleanChildren bool
 }
 
+type IssueCleanupOptions struct {
+	Project         string
+	IDs             []string
+	Statuses        []string
+	Query           string
+	UpdatedBefore   *time.Time
+	Limit           int
+	Action          string
+	DryRun          bool
+	JSON            bool
+	PerIssueTimeout time.Duration
+}
+
 type IssueUpdateOptions struct {
 	Project         string
 	IssueID         string
@@ -416,6 +430,13 @@ type SessionRestartAllOptions struct {
 	ForceBusy bool
 	Yolo      bool
 	JSON      bool
+}
+
+type SessionCaptureOptions struct {
+	Project string
+	IssueID string
+	Lines   int
+	JSON    bool
 }
 
 type WorktreeCreateOptions struct {
@@ -584,6 +605,38 @@ func ParseSessionRestartAllArgs(args []string) (SessionRestartAllOptions, error)
 	if fs.NArg() != 0 {
 		return SessionRestartAllOptions{}, fmt.Errorf("usage: az session restart-all [--force-busy] [--yolo] [--json]")
 	}
+	return opts, nil
+}
+
+func ParseSessionCaptureArgs(args []string) (SessionCaptureOptions, error) {
+	opts := SessionCaptureOptions{Lines: 120}
+	fs := flag.NewFlagSet("session capture", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&opts.IssueID, "issue", "", "issue id")
+	fs.StringVar(&opts.IssueID, "id", "", "issue id")
+	fs.IntVar(&opts.Lines, "lines", opts.Lines, "number of recent pane lines to capture")
+	fs.BoolVar(&opts.JSON, "json", false, "print JSON output")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return SessionCaptureOptions{}, err
+	}
+	if fs.NArg() > 1 {
+		return SessionCaptureOptions{}, fmt.Errorf("usage: az session capture [--project <project-id>] [--lines N] [--json] <issue-id>")
+	}
+	if fs.NArg() == 1 {
+		if strings.TrimSpace(opts.IssueID) != "" {
+			return SessionCaptureOptions{}, fmt.Errorf("usage: az session capture [--project <project-id>] [--lines N] [--json] <issue-id>")
+		}
+		opts.IssueID = strings.TrimSpace(fs.Arg(0))
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return SessionCaptureOptions{}, fmt.Errorf("usage: az session capture [--project <project-id>] [--lines N] [--json] <issue-id>")
+	}
+	if opts.Lines < 0 {
+		return SessionCaptureOptions{}, fmt.Errorf("--lines must be greater than or equal to zero")
+	}
+	opts.Project = strings.TrimSpace(opts.Project)
+	opts.IssueID = strings.TrimSpace(opts.IssueID)
 	return opts, nil
 }
 
@@ -1254,6 +1307,47 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 	}
 
 	return printCommandOutput(resp)
+}
+
+func SessionCaptureCommand(deps *Dependencies, opts SessionCaptureOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	var target sessionIssueTarget
+	var err error
+	if strings.TrimSpace(opts.Project) != "" {
+		target, err = resolveExplicitSessionStatusTarget(deps, opts.IssueID, opts.Project, opts.IssueID)
+	} else {
+		target, err = resolveSessionStatusTarget(deps, opts.IssueID)
+	}
+	if err != nil {
+		return err
+	}
+	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
+	defer restoreProject()
+
+	deps.Logger.Info("capturing session pane", "project_id", target.ProjectID, "issue_id", target.IssueID, "lines", opts.Lines)
+	result, err := deps.DaemonClient.CaptureSession(ctx, target.IssueID, daemonclient.CaptureSessionOptions{Lines: opts.Lines})
+	if err != nil {
+		return fmt.Errorf("failed to capture session pane: %w", err)
+	}
+	if opts.JSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+	fmt.Print(result.Output)
+	if result.Output != "" && !strings.HasSuffix(result.Output, "\n") {
+		fmt.Println()
+	}
+	return nil
+}
+
+func OrchestrateCaptureCommand(deps *Dependencies, opts SessionCaptureOptions) error {
+	return SessionCaptureCommand(deps, opts)
 }
 
 func SessionDiagnoseCommand(deps *Dependencies, issueID string) error {
@@ -3490,7 +3584,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	fs.StringVar(&priorityRaw, "priority", "", "issue priority (P0-P4)")
 	fs.BoolVar(&opts.Deferred, "deferred", false, "create standalone later/backlog work; skips AZEDARACH_ISSUE_ID auto-parenting and defaults priority to P4 unless --priority is provided")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue create result as JSON")
-	fs.StringVar(&typeRaw, "type", string(domain.TypeTask), "issue type (task|bug|feature|epic|chore)")
+	fs.StringVar(&typeRaw, "type", string(domain.TypeTask), "issue type (task|bug|feature|epic|chore|investigation)")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCreateOptions{}, err
 	}
@@ -3503,7 +3597,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	case fs.NArg() == 1 && titleFlag != "":
 		return IssueCreateOptions{}, fmt.Errorf("provide title either as --title or as a positional argument, not both")
 	default:
-		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
+		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
 	}
 
 	taskType, err := parseTaskType(typeRaw)
@@ -3629,6 +3723,64 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	return opts, nil
 }
 
+func ParseIssueCleanupArgs(args []string) (IssueCleanupOptions, error) {
+	opts := IssueCleanupOptions{Action: "closed", PerIssueTimeout: issueCloseCleanupTimeout}
+	var idsCSV, statusesCSV, updatedBefore string
+	fs := flag.NewFlagSet("issue cleanup", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.Func("id", "issue id (repeatable)", func(v string) error { opts.IDs = append(opts.IDs, v); return nil })
+	fs.StringVar(&idsCSV, "ids", "", "comma-separated issue ids")
+	fs.Func("status", "candidate status (repeatable)", func(v string) error { opts.Statuses = append(opts.Statuses, v); return nil })
+	fs.StringVar(&statusesCSV, "statuses", "", "comma-separated candidate statuses")
+	fs.StringVar(&opts.Query, "query", "", "case-insensitive candidate text query")
+	fs.StringVar(&updatedBefore, "updated-before", "", "candidate update cutoff")
+	fs.IntVar(&opts.Limit, "limit", 0, "maximum candidates (0 means unlimited)")
+	fs.StringVar(&opts.Action, "action", "closed", "lifecycle action: closed or cancelled")
+	fs.BoolVar(&opts.DryRun, "dry-run", false, "preview ordered actions without changing issues")
+	fs.BoolVar(&opts.JSON, "json", false, "output structured per-issue results")
+	fs.DurationVar(&opts.PerIssueTimeout, "per-issue-timeout", issueCloseCleanupTimeout, "maximum time for each issue cleanup")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueCleanupOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return IssueCleanupOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	if idsCSV != "" {
+		opts.IDs = append(opts.IDs, strings.Split(idsCSV, ",")...)
+	}
+	if statusesCSV != "" {
+		opts.Statuses = append(opts.Statuses, strings.Split(statusesCSV, ",")...)
+	}
+	opts.IDs = dedupeOrderedIDs(opts.IDs)
+	for i := range opts.Statuses {
+		opts.Statuses[i] = strings.ToLower(strings.TrimSpace(opts.Statuses[i]))
+	}
+	opts.Statuses = dedupeOrderedIDs(opts.Statuses)
+	opts.Action = strings.ToLower(strings.TrimSpace(opts.Action))
+	if opts.Action != "closed" && opts.Action != "cancelled" {
+		return IssueCleanupOptions{}, fmt.Errorf("action must be closed or cancelled")
+	}
+	if opts.Limit < 0 {
+		return IssueCleanupOptions{}, fmt.Errorf("limit must be >= 0")
+	}
+	if opts.PerIssueTimeout <= 0 {
+		return IssueCleanupOptions{}, fmt.Errorf("per-issue-timeout must be positive")
+	}
+	if strings.TrimSpace(opts.Query) != "" && len(domain.ContentQueryTerms(opts.Query)) == 0 {
+		return IssueCleanupOptions{}, fmt.Errorf("query must contain a searchable term")
+	}
+	var err error
+	if opts.UpdatedBefore, err = parseIssueListDateFilter(updatedBefore, true); err != nil {
+		return IssueCleanupOptions{}, fmt.Errorf("invalid --updated-before: %w", err)
+	}
+	if len(opts.IDs) == 0 && len(opts.Statuses) == 0 && strings.TrimSpace(opts.Query) == "" && opts.UpdatedBefore == nil {
+		return IssueCleanupOptions{}, fmt.Errorf("at least one --id/--ids or candidate filter is required")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
 func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 	opts := IssueDeleteOptions{}
 	issueIDFlag := ""
@@ -3737,13 +3889,13 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		updateImpls = append(updateImpls, trimmed)
 		return nil
 	})
-	fs.StringVar(&typeRaw, "type", "", "updated issue type (task|bug|feature|epic|chore)")
+	fs.StringVar(&typeRaw, "type", "", "updated issue type (task|bug|feature|epic|chore|investigation)")
 	fs.StringVar(&priorityRaw, "priority", "", "updated priority (P0-P4)")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueUpdateOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update (it is create-only); normal field updates do not need --update-impl, and --update-impl is only for changing issue implementations")
@@ -3755,7 +3907,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if typeRaw != "" {
 		tt, err := parseTaskType(typeRaw)
@@ -6224,6 +6376,67 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 	return nil
 }
 
+func IssueCleanupCommand(deps *Dependencies, opts IssueCleanupOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+	startupCtx, startupCancel := context.WithTimeout(context.Background(), issueCloseCleanupTimeout)
+	if err := ensureDaemon(startupCtx, deps, "cli"); err != nil {
+		startupCancel()
+		return err
+	}
+	startupCancel()
+	// The daemon applies an independent deadline to every selected issue. A
+	// batch-wide deadline derived from that same duration would starve later
+	// items in a sequential batch, so the transport parent remains cancellable
+	// but intentionally has no deadline of its own.
+	ctx, cancel := newIssueCleanupBatchContext()
+	defer cancel()
+	result, err := deps.DaemonClient.BulkCleanupTasks(ctx, daemonclient.TaskBulkCleanupRequest{
+		TaskIDs: opts.IDs, Statuses: opts.Statuses, Query: opts.Query, UpdatedBefore: opts.UpdatedBefore,
+		Limit: opts.Limit, DryRun: opts.DryRun, CloseOutcome: opts.Action, PerIssueTimeout: opts.PerIssueTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("bulk issue cleanup failed: %w", err)
+	}
+	failures := 0
+	for _, item := range result.Items {
+		if item.Error != "" {
+			failures++
+		}
+	}
+	if opts.JSON {
+		if err := printJSON(result); err != nil {
+			return err
+		}
+		if failures > 0 {
+			return fmt.Errorf("%d issue cleanup operation(s) failed", failures)
+		}
+		return nil
+	}
+	verb := "Cleanup"
+	if opts.DryRun {
+		verb = "Would clean up"
+	}
+	for _, item := range result.Items {
+		state := "ok"
+		if item.Skipped {
+			state = "already " + item.Action
+		}
+		if item.Error != "" {
+			state = "failed: " + item.Error
+		}
+		fmt.Printf("%s %s as %s: %s\n", verb, item.TaskID, item.Action, state)
+	}
+	if failures > 0 {
+		return fmt.Errorf("%d issue cleanup operation(s) failed", failures)
+	}
+	return nil
+}
+
+func newIssueCleanupBatchContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(context.Background())
+}
+
 func taskClosePhaseJSON(phases []daemonclient.TaskClosePhaseTiming) []map[string]any {
 	out := make([]map[string]any, 0, len(phases))
 	for _, phase := range phases {
@@ -8066,7 +8279,7 @@ func executeBulkApply(deps *Dependencies, dryRun bool, asJSON bool, operations [
 func parseTaskType(raw string) (domain.TaskType, error) {
 	tt := domain.TaskType(raw)
 	switch tt {
-	case domain.TypeTask, domain.TypeBug, domain.TypeFeature, domain.TypeEpic, domain.TypeChore:
+	case domain.TypeTask, domain.TypeBug, domain.TypeFeature, domain.TypeEpic, domain.TypeChore, domain.TypeInvestigation:
 		return tt, nil
 	default:
 		return "", fmt.Errorf("invalid issue type: %s", raw)
@@ -8206,7 +8419,7 @@ func PrimeCommand(deps *Dependencies) error {
 	questionFirstGuardrails := ""
 	orchestratorExitContract := ""
 	implementationSection := ""
-	implementationGuardrails := "- Implementation guardrails: `--impl` assigns implementation/spec variants only; it is not graph/root membership or parent selection. To parent new work under the active issue, run `az issue create \"Child task\"` from the correct `AZEDARACH_ISSUE_ID` context; for another parent/root, add an explicit `parent-child` edge. In multi-implementation repos, include explicit `--impl <impl>` only on implementation-specific new issue writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status, title, and description updates do not require it."
+	implementationGuardrails := "- `--impl` selects implementation/spec variants; it never establishes parentage or graph membership. Use the active issue context or an explicit parent-child edge for hierarchy."
 	learningSection := ""
 	specEnabled := deps != nil && deps.Config != nil && deps.Config.Spec.Enabled
 	orchestrationVia := primeOrchestrationVia(deps)
@@ -8221,18 +8434,11 @@ func PrimeCommand(deps *Dependencies) error {
   - MUST record unknowns/open questions in the issue description so scope is explicit.`
 	}
 	if specEnabled {
-		specGuardrails = `  - In this repo, when guidance says ` + "`spec`" + `, it means records managed by ` + "`az spec req ...`" + ` and ` + "`az spec link ...`" + `, not README.md, AGENTS.md, or other internal docs.
-  - ALWAYS run ` + "`az spec read --issue <issue-id>`" + ` before starting behavior work; use ` + "`az spec link list --issue <issue-id>`" + ` when you need link-only detail.
-  - To choose spec traceability, first inspect linked requirements, then use ` + "`az spec req list --query \"<issue title and feature terms>\" --match any --limit 10`" + ` and ` + "`az spec read --req <req-id>`" + ` to find nearby requirements across naming variants; avoid unbounded requirement lists during session startup.
-  - Link an existing requirement when it already defines the intended behavior; create or update a requirement before implementation when work adds behavior, changes user-visible behavior, changes a CLI/API/TUI contract, alters persistence/daemon semantics, or reveals an underspecified contract.
-  - Contract-preserving work usually does not need a new requirement: refactors, tests, formatting, tooling, observability, dependency/internal cleanup, docs/process-only edits, or fixes that restore already-specified behavior.
-  - For contract-preserving work, record explicit issue-note evidence such as ` + "`Spec impact: none (contract-preserving refactor)`" + `, ` + "`Spec impact: none (tests/tooling only)`" + `, or ` + "`Spec impact: none (fix restores existing behavior)`" + `.
-  - If behavior work has no linked requirements after that check, do not treat missing links as permission to skip spec alignment.
-  - If implementation is not aligned with spec, update spec first, then implement.
-  - Ensure implementation issue(s) are linked to relevant spec requirement(s) before execution.
-  - Treat ` + "`az spec link`" + ` records as required traceability for behavior work.
-  - Before implementing behavior changes, inspect relevant ` + "`az spec read --issue <issue-id>`" + ` output and align the plan.
-  - If this project should not use spec workflows, disable them with ` + "`az config set spec.enabled false`" + ` (or set ` + "`spec.enabled`" + ` to false in ` + "`.azedarach/config.json`" + `).`
+		specGuardrails = `- Specs are daemon-backed ` + "`az spec req`" + `/` + "`az spec link`" + ` records, not repository prose.
+- Read linked requirements before behavior work. Search nearby requirements when links are missing; link an existing contract or create/update one before implementation.
+- Update the spec before code when behavior, persistence, CLI/API/TUI contracts, or invariants change.
+- Contract-preserving refactors, tests, tooling, docs, and repairs normally need explicit ` + "`Spec impact: none (...)`" + ` evidence rather than a new requirement.
+- Keep implementation issues linked to the requirements they implement or verify.`
 	}
 
 	var snapshot daemonclient.TaskSnapshot
@@ -8595,16 +8801,10 @@ func renderPrimeImplementationSection(implementations []string) string {
 	for _, impl := range implementations {
 		quoted = append(quoted, fmt.Sprintf("`%s`", impl))
 	}
-	exampleImpl := implementations[0]
 	return fmt.Sprintf("- Implementation selection (multi-implementation project):\n"+
 		"  - Available implementations: %s\n"+
-		"  - Use `az impl list` to refresh the available options.\n"+
-		"  - If you mean \"make this a child of the active issue\", run `az issue create \"Child task\"`; auto-parenting uses `AZEDARACH_ISSUE_ID`, not `--impl`.\n"+
-		"  - If you mean \"attach this to another parent/root\", run `az issue create --parent <issue-id> \"Child task\"`.\n"+
-		"  - `--impl` selects implementation/spec variant assignment only; it does not attach an issue to a parent/root graph.\n"+
-		"  - New issue writes for a specific implementation must choose one, for example `az issue create --impl %s \"Implementation-specific task\"`; this still relies on auto-parenting, `--parent`, or parent-child edges for graph membership.\n"+
-		"  - Repeat `--impl` only for intentionally shared implementation work. Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.\n",
-		strings.Join(quoted, ", "), exampleImpl)
+		"  - Choose with `--impl` on creation; repeat it only for intentionally shared work. Use `--update-impl` only when changing an existing issue's assignments.\n",
+		strings.Join(quoted, ", "))
 }
 
 func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Task, observations []domain.WorkerObservation, containmentRisks []daemonclient.TaskContainmentRisk, tmuxAvailable bool) string {
@@ -8615,7 +8815,7 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 	if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
 		parentID := strings.TrimSpace(task.ParentID.String())
 		parent = fmt.Sprintf("\nParent: %s", parentID)
-		mailbox = fmt.Sprintf("- Worker mailbox: receive orchestrator messages with `az mail list --parent %s --since 0 --json`; use `az mail watch --parent %s --since <seq> --jsonl` only when explicitly asked to monitor continuously. Send `worker-integration-ready` with a complete JSON `worker_evidence.v1` body containing `summary`, `commands_run`, `key_assertions`, `files_changed`, `review`, and `risks`. Omit `artifact_links` unless needed; when present use objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array. Preflight with `az mail validate-evidence --body '<json>'`; use `az mail validate-evidence --fix --body '<json>'` for repairable schema aliases or `az mail validate-evidence --template` for the canonical template.\n", parentID, parentID)
+		mailbox = fmt.Sprintf("- Worker coordination parent: `%s`. Read inbound events with `az mail list --parent %s --since 0 --json`; report validated `worker_evidence.v1` only when the parent watch is active.\n", parentID, parentID)
 	}
 	childWorkRecommendation := renderPrimeChildWorkRecommendation(task, tasks, tmuxAvailable)
 	observationSection := renderPrimeWorkerObservationSection(observations)
@@ -8642,10 +8842,9 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 
 func renderPrimeOrchestratorExitContract(rootIssueID string) string {
 	return fmt.Sprintf(`Orchestrator Exit Contract (root %s):
-- Keep running the status/start/watch/integrate/close loop until `+"`az orchestrate complete-check --root %s`"+` passes, then run final validation and close the root.
-- Treat `+"`worker-integration-ready`"+` and `+"`in_review`"+` as evidence to inspect and validate; if accepted, run `+"`az issue close --id <worker>`"+` instead of handing off to the user.
-- Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `+"`az issue close --id <child-issue>`"+`, and leave any child `+"`open`"+` or `+"`in_progress`"+` only with an explicit blocker, dependency, or remaining-scope rationale.
-- Send the final assistant response only after root completion, a named hard blocker, or an explicit user pause.
+- Integrate accepted children until `+"`az orchestrate complete-check --root %s`"+` passes, then run root validation.
+- Set the root `+"`in_review`"+` and report to the human without stopping its session or cleaning its worktree.
+- Close/integrate the root only after explicit human acceptance.
 `, rootIssueID, rootIssueID)
 }
 
@@ -8841,13 +9040,11 @@ func renderPrimeChildWorkRecommendation(task domain.Task, tasks []domain.Task, t
 	if task.Type != domain.TypeEpic && !issueHasChildren(task.ID, tasks) {
 		return ""
 	}
-	commands := "`az issue create \"Child task\"` for tracking-only child work"
-	sessionCommands := "`az session start <child-issue>`"
+	commands := "`az issue create \"Child task\"` for tracking-only work"
 	if tmuxAvailable {
-		commands += "; use `az issue split \"Child task\"` only when that child should launch immediately in its own session"
-		sessionCommands += " or `az issue split \"Child task\"`"
+		commands += " or `az issue split \"Child task\"` for an immediate isolated worker"
 	}
-	return fmt.Sprintf("- Parent-context recommendation: `%s` is an epic or already has child issues; keep implementation/subtask work in child issues with %s instead of accumulating detailed work on the parent. Do the child implementation from the child issue execution context: preferably a child session (%s) and at minimum the child worktree (`az worktree create <child-issue>`). Parent/tracker completion includes child lifecycle cleanup: before reporting the parent complete, inspect child statuses, close accepted completed children with `az issue close --id <child-issue>`, and leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale.\n", task.ID, commands, sessionCommands)
+	return fmt.Sprintf("- Parent context: `%s` is an epic or has children. Keep implementation-sized scope in child issues using %s; execute each child from its own worktree/session and account for every child before root handoff.\n", task.ID, commands)
 }
 
 func issueHasChildren(issueID naming.IssueID, tasks []domain.Task) bool {

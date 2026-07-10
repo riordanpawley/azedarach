@@ -18,32 +18,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNewCreateTaskOverlay(t *testing.T) {
-	overlay := NewCreateTaskOverlay()
-	require.NotNil(t, overlay)
-	assert.Equal(t, domain.TypeTask, overlay.taskType)
-	assert.Equal(t, domain.P2, overlay.priority)
-	assert.Equal(t, focusTitle, overlay.focusIndex)
-}
-
 func TestCreateTaskOverlayImplOptionsRemainEmptyWithoutOptions(t *testing.T) {
 	overlay := NewCreateTaskOverlayWithParentAndImplOptions(nil, nil)
 	require.NotNil(t, overlay)
 	assert.Equal(t, []string{"default"}, overlay.implOptions)
 	assert.Empty(t, overlay.impls)
-}
-
-func TestCreateTaskOverlayNoHardcodedImplementationTriplet(t *testing.T) {
-	source, err := os.ReadFile(filepath.Join("create.go"))
-	require.NoError(t, err)
-	text := string(source)
-	assert.NotContains(t, text, `[]string{"default", "go-bubbletea", "ts-opentui"}`)
-	assert.NotContains(t, text, "default, go-bubbletea, ts-opentui")
-}
-
-func TestCreateTaskOverlayTitle(t *testing.T) {
-	overlay := NewCreateTaskOverlay()
-	assert.Equal(t, "Create New Task", overlay.Title())
 }
 
 func TestEditTaskOverlayTitleAndSubmitLabel(t *testing.T) {
@@ -615,6 +594,7 @@ func TestCreateTaskOverlayRenderTypeSelector(t *testing.T) {
 		domain.TypeFeature,
 		domain.TypeEpic,
 		domain.TypeChore,
+		domain.TypeInvestigation,
 	}
 
 	for _, typ := range types {

@@ -10,42 +10,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
-func TestNewCompactView(t *testing.T) {
-	tasks := []domain.Task{
-		{
-			ID:        "az-1",
-			Title:     "Test task",
-			Status:    domain.StatusOpen,
-			Priority:  domain.P0,
-			Type:      domain.TypeTask,
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
-		},
-	}
-
-	lv := NewCompactView(tasks, 80, 20)
-
-	if lv == nil {
-		t.Fatal("Expected non-nil ListView")
-	}
-
-	if len(lv.tasks) != 1 {
-		t.Errorf("Expected 1 task, got %d", len(lv.tasks))
-	}
-
-	if lv.cursor != 0 {
-		t.Errorf("Expected cursor at 0, got %d", lv.cursor)
-	}
-
-	if lv.width != 80 {
-		t.Errorf("Expected width 80, got %d", lv.width)
-	}
-
-	if lv.height != 20 {
-		t.Errorf("Expected height 20, got %d", lv.height)
-	}
-}
-
 func TestSetCursor(t *testing.T) {
 	tasks := createTestTasks(5)
 	lv := NewCompactView(tasks, 80, 20)

@@ -29,9 +29,13 @@ func (d *Daemon) loadSelectedBoardViewPreference(projectID string) (string, bool
 	if err := json.Unmarshal(data, &prefs); err != nil {
 		return "", false
 	}
-	value := domain.NormalizeBoardViewID(prefs.SelectedViewByProject[d.canonicalProjectID(projectID)])
+	rawValue := prefs.SelectedViewByProject[d.canonicalProjectID(projectID)]
+	value := domain.NormalizeBoardViewID(rawValue)
 	if value == "" {
 		return "", false
+	}
+	if value != rawValue {
+		_ = d.saveSelectedBoardViewPreference(projectID, value)
 	}
 	return value, true
 }

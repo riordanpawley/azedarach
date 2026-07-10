@@ -57,6 +57,8 @@ func printHelpForPath(path []string) bool {
 		printSessionCommandUsage("kill", key == "session kill")
 	case "session status", "status":
 		printSessionCommandUsage("status", key == "session status")
+	case "session capture":
+		printSessionCommandUsage("capture", true)
 	case "session restart-all":
 		printSessionCommandUsage("restart-all", true)
 	case "session resolve-conflict":
@@ -265,9 +267,9 @@ func printHelpForPath(path []string) bool {
 	case "ai migrate":
 		cli.PrintAIMigrateUsage()
 	case "ai hook":
-		fmt.Println("Usage: az ai hook run --agent=<claude|codex> [--json] <event>")
+		fmt.Println("Usage: az ai hook run --agent=<claude|codex|opencode> [--json] <event>")
 	case "ai hook run":
-		fmt.Println("Usage: az ai hook run --agent=<claude|codex> [--json] <event>")
+		fmt.Println("Usage: az ai hook run --agent=<claude|codex|opencode> [--json] <event>")
 	case "tmux":
 		cli.PrintTmuxUsage()
 	case "tmux selector":
@@ -312,6 +314,8 @@ func printHelpForPath(path []string) bool {
 		printIssueUpdateUsage(os.Stdout)
 	case "issue close":
 		printIssueCloseUsage(os.Stdout)
+	case "issue cleanup":
+		fmt.Println("Usage: az issue cleanup [--project <project-id>] [--id <issue-id> ...|--ids a,b] [--status <status> ...] [--query text] [--updated-before date] [--limit N] [--action closed|cancelled] [--dry-run] [--per-issue-timeout duration] [--json]")
 	case "issue delete":
 		fmt.Println(issueDeleteUsage)
 	case "issue unarchive":
@@ -367,7 +371,7 @@ func printHelpForPath(path []string) bool {
 	case "observe":
 		fmt.Println(observeUsage)
 	case "orchestrate":
-		fmt.Println("Usage: az orchestrate <status|start|group|watch|observe|prompt|message|complete-check|integrate|close-session> [arguments]")
+		fmt.Println("Usage: az orchestrate <status|start|group|watch|observe|prompt|message|capture|complete-check|integrate|close-session> [arguments]")
 	case "orchestrate status":
 		fmt.Println(orchestrateStatusUsage)
 	case "orchestrate start":
@@ -382,6 +386,8 @@ func printHelpForPath(path []string) bool {
 		fmt.Println(orchestratePromptUsage)
 	case "orchestrate message":
 		fmt.Println(orchestrateMessageUsage)
+	case "orchestrate capture":
+		fmt.Println(orchestrateCaptureUsage)
 	case "orchestrate complete-check":
 		fmt.Println(orchestrateCompleteCheckUsage)
 	case "orchestrate integrate":
@@ -407,7 +413,7 @@ func printHelpForPath(path []string) bool {
 func printIssueHelp() {
 	helpText, err := clitext.Render("issue_help", nil)
 	if err != nil {
-		fmt.Println("Usage: az issue <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|delete|unarchive|image|document|dep|bulk-create|bulk-update|fanout> [arguments]")
+		fmt.Println("Usage: az issue <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|cleanup|delete|unarchive|image|document|dep|bulk-create|bulk-update|fanout> [arguments]")
 		return
 	}
 	fmt.Print(helpText)
@@ -446,7 +452,7 @@ const (
 	issueGetManyUsage             = "Usage: az issue get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]"
 	issueCheckUsage               = "Usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]"
 	issueDoctorUsage              = "Usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<issue-id>]"
-	issueUpdateUsage              = "Usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]"
+	issueUpdateUsage              = "Usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]"
 	issueCloseUsage               = "Usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]"
 	issueDeleteUsage              = "Usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [<issue-id>]"
 	issueUnarchiveUsage           = "Usage: az issue unarchive [--project <project-id>] [--id <issue-id>] [--json] [--with-parents] [--cascade-children] [<issue-id>]"
@@ -476,6 +482,7 @@ const (
 	orchestrateObserveUsage       = "Usage: az orchestrate observe --root <issue-id> [--project <project-id>] [--json]"
 	orchestratePromptUsage        = "Usage: az orchestrate prompt --issue <issue-id> [--root <issue-id>] [--coordination native|mailbox] [--project <project-id>] [--json]"
 	orchestrateMessageUsage       = "Usage: az orchestrate message --root <issue-id> --issue <issue-id> --body <text> [--type <event-type>] [--force-self-delivery] [--project <project-id>] [--json]"
+	orchestrateCaptureUsage       = "Usage: az orchestrate capture --issue <issue-id> [--project <project-id>] [--lines N] [--json]"
 	orchestrateCompleteCheckUsage = "Usage: az orchestrate complete-check --root <issue-id> [--project <project-id>] [--json]"
 	orchestrateIntegrateUsage     = "Usage: az orchestrate integrate --issue <issue-id> [--apply] [--project <project-id>] [--json]"
 	orchestrateCloseSessionUsage  = "Usage: az orchestrate close-session --issue <issue-id> [--project <project-id>] [--json]"

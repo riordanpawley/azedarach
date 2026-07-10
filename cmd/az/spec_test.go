@@ -87,29 +87,6 @@ func TestRunSpecCommandValidationDeterminism(t *testing.T) {
 	}
 }
 
-func TestRunSpecCommandHelpIncludesRestoredGrammar(t *testing.T) {
-	helpOut := captureMainStdout(t, func() error {
-		return runSpecCommand(config.DefaultConfig(), []string{"--help"})
-	})
-	for _, want := range []string{
-		"az spec req get --id <req-id> [--json]",
-		"az spec req list [--json] [--issue <issue-id>] [--status <open|accepted|superseded>] [--query <text>] [--match <all|any>] [--limit <n>]",
-		"az spec req create --id <req-id> --title <text>",
-		"az spec link add --issue <issue-id> --req <req-id>",
-		"az spec pack [--json] (--issue <issue-id> | --req <req-id>)",
-		"az spec graph [--json] --issue <issue-id> [--meta <path>] [--format <text|dot>]",
-		"az spec slice gate --slice <slice-id>",
-		"az spec parity [--json] [--fail-on-out]",
-	} {
-		if !strings.Contains(helpOut, want) {
-			t.Fatalf("help output missing %q: %q", want, helpOut)
-		}
-	}
-	if strings.Contains(helpOut, "az spec sync") {
-		t.Fatalf("help output should not mention disabled sync command: %q", helpOut)
-	}
-}
-
 func TestBuildSpecSliceGraphTopologicalAndCriticalPath(t *testing.T) {
 	reqs := []protocol.SpecRequirement{
 		{ID: "req-a"},

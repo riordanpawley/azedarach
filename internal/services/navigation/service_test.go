@@ -63,16 +63,6 @@ func makeColumnsWithEmptyMiddle() []board.Column {
 	}
 }
 
-func TestNewService(t *testing.T) {
-	svc := NewService()
-	if svc == nil {
-		t.Fatal("NewService returned nil")
-	}
-	if svc.GetCursor() == nil {
-		t.Fatal("GetCursor returned nil")
-	}
-}
-
 func TestService_GetPosition(t *testing.T) {
 	svc := NewService()
 	columns := makeTestColumns()

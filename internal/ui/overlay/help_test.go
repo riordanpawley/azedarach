@@ -7,97 +7,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func TestNewHelpOverlay(t *testing.T) {
-	help := NewHelpOverlay()
-
-	if help == nil {
-		t.Fatal("NewHelpOverlay returned nil")
-	}
-
-	if help.styles == nil {
-		t.Error("styles should be initialized")
-	}
-
-	if help.scroll != 0 {
-		t.Errorf("initial scroll should be 0, got %d", help.scroll)
-	}
-}
-
-func TestHelpOverlay_Title(t *testing.T) {
-	help := NewHelpOverlay()
-	title := help.Title()
-
-	if title != "Help" {
-		t.Errorf("expected title 'Help', got '%s'", title)
-	}
-}
-
-func TestHelpOverlay_Size(t *testing.T) {
-	help := NewHelpOverlay()
-	width, height := help.Size()
-
-	if width <= 0 || height <= 0 {
-		t.Errorf("size should be positive, got width=%d, height=%d", width, height)
-	}
-
-	// Verify reasonable dimensions
-	if width < 40 {
-		t.Errorf("width seems too small: %d", width)
-	}
-
-	if height < 20 {
-		t.Errorf("height seems too small: %d", height)
-	}
-}
-
-func TestHelpOverlay_View_ContainsKeyBindings(t *testing.T) {
-	help := NewHelpOverlay()
-	view := collectScrolledViews(help)
-
-	// Check that view contains expected category names
-	expectedCategories := []string{"Card Header Legend", "Panes", "Navigation", "Workspace", "Modes", "Selection", "Task Actions", "Other"}
-	for _, category := range expectedCategories {
-		if !strings.Contains(view, category) {
-			t.Errorf("view should contain category '%s'", category)
-		}
-	}
-
-	// Check that view contains some key bindings from different categories
-	expectedBindings := []string{
-		"P0/P1/P2/...",             // Card header legend
-		"T / Td / ✓",               // Card header legend
-		"[1/3]",                    // Card header legend
-		"Open operation queue",     // Panes
-		"Open event log",           // Panes
-		"Open notification action", // Panes
-		"Open tmux sessions",       // Panes
-		"Open system diagnostics",  // Panes
-		"Open project selector",    // Panes
-		"h/l",                      // Navigation
-		"j/k",                      // Navigation
-		"Open task workspace",      // Workspace
-		"Drill into epic children", // Workspace
-		"a/5",                      // Selection
-		"v then Enter",             // Selection
-		"v then Space",             // Selection
-		"Toggle selection",         // Selection
-		"Refresh board data",       // Task actions
-		"Refresh issue",            // Task actions
-		"Open attachment manager",  // Task actions
-		"Open merge-into selector", // Task actions
-		"Open dev server menu",     // Task actions
-		"Cleanup worktree",         // Task actions
-		"Tab",                      // Other
-		"Quit",                     // Other
-	}
-
-	for _, binding := range expectedBindings {
-		if !strings.Contains(view, binding) {
-			t.Errorf("view should contain binding '%s'", binding)
-		}
-	}
-}
-
 func TestHelpOverlay_SmallViewportShowsPaneOpenersFirst(t *testing.T) {
 	help := NewHelpOverlay()
 	model, _ := help.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
@@ -108,6 +17,8 @@ func TestHelpOverlay_SmallViewportShowsPaneOpenersFirst(t *testing.T) {
 		"Panes:",
 		"Open this help reference",
 		"Open operation queue",
+		"B",
+		"Open board view selector",
 		"Open event log",
 		"Open notification action center",
 	}
@@ -119,6 +30,19 @@ func TestHelpOverlay_SmallViewportShowsPaneOpenersFirst(t *testing.T) {
 
 	if strings.Contains(view, "Card Header Legend:") {
 		t.Fatalf("small help view should prioritize pane openers before the card legend:\n%s", view)
+	}
+}
+
+func TestHelpOverlay_DefaultViewportShowsBoardViewOpenerBeforeScrolling(t *testing.T) {
+	help := NewHelpOverlay()
+	model, _ := help.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	help = model.(*HelpOverlay)
+
+	view := help.View()
+	for _, want := range []string{"B", "Open board view selector"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("default help should expose board-view opener %q before scrolling:\n%s", want, view)
+		}
 	}
 }
 

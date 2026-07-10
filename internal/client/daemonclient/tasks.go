@@ -28,6 +28,7 @@ const (
 	CommandTaskEventAppend      = "task.event.append"
 	CommandTaskCreate           = "task.create"
 	CommandTaskClose            = "task.close"
+	CommandTaskBulkCleanup      = "task.bulk_cleanup"
 	CommandTaskGraphReadiness   = "task.graph_readiness"
 	CommandTaskCompleteCheck    = "task.complete_check"
 	CommandTaskIntegrationReady = "task.integration_readiness"
@@ -128,6 +129,34 @@ type taskCloseRequest struct {
 	CloseCleanChildren   bool           `json:"close_clean_children,omitempty"`
 	AllowActiveSession   bool           `json:"allow_active_session,omitempty"`
 	CloseOutcome         string         `json:"closed_outcome,omitempty"`
+}
+
+// TaskBulkCleanupRequest selects and closes multiple issues in one daemon operation.
+type TaskBulkCleanupRequest struct {
+	TaskIDs         []string      `json:"task_ids,omitempty"`
+	Statuses        []string      `json:"statuses,omitempty"`
+	Query           string        `json:"query,omitempty"`
+	UpdatedBefore   *time.Time    `json:"updated_before,omitempty"`
+	Limit           int           `json:"limit,omitempty"`
+	DryRun          bool          `json:"dry_run,omitempty"`
+	CloseOutcome    string        `json:"closed_outcome,omitempty"`
+	PerIssueTimeout time.Duration `json:"per_issue_timeout,omitempty"`
+}
+
+type TaskBulkCleanupItem struct {
+	TaskID  string           `json:"task_id"`
+	Action  string           `json:"action"`
+	Status  string           `json:"status,omitempty"`
+	Success bool             `json:"success"`
+	Skipped bool             `json:"skipped,omitempty"`
+	Error   string           `json:"error,omitempty"`
+	Result  *TaskCloseResult `json:"result,omitempty"`
+}
+
+type TaskBulkCleanupResult struct {
+	DryRun bool                  `json:"dry_run"`
+	Action string                `json:"action"`
+	Items  []TaskBulkCleanupItem `json:"items"`
 }
 
 type taskDeleteRequest struct {
@@ -1039,6 +1068,14 @@ func (c *Client) CloseTask(ctx context.Context, taskID string, opts TaskStatusOp
 		CloseOutcome:         string(opts.CloseOutcome),
 	}, &out); err != nil {
 		return TaskCloseResult{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) BulkCleanupTasks(ctx context.Context, req TaskBulkCleanupRequest) (TaskBulkCleanupResult, error) {
+	var out TaskBulkCleanupResult
+	if err := c.commandJSON(ctx, CommandTaskBulkCleanup, req, &out); err != nil {
+		return TaskBulkCleanupResult{}, err
 	}
 	return out, nil
 }

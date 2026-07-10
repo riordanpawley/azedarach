@@ -218,6 +218,10 @@ func (m *FilterMenu) handleTypeMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.filter.ToggleType(domain.TypeChore)
 		m.mode = filterModeNormal
 		return m, nil
+	case "I":
+		m.filter.ToggleType(domain.TypeInvestigation)
+		m.mode = filterModeNormal
+		return m, nil
 	}
 
 	return m, nil
@@ -314,6 +318,7 @@ func (m *FilterMenu) renderContent() string {
 		{key: "F", label: "Feature", active: m.filter.Type[domain.TypeFeature]},
 		{key: "E", label: "Epic", active: m.filter.Type[domain.TypeEpic]},
 		{key: "C", label: "Chore", active: m.filter.Type[domain.TypeChore]},
+		{key: "I", label: "Investigation", active: m.filter.Type[domain.TypeInvestigation]},
 	}, m.mode == filterModeType))
 
 	// Session filter line

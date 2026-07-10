@@ -12,6 +12,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -23,6 +24,7 @@ func (d *Daemon) handleRuntimeSignalIngest(ctx context.Context, req protocol.Req
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
 	cmd = normalizeRuntimeSignalCommand(cmd)
+	cmd = applyAgentTerminalFailureClassification(cmd)
 	if cmd.Source == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required field: source"), nil
 	}
@@ -71,6 +73,26 @@ func (d *Daemon) handleRuntimeSignalIngest(ctx context.Context, req protocol.Req
 	resp.Body = body
 	resp.Revision = d.currentRevision(projectID)
 	return resp, nil
+}
+
+func applyAgentTerminalFailureClassification(cmd protocol.RuntimeSignalIngestCommandBody) protocol.RuntimeSignalIngestCommandBody {
+	if cmd.Source != protocol.RuntimeSignalSourceAgentHook || cmd.Kind != protocol.RuntimeSignalKindAgentActivityChanged {
+		return cmd
+	}
+	reason, ok := domain.ClassifyAgentTerminalFailure(cmd.Event, cmd.Payload)
+	if !ok {
+		return cmd
+	}
+	blocking := true
+	agent := strings.TrimSpace(cmd.Agent)
+	if agent == "" {
+		agent = "agent"
+	}
+	cmd.Activity = string(domain.SessionError)
+	cmd.Level = "error"
+	cmd.Blocking = &blocking
+	cmd.Message = fmt.Sprintf("%s hook: %s (terminal agent failure: %s)", agent, cmd.Event, reason)
+	return cmd
 }
 
 func normalizeRuntimeSignalCommand(cmd protocol.RuntimeSignalIngestCommandBody) protocol.RuntimeSignalIngestCommandBody {
@@ -376,11 +398,18 @@ func runtimeSignalAgentLifecycle(cmd protocol.RuntimeSignalIngestCommandBody) (s
 		return daemonhandlers.CommandSessionPause, "idle", true
 	case "waiting":
 		return daemonhandlers.CommandSessionPause, "waiting", true
+	case "error":
+		return daemonhandlers.CommandSessionPause, "error", true
 	}
 	switch strings.TrimSpace(cmd.Event) {
 	case "idle_prompt", "permission_request":
 		return daemonhandlers.CommandSessionPause, "waiting", true
-	case "stop", "subagent_stop", "session_end":
+	case "session_end":
+		if cmd.ExitStatus != nil && *cmd.ExitStatus != 0 {
+			return daemonhandlers.CommandSessionPause, "error", true
+		}
+		return daemonhandlers.CommandSessionPause, "idle", true
+	case "stop", "subagent_stop":
 		return daemonhandlers.CommandSessionPause, "idle", true
 	case "session_start", "subagent_start", "user_prompt_submit", "pre_tool_use":
 		return daemonhandlers.CommandSessionResume, "busy", true

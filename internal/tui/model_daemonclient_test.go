@@ -1315,7 +1315,7 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 	})
 
 	t.Run("load carries configured board columns", func(t *testing.T) {
-		view := domain.ActivityBoardView()
+		view := domain.OrchestrationBoardView()
 		task := domain.Task{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}
 		columns := []domain.BoardViewColumnSnapshot{
 			{

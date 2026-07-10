@@ -46,7 +46,7 @@ Output a JSON object matching this schema:
       "id": "task-1",
       "title": "Concise task title",
       "description": "What this task accomplishes",
-      "type": "task|bug|feature|chore",
+      "type": "task|bug|feature|chore|investigation",
       "priority": 1-4,
       "estimate": hours (optional),
       "dependsOn": ["task-id", ...],

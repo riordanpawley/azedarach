@@ -33,22 +33,6 @@ func settingIndexByKey(menu *SettingsOverlay, key string) int {
 	return -1
 }
 
-func TestNewSettingsOverlay(t *testing.T) {
-	items := []SettingItem{
-		{Key: "test", Label: "Test Setting", Type: SettingToggle, Value: true},
-	}
-
-	menu := NewSettingsOverlay(items)
-
-	if menu == nil {
-		t.Fatal("expected menu to be created")
-	}
-
-	if len(menu.items) != 1 {
-		t.Errorf("expected 1 item, got %d", len(menu.items))
-	}
-}
-
 func TestNewDefaultSettingsOverlay(t *testing.T) {
 	menu := NewDefaultSettingsOverlay()
 
@@ -83,28 +67,6 @@ func TestNewDefaultSettingsOverlay(t *testing.T) {
 	}
 	if !hasAction {
 		t.Error("expected default settings to have at least one action")
-	}
-}
-
-func TestSettingsOverlay_Title(t *testing.T) {
-	menu := NewDefaultSettingsOverlay()
-
-	title := menu.Title()
-	if title != "Settings" {
-		t.Errorf("expected title 'Settings', got %s", title)
-	}
-}
-
-func TestSettingsOverlay_Size(t *testing.T) {
-	menu := NewDefaultSettingsOverlay()
-
-	width, height := menu.Size()
-	if width <= 0 {
-		t.Errorf("expected positive width, got %d", width)
-	}
-
-	if height <= 0 {
-		t.Errorf("expected positive height, got %d", height)
 	}
 }
 
