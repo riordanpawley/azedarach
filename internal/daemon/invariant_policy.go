@@ -32,6 +32,7 @@ const (
 	daemonInvariantTaskMergeBaseTarget daemonInvariantID = "task.merge_base_target"
 	daemonInvariantTaskFollowOnMerge   daemonInvariantID = "task.follow_on_merge_candidates"
 	daemonInvariantWorkerObservation   daemonInvariantID = "worker.observation_projection"
+	daemonInvariantInteractionWaiting  daemonInvariantID = "interaction.waiting_human"
 
 	daemonInvariantRuntimeKnownProjectIDs  daemonInvariantID = "runtime.known_project_ids"
 	daemonInvariantIssueResourceLifecycle  daemonInvariantID = "issue_resources.lifecycle"
@@ -66,6 +67,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantOrchestrationSingleton:  daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationCompletion: daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationCandidates: daemonInvariantSourceProjection,
+	daemonInvariantInteractionWaiting:     daemonInvariantSourceProjection,
 }
 
 func sourceForInvariant(id daemonInvariantID) daemonInvariantSource {
