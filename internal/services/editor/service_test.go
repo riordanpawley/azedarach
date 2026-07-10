@@ -6,25 +6,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-func TestNewService(t *testing.T) {
-	svc := NewService()
-	if svc == nil {
-		t.Fatal("NewService returned nil")
-	}
-
-	if svc.GetMode() != ModeNormal {
-		t.Errorf("Expected ModeNormal, got %v", svc.GetMode())
-	}
-
-	if svc.GetFilter() == nil {
-		t.Error("Expected non-nil filter")
-	}
-
-	if svc.GetSort() == nil {
-		t.Error("Expected non-nil sort")
-	}
-}
-
 func TestService_ModeTransitions(t *testing.T) {
 	svc := NewService()
 

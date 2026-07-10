@@ -14,9 +14,13 @@ const BoardViewDefinitionSchemaVersion = 1
 type BoardViewID string
 
 const (
+	BoardViewDefaultID       BoardViewID = "default"
+	BoardViewOrchestrationID BoardViewID = "orchestration"
+	BoardViewCloseoutID      BoardViewID = "closeout"
+	// Legacy IDs remain exported so callers can recognize pre-catalog selections.
 	BoardViewCurrentID  BoardViewID = "current"
 	BoardViewActivityID BoardViewID = "activity"
-	DefaultBoardViewID              = string(BoardViewCurrentID)
+	DefaultBoardViewID              = string(BoardViewDefaultID)
 )
 
 type BoardColumnID string
@@ -145,10 +149,11 @@ func EncodeBoardViewDefinitionJSON(view BoardView) ([]byte, error) {
 
 func BuiltInBoardViewSet() BoardViewSet {
 	return BoardViewSet{
-		DefaultViewID: BoardViewCurrentID,
+		DefaultViewID: BoardViewDefaultID,
 		Views: []BoardView{
-			CurrentBoardView(),
-			ActivityBoardView(),
+			DefaultBoardView(),
+			OrchestrationBoardView(),
+			CloseoutBoardView(),
 		},
 	}
 }
@@ -159,69 +164,79 @@ func BuiltInBoardViews() []BoardView {
 }
 
 func DefaultBoardView() BoardView {
-	return CurrentBoardView()
+	return BoardView{
+		ID:      BoardViewDefaultID,
+		Title:   "Default",
+		Columns: defaultBoardViewColumns(),
+	}
 }
 
+// CurrentBoardView is the source-compatible name for the canonical Default view.
 func CurrentBoardView() BoardView {
-	return BoardView{
-		ID:    BoardViewCurrentID,
-		Title: "Current",
-		Columns: []BoardColumn{
-			{
-				ID:    BoardColumnBacklog,
-				Title: "Backlog",
-				Predicates: []BoardColumnPredicate{{
-					Kind:      BoardPredicateLifecycle,
-					Lifecycle: []IssueWorkflow{IssueWorkflowBacklog},
-				}},
-			},
-			{
-				ID:    BoardColumnOpen,
-				Title: "Open",
-				Predicates: []BoardColumnPredicate{{
-					Kind:      BoardPredicateLifecycle,
-					Lifecycle: []IssueWorkflow{IssueWorkflowOpen},
-				}},
-			},
-			{
-				ID:    BoardColumnActive,
-				Title: "In Progress",
-				Predicates: []BoardColumnPredicate{{
-					Kind:          BoardPredicateDisplayPhase,
-					DisplayPhases: []IssueDisplayPhase{IssueDisplayActive},
-				}},
-			},
-			{
-				ID:    BoardColumnReviewReady,
-				Title: "In Review",
-				Predicates: []BoardColumnPredicate{{
-					Kind: BoardPredicateReviewReady,
-				}},
-			},
-			{
-				ID:    BoardColumnDone,
-				Title: "Done",
-				Predicates: []BoardColumnPredicate{{
-					Kind:           BoardPredicateClosedOutcome,
-					ClosedOutcomes: []IssueCloseOutcome{IssueCloseCompleted},
-				}},
-			},
-			{
-				ID:    BoardColumnCancelled,
-				Title: "Cancelled",
-				Predicates: []BoardColumnPredicate{{
-					Kind:           BoardPredicateClosedOutcome,
-					ClosedOutcomes: []IssueCloseOutcome{IssueCloseCancelled},
-				}},
-			},
+	return DefaultBoardView()
+}
+
+func defaultBoardViewColumns() []BoardColumn {
+	return []BoardColumn{
+		{
+			ID:    BoardColumnBacklog,
+			Title: "Backlog",
+			Predicates: []BoardColumnPredicate{{
+				Kind:      BoardPredicateLifecycle,
+				Lifecycle: []IssueWorkflow{IssueWorkflowBacklog},
+			}},
+		},
+		{
+			ID:    BoardColumnOpen,
+			Title: "Open",
+			Predicates: []BoardColumnPredicate{{
+				Kind:      BoardPredicateLifecycle,
+				Lifecycle: []IssueWorkflow{IssueWorkflowOpen},
+			}},
+		},
+		{
+			ID:    BoardColumnActive,
+			Title: "In Progress",
+			Predicates: []BoardColumnPredicate{{
+				Kind:          BoardPredicateDisplayPhase,
+				DisplayPhases: []IssueDisplayPhase{IssueDisplayActive},
+			}},
+		},
+		{
+			ID:    BoardColumnReviewReady,
+			Title: "In Review",
+			Predicates: []BoardColumnPredicate{{
+				Kind: BoardPredicateReviewReady,
+			}},
+		},
+		{
+			ID:    BoardColumnDone,
+			Title: "Done",
+			Predicates: []BoardColumnPredicate{{
+				Kind:           BoardPredicateClosedOutcome,
+				ClosedOutcomes: []IssueCloseOutcome{IssueCloseCompleted},
+			}},
+		},
+		{
+			ID:    BoardColumnCancelled,
+			Title: "Cancelled",
+			Predicates: []BoardColumnPredicate{{
+				Kind:           BoardPredicateClosedOutcome,
+				ClosedOutcomes: []IssueCloseOutcome{IssueCloseCancelled},
+			}},
 		},
 	}
 }
 
+// ActivityBoardView is the source-compatible name for Orchestration.
 func ActivityBoardView() BoardView {
-	view := CurrentBoardView()
-	view.ID = BoardViewActivityID
-	view.Title = "Activity"
+	return OrchestrationBoardView()
+}
+
+func OrchestrationBoardView() BoardView {
+	view := DefaultBoardView()
+	view.ID = BoardViewOrchestrationID
+	view.Title = "Orchestration"
 	view.Columns = []BoardColumn{
 		view.Columns[0],
 		view.Columns[1],
@@ -245,6 +260,19 @@ func ActivityBoardView() BoardView {
 		view.Columns[5],
 	}
 	return view
+}
+
+func CloseoutBoardView() BoardView {
+	view := DefaultBoardView()
+	return BoardView{
+		ID:    BoardViewCloseoutID,
+		Title: "Closeout",
+		Columns: []BoardColumn{
+			view.Columns[3],
+			view.Columns[4],
+			view.Columns[5],
+		},
+	}
 }
 
 func GroupTasksByBoardView(view BoardView, tasks []Task) ([]BoardViewColumnSnapshot, error) {
@@ -622,8 +650,11 @@ func validateBoardColumnPredicateCombination(predicates []BoardColumnPredicate) 
 func NormalizeBoardViewID(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	value = strings.ReplaceAll(value, " ", "-")
-	if value == "default" {
-		return string(BoardViewCurrentID)
+	switch value {
+	case string(BoardViewCurrentID):
+		return string(BoardViewDefaultID)
+	case string(BoardViewActivityID):
+		return string(BoardViewOrchestrationID)
 	}
 	return value
 }

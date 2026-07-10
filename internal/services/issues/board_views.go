@@ -171,14 +171,23 @@ func (c *Client) seedBuiltInBoardViews(ctx context.Context, db *sql.DB, projectI
 		return err
 	}
 	projectID = normalizeBoardViewProjectID(projectID)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin built-in board view seed: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, view := range domain.BuiltInBoardViews() {
 		view = view.Normalized()
+		if err := preserveBoardViewIDConflict(ctx, tx, projectID, view.ID, now); err != nil {
+			return err
+		}
 		definitionJSON, err := domain.EncodeBoardViewDefinitionJSON(view)
 		if err != nil {
 			return err
 		}
-		if _, err := db.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO board_views (project_id, id, name, definition_json, built_in, created_at, updated_at, deleted_at)
 			VALUES (?, ?, ?, ?, 1, ?, ?, NULL)
 			ON CONFLICT(project_id, id) DO UPDATE SET
@@ -191,6 +200,62 @@ func (c *Client) seedBuiltInBoardViews(ctx context.Context, db *sql.DB, projectI
 		`, projectID, view.ID, view.Title, string(definitionJSON), now, now); err != nil {
 			return fmt.Errorf("seed board view %q: %w", view.ID, err)
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM board_views
+		WHERE project_id = ? AND built_in = 1 AND id IN (?, ?)
+	`, projectID, domain.BoardViewCurrentID, domain.BoardViewActivityID); err != nil {
+		return fmt.Errorf("remove legacy built-in board views: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit built-in board view seed: %w", err)
+	}
+	return nil
+}
+
+func preserveBoardViewIDConflict(ctx context.Context, tx *sql.Tx, projectID string, builtInID domain.BoardViewID, now string) error {
+	var (
+		definitionJSON string
+		builtIn        int
+	)
+	err := tx.QueryRowContext(ctx, `
+		SELECT definition_json, built_in
+		FROM board_views
+		WHERE project_id = ? AND id = ?
+	`, projectID, builtInID).Scan(&definitionJSON, &builtIn)
+	if errors.Is(err, sql.ErrNoRows) || builtIn != 0 {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect board view id conflict %q: %w", builtInID, err)
+	}
+	view, err := domain.DecodeBoardViewDefinitionJSON([]byte(definitionJSON))
+	if err != nil {
+		return fmt.Errorf("preserve custom board view conflicting with built-in %q: %w", builtInID, err)
+	}
+	base := string(builtInID) + "-custom"
+	candidate := base
+	for suffix := 2; ; suffix++ {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM board_views WHERE project_id = ? AND id = ?)`, projectID, candidate).Scan(&exists); err != nil {
+			return fmt.Errorf("find conflict-free board view id for %q: %w", builtInID, err)
+		}
+		if !exists {
+			break
+		}
+		candidate = fmt.Sprintf("%s-%d", base, suffix)
+	}
+	view.ID = domain.BoardViewID(candidate)
+	encoded, err := domain.EncodeBoardViewDefinitionJSON(view)
+	if err != nil {
+		return fmt.Errorf("encode preserved custom board view %q: %w", builtInID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE board_views
+		SET id = ?, definition_json = ?, updated_at = ?
+		WHERE project_id = ? AND id = ? AND built_in = 0
+	`, candidate, string(encoded), now, projectID, builtInID); err != nil {
+		return fmt.Errorf("preserve custom board view %q as %q: %w", builtInID, candidate, err)
 	}
 	return nil
 }

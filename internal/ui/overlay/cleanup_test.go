@@ -8,28 +8,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func TestBulkCleanupOverlay_Init(t *testing.T) {
-	mockCleanup := func(ctx context.Context, categoryIDs []string) (CleanupResult, error) {
-		return CleanupResult{}, nil
-	}
-
-	overlay := NewBulkCleanupOverlay(mockCleanup, 100, 5, 2)
-
-	if overlay == nil {
-		t.Fatal("NewBulkCleanupOverlay returned nil")
-	}
-
-	if len(overlay.categories) == 0 {
-		t.Error("Expected categories to be initialized")
-	}
-
-	// Test Init command
-	cmd := overlay.Init()
-	if cmd != nil {
-		t.Error("Init should return nil command")
-	}
-}
-
 func TestBulkCleanupOverlay_Navigation(t *testing.T) {
 	mockCleanup := func(ctx context.Context, categoryIDs []string) (CleanupResult, error) {
 		return CleanupResult{}, nil

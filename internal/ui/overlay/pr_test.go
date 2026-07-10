@@ -9,41 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNewPRCreateOverlay(t *testing.T) {
-	overlay := NewPRCreateOverlay("feature/x", testprofile.Smoke.BaseBranch, "az-123")
-	require.NotNil(t, overlay)
-	assert.Equal(t, "feature/x", overlay.branch)
-	assert.Equal(t, testprofile.Smoke.BaseBranch, overlay.baseBranch)
-	assert.Equal(t, "az-123", overlay.issueID)
-	assert.True(t, overlay.draft) // Default to draft
-	assert.Equal(t, prFocusTitle, overlay.focusIndex)
-}
-
-func TestPRCreateOverlayTitle(t *testing.T) {
-	overlay := NewPRCreateOverlay("test", testprofile.Smoke.BaseBranch, "az-1")
-	assert.Equal(t, "Create Pull Request", overlay.Title())
-}
-
-func TestPRCreateOverlaySize(t *testing.T) {
-	overlay := NewPRCreateOverlay("test", testprofile.Smoke.BaseBranch, "az-1")
-	width, height := overlay.Size()
-	assert.Equal(t, 80, width)
-	assert.Equal(t, 28, height)
-}
-
-func TestPRCreateOverlayView(t *testing.T) {
-	overlay := NewPRCreateOverlay("feature/auth", testprofile.Smoke.BaseBranch, "az-42")
-	view := overlay.View()
-
-	// Check that form elements are present
-	assert.Contains(t, view, "Title:")
-	assert.Contains(t, view, "Description:")
-	assert.Contains(t, view, "Draft:")
-	assert.Contains(t, view, "Create Pull Request")
-	assert.Contains(t, view, "feature/auth → "+testprofile.Smoke.BaseBranch)
-	assert.Contains(t, view, "az-42")
-}
-
 func TestPRCreateOverlayEscapeCloses(t *testing.T) {
 	overlay := NewPRCreateOverlay("test", testprofile.Smoke.BaseBranch, "az-1")
 

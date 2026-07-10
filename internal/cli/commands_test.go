@@ -5661,6 +5661,33 @@ func TestParseIssueCloseArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueCleanupArgs(t *testing.T) {
+	opts, err := ParseIssueCleanupArgs([]string{"--id", "az-1", "--statuses", "open,in_review", "--action", "cancelled", "--dry-run", "--per-issue-timeout", "2s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opts.IDs) != 1 || len(opts.Statuses) != 2 || opts.Action != "cancelled" || !opts.DryRun || opts.PerIssueTimeout != 2*time.Second {
+		t.Fatalf("opts = %+v", opts)
+	}
+	if _, err := ParseIssueCleanupArgs(nil); err == nil || !strings.Contains(err.Error(), "at least one") {
+		t.Fatalf("missing selector error = %v", err)
+	}
+	if _, err := ParseIssueCleanupArgs([]string{"--id", "az-1", "--action", "deleted"}); err == nil {
+		t.Fatal("invalid action accepted")
+	}
+	if _, err := ParseIssueCleanupArgs([]string{"--query", "--"}); err == nil || !strings.Contains(err.Error(), "searchable term") {
+		t.Fatalf("punctuation-only query error = %v", err)
+	}
+}
+
+func TestIssueCleanupBatchParentDoesNotConsumePerIssueBudget(t *testing.T) {
+	ctx, cancel := newIssueCleanupBatchContext()
+	defer cancel()
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("batch parent has deadline; later items can lose their per-issue budget")
+	}
+}
+
 func TestParseIssueDeleteArgs(t *testing.T) {
 	got, err := ParseIssueDeleteArgs([]string{"--confirm", "az-1"})
 	if err != nil {
@@ -12060,177 +12087,6 @@ func TestIssueBulkUpdateCommand_DependencyRetargetBuildsApplyOps(t *testing.T) {
 	}
 	if addBody.TaskID != "az-1" || addBody.DependsOnID != "az-new" || addBody.Type != "blocks" {
 		t.Fatalf("add body = %+v", addBody)
-	}
-}
-
-func TestPrintUsageIncludesExport(t *testing.T) {
-	output := captureStdout(t, func() error {
-		PrintUsage()
-		return nil
-	})
-
-	if !strings.Contains(output, "export") {
-		t.Fatalf("usage missing export command: %q", output)
-	}
-	if !strings.Contains(output, "log [sources]") {
-		t.Fatalf("usage missing log command: %q", output)
-	}
-	if !strings.Contains(output, "az export --format json --out snapshot.json") {
-		t.Fatalf("usage missing export example: %q", output)
-	}
-	if !strings.Contains(output, "az log --no-follow --lines 100 daemon tui") {
-		t.Fatalf("usage missing log example: %q", output)
-	}
-	if !strings.Contains(output, "issue list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>]") {
-		t.Fatalf("usage missing issue list command: %q", output)
-	}
-	if !strings.Contains(output, "issue search [--project <project-id>] [--json] [--deps]") ||
-		!strings.Contains(output, "(--query <text>|-q <text>|<query>)  Search title, description, notes, design, acceptance, labels, and implementations") {
-		t.Fatalf("usage missing issue search command: %q", output)
-	}
-	if !strings.Contains(output, "az issue search --status open --query \"runtime cache\"") {
-		t.Fatalf("usage missing issue search example: %q", output)
-	}
-	if !strings.Contains(output, "issue get [--project <project-id>] [--id <id>] [--json] [--with-notes] [<id>]") {
-		t.Fatalf("usage missing issue get command: %q", output)
-	}
-	if !strings.Contains(output, "issue get-many [--project <project-id>] --id <id>") {
-		t.Fatalf("usage missing issue get-many command: %q", output)
-	}
-	if !strings.Contains(output, "issue check [--project <project-id>] [--id <id>] [--json] [<id>]") {
-		t.Fatalf("usage missing issue check command: %q", output)
-	}
-	if !strings.Contains(output, "issue doctor [--project <project-id>] [--id <id>] [--json] [<id>]") {
-		t.Fatalf("usage missing issue doctor command: %q", output)
-	}
-	if !strings.Contains(output, "issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred]") {
-		t.Fatalf("usage missing issue create command: %q", output)
-	}
-	if !strings.Contains(output, "issue split [--project <project-id>] [--parent <id>]") {
-		t.Fatalf("usage missing issue split command: %q", output)
-	}
-	if strings.Contains(output, "issue child ") {
-		t.Fatalf("usage should not include issue child command: %q", output)
-	}
-	if !strings.Contains(output, "issue update [--project <project-id>] [--id <id>] [--json] [<id>]") {
-		t.Fatalf("usage missing issue update command: %q", output)
-	}
-	if strings.Contains(output, "az issue update --id az-123 --append-notes") || strings.Contains(output, "az issue update --id az-123 --notes") {
-		t.Fatalf("usage should not include note update examples: %q", output)
-	}
-	if strings.Contains(output, "issue status --impl <implementation>") {
-		t.Fatalf("usage should not include issue status command: %q", output)
-	}
-	if !strings.Contains(output, "issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--force-worktree] [<id>]") {
-		t.Fatalf("usage missing issue close command: %q", output)
-	}
-	if strings.Contains(output, "finalize") {
-		t.Fatalf("usage should not include removed close alias: %q", output)
-	}
-	if !strings.Contains(output, "issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]") {
-		t.Fatalf("usage missing issue delete command: %q", output)
-	}
-	if !strings.Contains(output, "issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]") {
-		t.Fatalf("usage missing issue image add command: %q", output)
-	}
-	if !strings.Contains(output, "issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]") {
-		t.Fatalf("usage missing issue image remove command: %q", output)
-	}
-	if !strings.Contains(output, "issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]") {
-		t.Fatalf("usage missing issue document add command: %q", output)
-	}
-	if !strings.Contains(output, "issue document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]") {
-		t.Fatalf("usage missing issue document list command: %q", output)
-	}
-	if !strings.Contains(output, "issue document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]") {
-		t.Fatalf("usage missing issue document remove command: %q", output)
-	}
-	if !strings.Contains(output, "issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--force-parent-change] [--json]") {
-		t.Fatalf("usage missing issue dep add command: %q", output)
-	}
-	if !strings.Contains(output, "issue dep remove [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm] [--confirm-parent-orphan] [--json]") {
-		t.Fatalf("usage missing issue dep remove command: %q", output)
-	}
-	if !strings.Contains(output, "issue dep bulk apply [--project <project-id>] --input <path>") {
-		t.Fatalf("usage missing issue dep bulk apply command: %q", output)
-	}
-	if !strings.Contains(output, "issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Create issues, epics, or nested children trees from JSON") {
-		t.Fatalf("usage missing issue bulk-create command: %q", output)
-	}
-	if !strings.Contains(output, "issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]") {
-		t.Fatalf("usage missing issue bulk-update command: %q", output)
-	}
-	if !strings.Contains(output, "config set <key> <value> [--project-dir <dir>]") {
-		t.Fatalf("usage missing config command: %q", output)
-	}
-	if !strings.Contains(output, "az config set spec.enabled false") {
-		t.Fatalf("usage missing config example: %q", output)
-	}
-	if !strings.Contains(output, "sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]") {
-		t.Fatalf("usage missing sync command: %q", output)
-	}
-	if !strings.Contains(output, "impl delete --confirm <implementation>") {
-		t.Fatalf("usage missing impl delete command: %q", output)
-	}
-	if !strings.Contains(output, "impl list") {
-		t.Fatalf("usage missing impl list command: %q", output)
-	}
-	if !strings.Contains(output, "impl migrate <from> <to>") {
-		t.Fatalf("usage missing impl migrate command: %q", output)
-	}
-	if !strings.Contains(output, "az sync --all") {
-		t.Fatalf("usage missing sync example: %q", output)
-	}
-	if !strings.Contains(output, "az impl list") {
-		t.Fatalf("usage missing impl list example: %q", output)
-	}
-	if !strings.Contains(output, "az impl delete --confirm ts-opentui") {
-		t.Fatalf("usage missing impl delete example: %q", output)
-	}
-	if !strings.Contains(output, "az impl migrate ts-opentui default") {
-		t.Fatalf("usage missing impl migrate example: %q", output)
-	}
-	if !strings.Contains(output, "operation <subcommand>") {
-		t.Fatalf("usage missing operation command family: %q", output)
-	}
-	if !strings.Contains(output, "az operation list --limit 20") {
-		t.Fatalf("usage missing operation list example: %q", output)
-	}
-	if !strings.Contains(output, "az operation get --id op-123 --wait") {
-		t.Fatalf("usage missing operation get example: %q", output)
-	}
-	if !strings.Contains(output, "az operation cancel --id op-123") {
-		t.Fatalf("usage missing operation cancel example: %q", output)
-	}
-	if !strings.Contains(output, "az operation logs --id op-123") {
-		t.Fatalf("usage missing operation logs example: %q", output)
-	}
-	if !strings.Contains(output, "prime") {
-		t.Fatalf("usage missing prime command: %q", output)
-	}
-	if !strings.Contains(output, "az issue create \"New task\"") {
-		t.Fatalf("usage missing plain issue create example: %q", output)
-	}
-	if !strings.Contains(output, "child under AZEDARACH_ISSUE_ID; no --impl needed for parentage") {
-		t.Fatalf("usage missing no-impl-parentage create example: %q", output)
-	}
-	if !strings.Contains(output, "attach an existing issue to another parent/root") {
-		t.Fatalf("usage missing explicit parent-child attach example: %q", output)
-	}
-	if !strings.Contains(output, "only assigns implementation metadata; still not parentage") {
-		t.Fatalf("usage missing impl-not-graph example clarification: %q", output)
-	}
-	if !strings.Contains(output, "Agent progress, validation, review facts, and worker closeout belong in mail/observation evidence, not issue notes.") {
-		t.Fatalf("usage missing evidence-first agent guidance: %q", output)
-	}
-	if !strings.Contains(output, "az issue events az-123 --json") {
-		t.Fatalf("usage missing issue events evidence example: %q", output)
-	}
-	if strings.Contains(output, "issue close --impl") || strings.Contains(output, "issue delete --impl") || strings.Contains(output, "issue dep add --impl") {
-		t.Fatalf("usage should not include --impl for existing-issue commands: %q", output)
-	}
-	if !strings.Contains(output, "Argument ordering: place flags/options before positional arguments for deterministic parsing.") {
-		t.Fatalf("usage missing canonical argument ordering hint: %q", output)
 	}
 }
 

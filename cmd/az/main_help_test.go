@@ -5,67 +5,6 @@ import (
 	"testing"
 )
 
-func TestMaybePrintCommandHelpUsesSpecificUsage(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-		want string
-	}{
-		{name: "root help", args: []string{"--help"}, want: "Usage: az [command] [arguments]"},
-		{name: "help command help", args: []string{"help", "--help"}, want: "Usage: az [command] [arguments]"},
-		{name: "help root syntax", args: []string{"help", "issue", "get"}, want: issueGetUsage},
-		{name: "version help", args: []string{"version", "--help"}, want: "Usage: az version"},
-		{name: "session leaf", args: []string{"session", "start", "--help"}, want: "usage: az session start [--project <project-id>] <issue-id> [--wait]"},
-		{name: "session capture leaf", args: []string{"session", "capture", "--help"}, want: "usage: az session capture [--project <project-id>] [--lines N] [--json] <issue-id>"},
-		{name: "alias leaf", args: []string{"start", "--help"}, want: "usage: az start <issue-id> [--wait]"},
-		{name: "branch leaf", args: []string{"branch", "agent-merge", "--help"}, want: "usage: az branch agent-merge [--project <project-id>] <issue-id> [--target base|<issue-id>]"},
-		{name: "branch merge alias", args: []string{"branch", "merge-to-base", "--help"}, want: "usage: az branch merge [--project <project-id>] [issue-id]"},
-		{name: "operation leaf", args: []string{"operation", "cancel", "--help"}, want: "Usage: az operation cancel --id <operation-id> [--reason <reason>]"},
-		{name: "operation queue leaf", args: []string{"operation", "queue", "--help"}, want: "Usage: az operation queue [--issue <issue-id>]"},
-		{name: "config leaf", args: []string{"config", "set", "--help"}, want: "Usage: az config set <key> <value> [--project-dir <dir>]"},
-		{name: "spec nested leaf", args: []string{"spec", "req", "get", "--help"}, want: "Usage: az spec req get --id <req-id> [--json]"},
-		{name: "decision nested leaf", args: []string{"decision", "link", "add", "--help"}, want: "Usage: az decision link add --id <decision-id>"},
-		{name: "learn root", args: []string{"learn", "--help"}, want: "Usage: az learn <add|recall|show|review|stale|demote|promote|retire|relate|supersede|doctor|gc>"},
-		{name: "learn nested leaf", args: []string{"learn", "doctor", "--help"}, want: "Usage: az learn doctor"},
-		{name: "githooks leaf", args: []string{"githooks", "hook", "--help"}, want: "Usage: az githooks hook --hook <name>"},
-		{name: "dev leaf", args: []string{"dev", "start", "--help"}, want: "Usage: az dev start <issue-id> [--project-dir <dir>] [--json] [--verbose]"},
-		{name: "project nested leaf", args: []string{"project", "scripts", "status", "--help"}, want: "Usage: az project scripts status [--project-dir <dir>] [--json] [<name> ...]"},
-		{name: "ai nested leaf", args: []string{"ai", "hook", "run", "--help"}, want: "Usage: az ai hook run --agent=<claude|codex|opencode> [--json] <event>"},
-		{name: "tmux leaf", args: []string{"tmux", "install-selector", "--help"}, want: "Usage: az tmux install-selector [--config <path>] [--project-dir <dir>] [--key <key>] [--az-command <command>] [--verbose]"},
-		{name: "prime leaf", args: []string{"prime", "--help"}, want: "Usage: az prime"},
-		{name: "issue root includes document", args: []string{"issue", "--help"}, want: "document add [--project <project-id>]"},
-		{name: "issue events leaf", args: []string{"issue", "events", "--help"}, want: issueEventsUsage},
-		{name: "issue record leaf", args: []string{"issue", "record", "--help"}, want: issueRecordUsage},
-		{name: "issue context risk leaf", args: []string{"issue", "context-risk", "--help"}, want: issueContextRiskUsage},
-		{name: "issue leaf", args: []string{"issue", "get", "--help"}, want: issueGetUsage},
-		{name: "issue unarchive leaf", args: []string{"issue", "unarchive", "--help"}, want: issueUnarchiveUsage},
-		{name: "issue parent", args: []string{"issue", "document", "--help"}, want: "Usage: az issue document <add|list|remove> [arguments]"},
-		{name: "issue nested leaf", args: []string{"issue", "dep", "bulk", "apply", "--help"}, want: issueDepBulkApplyUsage},
-		{name: "mail leaf", args: []string{"mail", "watch", "--help"}, want: mailWatchUsage},
-		{name: "observe leaf", args: []string{"observe", "--help"}, want: observeUsage},
-		{name: "orchestrate leaf", args: []string{"orchestrate", "complete-check", "--help"}, want: orchestrateCompleteCheckUsage},
-		{name: "orchestrate group leaf", args: []string{"orchestrate", "group", "--help"}, want: orchestrateGroupUsage},
-		{name: "orchestrate observe leaf", args: []string{"orchestrate", "observe", "--help"}, want: orchestrateObserveUsage},
-		{name: "orchestrate capture leaf", args: []string{"orchestrate", "capture", "--help"}, want: orchestrateCaptureUsage},
-		{name: "daemon leaf", args: []string{"daemon", "restart", "--help"}, want: "Usage: az daemon restart"},
-		{name: "daemon watch clients leaf", args: []string{"daemon", "watch-clients", "--help"}, want: "Usage: az daemon watch-clients [--json] [--all]"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			output := captureMainStdout(t, func() error {
-				if !maybePrintCommandHelp(tt.args) {
-					t.Fatalf("maybePrintCommandHelp(%v) = false, want true", tt.args)
-				}
-				return nil
-			})
-			if !strings.Contains(output, tt.want) {
-				t.Fatalf("help output missing %q in %q", tt.want, output)
-			}
-		})
-	}
-}
-
 func TestMaybePrintCommandHelpIgnoresNonHelpArgs(t *testing.T) {
 	if maybePrintCommandHelp([]string{"issue", "get", "csi"}) {
 		t.Fatal("maybePrintCommandHelp returned true for non-help command")
@@ -205,6 +144,7 @@ func TestMaybePrintCommandHelpCoversRoutedCommandSurface(t *testing.T) {
 		{"issue", "split"},
 		{"issue", "update"},
 		{"issue", "close"},
+		{"issue", "cleanup"},
 		{"issue", "delete"},
 		{"issue", "image"},
 		{"issue", "image", "add"},

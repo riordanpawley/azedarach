@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -11,12 +12,12 @@ import (
 func TestBoardViewOverlaySelectsCurrentView(t *testing.T) {
 	records := []domain.BoardViewRecord{
 		{ProjectID: "proj", View: domain.DefaultBoardView(), BuiltIn: true},
-		{ProjectID: "proj", View: domain.ActivityBoardView(), BuiltIn: true},
+		{ProjectID: "proj", View: domain.OrchestrationBoardView(), BuiltIn: true},
 	}
-	o := NewBoardViewOverlay(records, "activity")
+	o := NewBoardViewOverlay(records, "orchestration")
 
 	view := o.View()
-	if !strings.Contains(view, "Activity") || !strings.Contains(view, "built-in") {
+	if !strings.Contains(view, "Orchestration") || !strings.Contains(view, "built-in") {
 		t.Fatalf("overlay view missing board view rows:\n%s", view)
 	}
 
@@ -35,8 +36,8 @@ func TestBoardViewOverlaySelectsCurrentView(t *testing.T) {
 	if !ok {
 		t.Fatalf("selection value = %T, want BoardViewSelectMsg", msg.Value)
 	}
-	if selected.ViewID != "activity" {
-		t.Fatalf("selected view = %q, want activity", selected.ViewID)
+	if selected.ViewID != "orchestration" {
+		t.Fatalf("selected view = %q, want orchestration", selected.ViewID)
 	}
 }
 
@@ -64,12 +65,15 @@ func TestBoardViewOverlayStatusBindingsDescribeWorkingActions(t *testing.T) {
 }
 
 func TestBoardViewOverlayDuplicateValidatesAndSaves(t *testing.T) {
+	defaultView := domain.DefaultBoardView()
+	copyID := string(defaultView.ID) + "-copy"
+	uniqueCopyID := copyID + "-2"
 	existing := domain.DefaultBoardView()
-	existing.ID = "current-copy"
+	existing.ID = domain.BoardViewID(copyID)
 	existing.Title = "Existing"
-	o := NewBoardViewOverlay([]domain.BoardViewRecord{{View: domain.DefaultBoardView(), BuiltIn: true}, {View: existing}}, "current")
+	o := NewBoardViewOverlay([]domain.BoardViewRecord{{View: defaultView, BuiltIn: true}, {View: existing}}, domain.DefaultBoardViewID)
 	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	if o.mode != boardViewEdit || !strings.Contains(o.editor.Value(), `"id": "current-copy-2"`) {
+	if o.mode != boardViewEdit || !strings.Contains(o.editor.Value(), fmt.Sprintf(`"id": %q`, uniqueCopyID)) {
 		t.Fatalf("duplicate did not open populated editor: mode=%v value=%s", o.mode, o.editor.Value())
 	}
 	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
@@ -78,7 +82,7 @@ func TestBoardViewOverlayDuplicateValidatesAndSaves(t *testing.T) {
 	}
 	msg := cmd().(SelectionMsg)
 	saved := msg.Value.(BoardViewSaveMsg)
-	if saved.View.ID != "current-copy-2" || len(saved.View.Columns) == 0 {
+	if string(saved.View.ID) != uniqueCopyID || len(saved.View.Columns) == 0 {
 		t.Fatalf("saved view = %+v", saved.View)
 	}
 }

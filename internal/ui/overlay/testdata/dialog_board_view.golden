@@ -1,9 +1,9 @@
 ╭──────────────────────────────────────────────────────────────────────────────────────────────╮
 │Board View                                                                                    │
 │──────────────────────────────────────────────────────────────────────────────────────────────│
-││ ▸ * Current current  6 cols  built-in                        Columns                        │
-││     Activity activity  8 cols  built-in                      ───────────────────────────────│
-││                                                              current                        │
+││ ▸ * Default default  6 cols  built-in                        Columns                        │
+││     Orchestration orchestration  8 cols  built-in            ───────────────────────────────│
+││                                                              default                        │
 ││                                                                                             │
 ││                                                              Columns are query predicates   │
 ││                                                              over issue facts.              │

@@ -173,6 +173,8 @@ type Daemon struct {
 	taskGraphReadinessLoads            map[string]*taskGraphReadinessLoad
 	watchClientsMu                     sync.Mutex
 	watchClients                       map[string]watchClientObservation
+	terminalFailureProbeMu             sync.Mutex
+	terminalFailureProbes              map[string]terminalFailureProbeState
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -771,6 +773,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskCreate(ctx, req)
 	case "task.close":
 		return d.handleTaskClose(ctx, req)
+	case "task.bulk_cleanup":
+		return d.handleTaskBulkCleanup(ctx, req)
 	case "task.close_preflight":
 		return d.handleTaskClosePreflight(ctx, req)
 	case "task.delete_preflight":

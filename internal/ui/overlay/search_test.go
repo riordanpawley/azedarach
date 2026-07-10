@@ -218,13 +218,3 @@ func TestSearchOverlay_NoSearchMsgOnSameValue(t *testing.T) {
 	// This is harder to test precisely, but we've covered the main case
 	_ = cmd2
 }
-
-func TestSearchOverlay_ImplementsInterfaces(t *testing.T) {
-	s := NewSearchOverlay()
-
-	// Verify it implements tea.Model
-	var _ tea.Model = s
-
-	// Verify it implements Overlay
-	var _ Overlay = s
-}

@@ -215,6 +215,7 @@ func printBoardViewList(resp protocol.BoardViewListResponseBody, asJSON bool) er
 	}
 	fmt.Println()
 	fmt.Println("A board view is a saved column projection over issue lifecycle, review, close, and runtime facts; it does not change issue lifecycle status.")
+	fmt.Println("Built-ins: default (all lifecycle phases), orchestration (waiting/activity first), closeout (review and closed outcomes). Legacy current/activity IDs alias to default/orchestration.")
 	return nil
 }
 
