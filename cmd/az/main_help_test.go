@@ -30,6 +30,7 @@ func TestMaybePrintCommandHelpUsesSpecificUsage(t *testing.T) {
 		{name: "dev leaf", args: []string{"dev", "start", "--help"}, want: "Usage: az dev start <issue-id> [--project-dir <dir>] [--json] [--verbose]"},
 		{name: "project nested leaf", args: []string{"project", "scripts", "status", "--help"}, want: "Usage: az project scripts status [--project-dir <dir>] [--json] [<name> ...]"},
 		{name: "ai nested leaf", args: []string{"ai", "hook", "run", "--help"}, want: "Usage: az ai hook run --agent=<claude|codex> [--json] <event>"},
+		{name: "ai account leaf", args: []string{"ai", "account", "backup", "--help"}, want: "Usage: az ai account backup [--force] [--json] <provider> <profile>"},
 		{name: "tmux leaf", args: []string{"tmux", "install-selector", "--help"}, want: "Usage: az tmux install-selector [--config <path>] [--project-dir <dir>] [--key <key>] [--az-command <command>] [--verbose]"},
 		{name: "prime leaf", args: []string{"prime", "--help"}, want: "Usage: az prime"},
 		{name: "issue root includes document", args: []string{"issue", "--help"}, want: "document add [--project <project-id>]"},

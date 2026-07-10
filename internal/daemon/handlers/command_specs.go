@@ -22,6 +22,7 @@ const (
 	CommandDispatchGit
 	CommandDispatchWorktree
 	CommandDispatchDevServer
+	CommandDispatchAIAccount
 )
 
 // CommandSpec describes daemon policy metadata and dispatch ownership.
@@ -148,6 +149,11 @@ var commandSpecRegistry = map[string]CommandSpec{
 	CommandDevServerStop:                   {Command: CommandDevServerStop, DispatchTarget: CommandDispatchDevServer, RequiresProjectID: true},
 	CommandDevServerStatus:                 {Command: CommandDevServerStatus, DispatchTarget: CommandDispatchDevServer, RequiresProjectID: true},
 	CommandDevServerList:                   {Command: CommandDevServerList, DispatchTarget: CommandDispatchDevServer, RequiresProjectID: true},
+	protocol.CommandAIAccountBackup:        {Command: protocol.CommandAIAccountBackup, DispatchTarget: CommandDispatchAIAccount},
+	protocol.CommandAIAccountList:          {Command: protocol.CommandAIAccountList, DispatchTarget: CommandDispatchAIAccount},
+	protocol.CommandAIAccountStatus:        {Command: protocol.CommandAIAccountStatus, DispatchTarget: CommandDispatchAIAccount},
+	protocol.CommandAIAccountActivate:      {Command: protocol.CommandAIAccountActivate, DispatchTarget: CommandDispatchAIAccount},
+	protocol.CommandAIAccountDelete:        {Command: protocol.CommandAIAccountDelete, DispatchTarget: CommandDispatchAIAccount},
 	protocol.CommandIssueFanout:            {Command: protocol.CommandIssueFanout, RequiresProjectID: true},
 	protocol.CommandIssueFanoutDrift:       {Command: protocol.CommandIssueFanoutDrift, RequiresProjectID: true},
 	protocol.CommandMailSend:               {Command: protocol.CommandMailSend, RequiresProjectID: true},
@@ -230,7 +236,7 @@ func DaemonRoutesThroughDispatcher(command string) bool {
 		return false
 	}
 	switch target {
-	case CommandDispatchOperation, CommandDispatchPR, CommandDispatchSpec, CommandDispatchDecision, CommandDispatchLearn, CommandDispatchGit, CommandDispatchWorktree, CommandDispatchDevServer:
+	case CommandDispatchOperation, CommandDispatchPR, CommandDispatchSpec, CommandDispatchDecision, CommandDispatchLearn, CommandDispatchGit, CommandDispatchWorktree, CommandDispatchDevServer, CommandDispatchAIAccount:
 		return true
 	default:
 		return false
@@ -264,7 +270,7 @@ func ValidateCommandSpecs() error {
 			return fmt.Errorf("command spec %q declares mismatched Command value %q", key, spec.Command)
 		}
 		switch spec.DispatchTarget {
-		case CommandDispatchNone, CommandDispatchSession, CommandDispatchOperation, CommandDispatchPR, CommandDispatchSpec, CommandDispatchDecision, CommandDispatchLearn, CommandDispatchGit, CommandDispatchWorktree, CommandDispatchDevServer:
+		case CommandDispatchNone, CommandDispatchSession, CommandDispatchOperation, CommandDispatchPR, CommandDispatchSpec, CommandDispatchDecision, CommandDispatchLearn, CommandDispatchGit, CommandDispatchWorktree, CommandDispatchDevServer, CommandDispatchAIAccount:
 		default:
 			return fmt.Errorf("command spec %q declares unknown dispatch target %d", key, spec.DispatchTarget)
 		}
@@ -315,6 +321,10 @@ func ValidateDispatcherWiring(d *Dispatcher) error {
 		case CommandDispatchDevServer:
 			if d.devserver == nil {
 				return fmt.Errorf("command %q dispatches to devserver handler but dispatcher devserver handler is nil", command)
+			}
+		case CommandDispatchAIAccount:
+			if d.aiAccount == nil {
+				return fmt.Errorf("command %q dispatches to AI account handler but dispatcher AI account handler is nil", command)
 			}
 		default:
 			return fmt.Errorf("command %q has unknown dispatch target %d", command, spec.DispatchTarget)

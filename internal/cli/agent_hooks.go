@@ -304,7 +304,7 @@ func AIHookRunCommand(deps *Dependencies, opts AIHookRunOptions) error {
 
 // PrintAIUsage prints usage for the `az ai` family.
 func PrintAIUsage() {
-	fmt.Println("Usage: az ai <install|status|uninstall|migrate|hook> [arguments]")
+	fmt.Println("Usage: az ai <account|install|status|uninstall|migrate|hook> [arguments]")
 	fmt.Println("       az ai hook run --agent=<claude|codex> [--json] <event>")
-	fmt.Println("Manage and run AI agent hooks through the shared internal port.")
+	fmt.Println("Manage AI accounts and agent hooks through Azedarach.")
 }

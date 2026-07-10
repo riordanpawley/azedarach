@@ -158,10 +158,24 @@ func runAICommand(cfg *config.Config, args []string) error {
 		cli.PrintAIStatusUsage()
 		cli.PrintAIUninstallUsage()
 		cli.PrintAIMigrateUsage()
+		cli.PrintAIAccountUsage()
 		return nil
 	}
 
 	switch args[0] {
+	case "account":
+		if len(args) < 2 || isHelpArg(args[1]) {
+			cli.PrintAIAccountUsage()
+			return nil
+		}
+		opts, err := cli.ParseAIAccountArgs(args[1:])
+		if err != nil {
+			cli.PrintAIAccountUsage()
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.AIAccountCommand(deps, opts)
+		})
 	case "hook":
 		if len(args) < 2 || isHelpArg(args[1]) {
 			cli.PrintAIUsage()

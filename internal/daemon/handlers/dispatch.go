@@ -18,6 +18,7 @@ type Dispatcher struct {
 	operation OperationHandler
 	worktree  *WorktreeHandler
 	devserver *DevServerHandler
+	aiAccount *AIAccountHandler
 }
 
 // OperationHandler is a marker interface so operation routes can be injected
@@ -48,6 +49,8 @@ func NewDispatcher(session *SessionHandler, handlers ...any) *Dispatcher {
 			d.worktree = h
 		case *DevServerHandler:
 			d.devserver = h
+		case *AIAccountHandler:
+			d.aiAccount = h
 		}
 	}
 	return &Dispatcher{
@@ -60,6 +63,7 @@ func NewDispatcher(session *SessionHandler, handlers ...any) *Dispatcher {
 		operation: d.operation,
 		worktree:  d.worktree,
 		devserver: d.devserver,
+		aiAccount: d.aiAccount,
 	}
 }
 
@@ -116,6 +120,11 @@ func (d *Dispatcher) Handle(ctx context.Context, req protocol.RequestEnvelope) p
 			return unsupportedCommandResponse(req)
 		}
 		return d.devserver.Handle(ctx, req)
+	case CommandDispatchAIAccount:
+		if d.aiAccount == nil {
+			return unsupportedCommandResponse(req)
+		}
+		return d.aiAccount.Handle(ctx, req)
 	default:
 		return unsupportedCommandResponse(req)
 	}

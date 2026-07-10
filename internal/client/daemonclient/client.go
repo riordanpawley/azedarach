@@ -239,6 +239,8 @@ func isDaemonReadCommand(command string) bool {
 		protocol.CommandMailList,
 		protocol.CommandMailWatch:
 		return true
+	case protocol.CommandAIAccountList, protocol.CommandAIAccountStatus:
+		return true
 	default:
 		return false
 	}

@@ -231,6 +231,11 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		commandSyncRun,
 		commandSyncConflicts,
 		protocol.CommandTaskBulkApply,
+		protocol.CommandAIAccountBackup,
+		protocol.CommandAIAccountList,
+		protocol.CommandAIAccountStatus,
+		protocol.CommandAIAccountActivate,
+		protocol.CommandAIAccountDelete,
 	}
 
 	registered := RegisteredCommands()
@@ -276,6 +281,7 @@ func TestDispatcherWiringValidation(t *testing.T) {
 		operation: &routeOperationHandler{},
 		worktree:  &WorktreeHandler{},
 		devserver: &DevServerHandler{},
+		aiAccount: &AIAccountHandler{},
 	}
 	if err := ValidateDispatcherWiring(complete); err != nil {
 		t.Fatalf("expected complete dispatcher wiring validation to pass: %v", err)

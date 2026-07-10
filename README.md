@@ -79,6 +79,20 @@ azd --help
 - Runs quality gates: `az gate <issue-id>` and `az dev gate <issue-id>`
 - Manages per-issue dev servers: `az dev start|stop|restart|status` and `az dev list`
 
+### AI Account Profiles
+
+- Save the current provider credentials: `az ai account backup <provider> <profile>`
+- Inspect saved and active profiles: `az ai account list` and `az ai account status`
+- Switch credentials atomically: `az ai account activate <provider> <profile>`
+- Remove a saved profile: `az ai account delete --confirm <provider> <profile>`
+- Supported providers are `claude` and `codex`; commands accept `--json` for agent use.
+- Credentials remain in a permission-restricted user-local vault under
+  `~/.local/share/azedarach/accounts/`. Profile output never includes credential
+  contents. Treat vault files as bearer secrets and keep them out of backups,
+  repositories, and support bundles unless those systems are encrypted.
+- Activation applies to new provider processes. Restart existing Claude or Codex
+  sessions because long-running processes may retain credentials in memory.
+
 ### Issue Tracker Workflows
 
 - CRUD and query: `az issue list|get|get-many|create|split|update|close|delete`
