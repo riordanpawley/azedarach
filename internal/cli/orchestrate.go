@@ -790,15 +790,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		return err
 	}
 
-	scope, err := domain.RootedOrchestrationScope(opts.RootIssueID)
-	if err != nil {
-		return err
-	}
-	snapshot, err := deps.DaemonClient.OrchestrationSnapshot(ctx, protocol.OrchestrationSnapshotRequest{Scope: scope, ActorID: orchestrateOwnerID()})
-	if err != nil {
-		return err
-	}
-	ready, err := taskReadinessFromOrchestrationSnapshot(snapshot)
+	ready, err := deps.DaemonClient.TaskGraphReadinessForActor(ctx, opts.RootIssueID, orchestrateOwnerID())
 	if err != nil {
 		return err
 	}
@@ -1201,15 +1193,11 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	if err != nil {
 		return orchestrateStartResult{}, err
 	}
-	snapshot, err := deps.DaemonClient.OrchestrationSnapshot(ctx, protocol.OrchestrationSnapshotRequest{Scope: scope, ActorID: ownerID})
+	ready, err := deps.DaemonClient.TaskGraphReadinessForActor(ctx, opts.RootIssueID, ownerID)
 	if err != nil {
 		return orchestrateStartResult{}, err
 	}
-	ready, err := taskReadinessFromOrchestrationSnapshot(snapshot)
-	if err != nil {
-		return orchestrateStartResult{}, err
-	}
-	intentKey := fmt.Sprintf("start:%s:%d:%d:%s", opts.RootIssueID, snapshot.Revision, opts.Limit, strings.Join(opts.IssueIDs, ","))
+	intentKey := fmt.Sprintf("start:%s:%d:%s", opts.RootIssueID, opts.Limit, strings.Join(opts.IssueIDs, ","))
 	applied, err := deps.DaemonClient.ApplyOrchestrationIntent(ctx, protocol.OrchestrationIntentRequest{Scope: scope, Kind: protocol.OrchestrationIntentStart, IntentKey: intentKey, ActorID: ownerID, IssueIDs: opts.IssueIDs, Limit: opts.Limit, RepoDir: deps.RepoDir, BaseBranch: opts.BaseBranchOverride})
 	if err != nil {
 		return orchestrateStartResult{}, err
@@ -1259,21 +1247,6 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	}
 
 	return result, nil
-}
-
-func taskReadinessFromOrchestrationSnapshot(snapshot protocol.OrchestrationSnapshot) (daemonclient.TaskGraphReadiness, error) {
-	encoded, err := json.Marshal(snapshot)
-	if err != nil {
-		return daemonclient.TaskGraphReadiness{}, err
-	}
-	var ready daemonclient.TaskGraphReadiness
-	if err := json.Unmarshal(encoded, &ready); err != nil {
-		return daemonclient.TaskGraphReadiness{}, err
-	}
-	if snapshot.Scope.Kind == domain.OrchestrationScopeRooted {
-		ready.RootIssueID = snapshot.Scope.RootIssueID.String()
-	}
-	return ready, nil
 }
 
 func orchestrateOwnerID() string {

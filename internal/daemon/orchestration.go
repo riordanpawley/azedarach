@@ -159,11 +159,15 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	}
 	runnable := make(map[string]struct{}, len(snapshot.Runnable))
 	active := make(map[string]struct{}, len(snapshot.Active))
+	nestedRoots := make(map[string]struct{}, len(snapshot.NestedRoots))
 	for _, id := range snapshot.Runnable {
 		runnable[id] = struct{}{}
 	}
 	for _, id := range snapshot.Active {
 		active[id] = struct{}{}
+	}
+	for _, nested := range snapshot.NestedRoots {
+		nestedRoots[nested.IssueID] = struct{}{}
 	}
 	requested := append([]string(nil), request.IssueIDs...)
 	if len(requested) == 0 {
@@ -177,7 +181,9 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	started := 0
 	for _, issueID := range requested {
 		if _, ok := runnable[issueID]; !ok {
-			if _, ok := active[issueID]; ok {
+			if _, ok := nestedRoots[issueID]; ok {
+				result.Skipped[issueID] = fmt.Sprintf("nested-root-start-orchestrator-session: az session start %s", issueID)
+			} else if _, ok := active[issueID]; ok {
 				result.Skipped[issueID] = "session-already-running"
 			} else if reason := snapshot.Blocked[issueID]; reason != "" {
 				result.Skipped[issueID] = reason
