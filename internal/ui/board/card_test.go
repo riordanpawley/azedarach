@@ -108,6 +108,7 @@ func TestRenderTaskTypeBadge_UsesSingleLetter(t *testing.T) {
 		{name: "feature", taskType: domain.TypeFeature, want: " F "},
 		{name: "epic", taskType: domain.TypeEpic, want: " E "},
 		{name: "chore", taskType: domain.TypeChore, want: " C "},
+		{name: "investigation", taskType: domain.TypeInvestigation, want: " I "},
 		{name: "unknown", taskType: domain.TaskType("other"), want: " ? "},
 	}
 

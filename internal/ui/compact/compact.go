@@ -302,6 +302,8 @@ func (cv *CompactView) renderTypeCell(taskType domain.TaskType, width int) strin
 		style = cv.styles.TypeTask
 	case domain.TypeChore:
 		style = cv.styles.TypeChore
+	case domain.TypeInvestigation:
+		style = cv.styles.TypeInvestigation
 	default:
 		style = cv.styles.Row
 	}

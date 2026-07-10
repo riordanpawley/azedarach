@@ -59,13 +59,13 @@ func ParseIssueSplitArgs(args []string) (IssueSplitOptions, error) {
 	})
 	fs.StringVar(&opts.Description, "description", "", "child issue description")
 	fs.StringVar(&priorityRaw, "priority", "", "child issue priority (P0-P4)")
-	fs.StringVar(&typeRaw, "type", string(domain.TypeTask), "child issue type (task|bug|feature|epic|chore)")
+	fs.StringVar(&typeRaw, "type", string(domain.TypeTask), "child issue type (task|bug|feature|epic|chore|investigation)")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueSplitOptions{}, err
 	}
 	if fs.NArg() != 1 {
-		return IssueSplitOptions{}, fmt.Errorf("usage: az issue split [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
+		return IssueSplitOptions{}, fmt.Errorf("usage: az issue split [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
 	}
 	opts.Title = fs.Arg(0)
 	taskType, err := parseTaskType(typeRaw)

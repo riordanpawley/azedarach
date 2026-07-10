@@ -10,7 +10,7 @@
 ││ ┃     preserve layout                        T/B/F/E/C Set type   │
 ││ ┃                                            0/1/2/3/4 Set        │
 ││ ┃                                           priority              │
-││ Type: [●T] [ B] [ F] [ E] [ C]               h/l or ←/→ Cycle impl│
+││ Type: [●T] [ B] [ F] [ E] [ C] [ I]          h/l or ←/→ Cycle impl│
 ││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]          combinations          │
 ││ Impls: [<] (none) [>]                        Ctrl+P Paste image   │
 ││ Acceptance Criteria:                         j/k + d Manage       │

@@ -435,6 +435,8 @@ func parseApplyTaskType(value string) (domain.TaskType, error) {
 		return domain.TypeEpic, nil
 	case "chore":
 		return domain.TypeChore, nil
+	case "investigation":
+		return domain.TypeInvestigation, nil
 	default:
 		return "", fmt.Errorf("unsupported task type: %s", value)
 	}

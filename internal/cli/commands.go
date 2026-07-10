@@ -3584,7 +3584,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	fs.StringVar(&priorityRaw, "priority", "", "issue priority (P0-P4)")
 	fs.BoolVar(&opts.Deferred, "deferred", false, "create standalone later/backlog work; skips AZEDARACH_ISSUE_ID auto-parenting and defaults priority to P4 unless --priority is provided")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue create result as JSON")
-	fs.StringVar(&typeRaw, "type", string(domain.TypeTask), "issue type (task|bug|feature|epic|chore)")
+	fs.StringVar(&typeRaw, "type", string(domain.TypeTask), "issue type (task|bug|feature|epic|chore|investigation)")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCreateOptions{}, err
 	}
@@ -3597,7 +3597,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	case fs.NArg() == 1 && titleFlag != "":
 		return IssueCreateOptions{}, fmt.Errorf("provide title either as --title or as a positional argument, not both")
 	default:
-		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
+		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
 	}
 
 	taskType, err := parseTaskType(typeRaw)
@@ -3889,13 +3889,13 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		updateImpls = append(updateImpls, trimmed)
 		return nil
 	})
-	fs.StringVar(&typeRaw, "type", "", "updated issue type (task|bug|feature|epic|chore)")
+	fs.StringVar(&typeRaw, "type", "", "updated issue type (task|bug|feature|epic|chore|investigation)")
 	fs.StringVar(&priorityRaw, "priority", "", "updated priority (P0-P4)")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueUpdateOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update (it is create-only); normal field updates do not need --update-impl, and --update-impl is only for changing issue implementations")
@@ -3907,7 +3907,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if typeRaw != "" {
 		tt, err := parseTaskType(typeRaw)
@@ -8279,7 +8279,7 @@ func executeBulkApply(deps *Dependencies, dryRun bool, asJSON bool, operations [
 func parseTaskType(raw string) (domain.TaskType, error) {
 	tt := domain.TaskType(raw)
 	switch tt {
-	case domain.TypeTask, domain.TypeBug, domain.TypeFeature, domain.TypeEpic, domain.TypeChore:
+	case domain.TypeTask, domain.TypeBug, domain.TypeFeature, domain.TypeEpic, domain.TypeChore, domain.TypeInvestigation:
 		return tt, nil
 	default:
 		return "", fmt.Errorf("invalid issue type: %s", raw)

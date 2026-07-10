@@ -594,6 +594,7 @@ func TestCreateTaskOverlayRenderTypeSelector(t *testing.T) {
 		domain.TypeFeature,
 		domain.TypeEpic,
 		domain.TypeChore,
+		domain.TypeInvestigation,
 	}
 
 	for _, typ := range types {

@@ -14,7 +14,7 @@
 ││ ┃                                                                            Ctrl+E Edit in $EDITOR               │
 ││ ┃                                                                            Ctrl+K Clear form                    │
 ││ ┃                                                                            Esc Cancel                           │
-││ Type: [●T] [ B] [ F] [ E] [ C]                                                                                    │
+││ Type: [●T] [ B] [ F] [ E] [ C] [ I]                                                                               │
 ││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]                                                                                │
 ││ Impls: [<] (none) [>]                                                                                             │
 ││ Acceptance Criteria:                                                                                              │

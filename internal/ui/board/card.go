@@ -592,6 +592,8 @@ func renderTaskTypeBadge(taskType domain.TaskType, s *styles.Styles) string {
 		background = styles.Blue
 	case domain.TypeChore:
 		background = styles.Yellow
+	case domain.TypeInvestigation:
+		background = styles.Mauve
 	}
 
 	badgeStyle := lipgloss.NewStyle().

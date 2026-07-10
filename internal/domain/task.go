@@ -156,11 +156,12 @@ func (p Priority) String() string {
 type TaskType string
 
 const (
-	TypeTask    TaskType = "task"
-	TypeBug     TaskType = "bug"
-	TypeFeature TaskType = "feature"
-	TypeEpic    TaskType = "epic"
-	TypeChore   TaskType = "chore"
+	TypeTask          TaskType = "task"
+	TypeBug           TaskType = "bug"
+	TypeFeature       TaskType = "feature"
+	TypeEpic          TaskType = "epic"
+	TypeChore         TaskType = "chore"
+	TypeInvestigation TaskType = "investigation"
 )
 
 // Short returns single character representation
@@ -176,6 +177,8 @@ func (t TaskType) Short() string {
 		return "E"
 	case TypeChore:
 		return "C"
+	case TypeInvestigation:
+		return "I"
 	default:
 		return "?"
 	}
