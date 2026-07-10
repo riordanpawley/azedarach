@@ -39,3 +39,21 @@ func TestBoardViewOverlaySelectsCurrentView(t *testing.T) {
 		t.Fatalf("selected view = %q, want activity", selected.ViewID)
 	}
 }
+
+func TestBoardViewOverlayStatusBindingsDescribeWorkingActions(t *testing.T) {
+	o := NewBoardViewOverlay(nil, "")
+	bindings := o.StatusBindings()
+	got := make(map[string]string, len(bindings))
+	for _, binding := range bindings {
+		got[binding.Key] = binding.Description
+	}
+	for key, description := range map[string]string{
+		"j/k":   "view",
+		"Enter": "select",
+		"Esc":   "close",
+	} {
+		if got[key] != description {
+			t.Fatalf("status binding %q = %q, want %q (all=%+v)", key, got[key], description, bindings)
+		}
+	}
+}

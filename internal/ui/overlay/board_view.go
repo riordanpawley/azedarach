@@ -49,16 +49,20 @@ func (o *BoardViewOverlay) Init() tea.Cmd { return nil }
 func (o *BoardViewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "esc", "q":
+		action, ok := keybinds.LookupBoardViewAction(msg.String())
+		if !ok {
+			return o, nil
+		}
+		switch action {
+		case keybinds.ActionBoardViewClose:
 			return o, func() tea.Msg { return CloseOverlayMsg{} }
-		case "j", "down":
+		case keybinds.ActionBoardViewMoveDown:
 			o.moveCursor(1)
 			return o, nil
-		case "k", "up":
+		case keybinds.ActionBoardViewMoveUp:
 			o.moveCursor(-1)
 			return o, nil
-		case "enter":
+		case keybinds.ActionBoardViewSelect:
 			if len(o.views) == 0 {
 				return o, nil
 			}
@@ -102,11 +106,7 @@ func (o *BoardViewOverlay) Size() (int, int) {
 }
 
 func (o *BoardViewOverlay) StatusBindings() []keybinds.Binding {
-	return []keybinds.Binding{
-		{Key: "j/k", Description: "view"},
-		{Key: "Enter", Description: "select"},
-		{Key: "Esc", Description: "close"},
-	}
+	return keybinds.BoardViewHintBindings()
 }
 
 func (o *BoardViewOverlay) moveCursor(delta int) {
