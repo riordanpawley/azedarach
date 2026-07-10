@@ -38,14 +38,15 @@ type OrchestrationSnapshot struct {
 }
 
 type OrchestrationCandidate struct {
-	IssueID          string   `json:"issue_id"`
-	Included         bool     `json:"included"`
-	Eligible         bool     `json:"eligible"`
-	Sufficient       bool     `json:"sufficient"`
-	Classification   string   `json:"classification"`
-	Reason           string   `json:"reason"`
-	Sufficiency      []string `json:"sufficiency_signals"`
-	ExclusionReasons []string `json:"exclusion_reasons,omitempty"`
+	IssueID          string                              `json:"issue_id"`
+	Included         bool                                `json:"included"`
+	Eligible         bool                                `json:"eligible"`
+	Sufficient       bool                                `json:"sufficient"`
+	Classification   string                              `json:"classification"`
+	Reason           string                              `json:"reason"`
+	Sufficiency      []string                            `json:"sufficiency_signals"`
+	ExclusionReasons []string                            `json:"exclusion_reasons,omitempty"`
+	Executability    domain.IssueExecutabilityAssessment `json:"executability"`
 }
 
 type OrchestrationHealth struct {

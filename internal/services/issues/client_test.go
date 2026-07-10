@@ -1456,6 +1456,26 @@ func TestClient_ListGraphReadinessWithRuntimeBoundsProjectCandidatesAndCountsAll
 	assert.Equal(t, 12, count)
 }
 
+func TestClient_ListGraphReadinessWithRuntimeHydratesBoundedProjectContracts(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	_, err := client.Create(ctx, CreateTaskParams{
+		Title:       "Candidate",
+		Description: "Bounded scope",
+		Acceptance:  "Focused test passes",
+		Type:        domain.TypeTask,
+		Priority:    domain.P1,
+		Status:      domain.StatusOpen,
+	})
+	require.NoError(t, err)
+
+	tasks, err := client.ListGraphReadinessWithRuntime(ctx, "project", "", 1)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "Bounded scope", tasks[0].Description)
+	assert.Equal(t, "Focused test passes", tasks[0].Acceptance)
+}
+
 func TestClient_ListParentChildSubtreeWithRuntimeScopesToTargetClosure(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

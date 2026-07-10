@@ -170,6 +170,29 @@ func TestExplainOrchestrationCandidatesPreservesReviewAndDecisionClasses(t *test
 	}
 }
 
+func TestExplainOrchestrationCandidatesRejectsInsufficientContracts(t *testing.T) {
+	snapshot := protocol.OrchestrationSnapshot{
+		Runnable: []string{"thin"},
+		Blocked:  map[string]string{},
+		Candidates: []protocol.OrchestrationCandidate{{
+			IssueID:        "thin",
+			Included:       true,
+			Eligible:       true,
+			Sufficient:     false,
+			Classification: string(domain.OrchestrationCandidateOpen),
+			Executability: domain.IssueExecutabilityAssessment{
+				Disposition: domain.IssuePremature,
+				Reasons:     []string{"missing-acceptance"},
+			},
+		}},
+	}
+	explainOrchestrationCandidates(&snapshot)
+	got := snapshot.Candidates[0]
+	if got.Included || got.Eligible || got.Classification != string(domain.IssuePremature) || got.Reason != "excluded: missing-acceptance" {
+		t.Fatalf("candidate = %+v", got)
+	}
+}
+
 func TestOrchestrationGlobalActiveCountIncludesUninspectedRoots(t *testing.T) {
 	tasks := []domain.Task{{ID: "visible", HasTmuxSession: true}, {ID: "outside-limit", HasTmuxSession: true}, {ID: "inactive"}}
 	if got := orchestrationGlobalActiveCount(tasks); got != 2 {
@@ -183,7 +206,7 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership(t *testing.T
 	reader := issues.NewClientAtPath(path, slog.Default())
 	writer := issues.NewClientAtPath(path, slog.Default())
 	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
-	id, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Description: "Executable", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	id, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Description: "Executable", Acceptance: "Worker completes the scoped change", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
 	}

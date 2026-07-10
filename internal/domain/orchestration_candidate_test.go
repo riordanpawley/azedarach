@@ -26,7 +26,7 @@ func TestAssessOrchestrationCandidateClasses(t *testing.T) {
 		blockers []string
 		want     OrchestrationCandidateClass
 	}{
-		{name: "open", task: Task{ID: "open", Title: "Open", Description: "Executable", Status: StatusOpen}, want: OrchestrationCandidateOpen},
+		{name: "open", task: Task{ID: "open", Title: "Open", Description: "Executable", Acceptance: "Done", Status: StatusOpen}, want: OrchestrationCandidateOpen},
 		{name: "active", task: Task{ID: "active", Title: "Active", Description: "Executable", Status: StatusInProgress}, want: OrchestrationCandidateActive},
 		{name: "review", task: Task{ID: "review", Title: "Review", Description: "Executable", Status: StatusInReview, State: review}, want: OrchestrationCandidateReviewReady},
 		{name: "decision", task: Task{ID: "decision", Title: "Decision", Description: "Executable", Status: StatusInProgress, Session: waiting}, want: OrchestrationCandidateDecisionWaiting},
@@ -46,13 +46,16 @@ func TestAssessOrchestrationCandidateClasses(t *testing.T) {
 			if tt.want != OrchestrationCandidateOpen && got.Eligible {
 				t.Fatalf("excluded assessment eligible: %+v", got)
 			}
+			if tt.want == OrchestrationCandidateDecisionWaiting && got.Executability.Disposition != IssueNeedsInteraction {
+				t.Fatalf("decision executability = %+v", got.Executability)
+			}
 		})
 	}
 }
 
 func TestAssessOrchestrationCandidateReportsInsufficientContext(t *testing.T) {
 	got := AssessOrchestrationCandidate(Task{ID: naming.IssueID("thin"), Status: StatusOpen}, "", time.Now(), nil)
-	if !got.Eligible || got.Sufficient || !reflect.DeepEqual(got.Sufficiency, []string{"missing-title", "missing-execution-context"}) {
+	if !got.Eligible || got.Sufficient || !reflect.DeepEqual(got.Sufficiency, []string{"missing-title", "missing-scope", "missing-acceptance"}) {
 		t.Fatalf("assessment = %+v", got)
 	}
 }

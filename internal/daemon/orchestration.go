@@ -201,6 +201,10 @@ func explainOrchestrationCandidates(snapshot *protocol.OrchestrationSnapshot) {
 			candidate.ExclusionReasons = append(candidate.ExclusionReasons, snapshot.Blocked[candidate.IssueID])
 		case candidate.Classification != string(domain.OrchestrationCandidateOpen):
 			continue
+		case !candidate.Sufficient && candidate.Executability.Disposition != "":
+			candidate.Included, candidate.Eligible, candidate.Classification = false, false, string(candidate.Executability.Disposition)
+			candidate.Reason = "excluded: " + strings.Join(candidate.Executability.Reasons, "; ")
+			candidate.ExclusionReasons = append(candidate.ExclusionReasons, candidate.Executability.Reasons...)
 		case active[candidate.IssueID]:
 			candidate.Included, candidate.Eligible, candidate.Classification, candidate.Reason = false, false, string(domain.OrchestrationCandidateActive), "excluded: session already active"
 			candidate.ExclusionReasons = append(candidate.ExclusionReasons, "session-already-active")
@@ -412,7 +416,7 @@ func orchestrationBoardHealth(tasks []domain.Task, byID map[string]domain.Task, 
 
 func orchestrationCandidateForTask(task domain.Task, actorID string, now time.Time, diagnostics []string) protocol.OrchestrationCandidate {
 	assessment := domain.AssessOrchestrationCandidate(task, actorID, now, nil)
-	c := protocol.OrchestrationCandidate{IssueID: task.ID.String(), Included: assessment.Eligible, Eligible: assessment.Eligible, Sufficient: assessment.Sufficient, Classification: string(assessment.Classification), Sufficiency: assessment.Sufficiency, ExclusionReasons: assessment.ExclusionReasons}
+	c := protocol.OrchestrationCandidate{IssueID: task.ID.String(), Included: assessment.Eligible, Eligible: assessment.Eligible, Sufficient: assessment.Sufficient, Classification: string(assessment.Classification), Sufficiency: assessment.Sufficiency, ExclusionReasons: assessment.ExclusionReasons, Executability: assessment.Executability}
 	if assessment.Eligible {
 		c.Reason = "included: eligible for bounded readiness inspection"
 	} else {
