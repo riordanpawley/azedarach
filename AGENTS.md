@@ -202,7 +202,7 @@ If any are missing, keep issue state `in_progress` or `open`.
 
 ## Environment Rules
 
-- `.envrc` stores direnv/nix-direnv layouts under `${XDG_CACHE_HOME:-$HOME/.cache}/direnv/layouts`, keyed per canonical Git worktree, so linked worktrees do not gain checkout-local `.direnv` state.
+- `.envrc` stores one shared direnv/nix-direnv layout per repository under `${XDG_CACHE_HOME:-$HOME/.cache}/direnv/layouts`, keyed by the canonical Git common directory, so linked worktrees reuse the warm profile without gaining checkout-local `.direnv` state. Run `nix-direnv-reload` after changing `flake.nix` or `flake.lock`.
 - `.envrc` exports shared repo-family `GOCACHE`/`GOPATH` under the primary repo's `.azedarach/go/` so linked worktrees do not duplicate multi-GB Go caches. If Git common-dir detection fails, it falls back to the current checkout's `.azedarach/go/`. Use `AZEDARACH_GO_CACHE_ROOT`, `AZEDARACH_GOCACHE`, or `AZEDARACH_GOPATH` for explicit local overrides.
 - After `direnv allow`, use normal `go ...` commands from repo root without per-command env prefixes.
 
