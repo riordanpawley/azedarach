@@ -12567,6 +12567,16 @@ func TestPrimeCommandShowsRootExitContractForAzOrchestrationRoot(t *testing.T) {
 	if contractIndex < 0 {
 		t.Fatalf("prime output missing root exit contract: %q", output)
 	}
+	for _, guidance := range []string{
+		"Remain in the active orchestration turn/loop after starting workers, nested orchestrators, or a background watch; startup is not a completed handoff to the human.",
+		"Continuously consume the root watch and react to worker/nested-orchestrator progress, blocked, and integration-ready evidence while graph work remains.",
+		"Supervise nested epic/root orchestrators as direct children while they own their descendant workers; do not flatten or take over those descendants unless explicitly requested.",
+		"repeat status/start/watch/review until `az orchestrate complete-check --root az-root` passes",
+	} {
+		if !strings.Contains(output, guidance) {
+			t.Fatalf("prime output missing persistent parent-orchestrator guidance %q: %q", guidance, output)
+		}
+	}
 	if !strings.Contains(output, "az-child: review_ready - worker reported integration-ready evidence") {
 		t.Fatalf("prime output missing dynamic child observation: %q", output)
 	}
