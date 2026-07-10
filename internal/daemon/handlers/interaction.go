@@ -90,7 +90,7 @@ func validateInteractionMutation(cmd protocol.InteractionMutationRequestBody, an
 	if cmd.ID == "" || cmd.ExpectedRevision < 1 || strings.TrimSpace(cmd.Actor) == "" {
 		return "missing required fields: id/expected_revision/actor"
 	}
-	if answer && strings.TrimSpace(cmd.Answer) == "" {
+	if answer && (strings.TrimSpace(cmd.Answer.SelectedOption) == "" || strings.TrimSpace(cmd.Answer.Rationale) == "" || cmd.Answer.Revision < 1) {
 		return "missing required field: answer"
 	}
 	return ""

@@ -28,18 +28,11 @@ type InteractionGetRequestBody struct {
 	ID string `json:"id" msgpack:"id"`
 }
 type InteractionMutationRequestBody struct {
-	ID               string `json:"id" msgpack:"id"`
-	ExpectedRevision int64  `json:"expected_revision" msgpack:"expected_revision"`
-	Answer           string `json:"answer,omitempty" msgpack:"answer,omitempty"`
-	Actor            string `json:"actor" msgpack:"actor"`
-	SessionID        string `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
-}
-type InteractionIssueChanges struct {
-	Title       *string `json:"title,omitempty" msgpack:"title,omitempty"`
-	Description *string `json:"description,omitempty" msgpack:"description,omitempty"`
-	Design      *string `json:"design,omitempty" msgpack:"design,omitempty"`
-	Acceptance  *string `json:"acceptance,omitempty" msgpack:"acceptance,omitempty"`
-	Priority    *int    `json:"priority,omitempty" msgpack:"priority,omitempty"`
+	ID               string                          `json:"id" msgpack:"id"`
+	ExpectedRevision int64                           `json:"expected_revision" msgpack:"expected_revision"`
+	Answer           domain.InteractionAnswerPayload `json:"answer,omitempty" msgpack:"answer,omitempty"`
+	Actor            string                          `json:"actor" msgpack:"actor"`
+	SessionID        string                          `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
 }
 type InteractionDecisionEffect struct {
 	Title        string `json:"title" msgpack:"title"`
@@ -49,8 +42,7 @@ type InteractionDecisionEffect struct {
 }
 type InteractionResolveRequestBody struct {
 	InteractionMutationRequestBody
-	IssueChanges InteractionIssueChanges    `json:"issue_changes,omitempty" msgpack:"issue_changes,omitempty"`
-	Decision     *InteractionDecisionEffect `json:"decision,omitempty" msgpack:"decision,omitempty"`
+	Decision *InteractionDecisionEffect `json:"decision,omitempty" msgpack:"decision,omitempty"`
 }
 type InteractionResponseBody struct {
 	Request         domain.InteractionRequest `json:"request" msgpack:"request"`

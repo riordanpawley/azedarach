@@ -30,16 +30,19 @@ func TestInteractionRequestValidate(t *testing.T) {
 		{"missing decision packet", func(r *InteractionRequest) { r.DecisionPacket.Summary = "" }, true},
 		{"duplicate option key", func(r *InteractionRequest) { r.Options = append(r.Options, r.Options[0]) }, true},
 		{"malformed effect", func(r *InteractionRequest) {
-			r.Effects = []InteractionResolutionEffect{{Kind: "", Summary: "resume work"}}
+			empty := " "
+			r.Proposal = &InteractionAnswerAudit{Answer: interactionTestAnswer("squash", 1), Actor: "agent", CreatedAt: r.UpdatedAt}
+			r.Proposal.Answer.ApprovedIssueFieldEffects.Title = &empty
+			r.State, r.Revision = InteractionAnswerProposed, 2
 		}, true},
 		{"invalid revision", func(r *InteractionRequest) { r.Revision = 0 }, true},
 		{"proposal audit required", func(r *InteractionRequest) { r.State = InteractionAnswerProposed }, true},
 		{"final audit required", func(r *InteractionRequest) { r.State = InteractionResolved }, true},
 		{"final audit forbidden before resolution", func(r *InteractionRequest) {
-			r.FinalAnswer = &InteractionAnswerAudit{Answer: "squash", Actor: "owner", CreatedAt: r.UpdatedAt}
+			r.FinalAnswer = &InteractionAnswerAudit{Answer: interactionTestAnswer("squash", 1), Actor: "owner", CreatedAt: r.UpdatedAt}
 		}, true},
 		{"malformed historical proposal rejected", func(r *InteractionRequest) {
-			r.Proposal = &InteractionAnswerAudit{Answer: "", Actor: "agent", CreatedAt: r.UpdatedAt}
+			r.Proposal = &InteractionAnswerAudit{Answer: interactionTestAnswer("", 1), Actor: "agent", CreatedAt: r.UpdatedAt}
 		}, true},
 	}
 	for _, tt := range tests {
@@ -55,8 +58,8 @@ func TestInteractionRequestValidate(t *testing.T) {
 
 func TestInteractionRequestTransitions(t *testing.T) {
 	now := validInteractionRequest().UpdatedAt
-	proposal := &InteractionAnswerAudit{Answer: "squash", Actor: "agent", CreatedAt: now.Add(time.Minute)}
-	final := &InteractionAnswerAudit{Answer: "squash", Actor: "owner", CreatedAt: now.Add(2 * time.Minute)}
+	proposal := &InteractionAnswerAudit{Answer: interactionTestAnswer("squash", 1), Actor: "agent", CreatedAt: now.Add(time.Minute)}
+	final := &InteractionAnswerAudit{Answer: interactionTestAnswer("squash", 1), Actor: "owner", CreatedAt: now.Add(2 * time.Minute)}
 	tests := []struct {
 		name     string
 		from, to InteractionState
@@ -141,5 +144,13 @@ func TestProjectInteractionPredicates(t *testing.T) {
 	p.HasExecutableWork = true
 	if p.Quiescent() || p.Complete() {
 		t.Fatal("executable work prevents quiescence and completion")
+	}
+}
+
+func interactionTestAnswer(selected string, revision int64) InteractionAnswerPayload {
+	return InteractionAnswerPayload{
+		SelectedOption: selected, Rationale: "Because it is safest.",
+		Constraints: []string{"preserve history"}, SignificanceRecommendation: InteractionSignificanceMaterial,
+		Revision: revision,
 	}
 }
