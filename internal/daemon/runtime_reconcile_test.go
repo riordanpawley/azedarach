@@ -110,7 +110,7 @@ func startBlockingHeavySessionStart(t *testing.T, projectID, issueID string) *op
 		IssueID:      issueID,
 		Kind:         daemonhandlers.CommandSessionStart,
 		DedupeKey:    daemonhandlers.CommandSessionStart + ":" + issueID,
-		ResourceKeys: []string{"issue:" + projectID + ":" + issueID, heavySessionStartResourceKey(projectID)},
+		ResourceKeys: []string{"issue:" + projectID + ":" + issueID, "session:ch-" + issueID},
 	}, func(ctx context.Context) ([]byte, error) {
 		select {
 		case <-release:
