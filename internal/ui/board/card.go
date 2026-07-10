@@ -59,6 +59,11 @@ type CardState struct {
 	JumpLabel        string
 }
 
+type headerToken struct {
+	full    string
+	compact string
+}
+
 // renderCard renders a task card
 func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignals, childProgress *ChildProgress, phaseInfo *phases.TaskPhaseInfo, width int, s *styles.Styles) string {
 	if width < 1 {
@@ -142,26 +147,21 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 	if displaySession == nil && task.Session != nil {
 		hiddenSessionAge = renderSessionAge(task.Session, s)
 	}
-	sessionCompact := renderSessionStatusCompact(displaySession)
+	sessionCompact := renderSessionStatusCompact(displaySession, s)
 	visibleRuntimeSignals := runtimeSignalsForHeader(displaySession, runtimeSignals)
 	runtimeRow := renderRuntimeSignals(visibleRuntimeSignals, s)
 	runtimeCompact := renderRuntimeSignalsCompact(visibleRuntimeSignals, s)
 	typeBadge := renderTaskTypeBadge(task.Type, s)
 	headerTitle := strings.Join(headerParts, " ")
-	type headerToken struct {
-		full              string
-		compact           string
-		compactWhenNarrow bool
-	}
-	preferCompact := maxLineLen < 44
 	headerTokens := []headerToken{
 		{full: sessionRow, compact: sessionCompact},
 		{full: runtimeRow, compact: runtimeCompact},
 		{full: hiddenSessionAge, compact: hiddenSessionAge},
-		{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s), compactWhenNarrow: true},
+		{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s)},
 		{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
 		{full: typeBadge, compact: typeBadge},
 	}
+	preferCompact := !headerTokensFit(headerTitle, headerTokens, maxLineLen)
 	if preferCompact {
 		if hiddenSessionAge != "" {
 			headerTokens = []headerToken{
@@ -170,7 +170,7 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 				{full: hiddenSessionAge, compact: hiddenSessionAge},
 				{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
 				{full: typeBadge, compact: typeBadge},
-				{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s), compactWhenNarrow: true},
+				{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s)},
 			}
 		} else {
 			headerTokens = []headerToken{
@@ -178,26 +178,26 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 				{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
 				{full: typeBadge, compact: typeBadge},
 				{full: runtimeRow, compact: runtimeCompact},
-				{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s), compactWhenNarrow: true},
+				{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s)},
 			}
 		}
 	}
 	headerLines := []string{headerTitle}
-	cardHeight := CardContentHeight
-	if shouldExpandCardHeader(maxLineLen) {
-		headerLines = []string{headerTitle, ""}
-		cardHeight += narrowCardExtraLines
-	}
+	allowHeaderOverflow := shouldExpandCardHeader(maxLineLen)
 	for _, token := range headerTokens {
-		if token.compactWhenNarrow && preferCompact {
-			if appendHeaderToken(headerLines, maxLineLen, token.full, token.compact, true) {
-				continue
-			}
-		}
-		if appendHeaderToken(headerLines, maxLineLen, token.full, token.full, false) {
+		if preferCompact {
+			appendHeaderTokenOrOverflow(&headerLines, maxLineLen, token.full, token.compact, true, allowHeaderOverflow)
 			continue
 		}
-		appendHeaderToken(headerLines, maxLineLen, token.full, token.compact, preferCompact)
+		if appendHeaderTokenOrOverflow(&headerLines, maxLineLen, token.full, token.full, false, allowHeaderOverflow) {
+			continue
+		}
+		appendHeaderTokenOrOverflow(&headerLines, maxLineLen, token.full, token.compact, preferCompact, allowHeaderOverflow)
+	}
+
+	cardHeight := CardContentHeight
+	if allowHeaderOverflow {
+		cardHeight += narrowCardExtraLines
 	}
 
 	titleLines := renderTitleBodyLines(task.Title, maxLineLen, cardHeight-len(headerLines))
@@ -534,6 +534,36 @@ func appendHeaderToken(headerLines []string, maxLineLen int, full string, compac
 	return false
 }
 
+func headerTokensFit(headerTitle string, tokens []headerToken, maxLineLen int) bool {
+	line := headerTitle
+	for _, token := range tokens {
+		if token.full == "" {
+			continue
+		}
+		candidate := line
+		if strings.TrimSpace(candidate) != "" {
+			candidate += " "
+		}
+		candidate += token.full
+		if ansi.StringWidth(candidate) > maxLineLen {
+			return false
+		}
+		line = candidate
+	}
+	return true
+}
+
+func appendHeaderTokenOrOverflow(headerLines *[]string, maxLineLen int, full string, compact string, preferCompact bool, allowOverflow bool) bool {
+	if appendHeaderToken(*headerLines, maxLineLen, full, compact, preferCompact) {
+		return true
+	}
+	if !allowOverflow || len(*headerLines) >= 2 {
+		return false
+	}
+	*headerLines = append(*headerLines, "")
+	return appendHeaderToken(*headerLines, maxLineLen, full, compact, preferCompact)
+}
+
 func runtimeSignalsForHeader(session *domain.Session, signals *RuntimeSignals) *RuntimeSignals {
 	if signals == nil {
 		return nil
@@ -681,12 +711,19 @@ func sessionStateCardLabel(state domain.SessionState) string {
 	}
 }
 
-func renderSessionStatusCompact(session *domain.Session) string {
+func renderSessionStatusCompact(session *domain.Session, s *styles.Styles) string {
 	if session == nil {
 		return ""
 	}
 
-	return session.DisplayIcon()
+	value := session.DisplayIcon()
+	if session.StartedAt != nil {
+		value = fmt.Sprintf("%s %s", value, formatCompactDuration(time.Since(*session.StartedAt)))
+	}
+	if s == nil {
+		return value
+	}
+	return s.Session(session).Render(value)
 }
 
 func renderRuntimeSignals(signals *RuntimeSignals, s *styles.Styles) string {
