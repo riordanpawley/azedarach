@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -225,6 +226,68 @@ func TestRenderTerminalImagePreviewUsesHalfblockRenderer(t *testing.T) {
 	}
 	if output != "halfblock" {
 		t.Fatalf("output = %q, want halfblock renderer output", output)
+	}
+}
+
+func TestFitImageCellsAccountsForTerminalCellAspectRatio(t *testing.T) {
+	tests := []struct {
+		name       string
+		viewW      int
+		viewH      int
+		imageW     int
+		imageH     int
+		wantWidth  int
+		wantHeight int
+	}{
+		{name: "square image", viewW: 80, viewH: 24, imageW: 1000, imageH: 1000, wantWidth: 48, wantHeight: 24},
+		{name: "wide image", viewW: 80, viewH: 24, imageW: 1600, imageH: 900, wantWidth: 80, wantHeight: 22},
+		{name: "tall image", viewW: 80, viewH: 24, imageW: 900, imageH: 1600, wantWidth: 27, wantHeight: 24},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			width, height := fitImageCells(tt.viewW, tt.viewH, tt.imageW, tt.imageH)
+			if width != tt.wantWidth || height != tt.wantHeight {
+				t.Fatalf("fitImageCells() = %dx%d, want %dx%d", width, height, tt.wantWidth, tt.wantHeight)
+			}
+		})
+	}
+}
+
+func TestTerminalImageRenderersSerializeCapabilityDetection(t *testing.T) {
+	t.Setenv("TERMIMG_BYPASS_DETECTION", "halfblocks")
+	path := filepath.Join(t.TempDir(), "screen.png")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create png: %v", err)
+	}
+	if err := png.Encode(file, image.NewRGBA(image.Rect(0, 0, 4, 4))); err != nil {
+		_ = file.Close()
+		t.Fatalf("encode png: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close png: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err := renderHalfblockImagePreview(path, 20, 8)
+		errs <- err
+	}()
+	go func() {
+		defer wg.Done()
+		_, _, _, _, err := renderFullScreenImagePreviewWithTermimg(path, 80, 24)
+		errs <- err
+	}()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("render terminal image: %v", err)
+		}
 	}
 }
 

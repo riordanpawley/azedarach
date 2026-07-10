@@ -2,6 +2,8 @@ package overlay
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -435,6 +437,60 @@ func TestImagePreviewOverlay_RendersFullScreenImagePreview(t *testing.T) {
 	}
 	if !strings.Contains(ansi.Strip(view), "Esc/q close") || !strings.Contains(ansi.Strip(view), "o open") {
 		t.Fatalf("view missing full-screen actions: %q", view)
+	}
+}
+
+func TestBuildFullScreenImagePreviewFailureShowsExternalFallback(t *testing.T) {
+	restore := stubFullScreenImageRenderer(t, "", "Kitty", 32, 12, errors.New("render failed"))
+	defer restore()
+
+	preview := buildFullScreenImagePreview(attachment.Attachment{
+		ID:       "img-1",
+		Filename: "screen.png",
+		MimeType: "image/png",
+		Path:     filepath.Join(t.TempDir(), "screen.png"),
+	}, 90, 30)
+
+	guidance := strings.Join(preview.lines, "\n")
+	if !strings.Contains(guidance, "Press o to open externally") {
+		t.Fatalf("fallback guidance = %q, want external-open action", guidance)
+	}
+	if strings.Contains(guidance, "full preview") {
+		t.Fatalf("fallback guidance offered already-open full preview: %q", guidance)
+	}
+}
+
+func TestImagePreviewOverlay_IgnoresStaleFullScreenRender(t *testing.T) {
+	original := renderFullScreenImagePreview
+	renderFullScreenImagePreview = func(_ string, width, height int) (string, string, int, int, error) {
+		return fmt.Sprintf("render-%dx%d", width, height), "Kitty", width, height, nil
+	}
+	defer func() { renderFullScreenImagePreview = original }()
+
+	overlay := NewImagePreviewOverlay("test-issue", nil, 0)
+	overlay.images = []attachment.Attachment{{
+		ID:       "img-1",
+		Filename: "screen.png",
+		MimeType: "image/png",
+		Path:     filepath.Join(t.TempDir(), "screen.png"),
+	}}
+
+	overlay.ApplyWindowSize(tea.WindowSizeMsg{Width: 80, Height: 24})
+	staleCmd := overlay.loadCurrentFullImage()
+	overlay.ApplyWindowSize(tea.WindowSizeMsg{Width: 120, Height: 40})
+	currentCmd := overlay.loadCurrentFullImage()
+
+	model, _ := overlay.Update(currentCmd())
+	overlay = model.(*ImagePreviewOverlay)
+	currentOutput := overlay.fullImage.output
+	model, _ = overlay.Update(staleCmd())
+	overlay = model.(*ImagePreviewOverlay)
+
+	if overlay.fullImage.output != currentOutput {
+		t.Fatalf("stale render replaced current output: got %q, want %q", overlay.fullImage.output, currentOutput)
+	}
+	if currentOutput != "render-120x40" {
+		t.Fatalf("current render output = %q, want dimensions from latest request", currentOutput)
 	}
 }
 

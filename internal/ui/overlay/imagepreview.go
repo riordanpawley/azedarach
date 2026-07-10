@@ -32,6 +32,7 @@ type ImagePreviewOverlay struct {
 	markdownRendered   string
 	markdownScroll     int
 	fullImage          fullScreenImagePreviewState
+	fullImageRequest   uint64
 }
 
 // ImageDeletedMsg is sent when an image is deleted
@@ -113,6 +114,9 @@ func (i *ImagePreviewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return i, nil
 
 	case fullScreenImagePreviewLoadedMsg:
+		if msg.requestID != i.fullImageRequest {
+			return i, nil
+		}
 		if msg.preview.attachmentID != i.currentAttachmentID() {
 			return i, nil
 		}
@@ -311,11 +315,11 @@ func (i *ImagePreviewOverlay) renderFullScreenImageContent() string {
 
 	position := fmt.Sprintf("Attachment %d/%d", i.currentIndex+1, len(i.images))
 	title := fmt.Sprintf("%s  %s  %s", position, file.Filename, formatFileSize(file.Size))
-	b.WriteString(headerStyle.Render(truncate(title, max(12, width-2))))
+	b.WriteString(headerStyle.Render(truncateToCellWidth(title, max(12, width-2))))
 	b.WriteString("\n")
 
 	if i.error != "" {
-		b.WriteString(errorStyle.Render(truncate("Error: "+i.error, max(12, width-2))))
+		b.WriteString(errorStyle.Render(truncateToCellWidth("Error: "+i.error, max(12, width-2))))
 		b.WriteString("\n")
 	}
 
@@ -339,7 +343,7 @@ func (i *ImagePreviewOverlay) renderFullScreenImageContent() string {
 			lines = append([]string{"Terminal image render unavailable: " + i.fullImage.err}, lines...)
 		}
 		for _, line := range lines {
-			b.WriteString(footerStyle.Render(truncate(line, max(12, width-2))))
+			b.WriteString(footerStyle.Render(truncateToCellWidth(line, max(12, width-2))))
 			b.WriteString("\n")
 		}
 	}
@@ -349,9 +353,9 @@ func (i *ImagePreviewOverlay) renderFullScreenImageContent() string {
 		protocol = "auto"
 	}
 	meta := fmt.Sprintf("Protocol: %s  Size: %dx%d cells", protocol, i.fullImage.width, i.fullImage.height)
-	b.WriteString(footerStyle.Render(truncate(meta, max(12, width-2))))
+	b.WriteString(footerStyle.Render(truncateToCellWidth(meta, max(12, width-2))))
 	b.WriteString("\n")
-	b.WriteString(footerStyle.Render(truncate(i.fullScreenActionsText(), max(12, width-2))))
+	b.WriteString(footerStyle.Render(truncateToCellWidth(i.fullScreenActionsText(), max(12, width-2))))
 	return strings.TrimRight(b.String(), "\n")
 }
 
@@ -603,7 +607,8 @@ type markdownPreviewLoadedMsg struct {
 }
 
 type fullScreenImagePreviewLoadedMsg struct {
-	preview fullScreenImagePreviewState
+	requestID uint64
+	preview   fullScreenImagePreviewState
 }
 
 type terminalImagesClearedMsg struct{}
@@ -647,15 +652,18 @@ func (i *ImagePreviewOverlay) loadCurrentMarkdown() tea.Cmd {
 }
 
 func (i *ImagePreviewOverlay) loadCurrentFullImage() tea.Cmd {
+	i.fullImageRequest++
 	if !i.currentIsFullScreenImage() {
 		i.fullImage = fullScreenImagePreviewState{}
 		return nil
 	}
 	file := i.images[i.currentIndex]
 	width, height := i.fullScreenSize()
+	requestID := i.fullImageRequest
 	return func() tea.Msg {
 		return fullScreenImagePreviewLoadedMsg{
-			preview: buildFullScreenImagePreview(file, width, height),
+			requestID: requestID,
+			preview:   buildFullScreenImagePreview(file, width, height),
 		}
 	}
 }

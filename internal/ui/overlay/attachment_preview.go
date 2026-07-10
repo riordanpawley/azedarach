@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -145,6 +146,7 @@ var (
 	renderTerminalImagePreview   = renderTerminalImagePreviewWithTermimg
 	renderHalfblockTerminalImage = renderHalfblockImagePreview
 	renderFullScreenImagePreview = renderFullScreenImagePreviewWithTermimg
+	terminalImageRenderMu        sync.Mutex
 )
 
 func renderTerminalImagePreviewWithTermimg(path string, width, height int) (string, error) {
@@ -155,6 +157,9 @@ func renderTerminalImagePreviewWithTermimg(path string, width, height int) (stri
 }
 
 func renderHalfblockImagePreview(path string, width, height int) (string, error) {
+	terminalImageRenderMu.Lock()
+	defer terminalImageRenderMu.Unlock()
+
 	img, err := termimg.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("load terminal image: %w", err)
@@ -176,7 +181,7 @@ func renderHalfblockImagePreview(path string, width, height int) (string, error)
 func buildFullScreenImagePreview(att attachment.Attachment, width, height int) fullScreenImagePreviewState {
 	state := fullScreenImagePreviewState{
 		attachmentID: att.ID,
-		lines:        imagePreviewLines(att, nil),
+		lines:        fullScreenImagePreviewLines(att),
 	}
 	if !isPreviewableImageAttachment(att) {
 		state.err = "attachment is not an image"
@@ -198,6 +203,9 @@ func renderFullScreenImagePreviewWithTermimg(path string, width, height int) (st
 	if strings.TrimSpace(path) == "" {
 		return "", "", 0, 0, fmt.Errorf("attachment has no local path")
 	}
+	terminalImageRenderMu.Lock()
+	defer terminalImageRenderMu.Unlock()
+
 	img, err := termimg.Open(path)
 	if err != nil {
 		return "", "", 0, 0, fmt.Errorf("load terminal image: %w", err)
@@ -207,7 +215,7 @@ func renderFullScreenImagePreviewWithTermimg(path string, width, height int) (st
 	protocol := termimg.DetectProtocol()
 	output, err := termimg.NewImageWidget(img).
 		SetSize(targetW, targetH).
-		SetProtocol(termimg.Auto).
+		SetProtocol(protocol).
 		Render()
 	if err != nil {
 		return "", protocol.String(), targetW, targetH, fmt.Errorf("render terminal image: %w", err)
@@ -226,13 +234,15 @@ func fitImageCells(viewW, viewH, imgW, imgH int) (int, int) {
 	}
 
 	widthScale := float64(viewW) / float64(imgW)
-	heightScale := float64(viewH) / float64(imgH)
+	// Terminal cells are typically about twice as tall as they are wide. Fit in
+	// pixel-equivalent space so SetSize does not visibly stretch the image.
+	heightScale := (float64(viewH) * 2) / float64(imgH)
 	scale := widthScale
 	if heightScale < scale {
 		scale = heightScale
 	}
 	targetW := int(float64(imgW) * scale)
-	targetH := int(float64(imgH) * scale)
+	targetH := int((float64(imgH) * scale) / 2)
 	return max(1, min(viewW, targetW)), max(1, min(viewH, targetH))
 }
 
@@ -241,6 +251,18 @@ func imagePreviewLines(att attachment.Attachment, renderErr error) []string {
 	if renderErr != nil {
 		lines = append(lines, "Inline image rendering is not available in this terminal.")
 	}
+	lines = append(lines, imageDimensionLines(att)...)
+	lines = append(lines, "Press Enter/v for full preview or o to open externally.")
+	return lines
+}
+
+func fullScreenImagePreviewLines(att attachment.Attachment) []string {
+	lines := imageDimensionLines(att)
+	return append(lines, "Press o to open externally.")
+}
+
+func imageDimensionLines(att attachment.Attachment) []string {
+	lines := make([]string, 0, 1)
 	if width, height, format := imageDimensions(att.Path); width > 0 && height > 0 {
 		if format != "" {
 			lines = append(lines, fmt.Sprintf("%dx%d %s image", width, height, strings.ToUpper(format)))
@@ -248,7 +270,6 @@ func imagePreviewLines(att attachment.Attachment, renderErr error) []string {
 			lines = append(lines, fmt.Sprintf("%dx%d image", width, height))
 		}
 	}
-	lines = append(lines, "Press Enter/v for full preview or o to open externally.")
 	return lines
 }
 
