@@ -70,17 +70,17 @@ type CreateTaskOverlay struct {
 	implOptions       []string
 	implCombos        [][]string
 	implComboIndex    int
-	taskType        domain.TaskType
-	priority        domain.Priority
-	status          domain.Status
-	lifecycle       domain.IssueWorkflow
-	assignee        string
-	labels          []string
-	impls           []string
-	design          string
-	notes           string
-	acceptance      string
-	estimate        *int
+	taskType          domain.TaskType
+	priority          domain.Priority
+	status            domain.Status
+	lifecycle         domain.IssueWorkflow
+	assignee          string
+	labels            []string
+	impls             []string
+	design            string
+	notes             string
+	acceptance        string
+	estimate          *int
 	parentID          *string
 	focusIndex        int
 	styles            *Styles
@@ -666,7 +666,7 @@ func isPasteAttachmentKey(msg tea.KeyMsg) bool {
 
 // View renders the form
 func (c *CreateTaskOverlay) View() string {
-	width, height := c.ClampResponsive(createTaskOverlayWidth, createTaskOverlayHeight)
+	width, height := c.Size()
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            c.styles,
 		width:             width,
@@ -797,14 +797,20 @@ func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
 		titleWidth = max(8, width-4)
 	}
 	descriptionWidth := max(10, width-4)
-	descriptionHeight := max(4, height-16)
-	if stacked {
-		descriptionHeight = max(4, height-20)
+	attachmentHeight := 0
+	if strings.TrimSpace(c.id) != "" || c.attachmentSvc != nil {
+		attachmentHeight = 3
+		if len(c.attachments) > 0 {
+			attachmentHeight = 9
+		}
 	}
-	acceptanceHeight := max(3, height-20)
+	fixedHeight := 12
 	if stacked {
-		acceptanceHeight = max(3, height-24)
+		fixedHeight++
 	}
+	fieldHeight := max(7, height-fixedHeight-attachmentHeight)
+	acceptanceHeight := max(3, min(5, fieldHeight/3))
+	descriptionHeight := max(4, fieldHeight-acceptanceHeight)
 	c.title.Width = titleWidth
 	c.description.SetWidth(descriptionWidth)
 	c.description.SetHeight(descriptionHeight)
@@ -897,7 +903,7 @@ func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
 			b.WriteString(labelStyle.Render("Attachments:"))
 		}
 		b.WriteString("\n")
-		b.WriteString(c.renderAttachmentList())
+		b.WriteString(c.renderAttachmentListWithin(attachmentHeight))
 		b.WriteString("\n\n")
 	}
 	if !stacked {
@@ -921,7 +927,7 @@ func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
 		b.WriteString(errorStyle.Render("Editor error: " + c.editorError))
 	}
 
-	return b.String()
+	return cropFormContent(b.String(), height, c.focusIndex, c.submitLabel())
 }
 
 func (c *CreateTaskOverlay) isEditMode() bool {
@@ -1005,6 +1011,10 @@ func (c *CreateTaskOverlay) renderImplementationSelector() string {
 }
 
 func (c *CreateTaskOverlay) renderAttachmentList() string {
+	return c.renderAttachmentListWithin(0)
+}
+
+func (c *CreateTaskOverlay) renderAttachmentListWithin(maxLines int) string {
 	if c.attachmentSvc == nil {
 		return c.styles.Footer.Render("Attachment service unavailable.")
 	}
@@ -1023,30 +1033,83 @@ func (c *CreateTaskOverlay) renderAttachmentList() string {
 		}
 		return strings.Join(hints, "\n")
 	}
-	lines := make([]string, 0, len(c.attachments)+4)
+	lines := make([]string, 0, len(c.attachments)+8)
 	lines = append(lines, c.styles.Footer.Render(fmt.Sprintf("%d attachment(s)", len(c.attachments))))
-	for idx, file := range c.attachments {
+	entryStart, entryEnd := 0, len(c.attachments)
+	previewReserve := 0
+	if maxLines > 0 {
+		previewReserve = min(4, max(0, maxLines-3))
+		entryBudget := max(1, maxLines-2-previewReserve)
+		if entryEnd-entryStart > entryBudget {
+			entryStart = max(0, c.attachmentIndex-entryBudget+1)
+			entryEnd = min(len(c.attachments), entryStart+entryBudget)
+		}
+	}
+	for idx := entryStart; idx < entryEnd; idx++ {
+		file := c.attachments[idx]
 		indicator := "  "
 		style := c.styles.MenuItem
 		if idx == c.attachmentIndex {
 			indicator = "▶ "
 			style = c.styles.MenuItemActive
 		}
-		typeStr := strings.TrimPrefix(file.MimeType, "image/")
-		if strings.TrimSpace(typeStr) == "" || typeStr == file.MimeType {
-			typeStr = "img"
-		}
+		typeStr := attachmentTypeLabel(file)
 		entry := fmt.Sprintf("%s%-30s %8s  %s", indicator, truncate(file.Filename, 30), formatFileSize(file.Size), typeStr)
 		lines = append(lines, style.Render(entry))
 	}
 	lines = append(lines, c.styles.Footer.Render("Ctrl+P paste clipboard  j/k navigate  d/x delete"))
-	if c.attachmentIndex >= 0 && c.attachmentIndex < len(c.attachments) {
-		lines = append(lines, c.renderSelectedAttachmentPreview())
-	}
 	if c.attachmentError != "" {
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8")).Render("Error: "+c.attachmentError))
 	}
+	if c.attachmentIndex >= 0 && c.attachmentIndex < len(c.attachments) {
+		preview := c.renderSelectedAttachmentPreview()
+		if maxLines > 0 {
+			remaining := max(0, maxLines-len(lines))
+			preview = firstRenderedLines(preview, remaining)
+		}
+		if preview != "" {
+			lines = append(lines, preview)
+		}
+	}
+	result := strings.Join(lines, "\n")
+	if maxLines > 0 {
+		return firstRenderedLines(result, maxLines)
+	}
+	return result
+}
+
+func firstRenderedLines(view string, limit int) string {
+	if limit <= 0 || strings.TrimSpace(view) == "" {
+		return ""
+	}
+	lines := strings.Split(view, "\n")
+	if len(lines) > limit {
+		lines = lines[:limit]
+	}
 	return strings.Join(lines, "\n")
+}
+
+func cropFormContent(view string, height, focus int, submitLabel string) string {
+	if height <= 0 {
+		return view
+	}
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) <= height {
+		return view
+	}
+
+	anchors := []string{"Title:", "Description:", "Type:", "Priority:", "Impls:", "Acceptance Criteria:", "Attachments:", submitLabel}
+	anchor := 0
+	if focus >= 0 && focus < len(anchors) {
+		for idx, line := range lines {
+			if strings.Contains(line, anchors[focus]) {
+				anchor = idx
+				break
+			}
+		}
+	}
+	start := max(0, min(anchor-2, len(lines)-height))
+	return strings.Join(lines[start:start+height], "\n")
 }
 
 func (c *CreateTaskOverlay) renderSelectedAttachmentPreview() string {

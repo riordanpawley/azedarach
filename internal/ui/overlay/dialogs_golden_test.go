@@ -38,6 +38,7 @@ func TestDialogs_View_Golden(t *testing.T) {
 		{name: "operation_queue_default", view: goldenOperationQueueView},
 		{name: "help_default", view: goldenHelpView},
 		{name: "spec_workspace_default", view: goldenSpecWorkspaceView},
+		{name: "create_task_attachments", view: goldenCreateTaskAttachmentsView},
 		{name: "imageattach_list", view: goldenImageAttachListView},
 		{name: "imageattach_preview", view: goldenImageAttachPreviewView},
 		{name: "imagepreview_default", view: goldenImagePreviewView},
@@ -81,6 +82,7 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 		{name: "operation_queue_small", view: goldenOperationQueueSmallView},
 		{name: "help_small", view: goldenHelpSmallView},
 		{name: "spec_workspace_small", view: goldenSpecWorkspaceSmallView},
+		{name: "create_task_attachments_small", view: goldenCreateTaskAttachmentsSmallView},
 		{name: "orchestration_small", view: goldenOrchestrationSmallView},
 	}
 
@@ -416,6 +418,37 @@ func goldenSpecWorkspaceSmallView(t *testing.T) string {
 	overlay := NewSpecWorkspaceOverlay("azedarach")
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	return model.(*SpecWorkspaceOverlay).View()
+}
+
+func goldenCreateTaskAttachmentsView(t *testing.T) string {
+	t.Helper()
+	overlay := NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, nil, &mockClipboardAttachService{})
+	overlay.attachments = []attachment.Attachment{{
+		ID: "a1", IssueID: "draft-1", Filename: "task-context.md", MimeType: "text/markdown", Size: 1536,
+	}}
+	overlay.attachmentPreview = attachmentPreviewState{
+		attachmentID: "a1",
+		title:        "Markdown Preview",
+		lines:        []string{"## Context", "Keep attachment controls visible."},
+	}
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	return model.(*CreateTaskOverlay).View()
+}
+
+func goldenCreateTaskAttachmentsSmallView(t *testing.T) string {
+	t.Helper()
+	overlay := NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, nil, &mockClipboardAttachService{})
+	overlay.attachments = []attachment.Attachment{{
+		ID: "a1", IssueID: "draft-1", Filename: "task-context.md", MimeType: "text/markdown", Size: 1536,
+	}}
+	overlay.attachmentPreview = attachmentPreviewState{
+		attachmentID: "a1",
+		title:        "Markdown Preview",
+		lines:        []string{"## Context", "Keep attachment controls visible."},
+	}
+	overlay.focusIndex = focusAttachments
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	return model.(*CreateTaskOverlay).View()
 }
 
 func goldenImageAttachListView(t *testing.T) string {
