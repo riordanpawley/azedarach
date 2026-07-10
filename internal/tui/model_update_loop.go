@@ -163,6 +163,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.overlayStack.Pop()
 			return m, m.gitSyncService.Pull()
 		}
+		if msg.Key == "git_pane_refresh" {
+			return m, m.gitPaneStatusCmd(true)
+		}
+		if msg.Key == "git_pane_pull" {
+			return m, m.pullRootBaseBranchCmd()
+		}
+		if msg.Key == "git_pane_push" {
+			return m, m.pushRootBaseBranchCmd()
+		}
 		if msg.Key == "merge_attach" {
 			m.overlayStack.Pop()
 			issueID := msg.Value.(string)
@@ -1061,7 +1070,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message: formatPendingOperationMessage("Base pull", "", msg.operationID, msg.state),
 				Expires: time.Now().Add(5 * time.Second),
 			})
-			return m, m.loadOperationQueueCmd()
+			return m, tea.Batch(m.loadOperationQueueCmd(), m.gitPaneStatusCmd(false))
 		}
 		if msg.err != nil {
 			m.addToast(Toast{
@@ -1069,7 +1078,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message: fmt.Sprintf("Base pull failed: %v", msg.err),
 				Expires: time.Now().Add(6 * time.Second),
 			})
-			return m, nil
+			return m, m.gitPaneStatusCmd(false)
 		}
 		branch := strings.TrimSpace(msg.baseBranch)
 		if branch == "" {
@@ -1081,7 +1090,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		m.boardRefreshing = true
-		return m, tea.Batch(m.scheduleIssuesRefreshAfterRuntimeReconcileCmd(), m.gitSyncService.FetchAndCheck())
+		return m, tea.Batch(m.scheduleIssuesRefreshAfterRuntimeReconcileCmd(), m.gitSyncService.FetchAndCheck(), m.gitPaneStatusCmd(true))
+
+	case gitPaneStatusMsg:
+		if pane, ok := m.overlayStack.Current().(*overlay.GitPaneOverlay); ok {
+			pane.SetStatus(msg.status, msg.err)
+		}
+		return m, nil
+
+	case gitPanePushResultMsg:
+		if msg.operationID != "" && !operationStateTerminal(msg.state) {
+			m.addToast(Toast{Level: ToastInfo, Message: formatPendingOperationMessage("Git push", "", msg.operationID, msg.state), Expires: time.Now().Add(5 * time.Second)})
+			return m, tea.Batch(m.loadOperationQueueCmd(), m.gitPaneStatusCmd(false))
+		}
+		if msg.err != nil {
+			m.addToast(Toast{Level: ToastError, Message: fmt.Sprintf("Push failed: %v", msg.err), Expires: time.Now().Add(6 * time.Second)})
+			return m, m.gitPaneStatusCmd(true)
+		}
+		m.addToast(Toast{Level: ToastSuccess, Message: fmt.Sprintf("Pushed %s", msg.branch), Expires: time.Now().Add(3 * time.Second)})
+		return m, m.gitPaneStatusCmd(true)
 
 	case createPRResultMsg:
 		if msg.err != nil {

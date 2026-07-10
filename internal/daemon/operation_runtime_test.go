@@ -24,6 +24,7 @@ func (runtimeGitService) Fetch(context.Context, string, string, string) error { 
 func (runtimeGitService) PullBase(context.Context, string, string, string, string) error {
 	return nil
 }
+func (runtimeGitService) Push(context.Context, string, string, string, string) error { return nil }
 func (runtimeGitService) Merge(context.Context, string, string, string) (*git.MergeResult, error) {
 	return &git.MergeResult{Success: true}, nil
 }
@@ -1107,6 +1108,17 @@ func TestBuildSubmitRequestRoutesGitPullBaseByWorktreeAndBase(t *testing.T) {
 	}
 	if len(req.ResourceKeys) != 1 || req.ResourceKeys[0] != "worktree:/tmp/az-1" {
 		t.Fatalf("resource keys = %v, want worktree routing key", req.ResourceKeys)
+	}
+}
+
+func TestBuildSubmitRequestRoutesGitPushByWorktreeAndBranch(t *testing.T) {
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), nextRevision: sequentialRevision(), gitHandler: daemonhandlers.NewGitHandler(runtimeGitService{})})
+	req := runtime.buildSubmitRequestForTest(t, daemonhandlers.CommandGitPush, "proj-1", mustJSON(t, map[string]string{"worktree": "/tmp/az-1", "branch": "main"}))
+	if req.DedupeKey != "git.push:/tmp/az-1:origin:main" {
+		t.Fatalf("dedupe key = %q", req.DedupeKey)
+	}
+	if len(req.ResourceKeys) != 1 || req.ResourceKeys[0] != "worktree:/tmp/az-1" {
+		t.Fatalf("resource keys = %v", req.ResourceKeys)
 	}
 }
 

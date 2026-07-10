@@ -865,6 +865,10 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.beginMutationFeedback(fmt.Sprintf("Pulling %s in project root", baseBranch))
 		return m, m.pullRootBaseBranchCmd()
 
+	case keybinds.ActionOpenGitPane:
+		pane := overlay.NewGitPaneOverlay(m.resolveBaseBranch())
+		return m, tea.Batch(m.openOverlay(pane), m.gitPaneStatusCmd(true))
+
 	case keybinds.ActionToggleView: // Toggle view mode
 		switch m.viewMode {
 		case ViewModeBoard:
@@ -4379,6 +4383,16 @@ type pullBaseResultMsg struct {
 	err         error
 }
 
+type gitPaneStatusMsg struct {
+	status daemonclient.GitStatus
+	err    error
+}
+type gitPanePushResultMsg struct {
+	branch, operationID string
+	state               protocol.OperationState
+	err                 error
+}
+
 type createPRResultMsg struct {
 	issueID string
 	cmd     string
@@ -6885,6 +6899,51 @@ func (m Model) pullRootBaseBranchCmd() tea.Cmd {
 			worktree = strings.TrimSpace(resp.Worktree)
 		}
 		return pullBaseResultMsg{worktree: worktree, remote: remote, baseBranch: baseBranch}
+	}
+}
+
+func (m Model) gitPaneStatusCmd(refresh bool) tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return gitPaneStatusMsg{err: fmt.Errorf("daemon client unavailable")}
+		}
+		worktree := strings.TrimSpace(m.repoDir)
+		if worktree == "" {
+			return gitPaneStatusMsg{err: fmt.Errorf("project root unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
+		var status daemonclient.GitStatus
+		var err error
+		if refresh {
+			status, err = m.daemonClient.GitStatusRefresh(ctx, worktree)
+		} else {
+			status, err = m.daemonClient.GitStatus(ctx, worktree)
+		}
+		return gitPaneStatusMsg{status: status, err: err}
+	}
+}
+
+func (m Model) pushRootBaseBranchCmd() tea.Cmd {
+	return func() tea.Msg {
+		branch := strings.TrimSpace(m.resolveBaseBranch())
+		if branch == "" {
+			return gitPanePushResultMsg{err: fmt.Errorf("base branch unavailable")}
+		}
+		worktree := strings.TrimSpace(m.repoDir)
+		if worktree == "" {
+			return gitPanePushResultMsg{branch: branch, err: fmt.Errorf("project root unavailable")}
+		}
+		if m.daemonClient == nil {
+			return gitPanePushResultMsg{branch: branch, err: fmt.Errorf("daemon client unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
+		_, err := m.daemonClient.GitPush(ctx, worktree, "origin", branch)
+		if pending, ok := pendingOperationDetails(err); ok {
+			return gitPanePushResultMsg{branch: branch, operationID: pending.OperationID, state: pending.State}
+		}
+		return gitPanePushResultMsg{branch: branch, err: err}
 	}
 }
 

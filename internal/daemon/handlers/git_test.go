@@ -14,6 +14,7 @@ import (
 type fakeGitService struct {
 	fetchFn             func(context.Context, string, string, string) error
 	pullBaseFn          func(context.Context, string, string, string, string) error
+	pushFn              func(context.Context, string, string, string, string) error
 	mergeFn             func(context.Context, string, string, string) (*git.MergeResult, error)
 	checkoutFn          func(context.Context, string, string, string) error
 	abortMergeFn        func(context.Context, string, string) error
@@ -49,6 +50,28 @@ func (f *fakeGitService) PullBase(ctx context.Context, projectID, worktree, remo
 		return f.pullBaseFn(ctx, projectID, worktree, remote, baseBranch)
 	}
 	return nil
+}
+
+func (f *fakeGitService) Push(ctx context.Context, projectID, worktree, remote, branch string) error {
+	if f.pushFn != nil {
+		return f.pushFn(ctx, projectID, worktree, remote, branch)
+	}
+	return nil
+}
+
+func TestGitPushRoutesTypedArguments(t *testing.T) {
+	called := false
+	h := NewGitHandler(&fakeGitService{pushFn: func(_ context.Context, projectID, worktree, remote, branch string) error {
+		called = true
+		if projectID != "project-1" || worktree != "/tmp/root" || remote != "origin" || branch != "main" {
+			t.Fatalf("push args = %q %q %q %q", projectID, worktree, remote, branch)
+		}
+		return nil
+	}})
+	resp := h.HandleDirect(context.Background(), gitRequest(t, CommandGitPush, gitCommandBody{ProjectID: "project-1", Worktree: "/tmp/root", Branch: "main"}))
+	if !resp.OK || resp.Error != nil || !called {
+		t.Fatalf("response = %#v, called = %v", resp, called)
+	}
 }
 
 func (f *fakeGitService) Merge(ctx context.Context, projectID, worktree, branch string) (*git.MergeResult, error) {

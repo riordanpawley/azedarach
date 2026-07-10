@@ -744,7 +744,7 @@ func (r *operationRuntime) deriveOperationRouting(kind, projectID string, payloa
 		}
 		dedupeKey = kind + ":" + issueID
 		return issueID, resourceKeys, dedupeKey, nil
-	case daemonhandlers.CommandGitFetch, daemonhandlers.CommandGitPullBase:
+	case daemonhandlers.CommandGitFetch, daemonhandlers.CommandGitPullBase, daemonhandlers.CommandGitPush:
 		var body struct {
 			Worktree   string `json:"worktree"`
 			Remote     string `json:"remote"`
@@ -770,6 +770,16 @@ func (r *operationRuntime) deriveOperationRouting(kind, projectID string, payloa
 		resourceKeys = []string{"worktree:" + body.Worktree}
 		if kind == daemonhandlers.CommandGitPullBase {
 			dedupeKey = kind + ":" + body.Worktree + ":" + body.Remote + ":" + body.BaseBranch
+		} else if kind == daemonhandlers.CommandGitPush {
+			var pushBody struct {
+				Branch string `json:"branch"`
+			}
+			_ = json.Unmarshal(payload, &pushBody)
+			pushBody.Branch = strings.TrimSpace(pushBody.Branch)
+			if pushBody.Branch == "" {
+				return "", nil, "", errors.New("missing required fields: worktree/branch")
+			}
+			dedupeKey = kind + ":" + body.Worktree + ":" + body.Remote + ":" + pushBody.Branch
 		} else {
 			dedupeKey = kind + ":" + body.Worktree + ":" + body.Remote
 		}
@@ -907,6 +917,7 @@ func (r *operationRuntime) directRunnerForKind(kind string) (operationDirectRunn
 		return r.sessionResolveConflict, nil
 	case daemonhandlers.CommandGitFetch,
 		daemonhandlers.CommandGitPullBase,
+		daemonhandlers.CommandGitPush,
 		daemonhandlers.CommandGitMerge,
 		daemonhandlers.CommandGitCheckout,
 		daemonhandlers.CommandGitAbortMerge:
@@ -1465,6 +1476,8 @@ func operationDisplayName(kind string) string {
 		return "Git fetch"
 	case daemonhandlers.CommandGitPullBase:
 		return "Git pull base"
+	case daemonhandlers.CommandGitPush:
+		return "Git push"
 	case daemonhandlers.CommandGitMerge:
 		return "Git merge"
 	case daemonhandlers.CommandGitCheckout:

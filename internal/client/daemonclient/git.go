@@ -11,6 +11,7 @@ import (
 const (
 	CommandGitFetch             = "git.fetch"
 	CommandGitPullBase          = "git.pull_base"
+	CommandGitPush              = "git.push"
 	CommandGitMerge             = "git.merge"
 	CommandGitCheckout          = "git.checkout"
 	CommandGitAbortMerge        = "git.abort_merge"
@@ -165,6 +166,19 @@ func (c *Client) GitPullBase(ctx context.Context, worktree, remote, baseBranch s
 	}
 	var resp GitCommandResponse
 	if err := decodeLongRunningJSON(CommandGitPullBase, raw.Body, &resp); err != nil {
+		return GitCommandResponse{}, err
+	}
+	return resp, nil
+}
+
+// GitPush asks the daemon to push a branch from the requested worktree.
+func (c *Client) GitPush(ctx context.Context, worktree, remote, branch string) (GitCommandResponse, error) {
+	raw, err := c.commandJSONResponse(ctx, CommandGitPush, GitCommandRequest{Worktree: worktree, Remote: remote, Branch: branch})
+	if err != nil {
+		return GitCommandResponse{}, err
+	}
+	var resp GitCommandResponse
+	if err := decodeLongRunningJSON(CommandGitPush, raw.Body, &resp); err != nil {
 		return GitCommandResponse{}, err
 	}
 	return resp, nil
