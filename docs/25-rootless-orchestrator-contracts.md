@@ -20,6 +20,12 @@ Wake events are new open work, review requests, accepted human answers, and
 recovery events. They are idempotent and coalesced by
 `orchestration.wakeDebounce`.
 
+The exact-scope lease persists `complete_since`, `last_wake_at`, and the last
+wake reason. Completion changes clear and restart `complete_since`; daemon
+restart therefore cannot shorten or extend grace. Wake updates are serialized
+under the SQLite project write lock, so duplicate events from multiple daemons
+are suppressed by the durable debounce timestamp.
+
 `orchestration.scope_identity` uses refreshed durable projection state.
 `orchestration.scope_singleton` is hybrid: refresh the durable exact-scope
 lease, then compare its session identity with live tmux runtime.

@@ -63,8 +63,10 @@ var orderedMigrations = []migration{
 	{id: "0031_board_views", path: "migrations/0031_board_views.sql"},
 	{id: "0032_coordination_leases", path: "migrations/0032_coordination_leases.sql"},
 	{id: "0033_orchestrator_scope_leases", path: "migrations/0033_orchestrator_scope_leases.sql"},
-	{id: "0034_interaction_requests", path: "migrations/0034_interaction_requests.sql"},
-	{id: "0035_advisor_sessions", path: "migrations/0035_advisor_sessions.sql"},
+	{id: "0034_orchestration_start_attempts", path: "migrations/0034_orchestration_start_attempts.sql"},
+	{id: "0034_orchestrator_lifecycle_clock", apply: applyOrchestratorLifecycleClockMigration},
+	{id: "0035_interaction_requests", path: "migrations/0035_interaction_requests.sql"},
+	{id: "0036_advisor_sessions", path: "migrations/0036_advisor_sessions.sql"},
 }
 
 const (
@@ -488,6 +490,38 @@ func (c *Client) applyMigration(ctx context.Context, db *sql.DB, id, sqlText str
 		}
 	}
 
+	return nil
+}
+
+func applyOrchestratorLifecycleClockMigration(ctx context.Context, db *sql.DB, id string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	columns := []struct{ name, definition string }{
+		{"complete_since", "TEXT"},
+		{"last_wake_at", "TEXT"},
+		{"last_wake_reason", "TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, column := range columns {
+		exists, err := txColumnExists(ctx, tx, "daemon_orchestrator_scope_leases", column.name)
+		if err != nil {
+			return fmt.Errorf("inspect migration %s column %s: %w", id, column.name, err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE daemon_orchestrator_scope_leases ADD COLUMN "+column.name+" "+column.definition); err != nil {
+			return fmt.Errorf("apply migration %s column %s: %w", id, column.name, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
 	return nil
 }
 

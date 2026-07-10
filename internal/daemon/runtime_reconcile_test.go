@@ -23,6 +23,7 @@ import (
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
@@ -33,6 +34,7 @@ type runtimeReconcileRecorder struct {
 	projectIDs    []string
 	issueIDs      [][]string
 	started       chan struct{}
+	finished      chan struct{}
 	waitForCancel bool
 	result        protocol.RuntimeReconcileResponseBody
 	err           error
@@ -43,6 +45,7 @@ func (r *runtimeReconcileRecorder) Reconcile(ctx context.Context, projectID stri
 	r.calls++
 	r.projectIDs = append(r.projectIDs, projectID)
 	started := r.started
+	finished := r.finished
 	waitForCancel := r.waitForCancel
 	result := r.result
 	err := r.err
@@ -59,6 +62,12 @@ func (r *runtimeReconcileRecorder) Reconcile(ctx context.Context, projectID stri
 		<-ctx.Done()
 		if err == nil {
 			err = ctx.Err()
+		}
+	}
+	if finished != nil {
+		select {
+		case finished <- struct{}{}:
+		default:
 		}
 	}
 
@@ -332,6 +341,7 @@ func (s *runtimeReconcileTestServer) Serve(ctx context.Context) error {
 		case <-ctx.Done():
 		}
 	}
+	<-ctx.Done()
 	return nil
 }
 
@@ -351,6 +361,12 @@ func (emptyTmuxRunner) Run(_ context.Context, args ...string) (string, error) {
 	if len(args) > 0 && (args[0] == "list-sessions" || args[0] == "list-panes") {
 		return "", errors.New("no tmux sessions")
 	}
+	return "", nil
+}
+
+type emptyGitRunner struct{}
+
+func (emptyGitRunner) Run(context.Context, ...string) (string, error) {
 	return "", nil
 }
 
@@ -422,6 +438,9 @@ func TestCommandRuntimeReconcileRoutesToManualRepair(t *testing.T) {
 	if got := out.InvariantSources[string(daemonInvariantOrchestrationCompletion)]; got != string(daemonInvariantSourceHybrid) {
 		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantOrchestrationCompletion, got, daemonInvariantSourceHybrid)
 	}
+	if got := out.InvariantSources[string(daemonInvariantOrchestrationCandidates)]; got != string(daemonInvariantSourceProjection) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantOrchestrationCandidates, got, daemonInvariantSourceProjection)
+	}
 
 	calls, projectIDs := recorder.snapshot()
 	if calls != 1 {
@@ -437,9 +456,12 @@ func TestRunInvokesStartupRuntimeReconcileWithBoundedTimeout(t *testing.T) {
 
 	recorder := &runtimeReconcileRecorder{
 		started:       make(chan struct{}, 1),
+		finished:      make(chan struct{}, 1),
 		waitForCancel: true,
 	}
 	t.Chdir(t.TempDir())
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	t.Cleanup(cancelRun)
 	runDone := make(chan error, 1)
 	serveDone := make(chan struct{}, 1)
 	d := &Daemon{
@@ -454,7 +476,7 @@ func TestRunInvokesStartupRuntimeReconcileWithBoundedTimeout(t *testing.T) {
 	d.runtimeReconciler = recorder
 
 	go func() {
-		runDone <- d.Run(context.Background())
+		runDone <- d.Run(runCtx)
 	}()
 
 	select {
@@ -462,6 +484,12 @@ func TestRunInvokesStartupRuntimeReconcileWithBoundedTimeout(t *testing.T) {
 	case <-time.After(waitForStartupReconcile):
 		t.Fatal("timed out waiting for startup reconcile to begin")
 	}
+	select {
+	case <-recorder.finished:
+	case <-time.After(waitForStartupReconcile):
+		t.Fatal("timed out waiting for bounded startup reconcile to finish")
+	}
+	cancelRun()
 
 	select {
 	case err := <-runDone:
@@ -498,11 +526,15 @@ func TestStartupRuntimeReconcileBeginsSessionRecoveryBeforeInteractionStaleness(
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	interactionStarted := make(chan struct{})
+	interactionBeforeSessionRecovery := make(chan struct{}, 1)
 	releaseInteraction := make(chan struct{})
 	var releaseInteractionOnce sync.Once
 	release := func() { releaseInteractionOnce.Do(func() { close(releaseInteraction) }) }
 	t.Cleanup(release)
 	sessionRecoveryStarted := make(chan struct{})
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	t.Cleanup(cancelRun)
+	worktreeManager := git.NewWorktreeManager(emptyGitRunner{}, repoDir, slog.Default())
 
 	d := &Daemon{
 		cfg: Config{
@@ -515,12 +547,23 @@ func TestStartupRuntimeReconcileBeginsSessionRecoveryBeforeInteractionStaleness(
 		sessionStore: daemonstate.NewStore(),
 		lock:         runtimeReconcileTestLock{},
 		serve:        &runtimeReconcileTestServer{served: make(chan struct{}, 1), release: releaseInteraction},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: worktreeManager,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: worktreeManager,
+		},
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
 			projectID: runtimeStateStore,
 		},
 	}
 	t.Cleanup(func() { _ = d.issues.CloseDB() })
 	d.reconcileInteractionStalenessFn = func(ctx context.Context, _ string) error {
+		select {
+		case <-sessionRecoveryStarted:
+		default:
+			interactionBeforeSessionRecovery <- struct{}{}
+		}
 		close(interactionStarted)
 		select {
 		case <-releaseInteraction:
@@ -534,7 +577,7 @@ func TestStartupRuntimeReconcileBeginsSessionRecoveryBeforeInteractionStaleness(
 
 	runDone := make(chan error, 1)
 	go func() {
-		runDone <- d.Run(context.Background())
+		runDone <- d.Run(runCtx)
 	}()
 
 	select {
@@ -547,8 +590,14 @@ func TestStartupRuntimeReconcileBeginsSessionRecoveryBeforeInteractionStaleness(
 	case <-time.After(waitForSessionRecovery):
 		t.Fatal("timed out waiting for interaction reconciliation to begin")
 	}
+	select {
+	case <-interactionBeforeSessionRecovery:
+		t.Fatal("interaction reconciliation began before startup session recovery")
+	default:
+	}
 
 	release()
+	cancelRun()
 	select {
 	case err := <-runDone:
 		if err != nil {

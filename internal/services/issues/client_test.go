@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -1432,6 +1433,47 @@ func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
 	require.Len(t, taskByID[grandchildID].Dependencies, 1)
 	assert.Equal(t, blockerID, taskByID[grandchildID].Dependencies[0].ID.String())
 	assert.Equal(t, domain.DependencyBlocks, taskByID[grandchildID].Dependencies[0].Type)
+}
+
+func TestClient_ListGraphReadinessWithRuntimeBoundsProjectCandidatesAndCountsAllOpen(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	for i := 0; i < 12; i++ {
+		_, err := client.Create(ctx, CreateTaskParams{
+			Title:    fmt.Sprintf("Candidate %02d", i),
+			Type:     domain.TypeTask,
+			Priority: domain.P1,
+			Status:   domain.StatusOpen,
+		})
+		require.NoError(t, err)
+	}
+
+	tasks, err := client.ListGraphReadinessWithRuntime(ctx, "proj", "", 5)
+	require.NoError(t, err)
+	require.Len(t, tasks, 5)
+	count, err := client.CountOpenOrchestrationIssues(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 12, count)
+}
+
+func TestClient_ListGraphReadinessWithRuntimeHydratesBoundedProjectContracts(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	_, err := client.Create(ctx, CreateTaskParams{
+		Title:       "Candidate",
+		Description: "Bounded scope",
+		Acceptance:  "Focused test passes",
+		Type:        domain.TypeTask,
+		Priority:    domain.P1,
+		Status:      domain.StatusOpen,
+	})
+	require.NoError(t, err)
+
+	tasks, err := client.ListGraphReadinessWithRuntime(ctx, "project", "", 1)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "Bounded scope", tasks[0].Description)
+	assert.Equal(t, "Focused test passes", tasks[0].Acceptance)
 }
 
 func TestClient_ListParentChildSubtreeWithRuntimeScopesToTargetClosure(t *testing.T) {
@@ -3871,8 +3913,10 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0031_board_views",
 		"0032_coordination_leases",
 		"0033_orchestrator_scope_leases",
-		"0034_interaction_requests",
-		"0035_advisor_sessions",
+		"0034_orchestration_start_attempts",
+		"0034_orchestrator_lifecycle_clock",
+		"0035_interaction_requests",
+		"0036_advisor_sessions",
 	}, got)
 }
 

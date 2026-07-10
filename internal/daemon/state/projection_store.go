@@ -26,6 +26,7 @@ const (
 	worktreeStateTable      = "daemon_worktree_projections"
 	orchestratorLeaseTable  = "daemon_orchestrator_scope_leases"
 	advisorSessionTable     = "daemon_advisor_sessions"
+	orchestratorLoopTable   = "daemon_orchestrator_loop_checkpoints"
 )
 
 // WorktreeState captures durable daemon worktree state stored in sqlite.
@@ -1593,6 +1594,9 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 			lifecycle TEXT NOT NULL CHECK (lifecycle IN ('working', 'quiescent', 'complete-grace', 'paused')),
 			acquired_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
+			complete_since TEXT,
+			last_wake_at TEXT,
+			last_wake_reason TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (project_id, scope_kind, root_issue_id),
 			UNIQUE (project_id, session_id),
 			CHECK ((scope_kind = 'project' AND root_issue_id = '') OR (scope_kind = 'rooted' AND root_issue_id <> ''))
@@ -1608,6 +1612,18 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY (project_id, request_id),
 			UNIQUE (project_id, session_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS ` + orchestratorLoopTable + ` (
+			project_id TEXT NOT NULL,
+			scope_kind TEXT NOT NULL CHECK (scope_kind IN ('project', 'rooted')),
+			root_issue_id TEXT NOT NULL DEFAULT '',
+			watch_cursor INTEGER NOT NULL DEFAULT 0,
+			last_action_key TEXT NOT NULL DEFAULT '',
+			last_action_kind TEXT NOT NULL DEFAULT '',
+			last_action_status TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, scope_kind, root_issue_id),
+			CHECK ((scope_kind = 'project' AND root_issue_id = '') OR (scope_kind = 'rooted' AND root_issue_id <> ''))
 		)`,
 		`CREATE TABLE IF NOT EXISTS ` + sessionActivityTable + ` (
 			project_id TEXT NOT NULL,
@@ -1644,6 +1660,15 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	if err := ensureColumn(ctx, db, sessionStateTable, "started_at", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, orchestratorLeaseTable, "complete_since", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, orchestratorLeaseTable, "last_wake_at", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, orchestratorLeaseTable, "last_wake_reason", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := ensureColumn(ctx, db, sessionStateTable, "observed_state", "TEXT"); err != nil {

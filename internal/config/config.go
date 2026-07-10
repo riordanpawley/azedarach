@@ -810,6 +810,12 @@ func MergeWithDefaults(cfg *Config) *Config {
 	if cfg.Orchestration.OpenIssueLimit <= 0 {
 		cfg.Orchestration.OpenIssueLimit = defaults.Orchestration.OpenIssueLimit
 	}
+	if strings.TrimSpace(cfg.Orchestration.CompleteGrace) == "" {
+		cfg.Orchestration.CompleteGrace = defaults.Orchestration.CompleteGrace
+	}
+	if strings.TrimSpace(cfg.Orchestration.WakeDebounce) == "" {
+		cfg.Orchestration.WakeDebounce = defaults.Orchestration.WakeDebounce
+	}
 
 	// Merge Notifications config
 	if cfg.Notifications.ErrorThreshold == 0 {

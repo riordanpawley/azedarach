@@ -7,14 +7,25 @@ import (
 )
 
 const (
-	CommandOrchestrationSnapshot = "orchestration.snapshot"
-	CommandOrchestrationIntent   = "orchestration.intent"
+	CommandOrchestrationSnapshot  = "orchestration.snapshot"
+	CommandOrchestrationIntent    = "orchestration.intent"
+	EventOrchestrationLoopUpdated = "orchestration.loop.updated"
 )
+
+type OrchestrationLoopEventBody struct {
+	Scope        domain.OrchestrationScope `json:"scope" msgpack:"scope"`
+	WatchCursor  int64                     `json:"watch_cursor" msgpack:"watch_cursor"`
+	ActionKey    string                    `json:"action_key" msgpack:"action_key"`
+	ActionKind   string                    `json:"action_kind" msgpack:"action_kind"`
+	ActionStatus string                    `json:"action_status" msgpack:"action_status"`
+	UpdatedAt    time.Time                 `json:"updated_at" msgpack:"updated_at"`
+}
 
 type OrchestrationSnapshotRequest struct {
 	Scope   domain.OrchestrationScope `json:"scope"`
 	ActorID string                    `json:"actor_id,omitempty"`
 	Limit   int                       `json:"limit,omitempty"`
+	RepoDir string                    `json:"repo_dir,omitempty"`
 }
 
 type OrchestrationSnapshot struct {
@@ -34,14 +45,40 @@ type OrchestrationSnapshot struct {
 	WorkerObservations     []domain.WorkerObservation `json:"worker_observations,omitempty"`
 	Blocked                map[string]string          `json:"blocked"`
 	Candidates             []OrchestrationCandidate   `json:"candidates,omitempty"`
+	ReviewQueue            []OrchestrationReview      `json:"review_queue,omitempty"`
 	Health                 OrchestrationHealth        `json:"health"`
 }
 
+// OrchestrationReview is the bounded daemon-owned inspection packet for one
+// review-ready issue. It carries the worker's structured closeout evidence and
+// enough branch metadata for the orchestrator to inspect the actual diff.
+type OrchestrationReview struct {
+	IssueID            string                         `json:"issue_id"`
+	ParentIssueID      string                         `json:"parent_issue_id,omitempty"`
+	Actionable         bool                           `json:"actionable"`
+	Reasons            []string                       `json:"reasons,omitempty"`
+	Evidence           *domain.WorkerEvidencePacket   `json:"evidence,omitempty"`
+	ContextRisk        *domain.IssueContextRiskPacket `json:"context_risk,omitempty"`
+	EvidenceSource     string                         `json:"evidence_source,omitempty"`
+	WorktreePath       string                         `json:"worktree_path,omitempty"`
+	Branch             string                         `json:"branch,omitempty"`
+	BaseBranch         string                         `json:"base_branch,omitempty"`
+	DiffStat           string                         `json:"diff_stat,omitempty"`
+	ExecutionOwner     string                         `json:"execution_owner,omitempty"`
+	OrchestrationOwner string                         `json:"orchestration_owner,omitempty"`
+	ReviewOwner        string                         `json:"review_owner,omitempty"`
+}
+
 type OrchestrationCandidate struct {
-	IssueID        string `json:"issue_id"`
-	Included       bool   `json:"included"`
-	Classification string `json:"classification"`
-	Reason         string `json:"reason"`
+	IssueID          string                              `json:"issue_id"`
+	Included         bool                                `json:"included"`
+	Eligible         bool                                `json:"eligible"`
+	Sufficient       bool                                `json:"sufficient"`
+	Classification   string                              `json:"classification"`
+	Reason           string                              `json:"reason"`
+	Sufficiency      []string                            `json:"sufficiency_signals"`
+	ExclusionReasons []string                            `json:"exclusion_reasons,omitempty"`
+	Executability    domain.IssueExecutabilityAssessment `json:"executability"`
 }
 
 type OrchestrationHealth struct {
@@ -133,31 +170,59 @@ type OrchestrationRisk struct {
 
 type OrchestrationIntentKind string
 
-const OrchestrationIntentStart OrchestrationIntentKind = "start"
+const (
+	OrchestrationIntentStart        OrchestrationIntentKind = "start"
+	OrchestrationIntentReviewReturn OrchestrationIntentKind = "review-return"
+	OrchestrationIntentReviewAccept OrchestrationIntentKind = "review-accept"
+)
+
+type OrchestrationReviewFinding struct {
+	Severity     string   `json:"severity"`
+	File         string   `json:"file,omitempty"`
+	Line         int      `json:"line,omitempty"`
+	Finding      string   `json:"finding"`
+	SuggestedFix string   `json:"suggested_fix,omitempty"`
+	Validation   []string `json:"validation,omitempty"`
+}
 
 type OrchestrationIntentRequest struct {
-	Scope               domain.OrchestrationScope `json:"scope"`
-	Kind                OrchestrationIntentKind   `json:"kind"`
-	IntentKey           string                    `json:"intent_key"`
-	ActorID             string                    `json:"actor_id,omitempty"`
-	IssueIDs            []string                  `json:"issue_ids,omitempty"`
-	Limit               int                       `json:"limit,omitempty"`
-	RepoDir             string                    `json:"repo_dir,omitempty"`
-	BaseBranch          string                    `json:"base_branch,omitempty"`
-	OverrideBoardHealth bool                      `json:"override_board_health,omitempty"`
+	Scope               domain.OrchestrationScope            `json:"scope"`
+	Kind                OrchestrationIntentKind              `json:"kind"`
+	IntentKey           string                               `json:"intent_key"`
+	ActorID             string                               `json:"actor_id,omitempty"`
+	IssueIDs            []string                             `json:"issue_ids,omitempty"`
+	Limit               int                                  `json:"limit,omitempty"`
+	RepoDir             string                               `json:"repo_dir,omitempty"`
+	BaseBranch          string                               `json:"base_branch,omitempty"`
+	OverrideBoardHealth bool                                 `json:"override_board_health,omitempty"`
+	Findings            []OrchestrationReviewFinding         `json:"findings,omitempty"`
+	RestartWorker       bool                                 `json:"restart_worker,omitempty"`
+	Routes              []domain.OrchestrationCandidateRoute `json:"routes,omitempty"`
 }
 
 type OrchestrationIntentResult struct {
-	Scope     domain.OrchestrationScope `json:"scope"`
-	Kind      OrchestrationIntentKind   `json:"kind"`
-	IntentKey string                    `json:"intent_key"`
-	Revision  uint64                    `json:"revision"`
-	Requested []string                  `json:"requested"`
-	Started   []string                  `json:"started,omitempty"`
-	Launched  []OrchestrationLaunch     `json:"launched,omitempty"`
-	Pending   []OrchestrationPending    `json:"pending,omitempty"`
-	Skipped   map[string]string         `json:"skipped,omitempty"`
-	Failed    map[string]string         `json:"failed,omitempty"`
+	Scope     domain.OrchestrationScope  `json:"scope"`
+	Kind      OrchestrationIntentKind    `json:"kind"`
+	IntentKey string                     `json:"intent_key"`
+	Revision  uint64                     `json:"revision"`
+	Requested []string                   `json:"requested"`
+	Started   []string                   `json:"started,omitempty"`
+	Returned  []string                   `json:"returned,omitempty"`
+	Closed    []string                   `json:"closed,omitempty"`
+	Launched  []OrchestrationLaunch      `json:"launched,omitempty"`
+	Pending   []OrchestrationPending     `json:"pending,omitempty"`
+	Routed    []OrchestrationRouteResult `json:"routed,omitempty"`
+	Skipped   map[string]string          `json:"skipped,omitempty"`
+	Failed    map[string]string          `json:"failed,omitempty"`
+}
+
+type OrchestrationRouteResult struct {
+	IssueID            string                        `json:"issue_id"`
+	Kind               domain.OrchestrationRouteKind `json:"kind"`
+	Reason             string                        `json:"reason"`
+	MissingDetails     []string                      `json:"missing_details,omitempty"`
+	InteractionID      string                        `json:"interaction_id,omitempty"`
+	InteractionCreated bool                          `json:"interaction_created,omitempty"`
 }
 
 type OrchestrationLaunch struct {
