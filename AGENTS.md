@@ -161,6 +161,8 @@ fd "filename" -t f internal cmd
    - `orchestration.project_candidates` bounded project candidate classification -> `projection` (durable issue graph/lifecycle, ownership, session activity, and interaction projections)
    - `orchestration.claim_start` bounded worker-wave claim/start and compensation -> `hybrid` (durable ownership/start-attempt projection + daemon session-start operation/runtime)
    - `issue_resources.lifecycle` issue resource desired-state gate -> `projection` (durable issue status + runtime attachment projection)
+   - `interaction.waiting_human` decision-waiting and pickup exclusion gate -> `projection` (durable interaction request projection refreshed before evaluation)
+   - `interaction.staleness` stale/reminder/disposition/recovery policy -> `projection` (durable interaction request projection refreshed before age evaluation and revision-safe write-through audit)
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
    - orchestration scope identity -> `projection` (durable project + typed rooted/project scope)
    - orchestration scope singleton -> `hybrid` (refreshed durable scope lease + live tmux runtime)

@@ -60,6 +60,26 @@ func (s *Service) Upsert(ctx context.Context, candidate Candidate) (Record, bool
 	return record, created, rev, nil
 }
 
+// Project idempotently refreshes a deterministic notice projection without
+// changing read/dismissed lifecycle or occurrence counts.
+func (s *Service) Project(ctx context.Context, candidate Candidate) (Record, bool, uint64, error) {
+	if s == nil || s.repo == nil {
+		return Record{}, false, 0, errors.New("notice repository unavailable")
+	}
+	record, created, changed, err := s.repo.Project(ctx, candidate)
+	if err != nil {
+		return Record{}, false, 0, err
+	}
+	if !changed {
+		return record, created, 0, nil
+	}
+	event := protocol.EventNoticeUpdated
+	if created {
+		event = protocol.EventNoticeCreated
+	}
+	return record, created, s.publish(ctx, event, record), nil
+}
+
 func (s *Service) Get(ctx context.Context, projectID, noticeID string) (Record, error) {
 	if s == nil || s.repo == nil {
 		return Record{}, errors.New("notice repository unavailable")

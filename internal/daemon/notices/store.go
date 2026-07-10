@@ -19,12 +19,54 @@ import (
 
 type Repository interface {
 	UpsertActive(context.Context, Candidate) (Record, bool, error)
+	Project(context.Context, Candidate) (Record, bool, bool, error)
 	Get(context.Context, string, string) (Record, error)
 	List(context.Context, Query) ([]Record, error)
 	Update(context.Context, UpdateParams) (Record, bool, error)
 	ExpireDue(context.Context, ExpireQuery) ([]Record, error)
 	DeleteExpired(context.Context, ExpireQuery) ([]Record, error)
 	Close() error
+}
+
+// Project inserts or refreshes a deterministic presentation record by notice
+// identity. It preserves read/dismissed state and is idempotent.
+func (s *SQLiteStore) Project(ctx context.Context, candidate Candidate) (Record, bool, bool, error) {
+	incoming, err := NormalizeCandidate(candidate)
+	if err != nil {
+		return Record{}, false, false, err
+	}
+	db, err := s.dbHandle()
+	if err != nil {
+		return Record{}, false, false, err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return Record{}, false, false, fmt.Errorf("project notice %s: %w", incoming.NoticeID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	existing, err := scanRecord(tx.QueryRowContext(ctx, selectNoticeSQL+` WHERE project_id = ? AND notice_id = ?`, incoming.ProjectID, incoming.NoticeID))
+	if errors.Is(err, sql.ErrNoRows) {
+		if err := insertRecord(ctx, tx, incoming); err != nil {
+			return Record{}, false, false, fmt.Errorf("project notice %s: %w", incoming.NoticeID, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return Record{}, false, false, fmt.Errorf("project notice %s: %w", incoming.NoticeID, err)
+		}
+		return incoming, true, true, nil
+	}
+	if err != nil {
+		return Record{}, false, false, fmt.Errorf("project notice %s: %w", incoming.NoticeID, err)
+	}
+	next, changed := ApplyProjection(existing, incoming)
+	if changed {
+		if err := updateRecord(ctx, tx, next); err != nil {
+			return Record{}, false, false, fmt.Errorf("project notice %s: %w", incoming.NoticeID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Record{}, false, false, fmt.Errorf("project notice %s: %w", incoming.NoticeID, err)
+	}
+	return next, false, changed, nil
 }
 
 type SQLiteStore struct {

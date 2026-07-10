@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
@@ -34,6 +35,49 @@ func TestMergeOrchestrationSnapshotOrdersProjectResultsDeterministically(t *test
 	}
 	if dst.Blocked["x"] != "dependency" || dst.Capacity.DirectRunnableCount != 1 || dst.Capacity.DirectActiveCount != 1 {
 		t.Fatalf("merged project snapshot = %+v", dst)
+	}
+}
+
+func TestHybridActiveSessionCountRejectsProjectionTmuxDivergence(t *testing.T) {
+	identity, err := domain.NewOrchestratorIdentity("project", domain.ProjectOrchestrationScope())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := daemonstate.OrchestratorScopeLease{Identity: identity, SessionID: "orchestrator"}
+	issues := map[string]struct{}{"worker": {}}
+	tests := []struct {
+		name      string
+		projected []daemonstate.Session
+		live      []string
+		want      int
+	}{
+		{name: "projection only", projected: []daemonstate.Session{{ID: "worker", IssueID: "worker", State: daemonstate.SessionStateRunning}}, want: 1},
+		{name: "tmux only", live: []string{"worker"}, want: 1},
+		{name: "both count once", projected: []daemonstate.Session{{ID: "worker", IssueID: "worker", State: daemonstate.SessionStateRunning}}, live: []string{"worker"}, want: 1},
+		{name: "own orchestrator excluded", live: []string{"orchestrator"}, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hybridActiveSessionCount(lease, tt.projected, tt.live, issues); got != tt.want {
+				t.Fatalf("active = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOrchestratorWakeReasonPrioritizesActionableEvents(t *testing.T) {
+	updated := time.Date(2026, 7, 10, 3, 0, 0, 0, time.UTC)
+	if got := orchestratorWakeReason(domain.OrchestratorLifecycleFacts{ReviewRequests: 1, OpenIssues: 1}, updated, updated.Add(-time.Second)); got != domain.OrchestratorWakeReviewRequest {
+		t.Fatalf("review wake = %q", got)
+	}
+	if got := orchestratorWakeReason(domain.OrchestratorLifecycleFacts{OpenIssues: 1}, updated, updated.Add(-time.Second)); got != domain.OrchestratorWakeOpenWork {
+		t.Fatalf("work wake = %q", got)
+	}
+	if got := orchestratorWakeReason(domain.OrchestratorLifecycleFacts{}, updated, updated.Add(-time.Second)); got != domain.OrchestratorWakeHumanAnswer {
+		t.Fatalf("answer wake = %q", got)
+	}
+	if got := orchestratorWakeReason(domain.OrchestratorLifecycleFacts{}, updated, updated); got != "" {
+		t.Fatalf("unchanged wake = %q", got)
 	}
 }
 

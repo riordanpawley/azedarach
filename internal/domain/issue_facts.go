@@ -5,6 +5,13 @@ import (
 	"strings"
 )
 
+type WaitingHumanSource string
+
+const (
+	WaitingHumanSourceInteractionRequest WaitingHumanSource = "interaction_request"
+	WaitingHumanSourceRuntimePrompt      WaitingHumanSource = "runtime_prompt"
+)
+
 type IssueFactReason struct {
 	Code    string `json:"code" msgpack:"code"`
 	Message string `json:"message" msgpack:"message"`
@@ -20,12 +27,14 @@ type IssueOperationBlocker struct {
 }
 
 type IssueFactsInput struct {
-	Status            Status
-	Priority          Priority
-	State             IssueState
-	Session           *Session
-	HasTmuxSession    bool
-	OperationBlockers []IssueOperationBlocker
+	Status             Status
+	Priority           Priority
+	State              IssueState
+	Session            *Session
+	HasTmuxSession     bool
+	OperationBlockers  []IssueOperationBlocker
+	DecisionWaiting    bool
+	DecisionWaitReason string
 }
 
 type IssueFacts struct {
@@ -44,6 +53,8 @@ type IssueFacts struct {
 	HasSession         bool                    `json:"has_session" msgpack:"has_session"`
 	HasActiveSession   bool                    `json:"has_active_session" msgpack:"has_active_session"`
 	WaitingHuman       bool                    `json:"waiting_human" msgpack:"waiting_human"`
+	WaitingHumanSource WaitingHumanSource      `json:"waiting_human_source,omitempty" msgpack:"waiting_human_source,omitempty"`
+	WaitingHumanReason string                  `json:"waiting_human_reason,omitempty" msgpack:"waiting_human_reason,omitempty"`
 	WaitingAI          bool                    `json:"waiting_ai" msgpack:"waiting_ai"`
 	DelegatedOperation bool                    `json:"delegated_operation" msgpack:"delegated_operation"`
 	OperationBlockers  []IssueOperationBlocker `json:"operation_blockers,omitempty" msgpack:"operation_blockers,omitempty"`
@@ -66,6 +77,8 @@ func (f IssueFacts) IsZero() bool {
 		!f.HasSession &&
 		!f.HasActiveSession &&
 		!f.WaitingHuman &&
+		f.WaitingHumanSource == "" &&
+		f.WaitingHumanReason == "" &&
 		!f.WaitingAI &&
 		!f.DelegatedOperation &&
 		len(f.OperationBlockers) == 0 &&
@@ -155,6 +168,12 @@ func DeriveIssueFacts(input IssueFactsInput) IssueFacts {
 	}
 
 	applySessionFacts(&facts, input.Session, input.HasTmuxSession)
+	if input.DecisionWaiting {
+		facts.WaitingHuman = true
+		facts.WaitingHumanSource = WaitingHumanSourceInteractionRequest
+		facts.WaitingHumanReason = strings.TrimSpace(input.DecisionWaitReason)
+		facts.Reasons = append(facts.Reasons, IssueFactReason{Code: "interaction_request", Message: facts.WaitingHumanReason})
+	}
 	applyReviewReadyFacts(&facts, state, input.Session, input.HasTmuxSession)
 	facts.Reasons = append(facts.Reasons, IssueFactReason{
 		Code:    "display_phase",
@@ -219,6 +238,8 @@ func applySessionFacts(facts *IssueFacts, session *Session, hasTmuxSession bool)
 	switch facts.SessionActivity {
 	case string(SessionWaiting), "waiting_human", "waiting-for-human":
 		facts.WaitingHuman = true
+		facts.WaitingHumanSource = WaitingHumanSourceRuntimePrompt
+		facts.WaitingHumanReason = "active session is waiting for human input"
 	case "waiting_ai", "waiting-for-ai":
 		facts.WaitingAI = true
 	case "waiting_tool", "waiting-for-tool":

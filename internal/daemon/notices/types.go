@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -262,6 +263,34 @@ func ApplyDedupe(existing, incoming Record) Record {
 	next.ExpiresAt = cloneTime(incoming.ExpiresAt)
 	next.RetentionClass = incoming.RetentionClass
 	return next
+}
+
+// ApplyProjection refreshes daemon-owned presentation fields while preserving
+// the user's read/dismissed lifecycle. Unlike occurrence dedupe, a projection
+// refresh is idempotent and must not manufacture another occurrence.
+func ApplyProjection(existing, incoming Record) (Record, bool) {
+	next := existing
+	next.Scope = incoming.Scope
+	next.Source = cloneSource(incoming.Source)
+	next.Severity = incoming.Severity
+	next.Category = incoming.Category
+	next.Title = incoming.Title
+	next.Summary = incoming.Summary
+	next.Detail = incoming.Detail
+	next.Cause = cloneCause(incoming.Cause)
+	next.Actions = cloneActions(incoming.Actions)
+	next.DedupeKey = incoming.DedupeKey
+	next.ExpiresAt = cloneTime(incoming.ExpiresAt)
+	next.RetentionClass = incoming.RetentionClass
+	if recordsEqualForProjection(existing, next) {
+		return existing, false
+	}
+	next.UpdatedAt = incoming.UpdatedAt
+	return next, true
+}
+
+func recordsEqualForProjection(a, b Record) bool {
+	return reflect.DeepEqual(a, b)
 }
 
 func NewNoticeID(now time.Time) string {
