@@ -5680,6 +5680,14 @@ func TestParseIssueCleanupArgs(t *testing.T) {
 	}
 }
 
+func TestIssueCleanupBatchParentDoesNotConsumePerIssueBudget(t *testing.T) {
+	ctx, cancel := newIssueCleanupBatchContext()
+	defer cancel()
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("batch parent has deadline; later items can lose their per-issue budget")
+	}
+}
+
 func TestParseIssueDeleteArgs(t *testing.T) {
 	got, err := ParseIssueDeleteArgs([]string{"--confirm", "az-1"})
 	if err != nil {

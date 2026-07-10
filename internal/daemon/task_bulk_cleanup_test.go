@@ -134,4 +134,40 @@ func TestTaskBulkCleanupAcceptsClosedActionAlias(t *testing.T) {
 	}
 }
 
+func TestTaskBulkCleanupLaterItemGetsFreshTimeoutBudget(t *testing.T) {
+	parent := context.Background()
+	first, cancelFirst := taskBulkCleanupItemContext(parent, 5*time.Millisecond)
+	<-first.Done()
+	cancelFirst()
+
+	second, cancelSecond := taskBulkCleanupItemContext(parent, 50*time.Millisecond)
+	defer cancelSecond()
+	select {
+	case <-second.Done():
+		t.Fatalf("later item started with consumed budget: %v", second.Err())
+	case <-time.After(10 * time.Millisecond):
+	}
+}
+
+func TestTaskBulkCleanupRejectsOutOfRangePerIssueTimeout(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-bulk-timeout-validation"
+	repoDir := t.TempDir()
+	client := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	store := state.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, hub: publish.NewHub(16, 8, slog.Default()), issueClientsByProject: map[string]*issues.Client{projectID: client}, runtimeStoresByProject: map[string]*state.RuntimeStateStore{projectID: store}, revision: map[string]uint64{}}
+	for _, timeout := range []time.Duration{-time.Second, taskBulkCleanupMaxPerIssueTimeout + time.Second} {
+		body, _ := json.Marshal(taskBulkCleanupRequest{TaskIDs: []string{"missing"}, PerIssueTimeout: timeout})
+		resp, err := d.handleTaskBulkCleanup(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "timeout-validation", Kind: protocol.EnvelopeKindCommand, Command: "task.bulk_cleanup", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
+			t.Fatalf("timeout %s response = %+v, want invalid request", timeout, resp)
+		}
+	}
+}
+
 func ptrTime(v time.Time) *time.Time { return &v }

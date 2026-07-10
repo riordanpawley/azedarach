@@ -39,6 +39,11 @@ type taskBulkCleanupResult struct {
 	Items  []taskBulkCleanupItem `json:"items"`
 }
 
+const (
+	taskBulkCleanupDefaultPerIssueTimeout = 10 * time.Minute
+	taskBulkCleanupMaxPerIssueTimeout     = time.Hour
+)
+
 func (d *Daemon) handleTaskBulkCleanup(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	var cmd taskBulkCleanupRequest
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
@@ -53,6 +58,12 @@ func (d *Daemon) handleTaskBulkCleanup(ctx context.Context, req protocol.Request
 	}
 	if strings.TrimSpace(cmd.Query) != "" && len(domain.ContentQueryTerms(cmd.Query)) == 0 {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "candidate query must contain a searchable term"), nil
+	}
+	if cmd.PerIssueTimeout == 0 {
+		cmd.PerIssueTimeout = taskBulkCleanupDefaultPerIssueTimeout
+	}
+	if cmd.PerIssueTimeout < 0 || cmd.PerIssueTimeout > taskBulkCleanupMaxPerIssueTimeout {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("per_issue_timeout must be greater than zero and no more than %s", taskBulkCleanupMaxPerIssueTimeout)), nil
 	}
 	for _, raw := range cmd.Statuses {
 		switch domain.Status(strings.ToLower(strings.TrimSpace(raw))) {
@@ -92,11 +103,7 @@ func (d *Daemon) handleTaskBulkCleanup(ctx context.Context, req protocol.Request
 			result.Items = append(result.Items, item)
 			continue
 		}
-		itemCtx := ctx
-		cancel := func() {}
-		if cmd.PerIssueTimeout > 0 {
-			itemCtx, cancel = context.WithTimeout(ctx, cmd.PerIssueTimeout)
-		}
+		itemCtx, cancel := taskBulkCleanupItemContext(ctx, cmd.PerIssueTimeout)
 		closeResult, closeErr := d.closeTask(itemCtx, projectID, taskCloseRequest{
 			TaskID: task.ID.String(), IntegrateBeforeClose: outcome == domain.IssueCloseCompleted, CloseOutcome: string(outcome),
 		}, req)
@@ -122,6 +129,10 @@ func (d *Daemon) handleTaskBulkCleanup(ctx context.Context, req protocol.Request
 	resp := d.successResponse(req)
 	resp.Body = body
 	return resp, nil
+}
+
+func taskBulkCleanupItemContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, timeout)
 }
 
 func selectBulkCleanupTasks(tasks []domain.Task, cmd taskBulkCleanupRequest) []domain.Task {

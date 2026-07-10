@@ -6379,11 +6379,18 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 func IssueCleanupCommand(deps *Dependencies, opts IssueCleanupOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
-	ctx, cancel := context.WithTimeout(context.Background(), issueCloseCleanupTimeout)
-	defer cancel()
-	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+	startupCtx, startupCancel := context.WithTimeout(context.Background(), issueCloseCleanupTimeout)
+	if err := ensureDaemon(startupCtx, deps, "cli"); err != nil {
+		startupCancel()
 		return err
 	}
+	startupCancel()
+	// The daemon applies an independent deadline to every selected issue. A
+	// batch-wide deadline derived from that same duration would starve later
+	// items in a sequential batch, so the transport parent remains cancellable
+	// but intentionally has no deadline of its own.
+	ctx, cancel := newIssueCleanupBatchContext()
+	defer cancel()
 	result, err := deps.DaemonClient.BulkCleanupTasks(ctx, daemonclient.TaskBulkCleanupRequest{
 		TaskIDs: opts.IDs, Statuses: opts.Statuses, Query: opts.Query, UpdatedBefore: opts.UpdatedBefore,
 		Limit: opts.Limit, DryRun: opts.DryRun, CloseOutcome: opts.Action, PerIssueTimeout: opts.PerIssueTimeout,
@@ -6424,6 +6431,10 @@ func IssueCleanupCommand(deps *Dependencies, opts IssueCleanupOptions) error {
 		return fmt.Errorf("%d issue cleanup operation(s) failed", failures)
 	}
 	return nil
+}
+
+func newIssueCleanupBatchContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(context.Background())
 }
 
 func taskClosePhaseJSON(phases []daemonclient.TaskClosePhaseTiming) []map[string]any {
