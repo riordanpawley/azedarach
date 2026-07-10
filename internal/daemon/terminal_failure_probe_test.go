@@ -18,6 +18,7 @@ type terminalFailureProbeRunner struct {
 	mu     sync.Mutex
 	output string
 	calls  int
+	args   []string
 }
 
 func TestEnrichTasksWithSessionStateAppliesTerminalFailureProbe(t *testing.T) {
@@ -58,9 +59,16 @@ func (r *terminalFailureProbeRunner) Run(_ context.Context, args ...string) (str
 	defer r.mu.Unlock()
 	if len(args) > 0 && args[0] == "capture-pane" {
 		r.calls++
+		r.args = append([]string(nil), args...)
 		return r.output, nil
 	}
 	return "", nil
+}
+
+func (r *terminalFailureProbeRunner) lastArgs() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.args...)
 }
 
 func (r *terminalFailureProbeRunner) callCount() int {
@@ -88,6 +96,10 @@ func TestApplyTerminalFailureProbesClassifiesHookSilentCapacityScreen(t *testing
 	}
 	if runner.callCount() != 1 {
 		t.Fatalf("capture calls = %d, want 1", runner.callCount())
+	}
+	args := runner.lastArgs()
+	if len(args) < 6 || args[len(args)-1] != "-8" {
+		t.Fatalf("capture args = %v, want bounded 8-line tail", args)
 	}
 
 	got = d.applyTerminalFailureProbes(context.Background(), projectID, sessions, projectID, map[string]sessionDisplayActivity{

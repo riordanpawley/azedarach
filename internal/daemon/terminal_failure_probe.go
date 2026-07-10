@@ -13,7 +13,7 @@ const (
 	terminalFailureProbeStaleAfter = 15 * time.Second
 	terminalFailureProbeMinBackoff = 30 * time.Second
 	terminalFailureProbeMaxBackoff = 5 * time.Minute
-	terminalFailureProbeLines      = 20
+	terminalFailureProbeLines      = 8
 )
 
 type terminalFailureProbeState struct {
@@ -27,8 +27,9 @@ type terminalFailureProbeState struct {
 }
 
 // applyTerminalFailureProbes is the daemon-owned fallback for providers that
-// render a terminal failure but emit no lifecycle hook. It probes only stale,
-// hook-backed busy sessions and caches observations to avoid pane polling.
+// render a terminal failure but emit no lifecycle hook. It locally parses only
+// eight trailing lines from stale hook-backed busy sessions and caches
+// observations to avoid pane polling or any AI/model request.
 func (d *Daemon) applyTerminalFailureProbes(
 	ctx context.Context,
 	projectID string,

@@ -32,6 +32,11 @@ var terminalAgentFailurePatterns = []struct {
 	{reason: AgentTerminalFailureAuthentication, pattern: regexp.MustCompile(`(?i)\b(?:authentication\s+failed|not\s+authenticated|invalid\s+(?:api\s+)?(?:key|token))\b`)},
 }
 
+var (
+	agentTerminalANSIControlSequence = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+	agentTerminalANSIOSCSequence     = regexp.MustCompile(`\x1b\][^\x07]*(?:\x07|\x1b\\)`)
+)
+
 // ClassifyAgentTerminalOutput classifies the bounded tail of an agent pane.
 // It is intentionally independent of lifecycle event shape because some agents
 // render terminal failures without emitting a corresponding hook.
@@ -39,6 +44,8 @@ func ClassifyAgentTerminalOutput(output string) (AgentTerminalFailureReason, boo
 	if len(output) > maxAgentTerminalOutputBytes {
 		output = output[len(output)-maxAgentTerminalOutputBytes:]
 	}
+	output = agentTerminalANSIOSCSequence.ReplaceAllString(output, "")
+	output = agentTerminalANSIControlSequence.ReplaceAllString(output, "")
 	text := strings.Join(strings.Fields(output), " ")
 	for _, candidate := range terminalAgentFailurePatterns {
 		if candidate.pattern.MatchString(text) {

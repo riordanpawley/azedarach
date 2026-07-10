@@ -15,6 +15,7 @@ func TestClassifyAgentTerminalOutput(t *testing.T) {
 		ok     bool
 	}{
 		{name: "capacity screen", output: "⚠ Selected model is at capacity. Please try a different model.", want: AgentTerminalFailureModelCapacity, ok: true},
+		{name: "colored capacity screen", output: "\x1b[33m⚠ Selected \x1b[1mmodel\x1b[0m is at capacity.\x1b[0m Please try a different model.", want: AgentTerminalFailureModelCapacity, ok: true},
 		{name: "ordinary prompt", output: "Tests passed.\n› Continue", ok: false},
 		{name: "bounded tail ignores old failure", output: "Selected model is at capacity.\n" + strings.Repeat("x", maxAgentTerminalOutputBytes+1), ok: false},
 	}
