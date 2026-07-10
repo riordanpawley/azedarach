@@ -396,6 +396,12 @@ func TestCommandRuntimeReconcileRoutesToManualRepair(t *testing.T) {
 	if got := out.InvariantSources[string(daemonInvariantTaskListFreshness)]; got != string(daemonInvariantSourceProjection) {
 		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantTaskListFreshness, got, daemonInvariantSourceProjection)
 	}
+	if got := out.InvariantSources[string(daemonInvariantOrchestrationScope)]; got != string(daemonInvariantSourceProjection) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantOrchestrationScope, got, daemonInvariantSourceProjection)
+	}
+	if got := out.InvariantSources[string(daemonInvariantOrchestrationCompletion)]; got != string(daemonInvariantSourceHybrid) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantOrchestrationCompletion, got, daemonInvariantSourceHybrid)
+	}
 
 	calls, projectIDs := recorder.snapshot()
 	if calls != 1 {

@@ -493,6 +493,16 @@
           "type": "string",
           "enum": ["az", "native"],
           "default": "az"
+        },
+        "completeGrace": {
+          "type": "string",
+          "description": "Duration a complete project orchestrator remains wakeable before pausing.",
+          "default": "5m"
+        },
+        "wakeDebounce": {
+          "type": "string",
+          "description": "Minimum interval used to coalesce repeated idempotent orchestrator wake events.",
+          "default": "2s"
         }
       }
     },

@@ -212,7 +212,9 @@ type SpecConfig struct {
 }
 
 type OrchestrationConfig struct {
-	Via string `json:"via"`
+	Via           string `json:"via"`
+	CompleteGrace string `json:"completeGrace"`
+	WakeDebounce  string `json:"wakeDebounce"`
 }
 
 type DiagnosticsConfig struct {
@@ -336,7 +338,9 @@ func DefaultConfig() *Config {
 			Enabled: true,
 		},
 		Orchestration: OrchestrationConfig{
-			Via: "az",
+			Via:           "az",
+			CompleteGrace: "5m",
+			WakeDebounce:  "2s",
 		},
 		Diagnostics: DiagnosticsConfig{
 			LatencyTrace: false,

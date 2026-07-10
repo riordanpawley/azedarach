@@ -160,6 +160,8 @@ fd "filename" -t f internal cmd
    - `task.follow_on_merge_candidates` follow-on merge source gate -> `projection` (durable issue graph + worktree projection)
    - `issue_resources.lifecycle` issue resource desired-state gate -> `projection` (durable issue status + runtime attachment projection)
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
+   - orchestration scope identity -> `projection` (durable project + typed rooted/project scope)
+   - project orchestration completion -> `hybrid` (refreshed issue/review/interaction/session projections + live tmux runtime)
 
 ### Adding New Invariants (Required Checklist)
 
