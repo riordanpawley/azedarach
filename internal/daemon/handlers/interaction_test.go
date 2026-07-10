@@ -27,7 +27,7 @@ func (f fakeInteractionService) ResolveInteraction(context.Context, protocol.Int
 	return protocol.InteractionResponseBody{}, f.err
 }
 func TestInteractionHandlerStaleRevisionIsConflict(t *testing.T) {
-	body, _ := json.Marshal(protocol.InteractionMutationRequestBody{ID: "req", ExpectedRevision: 1, Answer: "yes", Actor: "human"})
+	body, _ := json.Marshal(protocol.InteractionMutationRequestBody{ID: "req", ExpectedRevision: 1, Answer: handlerTestAnswer(), Actor: "human"})
 	h := NewInteractionHandler(fakeInteractionService{err: fmt.Errorf("wrapped: %w", domain.ErrStaleInteractionRevision)})
 	resp := h.Handle(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, Command: protocol.CommandInteractionResolve, Body: body})
 	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeConflict || resp.Error.Retryable {
@@ -35,9 +35,18 @@ func TestInteractionHandlerStaleRevisionIsConflict(t *testing.T) {
 	}
 }
 func TestInteractionHandlerValidatesTypedAuthorityShape(t *testing.T) {
-	body, _ := json.Marshal(protocol.InteractionMutationRequestBody{ID: "req", ExpectedRevision: 1, Answer: "yes"})
+	body, _ := json.Marshal(protocol.InteractionMutationRequestBody{ID: "req", ExpectedRevision: 1, Answer: handlerTestAnswer()})
 	resp := NewInteractionHandler(fakeInteractionService{}).Handle(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, Command: protocol.CommandInteractionAnswer, Body: body})
 	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("response=%+v", resp)
+	}
+}
+
+func TestInteractionHandlerMapsMalformedStructuredAnswerToInvalidRequest(t *testing.T) {
+	body, _ := json.Marshal(protocol.InteractionMutationRequestBody{ID: "req", ExpectedRevision: 1, Answer: handlerTestAnswer(), Actor: "human"})
+	h := NewInteractionHandler(fakeInteractionService{err: fmt.Errorf("validate: %w", domain.ErrInvalidInteractionAnswer)})
+	resp := h.Handle(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, Command: protocol.CommandInteractionResolve, Body: body})
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest || resp.Error.Retryable {
 		t.Fatalf("response=%+v", resp)
 	}
 }
@@ -48,6 +57,10 @@ func TestInteractionDiscussAllowsDaemonOwnedSessionIdentity(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("response error = %+v", resp.Error)
 	}
+}
+
+func handlerTestAnswer() domain.InteractionAnswerPayload {
+	return domain.InteractionAnswerPayload{SelectedOption: "yes", Rationale: "Proceed.", SignificanceRecommendation: domain.InteractionSignificanceRoutine, Revision: 1}
 }
 
 func TestInteractionRecoverAllowsDaemonOwnedSessionIdentity(t *testing.T) {

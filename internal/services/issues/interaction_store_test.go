@@ -2,6 +2,7 @@ package issues
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -22,13 +23,15 @@ func TestResolveInteractionAtomicEffectsAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := r.UpdatedAt.Add(time.Second)
-	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: "yes", Actor: "human", CreatedAt: now}
+	title := "must roll back"
+	answer := interactionStoreTestAnswer(1)
+	answer.ApprovedIssueFieldEffects.Title = &title
+	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: answer, Actor: "human", CreatedAt: now}
 	r, err = r.Transition(domain.InteractionResolved, 1, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	title := "must roll back"
-	err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1, IssueChanges: InteractionIssueChanges{Title: &title}, Decision: &InteractionDecisionEffect{Title: "bad"}})
+	err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1, Decision: &InteractionDecisionEffect{Title: "bad"}})
 	if err == nil {
 		t.Fatal("expected decision validation failure")
 	}
@@ -43,7 +46,7 @@ func TestResolveInteractionAtomicEffectsAndRollback(t *testing.T) {
 	if task.Title != "before" {
 		t.Fatalf("title changed after rollback: %q", task.Title)
 	}
-	err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1, IssueChanges: InteractionIssueChanges{Title: &title}, Decision: &InteractionDecisionEffect{Title: "Proceed", Rationale: "Human approved"}})
+	err = c.ResolveInteraction(ctx, InteractionResolution{Request: r, ExpectedRevision: 1, Decision: &InteractionDecisionEffect{Title: "Proceed", Rationale: "Human approved"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +80,7 @@ func TestResolveInteractionAnswerOnlyPreservesIssueMetadataAndObservations(t *te
 		t.Fatal(err)
 	}
 	now := r.UpdatedAt.Add(time.Second)
-	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: "yes", Actor: "human", CreatedAt: now}
+	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: interactionStoreTestAnswer(1), Actor: "human", CreatedAt: now}
 	r, err = r.Transition(domain.InteractionResolved, 1, now)
 	if err != nil {
 		t.Fatal(err)
@@ -210,7 +213,63 @@ func TestInteractionStoreRejectsBypassedTransition(t *testing.T) {
 	}
 }
 
+func TestInteractionStoreReadsLegacyStringAnswerAuditAndRewritesStructuredFinal(t *testing.T) {
+	ctx := context.Background()
+	c := NewClient(t.TempDir(), nil)
+	issueID, err := c.Create(ctx, CreateTaskParams{Title: "Issue", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := testInteractionRequest("legacy-answer", issueID, "legacy")
+	if err := c.CreateInteraction(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	legacyTime := r.UpdatedAt.Add(time.Second)
+	var legacy map[string]any
+	raw, _ := json.Marshal(r)
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	legacy["proposal"] = map[string]any{"answer": "yes", "actor": "advisor", "created_at": legacyTime}
+	legacy["state"], legacy["revision"], legacy["updated_at"] = domain.InteractionAnswerProposed, 2, legacyTime
+	legacyRaw, _ := json.Marshal(legacy)
+	db, err := c.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE interaction_requests SET state=?, revision=?, request_json=?, updated_at=? WHERE id=?`, domain.InteractionAnswerProposed, 2, legacyRaw, legacyTime.Format(time.RFC3339Nano), r.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := c.GetInteraction(ctx, r.ID)
+	if err != nil || !found || got.Proposal == nil {
+		t.Fatalf("legacy proposal load: got=%+v found=%v err=%v", got, found, err)
+	}
+	if got.Proposal.Answer.SelectedOption != "yes" || got.Proposal.Answer.Rationale == "" || got.Proposal.Answer.Revision != 1 {
+		t.Fatalf("legacy proposal conversion = %+v", got.Proposal.Answer)
+	}
+	now := legacyTime.Add(time.Second)
+	got.FinalAnswer = &domain.InteractionAnswerAudit{Answer: interactionStoreTestAnswer(2), Actor: "human", CreatedAt: now}
+	got, err = got.Transition(domain.InteractionResolved, 2, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ResolveInteraction(ctx, InteractionResolution{Request: got, ExpectedRevision: 2}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, _, err := c.GetInteraction(ctx, r.ID)
+	if err != nil || reloaded.FinalAnswer == nil || reloaded.FinalAnswer.Answer.Revision != 2 {
+		t.Fatalf("structured rewrite: got=%+v err=%v", reloaded, err)
+	}
+}
+
 func testInteractionRequest(id, issueID, key string) domain.InteractionRequest {
 	now := time.Date(2026, 7, 10, 1, 2, 3, 0, time.UTC)
 	return domain.InteractionRequest{ID: id, IssueID: issueID, DecisionKey: key, OrchestrationScope: "root", Question: "Proceed?", Why: "Material choice", RequiredDecisions: []string{"yes or no"}, Significance: domain.InteractionSignificanceMaterial, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose"}, State: domain.InteractionOpen, Revision: 1, CreatedAt: now, UpdatedAt: now}
+}
+
+func interactionStoreTestAnswer(revision int64) domain.InteractionAnswerPayload {
+	return domain.InteractionAnswerPayload{
+		SelectedOption: "yes", Rationale: "Proceed safely.", Constraints: []string{"keep audit history"},
+		SignificanceRecommendation: domain.InteractionSignificanceMaterial, Revision: revision,
+	}
 }

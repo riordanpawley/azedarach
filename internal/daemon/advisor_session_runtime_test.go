@@ -352,7 +352,7 @@ func TestAdvisorRecoveryRetriesWhenNonTerminalMutationWinsCrossDaemonRace(t *tes
 			return
 		}
 		proposalAt := current.UpdatedAt.Add(time.Second)
-		current.Proposal = &domain.InteractionAnswerAudit{Answer: "A", Actor: "advisor", CreatedAt: proposalAt}
+		current.Proposal = &domain.InteractionAnswerAudit{Answer: domain.InteractionAnswerPayload{SelectedOption: "a", Rationale: "Prefer option A", SignificanceRecommendation: current.Significance, Revision: current.Revision}, Actor: "advisor", CreatedAt: proposalAt}
 		proposed, transitionErr := current.Transition(domain.InteractionAnswerProposed, current.Revision, proposalAt)
 		if transitionErr != nil {
 			t.Errorf("transition racing interaction: %v", transitionErr)

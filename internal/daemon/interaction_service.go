@@ -120,7 +120,10 @@ func (s issueInteractionService) MutateInteraction(ctx context.Context, command 
 		}
 		r, e = r.Transition(domain.InteractionDiscussing, in.ExpectedRevision, now)
 	case protocol.CommandInteractionPropose:
-		r.Proposal = &domain.InteractionAnswerAudit{Answer: strings.TrimSpace(in.Answer), Actor: strings.TrimSpace(in.Actor), CreatedAt: now}
+		if in.Answer.Revision != in.ExpectedRevision {
+			return protocol.InteractionResponseBody{}, fmt.Errorf("%w: answer authored at revision %d, current mutation expects %d", domain.ErrStaleInteractionRevision, in.Answer.Revision, in.ExpectedRevision)
+		}
+		r.Proposal = &domain.InteractionAnswerAudit{Answer: in.Answer, Actor: strings.TrimSpace(in.Actor), CreatedAt: now}
 		r, e = r.Transition(domain.InteractionAnswerProposed, in.ExpectedRevision, now)
 	case protocol.CommandInteractionAnswer:
 		if !humanActor(in.Actor) {
@@ -223,9 +226,11 @@ func (s issueInteractionService) ResolveInteraction(ctx context.Context, in prot
 	return s.resolve(ctx, c, r, in)
 }
 func (s issueInteractionService) resolve(ctx context.Context, c *issues.Client, r domain.InteractionRequest, in protocol.InteractionResolveRequestBody) (protocol.InteractionResponseBody, error) {
+	if in.Answer.Revision != in.ExpectedRevision {
+		return protocol.InteractionResponseBody{}, fmt.Errorf("%w: answer authored at revision %d, current mutation expects %d", domain.ErrStaleInteractionRevision, in.Answer.Revision, in.ExpectedRevision)
+	}
 	now := time.Now().UTC()
-	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: strings.TrimSpace(in.Answer), Actor: strings.TrimSpace(in.Actor), CreatedAt: now}
-	r.Effects = interactionResolutionEffects(in)
+	r.FinalAnswer = &domain.InteractionAnswerAudit{Answer: in.Answer, Actor: strings.TrimSpace(in.Actor), CreatedAt: now}
 	next, e := r.Transition(domain.InteractionResolved, in.ExpectedRevision, now)
 	if e != nil {
 		return protocol.InteractionResponseBody{}, e
@@ -235,8 +240,7 @@ func (s issueInteractionService) resolve(ctx context.Context, c *issues.Client, 
 	if e = next.Validate(); e != nil {
 		return protocol.InteractionResponseBody{}, e
 	}
-	ch := in.IssueChanges
-	resolution := issues.InteractionResolution{Request: next, ExpectedRevision: in.ExpectedRevision, IssueChanges: issues.InteractionIssueChanges{Title: ch.Title, Description: ch.Description, Design: ch.Design, Acceptance: ch.Acceptance, Priority: ch.Priority}}
+	resolution := issues.InteractionResolution{Request: next, ExpectedRevision: in.ExpectedRevision}
 	if in.Decision != nil {
 		resolution.Decision = &issues.InteractionDecisionEffect{Title: in.Decision.Title, Rationale: in.Decision.Rationale, Context: in.Decision.Context, Consequences: in.Decision.Consequences}
 	}
@@ -318,21 +322,6 @@ func (s issueInteractionService) publishLifecycle(ctx context.Context, event str
 	s.daemon.hub.Publish(protocol.EventEnvelope{ProtocolVersion: protocol.CurrentVersion, ProjectID: naming.ProjectID(projectID), Revision: s.daemon.nextRevision(projectID), Event: event, Kind: protocol.EnvelopeKindEvent, EmittedAt: now, Body: body})
 }
 
-func interactionResolutionEffects(in protocol.InteractionResolveRequestBody) []domain.InteractionResolutionEffect {
-	var out []domain.InteractionResolutionEffect
-	add := func(kind, target, summary string, approved bool) {
-		if approved {
-			out = append(out, domain.InteractionResolutionEffect{Kind: kind, Target: target, Summary: summary})
-		}
-	}
-	add("issue_field", in.ID, "title", in.IssueChanges.Title != nil)
-	add("issue_field", in.ID, "description", in.IssueChanges.Description != nil)
-	add("issue_field", in.ID, "design", in.IssueChanges.Design != nil)
-	add("issue_field", in.ID, "acceptance", in.IssueChanges.Acceptance != nil)
-	add("issue_field", in.ID, "priority", in.IssueChanges.Priority != nil)
-	add("decision", in.ID, "record significant decision", in.Decision != nil)
-	return out
-}
 func humanActor(actor string) bool {
 	a := strings.ToLower(strings.TrimSpace(actor))
 	return a == "human" || strings.HasPrefix(a, "human:")

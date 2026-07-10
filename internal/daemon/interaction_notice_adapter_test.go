@@ -50,7 +50,7 @@ func TestInteractionNoticeAdapterResolvesOnlyActiveProjection(t *testing.T) {
 	request.State = domain.InteractionResolved
 	request.Revision++
 	request.UpdatedAt = request.UpdatedAt.Add(time.Minute)
-	request.FinalAnswer = &domain.InteractionAnswerAudit{Answer: "yes", Actor: "human", CreatedAt: request.UpdatedAt}
+	request.FinalAnswer = &domain.InteractionAnswerAudit{Answer: domain.InteractionAnswerPayload{SelectedOption: "yes", Rationale: "Deploy now", SignificanceRecommendation: request.Significance, Revision: request.Revision - 1}, Actor: "human", CreatedAt: request.UpdatedAt}
 	if err := adapter.ProjectInteractionNotice(ctx, request); err != nil {
 		t.Fatalf("project resolved request: %v", err)
 	}
