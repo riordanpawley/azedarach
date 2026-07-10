@@ -6,7 +6,7 @@ Primer evidence key: `{{ .PrimeEvidenceKey }}`
 {{ if .OrchestratorExitContract }}{{ .OrchestratorExitContract }}
 {{ end }}
 Start here:
-1. {{ if .ActiveIssueID }}Run `az issue get {{ .ActiveIssueID }}`.{{ else }}Identify the issue with `az issue get <issue-id>` or create a fully described issue.{{ end }}
+1. {{ if .OrchestrationSection }}Use the daemon orchestration context below and continue the active stewardship loop.{{ else if .ActiveIssueID }}Run `az issue get {{ .ActiveIssueID }}`.{{ else }}Identify the issue with `az issue get <issue-id>` or create a fully described issue.{{ end }}
 2. {{ if .SpecEnabled }}{{ if .ActiveIssueID }}Run `az spec read --issue {{ .ActiveIssueID }}`{{ else }}Run `az spec read --issue <issue-id>`{{ end }} before behavior changes.{{ else }}Spec workflows are disabled for this project.{{ end }}
 3. When the user approves an implementation plan, your first action must always be to encode the approved plan into Azedarach before editing code: update the active issue's executable context and create any child issues, dependency edges, or requirement links the plan calls for. Do not create needless decomposition for a single-scope plan.
 4. Continue the requested work. Do not stop after restating the issue or proposing a plan unless the user asked for planning only.
@@ -14,6 +14,7 @@ Start here:
 {{ if .ActiveIssueClosedWarning }}{{ .ActiveIssueClosedWarning }}
 
 {{ end }}{{ if .ImplementationSection }}{{ .ImplementationSection }}
+{{ end }}{{ if .OrchestrationSection }}{{ .OrchestrationSection }}
 {{ end }}{{ if .IssueSection }}{{ .IssueSection }}
 {{ end }}{{ if .QuestionFirstGuardrails }}{{ .QuestionFirstGuardrails }}
 

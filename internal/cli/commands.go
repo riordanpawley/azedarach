@@ -8432,6 +8432,7 @@ type primeTemplateData struct {
 	OrchestrationViaNative   bool
 	TmuxAvailable            bool
 	OrchestratorExitContract string
+	OrchestrationSection     string
 	IssueSection             string
 	ActiveIssueClosedWarning string
 	ContextGuardrail         string
@@ -8464,6 +8465,34 @@ func PrimeCommand(deps *Dependencies) error {
 	orchestrationViaAz := strings.EqualFold(orchestrationVia, "az")
 	orchestrationViaNative := strings.EqualFold(orchestrationVia, "native")
 	tmuxAvailable := primeTmuxAvailable()
+	primeOrchestrator := false
+	orchestrationSection := ""
+	if tmuxAvailable && deps != nil && deps.DaemonClient != nil {
+		if sessionID, err := tmuxPaneSessionName(context.Background()); err == nil && strings.TrimSpace(sessionID) != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), primeDaemonReadTimeout)
+			finish := primePhase(deps, "orchestration_snapshot", "loading daemon orchestration scope snapshot")
+			orchestrationSnapshot, snapshotErr := deps.DaemonClient.OrchestrationSnapshot(ctx, protocol.OrchestrationSnapshotRequest{
+				SessionID: strings.TrimSpace(sessionID), ActorID: defaultIssueOwnerID(),
+			})
+			cancel()
+			finish(snapshotErr)
+			if snapshotErr == nil && orchestrationSnapshot.Role == "orchestrator" {
+				primeOrchestrator = true
+				issueID = orchestrationSnapshot.Scope.RootIssueID.String()
+				if issueID != "" {
+					issueIDSource = "daemon"
+					guardrail = fmt.Sprintf("- The daemon identifies this session as the rooted orchestrator for `%s`; its persisted scope is authority over environment-derived startup context.", issueID)
+				} else {
+					issueIDSource = ""
+					guardrail = "- The daemon identifies this session as the project orchestrator; remain project-scoped and do not invent an active worker issue from environment context."
+				}
+				orchestrationSection = renderPrimeOrchestrationSection(orchestrationSnapshot)
+				if issueID != "" {
+					orchestratorExitContract = renderPrimeOrchestratorExitContract(issueID)
+				}
+			}
+		}
+	}
 
 	if primeMode == "question-first" {
 		questionFirstGuardrails = `- Question-first execution rules (Space+Q mode):
@@ -8481,7 +8510,7 @@ func PrimeCommand(deps *Dependencies) error {
 
 	var snapshot daemonclient.TaskSnapshot
 	snapshotLoaded := false
-	if deps != nil && deps.DaemonClient != nil {
+	if !primeOrchestrator && deps != nil && deps.DaemonClient != nil {
 		if issueID != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), primeDaemonReadTimeout)
 			finish := primePhase(deps, "issue_snapshot", fmt.Sprintf("loading active issue snapshot for %s", issueID))
@@ -8512,7 +8541,7 @@ func PrimeCommand(deps *Dependencies) error {
 		}
 	}
 
-	if issueID != "" {
+	if !primeOrchestrator && issueID != "" {
 		if issueIDSource == "tmux" {
 			guardrail = fmt.Sprintf("- `AZEDARACH_ISSUE_ID` is absent, but the current tmux session resolves to issue `%s`; use it as the default issue scope and refresh stale context with `az issue get %s`.", issueID, issueID)
 		} else {
@@ -8558,7 +8587,7 @@ func PrimeCommand(deps *Dependencies) error {
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nIssue not found in current project snapshot; run `az issue get %s`.\n", issueID, issueID)
 		}
 	}
-	if issueID != "" {
+	if !primeOrchestrator && issueID != "" {
 		learningSection = renderPrimeLearningSection(context.Background(), deps, issueID)
 	}
 
@@ -8572,6 +8601,7 @@ func PrimeCommand(deps *Dependencies) error {
 		OrchestrationViaNative:   orchestrationViaNative,
 		TmuxAvailable:            tmuxAvailable,
 		OrchestratorExitContract: orchestratorExitContract,
+		OrchestrationSection:     orchestrationSection,
 		IssueSection:             issueSection,
 		ActiveIssueClosedWarning: activeIssueClosedWarning,
 		ContextGuardrail:         guardrail,
@@ -8887,6 +8917,64 @@ func renderPrimeOrchestratorExitContract(rootIssueID string) string {
 - Set the root `+"`in_review`"+` and report to the human without stopping its session or cleaning its worktree.
 - Close/integrate the root only after explicit human acceptance.
 `, rootIssueID, rootIssueID)
+}
+
+func renderPrimeOrchestrationSection(snapshot protocol.OrchestrationSnapshot) string {
+	var b strings.Builder
+	scope := "project"
+	if snapshot.Scope.Kind == domain.OrchestrationScopeRooted {
+		scope = "rooted:" + snapshot.Scope.RootIssueID.String()
+	}
+	fmt.Fprintf(&b, "Daemon orchestration context (role=orchestrator scope=%s lifecycle=%s revision=%d cursor=%d):\n", scope, snapshot.Lifecycle, snapshot.Revision, snapshot.Cursor)
+	fmt.Fprintf(&b, "- Capacity: active=%d runnable=%d total=%d/%d; wave limit=%d.\n", snapshot.Capacity.DirectActiveCount, snapshot.Capacity.DirectRunnableCount, snapshot.Capacity.TotalCountingCapacityCount, snapshot.Constraints.AgentCapacity, snapshot.Constraints.StartLimit)
+	renderCandidates := func(label string, candidates []protocol.OrchestrationCandidate) {
+		if len(candidates) == 0 {
+			return
+		}
+		fmt.Fprintf(&b, "- %s:\n", label)
+		for _, candidate := range candidates {
+			fmt.Fprintf(&b, "  - %s: %s (%s)\n", candidate.IssueID, candidate.Classification, candidate.Reason)
+		}
+	}
+	generalCandidates := make([]protocol.OrchestrationCandidate, 0, len(snapshot.Candidates))
+	for _, candidate := range snapshot.Candidates {
+		if candidate.Classification != string(domain.OrchestrationCandidateReviewReady) && candidate.Classification != string(domain.OrchestrationCandidateOwnedElsewhere) {
+			generalCandidates = append(generalCandidates, candidate)
+		}
+	}
+	renderCandidates("Candidates", generalCandidates)
+	renderCandidates("Reviews", snapshot.Reviews)
+	renderCandidates("Ownership conflicts", snapshot.OwnershipConflicts)
+	if len(snapshot.Blocked) > 0 {
+		ids := make([]string, 0, len(snapshot.Blocked))
+		for id := range snapshot.Blocked {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		b.WriteString("- Blockers:\n")
+		for _, id := range ids {
+			fmt.Fprintf(&b, "  - %s: %s\n", id, snapshot.Blocked[id])
+		}
+	}
+	if len(snapshot.Interactions) > 0 {
+		b.WriteString("- Waiting-human interactions:\n")
+		for _, interaction := range snapshot.Interactions {
+			fmt.Fprintf(&b, "  - %s (%s): %s\n", interaction.ID, interaction.IssueID, interaction.Question)
+		}
+	}
+	if len(snapshot.RecentEvents) > 0 {
+		b.WriteString("- Recent coordination events:\n")
+		for _, event := range snapshot.RecentEvents {
+			fmt.Fprintf(&b, "  - #%d %s %s: %s\n", event.Seq, event.Type, event.IssueID, summarizePrimeDescription(event.IssueID.String(), event.Body))
+		}
+	}
+	if len(snapshot.Constraints.Commands) > 0 {
+		fmt.Fprintf(&b, "- Commands: %s.\n", strings.Join(snapshot.Constraints.Commands, ", "))
+	}
+	for _, guardrail := range snapshot.Constraints.RoleGuardrails {
+		fmt.Fprintf(&b, "- Constraint: %s.\n", guardrail)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func primeIssueIsAzOrchestrationRoot(task domain.Task, tasks []domain.Task, orchestrationViaAz bool) bool {

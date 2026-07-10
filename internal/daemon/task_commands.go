@@ -147,6 +147,8 @@ type taskDeleteRequest struct {
 
 type taskCloseResult = protocol.TaskCloseResult
 
+type taskClosePhaseTiming = protocol.TaskClosePhaseTiming
+
 type deferredTaskWorktreeCleanupResult struct {
 	ProjectID string `json:"project_id"`
 	TaskID    string `json:"task_id"`
@@ -158,8 +160,6 @@ type deferredTaskWorktreeCleanupPlan struct {
 	Path   string
 	Branch string
 }
-
-type taskClosePhaseTiming = protocol.TaskClosePhaseTiming
 
 type taskDeleteResult struct {
 	TaskID          string `json:"task_id"`
@@ -1874,11 +1874,12 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 }
 
 type taskOwnershipRequest struct {
-	TaskID    string `json:"task_id"`
-	OwnerID   string `json:"owner_id,omitempty"`
-	OwnerKind string `json:"owner_kind,omitempty"`
-	TTL       string `json:"ttl,omitempty"`
-	Force     bool   `json:"force,omitempty"`
+	TaskID    string                          `json:"task_id"`
+	OwnerID   string                          `json:"owner_id,omitempty"`
+	OwnerKind string                          `json:"owner_kind,omitempty"`
+	TTL       string                          `json:"ttl,omitempty"`
+	Force     bool                            `json:"force,omitempty"`
+	Purpose   domain.CoordinationLeasePurpose `json:"purpose,omitempty"`
 }
 
 func (d *Daemon) handleTaskOwnershipClaim(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -1900,6 +1901,7 @@ func (d *Daemon) handleTaskOwnershipClaim(ctx context.Context, req protocol.Requ
 		OwnerKind: cmd.OwnerKind,
 		TTL:       ttl,
 		Force:     cmd.Force,
+		Purpose:   cmd.Purpose,
 	})
 	if err != nil {
 		return d.errorResponse(req, taskOwnershipErrorCode(err), err.Error()), nil
@@ -1920,6 +1922,7 @@ func (d *Daemon) handleTaskOwnershipRelease(ctx context.Context, req protocol.Re
 	task, err := issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, cmd.TaskID, issues.OwnershipClaimParams{
 		OwnerID: cmd.OwnerID,
 		Force:   cmd.Force,
+		Purpose: cmd.Purpose,
 	})
 	if err != nil {
 		return d.errorResponse(req, taskOwnershipErrorCode(err), err.Error()), nil
@@ -4508,6 +4511,21 @@ func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID,
 	if err != nil {
 		return taskGraphReadinessResult{}, err
 	}
+	waitingIssues, err := d.issueClientForProject(projectID).UnresolvedInteractionIssueIDs(ctx)
+	if err != nil {
+		return taskGraphReadinessResult{}, fmt.Errorf("refresh interaction readiness projection: %w", err)
+	}
+	if len(waitingIssues) > 0 {
+		runnable := ready.Runnable[:0]
+		for _, issueID := range ready.Runnable {
+			if _, waiting := waitingIssues[issueID]; waiting {
+				ready.Blocked[issueID] = "unresolved interaction request requires human decision"
+				continue
+			}
+			runnable = append(runnable, issueID)
+		}
+		ready.Runnable = runnable
+	}
 	pendingStarts, err := d.taskGraphPendingSessionStarts(ctx, projectID)
 	if err != nil {
 		return taskGraphReadinessResult{}, err
@@ -5229,16 +5247,17 @@ func (d *Daemon) daemonTaskGraphWorkerObservations(
 		issueID := task.ID.String()
 		issueEvents := d.workerObservationIssueEvents(ctx, projectID, issueID)
 		observation := daemonWorkerObservationFromInputs(workerObservationInputs{
-			RootIssueID:   rootID.String(),
-			Task:          task,
-			BlockedReason: ready.Blocked[issueID],
-			Runnable:      runnable[issueID],
-			Active:        activeByIssue[issueID],
-			Pending:       pendingByIssue[issueID],
-			StartProgress: startProgressByIssue[issueID],
-			Stale:         staleByIssue[issueID],
-			IssueEvents:   issueEvents,
-			MailEvents:    mailByIssue[issueID],
+			RootIssueID:     rootID.String(),
+			Task:            task,
+			BlockedReason:   ready.Blocked[issueID],
+			Runnable:        runnable[issueID],
+			Active:          activeByIssue[issueID],
+			Pending:         pendingByIssue[issueID],
+			StartProgress:   startProgressByIssue[issueID],
+			Stale:           staleByIssue[issueID],
+			IssueEvents:     issueEvents,
+			MailEvents:      mailByIssue[issueID],
+			DecisionWaiting: strings.HasPrefix(ready.Blocked[issueID], "unresolved interaction request"),
 		})
 		out = append(out, observation)
 	}
@@ -5249,16 +5268,17 @@ func (d *Daemon) daemonTaskGraphWorkerObservations(
 }
 
 type workerObservationInputs struct {
-	RootIssueID   string
-	Task          domain.Task
-	BlockedReason string
-	Runnable      bool
-	Active        *taskGraphActiveSession
-	Pending       *taskGraphPendingStart
-	StartProgress *taskGraphSessionStartProgress
-	Stale         *taskStaleCloseableCandidate
-	IssueEvents   []domain.IssueObservationEvent
-	MailEvents    []daemonMailEvent
+	RootIssueID     string
+	Task            domain.Task
+	BlockedReason   string
+	Runnable        bool
+	Active          *taskGraphActiveSession
+	Pending         *taskGraphPendingStart
+	StartProgress   *taskGraphSessionStartProgress
+	Stale           *taskStaleCloseableCandidate
+	IssueEvents     []domain.IssueObservationEvent
+	MailEvents      []daemonMailEvent
+	DecisionWaiting bool
 }
 
 func daemonWorkerObservationFromInputs(in workerObservationInputs) domain.WorkerObservation {
@@ -5281,12 +5301,19 @@ func daemonWorkerObservationFromInputs(in workerObservationInputs) domain.Worker
 	case in.Active != nil && daemonWorkerObservationActiveFailed(*in.Active):
 		observation.State = domain.WorkerObservationFailed
 		observation.Reason = "active session reports failed runtime state"
+	case in.DecisionWaiting:
+		observation.State = domain.WorkerObservationWaitingHuman
+		observation.Reason = "unresolved interaction request blocks issue pickup"
+		observation.WaitingHumanSource = domain.WaitingHumanSourceInteractionRequest
+		observation.WaitingHumanReason = observation.Reason
 	case in.Task.Status == domain.StatusInReview && daemonWorkerObservationReviewReadyPhaseAllowed(in):
 		observation.State = domain.WorkerObservationReviewReady
 		observation.Reason = "review-ready handoff is idle"
 	case in.Active != nil && daemonWorkerObservationActiveWaiting(*in.Active):
 		observation.State = domain.WorkerObservationWaitingHuman
 		observation.Reason = "active session is waiting for human input"
+		observation.WaitingHumanSource = domain.WaitingHumanSourceRuntimePrompt
+		observation.WaitingHumanReason = observation.Reason
 	case in.Active != nil:
 		observation.State = domain.WorkerObservationWorking
 		observation.Reason = "active worker session is present"

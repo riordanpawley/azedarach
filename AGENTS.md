@@ -158,8 +158,13 @@ fd "filename" -t f internal cmd
    - `task.integration_readiness` worker evidence gate and `task.context_risk_closeout` repeated-local-failure gate -> `projection` (durable issue projection + mailbox/observation evidence)
    - `task.merge_base_target` branch integration target gate -> `projection` (durable issue graph + worktree projection; explicit root-to-base requests also require issue-scoped `human.input_provided` acceptance evidence)
    - `task.follow_on_merge_candidates` follow-on merge source gate -> `projection` (durable issue graph + worktree projection)
+   - `orchestration.project_candidates` bounded project candidate classification -> `projection` (durable issue graph/lifecycle, ownership, session activity, and interaction projections)
    - `issue_resources.lifecycle` issue resource desired-state gate -> `projection` (durable issue status + runtime attachment projection)
+   - `interaction.waiting_human` decision-waiting and pickup exclusion gate -> `projection` (durable interaction request projection refreshed before evaluation)
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
+   - orchestration scope identity -> `projection` (durable project + typed rooted/project scope)
+   - orchestration scope singleton -> `hybrid` (refreshed durable scope lease + live tmux runtime)
+   - project orchestration completion -> `hybrid` (refreshed issue/review/interaction/session projections + live tmux runtime)
 
 ### Adding New Invariants (Required Checklist)
 
