@@ -6,14 +6,16 @@ import (
 )
 
 const (
-	CommandInteractionCreate   = protocol.CommandInteractionCreate
-	CommandInteractionList     = protocol.CommandInteractionList
-	CommandInteractionGet      = protocol.CommandInteractionGet
-	CommandInteractionDiscuss  = protocol.CommandInteractionDiscuss
-	CommandInteractionPropose  = protocol.CommandInteractionPropose
-	CommandInteractionAnswer   = protocol.CommandInteractionAnswer
-	CommandInteractionResolve  = protocol.CommandInteractionResolve
-	CommandInteractionWithdraw = protocol.CommandInteractionWithdraw
+	CommandInteractionCreate    = protocol.CommandInteractionCreate
+	CommandInteractionList      = protocol.CommandInteractionList
+	CommandInteractionGet       = protocol.CommandInteractionGet
+	CommandInteractionDiscuss   = protocol.CommandInteractionDiscuss
+	CommandInteractionPropose   = protocol.CommandInteractionPropose
+	CommandInteractionAnswer    = protocol.CommandInteractionAnswer
+	CommandInteractionResolve   = protocol.CommandInteractionResolve
+	CommandInteractionWithdraw  = protocol.CommandInteractionWithdraw
+	CommandInteractionSupersede = protocol.CommandInteractionSupersede
+	CommandInteractionRecover   = protocol.CommandInteractionRecover
 )
 
 func (c *Client) CreateInteraction(ctx context.Context, in protocol.InteractionCreateRequestBody) (protocol.InteractionResponseBody, error) {
