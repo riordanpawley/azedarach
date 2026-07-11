@@ -123,6 +123,14 @@ type orchestrationProjectOverview struct {
 	OrchestrationErr error
 }
 
+type projectOrchestratorTarget struct {
+	ProjectID   string
+	ProjectPath string
+	SocketPath  string
+}
+
+type projectOrchestratorActionRunner func(context.Context, projectOrchestratorTarget, string, protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error)
+
 type drillDownContext struct {
 	parentID   string
 	parentName string
@@ -247,6 +255,7 @@ type Model struct {
 	orchestrationOverviewBackendErrors  int
 	orchestrationOverviewHiddenLabels   []string
 	orchestrationOverviewCursor         int
+	projectOrchestratorActionRunner     projectOrchestratorActionRunner
 	jumpMode                            *overlay.JumpMode
 	jumpTargets                         []string
 	mergePickMode                       *mergePickState

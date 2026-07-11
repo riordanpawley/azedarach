@@ -659,6 +659,7 @@ func (m Model) projectOrchestratorActionCmd(project orchestrationProjectOverview
 		socketPath = config.DaemonSocketPathFor(project.Path)
 	}
 	projectID := strings.TrimSpace(project.ProjectID)
+	target := projectOrchestratorTarget{ProjectID: projectID, ProjectPath: strings.TrimSpace(project.Path), SocketPath: socketPath}
 	readPolicy := daemonclient.DefaultReadWaitPolicy()
 	if m.daemonClient != nil {
 		readPolicy = m.daemonClient.ReadWaitPolicy()
@@ -666,18 +667,22 @@ func (m Model) projectOrchestratorActionCmd(project orchestrationProjectOverview
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 		defer cancel()
-		client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID).WithReadWaitPolicy(readPolicy)
 		request := protocol.OrchestratorSessionRequest{Scope: domain.ProjectOrchestrationScope()}
-		var result protocol.OrchestratorSessionResult
-		var err error
-		switch action {
-		case "start":
-			result, err = client.StartOrchestratorSession(ctx, request)
-		case "attach":
-			result, err = client.AttachOrchestratorSession(ctx, request)
-		default:
-			err = fmt.Errorf("unsupported project orchestrator action %q", action)
+		runner := m.projectOrchestratorActionRunner
+		if runner == nil {
+			runner = func(ctx context.Context, target projectOrchestratorTarget, action string, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+				client := daemonclient.New(transport.NewClient(target.SocketPath)).WithProjectID(target.ProjectID).WithReadWaitPolicy(readPolicy)
+				switch action {
+				case "start":
+					return client.StartOrchestratorSession(ctx, request)
+				case "attach":
+					return client.AttachOrchestratorSession(ctx, request)
+				default:
+					return protocol.OrchestratorSessionResult{}, fmt.Errorf("unsupported project orchestrator action %q", action)
+				}
+			}
 		}
+		result, err := runner(ctx, target, action, request)
 		return projectOrchestratorActionMsg{projectID: projectID, action: action, result: result, err: err}
 	}
 }
