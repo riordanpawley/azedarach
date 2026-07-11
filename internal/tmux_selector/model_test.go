@@ -22,6 +22,25 @@ type fakeSnapshotLoader struct {
 	err      error
 }
 
+func TestLoadedTypedViewOwnsSelectorLayoutAndTabOverrideIsTransient(t *testing.T) {
+	view := domain.DefaultBoardView()
+	view.Layout = domain.BoardViewLayoutTreeList
+	model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+	next, _ := model.Update(LoadedMsg{Snapshot: Snapshot{View: view}})
+	loaded := next.(Model)
+	if loaded.activeTab != selectorTabTree {
+		t.Fatalf("active tab = %v, want tree from typed view", loaded.activeTab)
+	}
+	next, cmd := loaded.Update(tea.KeyMsg{Type: tea.KeyTab})
+	overridden := next.(Model)
+	if overridden.activeTab != selectorTabGrid {
+		t.Fatalf("active tab = %v, want transient grid override", overridden.activeTab)
+	}
+	if cmd != nil {
+		t.Fatal("typed-view tab override unexpectedly persisted selector tab")
+	}
+}
+
 func (f fakeSnapshotLoader) ListTasksSnapshot(context.Context) (Snapshot, error) {
 	return f.snapshot, f.err
 }

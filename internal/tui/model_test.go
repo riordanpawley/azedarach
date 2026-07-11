@@ -34,6 +34,21 @@ type mockTmuxService struct {
 	popupFn  func(ctx context.Context, title, width, height, command string) error
 }
 
+func TestDecorateConfiguredTreeTasksRendersHierarchyWithoutMutatingProjection(t *testing.T) {
+	parentID := naming.IssueID("parent")
+	tasks := []domain.Task{
+		{ID: parentID, Title: "Parent"},
+		{ID: "child", Title: "Child", ParentID: &parentID},
+	}
+	decorated := decorateConfiguredTreeTasks(tasks)
+	if got := decorated[1].Title; got != "└ Child" {
+		t.Fatalf("child title = %q", got)
+	}
+	if tasks[1].Title != "Child" {
+		t.Fatalf("projection task mutated: %q", tasks[1].Title)
+	}
+}
+
 type probeOverlay struct {
 	updated bool
 	lastMsg tea.Msg

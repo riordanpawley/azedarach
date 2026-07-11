@@ -473,6 +473,26 @@ func TestView_TabToggleRendersCompactAndBoardSurfaces(t *testing.T) {
 	}
 }
 
+func TestView_TypedTreeLayoutUsesDaemonProjectionOrder(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.width = 120
+	m.height = 24
+	m.tasks = m.tasks[:2]
+	m.boardView = domain.DefaultBoardView()
+	m.boardView.Layout = domain.BoardViewLayoutTreeList
+	m.boardOrdered = []domain.Task{m.tasks[1], m.tasks[0]}
+
+	view := m.View()
+	if strings.Contains(strings.Split(view, "\n")[0], "Open (") {
+		t.Fatalf("tree-list view rendered column board: %q", view)
+	}
+	first, second := strings.Index(view, "Task 2"), strings.Index(view, "Task 1")
+	if first < 0 || second < 0 || first >= second {
+		t.Fatalf("projected order not preserved: Task 2=%d Task 1=%d\n%s", first, second, view)
+	}
+}
+
 func TestView_OrchestrationOverviewShowsProgressAndGitWithoutDumpingEverything(t *testing.T) {
 	m := newTestModel()
 	m.width = 120

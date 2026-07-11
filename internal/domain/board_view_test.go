@@ -1,9 +1,12 @@
 package domain
 
 import (
+	"bytes"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWaitingHumanPredicateDistinguishesDecisionFromRuntimePrompt(t *testing.T) {
@@ -54,6 +57,62 @@ func TestBoardViewSortPolicyJSONRoundTrip(t *testing.T) {
 	if decoded.Options.SortPolicy != BoardViewSortHumanAttention {
 		t.Fatalf("decoded sort policy = %q", decoded.Options.SortPolicy)
 	}
+}
+
+func TestBoardViewSchemaV1MigratesToColumnLayoutAndAttentionSort(t *testing.T) {
+	legacy := []byte(`{"schema_version":1,"id":"legacy","title":"Legacy","columns":[{"id":"active","title":"Active","predicates":[{"kind":"lifecycle","lifecycle":["active"]}]}],"options":{"sort_policy":"human_attention"}}`)
+	view, err := DecodeBoardViewDefinitionJSON(legacy)
+	if err != nil {
+		t.Fatalf("DecodeBoardViewDefinitionJSON(v1): %v", err)
+	}
+	if view.Layout != BoardViewLayoutColumnBoard {
+		t.Fatalf("layout = %q, want %q", view.Layout, BoardViewLayoutColumnBoard)
+	}
+	if len(view.Sort) != 1 || view.Sort[0].Key != BoardViewSortKeyHumanAttention {
+		t.Fatalf("sort = %#v, want migrated human-attention rule", view.Sort)
+	}
+	encoded, err := EncodeBoardViewDefinitionJSON(view)
+	if err != nil {
+		t.Fatalf("EncodeBoardViewDefinitionJSON: %v", err)
+	}
+	if !bytes.Contains(encoded, []byte(`"schema_version":2`)) {
+		t.Fatalf("encoded definition = %s, want schema v2", encoded)
+	}
+}
+
+func TestProjectTasksByBoardViewAppliesFiltersOrderedRulesAndTreeLayout(t *testing.T) {
+	now := time.Now().UTC()
+	parentID := Task{ID: "parent"}.ID
+	view := DefaultBoardView()
+	view.Layout = BoardViewLayoutTreeList
+	view.Filters = []BoardColumnPredicate{{Kind: BoardPredicateLifecycle, Lifecycle: []IssueWorkflow{IssueWorkflowActive}}}
+	view.Sort = []BoardViewSortRule{
+		{Key: BoardViewSortKeyPriority, Direction: BoardViewSortAscending},
+		{Key: BoardViewSortKeyUpdated, Direction: BoardViewSortDescending},
+	}
+	tasks := []Task{
+		{ID: "child", ParentID: &parentID, Status: StatusInProgress, Priority: P0, UpdatedAt: now},
+		{ID: parentID, Status: StatusInProgress, Priority: P2, UpdatedAt: now.Add(-time.Hour)},
+		{ID: "filtered", Status: StatusOpen, Priority: P0, UpdatedAt: now.Add(time.Hour)},
+	}
+	projection, err := ProjectTasksByBoardView(view, tasks)
+	if err != nil {
+		t.Fatalf("ProjectTasksByBoardView: %v", err)
+	}
+	if projection.Layout != BoardViewLayoutTreeList {
+		t.Fatalf("layout = %q", projection.Layout)
+	}
+	if got := taskIDs(projection.Ordered); !slices.Equal(got, []string{"parent", "child"}) {
+		t.Fatalf("ordered = %v, want parent-before-child and filtered task omitted", got)
+	}
+}
+
+func taskIDs(tasks []Task) []string {
+	out := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		out = append(out, task.ID.String())
+	}
+	return out
 }
 
 func TestBuiltInBoardViewCatalogAndLegacyAliases(t *testing.T) {

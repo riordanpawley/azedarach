@@ -324,6 +324,28 @@ func TestGlobalInventoryLoaderCarriesTreeTasksForAncestorRendering(t *testing.T)
 	}
 }
 
+func TestApplyProjectViewOrderingUsesSharedProjectionWithoutDroppingLiveSessions(t *testing.T) {
+	snapshot := Snapshot{Entries: []InventoryEntry{
+		{IssueID: "low", ProjectID: "project", HasTmuxSession: true},
+		{IssueID: "high", ProjectID: "project", HasTmuxSession: true},
+		{SessionID: "untracked", HasTmuxSession: true},
+	}}
+	projects := []ProjectInventorySnapshot{{
+		ProjectID: "project",
+		View:      domain.DefaultBoardView(),
+		Projection: domain.BoardViewProjection{Layout: domain.BoardViewLayoutHorizontalGrid, Ordered: []domain.Task{
+			{ID: "high"}, {ID: "low"},
+		}},
+	}}
+	applyProjectViewOrdering(&snapshot, projects)
+	if got := []string{snapshot.Entries[0].IssueID, snapshot.Entries[1].IssueID, snapshot.Entries[2].SessionID}; !slices.Equal(got, []string{"high", "low", "untracked"}) {
+		t.Fatalf("entry order = %v", got)
+	}
+	if !snapshot.Entries[2].HasTmuxSession {
+		t.Fatal("untracked live tmux session was dropped")
+	}
+}
+
 func TestGlobalInventoryLoaderScopesTreeAncestorsByProject(t *testing.T) {
 	started := time.Unix(1775209200, 0).UTC()
 	projectDir := t.TempDir()

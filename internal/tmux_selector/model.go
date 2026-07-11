@@ -66,6 +66,8 @@ type Snapshot struct {
 	Entries          []InventoryEntry
 	Tasks            []domain.Task
 	TreeTasks        []domain.Task
+	View             domain.BoardView
+	Projection       domain.BoardViewProjection
 	Revision         uint64
 	LastCheckedAt    time.Time
 	Freshness        string
@@ -325,6 +327,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		m.snapshot = msg.Snapshot
 		m.normalizeSnapshot()
+		m.applySnapshotViewLayout()
 		m.status = formatSnapshotStatus(m.snapshot, len(m.snapshot.Entries))
 		slog.Default().Info("tmux selector snapshot applied",
 			"elapsed_ms", m.elapsedSinceStart().Milliseconds(),
@@ -336,7 +339,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 		m.logReadyToRender("snapshot")
 		cmds := []tea.Cmd{}
-		if !m.selectorTabLoaded {
+		if !m.selectorTabLoaded && m.snapshot.View.ID == "" {
 			cmds = append(cmds, m.loadSelectorTabCmd())
 		}
 		if liveLoader, ok := m.loader.(LiveSnapshotLoader); ok && m.snapshot.Enriching {
@@ -363,6 +366,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.snapshot = msg.Snapshot
 		m.normalizeSnapshot()
+		m.applySnapshotViewLayout()
 		if selectedSessionID != "" {
 			m.selectSessionID(selectedSessionID)
 		}
@@ -458,7 +462,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectorTabLoaded = true
 			m.selectorTabUserSet = true
 			m.loading = false
-			return m, m.persistSelectorTabCmd(m.activeTab)
+			if m.snapshot.View.ID == "" {
+				return m, m.persistSelectorTabCmd(m.activeTab)
+			}
+			return m, nil
 		case "u":
 			if m.activeTab == selectorTabTree {
 				m.toggleTreeSort()
@@ -524,6 +531,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *Model) applySnapshotViewLayout() {
+	if m == nil || m.selectorTabUserSet || m.snapshot.View.ID == "" {
+		return
+	}
+	switch m.snapshot.View.Normalized().Layout {
+	case domain.BoardViewLayoutTreeList:
+		m.activeTab = selectorTabTree
+	case domain.BoardViewLayoutColumnBoard, domain.BoardViewLayoutHorizontalGrid:
+		m.activeTab = selectorTabGrid
+	}
+	m.selectorTabLoaded = true
 }
 
 func nilFromLoadFailed(m *Model, err error) tea.Cmd {

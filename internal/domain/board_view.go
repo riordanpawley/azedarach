@@ -10,7 +10,15 @@ import (
 	"time"
 )
 
-const BoardViewDefinitionSchemaVersion = 1
+const BoardViewDefinitionSchemaVersion = 2
+
+type BoardViewLayout string
+
+const (
+	BoardViewLayoutColumnBoard    BoardViewLayout = "column_board"
+	BoardViewLayoutTreeList       BoardViewLayout = "tree_list"
+	BoardViewLayoutHorizontalGrid BoardViewLayout = "horizontal_grid"
+)
 
 type BoardViewID string
 
@@ -57,7 +65,10 @@ type BoardViewSet struct {
 type BoardView struct {
 	ID      BoardViewID             `json:"id"`
 	Title   string                  `json:"title"`
+	Layout  BoardViewLayout         `json:"layout,omitempty"`
 	Columns []BoardColumn           `json:"columns"`
+	Filters []BoardColumnPredicate  `json:"filters,omitempty"`
+	Sort    []BoardViewSortRule     `json:"sort,omitempty"`
 	Options BoardViewDisplayOptions `json:"options,omitempty"`
 }
 
@@ -72,6 +83,29 @@ const (
 	BoardViewSortDefault        BoardViewSortPolicy = ""
 	BoardViewSortHumanAttention BoardViewSortPolicy = "human_attention"
 )
+
+type BoardViewSortKey string
+
+const (
+	BoardViewSortKeyHumanAttention BoardViewSortKey = "human_attention"
+	BoardViewSortKeyPriority       BoardViewSortKey = "priority"
+	BoardViewSortKeyUpdated        BoardViewSortKey = "updated"
+	BoardViewSortKeySession        BoardViewSortKey = "session"
+	BoardViewSortKeyGitDiff        BoardViewSortKey = "git_diff"
+	BoardViewSortKeyIssueID        BoardViewSortKey = "issue_id"
+)
+
+type BoardViewSortDirection string
+
+const (
+	BoardViewSortAscending  BoardViewSortDirection = "asc"
+	BoardViewSortDescending BoardViewSortDirection = "desc"
+)
+
+type BoardViewSortRule struct {
+	Key       BoardViewSortKey       `json:"key"`
+	Direction BoardViewSortDirection `json:"direction,omitempty"`
+}
 
 type BoardColumn struct {
 	ID         BoardColumnID          `json:"id"`
@@ -99,6 +133,14 @@ type BoardViewColumnSnapshot struct {
 	Tasks      []Task      `json:"tasks"`
 }
 
+// BoardViewProjection is the surface-neutral result of applying a view.
+// Renderers choose geometry and interaction; placement and ordering live here.
+type BoardViewProjection struct {
+	Layout  BoardViewLayout           `json:"layout"`
+	Groups  []BoardViewColumnSnapshot `json:"groups"`
+	Ordered []Task                    `json:"ordered"`
+}
+
 type BoardPlacement struct {
 	Matched        bool          `json:"matched"`
 	ViewID         BoardViewID   `json:"view_id,omitempty"`
@@ -114,7 +156,10 @@ type persistedBoardViewDefinition struct {
 	ID            BoardViewID             `json:"id"`
 	Title         string                  `json:"title"`
 	Name          string                  `json:"name,omitempty"`
+	Layout        BoardViewLayout         `json:"layout,omitempty"`
 	Columns       []BoardColumn           `json:"columns"`
+	Filters       []BoardColumnPredicate  `json:"filters,omitempty"`
+	Sort          []BoardViewSortRule     `json:"sort,omitempty"`
 	Options       BoardViewDisplayOptions `json:"options,omitempty"`
 }
 
@@ -123,7 +168,7 @@ func DecodeBoardViewDefinitionJSON(data []byte) (BoardView, error) {
 	if err := json.Unmarshal(data, &persisted); err != nil {
 		return BoardView{}, err
 	}
-	if persisted.SchemaVersion != BoardViewDefinitionSchemaVersion {
+	if persisted.SchemaVersion != 1 && persisted.SchemaVersion != BoardViewDefinitionSchemaVersion {
 		return BoardView{}, fmt.Errorf("unsupported board view schema_version %d", persisted.SchemaVersion)
 	}
 	title := persisted.Title
@@ -133,7 +178,10 @@ func DecodeBoardViewDefinitionJSON(data []byte) (BoardView, error) {
 	view := BoardView{
 		ID:      persisted.ID,
 		Title:   title,
+		Layout:  persisted.Layout,
 		Columns: persisted.Columns,
+		Filters: persisted.Filters,
+		Sort:    persisted.Sort,
 		Options: persisted.Options,
 	}
 	view = view.Normalized()
@@ -152,7 +200,10 @@ func EncodeBoardViewDefinitionJSON(view BoardView) ([]byte, error) {
 		SchemaVersion: BoardViewDefinitionSchemaVersion,
 		ID:            view.ID,
 		Title:         view.Title,
+		Layout:        view.Layout,
 		Columns:       view.Columns,
+		Filters:       view.Filters,
+		Sort:          view.Sort,
 		Options:       view.Options,
 	})
 }
@@ -178,8 +229,21 @@ func DefaultBoardView() BoardView {
 	return BoardView{
 		ID:      BoardViewDefaultID,
 		Title:   "Default",
+		Layout:  BoardViewLayoutColumnBoard,
 		Columns: defaultBoardViewColumns(),
+		Sort:    DefaultBoardViewSortRules(),
 		Options: BoardViewDisplayOptions{SortPolicy: BoardViewSortHumanAttention},
+	}
+}
+
+func DefaultBoardViewSortRules() []BoardViewSortRule {
+	return []BoardViewSortRule{
+		{Key: BoardViewSortKeyHumanAttention, Direction: BoardViewSortDescending},
+		{Key: BoardViewSortKeyPriority, Direction: BoardViewSortAscending},
+		{Key: BoardViewSortKeyUpdated, Direction: BoardViewSortDescending},
+		{Key: BoardViewSortKeySession, Direction: BoardViewSortDescending},
+		{Key: BoardViewSortKeyGitDiff, Direction: BoardViewSortDescending},
+		{Key: BoardViewSortKeyIssueID, Direction: BoardViewSortAscending},
 	}
 }
 
@@ -302,25 +366,36 @@ func CloseoutBoardView() BoardView {
 }
 
 func GroupTasksByBoardView(view BoardView, tasks []Task) ([]BoardViewColumnSnapshot, error) {
+	projection, err := ProjectTasksByBoardView(view, tasks)
+	if err != nil {
+		return nil, err
+	}
+	return projection.Groups, nil
+}
+
+func ProjectTasksByBoardView(view BoardView, tasks []Task) (BoardViewProjection, error) {
 	view = view.Normalized()
 	if err := view.Validate(); err != nil {
-		return nil, err
+		return BoardViewProjection{}, err
 	}
 	columns := make([]BoardViewColumnSnapshot, 0, len(view.Columns))
 	for _, column := range view.Columns {
 		columns = append(columns, BoardViewColumnSnapshot{Definition: column})
 	}
 	for _, task := range tasks {
+		if !view.MatchesFilters(task) {
+			continue
+		}
 		placement, err := view.PlaceTask(task)
 		if err != nil {
-			return nil, err
+			return BoardViewProjection{}, err
 		}
 		if placement.Matched && placement.ColumnIndex >= 0 && placement.ColumnIndex < len(columns) {
 			columns[placement.ColumnIndex].Tasks = append(columns[placement.ColumnIndex].Tasks, task)
 		}
 	}
 	for i := range columns {
-		columns[i].Tasks = ApplyBoardViewSortPolicyInPlace(view.Options.SortPolicy, columns[i].Tasks)
+		columns[i].Tasks = ApplyBoardViewSortRulesInPlace(view.effectiveSortRules(), columns[i].Tasks)
 	}
 	if view.Options.HideEmptyColumns {
 		filtered := columns[:0]
@@ -331,7 +406,133 @@ func GroupTasksByBoardView(view BoardView, tasks []Task) ([]BoardViewColumnSnaps
 		}
 		columns = filtered
 	}
-	return columns, nil
+	ordered := make([]Task, 0, len(tasks))
+	for _, column := range columns {
+		ordered = append(ordered, column.Tasks...)
+	}
+	if view.Layout == BoardViewLayoutTreeList {
+		ordered = boardViewTreeOrder(ordered)
+	}
+	return BoardViewProjection{Layout: view.Layout, Groups: columns, Ordered: ordered}, nil
+}
+
+func boardViewTreeOrder(tasks []Task) []Task {
+	byID := make(map[string]Task, len(tasks))
+	children := make(map[string][]string, len(tasks))
+	roots := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	for _, task := range tasks {
+		id := task.ID.String()
+		parentID := ""
+		if task.ParentID != nil {
+			parentID = task.ParentID.String()
+		}
+		if parentID == "" {
+			for _, dependency := range task.Dependencies {
+				if dependency.Type == DependencyParentChild {
+					parentID = dependency.ID.String()
+					break
+				}
+			}
+		}
+		if parentID == "" || parentID == id {
+			roots = append(roots, id)
+		} else if _, ok := byID[parentID]; ok {
+			children[parentID] = append(children[parentID], id)
+		} else {
+			roots = append(roots, id)
+		}
+	}
+	ordered := make([]Task, 0, len(tasks))
+	seen := make(map[string]bool, len(tasks))
+	var visit func(string)
+	visit = func(id string) {
+		if seen[id] {
+			return
+		}
+		seen[id] = true
+		ordered = append(ordered, byID[id])
+		for _, childID := range children[id] {
+			visit(childID)
+		}
+	}
+	for _, rootID := range roots {
+		visit(rootID)
+	}
+	for _, task := range tasks {
+		visit(task.ID.String())
+	}
+	return ordered
+}
+
+func (v BoardView) MatchesFilters(task Task) bool {
+	for _, filter := range v.Filters {
+		matched, _ := filter.MatchTask(task)
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func (v BoardView) effectiveSortRules() []BoardViewSortRule {
+	if len(v.Sort) > 0 {
+		return v.Sort
+	}
+	if v.Options.SortPolicy == BoardViewSortHumanAttention {
+		return []BoardViewSortRule{{Key: BoardViewSortKeyHumanAttention, Direction: BoardViewSortDescending}}
+	}
+	return nil
+}
+
+func ApplyBoardViewSortRulesInPlace(rules []BoardViewSortRule, tasks []Task) []Task {
+	if len(rules) == 0 || len(tasks) < 2 {
+		return tasks
+	}
+	sort.SliceStable(tasks, func(i, j int) bool {
+		for _, rule := range rules {
+			comparison := compareBoardViewTasks(rule.Key, tasks[i], tasks[j])
+			if comparison == 0 {
+				continue
+			}
+			if rule.Direction == BoardViewSortDescending {
+				return comparison > 0
+			}
+			return comparison < 0
+		}
+		return false
+	})
+	return tasks
+}
+
+func compareBoardViewTasks(key BoardViewSortKey, left, right Task) int {
+	compareInt := func(a, b int) int {
+		if a < b {
+			return -1
+		}
+		if a > b {
+			return 1
+		}
+		return 0
+	}
+	switch key {
+	case BoardViewSortKeyHumanAttention:
+		return compareInt(int(HumanAttentionRank(left)), int(HumanAttentionRank(right)))
+	case BoardViewSortKeyPriority:
+		return compareInt(int(left.Priority), int(right.Priority))
+	case BoardViewSortKeyUpdated:
+		return left.UpdatedAt.Compare(right.UpdatedAt)
+	case BoardViewSortKeySession:
+		return compareInt(sessionPriority(left), sessionPriority(right))
+	case BoardViewSortKeyGitDiff:
+		return compareInt(gitDiffTotal(left), gitDiffTotal(right))
+	case BoardViewSortKeyIssueID:
+		return strings.Compare(left.ID.String(), right.ID.String())
+	default:
+		return 0
+	}
 }
 
 // ApplyBoardViewSortPolicyInPlace applies the view-owned ordering prefix while
@@ -386,6 +587,12 @@ func (s BoardViewSet) ViewByID(id BoardViewID) (BoardView, bool) {
 func (v BoardView) Normalized() BoardView {
 	v.ID = BoardViewID(NormalizeBoardViewID(string(v.ID)))
 	v.Title = strings.TrimSpace(v.Title)
+	if v.Layout == "" {
+		v.Layout = BoardViewLayoutColumnBoard
+	}
+	if len(v.Sort) == 0 && v.Options.SortPolicy == BoardViewSortHumanAttention {
+		v.Sort = []BoardViewSortRule{{Key: BoardViewSortKeyHumanAttention, Direction: BoardViewSortDescending}}
+	}
 	for i := range v.Columns {
 		v.Columns[i] = v.Columns[i].Normalized()
 	}
@@ -403,10 +610,32 @@ func (v BoardView) Validate() error {
 	if len(v.Columns) == 0 {
 		return fmt.Errorf("board view %q must define at least one column", v.ID)
 	}
+	switch v.Layout {
+	case BoardViewLayoutColumnBoard, BoardViewLayoutTreeList, BoardViewLayoutHorizontalGrid:
+	default:
+		return fmt.Errorf("board view %q has unsupported layout %q", v.ID, v.Layout)
+	}
 	switch v.Options.SortPolicy {
 	case BoardViewSortDefault, BoardViewSortHumanAttention:
 	default:
 		return fmt.Errorf("board view %q has unsupported sort policy %q", v.ID, v.Options.SortPolicy)
+	}
+	for i, rule := range v.Sort {
+		switch rule.Key {
+		case BoardViewSortKeyHumanAttention, BoardViewSortKeyPriority, BoardViewSortKeyUpdated, BoardViewSortKeySession, BoardViewSortKeyGitDiff, BoardViewSortKeyIssueID:
+		default:
+			return fmt.Errorf("board view %q sort rule %d has unsupported key %q", v.ID, i, rule.Key)
+		}
+		switch rule.Direction {
+		case "", BoardViewSortAscending, BoardViewSortDescending:
+		default:
+			return fmt.Errorf("board view %q sort rule %d has unsupported direction %q", v.ID, i, rule.Direction)
+		}
+	}
+	for i, filter := range v.Filters {
+		if err := filter.Validate(); err != nil {
+			return fmt.Errorf("filter %d: %w", i, err)
+		}
 	}
 	seen := make(map[BoardColumnID]struct{}, len(v.Columns))
 	for i, column := range v.Columns {

@@ -16,7 +16,7 @@ const (
 	CommandBoardViewSave       = "board.view.save"
 	CommandBoardViewDelete     = "board.view.delete"
 	CommandBoardViewSelect     = "board.view.select"
-	BoardSnapshotSchemaVersion = 3
+	BoardSnapshotSchemaVersion = 4
 )
 
 // BoardSnapshotPayload is the daemon/client contract for board view snapshots.
@@ -32,8 +32,23 @@ type BoardSnapshotPayload struct {
 	LastCheckedAt    time.Time             `json:"last_checked_at" msgpack:"last_checked_at"`
 	Freshness        TaskListFreshness     `json:"freshness" msgpack:"freshness"`
 	View             domain.BoardView      `json:"view" msgpack:"view"`
+	Projection       BoardViewProjection   `json:"projection" msgpack:"projection"`
 	Columns          []BoardSnapshotColumn `json:"columns" msgpack:"columns"`
 	Tasks            []BoardTaskSummary    `json:"tasks" msgpack:"tasks"`
+}
+
+type BoardViewProjection struct {
+	Layout  domain.BoardViewLayout `json:"layout" msgpack:"layout"`
+	Groups  []BoardSnapshotColumn  `json:"groups" msgpack:"groups"`
+	Ordered []BoardTaskSummary     `json:"ordered" msgpack:"ordered"`
+}
+
+func BoardViewProjectionFromDomain(projection domain.BoardViewProjection) BoardViewProjection {
+	return BoardViewProjection{
+		Layout:  projection.Layout,
+		Groups:  BoardSnapshotColumnsFromDomain(projection.Groups),
+		Ordered: BoardTaskSummariesFromDomain(projection.Ordered),
+	}
 }
 
 type BoardSnapshotRequestBody struct {

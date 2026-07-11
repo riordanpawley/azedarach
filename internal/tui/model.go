@@ -223,6 +223,7 @@ type Model struct {
 	tasks                []domain.Task
 	boardView            domain.BoardView
 	boardColumns         []domain.BoardViewColumnSnapshot
+	boardOrdered         []domain.Task
 	sessions             map[string]*domain.Session
 	suppressedTasks      map[string]struct{}
 	pendingStatuses      map[string]pendingTaskStatus
@@ -1182,6 +1183,7 @@ type issuesLoadedMsg struct {
 	tasks          []domain.Task
 	boardView      domain.BoardView
 	boardColumns   []domain.BoardViewColumnSnapshot
+	boardOrdered   []domain.Task
 	revision       uint64
 	lastCheckedAt  time.Time
 	freshness      protocol.TaskListFreshness
@@ -1207,6 +1209,7 @@ type projectSwitchResultMsg struct {
 	tasks         []domain.Task
 	boardView     domain.BoardView
 	boardColumns  []domain.BoardViewColumnSnapshot
+	boardOrdered  []domain.Task
 	revision      uint64
 	lastCheckedAt time.Time
 	freshness     protocol.TaskListFreshness
@@ -1765,6 +1768,7 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			tasks:          snapshot.Tasks,
 			boardView:      snapshot.View,
 			boardColumns:   snapshot.Columns,
+			boardOrdered:   snapshot.Projection.Ordered,
 			revision:       snapshot.Revision,
 			lastCheckedAt:  snapshot.LastCheckedAt,
 			freshness:      snapshot.Freshness,
@@ -1979,6 +1983,7 @@ func (m Model) loadIssuesAfterRuntimeReconcileCmd() tea.Cmd {
 			tasks:          snapshot.Tasks,
 			boardView:      snapshot.View,
 			boardColumns:   snapshot.Columns,
+			boardOrdered:   snapshot.Projection.Ordered,
 			revision:       snapshot.Revision,
 			lastCheckedAt:  snapshot.LastCheckedAt,
 			freshness:      snapshot.Freshness,
@@ -2046,6 +2051,7 @@ func (m Model) loadIssuesAfterIssueReconcileCmd(issueIDs []string) tea.Cmd {
 			tasks:          snapshot.Tasks,
 			boardView:      snapshot.View,
 			boardColumns:   snapshot.Columns,
+			boardOrdered:   snapshot.Projection.Ordered,
 			revision:       snapshot.Revision,
 			lastCheckedAt:  snapshot.LastCheckedAt,
 			freshness:      snapshot.Freshness,
@@ -2373,6 +2379,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 			tasks:         snapshot.Tasks,
 			boardView:     snapshot.View,
 			boardColumns:  snapshot.Columns,
+			boardOrdered:  snapshot.Projection.Ordered,
 			revision:      snapshot.Revision,
 			lastCheckedAt: snapshot.LastCheckedAt,
 			freshness:     snapshot.Freshness,
@@ -2451,6 +2458,7 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 			tasks:         snapshot.Tasks,
 			boardView:     snapshot.View,
 			boardColumns:  snapshot.Columns,
+			boardOrdered:  snapshot.Projection.Ordered,
 			revision:      snapshot.Revision,
 			lastCheckedAt: snapshot.LastCheckedAt,
 			freshness:     snapshot.Freshness,

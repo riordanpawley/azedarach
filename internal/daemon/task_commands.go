@@ -1156,7 +1156,7 @@ func buildBoardSnapshotPayload(projectID string, revision uint64, lastCheckedAt 
 	if view.ID == "" {
 		view = domain.DefaultBoardView()
 	}
-	columns, err := domain.GroupTasksByBoardView(view, tasks)
+	projection, err := domain.ProjectTasksByBoardView(view, tasks)
 	if err != nil {
 		return protocol.BoardSnapshotPayload{}, err
 	}
@@ -1168,7 +1168,8 @@ func buildBoardSnapshotPayload(projectID string, revision uint64, lastCheckedAt 
 		LastCheckedAt:    lastCheckedAt.UTC(),
 		Freshness:        freshness,
 		View:             view,
-		Columns:          protocol.BoardSnapshotColumnsFromDomain(columns),
+		Projection:       protocol.BoardViewProjectionFromDomain(projection),
+		Columns:          protocol.BoardSnapshotColumnsFromDomain(projection.Groups),
 		Tasks:            protocol.BoardTaskSummariesFromDomain(tasks),
 	}, nil
 }

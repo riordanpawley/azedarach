@@ -38,6 +38,8 @@ func (m Model) View() string {
 			mainView = m.renderCompactView()
 		} else if m.viewMode == ViewModeOverview {
 			mainView = m.renderOrchestrationOverview()
+		} else if m.boardView.Normalized().Layout == domain.BoardViewLayoutTreeList {
+			mainView = m.renderConfiguredListView()
 		} else {
 			mainView = m.renderBoardView()
 		}
@@ -1076,6 +1078,64 @@ func (m Model) renderCompactView() string {
 
 	rendered := compactView.Render()
 	return m.overlayFreshnessIndicator(rendered, board.BoardContentHeight(m.height))
+}
+
+func (m Model) renderConfiguredListView() string {
+	visible := m.boardVisibleTasks(m.tasks)
+	visibleByID := make(map[string]domain.Task, len(visible))
+	for _, task := range visible {
+		visibleByID[task.ID.String()] = task
+	}
+	ordered := make([]domain.Task, 0, len(visible))
+	for _, projected := range m.boardOrdered {
+		if task, ok := visibleByID[projected.ID.String()]; ok {
+			ordered = append(ordered, task)
+			delete(visibleByID, projected.ID.String())
+		}
+	}
+	if len(m.boardOrdered) == 0 {
+		projection, err := domain.ProjectTasksByBoardView(m.boardView, visible)
+		if err == nil {
+			ordered = projection.Ordered
+		}
+	}
+	if sortState := m.editor.GetSort(); sortState != nil && m.editor.IsSortExplicit() {
+		ordered = sortState.ApplyInPlace(ordered)
+	}
+	ordered = decorateConfiguredTreeTasks(ordered)
+	compactView := compact.NewCompactView(ordered, m.width, board.BoardContentHeight(m.height))
+	compactView.SetCursor(m.compactCursorIndex(ordered))
+	compactView.SetSelected(m.editor.GetSelectedTasks())
+	return m.overlayFreshnessIndicator(compactView.Render(), board.BoardContentHeight(m.height))
+}
+
+func decorateConfiguredTreeTasks(tasks []domain.Task) []domain.Task {
+	parents := make(map[string]string, len(tasks))
+	for _, task := range tasks {
+		if task.ParentID != nil {
+			parents[task.ID.String()] = task.ParentID.String()
+			continue
+		}
+		for _, dependency := range task.Dependencies {
+			if dependency.Type == domain.DependencyParentChild {
+				parents[task.ID.String()] = dependency.ID.String()
+				break
+			}
+		}
+	}
+	result := append([]domain.Task(nil), tasks...)
+	for i := range result {
+		depth := 0
+		seen := map[string]bool{result[i].ID.String(): true}
+		for parentID := parents[result[i].ID.String()]; parentID != "" && !seen[parentID]; parentID = parents[parentID] {
+			seen[parentID] = true
+			depth++
+		}
+		if depth > 0 {
+			result[i].Title = strings.Repeat("  ", depth-1) + "└ " + result[i].Title
+		}
+	}
+	return result
 }
 
 func (m Model) compactCursorIndex(tasks []domain.Task) int {

@@ -417,6 +417,7 @@ type TaskIDResponse struct {
 type TaskSnapshot struct {
 	Tasks         []domain.Task
 	View          domain.BoardView
+	Projection    domain.BoardViewProjection
 	Columns       []domain.BoardViewColumnSnapshot
 	Revision      uint64
 	LastCheckedAt time.Time
@@ -933,15 +934,37 @@ func (c *Client) decodeBoardSnapshotResponse(resp protocol.ResponseEnvelope) (Ta
 	if revision == 0 {
 		revision = resp.Revision
 	}
+	projection := boardSnapshotProjectionToDomain(payload)
 	return TaskSnapshot{
 		Tasks:         protocol.DomainTasksFromBoardSummaries(payload.Tasks),
 		View:          payload.View,
-		Columns:       boardSnapshotColumnsToDomain(payload.Columns),
+		Projection:    projection,
+		Columns:       projection.Groups,
 		Revision:      revision,
 		LastCheckedAt: payload.LastCheckedAt,
 		Freshness:     payload.Freshness,
 		SummariesOnly: true,
 	}, nil
+}
+
+func boardSnapshotProjectionToDomain(payload protocol.BoardSnapshotPayload) domain.BoardViewProjection {
+	groups := payload.Projection.Groups
+	if len(groups) == 0 {
+		groups = payload.Columns
+	}
+	ordered := payload.Projection.Ordered
+	if len(ordered) == 0 {
+		ordered = payload.Tasks
+	}
+	layout := payload.Projection.Layout
+	if layout == "" {
+		layout = payload.View.Normalized().Layout
+	}
+	return domain.BoardViewProjection{
+		Layout:  layout,
+		Groups:  boardSnapshotColumnsToDomain(groups),
+		Ordered: protocol.DomainTasksFromBoardSummaries(ordered),
+	}
 }
 
 func boardSnapshotColumnsToDomain(columns []protocol.BoardSnapshotColumn) []domain.BoardViewColumnSnapshot {
