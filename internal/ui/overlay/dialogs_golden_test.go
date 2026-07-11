@@ -48,6 +48,7 @@ func TestDialogs_View_Golden(t *testing.T) {
 		{name: "orchestration", view: goldenOrchestrationView},
 		{name: "orchestration_empty", view: goldenOrchestrationEmptyView},
 		{name: "board_view", view: goldenBoardView},
+		{name: "interaction", view: goldenInteractionView},
 	}
 
 	for _, tc := range cases {
@@ -89,6 +90,7 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 		{name: "create_task_attachments_small", view: goldenCreateTaskAttachmentsSmallView},
 		{name: "orchestration_small", view: goldenOrchestrationSmallView},
 		{name: "board_view_small", view: goldenBoardViewSmall},
+		{name: "interaction_small", view: goldenInteractionSmallView},
 	}
 
 	for _, tc := range cases {
@@ -99,6 +101,25 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 			assertGolden(t, filepath.Join("testdata", "dialog_"+tc.name+".golden"), got)
 		})
 	}
+}
+
+func goldenInteractionRequest() (domain.InteractionRequest, domain.InteractionAgeView) {
+	now := time.Date(2026, time.July, 11, 2, 0, 0, 0, time.UTC)
+	return domain.InteractionRequest{ID: "int-7", IssueID: "dcj", DecisionKey: "rollout", OrchestrationScope: "project", Question: "Which rollout path should we use?", Why: "The choice changes migration risk and user-visible availability.", Options: []domain.InteractionOption{{Key: "gradual", Label: "Gradual", Description: "Canary the change and expand after validation"}, {Key: "direct", Label: "Direct", Description: "Ship to everyone in one release"}}, Context: "docs/24-issue-state-model-v2-rollout.md", Significance: domain.InteractionSignificanceMaterial, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose rollout", Recommendation: "Use the gradual rollout."}, State: domain.InteractionOpen, Revision: 3, CreatedAt: now, UpdatedAt: now}, domain.InteractionAgeView{AgeSeconds: 3720, Stale: true}
+}
+
+func goldenInteractionView(t *testing.T) string {
+	r, age := goldenInteractionRequest()
+	o := NewInteractionOverlay(r, age)
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*InteractionOverlay).View()
+}
+
+func goldenInteractionSmallView(t *testing.T) string {
+	r, age := goldenInteractionRequest()
+	o := NewInteractionOverlay(r, age)
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	return model.(*InteractionOverlay).View()
 }
 
 func goldenBoardView(t *testing.T) string {

@@ -39,6 +39,19 @@ type probeOverlay struct {
 	lastMsg tea.Msg
 }
 
+func TestAttachAdvisorSessionCmdSwitchesToDaemonSessionID(t *testing.T) {
+	var target string
+	m := newTestModel()
+	m.tmuxClient = mockTmuxService{switchFn: func(_ context.Context, session string) error { target = session; return nil }}
+	msg := m.attachAdvisorSessionCmd("az-advisor-interaction-42")()
+	if result := msg.(advisorSessionAttachedMsg); result.err != nil {
+		t.Fatal(result.err)
+	}
+	if target != "az-advisor-interaction-42" {
+		t.Fatalf("tmux target = %q", target)
+	}
+}
+
 func (p *probeOverlay) Init() tea.Cmd { return nil }
 
 func (p *probeOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {

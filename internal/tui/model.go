@@ -528,6 +528,9 @@ func (m Model) openCurrentTaskWorkspace() (tea.Model, tea.Cmd) {
 	if task == nil {
 		return m, nil
 	}
+	if m.taskWaitingHuman(task) {
+		return m.openWaitingHumanRequest(task.ID.String())
+	}
 	return m.openTaskWorkspaceByID(task.ID.String())
 }
 

@@ -81,6 +81,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case overlay.SelectionMsg:
+		if msg.Key == overlay.InteractionActionKey {
+			action, ok := msg.Value.(overlay.InteractionAction)
+			if !ok || m.daemonClient == nil {
+				return m, nil
+			}
+			m.beginMutationFeedback("Updating human decision request")
+			return m, m.interactionActionCmd(action)
+		}
 		if msg.Key == overlay.BoardViewSelectKey {
 			m.overlayStack.Pop()
 			selected, _ := msg.Value.(overlay.BoardViewSelectMsg)
@@ -187,6 +195,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.attachSessionCmd(issueID)
 		}
 		return m.handleSelection(msg)
+
+	case interactionLoadedMsg:
+		if msg.err != nil {
+			m.addToast(Toast{Level: ToastWarning, Message: msg.err.Error(), Expires: time.Now().Add(4 * time.Second)})
+			return m, nil
+		}
+		if !msg.response.Request.Unresolved() {
+			if _, ok := m.overlayStack.Current().(*overlay.InteractionOverlay); ok {
+				m.overlayStack.Pop()
+			}
+			m.addToast(Toast{Level: ToastInfo, Message: "Human decision was already resolved", Expires: time.Now().Add(3 * time.Second)})
+			return m, m.scheduleIssuesRefreshAfterIssueReconcileCmd([]string{msg.response.Request.IssueID})
+		}
+		return m, m.openOverlay(overlay.NewInteractionOverlay(msg.response.Request, msg.response.Age))
+
+	case interactionMutatedMsg:
+		if msg.err != nil {
+			if interactionConflict(msg.err) {
+				m.addToast(Toast{Level: ToastWarning, Message: "Decision changed; reloading current revision", Expires: time.Now().Add(4 * time.Second)})
+				if current, ok := m.overlayStack.Current().(*overlay.InteractionOverlay); ok {
+					return m, m.reloadInteractionCmd(current.RequestID())
+				}
+			}
+			m.addToast(Toast{Level: ToastError, Message: msg.err.Error(), Expires: time.Now().Add(4 * time.Second)})
+			return m, nil
+		}
+		m.overlayStack.Pop()
+		if msg.response.Request.Unresolved() {
+			cmds := []tea.Cmd{m.openOverlay(overlay.NewInteractionOverlay(msg.response.Request, msg.response.Age)), m.scheduleIssuesRefreshAfterIssueReconcileCmd([]string{msg.response.Request.IssueID})}
+			if msg.action == "discuss" && strings.TrimSpace(msg.response.Request.SessionID) != "" {
+				cmds = append(cmds, m.attachAdvisorSessionCmd(msg.response.Request.SessionID))
+			}
+			return m, tea.Batch(cmds...)
+		}
+		m.addToast(Toast{Level: ToastInfo, Message: "Human decision resolved", Expires: time.Now().Add(3 * time.Second)})
+		return m, m.scheduleIssuesRefreshAfterIssueReconcileCmd([]string{msg.response.Request.IssueID})
+
+	case advisorSessionAttachedMsg:
+		if msg.err != nil {
+			m.addToast(Toast{Level: ToastWarning, Message: msg.err.Error(), Expires: time.Now().Add(4 * time.Second)})
+		}
+		return m, nil
 
 	case editTaskDetailLoadedMsg:
 		if msg.err != nil {
