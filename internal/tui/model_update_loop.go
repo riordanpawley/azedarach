@@ -1882,6 +1882,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, m.scheduleIssuesRefreshCmd()
 
+	case ancestorWorktreeCloseRetryResultMsg:
+		action := msg.action
+		previousStatus := domain.Status(strings.TrimSpace(action.PreviousStatus))
+		targetStatus := domain.Status(strings.TrimSpace(action.TargetStatus))
+		if previousStatus == "" {
+			previousStatus = domain.StatusInReview
+		}
+		if targetStatus == "" {
+			targetStatus = domain.StatusDone
+		}
+		if msg.err != nil {
+			m.addToast(Toast{Level: ToastError, Message: msg.err.Error(), Expires: time.Now().Add(8 * time.Second)})
+			failed := taskStatusResultMsg{
+				taskID: action.TaskID,
+				closeContext: closeFailureOperationContext{
+					projectID: action.ProjectID, projectName: action.ProjectName, projectPath: action.ProjectPath,
+					daemonSocket: action.DaemonSocket, baseBranch: action.BaseBranch, parentID: action.ParentID,
+					sourceWorktree: action.SourceWorktree,
+				},
+				previousStatus: previousStatus,
+				newStatus:      targetStatus,
+				opts:           daemonclient.TaskStatusOptions{ForceWorktree: action.ForceWorktree, CloseCleanChildren: action.CloseCleanChildren, AllowActiveSession: action.AllowActiveSession},
+				err:            msg.err,
+			}
+			return m, m.closeFailureDialogCmd(failed)
+		}
+		opts := daemonclient.TaskStatusOptions{ForceWorktree: action.ForceWorktree, CloseCleanChildren: action.CloseCleanChildren, AllowActiveSession: action.AllowActiveSession}
+		m.beginTaskStatusMoveFeedback(action.TaskID, previousStatus, targetStatus)
+		m.addToast(Toast{Level: ToastInfo, Message: fmt.Sprintf("Created ancestor worktree %s; retrying close for %s", action.ParentID, action.TaskID), Expires: time.Now().Add(5 * time.Second)})
+		actionModel := m.modelForCloseFailureAction(action)
+		return m, actionModel.moveTaskStatusCmdWithOptions(action.TaskID, previousStatus, targetStatus, opts)
+
 	case taskLifecycleResultMsg:
 		if msg.err != nil {
 			m.rollbackOptimisticTask(msg.previousTask)

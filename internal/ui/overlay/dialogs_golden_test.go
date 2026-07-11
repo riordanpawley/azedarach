@@ -231,14 +231,14 @@ func goldenCleanupSmallView(t *testing.T) string {
 func goldenCloseFailureView(t *testing.T) string {
 	t.Helper()
 	dialog := NewCloseFailureDialog(
-		"az-321",
-		"cannot close issue az-321: unresolved child issues remain: az-400 (open). Next: close or clean up the listed child issues first, then retry",
+		"gav",
+		"refusing to merge child issue gav directly into base: no active ancestor worktree branch was found; run `az worktree create gat`, then close the child into that target",
 		CloseFailureDialogOptions{
-			PreviousStatus:          "in_review",
-			TargetStatus:            "closed",
-			AllowAIMerge:            true,
-			AllowForceWorktree:      true,
-			AllowCloseCleanChildren: true,
+			ParentID:            "gat",
+			PreviousStatus:      "in_review",
+			TargetStatus:        "closed",
+			AllowAIMerge:        true,
+			AllowCreateAncestor: true,
 		},
 	)
 	model, _ := dialog.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
@@ -248,13 +248,14 @@ func goldenCloseFailureView(t *testing.T) string {
 func goldenCloseFailureSmallView(t *testing.T) string {
 	t.Helper()
 	dialog := NewCloseFailureDialog(
-		"az-321",
-		"cannot close issue az-321: worktree has local changes: main.go. Next: commit, discard, or merge the worktree changes first, then retry",
+		"gav",
+		"refusing to merge child issue gav directly into base: no active ancestor worktree branch was found; run `az worktree create gat`, then close the child into that target",
 		CloseFailureDialogOptions{
-			PreviousStatus:     "in_review",
-			TargetStatus:       "closed",
-			AllowAIMerge:       true,
-			AllowForceWorktree: true,
+			ParentID:            "gat",
+			PreviousStatus:      "in_review",
+			TargetStatus:        "closed",
+			AllowAIMerge:        true,
+			AllowCreateAncestor: true,
 		},
 	)
 	model, _ := dialog.Update(tea.WindowSizeMsg{Width: 72, Height: 22})

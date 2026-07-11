@@ -4952,6 +4952,11 @@ type taskStatusResultMsg struct {
 	err            error
 }
 
+type ancestorWorktreeCloseRetryResultMsg struct {
+	action overlay.CloseFailureActionMsg
+	err    error
+}
+
 type taskLifecycleResultMsg struct {
 	taskID        string
 	previousTask  domain.Task
@@ -5401,8 +5406,37 @@ func (m Model) closeFailureDialogCmd(msg taskStatusResultMsg) tea.Cmd {
 		AllowForceWorktree:      closeFailureSupportsForceWorktree(msg.err),
 		AllowActiveSessionRetry: closeFailureSupportsActiveSessionRetry(msg.err),
 		AllowCloseCleanChildren: closeFailureSupportsCloseCleanChildren(msg.err),
+		AllowCreateAncestor:     closeFailureSupportsCreateAncestor(msg.err, closeContext.parentID),
 	}
 	return m.openOverlay(overlay.NewCloseFailureDialog(msg.taskID, msg.err.Error(), options))
+}
+
+func closeFailureSupportsCreateAncestor(err error, parentID string) bool {
+	if err == nil || strings.TrimSpace(parentID) == "" {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "no active ancestor worktree branch was found") &&
+		strings.Contains(message, "az worktree create "+strings.ToLower(strings.TrimSpace(parentID)))
+}
+
+func (m Model) createAncestorWorktreeAndRetryCloseCmd(action overlay.CloseFailureActionMsg) tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return ancestorWorktreeCloseRetryResultMsg{action: action, err: fmt.Errorf("daemon client unavailable")}
+		}
+		parentID := strings.TrimSpace(action.ParentID)
+		if parentID == "" {
+			return ancestorWorktreeCloseRetryResultMsg{action: action, err: fmt.Errorf("parent issue id is unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
+		defer cancel()
+		_, err := m.daemonClient.CreateWorktreeResult(ctx, parentID, strings.TrimSpace(action.BaseBranch))
+		if err != nil {
+			err = fmt.Errorf("create ancestor worktree %s: %w", parentID, err)
+		}
+		return ancestorWorktreeCloseRetryResultMsg{action: action, err: err}
+	}
 }
 
 func closeFailureSupportsForceWorktree(err error) bool {
