@@ -26,22 +26,28 @@ type OrchestrationCandidateAssessment struct {
 	Sufficient       bool
 	Sufficiency      []string
 	ExclusionReasons []string
+	Executability    IssueExecutabilityAssessment
 }
 
 func AssessOrchestrationCandidate(task Task, actorID string, now time.Time, blockers []string) OrchestrationCandidateAssessment {
 	facts := task.IssueFacts()
 	a := OrchestrationCandidateAssessment{Classification: OrchestrationCandidateOpen, Eligible: true, Sufficient: true}
+	proposal := IssueContractProposal{}
+	if facts.WaitingHuman {
+		proposal.MaterialUnknowns = []string{"unresolved-human-interaction"}
+	}
+	a.Executability = AssessIssueExecutability(task, blockers, proposal)
 	if strings.TrimSpace(task.Title) != "" {
 		a.Sufficiency = append(a.Sufficiency, "title-present")
 	} else {
 		a.Sufficient = false
 		a.Sufficiency = append(a.Sufficiency, "missing-title")
 	}
-	if strings.TrimSpace(task.Description) != "" || strings.TrimSpace(task.Acceptance) != "" || strings.TrimSpace(task.Design) != "" {
+	if a.Executability.Executable {
 		a.Sufficiency = append(a.Sufficiency, "execution-context-present")
 	} else {
 		a.Sufficient = false
-		a.Sufficiency = append(a.Sufficiency, "missing-execution-context")
+		a.Sufficiency = append(a.Sufficiency, a.Executability.Reasons...)
 	}
 
 	switch {

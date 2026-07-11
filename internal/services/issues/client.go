@@ -1285,7 +1285,9 @@ func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, r
 		if len(issueIDs) == 0 {
 			return []domain.Task{}, nil
 		}
-		tasks, err := c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, taskDependencyLoadAll, ArchiveExclude, issueIDs...)
+		// Project stewardship is bounded and needs contract fields for
+		// executability assessment. Rooted graph reads remain summary-only.
+		tasks, err := c.queryTasksWithRuntimeProjection(ctx, db, projectID, true, taskDependencyLoadAll, ArchiveExclude, issueIDs...)
 		if err != nil {
 			return nil, c.wrapError("list-graph-readiness-with-runtime", projectID, err)
 		}

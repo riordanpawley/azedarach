@@ -543,7 +543,7 @@ func TestOrchestrateStatusCommandIncludesNestedRoots(t *testing.T) {
 							Type:           string(domain.TypeTask),
 							ChildCount:     2,
 							FallbackPolicy: "start_nested_root",
-							Advice:         "start nested root orchestrator: az session start az-2",
+							Advice:         "start nested root orchestrator: az orchestrator-session start --root az-2",
 						}},
 						Blocked: map[string]string{},
 					}), nil
@@ -573,7 +573,7 @@ func TestOrchestrateStatusCommandIncludesNestedRoots(t *testing.T) {
 		t.Fatalf("nested_roots = %+v, want one nested root", result.NestedRoots)
 	}
 	got := result.NestedRoots[0]
-	if got.IssueID != nested.String() || got.Status != "startable" || got.IssueStatus != string(domain.StatusOpen) || got.ChildCount != 2 || !strings.Contains(got.Advice, "az session start az-2") {
+	if got.IssueID != nested.String() || got.Status != "startable" || got.IssueStatus != string(domain.StatusOpen) || got.ChildCount != 2 || !strings.Contains(got.Advice, "az orchestrator-session start --root az-2") {
 		t.Fatalf("nested root = %+v", got)
 	}
 	if result.Capacity.DirectRunnableCount != 1 || result.Capacity.NestedStartableCount != 1 {
@@ -604,7 +604,7 @@ func TestOrchestrateStatusCommandShowsNestedRoots(t *testing.T) {
 							Type:           string(domain.TypeTask),
 							ChildCount:     1,
 							FallbackPolicy: "start_nested_root",
-							Advice:         "start its orchestrator session with `az session start az-2`",
+							Advice:         "start its orchestrator session with `az orchestrator-session start --root az-2`",
 						}},
 						Blocked: map[string]string{},
 					}), nil
@@ -631,7 +631,7 @@ func TestOrchestrateStatusCommandShowsNestedRoots(t *testing.T) {
 		"nested startable=1 active=0 blocked_start_failed=0 not_counting=0 total_counting=0",
 		"Nested roots:",
 		"- az-2 status=startable issue_status=open type=task children=1 fallback=start_nested_root",
-		"next: start its orchestrator session with `az session start az-2`",
+		"next: start its orchestrator session with `az orchestrator-session start --root az-2`",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
@@ -683,7 +683,7 @@ func TestOrchestrateGroupCommandMovesChildUnderNestedRoot(t *testing.T) {
 							Type:           string(domain.TypeEpic),
 							ChildCount:     childCount,
 							FallbackPolicy: "start_nested_root",
-							Advice:         "start nested root orchestrator: az session start az-2",
+							Advice:         "start nested root orchestrator: az orchestrator-session start --root az-2",
 						}},
 						Blocked: map[string]string{},
 					}), nil
@@ -2352,7 +2352,7 @@ func TestOrchestrateStartSkipsNestedRootWithSessionStartAdvice(t *testing.T) {
 							Status:     string(domain.StatusOpen),
 							Type:       string(domain.TypeTask),
 							ChildCount: 1,
-							Advice:     "start its orchestrator session with `az session start az-2`",
+							Advice:     "start its orchestrator session with `az orchestrator-session start --root az-2`",
 						}},
 						Blocked: map[string]string{},
 					}), nil

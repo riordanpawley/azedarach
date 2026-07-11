@@ -8363,7 +8363,7 @@ func TestTaskCompletionAdviceIncludesDomainNextSteps(t *testing.T) {
 	joined := strings.Join(advice, "\n")
 	for _, want := range []string{
 		"az orchestrate close-session --issue az-4",
-		"az session start az-5",
+		"az orchestrator-session start --root az-5",
 		"az issue close --id az-3",
 		"az orchestrate start --root az-1 --issue az-2 --json",
 	} {
@@ -8650,7 +8650,7 @@ func TestTaskGraphReadinessReportsNestedTrackerRootInsteadOfFlatteningDescendant
 	if ready.Capacity.DirectRunnableCount != 1 || ready.Capacity.NestedStartableCount != 1 || ready.Capacity.TotalCountingCapacityCount != 0 {
 		t.Fatalf("capacity = %+v, want direct runnable and nested startable outside active capacity", ready.Capacity)
 	}
-	if !strings.Contains(nested.Advice, "az session start "+trackerID) {
+	if !strings.Contains(nested.Advice, "az orchestrator-session start --root "+trackerID) {
 		t.Fatalf("nested advice = %q, want session start guidance", nested.Advice)
 	}
 	for _, observation := range ready.WorkerObservations {
@@ -8729,7 +8729,7 @@ func TestTaskGraphReadinessMarksFailedNestedRootStartAsBlockedCapacity(t *testin
 	if nested.FallbackPolicy != "keep_children_blocked_or_create_replacement_direct_work" {
 		t.Fatalf("fallback policy = %q", nested.FallbackPolicy)
 	}
-	if !strings.Contains(nested.Advice, "retry `az session start "+nestedID+"`") || !strings.Contains(nested.Advice, "replacement direct work") {
+	if !strings.Contains(nested.Advice, "retry `az orchestrator-session start --root "+nestedID+"`") || !strings.Contains(nested.Advice, "replacement direct work") {
 		t.Fatalf("advice = %q, want retry and replacement guidance", nested.Advice)
 	}
 	if ready.Capacity.BlockedNestedRootsCount != 1 || ready.Capacity.NestedStartableCount != 0 {

@@ -53,6 +53,9 @@ This directory primarily contains **developer/internal documentation**.
 - `session.advisor_singleton`: `hybrid` (refreshed interaction/session-role projection + tmux runtime); reconcile recreates missing discussion runtimes, resumes paused projections, removes terminal/orphan reservations, and project removal runs daemon cleanup before unregistering the project.
 - `task.close`, `task.close_preflight`, `task.delete`, `task.delete_preflight`, `task.graph_readiness`, and `task.complete_check`: `hybrid` (durable issue graph/v2 lifecycle projection + live runtime attachment state).
 - `orchestration.project_candidates`: `projection` (bounded durable lifecycle/graph, ownership, session activity, and interaction candidate projection).
+- `orchestration.project_review`: `projection` (durable issue/review/ownership, mailbox/observation evidence, and worktree projections; accepted outcomes delegate integration and cleanup to hybrid `task.close`).
+- `orchestration.claim_start`: `hybrid` (durable ownership/start-attempt projection plus daemon session-start operation/runtime compensation).
+- `orchestration.project_loop`: `projection` (durable issue-observation cursor and loop checkpoint refreshed before deterministic review-first action replay).
 - `task.review_handoff`: `projection` (durable issue v2 lifecycle/review projection + session activity projection; active issue self-handoff remains allowed).
 - `task.integration_readiness` and `task.context_risk_closeout`: `projection` (durable issue projection + mailbox/observation evidence).
 - `task.merge_base_target`: `projection` (durable issue graph + worktree projection; explicit root-to-base requests also require issue-scoped `human.input_provided` acceptance evidence).

@@ -8064,7 +8064,7 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "Start this root's direct runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`") {
 		t.Fatalf("prompt = %q, want direct leaf start guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Nested epic/root rule: if a runnable child is itself an epic/root that should self-orchestrate, start that child's own orchestrator session with `az session start <child-root>`") {
+	if !strings.Contains(prompt, "Nested epic/root rule: if a runnable child is itself an epic/root that should self-orchestrate, start that child's own orchestrator session with `az orchestrator-session start --root <child-root>`") {
 		t.Fatalf("prompt = %q, want nested root session guidance", prompt)
 	}
 	if !strings.Contains(prompt, "supervise that nested orchestrator as a direct child while it owns its descendant workers") ||

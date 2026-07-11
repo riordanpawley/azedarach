@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -423,12 +424,19 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{name: "codex", tool: "codex", want: []string{"command codex", "--sandbox read-only", "--ask-for-approval never", "--disable plugins", "--disable apps", "--disable hooks", "--disable multi_agent", "--disable computer_use", "--disable browser_use", "--disable goals", "--disable workspace_dependencies", "mcp_servers={}", `web_search="disabled"`, `history.persistence="none"`, "project_doc_max_bytes=0", "project_doc_fallback_filenames=[]"}},
-		{name: "claude", tool: "claude", want: []string{"command claude", "--permission-mode plan", `--tools "Read,Glob,Grep"`, `--disallowed-tools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,Agent,mcp__*"`, `--setting-sources ""`, "--strict-mcp-config", `--mcp-config`, `{"mcpServers":{}}`, "--disable-slash-commands", "--no-chrome"}},
-		{name: "opencode", tool: "opencode", want: []string{"command mktemp -d", "XDG_CONFIG_HOME=", "OPENCODE_CONFIG=", "OPENCODE_CONFIG_DIR=", "OPENCODE_TUI_CONFIG=", "OPENCODE_CONFIG_CONTENT=", `cd "$__azedarach_advisor_dir"`, "command rm -rf", "command opencode", `"*":"deny"`, `"read":"allow"`, `"edit":"deny"`, `"bash":"deny"`, `"advisor"`, `"mode":"primary"`, "--pure", "--agent advisor", "--prompt"}},
+		{name: "codex", tool: "codex", want: []string{"codex", "--sandbox read-only", "--ask-for-approval never", "--disable plugins", "--disable apps", "--disable hooks", "--disable multi_agent", "--disable computer_use", "--disable browser_use", "--disable goals", "--disable workspace_dependencies", "mcp_servers={}", `web_search="disabled"`, `history.persistence="none"`, "project_doc_max_bytes=0", "project_doc_fallback_filenames=[]"}},
+		{name: "claude", tool: "claude", want: []string{"claude", "--permission-mode plan", `--tools "Read,Glob,Grep"`, `--disallowed-tools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,Agent,mcp__*"`, `--setting-sources ""`, "--strict-mcp-config", `--mcp-config`, `{"mcpServers":{}}`, "--disable-slash-commands", "--no-chrome"}},
+		{name: "opencode", tool: "opencode", want: []string{"command mktemp -d", "XDG_CONFIG_HOME=", "OPENCODE_CONFIG=", "OPENCODE_CONFIG_DIR=", "OPENCODE_TUI_CONFIG=", "OPENCODE_CONFIG_CONTENT=", `cd "$__azedarach_advisor_dir"`, "command rm -rf", "opencode", `"*":"deny"`, `"read":"allow"`, `"edit":"deny"`, `"bash":"deny"`, `"advisor"`, `"mode":"primary"`, "--pure", "--agent advisor", "--prompt"}},
 		{name: "unsupported", tool: "unknown", wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			if test.tool != "unknown" {
+				if err := os.WriteFile(filepath.Join(binDir, test.tool), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			}
 			d := &Daemon{cfg: Config{CLITool: test.tool, DangerouslySkipPermissions: true, CodexAppServer: true, SessionShell: "sh"}}
 			command, err := d.buildAdvisorLaunchCommand(protocol.DefaultProjectID, advisor, "prompt")
 			if test.wantErr {
@@ -440,69 +448,151 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			commandText := command.String()
 			for _, want := range test.want {
-				if !strings.Contains(command, want) {
-					t.Fatalf("command = %q, want %q", command, want)
+				if !strings.Contains(commandText, want) {
+					t.Fatalf("command = %q, want %q", commandText, want)
 				}
 			}
 			for _, forbidden := range []string{"dangerously-bypass", "dangerously-skip", "--remote", "--chrome", "; exec sh", "; exec zsh"} {
-				if strings.Contains(command, forbidden) {
-					t.Fatalf("command = %q, contains forbidden %q", command, forbidden)
+				if strings.Contains(commandText, forbidden) {
+					t.Fatalf("command = %q, contains forbidden %q", commandText, forbidden)
 				}
 			}
-			if !strings.Contains(command, "AZEDARACH_SESSION_ID=") || !strings.Contains(command, "advisor-request-1") {
-				t.Fatalf("command = %q, missing advisor session identity", command)
+			if !strings.Contains(commandText, "AZEDARACH_SESSION_ID=") || !strings.Contains(commandText, "advisor-request-1") {
+				t.Fatalf("command = %q, missing advisor session identity", commandText)
 			}
-			promptEnd := strings.Index(command, "; AZEDARACH_SESSION_ROLE=advisor")
+			promptEnd := strings.Index(commandText, "; AZEDARACH_SESSION_ROLE=advisor")
 			if test.tool == "opencode" {
-				promptEnd = strings.Index(command, "OPENCODE_CONFIG_CONTENT=")
+				promptEnd = strings.Index(commandText, "OPENCODE_CONFIG_CONTENT=")
 			}
-			if promptEnd < 0 || strings.Index(command[promptEnd:], test.tool) < 0 {
-				t.Fatalf("command = %q, advisor environment is not attached to tool invocation", command)
+			if promptEnd < 0 || strings.Index(commandText[promptEnd:], test.tool) < 0 {
+				t.Fatalf("command = %q, advisor environment is not attached to tool invocation", commandText)
 			}
 		})
 	}
 }
 
-func TestAdvisorExactLaunchBypassesInteractiveShellAliasesAndFunctions(t *testing.T) {
-	zsh, err := exec.LookPath("zsh")
+func TestAdvisorExactLaunchDoesNotSourceStartupFiles(t *testing.T) {
+	tmuxPath, err := exec.LookPath("tmux")
 	if err != nil {
-		t.Skip("zsh is not installed")
+		t.Skip("tmux is not installed")
 	}
-	repoDir := t.TempDir()
-	binDir := t.TempDir()
-	zdotDir := t.TempDir()
-	startup := "alias codex='printf alias-redirected'\nclaude() { printf function-redirected; }\n"
-	if err := os.WriteFile(filepath.Join(zdotDir, ".zshrc"), []byte(startup), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	for _, shellName := range []string{"zsh", "bash"} {
+		shellPath, err := exec.LookPath(shellName)
+		if err != nil {
+			t.Logf("skipping %s: executable is not installed", shellName)
+			continue
+		}
+		shellCase := struct {
+			name string
+			path string
+		}{name: shellName, path: shellPath}
+		t.Run(shellCase.name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			homeDir := t.TempDir()
+			binDir := t.TempDir()
+			tmuxTmpDir, err := os.MkdirTemp("/tmp", "az-dcy-tmux-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(tmuxTmpDir) })
+			tmuxSocket := filepath.Join(tmuxTmpDir, "server.sock")
+			tmuxRunner := &isolatedTmuxTestRunner{tmuxPath: tmuxPath, socketPath: tmuxSocket}
+			sideEffect := filepath.Join(t.TempDir(), shellCase.name+"-startup-side-effect")
+			startupFile := filepath.Join(homeDir, "."+shellCase.name+"rc")
+			startup := fmt.Sprintf("printf sourced > %s\n", singleQuoteForShell(sideEffect))
+			if err := os.WriteFile(startupFile, []byte(startup), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			originalPath := os.Getenv("PATH")
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+originalPath)
+			t.Setenv("HOME", homeDir)
+			t.Setenv("ZDOTDIR", homeDir)
+			t.Setenv("BASH_ENV", startupFile)
+			t.Setenv("ENV", startupFile)
+			t.Setenv("TMUX", "")
+			t.Setenv("AZEDARACH_ALLOW_REAL_TMUX_IN_TESTS", "1")
 
-	for _, tool := range []string{"codex", "claude"} {
-		t.Run(tool, func(t *testing.T) {
-			wrapper := "#!/bin/sh\nprintf 'trusted-" + tool + "\\n'\n"
-			if err := os.WriteFile(filepath.Join(binDir, tool), []byte(wrapper), 0o755); err != nil {
-				t.Fatal(err)
+			if output, err := tmuxRunner.run(context.Background(), "-f", "/dev/null", "new-session", "-d", "-s", "keeper", "sleep", "30"); err != nil {
+				t.Fatalf("start isolated tmux server: %v\n%s", err, output)
 			}
-			d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: tool, SessionShell: zsh}}
-			command, err := d.buildAdvisorLaunchCommand(protocol.DefaultProjectID, daemonstate.AdvisorSession{RequestID: "request-1", SessionID: "advisor-request-1"}, "prompt")
-			if err != nil {
-				t.Fatal(err)
+			t.Cleanup(func() { _, _ = tmuxRunner.run(context.Background(), "kill-server") })
+			for _, args := range [][]string{
+				{"set-option", "-g", "default-shell", shellCase.path},
+				{"set-option", "-g", "remain-on-exit", "on"},
+				{"set-environment", "-g", "HOME", homeDir},
+				{"set-environment", "-g", "ZDOTDIR", homeDir},
+				{"set-environment", "-g", "BASH_ENV", startupFile},
+				{"set-environment", "-g", "ENV", startupFile},
+			} {
+				if output, err := tmuxRunner.run(context.Background(), args...); err != nil {
+					t.Fatalf("configure isolated tmux server with %v: %v\n%s", args, err, output)
+				}
 			}
-			cmd := exec.Command(zsh, "-c", command)
-			cmd.Dir = repoDir
-			cmd.Env = append(os.Environ(),
-				"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-				"ZDOTDIR="+zdotDir,
-			)
-			output, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatalf("exact %s advisor launch failed: %v\n%s", tool, err, output)
-			}
-			if !strings.Contains(string(output), "trusted-"+tool) || strings.Contains(string(output), "redirected") {
-				t.Fatalf("exact %s advisor launch used shell alias/function:\n%s", tool, output)
+
+			for _, tool := range []string{"codex", "claude", "opencode"} {
+				t.Run(tool, func(t *testing.T) {
+					launched := filepath.Join(t.TempDir(), "trusted-"+tool)
+					wrapper := "#!/bin/sh\nprintf launched > " + singleQuoteForShell(launched) + "\n"
+					if err := os.WriteFile(filepath.Join(binDir, tool), []byte(wrapper), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: tool, SessionShell: shellCase.path}}
+					command, err := d.buildAdvisorLaunchCommand(protocol.DefaultProjectID, daemonstate.AdvisorSession{RequestID: "request-1", SessionID: "advisor-request-1"}, "prompt")
+					if err != nil {
+						t.Fatal(err)
+					}
+					client := tmux.NewClient(tmuxRunner, slog.Default())
+					sessionID := "advisor-" + shellCase.name + "-" + tool
+					if err := client.NewSessionWithArgs(context.Background(), sessionID, repoDir, command.Executable, command.Args...); err != nil {
+						t.Fatalf("start exact %s advisor launch: %v", tool, err)
+					}
+					t.Cleanup(func() { _ = client.KillSession(context.Background(), sessionID) })
+					deadline := time.Now().Add(10 * time.Second)
+					for {
+						if _, err := os.Stat(launched); err == nil {
+							break
+						}
+						if time.Now().After(deadline) {
+							output, _ := tmuxRunner.run(context.Background(), "capture-pane", "-p", "-t", sessionID)
+							t.Fatalf("trusted %s executable was not launched; pane output:\n%s", tool, output)
+						}
+						time.Sleep(10 * time.Millisecond)
+					}
+					exitDeadline := time.Now().Add(10 * time.Second)
+					for {
+						dead, paneErr := tmuxRunner.run(context.Background(), "display-message", "-p", "-t", sessionID, "#{pane_dead}")
+						if paneErr == nil && strings.TrimSpace(dead) == "1" {
+							break
+						}
+						if time.Now().After(exitDeadline) {
+							t.Fatalf("trusted %s executable did not exit before cleanup: %v (%q)", tool, paneErr, dead)
+						}
+						time.Sleep(10 * time.Millisecond)
+					}
+					if _, err := os.Stat(sideEffect); !os.IsNotExist(err) {
+						t.Fatalf("%s startup file side effect occurred for %s: stat err=%v", shellCase.name, tool, err)
+					}
+				})
 			}
 		})
 	}
+}
+
+type isolatedTmuxTestRunner struct {
+	tmuxPath   string
+	socketPath string
+}
+
+func (r *isolatedTmuxTestRunner) Run(ctx context.Context, args ...string) (string, error) {
+	return r.run(ctx, args...)
+}
+
+func (r *isolatedTmuxTestRunner) run(ctx context.Context, args ...string) (string, error) {
+	commandArgs := append([]string{"-S", r.socketPath}, args...)
+	output, err := exec.CommandContext(ctx, r.tmuxPath, commandArgs...).CombinedOutput()
+	return string(output), err
 }
 
 func TestOpenCodeAdvisorExactLaunchIgnoresInvalidProjectAndInheritedConfig(t *testing.T) {
@@ -526,19 +616,18 @@ func TestOpenCodeAdvisorExactLaunchIgnoresInvalidProjectAndInheritedConfig(t *te
 	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte(wrapper), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OPENCODE_CONFIG", inheritedConfig)
+	t.Setenv("OPENCODE_TUI_CONFIG", inheritedConfig)
 
 	d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: "opencode", SessionShell: "sh"}}
 	command, err := d.buildAdvisorLaunchCommand(protocol.DefaultProjectID, daemonstate.AdvisorSession{RequestID: "request-1", SessionID: "advisor-request-1"}, "prompt")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("sh", "-c", command)
+	cmd := exec.Command(command.Executable, command.Args...)
 	cmd.Dir = repoDir
-	cmd.Env = append(os.Environ(),
-		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"OPENCODE_CONFIG="+inheritedConfig,
-		"OPENCODE_TUI_CONFIG="+inheritedConfig,
-	)
+	cmd.Env = os.Environ()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("exact OpenCode advisor launch failed: %v\n%s", err, output)
