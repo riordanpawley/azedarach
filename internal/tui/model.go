@@ -4194,6 +4194,9 @@ func (m Model) sortSummary() string {
 	if sortState.Order == domain.SortDesc {
 		order = "desc"
 	}
+	if m.boardView.Options.SortPolicy == domain.BoardViewSortHumanAttention && !m.editor.IsSortExplicit() {
+		field = "attention+" + field
+	}
 	return fmt.Sprintf("S:%s/%s", field, order)
 }
 

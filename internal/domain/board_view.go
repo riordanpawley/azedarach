@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 )
@@ -61,8 +62,16 @@ type BoardView struct {
 }
 
 type BoardViewDisplayOptions struct {
-	HideEmptyColumns bool `json:"hide_empty_columns,omitempty"`
+	HideEmptyColumns bool                `json:"hide_empty_columns,omitempty"`
+	SortPolicy       BoardViewSortPolicy `json:"sort_policy,omitempty"`
 }
+
+type BoardViewSortPolicy string
+
+const (
+	BoardViewSortDefault        BoardViewSortPolicy = ""
+	BoardViewSortHumanAttention BoardViewSortPolicy = "human_attention"
+)
 
 type BoardColumn struct {
 	ID         BoardColumnID          `json:"id"`
@@ -170,6 +179,7 @@ func DefaultBoardView() BoardView {
 		ID:      BoardViewDefaultID,
 		Title:   "Default",
 		Columns: defaultBoardViewColumns(),
+		Options: BoardViewDisplayOptions{SortPolicy: BoardViewSortHumanAttention},
 	}
 }
 
@@ -217,8 +227,9 @@ func defaultBoardViewColumns() []BoardColumn {
 func PlanningBoardView() BoardView {
 	view := DefaultBoardView()
 	return BoardView{
-		ID:    BoardViewPlanningID,
-		Title: "Planning",
+		ID:      BoardViewPlanningID,
+		Title:   "Planning",
+		Options: view.Options,
 		Columns: []BoardColumn{
 			{
 				ID:    BoardColumnBacklog,
@@ -272,8 +283,9 @@ func OrchestrationBoardView() BoardView {
 func CloseoutBoardView() BoardView {
 	view := DefaultBoardView()
 	return BoardView{
-		ID:    BoardViewCloseoutID,
-		Title: "Closeout",
+		ID:      BoardViewCloseoutID,
+		Title:   "Closeout",
+		Options: view.Options,
 		Columns: []BoardColumn{
 			view.Columns[2],
 			view.Columns[3],
@@ -307,6 +319,9 @@ func GroupTasksByBoardView(view BoardView, tasks []Task) ([]BoardViewColumnSnaps
 			columns[placement.ColumnIndex].Tasks = append(columns[placement.ColumnIndex].Tasks, task)
 		}
 	}
+	for i := range columns {
+		columns[i].Tasks = ApplyBoardViewSortPolicyInPlace(view.Options.SortPolicy, columns[i].Tasks)
+	}
 	if view.Options.HideEmptyColumns {
 		filtered := columns[:0]
 		for _, column := range columns {
@@ -317,6 +332,18 @@ func GroupTasksByBoardView(view BoardView, tasks []Task) ([]BoardViewColumnSnaps
 		columns = filtered
 	}
 	return columns, nil
+}
+
+// ApplyBoardViewSortPolicyInPlace applies the view-owned ordering prefix while
+// preserving the caller's existing order as the stable tie-breaker.
+func ApplyBoardViewSortPolicyInPlace(policy BoardViewSortPolicy, tasks []Task) []Task {
+	if policy != BoardViewSortHumanAttention || len(tasks) < 2 {
+		return tasks
+	}
+	sort.SliceStable(tasks, func(left, right int) bool {
+		return HumanAttentionRank(tasks[left]) > HumanAttentionRank(tasks[right])
+	})
+	return tasks
 }
 
 func (s BoardViewSet) Validate() error {
@@ -375,6 +402,11 @@ func (v BoardView) Validate() error {
 	}
 	if len(v.Columns) == 0 {
 		return fmt.Errorf("board view %q must define at least one column", v.ID)
+	}
+	switch v.Options.SortPolicy {
+	case BoardViewSortDefault, BoardViewSortHumanAttention:
+	default:
+		return fmt.Errorf("board view %q has unsupported sort policy %q", v.ID, v.Options.SortPolicy)
 	}
 	seen := make(map[BoardColumnID]struct{}, len(v.Columns))
 	for i, column := range v.Columns {

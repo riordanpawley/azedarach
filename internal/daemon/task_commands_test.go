@@ -520,6 +520,33 @@ func TestBuildBoardSnapshotPayloadOmitsDetailFields(t *testing.T) {
 	}
 }
 
+func TestBuildBoardSnapshotPayloadAppliesViewSortPolicy(t *testing.T) {
+	payload, err := buildBoardSnapshotPayload(
+		"proj-board",
+		13,
+		time.Now().UTC(),
+		protocol.TaskListFreshnessFresh,
+		[]domain.Task{
+			{ID: "ordinary", Status: domain.StatusInProgress, Priority: domain.P0},
+			{ID: "waiting", Status: domain.StatusInProgress, Priority: domain.P4, Session: &domain.Session{Activity: "waiting-for-human"}},
+		},
+		domain.DefaultBoardView(),
+	)
+	if err != nil {
+		t.Fatalf("build board payload: %v", err)
+	}
+	for _, column := range payload.Columns {
+		if column.Definition.ID != domain.BoardColumnActive {
+			continue
+		}
+		if len(column.Tasks) != 2 || column.Tasks[0].ID != "waiting" || column.Tasks[1].ID != "ordinary" {
+			t.Fatalf("active snapshot order = %+v, want waiting then ordinary", column.Tasks)
+		}
+		return
+	}
+	t.Fatal("active board column not found")
+}
+
 func TestHandleBoardFetchGroupsBySelectedView(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

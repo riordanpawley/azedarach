@@ -147,6 +147,9 @@ func TestService_ClearFilters(t *testing.T) {
 
 func TestService_Sort(t *testing.T) {
 	svc := NewService()
+	if svc.IsSortExplicit() {
+		t.Fatal("default sort should be automatic")
+	}
 
 	// Default sort
 	if svc.GetSort().Field != domain.SortByGitDiff {
@@ -158,6 +161,9 @@ func TestService_Sort(t *testing.T) {
 
 	// Change sort field
 	svc.SetSortField(domain.SortByPriority)
+	if !svc.IsSortExplicit() {
+		t.Fatal("setting a sort field should mark sorting explicit")
+	}
 	if svc.GetSort().Field != domain.SortByPriority {
 		t.Error("Expected sort by priority")
 	}

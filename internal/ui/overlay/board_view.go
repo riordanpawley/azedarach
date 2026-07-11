@@ -150,6 +150,7 @@ func (o *BoardViewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				view := o.views[o.cursor].View
 				view.ID = domain.BoardViewID(o.uniqueViewID(string(view.ID) + "-copy"))
 				view.Title += " Copy"
+				view.Options.SortPolicy = domain.BoardViewSortDefault
 				o.beginEdit(view, "")
 				return o, textarea.Blink
 			}

@@ -83,6 +83,9 @@ func TestBoardViewOverlayDuplicateValidatesAndSaves(t *testing.T) {
 	}
 	msg := cmd().(SelectionMsg)
 	saved := msg.Value.(BoardViewSaveMsg)
+	if saved.View.Options.SortPolicy != domain.BoardViewSortDefault {
+		t.Fatalf("duplicated custom view sort policy = %q, want explicit custom default", saved.View.Options.SortPolicy)
+	}
 	if string(saved.View.ID) != uniqueCopyID || len(saved.View.Columns) == 0 {
 		t.Fatalf("saved view = %+v", saved.View)
 	}

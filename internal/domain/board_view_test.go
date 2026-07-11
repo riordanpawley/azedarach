@@ -19,8 +19,40 @@ func TestWaitingHumanPredicateDistinguishesDecisionFromRuntimePrompt(t *testing.
 }
 
 func TestBuiltInBoardViewsValidate(t *testing.T) {
-	if err := BuiltInBoardViewSet().Validate(); err != nil {
+	set := BuiltInBoardViewSet()
+	if err := set.Validate(); err != nil {
 		t.Fatalf("BuiltInBoardViewSet().Validate() error = %v", err)
+	}
+	for _, view := range set.Views {
+		if view.Options.SortPolicy != BoardViewSortHumanAttention {
+			t.Fatalf("built-in view %q sort policy = %q, want %q", view.ID, view.Options.SortPolicy, BoardViewSortHumanAttention)
+		}
+	}
+}
+
+func TestBoardViewValidationRejectsUnknownSortPolicy(t *testing.T) {
+	view := DefaultBoardView()
+	view.Options.SortPolicy = "future_policy"
+	if err := view.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported sort policy") {
+		t.Fatalf("Validate() error = %v, want unsupported sort policy", err)
+	}
+}
+
+func TestBoardViewSortPolicyJSONRoundTrip(t *testing.T) {
+	view := DefaultBoardView()
+	encoded, err := EncodeBoardViewDefinitionJSON(view)
+	if err != nil {
+		t.Fatalf("EncodeBoardViewDefinitionJSON: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"sort_policy":"human_attention"`) {
+		t.Fatalf("encoded definition missing sort policy: %s", encoded)
+	}
+	decoded, err := DecodeBoardViewDefinitionJSON(encoded)
+	if err != nil {
+		t.Fatalf("DecodeBoardViewDefinitionJSON: %v", err)
+	}
+	if decoded.Options.SortPolicy != BoardViewSortHumanAttention {
+		t.Fatalf("decoded sort policy = %q", decoded.Options.SortPolicy)
 	}
 }
 
@@ -171,6 +203,23 @@ func TestGroupTasksByBoardViewUsesTypedPlacementAndFirstMatch(t *testing.T) {
 	done := findBoardViewTestColumn(columns, BoardColumnDone)
 	if len(done.Tasks) != 1 || done.Tasks[0].ID != "az-done" {
 		t.Fatalf("done column tasks = %+v, want done task", done.Tasks)
+	}
+}
+
+func TestGroupTasksByBuiltInBoardViewAppliesStableAttentionPolicy(t *testing.T) {
+	tasks := []Task{
+		{ID: "ordinary-newer", Status: StatusInProgress},
+		{ID: "ordinary-older", Status: StatusInProgress},
+		{ID: "review", Status: StatusInReview},
+		{ID: "waiting", Status: StatusInProgress, Session: &Session{Activity: "waiting-for-human"}},
+	}
+	columns, err := GroupTasksByBoardView(DefaultBoardView(), tasks)
+	if err != nil {
+		t.Fatalf("GroupTasksByBoardView: %v", err)
+	}
+	active := findBoardViewTestColumn(columns, BoardColumnActive).Tasks
+	if len(active) != 3 || active[0].ID != "waiting" || active[1].ID != "ordinary-newer" || active[2].ID != "ordinary-older" {
+		t.Fatalf("active order = %+v, want attention first with stable ordinary order", active)
 	}
 }
 

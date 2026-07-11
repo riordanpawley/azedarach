@@ -4704,6 +4704,7 @@ func TestModeStrings(t *testing.T) {
 
 func TestBoardColumnsPrioritizeHumanAttentionBeforeConfiguredSort(t *testing.T) {
 	m := newTestModel()
+	m.boardView = domain.DefaultBoardView()
 	m.tasks = []domain.Task{
 		{ID: "ordinary", Status: domain.StatusInProgress, Priority: domain.P0, GitAdditions: 100},
 		{ID: "waiting", Status: domain.StatusInProgress, Priority: domain.P4, Session: &domain.Session{Activity: "waiting-for-human"}},
@@ -4713,6 +4714,50 @@ func TestBoardColumnsPrioritizeHumanAttentionBeforeConfiguredSort(t *testing.T) 
 	active := columns[domain.StatusInProgress.Column()].Tasks
 	if len(active) != 2 || active[0].ID.String() != "waiting" || active[1].ID.String() != "ordinary" {
 		t.Fatalf("active tasks = %+v, want waiting-human task before git-diff order", active)
+	}
+}
+
+func TestBoardColumnsDoNotApplyAutomaticAttentionSortToCustomView(t *testing.T) {
+	m := newTestModel()
+	m.boardView = domain.DefaultBoardView()
+	m.boardView.ID = "custom"
+	m.boardView.Options.SortPolicy = domain.BoardViewSortDefault
+	m.tasks = []domain.Task{
+		{ID: "ordinary", Status: domain.StatusInProgress, GitAdditions: 100},
+		{ID: "waiting", Status: domain.StatusInProgress, Session: &domain.Session{Activity: "waiting-for-human"}},
+	}
+
+	active := m.buildColumns()[1].Tasks
+	if len(active) != 2 || active[0].ID.String() != "ordinary" {
+		t.Fatalf("custom view tasks = %+v, want configured git-diff order", active)
+	}
+}
+
+func TestBoardColumnsExplicitSortOverridesBuiltInAttentionPolicy(t *testing.T) {
+	m := newTestModel()
+	m.boardView = domain.DefaultBoardView()
+	m.editor.SetSortField(domain.SortByPriority)
+	m.editor.SetSortOrder(domain.SortAsc)
+	m.tasks = []domain.Task{
+		{ID: "ordinary", Status: domain.StatusInProgress, Priority: domain.P0},
+		{ID: "waiting", Status: domain.StatusInProgress, Priority: domain.P4, Session: &domain.Session{Activity: "waiting-for-human"}},
+	}
+
+	active := m.buildColumns()[1].Tasks
+	if len(active) != 2 || active[0].ID.String() != "ordinary" {
+		t.Fatalf("explicitly sorted tasks = %+v, want priority order", active)
+	}
+}
+
+func TestSortSummaryReportsAutomaticAttentionPolicyAndExplicitOverride(t *testing.T) {
+	m := newTestModel()
+	m.boardView = domain.DefaultBoardView()
+	if got := m.sortSummary(); got != "S:attention+git_diff/asc" {
+		t.Fatalf("automatic sort summary = %q", got)
+	}
+	m.editor.SetSortField(domain.SortByPriority)
+	if got := m.sortSummary(); got != "S:priority/asc" {
+		t.Fatalf("explicit sort summary = %q", got)
 	}
 }
 

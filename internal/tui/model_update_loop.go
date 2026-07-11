@@ -186,6 +186,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			issueID := msg.Value.(string)
 			return m, m.attachSessionCmd(issueID)
 		}
+		if _, ok := msg.Value.(*domain.Sort); ok {
+			m.editor.MarkSortExplicit()
+		}
 		return m.handleSelection(msg)
 
 	case editTaskDetailLoadedMsg:

@@ -86,11 +86,11 @@ func TestHumanAttentionRank(t *testing.T) {
 	tests := []struct {
 		name string
 		task Task
-		want int
+		want HumanAttentionTier
 	}{
-		{name: "ordinary work", task: Task{Status: StatusInProgress}, want: 0},
-		{name: "review ready", task: Task{Status: StatusInReview}, want: 1},
-		{name: "waiting human", task: Task{Status: StatusInProgress, Session: &Session{Activity: "waiting-for-human"}}, want: 2},
+		{name: "ordinary work", task: Task{Status: StatusInProgress}, want: HumanAttentionNone},
+		{name: "review ready", task: Task{Status: StatusInReview}, want: HumanAttentionReviewReady},
+		{name: "waiting human", task: Task{Status: StatusInProgress, Session: &Session{Activity: "waiting-for-human"}}, want: HumanAttentionWaitingHuman},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

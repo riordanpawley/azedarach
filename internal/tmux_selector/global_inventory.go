@@ -381,12 +381,12 @@ func (l *GlobalInventoryLoader) snapshotFromEntries(entries []InventoryEntry, en
 	}
 }
 
-func inventoryHumanAttentionRank(entry InventoryEntry) int {
+func inventoryHumanAttentionRank(entry InventoryEntry) domain.HumanAttentionTier {
 	// Live tmux discovery uses a provisional waiting state until daemon
 	// enrichment arrives. Only durable task metadata is authoritative enough to
 	// promote a selector entry as requiring human attention.
 	if entry.Task.ID.IsZero() {
-		return 0
+		return domain.HumanAttentionNone
 	}
 	return domain.HumanAttentionRank(entry.Task)
 }
