@@ -1,10 +1,10 @@
 ╭────────────────────────────────────────────────────────────────────╮
 │CLOSE BLOCKED                                                       │
 │────────────────────────────────────────────────────────────────────│
-│Issue: az-321                                                       │
+│Issue: gav                                                          │
 │The issue was not closed.                                           │
-│cannot close issue az-321: worktree has local changes: main.go.     │
-│Next: commit, discard, or merge the worktree changes first, then    │
+│refusing to merge child issue gav directly into base: no active     │
+│ancestor worktree branch was found; run `az worktree create gat`,   │
 │...                                                                 │
 │                                                                    │
 │                                                                    │
@@ -13,8 +13,8 @@
 │────────────────────────────────────────────────────────────────────│
 │> r Retry close                                                     │
 │  Run the close again after fixing the blocker.                     │
-│  f Force cleanup                                                   │
-│  Retry and allow worktree removal to discard local files.          │
+│  w Create ancestor & retry                                         │
+│  Create the missing parent worktree, then retry close.             │
 │  esc Cancel                                                        │
 │  Leave the issue in its previous status.                           │
 ╰────────────────────────────────────────────────────────────────────╯
