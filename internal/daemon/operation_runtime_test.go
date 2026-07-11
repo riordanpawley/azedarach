@@ -18,6 +18,12 @@ import (
 
 type runtimeGitService struct{}
 
+type unsuccessfulMergeRuntimeGitService struct{ runtimeGitService }
+
+func (unsuccessfulMergeRuntimeGitService) Merge(context.Context, string, string, string) (*git.MergeResult, error) {
+	return &git.MergeResult{Success: false, Message: "hook rejected merge"}, nil
+}
+
 type runtimeWorktreeService struct{}
 
 func (runtimeGitService) Fetch(context.Context, string, string, string) error { return nil }
@@ -256,6 +262,27 @@ func TestOperationRuntimeGitMergePublishesLifecycleEvents(t *testing.T) {
 		if body.Operation.Kind != daemonhandlers.CommandGitMerge {
 			t.Fatalf("event operation kind = %s, want %s", body.Operation.Kind, daemonhandlers.CommandGitMerge)
 		}
+	}
+}
+
+func TestOperationRuntimeMarksUnsuccessfulGitMergeFailed(t *testing.T) {
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), hub: publish.NewHub(32, 16, nil), nextRevision: sequentialRevision()})
+	runtime.gitHandler = daemonhandlers.NewGitHandler(unsuccessfulMergeRuntimeGitService{})
+	resp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID: "proj-1",
+		Kind:      daemonhandlers.CommandGitMerge,
+		Payload:   mustJSON(t, map[string]string{"worktree": "/tmp/wt", "branch": "source"}),
+	}))
+	if !resp.OK {
+		t.Fatalf("submit response = %+v", resp)
+	}
+	var body protocol.OperationSubmitResponseBody
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("unmarshal submit body: %v", err)
+	}
+	record := waitForRuntimeState(t, runtime, body.Operation.OperationID.String(), daemonops.StateFailed)
+	if record.ErrorMessage != "hook rejected merge" {
+		t.Fatalf("failed operation = %+v, want unsuccessful merge error", record)
 	}
 }
 

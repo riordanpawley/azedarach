@@ -4117,9 +4117,10 @@ func daemonWorkerIntegrationReadyMailType(eventType string) bool {
 func (d *Daemon) handleTaskMergeBaseTarget(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
 	var cmd struct {
-		TaskID            string `json:"task_id"`
-		BaseBranch        string `json:"base_branch,omitempty"`
-		AllowBaseForChild bool   `json:"allow_base_for_child,omitempty"`
+		TaskID                 string `json:"task_id"`
+		BaseBranch             string `json:"base_branch,omitempty"`
+		AllowBaseForChild      bool   `json:"allow_base_for_child,omitempty"`
+		RequireHumanAcceptance bool   `json:"require_human_acceptance,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -4127,6 +4128,15 @@ func (d *Daemon) handleTaskMergeBaseTarget(ctx context.Context, req protocol.Req
 	result, err := d.taskMergeBaseTarget(ctx, projectID, cmd.TaskID, cmd.BaseBranch, cmd.AllowBaseForChild)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if cmd.RequireHumanAcceptance && result.TargetID == "base" {
+		accepted, acceptErr := d.hasDurableBaseIntegrationAcceptance(ctx, projectID, cmd.TaskID)
+		if acceptErr != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, acceptErr.Error()), nil
+		}
+		if !accepted {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("refusing root issue %s integration into base without durable human acceptance; record `human.input_provided` with data {\"base_integration_accepted\":true}", cmd.TaskID)), nil
+		}
 	}
 	body, err := json.Marshal(result)
 	if err != nil {
@@ -4136,6 +4146,23 @@ func (d *Daemon) handleTaskMergeBaseTarget(ctx context.Context, req protocol.Req
 	resp.Body = body
 	resp.Revision = d.currentRevision(projectID)
 	return resp, nil
+}
+
+func (d *Daemon) hasDurableBaseIntegrationAcceptance(ctx context.Context, projectID, issueID string) (bool, error) {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return false, fmt.Errorf("issue store unavailable")
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventHumanInputProvided}, Limit: 100})
+	if err != nil {
+		return false, fmt.Errorf("read durable human acceptance for %s: %w", issueID, err)
+	}
+	for _, event := range events {
+		if accepted, ok := event.Payload["base_integration_accepted"].(bool); ok && accepted {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (d *Daemon) handleTaskFollowOnMergeCandidates(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -5011,7 +5038,7 @@ func (d *Daemon) daemonTaskGraphNestedRoots(
 				item.StartFailure = &copyFailure
 				item.Status = "blocked_start_failed"
 				item.FallbackPolicy = "keep_children_blocked_or_create_replacement_direct_work"
-				item.Advice = fmt.Sprintf("nested root session start failed; inspect operation %s, retry `az session start %s`, or create replacement direct work under the parent without flattening %s descendants", failure.OperationID, item.IssueID, item.IssueID)
+				item.Advice = fmt.Sprintf("nested root session start failed; inspect operation %s, retry `az orchestrator-session start --root %s`, or create replacement direct work under the parent without flattening %s descendants", failure.OperationID, item.IssueID, item.IssueID)
 			}
 		}
 		if item.Status == "" || item.Status == "startable" || item.Status == string(domain.StatusOpen) || item.Status == string(domain.StatusInProgress) || item.Status == string(domain.StatusInReview) {
@@ -5025,7 +5052,7 @@ func (d *Daemon) daemonTaskGraphNestedRoots(
 			}
 		}
 		if strings.TrimSpace(item.Advice) == "" {
-			item.Advice = fmt.Sprintf("start nested root orchestrator: az session start %s", item.IssueID)
+			item.Advice = fmt.Sprintf("start nested root orchestrator: az orchestrator-session start --root %s", item.IssueID)
 		}
 		out = append(out, item)
 	}
@@ -5907,7 +5934,7 @@ func daemonTaskGraphNestedRootSummaries(root naming.IssueID, byID map[naming.Iss
 				IssueStatus: string(task.Status),
 				Type:        string(task.Type),
 				ChildCount:  len(daemonTaskGraphDescendants(id, children)),
-				Advice:      fmt.Sprintf("start nested root orchestrator: az session start %s", id.String()),
+				Advice:      fmt.Sprintf("start nested root orchestrator: az orchestrator-session start --root %s", id.String()),
 			})
 			return
 		}
@@ -6143,7 +6170,7 @@ func daemonTaskCompletionAdvice(rootIssueID string, runnable []string, nestedRoo
 		if strings.TrimSpace(nested.Advice) != "" {
 			advice = append(advice, nested.Advice)
 		} else {
-			advice = append(advice, fmt.Sprintf("start nested root orchestrator: az session start %s", nested.IssueID))
+			advice = append(advice, fmt.Sprintf("start nested root orchestrator: az orchestrator-session start --root %s", nested.IssueID))
 		}
 	}
 	if len(staleCloseable) > 0 {

@@ -71,6 +71,9 @@ func TestOrchestratorScopeLeaseStaleRecoveryAndLifecyclePersistence(t *testing.T
 	if err != nil || result.Disposition != OrchestratorLeaseAcquired {
 		t.Fatalf("initial acquire = %+v, %v", result, err)
 	}
+	if _, err := storeA.AdvanceOrchestratorScopeCursor(ctx, identity, 41); err != nil {
+		t.Fatalf("advance cursor: %v", err)
+	}
 	if err := storeA.Close(); err != nil {
 		t.Fatalf("close first store: %v", err)
 	}
@@ -86,7 +89,7 @@ func TestOrchestratorScopeLeaseStaleRecoveryAndLifecyclePersistence(t *testing.T
 	if err != nil {
 		t.Fatalf("recover stale lease: %v", err)
 	}
-	if recovered.Disposition != OrchestratorLeaseRecoveredStale || recovered.Lease.SessionID != "replacement" {
+	if recovered.Disposition != OrchestratorLeaseRecoveredStale || recovered.Lease.SessionID != "replacement" || recovered.Lease.Cursor != 41 {
 		t.Fatalf("recovered = %+v", recovered)
 	}
 	paused, err := storeB.SetOrchestratorScopeLeaseLifecycle(ctx, identity, "replacement", domain.OrchestratorPaused)

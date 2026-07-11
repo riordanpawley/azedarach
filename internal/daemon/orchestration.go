@@ -3,14 +3,17 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 const (
@@ -38,17 +41,73 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
+	requestedScope := body.Scope
+	lease, found, err := d.resolveOrchestratorSession(ctx, d.projectID(req.Meta), body.SessionID)
+	leaseResolvedFromSession := found
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if found {
+		body.Scope = lease.Identity.Scope
+	} else if strings.TrimSpace(body.SessionID) != "" && body.Scope.Kind == "" {
+		// A normal worker session deliberately receives no orchestration context.
+		encoded, _ := json.Marshal(protocol.OrchestrationSnapshot{Role: "worker", SessionID: body.SessionID})
+		resp := d.successResponse(req)
+		resp.Body = encoded
+		return resp, nil
+	}
 	if _, err := domain.NewOrchestratorIdentity(d.projectID(req.Meta), body.Scope); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+	}
+	if !found && strings.TrimSpace(body.SessionID) == "" && d.sessionRuntimeStateStoreIfConfigured(d.projectID(req.Meta)) != nil {
+		identity, _ := domain.NewOrchestratorIdentity(d.projectID(req.Meta), body.Scope)
+		lease, found, err = daemonstate.NewOrchestratorLeaseAuthority(d.sessionRuntimeStateStoreIfConfigured(d.projectID(req.Meta))).Get(ctx, identity)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("load orchestration scope lease: %v", err)), nil
+		}
+	}
+	if leaseResolvedFromSession && body.ObservedCursor > lease.Cursor && requestedScope == lease.Identity.Scope {
+		lease, err = daemonstate.NewOrchestratorLeaseAuthority(d.sessionRuntimeStateStoreIfConfigured(d.projectID(req.Meta))).AdvanceCursor(ctx, lease.Identity, body.ObservedCursor)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("advance orchestration cursor: %v", err)), nil
+		}
 	}
 	if strings.TrimSpace(body.ActorID) == "" {
 		body.ActorID = strings.TrimSpace(req.Meta.ClientActor)
 	}
-	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, d.projectID(req.Meta), body)
-	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	projectID := d.projectID(req.Meta)
+	var snapshot protocol.OrchestrationSnapshot
+	var snapshotRevision uint64
+	stable := false
+	for attempt := 0; attempt < 3; attempt++ {
+		before := d.currentRevision(projectID)
+		snapshot, err = d.orchestrationAuthority().Snapshot(ctx, projectID, body)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		after := d.currentRevision(projectID)
+		if before == after {
+			snapshotRevision = after
+			stable = true
+			break
+		}
 	}
-	snapshot.Revision = d.currentRevision(d.projectID(req.Meta))
+	if !stable {
+		return d.errorResponse(req, protocol.ErrorCodeConflict, "orchestration projection changed while building snapshot; retry"), nil
+	}
+	snapshot.Role = "orchestrator"
+	snapshot.SessionID = strings.TrimSpace(body.SessionID)
+	if found {
+		snapshot.SessionID = lease.SessionID
+		snapshot.Lifecycle = lease.Lifecycle
+		snapshot.Completion.State = lease.Lifecycle
+		snapshot.Cursor = lease.Cursor
+		applyOrchestratorContinuationProjection(&snapshot, lease)
+	}
+	snapshot.Revision = snapshotRevision
+	if snapshot.Cursor == 0 && !found {
+		snapshot.Cursor = int64(snapshotRevision)
+	}
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -56,6 +115,51 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 	resp := d.successResponse(req)
 	resp.Body, resp.Revision = encoded, snapshot.Revision
 	return resp, nil
+}
+
+func applyOrchestratorContinuationProjection(snapshot *protocol.OrchestrationSnapshot, lease daemonstate.OrchestratorScopeLease) {
+	if snapshot == nil || lease.Identity.Scope.Kind != domain.OrchestrationScopeRooted || !rootedOrchestratorContinuationRequired(false, *snapshot) {
+		return
+	}
+	snapshot.ContinuationRequired = true
+	snapshot.ContinuationReason = "root complete-check has not passed while direct nested roots still require orchestration"
+	snapshot.ContinuationContract = orchestratorContinuationPrompt(lease, snapshot.NestedRoots)
+}
+
+func rootedOrchestratorContinuationRequired(completeCheckPassed bool, snapshot protocol.OrchestrationSnapshot) bool {
+	return !completeCheckPassed && len(snapshot.Interactions) == 0 && len(snapshot.NestedRoots) > 0
+}
+
+func orchestratorContinuationPrompt(lease daemonstate.OrchestratorScopeLease, nested []protocol.OrchestrationNestedRoot) string {
+	ids := make([]string, 0, len(nested))
+	for _, item := range nested {
+		if id := strings.TrimSpace(item.IssueID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return fmt.Sprintf("Persistent parent orchestration wake (root=%s cursor=%d). Continue now: consume `az orchestrate watch --root %s --since %d --jsonl`; coordinate only direct nested roots [%s] without flattening their descendants; review and integrate accepted epic results; advance cross-epic dependencies; repeat status/start/watch/review until `az orchestrate complete-check --root %s` passes, then validate and set the root in_review for human handoff. Do not emit a handoff response while this continuation remains required.", lease.Identity.Scope.RootIssueID, lease.Cursor, lease.Identity.Scope.RootIssueID, lease.Cursor, strings.Join(ids, ","), lease.Identity.Scope.RootIssueID)
+}
+
+func (d *Daemon) resolveOrchestratorSession(ctx context.Context, projectID, sessionID string) (daemonstate.OrchestratorScopeLease, bool, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return daemonstate.OrchestratorScopeLease{}, false, nil
+	}
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return daemonstate.OrchestratorScopeLease{}, false, nil
+	}
+	leases, err := store.ListOrchestratorScopeLeases(ctx, projectID)
+	if err != nil {
+		return daemonstate.OrchestratorScopeLease{}, false, fmt.Errorf("refresh orchestrator session projection: %w", err)
+	}
+	for _, lease := range leases {
+		if lease.SessionID == sessionID {
+			return lease, true, nil
+		}
+	}
+	return daemonstate.OrchestratorScopeLease{}, false, nil
 }
 
 func (d *Daemon) handleOrchestrationIntent(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -66,8 +170,11 @@ func (d *Daemon) handleOrchestrationIntent(ctx context.Context, req protocol.Req
 	if _, err := domain.NewOrchestratorIdentity(d.projectID(req.Meta), body.Scope); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 	}
-	if body.Kind != protocol.OrchestrationIntentStart || strings.TrimSpace(body.IntentKey) == "" {
-		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "start orchestration intent with intent_key is required"), nil
+	if !validOrchestrationIntentKind(body.Kind) || strings.TrimSpace(body.IntentKey) == "" {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "supported orchestration intent with intent_key is required"), nil
+	}
+	if err := validateOrchestrationReviewIntent(body); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 	}
 	if strings.TrimSpace(body.ActorID) == "" {
 		body.ActorID = strings.TrimSpace(req.Meta.ClientActor)
@@ -98,7 +205,14 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	if limit <= 0 {
 		limit = a.inspectLimit()
 	}
-	snapshot := protocol.OrchestrationSnapshot{Scope: identity.Scope, GeneratedAt: time.Now().UTC(), Blocked: map[string]string{}}
+	snapshot := protocol.OrchestrationSnapshot{
+		Scope: identity.Scope, GeneratedAt: time.Now().UTC(), Blocked: map[string]string{},
+		Constraints: protocol.OrchestrationConstraints{
+			InspectLimit: limit, StartLimit: a.startLimit(), AgentCapacity: a.agentCapacity(),
+			Commands:       orchestrationScopeCommands(identity.Scope),
+			RoleGuardrails: []string{"remain in the active orchestration loop", "do not implement worker issue scope", "preserve sessions during review handoff"},
+		},
+	}
 	if identity.Scope.Kind == domain.OrchestrationScopeRooted {
 		root := identity.Scope.RootIssueID.String()
 		ready, err := a.daemon.taskGraphReadinessForActor(ctx, projectID, root, request.ActorID)
@@ -109,13 +223,29 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 			return protocol.OrchestrationSnapshot{}, err
 		}
 		snapshot.Scope, snapshot.Roots, snapshot.GeneratedAt = identity.Scope, []string{root}, time.Now().UTC()
+		a.enrichStewardshipContext(ctx, projectID, &snapshot)
+		issueClient := a.daemon.issueClientForProject(projectID)
+		if issueClient == nil {
+			return protocol.OrchestrationSnapshot{}, fmt.Errorf("issue store unavailable")
+		}
+		tasks, err := issueClient.ListParentChildSubtreeWithRuntime(ctx, projectID, root)
+		if err != nil {
+			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load rooted review queue: %w", err)
+		}
+		snapshot.ReviewQueue = a.reviewQueue(ctx, projectID, request, tasks)
 		return snapshot, nil
 	}
 
-	tasks, err := a.daemon.loadTaskGraphDomainTasks(ctx, projectID)
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return protocol.OrchestrationSnapshot{}, fmt.Errorf("issue store unavailable")
+	}
+	tasks, err := issueClient.ListGraphReadinessWithRuntime(ctx, projectID, "", limit)
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("load project orchestration projection: %w", err)
 	}
+	tasks = a.daemon.enrichTasksWithSessionState(ctx, projectID, tasks)
+	snapshot.ReviewQueue = a.reviewQueue(ctx, projectID, request, tasks)
 	roots := make([]domain.Task, 0)
 	tasksByID := make(map[string]domain.Task, len(tasks))
 	for _, task := range tasks {
@@ -125,6 +255,17 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		}
 	}
 	snapshot.Health = orchestrationBoardHealth(tasks, tasksByID, limit, a.openIssueLimit())
+	openIssueCount, err := issueClient.CountOpenOrchestrationIssues(ctx)
+	if err != nil {
+		return protocol.OrchestrationSnapshot{}, fmt.Errorf("count project orchestration issues: %w", err)
+	}
+	snapshot.Health.OpenIssueCount = openIssueCount
+	if openIssueCount > snapshot.Health.OpenIssueLimit {
+		snapshot.Health.Diagnostics = append(snapshot.Health.Diagnostics, fmt.Sprintf("open issue count %d exceeds refusal threshold %d", openIssueCount, snapshot.Health.OpenIssueLimit))
+		sort.Strings(snapshot.Health.Diagnostics)
+		snapshot.Health.Diagnostics = uniqueStrings(snapshot.Health.Diagnostics)
+		snapshot.Health.Healthy = false
+	}
 	for _, task := range tasks {
 		if task.Status == domain.StatusDone {
 			continue
@@ -161,8 +302,102 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		snapshot.Capacity.TotalCountingCapacityCount = globalActive
 	}
 	explainOrchestrationCandidates(&snapshot)
+	a.enrichStewardshipContext(ctx, projectID, &snapshot)
 	sortOrchestrationSnapshot(&snapshot, tasksByID)
+	snapshot.Completion = projectOrchestrationCompletion(snapshot)
 	return snapshot, nil
+}
+
+func projectOrchestrationCompletion(snapshot protocol.OrchestrationSnapshot) protocol.OrchestrationCompletion {
+	reasons := make([]string, 0, 6)
+	checks := []struct {
+		count int
+		label string
+	}{
+		{snapshot.Health.OpenIssueCount, "open issues remain"},
+		{len(snapshot.ActiveSessions), "active worker sessions remain"},
+		{len(snapshot.Pending), "session starts remain pending"},
+		{len(snapshot.Reviews), "review requests remain"},
+		{len(snapshot.Interactions), "human interactions remain unresolved"},
+	}
+	for _, check := range checks {
+		if check.count > 0 {
+			reasons = append(reasons, fmt.Sprintf("%d %s", check.count, check.label))
+		}
+	}
+	if !snapshot.Health.Healthy {
+		reasons = append(reasons, "board health is not healthy: "+strings.Join(snapshot.Health.Diagnostics, "; "))
+	}
+	return protocol.OrchestrationCompletion{Scope: snapshot.Scope, State: snapshot.Lifecycle, Pass: len(reasons) == 0, Reasons: reasons}
+}
+
+func orchestrationScopeCommands(scope domain.OrchestrationScope) []string {
+	rootFlag := ""
+	if scope.Kind == domain.OrchestrationScopeRooted {
+		rootFlag = " --root " + scope.RootIssueID.String()
+	}
+	return []string{
+		"az orchestrate status" + rootFlag,
+		"az orchestrate start" + rootFlag,
+		"az orchestrate watch" + rootFlag + " --since <cursor> --jsonl",
+		"az orchestrate complete-check" + rootFlag,
+	}
+}
+
+func (a daemonOrchestrationAuthority) enrichStewardshipContext(ctx context.Context, projectID string, snapshot *protocol.OrchestrationSnapshot) {
+	for _, candidate := range snapshot.Candidates {
+		switch candidate.Classification {
+		case string(domain.OrchestrationCandidateReviewReady):
+			snapshot.Reviews = append(snapshot.Reviews, candidate)
+		case string(domain.OrchestrationCandidateOwnedElsewhere):
+			snapshot.OwnershipConflicts = append(snapshot.OwnershipConflicts, candidate)
+		}
+	}
+	if issueClient := a.daemon.issueClientForProject(projectID); issueClient != nil {
+		if interactions, err := issueClient.ListInteractions(ctx); err == nil {
+			for _, interaction := range interactions {
+				if interaction.Unresolved() && orchestrationInteractionInScope(interaction, snapshot.Scope) {
+					snapshot.Interactions = append(snapshot.Interactions, interaction)
+				}
+			}
+		}
+	}
+	repoDir := strings.TrimSpace(a.daemon.resolveRepoDirForProject(projectID))
+	if repoDir != "" {
+		parents := append([]string(nil), snapshot.Roots...)
+		if snapshot.Scope.Kind == domain.OrchestrationScopeRooted {
+			parents = []string{snapshot.Scope.RootIssueID.String()}
+		}
+		var recent []daemonMailEvent
+		for _, parent := range parents {
+			if events, err := readMailboxEvents(repoDir, parent); err == nil {
+				recent = append(recent, events...)
+			}
+		}
+		sort.SliceStable(recent, func(i, j int) bool {
+			if recent[i].CreatedAt.Equal(recent[j].CreatedAt) {
+				return recent[i].ParentIssue < recent[j].ParentIssue
+			}
+			return recent[i].CreatedAt.Before(recent[j].CreatedAt)
+		})
+		const recentLimit = 20
+		if len(recent) > recentLimit {
+			recent = recent[len(recent)-recentLimit:]
+		}
+		for _, event := range recent {
+			snapshot.RecentEvents = append(snapshot.RecentEvents, mailEventToProtocol(event))
+			if event.Seq > snapshot.Cursor {
+				snapshot.Cursor = event.Seq
+			}
+		}
+	}
+}
+
+func orchestrationInteractionInScope(interaction domain.InteractionRequest, scope domain.OrchestrationScope) bool {
+	if scope.Kind == domain.OrchestrationScopeProject {
+		return true
+	}
+	return interaction.OrchestrationScope == scope.RootIssueID.String() || interaction.IssueID == scope.RootIssueID.String()
 }
 
 func explainOrchestrationCandidates(snapshot *protocol.OrchestrationSnapshot) {
@@ -176,28 +411,50 @@ func explainOrchestrationCandidates(snapshot *protocol.OrchestrationSnapshot) {
 	}
 	for i := range snapshot.Candidates {
 		candidate := &snapshot.Candidates[i]
-		if candidate.Classification == "malformed" || candidate.Classification == "owned-elsewhere" {
+		if candidate.Classification == "malformed" || candidate.Classification == string(domain.OrchestrationCandidateOwnedElsewhere) {
 			continue
 		}
 		switch {
-		case runnable[candidate.IssueID]:
-			candidate.Included, candidate.Classification, candidate.Reason = true, "runnable", "included: ready for worker start"
-		case active[candidate.IssueID]:
-			candidate.Included, candidate.Classification, candidate.Reason = false, "active", "excluded: session already active"
+		case candidate.Classification == string(domain.OrchestrationCandidateDecisionWaiting):
+			// A durable whole-issue interaction is the specific source of the
+			// block and must remain visible as Waiting Human.
+			continue
 		case snapshot.Blocked[candidate.IssueID] != "":
-			candidate.Included, candidate.Classification, candidate.Reason = false, "blocked", "excluded: "+snapshot.Blocked[candidate.IssueID]
+			candidate.Included, candidate.Eligible, candidate.Classification, candidate.Reason = false, false, string(domain.OrchestrationCandidateBlocked), "excluded: "+snapshot.Blocked[candidate.IssueID]
+			candidate.ExclusionReasons = append(candidate.ExclusionReasons, snapshot.Blocked[candidate.IssueID])
+		case candidate.Classification != string(domain.OrchestrationCandidateOpen):
+			continue
+		case !candidate.Sufficient && candidate.Executability.Disposition != "":
+			candidate.Included, candidate.Eligible, candidate.Classification = false, false, string(candidate.Executability.Disposition)
+			candidate.Reason = "excluded: " + strings.Join(candidate.Executability.Reasons, "; ")
+			candidate.ExclusionReasons = append(candidate.ExclusionReasons, candidate.Executability.Reasons...)
+		case active[candidate.IssueID]:
+			candidate.Included, candidate.Eligible, candidate.Classification, candidate.Reason = false, false, string(domain.OrchestrationCandidateActive), "excluded: session already active"
+			candidate.ExclusionReasons = append(candidate.ExclusionReasons, "session-already-active")
+		case runnable[candidate.IssueID]:
+			candidate.Included, candidate.Eligible, candidate.Classification, candidate.Reason = true, true, "runnable", "included: ready for worker start"
 		default:
-			candidate.Included, candidate.Classification, candidate.Reason = false, "not-runnable", "excluded: not ready in current graph projection"
+			candidate.Included, candidate.Eligible, candidate.Classification, candidate.Reason = false, false, "not-runnable", "excluded: not ready in current graph projection"
+			candidate.ExclusionReasons = append(candidate.ExclusionReasons, "not-ready-in-current-graph")
 		}
 	}
 }
 
 func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest) (protocol.OrchestrationIntentResult, error) {
-	if request.Kind != protocol.OrchestrationIntentStart {
+	if !validOrchestrationIntentKind(request.Kind) {
 		return protocol.OrchestrationIntentResult{}, fmt.Errorf("unsupported orchestration intent %q", request.Kind)
 	}
 	if strings.TrimSpace(request.IntentKey) == "" {
 		return protocol.OrchestrationIntentResult{}, fmt.Errorf("orchestration intent_key is required")
+	}
+	if err := validateOrchestrationReviewIntent(request); err != nil {
+		return protocol.OrchestrationIntentResult{}, err
+	}
+	if request.Kind != protocol.OrchestrationIntentStart {
+		return a.applyReviewIntent(ctx, projectID, request)
+	}
+	if request.Scope.Kind != domain.OrchestrationScopeProject && len(request.Routes) > 0 {
+		return protocol.OrchestrationIntentResult{}, fmt.Errorf("candidate routing is available only for project orchestration scope")
 	}
 	// Keep readiness, capacity selection, claims, and operation submission in
 	// one daemon-authoritative critical section. Ownership claims remain the
@@ -232,6 +489,54 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		requested = stableRequestedCandidates(requested, snapshot.Runnable)
 	}
 	result := protocol.OrchestrationIntentResult{Scope: request.Scope, Kind: request.Kind, IntentKey: request.IntentKey, Requested: requested, Skipped: map[string]string{}, Failed: map[string]string{}}
+	routedIssues := map[string]struct{}{}
+	if request.Scope.Kind == domain.OrchestrationScopeProject {
+		issueClient := a.daemon.issueClientForProject(projectID)
+		if issueClient == nil {
+			return protocol.OrchestrationIntentResult{}, fmt.Errorf("issue store unavailable")
+		}
+		candidateIDs := make(map[string]bool, len(snapshot.Candidates))
+		for _, candidate := range snapshot.Candidates {
+			candidateIDs[candidate.IssueID] = true
+		}
+		for _, route := range request.Routes {
+			if issueID := strings.TrimSpace(route.IssueID); !candidateIDs[issueID] {
+				result.Failed[issueID] = "route candidate: issue is outside the bounded project candidate snapshot"
+			}
+		}
+		for _, route := range projectCandidateRoutes(snapshot, request.Routes) {
+			issueID := strings.TrimSpace(route.IssueID)
+			routedIssues[issueID] = struct{}{}
+			routed, err := issueClient.RouteOrchestrationCandidate(ctx, projectID, request.ActorID, route)
+			if err != nil {
+				result.Failed[issueID] = "route candidate: " + err.Error()
+				continue
+			}
+			entry := protocol.OrchestrationRouteResult{IssueID: issueID, Kind: routed.Route.Kind, Reason: routed.Route.Reason, MissingDetails: append([]string(nil), routed.Route.MissingDetails...), InteractionCreated: routed.InteractionCreated}
+			if routed.Interaction != nil {
+				entry.InteractionID = routed.Interaction.ID
+			}
+			result.Routed = append(result.Routed, entry)
+			a.publishOrchestrationRoute(ctx, projectID, routed.Task)
+		}
+		if len(result.Routed) > 0 && a.daemon.noticeService != nil {
+			_ = a.daemon.reconcileInteractionNotices(ctx, projectID)
+		}
+		if reviewID := firstActionableReview(snapshot.ReviewQueue); reviewID != "" {
+			for _, issueID := range requested {
+				if _, routed := routedIssues[issueID]; routed {
+					if _, failed := result.Failed[issueID]; failed {
+						result.Skipped[issueID] = "candidate-route-failed"
+					} else {
+						result.Skipped[issueID] = "candidate-routed-" + routeKindForIssue(result.Routed, issueID)
+					}
+					continue
+				}
+				result.Skipped[issueID] = "review-priority:" + reviewID
+			}
+			return result, nil
+		}
+	}
 	limit := request.Limit
 	if limit <= 0 {
 		limit = a.startLimit()
@@ -249,6 +554,14 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	}
 	started := 0
 	for _, issueID := range requested {
+		if _, routed := routedIssues[issueID]; routed {
+			if _, failed := result.Failed[issueID]; failed {
+				result.Skipped[issueID] = "candidate-route-failed"
+			} else {
+				result.Skipped[issueID] = "candidate-routed-" + routeKindForIssue(result.Routed, issueID)
+			}
+			continue
+		}
 		if _, ok := runnable[issueID]; !ok {
 			result.Skipped[issueID] = orchestrationSkipReason(issueID, nestedRoots, active, snapshot.Blocked)
 			continue
@@ -274,6 +587,52 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		started++
 	}
 	return result, nil
+}
+
+func projectCandidateRoutes(snapshot protocol.OrchestrationSnapshot, explicit []domain.OrchestrationCandidateRoute) []domain.OrchestrationCandidateRoute {
+	byIssue := make(map[string]domain.OrchestrationCandidateRoute, len(explicit))
+	for _, route := range explicit {
+		byIssue[strings.TrimSpace(route.IssueID)] = route
+	}
+	ordered := make([]domain.OrchestrationCandidateRoute, 0, len(snapshot.Candidates)+len(explicit))
+	seen := make(map[string]bool)
+	for _, candidate := range snapshot.Candidates {
+		issueID := strings.TrimSpace(candidate.IssueID)
+		if route, ok := byIssue[issueID]; ok {
+			ordered, seen[issueID] = append(ordered, route), true
+			continue
+		}
+		if candidate.Classification != string(domain.IssuePremature) {
+			continue
+		}
+		guidance, ok := domain.PrematureRouteGuidance(candidate.Executability)
+		if !ok {
+			continue
+		}
+		ordered, seen[issueID] = append(ordered, domain.OrchestrationCandidateRoute{IssueID: issueID, Kind: domain.OrchestrationRouteBacklog, Reason: "project orchestration found an incomplete execution contract", MissingDetails: guidance}), true
+	}
+	return ordered
+}
+
+func (a daemonOrchestrationAuthority) publishOrchestrationRoute(ctx context.Context, projectID string, task domain.Task) {
+	if a.daemon.hub == nil {
+		return
+	}
+	if enriched := a.daemon.enrichTasksWithSessionState(ctx, projectID, []domain.Task{task}); len(enriched) == 1 {
+		task = enriched[0]
+	}
+	revision := a.daemon.nextRevision(projectID)
+	body, _ := json.Marshal(taskEventBodyFromTask(projectID, task))
+	a.daemon.hub.Publish(protocol.EventEnvelope{ProtocolVersion: protocol.CurrentVersion, ProjectID: naming.ProjectID(projectID), Revision: revision, Event: protocol.EventTaskUpdated, Kind: protocol.EnvelopeKindEvent, EmittedAt: time.Now().UTC(), Body: body})
+}
+
+func routeKindForIssue(routes []protocol.OrchestrationRouteResult, issueID string) string {
+	for _, route := range routes {
+		if route.IssueID == issueID {
+			return string(route.Kind)
+		}
+	}
+	return "unknown"
 }
 
 func orchestrationGlobalActiveCount(tasks []domain.Task) int {
@@ -390,19 +749,17 @@ func orchestrationBoardHealth(tasks []domain.Task, byID map[string]domain.Task, 
 }
 
 func orchestrationCandidateForTask(task domain.Task, actorID string, now time.Time, diagnostics []string) protocol.OrchestrationCandidate {
-	c := protocol.OrchestrationCandidate{IssueID: task.ID.String(), Classification: "open", Reason: "eligible for bounded readiness inspection", Included: true}
-	if task.ParentID != nil && !task.ParentID.IsZero() {
-		c.Classification, c.Reason = "child", "included through root graph readiness"
-	}
-	if task.Status == domain.StatusInProgress || task.Status == domain.StatusInReview {
-		c.Included, c.Classification, c.Reason = false, "active", "already active or review-ready"
-	}
-	if task.Ownership != nil && task.Ownership.BlocksActor(actorID, now) {
-		c.Included, c.Classification, c.Reason = false, "owned-elsewhere", "durable ownership already exists"
+	assessment := domain.AssessOrchestrationCandidate(task, actorID, now, nil)
+	c := protocol.OrchestrationCandidate{IssueID: task.ID.String(), Included: assessment.Eligible, Eligible: assessment.Eligible, Sufficient: assessment.Sufficient, Classification: string(assessment.Classification), Sufficiency: assessment.Sufficiency, ExclusionReasons: assessment.ExclusionReasons, Executability: assessment.Executability}
+	if assessment.Eligible {
+		c.Reason = "included: eligible for bounded readiness inspection"
+	} else {
+		c.Reason = "excluded: " + strings.Join(assessment.ExclusionReasons, "; ")
 	}
 	for _, diagnostic := range diagnostics {
 		if strings.Contains(diagnostic, ": "+task.ID.String()+" ") {
-			c.Included, c.Classification, c.Reason = false, "malformed", diagnostic
+			c.Included, c.Eligible, c.Classification, c.Reason = false, false, "malformed", diagnostic
+			c.ExclusionReasons = append(c.ExclusionReasons, diagnostic)
 			break
 		}
 	}
@@ -438,7 +795,7 @@ func uniqueStrings(values []string) []string {
 
 func orchestrationSkipReason(issueID string, nestedRoots, active map[string]struct{}, blocked map[string]string) string {
 	if _, ok := nestedRoots[issueID]; ok {
-		return fmt.Sprintf("nested-root-start-orchestrator-session: az session start %s", issueID)
+		return fmt.Sprintf("nested-root-start-orchestrator-session: az orchestrator-session start --root %s", issueID)
 	}
 	if _, ok := active[issueID]; ok {
 		return "session-already-running"
@@ -450,67 +807,62 @@ func orchestrationSkipReason(issueID string, nestedRoots, active map[string]stru
 }
 
 func (a daemonOrchestrationAuthority) claimAndSubmitStart(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string) (protocol.OrchestrationLaunch, error) {
+	return a.claimAndSubmitStartWithPrompt(ctx, projectID, request, issueID, "")
+}
+
+func (a daemonOrchestrationAuthority) claimAndSubmitStartWithPrompt(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID, prompt string) (protocol.OrchestrationLaunch, error) {
 	parsed, err := naming.ParseIssueID(issueID)
 	if err != nil {
 		return protocol.OrchestrationLaunch{}, err
 	}
-	claimBody, err := json.Marshal(taskOwnershipRequest{TaskID: issueID, OwnerID: request.ActorID, OwnerKind: "agent"})
-	if err != nil {
-		return protocol.OrchestrationLaunch{}, fmt.Errorf("marshal ownership claim: %w", err)
-	}
 	baseReq := protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID("orchestration-" + request.IntentKey + "-" + issueID), Kind: protocol.EnvelopeKindCommand, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID), ClientActor: request.ActorID}}
-	claimReq := baseReq
-	claimReq.Command, claimReq.Body = "task.ownership.claim", claimBody
-	claimResp, err := a.daemon.handleTaskOwnershipClaim(ctx, claimReq)
-	if err != nil {
-		return protocol.OrchestrationLaunch{}, err
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return protocol.OrchestrationLaunch{}, fmt.Errorf("issue store unavailable")
 	}
-	if !claimResp.OK {
-		if claimResp.Error != nil {
-			return protocol.OrchestrationLaunch{}, fmt.Errorf("claim ownership: %s", claimResp.Error.Message)
-		}
-		return protocol.OrchestrationLaunch{}, fmt.Errorf("claim ownership failed")
+	dedupeKey := "session.start:" + issueID
+	attempt, err := issueClient.BeginOrchestrationStart(ctx, projectID, issueID, request.IntentKey, request.ActorID, dedupeKey)
+	if err != nil {
+		return protocol.OrchestrationLaunch{}, fmt.Errorf("claim orchestration start: %w", err)
 	}
 	sessionID := parsed.String()
 	if repoDir := strings.TrimSpace(request.RepoDir); repoDir != "" {
 		sessionID = naming.CanonicalSessionIDForIssue(repoDir, parsed).String()
 	}
-	payload, err := json.Marshal(sessionCommandBody{ProjectID: projectID, SessionID: sessionID, BaseBranch: request.BaseBranch})
+	payload, err := json.Marshal(sessionCommandBody{ProjectID: projectID, SessionID: sessionID, BaseBranch: request.BaseBranch, Prompt: strings.TrimSpace(prompt)})
 	if err != nil {
-		a.releaseStartClaim(ctx, baseReq, issueID, request.ActorID)
-		return protocol.OrchestrationLaunch{}, fmt.Errorf("marshal session start: %w", err)
+		return protocol.OrchestrationLaunch{}, a.compensateStartFailure(ctx, issueClient, attempt, fmt.Errorf("marshal session start: %w", err))
 	}
 	resources := []string{"issue:" + projectID + ":" + issueID, "worktree:" + issueID, "session:" + sessionID}
-	submitBody, err := json.Marshal(protocol.OperationSubmitRequestBody{ProjectID: naming.ProjectID(projectID), Kind: "session.start", IssueID: parsed, DedupeKey: "session.start:" + issueID, ResourceKeys: resources, Payload: payload})
+	submitBody, err := json.Marshal(protocol.OperationSubmitRequestBody{ProjectID: naming.ProjectID(projectID), Kind: "session.start", IssueID: parsed, DedupeKey: dedupeKey, ResourceKeys: resources, Payload: payload})
 	if err != nil {
-		a.releaseStartClaim(ctx, baseReq, issueID, request.ActorID)
-		return protocol.OrchestrationLaunch{}, fmt.Errorf("marshal operation submit: %w", err)
+		return protocol.OrchestrationLaunch{}, a.compensateStartFailure(ctx, issueClient, attempt, fmt.Errorf("marshal operation submit: %w", err))
 	}
 	submitReq := baseReq
 	submitReq.Command, submitReq.Body = protocol.CommandOperationSubmit, submitBody
 	submitResp := a.daemon.operationRuntime.handleOperationSubmit(ctx, submitReq)
 	if !submitResp.OK {
-		a.releaseStartClaim(ctx, baseReq, issueID, request.ActorID)
+		failure := errors.New("submit session start failed")
 		if submitResp.Error != nil {
-			return protocol.OrchestrationLaunch{}, fmt.Errorf("submit session start: %s", submitResp.Error.Message)
+			failure = fmt.Errorf("submit session start: %s", submitResp.Error.Message)
 		}
-		return protocol.OrchestrationLaunch{}, fmt.Errorf("submit session start failed")
+		return protocol.OrchestrationLaunch{}, a.compensateStartFailure(ctx, issueClient, attempt, failure)
 	}
 	var submitted protocol.OperationSubmitResponseBody
 	if err := json.Unmarshal(submitResp.Body, &submitted); err != nil {
 		return protocol.OrchestrationLaunch{}, err
 	}
+	if err := issueClient.CompleteOrchestrationStart(ctx, attempt, submitted.Operation.OperationID.String()); err != nil {
+		return protocol.OrchestrationLaunch{}, fmt.Errorf("record submitted orchestration start: %w", err)
+	}
 	return protocol.OrchestrationLaunch{IssueID: issueID, SessionID: sessionID, OperationID: submitted.Operation.OperationID.String(), OperationState: string(submitted.Operation.State)}, nil
 }
 
-func (a daemonOrchestrationAuthority) releaseStartClaim(ctx context.Context, baseReq protocol.RequestEnvelope, issueID, actorID string) {
-	releaseBody, err := json.Marshal(taskOwnershipRequest{TaskID: issueID, OwnerID: actorID})
-	if err != nil {
-		return
+func (a daemonOrchestrationAuthority) compensateStartFailure(ctx context.Context, issueClient *issues.Client, attempt issues.OrchestrationStartAttempt, cause error) error {
+	if err := issueClient.CompensateOrchestrationStart(ctx, attempt, cause); err != nil {
+		return fmt.Errorf("%v; persist orchestration start compensation: %w", cause, err)
 	}
-	releaseReq := baseReq
-	releaseReq.Command, releaseReq.Body = "task.ownership.release", releaseBody
-	_, _ = a.daemon.handleTaskOwnershipRelease(ctx, releaseReq)
+	return cause
 }
 
 func orchestrationTranscode(in, out any) error {

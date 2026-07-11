@@ -672,6 +672,7 @@ type BranchAgentMergeOptions struct {
 type BranchMergeToBaseOptions struct {
 	IssueID           string
 	Project           string
+	Target            string
 	AllowBaseForChild bool
 }
 
@@ -1967,7 +1968,7 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 	recordPhase("resolve_source", phaseStartedAt)
 
 	phaseStartedAt = time.Now()
-	target, decision, err := resolveMergeToBaseTarget(ctx, deps, source.IssueID, opts.AllowBaseForChild)
+	target, decision, err := resolveExplicitBranchMergeTarget(ctx, deps, source, opts)
 	if err != nil {
 		recordPhase("resolve_target", phaseStartedAt)
 		return branchMergeToBaseCommandResult{}, wrapPhaseErr("resolve_target", err)
@@ -1999,6 +2000,7 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 		"ancestor_chain", strings.Join(decision.AncestorChain, " -> "),
 		"allow_base_for_child", opts.AllowBaseForChild,
 	)
+	fmt.Printf("Merge plan: source %s (%s) -> target %s (%s)\n", source.IssueID, source.Branch, target.TargetID, baseBranch)
 
 	phaseStartedAt = time.Now()
 	if err := checkMergeToBasePreflight(ctx, deps, source, baseWorktree); err != nil {
@@ -2066,6 +2068,42 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 		Message:      result.Result.Message,
 		Phases:       phases,
 	}, nil
+}
+
+func resolveExplicitBranchMergeTarget(ctx context.Context, deps *Dependencies, source daemonclient.Worktree, opts BranchMergeToBaseOptions) (mergeBaseTarget, mergeTargetDecision, error) {
+	targetID := strings.TrimSpace(opts.Target)
+	if targetID == "" {
+		return resolveMergeToBaseTarget(ctx, deps, source.IssueID, opts.AllowBaseForChild)
+	}
+	if isBaseMergeTarget(targetID) {
+		defaultBase := resolveCLIBaseBranch(deps.Config)
+		targetResult, err := deps.DaemonClient.TaskMergeBaseTarget(ctx, source.IssueID, defaultBase, opts.AllowBaseForChild, true)
+		if err != nil {
+			return mergeBaseTarget{}, mergeTargetDecision{}, err
+		}
+		target := mergeBaseTarget{TargetID: targetResult.TargetID, Branch: targetResult.Branch, WorktreePath: targetResult.WorktreePath, BranchAttached: targetResult.BranchAttached}
+		decision := mergeTargetDecision{Reason: targetResult.Reason, AncestorChain: append([]string(nil), targetResult.AncestorChain...)}
+		if target.TargetID != "base" {
+			return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("refusing target base for %s: daemon selected active ancestor %s; use --target %s", source.IssueID, target.TargetID, target.TargetID)
+		}
+		return target, decision, nil
+	}
+	targetWorktree, err := resolveWorktreeForIssue(ctx, deps, targetID)
+	if err != nil {
+		return mergeBaseTarget{}, mergeTargetDecision{}, err
+	}
+	if naming.IssueIDsEqual(source.IssueID, targetWorktree.IssueID) {
+		return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("source and target issue must be different: %s", source.IssueID)
+	}
+	if strings.TrimSpace(targetWorktree.Branch) == "" {
+		return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("target issue %s has no branch", targetWorktree.IssueID)
+	}
+	return mergeBaseTarget{
+		TargetID:       targetWorktree.IssueID,
+		Branch:         targetWorktree.Branch,
+		WorktreePath:   targetWorktree.Path,
+		BranchAttached: true,
+	}, mergeTargetDecision{Reason: "selected explicit issue target"}, nil
 }
 
 func printBranchMergeToBaseResult(result branchMergeToBaseCommandResult) {
@@ -2253,7 +2291,7 @@ func BranchAgentMergeCommand(deps *Dependencies, opts BranchAgentMergeOptions) e
 	if preflight.Clean {
 		fmt.Printf("Merge preflight clean for %s -> %s; no agent needed.\n", source.IssueID, displayTargetID)
 		if requestedBaseTarget {
-			fmt.Printf("Run: az branch merge %s\n", source.IssueID)
+			fmt.Printf("Run: az branch merge --source %s --target %s\n", source.IssueID, targetID)
 		}
 		return nil
 	}
@@ -2320,7 +2358,7 @@ func buildBranchAgentMergePrompt(source daemonclient.Worktree, targetID, targetW
 	fmt.Fprintf(&b, "Auto-merge the blocked preflight for %s -> %s.\n\n", source.IssueID, targetID)
 	b.WriteString("Start by running `az prime`. Inspect the predicted conflict files, perform the merge in the appropriate worktree, resolve conflicts, commit the resolution, and run focused validation.\n\n")
 	if isBaseMergeTarget(targetID) {
-		fmt.Fprintf(&b, "This preflight blocked merging source branch %s into base ref %s. Work in source issue %s at %s: merge %s into %s, resolve conflicts there, and leave the source branch clean so `az branch merge %s` can be retried.\n", source.Branch, targetRef, source.IssueID, source.Path, targetRef, source.Branch, source.IssueID)
+		fmt.Fprintf(&b, "This preflight blocked merging source branch %s into base ref %s. Work in source issue %s at %s: merge %s into %s, resolve conflicts there, and leave the source branch clean so `az branch merge --source %s --target base` can be retried after durable human acceptance.\n", source.Branch, targetRef, source.IssueID, source.Path, targetRef, source.Branch, source.IssueID)
 	} else {
 		fmt.Fprintf(&b, "This preflight blocked merging source branch %s from %s into target issue %s at %s. Work in the target worktree, merge %s, resolve conflicts there, and leave the target branch clean.\n", source.Branch, source.Path, targetID, targetWorktree, source.Branch)
 	}
@@ -2370,7 +2408,7 @@ func resolveMergeToBaseSourceWorktree(ctx context.Context, deps *Dependencies, i
 			return wt, nil
 		}
 	}
-	return daemonclient.Worktree{}, fmt.Errorf("could not infer issue from current worktree %q; pass issue ID: az branch merge <issue-id>", absCWD)
+	return daemonclient.Worktree{}, fmt.Errorf("could not infer issue from current worktree %q; pass an explicit source: az branch merge --source <issue-id> --target <issue-id|base>", absCWD)
 }
 
 func samePath(left, right string) bool {
@@ -8394,6 +8432,7 @@ type primeTemplateData struct {
 	OrchestrationViaNative   bool
 	TmuxAvailable            bool
 	OrchestratorExitContract string
+	OrchestrationSection     string
 	IssueSection             string
 	ActiveIssueClosedWarning string
 	ContextGuardrail         string
@@ -8426,6 +8465,34 @@ func PrimeCommand(deps *Dependencies) error {
 	orchestrationViaAz := strings.EqualFold(orchestrationVia, "az")
 	orchestrationViaNative := strings.EqualFold(orchestrationVia, "native")
 	tmuxAvailable := primeTmuxAvailable()
+	primeOrchestrator := false
+	orchestrationSection := ""
+	if tmuxAvailable && deps != nil && deps.DaemonClient != nil {
+		if sessionID, err := tmuxPaneSessionName(context.Background()); err == nil && strings.TrimSpace(sessionID) != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), primeDaemonReadTimeout)
+			finish := primePhase(deps, "orchestration_snapshot", "loading daemon orchestration scope snapshot")
+			orchestrationSnapshot, snapshotErr := deps.DaemonClient.OrchestrationSnapshot(ctx, protocol.OrchestrationSnapshotRequest{
+				SessionID: strings.TrimSpace(sessionID), ActorID: defaultIssueOwnerID(),
+			})
+			cancel()
+			finish(snapshotErr)
+			if snapshotErr == nil && orchestrationSnapshot.Role == "orchestrator" {
+				primeOrchestrator = true
+				issueID = orchestrationSnapshot.Scope.RootIssueID.String()
+				if issueID != "" {
+					issueIDSource = "daemon"
+					guardrail = fmt.Sprintf("- The daemon identifies this session as the rooted orchestrator for `%s`; its persisted scope is authority over environment-derived startup context.", issueID)
+				} else {
+					issueIDSource = ""
+					guardrail = "- The daemon identifies this session as the project orchestrator; remain project-scoped and do not invent an active worker issue from environment context."
+				}
+				orchestrationSection = renderPrimeOrchestrationSection(orchestrationSnapshot)
+				if issueID != "" {
+					orchestratorExitContract = renderPrimeOrchestratorExitContract(issueID)
+				}
+			}
+		}
+	}
 
 	if primeMode == "question-first" {
 		questionFirstGuardrails = `- Question-first execution rules (Space+Q mode):
@@ -8443,7 +8510,7 @@ func PrimeCommand(deps *Dependencies) error {
 
 	var snapshot daemonclient.TaskSnapshot
 	snapshotLoaded := false
-	if deps != nil && deps.DaemonClient != nil {
+	if !primeOrchestrator && deps != nil && deps.DaemonClient != nil {
 		if issueID != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), primeDaemonReadTimeout)
 			finish := primePhase(deps, "issue_snapshot", fmt.Sprintf("loading active issue snapshot for %s", issueID))
@@ -8474,7 +8541,7 @@ func PrimeCommand(deps *Dependencies) error {
 		}
 	}
 
-	if issueID != "" {
+	if !primeOrchestrator && issueID != "" {
 		if issueIDSource == "tmux" {
 			guardrail = fmt.Sprintf("- `AZEDARACH_ISSUE_ID` is absent, but the current tmux session resolves to issue `%s`; use it as the default issue scope and refresh stale context with `az issue get %s`.", issueID, issueID)
 		} else {
@@ -8520,7 +8587,7 @@ func PrimeCommand(deps *Dependencies) error {
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nIssue not found in current project snapshot; run `az issue get %s`.\n", issueID, issueID)
 		}
 	}
-	if issueID != "" {
+	if !primeOrchestrator && issueID != "" {
 		learningSection = renderPrimeLearningSection(context.Background(), deps, issueID)
 	}
 
@@ -8534,6 +8601,7 @@ func PrimeCommand(deps *Dependencies) error {
 		OrchestrationViaNative:   orchestrationViaNative,
 		TmuxAvailable:            tmuxAvailable,
 		OrchestratorExitContract: orchestratorExitContract,
+		OrchestrationSection:     orchestrationSection,
 		IssueSection:             issueSection,
 		ActiveIssueClosedWarning: activeIssueClosedWarning,
 		ContextGuardrail:         guardrail,
@@ -8842,10 +8910,76 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 
 func renderPrimeOrchestratorExitContract(rootIssueID string) string {
 	return fmt.Sprintf(`Orchestrator Exit Contract (root %s):
-- Integrate accepted children until `+"`az orchestrate complete-check --root %s`"+` passes, then run root validation.
+- Remain in the active orchestration turn/loop after starting workers, nested orchestrators, or a background watch; startup is not a completed handoff to the human.
+- Continuously consume the root watch and react to worker/nested-orchestrator progress, blocked, and integration-ready evidence while graph work remains.
+- Supervise nested epic/root orchestrators as direct children while they own their descendant workers; do not flatten or take over those descendants unless explicitly requested.
+- Review and integrate accepted children/epics, advance newly unblocked work, and repeat status/start/watch/review until `+"`az orchestrate complete-check --root %s`"+` passes; then run root validation.
 - Set the root `+"`in_review`"+` and report to the human without stopping its session or cleaning its worktree.
 - Close/integrate the root only after explicit human acceptance.
 `, rootIssueID, rootIssueID)
+}
+
+func renderPrimeOrchestrationSection(snapshot protocol.OrchestrationSnapshot) string {
+	var b strings.Builder
+	scope := "project"
+	if snapshot.Scope.Kind == domain.OrchestrationScopeRooted {
+		scope = "rooted:" + snapshot.Scope.RootIssueID.String()
+	}
+	fmt.Fprintf(&b, "Daemon orchestration context (role=orchestrator scope=%s lifecycle=%s revision=%d cursor=%d):\n", scope, snapshot.Lifecycle, snapshot.Revision, snapshot.Cursor)
+	if snapshot.ContinuationRequired {
+		fmt.Fprintf(&b, "- Runtime persistence guard: wake-required (%s). Durable continuation: %s\n", snapshot.ContinuationReason, snapshot.ContinuationContract)
+	} else if snapshot.Scope.Kind == domain.OrchestrationScopeRooted {
+		b.WriteString("- Runtime persistence guard: daemon-enforced; idle/turn completion wakes this parent while direct nested roots remain, except after complete-check passes or while explicit human acceptance is pending.\n")
+	}
+	fmt.Fprintf(&b, "- Capacity: active=%d runnable=%d total=%d/%d; wave limit=%d.\n", snapshot.Capacity.DirectActiveCount, snapshot.Capacity.DirectRunnableCount, snapshot.Capacity.TotalCountingCapacityCount, snapshot.Constraints.AgentCapacity, snapshot.Constraints.StartLimit)
+	renderCandidates := func(label string, candidates []protocol.OrchestrationCandidate) {
+		if len(candidates) == 0 {
+			return
+		}
+		fmt.Fprintf(&b, "- %s:\n", label)
+		for _, candidate := range candidates {
+			fmt.Fprintf(&b, "  - %s: %s (%s)\n", candidate.IssueID, candidate.Classification, candidate.Reason)
+		}
+	}
+	generalCandidates := make([]protocol.OrchestrationCandidate, 0, len(snapshot.Candidates))
+	for _, candidate := range snapshot.Candidates {
+		if candidate.Classification != string(domain.OrchestrationCandidateReviewReady) && candidate.Classification != string(domain.OrchestrationCandidateOwnedElsewhere) {
+			generalCandidates = append(generalCandidates, candidate)
+		}
+	}
+	renderCandidates("Candidates", generalCandidates)
+	renderCandidates("Reviews", snapshot.Reviews)
+	renderCandidates("Ownership conflicts", snapshot.OwnershipConflicts)
+	if len(snapshot.Blocked) > 0 {
+		ids := make([]string, 0, len(snapshot.Blocked))
+		for id := range snapshot.Blocked {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		b.WriteString("- Blockers:\n")
+		for _, id := range ids {
+			fmt.Fprintf(&b, "  - %s: %s\n", id, snapshot.Blocked[id])
+		}
+	}
+	if len(snapshot.Interactions) > 0 {
+		b.WriteString("- Waiting-human interactions:\n")
+		for _, interaction := range snapshot.Interactions {
+			fmt.Fprintf(&b, "  - %s (%s): %s\n", interaction.ID, interaction.IssueID, interaction.Question)
+		}
+	}
+	if len(snapshot.RecentEvents) > 0 {
+		b.WriteString("- Recent coordination events:\n")
+		for _, event := range snapshot.RecentEvents {
+			fmt.Fprintf(&b, "  - #%d %s %s: %s\n", event.Seq, event.Type, event.IssueID, summarizePrimeDescription(event.IssueID.String(), event.Body))
+		}
+	}
+	if len(snapshot.Constraints.Commands) > 0 {
+		fmt.Fprintf(&b, "- Commands: %s.\n", strings.Join(snapshot.Constraints.Commands, ", "))
+	}
+	for _, guardrail := range snapshot.Constraints.RoleGuardrails {
+		fmt.Fprintf(&b, "- Constraint: %s.\n", guardrail)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func primeIssueIsAzOrchestrationRoot(task domain.Task, tasks []domain.Task, orchestrationViaAz bool) bool {

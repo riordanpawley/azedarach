@@ -240,7 +240,6 @@ func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.Req
 	}
 	out.ProjectionRevisions = appendRevision(out.ProjectionRevisions, rev)
 	out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: true, Revision: rev})
-
 	if parentSessionID, _, ok := agentScopedSessionParentAndPane(sessionID); ok {
 		canonicalRev, err := d.recordAgentHookActivityEvidenceAndMaterialize(ctx, req.Meta, projectID, parentSessionID, sessionID, cmd.IssueID, activity, cmd)
 		if err != nil {
@@ -250,6 +249,13 @@ func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.Req
 		out.ProjectionRevisions = appendRevision(out.ProjectionRevisions, canonicalRev)
 		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity_evidence", OK: true})
 		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity_canonical", OK: true, Revision: canonicalRev})
+	}
+	if orchestratorActivityWakeRequired(activity) {
+		if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC()); err != nil {
+			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "orchestrator_continuation", OK: false, Message: err.Error()})
+		} else {
+			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "orchestrator_continuation", OK: true})
+		}
 	}
 }
 

@@ -499,6 +499,14 @@ func (h *GitHandler) handleMerge(ctx context.Context, resp protocol.ResponseEnve
 		}
 		return resp
 	}
+	if !result.Success {
+		message := strings.TrimSpace(result.Message)
+		if message == "" {
+			message = "git merge did not complete successfully"
+		}
+		resp.Error = &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInternal, Message: message, Retryable: false}
+		return resp
+	}
 
 	body, err := json.Marshal(gitMergeResultBody{
 		Worktree: cmd.Worktree,

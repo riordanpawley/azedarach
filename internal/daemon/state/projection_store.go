@@ -25,6 +25,8 @@ const (
 	sessionActivityTable    = "daemon_session_activity_evidence"
 	worktreeStateTable      = "daemon_worktree_projections"
 	orchestratorLeaseTable  = "daemon_orchestrator_scope_leases"
+	advisorSessionTable     = "daemon_advisor_sessions"
+	orchestratorLoopTable   = "daemon_orchestrator_loop_checkpoints"
 )
 
 // WorktreeState captures durable daemon worktree state stored in sqlite.
@@ -174,6 +176,8 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 	if session.UpdatedAt.IsZero() {
 		session.UpdatedAt = time.Now().UTC()
 	}
+	metadataProvided := session.Role != "" || session.ScopeKind != "" || strings.TrimSpace(session.ScopeID) != ""
+	session = NormalizeSessionMetadata(session)
 	session.State = NormalizeSessionState(session.State)
 	session.ObservedState = NormalizeSessionState(session.ObservedState)
 	if session.State == SessionStateStopped {
@@ -183,6 +187,9 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 	session.ActivitySource = strings.ToLower(strings.TrimSpace(session.ActivitySource))
 	existing, found, err := s.GetSessionState(ctx, projectID, session.ID)
 	if err == nil && found {
+		if !metadataProvided {
+			session.Role, session.ScopeKind, session.ScopeID = existing.Role, existing.ScopeKind, existing.ScopeID
+		}
 		if strings.TrimSpace(string(session.ObservedState)) == "" && strings.TrimSpace(string(existing.ObservedState)) != "" {
 			session.ObservedState = existing.ObservedState
 		}
@@ -217,6 +224,9 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 			project_id,
 			session_id,
 			issue_id,
+			role,
+			scope_kind,
+			scope_id,
 			state,
 			observed_state,
 			activity,
@@ -224,9 +234,12 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 			tmux_attached_count,
 			started_at,
 			updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(project_id, session_id) DO UPDATE SET
 			issue_id = excluded.issue_id,
+			role = excluded.role,
+			scope_kind = excluded.scope_kind,
+			scope_id = excluded.scope_id,
 			state = excluded.state,
 			observed_state = excluded.observed_state,
 			activity = excluded.activity,
@@ -238,6 +251,9 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 		projectID,
 		session.ID,
 		session.IssueID,
+		string(session.Role),
+		string(session.ScopeKind),
+		session.ScopeID,
 		string(session.State),
 		string(session.ObservedState),
 		session.Activity,
@@ -613,6 +629,17 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 	activeIntentSessions := make(map[string]struct{}, len(sessions))
 	activeObservationSessions := make(map[string]struct{}, len(sessions))
 	for _, session := range sessions {
+		metadataProvided := session.Role != "" || session.ScopeKind != "" || strings.TrimSpace(session.ScopeID) != ""
+		if !metadataProvided {
+			var roleRaw, scopeKindRaw, scopeID string
+			scanErr := tx.QueryRowContext(ctx, `SELECT COALESCE(role, 'worker'), COALESCE(scope_kind, 'issue'), COALESCE(scope_id, issue_id) FROM `+sessionStorageTableForID(session.ID)+` WHERE project_id = ? AND session_id = ?`, projectID, strings.TrimSpace(session.ID)).Scan(&roleRaw, &scopeKindRaw, &scopeID)
+			if scanErr == nil {
+				session.Role, session.ScopeKind, session.ScopeID = SessionRole(roleRaw), SessionScopeKind(scopeKindRaw), scopeID
+			} else if scanErr != sql.ErrNoRows {
+				return fmt.Errorf("load session metadata before replace: %w", scanErr)
+			}
+		}
+		session = NormalizeSessionMetadata(session)
 		sessionID := strings.TrimSpace(session.ID)
 		if sessionID == "" {
 			continue
@@ -642,6 +669,9 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 				project_id,
 				session_id,
 				issue_id,
+				role,
+				scope_kind,
+				scope_id,
 				state,
 				observed_state,
 				activity,
@@ -649,9 +679,12 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 				tmux_attached_count,
 				started_at,
 				updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(project_id, session_id) DO UPDATE SET
 				issue_id = excluded.issue_id,
+				role = excluded.role,
+				scope_kind = excluded.scope_kind,
+				scope_id = excluded.scope_id,
 				state = excluded.state,
 				observed_state = excluded.observed_state,
 				activity = excluded.activity,
@@ -663,6 +696,9 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 			projectID,
 			sessionID,
 			session.IssueID,
+			string(session.Role),
+			string(session.ScopeKind),
+			session.ScopeID,
 			string(session.State),
 			string(session.ObservedState),
 			session.Activity,
@@ -755,6 +791,9 @@ func sessionProjectionUnionSQL() string {
 			project_id,
 			session_id,
 			issue_id,
+			role,
+			scope_kind,
+			scope_id,
 			state,
 			observed_state,
 			activity,
@@ -768,6 +807,9 @@ func sessionProjectionUnionSQL() string {
 			project_id,
 			session_id,
 			issue_id,
+			role,
+			scope_kind,
+			scope_id,
 			state,
 			observed_state,
 			activity,
@@ -788,6 +830,9 @@ func (s *RuntimeStateStore) ListSessionIntentStates(ctx context.Context, project
 			project_id,
 			session_id,
 			issue_id,
+			role,
+			scope_kind,
+			scope_id,
 			state,
 			observed_state,
 			activity,
@@ -808,6 +853,9 @@ func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, proj
 		SELECT
 			session_id,
 			issue_id,
+			COALESCE(role, 'worker'),
+			COALESCE(scope_kind, 'issue'),
+			COALESCE(scope_id, issue_id),
 			state,
 			COALESCE(observed_state, state),
 			COALESCE(activity, ''),
@@ -829,6 +877,9 @@ func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, proj
 		var (
 			sessionID     string
 			issueID       string
+			roleRaw       string
+			scopeKindRaw  string
+			scopeID       string
 			stateRaw      string
 			observedRaw   string
 			activityRaw   string
@@ -837,7 +888,7 @@ func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, proj
 			startedAt     string
 			updatedAt     string
 		)
-		if err := rows.Scan(&sessionID, &issueID, &stateRaw, &observedRaw, &activityRaw, &sourceRaw, &attachedCount, &startedAt, &updatedAt); err != nil {
+		if err := rows.Scan(&sessionID, &issueID, &roleRaw, &scopeKindRaw, &scopeID, &stateRaw, &observedRaw, &activityRaw, &sourceRaw, &attachedCount, &startedAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan session state row: %w", err)
 		}
 		parsedStartedAt, err := parseOptionalRuntimeStateTime(startedAt)
@@ -851,6 +902,9 @@ func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, proj
 		sessions = append(sessions, Session{
 			ID:                sessionID,
 			IssueID:           issueID,
+			Role:              SessionRole(roleRaw),
+			ScopeKind:         SessionScopeKind(scopeKindRaw),
+			ScopeID:           scopeID,
 			State:             NormalizeSessionState(SessionState(stateRaw)),
 			ObservedState:     NormalizeSessionState(SessionState(observedRaw)),
 			Activity:          strings.ToLower(strings.TrimSpace(activityRaw)),
@@ -881,6 +935,9 @@ func (s *RuntimeStateStore) GetSessionState(ctx context.Context, projectID, sess
 		SELECT
 			session_id,
 			issue_id,
+			COALESCE(role, 'worker'),
+			COALESCE(scope_kind, 'issue'),
+			COALESCE(scope_id, issue_id),
 			state,
 			COALESCE(observed_state, state),
 			COALESCE(activity, ''),
@@ -896,6 +953,9 @@ func (s *RuntimeStateStore) GetSessionState(ctx context.Context, projectID, sess
 	var (
 		rowSessionID  string
 		issueID       string
+		roleRaw       string
+		scopeKindRaw  string
+		scopeID       string
 		stateRaw      string
 		observedRaw   string
 		activityRaw   string
@@ -904,7 +964,7 @@ func (s *RuntimeStateStore) GetSessionState(ctx context.Context, projectID, sess
 		startedAt     string
 		updatedAt     string
 	)
-	if err := row.Scan(&rowSessionID, &issueID, &stateRaw, &observedRaw, &activityRaw, &sourceRaw, &attachedCount, &startedAt, &updatedAt); err != nil {
+	if err := row.Scan(&rowSessionID, &issueID, &roleRaw, &scopeKindRaw, &scopeID, &stateRaw, &observedRaw, &activityRaw, &sourceRaw, &attachedCount, &startedAt, &updatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return Session{}, false, nil
 		}
@@ -921,6 +981,9 @@ func (s *RuntimeStateStore) GetSessionState(ctx context.Context, projectID, sess
 	return Session{
 		ID:                rowSessionID,
 		IssueID:           issueID,
+		Role:              SessionRole(roleRaw),
+		ScopeKind:         SessionScopeKind(scopeKindRaw),
+		ScopeID:           scopeID,
 		State:             NormalizeSessionState(SessionState(stateRaw)),
 		ObservedState:     NormalizeSessionState(SessionState(observedRaw)),
 		Activity:          strings.ToLower(strings.TrimSpace(activityRaw)),
@@ -946,6 +1009,9 @@ func (s *RuntimeStateStore) GetSessionStateByIssueID(ctx context.Context, projec
 		SELECT
 			session_id,
 			issue_id,
+			COALESCE(role, 'worker'),
+			COALESCE(scope_kind, 'issue'),
+			COALESCE(scope_id, issue_id),
 			state,
 			COALESCE(observed_state, state),
 			COALESCE(activity, ''),
@@ -961,6 +1027,9 @@ func (s *RuntimeStateStore) GetSessionStateByIssueID(ctx context.Context, projec
 	var (
 		sessionID     string
 		rowIssue      string
+		roleRaw       string
+		scopeKindRaw  string
+		scopeID       string
 		stateRaw      string
 		observedRaw   string
 		activityRaw   string
@@ -969,7 +1038,7 @@ func (s *RuntimeStateStore) GetSessionStateByIssueID(ctx context.Context, projec
 		startedAt     string
 		updatedAt     string
 	)
-	if err := row.Scan(&sessionID, &rowIssue, &stateRaw, &observedRaw, &activityRaw, &sourceRaw, &attachedCount, &startedAt, &updatedAt); err != nil {
+	if err := row.Scan(&sessionID, &rowIssue, &roleRaw, &scopeKindRaw, &scopeID, &stateRaw, &observedRaw, &activityRaw, &sourceRaw, &attachedCount, &startedAt, &updatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return Session{}, false, nil
 		}
@@ -986,6 +1055,9 @@ func (s *RuntimeStateStore) GetSessionStateByIssueID(ctx context.Context, projec
 	return Session{
 		ID:                sessionID,
 		IssueID:           rowIssue,
+		Role:              SessionRole(roleRaw),
+		ScopeKind:         SessionScopeKind(scopeKindRaw),
+		ScopeID:           scopeID,
 		State:             NormalizeSessionState(SessionState(stateRaw)),
 		ObservedState:     NormalizeSessionState(SessionState(observedRaw)),
 		Activity:          strings.ToLower(strings.TrimSpace(activityRaw)),
@@ -1482,6 +1554,9 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 			project_id TEXT NOT NULL,
 			session_id TEXT NOT NULL,
 			issue_id TEXT NOT NULL,
+			role TEXT NOT NULL DEFAULT 'worker',
+			scope_kind TEXT NOT NULL DEFAULT 'issue',
+			scope_id TEXT NOT NULL DEFAULT '',
 			state TEXT NOT NULL,
 			observed_state TEXT,
 			activity TEXT,
@@ -1497,6 +1572,9 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 			project_id TEXT NOT NULL,
 			session_id TEXT NOT NULL,
 			issue_id TEXT NOT NULL,
+			role TEXT NOT NULL DEFAULT 'worker',
+			scope_kind TEXT NOT NULL DEFAULT 'issue',
+			scope_id TEXT NOT NULL DEFAULT '',
 			state TEXT NOT NULL,
 			observed_state TEXT,
 			activity TEXT,
@@ -1519,12 +1597,35 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 			complete_since TEXT,
 			last_wake_at TEXT,
 			last_wake_reason TEXT NOT NULL DEFAULT '',
+			cursor INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (project_id, scope_kind, root_issue_id),
 			UNIQUE (project_id, session_id),
 			CHECK ((scope_kind = 'project' AND root_issue_id = '') OR (scope_kind = 'rooted' AND root_issue_id <> ''))
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_orchestrator_scope_leases_project_updated
 			ON ` + orchestratorLeaseTable + ` (project_id, updated_at DESC, scope_kind, root_issue_id)`,
+		`CREATE TABLE IF NOT EXISTS ` + advisorSessionTable + ` (
+			project_id TEXT NOT NULL,
+			request_id TEXT NOT NULL,
+			issue_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, request_id),
+			UNIQUE (project_id, session_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS ` + orchestratorLoopTable + ` (
+			project_id TEXT NOT NULL,
+			scope_kind TEXT NOT NULL CHECK (scope_kind IN ('project', 'rooted')),
+			root_issue_id TEXT NOT NULL DEFAULT '',
+			watch_cursor INTEGER NOT NULL DEFAULT 0,
+			last_action_key TEXT NOT NULL DEFAULT '',
+			last_action_kind TEXT NOT NULL DEFAULT '',
+			last_action_status TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, scope_kind, root_issue_id),
+			CHECK ((scope_kind = 'project' AND root_issue_id = '') OR (scope_kind = 'rooted' AND root_issue_id <> ''))
+		)`,
 		`CREATE TABLE IF NOT EXISTS ` + sessionActivityTable + ` (
 			project_id TEXT NOT NULL,
 			session_id TEXT NOT NULL,
@@ -1571,6 +1672,9 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 	if err := ensureColumn(ctx, db, orchestratorLeaseTable, "last_wake_reason", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := ensureColumn(ctx, db, orchestratorLeaseTable, "cursor", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := ensureColumn(ctx, db, sessionStateTable, "observed_state", "TEXT"); err != nil {
 		return err
 	}
@@ -1582,6 +1686,17 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 	}
 	if err := ensureColumn(ctx, db, sessionStateTable, "tmux_attached_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
+	}
+	for _, table := range []string{sessionStateTable, sessionObservationTable} {
+		if err := ensureColumn(ctx, db, table, "role", "TEXT NOT NULL DEFAULT 'worker'"); err != nil {
+			return err
+		}
+		if err := ensureColumn(ctx, db, table, "scope_kind", "TEXT NOT NULL DEFAULT 'issue'"); err != nil {
+			return err
+		}
+		if err := ensureColumn(ctx, db, table, "scope_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
 	}
 	if err := ensureColumn(ctx, db, sessionObservationTable, "started_at", "TEXT"); err != nil {
 		return err

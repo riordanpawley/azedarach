@@ -50,17 +50,24 @@ This directory primarily contains **developer/internal documentation**.
 - Current source-policy examples:
 - `session.start` conflict / `session.attach` target / `session.pause` and `session.resume` lifecycle targets / `session.stop` targets: `tmux`.
 - `session.recover` reconciliation: `hybrid` (projection intent + tmux runtime).
+- `session.advisor_singleton`: `hybrid` (refreshed interaction/session-role projection + tmux runtime); reconcile recreates missing discussion runtimes, resumes paused projections, removes terminal/orphan reservations, and project removal runs daemon cleanup before unregistering the project.
 - `task.close`, `task.close_preflight`, `task.delete`, `task.delete_preflight`, `task.graph_readiness`, and `task.complete_check`: `hybrid` (durable issue graph/v2 lifecycle projection + live runtime attachment state).
+- `orchestration.project_candidates`: `projection` (bounded durable lifecycle/graph, ownership, session activity, and interaction candidate projection).
+- `orchestration.project_review`: `projection` (durable issue/review/ownership, mailbox/observation evidence, and worktree projections; accepted outcomes delegate integration and cleanup to hybrid `task.close`).
+- `orchestration.claim_start`: `hybrid` (durable ownership/start-attempt projection plus daemon session-start operation/runtime compensation).
+- `orchestration.project_loop`: `projection` (durable issue-observation cursor and loop checkpoint refreshed before deterministic review-first action replay).
 - `task.review_handoff`: `projection` (durable issue v2 lifecycle/review projection + session activity projection; active issue self-handoff remains allowed).
 - `task.integration_readiness` and `task.context_risk_closeout`: `projection` (durable issue projection + mailbox/observation evidence).
-- `task.merge_base_target`: `projection` (durable issue graph + worktree projection).
+- `task.merge_base_target`: `projection` (durable issue graph + worktree projection; explicit root-to-base requests also require issue-scoped `human.input_provided` acceptance evidence).
 - `task.follow_on_merge_candidates`: `projection` (durable issue graph + worktree projection).
 - `issue_resources.lifecycle`: `projection` (durable issue status + runtime attachment projection).
 - `interaction.waiting_human`: `projection` (durable interaction requests refreshed before decision-waiting and pickup evaluation).
+- `interaction.staleness`: `projection` (durable interaction requests refreshed before age evaluation and revision-safe stale/reminder/disposition/recovery audit writes).
 - `task.list` freshness/session timestamps: `projection` (refresh-then-cache).
 - `orchestration.scope_identity`: `projection` (durable project plus typed rooted/project scope; startup environment is not authority).
 - `orchestration.scope_singleton`: `hybrid` (refreshed durable scope lease compared with live tmux runtime).
 - `orchestration.project_completion`: `hybrid` (refreshed issue/review/interaction/session projections compared with live tmux runtime).
+- `orchestration.parent_continuation`: `hybrid` (durable rooted lease/cursor + refreshed direct nested-root, interaction, completion, and session projections compared with live tmux before a wake prompt is delivered).
 - `runtime.reconcile` includes `invariant_sources` debug output reflecting the active source-policy matrix.
 - Treat this as the required cross-daemon safety contract for session/worktree/runtime invariants.
 

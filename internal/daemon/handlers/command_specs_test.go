@@ -157,6 +157,8 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		protocol.CommandInteractionAnswer,
 		protocol.CommandInteractionResolve,
 		protocol.CommandInteractionWithdraw,
+		protocol.CommandInteractionSupersede,
+		protocol.CommandInteractionRecover,
 		protocol.CommandLearnAdd,
 		protocol.CommandLearnRecall,
 		protocol.CommandLearnShow,

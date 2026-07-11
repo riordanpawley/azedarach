@@ -61,10 +61,12 @@ var orderedMigrations = []migration{
 	{id: "0029_issue_state_model_v2"},
 	{id: "0030_issue_closed_runtime_v2_triggers", apply: applyIssueClosedRuntimeV2TriggersMigration},
 	{id: "0031_board_views", path: "migrations/0031_board_views.sql"},
-	{id: "0032_interaction_requests", path: "migrations/0032_interaction_requests.sql"},
 	{id: "0032_coordination_leases", path: "migrations/0032_coordination_leases.sql"},
 	{id: "0033_orchestrator_scope_leases", path: "migrations/0033_orchestrator_scope_leases.sql"},
+	{id: "0034_orchestration_start_attempts", path: "migrations/0034_orchestration_start_attempts.sql"},
 	{id: "0034_orchestrator_lifecycle_clock", apply: applyOrchestratorLifecycleClockMigration},
+	{id: "0035_interaction_requests", path: "migrations/0035_interaction_requests.sql"},
+	{id: "0036_advisor_sessions", path: "migrations/0036_advisor_sessions.sql"},
 }
 
 const (

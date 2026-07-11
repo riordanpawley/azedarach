@@ -8043,13 +8043,16 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "leave it running while workers are active") {
 		t.Fatalf("prompt = %q, want continuous watch instruction", prompt)
 	}
+	if !strings.Contains(prompt, "Remain in this active turn/loop and continuously consume its events; starting sessions and a background watch is not a completed handoff to the human") {
+		t.Fatalf("prompt = %q, want persistent watch-consumption duty", prompt)
+	}
 	if !strings.Contains(prompt, "Do not use `--once` for orchestration monitoring") {
 		t.Fatalf("prompt = %q, want --once diagnostic warning", prompt)
 	}
 	if !strings.Contains(prompt, "az orchestrate complete-check --root <issue-id>") {
 		t.Fatalf("prompt = %q, want complete-check instruction", prompt)
 	}
-	if !strings.Contains(prompt, "set the root `in_review` and keep its tmux session/worktree alive for human review") {
+	if !strings.Contains(prompt, "only then set the root `in_review` and hand it to the human while keeping its tmux session/worktree alive") {
 		t.Fatalf("prompt = %q, want non-terminal root review handoff", prompt)
 	}
 	if !strings.Contains(prompt, "Close/integrate the root only after explicit human acceptance") {
@@ -8061,11 +8064,15 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "Start this root's direct runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`") {
 		t.Fatalf("prompt = %q, want direct leaf start guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Nested epic/root rule: if a runnable child is itself an epic/root that should self-orchestrate, start that child's own orchestrator session with `az session start <child-root>`") {
+	if !strings.Contains(prompt, "Nested epic/root rule: if a runnable child is itself an epic/root that should self-orchestrate, start that child's own orchestrator session with `az orchestrator-session start --root <child-root>`") {
 		t.Fatalf("prompt = %q, want nested root session guidance", prompt)
 	}
-	if !strings.Contains(prompt, "do not launch the child root's descendants from this session unless the user explicitly asks to flatten orchestration") {
+	if !strings.Contains(prompt, "supervise that nested orchestrator as a direct child while it owns its descendant workers") ||
+		!strings.Contains(prompt, "do not launch or take over those descendants unless the user explicitly asks to flatten orchestration") {
 		t.Fatalf("prompt = %q, want no-flattening guidance", prompt)
+	}
+	if !strings.Contains(prompt, "React to progress, blocked, and integration-ready evidence; review and integrate accepted children/epics, advance newly unblocked work, and repeat status/start/watch/review while graph work remains") {
+		t.Fatalf("prompt = %q, want active parent coordination loop", prompt)
 	}
 	if !strings.Contains(prompt, "az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"") {
 		t.Fatalf("prompt = %q, want active worker message instruction", prompt)
@@ -8115,6 +8122,9 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale") {
 		t.Fatalf("prompt = %q, want unresolved child rationale guidance", prompt)
+	}
+	if !strings.Contains(prompt, "Continue the parent loop until `az orchestrate complete-check --root <issue-id>` and final validation pass; only then set the root `in_review` and hand it to the human") {
+		t.Fatalf("prompt = %q, want complete-check-gated human handoff", prompt)
 	}
 }
 
@@ -9126,6 +9136,21 @@ func TestActiveSessionIssueKeysIgnoreDesiredStoppedWithStaleObservedRunning(t *t
 
 	if _, ok := active[sessionKey(issueID)]; ok {
 		t.Fatalf("desired-stopped session %s was treated as active: %+v", issueID, active)
+	}
+}
+
+func TestImplementationSessionAggregatesIgnoreAdvisorSessions(t *testing.T) {
+	const issueID = "biz"
+	sessions := []daemonstate.Session{{
+		ID: "advisor-request-1", IssueID: issueID, Role: daemonstate.SessionRoleAdvisor,
+		ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: "request-1",
+		State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning,
+	}}
+	if counts := sessionProjectionCountsByIssueKey(sessions, "project")[sessionKey(issueID)]; counts.Total != 0 || counts.Active != 0 {
+		t.Fatalf("advisor session leaked into implementation counts: %+v", counts)
+	}
+	if _, active := activeSessionIssueKeysFromProjection(sessions, "project")[sessionKey(issueID)]; active {
+		t.Fatal("advisor session made its attached implementation issue active")
 	}
 }
 

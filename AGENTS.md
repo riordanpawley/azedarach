@@ -152,17 +152,24 @@ fd "filename" -t f internal cmd
 6. Mutations remain write-through: update in-memory authority and durable projection, then publish events.
 7. Example matrix:
    - `session.start`/`session.attach`/`session.pause`/`session.resume`/`session.stop` runtime-presence checks -> `tmux`
+   - advisor-session singleton/recovery/cleanup per interaction request -> `hybrid` (refreshed durable request/session-role projection + live tmux runtime; terminal requests and project removal clean advisor resources)
    - session recovery/reconcile -> `hybrid`
    - `task.close`/`task.close_preflight`/`task.delete`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle and orchestration checks -> `hybrid` (read v2 issue lifecycle projection first, then compare with live runtime)
    - `task.review_handoff` external busy-equivalent session activity gate before moving to `in_review` -> `projection` (durable issue v2 lifecycle/review projection + session activity projection; active issue self-handoff remains allowed)
    - `task.integration_readiness` worker evidence gate and `task.context_risk_closeout` repeated-local-failure gate -> `projection` (durable issue projection + mailbox/observation evidence)
-   - `task.merge_base_target` branch integration target gate -> `projection` (durable issue graph + worktree projection)
+   - `task.merge_base_target` branch integration target gate -> `projection` (durable issue graph + worktree projection; explicit root-to-base requests also require issue-scoped `human.input_provided` acceptance evidence)
    - `task.follow_on_merge_candidates` follow-on merge source gate -> `projection` (durable issue graph + worktree projection)
+   - `orchestration.project_candidates` bounded project candidate classification -> `projection` (durable issue graph/lifecycle, ownership, session activity, and interaction projections)
+   - `orchestration.project_review` review queue, reviewer lease, structured evidence, and outcome gate -> `projection` (durable issue/review/ownership, mailbox/observation evidence, and worktree projections; accepted close delegates to the existing hybrid `task.close` invariant)
+   - `orchestration.claim_start` bounded worker-wave claim/start and compensation -> `hybrid` (durable ownership/start-attempt projection + daemon session-start operation/runtime)
+   - `orchestration.project_loop` durable watch cursor, deterministic action replay, and review-first scheduling -> `projection` (durable issue observation stream + orchestration checkpoint refreshed before each loop decision)
    - `issue_resources.lifecycle` issue resource desired-state gate -> `projection` (durable issue status + runtime attachment projection)
    - `interaction.waiting_human` decision-waiting and pickup exclusion gate -> `projection` (durable interaction request projection refreshed before evaluation)
+   - `interaction.staleness` stale/reminder/disposition/recovery policy -> `projection` (durable interaction request projection refreshed before age evaluation and revision-safe write-through audit)
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
    - orchestration scope identity -> `projection` (durable project + typed rooted/project scope)
    - orchestration scope singleton -> `hybrid` (refreshed durable scope lease + live tmux runtime)
+   - rooted parent orchestration continuation -> `hybrid` (durable rooted lease/cursor + refreshed direct nested-root, interaction, completion, and session projections + live tmux wake delivery)
    - project orchestration completion -> `hybrid` (refreshed issue/review/interaction/session projections + live tmux runtime)
 
 ### Adding New Invariants (Required Checklist)

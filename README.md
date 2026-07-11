@@ -134,6 +134,11 @@ azd --help
 - Daemon lifecycle recovery: `az daemon restart`
 - Background operation control: `az operation list|get|cancel`
 - Mailbox event flow for orchestrator/worker coordination: `az mail send|list|watch`
+- Project stewardship: `az orchestrator-session start|attach|status`, then
+  `az orchestrate status|start|watch|complete-check`; omit `--root` for the whole
+  project or pass `--root <issue-id>` for rooted scope.
+- Human decisions: `az interaction list|get|discuss|answer|resolve|withdraw`.
+  Unresolved requests block their issue without blocking unrelated work.
 
 ## Architecture
 

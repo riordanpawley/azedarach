@@ -1,7 +1,10 @@
 package app
 
 import (
+	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -1156,6 +1160,134 @@ func TestView_OrchestrationOverviewCompactsHugeGitCounts(t *testing.T) {
 	if strings.Contains(view, "1074031") || strings.Contains(view, "255402") {
 		t.Fatalf("overview should compact huge git counts:\n%s", view)
 	}
+}
+
+func TestView_ProjectOrchestratorStatusFitsDefaultAndNarrow(t *testing.T) {
+	for _, size := range []struct {
+		name          string
+		width, height int
+	}{{"default", 120, 30}, {"narrow", 52, 18}} {
+		t.Run(size.name, func(t *testing.T) {
+			m := newTestModel()
+			m.width, m.height, m.loading, m.viewMode = size.width, size.height, false, ViewModeOverview
+			m.orchestrationOverviewLoadedAt = time.Date(2026, time.July, 11, 2, 0, 0, 0, time.UTC)
+			m.orchestrationOverview = []orchestrationProjectOverview{{
+				Name: "azedarach", ProjectID: "project-a",
+				Snapshot: &protocol.OrchestrationSnapshot{
+					Lifecycle:   domain.OrchestratorWorking,
+					Capacity:    protocol.OrchestrationCapacity{TotalCountingCapacityCount: 2},
+					Constraints: protocol.OrchestrationConstraints{AgentCapacity: 4},
+					Runnable:    []string{"dci", "dcj"}, Reviews: []protocol.OrchestrationCandidate{{IssueID: "dck"}},
+					Interactions: []domain.InteractionRequest{{ID: "request-1"}}, OwnershipConflicts: []protocol.OrchestrationCandidate{{IssueID: "dcm"}},
+					Health:       protocol.OrchestrationHealth{Healthy: false, Diagnostics: []string{"watch cursor stale"}},
+					RecentEvents: []protocol.MailEvent{{Type: "worker-progress", Body: "implemented typed projection"}},
+				},
+				Session: &protocol.OrchestratorSessionResult{Lifecycle: domain.OrchestratorWorking, Live: true},
+			}}
+
+			view := normalizeTUIGolden(ansi.Strip(m.View()))
+			assertTUIGolden(t, "project_orchestrator_"+size.name+".golden", view)
+			for _, want := range []string{"orchestrator working live=true", "workers 2/4", "ready 2", "review 1", "waiting-human 1", "owned-elsewhere 1", "watch cursor stale"} {
+				if !strings.Contains(view, want) {
+					t.Fatalf("project orchestration view missing %q:\n%s", want, view)
+				}
+			}
+			for i, line := range strings.Split(strings.TrimRight(view, "\n"), "\n") {
+				if got := lipgloss.Width(line); got > size.width {
+					t.Fatalf("line %d width=%d, want <=%d: %q", i, got, size.width, line)
+				}
+			}
+		})
+	}
+}
+
+func TestOverviewProjectOrchestratorActionsAndTypedUpdate(t *testing.T) {
+	m := newTestModel()
+	m.viewMode = ViewModeOverview
+	m.orchestrationOverview = []orchestrationProjectOverview{
+		{Name: "first", Path: "/projects/first", ProjectID: "project-a", Snapshot: &protocol.OrchestrationSnapshot{}},
+		{Name: "second", Path: "/projects/second", ProjectID: "project-b", Snapshot: &protocol.OrchestrationSnapshot{}},
+	}
+	type actionCall struct {
+		target  projectOrchestratorTarget
+		action  string
+		request protocol.OrchestratorSessionRequest
+	}
+	var calls []actionCall
+	m.projectOrchestratorActionRunner = func(_ context.Context, target projectOrchestratorTarget, action string, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+		calls = append(calls, actionCall{target: target, action: action, request: request})
+		return protocol.OrchestratorSessionResult{Disposition: action + "ed", Lifecycle: domain.OrchestratorWorking, Live: true}, nil
+	}
+
+	updated, _, consumed := m.handleOverviewModeKey(tea.KeyMsg{Type: tea.KeyRight})
+	if !consumed || updated.orchestrationOverviewCursor != 1 {
+		t.Fatalf("second project selection consumed=%v cursor=%d", consumed, updated.orchestrationOverviewCursor)
+	}
+	m = updated
+	var lastActionMsg projectOrchestratorActionMsg
+	for _, key := range []string{"o", "A"} {
+		updated, cmd, consumed := m.handleOverviewModeKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+		if !consumed || cmd == nil {
+			t.Fatalf("key %q consumed=%v cmd=%v, want consumed command", key, consumed, cmd)
+		}
+		msg := cmd().(projectOrchestratorActionMsg)
+		if msg.err != nil || msg.projectID != "project-b" {
+			t.Fatalf("key %q result=%+v, want project-b success", key, msg)
+		}
+		lastActionMsg = msg
+		m = updated
+	}
+	if len(calls) != 2 {
+		t.Fatalf("action calls=%+v, want start and attach", calls)
+	}
+	for i, action := range []string{"start", "attach"} {
+		call := calls[i]
+		if call.action != action || call.target.ProjectID != "project-b" || call.target.ProjectPath != "/projects/second" || call.target.SocketPath != config.DaemonSocketPathFor("/projects/second") {
+			t.Fatalf("call[%d]=%+v, want selected second project %s target", i, call, action)
+		}
+		if call.request.Scope != domain.ProjectOrchestrationScope() {
+			t.Fatalf("call[%d] scope=%+v, want project scope", i, call.request.Scope)
+		}
+	}
+
+	updatedAny, cmd := m.Update(lastActionMsg)
+	immediate := updatedAny.(Model)
+	if cmd == nil || immediate.orchestrationOverview[1].Session == nil || !immediate.orchestrationOverview[1].Session.Live {
+		t.Fatalf("typed selected-project update did not apply immediately: session=%+v cmd=%v", immediate.orchestrationOverview[1].Session, cmd)
+	}
+	_, refreshCmd, consumed := m.handleOverviewModeKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if !consumed || refreshCmd == nil {
+		t.Fatalf("refresh consumed=%v cmd=%v, want status refresh command", consumed, refreshCmd)
+	}
+}
+
+func assertTUIGolden(t *testing.T, name, got string) {
+	t.Helper()
+	path := filepath.Join("testdata", name)
+	if updateDir := strings.TrimSpace(os.Getenv("AZEDARACH_TUI_GOLDEN_OUTPUT_DIR")); updateDir != "" {
+		if err := os.MkdirAll(updateDir, 0o755); err != nil {
+			t.Fatalf("create golden output dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(updateDir, name), []byte(got), 0o644); err != nil {
+			t.Fatalf("write generated golden: %v", err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read golden %s: %v", path, err)
+	}
+	if got != string(want) {
+		t.Fatalf("render differs from %s\n--- want ---\n%s\n--- got ---\n%s", path, want, got)
+	}
+}
+
+func normalizeTUIGolden(view string) string {
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], " ")
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 func TestView_RendersFreshnessIndicatorAcrossBoardAndCompactViews(t *testing.T) {

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -63,12 +64,25 @@ func (m Model) loadOrchestrationOverviewCmd() tea.Cmd {
 			client := daemonclient.New(transport.NewClient(projectSocket)).
 				WithProjectID(project.projectID).
 				WithReadWaitPolicy(readPolicy)
+			scope := domain.ProjectOrchestrationScope()
+			orchestrationSnapshot, orchestrationErr := client.OrchestrationSnapshot(ctx, protocol.OrchestrationSnapshotRequest{
+				Scope:   scope,
+				RepoDir: project.path,
+			})
+			sessionStatus, sessionErr := client.OrchestratorSessionStatus(ctx, protocol.OrchestratorSessionRequest{Scope: scope})
 			snapshot, err := client.ListTasksSnapshotWithMode(ctx, daemonclient.ReadWaitModeDefault)
 			entry := orchestrationProjectOverview{
-				Name:      project.name,
-				Path:      project.path,
-				ProjectID: project.projectID,
-				Err:       err,
+				Name:             project.name,
+				Path:             project.path,
+				ProjectID:        project.projectID,
+				Err:              err,
+				OrchestrationErr: errors.Join(orchestrationErr, sessionErr),
+			}
+			if orchestrationErr == nil {
+				entry.Snapshot = &orchestrationSnapshot
+			}
+			if sessionErr == nil {
+				entry.Session = &sessionStatus
 			}
 			if err == nil {
 				var entryHiddenTasks int
@@ -93,7 +107,7 @@ func (m Model) loadOrchestrationOverviewCmd() tea.Cmd {
 					}
 				}
 			}
-			if len(entry.Tasks) > 0 {
+			if len(entry.Tasks) > 0 || entry.Snapshot != nil || entry.Session != nil {
 				if entry.MailByTask == nil {
 					entry.MailByTask = overviewLatestMailByTask(ctx, client, project.path, entry.Tasks)
 				}
@@ -578,6 +592,19 @@ func overviewStatusRank(status domain.Status) int {
 
 func (m Model) handleOverviewModeKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	taskRefs := orchestrationOverviewTaskRefs(m.overviewProjectsForInteraction())
+	project, hasProject := overviewSelectedProject(m.overviewProjectsForInteraction(), taskRefs, m.orchestrationOverviewCursor)
+	switch msg.String() {
+	case "o":
+		if hasProject {
+			return m, m.projectOrchestratorActionCmd(project, "start"), true
+		}
+	case "A":
+		if hasProject {
+			return m, m.projectOrchestratorActionCmd(project, "attach"), true
+		}
+	case "r":
+		return m, m.loadOrchestrationOverviewCmd(), true
+	}
 	if len(taskRefs) == 0 {
 		switch msg.String() {
 		case "j", "down", "k", "up", "h", "left", "l", "right", "g", "home", "G", "end", "enter", " ":
@@ -607,9 +634,57 @@ func (m Model) handleOverviewModeKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		return m, nil, true
 	case "enter", " ":
 		m.orchestrationOverviewCursor = clampInt(m.orchestrationOverviewCursor, 0, len(taskRefs)-1)
+		if taskRefs[m.orchestrationOverviewCursor].Task.ID.IsZero() {
+			return m, m.projectOrchestratorActionCmd(taskRefs[m.orchestrationOverviewCursor].Project, "attach"), true
+		}
 		return openOverviewTaskWorkspace(m, taskRefs[m.orchestrationOverviewCursor])
 	}
 	return m, nil, overviewConsumesBoardActionKey(msg.String())
+}
+
+func overviewSelectedProject(projects []orchestrationProjectOverview, refs []orchestrationOverviewTaskRef, cursor int) (orchestrationProjectOverview, bool) {
+	if len(refs) > 0 {
+		cursor = clampInt(cursor, 0, len(refs)-1)
+		return refs[cursor].Project, true
+	}
+	if len(projects) > 0 {
+		return projects[0], true
+	}
+	return orchestrationProjectOverview{}, false
+}
+
+func (m Model) projectOrchestratorActionCmd(project orchestrationProjectOverview, action string) tea.Cmd {
+	socketPath := strings.TrimSpace(m.daemonSocketPath)
+	if strings.TrimSpace(project.Path) != "" {
+		socketPath = config.DaemonSocketPathFor(project.Path)
+	}
+	projectID := strings.TrimSpace(project.ProjectID)
+	target := projectOrchestratorTarget{ProjectID: projectID, ProjectPath: strings.TrimSpace(project.Path), SocketPath: socketPath}
+	readPolicy := daemonclient.DefaultReadWaitPolicy()
+	if m.daemonClient != nil {
+		readPolicy = m.daemonClient.ReadWaitPolicy()
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		request := protocol.OrchestratorSessionRequest{Scope: domain.ProjectOrchestrationScope()}
+		runner := m.projectOrchestratorActionRunner
+		if runner == nil {
+			runner = func(ctx context.Context, target projectOrchestratorTarget, action string, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+				client := daemonclient.New(transport.NewClient(target.SocketPath)).WithProjectID(target.ProjectID).WithReadWaitPolicy(readPolicy)
+				switch action {
+				case "start":
+					return client.StartOrchestratorSession(ctx, request)
+				case "attach":
+					return client.AttachOrchestratorSession(ctx, request)
+				default:
+					return protocol.OrchestratorSessionResult{}, fmt.Errorf("unsupported project orchestrator action %q", action)
+				}
+			}
+		}
+		result, err := runner(ctx, target, action, request)
+		return projectOrchestratorActionMsg{projectID: projectID, action: action, result: result, err: err}
+	}
 }
 
 func overviewConsumesBoardActionKey(key string) bool {
@@ -727,6 +802,10 @@ func orchestrationOverviewTaskRefs(projects []orchestrationProjectOverview) []or
 			}
 			continue
 		}
+		if len(project.Tasks) == 0 && (project.Snapshot != nil || project.Session != nil) {
+			taskRefs = append(taskRefs, orchestrationOverviewTaskRef{Project: project})
+			continue
+		}
 		for _, task := range project.Tasks {
 			taskRefs = append(taskRefs, orchestrationOverviewTaskRef{
 				Project: project,
@@ -743,6 +822,10 @@ func orchestrationOverviewTaskCount(projects []orchestrationProjectOverview) int
 		sessionObservations := overviewSessionObservations(project.Observations, project.Tasks)
 		if len(sessionObservations) > 0 {
 			count += len(sessionObservations)
+			continue
+		}
+		if len(project.Tasks) == 0 && (project.Snapshot != nil || project.Session != nil) {
+			count++
 			continue
 		}
 		count += len(project.Tasks)
@@ -832,7 +915,7 @@ func overviewVisibleProjects(projects []orchestrationProjectOverview) []orchestr
 	for _, project := range projects {
 		project.Tasks = overviewRuntimeSessionTasks(project.Tasks)
 		project.Observations = overviewSessionObservations(project.Observations, project.Tasks)
-		if len(project.Tasks) == 0 && len(project.Observations) == 0 {
+		if len(project.Tasks) == 0 && len(project.Observations) == 0 && project.Snapshot == nil && project.Session == nil {
 			continue
 		}
 		out = append(out, project)
@@ -1188,6 +1271,21 @@ func (m Model) renderOverviewProjectCard(project orchestrationProjectOverview, w
 		lipgloss.NewStyle().Foreground(uistyles.Text).Bold(true).Render(titleLine),
 		m.styles.StatusHint.Render(ansi.Truncate(meta, innerWidth, "...")),
 	}
+	if status := overviewProjectOrchestratorStatus(project); status != "" && innerHeight > len(lines) {
+		lines = append(lines, m.styles.StatusHint.Render(ansi.Truncate(status, innerWidth, "...")))
+	}
+	for _, queues := range overviewProjectQueueSummary(project) {
+		if innerHeight <= len(lines) {
+			break
+		}
+		lines = append(lines, m.styles.StatusHint.Render(ansi.Truncate(queues, innerWidth, "...")))
+	}
+	if last := overviewProjectLastAction(project); last != "" && innerHeight > len(lines) {
+		lines = append(lines, m.styles.StatusHint.Render(ansi.Truncate("last "+last, innerWidth, "...")))
+	}
+	if warning := overviewProjectOrchestrationWarning(project); warning != "" && innerHeight > len(lines) {
+		lines = append(lines, lipgloss.NewStyle().Foreground(uistyles.Yellow).Render(ansi.Truncate(warning, innerWidth, "...")))
+	}
 	if summary := overviewProjectHealthSummary(project); summary != "" && innerHeight > len(lines) {
 		lines = append(lines, m.styles.StatusHint.Render(ansi.Truncate(summary, innerWidth, "...")))
 	}
@@ -1250,6 +1348,69 @@ func (m Model) renderOverviewProjectCard(project orchestrationProjectOverview, w
 		BorderForeground(overviewProjectBorderColor(project)).
 		Padding(0, 1).
 		Render(content)
+}
+
+func overviewProjectOrchestratorStatus(project orchestrationProjectOverview) string {
+	if project.Snapshot == nil && project.Session == nil {
+		return ""
+	}
+	lifecycle := domain.OrchestratorLifecycle("")
+	live := false
+	if project.Snapshot != nil {
+		lifecycle = project.Snapshot.Lifecycle
+	}
+	if project.Session != nil {
+		if project.Session.Lifecycle != "" {
+			lifecycle = project.Session.Lifecycle
+		}
+		live = project.Session.Live
+	}
+	state := strings.TrimSpace(string(lifecycle))
+	if state == "" {
+		state = "inactive"
+	}
+	workers, capacity := 0, 0
+	if project.Snapshot != nil {
+		workers = project.Snapshot.Capacity.TotalCountingCapacityCount
+		capacity = project.Snapshot.Constraints.AgentCapacity
+	}
+	return fmt.Sprintf("orchestrator %s live=%t  workers %d/%d", state, live, workers, capacity)
+}
+
+func overviewProjectQueueSummary(project orchestrationProjectOverview) []string {
+	if project.Snapshot == nil {
+		return nil
+	}
+	snapshot := project.Snapshot
+	return []string{
+		fmt.Sprintf("ready %d  review %d", len(snapshot.Runnable), len(snapshot.Reviews)),
+		fmt.Sprintf("waiting-human %d  owned-elsewhere %d", len(snapshot.Interactions), len(snapshot.OwnershipConflicts)),
+	}
+}
+
+func overviewProjectLastAction(project orchestrationProjectOverview) string {
+	if project.Snapshot == nil || len(project.Snapshot.RecentEvents) == 0 {
+		return ""
+	}
+	event := project.Snapshot.RecentEvents[len(project.Snapshot.RecentEvents)-1]
+	parts := []string{strings.TrimSpace(event.Type)}
+	if summary := strings.TrimSpace(event.Body); summary != "" {
+		parts = append(parts, strings.Split(summary, "\n")[0])
+	}
+	return strings.TrimSpace(strings.Join(parts, ": "))
+}
+
+func overviewProjectOrchestrationWarning(project orchestrationProjectOverview) string {
+	if project.OrchestrationErr != nil {
+		return "orchestration degraded: " + overviewDegradedReason(project.OrchestrationErr)
+	}
+	if project.Snapshot == nil || project.Snapshot.Health.Healthy {
+		return ""
+	}
+	if len(project.Snapshot.Health.Diagnostics) > 0 {
+		return "health: " + strings.Join(project.Snapshot.Health.Diagnostics, "; ")
+	}
+	return "health: unhealthy"
 }
 
 func overviewTasksByID(tasks []domain.Task) map[string]domain.Task {

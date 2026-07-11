@@ -79,6 +79,26 @@ func main() {
 	commandArgs := args[1:]
 
 	switch command {
+	case "orchestrator-session":
+		if len(commandArgs) == 0 {
+			fmt.Fprintln(os.Stderr, "Usage: az orchestrator-session <start|attach|status> [--root <issue-id>] [--project <project-id>] [--json]")
+			os.Exit(1)
+		}
+		subcommand := commandArgs[0]
+		if subcommand != "start" && subcommand != "attach" && subcommand != "status" {
+			fmt.Fprintf(os.Stderr, "Unknown orchestrator-session command: %s\n", subcommand)
+			os.Exit(1)
+		}
+		opts, err := cli.ParseOrchestratorSessionArgs(subcommand, commandArgs[1:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Usage: az orchestrator-session <start|attach|status> [--root <issue-id>] [--project <project-id>] [--json]")
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := runCommand(cfg, func(deps *cli.Dependencies) error { return cli.OrchestratorSessionCommand(deps, subcommand, opts) }); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	case "session":
 		if len(commandArgs) == 0 {
 			fmt.Fprintf(os.Stderr, "Usage: az session <start|attach|stop|status|capture|diagnose|restart-all|resolve-conflict> [arguments]\n")
@@ -402,6 +422,12 @@ func main() {
 
 	case "learn":
 		if err := runLearnCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "interaction":
+		if err := runInteractionCommand(cfg, commandArgs); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -1165,7 +1191,7 @@ func main() {
 		case "status":
 			opts, err := cli.ParseOrchestrateStatusArgs(commandArgs[1:])
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az orchestrate status --root <issue-id> [--project <project-id>] [--since <seq>] [--limit <n>] [--json] [--summary|--full]\n")
+				fmt.Fprintln(os.Stderr, orchestrateStatusUsage)
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -1178,7 +1204,7 @@ func main() {
 		case "start":
 			opts, err := cli.ParseOrchestrateStartArgs(commandArgs[1:])
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az orchestrate start --root <issue-id> [--project <project-id>] [--limit <n>] [--issue <issue-id> ...] [--json]\n")
+				fmt.Fprintln(os.Stderr, orchestrateStartUsage)
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -1204,7 +1230,7 @@ func main() {
 		case "watch":
 			opts, err := cli.ParseOrchestrateWatchArgs(commandArgs[1:])
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az orchestrate watch --root <issue-id> [--project <project-id>] [--since <seq>] [--jsonl] [--once] [--verbose|--full]\n")
+				fmt.Fprintln(os.Stderr, orchestrateWatchUsage)
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -1269,7 +1295,7 @@ func main() {
 		case "complete-check":
 			opts, err := cli.ParseOrchestrateCompleteCheckArgs(commandArgs[1:])
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az orchestrate complete-check --root <issue-id> [--project <project-id>] [--json]\n")
+				fmt.Fprintln(os.Stderr, orchestrateCompleteCheckUsage)
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -1496,10 +1522,9 @@ func printRootUsage() {
 		return
 	}
 	replacements := map[string]string{
-		"session <subcommand>  Session commands (start|attach|stop|status|diagnose)":                                     "session <subcommand>  Session commands (start|attach|stop|status|diagnose|restart-all|resolve-conflict)",
-		"branch <subcommand>   Branch commands (merge)":                                                                  "branch <subcommand>   Branch commands (merge|agent-merge)",
-		"az session status az-123  # Show status for az-123":                                                             "az session status az-123  # Show status for az-123\n  az session restart-all --force-busy\n  az session resolve-conflict az-123 --file README.md",
-		"az branch merge az-123    # Repair/manual merge into resolved target branch (normal close uses az issue close)": "az branch merge az-123    # Repair/manual merge into resolved target branch (normal close uses az issue close)\n  az branch agent-merge az-123 --target base",
+		"session <subcommand>  Session commands (start|attach|stop|status|diagnose)": "session <subcommand>  Session commands (start|attach|stop|status|diagnose|restart-all|resolve-conflict)",
+		"branch <subcommand>   Branch commands (merge)":                              "branch <subcommand>   Branch commands (merge|agent-merge)",
+		"az session status az-123  # Show status for az-123":                         "az session status az-123  # Show status for az-123\n  az session restart-all --force-busy\n  az session resolve-conflict az-123 --file README.md",
 	}
 	for old, new := range replacements {
 		usage = strings.ReplaceAll(usage, old, new)
@@ -1867,7 +1892,7 @@ func runBranchCommand(cfg *config.Config, command string, args []string) error {
 func branchCommandUsage(command string) (string, bool) {
 	switch command {
 	case "merge", "merge-to-base":
-		return "usage: az branch merge [--project <project-id>] [issue-id]", true
+		return "usage: az branch merge [--project <project-id>] --source <issue-id> --target base|<issue-id>", true
 	case "agent-merge":
 		return "usage: az branch agent-merge [--project <project-id>] <issue-id> [--target base|<issue-id>]", true
 	default:
@@ -1878,19 +1903,38 @@ func branchCommandUsage(command string) (string, bool) {
 func parseBranchMergeArgs(args []string) (cli.BranchMergeToBaseOptions, error) {
 	opts := cli.BranchMergeToBaseOptions{}
 	usageErr := func() (cli.BranchMergeToBaseOptions, error) {
-		return cli.BranchMergeToBaseOptions{}, fmt.Errorf("usage: az branch merge [--project <project-id>] [issue-id]")
+		return cli.BranchMergeToBaseOptions{}, fmt.Errorf("usage: az branch merge [--project <project-id>] --source <issue-id> --target base|<issue-id>")
 	}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		trimmed := strings.TrimSpace(arg)
 		switch trimmed {
-		case "--allow-base-for-child":
-			opts.AllowBaseForChild = true
+		case "--source":
+			if i+1 >= len(args) || strings.HasPrefix(strings.TrimSpace(args[i+1]), "-") {
+				return usageErr()
+			}
+			if opts.IssueID != "" {
+				return usageErr()
+			}
+			i++
+			opts.IssueID = strings.TrimSpace(args[i])
+		case "--target":
+			if i+1 >= len(args) || strings.HasPrefix(strings.TrimSpace(args[i+1]), "-") {
+				return usageErr()
+			}
+			if opts.Target != "" {
+				return usageErr()
+			}
+			i++
+			opts.Target = strings.TrimSpace(args[i])
 		case "--project":
 			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" || strings.HasPrefix(strings.TrimSpace(args[i+1]), "-") {
 				return usageErr()
 			}
 			i++
+			if opts.Project != "" {
+				return usageErr()
+			}
 			opts.Project = strings.TrimSpace(args[i])
 		case "":
 			continue
@@ -1902,14 +1946,11 @@ func parseBranchMergeArgs(args []string) (cli.BranchMergeToBaseOptions, error) {
 				}
 				continue
 			}
-			if strings.HasPrefix(trimmed, "--") {
-				return usageErr()
-			}
-			if opts.IssueID != "" {
-				return usageErr()
-			}
-			opts.IssueID = trimmed
+			return usageErr()
 		}
+	}
+	if opts.IssueID == "" || opts.Target == "" {
+		return usageErr()
 	}
 	return opts, nil
 }

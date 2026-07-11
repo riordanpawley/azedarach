@@ -140,6 +140,38 @@ func mustMarshalRawTaskListSnapshotBody(t *testing.T, body any) []byte {
 	return data
 }
 
+func TestOrchestrationReviewIntentTypedRoundTrip(t *testing.T) {
+	const wantProjectID = "proj-review"
+	transport := &taskRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			assertTaskProjectID(t, req, wantProjectID)
+			if req.Command != CommandOrchestrationIntent {
+				t.Fatalf("command = %q, want %q", req.Command, CommandOrchestrationIntent)
+			}
+			var body protocol.OrchestrationIntentRequest
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Kind != protocol.OrchestrationIntentReviewReturn || body.IntentKey != "review-1" || !body.RestartWorker || len(body.Findings) != 1 || body.Findings[0].Finding != "fix the race" {
+				t.Fatalf("request body = %+v", body)
+			}
+			return responseWithJSON(t, req, protocol.OrchestrationIntentResult{Scope: body.Scope, Kind: body.Kind, IntentKey: body.IntentKey, Requested: []string{"az-1"}, Returned: []string{"az-1"}}), nil
+		},
+	}
+	client := New(transport).WithProjectID(wantProjectID)
+	scope, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.ApplyOrchestrationIntent(context.Background(), protocol.OrchestrationIntentRequest{Scope: scope, Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "review-1", ActorID: "reviewer", IssueIDs: []string{"az-1"}, RestartWorker: true, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "fix the race"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Returned) != 1 || result.Returned[0] != "az-1" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
 func TestTaskSnapshotRequireFullDetails(t *testing.T) {
 	if err := (TaskSnapshot{}).RequireFullDetails("issue update"); err != nil {
 		t.Fatalf("full snapshot guard error = %v, want nil", err)
@@ -234,7 +266,7 @@ func TestTaskGraphReadinessDecodesWorkerObservations(t *testing.T) {
 					Status:     string(domain.StatusOpen),
 					Type:       string(domain.TypeTask),
 					ChildCount: 1,
-					Advice:     "start its orchestrator session with `az session start az-nested`",
+					Advice:     "start its orchestrator session with `az orchestrator-session start --root az-nested`",
 				}},
 				Blocked: map[string]string{},
 				WorkerObservations: []domain.WorkerObservation{{

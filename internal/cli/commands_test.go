@@ -41,6 +41,23 @@ type fakeDaemonTransport struct {
 	lastGraphReadiness      daemonclient.TaskGraphReadiness
 }
 
+func TestRenderPrimeOrchestrationSectionExplainsRuntimeContinuationGuard(t *testing.T) {
+	scope, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	section := renderPrimeOrchestrationSection(protocol.OrchestrationSnapshot{
+		Scope: scope, Cursor: 17, ContinuationRequired: true,
+		ContinuationReason:   "direct nested root active",
+		ContinuationContract: "consume the durable cursor and continue",
+	})
+	for _, want := range []string{"Runtime persistence guard: wake-required", "direct nested root active", "consume the durable cursor and continue", "cursor=17"} {
+		if !strings.Contains(section, want) {
+			t.Fatalf("prime orchestration section missing %q:\n%s", want, section)
+		}
+	}
+}
+
 func openSQLiteDB(t *testing.T, dbPath string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+dbPath)
@@ -591,7 +608,7 @@ func (f *fakeDaemonTransport) emulateOrchestrationIntent(ctx context.Context, re
 	for _, issueID := range requested {
 		if _, ok := runnable[issueID]; !ok {
 			if _, ok := nestedRoots[issueID]; ok {
-				result.Skipped[issueID] = fmt.Sprintf("nested-root-start-orchestrator-session: az session start %s", issueID)
+				result.Skipped[issueID] = fmt.Sprintf("nested-root-start-orchestrator-session: az orchestrator-session start --root %s", issueID)
 			} else if _, ok := active[issueID]; ok {
 				result.Skipped[issueID] = "session-already-running"
 			} else if reason := f.lastGraphReadiness.Blocked[issueID]; reason != "" {
@@ -2564,6 +2581,82 @@ func TestBranchMergeToBaseCommandUsesAttachedTargetBranchWorktree(t *testing.T) 
 		if cmd == daemonclient.CommandGitCheckout {
 			t.Fatalf("checkout command should not be issued, commands=%v", commands)
 		}
+	}
+}
+
+func TestBranchMergeCommandExplicitDescendantTargetIgnoresCallerWorktree(t *testing.T) {
+	sourceWorktree := t.TempDir()
+	descendantWorktree := t.TempDir()
+	t.Chdir(sourceWorktree)
+	var mergeBody daemonclient.GitCommandRequest
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				return responseWithJSON(req, map[string]any{"worktrees": []map[string]any{
+					{"path": sourceWorktree, "branch": "riordan/ancestor/work", "issue_id": "ancestor"},
+					{"path": descendantWorktree, "branch": "riordan/descendant/work", "issue_id": "descendant"},
+				}}), nil
+			case daemonclient.CommandTaskMergeBaseTarget:
+				t.Fatal("explicit issue target must not invoke inferred merge-base resolution")
+			case daemonclient.CommandGitStatus:
+				return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{HasChanges: false}}), nil
+			case daemonclient.CommandGitMerge:
+				if err := json.Unmarshal(req.Body, &mergeBody); err != nil {
+					t.Fatalf("unmarshal merge body: %v", err)
+				}
+				return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
+					Worktree: descendantWorktree,
+					Branch:   "riordan/ancestor/work",
+					Result:   gitservice.MergeResult{Success: true, Message: "merged"},
+				}), nil
+			default:
+				return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		}}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	if err := BranchMergeToBaseCommandWithOptions(deps, BranchMergeToBaseOptions{IssueID: "ancestor", Target: "descendant"}); err != nil {
+		t.Fatalf("explicit descendant merge: %v", err)
+	}
+	if mergeBody.Worktree != descendantWorktree || mergeBody.Branch != "riordan/ancestor/work" {
+		t.Fatalf("merge body = %+v, want source branch merged in named descendant worktree %q", mergeBody, descendantWorktree)
+	}
+}
+
+func TestBranchMergeCommandExplicitBaseRequiresDaemonHumanAcceptance(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				return responseWithJSON(req, map[string]any{"worktrees": []map[string]any{{
+					"path": t.TempDir(), "branch": "riordan/root/work", "issue_id": "root",
+				}}}), nil
+			case daemonclient.CommandTaskMergeBaseTarget:
+				var body map[string]any
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal merge target body: %v", err)
+				}
+				if required, _ := body["require_human_acceptance"].(bool); !required {
+					t.Fatalf("merge target request = %#v, want require_human_acceptance=true", body)
+				}
+				return protocol.ResponseEnvelope{}, fmt.Errorf("refusing root issue root integration into base without durable human acceptance")
+			default:
+				t.Fatalf("command %s must not run after acceptance refusal", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		}}).WithProjectID("proj"),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), ProjectID: "proj", RepoDir: t.TempDir(),
+	}
+	err := BranchMergeToBaseCommandWithOptions(deps, BranchMergeToBaseOptions{IssueID: "root", Target: "base"})
+	if err == nil || !strings.Contains(err.Error(), "without durable human acceptance") {
+		t.Fatalf("error = %v, want daemon acceptance refusal", err)
 	}
 }
 
@@ -12223,6 +12316,85 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 }
 
+func TestPrimeCommandRendersPersistedProjectOrchestratorSnapshotOnly(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "stale-worker-scope")
+	setPrimeTmuxAvailable(t, true)
+	previous := tmuxPaneSessionName
+	tmuxPaneSessionName = func(context.Context) (string, error) { return "az-project-orchestrator", nil }
+	t.Cleanup(func() { tmuxPaneSessionName = previous })
+	commands := []string{}
+	deps := &Dependencies{
+		ProjectID: "proj",
+		Config:    config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			commands = append(commands, req.Command)
+			if req.Command != daemonclient.CommandOrchestrationSnapshot {
+				t.Fatalf("unexpected daemon command %q", req.Command)
+			}
+			return responseWithJSON(req, protocol.OrchestrationSnapshot{
+				Role: "orchestrator", SessionID: "az-project-orchestrator", Lifecycle: domain.OrchestratorWorking,
+				Scope: domain.ProjectOrchestrationScope(), Revision: 41, Cursor: 9,
+				Capacity:           protocol.OrchestrationCapacity{DirectRunnableCount: 2, DirectActiveCount: 1, TotalCountingCapacityCount: 3},
+				Candidates:         []protocol.OrchestrationCandidate{{IssueID: "az-ready", Classification: "runnable", Reason: "included: ready for worker start"}},
+				Reviews:            []protocol.OrchestrationCandidate{{IssueID: "az-review", Classification: "review-ready", Reason: "excluded: review requested"}},
+				OwnershipConflicts: []protocol.OrchestrationCandidate{{IssueID: "az-owned", Classification: "owned-elsewhere", Reason: "excluded: owned by another actor"}},
+				Blocked:            map[string]string{"az-blocked": "dependency open"},
+				Interactions:       []domain.InteractionRequest{{ID: "int-1", IssueID: "az-wait", Question: "Choose rollout?"}},
+				RecentEvents:       []protocol.MailEvent{{Seq: 9, IssueID: "az-ready", Type: "worker-progress", Body: "tests running"}},
+				Constraints:        protocol.OrchestrationConstraints{StartLimit: 4, AgentCapacity: 12, Commands: []string{"az orchestrate status"}, RoleGuardrails: []string{"remain in the active orchestration loop"}},
+			}), nil
+		}}),
+	}
+	output := captureStdout(t, func() error { return PrimeCommand(deps) })
+	if !reflect.DeepEqual(commands, []string{daemonclient.CommandOrchestrationSnapshot}) {
+		t.Fatalf("commands = %v, want one coherent orchestration snapshot", commands)
+	}
+	for _, want := range []string{
+		"role=orchestrator scope=project lifecycle=working revision=41 cursor=9",
+		"daemon identifies this session as the project orchestrator",
+		"az-ready: runnable", "az-review: review-ready", "az-owned: owned-elsewhere",
+		"az-blocked: dependency open", "int-1 (az-wait): Choose rollout?", "#9 worker-progress az-ready: tests running",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("prime output missing %q: %s", want, output)
+		}
+	}
+	if strings.Contains(output, "stale-worker-scope") {
+		t.Fatalf("project orchestrator output leaked environment worker scope: %s", output)
+	}
+}
+
+func TestPrimeCommandRendersPersistedRootedOrchestratorScope(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "stale-root")
+	setPrimeTmuxAvailable(t, true)
+	previous := tmuxPaneSessionName
+	tmuxPaneSessionName = func(context.Context) (string, error) { return "az-root-orchestrator", nil }
+	t.Cleanup(func() { tmuxPaneSessionName = previous })
+	rooted, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := &Dependencies{ProjectID: "proj", Config: config.DefaultConfig(), DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		if req.Command != daemonclient.CommandOrchestrationSnapshot {
+			t.Fatalf("unexpected daemon command %q", req.Command)
+		}
+		return responseWithJSON(req, protocol.OrchestrationSnapshot{
+			Role: "orchestrator", Scope: rooted, Lifecycle: domain.OrchestratorWorking, Revision: 7,
+			Roots: []string{"az-root"}, Blocked: map[string]string{},
+			Constraints: protocol.OrchestrationConstraints{Commands: []string{"az orchestrate status --root az-root"}},
+		}), nil
+	}})}
+	output := captureStdout(t, func() error { return PrimeCommand(deps) })
+	for _, want := range []string{"Active issue ID: `az-root`", "scope=rooted:az-root", "rooted orchestrator for `az-root`", "az orchestrate status --root az-root", "Orchestrator Exit Contract (root az-root)"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("rooted prime output missing %q: %s", want, output)
+		}
+	}
+	if strings.Contains(output, "stale-root") {
+		t.Fatalf("rooted prime leaked environment scope: %s", output)
+	}
+}
+
 func TestPrimeCommandDoesNotEmitDiagnosticsToStderr(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
 	setPrimeTmuxAvailable(t, false)
@@ -12664,6 +12836,16 @@ func TestPrimeCommandShowsRootExitContractForAzOrchestrationRoot(t *testing.T) {
 	contractIndex := strings.Index(output, "Orchestrator Exit Contract (root az-root):")
 	if contractIndex < 0 {
 		t.Fatalf("prime output missing root exit contract: %q", output)
+	}
+	for _, guidance := range []string{
+		"Remain in the active orchestration turn/loop after starting workers, nested orchestrators, or a background watch; startup is not a completed handoff to the human.",
+		"Continuously consume the root watch and react to worker/nested-orchestrator progress, blocked, and integration-ready evidence while graph work remains.",
+		"Supervise nested epic/root orchestrators as direct children while they own their descendant workers; do not flatten or take over those descendants unless explicitly requested.",
+		"repeat status/start/watch/review until `az orchestrate complete-check --root az-root` passes",
+	} {
+		if !strings.Contains(output, guidance) {
+			t.Fatalf("prime output missing persistent parent-orchestrator guidance %q: %q", guidance, output)
+		}
 	}
 	if !strings.Contains(output, "az-child: review_ready - worker reported integration-ready evidence") {
 		t.Fatalf("prime output missing dynamic child observation: %q", output)

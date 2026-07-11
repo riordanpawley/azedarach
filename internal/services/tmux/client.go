@@ -86,6 +86,32 @@ func (c *Client) NewSessionWithCommand(ctx context.Context, name, workdir, comma
 	return nil
 }
 
+// NewSessionWithArgs creates a detached tmux session by passing an executable
+// and its arguments separately. tmux executes a multi-argument command
+// directly instead of routing a single shell-command string through the
+// configured default shell.
+func (c *Client) NewSessionWithArgs(ctx context.Context, name, workdir, executable string, commandArgs ...string) error {
+	c.logger.Debug("creating tmux session with argv", "name", name, "workdir", workdir, "executable", executable)
+	if strings.TrimSpace(executable) == "" || len(commandArgs) == 0 {
+		return &domain.TmuxError{Op: "new-session", Session: name, Err: errors.New("direct command requires an executable and at least one argument")}
+	}
+
+	args := []string{"new-session", "-d", "-s", name}
+	if workdir != "" {
+		args = append(args, "-c", workdir)
+	}
+	args = append(args, "--", executable)
+	args = append(args, commandArgs...)
+
+	_, err := c.runner.Run(ctx, args...)
+	if err != nil {
+		return &domain.TmuxError{Op: "new-session", Session: name, Err: err}
+	}
+
+	c.logger.Debug("tmux session created", "name", name)
+	return nil
+}
+
 // EnsureWindow creates a named window in an existing session when it is absent.
 // It returns true when the window already existed.
 func (c *Client) EnsureWindow(ctx context.Context, sessionName, windowName, workdir string) (bool, error) {

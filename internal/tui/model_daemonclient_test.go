@@ -44,6 +44,35 @@ type recordingCommandRunner struct {
 	err    error
 }
 
+func TestInteractionStaleConflictReloadsByRequestID(t *testing.T) {
+	transport := &recordingDaemonTransport{replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		var body protocol.InteractionGetRequestBody
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if body.ID != "interaction-42" {
+			t.Fatalf("interaction.get ID = %q, want request ID interaction-42", body.ID)
+		}
+		payload, _ := json.Marshal(protocol.InteractionResponseBody{Request: domain.InteractionRequest{ID: body.ID, IssueID: "issue-9"}})
+		return protocol.ResponseEnvelope{OK: true, Body: payload}, nil
+	}}
+	m := newTestModel()
+	m.daemonClient = daemonclient.New(transport)
+	m.overlayStack.Push(overlay.NewInteractionOverlay(domain.InteractionRequest{ID: "interaction-42", IssueID: "issue-9"}, domain.InteractionAgeView{}))
+	next, cmd := m.Update(interactionMutatedMsg{err: domain.ErrStaleInteractionRevision})
+	if cmd == nil {
+		t.Fatal("expected stale-conflict reload command")
+	}
+	if _, ok := next.(Model); !ok {
+		t.Fatalf("updated model type = %T", next)
+	}
+	msg := cmd()
+	loaded, ok := msg.(interactionLoadedMsg)
+	if !ok || loaded.err != nil {
+		t.Fatalf("reload result = %#v", msg)
+	}
+}
+
 type blockingSnapshotTransport struct{}
 
 type refreshableDiffClient struct {
@@ -11204,6 +11233,34 @@ func TestDaemonEventRevisionReducer(t *testing.T) {
 				t.Fatalf("model revision = %d, want %d", next.daemonRevision, tt.wantRevision)
 			}
 		})
+	}
+}
+
+func TestOrchestrationLoopEventRefreshesVisibleOverview(t *testing.T) {
+	m := newTestModel()
+	m.viewMode = ViewModeOverview
+	m.daemonRevision = 4
+
+	result := m.applyDaemonStreamEvent(protocol.EventEnvelope{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		Revision:  5,
+		Event:     protocol.EventOrchestrationLoopUpdated,
+	}, false)
+	if result.cmd == nil {
+		t.Fatal("orchestration loop event did not schedule overview refresh")
+	}
+	if m.daemonRevision != 5 {
+		t.Fatalf("daemon revision=%d, want 5", m.daemonRevision)
+	}
+
+	m.viewMode = ViewModeBoard
+	result = m.applyDaemonStreamEvent(protocol.EventEnvelope{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		Revision:  6,
+		Event:     protocol.EventOrchestrationLoopUpdated,
+	}, false)
+	if result.cmd != nil {
+		t.Fatalf("hidden overview refresh command=%T, want nil", result.cmd)
 	}
 }
 

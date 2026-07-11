@@ -144,6 +144,8 @@ func orchestrationOverviewStatusBindings() []keybinds.Binding {
 		{Key: "←/→ h/l", Description: "project"},
 		{Key: "Home/End g/G", Description: "top/end"},
 		{Key: "Enter", Description: "open"},
+		{Key: "o/A", Description: "start/attach orchestrator"},
+		{Key: "r", Description: "refresh status"},
 		{Key: "Tab", Description: "switch view"},
 		{Key: "/", Description: "search"},
 		{Key: "f", Description: "filter"},

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
@@ -14,6 +15,7 @@ import (
 // issue and session projections are refreshed first, then session presence is
 // compared with live tmux before durable lifecycle state is changed.
 func (d *Daemon) reconcileOrchestratorLifecycles(ctx context.Context, projectID string, now time.Time) error {
+	projectID = d.canonicalProjectID(projectID)
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	if store == nil || d.tmux == nil {
 		return nil
@@ -41,14 +43,81 @@ func (d *Daemon) reconcileOrchestratorLifecycles(ctx context.Context, projectID 
 				}
 			}
 		}
-		if _, err := authority.Evaluate(ctx, lease.Identity, lease.SessionID, now, facts, policy); err != nil {
+		evaluated, err := authority.Evaluate(ctx, lease.Identity, lease.SessionID, now, facts, policy)
+		if err != nil {
+			return err
+		}
+		if evaluated.Identity.Scope.Kind == domain.OrchestrationScopeProject && evaluated.Lifecycle == domain.OrchestratorWorking {
+			if _, err := d.runProjectOrchestratorLoopStep(ctx, evaluated, now); err != nil {
+				return fmt.Errorf("run project orchestrator loop: %w", err)
+			}
+		}
+		if err := d.enforceRootedOrchestratorContinuation(ctx, authority, lease, projectID, now, policy); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func (d *Daemon) enforceRootedOrchestratorContinuation(ctx context.Context, authority *daemonstate.OrchestratorLeaseAuthority, lease daemonstate.OrchestratorScopeLease, projectID string, now time.Time, policy domain.OrchestratorLifecyclePolicy) error {
+	if lease.Identity.Scope.Kind != domain.OrchestrationScopeRooted {
+		return nil
+	}
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	parent, found, err := store.GetSessionState(ctx, projectID, lease.SessionID)
+	if err != nil {
+		return fmt.Errorf("refresh parent orchestrator activity: %w", err)
+	}
+	if !found || !orchestratorActivityWakeRequired(parent.Activity) {
+		return nil
+	}
+	complete, err := d.taskCompleteCheck(ctx, projectID, lease.Identity.Scope.RootIssueID.String())
+	if err != nil {
+		return fmt.Errorf("evaluate parent orchestrator complete-check: %w", err)
+	}
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, projectID, protocol.OrchestrationSnapshotRequest{Scope: lease.Identity.Scope})
+	if err != nil {
+		return fmt.Errorf("build parent orchestrator continuation snapshot: %w", err)
+	}
+	if !rootedOrchestratorContinuationRequired(complete.Pass, snapshot) {
+		return nil
+	}
+	applyOrchestratorContinuationProjection(&snapshot, lease)
+	if !snapshot.ContinuationRequired {
+		return nil
+	}
+	reason := domain.OrchestratorWakeOpenWork
+	for _, nested := range snapshot.NestedRoots {
+		if strings.EqualFold(nested.IssueStatus, string(domain.StatusInReview)) {
+			reason = domain.OrchestratorWakeReviewRequest
+			break
+		}
+	}
+	woken, changed, err := authority.Wake(ctx, lease.Identity, now, reason, policy)
+	if err != nil {
+		return fmt.Errorf("record parent orchestrator continuation wake: %w", err)
+	}
+	if !changed {
+		return nil
+	}
+	applyOrchestratorContinuationProjection(&snapshot, woken)
+	if err := d.tmux.PasteTextAndSubmit(ctx, woken.SessionID, snapshot.ContinuationContract); err != nil {
+		return fmt.Errorf("deliver parent orchestrator continuation wake: %w", err)
+	}
+	return nil
+}
+
+func orchestratorActivityWakeRequired(activity string) bool {
+	switch strings.ToLower(strings.TrimSpace(activity)) {
+	case "idle", "done", "paused":
+		return true
+	default:
+		return false
+	}
+}
+
 func (d *Daemon) wakePausedOrchestratorsForRecovery(ctx context.Context, projectID string, now time.Time) error {
+	projectID = d.canonicalProjectID(projectID)
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	if store == nil {
 		return nil
@@ -64,6 +133,11 @@ func (d *Daemon) wakePausedOrchestratorsForRecovery(ctx context.Context, project
 	}
 	authority := daemonstate.NewOrchestratorLeaseAuthority(store)
 	for _, lease := range leases {
+		// Rooted leases are resumed by the full continuation guard so a durable
+		// wake record is never written without delivering its cursor-bearing prompt.
+		if lease.Identity.Scope.Kind == domain.OrchestrationScopeRooted {
+			continue
+		}
 		if lease.Lifecycle != domain.OrchestratorPaused {
 			continue
 		}
@@ -111,6 +185,18 @@ func (d *Daemon) orchestratorLifecycleFacts(ctx context.Context, lease daemonsta
 		}
 		if task.Facts.WaitingHuman {
 			facts.UnresolvedInteractions++
+		}
+	}
+	interactions, err := issueClient.Interactions(ctx)
+	if err != nil {
+		return facts, latestChange, fmt.Errorf("refresh orchestrator interaction projection: %w", err)
+	}
+	for _, interaction := range interactions {
+		if _, scoped := issueIDs[interaction.IssueID]; !scoped {
+			continue
+		}
+		if interaction.UpdatedAt.After(latestChange) {
+			latestChange = interaction.UpdatedAt
 		}
 	}
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)

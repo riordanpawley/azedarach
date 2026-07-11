@@ -323,9 +323,10 @@ type TaskMergeBaseTarget struct {
 }
 
 type taskMergeBaseTargetRequest struct {
-	TaskID            naming.IssueID `json:"task_id"`
-	BaseBranch        string         `json:"base_branch,omitempty"`
-	AllowBaseForChild bool           `json:"allow_base_for_child,omitempty"`
+	TaskID                 naming.IssueID `json:"task_id"`
+	BaseBranch             string         `json:"base_branch,omitempty"`
+	AllowBaseForChild      bool           `json:"allow_base_for_child,omitempty"`
+	RequireHumanAcceptance bool           `json:"require_human_acceptance,omitempty"`
 }
 
 // TaskFollowOnMergeCandidate is a daemon-owned follow-on merge source decision.
@@ -1206,6 +1207,26 @@ func (c *Client) ApplyOrchestrationIntent(ctx context.Context, request protocol.
 	return out, nil
 }
 
+func (c *Client) StartOrchestratorSession(ctx context.Context, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+	return c.orchestratorSession(ctx, protocol.CommandOrchestratorSessionStart, request)
+}
+
+func (c *Client) AttachOrchestratorSession(ctx context.Context, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+	return c.orchestratorSession(ctx, protocol.CommandOrchestratorSessionAttach, request)
+}
+
+func (c *Client) OrchestratorSessionStatus(ctx context.Context, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+	return c.orchestratorSession(ctx, protocol.CommandOrchestratorSessionStatus, request)
+}
+
+func (c *Client) orchestratorSession(ctx context.Context, command string, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+	var out protocol.OrchestratorSessionResult
+	if err := c.commandJSON(ctx, command, request, &out); err != nil {
+		return protocol.OrchestratorSessionResult{}, err
+	}
+	return out, nil
+}
+
 // TaskCompleteCheck returns the daemon-owned completion gate for a root issue.
 func (c *Client) TaskCompleteCheck(ctx context.Context, rootIssueID string) (TaskCompleteCheckResult, error) {
 	parsedRootID, err := naming.ParseIssueID(rootIssueID)
@@ -1258,16 +1279,18 @@ func (c *Client) TaskContextRisk(ctx context.Context, issueID, repoDir string, s
 }
 
 // TaskMergeBaseTarget resolves the daemon-owned merge target for an issue branch.
-func (c *Client) TaskMergeBaseTarget(ctx context.Context, issueID, baseBranch string, allowBaseForChild bool) (TaskMergeBaseTarget, error) {
+func (c *Client) TaskMergeBaseTarget(ctx context.Context, issueID, baseBranch string, allowBaseForChild bool, requireHumanAcceptance ...bool) (TaskMergeBaseTarget, error) {
 	parsedIssueID, err := naming.ParseIssueID(issueID)
 	if err != nil {
 		return TaskMergeBaseTarget{}, fmt.Errorf("invalid issue id: %w", err)
 	}
 	var out TaskMergeBaseTarget
+	requireAcceptance := len(requireHumanAcceptance) > 0 && requireHumanAcceptance[0]
 	if err := c.commandJSON(ctx, CommandTaskMergeBaseTarget, taskMergeBaseTargetRequest{
-		TaskID:            parsedIssueID,
-		BaseBranch:        strings.TrimSpace(baseBranch),
-		AllowBaseForChild: allowBaseForChild,
+		TaskID:                 parsedIssueID,
+		BaseBranch:             strings.TrimSpace(baseBranch),
+		AllowBaseForChild:      allowBaseForChild,
+		RequireHumanAcceptance: requireAcceptance,
 	}, &out); err != nil {
 		return TaskMergeBaseTarget{}, err
 	}

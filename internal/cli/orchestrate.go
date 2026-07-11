@@ -131,9 +131,9 @@ func issueGetCommandForProject(issueID, projectID string) string {
 func branchMergeCommandForProject(issueID, projectID string) string {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
-		return fmt.Sprintf("az branch merge %s", issueID)
+		return fmt.Sprintf("az branch merge --source %s --target <issue-id|base>", issueID)
 	}
-	return fmt.Sprintf("az branch merge --project %s %s", projectID, issueID)
+	return fmt.Sprintf("az branch merge --project %s --source %s --target <issue-id|base>", projectID, issueID)
 }
 
 func orchestrateIntegrateApplyCommandForProject(issueID, projectID string) string {
@@ -291,6 +291,7 @@ type orchestrateWatchFrame struct {
 	ContainmentRisks       []orchestrateContainmentRisk         `json:"containment_risks,omitempty"`
 	Blocked                map[string]string                    `json:"blocked"`
 	Events                 []mailEvent                          `json:"events"`
+	PersistenceGuard       string                               `json:"persistence_guard"`
 }
 
 type orchestrateCompactFrame struct {
@@ -498,9 +499,6 @@ func ParseOrchestrateStatusArgs(args []string) (OrchestrateStatusOptions, error)
 	if fs.NArg() != 0 {
 		return OrchestrateStatusOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
-	if strings.TrimSpace(opts.RootIssueID) == "" {
-		return OrchestrateStatusOptions{}, fmt.Errorf("missing required flag: --root")
-	}
 	if opts.Limit < 1 {
 		return OrchestrateStatusOptions{}, fmt.Errorf("limit must be >= 1")
 	}
@@ -533,9 +531,6 @@ func ParseOrchestrateStartArgs(args []string) (OrchestrateStartOptions, error) {
 	}
 	if fs.NArg() != 0 {
 		return OrchestrateStartOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
-	}
-	if strings.TrimSpace(opts.RootIssueID) == "" {
-		return OrchestrateStartOptions{}, fmt.Errorf("missing required flag: --root")
 	}
 	if opts.Limit < 1 {
 		return OrchestrateStartOptions{}, fmt.Errorf("limit must be >= 1")
@@ -603,9 +598,6 @@ func ParseOrchestrateWatchArgs(args []string) (OrchestrateWatchOptions, error) {
 	if fs.NArg() != 0 {
 		return OrchestrateWatchOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
-	if strings.TrimSpace(opts.RootIssueID) == "" {
-		return OrchestrateWatchOptions{}, fmt.Errorf("missing required flag: --root")
-	}
 	if explicitFlags["compact"] && opts.Compact && (opts.Full || opts.Verbose) {
 		return OrchestrateWatchOptions{}, fmt.Errorf("--compact cannot be combined with --verbose or --full")
 	}
@@ -667,9 +659,6 @@ func ParseOrchestrateCompleteCheckArgs(args []string) (OrchestrateCompleteCheckO
 	}
 	if fs.NArg() != 0 {
 		return OrchestrateCompleteCheckOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
-	}
-	if strings.TrimSpace(opts.RootIssueID) == "" {
-		return OrchestrateCompleteCheckOptions{}, fmt.Errorf("missing required flag: --root")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -783,8 +772,16 @@ func ParseOrchestrateMessageArgs(args []string) (OrchestrateMessageOptions, erro
 }
 
 func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject := applyOrchestrationProjectOverride(deps, opts.Project)
 	defer restoreProject()
+	scope, err := resolveCLIOrchestrationScope(opts.RootIssueID)
+	if err != nil {
+		return err
+	}
+	if scope.Kind == domain.OrchestrationScopeProject {
+		return projectOrchestrateStatusCommand(deps, opts, scope)
+	}
+	opts.RootIssueID = scope.RootIssueID.String()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
@@ -806,6 +803,9 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 	if err != nil {
 		return err
 	}
+	if next := nextMailboxSeq(events, opts.SinceSeq); next > opts.SinceSeq {
+		checkpointRootOrchestratorCursor(ctx, deps, opts.RootIssueID, next)
+	}
 
 	result := orchestrateStatusResult{
 		RootIssueID:            ready.RootIssueID,
@@ -825,6 +825,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		Advice: map[string]interface{}{
 			"watch":             fmt.Sprintf("az orchestrate watch --root %s --since %d --jsonl", ready.RootIssueID, nextMailboxSeq(events, opts.SinceSeq)),
 			"watch_instruction": "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
+			"persistence_guard": "Daemon-enforced: parent idle/turn completion is wake-required while direct nested roots remain and complete-check has not passed; the durable cursor is resumed after restart or session replacement.",
 		},
 	}
 	if opts.Summary {
@@ -1005,8 +1006,16 @@ func ObserveCommand(deps *Dependencies, opts ObserveOptions) error {
 }
 
 func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject := applyOrchestrationProjectOverride(deps, opts.Project)
 	defer restoreProject()
+	scope, err := resolveCLIOrchestrationScope(opts.RootIssueID)
+	if err != nil {
+		return err
+	}
+	if scope.Kind == domain.OrchestrationScopeProject {
+		return projectOrchestrateStartCommand(deps, opts, scope)
+	}
+	opts.RootIssueID = scope.RootIssueID.String()
 
 	result, err := orchestrateStart(deps, opts)
 	if err != nil {
@@ -1160,7 +1169,7 @@ func orchestrateGroup(deps *Dependencies, opts OrchestrateGroupOptions) (orchest
 		Grouped:       grouped,
 		Advice: []string{
 			fmt.Sprintf("inspect updated root: az orchestrate status --root %s --json", rootID.String()),
-			fmt.Sprintf("start nested root orchestrator when ready: az session start %s", nestedID.String()),
+			fmt.Sprintf("start nested root orchestrator when ready: az orchestrator-session start --root %s", nestedID.String()),
 		},
 	}
 	if len(nested) > 0 && nestedAfter.IssueID != "" {
@@ -1840,7 +1849,7 @@ func printOrchestrateStartResult(result orchestrateStartResult) {
 	if len(result.NestedRoots) > 0 {
 		fmt.Println("Nested roots:")
 		for _, id := range result.NestedRoots {
-			fmt.Printf("- %s: start its orchestrator session with `az session start %s`\n", id, id)
+			fmt.Printf("- %s: start its orchestrator session with `az orchestrator-session start --root %s`\n", id, id)
 		}
 	}
 	if len(result.Launched) > 0 {
@@ -1885,8 +1894,16 @@ func printOrchestrateStartResult(result orchestrateStartResult) {
 }
 
 func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject := applyOrchestrationProjectOverride(deps, opts.Project)
 	defer restoreProject()
+	scope, err := resolveCLIOrchestrationScope(opts.RootIssueID)
+	if err != nil {
+		return err
+	}
+	if scope.Kind == domain.OrchestrationScopeProject {
+		return projectOrchestrateWatchCommand(deps, opts, scope)
+	}
+	opts.RootIssueID = scope.RootIssueID.String()
 
 	watchCtx, stopWatch := newWatchCommandContext("orchestrate watch")
 	defer stopWatch()
@@ -1952,6 +1969,9 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 			watchEvents = append(watchEvents, protocolToLocalMailEvent(event))
 		}
 		nextSince := nextMailboxSeq(events, lastSeq)
+		if nextSince > lastSeq {
+			checkpointRootOrchestratorCursor(watchCtx, deps, opts.RootIssueID, nextSince)
+		}
 		now := time.Now()
 		refreshReadiness, refreshReason := readinessCache.shouldRefresh(now, len(events))
 		if deps.Logger != nil {
@@ -2075,6 +2095,7 @@ func orchestrateWatchFrameFromReadiness(ready daemonclient.TaskGraphReadiness, e
 		ContainmentRisks:       orchestrateContainmentRisksFromDaemon(ready.ContainmentRisks),
 		Blocked:                ready.Blocked,
 		Events:                 events,
+		PersistenceGuard:       "Daemon-enforced: parent idle/turn completion is wake-required while direct nested roots remain and complete-check has not passed; the durable cursor is resumed after restart or session replacement.",
 	}
 }
 
@@ -2166,8 +2187,16 @@ func shouldContinueOrchestrateWatchAfterError(err error) bool {
 }
 
 func OrchestrateCompleteCheckCommand(deps *Dependencies, opts OrchestrateCompleteCheckOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject := applyOrchestrationProjectOverride(deps, opts.Project)
 	defer restoreProject()
+	scope, err := resolveCLIOrchestrationScope(opts.RootIssueID)
+	if err != nil {
+		return err
+	}
+	if scope.Kind == domain.OrchestrationScopeProject {
+		return projectOrchestrateCompleteCheckCommand(deps, opts, scope)
+	}
+	opts.RootIssueID = scope.RootIssueID.String()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
@@ -2587,11 +2616,30 @@ func buildOrchestrateWatchFrameContext(ctx context.Context, deps *Dependencies, 
 	if err != nil {
 		return orchestrateWatchFrame{}, err
 	}
+	nextSince := nextMailboxSeq(events, since)
+	if nextSince > since {
+		checkpointRootOrchestratorCursor(ctx, deps, rootIssueID, nextSince)
+	}
 	watchEvents := make([]mailEvent, 0, len(events))
 	for _, event := range events {
 		watchEvents = append(watchEvents, protocolToLocalMailEvent(event))
 	}
-	return orchestrateWatchFrameFromReadiness(ready, watchEvents, since, nextMailboxSeq(events, since)), nil
+	return orchestrateWatchFrameFromReadiness(ready, watchEvents, since, nextSince), nil
+}
+
+func checkpointRootOrchestratorCursor(ctx context.Context, deps *Dependencies, rootIssueID string, cursor int64) {
+	if cursor <= 0 || strings.TrimSpace(os.Getenv("TMUX_PANE")) == "" {
+		return
+	}
+	sessionID, err := tmuxPaneSessionName(ctx)
+	if err != nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	scope, err := domain.RootedOrchestrationScope(rootIssueID)
+	if err != nil {
+		return
+	}
+	_, _ = deps.DaemonClient.OrchestrationSnapshot(ctx, protocol.OrchestrationSnapshotRequest{Scope: scope, SessionID: sessionID, ObservedCursor: cursor})
 }
 
 func compactFrameFromStatusResult(result orchestrateStatusResult, since, nextSince int64) orchestrateCompactFrame {
@@ -2631,7 +2679,7 @@ func copyAdvice(advice map[string]interface{}) map[string]interface{} {
 }
 
 func compactFrameFromWatchFrame(frame orchestrateWatchFrame) orchestrateCompactFrame {
-	return orchestrateCompactFrame{
+	compact := orchestrateCompactFrame{
 		RootIssueID: frame.RootIssueID,
 		SinceSeq:    frame.SinceSeq,
 		NextSince:   frame.NextSince,
@@ -2654,6 +2702,10 @@ func compactFrameFromWatchFrame(frame orchestrateWatchFrame) orchestrateCompactF
 		Events:     compactEvents(frame.Events),
 		EventCount: len(frame.Events),
 	}
+	if frame.PersistenceGuard != "" {
+		compact.Advice = map[string]interface{}{"persistence_guard": frame.PersistenceGuard}
+	}
+	return compact
 }
 
 func compactActivityCounts(activeSessions []orchestrateActiveSession) map[string]int {
@@ -2858,6 +2910,7 @@ func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool, compact 
 		return nil
 	}
 	fmt.Printf("root=%s since=%d next=%d\n", frame.RootIssueID, frame.SinceSeq, frame.NextSince)
+	fmt.Printf("persistence_guard: %s\n", frame.PersistenceGuard)
 	fmt.Printf("capacity: direct_runnable=%d direct_active=%d pending_starts=%d nested_startable=%d nested_active=%d blocked_nested_roots=%d not_counting=%d total_counting=%d\n",
 		frame.Capacity.DirectRunnableCount,
 		frame.Capacity.DirectActiveCount,

@@ -65,7 +65,9 @@ Commands:
   mail <send|list|watch|validate-evidence>  Mailbox event operations for orchestrator/worker coordination
   evidence validate [--body <json>|--file <path>] [--fix] [--template] [--json]  Validate worker_evidence.v1 packets locally
   observe [--root <issue-id>] [--json]  Show artifact-backed observations for active work
-  orchestrate <status|start|group|watch|observe|prompt|message|complete-check|integrate|close-session>  Orchestration operations for parent issues
+  orchestrate <status|start|group|watch|observe|prompt|message|complete-check|integrate|close-session>  Rooted or project orchestration operations
+  orchestrator-session <start|attach|status>  Manage the singleton orchestrator session for the resolved scope
+  interaction <list|get|discuss|answer|resolve|withdraw>  Human decision requests and read-only AI discussions
   config set <key> <value> [--project-dir <dir>]  Update project config
   sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]  Refresh issue tracker state for the current project or all worktrees
   prime                Print AI session primer with current issue context
@@ -83,7 +85,9 @@ Examples:
   az session stop az-123    # Stop issue az-123's session
   az session status         # Show all active sessions
   az session status az-123  # Show status for az-123
-  az branch merge az-123    # Repair/manual merge into resolved target branch (normal close uses az issue close)
+  az branch merge --source az-123 --target az-parent  # Explicit child-to-parent repair merge
+  az branch merge --source az-parent --target az-123  # Explicit ancestor-to-descendant materialization
+  az branch merge --source az-root --target base      # Root-to-base; durable human acceptance required
   az board view list
   az board view select current
   az board view explain az-123
@@ -142,6 +146,7 @@ Examples:
   az mail list --parent az-123 --since 40 --json
   az mail watch --parent az-123 --since 41 --jsonl
   az orchestrate status --root az-123 --since 41 --json --summary
+  env -u AZEDARACH_ISSUE_ID az orchestrate status --json  # Whole-project scope
   az orchestrate prompt --root az-123 --issue az-456
   az orchestrate prompt --root az-123 --issue az-456 --coordination mailbox
   az orchestrate start --root az-123 --limit 4
@@ -150,6 +155,8 @@ Examples:
   az orchestrate integrate --issue az-456      # Inspect worker evidence / repair guidance
   az orchestrate close-session --issue az-456  # Repair-only daemon stop; normal accepted-worker cleanup uses az issue close
   az orchestrate complete-check --root az-123
+  env -u AZEDARACH_ISSUE_ID az orchestrator-session start
+  az orchestrator-session status --root az-123 --json
   az config set spec.enabled false
   az config set spec.enabled true --project-dir .
   az config set diagnostics.latencyTrace true

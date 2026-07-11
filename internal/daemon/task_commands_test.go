@@ -8390,7 +8390,7 @@ func TestTaskCompletionAdviceIncludesDomainNextSteps(t *testing.T) {
 	joined := strings.Join(advice, "\n")
 	for _, want := range []string{
 		"az orchestrate close-session --issue az-4",
-		"az session start az-5",
+		"az orchestrator-session start --root az-5",
 		"az issue close --id az-3",
 		"az orchestrate start --root az-1 --issue az-2 --json",
 	} {
@@ -8677,7 +8677,7 @@ func TestTaskGraphReadinessReportsNestedTrackerRootInsteadOfFlatteningDescendant
 	if ready.Capacity.DirectRunnableCount != 1 || ready.Capacity.NestedStartableCount != 1 || ready.Capacity.TotalCountingCapacityCount != 0 {
 		t.Fatalf("capacity = %+v, want direct runnable and nested startable outside active capacity", ready.Capacity)
 	}
-	if !strings.Contains(nested.Advice, "az session start "+trackerID) {
+	if !strings.Contains(nested.Advice, "az orchestrator-session start --root "+trackerID) {
 		t.Fatalf("nested advice = %q, want session start guidance", nested.Advice)
 	}
 	for _, observation := range ready.WorkerObservations {
@@ -8756,7 +8756,7 @@ func TestTaskGraphReadinessMarksFailedNestedRootStartAsBlockedCapacity(t *testin
 	if nested.FallbackPolicy != "keep_children_blocked_or_create_replacement_direct_work" {
 		t.Fatalf("fallback policy = %q", nested.FallbackPolicy)
 	}
-	if !strings.Contains(nested.Advice, "retry `az session start "+nestedID+"`") || !strings.Contains(nested.Advice, "replacement direct work") {
+	if !strings.Contains(nested.Advice, "retry `az orchestrator-session start --root "+nestedID+"`") || !strings.Contains(nested.Advice, "replacement direct work") {
 		t.Fatalf("advice = %q, want retry and replacement guidance", nested.Advice)
 	}
 	if ready.Capacity.BlockedNestedRootsCount != 1 || ready.Capacity.NestedStartableCount != 0 {
@@ -9833,6 +9833,103 @@ func TestTaskMergeBaseTargetDefaultUsesProjectBaseBranch(t *testing.T) {
 	}
 	if got.Branch != "main" {
 		t.Fatalf("Branch = %q, want project base branch main", got.Branch)
+	}
+}
+
+func TestDurableBaseIntegrationAcceptanceRequiresIssueScopedHumanInput(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj-base-acceptance"
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}}
+	accepted, err := d.hasDurableBaseIntegrationAcceptance(ctx, projectID, issueID)
+	if err != nil || accepted {
+		t.Fatalf("acceptance before event = %v, %v; want false, nil", accepted, err)
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type:    domain.IssueEventHumanInputProvided,
+		Payload: map[string]any{"base_integration_accepted": true},
+	}); err != nil {
+		t.Fatalf("append acceptance: %v", err)
+	}
+	accepted, err = d.hasDurableBaseIntegrationAcceptance(ctx, projectID, issueID)
+	if err != nil || !accepted {
+		t.Fatalf("acceptance after event = %v, %v; want true, nil", accepted, err)
+	}
+}
+
+func TestTaskMergeBaseTargetHandlerGatesExplicitBaseOnDurableHumanAcceptance(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-handler-base-acceptance"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
+			return "worktree " + repoDir + "\nbranch refs/heads/main\n", nil
+		}
+		return "", fmt.Errorf("unexpected git args: %v", args)
+	}}
+	d := &Daemon{
+		cfg:                       Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		issueClientsByProject:     map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject:    map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(runner, repoDir, slog.Default())},
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return d.worktreeManagerForProject(projectID) },
+		runtimeStateStore: store,
+		logger:            slog.Default(),
+		pollers:           map[string]context.CancelFunc{normalizedProjectID(projectID): func() {}},
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	request := testRequest("task.merge_base_target", map[string]any{
+		"task_id": issueID, "base_branch": "main", "require_human_acceptance": true,
+	})
+	request.Meta.ProjectID = naming.ProjectID(projectID)
+	blocked, err := d.handleTaskMergeBaseTarget(ctx, request)
+	if err != nil {
+		t.Fatalf("blocked handler error: %v", err)
+	}
+	if blocked.OK || blocked.Error == nil || blocked.Error.Code != protocol.ErrorCodeInvalidRequest || !strings.Contains(blocked.Error.Message, "without durable human acceptance") {
+		t.Fatalf("blocked response = %+v, want acceptance refusal", blocked)
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventHumanInputProvided, Payload: map[string]any{"base_integration_accepted": true},
+	}); err != nil {
+		t.Fatalf("append acceptance: %v", err)
+	}
+	allowed, err := d.handleTaskMergeBaseTarget(ctx, request)
+	if err != nil || !allowed.OK {
+		t.Fatalf("allowed response = %+v, err = %v", allowed, err)
+	}
+	var result taskMergeBaseTargetResult
+	if err := json.Unmarshal(allowed.Body, &result); err != nil {
+		t.Fatalf("decode allowed response: %v", err)
+	}
+	if result.TargetID != "base" || result.Branch != "main" {
+		t.Fatalf("allowed target = %+v, want base/main", result)
 	}
 }
 

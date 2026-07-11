@@ -45,15 +45,15 @@ func TestParseBranchAgentMergeArgsRejectsMissingProjectValue(t *testing.T) {
 }
 
 func TestParseBranchMergeArgs(t *testing.T) {
-	opts, err := parseBranchMergeArgs([]string{"az-1", "--allow-base-for-child"})
+	opts, err := parseBranchMergeArgs([]string{"--source", "az-1", "--target", "az-parent"})
 	if err != nil {
 		t.Fatalf("parseBranchMergeArgs error = %v", err)
 	}
-	if opts.IssueID != "az-1" || !opts.AllowBaseForChild {
-		t.Fatalf("opts = %+v, want issue az-1 with allow-base-for-child=true", opts)
+	if opts.IssueID != "az-1" || opts.Target != "az-parent" {
+		t.Fatalf("opts = %+v, want source az-1 and target az-parent", opts)
 	}
 
-	opts, err = parseBranchMergeArgs([]string{"--project", "azedarach", "az-1"})
+	opts, err = parseBranchMergeArgs([]string{"--project", "azedarach", "--source", "az-1", "--target", "base"})
 	if err != nil {
 		t.Fatalf("parseBranchMergeArgs project error = %v", err)
 	}
@@ -64,14 +64,22 @@ func TestParseBranchMergeArgs(t *testing.T) {
 
 func TestParseBranchMergeArgsRejectsUnknownFlag(t *testing.T) {
 	_, err := parseBranchMergeArgs([]string{"--wat"})
-	if err == nil || !strings.Contains(err.Error(), "usage: az branch merge [--project <project-id>] [issue-id]") || strings.Contains(err.Error(), "--allow-base-for-child") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az branch merge [--project <project-id>] --source <issue-id> --target base|<issue-id>") || strings.Contains(err.Error(), "--allow-base-for-child") {
 		t.Fatalf("err = %v, want merge usage error", err)
 	}
 }
 
 func TestParseBranchMergeArgsRejectsMissingProjectValue(t *testing.T) {
-	_, err := parseBranchMergeArgs([]string{"--project", "--allow-base-for-child", "az-1"})
-	if err == nil || !strings.Contains(err.Error(), "usage: az branch merge [--project <project-id>] [issue-id]") {
+	_, err := parseBranchMergeArgs([]string{"--project", "--source", "az-1", "--target", "base"})
+	if err == nil || !strings.Contains(err.Error(), "usage: az branch merge [--project <project-id>] --source <issue-id> --target base|<issue-id>") {
 		t.Fatalf("err = %v, want merge usage error", err)
+	}
+}
+
+func TestParseBranchMergeArgsRejectsAmbiguousImplicitTarget(t *testing.T) {
+	for _, args := range [][]string{{"az-source"}, {"--source", "az-source"}, {"--target", "az-target"}, {"--source", "one", "--source", "two", "--target", "target"}, {"--source", "source", "--target", "one", "--target", "two"}} {
+		if _, err := parseBranchMergeArgs(args); err == nil {
+			t.Fatalf("parseBranchMergeArgs(%v) error = nil, want explicit source/target refusal", args)
+		}
 	}
 }

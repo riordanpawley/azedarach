@@ -1259,10 +1259,11 @@ func (c *Client) HydrateRuntime(ctx context.Context, projectID string, tasks []d
 	return out, nil
 }
 
-// ListGraphReadinessWithRuntime fetches the root graph plus direct dependency
-// context needed by daemon graph-readiness checks. The read scales with the
-// requested root graph instead of all active issues in the project.
-func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, rootID string) ([]domain.Task, error) {
+// ListGraphReadinessWithRuntime is the single indexed candidate read for rooted
+// and project orchestration. A root selects its graph closure; an empty root
+// selects a bounded project candidate window. Final semantics are always
+// applied by domain.AssessOrchestrationCandidate after hydration.
+func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, rootID string, projectLimit ...int) ([]domain.Task, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return nil, err
@@ -1273,7 +1274,24 @@ func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, r
 	}
 	rootID = strings.TrimSpace(rootID)
 	if rootID == "" {
-		return []domain.Task{}, nil
+		limit := 50
+		if len(projectLimit) > 0 && projectLimit[0] > 0 {
+			limit = projectLimit[0]
+		}
+		issueIDs, err := c.projectGraphReadinessContextIDs(ctx, db, limit)
+		if err != nil {
+			return nil, c.wrapError("list-graph-readiness-with-runtime", projectID, err)
+		}
+		if len(issueIDs) == 0 {
+			return []domain.Task{}, nil
+		}
+		// Project stewardship is bounded and needs contract fields for
+		// executability assessment. Rooted graph reads remain summary-only.
+		tasks, err := c.queryTasksWithRuntimeProjection(ctx, db, projectID, true, taskDependencyLoadAll, ArchiveExclude, issueIDs...)
+		if err != nil {
+			return nil, c.wrapError("list-graph-readiness-with-runtime", projectID, err)
+		}
+		return tasks, nil
 	}
 	issueIDs, err := c.graphReadinessContextIDs(ctx, db, rootID)
 	if err != nil {
@@ -1287,6 +1305,63 @@ func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, r
 		return nil, c.wrapError("list-graph-readiness-with-runtime", rootID, err)
 	}
 	return tasks, nil
+}
+
+// CountOpenOrchestrationIssues returns the project-wide durable lifecycle count
+// used by the rootless safety threshold. It deliberately does not hydrate
+// candidates or duplicate candidate-selection semantics.
+func (c *Client) CountOpenOrchestrationIssues(ctx context.Context) (int, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return 0, err
+	}
+	var count int
+	err = db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM issues INDEXED BY idx_issues_status_deleted_priority_updated
+		WHERE archived_at IS NULL AND deleted_at IS NULL
+		  AND status IN ('open', 'in_progress', 'in_review')
+	`).Scan(&count)
+	if err != nil {
+		return 0, c.wrapError("count-open-orchestration-issues", "", err)
+	}
+	return count, nil
+}
+
+func (c *Client) projectGraphReadinessContextIDs(ctx context.Context, db *sql.DB, limit int) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		WITH candidates(id) AS (
+			SELECT id FROM issues INDEXED BY idx_issues_status_deleted_priority_updated
+			WHERE archived_at IS NULL AND deleted_at IS NULL
+			  AND status IN ('open', 'in_progress', 'in_review')
+			ORDER BY priority ASC, updated_at ASC, id ASC
+			LIMIT ?
+		), context(id) AS (
+			SELECT id FROM candidates
+			UNION SELECT closure.ancestor_id FROM candidates c
+			JOIN issue_graph_closure closure INDEXED BY idx_issue_graph_closure_descendant
+			  ON closure.descendant_id = c.id
+			WHERE closure.project_id = ? AND closure.dependency_type = ?
+			UNION SELECT dep.depends_on_id FROM candidates c
+			JOIN issue_dependencies dep INDEXED BY idx_dependencies_issue_active_type
+			  ON dep.issue_id = c.id AND dep.tombstoned_at IS NULL
+		)
+		SELECT id FROM context ORDER BY id
+	`, limit, issueGraphClosureProjectID, string(domain.DependencyParentChild))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0, limit*2)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if id = strings.TrimSpace(id); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, rows.Err()
 }
 
 // ListParentChildSubtreeWithRuntime fetches the requested issue and active

@@ -1,0 +1,32 @@
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│Waiting Human · whole issue blocked                                                                                 │
+│────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
+││ Which rollout path should we use?                                           Decision                              │
+││                                                                             ──────────────────────────────────────│
+││ Why                                                                         Issue dcj                             │
+││ The choice changes migration risk and user-visible availability.            State open                            │
+││                                                                             Age 1h2m0s                            │
+││ Context                                                                     Revision 3                            │
+││ docs/24-issue-state-model-v2-rollout.md                                     Significance material · STALE         │
+││                                                                                                                   │
+││ Options                                                                     Recommendation                        │
+││ › Gradual — Canary the change and expand after validation                   Use the gradual rollout.              │
+││   Direct — Ship to everyone in one release                                                                        │
+││                                                                             ↑/↓ choose · a answer                 │
+││                                                                             e/enter resolve · d discuss           │
+││                                                                             r recover stale · w withdraw          │
+││                                                                             esc close                             │
+││                                                                                                                   │
+││                                                                                                                   │
+││                                                                                                                   │
+││                                                                                                                   │
+││                                                                                                                   │
+││                                                                                                                   │
+││                                                                                                                   │
+││                                                                                                                   │
+││                                                                                                                   │
+││                                                                                                                   │
+││                                                                                                                   │
+││                                                                                                                   │
+││                                                                                                                   │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

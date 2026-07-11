@@ -106,19 +106,30 @@ const (
 )
 
 type orchestrationProjectOverview struct {
-	Name            string
-	Path            string
-	ProjectID       string
-	Tasks           []domain.Task
-	Observations    []domain.WorkerObservation
-	ObservationErrs []string
-	MailByTask      map[string]protocol.MailEvent
-	Err             error
-	Fallback        string
-	Revision        uint64
-	LastCheckedAt   time.Time
-	Freshness       protocol.TaskListFreshness
+	Name             string
+	Path             string
+	ProjectID        string
+	Tasks            []domain.Task
+	Observations     []domain.WorkerObservation
+	ObservationErrs  []string
+	MailByTask       map[string]protocol.MailEvent
+	Err              error
+	Fallback         string
+	Revision         uint64
+	LastCheckedAt    time.Time
+	Freshness        protocol.TaskListFreshness
+	Snapshot         *protocol.OrchestrationSnapshot
+	Session          *protocol.OrchestratorSessionResult
+	OrchestrationErr error
 }
+
+type projectOrchestratorTarget struct {
+	ProjectID   string
+	ProjectPath string
+	SocketPath  string
+}
+
+type projectOrchestratorActionRunner func(context.Context, projectOrchestratorTarget, string, protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error)
 
 type drillDownContext struct {
 	parentID   string
@@ -244,6 +255,7 @@ type Model struct {
 	orchestrationOverviewBackendErrors  int
 	orchestrationOverviewHiddenLabels   []string
 	orchestrationOverviewCursor         int
+	projectOrchestratorActionRunner     projectOrchestratorActionRunner
 	jumpMode                            *overlay.JumpMode
 	jumpTargets                         []string
 	mergePickMode                       *mergePickState
@@ -515,6 +527,9 @@ func (m Model) openCurrentTaskWorkspace() (tea.Model, tea.Cmd) {
 	}
 	if task == nil {
 		return m, nil
+	}
+	if m.taskWaitingHuman(task) {
+		return m.openWaitingHumanRequest(task.ID.String())
 	}
 	return m.openTaskWorkspaceByID(task.ID.String())
 }
@@ -1305,6 +1320,13 @@ type orchestrationOverviewLoadedMsg struct {
 	hiddenTasks    int
 	backendErrors  int
 	hiddenLabels   []string
+}
+
+type projectOrchestratorActionMsg struct {
+	projectID string
+	action    string
+	result    protocol.OrchestratorSessionResult
+	err       error
 }
 
 type hookLogLoadedMsg struct {

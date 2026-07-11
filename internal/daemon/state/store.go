@@ -19,6 +19,19 @@ var (
 // SessionState represents daemon-authoritative lifecycle state.
 type SessionState string
 
+type SessionRole string
+type SessionScopeKind string
+
+const (
+	SessionRoleWorker       SessionRole = "worker"
+	SessionRoleOrchestrator SessionRole = "orchestrator"
+	SessionRoleAdvisor      SessionRole = "advisor"
+
+	SessionScopeIssue         SessionScopeKind = "issue"
+	SessionScopeOrchestration SessionScopeKind = "orchestration"
+	SessionScopeInteraction   SessionScopeKind = "interaction"
+)
+
 const (
 	SessionStateStarting SessionState = "starting"
 	SessionStateRunning  SessionState = "running"
@@ -34,6 +47,9 @@ const (
 type Session struct {
 	ID                string
 	IssueID           string
+	Role              SessionRole
+	ScopeKind         SessionScopeKind
+	ScopeID           string
 	State             SessionState
 	ObservedState     SessionState
 	Activity          string
@@ -41,6 +57,19 @@ type Session struct {
 	TmuxAttachedCount int
 	StartedAt         *time.Time
 	UpdatedAt         time.Time
+}
+
+func NormalizeSessionMetadata(session Session) Session {
+	if session.Role == "" {
+		session.Role = SessionRoleWorker
+	}
+	if session.ScopeKind == "" {
+		session.ScopeKind = SessionScopeIssue
+	}
+	if strings.TrimSpace(session.ScopeID) == "" && session.ScopeKind == SessionScopeIssue {
+		session.ScopeID = strings.TrimSpace(session.IssueID)
+	}
+	return session
 }
 
 // Snapshot is a read model for frontend/client attach flows.
@@ -89,6 +118,7 @@ func (s *Store) ReadSnapshot(projectID string) Snapshot {
 		Sessions:  make(map[string]Session, len(ps.sessions)),
 	}
 	for id, session := range ps.sessions {
+		session = NormalizeSessionMetadata(session)
 		session.State = NormalizeSessionState(session.State)
 		session.ObservedState = NormalizeSessionState(session.ObservedState)
 		out.Sessions[id] = session
@@ -155,6 +185,9 @@ func (s *Store) upsertSession(projectID, sessionID, issueID string, state Sessio
 	next := Session{
 		ID:             sessionID,
 		IssueID:        issueID,
+		Role:           existing.Role,
+		ScopeKind:      existing.ScopeKind,
+		ScopeID:        existing.ScopeID,
 		State:          state,
 		ObservedState:  observedState,
 		Activity:       strings.TrimSpace(existing.Activity),
@@ -162,6 +195,7 @@ func (s *Store) upsertSession(projectID, sessionID, issueID string, state Sessio
 		StartedAt:      startedAt,
 		UpdatedAt:      now,
 	}
+	next = NormalizeSessionMetadata(next)
 	ps.sessions[sessionID] = next
 	return SessionEvent{
 		ProjectID: projectID,

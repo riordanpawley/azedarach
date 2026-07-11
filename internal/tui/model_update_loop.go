@@ -81,6 +81,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case overlay.SelectionMsg:
+		if msg.Key == overlay.InteractionActionKey {
+			action, ok := msg.Value.(overlay.InteractionAction)
+			if !ok || m.daemonClient == nil {
+				return m, nil
+			}
+			m.beginMutationFeedback("Updating human decision request")
+			return m, m.interactionActionCmd(action)
+		}
 		if msg.Key == overlay.BoardViewSelectKey {
 			m.overlayStack.Pop()
 			selected, _ := msg.Value.(overlay.BoardViewSelectMsg)
@@ -190,6 +198,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editor.MarkSortExplicit()
 		}
 		return m.handleSelection(msg)
+
+	case interactionLoadedMsg:
+		if msg.err != nil {
+			m.addToast(Toast{Level: ToastWarning, Message: msg.err.Error(), Expires: time.Now().Add(4 * time.Second)})
+			return m, nil
+		}
+		if !msg.response.Request.Unresolved() {
+			if _, ok := m.overlayStack.Current().(*overlay.InteractionOverlay); ok {
+				m.overlayStack.Pop()
+			}
+			m.addToast(Toast{Level: ToastInfo, Message: "Human decision was already resolved", Expires: time.Now().Add(3 * time.Second)})
+			return m, m.scheduleIssuesRefreshAfterIssueReconcileCmd([]string{msg.response.Request.IssueID})
+		}
+		return m, m.openOverlay(overlay.NewInteractionOverlay(msg.response.Request, msg.response.Age))
+
+	case interactionMutatedMsg:
+		if msg.err != nil {
+			if interactionConflict(msg.err) {
+				m.addToast(Toast{Level: ToastWarning, Message: "Decision changed; reloading current revision", Expires: time.Now().Add(4 * time.Second)})
+				if current, ok := m.overlayStack.Current().(*overlay.InteractionOverlay); ok {
+					return m, m.reloadInteractionCmd(current.RequestID())
+				}
+			}
+			m.addToast(Toast{Level: ToastError, Message: msg.err.Error(), Expires: time.Now().Add(4 * time.Second)})
+			return m, nil
+		}
+		m.overlayStack.Pop()
+		if msg.response.Request.Unresolved() {
+			cmds := []tea.Cmd{m.openOverlay(overlay.NewInteractionOverlay(msg.response.Request, msg.response.Age)), m.scheduleIssuesRefreshAfterIssueReconcileCmd([]string{msg.response.Request.IssueID})}
+			if msg.action == "discuss" && strings.TrimSpace(msg.response.Request.SessionID) != "" {
+				cmds = append(cmds, m.attachAdvisorSessionCmd(msg.response.Request.SessionID))
+			}
+			return m, tea.Batch(cmds...)
+		}
+		m.addToast(Toast{Level: ToastInfo, Message: "Human decision resolved", Expires: time.Now().Add(3 * time.Second)})
+		return m, m.scheduleIssuesRefreshAfterIssueReconcileCmd([]string{msg.response.Request.IssueID})
+
+	case advisorSessionAttachedMsg:
+		if msg.err != nil {
+			m.addToast(Toast{Level: ToastWarning, Message: msg.err.Error(), Expires: time.Now().Add(4 * time.Second)})
+		}
+		return m, nil
 
 	case editTaskDetailLoadedMsg:
 		if msg.err != nil {
@@ -470,6 +520,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.orchestrationOverviewCursor = clampInt(m.orchestrationOverviewCursor, 0, max(0, orchestrationOverviewTaskCount(msg.projects)-1))
 		m.orchestrationOverviewLoadedAt = time.Now()
 		return m, nil
+
+	case projectOrchestratorActionMsg:
+		if msg.err != nil {
+			m.addToast(Toast{Level: ToastError, Message: fmt.Sprintf("Could not %s project orchestrator: %v", msg.action, msg.err), Expires: time.Now().Add(6 * time.Second)})
+			return m, nil
+		}
+		for i := range m.orchestrationOverview {
+			if m.orchestrationOverview[i].ProjectID == msg.projectID {
+				result := msg.result
+				m.orchestrationOverview[i].Session = &result
+				break
+			}
+		}
+		m.addToast(Toast{Level: ToastSuccess, Message: fmt.Sprintf("Project orchestrator %s: %s", msg.action, msg.result.Disposition), Expires: time.Now().Add(3 * time.Second)})
+		return m, m.loadOrchestrationOverviewCmd()
 
 	case issuesErrorMsg:
 		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
@@ -2064,6 +2129,17 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		return daemonStreamEventResult{cmd: cmd}
 	}
 	m.applyOperationProgressEvent(evt)
+	if evt.Event == protocol.EventOrchestrationLoopUpdated {
+		switch cursor.Decide(evt) {
+		case protocol.StreamProjectionDecisionIgnore:
+			return daemonStreamEventResult{}
+		case protocol.StreamProjectionDecisionResync:
+			m.clearDaemonEventStream()
+			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
+		}
+		m.daemonRevision = cursor.Advance(evt).Revision
+		return daemonStreamEventResult{cmd: m.loadOrchestrationOverviewIfVisibleCmd()}
+	}
 	if isNoticeEvent(evt.Event) {
 		switch cursor.Decide(evt) {
 		case protocol.StreamProjectionDecisionIgnore:
