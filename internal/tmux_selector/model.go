@@ -1177,6 +1177,12 @@ func prioritizeAzSessionFirst(entries []InventoryEntry) []InventoryEntry {
 	if azIndex <= 0 {
 		return entries
 	}
+	azAttention := inventoryHumanAttentionRank(entries[azIndex])
+	for _, entry := range entries[:azIndex] {
+		if inventoryHumanAttentionRank(entry) > azAttention {
+			return entries
+		}
+	}
 	reordered := make([]InventoryEntry, len(entries))
 	reordered[0] = entries[azIndex]
 	copy(reordered[1:], entries[:azIndex])

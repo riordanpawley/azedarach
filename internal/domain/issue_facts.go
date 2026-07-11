@@ -61,6 +61,20 @@ type IssueFacts struct {
 	Reasons            []IssueFactReason       `json:"reasons,omitempty" msgpack:"reasons,omitempty"`
 }
 
+// HumanAttentionRank orders issues that need a person's response ahead of
+// unattended work. Waiting-human work is most urgent, followed by work that is
+// visibly ready for review. A zero rank means no human action is currently due.
+func HumanAttentionRank(task Task) int {
+	facts := task.IssueFacts()
+	if facts.WaitingHuman {
+		return 2
+	}
+	if facts.ReviewReadyVisible {
+		return 1
+	}
+	return 0
+}
+
 func (f IssueFacts) IsZero() bool {
 	return f.LifecycleState == "" &&
 		f.ReviewState == "" &&

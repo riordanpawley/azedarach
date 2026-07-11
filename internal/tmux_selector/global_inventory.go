@@ -321,6 +321,11 @@ func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map
 
 func (l *GlobalInventoryLoader) snapshotFromEntries(entries []InventoryEntry, enriching bool) Snapshot {
 	sort.SliceStable(entries, func(i, j int) bool {
+		leftAttention := inventoryHumanAttentionRank(entries[i])
+		rightAttention := inventoryHumanAttentionRank(entries[j])
+		if leftAttention != rightAttention {
+			return leftAttention > rightAttention
+		}
 		leftCurrent := entries[i].TmuxAttached || entries[i].TmuxAttachedCount > 0
 		rightCurrent := entries[j].TmuxAttached || entries[j].TmuxAttachedCount > 0
 		if leftCurrent != rightCurrent {
@@ -374,6 +379,16 @@ func (l *GlobalInventoryLoader) snapshotFromEntries(entries []InventoryEntry, en
 		Freshness:     "fresh",
 		Enriching:     enriching,
 	}
+}
+
+func inventoryHumanAttentionRank(entry InventoryEntry) int {
+	// Live tmux discovery uses a provisional waiting state until daemon
+	// enrichment arrives. Only durable task metadata is authoritative enough to
+	// promote a selector entry as requiring human attention.
+	if entry.Task.ID.IsZero() {
+		return 0
+	}
+	return domain.HumanAttentionRank(entry.Task)
 }
 
 func (l *GlobalInventoryLoader) currentSession(ctx context.Context) string {

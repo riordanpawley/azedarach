@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -560,6 +561,9 @@ func (m Model) applyBoardColumnSort(columns []board.Column) []board.Column {
 		if sortState != nil {
 			columns[i].Tasks = sortState.ApplyInPlace(columns[i].Tasks)
 		}
+		sort.SliceStable(columns[i].Tasks, func(left, right int) bool {
+			return domain.HumanAttentionRank(columns[i].Tasks[left]) > domain.HumanAttentionRank(columns[i].Tasks[right])
+		})
 	}
 	return columns
 }

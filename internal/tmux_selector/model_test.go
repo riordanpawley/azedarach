@@ -1471,6 +1471,24 @@ func TestModelDefaultsCursorToCurrentTmuxSession(t *testing.T) {
 	}
 }
 
+func TestNormalizeSnapshotKeepsHumanAttentionAheadOfFullAzSession(t *testing.T) {
+	waiting := InventoryEntry{
+		SessionID: "az-waiting",
+		Task: domain.Task{
+			ID:      "waiting",
+			Status:  domain.StatusInProgress,
+			Session: &domain.Session{Activity: "waiting-for-human"},
+		},
+	}
+	m := New(fakeSnapshotLoader{})
+	m.snapshot.Entries = []InventoryEntry{waiting, {SessionID: defaultFullAzSession}}
+
+	m.normalizeSnapshot()
+	if got := m.snapshot.Entries[0].SessionID; got != waiting.SessionID {
+		t.Fatalf("first session = %q, want human-attention session %q", got, waiting.SessionID)
+	}
+}
+
 func TestModelDefaultsCursorToAttachedTmuxSessionWhenCurrentUnknown(t *testing.T) {
 	entries := []InventoryEntry{
 		{SessionID: "az", IssueID: "", TaskTitle: "Full az", HasTmuxSession: true},

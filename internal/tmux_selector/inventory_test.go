@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,22 @@ type fakeSessionInventory struct {
 	infos   []tmux.SessionInfo
 	err     error
 	current string
+}
+
+func TestSnapshotFromEntriesPrioritizesDurableHumanAttention(t *testing.T) {
+	loader := NewGlobalInventoryLoader(fakeSessionInventory{}, nil)
+	entries := []InventoryEntry{
+		{SessionID: "attached", TmuxAttached: true, Task: domain.Task{ID: "attached", Status: domain.StatusInProgress}},
+		{SessionID: "review", Task: domain.Task{ID: "review", Status: domain.StatusInReview}},
+		{SessionID: "waiting", Task: domain.Task{ID: "waiting", Status: domain.StatusInProgress, Session: &domain.Session{Activity: "waiting-for-human"}}},
+	}
+
+	snapshot := loader.snapshotFromEntries(entries, false)
+	got := []string{snapshot.Entries[0].SessionID, snapshot.Entries[1].SessionID, snapshot.Entries[2].SessionID}
+	want := []string{"waiting", "review", "attached"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("session order = %v, want %v", got, want)
+	}
 }
 
 func (f fakeSessionInventory) ListSessionInfos(context.Context) ([]tmux.SessionInfo, error) {

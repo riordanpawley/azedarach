@@ -82,6 +82,25 @@ func TestIssueFactsDeriveReviewReadyVisibilityAndReasons(t *testing.T) {
 	}
 }
 
+func TestHumanAttentionRank(t *testing.T) {
+	tests := []struct {
+		name string
+		task Task
+		want int
+	}{
+		{name: "ordinary work", task: Task{Status: StatusInProgress}, want: 0},
+		{name: "review ready", task: Task{Status: StatusInReview}, want: 1},
+		{name: "waiting human", task: Task{Status: StatusInProgress, Session: &Session{Activity: "waiting-for-human"}}, want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HumanAttentionRank(tt.task); got != tt.want {
+				t.Fatalf("HumanAttentionRank() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIssueFactsExposeClosedArchiveTombstoneAndOperationBlockers(t *testing.T) {
 	closed := mustIssueState(t, IssueStateParts{
 		Workflow:     IssueWorkflowClosed,

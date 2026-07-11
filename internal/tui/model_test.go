@@ -4702,6 +4702,20 @@ func TestModeStrings(t *testing.T) {
 	}
 }
 
+func TestBoardColumnsPrioritizeHumanAttentionBeforeConfiguredSort(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "ordinary", Status: domain.StatusInProgress, Priority: domain.P0, GitAdditions: 100},
+		{ID: "waiting", Status: domain.StatusInProgress, Priority: domain.P4, Session: &domain.Session{Activity: "waiting-for-human"}},
+	}
+
+	columns := m.buildColumns()
+	active := columns[domain.StatusInProgress.Column()].Tasks
+	if len(active) != 2 || active[0].ID.String() != "waiting" || active[1].ID.String() != "ordinary" {
+		t.Fatalf("active tasks = %+v, want waiting-human task before git-diff order", active)
+	}
+}
+
 func TestIssuesLoadedReconcilesSelection(t *testing.T) {
 	m := newTestModel()
 	m.editor.Select("az-1")
