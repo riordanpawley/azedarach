@@ -41,7 +41,10 @@ func TestStatusBar_RenderNormalMode(t *testing.T) {
 	if !strings.Contains(result, "Enter: drill") {
 		t.Errorf("Expected status bar to contain drill hint, got: %s", result)
 	}
-	if !strings.Contains(result, "Tab: view") {
+	if !strings.Contains(result, "O: orchestrator") {
+		t.Errorf("Expected status bar to contain orchestrator hint, got: %s", result)
+	}
+	if !strings.Contains(result, "Tab") {
 		t.Errorf("Expected status bar to contain view hint, got: %s", result)
 	}
 }
@@ -368,7 +371,7 @@ func TestGetHints_AllModes(t *testing.T) {
 		mode     types.Mode
 		expected string
 	}{
-		{types.ModeNormal, "?: help  Space: task workspace  g: goto  /: search  f: filter  t: session tree  ,: sort  v: select  Enter: drill  a: attach  c: create  s: settings  r: refresh  n: recover  Q: ops  B: board view  G: git  Tab: view  p: pull base  q: quit"},
+		{types.ModeNormal, "?: help  O: orchestrator  Space: task workspace  g: goto  /: search  f: filter  t: session tree  ,: sort  v: select  Enter: drill  a: attach  c: create  s: settings  r: refresh  n: recover  Q: ops  B: board view  G: git  Tab: view  p: pull base  q: quit"},
 		{types.ModeSelect, "a/5: toggle  A: column  %: all  *: invert  x: clear  Enter: drill  Space: bulk  v/Esc: exit"},
 		{types.ModeSearch, "Type: search  Enter: confirm  Esc: cancel"},
 		{types.ModeGoto, "g g: top  g e: bottom  g h: first col  g l: last col  g w: labels  g p: projects  g s: spec  Esc: cancel"},

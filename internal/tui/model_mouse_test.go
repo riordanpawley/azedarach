@@ -5,6 +5,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 )
 
@@ -194,13 +195,13 @@ func TestHorizontalMouseWheelMovesAcrossBoardColumns(t *testing.T) {
 	}
 }
 
-func TestMousePressFocusesCompactRow(t *testing.T) {
+func TestMousePressFocusesTreeRow(t *testing.T) {
 	m := newTestModel()
-	m.viewMode = ViewModeCompact
+	m.boardView = domain.TreeBoardView()
 
-	rendered := m.compactRenderedTasks()
+	rendered := m.treeRenderedTasks()
 	if len(rendered) == 0 {
-		t.Fatal("expected compact tasks")
+		t.Fatal("expected tree tasks")
 	}
 
 	updatedAny, cmd := m.Update(tea.MouseMsg{
@@ -220,13 +221,13 @@ func TestMousePressFocusesCompactRow(t *testing.T) {
 	}
 }
 
-func TestMouseDragScrollsCompactList(t *testing.T) {
+func TestMouseDragScrollsTreeList(t *testing.T) {
 	m := newTestModel()
-	m.viewMode = ViewModeCompact
+	m.boardView = domain.TreeBoardView()
 
-	rendered := m.compactRenderedTasks()
+	rendered := m.treeRenderedTasks()
 	if len(rendered) < 2 {
-		t.Fatal("expected at least two compact tasks")
+		t.Fatal("expected at least two tree tasks")
 	}
 
 	pressedAny, _ := m.Update(tea.MouseMsg{
@@ -253,13 +254,13 @@ func TestMouseDragScrollsCompactList(t *testing.T) {
 	}
 }
 
-func TestRightMousePressAttachesCompactRow(t *testing.T) {
+func TestRightMousePressAttachesTreeRow(t *testing.T) {
 	m := newTestModel()
-	m.viewMode = ViewModeCompact
+	m.boardView = domain.TreeBoardView()
 
-	rendered := m.compactRenderedTasks()
+	rendered := m.treeRenderedTasks()
 	if len(rendered) == 0 {
-		t.Fatal("expected compact tasks")
+		t.Fatal("expected tree tasks")
 	}
 
 	updatedAny, cmd := m.Update(tea.MouseMsg{
@@ -285,17 +286,17 @@ func TestRightMousePressAttachesCompactRow(t *testing.T) {
 	}
 }
 
-func TestDoubleTapAttachesCompactRow(t *testing.T) {
+func TestDoubleTapAttachesTreeRow(t *testing.T) {
 	now := time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC)
 	mouseNow = func() time.Time { return now }
 	t.Cleanup(func() { mouseNow = time.Now })
 
 	m := newTestModel()
-	m.viewMode = ViewModeCompact
+	m.boardView = domain.TreeBoardView()
 
-	rendered := m.compactRenderedTasks()
+	rendered := m.treeRenderedTasks()
 	if len(rendered) == 0 {
-		t.Fatal("expected compact tasks")
+		t.Fatal("expected tree tasks")
 	}
 	msg := tea.MouseMsg{
 		X:      2,

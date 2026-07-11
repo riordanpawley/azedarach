@@ -17,7 +17,7 @@ const (
 	CommandBoardViewSave       = "board.view.save"
 	CommandBoardViewDelete     = "board.view.delete"
 	CommandBoardViewSelect     = "board.view.select"
-	BoardSnapshotSchemaVersion = 4
+	BoardSnapshotSchemaVersion = 5
 )
 
 // BoardSnapshotPayload is the daemon/client contract for board view snapshots.
@@ -48,9 +48,10 @@ type BoardViewProjectedGroup struct {
 }
 
 type BoardViewProjectedItem struct {
-	Task    BoardTaskSummary     `json:"task" msgpack:"task"`
-	GroupID domain.BoardColumnID `json:"group_id" msgpack:"group_id"`
-	Depth   int                  `json:"depth,omitempty" msgpack:"depth,omitempty"`
+	Task               BoardTaskSummary              `json:"task" msgpack:"task"`
+	GroupID            domain.BoardColumnID          `json:"group_id" msgpack:"group_id"`
+	Depth              int                           `json:"depth,omitempty" msgpack:"depth,omitempty"`
+	OrchestrationState domain.OrchestrationViewState `json:"orchestration_state,omitempty" msgpack:"orchestration_state,omitempty"`
 }
 
 func BoardViewProjectionFromDomain(projection domain.BoardViewProjection) BoardViewProjection {
@@ -62,7 +63,7 @@ func BoardViewProjectionFromDomain(projection domain.BoardViewProjection) BoardV
 		out.Groups = append(out.Groups, BoardViewProjectedGroup{GroupID: group.GroupID, TaskIDs: append([]naming.IssueID(nil), group.TaskIDs...)})
 	}
 	for _, item := range projection.Items {
-		out.Items = append(out.Items, BoardViewProjectedItem{Task: BoardTaskSummaryFromDomain(item.Task), GroupID: item.GroupID, Depth: item.Depth})
+		out.Items = append(out.Items, BoardViewProjectedItem{Task: BoardTaskSummaryFromDomain(item.Task), GroupID: item.GroupID, Depth: item.Depth, OrchestrationState: item.OrchestrationState})
 	}
 	return out
 }

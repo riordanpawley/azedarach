@@ -956,7 +956,12 @@ func boardSnapshotProjectionToDomain(payload protocol.BoardSnapshotPayload) doma
 		projection.Groups = append(projection.Groups, domain.BoardViewProjectedGroup{GroupID: group.GroupID, TaskIDs: append([]naming.IssueID(nil), group.TaskIDs...)})
 	}
 	for _, item := range payload.Projection.Items {
-		projection.Items = append(projection.Items, domain.BoardViewProjectedItem{Task: item.Task.ToDomainTask(), GroupID: item.GroupID, Depth: item.Depth})
+		projection.Items = append(projection.Items, domain.BoardViewProjectedItem{
+			Task:               item.Task.ToDomainTask(),
+			GroupID:            item.GroupID,
+			Depth:              item.Depth,
+			OrchestrationState: item.OrchestrationState,
+		})
 	}
 	return projection
 }

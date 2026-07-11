@@ -29,6 +29,8 @@ const (
 	BoardViewPlanningID      BoardViewID = "planning"
 	BoardViewOrchestrationID BoardViewID = "orchestration"
 	BoardViewCloseoutID      BoardViewID = "closeout"
+	BoardViewGridID          BoardViewID = "grid"
+	BoardViewTreeID          BoardViewID = "tree"
 	// Legacy IDs remain exported so callers can recognize pre-catalog selections.
 	BoardViewCurrentID  BoardViewID = "current"
 	BoardViewActivityID BoardViewID = "activity"
@@ -150,9 +152,41 @@ type BoardViewProjectedGroup struct {
 }
 
 type BoardViewProjectedItem struct {
-	Task    Task          `json:"task"`
-	GroupID BoardColumnID `json:"group_id"`
-	Depth   int           `json:"depth,omitempty"`
+	Task               Task                   `json:"task"`
+	GroupID            BoardColumnID          `json:"group_id"`
+	Depth              int                    `json:"depth,omitempty"`
+	OrchestrationState OrchestrationViewState `json:"orchestration_state,omitempty"`
+}
+
+// OrchestrationViewState exposes daemon-derived orchestration semantics to all
+// view renderers without requiring them to recreate candidate policy.
+type OrchestrationViewState string
+
+const (
+	OrchestrationViewReady        OrchestrationViewState = "ready"
+	OrchestrationViewActive       OrchestrationViewState = "active"
+	OrchestrationViewReview       OrchestrationViewState = "review"
+	OrchestrationViewWaitingHuman OrchestrationViewState = "waiting_human"
+	OrchestrationViewOwned        OrchestrationViewState = "owned"
+	OrchestrationViewBacklog      OrchestrationViewState = "backlog"
+)
+
+func TaskOrchestrationViewState(task Task) OrchestrationViewState {
+	facts := task.IssueFacts()
+	switch {
+	case task.Ownership != nil && strings.TrimSpace(task.Ownership.OwnerID) != "":
+		return OrchestrationViewOwned
+	case facts.WaitingHuman:
+		return OrchestrationViewWaitingHuman
+	case facts.ReviewReadyVisible || facts.ReviewState == IssueReviewRequested:
+		return OrchestrationViewReview
+	case facts.HasActiveSession || facts.LifecycleState == IssueWorkflowActive:
+		return OrchestrationViewActive
+	case facts.LifecycleState == IssueWorkflowBacklog:
+		return OrchestrationViewBacklog
+	default:
+		return OrchestrationViewReady
+	}
 }
 
 type BoardPlacement struct {
@@ -230,8 +264,22 @@ func BuiltInBoardViewSet() BoardViewSet {
 			PlanningBoardView(),
 			OrchestrationBoardView(),
 			CloseoutBoardView(),
+			GridBoardView(),
+			TreeBoardView(),
 		},
 	}
+}
+
+func GridBoardView() BoardView {
+	view := DefaultBoardView()
+	view.ID, view.Title, view.Layout = BoardViewGridID, "Grid", BoardViewLayoutHorizontalGrid
+	return view
+}
+
+func TreeBoardView() BoardView {
+	view := DefaultBoardView()
+	view.ID, view.Title, view.Layout = BoardViewTreeID, "Tree", BoardViewLayoutTreeList
+	return view
 }
 
 func BuiltInBoardViews() []BoardView {
@@ -469,7 +517,12 @@ func ProjectTasksByBoardView(view BoardView, tasks []Task) (BoardViewProjection,
 	}
 	items := make([]BoardViewProjectedItem, 0, len(ordered))
 	for _, task := range ordered {
-		items = append(items, BoardViewProjectedItem{Task: task, GroupID: groupByTask[task.ID.String()], Depth: depths[task.ID.String()]})
+		items = append(items, BoardViewProjectedItem{
+			Task:               task,
+			GroupID:            groupByTask[task.ID.String()],
+			Depth:              depths[task.ID.String()],
+			OrchestrationState: TaskOrchestrationViewState(task),
+		})
 	}
 	knownTaskIDs := make([]naming.IssueID, 0, len(tasks))
 	for _, task := range tasks {
@@ -1028,6 +1081,21 @@ func NormalizeBoardViewID(value string) string {
 		return string(BoardViewOrchestrationID)
 	}
 	return value
+}
+
+// BoardViewIDFromLegacyUIMode maps retired surface-local modes onto saved
+// views. It is a one-way persistence migration, not a rendering mode adapter.
+func BoardViewIDFromLegacyUIMode(value string) (string, bool) {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "board":
+		return string(BoardViewDefaultID), true
+	case "compact":
+		return string(BoardViewTreeID), true
+	case "overview", "orchestration":
+		return string(BoardViewOrchestrationID), true
+	default:
+		return "", false
+	}
 }
 
 func normalizeBoardPredicateValues[T ~string](values []T) []T {

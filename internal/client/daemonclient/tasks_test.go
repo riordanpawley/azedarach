@@ -128,7 +128,7 @@ func testBoardProjection(tasks []domain.Task) domain.BoardViewProjection {
 	group := domain.BoardViewProjectedGroup{GroupID: groupID}
 	for _, task := range tasks {
 		projection.KnownTaskIDs = append(projection.KnownTaskIDs, task.ID)
-		projection.Items = append(projection.Items, domain.BoardViewProjectedItem{Task: task, GroupID: groupID})
+		projection.Items = append(projection.Items, domain.BoardViewProjectedItem{Task: task, GroupID: groupID, OrchestrationState: domain.TaskOrchestrationViewState(task)})
 		group.TaskIDs = append(group.TaskIDs, task.ID)
 	}
 	projection.Groups = []domain.BoardViewProjectedGroup{group}
@@ -449,6 +449,9 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 		if got, want := task.State.Review(), domain.IssueReviewRequested; got != want {
 			t.Fatalf("task issue review state = %s, want %s", got, want)
+		}
+		if got := snapshot.Projection.Items[0].OrchestrationState; got != domain.OrchestrationViewReview {
+			t.Fatalf("orchestration state = %q, want %q", got, domain.OrchestrationViewReview)
 		}
 		if task.Description != "" || task.Notes != "" || task.Design != "" || task.Acceptance != "" {
 			t.Fatalf("board snapshot decoded detail fields: description=%q notes=%q design=%q acceptance=%q", task.Description, task.Notes, task.Design, task.Acceptance)

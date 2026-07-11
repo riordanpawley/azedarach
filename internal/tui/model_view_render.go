@@ -35,11 +35,7 @@ func (m Model) View() string {
 	contentHeight := board.BoardContentHeight(m.height)
 	mainView := ""
 	if currentOverlay == nil || overlayUsesFullScreen(currentOverlay) {
-		if m.viewMode == ViewModeCompact {
-			mainView = m.renderCompactView()
-		} else if m.viewMode == ViewModeOverview {
-			mainView = m.renderOrchestrationOverview()
-		} else if m.boardView.Normalized().Layout == domain.BoardViewLayoutTreeList {
+		if m.boardView.Normalized().Layout == domain.BoardViewLayoutTreeList {
 			mainView = m.renderConfiguredListView()
 		} else if m.boardView.Normalized().Layout == domain.BoardViewLayoutHorizontalGrid {
 			mainView = m.renderConfiguredHorizontalGrid()
@@ -50,7 +46,7 @@ func (m Model) View() string {
 		mainView = m.renderModalBackdrop(contentHeight)
 	}
 
-	// Clamp board/compact content to the space above the footer to keep
+	// Clamp board/tree content to the space above the footer to keep
 	// column headers and card rows stable even when internal render paths
 	// overproduce lines (for example via wrapped content or spacing styles).
 	mainView = lipgloss.NewStyle().
@@ -64,11 +60,12 @@ func (m Model) View() string {
 	sb.SetFilterSummary(m.filterSummary())
 	sb.SetSortSummary(m.sortSummary())
 	sb.SetAlertIndicator(m.alertIndicator())
+	suffix := m.orchestratorChromeStatus()
 	if m.boardRefreshing {
-		sb.SetModeSuffix(m.spinner.View())
+		suffix = strings.TrimSpace(suffix + " " + m.spinner.View())
 	}
-	if currentOverlay == nil && m.viewMode == ViewModeOverview {
-		sb.SetHintBindings(orchestrationOverviewStatusBindings())
+	if suffix != "" {
+		sb.SetModeSuffix(suffix)
 	}
 	if current := currentOverlay; current != nil {
 		bindings := []keybinds.Binding(nil)
@@ -200,20 +197,6 @@ func horizontalGridGeometry(width int) (cardWidth, columns int) {
 	}
 	columns = max(1, width/cardWidth)
 	return cardWidth, columns
-}
-
-func orchestrationOverviewStatusBindings() []keybinds.Binding {
-	return []keybinds.Binding{
-		{Key: "↑/↓ j/k", Description: "row"},
-		{Key: "←/→ h/l", Description: "project"},
-		{Key: "Home/End g/G", Description: "top/end"},
-		{Key: "Enter", Description: "open"},
-		{Key: "o/A", Description: "start/attach orchestrator"},
-		{Key: "r", Description: "refresh status"},
-		{Key: "Tab", Description: "switch view"},
-		{Key: "/", Description: "search"},
-		{Key: "f", Description: "filter"},
-	}
 }
 
 func (m Model) layerNotificationStack(contentView string, width, height int) string {
@@ -749,8 +732,8 @@ func taskIDsWithSessionInTree(tasks []domain.Task) map[string]bool {
 }
 
 func (m Model) runtimeSignalRefreshTasks() []domain.Task {
-	if m.viewMode == ViewModeCompact {
-		return m.compactRenderedTasks()
+	if m.boardView.Normalized().Layout == domain.BoardViewLayoutTreeList {
+		return m.treeRenderedTasks()
 	}
 	return m.boardRenderedTasks()
 }
@@ -813,24 +796,12 @@ func (m Model) jumpLabelsByTask() map[string]string {
 	return labels
 }
 
-func (m Model) compactRenderedTasks() []domain.Task {
-	filtered := m.boardVisibleTasks(m.tasks)
-	if sortState := m.editor.GetSort(); sortState != nil {
-		filtered = sortState.ApplyInPlace(filtered)
-	}
-	if len(filtered) == 0 {
+func (m Model) treeRenderedTasks() []domain.Task {
+	ordered, _ := m.configuredListTasks()
+	if len(ordered) == 0 {
 		return nil
 	}
-
-	columns := m.buildColumns()
-	pos := m.nav.GetPosition(columns)
-	cursor := m.getFlatIndexFromPosition(pos, columns)
-	if cursor < 0 {
-		cursor = 0
-	}
-	if cursor >= len(filtered) {
-		cursor = len(filtered) - 1
-	}
+	cursor := m.treeCursorIndex(ordered)
 
 	visibleRows := board.BoardContentHeight(m.height) - 2
 	if visibleRows < 1 {
@@ -841,7 +812,7 @@ func (m Model) compactRenderedTasks() []domain.Task {
 	if cursor >= visibleRows {
 		scrollOffset = cursor - visibleRows + 1
 	}
-	maxOffset := len(filtered) - visibleRows
+	maxOffset := len(ordered) - visibleRows
 	if maxOffset < 0 {
 		maxOffset = 0
 	}
@@ -850,10 +821,10 @@ func (m Model) compactRenderedTasks() []domain.Task {
 	}
 
 	end := scrollOffset + visibleRows
-	if end > len(filtered) {
-		end = len(filtered)
+	if end > len(ordered) {
+		end = len(ordered)
 	}
-	return filtered[scrollOffset:end]
+	return ordered[scrollOffset:end]
 }
 
 func isChildOfParent(task domain.Task, parentID string) bool {
@@ -1150,28 +1121,16 @@ func buildActiveDescendantSessionByTask(tasks []domain.Task) map[string]bool {
 	return activeAncestorSessionByTask
 }
 
-// renderCompactView renders the compact list view
-func (m Model) renderCompactView() string {
-	// Get all filtered and sorted tasks
-	filteredTasks := m.boardVisibleTasks(m.tasks)
-	sortedTasks := filteredTasks
-	if sortState := m.editor.GetSort(); sortState != nil {
-		sortedTasks = sortState.ApplyInPlace(sortedTasks)
-	}
-
-	// Create compact view
-	compactView := compact.NewCompactView(sortedTasks, m.width, board.BoardContentHeight(m.height))
-
-	compactView.SetCursor(m.compactCursorIndex(sortedTasks))
-
-	// Set selected tasks
+func (m Model) renderConfiguredListView() string {
+	ordered, projectedItems := m.configuredListTasks()
+	ordered = decorateConfiguredTreeTasks(ordered, projectedItems)
+	compactView := compact.NewCompactView(ordered, m.width, board.BoardContentHeight(m.height))
+	compactView.SetCursor(m.treeCursorIndex(ordered))
 	compactView.SetSelected(m.editor.GetSelectedTasks())
-
-	rendered := compactView.Render()
-	return m.overlayFreshnessIndicator(rendered, board.BoardContentHeight(m.height))
+	return m.overlayFreshnessIndicator(compactView.Render(), board.BoardContentHeight(m.height))
 }
 
-func (m Model) renderConfiguredListView() string {
+func (m Model) configuredListTasks() ([]domain.Task, []domain.BoardViewProjectedItem) {
 	visible := m.boardVisibleTasks(m.tasks)
 	visibleByID := make(map[string]domain.Task, len(visible))
 	for _, task := range visible {
@@ -1195,11 +1154,7 @@ func (m Model) renderConfiguredListView() string {
 	if sortState := m.editor.GetSort(); sortState != nil && m.editor.IsSortExplicit() {
 		ordered = sortState.ApplyInPlace(ordered)
 	}
-	ordered = decorateConfiguredTreeTasks(ordered, projectedItems)
-	compactView := compact.NewCompactView(ordered, m.width, board.BoardContentHeight(m.height))
-	compactView.SetCursor(m.compactCursorIndex(ordered))
-	compactView.SetSelected(m.editor.GetSelectedTasks())
-	return m.overlayFreshnessIndicator(compactView.Render(), board.BoardContentHeight(m.height))
+	return ordered, projectedItems
 }
 
 func decorateConfiguredTreeTasks(tasks []domain.Task, items []domain.BoardViewProjectedItem) []domain.Task {
@@ -1217,7 +1172,7 @@ func decorateConfiguredTreeTasks(tasks []domain.Task, items []domain.BoardViewPr
 	return result
 }
 
-func (m Model) compactCursorIndex(tasks []domain.Task) int {
+func (m Model) treeCursorIndex(tasks []domain.Task) int {
 	if len(tasks) == 0 || m.nav == nil || m.nav.GetCursor() == nil {
 		return 0
 	}

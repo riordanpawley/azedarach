@@ -11272,7 +11272,6 @@ func TestDaemonEventRevisionReducer(t *testing.T) {
 
 func TestOrchestrationLoopEventRefreshesVisibleOverview(t *testing.T) {
 	m := newTestModel()
-	m.viewMode = ViewModeOverview
 	m.daemonRevision = 4
 
 	result := m.applyDaemonStreamEvent(protocol.EventEnvelope{
@@ -11287,14 +11286,13 @@ func TestOrchestrationLoopEventRefreshesVisibleOverview(t *testing.T) {
 		t.Fatalf("daemon revision=%d, want 5", m.daemonRevision)
 	}
 
-	m.viewMode = ViewModeBoard
 	result = m.applyDaemonStreamEvent(protocol.EventEnvelope{
 		ProjectID: naming.ProjectID(m.daemonProjectID()),
 		Revision:  6,
 		Event:     protocol.EventOrchestrationLoopUpdated,
 	}, false)
-	if result.cmd != nil {
-		t.Fatalf("hidden overview refresh command=%T, want nil", result.cmd)
+	if result.cmd == nil {
+		t.Fatal("orchestration event did not refresh current-project snapshot")
 	}
 }
 

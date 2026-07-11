@@ -164,6 +164,13 @@ func (d *Daemon) selectedBoardViewID(projectID string) string {
 			d.setUIStateValue(projectID, protocol.UIStateKeyBoardSelectedView, persisted)
 			return persisted
 		}
+		if legacy, ok := d.getUIStateValue(projectID, protocol.UIStateKeyUIViewMode); ok {
+			if migrated, recognized := domain.BoardViewIDFromLegacyUIMode(legacy); recognized {
+				d.setUIStateValue(projectID, protocol.UIStateKeyBoardSelectedView, migrated)
+				_ = d.saveSelectedBoardViewPreference(projectID, migrated)
+				return migrated
+			}
+		}
 		return domain.DefaultBoardViewID
 	}
 	return domain.NormalizeBoardViewID(value)

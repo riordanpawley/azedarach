@@ -50,6 +50,7 @@ const (
 	ActionOpenNotificationHistory ActionID = "open_notification_history"
 	ActionOpenOperationQueue      ActionID = "open_operation_queue"
 	ActionOpenBoardViews          ActionID = "open_board_views"
+	ActionOpenProjectOrchestrator ActionID = "open_project_orchestrator"
 	ActionToggleView              ActionID = "toggle_view"
 	ActionRefresh                 ActionID = "refresh"
 	ActionPullBase                ActionID = "pull_base"
@@ -91,6 +92,7 @@ var registry = []ActionSpec{
 	{ID: ActionHalfPageUp, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "ctrl+u", Display: "ctrl+u"}}},
 	{ID: ActionHalfPageDown, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "ctrl+d", Display: "ctrl+d"}}},
 	{ID: ActionOpenHelp, Mode: types.ModeNormal, Category: "Panes", Keys: []KeySpec{{Input: "?", Display: "?"}}, Hint: "help", Help: "Open this help reference"},
+	{ID: ActionOpenProjectOrchestrator, Mode: types.ModeNormal, Category: "Panes", Keys: []KeySpec{{Input: "O", Display: "O"}}, Hint: "orchestrator", Help: "Open project orchestrator details"},
 	{ID: ActionOpenWorkspace, Mode: types.ModeNormal, Keys: []KeySpec{{Input: " ", Display: "Space"}}, Hint: "task workspace"},
 	{ID: ActionEnterGoto, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "g", Display: "g"}}, Hint: "goto"},
 	{ID: ActionEnterSearch, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "/", Display: "/"}}, Hint: "search"},
@@ -176,7 +178,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "Q", Help: "Open operation queue"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "L", Help: "Open event log"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "N", Help: "Open notification action center"},
-	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "O", Help: "Open tmux sessions"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "O", Help: "Open project orchestrator details"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "D", Help: "Open system diagnostics"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "n", Help: "Open async failure recovery"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "s", Help: "Open settings"},
@@ -228,7 +230,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "N", Help: "Open notification action center"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "Q", Help: "Open operation queue"},
 
-	{Mode: types.ModeNormal, Category: "Other", HelpKey: "Tab", Help: "Toggle compact/kanban view"},
+	{Mode: types.ModeNormal, Category: "Other", HelpKey: "Tab", Help: "Switch to next configured view"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "esc", Help: "Close overlay / exit mode"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "ctrl+g", Help: "Close all stacked overlays"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "q", Help: "Quit"},

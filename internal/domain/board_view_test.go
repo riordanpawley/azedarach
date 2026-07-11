@@ -153,7 +153,7 @@ func TestBuiltInBoardViewCatalogAndLegacyAliases(t *testing.T) {
 	if set.DefaultViewID != BoardViewDefaultID {
 		t.Fatalf("default view id = %q, want %q", set.DefaultViewID, BoardViewDefaultID)
 	}
-	want := []BoardViewID{BoardViewDefaultID, BoardViewPlanningID, BoardViewOrchestrationID, BoardViewCloseoutID}
+	want := []BoardViewID{BoardViewDefaultID, BoardViewPlanningID, BoardViewOrchestrationID, BoardViewCloseoutID, BoardViewGridID, BoardViewTreeID}
 	if len(set.Views) != len(want) {
 		t.Fatalf("built-in views = %d, want %d", len(set.Views), len(want))
 	}
@@ -167,6 +167,40 @@ func TestBuiltInBoardViewCatalogAndLegacyAliases(t *testing.T) {
 	}
 	if got := NormalizeBoardViewID("activity"); got != string(BoardViewOrchestrationID) {
 		t.Fatalf("activity alias = %q", got)
+	}
+}
+
+func TestBuiltInViewsExposeAllSupportedLayouts(t *testing.T) {
+	want := map[BoardViewLayout]bool{
+		BoardViewLayoutColumnBoard:    true,
+		BoardViewLayoutHorizontalGrid: true,
+		BoardViewLayoutTreeList:       true,
+	}
+	for _, view := range BuiltInBoardViewSet().Views {
+		delete(want, view.Normalized().Layout)
+	}
+	if len(want) != 0 {
+		t.Fatalf("built-in catalog missing layouts: %v", want)
+	}
+}
+
+func TestLegacyUIViewModesMigrateToConfiguredViews(t *testing.T) {
+	tests := map[string]string{"board": string(BoardViewDefaultID), "compact": string(BoardViewTreeID), "overview": string(BoardViewOrchestrationID)}
+	for legacy, want := range tests {
+		if got, ok := BoardViewIDFromLegacyUIMode(legacy); !ok || got != want {
+			t.Fatalf("BoardViewIDFromLegacyUIMode(%q) = %q, %t; want %q, true", legacy, got, ok, want)
+		}
+	}
+}
+
+func TestProjectionExposesOrchestrationViewState(t *testing.T) {
+	task := Task{ID: "waiting", Title: "Waiting", Status: StatusInProgress, Session: &Session{Activity: "waiting-for-human"}}
+	projection, err := ProjectTasksByBoardView(DefaultBoardView(), []Task{task})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Items) != 1 || projection.Items[0].OrchestrationState != OrchestrationViewWaitingHuman {
+		t.Fatalf("projection items = %#v", projection.Items)
 	}
 }
 
