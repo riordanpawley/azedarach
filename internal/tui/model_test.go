@@ -34,6 +34,21 @@ type mockTmuxService struct {
 	popupFn  func(ctx context.Context, title, width, height, command string) error
 }
 
+func TestDecorateConfiguredTreeTasksRendersHierarchyWithoutMutatingProjection(t *testing.T) {
+	parentID := naming.IssueID("parent")
+	tasks := []domain.Task{
+		{ID: parentID, Title: "Parent"},
+		{ID: "child", Title: "Child", ParentID: &parentID},
+	}
+	decorated := decorateConfiguredTreeTasks(tasks, []domain.BoardViewProjectedItem{{Task: tasks[0]}, {Task: tasks[1], Depth: 1}})
+	if got := decorated[1].Title; got != "└ Child" {
+		t.Fatalf("child title = %q", got)
+	}
+	if tasks[1].Title != "Child" {
+		t.Fatalf("projection task mutated: %q", tasks[1].Title)
+	}
+}
+
 type probeOverlay struct {
 	updated bool
 	lastMsg tea.Msg
@@ -1633,7 +1648,6 @@ func TestView_CanonicalProfiles(t *testing.T) {
 			m.width = profile.Width
 			m.height = profile.Height
 			m.loading = false
-			m.viewMode = ViewModeBoard
 			m.editor.EnterNormal()
 
 			phases := m.computePhases()
@@ -1679,7 +1693,6 @@ func TestView_CanonicalProfiles(t *testing.T) {
 func TestView_ShowsHiddenSelectionCount(t *testing.T) {
 	m := newTestModel()
 	m.loading = false
-	m.viewMode = ViewModeBoard
 	m.editor.Select("az-1")
 	m.editor.Select("az-2")
 	m.editor.ToggleStatusFilter(domain.StatusDone)
@@ -1829,7 +1842,6 @@ func TestEscClearsFiltersInNormalMode(t *testing.T) {
 func TestRuntimeSignalRefreshTasks_BoardUsesRenderedWindow(t *testing.T) {
 	m := newTestModel()
 	m.loading = false
-	m.viewMode = ViewModeBoard
 	m.width = 80
 	m.height = 9
 	m.tasks = make([]domain.Task, 0, 12)
@@ -1869,7 +1881,7 @@ func TestRuntimeSignalRefreshTasks_BoardUsesRenderedWindow(t *testing.T) {
 func TestRuntimeSignalRefreshTasks_CompactUsesVisibleRows(t *testing.T) {
 	m := newTestModel()
 	m.loading = false
-	m.viewMode = ViewModeCompact
+	m.boardView = domain.TreeBoardView()
 	m.width = 100
 	m.height = 10
 	m.tasks = make([]domain.Task, 0, 16)
@@ -1918,10 +1930,10 @@ func TestRuntimeSignalRefreshTasks_CompactUsesVisibleRows(t *testing.T) {
 	}
 }
 
-func TestStartJumpMode_CompactOnlyLabelsVisibleRows(t *testing.T) {
+func TestStartJumpMode_TreeOnlyLabelsVisibleRows(t *testing.T) {
 	m := newTestModel()
 	m.loading = false
-	m.viewMode = ViewModeCompact
+	m.boardView = domain.TreeBoardView()
 	m.width = 100
 	m.height = 10
 	m.tasks = make([]domain.Task, 0, 16)
@@ -1934,14 +1946,14 @@ func TestStartJumpMode_CompactOnlyLabelsVisibleRows(t *testing.T) {
 			Type:     domain.TypeTask,
 		})
 	}
-	// Park the cursor near the bottom so compact-mode scrolling pushes the
-	// head of the list off-screen. With viewMode == ViewModeCompact, gw must
-	// only label rows that compact actually drew.
+	// Park the cursor near the bottom so tree-layout scrolling pushes the
+	// head of the list off-screen. In the configured Tree layout, gw must
+	// only label rows that the tree renderer actually drew.
 	m.nav.SelectTask("az-14", 0)
 
 	rendered := m.runtimeSignalRefreshTasks()
 	if len(rendered) == 0 {
-		t.Fatalf("expected compact view to render some rows")
+		t.Fatalf("expected tree view to render some rows")
 	}
 	if len(rendered) >= len(m.tasks) {
 		t.Fatalf("expected some rows to be off-screen, got %d rendered of %d total", len(rendered), len(m.tasks))
@@ -2986,7 +2998,6 @@ func TestNormalModeDown_KeepsCursorVisibleWithIndicators(t *testing.T) {
 func TestNormalModeDown_NarrowShortSingleColumnKeepsFinalIssueVisible(t *testing.T) {
 	m := newTestModel()
 	m.loading = false
-	m.viewMode = ViewModeBoard
 	m.width = 50
 	m.tasks = make([]domain.Task, 0, 12)
 	for i := 1; i <= 12; i++ {
@@ -3769,98 +3780,20 @@ func TestModeTransitions(t *testing.T) {
 		}
 	})
 
-	t.Run("tab cycles board compact and overview in normal mode", func(t *testing.T) {
+	t.Run("tab switches configured views without changing legacy modes", func(t *testing.T) {
 		m.editor.EnterNormal()
-		m.viewMode = ViewModeBoard
 		m.nav.SelectTask("az-2", 0)
 		before := getCursorPosition(m)
 
-		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
-		compactModel := result.(Model)
-
-		if compactModel.viewMode != ViewModeCompact {
-			t.Fatalf("expected tab to toggle to compact view, got %v", compactModel.viewMode)
+		result, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
+		updated := result.(Model)
+		if cmd == nil {
+			t.Fatal("Tab did not schedule configured-view selection")
 		}
-		if got := getCursorPosition(compactModel); got != before {
-			t.Fatalf("cursor position changed after tab to compact view: before=%+v after=%+v", before, got)
-		}
-		if got := compactModel.toasts[len(compactModel.toasts)-1].Message; got != "Switched to compact view" {
-			t.Fatalf("expected compact-view toast, got %q", got)
-		}
-
-		result, _ = compactModel.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
-		overviewModel := result.(Model)
-
-		if overviewModel.viewMode != ViewModeOverview {
-			t.Fatalf("expected second tab to switch to overview, got %v", overviewModel.viewMode)
-		}
-		if got := getCursorPosition(overviewModel); got != before {
-			t.Fatalf("cursor position changed after tab to overview: before=%+v after=%+v", before, got)
-		}
-		if got := overviewModel.toasts[len(overviewModel.toasts)-1].Message; got != "Switched to orchestration overview" {
-			t.Fatalf("expected overview toast, got %q", got)
-		}
-
-		result, _ = overviewModel.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
-		boardModel := result.(Model)
-
-		if boardModel.viewMode != ViewModeBoard {
-			t.Fatalf("expected third tab to restore board view, got %v", boardModel.viewMode)
-		}
-		if got := getCursorPosition(boardModel); got != before {
-			t.Fatalf("cursor position changed after tab back to board view: before=%+v after=%+v", before, got)
-		}
-		if got := boardModel.toasts[len(boardModel.toasts)-1].Message; got != "Switched to board view" {
-			t.Fatalf("expected board-view toast, got %q", got)
+		if got := getCursorPosition(updated); got != before {
+			t.Fatalf("cursor position changed while selecting next view: before=%+v after=%+v", before, got)
 		}
 	})
-}
-
-func TestUIViewModePersistenceMapping(t *testing.T) {
-	if got, ok := persistedValueForViewMode(ViewModeBoard); !ok || got != "board" {
-		t.Fatalf("persistedValueForViewMode(board) = %q,%v", got, ok)
-	}
-	if got, ok := persistedValueForViewMode(ViewModeCompact); !ok || got != "compact" {
-		t.Fatalf("persistedValueForViewMode(compact) = %q,%v", got, ok)
-	}
-	if got, ok := persistedValueForViewMode(ViewModeOverview); !ok || got != "overview" {
-		t.Fatalf("persistedValueForViewMode(overview) = %q,%v", got, ok)
-	}
-	if mode, ok := viewModeFromPersistedValue("compact"); !ok || mode != ViewModeCompact {
-		t.Fatalf("viewModeFromPersistedValue(compact) = %v,%v", mode, ok)
-	}
-	if mode, ok := viewModeFromPersistedValue("overview"); !ok || mode != ViewModeOverview {
-		t.Fatalf("viewModeFromPersistedValue(overview) = %v,%v", mode, ok)
-	}
-	if mode, ok := viewModeFromPersistedValue("board"); !ok || mode != ViewModeBoard {
-		t.Fatalf("viewModeFromPersistedValue(board) = %v,%v", mode, ok)
-	}
-	if _, ok := viewModeFromPersistedValue("bogus"); ok {
-		t.Fatal("viewModeFromPersistedValue(bogus) should be invalid")
-	}
-}
-
-func TestOrchestrationOverviewProjectsIncludesCurrentProjectWithRegistry(t *testing.T) {
-	m := newTestModel()
-	m.currentProject = "current-project"
-	m.repoDir = "/work/current-project"
-	m.projectRegistry = &config.ProjectsRegistry{
-		Projects: []config.Project{
-			{Name: "registered-project", Path: "/work/registered-project"},
-		},
-	}
-
-	projects := m.orchestrationOverviewProjects()
-	names := make(map[string]bool, len(projects))
-	for _, project := range projects {
-		names[project.name] = true
-	}
-	if !names["registered-project"] {
-		t.Fatalf("registered project missing from overview projects: %+v", projects)
-	}
-	if !names["current-project"] {
-		t.Fatalf("current project missing from overview projects: %+v", projects)
-	}
 }
 
 func TestActionModeUnavailablePRKeyFailsFastWithGuidance(t *testing.T) {
@@ -4735,6 +4668,7 @@ func TestBoardColumnsDoNotApplyAutomaticAttentionSortToCustomView(t *testing.T) 
 	m.boardView = domain.DefaultBoardView()
 	m.boardView.ID = "custom"
 	m.boardView.Options.SortPolicy = domain.BoardViewSortDefault
+	m.boardView.Sort = []domain.BoardViewSortRule{{Key: domain.BoardViewSortKeyGitDiff, Direction: domain.BoardViewSortDescending}}
 	m.tasks = []domain.Task{
 		{ID: "ordinary", Status: domain.StatusInProgress, GitAdditions: 100},
 		{ID: "waiting", Status: domain.StatusInProgress, Session: &domain.Session{Activity: "waiting-for-human"}},
@@ -8360,15 +8294,24 @@ func TestPendingWorktreeCleanupOperationFailureOpensForceConfirmation(t *testing
 	}
 }
 
-func TestLoadOrchestrationOverviewIfVisibleCmd(t *testing.T) {
+func TestLoadProjectOrchestratorSnapshotCmd(t *testing.T) {
 	m := newTestModel()
-	m.viewMode = ViewModeBoard
-	if cmd := m.loadOrchestrationOverviewIfVisibleCmd(); cmd != nil {
-		t.Fatalf("hidden overview load command = %T, want nil", cmd)
+	if cmd := m.loadProjectOrchestratorSnapshotCmd(); cmd == nil {
+		t.Fatal("current-project orchestrator snapshot command = nil")
 	}
 
-	m.viewMode = ViewModeOverview
-	if cmd := m.loadOrchestrationOverviewIfVisibleCmd(); cmd == nil {
-		t.Fatal("visible overview load command = nil, want command")
+	if cmd := m.loadProjectOrchestratorSnapshotCmd(); cmd == nil {
+		t.Fatal("snapshot refresh must not depend on a legacy mode")
+	}
+}
+
+func TestProjectOrchestratorRefreshFailurePreservesLastKnownSnapshot(t *testing.T) {
+	m := newTestModel()
+	known := projectOrchestratorSnapshot{ProjectID: m.daemonProjectID(), Snapshot: &protocol.OrchestrationSnapshot{Lifecycle: domain.OrchestratorWorking}}
+	m.projectOrchestrator = &known
+	updatedAny, _ := m.Update(projectOrchestratorLoadedMsg{project: projectOrchestratorSnapshot{ProjectID: m.daemonProjectID()}, err: errors.New("temporary read failure")})
+	updated := updatedAny.(Model)
+	if updated.projectOrchestrator == nil || updated.projectOrchestrator.Snapshot == nil || updated.projectOrchestrator.Snapshot.Lifecycle != domain.OrchestratorWorking {
+		t.Fatalf("last-known orchestrator snapshot was discarded: %+v", updated.projectOrchestrator)
 	}
 }

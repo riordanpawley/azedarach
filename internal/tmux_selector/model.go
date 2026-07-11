@@ -54,6 +54,10 @@ type InventoryEntry struct {
 	GitAdditions          int
 	GitDeletions          int
 	GraphAncestors        []string
+	ViewGroupID           domain.BoardColumnID
+	ViewGroupTitle        string
+	ViewDepth             int
+	ViewProjected         bool
 	Task                  domain.Task
 }
 
@@ -66,6 +70,8 @@ type Snapshot struct {
 	Entries          []InventoryEntry
 	Tasks            []domain.Task
 	TreeTasks        []domain.Task
+	View             domain.BoardView
+	Projection       domain.BoardViewProjection
 	Revision         uint64
 	LastCheckedAt    time.Time
 	Freshness        string
@@ -325,6 +331,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		m.snapshot = msg.Snapshot
 		m.normalizeSnapshot()
+		m.applySnapshotViewLayout()
 		m.status = formatSnapshotStatus(m.snapshot, len(m.snapshot.Entries))
 		slog.Default().Info("tmux selector snapshot applied",
 			"elapsed_ms", m.elapsedSinceStart().Milliseconds(),
@@ -336,7 +343,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 		m.logReadyToRender("snapshot")
 		cmds := []tea.Cmd{}
-		if !m.selectorTabLoaded {
+		if !m.selectorTabLoaded && m.snapshot.View.ID == "" {
 			cmds = append(cmds, m.loadSelectorTabCmd())
 		}
 		if liveLoader, ok := m.loader.(LiveSnapshotLoader); ok && m.snapshot.Enriching {
@@ -363,6 +370,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.snapshot = msg.Snapshot
 		m.normalizeSnapshot()
+		m.applySnapshotViewLayout()
 		if selectedSessionID != "" {
 			m.selectSessionID(selectedSessionID)
 		}
@@ -458,7 +466,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectorTabLoaded = true
 			m.selectorTabUserSet = true
 			m.loading = false
-			return m, m.persistSelectorTabCmd(m.activeTab)
+			if m.snapshot.View.ID == "" {
+				return m, m.persistSelectorTabCmd(m.activeTab)
+			}
+			return m, nil
 		case "u":
 			if m.activeTab == selectorTabTree {
 				m.toggleTreeSort()
@@ -524,6 +535,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *Model) applySnapshotViewLayout() {
+	if m == nil || m.selectorTabUserSet || m.snapshot.View.ID == "" {
+		return
+	}
+	switch m.snapshot.View.Normalized().Layout {
+	case domain.BoardViewLayoutTreeList:
+		m.activeTab = selectorTabTree
+	case domain.BoardViewLayoutColumnBoard, domain.BoardViewLayoutHorizontalGrid:
+		m.activeTab = selectorTabGrid
+	}
+	m.selectorTabLoaded = true
 }
 
 func nilFromLoadFailed(m *Model, err error) tea.Cmd {
@@ -606,27 +630,79 @@ func (m Model) View() string {
 		if m.activeTab == selectorTabTree {
 			b.WriteString(m.renderTree(entries))
 		} else {
-			availableHeight := m.gridAvailableHeight()
-			columns := m.gridColumnCount(availableHeight)
-			cardWidth := gridCardWidth(m.width, columns)
-			rows := RenderVisibleGridWithLabels(
-				entries,
-				m.cursor,
-				columns,
-				cardWidth,
-				availableHeight,
-				m.styles,
-				m.labelsByEntry(),
-			)
-			for _, row := range rows {
-				b.WriteString(row)
-				b.WriteString("\n")
+			if m.snapshot.View.ID != "" && m.snapshot.View.Normalized().Layout == domain.BoardViewLayoutColumnBoard {
+				b.WriteString(m.renderProjectedColumnBoard(entries))
+			} else {
+				availableHeight := m.gridAvailableHeight()
+				columns := m.gridColumnCount(availableHeight)
+				cardWidth := gridCardWidth(m.width, columns)
+				rows := RenderVisibleGridWithLabels(entries, m.cursor, columns, cardWidth, availableHeight, m.styles, m.labelsByEntry())
+				for _, row := range rows {
+					b.WriteString(row)
+					b.WriteString("\n")
+				}
 			}
 		}
 	}
 	contentLines := linesForHeight(b.String(), maxInt(0, m.height-1))
 	footer := m.renderFooter()
 	return strings.Join(append(contentLines, footer), "\n")
+}
+
+func (m Model) renderProjectedColumnBoard(entries []InventoryEntry) string {
+	columns, positions := selectorBoardColumns(entries)
+	cursor := board.Cursor{Column: -1, Task: -1}
+	if position, ok := positions[m.cursor]; ok {
+		cursor = position
+	}
+	layout := board.NewColumnLayout(len(columns), m.width, 0)
+	if cursor.Column >= 0 {
+		layout = layout.WithColumnVisible(cursor.Column)
+	}
+	start, end := layout.Range()
+	if start < end {
+		columns = columns[start:end]
+		cursor.Column -= start
+	}
+	signals := make(map[string]board.RuntimeSignals, len(entries))
+	jumpLabels := make(map[string]string)
+	labelsByEntry := m.labelsByEntry()
+	for index, entry := range entries {
+		task := taskFromInventoryEntry(entry)
+		if label := labelsByEntry[index]; label != "" {
+			jumpLabels[task.ID.String()] = label
+		}
+		signals[task.ID.String()] = board.RuntimeSignals{
+			HasTmuxSession: entry.HasTmuxSession, TmuxAttached: entry.TmuxAttached,
+			TmuxAttachedCount: entry.TmuxAttachedCount, HasWorktree: entry.HasWorktree,
+			GitAheadCount: entry.GitAheadCount, GitBehindCount: entry.GitBehindCount,
+			HasUncommittedChanges: entry.HasUncommittedChanges, HasConflicts: entry.HasConflicts,
+			GitAdditions: entry.GitAdditions, GitDeletions: entry.GitDeletions,
+		}
+	}
+	return board.Render(columns, cursor, nil, signals, nil, nil, false, jumpLabels, 0, m.styles, m.width, m.gridAvailableHeight()) + "\n"
+}
+
+func selectorBoardColumns(entries []InventoryEntry) ([]board.Column, map[int]board.Cursor) {
+	columns := []board.Column{}
+	columnByID := map[string]int{}
+	positions := make(map[int]board.Cursor, len(entries))
+	for index, entry := range entries {
+		groupID := string(entry.ViewGroupID)
+		title := entry.ViewGroupTitle
+		if groupID == "" {
+			groupID, title = "live_tmux", "Live tmux"
+		}
+		columnIndex, ok := columnByID[groupID]
+		if !ok {
+			columnIndex = len(columns)
+			columnByID[groupID] = columnIndex
+			columns = append(columns, board.Column{Title: title})
+		}
+		positions[index] = board.Cursor{Column: columnIndex, Task: len(columns[columnIndex].Tasks)}
+		columns[columnIndex].Tasks = append(columns[columnIndex].Tasks, taskFromInventoryEntry(entry))
+	}
+	return columns, positions
 }
 
 func (m Model) jumpLabelsByEntry() map[int]string {
@@ -894,6 +970,9 @@ func (m Model) filteredEntries() []InventoryEntry {
 			}
 		}
 	}
+	if m.snapshot.View.ID != "" {
+		return m.withGraphAncestors(entries)
+	}
 	return m.graphOrderedEntries(entries)
 }
 
@@ -1057,6 +1136,10 @@ func (m *Model) moveCursor(dx int, dy int) {
 		m.moveTreeCursor(entries, dx, dy)
 		return
 	}
+	if m.snapshot.View.ID != "" && m.snapshot.View.Normalized().Layout == domain.BoardViewLayoutColumnBoard {
+		m.moveColumnBoardCursor(entries, dx, dy)
+		return
+	}
 	count := len(entries)
 	if count == 0 {
 		m.cursor = 0
@@ -1091,6 +1174,25 @@ func (m *Model) moveCursor(dx int, dy int) {
 	next := nextRow*columns + nextCol
 	if next >= 0 && next < count {
 		m.cursor = next
+	}
+}
+
+func (m *Model) moveColumnBoardCursor(entries []InventoryEntry, dx, dy int) {
+	_, positions := selectorBoardColumns(entries)
+	current, ok := positions[m.cursor]
+	if !ok {
+		m.cursor = 0
+		return
+	}
+	targetColumn, targetTask := current.Column+dx, current.Task+dy
+	if dx != 0 {
+		targetTask = current.Task
+	}
+	for entryIndex, position := range positions {
+		if position.Column == targetColumn && position.Task == targetTask {
+			m.cursor = entryIndex
+			return
+		}
 	}
 }
 
@@ -1645,7 +1747,24 @@ func activeSessionTreeRows(entries []InventoryEntry) []sessionTreeRow {
 }
 
 func (m Model) activeSessionTreeRows(entries []InventoryEntry) []sessionTreeRow {
+	if m.snapshot.View.ID != "" {
+		return projectedSessionTreeRows(entries)
+	}
 	return activeSessionTreeRowsWithOptions(entries, m.treeAncestorTasks(), m.treeSort)
+}
+
+func projectedSessionTreeRows(entries []InventoryEntry) []sessionTreeRow {
+	rows := make([]sessionTreeRow, 0, len(entries))
+	for i, entry := range entries {
+		depth := maxInt(0, entry.ViewDepth)
+		ancestorLast := make([]bool, depth)
+		last := true
+		if i+1 < len(entries) && entries[i+1].ViewDepth >= depth {
+			last = false
+		}
+		rows = append(rows, sessionTreeRow{entryIndex: i, entry: entry, last: last, ancestorLast: ancestorLast})
+	}
+	return rows
 }
 
 func (m Model) treeAncestorTasks() map[string]domain.Task {

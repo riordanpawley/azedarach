@@ -110,12 +110,29 @@ func mustMarshalBoardSnapshotPayload(t *testing.T, protocolVersion protocol.Vers
 		ProjectID:        naming.ProjectID(projectID),
 		LastCheckedAt:    mustTaskSnapshotCheckedAt(),
 		Freshness:        protocol.TaskListFreshnessFresh,
-		Tasks:            protocol.BoardTaskSummariesFromDomain(tasks),
+		Projection:       protocol.BoardViewProjectionFromDomain(testBoardProjection(tasks)),
 	})
 	if err != nil {
 		t.Fatalf("marshal board snapshot payload: %v", err)
 	}
 	return body
+}
+
+func testBoardProjection(tasks []domain.Task) domain.BoardViewProjection {
+	groupID := domain.BoardColumnID("test")
+	view := domain.DefaultBoardView()
+	view.ID = "test"
+	view.Layout = domain.BoardViewLayoutHorizontalGrid
+	view.Columns = []domain.BoardColumn{{ID: groupID, Title: "Test", Predicates: view.Columns[0].Predicates}}
+	projection := domain.BoardViewProjection{View: view}
+	group := domain.BoardViewProjectedGroup{GroupID: groupID}
+	for _, task := range tasks {
+		projection.KnownTaskIDs = append(projection.KnownTaskIDs, task.ID)
+		projection.Items = append(projection.Items, domain.BoardViewProjectedItem{Task: task, GroupID: groupID, OrchestrationState: domain.TaskOrchestrationViewState(task)})
+		group.TaskIDs = append(group.TaskIDs, task.ID)
+	}
+	projection.Groups = []domain.BoardViewProjectedGroup{group}
+	return projection
 }
 
 func mustTaskSnapshotCheckedAt() time.Time {
@@ -432,6 +449,9 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 		if got, want := task.State.Review(), domain.IssueReviewRequested; got != want {
 			t.Fatalf("task issue review state = %s, want %s", got, want)
+		}
+		if got := snapshot.Projection.Items[0].OrchestrationState; got != domain.OrchestrationViewReview {
+			t.Fatalf("orchestration state = %q, want %q", got, domain.OrchestrationViewReview)
 		}
 		if task.Description != "" || task.Notes != "" || task.Design != "" || task.Acceptance != "" {
 			t.Fatalf("board snapshot decoded detail fields: description=%q notes=%q design=%q acceptance=%q", task.Description, task.Notes, task.Design, task.Acceptance)

@@ -49,6 +49,8 @@ type ProjectInventorySnapshot struct {
 	ProjectID   string
 	ProjectPath string
 	Tasks       []domain.Task
+	View        domain.BoardView
+	Projection  domain.BoardViewProjection
 }
 
 // GlobalInventoryLoader builds inventory from live tmux first, then projection metadata.
@@ -165,8 +167,9 @@ func (l *GlobalInventoryLoader) ListTasksSnapshot(ctx context.Context) (Snapshot
 	}
 	snapshot := l.snapshotFromLive(ctx, live, nil, true)
 	projectDirs := l.projectDirsForLiveSessions(live)
-	projections, tasks := l.loadProjectionsForEntries(ctx, projectDirs, snapshot.Entries)
+	projections, tasks, views := l.loadProjectionsForEntries(ctx, projectDirs, snapshot.Entries)
 	enriched := l.enrichEntries(snapshot, projections, tasks, projectDirs)
+	applyProjectViewOrdering(&enriched, views)
 	if l.logger != nil {
 		l.logger.Info("global selector full snapshot loaded",
 			"elapsed_ms", time.Since(start).Milliseconds(),
@@ -208,8 +211,9 @@ func (l *GlobalInventoryLoader) EnrichSnapshot(ctx context.Context, snapshot Sna
 	}
 	start := time.Now()
 	projectDirs := l.projectDirsForEntries(snapshot.Entries)
-	projections, tasks := l.loadProjectionsForEntries(ctx, projectDirs, snapshot.Entries)
+	projections, tasks, views := l.loadProjectionsForEntries(ctx, projectDirs, snapshot.Entries)
 	enriched := l.enrichEntries(snapshot, projections, tasks, projectDirs)
+	applyProjectViewOrdering(&enriched, views)
 	if l.logger != nil {
 		l.logger.Info("global selector snapshot enriched",
 			"elapsed_ms", time.Since(start).Milliseconds(),
@@ -527,7 +531,7 @@ func addProjectDir(dirs *[]string, seen map[string]struct{}, path string) {
 	*dirs = append(*dirs, abs)
 }
 
-func (l *GlobalInventoryLoader) loadProjectionsForEntries(ctx context.Context, projectDirs []string, entries []InventoryEntry) (map[string]projectedInventory, projectTaskIndex) {
+func (l *GlobalInventoryLoader) loadProjectionsForEntries(ctx context.Context, projectDirs []string, entries []InventoryEntry) (map[string]projectedInventory, projectTaskIndex, []ProjectInventorySnapshot) {
 	out := map[string]projectedInventory{}
 	tasks := projectTaskIndex{
 		byScope: map[string]map[string]domain.Task{},
@@ -535,7 +539,7 @@ func (l *GlobalInventoryLoader) loadProjectionsForEntries(ctx context.Context, p
 	}
 	source := l.source
 	if source == nil {
-		return out, tasks
+		return out, tasks, nil
 	}
 	if _, ok := source.(*DaemonSnapshotSource); ok {
 		source = NewDaemonSnapshotSourceForTasks(projectDirs, taskIDsByProjectDir(entries, projectDirs), l.logger)
@@ -550,7 +554,7 @@ func (l *GlobalInventoryLoader) loadProjectionsForEntries(ctx context.Context, p
 				"error", err,
 			)
 		}
-		return out, tasks
+		return out, tasks, nil
 	}
 	for _, snapshot := range snapshots {
 		projectID := protocol.NormalizeProjectID(snapshot.ProjectID)
@@ -590,7 +594,105 @@ func (l *GlobalInventoryLoader) loadProjectionsForEntries(ctx context.Context, p
 			"projection_count", len(out),
 		)
 	}
-	return out, tasks
+	return out, tasks, snapshots
+}
+
+func applyProjectViewOrdering(snapshot *Snapshot, projects []ProjectInventorySnapshot) {
+	if snapshot == nil || len(projects) == 0 {
+		return
+	}
+	ranks := make(map[string]int)
+	known := make(map[string]struct{})
+	included := make(map[string]struct{})
+	projectedItems := make(map[string]domain.BoardViewProjectedItem)
+	groupTitles := make(map[string]string)
+	next := 0
+	for _, project := range projects {
+		if snapshot.View.ID == "" && project.View.ID != "" {
+			snapshot.View = project.View
+			snapshot.Projection = project.Projection
+		}
+		for _, taskID := range project.Projection.KnownTaskIDs {
+			for _, scope := range taskScopeKeys(project.ProjectID, project.ProjectPath) {
+				known[scope+":"+taskID.String()] = struct{}{}
+			}
+		}
+		for _, group := range project.Projection.Groups {
+			title := string(group.GroupID)
+			for _, definition := range project.Projection.View.Columns {
+				if definition.ID == group.GroupID {
+					title = definition.Title
+					break
+				}
+			}
+			for _, scope := range taskScopeKeys(project.ProjectID, project.ProjectPath) {
+				groupTitles[scope+":"+string(group.GroupID)] = title
+			}
+		}
+		for _, item := range project.Projection.Items {
+			task := item.Task
+			for _, scope := range taskScopeKeys(project.ProjectID, project.ProjectPath) {
+				key := scope + ":" + task.ID.String()
+				ranks[key] = next
+				included[key] = struct{}{}
+				projectedItems[key] = item
+			}
+			next++
+		}
+	}
+	filtered := snapshot.Entries[:0]
+	for _, entry := range snapshot.Entries {
+		key, tracked := projectedEntryScopeKey(entry, known)
+		if tracked {
+			if _, visible := included[key]; !visible {
+				continue
+			}
+		}
+		if item, ok := projectedItems[key]; ok {
+			entry.ViewProjected = true
+			entry.ViewDepth = item.Depth
+			entry.ViewGroupID = item.GroupID
+			for _, scope := range taskScopeKeys(entry.ProjectID, entry.ProjectPath) {
+				if title := groupTitles[scope+":"+string(item.GroupID)]; title != "" {
+					entry.ViewGroupTitle = title
+					break
+				}
+			}
+		}
+		filtered = append(filtered, entry)
+	}
+	snapshot.Entries = filtered
+	sort.SliceStable(snapshot.Entries, func(i, j int) bool {
+		left, leftOK := projectedEntryRank(snapshot.Entries[i], ranks)
+		right, rightOK := projectedEntryRank(snapshot.Entries[j], ranks)
+		if leftOK != rightOK {
+			return leftOK
+		}
+		return leftOK && left != right && left < right
+	})
+	snapshot.Tasks = make([]domain.Task, 0, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		snapshot.Tasks = append(snapshot.Tasks, taskFromInventoryEntry(entry))
+	}
+}
+
+func projectedEntryScopeKey(entry InventoryEntry, values map[string]struct{}) (string, bool) {
+	for _, scope := range taskScopeKeys(entry.ProjectID, entry.ProjectPath) {
+		key := scope + ":" + entry.IssueID
+		if _, ok := values[key]; ok {
+			return key, true
+		}
+	}
+	return "", false
+}
+
+func projectedEntryRank(entry InventoryEntry, ranks map[string]int) (int, bool) {
+	for _, scope := range taskScopeKeys(entry.ProjectID, entry.ProjectPath) {
+		if rank, ok := ranks[scope+":"+entry.IssueID]; ok {
+			return rank, true
+		}
+	}
+	return 0, false
 }
 
 func taskIDsByProjectDir(entries []InventoryEntry, projectDirs []string) map[string][]string {
@@ -1002,7 +1104,10 @@ func (s *DaemonSnapshotSource) loadProjectSnapshot(ctx context.Context, projectD
 	}
 	client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
 	taskIDs := s.taskIDsForProjectDir(projectDir)
-	snapshot, err := s.loadTaskSnapshot(ctx, client, taskIDs)
+	snapshot, err := client.BoardSnapshotWithMode(ctx, daemonclient.ReadWaitModeDefault)
+	if err != nil {
+		snapshot, err = s.loadTaskSnapshot(ctx, client, taskIDs)
+	}
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Debug("global selector project snapshot failed",
@@ -1028,6 +1133,8 @@ func (s *DaemonSnapshotSource) loadProjectSnapshot(ctx context.Context, projectD
 		ProjectID:   projectID,
 		ProjectPath: projectDir,
 		Tasks:       snapshot.Tasks,
+		View:        snapshot.View,
+		Projection:  snapshot.Projection,
 	}, true
 }
 

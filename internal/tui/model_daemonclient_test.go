@@ -1223,7 +1223,7 @@ func mustMarshalBoardSnapshot(t *testing.T, protocolVersion protocol.Version, re
 		ProjectID:        naming.ProjectID(projectID),
 		LastCheckedAt:    daemonSnapshotCheckedAt(),
 		Freshness:        protocol.TaskListFreshnessFresh,
-		Tasks:            protocol.BoardTaskSummariesFromDomain(tasks),
+		Projection:       protocol.BoardViewProjectionFromDomain(testTUIBoardProjection(tasks, nil, domain.BoardView{})),
 	})
 	if err != nil {
 		t.Fatalf("marshal board snapshot: %v", err)
@@ -1240,14 +1240,42 @@ func mustMarshalBoardSnapshotWithView(t *testing.T, protocolVersion protocol.Ver
 		ProjectID:        naming.ProjectID(projectID),
 		LastCheckedAt:    daemonSnapshotCheckedAt(),
 		Freshness:        protocol.TaskListFreshnessFresh,
-		View:             view,
-		Columns:          protocol.BoardSnapshotColumnsFromDomain(columns),
-		Tasks:            protocol.BoardTaskSummariesFromDomain(tasks),
+		Projection:       protocol.BoardViewProjectionFromDomain(testTUIBoardProjection(tasks, columns, view)),
 	})
 	if err != nil {
 		t.Fatalf("marshal board snapshot: %v", err)
 	}
 	return body
+}
+
+func testTUIBoardProjection(tasks []domain.Task, columns []domain.BoardViewColumnSnapshot, view domain.BoardView) domain.BoardViewProjection {
+	if view.ID == "" {
+		view = domain.DefaultBoardView()
+		view.ID = "test"
+		view.Layout = domain.BoardViewLayoutHorizontalGrid
+		view.Columns = []domain.BoardColumn{{ID: "test", Title: "Test", Predicates: view.Columns[0].Predicates}}
+		columns = []domain.BoardViewColumnSnapshot{{Definition: view.Columns[0], Tasks: tasks}}
+	}
+	projection := domain.BoardViewProjection{View: view}
+	groupByTask := map[string]domain.BoardColumnID{}
+	for _, column := range columns {
+		group := domain.BoardViewProjectedGroup{GroupID: column.Definition.ID}
+		for _, task := range column.Tasks {
+			group.TaskIDs = append(group.TaskIDs, task.ID)
+			groupByTask[task.ID.String()] = column.Definition.ID
+		}
+		projection.Groups = append(projection.Groups, group)
+	}
+	for _, task := range tasks {
+		groupID := groupByTask[task.ID.String()]
+		if groupID == "" && len(projection.Groups) > 0 {
+			groupID = projection.Groups[0].GroupID
+			projection.Groups[0].TaskIDs = append(projection.Groups[0].TaskIDs, task.ID)
+		}
+		projection.KnownTaskIDs = append(projection.KnownTaskIDs, task.ID)
+		projection.Items = append(projection.Items, domain.BoardViewProjectedItem{Task: task, GroupID: groupID})
+	}
+	return projection
 }
 
 func worktreeListResponse(t *testing.T, req protocol.RequestEnvelope, issueID, path, branch string) protocol.ResponseEnvelope {
@@ -1327,7 +1355,10 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		msg := m.loadIssuesCmd()()
 		loaded, ok := msg.(issuesLoadedMsg)
 		if !ok {
-			t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+			if failed, isFailure := msg.(issuesErrorMsg); isFailure {
+				t.Fatalf("load failed: %v", failed.err)
+			}
+			t.Fatalf("message = %#v (%T), want issuesLoadedMsg", msg, msg)
 		}
 		if len(loaded.tasks) != 1 || loaded.tasks[0].ID != "az-1" {
 			t.Fatalf("loaded tasks = %+v", loaded.tasks)
@@ -1348,11 +1379,11 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		task := domain.Task{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}
 		columns := []domain.BoardViewColumnSnapshot{
 			{
-				Definition: domain.BoardColumn{ID: domain.BoardColumnWaitingAI, Title: "Waiting AI"},
+				Definition: view.Columns[1],
 				Tasks:      []domain.Task{task},
 			},
 			{
-				Definition: domain.BoardColumn{ID: domain.BoardColumnOpen, Title: "Open"},
+				Definition: view.Columns[0],
 			},
 		}
 		transport := &recordingDaemonTransport{
@@ -1374,7 +1405,10 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		msg := m.loadIssuesCmd()()
 		loaded, ok := msg.(issuesLoadedMsg)
 		if !ok {
-			t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+			if failed, isFailure := msg.(issuesErrorMsg); isFailure {
+				t.Fatalf("load configured board failed: %v", failed.err)
+			}
+			t.Fatalf("message = %#v (%T), want issuesLoadedMsg", msg, msg)
 		}
 		if got, want := loaded.boardView.ID, view.ID; got != want {
 			t.Fatalf("loaded board view id=%q want=%q", got, want)
@@ -11355,7 +11389,6 @@ func TestDaemonEventRevisionReducer(t *testing.T) {
 
 func TestOrchestrationLoopEventRefreshesVisibleOverview(t *testing.T) {
 	m := newTestModel()
-	m.viewMode = ViewModeOverview
 	m.daemonRevision = 4
 
 	result := m.applyDaemonStreamEvent(protocol.EventEnvelope{
@@ -11370,14 +11403,13 @@ func TestOrchestrationLoopEventRefreshesVisibleOverview(t *testing.T) {
 		t.Fatalf("daemon revision=%d, want 5", m.daemonRevision)
 	}
 
-	m.viewMode = ViewModeBoard
 	result = m.applyDaemonStreamEvent(protocol.EventEnvelope{
 		ProjectID: naming.ProjectID(m.daemonProjectID()),
 		Revision:  6,
 		Event:     protocol.EventOrchestrationLoopUpdated,
 	}, false)
-	if result.cmd != nil {
-		t.Fatalf("hidden overview refresh command=%T, want nil", result.cmd)
+	if result.cmd == nil {
+		t.Fatal("orchestration event did not refresh current-project snapshot")
 	}
 }
 

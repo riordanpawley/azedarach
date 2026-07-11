@@ -27,7 +27,6 @@ func (m Model) Init() tea.Cmd {
 		m.attachDaemonCmd(),
 		m.attachLogStreamCmd(),
 		m.gitSyncService.FetchAndCheck(),
-		m.loadUIViewModeCmd(),
 	)
 }
 
@@ -336,6 +335,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.boardView = msg.boardView
 		m.boardColumns = cloneBoardViewColumnSnapshots(msg.boardColumns)
+		m.boardOrdered = append([]domain.Task(nil), msg.boardOrdered...)
+		m.boardProjection = msg.boardProjection
 		if msg.boardView.ID != "" {
 			m.selectedBoardViewID = string(msg.boardView.ID)
 		}
@@ -397,12 +398,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			if opCmd := m.loadOperationsCmd(); opCmd != nil {
 				cmds = append(cmds, opCmd)
-				if overviewCmd := m.loadOrchestrationOverviewIfVisibleCmd(); overviewCmd != nil {
-					cmds = append(cmds, overviewCmd)
+				if orchestratorCmd := m.loadProjectOrchestratorSnapshotCmd(); orchestratorCmd != nil {
+					cmds = append(cmds, orchestratorCmd)
 				}
 			} else {
-				if overviewCmd := m.loadOrchestrationOverviewIfVisibleCmd(); overviewCmd != nil {
-					cmds = append(cmds, overviewCmd)
+				if orchestratorCmd := m.loadProjectOrchestratorSnapshotCmd(); orchestratorCmd != nil {
+					cmds = append(cmds, orchestratorCmd)
 				}
 			}
 			if noticeCmd := m.loadFeedbackProjectionCmd(); noticeCmd != nil {
@@ -447,27 +448,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logStreamReconnectQueued = false
 		return m, m.waitForLogStreamEventCmd()
 
-	case uiViewModeLoadedMsg:
-		if msg.err != nil {
-			if m.logger != nil {
-				m.logger.Debug("ui view-mode restore failed", "error", msg.err)
-			}
-			return m, nil
-		}
-		if msg.found {
-			m.viewMode = msg.viewMode
-		}
-		if m.viewMode == ViewModeOverview {
-			return m, m.loadOrchestrationOverviewCmd()
-		}
-		return m, nil
-
-	case uiViewModeSavedMsg:
-		if msg.err != nil && m.logger != nil {
-			m.logger.Debug("ui view-mode persist failed", "error", msg.err)
-		}
-		return m, nil
-
 	case boardViewsLoadedMsg:
 		if msg.err != nil {
 			m.addToast(Toast{
@@ -511,14 +491,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.boardRefreshing = true
 		return m, tea.Batch(m.scheduleIssuesRefreshCmd(), m.loadBoardViewsCmd())
 
-	case orchestrationOverviewLoadedMsg:
-		m.orchestrationOverview = msg.projects
-		m.orchestrationOverviewHiddenProjects = msg.hiddenProjects
-		m.orchestrationOverviewHiddenTasks = msg.hiddenTasks
-		m.orchestrationOverviewBackendErrors = msg.backendErrors
-		m.orchestrationOverviewHiddenLabels = append([]string(nil), msg.hiddenLabels...)
-		m.orchestrationOverviewCursor = clampInt(m.orchestrationOverviewCursor, 0, max(0, orchestrationOverviewTaskCount(msg.projects)-1))
-		m.orchestrationOverviewLoadedAt = time.Now()
+	case projectOrchestratorLoadedMsg:
+		project := msg.project
+		if msg.err != nil && project.Snapshot == nil && project.Session == nil && m.projectOrchestrator != nil &&
+			(m.projectOrchestrator.Snapshot != nil || m.projectOrchestrator.Session != nil) {
+			return m, nil
+		}
+		m.projectOrchestrator = &project
+		if current, ok := m.overlayStack.Current().(*overlay.ProjectOrchestratorOverlay); ok {
+			current.Sync(projectOrchestratorDetails(project))
+		}
 		return m, nil
 
 	case projectOrchestratorActionMsg:
@@ -526,15 +508,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.addToast(Toast{Level: ToastError, Message: fmt.Sprintf("Could not %s project orchestrator: %v", msg.action, msg.err), Expires: time.Now().Add(6 * time.Second)})
 			return m, nil
 		}
-		for i := range m.orchestrationOverview {
-			if m.orchestrationOverview[i].ProjectID == msg.projectID {
-				result := msg.result
-				m.orchestrationOverview[i].Session = &result
-				break
-			}
+		if m.projectOrchestrator != nil && m.projectOrchestrator.ProjectID == msg.projectID {
+			result := msg.result
+			m.projectOrchestrator.Session = &result
 		}
 		m.addToast(Toast{Level: ToastSuccess, Message: fmt.Sprintf("Project orchestrator %s: %s", msg.action, msg.result.Disposition), Expires: time.Now().Add(3 * time.Second)})
-		return m, m.loadOrchestrationOverviewCmd()
+		return m, m.loadProjectOrchestratorSnapshotCmd()
 
 	case issuesErrorMsg:
 		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
@@ -1276,6 +1255,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
 		m.boardView = msg.boardView
 		m.boardColumns = cloneBoardViewColumnSnapshots(msg.boardColumns)
+		m.boardOrdered = append([]domain.Task(nil), msg.boardOrdered...)
+		m.boardProjection = msg.boardProjection
 		for i := range m.tasks {
 			m.tasks[i].Session = cloneSession(m.tasks[i].Session)
 		}
@@ -1302,8 +1283,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		cmds := []tea.Cmd{m.waitForDaemonEventCmd()}
-		if overviewCmd := m.loadOrchestrationOverviewIfVisibleCmd(); overviewCmd != nil {
-			cmds = append(cmds, overviewCmd)
+		if orchestratorCmd := m.loadProjectOrchestratorSnapshotCmd(); orchestratorCmd != nil {
+			cmds = append(cmds, orchestratorCmd)
 		}
 		if opCmd := m.loadOperationsCmd(); opCmd != nil {
 			cmds = append(cmds, opCmd)
@@ -2170,7 +2151,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 		}
 		m.daemonRevision = cursor.Advance(evt).Revision
-		return daemonStreamEventResult{cmd: m.loadOrchestrationOverviewIfVisibleCmd()}
+		return daemonStreamEventResult{cmd: m.loadProjectOrchestratorSnapshotCmd()}
 	}
 	if isNoticeEvent(evt.Event) {
 		switch cursor.Decide(evt) {
