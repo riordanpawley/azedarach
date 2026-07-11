@@ -149,3 +149,42 @@ recovery. When it targets a branch that is already checked out in another Git
 worktree, the merge runs in that attached worktree. This avoids Git's
 single-checkout guard for branches while keeping the target branch as the merge
 authority.
+
+## Project Orchestrator Recovery
+
+Project orchestrators are daemon-owned exact-scope singletons. Diagnose them
+from typed state before touching tmux:
+
+```bash
+az orchestrator-session status
+az orchestrate status --json
+```
+
+For rooted scope, put flags before positionals and pass `--root <issue-id>` to
+the orchestrator/orchestrate command. The typed `runtime.reconcile` daemon debug
+response (there is no public runtime CLI family) exposes `invariant_sources`.
+Verify its mapping with
+`go test ./internal/daemon -run TestCommandRuntimeReconcileRoutesToManualRepair`;
+`orchestration.scope_singleton` and `orchestration.project_completion` must be
+`hybrid`. Projection-only state is not sufficient evidence of live runtime.
+
+- If the lease exists and tmux is live, use declarative `attach`.
+- If the lease exists and tmux is absent, use `start`; stale recovery must reuse
+  the exact-scope identity and recreate one runtime.
+- If work is quiescent, leave the session intact. An unresolved interaction
+  prevents completion but does not require a busy worker.
+- If lifecycle is `complete-grace`, allow the durable timer to expire. A relevant
+  change resets grace; do not pause the session manually to simulate expiry.
+- If lifecycle is `paused`, new open work, review, an accepted human answer, or
+  recovery wakes it idempotently.
+
+For duplicate/replay symptoms, inspect the durable orchestration cursor and
+action key before retrying. Do not invent a new intent key for the same action,
+and do not delete SQLite lease/checkpoint rows. Cross-daemon recovery depends on
+compare-and-swap and refreshed projections; manual row deletion defeats both.
+
+Interaction recovery is revision-safe. Fetch the current request, preserve the
+request ID (not issue ID), and retry with its latest revision. Discussion attach
+reuses the daemon-managed advisor singleton. Only a human-confirmed resolution
+may apply declared issue/spec/decision effects; expiry and recovery never infer
+an answer.
