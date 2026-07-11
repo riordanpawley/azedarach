@@ -1158,6 +1158,67 @@ func TestView_OrchestrationOverviewCompactsHugeGitCounts(t *testing.T) {
 	}
 }
 
+func TestView_ProjectOrchestratorStatusFitsDefaultAndNarrow(t *testing.T) {
+	for _, size := range []struct {
+		name          string
+		width, height int
+	}{{"default", 120, 30}, {"narrow", 52, 18}} {
+		t.Run(size.name, func(t *testing.T) {
+			m := newTestModel()
+			m.width, m.height, m.loading, m.viewMode = size.width, size.height, false, ViewModeOverview
+			m.orchestrationOverviewLoadedAt = time.Date(2026, time.July, 11, 2, 0, 0, 0, time.UTC)
+			m.orchestrationOverview = []orchestrationProjectOverview{{
+				Name: "azedarach", ProjectID: "project-a",
+				Snapshot: &protocol.OrchestrationSnapshot{
+					Lifecycle:   domain.OrchestratorWorking,
+					Capacity:    protocol.OrchestrationCapacity{TotalCountingCapacityCount: 2},
+					Constraints: protocol.OrchestrationConstraints{AgentCapacity: 4},
+					Runnable:    []string{"dci", "dcj"}, Reviews: []protocol.OrchestrationCandidate{{IssueID: "dck"}},
+					Interactions: []domain.InteractionRequest{{ID: "request-1"}}, OwnershipConflicts: []protocol.OrchestrationCandidate{{IssueID: "dcm"}},
+					Health:       protocol.OrchestrationHealth{Healthy: false, Diagnostics: []string{"watch cursor stale"}},
+					RecentEvents: []protocol.MailEvent{{Type: "worker-progress", Body: "implemented typed projection"}},
+				},
+				Session: &protocol.OrchestratorSessionResult{Lifecycle: domain.OrchestratorWorking, Live: true},
+			}}
+
+			view := ansi.Strip(m.View())
+			for _, want := range []string{"orchestrator working live=true", "workers 2/4", "ready 2", "review 1", "waiting-human 1", "owned-elsewhere 1", "watch cursor stale"} {
+				if !strings.Contains(view, want) {
+					t.Fatalf("project orchestration view missing %q:\n%s", want, view)
+				}
+			}
+			for i, line := range strings.Split(strings.TrimRight(view, "\n"), "\n") {
+				if got := lipgloss.Width(line); got > size.width {
+					t.Fatalf("line %d width=%d, want <=%d: %q", i, got, size.width, line)
+				}
+			}
+		})
+	}
+}
+
+func TestOverviewProjectOrchestratorActionsAndTypedUpdate(t *testing.T) {
+	m := newTestModel()
+	m.viewMode = ViewModeOverview
+	m.orchestrationOverview = []orchestrationProjectOverview{{Name: "empty", ProjectID: "project-a", Snapshot: &protocol.OrchestrationSnapshot{}}}
+
+	for _, key := range []string{"o", "A", "r"} {
+		updated, cmd, consumed := m.handleOverviewModeKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+		if !consumed || cmd == nil {
+			t.Fatalf("key %q consumed=%v cmd=%v, want consumed command", key, consumed, cmd)
+		}
+		m = updated
+	}
+
+	updatedAny, cmd := m.Update(projectOrchestratorActionMsg{
+		projectID: "project-a", action: "start",
+		result: protocol.OrchestratorSessionResult{Disposition: "started", Lifecycle: domain.OrchestratorWorking, Live: true},
+	})
+	updated := updatedAny.(Model)
+	if cmd == nil || updated.orchestrationOverview[0].Session == nil || !updated.orchestrationOverview[0].Session.Live {
+		t.Fatalf("typed update did not apply immediately: session=%+v cmd=%v", updated.orchestrationOverview[0].Session, cmd)
+	}
+}
+
 func TestView_RendersFreshnessIndicatorAcrossBoardAndCompactViews(t *testing.T) {
 	m := newTestModel()
 	m.width = 120

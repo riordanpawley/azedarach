@@ -468,6 +468,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.orchestrationOverviewLoadedAt = time.Now()
 		return m, nil
 
+	case projectOrchestratorActionMsg:
+		if msg.err != nil {
+			m.addToast(Toast{Level: ToastError, Message: fmt.Sprintf("Could not %s project orchestrator: %v", msg.action, msg.err), Expires: time.Now().Add(6 * time.Second)})
+			return m, nil
+		}
+		for i := range m.orchestrationOverview {
+			if m.orchestrationOverview[i].ProjectID == msg.projectID {
+				result := msg.result
+				m.orchestrationOverview[i].Session = &result
+				break
+			}
+		}
+		m.addToast(Toast{Level: ToastSuccess, Message: fmt.Sprintf("Project orchestrator %s: %s", msg.action, msg.result.Disposition), Expires: time.Now().Add(3 * time.Second)})
+		return m, m.loadOrchestrationOverviewCmd()
+
 	case issuesErrorMsg:
 		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
 			return m, nil
@@ -2061,6 +2076,17 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		return daemonStreamEventResult{cmd: cmd}
 	}
 	m.applyOperationProgressEvent(evt)
+	if evt.Event == protocol.EventOrchestrationLoopUpdated {
+		switch cursor.Decide(evt) {
+		case protocol.StreamProjectionDecisionIgnore:
+			return daemonStreamEventResult{}
+		case protocol.StreamProjectionDecisionResync:
+			m.clearDaemonEventStream()
+			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
+		}
+		m.daemonRevision = cursor.Advance(evt).Revision
+		return daemonStreamEventResult{cmd: m.loadOrchestrationOverviewIfVisibleCmd()}
+	}
 	if isNoticeEvent(evt.Event) {
 		switch cursor.Decide(evt) {
 		case protocol.StreamProjectionDecisionIgnore:

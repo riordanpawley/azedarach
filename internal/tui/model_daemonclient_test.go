@@ -11207,6 +11207,34 @@ func TestDaemonEventRevisionReducer(t *testing.T) {
 	}
 }
 
+func TestOrchestrationLoopEventRefreshesVisibleOverview(t *testing.T) {
+	m := newTestModel()
+	m.viewMode = ViewModeOverview
+	m.daemonRevision = 4
+
+	result := m.applyDaemonStreamEvent(protocol.EventEnvelope{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		Revision:  5,
+		Event:     protocol.EventOrchestrationLoopUpdated,
+	}, false)
+	if result.cmd == nil {
+		t.Fatal("orchestration loop event did not schedule overview refresh")
+	}
+	if m.daemonRevision != 5 {
+		t.Fatalf("daemon revision=%d, want 5", m.daemonRevision)
+	}
+
+	m.viewMode = ViewModeBoard
+	result = m.applyDaemonStreamEvent(protocol.EventEnvelope{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		Revision:  6,
+		Event:     protocol.EventOrchestrationLoopUpdated,
+	}, false)
+	if result.cmd != nil {
+		t.Fatalf("hidden overview refresh command=%T, want nil", result.cmd)
+	}
+}
+
 func TestTaskEventBodyAppliesWithoutSnapshotRefresh(t *testing.T) {
 	m := newTestModel()
 	m.daemonRevision = 4
