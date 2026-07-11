@@ -67,7 +67,7 @@ paths rather than transitional adapters:
 | Foreign ownership exclusion and claim races | `TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership`, `TestProjectStartIntentCannotBypassActionableReview` |
 | Human request, advisor discussion, edited/direct answer, atomic resolution | `TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle`, `TestInteractionStructuredProposalCanBeHumanEditedAndAtomicallyResolved` |
 | Review return and authoritative accepted close | `TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings`, `TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState` |
-| Quiescent, complete-grace, pause, and wake | `TestOrchestratorLifecycleGracePersistsAcrossRestartAndResets`, `TestOrchestratorWakeIsDurablyDebouncedAcrossStores` |
+| Quiescent, complete-grace, pause, and wake | `TestProjectOrchestrationEndToEndAcceptanceInventory` executes the production lease authority across quiescence, persisted grace, pause, relevant-change wake, debounced duplicate wake, and grace reset; focused state regressions are `TestOrchestratorLifecycleGracePersistsAcrossRestartAndResets` and `TestOrchestratorWakeIsDurablyDebouncedAcrossStores` |
 | Restart and durable cursor/action replay | `TestProjectOrchestratorActionKeyIsRestartStableAndStateSensitive`, `TestOrchestratorLoopCheckpointSurvivesRestartAndUsesCursorCAS` |
 | Multi-daemon stale-cache/race behavior | `TestOrchestratorLeaseAuthorityRefreshesStaleCacheBeforeAcquire`, `TestProjectOrchestratorLoopMultiDaemonReplayDoesNotDuplicateCheckpointAction`, `TestAdvisorRecoveryCleansRuntimeWhenTerminalRequestWinsCrossDaemonRace` |
 
@@ -80,6 +80,7 @@ Run the focused acceptance gate with:
 
 ```bash
 go test ./internal/daemon -run 'TestProject(OrchestrationEndToEndAcceptanceInventory|OrchestratorSessionStartAttachesExactScopeSingleton|OrchestratorLoopPrioritizesReviewAndPersistsCursor|OrchestrationSnapshotRefreshesCrossProcessOwnership)|TestInteraction(DiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle|StructuredProposalCanBeHumanEditedAndAtomicallyResolved)|TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings|TestOrchestrator(LifecycleGracePersistsAcrossRestartAndResets|WakeIsDurablyDebouncedAcrossStores|LeaseAuthorityRefreshesStaleCacheBeforeAcquire)' -count=1
+go test ./internal/daemon/state -run 'TestOrchestrator(LifecycleGracePersistsAcrossRestartAndResets|WakeIsDurablyDebouncedAcrossStores)' -count=1
 ```
 
 ## Rollout and rollback
