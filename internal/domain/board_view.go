@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 const BoardViewDefinitionSchemaVersion = 2
@@ -136,9 +138,21 @@ type BoardViewColumnSnapshot struct {
 // BoardViewProjection is the surface-neutral result of applying a view.
 // Renderers choose geometry and interaction; placement and ordering live here.
 type BoardViewProjection struct {
-	Layout  BoardViewLayout           `json:"layout"`
-	Groups  []BoardViewColumnSnapshot `json:"groups"`
-	Ordered []Task                    `json:"ordered"`
+	View         BoardView                 `json:"view"`
+	Groups       []BoardViewProjectedGroup `json:"groups"`
+	Items        []BoardViewProjectedItem  `json:"items"`
+	KnownTaskIDs []naming.IssueID          `json:"known_task_ids,omitempty"`
+}
+
+type BoardViewProjectedGroup struct {
+	GroupID BoardColumnID    `json:"group_id"`
+	TaskIDs []naming.IssueID `json:"task_ids"`
+}
+
+type BoardViewProjectedItem struct {
+	Task    Task          `json:"task"`
+	GroupID BoardColumnID `json:"group_id"`
+	Depth   int           `json:"depth,omitempty"`
 }
 
 type BoardPlacement struct {
@@ -370,7 +384,37 @@ func GroupTasksByBoardView(view BoardView, tasks []Task) ([]BoardViewColumnSnaps
 	if err != nil {
 		return nil, err
 	}
-	return projection.Groups, nil
+	return projection.ColumnSnapshots(), nil
+}
+
+func (p BoardViewProjection) ColumnSnapshots() []BoardViewColumnSnapshot {
+	items := make(map[string]Task, len(p.Items))
+	for _, item := range p.Items {
+		items[item.Task.ID.String()] = item.Task
+	}
+	columns := make([]BoardViewColumnSnapshot, 0, len(p.Groups))
+	definitions := make(map[BoardColumnID]BoardColumn, len(p.View.Columns))
+	for _, definition := range p.View.Columns {
+		definitions[definition.ID] = definition
+	}
+	for _, group := range p.Groups {
+		column := BoardViewColumnSnapshot{Definition: definitions[group.GroupID]}
+		for _, taskID := range group.TaskIDs {
+			if task, ok := items[taskID.String()]; ok {
+				column.Tasks = append(column.Tasks, task)
+			}
+		}
+		columns = append(columns, column)
+	}
+	return columns
+}
+
+func (p BoardViewProjection) OrderedTasks() []Task {
+	result := make([]Task, 0, len(p.Items))
+	for _, item := range p.Items {
+		result = append(result, item.Task)
+	}
+	return result
 }
 
 func ProjectTasksByBoardView(view BoardView, tasks []Task) (BoardViewProjection, error) {
@@ -386,10 +430,7 @@ func ProjectTasksByBoardView(view BoardView, tasks []Task) (BoardViewProjection,
 		if !view.MatchesFilters(task) {
 			continue
 		}
-		placement, err := view.PlaceTask(task)
-		if err != nil {
-			return BoardViewProjection{}, err
-		}
+		placement := view.placeTaskNormalized(task)
 		if placement.Matched && placement.ColumnIndex >= 0 && placement.ColumnIndex < len(columns) {
 			columns[placement.ColumnIndex].Tasks = append(columns[placement.ColumnIndex].Tasks, task)
 		}
@@ -407,13 +448,69 @@ func ProjectTasksByBoardView(view BoardView, tasks []Task) (BoardViewProjection,
 		columns = filtered
 	}
 	ordered := make([]Task, 0, len(tasks))
+	groupByTask := make(map[string]BoardColumnID, len(tasks))
 	for _, column := range columns {
-		ordered = append(ordered, column.Tasks...)
+		for _, task := range column.Tasks {
+			ordered = append(ordered, task)
+			groupByTask[task.ID.String()] = column.Definition.ID
+		}
 	}
 	if view.Layout == BoardViewLayoutTreeList {
 		ordered = boardViewTreeOrder(ordered)
 	}
-	return BoardViewProjection{Layout: view.Layout, Groups: columns, Ordered: ordered}, nil
+	depths := boardViewTreeDepths(ordered)
+	groups := make([]BoardViewProjectedGroup, 0, len(columns))
+	for _, column := range columns {
+		group := BoardViewProjectedGroup{GroupID: column.Definition.ID}
+		for _, task := range column.Tasks {
+			group.TaskIDs = append(group.TaskIDs, task.ID)
+		}
+		groups = append(groups, group)
+	}
+	items := make([]BoardViewProjectedItem, 0, len(ordered))
+	for _, task := range ordered {
+		items = append(items, BoardViewProjectedItem{Task: task, GroupID: groupByTask[task.ID.String()], Depth: depths[task.ID.String()]})
+	}
+	knownTaskIDs := make([]naming.IssueID, 0, len(tasks))
+	for _, task := range tasks {
+		knownTaskIDs = append(knownTaskIDs, task.ID)
+	}
+	return BoardViewProjection{View: view, Groups: groups, Items: items, KnownTaskIDs: knownTaskIDs}, nil
+}
+
+func boardViewTreeDepths(tasks []Task) map[string]int {
+	byID := make(map[string]struct{}, len(tasks))
+	parents := make(map[string]string, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID.String()] = struct{}{}
+		if parentID := boardViewTaskParentID(task); parentID != "" {
+			parents[task.ID.String()] = parentID
+		}
+	}
+	depths := make(map[string]int, len(tasks))
+	for _, task := range tasks {
+		seen := map[string]bool{task.ID.String(): true}
+		for parentID := parents[task.ID.String()]; parentID != "" && !seen[parentID]; parentID = parents[parentID] {
+			if _, included := byID[parentID]; !included {
+				break
+			}
+			seen[parentID] = true
+			depths[task.ID.String()]++
+		}
+	}
+	return depths
+}
+
+func boardViewTaskParentID(task Task) string {
+	if task.ParentID != nil {
+		return task.ParentID.String()
+	}
+	for _, dependency := range task.Dependencies {
+		if dependency.Type == DependencyParentChild {
+			return dependency.ID.String()
+		}
+	}
+	return ""
 }
 
 func boardViewTreeOrder(tasks []Task) []Task {
@@ -425,18 +522,7 @@ func boardViewTreeOrder(tasks []Task) []Task {
 	}
 	for _, task := range tasks {
 		id := task.ID.String()
-		parentID := ""
-		if task.ParentID != nil {
-			parentID = task.ParentID.String()
-		}
-		if parentID == "" {
-			for _, dependency := range task.Dependencies {
-				if dependency.Type == DependencyParentChild {
-					parentID = dependency.ID.String()
-					break
-				}
-			}
-		}
+		parentID := boardViewTaskParentID(task)
 		if parentID == "" || parentID == id {
 			roots = append(roots, id)
 		} else if _, ok := byID[parentID]; ok {
@@ -651,7 +737,7 @@ func (v BoardView) Validate() error {
 }
 
 func (c BoardColumn) Normalized() BoardColumn {
-	c.ID = BoardColumnID(NormalizeBoardViewID(string(c.ID)))
+	c.ID = BoardColumnID(normalizeBoardGroupID(string(c.ID)))
 	c.Title = strings.TrimSpace(c.Title)
 	for i := range c.Predicates {
 		c.Predicates[i] = c.Predicates[i].Normalized()
@@ -659,13 +745,15 @@ func (c BoardColumn) Normalized() BoardColumn {
 	return c
 }
 
+func normalizeBoardGroupID(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.ReplaceAll(value, " ", "-")
+}
+
 func (c BoardColumn) Validate() error {
 	c = c.Normalized()
 	if strings.TrimSpace(string(c.ID)) == "" {
 		return fmt.Errorf("board column id is required")
-	}
-	if !knownBoardColumnID(c.ID) {
-		return fmt.Errorf("unknown board column id %q", c.ID)
 	}
 	if strings.TrimSpace(c.Title) == "" {
 		return fmt.Errorf("board column %q title is required", c.ID)
@@ -750,6 +838,10 @@ func (v BoardView) PlaceTask(task Task) (BoardPlacement, error) {
 	if err := v.Validate(); err != nil {
 		return BoardPlacement{}, err
 	}
+	return v.placeTaskNormalized(task), nil
+}
+
+func (v BoardView) placeTaskNormalized(task Task) BoardPlacement {
 	for i, column := range v.Columns {
 		matched, reasons := column.MatchTask(task)
 		if !matched {
@@ -767,14 +859,14 @@ func (v BoardView) PlaceTask(task Task) (BoardPlacement, error) {
 			ColumnIndex:    i,
 			MatchReason:    strings.Join(reasons, "; "),
 			PredicateKinds: kinds,
-		}, nil
+		}
 	}
 	return BoardPlacement{
 		Matched:     false,
 		ViewID:      v.ID,
 		ColumnIndex: -1,
 		MatchReason: "no board column predicates matched",
-	}, nil
+	}
 }
 
 func (c BoardColumn) MatchTask(task Task) (bool, []string) {
@@ -1002,22 +1094,6 @@ func validateIssueCloseOutcomes(values []IssueCloseOutcome) error {
 		seen[value] = struct{}{}
 	}
 	return nil
-}
-
-func knownBoardColumnID(id BoardColumnID) bool {
-	switch id {
-	case BoardColumnBacklog,
-		BoardColumnOpen,
-		BoardColumnActive,
-		BoardColumnReviewReady,
-		BoardColumnDone,
-		BoardColumnCancelled,
-		BoardColumnWaitingHuman,
-		BoardColumnWaitingAI:
-		return true
-	default:
-		return false
-	}
 }
 
 func issueWorkflowIn(value IssueWorkflow, values []IssueWorkflow) bool {

@@ -337,6 +337,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.boardView = msg.boardView
 		m.boardColumns = cloneBoardViewColumnSnapshots(msg.boardColumns)
 		m.boardOrdered = append([]domain.Task(nil), msg.boardOrdered...)
+		m.boardProjection = msg.boardProjection
 		if msg.boardView.ID != "" {
 			m.selectedBoardViewID = string(msg.boardView.ID)
 		}
@@ -1278,6 +1279,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.boardView = msg.boardView
 		m.boardColumns = cloneBoardViewColumnSnapshots(msg.boardColumns)
 		m.boardOrdered = append([]domain.Task(nil), msg.boardOrdered...)
+		m.boardProjection = msg.boardProjection
 		for i := range m.tasks {
 			m.tasks[i].Session = cloneSession(m.tasks[i].Session)
 		}

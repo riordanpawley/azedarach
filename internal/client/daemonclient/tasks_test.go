@@ -110,12 +110,29 @@ func mustMarshalBoardSnapshotPayload(t *testing.T, protocolVersion protocol.Vers
 		ProjectID:        naming.ProjectID(projectID),
 		LastCheckedAt:    mustTaskSnapshotCheckedAt(),
 		Freshness:        protocol.TaskListFreshnessFresh,
-		Tasks:            protocol.BoardTaskSummariesFromDomain(tasks),
+		Projection:       protocol.BoardViewProjectionFromDomain(testBoardProjection(tasks)),
 	})
 	if err != nil {
 		t.Fatalf("marshal board snapshot payload: %v", err)
 	}
 	return body
+}
+
+func testBoardProjection(tasks []domain.Task) domain.BoardViewProjection {
+	groupID := domain.BoardColumnID("test")
+	view := domain.DefaultBoardView()
+	view.ID = "test"
+	view.Layout = domain.BoardViewLayoutHorizontalGrid
+	view.Columns = []domain.BoardColumn{{ID: groupID, Title: "Test", Predicates: view.Columns[0].Predicates}}
+	projection := domain.BoardViewProjection{View: view}
+	group := domain.BoardViewProjectedGroup{GroupID: groupID}
+	for _, task := range tasks {
+		projection.KnownTaskIDs = append(projection.KnownTaskIDs, task.ID)
+		projection.Items = append(projection.Items, domain.BoardViewProjectedItem{Task: task, GroupID: groupID})
+		group.TaskIDs = append(group.TaskIDs, task.ID)
+	}
+	projection.Groups = []domain.BoardViewProjectedGroup{group}
+	return projection
 }
 
 func mustTaskSnapshotCheckedAt() time.Time {

@@ -1167,10 +1167,7 @@ func buildBoardSnapshotPayload(projectID string, revision uint64, lastCheckedAt 
 		ProjectID:        naming.ProjectID(projectID),
 		LastCheckedAt:    lastCheckedAt.UTC(),
 		Freshness:        freshness,
-		View:             view,
 		Projection:       protocol.BoardViewProjectionFromDomain(projection),
-		Columns:          protocol.BoardSnapshotColumnsFromDomain(projection.Groups),
-		Tasks:            protocol.BoardTaskSummariesFromDomain(tasks),
 	}, nil
 }
 

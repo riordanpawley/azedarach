@@ -328,14 +328,19 @@ func TestApplyProjectViewOrderingUsesSharedProjectionWithoutDroppingLiveSessions
 	snapshot := Snapshot{Entries: []InventoryEntry{
 		{IssueID: "low", ProjectID: "project", HasTmuxSession: true},
 		{IssueID: "high", ProjectID: "project", HasTmuxSession: true},
+		{IssueID: "filtered", ProjectID: "project", HasTmuxSession: true},
 		{SessionID: "untracked", HasTmuxSession: true},
 	}}
 	projects := []ProjectInventorySnapshot{{
 		ProjectID: "project",
 		View:      domain.DefaultBoardView(),
-		Projection: domain.BoardViewProjection{Layout: domain.BoardViewLayoutHorizontalGrid, Ordered: []domain.Task{
-			{ID: "high"}, {ID: "low"},
-		}},
+		Projection: domain.BoardViewProjection{View: func() domain.BoardView {
+			v := domain.DefaultBoardView()
+			v.Layout = domain.BoardViewLayoutHorizontalGrid
+			return v
+		}(),
+			KnownTaskIDs: []naming.IssueID{"high", "low", "filtered"},
+			Items:        []domain.BoardViewProjectedItem{{Task: domain.Task{ID: "high"}}, {Task: domain.Task{ID: "low"}}}},
 	}}
 	applyProjectViewOrdering(&snapshot, projects)
 	if got := []string{snapshot.Entries[0].IssueID, snapshot.Entries[1].IssueID, snapshot.Entries[2].SessionID}; !slices.Equal(got, []string{"high", "low", "untracked"}) {
@@ -343,6 +348,11 @@ func TestApplyProjectViewOrderingUsesSharedProjectionWithoutDroppingLiveSessions
 	}
 	if !snapshot.Entries[2].HasTmuxSession {
 		t.Fatal("untracked live tmux session was dropped")
+	}
+	for _, entry := range snapshot.Entries {
+		if entry.IssueID == "filtered" {
+			t.Fatal("view-filtered tracked session remained visible")
+		}
 	}
 }
 

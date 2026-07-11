@@ -18,6 +18,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 	"github.com/riordanpawley/azedarach/internal/ui/statusbar"
+	"github.com/riordanpawley/azedarach/internal/ui/styles"
 	"github.com/riordanpawley/azedarach/internal/ui/toast"
 )
 
@@ -40,6 +41,8 @@ func (m Model) View() string {
 			mainView = m.renderOrchestrationOverview()
 		} else if m.boardView.Normalized().Layout == domain.BoardViewLayoutTreeList {
 			mainView = m.renderConfiguredListView()
+		} else if m.boardView.Normalized().Layout == domain.BoardViewLayoutHorizontalGrid {
+			mainView = m.renderConfiguredHorizontalGrid()
 		} else {
 			mainView = m.renderBoardView()
 		}
@@ -138,6 +141,65 @@ func (m Model) View() string {
 
 	contentView = m.layerNotificationStack(contentView, m.width, contentHeight)
 	return lipgloss.JoinVertical(lipgloss.Left, contentView, statusBarView)
+}
+
+func (m Model) renderConfiguredHorizontalGrid() string {
+	visible := m.boardVisibleTasks(m.tasks)
+	visibleByID := make(map[string]domain.Task, len(visible))
+	for _, task := range visible {
+		visibleByID[task.ID.String()] = task
+	}
+	ordered := make([]domain.Task, 0, len(visible))
+	for _, projected := range m.boardOrdered {
+		if task, ok := visibleByID[projected.ID.String()]; ok {
+			ordered = append(ordered, task)
+		}
+	}
+	if len(m.boardOrdered) == 0 {
+		projection, err := domain.ProjectTasksByBoardView(m.boardView, visible)
+		if err == nil {
+			ordered = projection.OrderedTasks()
+		}
+	}
+	if sortState := m.editor.GetSort(); sortState != nil && m.editor.IsSortExplicit() {
+		ordered = sortState.ApplyInPlace(ordered)
+	}
+	if len(ordered) == 0 {
+		return ""
+	}
+	cardWidth, columns := horizontalGridGeometry(m.width)
+	selectedID := ""
+	if m.nav != nil && m.nav.GetCursor() != nil {
+		selectedID = m.nav.GetCursor().TaskID
+	}
+	cards := make([]string, 0, len(ordered))
+	for _, task := range ordered {
+		style := lipgloss.NewStyle().Width(max(1, cardWidth-4)).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(styles.Surface0)
+		if task.ID.String() == selectedID {
+			style = style.BorderForeground(styles.Blue).Bold(true)
+		}
+		bodyWidth := max(1, cardWidth-4)
+		body := ansi.Truncate(task.ID.String()+" "+task.Title, bodyWidth, "…") + "\n" + ansi.Truncate(task.Status.String(), bodyWidth, "…")
+		cards = append(cards, style.Render(body))
+	}
+	rows := make([]string, 0, (len(cards)+columns-1)/columns)
+	for start := 0; start < len(cards); start += columns {
+		end := min(len(cards), start+columns)
+		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, cards[start:end]...))
+	}
+	return m.overlayFreshnessIndicator(strings.Join(rows, "\n"), board.BoardContentHeight(m.height))
+}
+
+func horizontalGridGeometry(width int) (cardWidth, columns int) {
+	if width < 1 {
+		width = 1
+	}
+	cardWidth = min(32, max(4, width/3))
+	if cardWidth > width {
+		cardWidth = width
+	}
+	columns = max(1, width/cardWidth)
+	return cardWidth, columns
 }
 
 func orchestrationOverviewStatusBindings() []keybinds.Binding {
@@ -461,6 +523,9 @@ func renderedBlockSize(view string) (width, height int) {
 func (m Model) buildColumns() []board.Column {
 	// Apply filter to tasks and enforce board-level child hiding semantics.
 	filteredTasks := m.boardVisibleTasks(m.tasks)
+	if m.boardView.Normalized().Layout == domain.BoardViewLayoutHorizontalGrid {
+		return m.horizontalGridNavigationColumns(filteredTasks)
+	}
 	if columns, ok := m.configuredBoardColumns(filteredTasks); ok {
 		return m.applyBoardColumnSort(columns)
 	}
@@ -482,6 +547,30 @@ func (m Model) buildColumns() []board.Column {
 	}
 
 	return m.applyBoardColumnSort(columns)
+}
+
+func (m Model) horizontalGridNavigationColumns(visible []domain.Task) []board.Column {
+	visibleByID := make(map[string]domain.Task, len(visible))
+	for _, task := range visible {
+		visibleByID[task.ID.String()] = task
+	}
+	ordered := make([]domain.Task, 0, len(visible))
+	for _, projected := range m.boardOrdered {
+		if task, ok := visibleByID[projected.ID.String()]; ok {
+			ordered = append(ordered, task)
+		}
+	}
+	if len(m.boardOrdered) == 0 {
+		if projection, err := domain.ProjectTasksByBoardView(m.boardView, visible); err == nil {
+			ordered = projection.OrderedTasks()
+		}
+	}
+	_, columnCount := horizontalGridGeometry(m.width)
+	columns := make([]board.Column, min(columnCount, len(ordered)))
+	for i, task := range ordered {
+		columns[i%len(columns)].Tasks = append(columns[i%len(columns)].Tasks, task)
+	}
+	return columns
 }
 
 func (m Model) configuredBoardColumns(filteredTasks []domain.Task) ([]board.Column, bool) {
@@ -550,7 +639,7 @@ func (m Model) applyBoardColumnSort(columns []board.Column) []board.Column {
 	}
 	var activeDescendantSessionByTask map[string]bool
 	sortState := m.editor.GetSort()
-	if sortState != nil && sortState.Field == domain.SortBySession {
+	if m.editor.IsSortExplicit() && sortState != nil && sortState.Field == domain.SortBySession {
 		activeDescendantSessionByTask = buildActiveDescendantSessionByTask(m.tasks)
 	}
 	for i := range columns {
@@ -561,11 +650,8 @@ func (m Model) applyBoardColumnSort(columns []board.Column) []board.Column {
 				}
 			}
 		}
-		if sortState != nil {
+		if m.editor.IsSortExplicit() && sortState != nil {
 			columns[i].Tasks = sortState.ApplyInPlace(columns[i].Tasks)
-		}
-		if m.boardView.Options.SortPolicy == domain.BoardViewSortHumanAttention && !m.editor.IsSortExplicit() {
-			columns[i].Tasks = domain.ApplyBoardViewSortPolicyInPlace(m.boardView.Options.SortPolicy, columns[i].Tasks)
 		}
 	}
 	return columns
@@ -585,6 +671,11 @@ func (m Model) boardVisibleTasks(tasks []domain.Task) []domain.Task {
 			}
 		}
 		return result
+	}
+	if m.boardProjection.View.ID != "" {
+		filter := *m.editor.GetFilter()
+		filter.HideEpicChildren = false
+		return m.applySessionTreeFilter(filter.Apply(tasks))
 	}
 
 	if m.sessionTreeFilterOnly {
@@ -1087,6 +1178,7 @@ func (m Model) renderConfiguredListView() string {
 		visibleByID[task.ID.String()] = task
 	}
 	ordered := make([]domain.Task, 0, len(visible))
+	projectedItems := m.boardProjection.Items
 	for _, projected := range m.boardOrdered {
 		if task, ok := visibleByID[projected.ID.String()]; ok {
 			ordered = append(ordered, task)
@@ -1096,41 +1188,28 @@ func (m Model) renderConfiguredListView() string {
 	if len(m.boardOrdered) == 0 {
 		projection, err := domain.ProjectTasksByBoardView(m.boardView, visible)
 		if err == nil {
-			ordered = projection.Ordered
+			ordered = projection.OrderedTasks()
+			projectedItems = projection.Items
 		}
 	}
 	if sortState := m.editor.GetSort(); sortState != nil && m.editor.IsSortExplicit() {
 		ordered = sortState.ApplyInPlace(ordered)
 	}
-	ordered = decorateConfiguredTreeTasks(ordered)
+	ordered = decorateConfiguredTreeTasks(ordered, projectedItems)
 	compactView := compact.NewCompactView(ordered, m.width, board.BoardContentHeight(m.height))
 	compactView.SetCursor(m.compactCursorIndex(ordered))
 	compactView.SetSelected(m.editor.GetSelectedTasks())
 	return m.overlayFreshnessIndicator(compactView.Render(), board.BoardContentHeight(m.height))
 }
 
-func decorateConfiguredTreeTasks(tasks []domain.Task) []domain.Task {
-	parents := make(map[string]string, len(tasks))
-	for _, task := range tasks {
-		if task.ParentID != nil {
-			parents[task.ID.String()] = task.ParentID.String()
-			continue
-		}
-		for _, dependency := range task.Dependencies {
-			if dependency.Type == domain.DependencyParentChild {
-				parents[task.ID.String()] = dependency.ID.String()
-				break
-			}
-		}
+func decorateConfiguredTreeTasks(tasks []domain.Task, items []domain.BoardViewProjectedItem) []domain.Task {
+	depths := make(map[string]int, len(items))
+	for _, item := range items {
+		depths[item.Task.ID.String()] = item.Depth
 	}
 	result := append([]domain.Task(nil), tasks...)
 	for i := range result {
-		depth := 0
-		seen := map[string]bool{result[i].ID.String(): true}
-		for parentID := parents[result[i].ID.String()]; parentID != "" && !seen[parentID]; parentID = parents[parentID] {
-			seen[parentID] = true
-			depth++
-		}
+		depth := depths[result[i].ID.String()]
 		if depth > 0 {
 			result[i].Title = strings.Repeat("  ", depth-1) + "└ " + result[i].Title
 		}

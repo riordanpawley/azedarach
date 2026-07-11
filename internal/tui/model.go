@@ -224,6 +224,7 @@ type Model struct {
 	boardView            domain.BoardView
 	boardColumns         []domain.BoardViewColumnSnapshot
 	boardOrdered         []domain.Task
+	boardProjection      domain.BoardViewProjection
 	sessions             map[string]*domain.Session
 	suppressedTasks      map[string]struct{}
 	pendingStatuses      map[string]pendingTaskStatus
@@ -1177,23 +1178,24 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Message types for async operations
 
 type issuesLoadedMsg struct {
-	refreshSeq     uint64
-	projectID      string
-	scopedParentID string
-	tasks          []domain.Task
-	boardView      domain.BoardView
-	boardColumns   []domain.BoardViewColumnSnapshot
-	boardOrdered   []domain.Task
-	revision       uint64
-	lastCheckedAt  time.Time
-	freshness      protocol.TaskListFreshness
-	events         <-chan protocol.EventEnvelope
-	eventsCancel   context.CancelFunc
-	daemonClient   *daemonclient.Client
-	daemonSocket   string
-	stale          bool
-	freshnessHint  string
-	reconcileWarn  error
+	refreshSeq      uint64
+	projectID       string
+	scopedParentID  string
+	tasks           []domain.Task
+	boardView       domain.BoardView
+	boardColumns    []domain.BoardViewColumnSnapshot
+	boardOrdered    []domain.Task
+	boardProjection domain.BoardViewProjection
+	revision        uint64
+	lastCheckedAt   time.Time
+	freshness       protocol.TaskListFreshness
+	events          <-chan protocol.EventEnvelope
+	eventsCancel    context.CancelFunc
+	daemonClient    *daemonclient.Client
+	daemonSocket    string
+	stale           bool
+	freshnessHint   string
+	reconcileWarn   error
 }
 
 type issuesErrorMsg struct {
@@ -1203,21 +1205,22 @@ type issuesErrorMsg struct {
 }
 
 type projectSwitchResultMsg struct {
-	switchSeq     uint64
-	project       config.Project
-	projectConfig *config.Config
-	tasks         []domain.Task
-	boardView     domain.BoardView
-	boardColumns  []domain.BoardViewColumnSnapshot
-	boardOrdered  []domain.Task
-	revision      uint64
-	lastCheckedAt time.Time
-	freshness     protocol.TaskListFreshness
-	events        <-chan protocol.EventEnvelope
-	eventsCancel  context.CancelFunc
-	daemonClient  *daemonclient.Client
-	daemonSocket  string
-	err           error
+	switchSeq       uint64
+	project         config.Project
+	projectConfig   *config.Config
+	tasks           []domain.Task
+	boardView       domain.BoardView
+	boardColumns    []domain.BoardViewColumnSnapshot
+	boardOrdered    []domain.Task
+	boardProjection domain.BoardViewProjection
+	revision        uint64
+	lastCheckedAt   time.Time
+	freshness       protocol.TaskListFreshness
+	events          <-chan protocol.EventEnvelope
+	eventsCancel    context.CancelFunc
+	daemonClient    *daemonclient.Client
+	daemonSocket    string
+	err             error
 }
 
 const (
@@ -1762,16 +1765,17 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: err}
 		}
 		return issuesLoadedMsg{
-			refreshSeq:     refreshSeq,
-			projectID:      projectID,
-			scopedParentID: scopedParentID,
-			tasks:          snapshot.Tasks,
-			boardView:      snapshot.View,
-			boardColumns:   snapshot.Columns,
-			boardOrdered:   snapshot.Projection.Ordered,
-			revision:       snapshot.Revision,
-			lastCheckedAt:  snapshot.LastCheckedAt,
-			freshness:      snapshot.Freshness,
+			refreshSeq:      refreshSeq,
+			projectID:       projectID,
+			scopedParentID:  scopedParentID,
+			tasks:           snapshot.Tasks,
+			boardView:       snapshot.View,
+			boardColumns:    snapshot.Columns,
+			boardOrdered:    snapshot.Projection.OrderedTasks(),
+			boardProjection: snapshot.Projection,
+			revision:        snapshot.Revision,
+			lastCheckedAt:   snapshot.LastCheckedAt,
+			freshness:       snapshot.Freshness,
 		}
 	}
 }
@@ -1977,17 +1981,18 @@ func (m Model) loadIssuesAfterRuntimeReconcileCmd() tea.Cmd {
 		}
 
 		return issuesLoadedMsg{
-			refreshSeq:     refreshSeq,
-			projectID:      projectID,
-			scopedParentID: scopedParentID,
-			tasks:          snapshot.Tasks,
-			boardView:      snapshot.View,
-			boardColumns:   snapshot.Columns,
-			boardOrdered:   snapshot.Projection.Ordered,
-			revision:       snapshot.Revision,
-			lastCheckedAt:  snapshot.LastCheckedAt,
-			freshness:      snapshot.Freshness,
-			reconcileWarn:  reconcileWarn,
+			refreshSeq:      refreshSeq,
+			projectID:       projectID,
+			scopedParentID:  scopedParentID,
+			tasks:           snapshot.Tasks,
+			boardView:       snapshot.View,
+			boardColumns:    snapshot.Columns,
+			boardOrdered:    snapshot.Projection.OrderedTasks(),
+			boardProjection: snapshot.Projection,
+			revision:        snapshot.Revision,
+			lastCheckedAt:   snapshot.LastCheckedAt,
+			freshness:       snapshot.Freshness,
+			reconcileWarn:   reconcileWarn,
 		}
 	}
 }
@@ -2045,17 +2050,18 @@ func (m Model) loadIssuesAfterIssueReconcileCmd(issueIDs []string) tea.Cmd {
 		}
 
 		return issuesLoadedMsg{
-			refreshSeq:     refreshSeq,
-			projectID:      projectID,
-			scopedParentID: scopedParentID,
-			tasks:          snapshot.Tasks,
-			boardView:      snapshot.View,
-			boardColumns:   snapshot.Columns,
-			boardOrdered:   snapshot.Projection.Ordered,
-			revision:       snapshot.Revision,
-			lastCheckedAt:  snapshot.LastCheckedAt,
-			freshness:      snapshot.Freshness,
-			reconcileWarn:  reconcileWarn,
+			refreshSeq:      refreshSeq,
+			projectID:       projectID,
+			scopedParentID:  scopedParentID,
+			tasks:           snapshot.Tasks,
+			boardView:       snapshot.View,
+			boardColumns:    snapshot.Columns,
+			boardOrdered:    snapshot.Projection.OrderedTasks(),
+			boardProjection: snapshot.Projection,
+			revision:        snapshot.Revision,
+			lastCheckedAt:   snapshot.LastCheckedAt,
+			freshness:       snapshot.Freshness,
+			reconcileWarn:   reconcileWarn,
 		}
 	}
 }
@@ -2373,20 +2379,21 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		}
 
 		return projectSwitchResultMsg{
-			switchSeq:     switchSeq,
-			project:       project,
-			projectConfig: projectConfig,
-			tasks:         snapshot.Tasks,
-			boardView:     snapshot.View,
-			boardColumns:  snapshot.Columns,
-			boardOrdered:  snapshot.Projection.Ordered,
-			revision:      snapshot.Revision,
-			lastCheckedAt: snapshot.LastCheckedAt,
-			freshness:     snapshot.Freshness,
-			events:        events,
-			eventsCancel:  streamCancel,
-			daemonClient:  daemonClient,
-			daemonSocket:  socketPath,
+			switchSeq:       switchSeq,
+			project:         project,
+			projectConfig:   projectConfig,
+			tasks:           snapshot.Tasks,
+			boardView:       snapshot.View,
+			boardColumns:    snapshot.Columns,
+			boardOrdered:    snapshot.Projection.OrderedTasks(),
+			boardProjection: snapshot.Projection,
+			revision:        snapshot.Revision,
+			lastCheckedAt:   snapshot.LastCheckedAt,
+			freshness:       snapshot.Freshness,
+			events:          events,
+			eventsCancel:    streamCancel,
+			daemonClient:    daemonClient,
+			daemonSocket:    socketPath,
 		}
 	}
 }
@@ -2454,18 +2461,19 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		}
 
 		return issuesLoadedMsg{
-			projectID:     projectID,
-			tasks:         snapshot.Tasks,
-			boardView:     snapshot.View,
-			boardColumns:  snapshot.Columns,
-			boardOrdered:  snapshot.Projection.Ordered,
-			revision:      snapshot.Revision,
-			lastCheckedAt: snapshot.LastCheckedAt,
-			freshness:     snapshot.Freshness,
-			events:        events,
-			eventsCancel:  streamCancel,
-			daemonClient:  daemonClient,
-			daemonSocket:  socketPath,
+			projectID:       projectID,
+			tasks:           snapshot.Tasks,
+			boardView:       snapshot.View,
+			boardColumns:    snapshot.Columns,
+			boardOrdered:    snapshot.Projection.OrderedTasks(),
+			boardProjection: snapshot.Projection,
+			revision:        snapshot.Revision,
+			lastCheckedAt:   snapshot.LastCheckedAt,
+			freshness:       snapshot.Freshness,
+			events:          events,
+			eventsCancel:    streamCancel,
+			daemonClient:    daemonClient,
+			daemonSocket:    socketPath,
 		}
 	}
 }

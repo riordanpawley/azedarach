@@ -41,6 +41,38 @@ func TestLoadedTypedViewOwnsSelectorLayoutAndTabOverrideIsTransient(t *testing.T
 	}
 }
 
+func TestTypedColumnBoardRendersProjectedGroups(t *testing.T) {
+	view := domain.DefaultBoardView()
+	model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+	model.loading = false
+	model.snapshot = Snapshot{View: view, Entries: []InventoryEntry{
+		{IssueID: "one", TaskTitle: "One", ViewProjected: true, ViewGroupID: domain.BoardColumnOpen, ViewGroupTitle: "Open"},
+		{IssueID: "two", TaskTitle: "Two", ViewProjected: true, ViewGroupID: domain.BoardColumnActive, ViewGroupTitle: "In Progress"},
+	}}
+	rendered := model.View()
+	if !strings.Contains(rendered, "Open (1)") || !strings.Contains(rendered, "In Progress (1)") {
+		t.Fatalf("column board missing projected groups:\n%s", rendered)
+	}
+}
+
+func TestTypedColumnBoardKeepsSelectedGroupVisibleOnNarrowViewport(t *testing.T) {
+	view := domain.DefaultBoardView()
+	model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+	model.loading, model.width, model.height, model.cursor = false, 60, 20, 2
+	model.snapshot = Snapshot{View: view, Entries: []InventoryEntry{
+		{IssueID: "one", TaskTitle: "One", ViewGroupID: "one", ViewGroupTitle: "One"},
+		{IssueID: "two", TaskTitle: "Two", ViewGroupID: "two", ViewGroupTitle: "Two"},
+		{IssueID: "three", TaskTitle: "Three", ViewGroupID: "three", ViewGroupTitle: "Three"},
+	}}
+	rendered := model.View()
+	if !strings.Contains(rendered, "Three (1)") {
+		t.Fatalf("selected group not visible:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "One (1)") {
+		t.Fatalf("narrow viewport rendered off-screen group:\n%s", rendered)
+	}
+}
+
 func (f fakeSnapshotLoader) ListTasksSnapshot(context.Context) (Snapshot, error) {
 	return f.snapshot, f.err
 }

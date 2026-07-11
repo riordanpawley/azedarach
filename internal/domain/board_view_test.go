@@ -99,11 +99,44 @@ func TestProjectTasksByBoardViewAppliesFiltersOrderedRulesAndTreeLayout(t *testi
 	if err != nil {
 		t.Fatalf("ProjectTasksByBoardView: %v", err)
 	}
-	if projection.Layout != BoardViewLayoutTreeList {
-		t.Fatalf("layout = %q", projection.Layout)
+	if projection.View.Layout != BoardViewLayoutTreeList {
+		t.Fatalf("layout = %q", projection.View.Layout)
 	}
-	if got := taskIDs(projection.Ordered); !slices.Equal(got, []string{"parent", "child"}) {
+	if got := taskIDs(projection.OrderedTasks()); !slices.Equal(got, []string{"parent", "child"}) {
 		t.Fatalf("ordered = %v, want parent-before-child and filtered task omitted", got)
+	}
+}
+
+func TestTreeProjectionPromotesChildWhenParentIsFiltered(t *testing.T) {
+	parentID := Task{ID: "parent"}.ID
+	view := DefaultBoardView()
+	view.Layout = BoardViewLayoutTreeList
+	view.Filters = []BoardColumnPredicate{{Kind: BoardPredicateLifecycle, Lifecycle: []IssueWorkflow{IssueWorkflowActive}}}
+	projection, err := ProjectTasksByBoardView(view, []Task{
+		{ID: parentID, Status: StatusOpen},
+		{ID: "child", ParentID: &parentID, Status: StatusInProgress},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Items) != 1 || projection.Items[0].Task.ID != "child" || projection.Items[0].Depth != 0 {
+		t.Fatalf("projection items = %+v, want child promoted to root", projection.Items)
+	}
+}
+
+func TestBoardViewAllowsCustomGroupIDs(t *testing.T) {
+	view := DefaultBoardView()
+	view.Columns[0].ID = "needs_attention"
+	if err := view.Validate(); err != nil {
+		t.Fatalf("custom group id rejected: %v", err)
+	}
+}
+
+func TestCustomGroupIDDoesNotUseLegacyViewAliases(t *testing.T) {
+	column := DefaultBoardView().Columns[0]
+	column.ID = "current"
+	if got := column.Normalized().ID; got != "current" {
+		t.Fatalf("group id = %q, want current", got)
 	}
 }
 
@@ -541,7 +574,7 @@ func TestBoardViewValidationRejectsInvalidDefinitions(t *testing.T) {
 					Kind: BoardColumnPredicateKind("sql"),
 				}},
 			}}},
-			want: "unknown board column id",
+			want: "unsupported board column predicate kind",
 		},
 		{
 			name: "unsupported predicate kind",

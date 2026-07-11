@@ -6,13 +6,13 @@ or `horizontal_grid`), first-match groups, conjunctive filters, ordered sort
 rules, and display options. The domain projection engine applies those rules;
 surface code owns only interaction and rendering.
 
-The daemon board snapshot schema v4 carries both compatibility `columns` and a
-typed `projection` containing the layout, groups, and total ordered task list.
-The TUI renders column and grid layouts from the groups and tree-list layouts
-from the total order. The global tmux selector fetches each project's selected
-board snapshot, applies its projection order to matching sessions, and retains
-live tmux sessions that have no durable issue match. Live tmux discovery remains
-authoritative for runtime presence.
+The daemon board snapshot schema v4 carries one typed `projection`: ordered
+groups reference a single ordered item collection, items carry tree depth, and
+`known_task_ids` distinguishes filtered durable issues from tmux-only runtime
+discoveries. The TUI and tmux selector render column-board, tree-list, and
+horizontal-grid adapters over that same projection. The selector retains live
+tmux sessions only when they have no durable issue match. Live tmux discovery
+remains authoritative for runtime presence without bypassing view filters.
 
 ## Persistence and transient changes
 

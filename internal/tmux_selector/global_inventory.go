@@ -602,19 +602,66 @@ func applyProjectViewOrdering(snapshot *Snapshot, projects []ProjectInventorySna
 		return
 	}
 	ranks := make(map[string]int)
+	known := make(map[string]struct{})
+	included := make(map[string]struct{})
+	projectedItems := make(map[string]domain.BoardViewProjectedItem)
+	groupTitles := make(map[string]string)
 	next := 0
 	for _, project := range projects {
 		if snapshot.View.ID == "" && project.View.ID != "" {
 			snapshot.View = project.View
 			snapshot.Projection = project.Projection
 		}
-		for _, task := range project.Projection.Ordered {
+		for _, taskID := range project.Projection.KnownTaskIDs {
 			for _, scope := range taskScopeKeys(project.ProjectID, project.ProjectPath) {
-				ranks[scope+":"+task.ID.String()] = next
+				known[scope+":"+taskID.String()] = struct{}{}
+			}
+		}
+		for _, group := range project.Projection.Groups {
+			title := string(group.GroupID)
+			for _, definition := range project.Projection.View.Columns {
+				if definition.ID == group.GroupID {
+					title = definition.Title
+					break
+				}
+			}
+			for _, scope := range taskScopeKeys(project.ProjectID, project.ProjectPath) {
+				groupTitles[scope+":"+string(group.GroupID)] = title
+			}
+		}
+		for _, item := range project.Projection.Items {
+			task := item.Task
+			for _, scope := range taskScopeKeys(project.ProjectID, project.ProjectPath) {
+				key := scope + ":" + task.ID.String()
+				ranks[key] = next
+				included[key] = struct{}{}
+				projectedItems[key] = item
 			}
 			next++
 		}
 	}
+	filtered := snapshot.Entries[:0]
+	for _, entry := range snapshot.Entries {
+		key, tracked := projectedEntryScopeKey(entry, known)
+		if tracked {
+			if _, visible := included[key]; !visible {
+				continue
+			}
+		}
+		if item, ok := projectedItems[key]; ok {
+			entry.ViewProjected = true
+			entry.ViewDepth = item.Depth
+			entry.ViewGroupID = item.GroupID
+			for _, scope := range taskScopeKeys(entry.ProjectID, entry.ProjectPath) {
+				if title := groupTitles[scope+":"+string(item.GroupID)]; title != "" {
+					entry.ViewGroupTitle = title
+					break
+				}
+			}
+		}
+		filtered = append(filtered, entry)
+	}
+	snapshot.Entries = filtered
 	sort.SliceStable(snapshot.Entries, func(i, j int) bool {
 		left, leftOK := projectedEntryRank(snapshot.Entries[i], ranks)
 		right, rightOK := projectedEntryRank(snapshot.Entries[j], ranks)
@@ -627,6 +674,16 @@ func applyProjectViewOrdering(snapshot *Snapshot, projects []ProjectInventorySna
 	for _, entry := range snapshot.Entries {
 		snapshot.Tasks = append(snapshot.Tasks, taskFromInventoryEntry(entry))
 	}
+}
+
+func projectedEntryScopeKey(entry InventoryEntry, values map[string]struct{}) (string, bool) {
+	for _, scope := range taskScopeKeys(entry.ProjectID, entry.ProjectPath) {
+		key := scope + ":" + entry.IssueID
+		if _, ok := values[key]; ok {
+			return key, true
+		}
+	}
+	return "", false
 }
 
 func projectedEntryRank(entry InventoryEntry, ranks map[string]int) (int, bool) {

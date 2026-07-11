@@ -40,7 +40,7 @@ func TestDecorateConfiguredTreeTasksRendersHierarchyWithoutMutatingProjection(t 
 		{ID: parentID, Title: "Parent"},
 		{ID: "child", Title: "Child", ParentID: &parentID},
 	}
-	decorated := decorateConfiguredTreeTasks(tasks)
+	decorated := decorateConfiguredTreeTasks(tasks, []domain.BoardViewProjectedItem{{Task: tasks[0]}, {Task: tasks[1], Depth: 1}})
 	if got := decorated[1].Title; got != "└ Child" {
 		t.Fatalf("child title = %q", got)
 	}
@@ -4750,6 +4750,7 @@ func TestBoardColumnsDoNotApplyAutomaticAttentionSortToCustomView(t *testing.T) 
 	m.boardView = domain.DefaultBoardView()
 	m.boardView.ID = "custom"
 	m.boardView.Options.SortPolicy = domain.BoardViewSortDefault
+	m.boardView.Sort = []domain.BoardViewSortRule{{Key: domain.BoardViewSortKeyGitDiff, Direction: domain.BoardViewSortDescending}}
 	m.tasks = []domain.Task{
 		{ID: "ordinary", Status: domain.StatusInProgress, GitAdditions: 100},
 		{ID: "waiting", Status: domain.StatusInProgress, Session: &domain.Session{Activity: "waiting-for-human"}},

@@ -493,6 +493,40 @@ func TestView_TypedTreeLayoutUsesDaemonProjectionOrder(t *testing.T) {
 	}
 }
 
+func TestView_TypedHorizontalGridUsesDistinctRenderer(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.width = 120
+	m.height = 24
+	m.tasks = m.tasks[:2]
+	m.boardView = domain.DefaultBoardView()
+	m.boardView.Layout = domain.BoardViewLayoutHorizontalGrid
+	m.boardOrdered = append([]domain.Task(nil), m.tasks...)
+	view := m.View()
+	if strings.Contains(strings.Split(view, "\n")[0], "Open (") {
+		t.Fatalf("grid rendered board columns:\n%s", view)
+	}
+	if !strings.Contains(view, "Task 1") || !strings.Contains(view, "Task 2") {
+		t.Fatalf("grid omitted tasks:\n%s", view)
+	}
+}
+
+func TestView_TypedHorizontalGridFitsNarrowViewport(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.width = 12
+	m.height = 12
+	m.tasks = m.tasks[:1]
+	m.boardView = domain.DefaultBoardView()
+	m.boardView.Layout = domain.BoardViewLayoutHorizontalGrid
+	m.boardOrdered = append([]domain.Task(nil), m.tasks...)
+	for _, line := range strings.Split(m.View(), "\n") {
+		if width := ansi.StringWidth(line); width > m.width {
+			t.Fatalf("line width = %d > %d: %q", width, m.width, line)
+		}
+	}
+}
+
 func TestView_OrchestrationOverviewShowsProgressAndGitWithoutDumpingEverything(t *testing.T) {
 	m := newTestModel()
 	m.width = 120

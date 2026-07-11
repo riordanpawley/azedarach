@@ -936,10 +936,10 @@ func (c *Client) decodeBoardSnapshotResponse(resp protocol.ResponseEnvelope) (Ta
 	}
 	projection := boardSnapshotProjectionToDomain(payload)
 	return TaskSnapshot{
-		Tasks:         protocol.DomainTasksFromBoardSummaries(payload.Tasks),
-		View:          payload.View,
+		Tasks:         projection.OrderedTasks(),
+		View:          projection.View,
 		Projection:    projection,
-		Columns:       projection.Groups,
+		Columns:       projection.ColumnSnapshots(),
 		Revision:      revision,
 		LastCheckedAt: payload.LastCheckedAt,
 		Freshness:     payload.Freshness,
@@ -948,37 +948,17 @@ func (c *Client) decodeBoardSnapshotResponse(resp protocol.ResponseEnvelope) (Ta
 }
 
 func boardSnapshotProjectionToDomain(payload protocol.BoardSnapshotPayload) domain.BoardViewProjection {
-	groups := payload.Projection.Groups
-	if len(groups) == 0 {
-		groups = payload.Columns
+	projection := domain.BoardViewProjection{
+		View:         payload.Projection.View,
+		KnownTaskIDs: append([]naming.IssueID(nil), payload.Projection.KnownTaskIDs...),
 	}
-	ordered := payload.Projection.Ordered
-	if len(ordered) == 0 {
-		ordered = payload.Tasks
+	for _, group := range payload.Projection.Groups {
+		projection.Groups = append(projection.Groups, domain.BoardViewProjectedGroup{GroupID: group.GroupID, TaskIDs: append([]naming.IssueID(nil), group.TaskIDs...)})
 	}
-	layout := payload.Projection.Layout
-	if layout == "" {
-		layout = payload.View.Normalized().Layout
+	for _, item := range payload.Projection.Items {
+		projection.Items = append(projection.Items, domain.BoardViewProjectedItem{Task: item.Task.ToDomainTask(), GroupID: item.GroupID, Depth: item.Depth})
 	}
-	return domain.BoardViewProjection{
-		Layout:  layout,
-		Groups:  boardSnapshotColumnsToDomain(groups),
-		Ordered: protocol.DomainTasksFromBoardSummaries(ordered),
-	}
-}
-
-func boardSnapshotColumnsToDomain(columns []protocol.BoardSnapshotColumn) []domain.BoardViewColumnSnapshot {
-	if len(columns) == 0 {
-		return nil
-	}
-	out := make([]domain.BoardViewColumnSnapshot, 0, len(columns))
-	for _, column := range columns {
-		out = append(out, domain.BoardViewColumnSnapshot{
-			Definition: column.Definition,
-			Tasks:      protocol.DomainTasksFromBoardSummaries(column.Tasks),
-		})
-	}
-	return out
+	return projection
 }
 
 // CreateTask creates a task through the daemon client boundary.
