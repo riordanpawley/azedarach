@@ -95,7 +95,7 @@ func (o *InteractionOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if o.resolve {
 				kind = "resolve"
 			}
-			if o.request.Significance != domain.InteractionSignificanceRoutine {
+			if a.SignificanceRecommendation != domain.InteractionSignificanceRoutine {
 				o.confirming = true
 				o.confirmAction = kind
 				return o, nil
@@ -157,6 +157,7 @@ func (o *InteractionOverlay) answer() domain.InteractionAnswerPayload {
 	answer := domain.InteractionAnswerPayload{SelectedOption: selected, Rationale: strings.TrimSpace(o.editor.Value()), SignificanceRecommendation: o.request.Significance, Revision: o.request.Revision}
 	if o.request.Proposal != nil {
 		answer.Constraints = append([]string(nil), o.request.Proposal.Answer.Constraints...)
+		answer.SignificanceRecommendation = o.request.Proposal.Answer.SignificanceRecommendation
 	}
 	return answer
 }

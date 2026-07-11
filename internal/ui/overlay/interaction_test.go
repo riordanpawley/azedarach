@@ -44,12 +44,21 @@ func TestInteractionOverlayProposalCanBeEdited(t *testing.T) {
 
 func TestInteractionOverlayDoesNotImplicitlyApproveProposalEffects(t *testing.T) {
 	r, age := goldenInteractionRequest()
+	r.Significance = domain.InteractionSignificanceRoutine
 	design := "unsafe implicit edit"
-	r.Proposal = &domain.InteractionAnswerAudit{Answer: domain.InteractionAnswerPayload{SelectedOption: "gradual", Rationale: "Proposal", ApprovedIssueFieldEffects: domain.InteractionIssueFieldEffects{Design: &design}, ApprovedRequirementEffects: []domain.InteractionRequirementEffect{{RequirementID: "req-1", Description: &design}}, ApprovedDecisionEffect: &domain.InteractionDecisionEffect{Title: "Decision"}, Revision: r.Revision}}
+	r.Proposal = &domain.InteractionAnswerAudit{Answer: domain.InteractionAnswerPayload{SelectedOption: "gradual", Rationale: "Proposal", SignificanceRecommendation: domain.InteractionSignificanceMaterial, ApprovedIssueFieldEffects: domain.InteractionIssueFieldEffects{Design: &design}, ApprovedRequirementEffects: []domain.InteractionRequirementEffect{{RequirementID: "req-1", Description: &design}}, ApprovedDecisionEffect: &domain.InteractionDecisionEffect{Title: "Decision"}, Revision: r.Revision}}
 	o := NewInteractionOverlay(r, age)
 	answer := o.answer()
 	if answer.ApprovedIssueFieldEffects.Any() || len(answer.ApprovedRequirementEffects) != 0 || answer.ApprovedDecisionEffect != nil {
 		t.Fatalf("AI proposal effects must require separate explicit human approval: %+v", answer)
+	}
+	if answer.SignificanceRecommendation != domain.InteractionSignificanceMaterial {
+		t.Fatalf("proposal significance = %q, want material", answer.SignificanceRecommendation)
+	}
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	if cmd != nil || !o.confirming || o.confirmAction != "resolve" {
+		t.Fatal("material proposal on routine request must require confirmation")
 	}
 }
 
@@ -97,5 +106,24 @@ func TestInteractionOverlayRequestIDIsInteractionIdentity(t *testing.T) {
 	o := NewInteractionOverlay(r, age)
 	if got := o.RequestID(); got != "int-7" {
 		t.Fatalf("RequestID() = %q, want interaction request ID int-7 (not issue ID %s)", got, r.IssueID)
+	}
+}
+
+func TestInteractionOverlayRecoveryOnlyEmitsForStaleRequest(t *testing.T) {
+	r, _ := goldenInteractionRequest()
+	fresh := NewInteractionOverlay(r, domain.InteractionAgeView{Stale: false})
+	_, cmd := fresh.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if cmd != nil {
+		t.Fatal("fresh request must not emit recovery action")
+	}
+
+	stale := NewInteractionOverlay(r, domain.InteractionAgeView{Stale: true})
+	_, cmd = stale.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if cmd == nil {
+		t.Fatal("stale request must emit recovery action")
+	}
+	action := cmd().(SelectionMsg).Value.(InteractionAction)
+	if action.Kind != "recover" || action.Request.ID != r.ID || action.Request.Revision != r.Revision {
+		t.Fatalf("unexpected recovery action: %+v", action)
 	}
 }
