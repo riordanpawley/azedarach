@@ -17,8 +17,8 @@ func TestHelpOverlay_SmallViewportShowsPaneOpenersFirst(t *testing.T) {
 		"Panes:",
 		"Open this help reference",
 		"Open operation queue",
-		"B",
-		"Open board view selector",
+		"V",
+		"Open View Configurator",
 		"Open event log",
 		"Open notification action center",
 	}
@@ -39,7 +39,7 @@ func TestHelpOverlay_DefaultViewportShowsBoardViewOpenerBeforeScrolling(t *testi
 	help = model.(*HelpOverlay)
 
 	view := help.View()
-	for _, want := range []string{"B", "Open board view selector"} {
+	for _, want := range []string{"V", "Open View Configurator"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("default help should expose board-view opener %q before scrolling:\n%s", want, view)
 		}

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -31,8 +32,19 @@ type boardViewOverlayMode int
 const (
 	boardViewBrowse boardViewOverlayMode = iota
 	boardViewEdit
+	boardViewAdvancedEdit
 	boardViewConfirmDelete
 )
+
+type viewConfigurator struct {
+	view                                        domain.BoardView
+	title                                       textinput.Model
+	field                                       int
+	filter                                      int
+	grouping                                    int
+	sortPreset                                  int
+	filterChanged, groupingChanged, sortChanged bool
+}
 
 type BoardViewOverlay struct {
 	twoPaneDialogChrome
@@ -42,6 +54,7 @@ type BoardViewOverlay struct {
 	cursor         int
 	mode           boardViewOverlayMode
 	editor         textarea.Model
+	configurator   viewConfigurator
 	errorText      string
 	lockedEditID   domain.BoardViewID
 	styles         *Styles
@@ -58,7 +71,7 @@ func NewBoardViewOverlay(views []domain.BoardViewRecord, selectedViewID string) 
 		}
 	}
 	editor := textarea.New()
-	editor.Placeholder = "Board view JSON"
+	editor.Placeholder = "Advanced View definition JSON"
 	editor.SetWidth(66)
 	editor.SetHeight(16)
 	return &BoardViewOverlay{
@@ -78,10 +91,13 @@ func (o *BoardViewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return o, nil
 	}
 	if o.mode == boardViewEdit {
+		return o.updateConfigurator(msg)
+	}
+	if o.mode == boardViewAdvancedEdit {
 		if key, ok := msg.(tea.KeyMsg); ok {
 			switch key.String() {
 			case "esc":
-				o.mode, o.errorText = boardViewBrowse, ""
+				o.mode, o.errorText = boardViewEdit, ""
 				o.editor.Blur()
 				return o, nil
 			case "ctrl+s":
@@ -143,8 +159,10 @@ func (o *BoardViewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return SelectionMsg{Key: BoardViewSelectKey, Value: BoardViewSelectMsg{ViewID: viewID}}
 			}
 		case keybinds.ActionBoardViewCreate:
-			o.beginEdit(domain.BoardView{ID: domain.BoardViewID(o.uniqueViewID("custom")), Title: "Custom", Columns: domain.DefaultBoardView().Columns}, "")
-			return o, textarea.Blink
+			view := domain.DefaultBoardView()
+			view.ID, view.Title, view.Options.SortPolicy = domain.BoardViewID(o.uniqueViewID("custom")), "Custom", domain.BoardViewSortDefault
+			o.beginEdit(view, "")
+			return o, textinput.Blink
 		case keybinds.ActionBoardViewDuplicate:
 			if len(o.views) > 0 {
 				view := o.views[o.cursor].View
@@ -152,12 +170,12 @@ func (o *BoardViewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				view.Title += " Copy"
 				view.Options.SortPolicy = domain.BoardViewSortDefault
 				o.beginEdit(view, "")
-				return o, textarea.Blink
+				return o, textinput.Blink
 			}
 		case keybinds.ActionBoardViewEdit:
 			if len(o.views) > 0 && !o.views[o.cursor].BuiltIn {
 				o.beginEdit(o.views[o.cursor].View, o.views[o.cursor].View.ID)
-				return o, textarea.Blink
+				return o, textinput.Blink
 			}
 			o.errorText = "Built-in views cannot be edited; duplicate it first."
 		case keybinds.ActionBoardViewDelete:
@@ -181,13 +199,16 @@ func (o *BoardViewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (o *BoardViewOverlay) View() string {
 	width, height := o.Size()
 	if o.mode == boardViewEdit {
+		return o.renderConfigurator(width, height)
+	}
+	if o.mode == boardViewAdvancedEdit {
 		o.editor.SetWidth(max(20, width-8))
 		o.editor.SetHeight(max(5, height-8))
 		body := o.editor.View()
 		if o.errorText != "" {
 			body += "\n" + o.styles.MenuItemDisabled.Render(clampOverlayLineWidth(o.errorText, width-6))
 		}
-		return o.renderSingleDialog(width, height, "Edit Board View", body, []keybinds.Binding{{Key: "Ctrl+S", Description: "save"}, {Key: "Esc", Description: "cancel"}})
+		return o.renderSingleDialog(width, height, "Advanced View JSON", body, []keybinds.Binding{{Key: "Ctrl+S", Description: "save"}, {Key: "Esc", Description: "guided editor"}})
 	}
 	if o.mode == boardViewConfirmDelete {
 		view := o.views[o.cursor].View
@@ -199,7 +220,7 @@ func (o *BoardViewOverlay) View() string {
 		width:             width,
 		height:            height,
 		title:             o.Title(),
-		rightSectionTitle: "Columns",
+		rightSectionTitle: o.detailSectionTitle(),
 		breakpoint:        64,
 		gap:               3,
 		minLeft:           30,
@@ -214,7 +235,7 @@ func (o *BoardViewOverlay) View() string {
 	})
 }
 
-func (o *BoardViewOverlay) Title() string { return "Board View" }
+func (o *BoardViewOverlay) Title() string { return "Views" }
 
 func (o *BoardViewOverlay) Size() (int, int) {
 	return o.ClampResponsive(74, 24)
@@ -234,7 +255,7 @@ func (o *BoardViewOverlay) moveCursor(delta int) {
 
 func (o *BoardViewOverlay) renderList(width int) string {
 	if len(o.views) == 0 {
-		return o.styles.MenuItemDisabled.Render("No board views available")
+		return o.styles.MenuItemDisabled.Render("No views available")
 	}
 	lines := make([]string, 0, len(o.views)+1)
 	for i, record := range o.views {
@@ -250,7 +271,7 @@ func (o *BoardViewOverlay) renderList(width int) string {
 		if i == o.cursor {
 			label = o.styles.MenuItemActive.Render(label)
 		}
-		meta := fmt.Sprintf(" %s  %d cols", record.View.ID, len(record.View.Columns))
+		meta := fmt.Sprintf(" %s  %s", record.View.ID, viewLayoutLabel(record.View.Layout))
 		if record.BuiltIn {
 			meta += "  built-in"
 		}
@@ -266,9 +287,12 @@ func (o *BoardViewOverlay) renderDetails(width int) string {
 	view := o.views[o.cursor].View
 	lines := []string{
 		o.styles.Title.Render(string(view.ID)),
-		o.styles.MenuItemDisabled.Render("Columns are query predicates over issue facts."),
+		o.styles.MenuItemDisabled.Render(viewLayoutDescription(view.Layout)),
 		fmt.Sprintf("hide empty columns: %t", view.Options.HideEmptyColumns),
 		"",
+	}
+	if o.views[o.cursor].BuiltIn {
+		lines = append(lines, "Built-in · immutable", "Press d to duplicate before editing.", "")
 	}
 	for _, column := range view.Columns {
 		line := fmt.Sprintf("%s: %s", column.Title, boardViewPredicateSummary(column.Predicates))
@@ -301,12 +325,235 @@ func (o *BoardViewOverlay) uniqueViewID(base string) string {
 }
 
 func (o *BoardViewOverlay) beginEdit(view domain.BoardView, lockedID domain.BoardViewID) {
+	view = view.Normalized()
+	title := textinput.New()
+	title.SetValue(view.Title)
+	title.Focus()
+	o.configurator = viewConfigurator{view: view, title: title, filter: filterPresetIndex(view.Filters), grouping: groupingPresetIndex(view), sortPreset: sortPresetIndex(view.Sort)}
+	o.lockedEditID = lockedID
+	o.mode, o.errorText = boardViewEdit, ""
+}
+
+func (o *BoardViewOverlay) beginAdvancedEdit() {
+	view := o.configuredView()
 	data, _ := json.MarshalIndent(view, "", "  ")
 	o.editor.SetValue(string(data))
 	o.editor.CursorStart()
 	o.editor.Focus()
-	o.lockedEditID = lockedID
-	o.mode, o.errorText = boardViewEdit, ""
+	o.mode, o.errorText = boardViewAdvancedEdit, ""
+}
+
+var configuratorFields = []string{"Title", "Layout", "Filters", "Grouping", "Ordered sorting", "Hide empty"}
+var filterPresets = []string{"All issues", "Open only", "Active only", "Review ready"}
+var groupingPresets = []string{"Workflow columns", "Single list"}
+var sortPresets = []string{"Attention ↓, priority ↑, updated ↓", "Priority ↑, updated ↓", "Updated ↓", "Issue ID ↑"}
+
+func (o *BoardViewOverlay) updateConfigurator(msg tea.Msg) (tea.Model, tea.Cmd) {
+	key, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return o, nil
+	}
+	switch key.String() {
+	case "esc":
+		o.configurator.title.Blur()
+		o.mode, o.errorText = boardViewBrowse, ""
+		return o, nil
+	case "tab", "down":
+		o.configurator.field = (o.configurator.field + 1) % len(configuratorFields)
+	case "shift+tab", "up":
+		o.configurator.field = (o.configurator.field - 1 + len(configuratorFields)) % len(configuratorFields)
+	case "left":
+		o.adjustConfigurator(-1)
+	case "right", "enter":
+		o.adjustConfigurator(1)
+	case "ctrl+s":
+		view := o.configuredView().Normalized()
+		if err := view.Validate(); err != nil {
+			o.errorText = "Validation: " + err.Error()
+			return o, nil
+		}
+		return o, func() tea.Msg { return SelectionMsg{Key: BoardViewSaveKey, Value: BoardViewSaveMsg{View: view}} }
+	case "ctrl+j":
+		o.beginAdvancedEdit()
+		return o, textarea.Blink
+	default:
+		if o.configurator.field == 0 {
+			var cmd tea.Cmd
+			o.configurator.title, cmd = o.configurator.title.Update(msg)
+			return o, cmd
+		}
+	}
+	o.configurator.title.Blur()
+	if o.configurator.field == 0 {
+		o.configurator.title.Focus()
+	}
+	return o, nil
+}
+
+func (o *BoardViewOverlay) adjustConfigurator(delta int) {
+	c := &o.configurator
+	switch c.field {
+	case 1:
+		layouts := []domain.BoardViewLayout{domain.BoardViewLayoutHorizontalGrid, domain.BoardViewLayoutColumnBoard, domain.BoardViewLayoutTreeList}
+		i := 0
+		for n, layout := range layouts {
+			if c.view.Layout == layout {
+				i = n
+			}
+		}
+		c.view.Layout = layouts[(i+delta+len(layouts))%len(layouts)]
+	case 2:
+		c.filter = (c.filter + delta + len(filterPresets)) % len(filterPresets)
+		c.filterChanged = true
+	case 3:
+		c.grouping = (c.grouping + delta + len(groupingPresets)) % len(groupingPresets)
+		c.groupingChanged = true
+	case 4:
+		c.sortPreset = (c.sortPreset + delta + len(sortPresets)) % len(sortPresets)
+		c.sortChanged = true
+	case 5:
+		c.view.Options.HideEmptyColumns = !c.view.Options.HideEmptyColumns
+	}
+}
+
+func (o *BoardViewOverlay) configuredView() domain.BoardView {
+	c := o.configurator
+	view := c.view
+	view.Title = strings.TrimSpace(c.title.Value())
+	if c.filterChanged {
+		view.Filters = filterPreset(c.filter)
+	}
+	if c.groupingChanged {
+		if c.grouping == 1 {
+			view.Columns = []domain.BoardColumn{{
+				ID:    "issues",
+				Title: "Issues",
+				Predicates: []domain.BoardColumnPredicate{{
+					Kind: domain.BoardPredicateLifecycle,
+					Lifecycle: []domain.IssueWorkflow{
+						domain.IssueWorkflowBacklog,
+						domain.IssueWorkflowOpen,
+						domain.IssueWorkflowActive,
+						domain.IssueWorkflowClosed,
+					},
+				}},
+			}}
+		} else {
+			view.Columns = domain.DefaultBoardView().Columns
+		}
+	}
+	if c.sortChanged {
+		view.Sort = sortPreset(c.sortPreset)
+	}
+	view.Options.SortPolicy = domain.BoardViewSortDefault
+	return view
+}
+
+func (o *BoardViewOverlay) renderConfigurator(width, height int) string {
+	view := o.configuredView()
+	values := []string{o.configurator.title.View(), viewLayoutLabel(view.Layout), filterPresets[o.configurator.filter], groupingPresets[o.configurator.grouping], sortPresets[o.configurator.sortPreset], fmt.Sprintf("%t", view.Options.HideEmptyColumns)}
+	lines := []string{"Configure the View with guided fields; no JSON required.", ""}
+	for i, label := range configuratorFields {
+		prefix := "  "
+		if i == o.configurator.field {
+			prefix = "▸ "
+		}
+		lines = append(lines, fmt.Sprintf("%s%-16s %s", prefix, label, values[i]))
+	}
+	if o.errorText != "" {
+		lines = append(lines, "", o.errorText)
+	}
+	return o.renderSingleDialog(width, height, "View Configurator", strings.Join(lines, "\n"), []keybinds.Binding{{Key: "Tab", Description: "field"}, {Key: "←/→", Description: "choice"}, {Key: "Ctrl+S", Description: "save"}, {Key: "Ctrl+J", Description: "advanced JSON"}, {Key: "Esc", Description: "cancel"}})
+}
+
+func viewLayoutLabel(layout domain.BoardViewLayout) string {
+	switch layout {
+	case domain.BoardViewLayoutHorizontalGrid:
+		return "Grid"
+	case domain.BoardViewLayoutTreeList:
+		return "Tree"
+	default:
+		return "Board"
+	}
+}
+func viewLayoutDescription(layout domain.BoardViewLayout) string {
+	switch layout {
+	case domain.BoardViewLayoutHorizontalGrid:
+		return "Grid groups issues in horizontal lanes."
+	case domain.BoardViewLayoutTreeList:
+		return "Tree shows issue hierarchy with indentation."
+	default:
+		return "Board places issues into configured columns."
+	}
+}
+func (o *BoardViewOverlay) detailSectionTitle() string {
+	if len(o.views) == 0 || o.cursor >= len(o.views) {
+		return "Details"
+	}
+	switch o.views[o.cursor].View.Layout {
+	case domain.BoardViewLayoutTreeList:
+		return "Hierarchy"
+	case domain.BoardViewLayoutHorizontalGrid:
+		return "Grid groups"
+	default:
+		return "Columns"
+	}
+}
+func filterPresetIndex(filters []domain.BoardColumnPredicate) int {
+	if len(filters) == 0 {
+		return 0
+	}
+	switch filters[0].Kind {
+	case domain.BoardPredicateLifecycle:
+		return 1
+	case domain.BoardPredicateDisplayPhase:
+		return 2
+	case domain.BoardPredicateReviewReady:
+		return 3
+	}
+	return 0
+}
+func filterPreset(i int) []domain.BoardColumnPredicate {
+	switch i {
+	case 1:
+		return []domain.BoardColumnPredicate{{Kind: domain.BoardPredicateLifecycle, Lifecycle: []domain.IssueWorkflow{domain.IssueWorkflowOpen}}}
+	case 2:
+		return []domain.BoardColumnPredicate{{Kind: domain.BoardPredicateDisplayPhase, DisplayPhases: []domain.IssueDisplayPhase{domain.IssueDisplayActive}}}
+	case 3:
+		return []domain.BoardColumnPredicate{{Kind: domain.BoardPredicateReviewReady}}
+	}
+	return nil
+}
+func groupingPresetIndex(view domain.BoardView) int {
+	if len(view.Columns) == 1 {
+		return 1
+	}
+	return 0
+}
+func sortPresetIndex(r []domain.BoardViewSortRule) int {
+	if len(r) == 1 {
+		if r[0].Key == domain.BoardViewSortKeyUpdated {
+			return 2
+		}
+		if r[0].Key == domain.BoardViewSortKeyIssueID {
+			return 3
+		}
+	}
+	if len(r) > 0 && r[0].Key == domain.BoardViewSortKeyPriority {
+		return 1
+	}
+	return 0
+}
+func sortPreset(i int) []domain.BoardViewSortRule {
+	switch i {
+	case 1:
+		return []domain.BoardViewSortRule{{Key: domain.BoardViewSortKeyPriority, Direction: domain.BoardViewSortAscending}, {Key: domain.BoardViewSortKeyUpdated, Direction: domain.BoardViewSortDescending}}
+	case 2:
+		return []domain.BoardViewSortRule{{Key: domain.BoardViewSortKeyUpdated, Direction: domain.BoardViewSortDescending}}
+	case 3:
+		return []domain.BoardViewSortRule{{Key: domain.BoardViewSortKeyIssueID, Direction: domain.BoardViewSortAscending}}
+	}
+	return domain.DefaultBoardViewSortRules()
 }
 
 func (o *BoardViewOverlay) renderSingleDialog(width, height int, title, body string, actions []keybinds.Binding) string {

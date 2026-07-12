@@ -6,11 +6,19 @@ or `horizontal_grid`), first-match groups, conjunctive filters, ordered sort
 rules, and display options. The domain projection engine applies those rules;
 surface code owns only interaction and rendering.
 
-The supported layouts are exactly Board/Columns (`column_board`), Grid
+The supported layouts are exactly Board (`column_board`), Grid
 (`horizontal_grid`), and Tree (`tree_list`). They are properties of saved view
 definitions rather than hardcoded application modes. In the TUI, Tab advances
 to the next configured view through the daemon selection contract; it does not
 toggle a surface-local Compact or Orchestration Overview mode.
+
+Press `V` in normal mode to open **Views**. Create and edit open the **View
+Configurator**, whose guided fields cover title, Grid/Board/Tree layout,
+filters, grouping/columns, ordered sorting, and display options. Built-ins are
+marked immutable in context; duplicate one with `d` before editing it. The
+advanced JSON editor remains available with `Ctrl+J`, but is never required by
+the primary TUI workflow. `V` is deliberately scoped to normal mode; the
+existing select-mode dev-server binding does not conflict.
 
 The daemon board snapshot schema v5 carries one typed `projection`: ordered
 groups reference a single ordered item collection, items carry tree depth, and
@@ -30,10 +38,15 @@ focused details overlay owns start/attach actions and queue counts.
 
 ## Persistence and transient changes
 
-`az board view save` is the explicit persistence boundary for a changed
-definition. `az board view select` explicitly changes the selected saved view.
+`az view create` and `az view update` are the explicit persistence boundaries
+for definitions. `az view select` explicitly changes the selected saved view.
 Surface-local layout or sort toggles are transient and do not rewrite a saved
 definition.
+
+`az view list|get|select|create|update|delete|explain` is the canonical CLI
+information architecture. `az board view ...` remains a compatibility alias
+with identical request and persisted-definition behavior for existing
+automation.
 
 ## Migration
 

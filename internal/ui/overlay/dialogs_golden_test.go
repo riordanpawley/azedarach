@@ -48,6 +48,7 @@ func TestDialogs_View_Golden(t *testing.T) {
 		{name: "orchestration", view: goldenOrchestrationView},
 		{name: "orchestration_empty", view: goldenOrchestrationEmptyView},
 		{name: "board_view", view: goldenBoardView},
+		{name: "view_configurator", view: goldenViewConfigurator},
 		{name: "interaction", view: goldenInteractionView},
 	}
 
@@ -90,6 +91,7 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 		{name: "create_task_attachments_small", view: goldenCreateTaskAttachmentsSmallView},
 		{name: "orchestration_small", view: goldenOrchestrationSmallView},
 		{name: "board_view_small", view: goldenBoardViewSmall},
+		{name: "view_configurator_small", view: goldenViewConfiguratorSmall},
 		{name: "interaction_small", view: goldenInteractionSmallView},
 	}
 
@@ -145,6 +147,22 @@ func goldenGitPaneSmallView(t *testing.T) string {
 func goldenBoardViewSmall(t *testing.T) string {
 	o := NewBoardViewOverlay(goldenBuiltInBoardViews(), domain.DefaultBoardViewID)
 	model, _ := o.Update(tea.WindowSizeMsg{Width: 54, Height: 18})
+	return model.(*BoardViewOverlay).View()
+}
+
+func goldenViewConfigurator(t *testing.T) string {
+	o := NewBoardViewOverlay(goldenBuiltInBoardViews(), domain.DefaultBoardViewID)
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	o = model.(*BoardViewOverlay)
+	model, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	return model.(*BoardViewOverlay).View()
+}
+
+func goldenViewConfiguratorSmall(t *testing.T) string {
+	o := NewBoardViewOverlay(goldenBuiltInBoardViews(), domain.DefaultBoardViewID)
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 54, Height: 18})
+	o = model.(*BoardViewOverlay)
+	model, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	return model.(*BoardViewOverlay).View()
 }
 
