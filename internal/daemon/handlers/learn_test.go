@@ -27,6 +27,10 @@ type fakeLearnService struct {
 	gcFn        func(context.Context, protocol.LearnGCRequestBody) (protocol.LearnGCResponseBody, error)
 }
 
+func (f *fakeLearnService) Capture(context.Context, protocol.LearnCaptureRequestBody) (protocol.LearnCaptureResponseBody, error) {
+	return protocol.LearnCaptureResponseBody{Observation: protocol.LearningObservation{ID: "learn-obs-1", Learning: protocol.Learning{ID: "learn-1"}}}, nil
+}
+
 func (f *fakeLearnService) Activate(ctx context.Context, req protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error) {
 	if f.activateFn != nil {
 		return f.activateFn(ctx, req)

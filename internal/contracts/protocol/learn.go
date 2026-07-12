@@ -20,6 +20,7 @@ const (
 	CommandLearnSuggestionReject = "learn.suggestion.reject"
 	CommandLearnActivate         = "learn.activate"
 	CommandLearnFeedback         = "learn.feedback"
+	CommandLearnCapture          = "learn.capture"
 )
 
 type LearningStatus string
@@ -165,6 +166,44 @@ type LearnAddRequestBody struct {
 
 type LearnAddResponseBody struct {
 	Learning Learning `json:"learning" msgpack:"learning"`
+}
+
+type LearningObservationProvenance struct {
+	Source string `json:"source" msgpack:"source"`
+	Actor  string `json:"actor,omitempty" msgpack:"actor,omitempty"`
+	Ref    string `json:"ref,omitempty" msgpack:"ref,omitempty"`
+}
+type LearnCaptureRequestBody struct {
+	ProjectID         string                        `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	IssueID           naming.IssueID                `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
+	ReqID             naming.RequirementID          `json:"req_id,omitempty" msgpack:"req_id,omitempty"`
+	SessionID         naming.SessionID              `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
+	ObservedBehavior  string                        `json:"observed_behavior" msgpack:"observed_behavior"`
+	PreferredBehavior string                        `json:"preferred_behavior" msgpack:"preferred_behavior"`
+	Outcome           string                        `json:"outcome,omitempty" msgpack:"outcome,omitempty"`
+	Impact            string                        `json:"impact,omitempty" msgpack:"impact,omitempty"`
+	Context           map[string]string             `json:"context,omitempty" msgpack:"context,omitempty"`
+	Provenance        LearningObservationProvenance `json:"provenance" msgpack:"provenance"`
+	Sensitivity       string                        `json:"sensitivity" msgpack:"sensitivity"`
+	Tags              []string                      `json:"tags,omitempty" msgpack:"tags,omitempty"`
+	Files             []string                      `json:"files,omitempty" msgpack:"files,omitempty"`
+}
+type LearningObservation struct {
+	ID                   string                        `json:"id" msgpack:"id"`
+	Learning             Learning                      `json:"learning" msgpack:"learning"`
+	ObservedBehavior     string                        `json:"observed_behavior,omitempty" msgpack:"observed_behavior,omitempty"`
+	PreferredBehavior    string                        `json:"preferred_behavior,omitempty" msgpack:"preferred_behavior,omitempty"`
+	Outcome              string                        `json:"outcome,omitempty" msgpack:"outcome,omitempty"`
+	Impact               string                        `json:"impact,omitempty" msgpack:"impact,omitempty"`
+	Context              map[string]string             `json:"context,omitempty" msgpack:"context,omitempty"`
+	Provenance           LearningObservationProvenance `json:"provenance" msgpack:"provenance"`
+	Sensitivity          string                        `json:"sensitivity" msgpack:"sensitivity"`
+	SafeFingerprint      string                        `json:"safe_fingerprint,omitempty" msgpack:"safe_fingerprint,omitempty"`
+	DuplicateLearningIDs []string                      `json:"duplicate_learning_ids,omitempty" msgpack:"duplicate_learning_ids,omitempty"`
+	CreatedAt            string                        `json:"created_at" msgpack:"created_at"`
+}
+type LearnCaptureResponseBody struct {
+	Observation LearningObservation `json:"observation" msgpack:"observation"`
 }
 
 type LearnRecallRequestBody struct {

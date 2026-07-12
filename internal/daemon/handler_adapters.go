@@ -57,35 +57,66 @@ func (s issueLearnService) issueClient(ctx context.Context) (*issues.Client, err
 }
 
 func (s issueLearnService) Add(ctx context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
+	preferred := strings.TrimSpace(req.Summary)
+	if preferred == "" {
+		preferred = summarizeLearningEvidenceForAdapter(req.Evidence)
+	}
+	sensitivity := "public"
+	if req.Private {
+		sensitivity = "private"
+	}
+	captured, err := s.Capture(ctx, protocol.LearnCaptureRequestBody{ProjectID: req.ProjectID, IssueID: req.IssueID, ReqID: req.ReqID, SessionID: req.SessionID, ObservedBehavior: req.Evidence, PreferredBehavior: preferred, Provenance: protocol.LearningObservationProvenance{Source: "az.learn.add"}, Sensitivity: sensitivity, Tags: req.Tags, Files: req.Files})
+	if err != nil {
+		return protocol.LearnAddResponseBody{}, err
+	}
+	learning := captured.Observation.Learning
+	if req.Private {
+		learning.Evidence = req.Evidence
+	}
+	return protocol.LearnAddResponseBody{Learning: learning}, nil
+}
+
+func summarizeLearningEvidenceForAdapter(evidence string) string {
+	summary := strings.Join(strings.Fields(evidence), " ")
+	runes := []rune(summary)
+	if len(runes) > 120 {
+		summary = strings.TrimSpace(string(runes[:120]))
+	}
+	return summary
+}
+
+func (s issueLearnService) Capture(ctx context.Context, req protocol.LearnCaptureRequestBody) (protocol.LearnCaptureResponseBody, error) {
 	client, err := s.issueClient(ctx)
 	if err != nil {
-		return protocol.LearnAddResponseBody{}, err
+		return protocol.LearnCaptureResponseBody{}, err
 	}
-	params := issues.CreateLearningParams{
-		ProjectID:       firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)),
-		Summary:         req.Summary,
-		Evidence:        req.Evidence,
-		EvidencePrivate: req.Private,
-		Tags:            req.Tags,
-		Files:           req.Files,
-	}
+	p := issues.CaptureLearningObservationParams{ProjectID: firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)), ObservedBehavior: req.ObservedBehavior, PreferredBehavior: req.PreferredBehavior, Outcome: req.Outcome, Impact: req.Impact, Context: req.Context, Provenance: issues.LearningObservationProvenance{Source: req.Provenance.Source, Actor: req.Provenance.Actor, Ref: req.Provenance.Ref}, Sensitivity: domain.LearningSensitivity(req.Sensitivity), Tags: req.Tags, Files: req.Files}
 	if req.IssueID != "" {
-		issueID := req.IssueID.String()
-		params.IssueID = &issueID
+		v := req.IssueID.String()
+		p.IssueID = &v
 	}
 	if req.ReqID != "" {
-		reqID := req.ReqID.String()
-		params.RequirementID = &reqID
+		v := req.ReqID.String()
+		p.RequirementID = &v
 	}
 	if req.SessionID != "" {
-		sessionID := req.SessionID.String()
-		params.SessionID = &sessionID
+		v := req.SessionID.String()
+		p.SessionID = &v
 	}
-	learning, err := client.CreateLearning(ctx, params)
+	obs, err := client.CaptureLearningObservation(ctx, p)
 	if err != nil {
-		return protocol.LearnAddResponseBody{}, err
+		return protocol.LearnCaptureResponseBody{}, err
 	}
-	return protocol.LearnAddResponseBody{Learning: mapLearningToProtocol(learning, true)}, nil
+	out := protocol.LearningObservation{ID: obs.LocalID, Learning: mapLearningToProtocol(obs.Learning, obs.Sensitivity == domain.LearningSensitivityPublic), ObservedBehavior: obs.ObservedBehavior, PreferredBehavior: obs.PreferredBehavior, Outcome: obs.Outcome, Impact: obs.Impact, Context: obs.Context, Provenance: protocol.LearningObservationProvenance{Source: obs.Provenance.Source, Actor: obs.Provenance.Actor, Ref: obs.Provenance.Ref}, Sensitivity: string(obs.Sensitivity), SafeFingerprint: obs.SafeFingerprint, DuplicateLearningIDs: obs.DuplicateLearningIDs, CreatedAt: obs.CreatedAt.Format(time.RFC3339Nano)}
+	if obs.Sensitivity == domain.LearningSensitivityPrivate {
+		out.ObservedBehavior = ""
+		out.PreferredBehavior = ""
+		out.Outcome = ""
+		out.Impact = ""
+		out.Context = nil
+		out.SafeFingerprint = ""
+	}
+	return protocol.LearnCaptureResponseBody{Observation: out}, nil
 }
 
 func (s issueLearnService) Recall(ctx context.Context, req protocol.LearnRecallRequestBody) (protocol.LearnRecallResponseBody, error) {

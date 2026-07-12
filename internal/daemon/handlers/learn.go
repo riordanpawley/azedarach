@@ -30,6 +30,7 @@ type LearnService interface {
 	RejectSuggestion(context.Context, protocol.LearnSuggestionRejectRequestBody) (protocol.LearnSuggestionRejectResponseBody, error)
 	Activate(context.Context, protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error)
 	Feedback(context.Context, protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error)
+	Capture(context.Context, protocol.LearnCaptureRequestBody) (protocol.LearnCaptureResponseBody, error)
 }
 
 type LearnHandler struct {
@@ -57,6 +58,19 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 		return resp
 	}
 	switch req.Command {
+	case protocol.CommandLearnCapture:
+		var cmd protocol.LearnCaptureRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.ObservedBehavior, cmd.PreferredBehavior, cmd.Provenance.Source = strings.TrimSpace(cmd.ObservedBehavior), strings.TrimSpace(cmd.PreferredBehavior), strings.TrimSpace(cmd.Provenance.Source)
+		if cmd.ObservedBehavior == "" || cmd.PreferredBehavior == "" || cmd.Provenance.Source == "" {
+			return learnInvalidRequest(resp, "observed_behavior, preferred_behavior, and provenance.source are required")
+		}
+		if !domain.LearningSensitivity(cmd.Sensitivity).Valid() {
+			return learnInvalidRequest(resp, "sensitivity must be public|private")
+		}
+		return learnJSONResponse(ctx, resp, h.service.Capture, cmd)
 	case protocol.CommandLearnActivate:
 		var cmd protocol.LearnActivateRequestBody
 		if !decodeLearnRequest(req.Body, &cmd, &resp) {

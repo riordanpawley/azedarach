@@ -136,6 +136,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandInteractionSupersede:   {Command: protocol.CommandInteractionSupersede, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
 	protocol.CommandInteractionRecover:     {Command: protocol.CommandInteractionRecover, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
 	protocol.CommandLearnAdd:               {Command: protocol.CommandLearnAdd, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
+	protocol.CommandLearnCapture:           {Command: protocol.CommandLearnCapture, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnRecall:            {Command: protocol.CommandLearnRecall, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnShow:              {Command: protocol.CommandLearnShow, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnReview:            {Command: protocol.CommandLearnReview, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},

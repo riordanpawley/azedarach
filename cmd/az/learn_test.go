@@ -84,6 +84,16 @@ func TestParseLearnAddArgs(t *testing.T) {
 	}
 }
 
+func TestParseLearnCaptureArgs(t *testing.T) {
+	o, err := parseLearnCaptureArgs([]string{"--observed", "loop retried", "--preferred", "bound retries", "--source", "agent-hook", "--context", "surface=cli", "--sensitivity", "private"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Observed != "loop retried" || o.Preferred != "bound retries" || o.Source != "agent-hook" || o.Context["surface"] != "cli" || o.Sensitivity != "private" {
+		t.Fatalf("unexpected opts: %+v", o)
+	}
+}
+
 func TestParseLearnRecallArgs(t *testing.T) {
 	cases := []struct {
 		name    string

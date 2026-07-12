@@ -3919,6 +3919,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0036_advisor_sessions",
 		"0037_learning_activation_feedback",
 		"0038_learning_consolidation",
+		"0040_typed_learning_observations",
 	}, got)
 }
 

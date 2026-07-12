@@ -21,3 +21,11 @@ func (c *Client) RecordLearningFeedback(ctx context.Context, req protocol.LearnF
 	}
 	return out, nil
 }
+
+func (c *Client) CaptureLearningObservation(ctx context.Context, req protocol.LearnCaptureRequestBody) (protocol.LearnCaptureResponseBody, error) {
+	var out protocol.LearnCaptureResponseBody
+	if err := c.commandJSON(ctx, protocol.CommandLearnCapture, req, &out); err != nil {
+		return protocol.LearnCaptureResponseBody{}, err
+	}
+	return out, nil
+}

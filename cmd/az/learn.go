@@ -30,6 +30,12 @@ type learnAddOpts struct {
 	Tags     []string
 	Files    []string
 }
+type learnCaptureOpts struct {
+	JSON                                                                                       bool
+	Issue, Req, Session, Observed, Preferred, Outcome, Impact, Source, Actor, Ref, Sensitivity string
+	Context                                                                                    map[string]string
+	Tags, Files                                                                                []string
+}
 
 type learnRecallOpts struct {
 	JSON            bool
@@ -176,6 +182,13 @@ func runLearnCommand(cfg *config.Config, args []string) error {
 		return nil
 	}
 	switch args[0] {
+	case "capture":
+		opts, err := parseLearnCaptureArgs(args[1:])
+		if err != nil {
+			printLearnUsage()
+			return err
+		}
+		return runLearnCaptureRPC(cfg, opts)
 	case "activate":
 		opts, err := parseLearnActivateArgs(args[1:])
 		if err != nil {
@@ -479,6 +492,19 @@ func runLearnAddRPC(cfg *config.Config, opts learnAddOpts) error {
 		return printJSON(out)
 	}
 	fmt.Printf("Recorded learning: %s\n", out.Learning.ID)
+	return nil
+}
+
+func runLearnCaptureRPC(cfg *config.Config, o learnCaptureOpts) error {
+	req := protocol.LearnCaptureRequestBody{IssueID: naming.IssueID(o.Issue), ReqID: naming.RequirementID(o.Req), SessionID: naming.SessionID(o.Session), ObservedBehavior: o.Observed, PreferredBehavior: o.Preferred, Outcome: o.Outcome, Impact: o.Impact, Context: o.Context, Provenance: protocol.LearningObservationProvenance{Source: o.Source, Actor: o.Actor, Ref: o.Ref}, Sensitivity: o.Sensitivity, Tags: o.Tags, Files: o.Files}
+	var out protocol.LearnCaptureResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnCapture, req, &out); err != nil {
+		return err
+	}
+	if o.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Recorded learning observation: %s (%s)\n", out.Observation.ID, out.Observation.Learning.ID)
 	return nil
 }
 
@@ -906,6 +932,34 @@ func parseLearnAddArgs(args []string) (learnAddOpts, error) {
 		return learnAddOpts{}, fmt.Errorf("missing required flag: --evidence")
 	}
 	return opts, nil
+}
+
+func parseLearnCaptureArgs(args []string) (learnCaptureOpts, error) {
+	o := learnCaptureOpts{Issue: strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID")), Sensitivity: "public", Context: map[string]string{}}
+	fs := flag.NewFlagSet("learn capture", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&o.JSON, "json", false, "json output")
+	fs.StringVar(&o.Issue, "issue", o.Issue, "issue id")
+	fs.StringVar(&o.Req, "req", "", "requirement id")
+	fs.StringVar(&o.Session, "session", "", "session id")
+	fs.StringVar(&o.Observed, "observed", "", "observed behavior")
+	fs.StringVar(&o.Preferred, "preferred", "", "preferred behavior")
+	fs.StringVar(&o.Outcome, "outcome", "", "outcome")
+	fs.StringVar(&o.Impact, "impact", "", "impact")
+	fs.StringVar(&o.Source, "source", "", "provenance source")
+	fs.StringVar(&o.Actor, "actor", "", "provenance actor")
+	fs.StringVar(&o.Ref, "ref", "", "provenance reference")
+	fs.StringVar(&o.Sensitivity, "sensitivity", o.Sensitivity, "public or private")
+	addRepeatedKeyValueFlag(fs, "context", &o.Context)
+	addRepeatedStringFlag(fs, "tag", &o.Tags)
+	addRepeatedStringFlag(fs, "file", &o.Files)
+	if err := fs.Parse(args); err != nil {
+		return o, err
+	}
+	if fs.NArg() != 0 || strings.TrimSpace(o.Observed) == "" || strings.TrimSpace(o.Preferred) == "" || strings.TrimSpace(o.Source) == "" || !domain.LearningSensitivity(o.Sensitivity).Valid() {
+		return o, fmt.Errorf("usage: az learn capture --observed <text> --preferred <text> --source <source> [--outcome <text>] [--impact <text>] [--context key=value ...] [--sensitivity public|private] [--json]")
+	}
+	return o, nil
 }
 
 func parseLearnRecallArgs(args []string) (learnRecallOpts, error) {
@@ -1349,7 +1403,8 @@ func parseLearningAgeDuration(raw string) (time.Duration, error) {
 }
 
 func printLearnUsage() {
-	fmt.Println("Usage: az learn <add|recall|activate|feedback|show|review|stale|demote|promote|retire|relate|supersede|suggest|consolidate|suggestion-reject|doctor|gc> [arguments]")
+	fmt.Println("Usage: az learn <capture|add|recall|activate|feedback|show|review|stale|demote|promote|retire|relate|supersede|suggest|consolidate|suggestion-reject|doctor|gc> [arguments]")
+	fmt.Println("  capture  Capture a typed learning correction or observation")
 	fmt.Println("  add      Capture an evidence-backed candidate learning")
 	fmt.Println("  recall   Search accepted/promoted learning summaries")
 	fmt.Println("  activate Record actual delivery of selected public learnings")
@@ -1369,6 +1424,7 @@ func printLearnUsage() {
 	fmt.Println("  gc       Dry-run or confirm bounded cleanup of inactive learnings")
 	fmt.Println("")
 	fmt.Println("Commands:")
+	fmt.Println("  az learn capture --observed <text> --preferred <text> --source <source> [--outcome <text>] [--impact <text>] [--context key=value ...] [--sensitivity public|private] [--json]")
 	fmt.Println("  az learn add --evidence <text> [--summary <text>] [--private] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--json]")
 	fmt.Println("  az learn recall [--query <text>] [--issue <id>] [--req <id>] [--status <status> ...] [--tag <tag> ...] [--file <path> ...] [--limit N] [--include-evidence] [--include-private] [--json]")
 	fmt.Println("  az learn activate --surface <name> [--token-cost N] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--explanation <text>] <learning-id> ... [--json]")
