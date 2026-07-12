@@ -743,16 +743,19 @@ func TestRuntimeSignalMaterializesActivityEvidenceForRequestedIssuesOnly(t *test
 	for _, issueID := range []string{"az-42", "az-43"} {
 		sessionID := "pr-" + issueID
 		if err := store.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-			ID:             sessionID,
-			IssueID:        issueID,
-			State:          daemonstate.SessionStateRunning,
-			ObservedState:  daemonstate.SessionStateRunning,
-			Activity:       "busy",
-			ActivitySource: "session",
-			StartedAt:      &startedAt,
-			UpdatedAt:      startedAt,
+			ID:        sessionID,
+			IssueID:   issueID,
+			State:     daemonstate.SessionStateRunning,
+			StartedAt: &startedAt,
+			UpdatedAt: startedAt,
 		}); err != nil {
 			t.Fatalf("seed canonical session projection %s: %v", issueID, err)
+		}
+		if _, _, err := store.ApplyPhysicalSessionObservation(context.Background(), daemonstate.PhysicalSessionObservation{
+			ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning,
+			Activity: "busy", ActivitySource: "session", UpdatedAt: startedAt,
+		}); err != nil {
+			t.Fatalf("seed physical session observation %s: %v", issueID, err)
 		}
 		if err := store.UpsertSessionActivityEvidence(context.Background(), daemonstate.SessionActivityEvidence{
 			ProjectID:       projectID,

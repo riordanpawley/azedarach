@@ -66,7 +66,7 @@ func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID stri
 		return advisorSessionRuntimeResult{}, err
 	}
 	resumed := projected && (priorProjection.State == daemonstate.SessionStatePaused || priorProjection.ObservedState == daemonstate.SessionStatePaused)
-	starting := daemonstate.Session{ID: sessionID, IssueID: request.IssueID, Role: daemonstate.SessionRoleAdvisor, ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: request.ID, State: daemonstate.SessionStateStarting, ObservedState: daemonstate.SessionStateStarting, UpdatedAt: time.Now().UTC()}
+	starting := daemonstate.Session{ID: sessionID, IssueID: request.IssueID, Role: daemonstate.SessionRoleAdvisor, ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: request.ID, State: daemonstate.SessionStateStarting, UpdatedAt: time.Now().UTC()}
 	if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, starting); err != nil {
 		return advisorSessionRuntimeResult{}, err
 	}
@@ -88,7 +88,12 @@ func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID stri
 		return advisorSessionRuntimeResult{Session: advisor, Attached: attached}, err
 	}
 	projection := daemonstate.Session{ID: advisor.SessionID, IssueID: advisor.IssueID, Role: daemonstate.SessionRoleAdvisor, ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: advisor.RequestID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "runtime", UpdatedAt: time.Now().UTC()}
-	d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(protocol.NormalizeProjectID(projectID))}, projection)
+	if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, projection); err != nil {
+		return advisorSessionRuntimeResult{Session: advisor, Attached: attached}, err
+	}
+	if err := d.persistObservedRuntimeProjection(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(protocol.NormalizeProjectID(projectID))}, projection); err != nil {
+		return advisorSessionRuntimeResult{Session: advisor, Attached: attached}, err
+	}
 	return advisorSessionRuntimeResult{Session: advisor, Started: !attached, Attached: attached, Resumed: attached && resumed}, nil
 }
 
@@ -253,7 +258,12 @@ func (d *Daemon) cleanupAdvisorSessionRuntime(ctx context.Context, projectID, re
 			}
 		}
 		projection.State, projection.ObservedState, projection.Activity, projection.ActivitySource, projection.UpdatedAt = daemonstate.SessionStateStopped, daemonstate.SessionStateStopped, "", "", time.Now().UTC()
-		d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(protocol.NormalizeProjectID(projectID))}, projection)
+		if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, projection); err != nil {
+			return err
+		}
+		if err := d.persistObservedRuntimeProjection(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(protocol.NormalizeProjectID(projectID))}, projection); err != nil {
+			return err
+		}
 		if err := store.DeleteSessionIntentState(ctx, projectID, projection); err != nil {
 			return fmt.Errorf("delete advisor session projection %s: %w", sessionID, err)
 		}

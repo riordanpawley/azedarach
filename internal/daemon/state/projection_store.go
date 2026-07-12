@@ -127,7 +127,8 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 			if observation.UpdatedAt.After(freshness) {
 				freshness = observation.UpdatedAt
 			}
-			if _, err := tx.ExecContext(ctx, `UPDATE `+sessionStateTable+`
+			targetTable := sessionStorageTableForID(intent.ID)
+			if _, err := tx.ExecContext(ctx, `UPDATE `+targetTable+`
 				SET observed_state=?, activity=?, activity_source=?, updated_at=?
 				WHERE project_id=? AND logical_id=?`, observation.ObservedState,
 				observation.Activity, observation.ActivitySource, freshness.Format(time.RFC3339Nano),
@@ -175,8 +176,8 @@ func listSessionIntentsByPhysicalIDTx(ctx context.Context, tx *sql.Tx, projectID
 	rows, err := tx.QueryContext(ctx, `SELECT session_id,issue_id,role,scope_kind,scope_id,state,
 		COALESCE(observed_state,state),COALESCE(activity,''),COALESCE(activity_source,''),
 		COALESCE(tmux_attached_count,0),COALESCE(started_at,''),updated_at
-		FROM `+sessionStateTable+` WHERE project_id=? AND session_id=?
-		ORDER BY logical_id`, projectID, sessionID)
+		FROM (`+sessionProjectionUnionSQL()+`) WHERE project_id=? AND session_id=?
+		ORDER BY role,scope_kind,scope_id`, projectID, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("list physical session logical intents: %w", err)
 	}
@@ -355,9 +356,6 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 	session = NormalizeSessionMetadata(session)
 	session.State = NormalizeSessionState(session.State)
 	session.ObservedState = NormalizeSessionState(session.ObservedState)
-	if session.State == SessionStateStopped {
-		session.ObservedState = SessionStateStopped
-	}
 	session.Activity = strings.ToLower(strings.TrimSpace(session.Activity))
 	session.ActivitySource = strings.ToLower(strings.TrimSpace(session.ActivitySource))
 	var existing Session
@@ -414,7 +412,7 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 			}
 		}
 	}
-	if strings.TrimSpace(string(session.ObservedState)) == "" {
+	if strings.TrimSpace(string(session.ObservedState)) == "" && sessionStorageTableForID(session.ID) == sessionObservationTable {
 		session.ObservedState = session.State
 	}
 	normalizeSessionProjectionActivity(&session)
@@ -448,6 +446,13 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 			if physicalUpdatedAt.After(session.UpdatedAt) {
 				session.UpdatedAt = physicalUpdatedAt
 			}
+		} else if err == sql.ErrNoRows {
+			// Logical session upserts own desired intent only. Runtime observations
+			// enter through ApplyPhysicalSessionObservation so physical authority
+			// and every linked intent advance atomically under one version clock.
+			session.ObservedState = ""
+			session.Activity = ""
+			session.ActivitySource = ""
 		} else if err != sql.ErrNoRows {
 			return fmt.Errorf("load physical observation before intent upsert %s/%s: %w", projectID, session.ID, err)
 		}

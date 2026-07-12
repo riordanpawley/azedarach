@@ -45,8 +45,8 @@ func TestRuntimeStateStoreSessionRoundTrip(t *testing.T) {
 	if sessions[0].State != SessionStateAttached {
 		t.Fatalf("session state = %s, want %s", sessions[0].State, SessionStateAttached)
 	}
-	if sessions[0].Activity != "no-agent" || sessions[0].ActivitySource != "session" {
-		t.Fatalf("session activity = %s/%s, want no-agent/session", sessions[0].Activity, sessions[0].ActivitySource)
+	if sessions[0].Activity != "" || sessions[0].ActivitySource != "" {
+		t.Fatalf("desired-only session activity = %s/%s, want empty without physical observation", sessions[0].Activity, sessions[0].ActivitySource)
 	}
 
 	if err := store.DeleteSessionState(context.Background(), "proj-a", "sess-1"); err != nil {
@@ -98,8 +98,8 @@ func TestRuntimeStateStoreClearsSessionActivityForStoppedRows(t *testing.T) {
 	if session.Activity != "" || session.ActivitySource != "" {
 		t.Fatalf("session activity = %s/%s, want empty activity for stopped row", session.Activity, session.ActivitySource)
 	}
-	if session.ObservedState != SessionStateStopped {
-		t.Fatalf("session observed state = %s, want %s", session.ObservedState, SessionStateStopped)
+	if session.ObservedState != "" {
+		t.Fatalf("session observed state = %s, desired stop must not fabricate runtime observation", session.ObservedState)
 	}
 
 	if err := store.ReplaceSessionStates(ctx, "proj-a", []Session{
@@ -338,8 +338,8 @@ func TestRuntimeStateStoreKeepsHookObservationSeparateFromCanonicalSession(t *te
 	if session.State != SessionStateRunning {
 		t.Fatalf("parent state = %s, want existing lifecycle state preserved", session.State)
 	}
-	if session.Activity != "busy" || session.ActivitySource != "session" {
-		t.Fatalf("parent activity = %s/%s, want busy/session", session.Activity, session.ActivitySource)
+	if session.Activity != "" || session.ActivitySource != "" {
+		t.Fatalf("parent activity = %s/%s, want desired-only parent unaffected by pane observation", session.Activity, session.ActivitySource)
 	}
 }
 
@@ -1159,6 +1159,52 @@ func TestRuntimeStateStoreOrphanObservationHydratesLaterIntent(t *testing.T) {
 	}
 }
 
+func TestRuntimeStateStoreNewerRuntimeObservationSurvivesLaterDesiredWrite(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	hookStore := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	tmuxStore := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = hookStore.Close(); _ = tmuxStore.Close() })
+	ctx := context.Background()
+	t1 := time.Now().UTC().Add(-3 * time.Second)
+	t2, t3, t4 := t1.Add(time.Second), t1.Add(2*time.Second), t1.Add(3*time.Second)
+	if _, _, err := hookStore.ApplyPhysicalSessionObservation(ctx, PhysicalSessionObservation{
+		ProjectID: "p", SessionID: "az-root", ObservedState: SessionStateRunning,
+		Activity: "busy", ActivitySource: "hooks", UpdatedAt: t1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := tmuxStore.ApplyPhysicalSessionObservation(ctx, PhysicalSessionObservation{
+		ProjectID: "p", SessionID: "az-root", ObservedState: SessionStateStopped, UpdatedAt: t2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := hookStore.UpsertSessionState(ctx, "p", Session{
+		ID: "az-root", IssueID: "root", Role: SessionRoleWorker, ScopeKind: SessionScopeIssue,
+		ScopeID: "root", State: SessionStatePaused, ObservedState: SessionStateRunning,
+		Activity: "stale", ActivitySource: "desired", UpdatedAt: t3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	intent, found, err := tmuxStore.GetSessionIntent(ctx, "p", SessionRoleWorker, SessionScopeIssue, "root")
+	if err != nil || !found || intent.State != SessionStatePaused || intent.ObservedState != SessionStateStopped || intent.Activity != "" {
+		t.Fatalf("later desired write overrode newer tmux fact: %+v found=%v err=%v", intent, found, err)
+	}
+	physical, found, err := hookStore.GetPhysicalSessionObservation(ctx, "p", "az-root")
+	if err != nil || !found || physical.ObservedState != SessionStateStopped || !physical.UpdatedAt.Equal(t2) {
+		t.Fatalf("physical tmux fact=%+v found=%v err=%v", physical, found, err)
+	}
+	if _, _, err := hookStore.ApplyPhysicalSessionObservation(ctx, PhysicalSessionObservation{
+		ProjectID: "p", SessionID: "az-root", ObservedState: SessionStateRunning,
+		Activity: "busy", ActivitySource: "hooks", UpdatedAt: t4,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	intent, found, err = tmuxStore.GetSessionIntent(ctx, "p", SessionRoleWorker, SessionScopeIssue, "root")
+	if err != nil || !found || intent.ObservedState != SessionStateRunning || intent.Activity != "busy" || !intent.UpdatedAt.Equal(t4) {
+		t.Fatalf("newer hook did not win: %+v found=%v err=%v", intent, found, err)
+	}
+}
+
 func TestRuntimeStateStoreUpgradeBackfillsPhysicalObservationVersion(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
 	db, err := sql.Open("sqlite", dbPath)
@@ -1239,9 +1285,9 @@ func TestRuntimeStateStorePhysicalObservationFanoutRollsBackTogether(t *testing.
 	}
 	for _, role := range []SessionRole{SessionRoleWorker, SessionRoleOrchestrator} {
 		scope := SessionScopeIssue
-		wantObserved := SessionStateStopped
+		wantObserved := SessionState("")
 		if role == SessionRoleOrchestrator {
-			scope, wantObserved = SessionScopeOrchestration, SessionStatePaused
+			scope = SessionScopeOrchestration
 		}
 		intent, found, err := store.GetSessionIntent(ctx, "p", role, scope, "root")
 		if err != nil || !found || intent.ObservedState != wantObserved {

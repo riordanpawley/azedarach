@@ -1586,8 +1586,8 @@ func TestRefreshExistingSessionRuntimeStateSkipsUnchangedProjectionWrites(t *tes
 	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil {
 		t.Fatalf("refreshExistingSessionRuntimeState: %v", err)
 	}
-	if got := writer.sessionPersistCount(); got != 1 {
-		t.Fatalf("session projection persists = %d, want only stale row persisted", got)
+	if got := writer.sessionPersistCount(); got != 0 {
+		t.Fatalf("logical session persists = %d, runtime observations must use physical authority", got)
 	}
 
 	live, found, err := runtimeStateStore.GetSessionState(ctx, projectID, liveSessionID)

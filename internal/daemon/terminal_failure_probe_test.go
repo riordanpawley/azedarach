@@ -33,9 +33,15 @@ func TestEnrichTasksWithSessionStateAppliesTerminalFailureProbe(t *testing.T) {
 	t.Cleanup(func() { _ = runtimeStore.Close() })
 	if err := runtimeStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
 		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning,
-		ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: now.Add(-time.Minute),
+		UpdatedAt: now.Add(-time.Minute),
 	}); err != nil {
 		t.Fatalf("seed runtime state: %v", err)
+	}
+	if _, _, err := runtimeStore.ApplyPhysicalSessionObservation(context.Background(), daemonstate.PhysicalSessionObservation{
+		ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning,
+		Activity: "busy", ActivitySource: "hooks", UpdatedAt: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("seed physical runtime observation: %v", err)
 	}
 	runner := &terminalFailureProbeRunner{output: "⚠ Selected model is at capacity. Please try a different model."}
 	d := &Daemon{

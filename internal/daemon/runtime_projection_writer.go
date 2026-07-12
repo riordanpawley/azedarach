@@ -34,6 +34,33 @@ type daemonRuntimeProjectionWriter struct {
 	mu sync.Mutex
 }
 
+func (d *Daemon) persistObservedRuntimeProjection(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session) error {
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return nil
+	}
+	observedAt := session.UpdatedAt
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
+	activity, source := session.Activity, session.ActivitySource
+	if daemonstate.NormalizeSessionState(session.ObservedState) == daemonstate.SessionStateStopped {
+		activity, source = "", ""
+	}
+	changed, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+		ProjectID: projectID, SessionID: session.ID, ObservedState: session.ObservedState,
+		Activity: activity, ActivitySource: source, UpdatedAt: observedAt,
+	})
+	if err != nil {
+		return err
+	}
+	writer := d.runtimeProjectionStateWriter()
+	for _, row := range changed {
+		writer.PublishSessionProjectionEvent(ctx, projectID, meta, row)
+	}
+	return nil
+}
+
 type runtimeProjectionWriterOperationContextKey struct{}
 
 func newRuntimeProjectionWriter(d *Daemon) *daemonRuntimeProjectionWriter {

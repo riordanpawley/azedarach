@@ -1085,8 +1085,10 @@ func (d *Daemon) applyTypedSessionLifecycleTransition(ctx context.Context, req p
 	if err != nil {
 		return err
 	}
+	runtimeObservedFound := false
 	if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil && strings.TrimSpace(sessionID) != "" {
 		if observed, found, loadErr := runtimeStore.GetSessionIntent(ctx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID); loadErr == nil && found {
+			runtimeObservedFound = strings.TrimSpace(string(observed.ObservedState)) != ""
 			// Durable projection identity is authoritative. The transient lifecycle
 			// store carries only physical session/issue strings and must not erase a
 			// typed advisor or orchestrator product during a state transition.
@@ -1112,6 +1114,9 @@ func (d *Daemon) applyTypedSessionLifecycleTransition(ctx context.Context, req p
 			d.cfg.Logger.Debug("load runtime session projection for transition failed", "project_id", projectID, "session_id", sessionID, "error", loadErr)
 		}
 	}
+	if !runtimeObservedFound {
+		session.ObservedState = ""
+	}
 	if state == daemonstate.SessionStateStopped {
 		session.Activity = ""
 		session.ActivitySource = ""
@@ -1134,6 +1139,15 @@ func (d *Daemon) applyTypedSessionLifecycleTransition(ctx context.Context, req p
 	writer := d.runtimeProjectionStateWriter()
 	if err := writer.PersistSessionProjection(ctx, projectID, session); err != nil {
 		return err
+	}
+	if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil {
+		persisted, found, err := runtimeStore.GetSessionIntent(ctx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID)
+		if err != nil {
+			return fmt.Errorf("reload persisted session intent for publication: %w", err)
+		}
+		if found {
+			session = persisted
+		}
 	}
 	writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, session)
 	return nil

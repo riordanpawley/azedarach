@@ -1901,6 +1901,9 @@ func (d *Daemon) persistRestartedSessionProjection(ctx context.Context, projectI
 			"error", err,
 		)
 	}
+	if err := d.persistObservedRuntimeProjection(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, session); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("persist restarted physical runtime observation failed", "project_id", projectID, "session_id", sessionID, "error", err)
+	}
 }
 
 func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -2262,6 +2265,11 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 		}
 		return err
 	}
+	if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+		ProjectID: projectID, SessionID: session.ID, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: session.UpdatedAt,
+	}); err != nil {
+		return err
+	}
 	rows, err := store.ListSessionStates(ctx, projectID)
 	if err != nil {
 		return fmt.Errorf("list logical session observations before stop: %w", err)
@@ -2276,6 +2284,11 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 		row.UpdatedAt = time.Now().UTC()
 		if err := store.UpsertSessionState(ctx, projectID, row); err != nil {
 			return fmt.Errorf("stop session observation %s: %w", row.ID, err)
+		}
+		if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+			ProjectID: projectID, SessionID: row.ID, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: row.UpdatedAt,
+		}); err != nil {
+			return fmt.Errorf("stop physical session observation %s: %w", row.ID, err)
 		}
 	}
 	return nil
@@ -3340,6 +3353,9 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 				"error", err,
 			)
 		}
+		if err := d.persistObservedRuntimeProjection(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, reattached); err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("persist recreated physical session observation failed", "project_id", projectID, "session_id", canonicalSessionID, "error", err)
+		}
 		tmuxSet[issueKey] = struct{}{}
 		tmuxNameByIssueKey[issueKey] = canonicalSessionID
 		result.RecreatedTmuxSessions++
@@ -3418,6 +3434,9 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 					"session_id", sessionIDInTmux,
 					"error", err,
 				)
+			}
+			if err := d.persistObservedRuntimeProjection(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, stopped); err != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("persist killed physical session observation failed", "project_id", projectID, "session_id", stopped.ID, "error", err)
 			}
 			continue
 		}
@@ -4026,7 +4045,6 @@ func (d *Daemon) refreshExistingSessionRuntimeState(ctx context.Context, project
 		return err
 	}
 	live := newTmuxRuntimeLiveness(tmuxSessions, tmuxPanes)
-	writer := d.runtimeProjectionStateWriter()
 	persistCtx := contextWithRuntimeProjectionWriterOperation(ctx, "session.refresh_existing.persist")
 	for _, session := range existingSessions {
 		scanned++
@@ -4042,14 +4060,7 @@ func (d *Daemon) refreshExistingSessionRuntimeState(ctx context.Context, project
 			continue
 		}
 		session.UpdatedAt = time.Now().UTC()
-		if writer != nil {
-			if err := writer.PersistSessionProjection(persistCtx, projectID, session); err != nil {
-				return err
-			}
-			changed++
-			continue
-		}
-		if err := store.UpsertSessionState(ctx, projectID, session); err != nil {
+		if err := d.persistObservedRuntimeProjection(persistCtx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, session); err != nil {
 			return err
 		}
 		changed++
@@ -4096,7 +4107,6 @@ func (d *Daemon) refreshIssueSessionRuntimeState(ctx context.Context, projectID 
 		return err
 	}
 	live := newTmuxRuntimeLiveness(tmuxSessions, tmuxPanes)
-	writer := d.runtimeProjectionStateWriter()
 	persistCtx := contextWithRuntimeProjectionWriterOperation(ctx, "session.refresh_issue.persist")
 	for _, session := range targetSessions {
 		before := session
@@ -4110,13 +4120,7 @@ func (d *Daemon) refreshIssueSessionRuntimeState(ctx context.Context, projectID 
 			continue
 		}
 		session.UpdatedAt = time.Now().UTC()
-		if writer != nil {
-			if err := writer.PersistSessionProjection(persistCtx, projectID, session); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := store.UpsertSessionState(ctx, projectID, session); err != nil {
+		if err := d.persistObservedRuntimeProjection(persistCtx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, session); err != nil {
 			return err
 		}
 	}
@@ -4160,6 +4164,9 @@ func (d *Daemon) refreshStoppedSessionRuntimeState(ctx context.Context, projectI
 		if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, session); err != nil {
 			return err
 		}
+		if err := d.persistObservedRuntimeProjection(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, session); err != nil {
+			return err
+		}
 		matched = true
 	}
 	if matched && issueID == "" {
@@ -4177,7 +4184,10 @@ func (d *Daemon) refreshStoppedSessionRuntimeState(ctx context.Context, projectI
 		if canonicalStopped.ID == "" {
 			return nil
 		}
-		return d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, canonicalStopped)
+		if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, canonicalStopped); err != nil {
+			return err
+		}
+		return d.persistObservedRuntimeProjection(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, canonicalStopped)
 	}
 
 	fallbackSessionID := ""
@@ -4214,7 +4224,10 @@ func (d *Daemon) refreshStoppedSessionRuntimeState(ctx context.Context, projectI
 	session.State = daemonstate.SessionStateStopped
 	session.ObservedState = daemonstate.SessionStateStopped
 	session.UpdatedAt = time.Now().UTC()
-	return d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, session)
+	if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, session); err != nil {
+		return err
+	}
+	return d.persistObservedRuntimeProjection(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, session)
 }
 
 func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID string, tmuxSessions []tmux.SessionInfo, tmuxPanes []tmux.PaneInfo) error {
@@ -4288,6 +4301,9 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 				"error", err,
 			)
 		}
+		if err := d.persistObservedRuntimeProjection(persistCtx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, row); err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("persist live tmux physical observation failed", "project_id", projectID, "session_id", row.ID, "error", err)
+		}
 	}
 	for _, session := range existingSessions {
 		if _, liveSession := live.sessionIDs[strings.TrimSpace(session.ID)]; liveSession {
@@ -4306,6 +4322,9 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 				"issue_id", stopped.IssueID,
 				"error", err,
 			)
+		}
+		if err := d.persistObservedRuntimeProjection(persistCtx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, stopped); err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("persist stopped tmux physical observation failed", "project_id", projectID, "session_id", stopped.ID, "error", err)
 		}
 	}
 	return nil

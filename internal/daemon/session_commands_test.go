@@ -5819,6 +5819,57 @@ func TestTypedLifecycleTransitionTargetsSharedRuntimeIntent(t *testing.T) {
 	}
 }
 
+func TestTmuxObservationAuthoritySupersedesOldHookAndLaterDesiredWrite(t *testing.T) {
+	ctx := context.Background()
+	projectID, issueID := "p", "root"
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	seed := daemonstate.Session{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC().Add(-3 * time.Second)}
+	if err := store.UpsertSessionState(ctx, projectID, seed); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+		ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning,
+		Activity: "busy", ActivitySource: "hooks", UpdatedAt: time.Now().UTC().Add(-2 * time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: slog.Default()}, sessionStore: daemonstate.NewStore(),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{".": store},
+	}
+	if err := d.persistTmuxSessionRuntimeState(ctx, projectID, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	physical, found, err := store.GetPhysicalSessionObservation(ctx, projectID, sessionID)
+	if err != nil || !found || physical.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("tmux stopped observation=%+v found=%v err=%v", physical, found, err)
+	}
+	if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStatePaused,
+		ObservedState: daemonstate.SessionStateRunning, Activity: "stale", UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	intent, found, err := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, issueID)
+	if err != nil || !found || intent.ObservedState != daemonstate.SessionStateStopped || intent.Activity != "" {
+		t.Fatalf("desired write overrode tmux fact: %+v found=%v err=%v", intent, found, err)
+	}
+	newerHookAt := time.Now().UTC().Add(time.Second)
+	if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+		ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning,
+		Activity: "busy", ActivitySource: "hooks", UpdatedAt: newerHookAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	intent, found, err = store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, issueID)
+	if err != nil || !found || intent.ObservedState != daemonstate.SessionStateRunning || intent.Activity != "busy" {
+		t.Fatalf("newer hook did not win: %+v found=%v err=%v", intent, found, err)
+	}
+}
+
 func TestApplySessionLifecycleTransitionPreservesObservedRuntimeState(t *testing.T) {
 	const (
 		projectID = "proj-refresh-transition"
@@ -9355,8 +9406,8 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvents(t *testing.T) 
 	if len(startRows) != 1 {
 		t.Fatalf("runtime rows after start = %+v, want 1 row", startRows)
 	}
-	if startRows[0].State != daemonstate.SessionStateStarting || startRows[0].ObservedState != daemonstate.SessionStateStarting {
-		t.Fatalf("runtime rows after start = %+v, want desired and observed starting", startRows)
+	if startRows[0].State != daemonstate.SessionStateStarting || startRows[0].ObservedState != "" {
+		t.Fatalf("runtime rows after start = %+v, want desired starting without fabricated observation", startRows)
 	}
 
 	stopReq := startReq
@@ -9368,6 +9419,10 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvents(t *testing.T) 
 
 	events := collectSessionProjectionEvents(t, ch, 2)
 	wantStates := []protocol.SessionLifecycleState{
+		protocol.SessionLifecycleStateStarting,
+		protocol.SessionLifecycleStateStopped,
+	}
+	wantRuntimeStates := []protocol.SessionLifecycleState{
 		protocol.SessionLifecycleStateStarting,
 		protocol.SessionLifecycleStateStopped,
 	}
@@ -9409,12 +9464,12 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvents(t *testing.T) 
 		if body.Runtime.Projection.IssueID != issueID || body.Runtime.Projection.Session.SessionID != sessionID {
 			t.Fatalf("body runtime projection = %+v, want issue/session %s/%s", body.Runtime.Projection, issueID, sessionID)
 		}
-		if body.Runtime.Projection.Session.State != protocol.SessionLifecycleStateStarting {
+		if body.Runtime.Projection.Session.State != wantRuntimeStates[i] {
 			runtimeRows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
 			if err != nil {
-				t.Fatalf("body runtime session state = %s, want observed %s (load runtime rows failed: %v)", body.Runtime.Projection.Session.State, protocol.SessionLifecycleStateStarting, err)
+				t.Fatalf("body runtime session state = %s, want observed %s (load runtime rows failed: %v)", body.Runtime.Projection.Session.State, wantRuntimeStates[i], err)
 			}
-			t.Fatalf("body runtime session state = %s, want observed %s (runtime rows = %+v)", body.Runtime.Projection.Session.State, protocol.SessionLifecycleStateStarting, runtimeRows)
+			t.Fatalf("body runtime session state = %s, want observed %s (runtime rows = %+v)", body.Runtime.Projection.Session.State, wantRuntimeStates[i], runtimeRows)
 		}
 	}
 }

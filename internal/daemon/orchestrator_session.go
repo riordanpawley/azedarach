@@ -157,8 +157,7 @@ func (d *Daemon) persistOrchestratorSessionProjection(ctx context.Context, meta 
 	if err := writer.PersistSessionProjection(ctx, projectID, projection); err != nil {
 		return fmt.Errorf("persist orchestrator session projection: %w", err)
 	}
-	writer.PublishSessionProjectionEvent(ctx, projectID, meta, projection)
-	return nil
+	return d.persistObservedRuntimeProjection(ctx, projectID, meta, projection)
 }
 
 func (d *Daemon) orchestratorSessionID(projectID string, scope domain.OrchestrationScope) string {
