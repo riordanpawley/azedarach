@@ -30,11 +30,13 @@ type LearningOutcomeSource string
 
 const (
 	LearningOutcomeExplicit LearningOutcomeSource = "explicit"
+	LearningOutcomeHuman    LearningOutcomeSource = "human"
+	LearningOutcomeAgent    LearningOutcomeSource = "agent"
 	LearningOutcomeInferred LearningOutcomeSource = "inferred"
 )
 
 func (s LearningOutcomeSource) Valid() bool {
-	return s == LearningOutcomeExplicit || s == LearningOutcomeInferred
+	return s == LearningOutcomeExplicit || s == LearningOutcomeHuman || s == LearningOutcomeAgent || s == LearningOutcomeInferred
 }
 
 // LearningContextFingerprint deliberately accepts only structured, non-evidence context.

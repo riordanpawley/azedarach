@@ -481,7 +481,7 @@ func parseLearnFeedbackArgs(args []string) (learnFeedbackOpts, error) {
 	fs.BoolVar(&o.JSON, "json", false, "json output")
 	fs.StringVar(&o.IdempotencyKey, "idempotency-key", "", "deduplication key")
 	fs.StringVar(&o.Outcome, "outcome", "", "helpful|followed|contradicted|unknown")
-	fs.StringVar(&o.Source, "source", "explicit", "explicit|inferred")
+	fs.StringVar(&o.Source, "source", "human", "human|agent|inferred")
 	fs.StringVar(&o.Explanation, "explanation", "", "outcome explanation")
 	if err := fs.Parse(args); err != nil {
 		return o, err

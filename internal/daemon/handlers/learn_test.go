@@ -55,6 +55,10 @@ func (f *fakeLearnService) ContextualActivate(ctx context.Context, req protocol.
 	return protocol.LearnContextualActivateResponseBody{}, nil
 }
 
+func (f *fakeLearnService) ConfirmActivation(context.Context, protocol.LearnActivationConfirmRequestBody) (protocol.LearnActivationConfirmResponseBody, error) {
+	return protocol.LearnActivationConfirmResponseBody{}, nil
+}
+
 func (f *fakeLearnService) Capture(context.Context, protocol.LearnCaptureRequestBody) (protocol.LearnCaptureResponseBody, error) {
 	return protocol.LearnCaptureResponseBody{Observation: protocol.LearningObservation{ID: "learn-obs-1", Learning: protocol.Learning{ID: "learn-1"}}}, nil
 }

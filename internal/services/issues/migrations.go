@@ -71,6 +71,7 @@ var orderedMigrations = []migration{
 	{id: "0038_learning_consolidation", path: "migrations/0038_learning_consolidation.sql"},
 	{id: "0039_contextual_learning_activation", path: "migrations/0039_contextual_learning_activation.sql"},
 	{id: "0040_typed_learning_observations", path: "migrations/0040_typed_learning_observations.sql"},
+	{id: "0041_learning_activation_confirmation", path: "migrations/0041_learning_activation_confirmation.sql"},
 }
 
 const (

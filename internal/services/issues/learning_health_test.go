@@ -20,7 +20,7 @@ func TestLearningPortfolioHealthUsesExplicitDeliveryDenominators(t *testing.T) {
 	require.NoError(t, err)
 	a, err := client.RecordLearningActivation(ctx, RecordLearningActivationParams{ProjectID: "proj", Surface: "prime", ContextFingerprint: "sha256:x", Purpose: "session_start", SessionID: "s-1", LearningIDs: []string{learning.LocalID}, TokenCost: 12})
 	require.NoError(t, err)
-	_, _, err = client.RecordLearningActivationOutcome(ctx, LearningActivationOutcome{ActivationID: a.ActivationID, IdempotencyKey: "one", Outcome: domain.LearningOutcomeHelpful, Source: domain.LearningOutcomeExplicit})
+	_, _, err = client.RecordLearningActivationOutcome(ctx, LearningActivationOutcome{ProjectID: "proj", ActivationID: a.ActivationID, IdempotencyKey: "one", Outcome: domain.LearningOutcomeHelpful, Source: domain.LearningOutcomeExplicit})
 	require.NoError(t, err)
 	health, err := client.LearningPortfolioHealth(ctx, "proj", time.Now().UTC())
 	require.NoError(t, err)

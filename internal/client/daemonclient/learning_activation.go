@@ -38,6 +38,14 @@ func (c *Client) ActivateContextualLearnings(ctx context.Context, req protocol.L
 	return out, nil
 }
 
+func (c *Client) ConfirmLearningActivation(ctx context.Context, req protocol.LearnActivationConfirmRequestBody) (protocol.LearnActivationConfirmResponseBody, error) {
+	var out protocol.LearnActivationConfirmResponseBody
+	if err := c.commandJSON(ctx, protocol.CommandLearnActivationConfirm, req, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
 func (c *Client) LearningHealth(ctx context.Context, req protocol.LearnHealthRequestBody) (protocol.LearnHealthResponseBody, error) {
 	var out protocol.LearnHealthResponseBody
 	if err := c.commandJSON(ctx, protocol.CommandLearnHealth, req, &out); err != nil {

@@ -8668,18 +8668,23 @@ func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID
 	finish := primePhase(deps, "learning_recall", fmt.Sprintf("loading learning recall for %s", issueID))
 	resp, err := deps.DaemonClient.ActivateContextualLearnings(ctx, protocol.LearnContextualActivateRequestBody{Purpose: string(domain.LearningPurposeSessionStart), Surface: "prime", SessionID: naming.SessionID(sessionID), ContextIssueID: naming.IssueID(issueID), TokenBudget: 256})
 	finish(err)
-	if err != nil || len(resp.Learnings) == 0 {
+	if err != nil || resp.Proposal == nil || len(resp.Learnings) == 0 {
 		return strings.Join(lines, "\n")
 	}
-	lines = append(lines, "", "Relevant accepted/promoted learnings:")
+	section := []string{"", fmt.Sprintf("Relevant accepted/promoted learnings [activation: %s]:", resp.Proposal.ActivationID)}
 	for _, learning := range resp.Learnings {
 		reason := strings.TrimSpace(learning.RecallReason)
 		if reason != "" {
 			reason = " (why: " + reason + ")"
 		}
-		lines = append(lines, fmt.Sprintf("- %s [%s]: %s%s", learning.ID, learning.Status, learning.Summary, reason))
+		section = append(section, fmt.Sprintf("- %s [%s]: %s%s", learning.ID, learning.Status, learning.Summary, reason))
 	}
-	lines = append(lines, "Use `az learn show <learning-id>` for evidence; long evidence is not injected by default.")
+	section = append(section, "Use `az learn show <learning-id>` for evidence; long evidence is not injected by default.")
+	rendered := strings.Join(section, "\n")
+	if _, err := deps.DaemonClient.ConfirmLearningActivation(ctx, protocol.LearnActivationConfirmRequestBody{ActivationID: resp.Proposal.ActivationID, TokenCost: domain.RenderedLearningTokenCost(rendered)}); err != nil {
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines, section...)
 	return strings.Join(lines, "\n")
 }
 

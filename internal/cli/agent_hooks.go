@@ -63,6 +63,7 @@ type AgentHookOutcome struct {
 func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookContext) (AgentHookOutcome, error) {
 	outcome := AgentHookOutcome{GuardResponse: map[string]any{}}
 	contextualGuidance := ""
+	contextualActivationID := ""
 
 	agent := hookCtx.Agent
 	if !agent.IsKnown() {
@@ -93,10 +94,11 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 		activation, activationErr := deps.DaemonClient.ActivateContextualLearnings(activationCtx, protocol.LearnContextualActivateRequestBody{
 			Purpose: string(purpose), Surface: "agent_hook", SessionID: naming.SessionID(naming.CanonicalSessionID(projectID, hookCtx.IssueID)), ContextIssueID: naming.IssueID(hookCtx.IssueID), Query: query, TokenBudget: 192,
 		})
-		cancel()
-		if activationErr == nil && len(activation.Learnings) > 0 {
-			contextualGuidance = renderContextualLearningGuidance(activation.Learnings)
+		if activationErr == nil && activation.Proposal != nil && len(activation.Learnings) > 0 {
+			contextualGuidance = renderContextualLearningGuidance(activation.Proposal.ActivationID, activation.Learnings)
+			contextualActivationID = activation.Proposal.ActivationID
 		}
+		cancel()
 	}
 
 	switch agent {
@@ -116,10 +118,22 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 		// Claude has no port-layer guard today.
 	}
 	if contextualGuidance != "" {
-		if existing, _ := outcome.GuardResponse["systemMessage"].(string); strings.TrimSpace(existing) != "" {
+		renderedGuidance := contextualGuidance
+		existing, _ := outcome.GuardResponse["systemMessage"].(string)
+		if strings.TrimSpace(existing) != "" {
 			contextualGuidance = strings.TrimSpace(existing) + "\n\n" + contextualGuidance
 		}
 		outcome.GuardResponse["systemMessage"] = contextualGuidance
+		confirmCtx, cancel := context.WithTimeout(ctx, hookBestEffortDaemonTimeout)
+		_, confirmErr := deps.DaemonClient.ConfirmLearningActivation(confirmCtx, protocol.LearnActivationConfirmRequestBody{ActivationID: contextualActivationID, TokenCost: domain.RenderedLearningTokenCost(renderedGuidance)})
+		cancel()
+		if confirmErr != nil {
+			if strings.TrimSpace(existing) == "" {
+				delete(outcome.GuardResponse, "systemMessage")
+			} else {
+				outcome.GuardResponse["systemMessage"] = existing
+			}
+		}
 	}
 
 	return outcome, nil
@@ -134,9 +148,9 @@ func agentHookPromptText(payload map[string]any) string {
 	return ""
 }
 
-func renderContextualLearningGuidance(learnings []protocol.Learning) string {
+func renderContextualLearningGuidance(activationID string, learnings []protocol.Learning) string {
 	var b strings.Builder
-	b.WriteString("Relevant project guidance:\n")
+	fmt.Fprintf(&b, "Relevant project guidance [activation: %s]:\n", activationID)
 	for _, learning := range learnings {
 		fmt.Fprintf(&b, "- %s: %s\n", learning.ID, learning.Summary)
 	}

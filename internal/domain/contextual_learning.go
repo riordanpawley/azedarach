@@ -65,3 +65,7 @@ func contextualLearningTokenCost(value string) int {
 	}
 	return (runes + 3) / 4
 }
+
+// RenderedLearningTokenCost measures the payload that the delivery adapter
+// actually produced, rather than the daemon's pre-render selection estimate.
+func RenderedLearningTokenCost(value string) int { return contextualLearningTokenCost(value) }

@@ -476,19 +476,26 @@ func TestIssueLearnServiceContextualActivationIsPrivateSafeBudgetedAndSessionDed
 	if err != nil {
 		t.Fatalf("activate: %v", err)
 	}
-	if first.Activation == nil || len(first.Learnings) != 1 || first.Learnings[0].ID != public.LocalID || first.Learnings[0].EvidencePrivate {
+	if first.Proposal == nil || len(first.Learnings) != 1 || first.Learnings[0].ID != public.LocalID || first.Learnings[0].EvidencePrivate {
 		t.Fatalf("first activation = %+v", first)
+	}
+	lostResponseRetry, err := service.ContextualActivate(ctx, req)
+	if err != nil || lostResponseRetry.Proposal == nil || lostResponseRetry.Proposal.ActivationID == first.Proposal.ActivationID {
+		t.Fatalf("unconfirmed proposal should not suppress retry: %+v err=%v", lostResponseRetry, err)
+	}
+	if _, err := service.ConfirmActivation(ctx, protocol.LearnActivationConfirmRequestBody{ActivationID: lostResponseRetry.Proposal.ActivationID, TokenCost: 10}); err != nil {
+		t.Fatalf("confirm: %v", err)
 	}
 	second, err := service.ContextualActivate(ctx, req)
 	if err != nil {
 		t.Fatalf("repeat activate: %v", err)
 	}
-	if second.Activation != nil || len(second.Learnings) != 0 {
+	if second.Proposal != nil || len(second.Learnings) != 0 {
 		t.Fatalf("repeat activation = %+v, want suppressed", second)
 	}
 	req.SessionID = "session-2"
 	third, err := service.ContextualActivate(ctx, req)
-	if err != nil || third.Activation == nil {
+	if err != nil || third.Proposal == nil {
 		t.Fatalf("new session activation = %+v, err=%v", third, err)
 	}
 }

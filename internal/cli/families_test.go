@@ -897,7 +897,9 @@ func TestRunAgentHookActivatesGuidanceOnUserPromptTransition(t *testing.T) {
 			if err := json.Unmarshal(req.Body, &activationReq); err != nil {
 				t.Fatal(err)
 			}
-			return responseWithJSON(req, protocol.LearnContextualActivateResponseBody{Learnings: []protocol.Learning{{ID: "learn-1", Summary: "Keep authority in the daemon."}}}), nil
+			return responseWithJSON(req, protocol.LearnContextualActivateResponseBody{Proposal: &protocol.LearningActivationProposal{ActivationID: "act-hook", LearningIDs: []string{"learn-1"}}, Learnings: []protocol.Learning{{ID: "learn-1", Summary: "Keep authority in the daemon."}}}), nil
+		case protocol.CommandLearnActivationConfirm:
+			return responseWithJSON(req, protocol.LearnActivationConfirmResponseBody{Activation: protocol.LearningActivation{ActivationID: "act-hook"}}), nil
 		default:
 			return responseWithJSON(req, map[string]any{}), nil
 		}

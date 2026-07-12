@@ -12955,11 +12955,13 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 						Status:       protocol.LearningStatusAccepted,
 						RecallReason: "issue=az-1; query",
 					}}
-					body, err := json.Marshal(protocol.LearnContextualActivateResponseBody{Learnings: learnings})
+					body, err := json.Marshal(protocol.LearnContextualActivateResponseBody{Proposal: &protocol.LearningActivationProposal{ActivationID: "act-prime", LearningIDs: []string{"learn-1"}}, Learnings: learnings})
 					if err != nil {
 						t.Fatalf("marshal learn recall response: %v", err)
 					}
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt, Body: body}, nil
+				case protocol.CommandLearnActivationConfirm:
+					return responseWithJSON(req, protocol.LearnActivationConfirmResponseBody{Activation: protocol.LearningActivation{ActivationID: "act-prime"}}), nil
 				default:
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt}, nil
 				}
@@ -12979,7 +12981,7 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 	if learnReq.Purpose != string(domain.LearningPurposeSessionStart) || learnReq.Surface != "prime" || learnReq.TokenBudget != 256 {
 		t.Fatalf("contextual activation request = %+v", learnReq)
 	}
-	if !strings.Contains(output, "Relevant accepted/promoted learnings:") ||
+	if !strings.Contains(output, "Relevant accepted/promoted learnings [activation: act-prime]:") ||
 		!strings.Contains(output, "- learn-1 [accepted]: Keep durable choices in decisions (why: issue=az-1; query)") {
 		t.Fatalf("prime output missing learning section: %q", output)
 	}

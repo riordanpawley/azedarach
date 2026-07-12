@@ -182,7 +182,7 @@ func (s issueLearnService) ContextualActivate(ctx context.Context, req protocol.
 	if err != nil {
 		return protocol.LearnContextualActivateResponseBody{}, err
 	}
-	projectID := firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx))
+	projectID := firstNonEmptyDaemon(daemonProjectIDFromContext(ctx), req.ProjectID, protocol.DefaultProjectID)
 	rows, err := client.ListLearnings(ctx, issues.LearningFilter{ProjectID: projectID, ContextIssueID: req.ContextIssueID.String(), ContextReqID: req.ContextReqID.String(), ContextTags: req.ContextTags, ContextFiles: req.ContextFiles, Query: req.Query, Statuses: []issues.LearningStatus{issues.LearningStatusAccepted, issues.LearningStatusPromoted}, IncludeEvidence: false, ExcludePrivate: true, ActiveOnly: true, SkipRecallTracking: true})
 	if err != nil {
 		return protocol.LearnContextualActivateResponseBody{}, err
@@ -207,12 +207,24 @@ func (s issueLearnService) ContextualActivate(ctx context.Context, req protocol.
 	}
 	explanation := strings.Join(selection.Explanations, "; ")
 	fingerprint := contextualActivationFingerprint(req)
-	a, err := client.RecordLearningActivation(ctx, issues.RecordLearningActivationParams{ProjectID: projectID, Surface: req.Surface, ContextFingerprint: fingerprint, Purpose: req.Purpose, SessionID: req.SessionID.String(), LearningIDs: selection.IDs, TokenCost: selection.TokenCost, Explanation: explanation})
+	a, err := client.ProposeLearningActivation(ctx, issues.RecordLearningActivationParams{ProjectID: projectID, Surface: req.Surface, ContextFingerprint: fingerprint, Purpose: req.Purpose, SessionID: req.SessionID.String(), LearningIDs: selection.IDs, Explanation: explanation})
 	if err != nil {
 		return protocol.LearnContextualActivateResponseBody{}, err
 	}
-	activation := protocol.LearningActivation{ActivationID: a.ActivationID, Surface: a.Surface, ContextFingerprint: a.ContextFingerprint, LearningIDs: a.LearningIDs, TokenCost: a.TokenCost, Explanation: a.Explanation, DeliveredAt: formatProtocolTime(a.DeliveredAt)}
-	return protocol.LearnContextualActivateResponseBody{Activation: &activation, Learnings: learnings, Explanation: explanation}, nil
+	proposal := protocol.LearningActivationProposal{ActivationID: a.ActivationID, Surface: a.Surface, ContextFingerprint: a.ContextFingerprint, LearningIDs: a.LearningIDs, Explanation: a.Explanation}
+	return protocol.LearnContextualActivateResponseBody{Proposal: &proposal, Learnings: learnings, Explanation: explanation}, nil
+}
+
+func (s issueLearnService) ConfirmActivation(ctx context.Context, req protocol.LearnActivationConfirmRequestBody) (protocol.LearnActivationConfirmResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnActivationConfirmResponseBody{}, err
+	}
+	a, err := client.ConfirmLearningActivation(ctx, firstNonEmptyDaemon(daemonProjectIDFromContext(ctx), protocol.DefaultProjectID), req.ActivationID, req.TokenCost)
+	if err != nil {
+		return protocol.LearnActivationConfirmResponseBody{}, err
+	}
+	return protocol.LearnActivationConfirmResponseBody{Activation: protocol.LearningActivation{ActivationID: a.ActivationID, Surface: a.Surface, ContextFingerprint: a.ContextFingerprint, LearningIDs: a.LearningIDs, TokenCost: a.TokenCost, Explanation: a.Explanation, DeliveredAt: formatProtocolTime(a.DeliveredAt)}}, nil
 }
 
 func contextualActivationFingerprint(req protocol.LearnContextualActivateRequestBody) string {
@@ -237,7 +249,7 @@ func (s issueLearnService) Activate(ctx context.Context, req protocol.LearnActiv
 	if err != nil {
 		return protocol.LearnActivateResponseBody{}, err
 	}
-	a, err := client.RecordLearningActivation(ctx, issues.RecordLearningActivationParams{ProjectID: firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)), Surface: req.Surface, ContextFingerprint: fingerprint, LearningIDs: req.LearningIDs, TokenCost: req.TokenCost, Explanation: req.Explanation})
+	a, err := client.RecordLearningActivation(ctx, issues.RecordLearningActivationParams{ProjectID: firstNonEmptyDaemon(daemonProjectIDFromContext(ctx), req.ProjectID, protocol.DefaultProjectID), Surface: req.Surface, ContextFingerprint: fingerprint, LearningIDs: req.LearningIDs, TokenCost: req.TokenCost, Explanation: req.Explanation})
 	if err != nil {
 		return protocol.LearnActivateResponseBody{}, err
 	}
@@ -249,11 +261,11 @@ func (s issueLearnService) Feedback(ctx context.Context, req protocol.LearnFeedb
 	if err != nil {
 		return protocol.LearnFeedbackResponseBody{}, err
 	}
-	out, created, err := client.RecordLearningActivationOutcome(ctx, issues.LearningActivationOutcome{ActivationID: req.ActivationID, IdempotencyKey: req.IdempotencyKey, Outcome: domain.LearningActivationOutcome(req.Outcome), Source: domain.LearningOutcomeSource(req.Source), Explanation: req.Explanation})
+	out, created, err := client.RecordLearningActivationOutcome(ctx, issues.LearningActivationOutcome{ProjectID: firstNonEmptyDaemon(daemonProjectIDFromContext(ctx), protocol.DefaultProjectID), ActivationID: req.ActivationID, IdempotencyKey: req.IdempotencyKey, Outcome: domain.LearningActivationOutcome(req.Outcome), Source: domain.LearningOutcomeSource(req.Source), Explanation: req.Explanation})
 	if err != nil {
 		return protocol.LearnFeedbackResponseBody{}, err
 	}
-	return protocol.LearnFeedbackResponseBody{Created: created, Feedback: protocol.LearningActivationFeedback{ActivationID: out.ActivationID, IdempotencyKey: out.IdempotencyKey, Outcome: string(out.Outcome), Source: string(out.Source), Explanation: out.Explanation, RecordedAt: formatProtocolTime(out.RecordedAt)}}, nil
+	return protocol.LearnFeedbackResponseBody{Created: created, Feedback: protocol.LearningActivationFeedback{ActivationID: out.ActivationID, IdempotencyKey: out.IdempotencyKey, Outcome: string(out.Outcome), Source: string(out.Source), Explanation: out.Explanation, RecordedAt: formatProtocolTime(out.RecordedAt), ResolvedOutcome: string(out.ResolvedOutcome), ResolvedSource: string(out.ResolvedSource)}}, nil
 }
 
 func (s issueLearnService) Show(ctx context.Context, req protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error) {
