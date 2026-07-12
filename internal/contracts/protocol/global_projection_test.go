@@ -1,10 +1,25 @@
 package protocol
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
+
+func TestGlobalSnapshotRequestHydrationUsesScopedWireIdentity(t *testing.T) {
+	raw, err := json.Marshal(GlobalSnapshotRequestBody{
+		Consumer:       GlobalViewConsumerTmuxSelector,
+		HydrateTaskIDs: []ScopedIssueID{{ProjectID: "alpha", IssueID: "same"}, {ProjectID: "beta", IssueID: "same"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"consumer":"tmux_selector","scope":{},"hydrate_task_ids":[{"project_id":"alpha","issue_id":"same"},{"project_id":"beta","issue_id":"same"}]}`
+	if string(raw) != want {
+		t.Fatalf("request JSON = %s, want %s", raw, want)
+	}
+}
 
 func TestGlobalViewConsumerValid(t *testing.T) {
 	tests := []struct {

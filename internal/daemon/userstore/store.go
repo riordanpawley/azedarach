@@ -868,6 +868,13 @@ func (s *Store) SnapshotForView(ctx context.Context, query string, view *domain.
 // SnapshotForScopedView pushes project scope into SQLite so excluded projects
 // are never hydrated into memory.
 func (s *Store) SnapshotForScopedView(ctx context.Context, query string, view *domain.BoardView, scope protocol.GlobalViewScope) (protocol.GlobalSnapshotResponseBody, error) {
+	return s.SnapshotForScopedViewWithTasks(ctx, query, view, scope, nil)
+}
+
+// SnapshotForScopedViewWithTasks returns view candidates plus explicitly scoped
+// task metadata. Explicit tasks do not affect the view projection; callers use
+// them to hydrate live runtime rows that remain visible independently of a view.
+func (s *Store) SnapshotForScopedViewWithTasks(ctx context.Context, query string, view *domain.BoardView, scope protocol.GlobalViewScope, hydrate []protocol.ScopedIssueID) (protocol.GlobalSnapshotResponseBody, error) {
 	now := s.now().UTC()
 	out := protocol.GlobalSnapshotResponseBody{SchemaVersion: projectionVersion, GeneratedAt: now}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
@@ -878,6 +885,9 @@ func (s *Store) SnapshotForScopedView(ctx context.Context, query string, view *d
 	q := `SELECT project_id,name,path,db_path,schema_version,schema_fingerprint,projection_version,checkpoint,freshness,refreshed_at,last_attempt_at,last_error,registered FROM projects`
 	args := []any{}
 	ids := scopeProjectIDs(scope)
+	if len(ids) > 0 {
+		ids = appendUniqueStrings(ids, hydrationProjectIDs(hydrate)...)
+	}
 	if len(ids) > 0 {
 		q += ` WHERE project_id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + `)`
 		for _, id := range ids {
@@ -925,7 +935,7 @@ func (s *Store) SnapshotForScopedView(ctx context.Context, query string, view *d
 	}
 	for i := range projects {
 		if projects[i].Registered {
-			projects[i].Tasks, err = s.tasks(ctx, tx, projects[i].ProjectID, query, view)
+			projects[i].Tasks, err = s.tasks(ctx, tx, projects[i].ProjectID, query, view, hydratedIssueIDs(hydrate, projects[i].ProjectID))
 			if err != nil {
 				return out, err
 			}
@@ -936,6 +946,31 @@ func (s *Store) SnapshotForScopedView(ctx context.Context, query string, view *d
 		return out, fmt.Errorf("commit global snapshot read: %w", err)
 	}
 	return out, nil
+}
+
+func hydrationProjectIDs(ids []protocol.ScopedIssueID) []string {
+	out := make([]string, 0, len(ids))
+	for _, scoped := range ids {
+		if projectID := protocol.NormalizeProjectID(scoped.ProjectID.String()); projectID != "" {
+			out = appendUniqueStrings(out, projectID)
+		}
+	}
+	return out
+}
+
+func appendUniqueStrings(dst []string, values ...string) []string {
+	seen := make(map[string]struct{}, len(dst)+len(values))
+	for _, value := range dst {
+		seen[value] = struct{}{}
+	}
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		dst = append(dst, value)
+	}
+	return dst
 }
 
 func scopeProjectIDs(scope protocol.GlobalViewScope) []string {
@@ -957,7 +992,28 @@ func scopeProjectIDs(scope protocol.GlobalViewScope) []string {
 	return out
 }
 
-func (s *Store) tasks(ctx context.Context, db queryer, projectID, query string, view *domain.BoardView) ([]domain.Task, error) {
+func hydratedIssueIDs(ids []protocol.ScopedIssueID, projectID string) []string {
+	projectID = protocol.NormalizeProjectID(projectID)
+	seen := make(map[string]struct{})
+	out := make([]string, 0, len(ids))
+	for _, scoped := range ids {
+		if protocol.NormalizeProjectID(scoped.ProjectID.String()) != projectID {
+			continue
+		}
+		issueID := strings.TrimSpace(scoped.IssueID.String())
+		if issueID == "" {
+			continue
+		}
+		if _, ok := seen[issueID]; ok {
+			continue
+		}
+		seen[issueID] = struct{}{}
+		out = append(out, issueID)
+	}
+	return out
+}
+
+func (s *Store) tasks(ctx context.Context, db queryer, projectID, query string, view *domain.BoardView, hydrate []string) ([]domain.Task, error) {
 	q := `SELECT i.issue_id,i.title,i.description,i.notes,i.design,i.acceptance,i.assignee,i.labels_json,i.estimate,i.implementations_json,
 i.status,i.lifecycle,i.review_state,i.closed_outcome,i.archive_state,i.deletion_state,i.waiting_human,i.waiting_human_source,i.waiting_human_reason,i.waiting_ai,
 i.priority,i.issue_type,i.parent_issue_id,i.has_tmux_session,i.origin,i.pr_number,i.pr_remote_key,i.pr_display_key,i.pr_url,i.pr_state,i.pr_draft,i.pr_checks_status,
@@ -969,17 +1025,30 @@ LEFT JOIN project_session_projection s ON s.project_id=i.project_id AND s.issue_
 LEFT JOIN project_worktree_projection w ON w.project_id=i.project_id AND w.issue_id=i.issue_id
 WHERE i.project_id=?`
 	args := []any{projectID}
+	q += ` AND (`
+	candidateClauses := make([]string, 0, 2)
 	if strings.TrimSpace(query) != "" {
 		if expression := domain.ContentQueryFTSExpression(query); expression != "" {
-			q += ` AND i.issue_id IN (SELECT issue_id FROM project_issue_search_projection WHERE project_id=? AND project_issue_search_projection MATCH ?)`
+			candidateClauses = append(candidateClauses, `i.issue_id IN (SELECT issue_id FROM project_issue_search_projection WHERE project_id=? AND project_issue_search_projection MATCH ?)`)
 			args = append(args, projectID, expression)
 		}
 	}
 	if view != nil {
 		clause, viewArgs := viewCandidateSQL(*view)
 		if clause != "" {
-			q += " AND (" + clause + ")"
+			candidateClauses = append(candidateClauses, "("+clause+")")
 			args = append(args, viewArgs...)
+		}
+	}
+	if len(candidateClauses) == 0 {
+		candidateClauses = append(candidateClauses, `1=1`)
+	}
+	q += strings.Join(candidateClauses, ` AND `) + `)`
+	if len(hydrate) > 0 {
+		q += ` OR (i.project_id=? AND i.issue_id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(hydrate)), ",") + `))`
+		args = append(args, projectID)
+		for _, issueID := range hydrate {
+			args = append(args, issueID)
 		}
 	}
 	q += ` ORDER BY i.updated_at DESC,i.issue_id`

@@ -274,11 +274,11 @@ func (d *Daemon) handleGlobalSnapshot(ctx context.Context, req protocol.RequestE
 	if body.Scope.Kind != "" {
 		scope = body.Scope
 	}
-	snapshot, err := d.userStore.SnapshotForScopedView(ctx, strings.TrimSpace(body.Query), &view, scope)
+	snapshot, err := d.userStore.SnapshotForScopedViewWithTasks(ctx, strings.TrimSpace(body.Query), &view, scope, body.HydrateTaskIDs)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	projection, err := projectGlobalView(view, snapshot.Projects)
+	projection, err := projectGlobalView(view, filterGlobalProjects(snapshot.Projects, scope))
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}

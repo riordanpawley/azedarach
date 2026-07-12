@@ -1123,7 +1123,8 @@ func (s *DaemonSnapshotSource) loadGlobalSnapshot(ctx context.Context) ([]Projec
 		return nil, err
 	}
 	client := daemonclient.New(transport.NewClient(socketPath))
-	snapshot, err := client.GlobalViewSnapshot(ctx, protocol.GlobalSnapshotRequestBody{Consumer: protocol.GlobalViewConsumerTmuxSelector})
+	hydrate := scopedTaskIDsByProjectDir(s.taskIDsByDir)
+	snapshot, err := client.GlobalViewSnapshot(ctx, protocol.GlobalSnapshotRequestBody{Consumer: protocol.GlobalViewConsumerTmuxSelector, HydrateTaskIDs: hydrate})
 	if err != nil {
 		return nil, err
 	}
@@ -1135,6 +1136,47 @@ func (s *DaemonSnapshotSource) loadGlobalSnapshot(ctx context.Context) ([]Projec
 		out[0].GlobalProjection = &snapshot.Projection
 	}
 	return out, nil
+}
+
+func scopedTaskIDsByProjectDir(taskIDsByDir map[string][]string) []protocol.ScopedIssueID {
+	hydrate := make([]protocol.ScopedIssueID, 0)
+	registeredIDs := registeredProjectIDsByPath()
+	for projectDir, taskIDs := range taskIDsByDir {
+		projectID := registeredIDs[cleanProjectDirKey(projectDir)]
+		if projectID == "" {
+			projectID = projectIDForPath(projectDir)
+		}
+		if projectID == "" {
+			continue
+		}
+		for _, taskID := range taskIDs {
+			hydrate = append(hydrate, protocol.ScopedIssueID{ProjectID: naming.ProjectID(projectID), IssueID: naming.IssueID(taskID)})
+		}
+	}
+	sort.Slice(hydrate, func(i, j int) bool {
+		if hydrate[i].ProjectID != hydrate[j].ProjectID {
+			return hydrate[i].ProjectID < hydrate[j].ProjectID
+		}
+		return hydrate[i].IssueID < hydrate[j].IssueID
+	})
+	return hydrate
+}
+
+func registeredProjectIDsByPath() map[string]string {
+	out := make(map[string]string)
+	registry, err := config.LoadProjectsRegistry()
+	if err == nil {
+		for _, project := range registry.Projects {
+			root, resolveErr := config.ResolveProjectRoot(project.Path)
+			if resolveErr != nil {
+				root = project.Path
+			}
+			if path := cleanProjectDirKey(root); path != "" {
+				out[path] = protocol.NormalizeProjectID(config.RegisteredProjectID(project))
+			}
+		}
+	}
+	return out
 }
 
 func (s *DaemonSnapshotSource) snapshotBudget() time.Duration {

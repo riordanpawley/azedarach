@@ -68,6 +68,91 @@ func TestNormalizedProjectionRoundTripsViewAndSearchFields(t *testing.T) {
 	}
 }
 
+func TestSnapshotForScopedViewHydratesExcludedTasksByScopedIdentity(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, project := range []ProjectInput{
+		{ProjectID: "alpha", Name: "Alpha", Path: "/alpha", Tasks: []domain.Task{{ID: "same", Title: "Alpha excluded", Status: domain.StatusOpen, Type: domain.TypeBug, CreatedAt: now, UpdatedAt: now}, {ID: "active", Title: "Alpha active", Status: domain.StatusInProgress, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}}},
+		{ProjectID: "beta", Name: "Beta", Path: "/beta", Tasks: []domain.Task{{ID: "same", Title: "Beta excluded", Status: domain.StatusOpen, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}}},
+	} {
+		if err = store.ReplaceProject(ctx, project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	view := domain.OrchestrationBoardView()
+	snapshot, err := store.SnapshotForScopedViewWithTasks(ctx, "", &view, protocol.GlobalViewScope{}, []protocol.ScopedIssueID{{ProjectID: "alpha", IssueID: "same"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byProject := make(map[string][]domain.Task)
+	for _, project := range snapshot.Projects {
+		byProject[project.ProjectID] = project.Tasks
+	}
+	if got := byProject["alpha"]; len(got) != 2 || got[0].ID != "active" || got[1].ID != "same" || got[1].Title != "Alpha excluded" {
+		t.Fatalf("alpha hydrated tasks = %#v", got)
+	}
+	if got := byProject["beta"]; len(got) != 0 {
+		t.Fatalf("beta duplicate was hydrated by bare ID: %#v", got)
+	}
+}
+
+func TestSnapshotForScopedViewHydratesProjectOutsideConfiguredScope(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, project := range []ProjectInput{
+		{ProjectID: "alpha", Name: "Alpha", Path: "/alpha", Tasks: []domain.Task{{ID: "active", Title: "Visible", Status: domain.StatusInProgress, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}}},
+		{ProjectID: "beta", Name: "Beta", Path: "/beta", Tasks: []domain.Task{{ID: "live", Title: "Outside scope", Status: domain.StatusOpen, Type: domain.TypeBug, CreatedAt: now, UpdatedAt: now}}},
+	} {
+		if err = store.ReplaceProject(ctx, project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	view := domain.OrchestrationBoardView()
+	snapshot, err := store.SnapshotForScopedViewWithTasks(ctx, "", &view, protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeSelectedProjects, ProjectIDs: []naming.ProjectID{"alpha"}}, []protocol.ScopedIssueID{{ProjectID: "beta", IssueID: "live"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 2 {
+		t.Fatalf("metadata projects = %+v, want scoped alpha plus hydrated beta", snapshot.Projects)
+	}
+	for _, project := range snapshot.Projects {
+		if project.ProjectID == "beta" && (len(project.Tasks) != 1 || project.Tasks[0].Title != "Outside scope") {
+			t.Fatalf("hydrated beta = %+v", project)
+		}
+	}
+}
+
+func TestSnapshotForScopedViewWithTasksAllowsQueryWithoutFTSExpression(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err = store.ReplaceProject(ctx, ProjectInput{ProjectID: "p", Name: "P", Path: "/p", Tasks: []domain.Task{{ID: "active", Title: "Active", Status: domain.StatusInProgress, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}}}); err != nil {
+		t.Fatal(err)
+	}
+	view := domain.OrchestrationBoardView()
+	snapshot, err := store.SnapshotForScopedViewWithTasks(ctx, `""`, &view, protocol.GlobalViewScope{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 {
+		t.Fatalf("snapshot = %+v, want active view candidate", snapshot)
+	}
+}
+
 func TestOlderCheckpointCannotOverwriteNewerProjectionAcrossStores(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "user.db")
 	first, err := Open(path)

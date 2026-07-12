@@ -68,6 +68,24 @@ func TestProjectGlobalViewPreservesCollidingScopedIssueIDs(t *testing.T) {
 	}
 }
 
+func TestProjectGlobalViewLeavesHydratedOutOfViewTaskOutOfOrdering(t *testing.T) {
+	now := time.Now().UTC()
+	projects := []protocol.GlobalProjectSnapshot{{ProjectID: "p", Tasks: []domain.Task{
+		{ID: "excluded-live", Title: "Hydrated title", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeBug, CreatedAt: now, UpdatedAt: now},
+		{ID: "active", Title: "Visible", Status: domain.StatusInProgress, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now},
+	}}}
+	projection, err := projectGlobalView(domain.OrchestrationBoardView(), projects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Items) != 1 || projection.Items[0].Identity.IssueID != "active" {
+		t.Fatalf("configured view ordering included hydrated fallback: %+v", projection.Items)
+	}
+	if len(projection.KnownTaskIDs) != 2 {
+		t.Fatalf("known task IDs = %+v, want both durable tasks", projection.KnownTaskIDs)
+	}
+}
+
 func TestFilterGlobalProjectsUsesCanonicalScopedIdentity(t *testing.T) {
 	projects := []protocol.GlobalProjectSnapshot{{ProjectID: "alpha"}, {ProjectID: "beta"}}
 	selected := filterGlobalProjects(projects, protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeSelectedProjects, ProjectIDs: []naming.ProjectID{"beta"}})
@@ -77,5 +95,14 @@ func TestFilterGlobalProjectsUsesCanonicalScopedIdentity(t *testing.T) {
 	current := filterGlobalProjects(projects, protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeCurrentProject, CurrentProjectID: "alpha"})
 	if len(current) != 1 || current[0].ProjectID != "alpha" {
 		t.Fatalf("current projects = %+v", current)
+	}
+}
+
+func TestConfiguredScopeExcludesMetadataOnlyHydrationFromProjection(t *testing.T) {
+	projects := []protocol.GlobalProjectSnapshot{{ProjectID: "alpha"}, {ProjectID: "beta"}}
+	scope := protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeSelectedProjects, ProjectIDs: []naming.ProjectID{"alpha"}}
+	projected := filterGlobalProjects(projects, scope)
+	if len(projected) != 1 || projected[0].ProjectID != "alpha" {
+		t.Fatalf("projection projects = %+v, want alpha only", projected)
 	}
 }

@@ -73,6 +73,93 @@ func TestTypedColumnBoardKeepsSelectedGroupVisibleOnNarrowViewport(t *testing.T)
 	}
 }
 
+func TestTypedColumnBoardScrollsSelectedCardIntoView(t *testing.T) {
+	view := domain.DefaultBoardView()
+	entries := make([]InventoryEntry, 8)
+	for i := range entries {
+		id := string(rune('a' + i))
+		entries[i] = InventoryEntry{
+			IssueID: id, TaskTitle: "Card " + id, HasTmuxSession: true,
+			ViewGroupID: domain.BoardColumnOpen, ViewGroupTitle: "Open",
+		}
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{View: view, Entries: entries}})
+	model.loading, model.width, model.height, model.cursor = false, 72, 14, len(entries)-1
+	model.snapshot = Snapshot{View: view, Entries: entries}
+
+	rendered := ansi.Strip(model.View())
+	if !strings.Contains(rendered, "Card h") {
+		t.Fatalf("selected card was not scrolled into view:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "more ^") {
+		t.Fatalf("scrolled column missing overflow indicator:\n%s", rendered)
+	}
+}
+
+func TestTypedColumnBoardPageNavigationKeepsSelectionVisible(t *testing.T) {
+	view := domain.DefaultBoardView()
+	entries := make([]InventoryEntry, 10)
+	for i := range entries {
+		id := string(rune('a' + i))
+		entries[i] = InventoryEntry{
+			IssueID: id, TaskTitle: "Card " + id, HasTmuxSession: true,
+			ViewGroupID: domain.BoardColumnOpen, ViewGroupTitle: "Open",
+		}
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{View: view, Entries: entries}})
+	model.loading, model.width, model.height = false, 72, 14
+	model.snapshot = Snapshot{View: view, Entries: entries}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	model = updated.(Model)
+	if model.cursor <= 0 {
+		t.Fatalf("PageDown cursor = %d, want movement", model.cursor)
+	}
+	selected, ok := model.selectedEntry()
+	if !ok || !strings.Contains(ansi.Strip(model.View()), selected.TaskTitle) {
+		t.Fatalf("paged selection is not visible: cursor=%d selected=%#v\n%s", model.cursor, selected, ansi.Strip(model.View()))
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	model = updated.(Model)
+	if model.cursor != 0 {
+		t.Fatalf("PageUp cursor = %d, want 0", model.cursor)
+	}
+}
+
+func TestTypedColumnBoardMouseWheelScrollsSelection(t *testing.T) {
+	view := domain.DefaultBoardView()
+	entries := make([]InventoryEntry, 8)
+	for i := range entries {
+		id := string(rune('a' + i))
+		entries[i] = InventoryEntry{
+			IssueID: id, TaskTitle: "Card " + id, HasTmuxSession: true,
+			ViewGroupID: domain.BoardColumnOpen, ViewGroupTitle: "Open",
+		}
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{View: view, Entries: entries}})
+	model.loading, model.width, model.height = false, 72, 14
+	model.snapshot = Snapshot{View: view, Entries: entries}
+
+	for range len(entries) - 1 {
+		updated, _ := model.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress})
+		model = updated.(Model)
+	}
+	if model.cursor != len(entries)-1 || !strings.Contains(ansi.Strip(model.View()), "Card h") {
+		t.Fatalf("mouse wheel did not scroll selected card into view: cursor=%d\n%s", model.cursor, ansi.Strip(model.View()))
+	}
+}
+
+func TestTypedViewStatusExplainsSelectorConfiguration(t *testing.T) {
+	view := domain.DefaultBoardView()
+	status := formatSnapshotStatus(Snapshot{View: view}, 3)
+	for _, want := range []string{"view default", "az view select --project global --consumer tmux_selector VIEW"} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("status %q missing %q", status, want)
+		}
+	}
+}
+
 func TestTypedColumnBoardHorizontalMovementClampsAcrossUnevenColumns(t *testing.T) {
 	view := domain.DefaultBoardView()
 	entries := []InventoryEntry{
