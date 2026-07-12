@@ -3921,6 +3921,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0038_learning_consolidation",
 		"0039_contextual_learning_activation",
 		"0040_typed_learning_observations",
+		"0042_learning_consolidation_scan_cursor",
 	}, got)
 }
 

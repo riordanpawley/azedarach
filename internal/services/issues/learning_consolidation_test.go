@@ -145,6 +145,54 @@ func TestLearningConsolidationCandidateRetrievalIsBounded(t *testing.T) {
 	assert.Contains(t, details, "VIRTUAL TABLE INDEX")
 }
 
+func TestLearningConsolidationCursorEventuallyCoversBeyondFirstWindow(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	lateIDs := map[int]string{}
+	for i := 0; i < 140; i++ {
+		summary := fmt.Sprintf("Independent portfolio guidance %03d token%03d", i, i)
+		private := false
+		if i >= 136 {
+			summary = "Never automatically promote learning guidance after review"
+		}
+		if i == 137 {
+			summary = "Never automatically promote learning guidance after review"
+			private = true
+		}
+		row, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: summary, Evidence: "cursor", EvidencePrivate: private})
+		require.NoError(t, err)
+		if i >= 136 {
+			lateIDs[i] = row.LocalID
+		}
+		if i == 136 {
+			_, err = client.UpdateLearningStatus(ctx, row.LocalID, LearningStatusRejected, "ineligible")
+			require.NoError(t, err)
+		}
+	}
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	for i, localID := range lateIDs {
+		_, err = db.ExecContext(ctx, `UPDATE agent_learnings SET local_id=? WHERE local_id=?`, fmt.Sprintf("zz-late-%d", i), localID)
+		require.NoError(t, err)
+	}
+	var suggestions []LearningSuggestion
+	for attempt := 0; attempt < 3 && len(suggestions) == 0; attempt++ {
+		var err error
+		suggestions, err = client.SuggestLearningConsolidations(ctx, "proj")
+		require.NoError(t, err)
+	}
+	require.Len(t, suggestions, 1)
+	assert.Equal(t, LearningSuggestionDuplicate, suggestions[0].Kind)
+
+	var cursor string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT cursor_local_id FROM agent_learning_consolidation_scan_state WHERE project_id=?`, "proj").Scan(&cursor))
+	assert.NotEmpty(t, cursor)
+	for _, suggestion := range suggestions {
+		assert.NotContains(t, []string{suggestion.LeftLearningID, suggestion.RightLearningID}, "zz-late-137")
+		assert.NotContains(t, []string{suggestion.LeftLearningID, suggestion.RightLearningID}, "zz-late-136")
+	}
+}
+
 func TestLearningConsolidationAuditFailureRollsBack(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

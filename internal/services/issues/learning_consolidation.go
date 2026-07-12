@@ -68,8 +68,13 @@ func (c *Client) suggestLearningConsolidationsOnce(ctx context.Context, projectI
 	const seedLimit = 128
 	now := time.Now().UTC()
 	eligibleSQL, eligibleArgs := learningConsolidationEligibleSQL("l", now)
-	query := `SELECT l.id,l.local_id,l.summary FROM agent_learnings l WHERE l.project_id=? AND ` + eligibleSQL + ` ORDER BY l.local_id LIMIT ?`
-	args := append([]any{projectID}, eligibleArgs...)
+	var cursor string
+	err = db.QueryRowContext(ctx, `SELECT cursor_local_id FROM agent_learning_consolidation_scan_state WHERE project_id=?`, projectID).Scan(&cursor)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, c.wrapError("suggest-learning-consolidations", projectID, err)
+	}
+	query := `SELECT l.id,l.local_id,l.summary FROM agent_learnings l WHERE l.project_id=? AND l.local_id>? AND ` + eligibleSQL + ` ORDER BY l.local_id LIMIT ?`
+	args := append([]any{projectID, cursor}, eligibleArgs...)
 	args = append(args, seedLimit)
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -91,9 +96,25 @@ func (c *Client) suggestLearningConsolidationsOnce(ctx context.Context, projectI
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
-	byRowID := make(map[int64]candidate, len(candidates))
-	for _, v := range candidates {
-		byRowID[v.rowID] = v
+	// A cursor past the current eligible tail wraps deterministically.
+	if len(candidates) == 0 && cursor != "" {
+		args = append([]any{projectID, ""}, eligibleArgs...)
+		args = append(args, seedLimit)
+		rows, err = db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, c.wrapError("suggest-learning-consolidations", projectID, err)
+		}
+		for rows.Next() {
+			var v candidate
+			if err := rows.Scan(&v.rowID, &v.id, &v.summary); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			candidates = append(candidates, v)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
 	}
 	type proposed struct {
 		left, right candidate
@@ -110,19 +131,20 @@ func (c *Client) suggestLearningConsolidationsOnce(ctx context.Context, projectI
 		for i, term := range terms {
 			quoted[i] = `"` + strings.ReplaceAll(term, `"`, `""`) + `"`
 		}
-		matchRows, queryErr := db.QueryContext(ctx, `SELECT rowid FROM agent_learning_search_fts WHERE agent_learning_search_fts MATCH ? AND rowid != ? ORDER BY rank,rowid LIMIT ?`, strings.Join(quoted, " OR "), seed.rowID, matchesPerSeed)
+		matchEligible, matchEligibleArgs := learningConsolidationEligibleSQL("l", now)
+		matchQuery := `SELECT agent_learning_search_fts.rowid,l.local_id,l.summary FROM agent_learning_search_fts JOIN agent_learnings l ON l.id=agent_learning_search_fts.rowid WHERE agent_learning_search_fts MATCH ? AND agent_learning_search_fts.rowid!=? AND l.project_id=? AND ` + matchEligible + ` ORDER BY rank,agent_learning_search_fts.rowid LIMIT ?`
+		matchArgs := []any{strings.Join(quoted, " AND "), seed.rowID, projectID}
+		matchArgs = append(matchArgs, matchEligibleArgs...)
+		matchArgs = append(matchArgs, matchesPerSeed)
+		matchRows, queryErr := db.QueryContext(ctx, matchQuery, matchArgs...)
 		if queryErr != nil {
 			return nil, c.wrapError("suggest-learning-consolidations", seed.id, queryErr)
 		}
 		for matchRows.Next() {
-			var otherID int64
-			if err := matchRows.Scan(&otherID); err != nil {
+			var other candidate
+			if err := matchRows.Scan(&other.rowID, &other.id, &other.summary); err != nil {
 				matchRows.Close()
 				return nil, err
-			}
-			other, ok := byRowID[otherID]
-			if !ok {
-				continue
 			}
 			left, right := seed, other
 			if left.id > right.id {
@@ -179,6 +201,11 @@ func (c *Client) suggestLearningConsolidationsOnce(ctx context.Context, projectI
 			if _, err := tx.ExecContext(ctx, `INSERT INTO agent_learning_consolidation_audit(suggestion_id,action,detail_json,created_at) VALUES(?,?,?,?)`, id, "suggested", string(detail), formatTimestamp(now)); err != nil {
 				return nil, err
 			}
+		}
+	}
+	if len(candidates) > 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_learning_consolidation_scan_state(project_id,cursor_local_id,updated_at) VALUES(?,?,?) ON CONFLICT(project_id) DO UPDATE SET cursor_local_id=excluded.cursor_local_id,updated_at=excluded.updated_at`, projectID, candidates[len(candidates)-1].id, formatTimestamp(now)); err != nil {
+			return nil, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
