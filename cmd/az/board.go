@@ -62,9 +62,9 @@ func printBoardViewUsage() {
 	fmt.Println("Usage:")
 	fmt.Println("  az view list [--project <project-id>] [--json]")
 	fmt.Println("  az view get [--project <project-id>] [--json] <view-id>")
-	fmt.Println("  az view select [--project <project-id>] [--json] <view-id>")
-	fmt.Println("  az view create [--project <project-id>] --file <path|-> [--select] [--json]")
-	fmt.Println("  az view update [--project <project-id>] --file <path|-> [--select] [--json]")
+	fmt.Println("  az view select [--project <project-id>] [--consumer <name>] [--json] <view-id>")
+	fmt.Println("  az view create [--project <project-id>] --file <path|-> [--scope <kind>] [--scope-projects <ids>] [--select] [--json]")
+	fmt.Println("  az view update [--project <project-id>] --file <path|-> [--scope <kind>] [--scope-projects <ids>] [--select] [--json]")
 	fmt.Println("  az view delete [--project <project-id>] --confirm [--json] <view-id>")
 	fmt.Println("  az view explain [--project <project-id>] [--view <view-id>] [--json] <issue-id>")
 	fmt.Println()
@@ -79,11 +79,11 @@ func printBoardViewCommandUsage(command string) bool {
 	case "get":
 		fmt.Println("Usage: az view get [--project <project-id>] [--json] <view-id>")
 	case "select":
-		fmt.Println("Usage: az view select [--project <project-id>] [--json] <view-id>")
+		fmt.Println("Usage: az view select [--project <project-id>] [--consumer <name>] [--json] <view-id>")
 	case "create":
-		fmt.Println("Usage: az view create [--project <project-id>] --file <path|-> [--select] [--json]")
+		fmt.Println("Usage: az view create [--project <project-id>] --file <path|-> [--scope <kind>] [--scope-projects <ids>] [--select] [--json]")
 	case "update":
-		fmt.Println("Usage: az view update [--project <project-id>] --file <path|-> [--select] [--json]")
+		fmt.Println("Usage: az view update [--project <project-id>] --file <path|-> [--scope <kind>] [--scope-projects <ids>] [--select] [--json]")
 	case "delete":
 		fmt.Println("Usage: az view delete [--project <project-id>] --confirm [--json] <view-id>")
 	case "explain":

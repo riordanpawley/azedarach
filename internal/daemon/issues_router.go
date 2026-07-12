@@ -118,6 +118,7 @@ func (d *Daemon) resolveRepoDirForProjectExactLocked(projectID string) (string, 
 			continue
 		}
 		candidates := []string{
+			protocol.NormalizeProjectID(project.ID),
 			protocol.NormalizeProjectID(project.Name),
 			protocol.NormalizeProjectID(filepath.Base(repoDir)),
 		}

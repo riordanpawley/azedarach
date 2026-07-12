@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
@@ -776,6 +777,50 @@ func TestTaskIDsByProjectDirUsesWorktreeWhenProjectPrefixesCollide(t *testing.T)
 	}
 	if ids := got[cleanProjectDirKey(alpineDir)]; !slices.Equal(ids, []string{"alpine"}) {
 		t.Fatalf("alpine task ids = %v, want [alpine]", ids)
+	}
+}
+
+func TestApplyGlobalViewOrderingFiltersOnlyTrackedExcludedSessions(t *testing.T) {
+	snapshot := Snapshot{Entries: []InventoryEntry{
+		{ProjectID: "alpha", IssueID: "one", SessionID: "alpha-one"},
+		{ProjectID: "alpha", IssueID: "two", SessionID: "alpha-two"},
+		{ProjectID: "beta", IssueID: "one", SessionID: "beta-one"},
+		{ProjectID: "", IssueID: "external", SessionID: "external"},
+	}}
+	projection := protocol.GlobalViewProjection{
+		KnownTaskIDs: []protocol.ScopedIssueID{
+			{ProjectID: "alpha", IssueID: "one"}, {ProjectID: "alpha", IssueID: "two"}, {ProjectID: "beta", IssueID: "one"},
+		},
+		Items: []protocol.GlobalViewProjectedItem{
+			{Identity: protocol.ScopedIssueID{ProjectID: "beta", IssueID: "one"}},
+			{Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "one"}},
+		},
+	}
+	applyGlobalViewOrdering(&snapshot, projection)
+	got := make([]string, 0, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		got = append(got, entry.SessionID)
+	}
+	if !slices.Equal(got, []string{"beta-one", "alpha-one", "external"}) {
+		t.Fatalf("ordered sessions = %v", got)
+	}
+}
+
+func TestProjectionEnrichmentDoesNotGuessDuplicateBareIssueID(t *testing.T) {
+	source := &fakeProjectSnapshotSource{snapshots: []ProjectInventorySnapshot{
+		{ProjectID: "alpha", ProjectPath: "/projects/alpha", Tasks: []domain.Task{{ID: "ddm", Title: "Alpha"}}},
+		{ProjectID: "beta", ProjectPath: "/projects/beta", Tasks: []domain.Task{{ID: "ddm", Title: "Beta"}}},
+	}}
+	loader := &GlobalInventoryLoader{source: source}
+	projections, _, _ := loader.loadProjectionsForEntries(context.Background(), nil, nil)
+	if projection, ok := projections["ddm"]; ok {
+		t.Fatalf("duplicate bare issue ID was attributed to project %q", projection.projectID)
+	}
+	if _, ok := projections[naming.CanonicalSessionID("alpha", "ddm")]; !ok {
+		t.Fatal("missing alpha scoped session projection")
+	}
+	if _, ok := projections[naming.CanonicalSessionID("beta", "ddm")]; !ok {
+		t.Fatal("missing beta scoped session projection")
 	}
 }
 

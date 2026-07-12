@@ -31,6 +31,30 @@ func TestParseBoardViewArgs(t *testing.T) {
 	}
 }
 
+func TestParseGlobalViewScope(t *testing.T) {
+	selected, err := parseGlobalViewScope("selected_projects", "alpha,beta")
+	if err != nil {
+		t.Fatalf("selected scope: %v", err)
+	}
+	if selected.Kind != protocol.GlobalViewScopeSelectedProjects || len(selected.ProjectIDs) != 2 {
+		t.Fatalf("selected scope = %+v", selected)
+	}
+	current, err := parseGlobalViewScope("current_project", "alpha")
+	if err != nil || current.CurrentProjectID != "alpha" {
+		t.Fatalf("current scope = %+v, err=%v", current, err)
+	}
+	if _, err := parseGlobalViewScope("selected_projects", ""); err == nil {
+		t.Fatal("empty selected scope accepted")
+	}
+}
+
+func TestFormatGlobalViewScope(t *testing.T) {
+	got := formatGlobalViewScope(protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeSelectedProjects, ProjectIDs: []naming.ProjectID{"alpha", "beta"}})
+	if got != "selected_projects (alpha,beta)" {
+		t.Fatalf("scope = %q", got)
+	}
+}
+
 func TestBoardViewCommandUsesTypedDaemonClient(t *testing.T) {
 	updatedAt := time.Date(2026, time.July, 9, 12, 0, 0, 0, time.UTC)
 	transport := &fakeDaemonTransport{

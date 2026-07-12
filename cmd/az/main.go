@@ -70,6 +70,10 @@ func main() {
 		runTUI(cfg)
 		return
 	}
+	if len(args) == 1 && args[0] == "global" {
+		runTUIWithOptions(cfg, app.WithGlobalBoardOnLoad())
+		return
+	}
 
 	shutdownObservability := configureProcessObservability("az", cfg)
 	defer shutdownObservability()

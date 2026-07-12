@@ -6887,6 +6887,56 @@ func TestIssueListCommand_ContentQueryDelegatesToTaskList(t *testing.T) {
 	}
 }
 
+func TestIssueSearchGlobalUsesScopedProjectionConsumer(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandGlobalSnapshot {
+				t.Fatalf("command = %q, want global.snapshot", req.Command)
+			}
+			var request protocol.GlobalSnapshotRequestBody
+			if err := json.Unmarshal(req.Body, &request); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			if request.Consumer != protocol.GlobalViewConsumerSearch || request.Query != "runtime cache" {
+				t.Fatalf("request = %+v", request)
+			}
+			body, err := json.Marshal(protocol.GlobalSnapshotResponseBody{
+				SchemaVersion: protocol.GlobalProjectionSchemaVersion,
+				Projection: protocol.GlobalViewProjection{Items: []protocol.GlobalViewProjectedItem{{
+					Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "ddm"},
+					Task:     domain.Task{ID: "ddm", Title: "Runtime cache", Status: domain.StatusOpen},
+				}}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return responseWithBody(req, body), nil
+		}}),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueListCommand(deps, IssueListOptions{Project: "global", Query: "runtime cache"})
+	})
+	if !strings.Contains(output, "alpha:ddm") || !strings.Contains(output, "Runtime cache") {
+		t.Fatalf("global search output = %q", output)
+	}
+}
+
+func TestIssueSearchGlobalRejectsUnsupportedDependencyAndArchiveFlags(t *testing.T) {
+	deps := &Dependencies{DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		t.Fatalf("unexpected daemon command %s", req.Command)
+		return protocol.ResponseEnvelope{}, nil
+	}})}
+	if err := IssueListCommand(deps, IssueListOptions{Project: "global", Deps: true}); err == nil || !strings.Contains(err.Error(), "--deps") {
+		t.Fatalf("deps error = %v", err)
+	}
+	if err := IssueListCommand(deps, IssueListOptions{Project: "global", Archived: "include"}); err == nil || !strings.Contains(err.Error(), "--archived exclude") {
+		t.Fatalf("archive error = %v", err)
+	}
+}
+
 func TestIssueListCommand_DateRangeFilters(t *testing.T) {
 	base := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
 	tasks := []domain.Task{

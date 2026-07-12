@@ -21,12 +21,56 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
+
+func TestRuntimeReconcileRefreshesCrossProjectProjectionAfterSourceChanges(t *testing.T) {
+	home := t.TempDir()
+	root := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const projectID = "runtime-refresh-project"
+	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{Projects: []appconfig.Project{{ID: projectID, Name: "Runtime refresh", Path: root}}}); err != nil {
+		t.Fatal(err)
+	}
+	issueClient := issues.NewClientAtPath(filepath.Join(root, ".azedarach", "azedarach.db"), slog.Default())
+	issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "Created before reconcile", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg:                   Config{RepoDir: root, Logger: slog.Default()},
+		userStore:             store,
+		issueClientsByProject: map[string]*issues.Client{projectID: issueClient},
+	}
+
+	result, err := newRuntimeReconcileService(d).Reconcile(context.Background(), projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CrossProjectProjection == nil || result.CrossProjectProjection.Freshness != protocol.GlobalProjectionFreshnessFresh {
+		t.Fatalf("cross-project projection health = %+v", result.CrossProjectProjection)
+	}
+	snapshot, err := store.Snapshot(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].ID.String() != issueID {
+		t.Fatalf("post-reconcile projection = %+v", snapshot.Projects)
+	}
+}
 
 type runtimeReconcileRecorder struct {
 	mu            sync.Mutex

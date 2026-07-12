@@ -3917,6 +3917,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0034_orchestrator_lifecycle_clock",
 		"0035_interaction_requests",
 		"0036_advisor_sessions",
+		"0037_projection_source_revision",
 	}, got)
 }
 

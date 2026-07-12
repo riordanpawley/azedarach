@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -22,6 +23,26 @@ type unsuccessfulMergeRuntimeGitService struct{ runtimeGitService }
 
 func (unsuccessfulMergeRuntimeGitService) Merge(context.Context, string, string, string) (*git.MergeResult, error) {
 	return &git.MergeResult{Success: false, Message: "hook rejected merge"}, nil
+}
+
+func TestGlobalProjectionRebuildOperationRoutingAndRunner(t *testing.T) {
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), globalProjectionRebuild: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, OK: true, Body: json.RawMessage(`{"schema_version":2}`)}, nil
+	}})
+	defer runtime.Close()
+	request, err := runtime.buildSubmitRequest(protocol.CommandGlobalProjectionRebuild, "project-a", nil, operationSubmitOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := request.ResourceKeys, []string{"user-projection:rebuild"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("resource keys=%v want %v", got, want)
+	}
+	if request.RecentDedupeWindow != 0 {
+		t.Fatalf("dedupe window=%s want immediate retry", request.RecentDedupeWindow)
+	}
+	if _, err = runtime.directRunnerForKind(protocol.CommandGlobalProjectionRebuild); err != nil {
+		t.Fatal(err)
+	}
 }
 
 type runtimeWorktreeService struct{}

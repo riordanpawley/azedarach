@@ -632,7 +632,7 @@ func ApplyBoardViewSortRulesInPlace(rules []BoardViewSortRule, tasks []Task) []T
 	}
 	sort.SliceStable(tasks, func(i, j int) bool {
 		for _, rule := range rules {
-			comparison := compareBoardViewTasks(rule.Key, tasks[i], tasks[j])
+			comparison := CompareBoardViewTasks(rule.Key, tasks[i], tasks[j])
 			if comparison == 0 {
 				continue
 			}
@@ -646,7 +646,10 @@ func ApplyBoardViewSortRulesInPlace(rules []BoardViewSortRule, tasks []Task) []T
 	return tasks
 }
 
-func compareBoardViewTasks(key BoardViewSortKey, left, right Task) int {
+// CompareBoardViewTasks compares two tasks using a validated view sort key.
+// Cross-project evaluators use this to preserve the same domain ordering while
+// retaining project-scoped identities outside Task.
+func CompareBoardViewTasks(key BoardViewSortKey, left, right Task) int {
 	compareInt := func(a, b int) int {
 		if a < b {
 			return -1
@@ -954,7 +957,7 @@ func (p BoardColumnPredicate) MatchTask(task Task) (bool, string) {
 		}
 		return false, fmt.Sprintf("display_phase=%s not in %s", phase, joinStringers(p.DisplayPhases))
 	case BoardPredicateReviewReady:
-		if taskReviewReady(task) {
+		if TaskReviewReady(task) {
 			return true, "review_ready=true"
 		}
 		return false, "review_ready=false"
@@ -986,7 +989,7 @@ func (p BoardColumnPredicate) MatchTask(task Task) (bool, string) {
 	}
 }
 
-func taskReviewReady(task Task) bool {
+func TaskReviewReady(task Task) bool {
 	state, err := task.IssueState()
 	if err != nil {
 		return false

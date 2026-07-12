@@ -202,23 +202,28 @@ type notificationHistoryEntry struct {
 // Model is the main application state
 type Model struct {
 	// Core data
-	tasks                []domain.Task
-	boardView            domain.BoardView
-	boardColumns         []domain.BoardViewColumnSnapshot
-	boardOrdered         []domain.Task
-	boardProjection      domain.BoardViewProjection
-	sessions             map[string]*domain.Session
-	suppressedTasks      map[string]struct{}
-	pendingStatuses      map[string]pendingTaskStatus
-	pendingDetails       map[string]pendingTaskDetails
-	operationTaskID      map[string]string
-	pendingOpsByTask     map[string]pendingOperationProgress
-	pendingFailures      map[string]taskMutationFailure
-	pendingCleanupOps    map[string]pendingWorktreeCleanupConfirmation
-	pendingCleanup       *pendingWorktreeCleanupConfirmation
-	pendingBulkCleanup   *pendingBulkCleanupConfirmation
-	pendingClose         *pendingCloseCleanupConfirmation
-	pendingReviewCascade *pendingReviewCascadeConfirmation
+	tasks                   []domain.Task
+	boardView               domain.BoardView
+	boardColumns            []domain.BoardViewColumnSnapshot
+	boardOrdered            []domain.Task
+	boardProjection         domain.BoardViewProjection
+	globalBoard             bool
+	globalTaskScopes        map[string]protocol.ScopedIssueID
+	globalTaskProjects      map[string]config.Project
+	projectSwitchFromGlobal bool
+	globalLoadSeq           uint64
+	sessions                map[string]*domain.Session
+	suppressedTasks         map[string]struct{}
+	pendingStatuses         map[string]pendingTaskStatus
+	pendingDetails          map[string]pendingTaskDetails
+	operationTaskID         map[string]string
+	pendingOpsByTask        map[string]pendingOperationProgress
+	pendingFailures         map[string]taskMutationFailure
+	pendingCleanupOps       map[string]pendingWorktreeCleanupConfirmation
+	pendingCleanup          *pendingWorktreeCleanupConfirmation
+	pendingBulkCleanup      *pendingBulkCleanupConfirmation
+	pendingClose            *pendingCloseCleanupConfirmation
+	pendingReviewCascade    *pendingReviewCascadeConfirmation
 
 	// Navigation (using NavigationService)
 	nav *navigation.Service
@@ -345,6 +350,13 @@ func WithSessionSelectorOnLoad() Option {
 	}
 }
 
+// WithGlobalBoardOnLoad starts the TUI in the user-level cross-project view.
+// Actions leave the global projection and hydrate the selected authoritative
+// project before any mutation is offered.
+func WithGlobalBoardOnLoad() Option {
+	return func(m *Model) { m.globalBoard, m.globalLoadSeq = true, 1 }
+}
+
 // New creates a new application model with the given config
 func New(cfg *config.Config) Model {
 	return NewWithOptions(cfg)
@@ -397,6 +409,8 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 		runtimeSignalsByTask:        make(map[string]board.RuntimeSignals),
 		runtimeSignalWorktreeByTask: make(map[string]string),
 		runtimeSignalBranchByTask:   make(map[string]string),
+		globalTaskScopes:            make(map[string]protocol.ScopedIssueID),
+		globalTaskProjects:          make(map[string]config.Project),
 		toasts:                      []Toast{},
 		activeToastHistoryIDs:       []string{},
 		notificationHistory:         []notificationHistoryEntry{},
@@ -648,6 +662,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		if m.editor.GetMode() != ModeAction {
 			m.boardRefreshing = true
+			if m.globalBoard {
+				m.globalLoadSeq++
+				return m, m.loadGlobalBoardCmd(m.globalLoadSeq)
+			}
 			return m, tea.Batch(m.scheduleIssuesRefreshAfterRuntimeReconcileCmd(), m.gitSyncService.FetchAndCheck())
 		}
 	}
@@ -709,6 +727,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // handleNormalMode processes keyboard input in normal mode
 func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
+	if m.globalBoard {
+		switch msg.String() {
+		case overlay.EventLogHotkey, overlay.OperationQueueHotkey, "O", "X":
+			m.addToast(Toast{Level: ToastInfo, Message: "Open an issue's project before using project operations", Expires: time.Now().Add(4 * time.Second)})
+			return m, nil
+		}
+	}
 	switch msg.String() {
 	case overlay.EventLogHotkey:
 		return m, tea.Batch(
@@ -738,6 +763,15 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.applyBoardNavigationAction(action, columns) {
 		return m, nil
+	}
+	if m.globalBoard {
+		switch action {
+		case keybinds.ActionQuit, keybinds.ActionEnterGoto, keybinds.ActionEnterSearch,
+			keybinds.ActionOpenFilter, keybinds.ActionOpenSort, keybinds.ActionOpenHelp:
+			// These actions are projection-local and cannot mutate a project.
+		default:
+			return m.leaveGlobalBoardForCurrentTask()
+		}
 	}
 
 	switch action {
@@ -871,6 +905,14 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	action, ok := keybinds.LookupAction(types.ModeGoto, msg.String())
 	if !ok {
+		return m, nil
+	}
+	if m.globalBoard && action == keybinds.ActionGotoSpec {
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: "Open an issue's project before viewing its spec",
+			Expires: time.Now().Add(4 * time.Second),
+		})
 		return m, nil
 	}
 

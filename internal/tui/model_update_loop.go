@@ -22,9 +22,13 @@ import (
 )
 
 func (m Model) Init() tea.Cmd {
+	attach := m.attachDaemonCmd()
+	if m.globalBoard {
+		attach = m.loadGlobalBoardCmd(m.globalLoadSeq)
+	}
 	return tea.Batch(
 		m.spinner.Tick,
-		m.attachDaemonCmd(),
+		attach,
 		m.attachLogStreamCmd(),
 		m.gitSyncService.FetchAndCheck(),
 	)
@@ -415,6 +419,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case globalBoardLoadedMsg:
+		if !m.globalBoard || msg.seq < m.globalLoadSeq {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.loading = false
+			m.boardRefreshing = false
+			m.addToast(Toast{Level: ToastError, Message: fmt.Sprintf("Global board load failed: %v", msg.err), Expires: time.Now().Add(6 * time.Second)})
+			return m, nil
+		}
+		m.applyGlobalBoardSnapshot(msg.snapshot)
+		m.loading = false
+		m.boardRefreshing = false
+		m.reconcileCursorAfterIssuesRefresh()
+		if !m.hasRefreshLoop {
+			m.hasRefreshLoop = true
+			return m, tickEvery(5 * time.Second)
+		}
+		return m, nil
+
 	case logStreamAttachedMsg:
 		if msg.err != nil {
 			if m.logger != nil {
@@ -544,6 +568,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Expire old toasts and refresh issues
 		m.expireToasts()
 		m.boardRefreshing = true
+		if m.globalBoard {
+			m.globalLoadSeq++
+			return m, tea.Batch(m.loadGlobalBoardCmd(m.globalLoadSeq), tickEvery(5*time.Second))
+		}
 		return m, tea.Batch(
 			m.scheduleIssuesRefreshCmd(),
 			m.gitSyncService.FetchAndCheck(),
@@ -1230,6 +1258,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.err != nil {
+			if m.projectSwitchFromGlobal {
+				m.globalBoard = true
+				m.projectSwitchFromGlobal = false
+				m.pendingUIOpenTaskID = ""
+			}
 			m.loading = false
 			m.boardRefreshing = false
 			m.projectSwitchInFlight = false
@@ -1249,6 +1282,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.rebindProjectContext(msg.project, msg.projectConfig)
 		m.clearDrillDown()
+		if m.projectSwitchFromGlobal {
+			// Synthetic scoped IDs are projection-only. Remove them before the
+			// authoritative project reducer runs.
+			m.tasks = nil
+			m.boardOrdered = nil
+			m.boardColumns = nil
+			m.boardProjection = domain.BoardViewProjection{}
+			m.globalTaskScopes = nil
+			m.globalTaskProjects = nil
+			m.projectSwitchFromGlobal = false
+		}
 
 		// Reuse the normal loaded-state reducer path.
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)

@@ -122,6 +122,7 @@ type BoardViewGetRequestBody struct {
 type BoardViewSaveRequestBody struct {
 	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
 	View      domain.BoardView `json:"view" msgpack:"view"`
+	Scope     GlobalViewScope  `json:"scope,omitempty" msgpack:"scope,omitempty"`
 }
 
 type BoardViewDeleteRequestBody struct {
@@ -130,19 +131,24 @@ type BoardViewDeleteRequestBody struct {
 }
 
 type BoardViewSelectRequestBody struct {
-	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
-	ViewID    string           `json:"view_id" msgpack:"view_id"`
+	ProjectID naming.ProjectID   `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	ViewID    string             `json:"view_id" msgpack:"view_id"`
+	Consumer  GlobalViewConsumer `json:"consumer,omitempty" msgpack:"consumer,omitempty"`
 }
 
 type BoardViewListResponseBody struct {
-	ProjectID      naming.ProjectID         `json:"project_id" msgpack:"project_id"`
-	SelectedViewID string                   `json:"selected_view_id,omitempty" msgpack:"selected_view_id,omitempty"`
-	Views          []domain.BoardViewRecord `json:"views" msgpack:"views"`
+	ProjectID      naming.ProjectID              `json:"project_id" msgpack:"project_id"`
+	SelectedViewID string                        `json:"selected_view_id,omitempty" msgpack:"selected_view_id,omitempty"`
+	Views          []domain.BoardViewRecord      `json:"views" msgpack:"views"`
+	GlobalViews    []GlobalViewRecord            `json:"global_views,omitempty" msgpack:"global_views,omitempty"`
+	Selections     map[GlobalViewConsumer]string `json:"selections,omitempty" msgpack:"selections,omitempty"`
 }
 
 type BoardViewResponseBody struct {
-	ProjectID naming.ProjectID       `json:"project_id" msgpack:"project_id"`
-	View      domain.BoardViewRecord `json:"view" msgpack:"view"`
+	ProjectID  naming.ProjectID              `json:"project_id" msgpack:"project_id"`
+	View       domain.BoardViewRecord        `json:"view" msgpack:"view"`
+	GlobalView *GlobalViewRecord             `json:"global_view,omitempty" msgpack:"global_view,omitempty"`
+	Selections map[GlobalViewConsumer]string `json:"selections,omitempty" msgpack:"selections,omitempty"`
 }
 
 type BoardViewSelectResponseBody struct {

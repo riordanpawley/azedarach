@@ -33,36 +33,40 @@ const (
 )
 
 type operationRuntimeConfig struct {
-	repoDir                string
-	logger                 *slog.Logger
-	hub                    *publish.Hub
-	nextRevision           func(string) uint64
-	sessionStart           func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	sessionStop            func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	sessionResolveConflict func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	taskBulkCleanup        func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	recoverInterrupted     func(context.Context, daemonops.Record) (interruptedOperationRecovery, bool)
-	gitHandler             *daemonhandlers.GitHandler
-	worktreeHandler        *daemonhandlers.WorktreeHandler
-	noticeService          *daemonnotices.Service
+	repoDir                 string
+	logger                  *slog.Logger
+	hub                     *publish.Hub
+	nextRevision            func(string) uint64
+	sessionStart            func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	sessionStop             func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	sessionResolveConflict  func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	taskBulkCleanup         func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	globalProjectionRebuild func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	onMutationSuccess       func(string)
+	recoverInterrupted      func(context.Context, daemonops.Record) (interruptedOperationRecovery, bool)
+	gitHandler              *daemonhandlers.GitHandler
+	worktreeHandler         *daemonhandlers.WorktreeHandler
+	noticeService           *daemonnotices.Service
 }
 
 type operationRuntime struct {
-	logger                 *slog.Logger
-	hub                    *publish.Hub
-	nextRevision           func(string) uint64
-	store                  *opstore.SQLiteStore
-	manager                *opmanager.Manager
-	sessionStart           func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	sessionStop            func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	sessionResolveConflict func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	taskBulkCleanup        func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	gitHandler             *daemonhandlers.GitHandler
-	worktreeHandler        *daemonhandlers.WorktreeHandler
-	pollInterval           time.Duration
-	repoDir                string
-	repoNameProject        string
-	canonicalProject       string
+	logger                  *slog.Logger
+	hub                     *publish.Hub
+	nextRevision            func(string) uint64
+	store                   *opstore.SQLiteStore
+	manager                 *opmanager.Manager
+	sessionStart            func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	sessionStop             func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	sessionResolveConflict  func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	taskBulkCleanup         func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	globalProjectionRebuild func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	onMutationSuccess       func(string)
+	gitHandler              *daemonhandlers.GitHandler
+	worktreeHandler         *daemonhandlers.WorktreeHandler
+	pollInterval            time.Duration
+	repoDir                 string
+	repoNameProject         string
+	canonicalProject        string
 }
 
 type operationCommandExecutor struct {
@@ -147,20 +151,23 @@ func newOperationRuntime(cfg operationRuntimeConfig) *operationRuntime {
 	reconcileInterruptedOperations(context.Background(), adapter, logger, cfg.recoverInterrupted)
 	manager := opmanager.New(adapter, opmanager.Config{Logger: logger})
 	return &operationRuntime{
-		logger:                 logger,
-		hub:                    cfg.hub,
-		nextRevision:           cfg.nextRevision,
-		store:                  store,
-		manager:                manager,
-		sessionStart:           cfg.sessionStart,
-		sessionStop:            cfg.sessionStop,
-		sessionResolveConflict: cfg.sessionResolveConflict,
-		gitHandler:             cfg.gitHandler,
-		worktreeHandler:        cfg.worktreeHandler,
-		pollInterval:           defaultOperationPollDelay,
-		repoDir:                repoDir,
-		repoNameProject:        repoNameProjectID,
-		canonicalProject:       canonicalProjectID,
+		logger:                  logger,
+		hub:                     cfg.hub,
+		nextRevision:            cfg.nextRevision,
+		store:                   store,
+		manager:                 manager,
+		sessionStart:            cfg.sessionStart,
+		sessionStop:             cfg.sessionStop,
+		sessionResolveConflict:  cfg.sessionResolveConflict,
+		taskBulkCleanup:         cfg.taskBulkCleanup,
+		globalProjectionRebuild: cfg.globalProjectionRebuild,
+		onMutationSuccess:       cfg.onMutationSuccess,
+		gitHandler:              cfg.gitHandler,
+		worktreeHandler:         cfg.worktreeHandler,
+		pollInterval:            defaultOperationPollDelay,
+		repoDir:                 repoDir,
+		repoNameProject:         repoNameProjectID,
+		canonicalProject:        canonicalProjectID,
 	}
 }
 
@@ -467,6 +474,9 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 			runSpanErr = errors.New("operation failed")
 			return nil, runSpanErr
 		}
+		if r.onMutationSuccess != nil && commandMutatesProjectProjection(body.Kind) {
+			r.onMutationSuccess(projectID)
+		}
 		return append([]byte(nil), resp.Body...), nil
 	})
 	if submitErr != nil {
@@ -684,6 +694,9 @@ func (r *operationRuntime) buildSubmitRequest(kind, projectID string, payload []
 		// retried immediately so per-item failures can make progress.
 		recentDedupeWindow = 0
 	}
+	if kind == protocol.CommandGlobalProjectionRebuild {
+		recentDedupeWindow = 0
+	}
 	return daemonops.SubmitRequest{
 		ProjectID:          projectID,
 		IssueID:            issueID,
@@ -859,6 +872,8 @@ func (r *operationRuntime) deriveOperationRouting(kind, projectID string, payloa
 		digest := sha256.Sum256(payload)
 		dedupeKey = fmt.Sprintf("%s:%x", kind, digest)
 		return "", resourceKeys, dedupeKey, nil
+	case protocol.CommandGlobalProjectionRebuild:
+		return "", []string{"user-projection:rebuild"}, kind, nil
 	default:
 		return "", nil, "", fmt.Errorf("unsupported operation kind: %s", kind)
 	}
@@ -958,6 +973,11 @@ func (r *operationRuntime) directRunnerForKind(kind string) (operationDirectRunn
 			return nil, errors.New("task.bulk_cleanup handler unavailable")
 		}
 		return r.taskBulkCleanup, nil
+	case protocol.CommandGlobalProjectionRebuild:
+		if r.globalProjectionRebuild == nil {
+			return nil, errors.New("global projection rebuild handler unavailable")
+		}
+		return r.globalProjectionRebuild, nil
 	default:
 		return nil, fmt.Errorf("unsupported operation kind: %s", kind)
 	}

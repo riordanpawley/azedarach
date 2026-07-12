@@ -22,6 +22,7 @@ import (
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
@@ -97,6 +98,14 @@ type Daemon struct {
 	apply  *daemonhandlers.ApplyHandler
 
 	issues                             *issues.Client
+	userStore                          *userstore.Store
+	userStoreRefreshMu                 sync.Mutex
+	userStoreRefreshPending            map[string]bool
+	userStoreRefreshDirty              map[string]bool
+	userStoreRefreshWG                 sync.WaitGroup
+	userStoreRefreshStopping           bool
+	userStoreRefreshCtx                context.Context
+	userStoreRefreshCancel             context.CancelFunc
 	issueClientsMu                     sync.Mutex
 	issueClientsByProject              map[string]*issues.Client
 	issueClientsByRoot                 map[string]*issues.Client
@@ -326,7 +335,16 @@ func New(cfg Config) *Daemon {
 		issueAutoArchiveLastRun:            map[string]time.Time{},
 		taskGraphReadinessLoads:            map[string]*taskGraphReadinessLoad{},
 		revision:                           map[string]uint64{},
+		userStoreRefreshPending:            map[string]bool{},
+		userStoreRefreshDirty:              map[string]bool{},
 		shutdownReqCh:                      make(chan struct{}),
+	}
+	if !cfg.ScopedRuntime && strings.TrimSpace(os.Getenv("AZEDARACH_DISABLE_USER_DB")) != "1" {
+		if store, err := userstore.Open(userstore.DefaultPath()); err != nil {
+			cfg.Logger.Warn("initialize user cross-project projection", "error", err)
+		} else {
+			d.userStore = store
+		}
 	}
 	canonicalProjectID := protocol.DefaultProjectID
 	if hashProjectID, err := appconfig.ProjectIDForRoot(strings.TrimSpace(cfg.RepoDir)); err == nil {
@@ -388,16 +406,18 @@ func New(cfg Config) *Daemon {
 		Logger:       cfg.Logger,
 	})
 	runtime := newOperationRuntime(operationRuntimeConfig{
-		repoDir:                cfg.RepoDir,
-		logger:                 cfg.Logger,
-		hub:                    d.hub,
-		nextRevision:           d.nextRevision,
-		sessionStart:           d.handleSessionStartDirect,
-		sessionStop:            d.handleSessionStopDirect,
-		sessionResolveConflict: d.handleSessionResolveConflictDirect,
-		taskBulkCleanup:        d.handleTaskBulkCleanup,
-		recoverInterrupted:     d.recoverInterruptedOperation,
-		noticeService:          noticeService,
+		repoDir:                 cfg.RepoDir,
+		logger:                  cfg.Logger,
+		hub:                     d.hub,
+		nextRevision:            d.nextRevision,
+		sessionStart:            d.handleSessionStartDirect,
+		sessionStop:             d.handleSessionStopDirect,
+		sessionResolveConflict:  d.handleSessionResolveConflictDirect,
+		taskBulkCleanup:         d.handleTaskBulkCleanup,
+		globalProjectionRebuild: d.handleGlobalProjectionRebuild,
+		onMutationSuccess:       d.enqueueUserProjectionRefresh,
+		recoverInterrupted:      d.recoverInterruptedOperation,
+		noticeService:           noticeService,
 	})
 	commandExecutor := operationCommandExecutor{runtime: runtime}
 	sessionExecutor := sessionOperationExecutor{runtime: runtime}
@@ -537,7 +557,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if d.issueAutoArchive != nil {
 			d.issueAutoArchive.Close()
 		}
-		d.closeIssueClients()
 		if d.runtimeReconcileQueue != nil {
 			if closeErr := d.runtimeReconcileQueue.Close(); closeErr != nil && d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("failed to close runtime reconcile queue", "error", closeErr)
@@ -546,6 +565,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if d.gitStatusRefreshQueue != nil {
 			if closeErr := d.gitStatusRefreshQueue.Close(); closeErr != nil && d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("failed to close git status refresh queue", "error", closeErr)
+			}
+		}
+		d.stopUserProjectionWorkers()
+		d.closeIssueClients()
+		if d.userStore != nil {
+			if closeErr := d.userStore.Close(); closeErr != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("failed to close user database", "error", closeErr)
 			}
 		}
 		d.closeRuntimeStateStores()
@@ -615,6 +641,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.startLinearSyncWorker(serveCtx)
 	d.startScheduledScriptWorker(serveCtx)
 	d.startIssueAutoArchiveWorker(serveCtx)
+	d.startGlobalProjectionRepairWorker(serveCtx)
 	d.cfg.Logger.Info("daemon startup phase", "phase", "startup_ready", "duration_ms", time.Since(startedAt).Milliseconds())
 	err = <-serveErrCh
 	if ctx.Err() != nil {
@@ -719,6 +746,13 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	}
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "command.begin", beginStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	defer d.endCommand()
+	if commandMutatesProjectProjection(req.Command) {
+		defer func() {
+			if err == nil && resp.OK {
+				d.enqueueUserProjectionRefresh(projectID)
+			}
+		}()
+	}
 
 	if daemonhandlers.DaemonRoutesThroughDispatcher(req.Command) {
 		if d.router == nil {
@@ -781,6 +815,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleBoardFetch(ctx, req)
 	case protocol.CommandScheduledScriptsStatus:
 		return d.handleScheduledScriptsStatus(ctx, req)
+	case protocol.CommandGlobalSnapshot:
+		return d.handleGlobalSnapshot(ctx, req)
+	case protocol.CommandGlobalProjectionRebuild:
+		return d.handleGlobalProjectionRebuild(ctx, req)
 	case "task.list":
 		return d.handleTaskList(ctx, req)
 	case "task.get":
