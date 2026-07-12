@@ -1420,7 +1420,7 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		updatedAny, _ := m.Update(loaded)
 		updated := updatedAny.(Model)
 		rendered := updated.buildColumns()
-		if got, want := rendered[0].Title, "Waiting AI"; got != want {
+		if got, want := rendered[0].Title, "AI Review"; got != want {
 			t.Fatalf("rendered first column title=%q want=%q", got, want)
 		}
 		if got, want := rendered[0].Tasks[0].ID.String(), "az-1"; got != want {

@@ -300,13 +300,13 @@ func TestBoardViewportSupportsOrchestrationViewColumns(t *testing.T) {
 	if got, want := len(columns), len(view.Columns); got != want {
 		t.Fatalf("columns=%d want=%d", got, want)
 	}
-	if got, want := columns[0].Title, "Waiting Human"; got != want {
+	if got, want := columns[0].Title, "Human Review"; got != want {
 		t.Fatalf("activity column 0 title=%q want=%q", got, want)
 	}
-	if got, want := columns[1].Title, "Waiting AI"; got != want {
+	if got, want := columns[1].Title, "AI Review"; got != want {
 		t.Fatalf("activity column 1 title=%q want=%q", got, want)
 	}
-	if got, want := columns[2].Title, "Working"; got != want {
+	if got, want := columns[2].Title, "In Progress"; got != want {
 		t.Fatalf("activity column 2 title=%q want=%q", got, want)
 	}
 
@@ -314,7 +314,8 @@ func TestBoardViewportSupportsOrchestrationViewColumns(t *testing.T) {
 	m.nav.SelectTask(tasks[lastColumn].ID.String(), lastColumn)
 	m.ensureCursorVisible(columns)
 	start, end := m.boardColumnLayout(columns).Range()
-	if got, want := start, 2; got != want {
+	wantStart := len(columns) - board.VisibleColumnCount(len(columns), m.width)
+	if got, want := start, wantStart; got != want {
 		t.Fatalf("visible column start=%d want=%d", got, want)
 	}
 	if got, want := end, len(columns); got != want {

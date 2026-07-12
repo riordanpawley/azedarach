@@ -509,6 +509,10 @@ func (m Model) buildColumns() []board.Column {
 	if m.boardView.Normalized().Layout == domain.BoardViewLayoutHorizontalGrid {
 		return m.horizontalGridNavigationColumns(filteredTasks)
 	}
+	if m.boardView.Normalized().Layout == domain.BoardViewLayoutTreeList {
+		ordered, _ := m.configuredListTasks()
+		return []board.Column{{Title: m.boardView.Title, Tasks: ordered}}
+	}
 	if columns, ok := m.configuredBoardColumns(filteredTasks); ok {
 		return m.applyBoardColumnSort(columns)
 	}

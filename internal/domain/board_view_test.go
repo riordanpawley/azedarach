@@ -204,14 +204,14 @@ func TestProjectionExposesOrchestrationViewState(t *testing.T) {
 	}
 }
 
-func TestBuiltInBoardViewsUseFocusedFourColumnWorkflows(t *testing.T) {
+func TestBuiltInBoardViewsUseFocusedWorkflows(t *testing.T) {
 	tests := []struct {
 		view BoardView
 		want []BoardColumnID
 	}{
 		{DefaultBoardView(), []BoardColumnID{BoardColumnOpen, BoardColumnActive, BoardColumnReviewReady, BoardColumnDone}},
 		{PlanningBoardView(), []BoardColumnID{BoardColumnBacklog, BoardColumnOpen, BoardColumnActive, BoardColumnReviewReady}},
-		{OrchestrationBoardView(), []BoardColumnID{BoardColumnWaitingHuman, BoardColumnWaitingAI, BoardColumnActive, BoardColumnReviewReady}},
+		{OrchestrationBoardView(), []BoardColumnID{BoardColumnReviewReady, BoardColumnWaitingAI, BoardColumnActive}},
 		{CloseoutBoardView(), []BoardColumnID{BoardColumnReviewReady, BoardColumnDone, BoardColumnCancelled}},
 	}
 	for _, tt := range tests {
@@ -228,14 +228,44 @@ func TestBuiltInBoardViewsUseFocusedFourColumnWorkflows(t *testing.T) {
 	}
 }
 
-func TestOrchestrationBoardViewPlacesWaitingBeforeWorking(t *testing.T) {
-	task := Task{ID: "az-waiting", Status: StatusInProgress, Session: &Session{Activity: "waiting-for-human"}, HasTmuxSession: true}
-	placement, err := OrchestrationBoardView().PlaceTask(task)
-	if err != nil {
-		t.Fatalf("PlaceTask error: %v", err)
+func TestOrchestrationBoardViewContainsOnlyFocusedActiveAttentionColumns(t *testing.T) {
+	view := OrchestrationBoardView()
+	tests := []struct {
+		name       string
+		task       Task
+		wantColumn BoardColumnID
+		wantMatch  bool
+	}{
+		{name: "human review", task: Task{ID: "human", Status: StatusInReview, Session: &Session{Activity: string(SessionIdle)}, HasTmuxSession: true}, wantColumn: BoardColumnReviewReady, wantMatch: true},
+		{name: "ai review", task: Task{ID: "ai", Status: StatusInProgress, Session: &Session{Activity: "waiting_tool"}, HasTmuxSession: true}, wantColumn: BoardColumnWaitingAI, wantMatch: true},
+		{name: "in progress", task: Task{ID: "active", Status: StatusInProgress, Session: &Session{Activity: string(SessionBusy)}, HasTmuxSession: true}, wantColumn: BoardColumnActive, wantMatch: true},
+		{name: "open omitted", task: Task{ID: "open", Status: StatusOpen}, wantMatch: false},
+		{name: "done omitted", task: Task{ID: "done", Status: StatusDone}, wantMatch: false},
 	}
-	if placement.ColumnID != BoardColumnWaitingHuman {
-		t.Fatalf("column = %q, want %q", placement.ColumnID, BoardColumnWaitingHuman)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			placement, err := view.PlaceTask(tt.task)
+			if err != nil {
+				t.Fatalf("PlaceTask error: %v", err)
+			}
+			if placement.Matched != tt.wantMatch || placement.ColumnID != tt.wantColumn {
+				t.Fatalf("placement = %+v, want matched=%t column=%q", placement, tt.wantMatch, tt.wantColumn)
+			}
+		})
+	}
+}
+
+func TestTreeBoardViewSortsHumanAttentionRootsFirst(t *testing.T) {
+	projection, err := ProjectTasksByBoardView(TreeBoardView(), []Task{
+		{ID: "ordinary", Status: StatusInProgress, Priority: P0, UpdatedAt: time.Now().UTC()},
+		{ID: "review", Status: StatusInReview, Priority: P4, Session: &Session{Activity: string(SessionIdle)}, HasTmuxSession: true},
+		{ID: "waiting", Status: StatusInProgress, Priority: P4, Session: &Session{Activity: "waiting-for-human"}, HasTmuxSession: true},
+	})
+	if err != nil {
+		t.Fatalf("ProjectTasksByBoardView: %v", err)
+	}
+	if got := taskIDs(projection.OrderedTasks()); !slices.Equal(got, []string{"waiting", "review", "ordinary"}) {
+		t.Fatalf("tree order = %v, want waiting-human then review then ordinary", got)
 	}
 }
 
