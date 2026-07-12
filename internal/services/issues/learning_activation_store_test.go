@@ -2,6 +2,7 @@ package issues
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -143,4 +144,28 @@ func TestLearningActivationProposalExpiresLostResponses(t *testing.T) {
 	var count int
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM learning_activation_proposals WHERE activation_id=? AND status='abandoned'`, p.ActivationID).Scan(&count))
 	require.Equal(t, 1, count, "expired proposals remain as auditable abandoned-delivery telemetry")
+}
+
+func TestLearningActivationKnownFailureAbandonsImmediately(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	learning, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "safe", Evidence: "safe"})
+	require.NoError(t, err)
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `UPDATE agent_learnings SET status='accepted',reviewed_at=? WHERE local_id=?`, formatTimestamp(time.Now().UTC()), learning.LocalID)
+	require.NoError(t, err)
+	proposal, err := client.ProposeLearningActivation(ctx, RecordLearningActivationParams{ProjectID: "proj", Surface: "prime", ContextFingerprint: "sha256:fail", Purpose: "session_start", SessionID: "s-1", LearningIDs: []string{learning.LocalID}})
+	require.NoError(t, err)
+	abandoned, err := client.AbandonLearningActivation(ctx, "proj", proposal.ActivationID, "write_failed")
+	require.NoError(t, err)
+	require.True(t, abandoned)
+	var status, reason string
+	var abandonedAt sql.NullString
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT status,abandonment_reason,abandoned_at FROM learning_activation_proposals WHERE activation_id=?`, proposal.ActivationID).Scan(&status, &reason, &abandonedAt))
+	require.Equal(t, "abandoned", status)
+	require.Equal(t, "write_failed", reason)
+	require.True(t, abandonedAt.Valid)
+	_, err = client.ConfirmLearningActivation(ctx, "proj", proposal.ActivationID, 1)
+	require.Error(t, err, "an abandoned proposal cannot later become delivery")
 }

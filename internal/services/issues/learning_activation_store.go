@@ -147,6 +147,23 @@ func (c *Client) RecordLearningActivationExclusion(ctx context.Context, projectI
 	return err
 }
 
+func (c *Client) AbandonLearningActivation(ctx context.Context, projectID, activationID, reason string) (bool, error) {
+	projectID, activationID, reason = strings.TrimSpace(projectID), strings.TrimSpace(activationID), strings.TrimSpace(reason)
+	if projectID == "" || activationID == "" || reason == "" {
+		return false, errors.New("project, activation id, and abandonment reason are required")
+	}
+	db, err := c.dbHandle()
+	if err != nil {
+		return false, err
+	}
+	result, err := db.ExecContext(ctx, `UPDATE learning_activation_proposals SET status='abandoned',abandoned_at=?,abandonment_reason=? WHERE project_id=? AND activation_id=? AND status='proposed'`, formatTimestamp(time.Now().UTC()), reason, projectID, activationID)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed > 0, err
+}
+
 func (c *Client) validateActiveLearningIDs(ctx context.Context, db *sql.DB, projectID string, input []string) ([]string, error) {
 	ids := make([]string, 0, len(input))
 	seen := map[string]struct{}{}

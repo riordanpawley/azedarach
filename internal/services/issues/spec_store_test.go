@@ -339,6 +339,11 @@ func TestClient_RequirementCRUDAndSelectorResolution(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, issueID, derefString(requirement.IssueID))
+	ownerLinks, err := client.ListSpecLinksByRequirementLocalID(ctx, requirement.LocalID)
+	require.NoError(t, err)
+	require.Len(t, ownerLinks, 1)
+	assert.Equal(t, issueID, ownerLinks[0].IssueID)
+	assert.Equal(t, LinkRoleRelates, ownerLinks[0].Role)
 
 	resolved, err := client.GetRequirement(ctx, "PAYLOAD-100")
 	require.NoError(t, err)

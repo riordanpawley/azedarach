@@ -8621,10 +8621,10 @@ func primeCommandTo(deps *Dependencies, stdout io.Writer, render primeRenderFunc
 	})
 	finishRender(err)
 	if err != nil {
-		return fmt.Errorf("render prime output: %w", err)
+		return errors.Join(fmt.Errorf("render prime output: %w", err), abandonPrimeLearningActivation(deps, learningConfirmation, "render_failed"))
 	}
 	if _, err := io.WriteString(stdout, output); err != nil {
-		return fmt.Errorf("write prime output: %w", err)
+		return errors.Join(fmt.Errorf("write prime output: %w", err), abandonPrimeLearningActivation(deps, learningConfirmation, "write_failed"))
 	}
 	if learningConfirmation != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -8635,6 +8635,16 @@ func primeCommandTo(deps *Dependencies, stdout io.Writer, render primeRenderFunc
 	}
 	latencytrace.LogPhaseContext(primeTraceContext(deps), primeLogger(deps), "cli", "prime.total", commandStartedAt, "issue_id", issueID)
 	return nil
+}
+
+func abandonPrimeLearningActivation(deps *Dependencies, confirmation *protocol.LearnActivationConfirmRequestBody, reason string) error {
+	if deps == nil || deps.DaemonClient == nil || confirmation == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := deps.DaemonClient.AbandonLearningActivation(ctx, protocol.LearnActivationAbandonRequestBody{ActivationID: confirmation.ActivationID, Reason: reason})
+	return err
 }
 
 func primePhase(deps *Dependencies, phase, message string) func(error) {

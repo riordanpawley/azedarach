@@ -12927,6 +12927,7 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 	var learnReq protocol.LearnContextualActivateRequestBody
 	var confirmReq protocol.LearnActivationConfirmRequestBody
 	var confirmCalls int
+	var abandonCalls int
 
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -12969,6 +12970,9 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 						t.Fatal(err)
 					}
 					return responseWithJSON(req, protocol.LearnActivationConfirmResponseBody{Activation: protocol.LearningActivation{ActivationID: "act-prime"}}), nil
+				case protocol.CommandLearnActivationAbandon:
+					abandonCalls++
+					return responseWithJSON(req, protocol.LearnActivationAbandonResponseBody{Abandoned: true}), nil
 				default:
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt}, nil
 				}
@@ -13014,6 +13018,9 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 	}
 	if confirmCalls != 1 {
 		t.Fatalf("render failure confirmed activation: calls=%d", confirmCalls)
+	}
+	if abandonCalls != 2 {
+		t.Fatalf("known prime delivery failures must abandon immediately: calls=%d", abandonCalls)
 	}
 }
 

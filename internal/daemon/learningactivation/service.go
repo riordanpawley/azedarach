@@ -96,6 +96,15 @@ func (s *Service) Propose(ctx context.Context, req Request) (Proposal, error) {
 func (s *Service) Confirm(ctx context.Context, projectID, activationID string, tokenCost int) (issues.LearningActivation, error) {
 	return s.store.ConfirmLearningActivation(ctx, projectID, activationID, tokenCost)
 }
+func (s *Service) Abandon(ctx context.Context, projectID, activationID, reason string) (bool, error) {
+	store, ok := s.store.(interface {
+		AbandonLearningActivation(context.Context, string, string, string) (bool, error)
+	})
+	if !ok {
+		return false, nil
+	}
+	return store.AbandonLearningActivation(ctx, projectID, activationID, reason)
+}
 func (s *Service) Feedback(ctx context.Context, in issues.LearningActivationOutcome) (issues.LearningActivationOutcome, bool, error) {
 	return s.store.RecordLearningActivationOutcome(ctx, in)
 }

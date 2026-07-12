@@ -193,6 +193,15 @@ func (s issueLearnService) ConfirmActivation(ctx context.Context, req protocol.L
 	return protocol.LearnActivationConfirmResponseBody{Activation: protocol.LearningActivation{ActivationID: a.ActivationID, Surface: a.Surface, ContextFingerprint: a.ContextFingerprint, LearningIDs: a.LearningIDs, TokenCost: a.TokenCost, Explanation: a.Explanation, DeliveredAt: formatProtocolTime(a.DeliveredAt)}}, nil
 }
 
+func (s issueLearnService) AbandonActivation(ctx context.Context, req protocol.LearnActivationAbandonRequestBody) (protocol.LearnActivationAbandonResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnActivationAbandonResponseBody{}, err
+	}
+	abandoned, err := activationmodule.New(client).Abandon(ctx, firstNonEmptyDaemon(daemonProjectIDFromContext(ctx), protocol.DefaultProjectID), req.ActivationID, req.Reason)
+	return protocol.LearnActivationAbandonResponseBody{Abandoned: abandoned}, err
+}
+
 func (s issueLearnService) Activate(ctx context.Context, req protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error) {
 	client, err := s.issueClient(ctx)
 	if err != nil {

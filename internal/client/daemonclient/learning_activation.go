@@ -46,6 +46,14 @@ func (c *Client) ConfirmLearningActivation(ctx context.Context, req protocol.Lea
 	return out, nil
 }
 
+func (c *Client) AbandonLearningActivation(ctx context.Context, req protocol.LearnActivationAbandonRequestBody) (protocol.LearnActivationAbandonResponseBody, error) {
+	var out protocol.LearnActivationAbandonResponseBody
+	if err := c.commandJSON(ctx, protocol.CommandLearnActivationAbandon, req, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
 func (c *Client) LearningHealth(ctx context.Context, req protocol.LearnHealthRequestBody) (protocol.LearnHealthResponseBody, error) {
 	var out protocol.LearnHealthResponseBody
 	if err := c.commandJSON(ctx, protocol.CommandLearnHealth, req, &out); err != nil {

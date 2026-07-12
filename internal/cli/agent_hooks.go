@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -371,35 +372,44 @@ func aiHookRunCommandTo(deps *Dependencies, opts AIHookRunOptions, stdout io.Wri
 }
 
 func emitAgentHookOutcome(deps *Dependencies, opts AIHookRunOptions, outcome AgentHookOutcome, stdout io.Writer) error {
+	fail := func(reason string, deliveryErr error) error {
+		if outcome.ActivationConfirmation == nil || deps == nil || deps.DaemonClient == nil {
+			return deliveryErr
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), hookBestEffortDaemonTimeout)
+		defer cancel()
+		_, abandonErr := deps.DaemonClient.AbandonLearningActivation(ctx, protocol.LearnActivationAbandonRequestBody{ActivationID: outcome.ActivationConfirmation.ActivationID, Reason: reason})
+		return errors.Join(deliveryErr, abandonErr)
+	}
 	switch opts.Agent {
 	case AgentCodex:
 		if opts.JSON {
 			encoded, err := json.Marshal(outcome.GuardResponse)
 			if err != nil {
-				return err
+				return fail("render_failed", err)
 			}
 			if _, err := fmt.Fprintln(stdout, string(encoded)); err != nil {
-				return err
+				return fail("write_failed", err)
 			}
 			break
 		}
 		notifyOutput, err := renderNotifyOutput(opts.Event, false, false, "")
 		if err != nil {
-			return err
+			return fail("render_failed", err)
 		}
 		if _, err := fmt.Fprintln(stdout, notifyOutput); err != nil {
-			return err
+			return fail("write_failed", err)
 		}
 		if err := writeCodexGuardResponse(stdout, outcome.GuardResponse); err != nil {
-			return err
+			return fail("write_failed", err)
 		}
 	default: // claude
 		notifyOutput, err := renderNotifyOutput(opts.Event, opts.JSON, false, "")
 		if err != nil {
-			return err
+			return fail("render_failed", err)
 		}
 		if _, err := fmt.Fprintln(stdout, notifyOutput); err != nil {
-			return err
+			return fail("write_failed", err)
 		}
 	}
 	if outcome.ActivationConfirmation != nil {

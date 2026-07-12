@@ -33,6 +33,7 @@ type LearnService interface {
 	Capture(context.Context, protocol.LearnCaptureRequestBody) (protocol.LearnCaptureResponseBody, error)
 	ContextualActivate(context.Context, protocol.LearnContextualActivateRequestBody) (protocol.LearnContextualActivateResponseBody, error)
 	ConfirmActivation(context.Context, protocol.LearnActivationConfirmRequestBody) (protocol.LearnActivationConfirmResponseBody, error)
+	AbandonActivation(context.Context, protocol.LearnActivationAbandonRequestBody) (protocol.LearnActivationAbandonResponseBody, error)
 	Health(context.Context, protocol.LearnHealthRequestBody) (protocol.LearnHealthResponseBody, error)
 }
 
@@ -61,6 +62,16 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 		return resp
 	}
 	switch req.Command {
+	case protocol.CommandLearnActivationAbandon:
+		var cmd protocol.LearnActivationAbandonRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.ActivationID, cmd.Reason = strings.TrimSpace(cmd.ActivationID), strings.TrimSpace(cmd.Reason)
+		if cmd.ActivationID == "" || cmd.Reason == "" {
+			return learnInvalidRequest(resp, "activation_id and reason are required")
+		}
+		return learnJSONResponse(ctx, resp, h.service.AbandonActivation, cmd)
 	case protocol.CommandLearnActivationConfirm:
 		var cmd protocol.LearnActivationConfirmRequestBody
 		if !decodeLearnRequest(req.Body, &cmd, &resp) {

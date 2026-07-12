@@ -951,17 +951,21 @@ func (failingHookWriter) Write([]byte) (int, error) { return 0, errors.New("writ
 
 func TestEmitAgentHookOutcomeDoesNotConfirmAfterWriteFailure(t *testing.T) {
 	var confirmCalls int
+	var abandonCalls int
 	transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 		if req.Command == protocol.CommandLearnActivationConfirm {
 			confirmCalls++
+		}
+		if req.Command == protocol.CommandLearnActivationAbandon {
+			abandonCalls++
 		}
 		return responseWithJSON(req, protocol.LearnActivationConfirmResponseBody{}), nil
 	}}
 	deps := &Dependencies{DaemonClient: daemonclient.New(transport).WithProjectID("proj"), ProjectID: "proj"}
 	out := AgentHookOutcome{GuardResponse: map[string]any{"systemMessage": "guidance"}, ActivationConfirmation: &protocol.LearnActivationConfirmRequestBody{ActivationID: "act-1", TokenCost: 3}}
 	err := emitAgentHookOutcome(deps, AIHookRunOptions{Agent: AgentCodex, Event: hookEventUserPromptSubmit, JSON: true}, out, failingHookWriter{})
-	if err == nil || confirmCalls != 0 {
-		t.Fatalf("write failure must prevent confirmation: err=%v calls=%d", err, confirmCalls)
+	if err == nil || confirmCalls != 0 || abandonCalls != 1 {
+		t.Fatalf("write failure must abandon without confirmation: err=%v confirm=%d abandon=%d", err, confirmCalls, abandonCalls)
 	}
 }
 

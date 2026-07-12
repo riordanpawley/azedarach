@@ -35,6 +35,9 @@ func (f *fakeLearnService) Health(ctx context.Context, req protocol.LearnHealthR
 	}
 	return protocol.LearnHealthResponseBody{}, nil
 }
+func (f *fakeLearnService) AbandonActivation(context.Context, protocol.LearnActivationAbandonRequestBody) (protocol.LearnActivationAbandonResponseBody, error) {
+	return protocol.LearnActivationAbandonResponseBody{Abandoned: true}, nil
+}
 
 func TestLearnHandlerHealthDispatch(t *testing.T) {
 	called := false

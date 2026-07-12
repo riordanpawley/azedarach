@@ -26,6 +26,7 @@ const (
 	CommandLearnCapture            = "learn.capture"
 	CommandLearnContextualActivate = "learn.contextual_activate"
 	CommandLearnActivationConfirm  = "learn.activation.confirm"
+	CommandLearnActivationAbandon  = "learn.activation.abandon"
 	CommandLearnHealth             = "learn.health"
 )
 
@@ -296,6 +297,13 @@ type LearnActivationConfirmRequestBody struct {
 }
 type LearnActivationConfirmResponseBody struct {
 	Activation LearningActivation `json:"activation" msgpack:"activation"`
+}
+type LearnActivationAbandonRequestBody struct {
+	ActivationID string `json:"activation_id" msgpack:"activation_id"`
+	Reason       string `json:"reason" msgpack:"reason"`
+}
+type LearnActivationAbandonResponseBody struct {
+	Abandoned bool `json:"abandoned" msgpack:"abandoned"`
 }
 
 type LearnFeedbackRequestBody struct {
