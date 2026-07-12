@@ -60,12 +60,13 @@ type SessionActivityEvidence struct {
 // PhysicalSessionObservation records tmux/hook facts independently from any
 // desired logical worker, advisor, or orchestrator intent.
 type PhysicalSessionObservation struct {
-	ProjectID      string
-	SessionID      string
-	ObservedState  SessionState
-	Activity       string
-	ActivitySource string
-	UpdatedAt      time.Time
+	ProjectID       string
+	SessionID       string
+	ObservedState   SessionState
+	Activity        string
+	ActivitySource  string
+	UpdatedAt       time.Time
+	ObservedVersion int64
 }
 
 // ApplyPhysicalSessionObservation atomically records a monotonic physical
@@ -103,7 +104,7 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 			WHERE excluded.observed_version > `+physicalSessionObservationTable+`.observed_version`,
 			observation.ProjectID, observation.SessionID, observation.ObservedState,
 			observation.Activity, observation.ActivitySource,
-			observation.UpdatedAt.Format(time.RFC3339Nano), observation.UpdatedAt.UnixNano())
+			observation.UpdatedAt.Format(time.RFC3339Nano), observation.ObservedVersion)
 		if err != nil {
 			return fmt.Errorf("persist physical session observation: %w", err)
 		}
@@ -169,6 +170,9 @@ func normalizePhysicalSessionObservation(observation PhysicalSessionObservation)
 	} else {
 		observation.UpdatedAt = observation.UpdatedAt.UTC()
 	}
+	if observation.ObservedVersion <= 0 {
+		observation.ObservedVersion = observation.UpdatedAt.UnixNano()
+	}
 	return observation, nil
 }
 
@@ -214,10 +218,10 @@ func (s *RuntimeStateStore) GetPhysicalSessionObservation(ctx context.Context, p
 	}
 	var out PhysicalSessionObservation
 	var state, updated string
-	err = db.QueryRowContext(ctx, `SELECT project_id,session_id,observed_state,activity,activity_source,updated_at
+	err = db.QueryRowContext(ctx, `SELECT project_id,session_id,observed_state,activity,activity_source,updated_at,observed_version
 		FROM `+physicalSessionObservationTable+` WHERE project_id=? AND session_id=?`,
 		normalizedProjectID(projectID), strings.TrimSpace(sessionID)).Scan(
-		&out.ProjectID, &out.SessionID, &state, &out.Activity, &out.ActivitySource, &updated)
+		&out.ProjectID, &out.SessionID, &state, &out.Activity, &out.ActivitySource, &updated, &out.ObservedVersion)
 	if err == sql.ErrNoRows {
 		return out, false, nil
 	}
@@ -227,6 +231,37 @@ func (s *RuntimeStateStore) GetPhysicalSessionObservation(ctx context.Context, p
 	out.ObservedState = NormalizeSessionState(SessionState(state))
 	out.UpdatedAt, err = parseRuntimeStateTime(updated)
 	return out, true, err
+}
+
+func (s *RuntimeStateStore) ListPhysicalSessionObservations(ctx context.Context, projectID string) ([]PhysicalSessionObservation, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT project_id,session_id,observed_state,activity,activity_source,updated_at,observed_version
+		FROM `+physicalSessionObservationTable+` WHERE project_id=? ORDER BY session_id`, normalizedProjectID(projectID))
+	if err != nil {
+		return nil, fmt.Errorf("list physical session observations: %w", err)
+	}
+	defer rows.Close()
+	var out []PhysicalSessionObservation
+	for rows.Next() {
+		var observation PhysicalSessionObservation
+		var state, updated string
+		if err := rows.Scan(&observation.ProjectID, &observation.SessionID, &state, &observation.Activity, &observation.ActivitySource, &updated, &observation.ObservedVersion); err != nil {
+			return nil, fmt.Errorf("scan physical session observation: %w", err)
+		}
+		observation.ObservedState = NormalizeSessionState(SessionState(state))
+		observation.UpdatedAt, err = parseRuntimeStateTime(updated)
+		if err != nil {
+			return nil, fmt.Errorf("parse physical session observation: %w", err)
+		}
+		out = append(out, observation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate physical session observations: %w", err)
+	}
+	return out, nil
 }
 
 // RuntimeStateStore persists daemon-owned session/worktree state in sqlite.
@@ -909,9 +944,6 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 		}
 		session.State = NormalizeSessionState(session.State)
 		session.ObservedState = NormalizeSessionState(session.ObservedState)
-		if session.State == SessionStateStopped {
-			session.ObservedState = SessionStateStopped
-		}
 		targetTable := sessionStorageTableForID(sessionID)
 		logicalID := logicalSessionIntentID(session)
 		if targetTable == sessionStateTable {
@@ -923,7 +955,28 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 		if updatedAt.IsZero() {
 			updatedAt = time.Now().UTC()
 		}
-		if strings.TrimSpace(string(session.ObservedState)) == "" {
+		if targetTable == sessionStateTable {
+			// Snapshot replacement carries desired logical intents. Hydrate runtime
+			// facts only from the independently versioned physical authority.
+			session.ObservedState, session.Activity, session.ActivitySource = "", "", ""
+			var observedState, activity, activitySource, observedAt string
+			err := tx.QueryRowContext(ctx, `SELECT observed_state,activity,activity_source,updated_at
+				FROM `+physicalSessionObservationTable+` WHERE project_id=? AND session_id=?`, projectID, sessionID).
+				Scan(&observedState, &activity, &activitySource, &observedAt)
+			if err == nil {
+				session.ObservedState = NormalizeSessionState(SessionState(observedState))
+				session.Activity, session.ActivitySource = activity, activitySource
+				physicalUpdatedAt, parseErr := parseRuntimeStateTime(observedAt)
+				if parseErr != nil {
+					return fmt.Errorf("parse physical observation before replace %s/%s: %w", projectID, sessionID, parseErr)
+				}
+				if physicalUpdatedAt.After(updatedAt) {
+					updatedAt = physicalUpdatedAt
+				}
+			} else if err != sql.ErrNoRows {
+				return fmt.Errorf("load physical observation before replace %s/%s: %w", projectID, sessionID, err)
+			}
+		} else if strings.TrimSpace(string(session.ObservedState)) == "" {
 			session.ObservedState = session.State
 		}
 		normalizeSessionProjectionActivity(&session)
@@ -1421,6 +1474,8 @@ func (s *RuntimeStateStore) ListProjectIDs(ctx context.Context) ([]string, error
 		SELECT project_id FROM `+sessionStateTable+`
 		UNION
 		SELECT project_id FROM `+sessionObservationTable+`
+		UNION
+		SELECT project_id FROM `+physicalSessionObservationTable+`
 		UNION
 		SELECT project_id FROM `+worktreeStateTable+`
 	`)

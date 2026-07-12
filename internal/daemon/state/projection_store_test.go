@@ -103,7 +103,7 @@ func TestRuntimeStateStoreClearsSessionActivityForStoppedRows(t *testing.T) {
 	}
 
 	if err := store.ReplaceSessionStates(ctx, "proj-a", []Session{
-		{ID: "sess-2", IssueID: "bjb", State: SessionStateStopped, Activity: "no-agent", ActivitySource: "session", UpdatedAt: now},
+		{ID: "sess-2", IssueID: "bjb", State: SessionStateStopped, ObservedState: SessionStateStopped, Activity: "no-agent", ActivitySource: "session", UpdatedAt: now},
 	}); err != nil {
 		t.Fatalf("ReplaceSessionStates stopped: %v", err)
 	}
@@ -117,8 +117,8 @@ func TestRuntimeStateStoreClearsSessionActivityForStoppedRows(t *testing.T) {
 	if session.Activity != "" || session.ActivitySource != "" {
 		t.Fatalf("replaced session activity = %s/%s, want empty activity for stopped row", session.Activity, session.ActivitySource)
 	}
-	if session.ObservedState != SessionStateStopped {
-		t.Fatalf("replaced session observed state = %s, want %s", session.ObservedState, SessionStateStopped)
+	if session.ObservedState != "" {
+		t.Fatalf("replaced session observed state = %s, desired snapshot must not fabricate runtime observation", session.ObservedState)
 	}
 }
 
@@ -1014,12 +1014,18 @@ func TestRuntimeStateStoreListProjectIDs(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertWorktreeState proj-a: %v", err)
 	}
+	if _, _, err := store.ApplyPhysicalSessionObservation(ctx, PhysicalSessionObservation{
+		ProjectID: "proj-c", SessionID: "orphan-runtime", ObservedState: SessionStateRunning,
+		UpdatedAt: time.Date(2026, time.April, 2, 8, 2, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("ApplyPhysicalSessionObservation proj-c: %v", err)
+	}
 
 	got, err := store.ListProjectIDs(ctx)
 	if err != nil {
 		t.Fatalf("ListProjectIDs: %v", err)
 	}
-	want := []string{"proj-a", "proj-b"}
+	want := []string{"proj-a", "proj-b", "proj-c"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ListProjectIDs() = %v, want %v", got, want)
 	}
