@@ -1130,14 +1130,16 @@ func TestClient_ListWithRuntimeReadsCanonicalHookActivityProjection(t *testing.T
 	})
 	started := startedAt
 	err = runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
-		ID:             "az-" + taskID,
-		IssueID:        taskID,
-		State:          daemonstate.SessionStateRunning,
-		ObservedState:  daemonstate.SessionStateRunning,
-		Activity:       "idle",
-		ActivitySource: "hooks",
-		StartedAt:      &started,
-		UpdatedAt:      hookUpdatedAt,
+		ID:        "az-" + taskID,
+		IssueID:   taskID,
+		State:     daemonstate.SessionStateRunning,
+		StartedAt: &started,
+		UpdatedAt: hookUpdatedAt,
+	})
+	require.NoError(t, err)
+	_, _, err = runtimeStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+		ProjectID: projectID, SessionID: "az-" + taskID, ObservedState: daemonstate.SessionStateRunning,
+		Activity: "idle", ActivitySource: "hooks", UpdatedAt: hookUpdatedAt,
 	})
 	require.NoError(t, err)
 	err = runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
