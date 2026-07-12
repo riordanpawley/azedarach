@@ -1077,6 +1077,13 @@ func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 	}
 	if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil && strings.TrimSpace(sessionID) != "" {
 		if observed, found, loadErr := runtimeStore.GetSessionState(ctx, projectID, sessionID); loadErr == nil && found {
+			// Durable projection identity is authoritative. The transient lifecycle
+			// store carries only physical session/issue strings and must not erase a
+			// typed advisor or orchestrator product during a state transition.
+			session.IssueID = observed.IssueID
+			session.Role = observed.Role
+			session.ScopeKind = observed.ScopeKind
+			session.ScopeID = observed.ScopeID
 			if strings.TrimSpace(string(observed.ObservedState)) != "" {
 				session.ObservedState = observed.ObservedState
 			}

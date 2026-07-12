@@ -189,7 +189,9 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 	session.ActivitySource = strings.ToLower(strings.TrimSpace(session.ActivitySource))
 	var existing Session
 	var found bool
-	if sessionStorageTableForID(session.ID) == sessionStateTable {
+	if !metadataProvided {
+		existing, found, err = s.GetSessionState(ctx, projectID, session.ID)
+	} else if sessionStorageTableForID(session.ID) == sessionStateTable {
 		rows, listErr := s.ListSessionIntentStates(ctx, projectID)
 		err = listErr
 		if err == nil {
@@ -671,7 +673,7 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 		metadataProvided := session.Role != "" || session.ScopeKind != "" || strings.TrimSpace(session.ScopeID) != ""
 		if !metadataProvided {
 			var roleRaw, scopeKindRaw, scopeID string
-			scanErr := tx.QueryRowContext(ctx, `SELECT COALESCE(role, 'worker'), COALESCE(scope_kind, 'issue'), COALESCE(scope_id, issue_id) FROM `+sessionStorageTableForID(session.ID)+` WHERE project_id = ? AND session_id = ?`, projectID, strings.TrimSpace(session.ID)).Scan(&roleRaw, &scopeKindRaw, &scopeID)
+			scanErr := tx.QueryRowContext(ctx, `SELECT COALESCE(role, 'worker'), COALESCE(scope_kind, 'issue'), COALESCE(scope_id, issue_id) FROM `+sessionStorageTableForID(session.ID)+` WHERE project_id = ? AND session_id = ? ORDER BY CASE WHEN role='worker' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1`, projectID, strings.TrimSpace(session.ID)).Scan(&roleRaw, &scopeKindRaw, &scopeID)
 			if scanErr == nil {
 				session.Role, session.ScopeKind, session.ScopeID = SessionRole(roleRaw), SessionScopeKind(scopeKindRaw), scopeID
 			} else if scanErr != sql.ErrNoRows {
@@ -689,10 +691,11 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 			session.ObservedState = SessionStateStopped
 		}
 		targetTable := sessionStorageTableForID(sessionID)
+		logicalID := logicalSessionIntentID(session)
 		if targetTable == sessionStateTable {
-			activeIntentSessions[sessionID] = struct{}{}
+			activeIntentSessions[logicalID] = struct{}{}
 		} else {
-			activeObservationSessions[sessionID] = struct{}{}
+			activeObservationSessions[logicalID] = struct{}{}
 		}
 		updatedAt := session.UpdatedAt
 		if updatedAt.IsZero() {
@@ -786,11 +789,11 @@ func deleteStaleSessionRows(ctx context.Context, tx *sql.Tx, tableName, projectI
 	args := make([]any, 0, len(activeSessions)+1)
 	args = append(args, projectID)
 	placeholders := make([]string, 0, len(activeSessions))
-	for sessionID := range activeSessions {
+	for logicalID := range activeSessions {
 		placeholders = append(placeholders, "?")
-		args = append(args, sessionID)
+		args = append(args, logicalID)
 	}
-	query := `DELETE FROM ` + tableName + ` WHERE project_id = ? AND session_id NOT IN (` + strings.Join(placeholders, ",") + `)`
+	query := `DELETE FROM ` + tableName + ` WHERE project_id = ? AND logical_id NOT IN (` + strings.Join(placeholders, ",") + `)`
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("delete stale session state rows %s: %w", projectID, err)
 	}

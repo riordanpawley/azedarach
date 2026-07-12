@@ -5740,6 +5740,46 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvent(t *testing.T) {
 	}
 }
 
+func TestApplySessionLifecycleTransitionPreservesTypedIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, sessionID, issueHint string
+		projection                 daemonstate.Session
+	}{
+		{name: "advisor", sessionID: "advisor-request-1", issueHint: "request-1", projection: daemonstate.Session{ID: "advisor-request-1", IssueID: "issue-1", Role: daemonstate.SessionRoleAdvisor, ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: "request-1", State: daemonstate.SessionStateStopped}},
+		{name: "rooted orchestrator", sessionID: "az-root", issueHint: "root", projection: daemonstate.Session{ID: "az-root", IssueID: "root", Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: "root", State: daemonstate.SessionStateStopped}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			transient := daemonstate.NewStore()
+			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+			t.Cleanup(func() { _ = runtimeStore.Close() })
+			tc.projection.UpdatedAt = time.Now().UTC()
+			if err := runtimeStore.UpsertSessionState(ctx, "p", tc.projection); err != nil {
+				t.Fatal(err)
+			}
+			d := &Daemon{cfg: Config{RepoDir: ".", Logger: slog.Default()}, sessionStore: transient, session: daemonhandlers.NewSessionHandler(transient), hub: publish.NewHub(8, 8, slog.Default()), runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": runtimeStore}}
+			ch, cancel := d.hub.Subscribe("p", 0)
+			defer cancel()
+			req := protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "typed", Kind: protocol.EnvelopeKindCommand, Meta: protocol.Metadata{ProjectID: "p"}}
+			if err := d.applySessionLifecycleTransition(ctx, req, "p", tc.sessionID, tc.issueHint, daemonhandlers.CommandSessionStart); err != nil {
+				t.Fatal(err)
+			}
+			rows, err := runtimeStore.ListSessionIntentStates(ctx, "p")
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("rows=%+v err=%v", rows, err)
+			}
+			got := rows[0]
+			if got.IssueID != tc.projection.IssueID || got.Role != tc.projection.Role || got.ScopeKind != tc.projection.ScopeKind || got.ScopeID != tc.projection.ScopeID {
+				t.Fatalf("typed identity lost: %+v want %+v", got, tc.projection)
+			}
+			events := collectSessionProjectionEvents(t, ch, 1)
+			if len(events) != 1 || events[0].Event != protocol.EventSessionUpdated {
+				t.Fatalf("publication lost: %+v", events)
+			}
+		})
+	}
+}
+
 func TestApplySessionLifecycleTransitionPreservesObservedRuntimeState(t *testing.T) {
 	const (
 		projectID = "proj-refresh-transition"

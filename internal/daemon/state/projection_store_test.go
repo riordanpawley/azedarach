@@ -165,6 +165,42 @@ func TestRuntimeStateStoreSessionReplaceAndList(t *testing.T) {
 	}
 }
 
+func TestReplaceSessionStatesPrunesSharedRuntimeByLogicalIntent(t *testing.T) {
+	ctx := context.Background()
+	sharedID, issueID := "az-root", "root"
+	worker := Session{ID: sharedID, IssueID: issueID, Role: SessionRoleWorker, ScopeKind: SessionScopeIssue, ScopeID: issueID, State: SessionStateRunning}
+	rooted := Session{ID: sharedID, IssueID: issueID, Role: SessionRoleOrchestrator, ScopeKind: SessionScopeOrchestration, ScopeID: issueID, State: SessionStateRunning}
+	for _, tc := range []struct {
+		name    string
+		keep    Session
+		removed SessionRole
+	}{
+		{name: "worker only", keep: worker, removed: SessionRoleOrchestrator},
+		{name: "rooted only", keep: rooted, removed: SessionRoleWorker},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+			t.Cleanup(func() { _ = store.Close() })
+			if err := store.ReplaceSessionStates(ctx, "p", []Session{worker, rooted}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.ReplaceSessionStates(ctx, "p", []Session{tc.keep}); err != nil {
+				t.Fatal(err)
+			}
+			rows, err := store.ListSessionIntentStates(ctx, "p")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 || rows[0].Role != tc.keep.Role || rows[0].ID != sharedID {
+				t.Fatalf("remaining intents=%+v", rows)
+			}
+			if rows[0].Role == tc.removed {
+				t.Fatalf("stale %s intent retained", tc.removed)
+			}
+		})
+	}
+}
+
 func TestRuntimeStateStoreSessionGetters(t *testing.T) {
 	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
 	t.Cleanup(func() {
