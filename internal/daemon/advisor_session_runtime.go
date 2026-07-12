@@ -61,7 +61,7 @@ func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID stri
 	if workdir == "" {
 		return advisorSessionRuntimeResult{}, fmt.Errorf("advisor project workdir unavailable for project %s", projectID)
 	}
-	priorProjection, projected, err := store.GetSessionState(ctx, projectID, sessionID)
+	priorProjection, projected, err := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleAdvisor, daemonstate.SessionScopeInteraction, request.ID)
 	if err != nil {
 		return advisorSessionRuntimeResult{}, err
 	}

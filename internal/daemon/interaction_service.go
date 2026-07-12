@@ -27,12 +27,19 @@ func (s issueInteractionService) AuthorizeInteractionCommand(ctx context.Context
 	if store == nil {
 		return nil
 	}
-	session, found, err := store.GetSessionState(ctx, projectID, sessionID)
+	sessions, err := store.ListSessionIntentStates(ctx, projectID)
 	if err != nil {
 		return fmt.Errorf("verify interaction caller session %s: %w", sessionID, err)
 	}
-	if found && session.Role == daemonstate.SessionRoleAdvisor {
-		return fmt.Errorf("advisor session %s is read-only and cannot run %s", sessionID, command)
+	found := false
+	for _, session := range sessions {
+		if strings.TrimSpace(session.ID) != sessionID {
+			continue
+		}
+		found = true
+		if session.Role == daemonstate.SessionRoleAdvisor {
+			return fmt.Errorf("advisor session %s is read-only and cannot run %s", sessionID, command)
+		}
 	}
 	if !found {
 		advisors, err := store.ListAdvisorSessions(ctx, projectID)

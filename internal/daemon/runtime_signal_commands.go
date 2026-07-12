@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -228,8 +229,13 @@ func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.Req
 		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: true, Message: "lifecycle neutral"})
 		return
 	}
+	selector, selectErr := d.runtimeSignalIntentSelector(ctx, projectID, sessionID, cmd.IssueID)
+	if selectErr != nil {
+		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: false, Message: selectErr.Error()})
+		return
+	}
 	before := d.currentRevision(projectID)
-	if err := d.applySessionLifecycleTransitionWithActivity(ctx, req, projectID, sessionID, cmd.IssueID, command, activity, "hooks"); err != nil {
+	if err := d.applyTypedSessionLifecycleTransition(ctx, req, projectID, sessionID, cmd.IssueID, command, activity, "hooks", selector); err != nil {
 		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: false, Message: err.Error()})
 		return
 	}
@@ -257,6 +263,31 @@ func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.Req
 			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "orchestrator_continuation", OK: true})
 		}
 	}
+}
+
+func (d *Daemon) runtimeSignalIntentSelector(ctx context.Context, projectID, sessionID, issueID string) (sessionIntentSelector, error) {
+	store := d.sessionRuntimeStateStore(projectID)
+	if store == nil {
+		return sessionIntentSelector{}, errors.New("session runtime store unavailable")
+	}
+	rows, err := store.ListSessionIntentStates(ctx, projectID)
+	if err != nil {
+		return sessionIntentSelector{}, err
+	}
+	var matches []daemonstate.Session
+	for _, row := range rows {
+		if strings.TrimSpace(row.ID) == strings.TrimSpace(sessionID) {
+			matches = append(matches, row)
+		}
+	}
+	if len(matches) == 0 {
+		return sessionIntentSelector{Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID}, nil
+	}
+	if len(matches) != 1 {
+		return sessionIntentSelector{}, fmt.Errorf("physical session %s maps to %d logical intents; typed runtime signal required", sessionID, len(matches))
+	}
+	row := matches[0]
+	return sessionIntentSelector{Role: row.Role, ScopeKind: row.ScopeKind, ScopeID: row.ScopeID}, nil
 }
 
 func (d *Daemon) recordAgentHookActivityEvidenceAndMaterialize(ctx context.Context, meta protocol.Metadata, projectID, sessionID, sourceSessionID, issueID, activity string, cmd protocol.RuntimeSignalIngestCommandBody) (uint64, error) {

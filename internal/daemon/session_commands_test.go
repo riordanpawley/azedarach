@@ -5761,7 +5761,8 @@ func TestApplySessionLifecycleTransitionPreservesTypedIdentity(t *testing.T) {
 			ch, cancel := d.hub.Subscribe("p", 0)
 			defer cancel()
 			req := protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "typed", Kind: protocol.EnvelopeKindCommand, Meta: protocol.Metadata{ProjectID: "p"}}
-			if err := d.applySessionLifecycleTransition(ctx, req, "p", tc.sessionID, tc.issueHint, daemonhandlers.CommandSessionStart); err != nil {
+			selector := sessionIntentSelector{Role: tc.projection.Role, ScopeKind: tc.projection.ScopeKind, ScopeID: tc.projection.ScopeID}
+			if err := d.applyTypedSessionLifecycleTransition(ctx, req, "p", tc.sessionID, tc.issueHint, daemonhandlers.CommandSessionStart, "", "", selector); err != nil {
 				t.Fatal(err)
 			}
 			rows, err := runtimeStore.ListSessionIntentStates(ctx, "p")
@@ -5775,6 +5776,44 @@ func TestApplySessionLifecycleTransitionPreservesTypedIdentity(t *testing.T) {
 			events := collectSessionProjectionEvents(t, ch, 1)
 			if len(events) != 1 || events[0].Event != protocol.EventSessionUpdated {
 				t.Fatalf("publication lost: %+v", events)
+			}
+		})
+	}
+}
+
+func TestTypedLifecycleTransitionTargetsSharedRuntimeIntent(t *testing.T) {
+	ctx := context.Background()
+	sharedID, issueID := "az-root", "root"
+	worker := daemonstate.Session{ID: sharedID, IssueID: issueID, Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID, State: daemonstate.SessionStateStopped}
+	rooted := daemonstate.Session{ID: sharedID, IssueID: issueID, Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: issueID, State: daemonstate.SessionStateStopped}
+	for _, target := range []daemonstate.Session{worker, rooted} {
+		t.Run(string(target.Role), func(t *testing.T) {
+			transient := daemonstate.NewStore()
+			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+			t.Cleanup(func() { _ = runtimeStore.Close() })
+			for _, seed := range []daemonstate.Session{worker, rooted} {
+				seed.UpdatedAt = time.Now().UTC()
+				if err := runtimeStore.UpsertSessionState(ctx, "p", seed); err != nil {
+					t.Fatal(err)
+				}
+			}
+			d := &Daemon{cfg: Config{RepoDir: ".", Logger: slog.Default()}, sessionStore: transient, session: daemonhandlers.NewSessionHandler(transient), runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": runtimeStore}}
+			sel := sessionIntentSelector{Role: target.Role, ScopeKind: target.ScopeKind, ScopeID: target.ScopeID}
+			if err := d.applyTypedSessionLifecycleTransition(ctx, protocol.RequestEnvelope{}, "p", sharedID, issueID, daemonhandlers.CommandSessionStart, "", "", sel); err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []daemonstate.Session{worker, rooted} {
+				got, found, err := runtimeStore.GetSessionIntent(ctx, "p", want.Role, want.ScopeKind, want.ScopeID)
+				if err != nil || !found {
+					t.Fatalf("load %s: %v", want.Role, err)
+				}
+				expected := daemonstate.SessionStateStopped
+				if want.Role == target.Role {
+					expected = daemonstate.SessionStateStarting
+				}
+				if got.State != expected {
+					t.Fatalf("%s state=%s want %s", want.Role, got.State, expected)
+				}
 			}
 		})
 	}

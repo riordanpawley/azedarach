@@ -70,6 +70,7 @@ type SessionStateReader interface {
 	ListSessionStates(context.Context, string) ([]Session, error)
 	ListSessionIntentStates(context.Context, string) ([]Session, error)
 	GetSessionState(context.Context, string, string) (Session, bool, error)
+	GetSessionIntent(context.Context, string, SessionRole, SessionScopeKind, string) (Session, bool, error)
 	GetSessionStateByIssueID(context.Context, string, string) (Session, bool, error)
 	GetWorkerSessionStateByIssueID(context.Context, string, string, string) (Session, bool, error)
 }
@@ -1044,6 +1045,30 @@ func (s *RuntimeStateStore) GetSessionState(ctx context.Context, projectID, sess
 		StartedAt:         parsedStartedAt,
 		UpdatedAt:         parsedUpdatedAt,
 	}, true, nil
+}
+
+func (s *RuntimeStateStore) GetSessionIntent(ctx context.Context, projectID string, role SessionRole, scopeKind SessionScopeKind, scopeID string) (Session, bool, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return Session{}, false, err
+	}
+	row := db.QueryRowContext(ctx, `SELECT session_id,issue_id,role,scope_kind,scope_id,state,COALESCE(observed_state,state),COALESCE(activity,''),COALESCE(activity_source,''),COALESCE(tmux_attached_count,0),COALESCE(started_at,''),updated_at FROM `+sessionStateTable+` WHERE project_id=? AND role=? AND scope_kind=? AND scope_id=? LIMIT 1`, normalizedProjectID(projectID), role, scopeKind, strings.TrimSpace(scopeID))
+	var out Session
+	var roleRaw, scopeRaw, stateRaw, observedRaw, startedRaw, updatedRaw string
+	if err := row.Scan(&out.ID, &out.IssueID, &roleRaw, &scopeRaw, &out.ScopeID, &stateRaw, &observedRaw, &out.Activity, &out.ActivitySource, &out.TmuxAttachedCount, &startedRaw, &updatedRaw); err != nil {
+		if err == sql.ErrNoRows {
+			return Session{}, false, nil
+		}
+		return Session{}, false, err
+	}
+	out.Role, out.ScopeKind, out.State, out.ObservedState = SessionRole(roleRaw), SessionScopeKind(scopeRaw), NormalizeSessionState(SessionState(stateRaw)), NormalizeSessionState(SessionState(observedRaw))
+	if out.StartedAt, err = parseOptionalRuntimeStateTime(startedRaw); err != nil {
+		return Session{}, false, err
+	}
+	if out.UpdatedAt, err = parseRuntimeStateTime(updatedRaw); err != nil {
+		return Session{}, false, err
+	}
+	return out, true, nil
 }
 
 func (s *RuntimeStateStore) GetSessionStateByIssueID(ctx context.Context, projectID, issueID string) (Session, bool, error) {

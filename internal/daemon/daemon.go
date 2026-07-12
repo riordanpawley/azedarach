@@ -1042,6 +1042,12 @@ func (d *Daemon) applySessionLifecycleTransition(
 	return d.applySessionLifecycleTransitionWithActivity(ctx, req, projectID, sessionID, issueID, command, "", "")
 }
 
+type sessionIntentSelector struct {
+	Role      daemonstate.SessionRole
+	ScopeKind daemonstate.SessionScopeKind
+	ScopeID   string
+}
+
 func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 	ctx context.Context,
 	req protocol.RequestEnvelope,
@@ -1052,6 +1058,10 @@ func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 	activity string,
 	activitySource string,
 ) error {
+	return d.applyTypedSessionLifecycleTransition(ctx, req, projectID, sessionID, issueID, command, activity, activitySource, sessionIntentSelector{Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID})
+}
+
+func (d *Daemon) applyTypedSessionLifecycleTransition(ctx context.Context, req protocol.RequestEnvelope, projectID, sessionID, issueID, command, activity, activitySource string, selector sessionIntentSelector) error {
 	if d.sessionStore == nil {
 		return errors.New("session store unavailable")
 	}
@@ -1076,7 +1086,7 @@ func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 		return err
 	}
 	if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil && strings.TrimSpace(sessionID) != "" {
-		if observed, found, loadErr := runtimeStore.GetSessionState(ctx, projectID, sessionID); loadErr == nil && found {
+		if observed, found, loadErr := runtimeStore.GetSessionIntent(ctx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID); loadErr == nil && found {
 			// Durable projection identity is authoritative. The transient lifecycle
 			// store carries only physical session/issue strings and must not erase a
 			// typed advisor or orchestrator product during a state transition.
