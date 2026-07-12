@@ -443,6 +443,8 @@ func TestRuntimeSignalIngestFansPhysicalObservationAcrossSharedLogicalIntents(t 
 			t.Fatalf("seed %s intent: %v", seed.Role, err)
 		}
 	}
+	projectionWriter := &recordingRuntimeProjectionWriter{}
+	d.runtimeProjectionWriter = projectionWriter
 
 	resp, err := d.command(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -487,6 +489,19 @@ func TestRuntimeSignalIngestFansPhysicalObservationAcrossSharedLogicalIntents(t 
 		}
 		if got.State != want.state || got.ObservedState != daemonstate.SessionStateRunning || got.Activity != "busy" || got.ActivitySource != "hooks" {
 			t.Fatalf("%s intent = %+v; desired state must remain %s", want.role, got, want.state)
+		}
+	}
+	published := projectionWriter.sessionSnapshot()
+	if len(published) != 2 {
+		t.Fatalf("published sessions = %+v, want both shared intents", published)
+	}
+	for _, eventSession := range published {
+		persisted, found, err := store.GetSessionIntent(ctx, projectID, eventSession.Role, eventSession.ScopeKind, eventSession.ScopeID)
+		if err != nil || !found {
+			t.Fatalf("load published %s intent found=%v err=%v", eventSession.Role, found, err)
+		}
+		if !eventSession.UpdatedAt.Equal(persisted.UpdatedAt) || !eventSession.UpdatedAt.After(now) {
+			t.Fatalf("published freshness=%v persisted=%v seed=%v", eventSession.UpdatedAt, persisted.UpdatedAt, now)
 		}
 	}
 }

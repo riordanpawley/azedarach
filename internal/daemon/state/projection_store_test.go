@@ -1033,7 +1033,7 @@ func TestRuntimeStateStorePhysicalObservationConstraints(t *testing.T) {
 		ProjectID: "p", SessionID: "az-root", ObservedState: SessionStatePaused,
 		Activity: "waiting", ActivitySource: "hooks", UpdatedAt: time.Now().UTC(),
 	}
-	if err := store.UpsertPhysicalSessionObservation(ctx, want); err != nil {
+	if _, applied, err := store.ApplyPhysicalSessionObservation(ctx, want); err != nil || !applied {
 		t.Fatal(err)
 	}
 	got, found, err := store.GetPhysicalSessionObservation(ctx, "p", "az-root")
@@ -1113,7 +1113,7 @@ func TestRuntimeStateStorePhysicalObservationFanoutIsMonotonicAcrossStores(t *te
 			scope = SessionScopeOrchestration
 		}
 		intent, found, err := stores[0].GetSessionIntent(ctx, "p", role, scope, "root")
-		if err != nil || !found || intent.ObservedState != SessionStateRunning || intent.Activity != "busy" {
+		if err != nil || !found || intent.ObservedState != SessionStateRunning || intent.Activity != "busy" || !intent.UpdatedAt.Equal(newer.UpdatedAt) {
 			t.Fatalf("%s intent=%+v found=%v err=%v", role, intent, found, err)
 		}
 		if role == SessionRoleWorker && intent.State != SessionStateStopped {
@@ -1127,6 +1127,83 @@ func TestRuntimeStateStorePhysicalObservationFanoutIsMonotonicAcrossStores(t *te
 	observation, found, err = stores[1].GetPhysicalSessionObservation(ctx, "p", "az-root")
 	if err != nil || !found || observation.ObservedState != SessionStateRunning || observation.Activity != "busy" {
 		t.Fatalf("stale observation regressed physical fact: %+v found=%v err=%v", observation, found, err)
+	}
+}
+
+func TestRuntimeStateStoreOrphanObservationHydratesLaterIntent(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	observedAt := time.Now().UTC().Add(time.Second)
+	changed, applied, err := store.ApplyPhysicalSessionObservation(ctx, PhysicalSessionObservation{
+		ProjectID: "p", SessionID: "az-root", ObservedState: SessionStateRunning,
+		Activity: "busy", ActivitySource: "hooks", UpdatedAt: observedAt,
+	})
+	if err != nil || !applied || len(changed) != 0 {
+		t.Fatalf("orphan observation changed=%+v applied=%v err=%v", changed, applied, err)
+	}
+	desiredAt := observedAt.Add(-time.Minute)
+	if err := store.UpsertSessionState(ctx, "p", Session{
+		ID: "az-root", IssueID: "root", Role: SessionRoleWorker,
+		ScopeKind: SessionScopeIssue, ScopeID: "root", State: SessionStateStopped,
+		ObservedState: SessionStateStopped, UpdatedAt: desiredAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	intent, found, err := store.GetSessionIntent(ctx, "p", SessionRoleWorker, SessionScopeIssue, "root")
+	if err != nil || !found {
+		t.Fatalf("hydrated intent found=%v err=%v", found, err)
+	}
+	if intent.State != SessionStateStopped || intent.ObservedState != SessionStateRunning || intent.Activity != "busy" || intent.ActivitySource != "hooks" || !intent.UpdatedAt.Equal(observedAt) {
+		t.Fatalf("hydrated intent = %+v", intent)
+	}
+}
+
+func TestRuntimeStateStoreUpgradeBackfillsPhysicalObservationVersion(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newerAt := time.Date(2026, time.July, 13, 8, 0, 0, 500000000, time.UTC)
+	if _, err := db.Exec(`CREATE TABLE daemon_physical_session_observations(
+		project_id TEXT NOT NULL, session_id TEXT NOT NULL, observed_state TEXT NOT NULL,
+		activity TEXT NOT NULL DEFAULT '', activity_source TEXT NOT NULL DEFAULT '',
+		updated_at TEXT NOT NULL, PRIMARY KEY(project_id,session_id));
+		INSERT INTO daemon_physical_session_observations VALUES('p','az-root','running','busy','hooks',?)`, newerAt.Format(time.RFC3339Nano)); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	if _, _, err := store.GetPhysicalSessionObservation(ctx, "p", "az-root"); err != nil {
+		t.Fatal(err)
+	}
+	verifyDB, err := store.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version int64
+	if err := verifyDB.QueryRow(`SELECT observed_version FROM daemon_physical_session_observations WHERE project_id='p' AND session_id='az-root'`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != newerAt.UnixNano() {
+		t.Fatalf("observed_version=%d want %d", version, newerAt.UnixNano())
+	}
+	changed, applied, err := store.ApplyPhysicalSessionObservation(ctx, PhysicalSessionObservation{
+		ProjectID: "p", SessionID: "az-root", ObservedState: SessionStatePaused,
+		Activity: "waiting", ActivitySource: "hooks", UpdatedAt: newerAt.Add(-time.Second),
+	})
+	if err != nil || applied || len(changed) != 0 {
+		t.Fatalf("older post-upgrade observation changed=%+v applied=%v err=%v", changed, applied, err)
+	}
+	got, found, err := store.GetPhysicalSessionObservation(ctx, "p", "az-root")
+	if err != nil || !found || got.ObservedState != SessionStateRunning || got.Activity != "busy" {
+		t.Fatalf("upgraded observation=%+v found=%v err=%v", got, found, err)
 	}
 }
 

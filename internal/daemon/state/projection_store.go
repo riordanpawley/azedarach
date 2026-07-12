@@ -118,12 +118,22 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 			return nil
 		}
 
-		if _, err := tx.ExecContext(ctx, `UPDATE `+sessionStateTable+`
-			SET observed_state=?, activity=?, activity_source=?
-			WHERE project_id=? AND session_id=?`, observation.ObservedState,
-			observation.Activity, observation.ActivitySource, observation.ProjectID,
-			observation.SessionID); err != nil {
-			return fmt.Errorf("fan physical session observation into logical intents: %w", err)
+		linked, err := listSessionIntentsByPhysicalIDTx(ctx, tx, observation.ProjectID, observation.SessionID)
+		if err != nil {
+			return err
+		}
+		for _, intent := range linked {
+			freshness := intent.UpdatedAt
+			if observation.UpdatedAt.After(freshness) {
+				freshness = observation.UpdatedAt
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE `+sessionStateTable+`
+				SET observed_state=?, activity=?, activity_source=?, updated_at=?
+				WHERE project_id=? AND logical_id=?`, observation.ObservedState,
+				observation.Activity, observation.ActivitySource, freshness.Format(time.RFC3339Nano),
+				observation.ProjectID, logicalSessionIntentID(intent)); err != nil {
+				return fmt.Errorf("fan physical session observation into logical intent %s: %w", logicalSessionIntentID(intent), err)
+			}
 		}
 		changed, err = listSessionIntentsByPhysicalIDTx(ctx, tx, observation.ProjectID, observation.SessionID)
 		if err != nil {
@@ -194,36 +204,6 @@ func listSessionIntentsByPhysicalIDTx(ctx context.Context, tx *sql.Tx, projectID
 		return nil, fmt.Errorf("iterate physical session logical intents: %w", err)
 	}
 	return sessions, nil
-}
-
-func (s *RuntimeStateStore) UpsertPhysicalSessionObservation(ctx context.Context, observation PhysicalSessionObservation) error {
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
-		return s.upsertPhysicalSessionObservationLocked(ctx, observation)
-	})
-}
-
-func (s *RuntimeStateStore) upsertPhysicalSessionObservationLocked(ctx context.Context, observation PhysicalSessionObservation) error {
-	db, err := s.dbHandle()
-	if err != nil {
-		return err
-	}
-	observation, err = normalizePhysicalSessionObservation(observation)
-	if err != nil {
-		return err
-	}
-	_, err = db.ExecContext(ctx, `INSERT INTO `+physicalSessionObservationTable+`
-		(project_id,session_id,observed_state,activity,activity_source,updated_at,observed_version)
-		VALUES(?,?,?,?,?,?,?)
-		ON CONFLICT(project_id,session_id) DO UPDATE SET
-			observed_state=excluded.observed_state,
-			activity=excluded.activity,
-			activity_source=excluded.activity_source,
-			updated_at=excluded.updated_at,
-			observed_version=excluded.observed_version
-		WHERE excluded.observed_version > `+physicalSessionObservationTable+`.observed_version`, observation.ProjectID, observation.SessionID,
-		observation.ObservedState, observation.Activity, observation.ActivitySource,
-		observation.UpdatedAt.Format(time.RFC3339Nano), observation.UpdatedAt.UnixNano())
-	return err
 }
 
 func (s *RuntimeStateStore) GetPhysicalSessionObservation(ctx context.Context, projectID, sessionID string) (PhysicalSessionObservation, bool, error) {
@@ -448,8 +428,35 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 		}
 	}
 	targetTable := sessionStorageTableForID(session.ID)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin upsert session state %s/%s: %w", projectID, session.ID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if targetTable == sessionStateTable {
+		var observedState, activity, activitySource, observedAt string
+		err := tx.QueryRowContext(ctx, `SELECT observed_state,activity,activity_source,updated_at
+			FROM `+physicalSessionObservationTable+` WHERE project_id=? AND session_id=?`, projectID, session.ID).
+			Scan(&observedState, &activity, &activitySource, &observedAt)
+		if err == nil {
+			session.ObservedState = NormalizeSessionState(SessionState(observedState))
+			session.Activity, session.ActivitySource = activity, activitySource
+			physicalUpdatedAt, parseErr := parseRuntimeStateTime(observedAt)
+			if parseErr != nil {
+				return fmt.Errorf("parse physical observation freshness for %s/%s: %w", projectID, session.ID, parseErr)
+			}
+			if physicalUpdatedAt.After(session.UpdatedAt) {
+				session.UpdatedAt = physicalUpdatedAt
+			}
+		} else if err != sql.ErrNoRows {
+			return fmt.Errorf("load physical observation before intent upsert %s/%s: %w", projectID, session.ID, err)
+		}
+		if err := ValidateSessionProduct(session); err != nil {
+			return fmt.Errorf("hydrate session state %s/%s from physical observation: %w", projectID, session.ID, err)
+		}
+	}
 	startedAt := nullableRuntimeStateTime(session.StartedAt)
-	_, err = db.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO `+targetTable+` (
 			project_id,
 			session_id,
@@ -497,9 +504,12 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 		return fmt.Errorf("upsert session state %s/%s: %w", projectID, session.ID, err)
 	}
 	if targetTable == sessionObservationTable {
-		if _, err := db.ExecContext(ctx, `DELETE FROM `+sessionStateTable+` WHERE project_id = ? AND session_id = ?`, projectID, session.ID); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+sessionStateTable+` WHERE project_id = ? AND session_id = ?`, projectID, session.ID); err != nil {
 			return fmt.Errorf("delete moved session intent %s/%s: %w", projectID, session.ID, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit upsert session state %s/%s: %w", projectID, session.ID, err)
 	}
 	return nil
 }
@@ -2004,6 +2014,9 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 	if err := ensureColumn(ctx, db, physicalSessionObservationTable, "observed_version", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := backfillPhysicalObservationVersions(ctx, db); err != nil {
+		return err
+	}
 	if err := ensureColumn(ctx, db, sessionStateTable, "started_at", "TEXT"); err != nil {
 		return err
 	}
@@ -2080,6 +2093,54 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 	}
 	if err := ensureColumn(ctx, db, worktreeStateTable, "git_status_updated_at", "TEXT"); err != nil {
 		return err
+	}
+	return nil
+}
+
+func backfillPhysicalObservationVersions(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `SELECT project_id,session_id,updated_at FROM `+physicalSessionObservationTable+` WHERE observed_version=0`)
+	if err != nil {
+		return fmt.Errorf("list physical observations needing version backfill: %w", err)
+	}
+	type versionBackfill struct {
+		projectID, sessionID string
+		version              int64
+	}
+	var pending []versionBackfill
+	for rows.Next() {
+		var projectID, sessionID, updatedAt string
+		if err := rows.Scan(&projectID, &sessionID, &updatedAt); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan physical observation version backfill: %w", err)
+		}
+		parsed, err := parseRuntimeStateTime(updatedAt)
+		if err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("backfill physical observation version %s/%s: %w", projectID, sessionID, err)
+		}
+		pending = append(pending, versionBackfill{projectID: projectID, sessionID: sessionID, version: parsed.UnixNano()})
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close physical observation version backfill rows: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate physical observation version backfill rows: %w", err)
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin physical observation version backfill: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, row := range pending {
+		if _, err := tx.ExecContext(ctx, `UPDATE `+physicalSessionObservationTable+` SET observed_version=? WHERE project_id=? AND session_id=? AND observed_version=0`, row.version, row.projectID, row.sessionID); err != nil {
+			return fmt.Errorf("write physical observation version backfill %s/%s: %w", row.projectID, row.sessionID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit physical observation version backfill: %w", err)
 	}
 	return nil
 }
