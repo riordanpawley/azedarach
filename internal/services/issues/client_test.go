@@ -847,7 +847,7 @@ func TestClient_NormalizeProviderDisplayKeyIssueIDsMigratesDurableRefs(t *testin
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, started_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, "proj", "session-CHE-02091", "CHE-02091", "CHE-02091", "attached", now, now)
+	`, "proj", "session-CHE-02091", "CHE-02091", "CHE-02091", "running", now, now)
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at)
@@ -922,7 +922,7 @@ func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, activity, activity_source, started_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, projectID, sessionID, taskID, taskID, "attached", "no-agent", "session", startedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
+	`, projectID, sessionID, taskID, taskID, "running", "no-agent", "session", startedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	statusRaw, err := json.Marshal(git.GitStatus{
@@ -1003,7 +1003,7 @@ func TestClient_SearchWithRuntimeUsesFTSIndexAndHydratesMatches(t *testing.T) {
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, activity, activity_source, started_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, projectID, "sess-search-runtime", matchingID, matchingID, "attached", "busy", "session", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	`, projectID, "sess-search-runtime", matchingID, matchingID, "running", "busy", "session", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	tasks, err := client.SearchWithRuntime(ctx, projectID, "runtime cache")
@@ -1093,10 +1093,10 @@ func TestClient_ListWithRuntimeReadsSessionObservations(t *testing.T) {
 	updatedAt := startedAt.Add(time.Minute)
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO daemon_session_observations (
-			project_id, session_id, issue_id, state, observed_state, activity, activity_source, started_at, updated_at
+			project_id, session_id, issue_id, scope_id, state, observed_state, activity, activity_source, started_at, updated_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, projectID, "sess-runtime-observation.pane-535", taskID, "running", "running", "busy", "runtime", startedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-runtime-observation.pane-535", taskID, taskID, "running", "running", "busy", "runtime", startedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	tasks, err := client.ListWithRuntime(ctx, projectID)
@@ -1225,7 +1225,7 @@ func TestClient_ListSummariesWithRuntimeKeepsParentAndRuntimeProjection(t *testi
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, activity, activity_source, started_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, projectID, "sess-summary-runtime", childID, childID, "attached", "idle", "hooks", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	`, projectID, "sess-summary-runtime", childID, childID, "running", "idle", "hooks", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	statusRaw, err := json.Marshal(git.GitStatus{HasChanges: true, GitAdditions: 5, GitDeletions: 1})
@@ -1420,7 +1420,7 @@ func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, activity, activity_source, started_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, projectID, "sess-graph-readiness", childID, childID, "attached", "busy", "hooks", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	`, projectID, "sess-graph-readiness", childID, childID, "running", "busy", "hooks", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	tasks, err := client.ListGraphReadinessWithRuntime(ctx, projectID, rootID)
@@ -3398,7 +3398,7 @@ func TestClient_DeleteBlockedWhenTaskHasActiveSessionProjection(t *testing.T) {
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, started_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, projectID, "sess-"+taskID, taskID, taskID, "attached", time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
+	`, projectID, "sess-"+taskID, taskID, taskID, "running", time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	err = client.Delete(ctx, taskID)

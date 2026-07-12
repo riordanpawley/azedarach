@@ -6077,6 +6077,67 @@ func TestUntargetedReconcilePreservesProjectOrchestratorRuntime(t *testing.T) {
 	}
 }
 
+func TestReconcileRecoversRootedOrchestratorThroughOrchestratorAuthority(t *testing.T) {
+	for _, target := range []string{"targeted", "full", "batched"} {
+		t.Run(target, func(t *testing.T) {
+			repoDir := t.TempDir()
+			projectID, err := appconfig.ProjectIDForRoot(repoDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			issueClient := issues.NewClient(repoDir, slog.Default())
+			t.Cleanup(func() { _ = issueClient.CloseDB() })
+			issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sessionID := naming.CanonicalSessionID(repoDir, issueID)
+			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+			t.Cleanup(func() { _ = runtimeStore.Close() })
+			if err := runtimeStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{ID: sessionID, IssueID: issueID, Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning}); err != nil {
+				t.Fatal(err)
+			}
+			runner := newSessionStartTmuxRunner()
+			store := daemonstate.NewStore()
+			manager := git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/root"}, repoDir, slog.Default())
+			d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: "codex", Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), session: daemonhandlers.NewSessionHandler(store), sessionStore: store, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore}, worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: manager}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager}}
+			targetIssue := issueID
+			if target == "full" {
+				targetIssue = ""
+			}
+			if target == "batched" {
+				ids := make([]string, runtimeReconcileIssueRepairLimit)
+				for i := range ids {
+					ids[i] = fmt.Sprintf("missing-%d", i)
+				}
+				ids = append(ids, issueID)
+				if _, err := newRuntimeReconcileService(d).ReconcileIssues(context.Background(), projectID, ids); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				result, err := d.reconcileTmuxAndDaemonSessions(context.Background(), projectID, targetIssue)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if result.RecreatedTmuxSessions != 1 {
+					t.Fatalf("result=%+v", result)
+				}
+			}
+			if !runner.sessions[sessionID] {
+				t.Fatalf("rooted orchestrator runtime %s was not recovered", sessionID)
+			}
+			projection, found, err := runtimeStore.GetSessionState(context.Background(), projectID, sessionID)
+			if err != nil || !found || projection.Role != daemonstate.SessionRoleOrchestrator || projection.ScopeKind != daemonstate.SessionScopeOrchestration || projection.ScopeID != issueID {
+				t.Fatalf("projection=%+v found=%v err=%v", projection, found, err)
+			}
+			contract := requireNewSessionLaunchCommand(t, runner, sessionID) + "\n" + strings.Join(runner.inputPayloads, "\n") + "\n" + strings.Join(runner.sendKeysPayloads, "\n")
+			if !strings.Contains(contract, "Role: orchestrator") || strings.Contains(contract, "Role: worker") {
+				t.Fatalf("rooted orchestrator launch contract=%q", contract)
+			}
+		})
+	}
+}
+
 func TestReconcileRefreshesLifecycleBeforeRepairAcrossDaemons(t *testing.T) {
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
@@ -10287,7 +10348,7 @@ func TestEnrichTasksWithSessionStateIgnoresStoppedAgentScopedRows(t *testing.T) 
 		IssueID:           issueID,
 		State:             daemonstate.SessionStateAttached,
 		ObservedState:     daemonstate.SessionStateStopped,
-		TmuxAttachedCount: 1,
+		TmuxAttachedCount: 0,
 		StartedAt:         &secondStartedAt,
 		UpdatedAt:         secondStartedAt,
 	}); err != nil {

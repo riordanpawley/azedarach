@@ -331,6 +331,22 @@ func TestWorkerSessionScopeDirectSQLRejectsEmptyAndMismatch(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,role,scope_kind,scope_id,state,tmux_attached_count,updated_at) VALUES('p','project-orchestrator','','orchestrator','orchestration','project','running',0,?)`, now); err != nil {
 		t.Fatalf("project orchestrator without issue identity: %v", err)
 	}
+	for _, statement := range []string{
+		`INSERT INTO daemon_session_projections(project_id,session_id,issue_id,role,scope_kind,scope_id,state,updated_at) VALUES('p','project-bad',?,'orchestrator','orchestration','project','running',?)`,
+		`INSERT INTO daemon_session_projections(project_id,session_id,issue_id,role,scope_kind,scope_id,state,updated_at) VALUES('p','root-bad',?,'orchestrator','orchestration','other','running',?)`,
+		`INSERT INTO daemon_session_projections(project_id,session_id,issue_id,role,scope_kind,scope_id,state,updated_at) VALUES('p','root-missing','missing','orchestrator','orchestration','missing','running',?)`,
+	} {
+		args := []any{now}
+		if strings.Count(statement, "?") == 2 {
+			args = []any{id, now}
+		}
+		if _, err := db.ExecContext(ctx, statement, args...); err == nil || !strings.Contains(err.Error(), "orchestrator session") {
+			t.Fatalf("invalid orchestrator product accepted: statement=%s err=%v", statement, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,role,scope_kind,scope_id,state,updated_at) VALUES('p','rooted',?,'orchestrator','orchestration',?,'running',?)`, id, id, now); err != nil {
+		t.Fatalf("valid rooted orchestrator: %v", err)
+	}
 }
 
 func TestCanonicalMigrationBackfillsPreColumnWorkerScope(t *testing.T) {

@@ -39,6 +39,8 @@ type sessionCommandBody struct {
 	Lines      int      `json:"lines,omitempty"`
 }
 
+type rootedOrchestratorRecoveryContextKey struct{}
+
 type resolvedSessionTarget struct {
 	ProjectID  string
 	IssueID    string
@@ -3017,6 +3019,38 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			return result, err
 		}
 	}
+	liveTmuxNames := make(map[string]struct{}, len(tmuxSessions))
+	for _, name := range tmuxSessions {
+		liveTmuxNames[strings.TrimSpace(name)] = struct{}{}
+	}
+	for _, session := range snapshotSessions {
+		if suppress, _ := ctx.Value(rootedOrchestratorRecoveryContextKey{}).(bool); suppress {
+			break
+		}
+		if !rootedOrchestratorSessionProjection(session) || !matchesTargetIssue(sessionKey(session.ScopeID)) || !sessionProjectionCanRecreateTmuxSession(session) {
+			continue
+		}
+		if _, live := liveTmuxNames[strings.TrimSpace(session.ID)]; live {
+			continue
+		}
+		scope, scopeErr := domain.RootedOrchestrationScope(session.ScopeID)
+		if scopeErr != nil {
+			return result, fmt.Errorf("recover rooted orchestrator %s: %w", session.ScopeID, scopeErr)
+		}
+		body, marshalErr := json.Marshal(protocol.OrchestratorSessionRequest{Scope: scope})
+		if marshalErr != nil {
+			return result, fmt.Errorf("encode rooted orchestrator recovery: %w", marshalErr)
+		}
+		recoveryCtx := context.WithValue(ctx, rootedOrchestratorRecoveryContextKey{}, true)
+		response, recoverErr := d.handleOrchestratorSession(recoveryCtx, protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body})
+		if recoverErr != nil {
+			return result, fmt.Errorf("recover rooted orchestrator %s: %w", session.ScopeID, recoverErr)
+		}
+		if response.Error != nil {
+			return result, fmt.Errorf("recover rooted orchestrator %s: %s", session.ScopeID, response.Error.Message)
+		}
+		result.RecreatedTmuxSessions++
+	}
 	excludedTmuxNames := make(map[string]struct{})
 	for _, session := range snapshotSessions {
 		if !lifecycleManagedSessionProjection(session) {
@@ -3421,11 +3455,13 @@ func lifecycleManagedSessionProjection(session daemonstate.Session) bool {
 	switch session.Role {
 	case "", daemonstate.SessionRoleWorker:
 		return session.ScopeKind == "" || session.ScopeKind == daemonstate.SessionScopeIssue
-	case daemonstate.SessionRoleOrchestrator:
-		return session.ScopeKind == daemonstate.SessionScopeOrchestration && strings.TrimSpace(session.ScopeID) != "" && strings.TrimSpace(session.ScopeID) != string(domain.OrchestrationScopeProject) && strings.TrimSpace(session.IssueID) == strings.TrimSpace(session.ScopeID)
 	default:
 		return false
 	}
+}
+
+func rootedOrchestratorSessionProjection(session daemonstate.Session) bool {
+	return session.Role == daemonstate.SessionRoleOrchestrator && session.ScopeKind == daemonstate.SessionScopeOrchestration && strings.TrimSpace(session.ScopeID) != "" && strings.TrimSpace(session.ScopeID) != string(domain.OrchestrationScopeProject) && strings.TrimSpace(session.IssueID) == strings.TrimSpace(session.ScopeID)
 }
 
 func (d *Daemon) reconcileIssueKeyIndex(ctx context.Context, projectID string, issueIDs []string) (map[string]domain.Task, bool, error) {

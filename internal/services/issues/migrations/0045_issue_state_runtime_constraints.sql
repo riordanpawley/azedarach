@@ -45,6 +45,18 @@ SELECT 0 WHERE EXISTS (
 );
 INSERT INTO issue_state_runtime_constraint_validation(ok)
 SELECT 0 WHERE EXISTS (
+  SELECT 1 FROM daemon_session_observations WHERE
+    trim(project_id)='' OR trim(session_id)='' OR
+    role NOT IN ('worker','advisor','orchestrator') OR scope_kind NOT IN ('issue','interaction','orchestration') OR
+    (role='worker' AND (scope_kind!='issue' OR trim(issue_id)='' OR trim(scope_id)='' OR scope_id!=issue_id OR NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_session_observations.issue_id))) OR
+    (role='advisor' AND (scope_kind!='interaction' OR trim(scope_id)='')) OR
+    (role='orchestrator' AND (scope_kind!='orchestration' OR trim(scope_id)='' OR (scope_id='project' AND trim(issue_id)!='') OR (scope_id!='project' AND (issue_id!=scope_id OR NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_session_observations.issue_id))))) OR
+    state NOT IN ('starting','running','stopping','paused','stopped') OR
+    (observed_state IS NOT NULL AND observed_state NOT IN ('','starting','running','stopping','paused','stopped')) OR
+    tmux_attached_count < 0 OR ((state='stopped' OR observed_state='stopped') AND tmux_attached_count != 0)
+);
+INSERT INTO issue_state_runtime_constraint_validation(ok)
+SELECT 0 WHERE EXISTS (
   -- Desired session projections are discriminated by role and scope. Storage
   -- selection is table-based, not role-based.
   SELECT 1 FROM daemon_session_projections WHERE
@@ -52,9 +64,11 @@ SELECT 0 WHERE EXISTS (
     role NOT IN ('worker','advisor','orchestrator') OR scope_kind NOT IN ('issue','interaction','orchestration') OR
     (role='worker' AND (scope_kind!='issue' OR trim(scope_id)='' OR scope_id!=issue_id OR NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_session_projections.issue_id))) OR
     (role='advisor' AND (scope_kind!='interaction' OR trim(scope_id)='')) OR
-    (role='orchestrator' AND (scope_kind!='orchestration' OR trim(scope_id)='')) OR
-    state NOT IN ('starting','running','attached','stopping','paused','stopped','idle','busy','waiting','done','error','unknown') OR
-    (observed_state IS NOT NULL AND observed_state NOT IN ('','starting','running','attached','stopping','paused','stopped','idle','busy','waiting','done','error','unknown')) OR
+    (role='orchestrator' AND (scope_kind!='orchestration' OR trim(scope_id)='' OR
+      (scope_id='project' AND trim(issue_id)!='') OR
+      (scope_id!='project' AND (issue_id!=scope_id OR NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_session_projections.issue_id))))) OR
+    state NOT IN ('starting','running','stopping','paused','stopped') OR
+    (observed_state IS NOT NULL AND observed_state NOT IN ('','starting','running','stopping','paused','stopped')) OR
     tmux_attached_count < 0 OR
     ((state='stopped' OR observed_state='stopped') AND tmux_attached_count != 0)
 );
@@ -204,11 +218,11 @@ BEGIN
     THEN RAISE(ABORT, 'worker session projection requires existing issue scope') END;
   SELECT CASE WHEN NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.scope_id)='')
     THEN RAISE(ABORT, 'advisor session requires interaction scope') END;
-  SELECT CASE WHEN NEW.role='orchestrator' AND (NEW.scope_kind!='orchestration' OR trim(NEW.scope_id)='')
+  SELECT CASE WHEN NEW.role='orchestrator' AND (NEW.scope_kind!='orchestration' OR trim(NEW.scope_id)='' OR (NEW.scope_id='project' AND trim(NEW.issue_id)!='') OR (NEW.scope_id!='project' AND (NEW.issue_id!=NEW.scope_id OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))))
     THEN RAISE(ABORT, 'orchestrator session requires orchestration scope') END;
-  SELECT CASE WHEN NEW.state NOT IN ('starting','running','attached','stopping','paused','stopped','idle','busy','waiting','done','error','unknown')
+  SELECT CASE WHEN NEW.state NOT IN ('starting','running','stopping','paused','stopped')
     THEN RAISE(ABORT, 'invalid desired session state') END;
-  SELECT CASE WHEN NEW.observed_state IS NOT NULL AND NEW.observed_state NOT IN ('','starting','running','attached','stopping','paused','stopped','idle','busy','waiting','done','error','unknown')
+  SELECT CASE WHEN NEW.observed_state IS NOT NULL AND NEW.observed_state NOT IN ('','starting','running','stopping','paused','stopped')
     THEN RAISE(ABORT, 'invalid observed session state') END;
   SELECT CASE WHEN NEW.tmux_attached_count < 0
     THEN RAISE(ABORT, 'tmux attachment count cannot be negative') END;
@@ -227,17 +241,39 @@ BEGIN
     THEN RAISE(ABORT, 'worker session projection requires existing issue scope') END;
   SELECT CASE WHEN NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.scope_id)='')
     THEN RAISE(ABORT, 'advisor session requires interaction scope') END;
-  SELECT CASE WHEN NEW.role='orchestrator' AND (NEW.scope_kind!='orchestration' OR trim(NEW.scope_id)='')
+  SELECT CASE WHEN NEW.role='orchestrator' AND (NEW.scope_kind!='orchestration' OR trim(NEW.scope_id)='' OR (NEW.scope_id='project' AND trim(NEW.issue_id)!='') OR (NEW.scope_id!='project' AND (NEW.issue_id!=NEW.scope_id OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))))
     THEN RAISE(ABORT, 'orchestrator session requires orchestration scope') END;
-  SELECT CASE WHEN NEW.state NOT IN ('starting','running','attached','stopping','paused','stopped','idle','busy','waiting','done','error','unknown')
+  SELECT CASE WHEN NEW.state NOT IN ('starting','running','stopping','paused','stopped')
     THEN RAISE(ABORT, 'invalid desired session state') END;
-  SELECT CASE WHEN NEW.observed_state IS NOT NULL AND NEW.observed_state NOT IN ('','starting','running','attached','stopping','paused','stopped','idle','busy','waiting','done','error','unknown')
+  SELECT CASE WHEN NEW.observed_state IS NOT NULL AND NEW.observed_state NOT IN ('','starting','running','stopping','paused','stopped')
     THEN RAISE(ABORT, 'invalid observed session state') END;
   SELECT CASE WHEN NEW.tmux_attached_count < 0
     THEN RAISE(ABORT, 'tmux attachment count cannot be negative') END;
   SELECT CASE WHEN (NEW.state='stopped' OR NEW.observed_state='stopped') AND NEW.tmux_attached_count != 0
     THEN RAISE(ABORT, 'stopped session cannot be attached') END;
 END;
+
+DROP TRIGGER IF EXISTS daemon_session_observation_product_guard_insert;
+DROP TRIGGER IF EXISTS daemon_session_observation_product_guard_update;
+CREATE TRIGGER daemon_session_observation_product_guard_insert
+BEFORE INSERT ON daemon_session_observations
+WHEN trim(NEW.project_id)='' OR trim(NEW.session_id)='' OR
+  NEW.role NOT IN ('worker','advisor','orchestrator') OR NEW.scope_kind NOT IN ('issue','interaction','orchestration') OR
+  (NEW.role='worker' AND (NEW.scope_kind!='issue' OR trim(NEW.issue_id)='' OR trim(NEW.scope_id)='' OR NEW.scope_id!=NEW.issue_id OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))) OR
+  (NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.scope_id)='')) OR
+  (NEW.role='orchestrator' AND (NEW.scope_kind!='orchestration' OR trim(NEW.scope_id)='' OR (NEW.scope_id='project' AND trim(NEW.issue_id)!='') OR (NEW.scope_id!='project' AND (NEW.issue_id!=NEW.scope_id OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))))) OR
+  NEW.state NOT IN ('starting','running','stopping','paused','stopped') OR COALESCE(NEW.observed_state,'') NOT IN ('','starting','running','stopping','paused','stopped') OR NEW.tmux_attached_count<0 OR ((NEW.state='stopped' OR NEW.observed_state='stopped') AND NEW.tmux_attached_count!=0)
+BEGIN SELECT RAISE(ABORT, 'invalid session observation product'); END;
+
+CREATE TRIGGER daemon_session_observation_product_guard_update
+BEFORE UPDATE ON daemon_session_observations
+WHEN trim(NEW.project_id)='' OR trim(NEW.session_id)='' OR
+  NEW.role NOT IN ('worker','advisor','orchestrator') OR NEW.scope_kind NOT IN ('issue','interaction','orchestration') OR
+  (NEW.role='worker' AND (NEW.scope_kind!='issue' OR trim(NEW.issue_id)='' OR trim(NEW.scope_id)='' OR NEW.scope_id!=NEW.issue_id OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))) OR
+  (NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.scope_id)='')) OR
+  (NEW.role='orchestrator' AND (NEW.scope_kind!='orchestration' OR trim(NEW.scope_id)='' OR (NEW.scope_id='project' AND trim(NEW.issue_id)!='') OR (NEW.scope_id!='project' AND (NEW.issue_id!=NEW.scope_id OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))))) OR
+  NEW.state NOT IN ('starting','running','stopping','paused','stopped') OR COALESCE(NEW.observed_state,'') NOT IN ('','starting','running','stopping','paused','stopped') OR NEW.tmux_attached_count<0 OR ((NEW.state='stopped' OR NEW.observed_state='stopped') AND NEW.tmux_attached_count!=0)
+BEGIN SELECT RAISE(ABORT, 'invalid session observation product'); END;
 
 CREATE TRIGGER daemon_worktree_state_product_guard_insert
 BEFORE INSERT ON daemon_worktree_projections

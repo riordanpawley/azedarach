@@ -86,7 +86,7 @@ func TestExportProjectionUsesStableSchemaFingerprintAndMonotonicSourceRevision(t
 	}
 
 	observedAt := time.Now().UTC().Add(2 * time.Second).Format(time.RFC3339Nano)
-	if _, err = db.ExecContext(ctx, `INSERT INTO daemon_session_observations(project_id,session_id,issue_id,state,observed_state,activity,updated_at) VALUES(?,?,?,?,?,?,?)`, "project-a", "observed-1", "issue-1", "running", "running", "waiting", observedAt); err != nil {
+	if _, err = db.ExecContext(ctx, `INSERT INTO daemon_session_observations(project_id,session_id,issue_id,scope_id,state,observed_state,activity,updated_at) VALUES(?,?,?,?,?,?,?,?)`, "project-a", "observed-1", "issue-1", "issue-1", "running", "running", "waiting", observedAt); err != nil {
 		t.Fatal(err)
 	}
 	exported := assertAdvanced("session observation insert")

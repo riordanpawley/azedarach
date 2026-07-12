@@ -663,6 +663,52 @@ func TestRuntimeStateStoreWorktreeReplaceAndList(t *testing.T) {
 	}
 }
 
+func TestRuntimeStateStoreRejectsInvalidSessionProducts(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	cases := []Session{
+		{ID: "negative", IssueID: "a", State: SessionStateRunning, TmuxAttachedCount: -1},
+		{ID: "stopped-attached", IssueID: "a", State: SessionStateStopped, TmuxAttachedCount: 1},
+		{ID: "project-with-issue", IssueID: "a", Role: SessionRoleOrchestrator, ScopeKind: SessionScopeOrchestration, ScopeID: "project", State: SessionStateRunning},
+		{ID: "root-mismatch", IssueID: "a", Role: SessionRoleOrchestrator, ScopeKind: SessionScopeOrchestration, ScopeID: "b", State: SessionStateRunning},
+	}
+	for _, session := range cases {
+		if err := store.UpsertSessionState(ctx, "project", session); err == nil {
+			t.Fatalf("UpsertSessionState(%s) accepted invalid product", session.ID)
+		}
+	}
+	valid := Session{ID: "project", Role: SessionRoleOrchestrator, ScopeKind: SessionScopeOrchestration, ScopeID: "project", State: SessionStateRunning}
+	if err := store.UpsertSessionState(ctx, "project", valid); err != nil {
+		t.Fatalf("valid project orchestrator: %v", err)
+	}
+	db, err := store.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE daemon_session_projections SET tmux_attached_count=-1 WHERE session_id='project'`); err == nil {
+		t.Fatal("direct SQL bypassed authoritative session product trigger")
+	}
+}
+
+func TestRuntimeStateStoreUpgradeFailsClosedOnInvalidHistoricalSessionProduct(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE daemon_session_projections(project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL,scope_kind TEXT NOT NULL,scope_id TEXT NOT NULL,state TEXT NOT NULL,observed_state TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,session_id)); INSERT INTO daemon_session_projections VALUES('p','bad','','orchestrator','orchestration','root','running','running',0,'2026-07-13T00:00:00Z')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.ListSessionStates(context.Background(), "p"); err == nil || !strings.Contains(err.Error(), "invalid historical runtime authority") {
+		t.Fatalf("upgrade error=%v", err)
+	}
+}
+
 func TestRuntimeStateStoreWorktreeGetters(t *testing.T) {
 	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
 	t.Cleanup(func() {

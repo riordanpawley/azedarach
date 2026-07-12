@@ -211,6 +211,9 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 		session.ObservedState = session.State
 	}
 	normalizeSessionProjectionActivity(&session)
+	if err := ValidateSessionProduct(session); err != nil {
+		return fmt.Errorf("upsert session state %s/%s: %w", projectID, session.ID, err)
+	}
 	if session.StartedAt == nil || session.StartedAt.IsZero() {
 		if session.State != SessionStateStopped {
 			started := session.UpdatedAt.UTC()
@@ -663,6 +666,9 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 			session.ObservedState = session.State
 		}
 		normalizeSessionProjectionActivity(&session)
+		if err := ValidateSessionProduct(session); err != nil {
+			return fmt.Errorf("replace session state %s/%s: %w", projectID, sessionID, err)
+		}
 		startedAt := nullableRuntimeStateTime(session.StartedAt)
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO `+targetTable+` (
@@ -1716,6 +1722,9 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 	if err := migrateSessionObservations(ctx, db); err != nil {
 		return err
 	}
+	if err := ensureRuntimeSessionProductConstraints(ctx, db); err != nil {
+		return err
+	}
 	if err := ensureSessionActivityEvidenceSourceKey(ctx, db); err != nil {
 		return err
 	}
@@ -1913,6 +1922,9 @@ func migrateSessionObservations(ctx context.Context, db *sql.DB) error {
 			project_id,
 			session_id,
 			issue_id,
+			role,
+			scope_kind,
+			scope_id,
 			state,
 			observed_state,
 			activity,
@@ -1925,6 +1937,9 @@ func migrateSessionObservations(ctx context.Context, db *sql.DB) error {
 			project_id,
 			session_id,
 			issue_id,
+			role,
+			scope_kind,
+			COALESCE(NULLIF(trim(scope_id), ''), issue_id),
 			state,
 			observed_state,
 			activity,
@@ -1951,6 +1966,78 @@ func migrateSessionObservations(ctx context.Context, db *sql.DB) error {
 		WHERE instr(session_id, '.pane-') > 0
 	`); err != nil {
 		return fmt.Errorf("migrate session observations: delete pane rows from intent table: %w", err)
+	}
+	return nil
+}
+
+func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) error {
+	var issuesTableCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='issues'`).Scan(&issuesTableCount); err != nil {
+		return fmt.Errorf("inspect relational issue authority: %w", err)
+	}
+	for _, table := range []string{sessionStateTable, sessionObservationTable} {
+		if _, err := db.ExecContext(ctx, `UPDATE `+table+` SET state=CASE WHEN state='attached' THEN 'running' ELSE state END, observed_state=CASE WHEN observed_state='attached' THEN 'running' ELSE observed_state END WHERE state='attached' OR observed_state='attached'`); err != nil {
+			return fmt.Errorf("normalize %s legacy attached state: %w", table, err)
+		}
+		if _, err := db.ExecContext(ctx, `UPDATE `+table+` SET scope_id=issue_id WHERE role='worker' AND scope_kind='issue' AND trim(scope_id)=''`); err != nil {
+			return fmt.Errorf("backfill %s worker scope identity: %w", table, err)
+		}
+		rows, err := db.QueryContext(ctx, `SELECT session_id,issue_id,role,scope_kind,scope_id,state,COALESCE(observed_state,''),tmux_attached_count FROM `+table)
+		if err != nil {
+			return fmt.Errorf("validate %s session products: %w", table, err)
+		}
+		for rows.Next() {
+			var session Session
+			var role, scopeKind, state, observed string
+			if err := rows.Scan(&session.ID, &session.IssueID, &role, &scopeKind, &session.ScopeID, &state, &observed, &session.TmuxAttachedCount); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan %s session product: %w", table, err)
+			}
+			session.Role, session.ScopeKind = SessionRole(role), SessionScopeKind(scopeKind)
+			session.State, session.ObservedState = SessionState(state), SessionState(observed)
+			if err := ValidateSessionProduct(session); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("invalid historical runtime authority %s/%s: %w", table, session.ID, err)
+			}
+			if issuesTableCount > 0 && session.Role == SessionRoleOrchestrator && strings.TrimSpace(session.ScopeID) != "project" {
+				var count int
+				if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id=?`, strings.TrimSpace(session.IssueID)).Scan(&count); err != nil || count != 1 {
+					_ = rows.Close()
+					return fmt.Errorf("invalid historical runtime authority %s/%s: rooted orchestrator issue does not exist", table, session.ID)
+				}
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close %s session product validation: %w", table, err)
+		}
+		prefix := "runtime_" + table + "_product"
+		for _, suffix := range []string{"insert", "update"} {
+			if _, err := db.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+prefix+`_`+suffix); err != nil {
+				return err
+			}
+			action := "INSERT"
+			if suffix == "update" {
+				action = "UPDATE"
+			}
+			rootExistenceGuard := ""
+			if issuesTableCount > 0 {
+				rootExistenceGuard = `SELECT CASE WHEN NEW.role='orchestrator' AND NEW.scope_id!='project' AND NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id) THEN RAISE(ABORT,'rooted orchestrator issue does not exist') END;`
+			}
+			trigger := `CREATE TRIGGER ` + prefix + `_` + suffix + ` BEFORE ` + action + ` ON ` + table + ` BEGIN
+				SELECT CASE WHEN trim(NEW.project_id)='' OR trim(NEW.session_id)='' THEN RAISE(ABORT,'session projection identity must be nonempty') END;
+				SELECT CASE WHEN NEW.role='worker' AND (NEW.scope_kind!='issue' OR trim(NEW.issue_id)='' OR trim(NEW.scope_id)='' OR NEW.scope_id!=NEW.issue_id) THEN RAISE(ABORT,'worker session requires matching issue scope') END;
+				SELECT CASE WHEN NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.scope_id)='') THEN RAISE(ABORT,'advisor session requires interaction scope') END;
+				SELECT CASE WHEN NEW.role='orchestrator' AND (NEW.scope_kind!='orchestration' OR trim(NEW.scope_id)='' OR (NEW.scope_id='project' AND trim(NEW.issue_id)!='') OR (NEW.scope_id!='project' AND NEW.issue_id!=NEW.scope_id)) THEN RAISE(ABORT,'invalid orchestrator session scope') END;
+				` + rootExistenceGuard + `
+				SELECT CASE WHEN NEW.role NOT IN ('worker','advisor','orchestrator') OR NEW.scope_kind NOT IN ('issue','interaction','orchestration') THEN RAISE(ABORT,'invalid session role or scope') END;
+				SELECT CASE WHEN NEW.state NOT IN ('starting','running','stopping','paused','stopped') OR COALESCE(NEW.observed_state,'') NOT IN ('','starting','running','stopping','paused','stopped') THEN RAISE(ABORT,'invalid session state') END;
+				SELECT CASE WHEN NEW.tmux_attached_count<0 THEN RAISE(ABORT,'tmux attachment count cannot be negative') END;
+				SELECT CASE WHEN (NEW.state='stopped' OR NEW.observed_state='stopped') AND NEW.tmux_attached_count!=0 THEN RAISE(ABORT,'stopped session cannot be attached') END;
+			END`
+			if _, err := db.ExecContext(ctx, trigger); err != nil {
+				return fmt.Errorf("create %s session product trigger: %w", table, err)
+			}
+		}
 	}
 	return nil
 }

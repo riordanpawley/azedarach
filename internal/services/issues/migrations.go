@@ -129,6 +129,12 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 		WHERE role='worker' AND scope_kind='issue' AND COALESCE(trim(scope_id),'')=''`); err != nil {
 		return fmt.Errorf("backfill legacy worker session scope identity: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE daemon_session_observations SET scope_id=issue_id WHERE role='worker' AND scope_kind='issue' AND COALESCE(trim(scope_id),'')=''; UPDATE daemon_session_observations SET state='running' WHERE state='attached'; UPDATE daemon_session_observations SET observed_state='running' WHERE observed_state='attached'`); err != nil {
+		return fmt.Errorf("normalize legacy session observations: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE daemon_session_projections SET state='running' WHERE state='attached'; UPDATE daemon_session_projections SET observed_state='running' WHERE observed_state='attached'`); err != nil {
+		return fmt.Errorf("normalize legacy attached session state: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS issue_coordination_leases (
 		issue_id TEXT NOT NULL, purpose TEXT NOT NULL CHECK (purpose IN ('execution','orchestration','review')),
 		owner_id TEXT NOT NULL, owner_kind TEXT NOT NULL, claimed_at TEXT NOT NULL, expires_at TEXT,
