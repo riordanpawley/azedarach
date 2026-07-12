@@ -8,8 +8,8 @@ import (
 )
 
 func TestProtocolV42PreservesCombinedOrchestrationViewProjectionAndLearningContracts(t *testing.T) {
-	if CurrentVersion != 42 {
-		t.Fatalf("protocol version = %d, want 42", CurrentVersion)
+	if CurrentVersion != 43 {
+		t.Fatalf("protocol version = %d, want 43", CurrentVersion)
 	}
 	if CommandOrchestratorSessionStart == "" || CommandOrchestratorSessionAttach == "" || CommandOrchestratorSessionStatus == "" || EventOrchestrationLoopUpdated == "" {
 		t.Fatal("combined orchestration session and loop commands must remain registered")

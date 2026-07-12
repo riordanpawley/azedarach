@@ -7,11 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -777,6 +779,34 @@ func TestTaskIDsByProjectDirUsesWorktreeWhenProjectPrefixesCollide(t *testing.T)
 	}
 	if ids := got[cleanProjectDirKey(alpineDir)]; !slices.Equal(ids, []string{"alpine"}) {
 		t.Fatalf("alpine task ids = %v, want [alpine]", ids)
+	}
+}
+
+func TestScopedTaskIDsByProjectDirPreservesDuplicateIssueProjectIdentity(t *testing.T) {
+	root := t.TempDir()
+	alpha := filepath.Join(root, "alpha")
+	beta := filepath.Join(root, "beta")
+	got := scopedTaskIDsByProjectDir(map[string][]string{alpha: {"same"}, beta: {"same"}})
+	want := []protocol.ScopedIssueID{
+		{ProjectID: naming.ProjectID(projectIDForPath(alpha)), IssueID: "same"},
+		{ProjectID: naming.ProjectID(projectIDForPath(beta)), IssueID: "same"},
+	}
+	sort.Slice(want, func(i, j int) bool { return want[i].ProjectID < want[j].ProjectID })
+	if !slices.Equal(got, want) {
+		t.Fatalf("scoped hydration IDs = %+v, want %+v", got, want)
+	}
+}
+
+func TestScopedTaskIDsByProjectDirUsesStableRegisteredProjectIdentity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	projectDir := t.TempDir()
+	if err := config.SaveProjectsRegistry(&config.ProjectsRegistry{Projects: []config.Project{{ID: "stable-id", Name: "Renamed", Path: projectDir}}}); err != nil {
+		t.Fatal(err)
+	}
+	got := scopedTaskIDsByProjectDir(map[string][]string{projectDir: {"issue"}})
+	want := []protocol.ScopedIssueID{{ProjectID: "stable-id", IssueID: "issue"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("scoped hydration IDs = %+v, want %+v", got, want)
 	}
 }
 

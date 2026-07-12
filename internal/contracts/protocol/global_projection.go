@@ -40,10 +40,11 @@ func (c GlobalViewConsumer) Valid() bool {
 }
 
 type GlobalSnapshotRequestBody struct {
-	Query    string             `json:"query,omitempty"`
-	ViewID   string             `json:"view_id,omitempty"`
-	Consumer GlobalViewConsumer `json:"consumer,omitempty"`
-	Scope    GlobalViewScope    `json:"scope,omitempty"`
+	Query          string             `json:"query,omitempty"`
+	ViewID         string             `json:"view_id,omitempty"`
+	Consumer       GlobalViewConsumer `json:"consumer,omitempty"`
+	Scope          GlobalViewScope    `json:"scope,omitempty"`
+	HydrateTaskIDs []ScopedIssueID    `json:"hydrate_task_ids,omitempty"`
 }
 
 type GlobalViewScopeKind string
