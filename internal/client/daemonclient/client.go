@@ -226,6 +226,7 @@ func isDaemonReadCommand(command string) bool {
 		CommandDecisionLinkList,
 		protocol.CommandLearnRecall,
 		protocol.CommandLearnShow,
+		protocol.CommandLearnSuggest,
 		CommandGitBranchBehind,
 		CommandGitDiffStat,
 		CommandGitStatus,

@@ -383,3 +383,22 @@ func assertParseOutcome(t *testing.T, err error, ok bool, errFrag string) {
 		t.Fatalf("error %q does not contain %q", err.Error(), errFrag)
 	}
 }
+
+func TestParseLearnConsolidationArgs(t *testing.T) {
+	if _, err := parseLearnSuggestArgs([]string{"--refresh", "--status", "pending"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := parseLearnConsolidateArgs([]string{"--canonical", "learn-1", "--note", "human confirmed", "learn-sug-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CanonicalID != "learn-1" || got.SuggestionID != "learn-sug-1" {
+		t.Fatalf("opts=%+v", got)
+	}
+	if _, err := parseLearnConsolidateArgs([]string{"learn-sug-1"}); err == nil {
+		t.Fatal("expected missing confirmation fields to fail")
+	}
+	if _, err := parseLearnSuggestionRejectArgs([]string{"--note", "not a duplicate", "learn-sug-1"}); err != nil {
+		t.Fatal(err)
+	}
+}

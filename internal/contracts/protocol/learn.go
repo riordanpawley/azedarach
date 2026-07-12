@@ -15,6 +15,9 @@ const (
 	CommandLearnSupersede          = "learn.supersede"
 	CommandLearnDoctor             = "learn.doctor"
 	CommandLearnGC                 = "learn.gc"
+	CommandLearnSuggest          = "learn.suggest"
+	CommandLearnConsolidate      = "learn.consolidate"
+	CommandLearnSuggestionReject = "learn.suggestion.reject"
 	CommandLearnActivate           = "learn.activate"
 	CommandLearnFeedback           = "learn.feedback"
 	CommandLearnContextualActivate = "learn.contextual_activate"
@@ -89,6 +92,49 @@ type Learning struct {
 	UpdatedAt       string                  `json:"updated_at" msgpack:"updated_at"`
 	RecallScore     int                     `json:"recall_score,omitempty" msgpack:"recall_score,omitempty"`
 	RecallReason    string                  `json:"recall_reason,omitempty" msgpack:"recall_reason,omitempty"`
+}
+
+type LearningSuggestion struct {
+	ID                  string `json:"id" msgpack:"id"`
+	ProjectID           string `json:"project_id" msgpack:"project_id"`
+	Kind                string `json:"kind" msgpack:"kind"`
+	LeftLearningID      string `json:"left_learning_id" msgpack:"left_learning_id"`
+	RightLearningID     string `json:"right_learning_id" msgpack:"right_learning_id"`
+	Score               int    `json:"score" msgpack:"score"`
+	Reason              string `json:"reason" msgpack:"reason"`
+	Status              string `json:"status" msgpack:"status"`
+	ReviewNote          string `json:"review_note,omitempty" msgpack:"review_note,omitempty"`
+	CanonicalLearningID string `json:"canonical_learning_id,omitempty" msgpack:"canonical_learning_id,omitempty"`
+	CreatedAt           string `json:"created_at" msgpack:"created_at"`
+	UpdatedAt           string `json:"updated_at" msgpack:"updated_at"`
+}
+
+type LearnSuggestRequestBody struct {
+	ProjectID string `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	Status    string `json:"status,omitempty" msgpack:"status,omitempty"`
+	Refresh   bool   `json:"refresh,omitempty" msgpack:"refresh,omitempty"`
+	Limit     int    `json:"limit,omitempty" msgpack:"limit,omitempty"`
+}
+type LearnSuggestResponseBody struct {
+	Suggestions []LearningSuggestion `json:"suggestions" msgpack:"suggestions"`
+}
+type LearnConsolidateRequestBody struct {
+	SuggestionID        string `json:"suggestion_id" msgpack:"suggestion_id"`
+	CanonicalLearningID string `json:"canonical_learning_id" msgpack:"canonical_learning_id"`
+	Summary             string `json:"summary,omitempty" msgpack:"summary,omitempty"`
+	Note                string `json:"note" msgpack:"note"`
+}
+type LearnConsolidateResponseBody struct {
+	Suggestion        LearningSuggestion `json:"suggestion" msgpack:"suggestion"`
+	Learning          Learning           `json:"learning" msgpack:"learning"`
+	SourceLearningIDs []string           `json:"source_learning_ids" msgpack:"source_learning_ids"`
+}
+type LearnSuggestionRejectRequestBody struct {
+	SuggestionID string `json:"suggestion_id" msgpack:"suggestion_id"`
+	Note         string `json:"note" msgpack:"note"`
+}
+type LearnSuggestionRejectResponseBody struct {
+	Suggestion LearningSuggestion `json:"suggestion" msgpack:"suggestion"`
 }
 
 type LearningRelation struct {

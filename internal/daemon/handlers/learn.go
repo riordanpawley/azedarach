@@ -25,6 +25,9 @@ type LearnService interface {
 	Supersede(context.Context, protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error)
 	Doctor(context.Context, protocol.LearnDoctorRequestBody) (protocol.LearnDoctorResponseBody, error)
 	GC(context.Context, protocol.LearnGCRequestBody) (protocol.LearnGCResponseBody, error)
+	Suggest(context.Context, protocol.LearnSuggestRequestBody) (protocol.LearnSuggestResponseBody, error)
+	Consolidate(context.Context, protocol.LearnConsolidateRequestBody) (protocol.LearnConsolidateResponseBody, error)
+	RejectSuggestion(context.Context, protocol.LearnSuggestionRejectRequestBody) (protocol.LearnSuggestionRejectResponseBody, error)
 	Activate(context.Context, protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error)
 	Feedback(context.Context, protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error)
 	ContextualActivate(context.Context, protocol.LearnContextualActivateRequestBody) (protocol.LearnContextualActivateResponseBody, error)
@@ -320,6 +323,44 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 			return learnInvalidRequest(resp, "limit must be non-negative")
 		}
 		return learnJSONResponse(ctx, resp, h.service.GC, cmd)
+	case protocol.CommandLearnSuggest:
+		var cmd protocol.LearnSuggestRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.ProjectID = strings.TrimSpace(cmd.ProjectID)
+		cmd.Status = strings.TrimSpace(cmd.Status)
+		if cmd.Limit < 0 {
+			return learnInvalidRequest(resp, "limit must be non-negative")
+		}
+		if cmd.Status != "" && cmd.Status != "pending" && cmd.Status != "rejected" && cmd.Status != "confirmed" {
+			return learnInvalidRequest(resp, "invalid suggestion status")
+		}
+		return learnJSONResponse(ctx, resp, h.service.Suggest, cmd)
+	case protocol.CommandLearnConsolidate:
+		var cmd protocol.LearnConsolidateRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.SuggestionID = strings.TrimSpace(cmd.SuggestionID)
+		cmd.CanonicalLearningID = strings.TrimSpace(cmd.CanonicalLearningID)
+		cmd.Summary = strings.TrimSpace(cmd.Summary)
+		cmd.Note = strings.TrimSpace(cmd.Note)
+		if cmd.SuggestionID == "" || cmd.CanonicalLearningID == "" || cmd.Note == "" {
+			return learnInvalidRequest(resp, "suggestion_id, canonical_learning_id, and note are required")
+		}
+		return learnJSONResponse(ctx, resp, h.service.Consolidate, cmd)
+	case protocol.CommandLearnSuggestionReject:
+		var cmd protocol.LearnSuggestionRejectRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.SuggestionID = strings.TrimSpace(cmd.SuggestionID)
+		cmd.Note = strings.TrimSpace(cmd.Note)
+		if cmd.SuggestionID == "" || cmd.Note == "" {
+			return learnInvalidRequest(resp, "suggestion_id and note are required")
+		}
+		return learnJSONResponse(ctx, resp, h.service.RejectSuggestion, cmd)
 	default:
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeUnsupportedCommand,

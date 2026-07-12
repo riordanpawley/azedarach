@@ -48,6 +48,16 @@ func (f *fakeLearnService) Feedback(ctx context.Context, req protocol.LearnFeedb
 	return protocol.LearnFeedbackResponseBody{}, nil
 }
 
+func (f *fakeLearnService) Suggest(context.Context, protocol.LearnSuggestRequestBody) (protocol.LearnSuggestResponseBody, error) {
+	return protocol.LearnSuggestResponseBody{}, nil
+}
+func (f *fakeLearnService) Consolidate(context.Context, protocol.LearnConsolidateRequestBody) (protocol.LearnConsolidateResponseBody, error) {
+	return protocol.LearnConsolidateResponseBody{}, nil
+}
+func (f *fakeLearnService) RejectSuggestion(context.Context, protocol.LearnSuggestionRejectRequestBody) (protocol.LearnSuggestionRejectResponseBody, error) {
+	return protocol.LearnSuggestionRejectResponseBody{}, nil
+}
+
 func (f *fakeLearnService) Add(ctx context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
 	if f.addFn != nil {
 		return f.addFn(ctx, req)
@@ -442,5 +452,26 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	}))
 	if conflictResp.OK || conflictResp.Error == nil || conflictResp.Error.Code != protocol.ErrorCodeConflict {
 		t.Fatalf("conflict promote response=%+v", conflictResp)
+	}
+}
+
+func TestLearnHandlerConsolidationCommands(t *testing.T) {
+	h := NewLearnHandler(&fakeLearnService{})
+	for _, tc := range []struct {
+		command string
+		body    any
+	}{
+		{protocol.CommandLearnSuggest, protocol.LearnSuggestRequestBody{Refresh: true}},
+		{protocol.CommandLearnConsolidate, protocol.LearnConsolidateRequestBody{SuggestionID: "learn-sug-1", CanonicalLearningID: "learn-1", Note: "confirmed"}},
+		{protocol.CommandLearnSuggestionReject, protocol.LearnSuggestionRejectRequestBody{SuggestionID: "learn-sug-1", Note: "rejected"}},
+	} {
+		resp := h.Handle(context.Background(), specRequest(t, tc.command, tc.body))
+		if !resp.OK {
+			t.Fatalf("%s response=%+v", tc.command, resp)
+		}
+	}
+	bad := h.Handle(context.Background(), specRequest(t, protocol.CommandLearnConsolidate, protocol.LearnConsolidateRequestBody{}))
+	if bad.OK || bad.Error == nil || bad.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("bad response=%+v", bad)
 	}
 }

@@ -384,7 +384,7 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		query.WriteString(` JOIN agent_learning_search_fts fts ON fts.rowid = l.id AND agent_learning_search_fts MATCH ?`)
 		args = append(args, match)
 	}
-	query.WriteString(` WHERE 1 = 1`)
+	query.WriteString(` WHERE l.consolidated_into_id IS NULL`)
 	if !filter.IncludeDeleted {
 		query.WriteString(` AND l.deleted_at IS NULL`)
 	}

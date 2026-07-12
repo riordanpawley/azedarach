@@ -228,6 +228,9 @@ var commandSpecRegistry = map[string]CommandSpec{
 	commandSyncRun:                          {Command: commandSyncRun, RequiresProjectID: true},
 	commandSyncConflicts:                    {Command: commandSyncConflicts, RequiresProjectID: true},
 	protocol.CommandTaskBulkApply:           {Command: protocol.CommandTaskBulkApply, RequiresProjectID: true},
+	protocol.CommandLearnSuggest:           {Command: protocol.CommandLearnSuggest, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
+	protocol.CommandLearnConsolidate:       {Command: protocol.CommandLearnConsolidate, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
+	protocol.CommandLearnSuggestionReject:  {Command: protocol.CommandLearnSuggestionReject, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 }
 
 // LookupCommandSpec returns the typed command specification for a command.
