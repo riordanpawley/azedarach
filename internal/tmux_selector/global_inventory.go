@@ -286,11 +286,11 @@ func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmu
 				entry = mergeProjectedInventory(entry, projection)
 			}
 		}
-		if entry.ProjectPath == "" {
-			entry.ProjectPath = projectPathForSessionPrefix(entry, l.projectDirs)
-		}
 		if entry.ProjectPath == "" && entry.Worktree != "" {
 			entry.ProjectPath = inferProjectPath(entry.Worktree, l.projectDirs)
+		}
+		if entry.ProjectPath == "" {
+			entry.ProjectPath = projectPathForSessionPrefix(entry, l.projectDirs)
 		}
 		entries = append(entries, entry)
 	}
@@ -309,11 +309,11 @@ func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map
 				entry = mergeProjectedInventory(entry, projection)
 			}
 		}
-		if entry.ProjectPath == "" {
-			entry.ProjectPath = projectPathForSessionPrefix(entry, projectDirs)
-		}
 		if entry.ProjectPath == "" && entry.Worktree != "" {
 			entry.ProjectPath = inferProjectPath(entry.Worktree, projectDirs)
+		}
+		if entry.ProjectPath == "" {
+			entry.ProjectPath = projectPathForSessionPrefix(entry, projectDirs)
 		}
 		entries = append(entries, entry)
 	}
@@ -722,11 +722,13 @@ func inventoryEntryProjectDir(entry InventoryEntry, projectDirs []string) string
 	if projectPath := strings.TrimSpace(entry.ProjectPath); projectPath != "" {
 		return projectPath
 	}
+	if worktree := strings.TrimSpace(entry.Worktree); worktree != "" {
+		if projectPath := inferProjectPath(worktree, projectDirs); projectPath != "" {
+			return projectPath
+		}
+	}
 	if projectPath := projectPathForSessionPrefix(entry, projectDirs); projectPath != "" {
 		return projectPath
-	}
-	if worktree := strings.TrimSpace(entry.Worktree); worktree != "" {
-		return inferProjectPath(worktree, projectDirs)
 	}
 	return ""
 }
@@ -925,16 +927,20 @@ func projectPathForSessionPrefix(entry InventoryEntry, projectDirs []string) str
 	if prefix == "" {
 		return ""
 	}
+	match := ""
 	for _, projectDir := range projectDirs {
 		projectDir = strings.TrimSpace(projectDir)
 		if projectDir == "" {
 			continue
 		}
 		if naming.ProjectSessionPrefix(projectDir) == prefix {
-			return projectDir
+			if match != "" {
+				return ""
+			}
+			match = projectDir
 		}
 	}
-	return ""
+	return match
 }
 
 func inferProjectPath(worktree string, projectDirs []string) string {

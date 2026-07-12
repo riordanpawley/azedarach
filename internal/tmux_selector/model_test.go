@@ -73,6 +73,45 @@ func TestTypedColumnBoardKeepsSelectedGroupVisibleOnNarrowViewport(t *testing.T)
 	}
 }
 
+func TestTypedColumnBoardHorizontalMovementClampsAcrossUnevenColumns(t *testing.T) {
+	view := domain.DefaultBoardView()
+	entries := []InventoryEntry{
+		{IssueID: "left-1", TaskTitle: "Left one", ViewGroupID: "left", ViewGroupTitle: "Left"},
+		{IssueID: "left-2", TaskTitle: "Left two", ViewGroupID: "left", ViewGroupTitle: "Left"},
+		{IssueID: "left-3", TaskTitle: "Left three", ViewGroupID: "left", ViewGroupTitle: "Left"},
+		{IssueID: "middle-1", TaskTitle: "Middle one", ViewGroupID: "middle", ViewGroupTitle: "Middle"},
+		{IssueID: "right-1", TaskTitle: "Right one", ViewGroupID: "right", ViewGroupTitle: "Right"},
+		{IssueID: "right-2", TaskTitle: "Right two", ViewGroupID: "right", ViewGroupTitle: "Right"},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{View: view, Entries: entries}})
+	model.loading, model.width, model.height, model.cursor = false, 90, 14, 2
+	model.snapshot = Snapshot{View: view, Entries: entries}
+
+	model = updateKey(t, model, "right")
+	if model.cursor != 3 {
+		t.Fatalf("right into shorter column cursor = %d, want clamped middle row 0", model.cursor)
+	}
+	model = updateKey(t, model, "right")
+	if model.cursor != 4 {
+		t.Fatalf("right into next column cursor = %d, want right row 0", model.cursor)
+	}
+	model = updateKey(t, model, "down")
+	if model.cursor != 5 {
+		t.Fatalf("down cursor = %d, want column-local right row 1", model.cursor)
+	}
+	model = updateKey(t, model, "left")
+	if model.cursor != 3 {
+		t.Fatalf("left into shorter column cursor = %d, want clamped middle row 0", model.cursor)
+	}
+
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 50, Height: 10})
+	model = updated.(Model)
+	rendered := model.View()
+	if !strings.Contains(rendered, "Middle one") {
+		t.Fatalf("selected card lost after resize/scroll:\n%s", rendered)
+	}
+}
+
 func (f fakeSnapshotLoader) ListTasksSnapshot(context.Context) (Snapshot, error) {
 	return f.snapshot, f.err
 }
