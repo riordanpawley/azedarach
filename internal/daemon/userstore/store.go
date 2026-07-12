@@ -672,12 +672,12 @@ func insertTask(ctx context.Context, tx *sql.Tx, projectID string, task domain.T
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO project_issue_projection(
 project_id,issue_id,title,description,notes,design,acceptance,assignee,labels_json,estimate,implementations_json,
-status,lifecycle,review_state,display_phase,closed_outcome,archive_state,deletion_state,review_ready,waiting_human,waiting_human_source,waiting_human_reason,waiting_ai,human_attention_rank,
+status,lifecycle,review_state,display_phase,closed_outcome,archive_state,review_ready,waiting_human,waiting_human_source,waiting_human_reason,waiting_ai,human_attention_rank,
 priority,issue_type,parent_issue_id,has_tmux_session,origin,pr_number,pr_remote_key,pr_display_key,pr_url,pr_state,pr_draft,pr_checks_status,
 ownership_owner_id,ownership_owner_kind,ownership_claimed_at,ownership_expires_at,coordination_leases_json,operation_blockers_json,fact_reasons_json,
-git_diff_total,session_rank,runtime_updated_at,created_at,updated_at) VALUES(`+strings.TrimSuffix(strings.Repeat("?,", 48), ",")+`)`,
+git_diff_total,session_rank,runtime_updated_at,created_at,updated_at) VALUES(`+strings.TrimSuffix(strings.Repeat("?,", 47), ",")+`)`,
 		projectID, task.ID.String(), task.Title, task.Description, task.Notes, task.Design, task.Acceptance, task.Assignee, labels, estimate, impls,
-		string(task.Status), string(state.Workflow()), string(state.Review()), string(facts.DisplayPhase), string(state.CloseOutcome()), string(state.Archive()), string(state.Deletion()), boolInt(domain.TaskReviewReady(task)), boolInt(facts.WaitingHuman), string(facts.WaitingHumanSource), facts.WaitingHumanReason, boolInt(waitingAI), int(domain.HumanAttentionRank(task)),
+		string(task.Status), string(state.Workflow()), string(state.Review()), string(facts.DisplayPhase), string(state.CloseOutcome()), string(state.Archive()), boolInt(domain.TaskReviewReady(task)), boolInt(facts.WaitingHuman), string(facts.WaitingHumanSource), facts.WaitingHumanReason, boolInt(waitingAI), int(domain.HumanAttentionRank(task)),
 		int(task.Priority), string(task.Type), parentID, boolInt(task.HasTmuxSession), task.Origin, pr.Number, pr.RemoteKey, pr.DisplayKey, pr.URL, pr.State, boolInt(pr.Draft), pr.ChecksStatus,
 		ownerID, ownerKind, ownershipClaimed, ownershipExpires, leases, blockers, reasons, task.GitAdditions+task.GitDeletions, projectionSessionRank(task), runtimeUpdated, formatTime(task.CreatedAt), formatTime(task.UpdatedAt))
 	if err != nil {
@@ -1015,7 +1015,7 @@ func hydratedIssueIDs(ids []protocol.ScopedIssueID, projectID string) []string {
 
 func (s *Store) tasks(ctx context.Context, db queryer, projectID, query string, view *domain.BoardView, hydrate []string) ([]domain.Task, error) {
 	q := `SELECT i.issue_id,i.title,i.description,i.notes,i.design,i.acceptance,i.assignee,i.labels_json,i.estimate,i.implementations_json,
-i.status,i.lifecycle,i.review_state,i.closed_outcome,i.archive_state,i.deletion_state,i.waiting_human,i.waiting_human_source,i.waiting_human_reason,i.waiting_ai,
+i.status,i.lifecycle,i.review_state,i.closed_outcome,i.archive_state,i.waiting_human,i.waiting_human_source,i.waiting_human_reason,i.waiting_ai,
 i.priority,i.issue_type,i.parent_issue_id,i.has_tmux_session,i.origin,i.pr_number,i.pr_remote_key,i.pr_display_key,i.pr_url,i.pr_state,i.pr_draft,i.pr_checks_status,
 i.ownership_owner_id,i.ownership_owner_kind,i.ownership_claimed_at,i.ownership_expires_at,i.coordination_leases_json,i.operation_blockers_json,i.fact_reasons_json,i.runtime_updated_at,i.created_at,i.updated_at,
 s.issue_id,s.role,s.scope_kind,s.scope_id,s.state,s.activity,s.activity_source,s.total_count,s.active_count,s.paused_count,s.tmux_attached,s.tmux_attached_count,s.started_at,s.worktree,s.devserver_port,s.devserver_command,s.devserver_running,s.updated_at,
@@ -1062,7 +1062,7 @@ WHERE i.project_id=?`
 		var t domain.Task
 		var labels, impls, leases, blockers, reasons, conflicts []byte
 		var estimate sql.NullInt64
-		var lifecycle, review, outcome, archive, deletion string
+		var lifecycle, review, outcome, archive string
 		var parent string
 		var hasTmux, prDraft bool
 		var pr domain.PullRequest
@@ -1080,18 +1080,18 @@ WHERE i.project_id=?`
 		var ahead, behind, additions, deletions sql.NullInt64
 		var uncommitted, hasConflicts sql.NullBool
 		if err = rows.Scan(&t.ID, &t.Title, &t.Description, &t.Notes, &t.Design, &t.Acceptance, &t.Assignee, &labels, &estimate, &impls,
-			&t.Status, &lifecycle, &review, &outcome, &archive, &deletion, &t.Facts.WaitingHuman, &t.Facts.WaitingHumanSource, &t.Facts.WaitingHumanReason, &t.Facts.WaitingAI,
+			&t.Status, &lifecycle, &review, &outcome, &archive, &t.Facts.WaitingHuman, &t.Facts.WaitingHumanSource, &t.Facts.WaitingHumanReason, &t.Facts.WaitingAI,
 			&t.Priority, &t.Type, &parent, &hasTmux, &t.Origin, &pr.Number, &pr.RemoteKey, &pr.DisplayKey, &pr.URL, &pr.State, &prDraft, &pr.ChecksStatus,
 			&ownerID, &ownerKind, &ownerClaimed, &ownerExpires, &leases, &blockers, &reasons, &runtimeUpdated, &created, &updated,
 			&sessionIssue, &sessRole, &sessScopeKind, &sessScopeID, &sessState, &sessActivity, &sessActivitySource, &sessTotal, &sessActive, &sessPaused, &sessAttached, &sessAttachedCount, &sessStarted, &sessWorktree, &devPort, &devCommand, &devRunning, &sessUpdated,
 			&worktreeIssue, &worktreePath, &ahead, &behind, &additions, &deletions, &uncommitted, &hasConflicts, &conflicts); err != nil {
 			return nil, err
 		}
-		t.State, err = domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflow(lifecycle), Review: domain.IssueReviewState(review), CloseOutcome: domain.IssueCloseOutcome(outcome), Archive: domain.IssueArchiveState(archive), Deletion: domain.IssueDeletionState(deletion)})
+		t.State, err = domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflow(lifecycle), Review: domain.IssueReviewState(review), CloseOutcome: domain.IssueCloseOutcome(outcome), Archive: domain.IssueArchiveState(archive)})
 		if err != nil {
 			return nil, fmt.Errorf("hydrate projected issue %s state: %w", t.ID, err)
 		}
-		t.Facts.LifecycleState, t.Facts.ReviewState, t.Facts.ClosedOutcome, t.Facts.ArchiveState, t.Facts.DeletionState = t.State.Workflow(), t.State.Review(), t.State.CloseOutcome(), t.State.Archive(), t.State.Deletion()
+		t.Facts.LifecycleState, t.Facts.ReviewState, t.Facts.ClosedOutcome, t.Facts.ArchiveState = t.State.Workflow(), t.State.Review(), t.State.CloseOutcome(), t.State.Archive()
 		t.Facts.BoardPhase, t.Facts.DisplayPhase, t.Facts.DisplayStatus = t.State.BoardPhase(), t.State.DisplayPhase(), t.State.DisplayPhase().FilterStatus()
 		t.HasTmuxSession = hasTmux
 		pr.Draft = prDraft

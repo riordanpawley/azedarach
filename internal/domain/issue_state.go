@@ -69,13 +69,6 @@ const (
 	IssueArchiveArchived IssueArchiveState = "archived"
 )
 
-type IssueDeletionState string
-
-const (
-	IssueDeletionPresent    IssueDeletionState = "present"
-	IssueDeletionTombstoned IssueDeletionState = "tombstoned"
-)
-
 type IssueBoardPhase string
 
 const (
@@ -104,7 +97,6 @@ type IssueStateParts struct {
 	Review       IssueReviewState
 	CloseOutcome IssueCloseOutcome
 	Archive      IssueArchiveState
-	Deletion     IssueDeletionState
 }
 
 type IssueState struct {
@@ -120,11 +112,10 @@ type CanonicalIssueStateParts struct {
 }
 
 type LegacyIssueStateInput struct {
-	Status     Status
-	Priority   Priority
-	Archived   bool
-	Tombstoned bool
-	Cancelled  bool
+	Status    Status
+	Priority  Priority
+	Archived  bool
+	Cancelled bool
 }
 
 func IssueStateFromLegacy(input LegacyIssueStateInput) (IssueState, error) {
@@ -133,7 +124,6 @@ func IssueStateFromLegacy(input LegacyIssueStateInput) (IssueState, error) {
 		Review:       IssueReviewNone,
 		CloseOutcome: IssueCloseNone,
 		Archive:      archiveStateFromBool(input.Archived),
-		Deletion:     deletionStateFromBool(input.Tombstoned),
 	}
 
 	switch normalizeStatus(input.Status) {
@@ -174,7 +164,6 @@ func IssueStateFromStatus(status Status) (IssueState, error) {
 		Review:       IssueReviewNone,
 		CloseOutcome: IssueCloseNone,
 		Archive:      IssueArchiveLive,
-		Deletion:     IssueDeletionPresent,
 	}
 	switch normalizeStatus(status) {
 	case StatusOpen:
@@ -279,10 +268,6 @@ func (s IssueState) Archive() IssueArchiveState {
 	return IssueArchiveLive
 }
 
-func (s IssueState) Deletion() IssueDeletionState {
-	return IssueDeletionPresent
-}
-
 func (s IssueState) BoardPhase() IssueBoardPhase {
 	if err := s.Validate(); err != nil {
 		return IssueBoardUnknown
@@ -330,10 +315,6 @@ func (s IssueState) IsArchived() bool {
 	return s.Visibility == IssueVisibilityArchived
 }
 
-func (s IssueState) IsTombstoned() bool {
-	return false
-}
-
 func (s IssueState) IsClosed() bool {
 	return s.Validate() == nil && (s.Disposition == IssueDispositionCompleted || s.Disposition == IssueDispositionCancelled)
 }
@@ -361,6 +342,9 @@ func (s IssueState) Validate() error {
 	if s.Disposition != IssueDispositionReady && s.Engagement != IssueEngagementIdle {
 		return fmt.Errorf("issue disposition %s requires idle engagement, got %s", s.Disposition, s.Engagement)
 	}
+	if s.Visibility == IssueVisibilityArchived && s.Engagement != IssueEngagementIdle {
+		return fmt.Errorf("archived issue requires idle engagement, got %s", s.Engagement)
+	}
 	return nil
 }
 
@@ -377,9 +361,6 @@ func ValidateIssueStateTransition(from, to IssueState) error {
 	if from.IsArchived() || to.IsArchived() {
 		return fmt.Errorf("workflow transition cannot change archived issue state")
 	}
-	if from.IsTombstoned() || to.IsTombstoned() {
-		return fmt.Errorf("workflow transition cannot change tombstoned issue state")
-	}
 	if issueStateTransitionAllowed(from, to) {
 		return nil
 	}
@@ -395,9 +376,6 @@ func normalizeIssueStateParts(parts IssueStateParts) IssueStateParts {
 	}
 	if parts.Archive == "" {
 		parts.Archive = IssueArchiveLive
-	}
-	if parts.Deletion == "" {
-		parts.Deletion = IssueDeletionPresent
 	}
 	return parts
 }
@@ -422,11 +400,6 @@ func validateIssueStateParts(parts IssueStateParts) error {
 	case IssueArchiveLive, IssueArchiveArchived:
 	default:
 		return fmt.Errorf("invalid issue archive state: %s", parts.Archive)
-	}
-	switch parts.Deletion {
-	case IssueDeletionPresent, IssueDeletionTombstoned:
-	default:
-		return fmt.Errorf("invalid issue deletion state: %s", parts.Deletion)
 	}
 	if parts.Review == IssueReviewRequested && parts.Workflow != IssueWorkflowActive {
 		return fmt.Errorf("review state %s requires active workflow, got %s", parts.Review, parts.Workflow)
@@ -527,13 +500,6 @@ func archiveStateFromBool(archived bool) IssueArchiveState {
 		return IssueArchiveArchived
 	}
 	return IssueArchiveLive
-}
-
-func deletionStateFromBool(tombstoned bool) IssueDeletionState {
-	if tombstoned {
-		return IssueDeletionTombstoned
-	}
-	return IssueDeletionPresent
 }
 
 func (p IssueDisplayPhase) Label() string {

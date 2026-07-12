@@ -82,10 +82,16 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 			result.WorktreesRefreshed = worktreeCount
 		}
 		if sessionResult, err := d.reconcileTmuxAndDaemonSessions(ctx, result.ProjectID.String(), ""); err != nil {
+			result.RecreatedTmuxSessions += sessionResult.RecreatedTmuxSessions
+			result.AlignedDaemonSessions += sessionResult.AlignedDaemonSessions
+			result.IssueLifecycleRepairs += sessionResult.RepairedIssueLifecycle
+			result.IssueLifecycleDivergences = append(result.IssueLifecycleDivergences, sessionResult.LifecycleDivergences...)
 			errs = append(errs, fmt.Errorf("reconcile sessions: %w", err))
 		} else {
 			result.RecreatedTmuxSessions = sessionResult.RecreatedTmuxSessions
 			result.AlignedDaemonSessions = sessionResult.AlignedDaemonSessions
+			result.IssueLifecycleRepairs = sessionResult.RepairedIssueLifecycle
+			result.IssueLifecycleDivergences = append(result.IssueLifecycleDivergences, sessionResult.LifecycleDivergences...)
 		}
 	}
 	if shouldReconcileInteractionStaleness && hasSessionRuntime {
@@ -147,17 +153,15 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 		}
 	}
 	if d.tmux != nil && d.sessionStore != nil && d.sessionRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil {
-		if len(issueIDs) > runtimeReconcileIssueRepairLimit {
-			if err := d.refreshIssueSessionRuntimeState(ctx, result.ProjectID.String(), issueIDs); err != nil {
-				errs = append(errs, fmt.Errorf("refresh issue session runtime state: %w", err))
-			}
-		} else {
-			sessionResult, err := d.reconcileTmuxAndDaemonSessionsForIssues(ctx, result.ProjectID.String(), issueIDs)
+		for start := 0; start < len(issueIDs); start += runtimeReconcileIssueRepairLimit {
+			end := min(start+runtimeReconcileIssueRepairLimit, len(issueIDs))
+			sessionResult, err := d.reconcileTmuxAndDaemonSessionsForIssues(ctx, result.ProjectID.String(), issueIDs[start:end])
+			result.RecreatedTmuxSessions += sessionResult.RecreatedTmuxSessions
+			result.AlignedDaemonSessions += sessionResult.AlignedDaemonSessions
+			result.IssueLifecycleRepairs += sessionResult.RepairedIssueLifecycle
+			result.IssueLifecycleDivergences = append(result.IssueLifecycleDivergences, sessionResult.LifecycleDivergences...)
 			if err != nil {
-				errs = append(errs, fmt.Errorf("reconcile issue sessions (%d targets): %w", len(issueIDs), err))
-			} else {
-				result.RecreatedTmuxSessions += sessionResult.RecreatedTmuxSessions
-				result.AlignedDaemonSessions += sessionResult.AlignedDaemonSessions
+				errs = append(errs, fmt.Errorf("reconcile issue sessions (%d targets): %w", end-start, err))
 			}
 		}
 	}
@@ -1028,6 +1032,8 @@ func summarizeRuntimeReconcileSweep(results []protocol.RuntimeReconcileResponseB
 		summary.WorktreesRefreshed += result.WorktreesRefreshed
 		summary.RecreatedTmuxSessions += result.RecreatedTmuxSessions
 		summary.AlignedDaemonSessions += result.AlignedDaemonSessions
+		summary.IssueLifecycleRepairs += result.IssueLifecycleRepairs
+		summary.IssueLifecycleDivergences = append(summary.IssueLifecycleDivergences, result.IssueLifecycleDivergences...)
 		summary.AdvisorSessionsRecovered += result.AdvisorSessionsRecovered
 		summary.AdvisorSessionsCleaned += result.AdvisorSessionsCleaned
 	}

@@ -12801,11 +12801,11 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 	} {
 		if _, err := db.ExecContext(ctx, `
 			INSERT INTO issues (
-				id, title, description, status, priority, issue_type,
+				id, title, description, status, disposition, engagement, visibility, lifecycle_state, closed_outcome, review_state, priority, issue_type,
 				created_at, updated_at, closed_at, assignee, labels_json,
 				implementations_json, design, notes, acceptance, estimate, deleted_at
 			)
-			VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+			VALUES (?, ?, NULL, ?, 'ready', 'idle', 'live', 'open', 'none', 'none', ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
 		`, row.id, row.title, string(domain.StatusOpen), int(domain.P3), string(domain.TypeTask), now, now); err != nil {
 			t.Fatalf("insert issue %s: %v", row.id, err)
 		}

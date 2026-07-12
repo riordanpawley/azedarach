@@ -796,6 +796,12 @@ func TestClient_NormalizeProviderDisplayKeyIssueIDsMigratesDurableRefs(t *testin
 			title,
 			description,
 			status,
+			disposition,
+			engagement,
+			visibility,
+			lifecycle_state,
+			closed_outcome,
+			review_state,
 			priority,
 			issue_type,
 			created_at,
@@ -803,7 +809,7 @@ func TestClient_NormalizeProviderDisplayKeyIssueIDsMigratesDurableRefs(t *testin
 			labels_json,
 			implementations_json
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, 'ready', 'working', 'live', 'active', 'none', 'none', ?, ?, ?, ?, ?, ?)
 	`, "CHE-02091", "Imported Linear issue", "legacy id", string(domain.StatusInProgress), int(domain.P1), string(domain.TypeTask), now, now, "[]", "[]")
 	require.NoError(t, err)
 
@@ -2360,7 +2366,7 @@ func TestClient_IssueOwnershipClaimConflictReleaseAndExpiredTakeover(t *testing.
 	require.NoError(t, err)
 	defer db.Close()
 	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
-	_, err = db.ExecContext(ctx, `UPDATE issues SET owner_expires_at = ? WHERE id = ?`, past, taskID)
+	_, err = db.ExecContext(ctx, `UPDATE issue_coordination_leases SET expires_at = ? WHERE issue_id = ? AND purpose = 'execution'`, past, taskID)
 	require.NoError(t, err)
 
 	takenOver, err := client.ClaimOwnershipWithRuntime(ctx, "project-1", taskID, OwnershipClaimParams{

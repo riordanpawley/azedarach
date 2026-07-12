@@ -91,7 +91,7 @@ func (c *Client) routeOrchestrationCandidateLocked(ctx context.Context, actorID 
 			if state.Workflow() != domain.IssueWorkflowOpen {
 				return nil, false, c.wrapError("orchestration-route", route.IssueID, fmt.Errorf("%w: backlog routing requires open lifecycle, got %s", domain.ErrConflict, state.Workflow()))
 			}
-			next, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowBacklog, Review: domain.IssueReviewNone, CloseOutcome: domain.IssueCloseNone, Archive: state.Archive(), Deletion: state.Deletion()})
+			next, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowBacklog, Review: domain.IssueReviewNone, CloseOutcome: domain.IssueCloseNone, Archive: state.Archive()})
 			if err != nil {
 				return nil, false, err
 			}
@@ -100,7 +100,7 @@ func (c *Client) routeOrchestrationCandidateLocked(ctx context.Context, actorID 
 			}
 			write := issueStateWriteValuesFromState(next, nil)
 			nowRaw := now.Format(time.RFC3339Nano)
-			if _, err := tx.ExecContext(ctx, `UPDATE issues SET status=?, lifecycle_state=?, closed_outcome=?, review_state=?, updated_at=? WHERE id=? AND archived_at IS NULL`, write.LegacyStatus, write.Lifecycle, write.ClosedOutcome, write.Review, nowRaw, route.IssueID); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE issues SET disposition=?, engagement=?, visibility=?, status=?, lifecycle_state=?, closed_outcome=?, review_state=?, updated_at=? WHERE id=? AND visibility='live'`, write.Disposition, write.Engagement, write.Visibility, write.LegacyStatus, write.Lifecycle, write.ClosedOutcome, write.Review, nowRaw, route.IssueID); err != nil {
 				return nil, false, err
 			}
 			if err := c.appendIssueObservationEvent(ctx, tx, route.IssueID, domain.IssueEventIssueStatusChanged, map[string]any{"from_status": string(task.Status), "to_status": string(write.LegacyStatus), "from_lifecycle": string(state.Workflow()), "to_lifecycle": string(next.Workflow()), "orchestration_route": true}); err != nil {
@@ -134,7 +134,7 @@ func (c *Client) routeOrchestrationCandidateLocked(ctx context.Context, actorID 
 	default:
 		return nil, false, fmt.Errorf("unsupported orchestration route kind %q", route.Kind)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE issues SET updated_at=? WHERE id=? AND archived_at IS NULL`, now.Format(time.RFC3339Nano), route.IssueID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE issues SET updated_at=? WHERE id=? AND visibility='live'`, now.Format(time.RFC3339Nano), route.IssueID); err != nil {
 		return nil, false, err
 	}
 
@@ -155,7 +155,12 @@ func orchestrationRouteTaskForUpdate(ctx context.Context, tx *sql.Tx, issueID st
 	var priority int
 	var ownerID, ownerKind, claimedAt, expiresAt string
 	var cols issueStateColumns
-	err := tx.QueryRowContext(ctx, `SELECT id, title, COALESCE(description,''), COALESCE(acceptance,''), status, priority, COALESCE(lifecycle_state,''), COALESCE(closed_outcome,''), COALESCE(review_state,''), archived_at, deleted_at, COALESCE(owner_id,''), COALESCE(owner_kind,''), COALESCE(owner_claimed_at,''), COALESCE(owner_expires_at,'') FROM issues WHERE id=? AND archived_at IS NULL`, strings.TrimSpace(issueID)).Scan(&task.ID, &task.Title, &task.Description, &task.Acceptance, &cols.LegacyStatus, &priority, &cols.Lifecycle, &cols.ClosedOutcome, &cols.Review, &cols.ArchivedAt, &cols.DeletedAt, &ownerID, &ownerKind, &claimedAt, &expiresAt)
+	err := tx.QueryRowContext(ctx, `SELECT i.id, i.title, COALESCE(i.description,''), COALESCE(i.acceptance,''), i.status, i.priority, COALESCE(i.disposition,''), COALESCE(i.engagement,''), COALESCE(i.visibility,''), i.archived_at,
+		COALESCE((SELECT owner_id FROM issue_coordination_leases l WHERE l.issue_id=i.id AND l.purpose='execution'),''),
+		COALESCE((SELECT owner_kind FROM issue_coordination_leases l WHERE l.issue_id=i.id AND l.purpose='execution'),''),
+		COALESCE((SELECT claimed_at FROM issue_coordination_leases l WHERE l.issue_id=i.id AND l.purpose='execution'),''),
+		COALESCE((SELECT expires_at FROM issue_coordination_leases l WHERE l.issue_id=i.id AND l.purpose='execution'),'')
+		FROM issues i WHERE i.id=? AND i.visibility='live'`, strings.TrimSpace(issueID)).Scan(&task.ID, &task.Title, &task.Description, &task.Acceptance, &cols.LegacyStatus, &priority, &cols.Disposition, &cols.Engagement, &cols.Visibility, &cols.ArchivedAt, &ownerID, &ownerKind, &claimedAt, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Task{}, domain.IssueState{}, domain.ErrNotFound
 	}
@@ -193,10 +198,6 @@ func releaseOrchestrationExecutionLease(ctx context.Context, c *Client, tx *sql.
 		return fmt.Errorf("%w: execution lease owned by %s", domain.ErrConflict, task.Ownership.OwnerID)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases WHERE issue_id=? AND purpose=?`, task.ID, domain.CoordinationLeaseExecution); err != nil {
-		return err
-	}
-	nowRaw := now.Format(time.RFC3339Nano)
-	if _, err := tx.ExecContext(ctx, `UPDATE issues SET owner_id=NULL, owner_kind=NULL, owner_claimed_at=NULL, owner_expires_at=NULL, updated_at=? WHERE id=?`, nowRaw, task.ID); err != nil {
 		return err
 	}
 	return c.appendIssueObservationEvent(ctx, tx, task.ID.String(), domain.IssueEventIssueOwnershipChanged, map[string]any{"action": "released", "released_by": actorID, "purpose": domain.CoordinationLeaseExecution, "orchestration_route": kind})

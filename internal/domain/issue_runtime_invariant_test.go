@@ -11,7 +11,7 @@ func TestManagedRuntimeLifecycleCartesianProduct(t *testing.T) {
 			for _, visibility := range visibilities {
 				parts := CanonicalIssueStateParts{Disposition: disposition, Engagement: engagement, Visibility: visibility}
 				state, stateErr := NewCanonicalIssueState(parts)
-				if disposition != IssueDispositionReady && engagement != IssueEngagementIdle {
+				if (disposition != IssueDispositionReady || visibility == IssueVisibilityArchived) && engagement != IssueEngagementIdle {
 					if stateErr == nil {
 						t.Fatalf("NewCanonicalIssueState(%+v) accepted non-ready engagement", parts)
 					}

@@ -12,7 +12,6 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 		boardPhase IssueBoardPhase
 		display    IssueDisplayPhase
 		archive    IssueArchiveState
-		deletion   IssueDeletionState
 	}{
 		{
 			name:       "p4 open issue is backlog",
@@ -23,7 +22,6 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			boardPhase: IssueBoardBacklog,
 			display:    IssueDisplayBacklog,
 			archive:    IssueArchiveLive,
-			deletion:   IssueDeletionPresent,
 		},
 		{
 			name:       "non backlog open issue is open",
@@ -34,7 +32,6 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			boardPhase: IssueBoardOpen,
 			display:    IssueDisplayOpen,
 			archive:    IssueArchiveLive,
-			deletion:   IssueDeletionPresent,
 		},
 		{
 			name:       "in progress issue is active",
@@ -45,7 +42,6 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			boardPhase: IssueBoardActive,
 			display:    IssueDisplayActive,
 			archive:    IssueArchiveLive,
-			deletion:   IssueDeletionPresent,
 		},
 		{
 			name:       "in review issue is active with review requested",
@@ -56,7 +52,6 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			boardPhase: IssueBoardReview,
 			display:    IssueDisplayReview,
 			archive:    IssueArchiveLive,
-			deletion:   IssueDeletionPresent,
 		},
 		{
 			name:       "closed issue defaults to completed",
@@ -67,7 +62,6 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			boardPhase: IssueBoardClosed,
 			display:    IssueDisplayDone,
 			archive:    IssueArchiveLive,
-			deletion:   IssueDeletionPresent,
 		},
 		{
 			name:       "cancelled legacy status maps to cancelled closure",
@@ -78,7 +72,6 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			boardPhase: IssueBoardClosed,
 			display:    IssueDisplayCancelled,
 			archive:    IssueArchiveLive,
-			deletion:   IssueDeletionPresent,
 		},
 		{
 			name:       "cancelled flag overrides closed outcome",
@@ -89,18 +82,16 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			boardPhase: IssueBoardClosed,
 			display:    IssueDisplayCancelled,
 			archive:    IssueArchiveLive,
-			deletion:   IssueDeletionPresent,
 		},
 		{
-			name:       "legacy issue tombstone is not durable issue state",
-			input:      LegacyIssueStateInput{Status: StatusOpen, Priority: P2, Archived: true, Tombstoned: true},
+			name:       "legacy archived issue maps only visibility",
+			input:      LegacyIssueStateInput{Status: StatusOpen, Priority: P2, Archived: true},
 			workflow:   IssueWorkflowOpen,
 			review:     IssueReviewNone,
 			close:      IssueCloseNone,
 			boardPhase: IssueBoardOpen,
 			display:    IssueDisplayOpen,
 			archive:    IssueArchiveArchived,
-			deletion:   IssueDeletionPresent,
 		},
 	}
 
@@ -127,9 +118,6 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			}
 			if got.Archive() != tt.archive {
 				t.Errorf("Archive() = %s, want %s", got.Archive(), tt.archive)
-			}
-			if got.Deletion() != tt.deletion {
-				t.Errorf("Deletion() = %s, want %s", got.Deletion(), tt.deletion)
 			}
 		})
 	}
@@ -340,13 +328,6 @@ func TestNewIssueStateRejectsInvalidCombinations(t *testing.T) {
 			},
 		},
 		{
-			name: "unknown deletion state is rejected",
-			input: IssueStateParts{
-				Workflow: IssueWorkflowOpen,
-				Deletion: IssueDeletionState("missing"),
-			},
-		},
-		{
 			name: "missing workflow is rejected",
 			input: IssueStateParts{
 				Review: IssueReviewNone,
@@ -371,7 +352,6 @@ func TestIssueStateTransitions(t *testing.T) {
 	completed := mustIssueState(t, IssueStateParts{Workflow: IssueWorkflowClosed, CloseOutcome: IssueCloseCompleted})
 	cancelled := mustIssueState(t, IssueStateParts{Workflow: IssueWorkflowClosed, CloseOutcome: IssueCloseCancelled})
 	archivedOpen := mustIssueState(t, IssueStateParts{Workflow: IssueWorkflowOpen, Archive: IssueArchiveArchived})
-	tombstonedOpen := mustIssueState(t, IssueStateParts{Workflow: IssueWorkflowOpen, Deletion: IssueDeletionTombstoned})
 
 	valid := []struct {
 		name string
@@ -387,7 +367,6 @@ func TestIssueStateTransitions(t *testing.T) {
 		{"completed can reopen", completed, open},
 		{"cancelled can reopen", cancelled, backlog},
 		{"archived no-op is valid", archivedOpen, archivedOpen},
-		{"tombstoned no-op is valid", tombstonedOpen, tombstonedOpen},
 	}
 
 	for _, tt := range valid {

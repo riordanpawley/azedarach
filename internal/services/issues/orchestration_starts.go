@@ -78,9 +78,6 @@ func (c *Client) BeginOrchestrationStart(ctx context.Context, projectID, issueID
 					owner_kind=excluded.owner_kind, claimed_at=excluded.claimed_at, expires_at=NULL`, issueID, domain.CoordinationLeaseExecution, actorID, nowRaw); err != nil {
 					return err
 				}
-				if _, err := tx.ExecContext(ctx, `UPDATE issues SET owner_id=?, owner_kind='agent', owner_claimed_at=?, owner_expires_at=NULL, updated_at=? WHERE id=? AND archived_at IS NULL`, actorID, nowRaw, nowRaw, issueID); err != nil {
-					return err
-				}
 				if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, map[string]any{"action": "claimed", "owner_id": actorID, "owner_kind": "agent", "purpose": domain.CoordinationLeaseExecution, "orchestration_intent_key": intentKey}); err != nil {
 					return err
 				}
@@ -151,9 +148,6 @@ func (c *Client) finishOrchestrationStart(ctx context.Context, attempt Orchestra
 					return err
 				}
 				if n, _ := res.RowsAffected(); n > 0 {
-					if _, err := tx.ExecContext(ctx, `UPDATE issues SET owner_id=NULL, owner_kind=NULL, owner_claimed_at=NULL, owner_expires_at=NULL, updated_at=? WHERE id=? AND owner_id=?`, nowRaw, current.IssueID, current.ActorID); err != nil {
-						return err
-					}
 					if err := c.appendIssueObservationEvent(ctx, tx, current.IssueID, domain.IssueEventIssueOwnershipChanged, map[string]any{"action": "released", "released_by": current.ActorID, "purpose": domain.CoordinationLeaseExecution, "orchestration_compensation": true, "orchestration_intent_key": current.IntentKey}); err != nil {
 						return err
 					}

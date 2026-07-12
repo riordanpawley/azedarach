@@ -6005,6 +6005,40 @@ func TestReconcileRefreshesLifecycleBeforeRepairAcrossDaemons(t *testing.T) {
 	}
 }
 
+func TestReconcileIssueProjectionFailureFailsClosedForConfiguredProject(t *testing.T) {
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := issues.NewClient(repoDir, slog.Default())
+	if _, err := client.Create(context.Background(), issues.CreateTaskParams{Title: "configured", Type: domain.TypeTask}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CloseDB(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AZEDARACH_REFUSE_DB_PATH", filepath.Join(repoDir, ".azedarach", "azedarach.db"))
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: client}}
+	_, enabled, err := d.reconcileIssueKeyIndex(context.Background(), projectID, []string{"a"})
+	if !enabled || err == nil {
+		t.Fatalf("enabled=%t err=%v, want configured fail-closed error", enabled, err)
+	}
+}
+
+func TestManagedRuntimeLifecycleEvaluationConsultsInvariantPolicy(t *testing.T) {
+	old := daemonInvariantSourceMatrix[daemonInvariantSessionIssueLifecycle]
+	daemonInvariantSourceMatrix[daemonInvariantSessionIssueLifecycle] = daemonInvariantSourceProjection
+	t.Cleanup(func() { daemonInvariantSourceMatrix[daemonInvariantSessionIssueLifecycle] = old })
+	store := daemonstate.NewStore()
+	d := &Daemon{cfg: Config{RepoDir: ".", Logger: slog.Default()}, tmux: tmux.NewClient(newTestTmuxRunner("proj-a"), slog.Default()), sessionStore: store,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{".": git.NewWorktreeManager(&testGitRunner{}, ".", slog.Default())}}
+	_, err := d.reconcileTmuxAndDaemonSessions(context.Background(), "proj", "a")
+	if err == nil || !strings.Contains(err.Error(), "requires hybrid source") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)

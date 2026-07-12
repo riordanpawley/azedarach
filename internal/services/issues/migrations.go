@@ -88,7 +88,89 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 	if err != nil {
 		return fmt.Errorf("load migration %s: %w", id, err)
 	}
-	return client.applyMigration(ctx, db, id, sqlText)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	for _, column := range []struct{ name, ddl string }{{"disposition", "TEXT"}, {"engagement", "TEXT"}, {"visibility", "TEXT"}} {
+		exists, err := txColumnExists(ctx, tx, "issues", column.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE issues ADD COLUMN `+column.name+` `+column.ddl); err != nil {
+			return fmt.Errorf("add canonical issue state column %s: %w", column.name, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE issues SET
+		disposition = CASE
+			WHEN lifecycle_state='backlog' THEN 'backlog'
+			WHEN lifecycle_state IN ('open','active') THEN 'ready'
+			WHEN lifecycle_state='closed' AND closed_outcome='completed' THEN 'completed'
+			WHEN lifecycle_state='closed' AND closed_outcome='cancelled' THEN 'cancelled'
+		END,
+		engagement = CASE
+			WHEN lifecycle_state='active' AND review_state='requested' THEN 'review_requested'
+			WHEN lifecycle_state='active' THEN 'working'
+			ELSE 'idle'
+		END,
+		visibility = CASE WHEN archived_at IS NULL THEN 'live' ELSE 'archived' END
+		WHERE disposition IS NULL OR engagement IS NULL OR visibility IS NULL`); err != nil {
+		return fmt.Errorf("backfill canonical issue state: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS issue_coordination_leases (
+		issue_id TEXT NOT NULL, purpose TEXT NOT NULL CHECK (purpose IN ('execution','orchestration','review')),
+		owner_id TEXT NOT NULL, owner_kind TEXT NOT NULL, claimed_at TEXT NOT NULL, expires_at TEXT,
+		PRIMARY KEY(issue_id,purpose), FOREIGN KEY(issue_id) REFERENCES issues(id) ON DELETE CASCADE)`); err != nil {
+		return fmt.Errorf("ensure canonical claim authority: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS idx_issues_owner_active`); err != nil {
+		return err
+	}
+	for _, name := range []string{"owner_expires_at", "owner_claimed_at", "owner_kind", "owner_id"} {
+		exists, err := txColumnExists(ctx, tx, "issues", name)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE issues DROP COLUMN `+name); err != nil {
+			return fmt.Errorf("drop legacy issue claim mirror %s: %w", name, err)
+		}
+	}
+	for _, name := range []string{"issue_closed_runtime_guard_insert", "issue_closed_runtime_guard_update", "daemon_worktree_closed_issue_guard_insert", "daemon_worktree_closed_issue_guard_update", "daemon_session_closed_issue_guard_insert", "daemon_session_closed_issue_guard_update", "issue_dependency_closed_runtime_guard_insert", "issue_dependency_closed_runtime_guard_update", "issue_descendant_closed_ancestor_guard_update"} {
+		if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+name); err != nil {
+			return fmt.Errorf("drop legacy lifecycle authority trigger %s: %w", name, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+		return fmt.Errorf("apply migration %s: %w", id, err)
+	}
+	canonicalRuntimeGuards := issueClosedRuntimeV2TriggersSQL
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "BEFORE UPDATE OF lifecycle_state", "BEFORE UPDATE OF disposition")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "NEW.lifecycle_state = 'closed'", "NEW.disposition IN ('completed','cancelled')")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "NEW.lifecycle_state <> 'closed'", "NEW.disposition NOT IN ('completed','cancelled')")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "child.lifecycle_state <> 'closed'", "child.disposition NOT IN ('completed','cancelled')")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "i.lifecycle_state = 'closed'", "i.disposition IN ('completed','cancelled')")
+	if _, err := tx.ExecContext(ctx, canonicalRuntimeGuards); err != nil {
+		return fmt.Errorf("install canonical runtime aggregate guards: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(id,applied_at) VALUES(?,?)`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	tx = nil
+	return nil
 }
 
 const (
@@ -193,8 +275,14 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
-	if err := c.reconcileIssueStateModelV2Drift(ctx, db); err != nil {
-		return err
+	canonicalApplied, err := isMigrationApplied(ctx, db, "0045_issue_state_runtime_constraints")
+	if err != nil {
+		return fmt.Errorf("check canonical issue state migration: %w", err)
+	}
+	if !canonicalApplied {
+		if err := c.reconcileIssueStateModelV2Drift(ctx, db); err != nil {
+			return err
+		}
 	}
 
 	if err := repairAgentLearningBaseSchema(ctx, db); err != nil {
@@ -1509,7 +1597,6 @@ func issueStateModelV2Reconciliations(ctx context.Context, db sqlIssueQueryer) (
 				Review:       domain.IssueReviewState(reviewState),
 				CloseOutcome: domain.IssueCloseOutcome(closedOutcome),
 				Archive:      issueArchiveStateFromTimestamp(archivedAt),
-				Deletion:     domain.IssueDeletionPresent,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("issue %s v2 state: %w", id, err)
@@ -1532,7 +1619,6 @@ func issueStateModelV2Reconciliations(ctx context.Context, db sqlIssueQueryer) (
 			Review:       authoritativeState.Review(),
 			CloseOutcome: authoritativeState.CloseOutcome(),
 			Archive:      issueArchiveStateFromTimestamp(deletedAt),
-			Deletion:     authoritativeState.Deletion(),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("issue %s reconciled state: %w", id, err)

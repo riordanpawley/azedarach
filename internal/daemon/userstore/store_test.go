@@ -364,7 +364,7 @@ func TestArchivedIssueRemainsQueryable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	state, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowClosed, Review: domain.IssueReviewNone, CloseOutcome: domain.IssueCloseCompleted, Archive: domain.IssueArchiveArchived, Deletion: domain.IssueDeletionPresent})
+	state, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowClosed, Review: domain.IssueReviewNone, CloseOutcome: domain.IssueCloseCompleted, Archive: domain.IssueArchiveArchived})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -53,9 +53,10 @@ type resolvedSessionTarget struct {
 }
 
 type sessionRecoveryResult struct {
-	RecreatedTmuxSessions  int `json:"recreated_tmux_sessions"`
-	AlignedDaemonSessions  int `json:"aligned_daemon_sessions"`
-	RepairedIssueLifecycle int `json:"repaired_issue_lifecycle"`
+	RecreatedTmuxSessions  int                                   `json:"recreated_tmux_sessions"`
+	AlignedDaemonSessions  int                                   `json:"aligned_daemon_sessions"`
+	RepairedIssueLifecycle int                                   `json:"repaired_issue_lifecycle"`
+	LifecycleDivergences   []protocol.RuntimeLifecycleDivergence `json:"lifecycle_divergences,omitempty"`
 }
 
 type issueResourceLifecycleContext struct {
@@ -3045,6 +3046,10 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		return ok
 	}
 	var lifecycleInvariantErrs []error
+	lifecycleSource := sourceForInvariant(daemonInvariantSessionIssueLifecycle)
+	if !usesProjectionSource(lifecycleSource) || !usesTmuxSource(lifecycleSource) {
+		return result, fmt.Errorf("invariant %s requires hybrid source, got %s", daemonInvariantSessionIssueLifecycle, lifecycleSource)
+	}
 	enforceManagedRuntimeLifecycle := func(issueKey string) bool {
 		if !issueValidationEnabled {
 			return true
@@ -3056,10 +3061,18 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		issueClient := d.issueClientForProject(projectID)
 		action, invariantErr := domain.EvaluateManagedRuntimeLifecycle(task.State, true)
 		if action == domain.ManagedRuntimeLifecycleReject {
+			if recordErr := issueClient.RecordRuntimeDivergence(ctx, task.ID.String(), invariantErr.Error()); recordErr != nil {
+				lifecycleInvariantErrs = append(lifecycleInvariantErrs, fmt.Errorf("persist runtime divergence for issue %s: %w", task.ID, recordErr))
+			}
 			lifecycleInvariantErrs = append(lifecycleInvariantErrs, fmt.Errorf("managed session lifecycle invariant for issue %s: %w", task.ID, invariantErr))
+			result.LifecycleDivergences = append(result.LifecycleDivergences, protocol.RuntimeLifecycleDivergence{IssueID: task.ID.String(), Reason: invariantErr.Error()})
 			return false
 		}
 		if action != domain.ManagedRuntimeLifecycleRepairWorking {
+			if clearErr := issueClient.ClearRuntimeDivergence(ctx, task.ID.String()); clearErr != nil {
+				lifecycleInvariantErrs = append(lifecycleInvariantErrs, fmt.Errorf("clear runtime divergence for issue %s: %w", task.ID, clearErr))
+				return false
+			}
 			return true
 		}
 		repaired, updateErr := issueClient.RepairReadyIdleEngagement(ctx, task.ID.String())
@@ -3079,6 +3092,10 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 				return false
 			}
 			issuesByKey[issueKey] = refreshed
+			if clearErr := issueClient.ClearRuntimeDivergence(ctx, task.ID.String()); clearErr != nil {
+				lifecycleInvariantErrs = append(lifecycleInvariantErrs, fmt.Errorf("clear converged runtime divergence for issue %s: %w", task.ID, clearErr))
+				return false
+			}
 			return true
 		}
 		result.RepairedIssueLifecycle++
@@ -3089,6 +3106,10 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 				body, _ := json.Marshal(taskEventBodyFromTask(projectID, repairedTask))
 				d.hub.Publish(protocol.EventEnvelope{ProtocolVersion: protocol.CurrentVersion, ProjectID: naming.ProjectID(projectID), Revision: revision, Event: protocol.EventTaskUpdated, Kind: protocol.EnvelopeKindEvent, EmittedAt: time.Now().UTC(), Body: body})
 			}
+		}
+		if clearErr := issueClient.ClearRuntimeDivergence(ctx, task.ID.String()); clearErr != nil {
+			lifecycleInvariantErrs = append(lifecycleInvariantErrs, fmt.Errorf("clear repaired runtime divergence for issue %s: %w", task.ID, clearErr))
+			return false
 		}
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Info("session reconciliation repaired issue engagement", "project_id", projectID, "issue_id", task.ID.String(), "engagement", string(domain.IssueEngagementWorking))
@@ -3360,7 +3381,7 @@ func (d *Daemon) reconcileIssueKeyIndex(ctx context.Context, projectID string, i
 	}
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
-		return nil, false, nil
+		return nil, true, fmt.Errorf("configured project %s issue projection unavailable", projectID)
 	}
 	issueIDs = normalizeRuntimeReconcileIssueIDs(issueIDs)
 	var (
@@ -3376,7 +3397,7 @@ func (d *Daemon) reconcileIssueKeyIndex(ctx context.Context, projectID string, i
 				"error", err,
 			)
 		}
-		return nil, false, nil
+		return nil, true, fmt.Errorf("refresh configured project %s issue projection: %w", projectID, err)
 	}
 	index := make(map[string]domain.Task, len(tasks))
 	for _, task := range tasks {

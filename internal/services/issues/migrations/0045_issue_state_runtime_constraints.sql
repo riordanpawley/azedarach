@@ -1,16 +1,25 @@
 -- Persistent guards for local state-product invariants. Cross-module facts
 -- (notably tmux presence) remain daemon hybrid invariants.
 
--- Normalize valid legacy representations before installing fail-closed guards.
-UPDATE issues SET closed_at=COALESCE(closed_at, updated_at)
-  WHERE lifecycle_state='closed';
-UPDATE issues SET closed_at=NULL
-  WHERE lifecycle_state!='closed';
-UPDATE issues SET owner_kind=COALESCE(NULLIF(owner_kind,''),'agent'),
-  owner_claimed_at=COALESCE(owner_claimed_at,updated_at)
-  WHERE owner_id IS NOT NULL;
-UPDATE issues SET owner_kind=NULL, owner_claimed_at=NULL, owner_expires_at=NULL
-  WHERE owner_id IS NULL;
+INSERT INTO meta(key,value)
+SELECT 'issue:canonical_state_v3_archive_adapter_cutover',
+       json_object('cleared_equal_archive_delete_mirrors',COUNT(*),'recorded_at',strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+FROM issues WHERE deleted_at IS NOT NULL AND deleted_at=archived_at
+ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+UPDATE issues SET deleted_at=NULL
+WHERE deleted_at IS NOT NULL AND deleted_at=archived_at;
+
+CREATE TABLE IF NOT EXISTS issue_runtime_divergences (
+  issue_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('lifecycle_runtime')),
+  reason TEXT NOT NULL,
+  detected_at TEXT NOT NULL,
+  resolved_at TEXT,
+  PRIMARY KEY(issue_id,kind),
+  FOREIGN KEY(issue_id) REFERENCES issues(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_issue_runtime_divergences_active
+  ON issue_runtime_divergences(issue_id,detected_at) WHERE resolved_at IS NULL;
 
 CREATE TABLE issue_state_runtime_constraint_validation (
   ok INTEGER NOT NULL CHECK (ok = 1)
@@ -18,15 +27,21 @@ CREATE TABLE issue_state_runtime_constraint_validation (
 INSERT INTO issue_state_runtime_constraint_validation(ok)
 SELECT 0 WHERE EXISTS (
   SELECT 1 FROM issues WHERE
+	 COALESCE(disposition,'') NOT IN ('backlog','ready','completed','cancelled') OR
+	 COALESCE(engagement,'') NOT IN ('idle','working','review_requested') OR
+	 COALESCE(visibility,'') NOT IN ('live','archived') OR
+	 (disposition!='ready' AND engagement!='idle') OR
+	 (visibility='archived' AND engagement!='idle') OR
+	 deleted_at IS NOT NULL OR
+	 (visibility='live' AND archived_at IS NOT NULL) OR
+	 (visibility='archived' AND archived_at IS NULL) OR
     issue_type NOT IN ('task','bug','feature','epic','chore','investigation') OR
     lifecycle_state NOT IN ('backlog','open','active','closed') OR
     review_state NOT IN ('none','requested') OR
     closed_outcome NOT IN ('none','completed','cancelled') OR
     (review_state='requested' AND lifecycle_state!='active') OR
     (lifecycle_state='closed' AND (closed_outcome='none' OR closed_at IS NULL)) OR
-    (lifecycle_state!='closed' AND (closed_outcome!='none' OR closed_at IS NOT NULL)) OR
-    ((owner_id IS NULL) != (owner_kind IS NULL)) OR
-    ((owner_id IS NULL) != (owner_claimed_at IS NULL))
+    (lifecycle_state!='closed' AND (closed_outcome!='none' OR closed_at IS NOT NULL))
 );
 INSERT INTO issue_state_runtime_constraint_validation(ok)
 SELECT 0 WHERE EXISTS (
@@ -46,6 +61,17 @@ DROP TABLE issue_state_runtime_constraint_validation;
 CREATE TRIGGER issue_state_product_guard_insert
 BEFORE INSERT ON issues
 BEGIN
+  SELECT CASE WHEN COALESCE(NEW.disposition,'') NOT IN ('backlog','ready','completed','cancelled') THEN RAISE(ABORT, 'invalid disposition') END;
+  SELECT CASE WHEN COALESCE(NEW.engagement,'') NOT IN ('idle','working','review_requested') THEN RAISE(ABORT, 'invalid engagement') END;
+  SELECT CASE WHEN COALESCE(NEW.visibility,'') NOT IN ('live','archived') THEN RAISE(ABORT, 'invalid visibility') END;
+  SELECT CASE WHEN NEW.disposition!='ready' AND NEW.engagement!='idle' THEN RAISE(ABORT, 'non-ready issue requires idle engagement') END;
+  SELECT CASE WHEN NEW.visibility='archived' AND NEW.engagement!='idle' THEN RAISE(ABORT, 'archived issue requires idle engagement') END;
+  SELECT CASE WHEN NEW.deleted_at IS NOT NULL THEN RAISE(ABORT, 'issue deletion timestamp is not canonical authority') END;
+  SELECT CASE WHEN (NEW.visibility='live') != (NEW.archived_at IS NULL) THEN RAISE(ABORT, 'visibility/archive audit mismatch') END;
+  SELECT CASE WHEN NEW.lifecycle_state != CASE WHEN NEW.disposition='backlog' THEN 'backlog' WHEN NEW.disposition='ready' AND NEW.engagement='idle' THEN 'open' WHEN NEW.disposition='ready' THEN 'active' ELSE 'closed' END THEN RAISE(ABORT, 'legacy lifecycle projection mismatch') END;
+  SELECT CASE WHEN NEW.review_state != CASE WHEN NEW.engagement='review_requested' THEN 'requested' ELSE 'none' END THEN RAISE(ABORT, 'legacy review projection mismatch') END;
+  SELECT CASE WHEN NEW.closed_outcome != CASE WHEN NEW.disposition='completed' THEN 'completed' WHEN NEW.disposition='cancelled' THEN 'cancelled' ELSE 'none' END THEN RAISE(ABORT, 'legacy outcome projection mismatch') END;
+  SELECT CASE WHEN NEW.status != CASE WHEN NEW.disposition='completed' THEN 'closed' WHEN NEW.disposition='cancelled' THEN 'cancelled' WHEN NEW.engagement='review_requested' THEN 'in_review' WHEN NEW.engagement='working' THEN 'in_progress' ELSE 'open' END THEN RAISE(ABORT, 'legacy status projection mismatch') END;
   SELECT CASE WHEN NEW.issue_type NOT IN ('task','bug','feature','epic','chore','investigation')
     THEN RAISE(ABORT, 'invalid issue_type') END;
   SELECT CASE WHEN NEW.lifecycle_state NOT IN ('backlog','open','active','closed')
@@ -60,14 +86,22 @@ BEGIN
     THEN RAISE(ABORT, 'terminal issue requires outcome and closed_at') END;
   SELECT CASE WHEN NEW.lifecycle_state!='closed' AND (NEW.closed_outcome!='none' OR NEW.closed_at IS NOT NULL)
     THEN RAISE(ABORT, 'non-terminal issue cannot retain outcome or closed_at') END;
-  SELECT CASE WHEN (NEW.owner_id IS NULL) != (NEW.owner_kind IS NULL)
-    OR (NEW.owner_id IS NULL) != (NEW.owner_claimed_at IS NULL)
-    THEN RAISE(ABORT, 'issue owner fields must form a complete tuple') END;
 END;
 
 CREATE TRIGGER issue_state_product_guard_update
-BEFORE UPDATE OF issue_type,lifecycle_state,review_state,closed_outcome,closed_at,owner_id,owner_kind,owner_claimed_at ON issues
+BEFORE UPDATE OF issue_type,disposition,engagement,visibility,lifecycle_state,review_state,closed_outcome,closed_at ON issues
 BEGIN
+  SELECT CASE WHEN COALESCE(NEW.disposition,'') NOT IN ('backlog','ready','completed','cancelled') THEN RAISE(ABORT, 'invalid disposition') END;
+  SELECT CASE WHEN COALESCE(NEW.engagement,'') NOT IN ('idle','working','review_requested') THEN RAISE(ABORT, 'invalid engagement') END;
+  SELECT CASE WHEN COALESCE(NEW.visibility,'') NOT IN ('live','archived') THEN RAISE(ABORT, 'invalid visibility') END;
+  SELECT CASE WHEN NEW.disposition!='ready' AND NEW.engagement!='idle' THEN RAISE(ABORT, 'non-ready issue requires idle engagement') END;
+  SELECT CASE WHEN NEW.visibility='archived' AND NEW.engagement!='idle' THEN RAISE(ABORT, 'archived issue requires idle engagement') END;
+  SELECT CASE WHEN NEW.deleted_at IS NOT NULL THEN RAISE(ABORT, 'issue deletion timestamp is not canonical authority') END;
+  SELECT CASE WHEN (NEW.visibility='live') != (NEW.archived_at IS NULL) THEN RAISE(ABORT, 'visibility/archive audit mismatch') END;
+  SELECT CASE WHEN NEW.lifecycle_state != CASE WHEN NEW.disposition='backlog' THEN 'backlog' WHEN NEW.disposition='ready' AND NEW.engagement='idle' THEN 'open' WHEN NEW.disposition='ready' THEN 'active' ELSE 'closed' END THEN RAISE(ABORT, 'legacy lifecycle projection mismatch') END;
+  SELECT CASE WHEN NEW.review_state != CASE WHEN NEW.engagement='review_requested' THEN 'requested' ELSE 'none' END THEN RAISE(ABORT, 'legacy review projection mismatch') END;
+  SELECT CASE WHEN NEW.closed_outcome != CASE WHEN NEW.disposition='completed' THEN 'completed' WHEN NEW.disposition='cancelled' THEN 'cancelled' ELSE 'none' END THEN RAISE(ABORT, 'legacy outcome projection mismatch') END;
+  SELECT CASE WHEN NEW.status != CASE WHEN NEW.disposition='completed' THEN 'closed' WHEN NEW.disposition='cancelled' THEN 'cancelled' WHEN NEW.engagement='review_requested' THEN 'in_review' WHEN NEW.engagement='working' THEN 'in_progress' ELSE 'open' END THEN RAISE(ABORT, 'legacy status projection mismatch') END;
   SELECT CASE WHEN NEW.issue_type NOT IN ('task','bug','feature','epic','chore','investigation')
     THEN RAISE(ABORT, 'invalid issue_type') END;
   SELECT CASE WHEN NEW.lifecycle_state NOT IN ('backlog','open','active','closed')
@@ -82,10 +116,34 @@ BEGIN
     THEN RAISE(ABORT, 'terminal issue requires outcome and closed_at') END;
   SELECT CASE WHEN NEW.lifecycle_state!='closed' AND (NEW.closed_outcome!='none' OR NEW.closed_at IS NOT NULL)
     THEN RAISE(ABORT, 'non-terminal issue cannot retain outcome or closed_at') END;
-  SELECT CASE WHEN (NEW.owner_id IS NULL) != (NEW.owner_kind IS NULL)
-    OR (NEW.owner_id IS NULL) != (NEW.owner_claimed_at IS NULL)
-    THEN RAISE(ABORT, 'issue owner fields must form a complete tuple') END;
 END;
+
+CREATE TRIGGER issue_archive_aggregate_guard
+BEFORE UPDATE OF visibility ON issues
+WHEN NEW.visibility='archived'
+BEGIN
+  SELECT CASE WHEN EXISTS(SELECT 1 FROM issue_coordination_leases WHERE issue_id=NEW.id)
+    THEN RAISE(ABORT, 'archived issue cannot retain claims') END;
+  SELECT CASE WHEN EXISTS(SELECT 1 FROM daemon_worktree_projections WHERE issue_id=NEW.id AND trim(path)!='')
+    THEN RAISE(ABORT, 'archived issue cannot retain worktree') END;
+  SELECT CASE WHEN EXISTS(SELECT 1 FROM daemon_session_projections WHERE issue_id=NEW.id AND lower(trim(state))!='stopped')
+    THEN RAISE(ABORT, 'archived issue cannot retain live session') END;
+END;
+
+CREATE TRIGGER issue_lease_archived_guard
+BEFORE INSERT ON issue_coordination_leases
+WHEN EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id AND visibility='archived')
+BEGIN SELECT RAISE(ABORT, 'cannot claim archived issue'); END;
+
+CREATE TRIGGER issue_worktree_archived_guard
+BEFORE INSERT ON daemon_worktree_projections
+WHEN EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id AND visibility='archived')
+BEGIN SELECT RAISE(ABORT, 'cannot attach worktree to archived issue'); END;
+
+CREATE TRIGGER issue_session_archived_guard
+BEFORE INSERT ON daemon_session_projections
+WHEN EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id AND visibility='archived')
+BEGIN SELECT RAISE(ABORT, 'cannot attach session to archived issue'); END;
 
 CREATE TRIGGER daemon_session_state_product_guard_insert
 BEFORE INSERT ON daemon_session_projections

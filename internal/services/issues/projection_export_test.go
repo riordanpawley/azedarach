@@ -48,7 +48,7 @@ func TestExportProjectionUsesStableSchemaFingerprintAndMonotonicSourceRevision(t
 	// Use a deliberately older timestamp: checkpoint ordering must follow durable
 	// writes, not wall-clock values or incomparable issue/runtime counters.
 	older := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano)
-	_, err = db.ExecContext(ctx, `INSERT INTO issues(id,title,description,status,priority,issue_type,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, `issue-1`, `before`, ``, `open`, 2, `task`, older, older)
+	_, err = db.ExecContext(ctx, `INSERT INTO issues(id,title,description,status,disposition,engagement,visibility,lifecycle_state,closed_outcome,review_state,priority,issue_type,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, `issue-1`, `before`, ``, `open`, `ready`, `idle`, `live`, `open`, `none`, `none`, 2, `task`, older, older)
 	if err != nil {
 		t.Fatal(err)
 	}

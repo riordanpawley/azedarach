@@ -106,7 +106,6 @@ func TestIssueFactsExposeClosedArchiveTombstoneAndOperationBlockers(t *testing.T
 		Workflow:     IssueWorkflowClosed,
 		CloseOutcome: IssueCloseCancelled,
 		Archive:      IssueArchiveArchived,
-		Deletion:     IssueDeletionPresent,
 	})
 	facts := DeriveIssueFacts(IssueFactsInput{
 		Status: StatusDone,
@@ -123,8 +122,8 @@ func TestIssueFactsExposeClosedArchiveTombstoneAndOperationBlockers(t *testing.T
 	if facts.DisplayPhase != IssueDisplayCancelled || facts.ClosedOutcome != IssueCloseCancelled {
 		t.Fatalf("facts = %+v, want cancelled display with cancelled outcome", facts)
 	}
-	if facts.ArchiveState != IssueArchiveArchived || facts.DeletionState != IssueDeletionPresent {
-		t.Fatalf("archive/deletion = %s/%s, want archived/present", facts.ArchiveState, facts.DeletionState)
+	if facts.ArchiveState != IssueArchiveArchived {
+		t.Fatalf("archive = %s, want archived", facts.ArchiveState)
 	}
 	if !facts.DelegatedOperation || len(facts.OperationBlockers) != 1 {
 		t.Fatalf("operation blockers = %+v, delegated=%t", facts.OperationBlockers, facts.DelegatedOperation)
