@@ -9,6 +9,51 @@ ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 UPDATE issues SET deleted_at=NULL
 WHERE deleted_at IS NOT NULL AND deleted_at=archived_at;
 
+-- Converge historical duplicate non-pane identities before enforcing the
+-- logical-scope unique indexes. Canonical tmux names win when present; runtime
+-- facts come from the newest row and started_at preserves the earliest fact.
+CREATE TEMP TABLE logical_session_winners(
+  table_name TEXT, project_id TEXT, role TEXT, scope_kind TEXT, scope_id TEXT,
+  winner_id TEXT, newest_id TEXT,
+  PRIMARY KEY(table_name,project_id,role,scope_kind,scope_id)
+);
+INSERT INTO logical_session_winners
+SELECT DISTINCT 'daemon_session_projections',project_id,role,scope_kind,scope_id,
+  FIRST_VALUE(session_id) OVER logical_preferred,FIRST_VALUE(session_id) OVER logical_newest
+FROM daemon_session_projections WHERE instr(session_id,'.pane-')=0
+WINDOW logical_preferred AS (PARTITION BY project_id,role,scope_kind,scope_id ORDER BY CASE WHEN length(session_id)>3 AND substr(session_id,3,1)='-' AND substr(session_id,4)=CASE WHEN role='orchestrator' AND scope_id='project' THEN 'orchestrator-project' ELSE scope_id END THEN 0 ELSE 1 END,updated_at DESC,session_id ASC),
+logical_newest AS (PARTITION BY project_id,role,scope_kind,scope_id ORDER BY updated_at DESC,session_id ASC);
+UPDATE daemon_session_projections AS dst SET
+  issue_id=(SELECT src.issue_id FROM daemon_session_projections src JOIN logical_session_winners w ON w.table_name='daemon_session_projections' AND src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+  state=(SELECT src.state FROM daemon_session_projections src JOIN logical_session_winners w ON w.table_name='daemon_session_projections' AND src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+  observed_state=(SELECT src.observed_state FROM daemon_session_projections src JOIN logical_session_winners w ON w.table_name='daemon_session_projections' AND src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+  activity=(SELECT src.activity FROM daemon_session_projections src JOIN logical_session_winners w ON w.table_name='daemon_session_projections' AND src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+  activity_source=(SELECT src.activity_source FROM daemon_session_projections src JOIN logical_session_winners w ON w.table_name='daemon_session_projections' AND src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+  tmux_attached_count=(SELECT src.tmux_attached_count FROM daemon_session_projections src JOIN logical_session_winners w ON w.table_name='daemon_session_projections' AND src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+  started_at=(SELECT MIN(NULLIF(src.started_at,'')) FROM daemon_session_projections src JOIN logical_session_winners w ON w.table_name='daemon_session_projections' AND src.project_id=w.project_id AND src.role=w.role AND src.scope_kind=w.scope_kind AND src.scope_id=w.scope_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+  updated_at=(SELECT MAX(src.updated_at) FROM daemon_session_projections src JOIN logical_session_winners w ON w.table_name='daemon_session_projections' AND src.project_id=w.project_id AND src.role=w.role AND src.scope_kind=w.scope_kind AND src.scope_id=w.scope_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id)
+WHERE EXISTS(SELECT 1 FROM logical_session_winners w WHERE w.table_name='daemon_session_projections' AND w.project_id=dst.project_id AND w.winner_id=dst.session_id);
+DELETE FROM daemon_session_projections AS doomed WHERE instr(session_id,'.pane-')=0 AND EXISTS(SELECT 1 FROM logical_session_winners w WHERE w.table_name='daemon_session_projections' AND w.project_id=doomed.project_id AND w.role=doomed.role AND w.scope_kind=doomed.scope_kind AND w.scope_id=doomed.scope_id AND w.winner_id!=doomed.session_id);
+
+INSERT INTO logical_session_winners
+SELECT DISTINCT 'daemon_session_observations',project_id,role,scope_kind,scope_id,
+  FIRST_VALUE(session_id) OVER logical_preferred,FIRST_VALUE(session_id) OVER logical_newest
+FROM daemon_session_observations WHERE instr(session_id,'.pane-')=0
+WINDOW logical_preferred AS (PARTITION BY project_id,role,scope_kind,scope_id ORDER BY CASE WHEN length(session_id)>3 AND substr(session_id,3,1)='-' AND substr(session_id,4)=CASE WHEN role='orchestrator' AND scope_id='project' THEN 'orchestrator-project' ELSE scope_id END THEN 0 ELSE 1 END,updated_at DESC,session_id ASC),
+logical_newest AS (PARTITION BY project_id,role,scope_kind,scope_id ORDER BY updated_at DESC,session_id ASC);
+UPDATE daemon_session_observations AS dst SET
+  issue_id=(SELECT src.issue_id FROM daemon_session_observations src JOIN logical_session_winners w ON w.table_name='daemon_session_observations' AND src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+  state=(SELECT src.state FROM daemon_session_observations src JOIN logical_session_winners w ON w.table_name='daemon_session_observations' AND src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+  observed_state=(SELECT src.observed_state FROM daemon_session_observations src JOIN logical_session_winners w ON w.table_name='daemon_session_observations' AND src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+  activity=(SELECT src.activity FROM daemon_session_observations src JOIN logical_session_winners w ON w.table_name='daemon_session_observations' AND src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+  activity_source=(SELECT src.activity_source FROM daemon_session_observations src JOIN logical_session_winners w ON w.table_name='daemon_session_observations' AND src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+  tmux_attached_count=(SELECT src.tmux_attached_count FROM daemon_session_observations src JOIN logical_session_winners w ON w.table_name='daemon_session_observations' AND src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+  started_at=(SELECT MIN(NULLIF(src.started_at,'')) FROM daemon_session_observations src JOIN logical_session_winners w ON w.table_name='daemon_session_observations' AND src.project_id=w.project_id AND src.role=w.role AND src.scope_kind=w.scope_kind AND src.scope_id=w.scope_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+  updated_at=(SELECT MAX(src.updated_at) FROM daemon_session_observations src JOIN logical_session_winners w ON w.table_name='daemon_session_observations' AND src.project_id=w.project_id AND src.role=w.role AND src.scope_kind=w.scope_kind AND src.scope_id=w.scope_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id)
+WHERE EXISTS(SELECT 1 FROM logical_session_winners w WHERE w.table_name='daemon_session_observations' AND w.project_id=dst.project_id AND w.winner_id=dst.session_id);
+DELETE FROM daemon_session_observations AS doomed WHERE instr(session_id,'.pane-')=0 AND EXISTS(SELECT 1 FROM logical_session_winners w WHERE w.table_name='daemon_session_observations' AND w.project_id=doomed.project_id AND w.role=doomed.role AND w.scope_kind=doomed.scope_kind AND w.scope_id=doomed.scope_id AND w.winner_id!=doomed.session_id);
+DROP TABLE logical_session_winners;
+
 CREATE TABLE IF NOT EXISTS issue_runtime_divergences (
   issue_id TEXT NOT NULL,
   kind TEXT NOT NULL CHECK(kind IN ('lifecycle_runtime')),

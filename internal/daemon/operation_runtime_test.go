@@ -793,6 +793,55 @@ func TestDaemonRecoverInterruptedSessionStartUsesActiveProjection(t *testing.T) 
 	}
 }
 
+func TestWorkerLifecyclePathsIgnoreNewerNonWorkerSessions(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, issueID := "proj-1", "AZ-2"
+	workerID := naming.CanonicalSessionID(repoDir, issueID)
+	store := daemonstate.NewRuntimeStateStore(t.TempDir(), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	seeds := []daemonstate.Session{
+		{ID: workerID, IssueID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: now},
+		{ID: issueID, IssueID: issueID, Role: daemonstate.SessionRoleAdvisor, ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: "request-1", State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: now.Add(time.Minute)},
+		{ID: "root-newest", IssueID: issueID, Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: now.Add(2 * time.Minute)},
+	}
+	for _, seed := range seeds {
+		if err := store.UpsertSessionState(ctx, projectID, seed); err != nil {
+			t.Fatalf("seed %s: %v", seed.ID, err)
+		}
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{}}
+	if err := d.persistSessionState(projectID, daemonstate.Session{ID: "foreign-worker", IssueID: issueID, State: daemonstate.SessionStatePaused, ObservedState: daemonstate.SessionStatePaused, UpdatedAt: now.Add(3 * time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	worker, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, workerID)
+	if err != nil || !found || worker.ID != workerID || worker.State != daemonstate.SessionStatePaused {
+		t.Fatalf("worker persist selected %+v found=%t err=%v", worker, found, err)
+	}
+	if err := d.writeSessionStopProjection(projectID, "foreign-worker", issueID); err != nil {
+		t.Fatal(err)
+	}
+	worker, _, _ = store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, workerID)
+	if worker.ID != workerID || worker.State != daemonstate.SessionStateStopped {
+		t.Fatalf("worker stop selected %+v", worker)
+	}
+	for _, id := range []string{issueID, "root-newest"} {
+		row, found, err := store.GetSessionState(ctx, projectID, id)
+		if err != nil || !found || row.State != daemonstate.SessionStateRunning {
+			t.Fatalf("non-worker %s changed: %+v found=%t err=%v", id, row, found, err)
+		}
+	}
+	worker.State, worker.ObservedState, worker.UpdatedAt = daemonstate.SessionStateRunning, daemonstate.SessionStateRunning, now.Add(4*time.Minute)
+	if err := store.UpsertSessionState(ctx, projectID, worker); err != nil {
+		t.Fatal(err)
+	}
+	recovery, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{ID: "op", ProjectID: projectID, IssueID: issueID, Kind: daemonhandlers.CommandSessionStart})
+	if !ok || recovery.State != daemonops.StateDone {
+		t.Fatalf("worker recovery=%+v ok=%t", recovery, ok)
+	}
+}
+
 func TestSessionOperationExecutorWrapsNestedResultEnvelope(t *testing.T) {
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), nextRevision: sequentialRevision()})
 	runtime.sessionStart = func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

@@ -2232,7 +2232,8 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 		issueID = sessionID
 	}
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
-	if existing, found, err := store.GetSessionStateByIssueID(context.Background(), projectID, issueID); err != nil {
+	canonicalID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
+	if existing, found, err := store.GetWorkerSessionStateByIssueID(context.Background(), projectID, issueID, canonicalID); err != nil {
 		return fmt.Errorf("load logical session before stop projection: %w", err)
 	} else if found && !isAgentScopedSessionID(existing.ID) {
 		sessionID = existing.ID

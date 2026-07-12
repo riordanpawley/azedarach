@@ -1248,28 +1248,18 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 	if store == nil {
 		return interruptedOperationRecovery{}, false
 	}
-	session, found, err := store.GetSessionState(ctx, projectID, record.IssueID)
-	if err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Warn("failed to inspect interrupted session.start projection",
-			"operation_id", record.ID,
-			"project_id", projectID,
-			"issue_id", record.IssueID,
-			"error", err,
-		)
-	}
-	if err != nil || !found {
-		session, found, err = store.GetSessionStateByIssueID(ctx, projectID, record.IssueID)
-		if err != nil {
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Warn("failed to inspect interrupted session.start projection by issue",
-					"operation_id", record.ID,
-					"project_id", projectID,
-					"issue_id", record.IssueID,
-					"error", err,
-				)
-			}
-			return interruptedOperationRecovery{}, false
+	canonicalID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), record.IssueID)
+	session, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, record.IssueID, canonicalID)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("failed to inspect interrupted worker session.start projection",
+				"operation_id", record.ID,
+				"project_id", projectID,
+				"issue_id", record.IssueID,
+				"error", err,
+			)
 		}
+		return interruptedOperationRecovery{}, false
 	}
 	if !found || strings.TrimSpace(session.IssueID) != strings.TrimSpace(record.IssueID) {
 		return interruptedOperationRecovery{}, false
@@ -1452,7 +1442,8 @@ func (d *Daemon) persistSessionState(projectID string, session daemonstate.Sessi
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if (session.Role == "" || session.Role == daemonstate.SessionRoleWorker) && !isAgentScopedSessionID(session.ID) {
-		if existing, found, err := store.GetSessionStateByIssueID(ctx, projectID, session.IssueID); err != nil {
+		canonicalID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), session.IssueID)
+		if existing, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, session.IssueID, canonicalID); err != nil {
 			return fmt.Errorf("load logical worker session before persist: %w", err)
 		} else if found && !isAgentScopedSessionID(existing.ID) {
 			session.ID = existing.ID

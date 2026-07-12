@@ -713,6 +713,52 @@ func TestRuntimeStateStoreUpgradeFailsClosedOnInvalidHistoricalSessionProduct(t 
 	}
 }
 
+func TestRuntimeStateStoreUpgradeCanonicalizesDuplicateLogicalSessions(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := func(table string) string {
+		return `CREATE TABLE ` + table + `(project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL,scope_kind TEXT NOT NULL,scope_id TEXT NOT NULL,state TEXT NOT NULL,observed_state TEXT,activity TEXT,activity_source TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,started_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,session_id));`
+	}
+	if _, err := db.Exec(schema(sessionStateTable) + schema(sessionObservationTable) + `
+		INSERT INTO daemon_session_projections VALUES
+		('p','pr-worker','worker','worker','issue','worker','running','running','idle','hooks',0,'2026-07-13T00:00:00Z','2026-07-13T00:00:00Z'),
+		('p','worker-new','worker','worker','issue','worker','paused','paused','busy','hooks',0,'2026-07-13T00:01:00Z','2026-07-13T00:02:00Z'),
+		('p','pr-orchestrator-project','','orchestrator','orchestration','project','running','running','idle','',0,'2026-07-13T00:00:00Z','2026-07-13T00:00:00Z'),
+		('p','project-new','','orchestrator','orchestration','project','paused','paused','busy','hooks',0,'2026-07-13T00:01:00Z','2026-07-13T00:02:00Z'),
+		('p','pr-root','root','orchestrator','orchestration','root','running','running','idle','',0,'2026-07-13T00:00:00Z','2026-07-13T00:00:00Z'),
+		('p','root-new','root','orchestrator','orchestration','root','paused','paused','busy','hooks',0,'2026-07-13T00:01:00Z','2026-07-13T00:02:00Z');
+		INSERT INTO daemon_session_observations VALUES
+		('p','pr-worker','worker','worker','issue','worker','running','running','idle','',0,'2026-07-13T00:00:00Z','2026-07-13T00:00:00Z'),
+		('p','worker-new','worker','worker','issue','worker','paused','paused','busy','hooks',0,'2026-07-13T00:01:00Z','2026-07-13T00:02:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	rows, err := store.ListSessionIntentStates(context.Background(), "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("canonical rows=%d want 3: %+v", len(rows), rows)
+	}
+	for _, row := range rows {
+		if row.State != SessionStatePaused || row.Activity != "busy" || !row.StartedAt.Equal(time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)) {
+			t.Fatalf("merged row=%+v", row)
+		}
+	}
+	all, err := store.ListSessionStates(context.Background(), "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 4 {
+		t.Fatalf("projection plus canonical observation rows=%d want 4", len(all))
+	}
+}
+
 func TestRuntimeStateStoreEnforcesRelationalSessionIdentity(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "runtime.db")
 	db, err := sql.Open("sqlite", dbPath)

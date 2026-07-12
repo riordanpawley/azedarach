@@ -71,6 +71,7 @@ type SessionStateReader interface {
 	ListSessionIntentStates(context.Context, string) ([]Session, error)
 	GetSessionState(context.Context, string, string) (Session, bool, error)
 	GetSessionStateByIssueID(context.Context, string, string) (Session, bool, error)
+	GetWorkerSessionStateByIssueID(context.Context, string, string, string) (Session, bool, error)
 }
 
 // SessionStateWriter mutates persisted session state rows for a project.
@@ -1074,6 +1075,51 @@ func (s *RuntimeStateStore) GetSessionStateByIssueID(ctx context.Context, projec
 	}, true, nil
 }
 
+// GetWorkerSessionStateByIssueID returns the desired worker projection for an
+// issue. Advisor and orchestrator rows can share an issue ID and must never be
+// treated as worker lifecycle authority.
+func (s *RuntimeStateStore) GetWorkerSessionStateByIssueID(ctx context.Context, projectID, issueID, canonicalSessionID string) (Session, bool, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return Session{}, false, err
+	}
+	projectID = normalizedProjectID(projectID)
+	issueID = strings.TrimSpace(issueID)
+	canonicalSessionID = strings.TrimSpace(canonicalSessionID)
+	if issueID == "" {
+		return Session{}, false, nil
+	}
+	row := db.QueryRowContext(ctx, `
+		SELECT session_id,issue_id,role,scope_kind,scope_id,state,
+			COALESCE(observed_state,state),COALESCE(activity,''),COALESCE(activity_source,''),
+			COALESCE(tmux_attached_count,0),COALESCE(started_at,''),updated_at
+		FROM `+sessionStateTable+`
+		WHERE project_id=? AND issue_id=? AND role='worker' AND scope_kind='issue' AND scope_id=issue_id
+		ORDER BY CASE WHEN session_id=? THEN 0 ELSE 1 END, updated_at DESC, session_id ASC
+		LIMIT 1`, projectID, issueID, canonicalSessionID)
+	var session Session
+	var role, scopeKind, state, observed, startedAt, updatedAt string
+	if err := row.Scan(&session.ID, &session.IssueID, &role, &scopeKind, &session.ScopeID, &state,
+		&observed, &session.Activity, &session.ActivitySource, &session.TmuxAttachedCount, &startedAt, &updatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return Session{}, false, nil
+		}
+		return Session{}, false, fmt.Errorf("get worker session state by issue %s/%s: %w", projectID, issueID, err)
+	}
+	session.Role, session.ScopeKind = SessionRole(role), SessionScopeKind(scopeKind)
+	session.State, session.ObservedState = NormalizeSessionState(SessionState(state)), NormalizeSessionState(SessionState(observed))
+	if session.StartedAt, err = parseOptionalRuntimeStateTime(startedAt); err != nil {
+		return Session{}, false, err
+	}
+	if session.UpdatedAt, err = parseRuntimeStateTime(updatedAt); err != nil {
+		return Session{}, false, err
+	}
+	if err := ValidateSessionProduct(session); err != nil {
+		return Session{}, false, fmt.Errorf("invalid worker session state by issue %s/%s: %w", projectID, issueID, err)
+	}
+	return session, true, nil
+}
+
 // ListProjectIDs returns all distinct project IDs referenced by persisted runtime-state rows.
 func (s *RuntimeStateStore) ListProjectIDs(ctx context.Context) ([]string, error) {
 	db, err := s.dbHandle()
@@ -1982,6 +2028,9 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='interaction_requests'`).Scan(&interactionTableCount); err != nil {
 		return fmt.Errorf("inspect relational interaction authority: %w", err)
 	}
+	if err := canonicalizeRuntimeLogicalSessions(ctx, db); err != nil {
+		return err
+	}
 	for _, table := range []string{sessionStateTable, sessionObservationTable} {
 		if _, err := db.ExecContext(ctx, `UPDATE `+table+` SET state=CASE WHEN state='attached' THEN 'running' ELSE state END, observed_state=CASE WHEN observed_state='attached' THEN 'running' ELSE observed_state END WHERE state='attached' OR observed_state='attached'`); err != nil {
 			return fmt.Errorf("normalize %s legacy attached state: %w", table, err)
@@ -2061,6 +2110,55 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 		}
 	}
 	return nil
+}
+
+func canonicalizeRuntimeLogicalSessions(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin logical session canonicalization: %w", err)
+	}
+	defer tx.Rollback()
+	for _, table := range []string{sessionStateTable, sessionObservationTable} {
+		if _, err := tx.ExecContext(ctx, logicalSessionCanonicalizationSQL(table)); err != nil {
+			return fmt.Errorf("canonicalize %s logical sessions: %w", table, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit logical session canonicalization: %w", err)
+	}
+	return nil
+}
+
+func logicalSessionCanonicalizationSQL(table string) string {
+	// Merge volatile runtime facts from the newest row into a deterministic
+	// identity. Prefer an existing canonical tmux name, then newest/lexical.
+	return `
+		CREATE TEMP TABLE IF NOT EXISTS logical_session_winners(
+			project_id TEXT, role TEXT, scope_kind TEXT, scope_id TEXT,
+			winner_id TEXT, newest_id TEXT,
+			PRIMARY KEY(project_id,role,scope_kind,scope_id));
+		DELETE FROM logical_session_winners;
+		INSERT INTO logical_session_winners
+		SELECT DISTINCT project_id,role,scope_kind,scope_id,
+			FIRST_VALUE(session_id) OVER logical_preferred,
+			FIRST_VALUE(session_id) OVER logical_newest
+		FROM ` + table + ` WHERE instr(session_id,'.pane-')=0
+		WINDOW
+			logical_preferred AS (PARTITION BY project_id,role,scope_kind,scope_id ORDER BY CASE WHEN length(session_id)>3 AND substr(session_id,3,1)='-' AND substr(session_id,4)=CASE WHEN role='orchestrator' AND scope_id='project' THEN 'orchestrator-project' ELSE scope_id END THEN 0 ELSE 1 END,updated_at DESC,session_id ASC),
+			logical_newest AS (PARTITION BY project_id,role,scope_kind,scope_id ORDER BY updated_at DESC,session_id ASC);
+		UPDATE ` + table + ` AS dst SET
+			issue_id=(SELECT src.issue_id FROM ` + table + ` src JOIN logical_session_winners w ON src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+			state=(SELECT src.state FROM ` + table + ` src JOIN logical_session_winners w ON src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+			observed_state=(SELECT src.observed_state FROM ` + table + ` src JOIN logical_session_winners w ON src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+			activity=(SELECT src.activity FROM ` + table + ` src JOIN logical_session_winners w ON src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+			activity_source=(SELECT src.activity_source FROM ` + table + ` src JOIN logical_session_winners w ON src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+			tmux_attached_count=(SELECT src.tmux_attached_count FROM ` + table + ` src JOIN logical_session_winners w ON src.project_id=w.project_id AND src.session_id=w.newest_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+			started_at=(SELECT MIN(NULLIF(src.started_at,'')) FROM ` + table + ` src JOIN logical_session_winners w ON src.project_id=w.project_id AND src.role=w.role AND src.scope_kind=w.scope_kind AND src.scope_id=w.scope_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id),
+			updated_at=(SELECT MAX(src.updated_at) FROM ` + table + ` src JOIN logical_session_winners w ON src.project_id=w.project_id AND src.role=w.role AND src.scope_kind=w.scope_kind AND src.scope_id=w.scope_id WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id)
+		WHERE EXISTS(SELECT 1 FROM logical_session_winners w WHERE w.project_id=dst.project_id AND w.winner_id=dst.session_id);
+		DELETE FROM ` + table + ` AS doomed WHERE instr(session_id,'.pane-')=0 AND EXISTS(
+			SELECT 1 FROM logical_session_winners w WHERE w.project_id=doomed.project_id AND w.role=doomed.role AND w.scope_kind=doomed.scope_kind AND w.scope_id=doomed.scope_id AND w.winner_id!=doomed.session_id);
+		DROP TABLE logical_session_winners;`
 }
 
 func ensureColumn(ctx context.Context, db *sql.DB, tableName, columnName, columnDDL string) error {

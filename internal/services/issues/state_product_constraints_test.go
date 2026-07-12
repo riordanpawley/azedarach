@@ -383,6 +383,72 @@ func TestCanonicalMigrationBackfillsPreColumnWorkerScope(t *testing.T) {
 	}
 }
 
+func TestCanonicalMigrationConvergesDuplicateLogicalSessions(t *testing.T) {
+	client := NewClient(t.TempDir(), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	ctx := context.Background()
+	workerID, err := client.Create(ctx, CreateTaskParams{Title: "worker", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootID, err := client.Create(ctx, CreateTaskParams{Title: "root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, _ := client.dbHandle()
+	dropCanonicalStateMigrationGuards(t, db)
+	if _, err := db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_daemon_session_projections_logical_scope_unique; DROP INDEX IF EXISTS idx_daemon_session_observations_logical_scope_unique; DELETE FROM schema_migrations WHERE id='0045_issue_state_runtime_constraints'`); err != nil {
+		t.Fatal(err)
+	}
+	insert := `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`
+	for _, row := range [][]any{
+		{"p", "pr-" + workerID, workerID, "worker", "issue", workerID, "running", "running", "idle", "", 0, "2026-07-13T00:00:00Z", "2026-07-13T00:00:00Z"},
+		{"p", "worker-new", workerID, "worker", "issue", workerID, "paused", "paused", "busy", "hooks", 0, "2026-07-13T00:01:00Z", "2026-07-13T00:02:00Z"},
+		{"p", "pr-orchestrator-project", "", "orchestrator", "orchestration", "project", "running", "running", "idle", "", 0, "2026-07-13T00:00:00Z", "2026-07-13T00:00:00Z"},
+		{"p", "project-new", "", "orchestrator", "orchestration", "project", "paused", "paused", "busy", "hooks", 0, "2026-07-13T00:01:00Z", "2026-07-13T00:02:00Z"},
+		{"p", "pr-" + rootID, rootID, "orchestrator", "orchestration", rootID, "running", "running", "idle", "", 0, "2026-07-13T00:00:00Z", "2026-07-13T00:00:00Z"},
+		{"p", "root-new", rootID, "orchestrator", "orchestration", rootID, "paused", "paused", "busy", "hooks", 0, "2026-07-13T00:01:00Z", "2026-07-13T00:02:00Z"},
+	} {
+		if _, err := db.ExecContext(ctx, insert, row...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observationInsert := strings.Replace(insert, "daemon_session_projections", "daemon_session_observations", 1)
+	for _, row := range [][]any{
+		{"p", "pr-" + workerID, workerID, "worker", "issue", workerID, "running", "running", "idle", "", 0, "2026-07-13T00:00:00Z", "2026-07-13T00:00:00Z"},
+		{"p", "worker-new", workerID, "worker", "issue", workerID, "paused", "paused", "busy", "hooks", 0, "2026-07-13T00:01:00Z", "2026-07-13T00:02:00Z"},
+	} {
+		if _, err := db.ExecContext(ctx, observationInsert, row...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := applyIssueStateRuntimeConstraintsMigration(ctx, db, "0045_issue_state_runtime_constraints"); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_session_projections WHERE project_id='p'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("canonical rows=%d want 3", count)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_session_observations WHERE project_id='p'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("canonical observation rows=%d want 1", count)
+	}
+	for _, id := range []string{"pr-" + workerID, "pr-orchestrator-project", "pr-" + rootID} {
+		var state, activity, started string
+		if err := db.QueryRowContext(ctx, `SELECT state,activity,started_at FROM daemon_session_projections WHERE project_id='p' AND session_id=?`, id).Scan(&state, &activity, &started); err != nil {
+			t.Fatal(err)
+		}
+		if state != "paused" || activity != "busy" || started != "2026-07-13T00:00:00Z" {
+			t.Fatalf("%s merged=%s/%s/%s", id, state, activity, started)
+		}
+	}
+}
+
 func TestCanonicalStateMigrationUpgradesLegacyProjectionDeterministically(t *testing.T) {
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
