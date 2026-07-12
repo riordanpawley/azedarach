@@ -238,11 +238,11 @@ func archiveWhere(alias string, mode ArchiveMode) string {
 }
 
 type issueStateColumns struct {
-	Disposition   string
-	Engagement    string
-	Visibility    string
-	LegacyStatus  string
-	ArchivedAt    sql.NullString
+	Disposition  string
+	Engagement   string
+	Visibility   string
+	LegacyStatus string
+	ArchivedAt   sql.NullString
 }
 
 type issueStateWriteValues struct {
@@ -1196,7 +1196,7 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 			created_at,
 			updated_at
 		FROM issues
-		WHERE archived_at IS NULL
+		WHERE visibility = 'live'
 		ORDER BY updated_at DESC
 	`)
 	if err != nil {
@@ -2507,6 +2507,9 @@ func (c *Client) claimOwnership(ctx context.Context, issueID string, params Owne
 			if err != nil {
 				return c.wrapError("claim-ownership", issueID, err)
 			}
+			if err := issueLeaseEligibilityForUpdate(ctx, tx, issueID, purpose); err != nil {
+				return c.wrapError("claim-ownership", issueID, err)
+			}
 			now := time.Now().UTC()
 			var lease *domain.CoordinationLease
 			lease, err = coordinationLeaseForUpdate(ctx, tx, issueID, purpose)
@@ -2549,6 +2552,31 @@ func (c *Client) claimOwnership(ctx context.Context, issueID string, params Owne
 			return nil
 		})
 	})
+}
+
+func issueLeaseEligibilityForUpdate(ctx context.Context, tx *sql.Tx, issueID string, purpose domain.CoordinationLeasePurpose) error {
+	var disposition, engagement, visibility string
+	if err := tx.QueryRowContext(ctx, `SELECT disposition,engagement,visibility FROM issues WHERE id=?`, issueID).Scan(&disposition, &engagement, &visibility); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.ErrNotFound
+		}
+		return err
+	}
+	eligible := visibility == string(domain.IssueVisibilityLive)
+	switch purpose {
+	case domain.CoordinationLeaseExecution:
+		eligible = eligible && disposition == string(domain.IssueDispositionReady)
+	case domain.CoordinationLeaseReview:
+		eligible = eligible && disposition == string(domain.IssueDispositionReady)
+	case domain.CoordinationLeaseOrchestration:
+		eligible = eligible && (disposition == string(domain.IssueDispositionBacklog) || disposition == string(domain.IssueDispositionReady))
+	default:
+		eligible = false
+	}
+	if !eligible {
+		return fmt.Errorf("%w: issue state is ineligible for %s lease", domain.ErrConflict, purpose)
+	}
+	return nil
 }
 
 func (c *Client) releaseOwnership(ctx context.Context, issueID string, params OwnershipClaimParams) error {
@@ -3368,10 +3396,10 @@ func (c *Client) rebuildIssueGraphClosure(ctx context.Context, execer sqlIssueEx
 			FROM issue_dependencies d
 			INNER JOIN issues ancestor
 				ON ancestor.id = d.depends_on_id
-				AND ancestor.archived_at IS NULL
+				AND ancestor.visibility = 'live'
 			INNER JOIN issues descendant
 				ON descendant.id = d.issue_id
-				AND descendant.archived_at IS NULL
+				AND descendant.visibility = 'live'
 			WHERE d.tombstoned_at IS NULL
 				AND d.dependency_type IN (?, 'parent_child')
 		),
@@ -3681,7 +3709,7 @@ func (c *Client) archiveLocked(ctx context.Context, id string) error {
 	if err := tx.QueryRowContext(ctx, `SELECT
 		(SELECT COUNT(*) FROM issue_coordination_leases WHERE issue_id=?) +
 		(SELECT COUNT(*) FROM daemon_worktree_projections WHERE issue_id=? AND trim(path)!='') +
-		(SELECT COUNT(*) FROM (`+runtimeSessionProjectionUnionSQL+`) WHERE issue_id=? AND lower(trim(COALESCE(state,'')))!='stopped')`, id, id, id).Scan(&blockers); err != nil {
+		(SELECT COUNT(*) FROM (`+runtimeSessionProjectionUnionSQL+`) WHERE issue_id=?)`, id, id, id).Scan(&blockers); err != nil {
 		return c.wrapError("archive", id, err)
 	}
 	if blockers != 0 {
@@ -3755,12 +3783,12 @@ func (c *Client) unarchiveLocked(ctx context.Context, id string, opts UnarchiveO
 		}
 	}()
 
-	var targetArchivedAt sql.NullString
+	var targetVisibility string
 	if err := tx.QueryRowContext(ctx, `
-		SELECT archived_at
+		SELECT visibility
 		FROM issues
 		WHERE id = ?
-	`, id).Scan(&targetArchivedAt); err != nil {
+	`, id).Scan(&targetVisibility); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return result, c.wrapError("unarchive", id, domain.ErrNotFound)
 		}
@@ -3783,7 +3811,7 @@ func (c *Client) unarchiveLocked(ctx context.Context, id string, opts UnarchiveO
 	if opts.WithParents {
 		restoreIDs = append(restoreIDs, archivedParents...)
 	}
-	if targetArchivedAt.Valid && strings.TrimSpace(targetArchivedAt.String) != "" {
+	if targetVisibility == string(domain.IssueVisibilityArchived) {
 		restoreIDs = append(restoreIDs, id)
 	}
 	if opts.CascadeChildren {
@@ -3861,7 +3889,7 @@ func (c *Client) archivedParentChildAncestorIDs(ctx context.Context, queryer sql
 		SELECT ancestors.id
 		FROM ancestors
 		INNER JOIN issues parent ON parent.id = ancestors.id
-		WHERE parent.archived_at IS NOT NULL
+		WHERE parent.visibility = 'archived'
 		ORDER BY ancestors.depth DESC, ancestors.id
 	`, issueID, string(domain.DependencyParentChild), string(domain.DependencyParentChild))
 	if err != nil {
@@ -3895,7 +3923,7 @@ func (c *Client) archivedParentChildDescendantIDs(ctx context.Context, queryer s
 		SELECT descendants.id
 		FROM descendants
 		INNER JOIN issues child ON child.id = descendants.id
-		WHERE child.archived_at IS NOT NULL
+		WHERE child.visibility = 'archived'
 		ORDER BY descendants.depth ASC, descendants.id
 	`, issueID, string(domain.DependencyParentChild), string(domain.DependencyParentChild))
 	if err != nil {
@@ -3974,7 +4002,7 @@ func (c *Client) countUndeletedParentChildDescendants(ctx context.Context, query
 		FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_ancestor
 		INNER JOIN issues descendant
 			ON descendant.id = closure.descendant_id
-			AND descendant.archived_at IS NULL
+			AND descendant.visibility = 'live'
 		WHERE closure.project_id = ?
 			AND closure.dependency_type = ?
 			AND closure.ancestor_id = ?
@@ -4203,7 +4231,7 @@ func (c *Client) updateDetailsLocked(ctx context.Context, id string, params Upda
 			review_state = ?,
 			implementations_json = CASE WHEN ? = 1 THEN ? ELSE implementations_json END,
 			updated_at = ?
-		WHERE id = ? AND archived_at IS NULL
+		WHERE id = ? AND visibility = 'live'
 	`, params.Title, nullableString(params.Description), designSet, nullableString(designValue), noteSet, nullableString(noteValue), acceptanceSet, nullableString(acceptanceValue), estimateSet, estimateValue, string(params.Type), int(params.Priority), writeState.Disposition, writeState.Engagement, writeState.Visibility, writeState.LegacyStatus, writeState.Lifecycle, writeState.ClosedOutcome, writeState.Review, implSet, implementationsJSON, now, id)
 	if err != nil {
 		return c.wrapError("update-details", id, err)

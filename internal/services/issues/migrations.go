@@ -134,6 +134,34 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 	if _, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS idx_issues_owner_active`); err != nil {
 		return err
 	}
+	hasOwnerColumns, err := txColumnExists(ctx, tx, "issues", "owner_id")
+	if err != nil {
+		return err
+	}
+	if hasOwnerColumns {
+		var invalidOwnerRows int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE
+			(COALESCE(trim(owner_id),'')='' AND (COALESCE(trim(owner_kind),'')!='' OR COALESCE(trim(owner_claimed_at),'')!='' OR COALESCE(trim(owner_expires_at),'')!='')) OR
+			(COALESCE(trim(owner_id),'')!='' AND (COALESCE(trim(owner_kind),'')='' OR COALESCE(trim(owner_claimed_at),'')=''))`).Scan(&invalidOwnerRows); err != nil {
+			return fmt.Errorf("validate legacy issue claim tuples: %w", err)
+		}
+		if invalidOwnerRows != 0 {
+			return fmt.Errorf("legacy issue claim authority contains %d partial tuples", invalidOwnerRows)
+		}
+		var conflictingOwnerRows int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues i JOIN issue_coordination_leases l ON l.issue_id=i.id AND l.purpose='execution'
+			WHERE COALESCE(trim(i.owner_id),'')!='' AND (l.owner_id!=i.owner_id OR l.owner_kind!=i.owner_kind OR l.claimed_at!=i.owner_claimed_at OR COALESCE(l.expires_at,'')!=COALESCE(i.owner_expires_at,''))`).Scan(&conflictingOwnerRows); err != nil {
+			return fmt.Errorf("compare legacy and canonical issue claims: %w", err)
+		}
+		if conflictingOwnerRows != 0 {
+			return fmt.Errorf("legacy and canonical issue claim authority conflict on %d rows", conflictingOwnerRows)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_coordination_leases(issue_id,purpose,owner_id,owner_kind,claimed_at,expires_at)
+			SELECT i.id,'execution',i.owner_id,i.owner_kind,i.owner_claimed_at,i.owner_expires_at FROM issues i
+			WHERE COALESCE(trim(i.owner_id),'')!='' AND NOT EXISTS(SELECT 1 FROM issue_coordination_leases l WHERE l.issue_id=i.id AND l.purpose='execution')`); err != nil {
+			return fmt.Errorf("migrate unambiguous legacy issue claims: %w", err)
+		}
+	}
 	for _, name := range []string{"owner_expires_at", "owner_claimed_at", "owner_kind", "owner_id"} {
 		exists, err := txColumnExists(ctx, tx, "issues", name)
 		if err != nil {
@@ -160,6 +188,9 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "NEW.lifecycle_state <> 'closed'", "NEW.disposition NOT IN ('completed','cancelled')")
 	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "child.lifecycle_state <> 'closed'", "child.disposition NOT IN ('completed','cancelled')")
 	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "i.lifecycle_state = 'closed'", "i.disposition IN ('completed','cancelled')")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "NEW.archived_at IS NULL", "NEW.visibility = 'live'")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "child.archived_at IS NULL", "child.visibility = 'live'")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "i.archived_at IS NULL", "i.visibility = 'live'")
 	if _, err := tx.ExecContext(ctx, canonicalRuntimeGuards); err != nil {
 		return fmt.Errorf("install canonical runtime aggregate guards: %w", err)
 	}

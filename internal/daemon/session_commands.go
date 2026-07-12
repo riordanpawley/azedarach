@@ -3117,6 +3117,33 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		return true
 	}
 	if issueValidationEnabled {
+		runtimeIntent := make(map[string]struct{}, len(tmuxSet)+len(snapshotSessions))
+		for issueKey := range tmuxSet {
+			runtimeIntent[issueKey] = struct{}{}
+		}
+		for _, session := range snapshotSessions {
+			if session.Role == daemonstate.SessionRoleAdvisor || !sessionProjectionCanRecreateTmuxSession(session) {
+				continue
+			}
+			issueID := sessionProjectionIssueID(session, namingScope)
+			if d.isSessionStopPending(projectID, issueID) {
+				continue
+			}
+			runtimeIntent[sessionKey(issueID)] = struct{}{}
+		}
+		issueClient := d.issueClientForProject(projectID)
+		for issueKey, task := range issuesByKey {
+			if _, present := runtimeIntent[issueKey]; present {
+				continue
+			}
+			if action, invariantErr := domain.EvaluateManagedRuntimeLifecycle(task.State, false); action != domain.ManagedRuntimeLifecycleNoop || invariantErr != nil {
+				lifecycleInvariantErrs = append(lifecycleInvariantErrs, fmt.Errorf("evaluate absent managed runtime for issue %s: action=%s: %w", task.ID, action, invariantErr))
+				continue
+			}
+			if clearErr := issueClient.ClearRuntimeDivergence(ctx, task.ID.String()); clearErr != nil {
+				lifecycleInvariantErrs = append(lifecycleInvariantErrs, fmt.Errorf("resolve absent runtime divergence for issue %s: %w", task.ID, clearErr))
+			}
+		}
 		for issueKey := range tmuxSet {
 			if !enforceManagedRuntimeLifecycle(issueKey) {
 				delete(tmuxSet, issueKey)

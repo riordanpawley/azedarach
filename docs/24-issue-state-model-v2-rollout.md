@@ -22,24 +22,25 @@ The canonical domain authority is the product of three small enums:
 Issue deletion is not part of this state product. Dependency-edge tombstones
 remain separate relationship authority.
 
-The staged store adapter currently persists:
+SQLite persists the canonical disposition/engagement/visibility product above.
+The following columns are one-way, trigger-checked compatibility projections:
 
 - `lifecycle_state`: `backlog`, `open`, `active`, or `closed`.
 - `review_state`: `none` or `requested`; review is valid only for active
   workflow.
 - `closed_outcome`: `none`, `completed`, or `cancelled`; closed workflow must
   have a non-`none` outcome.
-- `archived_at`: soft-archive visibility authority.
+- `archived_at`: archive transition timestamp; `visibility` is authority.
 - dependency `tombstoned_at`: dependency-edge deletion authority.
 
-Legacy `status` and `deleted_at` remain compatibility mirrors for callers,
-search indexes, and existing external integrations. New lifecycle decisions must
-not infer authority directly from raw `status` or `deleted_at` when v2 fields are
-available.
+Legacy `status`, `lifecycle_state`, `review_state`, and `closed_outcome` remain
+compatibility projections for callers and existing integrations. Issue
+`deleted_at` is constrained null; issue deletion is physical and dependency-edge
+tombstones remain separate. Active decisions read only canonical fields.
 
 Archive and tombstone semantics are intentionally separate:
 
-- Archive hides/restores an issue through `archived_at`.
+- Archive hides/restores an issue through `visibility`; `archived_at` records time.
 - Tombstone/delete removes or deactivates records and relationships through the
   relevant tombstone/delete path.
 - Workflow transitions must not use archive or tombstone state as a substitute
@@ -53,7 +54,7 @@ session activity:
 
 | Derived phase | Source |
 | --- | --- |
-| `backlog` | `lifecycle_state=backlog` |
+| `backlog` | disposition `backlog`, engagement `idle` |
 | `open` | disposition `ready`, engagement `idle` |
 | `active` | disposition `ready`, engagement `working` |
 | `review` | disposition `ready`, engagement `review_requested`, and review-ready runtime activity |
@@ -85,9 +86,10 @@ known-good database. Do not delete the marker to force startup; that bypasses th
 rollback contract and can let later migrations run against a partially upgraded
 schema.
 
-Migration `0030` reapplies closed-runtime invariant triggers against v2
-authority. Closed-runtime guards now read `lifecycle_state` and `archived_at`
-instead of legacy `status` and `deleted_at`.
+Migration `0045` installs canonical state-product and resource guards, migrates
+unambiguous ownership into typed coordination leases, and rewrites runtime
+aggregate guards to read disposition and visibility. Legacy v2 columns are no
+longer decision authority.
 
 ## Invariant Sources
 

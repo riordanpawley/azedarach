@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -5960,6 +5961,47 @@ func TestReconcileRejectsBacklogLiveRuntimeWithoutDestroyingIt(t *testing.T) {
 	tmuxRunner.mu.Unlock()
 	if !live {
 		t.Fatal("live runtime was destroyed during invariant rejection")
+	}
+}
+
+func TestReconcileResolvesLifecycleDivergenceAfterStoppedRuntime(t *testing.T) {
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "stopped divergence", Type: domain.TypeBug, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := issueClient.RecordRuntimeDivergence(context.Background(), issueID, "prior live runtime rejected"); err != nil {
+		t.Fatal(err)
+	}
+	store := daemonstate.NewStore()
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStopped); err != nil {
+		t.Fatal(err)
+	}
+	tmuxRunner := newTestTmuxRunner("")
+	delete(tmuxRunner.sessions, "")
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, tmux: tmux.NewClient(tmuxRunner, slog.Default()), session: daemonhandlers.NewSessionHandler(store), sessionStore: store,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default())}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default())}}
+	if _, err := d.reconcileTmuxAndDaemonSessions(context.Background(), projectID, issueID); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(repoDir, ".azedarach", "azedarach.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var active int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM issue_runtime_divergences WHERE issue_id=? AND resolved_at IS NULL`, issueID).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 {
+		t.Fatalf("active divergence=%d, want resolved", active)
 	}
 }
 

@@ -26,6 +26,9 @@ func TestStateProductMigrationRejectsDirectSQLContradictions(t *testing.T) {
 
 	tests := []struct{ name, query, want string }{
 		{"invalid kind", `UPDATE issues SET issue_type='story' WHERE id=?`, "invalid issue_type"},
+		{"status mirror bypass", `UPDATE issues SET status='closed' WHERE id=?`, "legacy status projection mismatch"},
+		{"archive timestamp bypass", `UPDATE issues SET archived_at='2026-07-13T00:00:00Z' WHERE id=?`, "visibility/archive audit mismatch"},
+		{"deletion timestamp bypass", `UPDATE issues SET deleted_at='2026-07-13T00:00:00Z' WHERE id=?`, "deletion timestamp is not canonical authority"},
 		{"review on backlog", `UPDATE issues SET disposition='backlog', engagement='review_requested', review_state='requested', lifecycle_state='backlog', status='backlog' WHERE id=?`, "non-ready issue requires idle engagement"},
 		{"terminal without timestamp", `UPDATE issues SET disposition='completed', engagement='idle', lifecycle_state='closed', review_state='none', closed_outcome='completed', status='closed', closed_at=NULL WHERE id=?`, "terminal issue requires outcome and closed_at"},
 	}
@@ -53,6 +56,151 @@ func TestStateProductMigrationRejectsDirectSQLContradictions(t *testing.T) {
 	_, err = db.ExecContext(ctx, `INSERT INTO daemon_worktree_projections(project_id,issue_id,path,branch,updated_at) VALUES('p',?,'','b',?)`, issueID, now)
 	if err == nil || !strings.Contains(err.Error(), "must be nonempty") {
 		t.Fatalf("empty worktree err=%v", err)
+	}
+}
+
+func TestArchivedResourceGuardsRejectUpdatesAndStoppedRows(t *testing.T) {
+	client := NewClient(t.TempDir(), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	ctx := context.Background()
+	archivedID, err := client.Create(ctx, CreateTaskParams{Title: "archived", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Archive(ctx, archivedID); err != nil {
+		t.Fatal(err)
+	}
+	liveID, err := client.Create(ctx, CreateTaskParams{Title: "live", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, _ := client.dbHandle()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,state,tmux_attached_count,updated_at) VALUES('p','s',?,'stopped',0,?)`, liveID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE daemon_session_projections SET issue_id=? WHERE session_id='s'`, archivedID); err == nil || !strings.Contains(err.Error(), "cannot attach session") {
+		t.Fatalf("session retarget err=%v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO daemon_worktree_projections(project_id,issue_id,path,branch,updated_at) VALUES('p',?,'/tmp/live','b',?)`, liveID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE daemon_worktree_projections SET issue_id=? WHERE issue_id=?`, archivedID, liveID); err == nil || !strings.Contains(err.Error(), "cannot attach worktree") {
+		t.Fatalf("worktree retarget err=%v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO issue_coordination_leases(issue_id,purpose,owner_id,owner_kind,claimed_at) VALUES(?,'execution','a','agent',?)`, liveID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE issue_coordination_leases SET issue_id=? WHERE issue_id=?`, archivedID, liveID); err == nil || !strings.Contains(err.Error(), "ineligible") {
+		t.Fatalf("lease retarget err=%v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM issue_coordination_leases WHERE issue_id=?`, liveID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM daemon_worktree_projections WHERE issue_id=?`, liveID); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Archive(ctx, liveID); err == nil || !strings.Contains(err.Error(), "resource-free") {
+		t.Fatalf("archive with stopped session err=%v", err)
+	}
+}
+
+func TestLeasePurposeEligibilityAcrossIssueStateProduct(t *testing.T) {
+	client := NewClient(t.TempDir(), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	ctx := context.Background()
+	readyID, _ := client.Create(ctx, CreateTaskParams{Title: "ready", Type: domain.TypeTask, Status: domain.StatusOpen})
+	backlogID, _ := client.Create(ctx, CreateTaskParams{Title: "backlog", Type: domain.TypeTask, Status: domain.StatusOpen})
+	backlog := domain.IssueWorkflowBacklog
+	if err := client.UpdateDetails(ctx, backlogID, UpdateTaskParams{Title: "backlog", Type: domain.TypeTask, Priority: domain.P2, Lifecycle: &backlog}); err != nil {
+		t.Fatal(err)
+	}
+	terminalID, _ := client.Create(ctx, CreateTaskParams{Title: "terminal", Type: domain.TypeTask, Status: domain.StatusDone})
+	claim := func(id string, purpose domain.CoordinationLeasePurpose) error {
+		return client.claimOwnership(ctx, id, OwnershipClaimParams{OwnerID: "agent", OwnerKind: "agent", Purpose: purpose})
+	}
+	if err := claim(readyID, domain.CoordinationLeaseExecution); err != nil {
+		t.Fatalf("ready execution claim: %v", err)
+	}
+	if err := claim(backlogID, domain.CoordinationLeaseOrchestration); err != nil {
+		t.Fatalf("backlog orchestration claim: %v", err)
+	}
+	for _, tc := range []struct {
+		id      string
+		purpose domain.CoordinationLeasePurpose
+	}{{backlogID, domain.CoordinationLeaseExecution}, {backlogID, domain.CoordinationLeaseReview}, {terminalID, domain.CoordinationLeaseExecution}, {terminalID, domain.CoordinationLeaseOrchestration}} {
+		if err := claim(tc.id, tc.purpose); err == nil || !strings.Contains(err.Error(), "ineligible") {
+			t.Fatalf("claim %s/%s err=%v", tc.id, tc.purpose, err)
+		}
+	}
+}
+
+func TestCanonicalClaimMigrationPreflight(t *testing.T) {
+	tests := []struct {
+		name       string
+		ownerID    string
+		ownerKind  string
+		claimedAt  string
+		leaseOwner string
+		wantErr    string
+	}{
+		{name: "owner only", ownerID: "owner", ownerKind: "agent", claimedAt: "2026-07-13T00:00:00Z"},
+		{name: "lease only", leaseOwner: "lease"},
+		{name: "matching", ownerID: "same", ownerKind: "agent", claimedAt: "2026-07-13T00:00:00Z", leaseOwner: "same"},
+		{name: "conflicting", ownerID: "owner", ownerKind: "agent", claimedAt: "2026-07-13T00:00:00Z", leaseOwner: "lease", wantErr: "authority conflict"},
+		{name: "partial", ownerID: "owner", ownerKind: "", claimedAt: "", wantErr: "partial tuples"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := NewClient(t.TempDir(), slog.Default())
+			t.Cleanup(func() { _ = client.CloseDB() })
+			ctx := context.Background()
+			id, err := client.Create(ctx, CreateTaskParams{Title: tt.name, Type: domain.TypeTask, Status: domain.StatusOpen})
+			if err != nil {
+				t.Fatal(err)
+			}
+			db, _ := client.dbHandle()
+			dropCanonicalStateMigrationGuards(t, db)
+			for _, ddl := range []string{"ALTER TABLE issues ADD COLUMN owner_id TEXT", "ALTER TABLE issues ADD COLUMN owner_kind TEXT", "ALTER TABLE issues ADD COLUMN owner_claimed_at TEXT", "ALTER TABLE issues ADD COLUMN owner_expires_at TEXT"} {
+				if _, err := db.ExecContext(ctx, ddl); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE id='0045_issue_state_runtime_constraints'`); err != nil {
+				t.Fatal(err)
+			}
+			if tt.ownerID != "" {
+				if _, err := db.ExecContext(ctx, `UPDATE issues SET owner_id=?,owner_kind=?,owner_claimed_at=? WHERE id=?`, tt.ownerID, tt.ownerKind, tt.claimedAt, id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.leaseOwner != "" {
+				if _, err := db.ExecContext(ctx, `INSERT INTO issue_coordination_leases(issue_id,purpose,owner_id,owner_kind,claimed_at) VALUES(?,'execution',?,'agent','2026-07-13T00:00:00Z') ON CONFLICT(issue_id,purpose) DO UPDATE SET owner_id=excluded.owner_id,owner_kind=excluded.owner_kind,claimed_at=excluded.claimed_at`, id, tt.leaseOwner); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err = applyIssueStateRuntimeConstraintsMigration(ctx, db, "0045_issue_state_runtime_constraints")
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("migration err=%v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var owner string
+			if err := db.QueryRowContext(ctx, `SELECT owner_id FROM issue_coordination_leases WHERE issue_id=? AND purpose='execution'`, id).Scan(&owner); err != nil {
+				t.Fatal(err)
+			}
+			want := tt.leaseOwner
+			if want == "" {
+				want = tt.ownerID
+			}
+			if owner != want {
+				t.Fatalf("lease owner=%q want %q", owner, want)
+			}
+		})
 	}
 }
 
@@ -128,7 +276,7 @@ func dropCanonicalStateMigrationGuards(t *testing.T, db interface {
 	if _, err := db.Exec(`DROP TABLE IF EXISTS issue_runtime_divergences`); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"issue_state_product_guard_insert", "issue_state_product_guard_update", "issue_archive_aggregate_guard", "issue_lease_archived_guard", "issue_worktree_archived_guard", "issue_session_archived_guard", "daemon_session_state_product_guard_insert", "daemon_session_state_product_guard_update", "daemon_worktree_state_product_guard_insert", "daemon_worktree_state_product_guard_update"} {
+	for _, name := range []string{"issue_state_product_guard_insert", "issue_state_product_guard_update", "issue_archive_aggregate_guard", "issue_lease_archived_guard", "issue_lease_state_guard_update", "issue_worktree_archived_guard", "issue_worktree_archived_guard_update", "issue_session_archived_guard", "issue_session_archived_guard_update", "daemon_session_state_product_guard_insert", "daemon_session_state_product_guard_update", "daemon_worktree_state_product_guard_insert", "daemon_worktree_state_product_guard_update"} {
 		if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + name); err != nil {
 			t.Fatal(err)
 		}

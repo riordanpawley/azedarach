@@ -56,6 +56,14 @@ INSERT INTO issue_state_runtime_constraint_validation(ok)
 SELECT 0 WHERE EXISTS (
   SELECT 1 FROM daemon_worktree_projections WHERE trim(project_id)='' OR trim(issue_id)='' OR trim(path)=''
 );
+INSERT INTO issue_state_runtime_constraint_validation(ok)
+SELECT 0 WHERE EXISTS (
+  SELECT 1 FROM issue_coordination_leases l JOIN issues i ON i.id=l.issue_id WHERE
+    i.visibility!='live' OR i.disposition IN ('completed','cancelled') OR
+    (l.purpose='execution' AND i.disposition!='ready') OR
+    (l.purpose='review' AND i.disposition!='ready') OR
+    (l.purpose='orchestration' AND i.disposition NOT IN ('backlog','ready'))
+);
 DROP TABLE issue_state_runtime_constraint_validation;
 
 CREATE TRIGGER issue_state_product_guard_insert
@@ -86,10 +94,16 @@ BEGIN
     THEN RAISE(ABORT, 'terminal issue requires outcome and closed_at') END;
   SELECT CASE WHEN NEW.lifecycle_state!='closed' AND (NEW.closed_outcome!='none' OR NEW.closed_at IS NOT NULL)
     THEN RAISE(ABORT, 'non-terminal issue cannot retain outcome or closed_at') END;
+  SELECT CASE WHEN EXISTS(SELECT 1 FROM issue_coordination_leases l WHERE l.issue_id=NEW.id AND NOT (
+    NEW.visibility='live' AND NEW.disposition NOT IN ('completed','cancelled') AND
+    ((l.purpose='execution' AND NEW.disposition='ready') OR
+     (l.purpose='review' AND NEW.disposition='ready') OR
+     (l.purpose='orchestration' AND NEW.disposition IN ('backlog','ready')))))
+    THEN RAISE(ABORT, 'issue state is ineligible for existing lease purpose') END;
 END;
 
 CREATE TRIGGER issue_state_product_guard_update
-BEFORE UPDATE OF issue_type,disposition,engagement,visibility,lifecycle_state,review_state,closed_outcome,closed_at ON issues
+BEFORE UPDATE ON issues
 BEGIN
   SELECT CASE WHEN COALESCE(NEW.disposition,'') NOT IN ('backlog','ready','completed','cancelled') THEN RAISE(ABORT, 'invalid disposition') END;
   SELECT CASE WHEN COALESCE(NEW.engagement,'') NOT IN ('idle','working','review_requested') THEN RAISE(ABORT, 'invalid engagement') END;
@@ -116,6 +130,12 @@ BEGIN
     THEN RAISE(ABORT, 'terminal issue requires outcome and closed_at') END;
   SELECT CASE WHEN NEW.lifecycle_state!='closed' AND (NEW.closed_outcome!='none' OR NEW.closed_at IS NOT NULL)
     THEN RAISE(ABORT, 'non-terminal issue cannot retain outcome or closed_at') END;
+  SELECT CASE WHEN EXISTS(SELECT 1 FROM issue_coordination_leases l WHERE l.issue_id=NEW.id AND NOT (
+    NEW.visibility='live' AND NEW.disposition NOT IN ('completed','cancelled') AND
+    ((l.purpose='execution' AND NEW.disposition='ready') OR
+     (l.purpose='review' AND NEW.disposition='ready') OR
+     (l.purpose='orchestration' AND NEW.disposition IN ('backlog','ready')))))
+    THEN RAISE(ABORT, 'issue state is ineligible for existing lease purpose') END;
 END;
 
 CREATE TRIGGER issue_archive_aggregate_guard
@@ -126,22 +146,43 @@ BEGIN
     THEN RAISE(ABORT, 'archived issue cannot retain claims') END;
   SELECT CASE WHEN EXISTS(SELECT 1 FROM daemon_worktree_projections WHERE issue_id=NEW.id AND trim(path)!='')
     THEN RAISE(ABORT, 'archived issue cannot retain worktree') END;
-  SELECT CASE WHEN EXISTS(SELECT 1 FROM daemon_session_projections WHERE issue_id=NEW.id AND lower(trim(state))!='stopped')
-    THEN RAISE(ABORT, 'archived issue cannot retain live session') END;
+  SELECT CASE WHEN EXISTS(SELECT 1 FROM daemon_session_projections WHERE issue_id=NEW.id)
+    THEN RAISE(ABORT, 'archived issue cannot retain session') END;
 END;
 
 CREATE TRIGGER issue_lease_archived_guard
 BEFORE INSERT ON issue_coordination_leases
-WHEN EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id AND visibility='archived')
-BEGIN SELECT RAISE(ABORT, 'cannot claim archived issue'); END;
+WHEN NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=NEW.issue_id AND i.visibility='live' AND i.disposition NOT IN ('completed','cancelled') AND
+  ((NEW.purpose='execution' AND i.disposition='ready') OR
+   (NEW.purpose='review' AND i.disposition='ready') OR
+   (NEW.purpose='orchestration' AND i.disposition IN ('backlog','ready'))))
+BEGIN SELECT RAISE(ABORT, 'issue state is ineligible for lease purpose'); END;
+
+CREATE TRIGGER issue_lease_state_guard_update
+BEFORE UPDATE ON issue_coordination_leases
+WHEN NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=NEW.issue_id AND i.visibility='live' AND i.disposition NOT IN ('completed','cancelled') AND
+  ((NEW.purpose='execution' AND i.disposition='ready') OR
+   (NEW.purpose='review' AND i.disposition='ready') OR
+   (NEW.purpose='orchestration' AND i.disposition IN ('backlog','ready'))))
+BEGIN SELECT RAISE(ABORT, 'issue state is ineligible for lease purpose'); END;
 
 CREATE TRIGGER issue_worktree_archived_guard
 BEFORE INSERT ON daemon_worktree_projections
 WHEN EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id AND visibility='archived')
 BEGIN SELECT RAISE(ABORT, 'cannot attach worktree to archived issue'); END;
 
+CREATE TRIGGER issue_worktree_archived_guard_update
+BEFORE UPDATE ON daemon_worktree_projections
+WHEN EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id AND visibility='archived')
+BEGIN SELECT RAISE(ABORT, 'cannot attach worktree to archived issue'); END;
+
 CREATE TRIGGER issue_session_archived_guard
 BEFORE INSERT ON daemon_session_projections
+WHEN EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id AND visibility='archived')
+BEGIN SELECT RAISE(ABORT, 'cannot attach session to archived issue'); END;
+
+CREATE TRIGGER issue_session_archived_guard_update
+BEFORE UPDATE ON daemon_session_projections
 WHEN EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id AND visibility='archived')
 BEGIN SELECT RAISE(ABORT, 'cannot attach session to archived issue'); END;
 

@@ -109,7 +109,7 @@ func TestExportProjectionUsesStableSchemaFingerprintAndMonotonicSourceRevision(t
 		t.Fatalf("deleted external ref remains: %+v", exported.Tasks[0].PullRequest)
 	}
 
-	if _, err = db.ExecContext(ctx, `INSERT INTO issue_coordination_leases(issue_id,purpose,owner_id,owner_kind,claimed_at) VALUES(?,?,?,?,?)`, "issue-1", "review", "reviewer", "agent", observedAt); err != nil {
+	if _, err = db.ExecContext(ctx, `INSERT INTO issue_coordination_leases(issue_id,purpose,owner_id,owner_kind,claimed_at) VALUES(?,?,?,?,?)`, "issue-1", "execution", "reviewer", "agent", observedAt); err != nil {
 		t.Fatal(err)
 	}
 	exported = assertAdvanced("coordination lease insert")

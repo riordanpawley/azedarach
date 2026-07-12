@@ -77,6 +77,9 @@ func (c *Client) routeOrchestrationCandidateLocked(ctx context.Context, actorID 
 	}
 
 	now := time.Now().UTC()
+	if err := releaseOrchestrationExecutionLease(ctx, c, tx, task, actorID, now, route.Kind); err != nil {
+		return nil, false, err
+	}
 	var interaction *domain.InteractionRequest
 	var interactionCreated bool
 	switch route.Kind {
@@ -138,9 +141,6 @@ func (c *Client) routeOrchestrationCandidateLocked(ctx context.Context, actorID 
 		return nil, false, err
 	}
 
-	if err := releaseOrchestrationExecutionLease(ctx, c, tx, task, actorID, now, route.Kind); err != nil {
-		return nil, false, err
-	}
 	if err := c.appendIssueObservationEvent(ctx, tx, route.IssueID, domain.IssueEventOrchestrationRouted, map[string]any{"kind": route.Kind, "reason": route.Reason, "missing_details": route.MissingDetails, "actor_id": actorID, "interaction_id": interactionID(interaction)}); err != nil {
 		return nil, false, err
 	}
