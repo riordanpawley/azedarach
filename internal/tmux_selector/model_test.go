@@ -1825,6 +1825,73 @@ func TestModelViewUsesCompactCardsOnMobileViewport(t *testing.T) {
 	}
 }
 
+func TestModelGridSmallViewportKeepsIssueAndSessionMetadataVisible(t *testing.T) {
+	entries := []InventoryEntry{{
+		SessionID:         "az-one",
+		IssueID:           "one",
+		TaskTitle:         "One",
+		IssueStatus:       domain.StatusInProgress,
+		State:             domain.SessionBusy,
+		Activity:          "working",
+		HasTmuxSession:    true,
+		TmuxAttached:      true,
+		TmuxAttachedCount: 2,
+	}}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 9})
+	model = updated.(Model)
+	updated, _ = model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+
+	view := ansi.Strip(model.View())
+	for _, want := range []string{"one", "issue in_progress", "tmux az-one", "attached x2"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("small grid view missing projected metadata %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestModelGridSmallViewportNavigationKeepsSelectionVisibleAfterResize(t *testing.T) {
+	entries := make([]InventoryEntry, 12)
+	for i := range entries {
+		id := string(rune('a' + i))
+		entries[i] = InventoryEntry{SessionID: "az-" + id, IssueID: id, TaskTitle: "Issue " + id, HasTmuxSession: true}
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 12})
+	model = updated.(Model)
+	updated, _ = model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+
+	for _, key := range []tea.KeyType{tea.KeyRight, tea.KeyDown, tea.KeyDown} {
+		updated, _ = model.Update(tea.KeyMsg{Type: key})
+		model = updated.(Model)
+		selected, ok := model.selectedEntry()
+		if !ok || !strings.Contains(ansi.Strip(model.View()), selected.SessionID) {
+			t.Fatalf("selection not visible after %s: cursor=%d selected=%#v\n%s", key, model.cursor, selected, ansi.Strip(model.View()))
+		}
+	}
+
+	updated, _ = model.Update(tea.WindowSizeMsg{Width: 32, Height: 8})
+	model = updated.(Model)
+	selected, ok := model.selectedEntry()
+	resizedView := model.View()
+	if !ok || !strings.Contains(ansi.Strip(resizedView), selected.SessionID) {
+		t.Fatalf("selection not visible after narrow resize: cursor=%d selected=%#v\n%s", model.cursor, selected, ansi.Strip(model.View()))
+	}
+	for _, line := range strings.Split(resizedView, "\n") {
+		if got := ansi.StringWidth(line); got > model.width {
+			t.Fatalf("narrow resize left content horizontally off-screen: line width=%d viewport=%d\n%s", got, model.width, ansi.Strip(resizedView))
+		}
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	selected, ok = model.selectedEntry()
+	if !ok || !strings.Contains(ansi.Strip(model.View()), selected.SessionID) {
+		t.Fatalf("selection not visible after vertical scroll: cursor=%d selected=%#v\n%s", model.cursor, selected, ansi.Strip(model.View()))
+	}
+}
+
 func TestModelViewUsesGridOnWideViewport(t *testing.T) {
 	started := time.Unix(1775209200, 0).UTC()
 	entries := []InventoryEntry{

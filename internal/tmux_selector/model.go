@@ -2121,8 +2121,38 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 	if len(metaParts) == 0 {
 		return card
 	}
-	meta := strings.Join(metaParts, "  ")
-	return insertCardMetaLine(card, meta, origin, s)
+	return insertCardMetaLines(card, metaParts, origin, s)
+}
+
+func insertCardMetaLines(card string, parts []string, origin string, s *styles.Styles) string {
+	cardWidth := 0
+	if lines := strings.Split(card, "\n"); len(lines) > 0 {
+		cardWidth = ansi.StringWidth(lines[0])
+	}
+	innerWidth := maxInt(1, cardWidth-4)
+	lines := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if len(lines) > 0 {
+			joined := lines[len(lines)-1] + "  " + part
+			if ansi.StringWidth(joined) <= innerWidth {
+				lines[len(lines)-1] = joined
+				continue
+			}
+		}
+		lines = append(lines, part)
+	}
+	for i, line := range lines {
+		badge := ""
+		if i == len(lines)-1 {
+			badge = origin
+		}
+		card = insertCardMetaLine(card, line, badge, s)
+	}
+	return card
 }
 
 func entryDisplayLabel(entry InventoryEntry) string {
@@ -2686,7 +2716,7 @@ func gridCardWidth(width int, columns int) int {
 	const gapWidth = 2
 	available := maxInt(1, width-4)
 	cardWidth := (available-gapWidth*(columns-1))/columns - 2
-	return clampInt(cardWidth, 36, 96)
+	return clampInt(cardWidth, 12, 96)
 }
 
 func formatSnapshotStatus(snapshot Snapshot, rows int) string {
