@@ -16,6 +16,7 @@ type ProjectsRegistry struct {
 
 // Project represents a registered project
 type Project struct {
+	ID   string `json:"id,omitempty"`
 	Name string `json:"name"`
 	Path string `json:"path"`
 }
@@ -58,6 +59,21 @@ func LoadProjectsRegistry() (*ProjectsRegistry, error) {
 	if err := json.Unmarshal(data, &registry); err != nil {
 		return nil, err
 	}
+	changed := false
+	for i := range registry.Projects {
+		if strings.TrimSpace(registry.Projects[i].ID) != "" {
+			continue
+		}
+		if id, idErr := ProjectIDForRoot(registry.Projects[i].Path); idErr == nil && strings.TrimSpace(id) != "" {
+			registry.Projects[i].ID = id
+			changed = true
+		}
+	}
+	if changed {
+		if err := SaveProjectsRegistry(&registry); err != nil {
+			return nil, err
+		}
+	}
 
 	return &registry, nil
 }
@@ -79,7 +95,22 @@ func SaveProjectsRegistry(reg *ProjectsRegistry) error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".projects-*.json")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err = tmp.Chmod(0o644); err == nil {
+		_, err = tmp.Write(data)
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // Add adds a new project to the registry
@@ -104,7 +135,9 @@ func (r *ProjectsRegistry) Add(name, path string) error {
 	}
 
 	// Add project
+	projectID, _ := ProjectIDForRoot(path)
 	r.Projects = append(r.Projects, Project{
+		ID:   projectID,
 		Name: name,
 		Path: path,
 	})
@@ -115,6 +148,14 @@ func (r *ProjectsRegistry) Add(name, path string) error {
 	}
 
 	return nil
+}
+
+func RegisteredProjectID(project Project) string {
+	if id := strings.TrimSpace(project.ID); id != "" {
+		return id
+	}
+	id, _ := ProjectIDForRoot(project.Path)
+	return strings.TrimSpace(id)
 }
 
 // Remove removes a project from the registry

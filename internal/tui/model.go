@@ -96,28 +96,10 @@ const (
 // Re-export navigation types for compatibility
 type Position = navigation.Position
 
-// ViewMode represents the current view mode
-type ViewMode int
-
-const (
-	ViewModeBoard ViewMode = iota
-	ViewModeCompact
-	ViewModeOverview
-)
-
-type orchestrationProjectOverview struct {
+type projectOrchestratorSnapshot struct {
 	Name             string
 	Path             string
 	ProjectID        string
-	Tasks            []domain.Task
-	Observations     []domain.WorkerObservation
-	ObservationErrs  []string
-	MailByTask       map[string]protocol.MailEvent
-	Err              error
-	Fallback         string
-	Revision         uint64
-	LastCheckedAt    time.Time
-	Freshness        protocol.TaskListFreshness
 	Snapshot         *protocol.OrchestrationSnapshot
 	Session          *protocol.OrchestratorSessionResult
 	OrchestrationErr error
@@ -220,21 +202,28 @@ type notificationHistoryEntry struct {
 // Model is the main application state
 type Model struct {
 	// Core data
-	tasks                []domain.Task
-	boardView            domain.BoardView
-	boardColumns         []domain.BoardViewColumnSnapshot
-	sessions             map[string]*domain.Session
-	suppressedTasks      map[string]struct{}
-	pendingStatuses      map[string]pendingTaskStatus
-	pendingDetails       map[string]pendingTaskDetails
-	operationTaskID      map[string]string
-	pendingOpsByTask     map[string]pendingOperationProgress
-	pendingFailures      map[string]taskMutationFailure
-	pendingCleanupOps    map[string]pendingWorktreeCleanupConfirmation
-	pendingCleanup       *pendingWorktreeCleanupConfirmation
-	pendingBulkCleanup   *pendingBulkCleanupConfirmation
-	pendingClose         *pendingCloseCleanupConfirmation
-	pendingReviewCascade *pendingReviewCascadeConfirmation
+	tasks                   []domain.Task
+	boardView               domain.BoardView
+	boardColumns            []domain.BoardViewColumnSnapshot
+	boardOrdered            []domain.Task
+	boardProjection         domain.BoardViewProjection
+	globalBoard             bool
+	globalTaskScopes        map[string]protocol.ScopedIssueID
+	globalTaskProjects      map[string]config.Project
+	projectSwitchFromGlobal bool
+	globalLoadSeq           uint64
+	sessions                map[string]*domain.Session
+	suppressedTasks         map[string]struct{}
+	pendingStatuses         map[string]pendingTaskStatus
+	pendingDetails          map[string]pendingTaskDetails
+	operationTaskID         map[string]string
+	pendingOpsByTask        map[string]pendingOperationProgress
+	pendingFailures         map[string]taskMutationFailure
+	pendingCleanupOps       map[string]pendingWorktreeCleanupConfirmation
+	pendingCleanup          *pendingWorktreeCleanupConfirmation
+	pendingBulkCleanup      *pendingBulkCleanupConfirmation
+	pendingClose            *pendingCloseCleanupConfirmation
+	pendingReviewCascade    *pendingReviewCascadeConfirmation
 
 	// Navigation (using NavigationService)
 	nav *navigation.Service
@@ -243,39 +232,32 @@ type Model struct {
 	editor *editor.Service
 
 	// UI state
-	overlayStack                        *overlay.Stack
-	createTaskOverlay                   *overlay.CreateTaskOverlay
-	viewMode                            ViewMode
-	boardViews                          []domain.BoardViewRecord
-	selectedBoardViewID                 string
-	orchestrationOverview               []orchestrationProjectOverview
-	orchestrationOverviewLoadedAt       time.Time
-	orchestrationOverviewHiddenProjects int
-	orchestrationOverviewHiddenTasks    int
-	orchestrationOverviewBackendErrors  int
-	orchestrationOverviewHiddenLabels   []string
-	orchestrationOverviewCursor         int
-	projectOrchestratorActionRunner     projectOrchestratorActionRunner
-	jumpMode                            *overlay.JumpMode
-	jumpTargets                         []string
-	mergePickMode                       *mergePickState
-	mouseDrag                           mouseDragState
-	mouseTap                            mouseTapState
-	viewportStarts                      [maxBoardViewColumns]int
-	columnViewportStart                 int
-	drillDownParentID                   string
-	drillDownParentName                 string
-	drillDownTrail                      []drillDownContext
-	pendingCreatedTaskID                string
-	pendingCreatedWorkspaceTaskID       string
-	pendingUIOpenTaskID                 string
-	pendingUIDrillDownTaskID            string
-	openCreatedTaskInWorkspace          bool
-	openSessionSelectorOnLoad           bool
-	sessionTreeFilterOnly               bool
-	runtimeSignalsByTask                map[string]board.RuntimeSignals
-	runtimeSignalWorktreeByTask         map[string]string
-	runtimeSignalBranchByTask           map[string]string
+	overlayStack                    *overlay.Stack
+	createTaskOverlay               *overlay.CreateTaskOverlay
+	boardViews                      []domain.BoardViewRecord
+	selectedBoardViewID             string
+	projectOrchestrator             *projectOrchestratorSnapshot
+	projectOrchestratorActionRunner projectOrchestratorActionRunner
+	jumpMode                        *overlay.JumpMode
+	jumpTargets                     []string
+	mergePickMode                   *mergePickState
+	mouseDrag                       mouseDragState
+	mouseTap                        mouseTapState
+	viewportStarts                  [maxBoardViewColumns]int
+	columnViewportStart             int
+	drillDownParentID               string
+	drillDownParentName             string
+	drillDownTrail                  []drillDownContext
+	pendingCreatedTaskID            string
+	pendingCreatedWorkspaceTaskID   string
+	pendingUIOpenTaskID             string
+	pendingUIDrillDownTaskID        string
+	openCreatedTaskInWorkspace      bool
+	openSessionSelectorOnLoad       bool
+	sessionTreeFilterOnly           bool
+	runtimeSignalsByTask            map[string]board.RuntimeSignals
+	runtimeSignalWorktreeByTask     map[string]string
+	runtimeSignalBranchByTask       map[string]string
 
 	// Project
 	currentProject       string
@@ -368,6 +350,13 @@ func WithSessionSelectorOnLoad() Option {
 	}
 }
 
+// WithGlobalBoardOnLoad starts the TUI in the user-level cross-project view.
+// Actions leave the global projection and hydrate the selected authoritative
+// project before any mutation is offered.
+func WithGlobalBoardOnLoad() Option {
+	return func(m *Model) { m.globalBoard, m.globalLoadSeq = true, 1 }
+}
+
 // New creates a new application model with the given config
 func New(cfg *config.Config) Model {
 	return NewWithOptions(cfg)
@@ -416,11 +405,12 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 		nav:                         navigation.NewService(),
 		editor:                      editor.NewService(),
 		overlayStack:                overlay.NewStack(),
-		viewMode:                    ViewModeBoard, // Start with board view
 		selectedBoardViewID:         domain.DefaultBoardViewID,
 		runtimeSignalsByTask:        make(map[string]board.RuntimeSignals),
 		runtimeSignalWorktreeByTask: make(map[string]string),
 		runtimeSignalBranchByTask:   make(map[string]string),
+		globalTaskScopes:            make(map[string]protocol.ScopedIssueID),
+		globalTaskProjects:          make(map[string]config.Project),
 		toasts:                      []Toast{},
 		activeToastHistoryIDs:       []string{},
 		notificationHistory:         []notificationHistoryEntry{},
@@ -672,6 +662,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		if m.editor.GetMode() != ModeAction {
 			m.boardRefreshing = true
+			if m.globalBoard {
+				m.globalLoadSeq++
+				return m, m.loadGlobalBoardCmd(m.globalLoadSeq)
+			}
 			return m, tea.Batch(m.scheduleIssuesRefreshAfterRuntimeReconcileCmd(), m.gitSyncService.FetchAndCheck())
 		}
 	}
@@ -733,9 +727,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // handleNormalMode processes keyboard input in normal mode
 func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
-	if m.viewMode == ViewModeOverview {
-		if next, cmd, handled := m.handleOverviewModeKey(msg); handled {
-			return next, cmd
+	if m.globalBoard {
+		switch msg.String() {
+		case overlay.EventLogHotkey, overlay.OperationQueueHotkey, "O", "X":
+			m.addToast(Toast{Level: ToastInfo, Message: "Open an issue's project before using project operations", Expires: time.Now().Add(4 * time.Second)})
+			return m, nil
 		}
 	}
 	switch msg.String() {
@@ -751,7 +747,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case overlay.OperationQueueHotkey:
 		return m.openOperationQueueOverlay()
 	case "O": // Orchestration overlay
-		return m, m.openOrchestrationOverlay()
+		return m, m.openProjectOrchestratorOverlay()
 	case "X": // Bulk cleanup (Shift+X)
 		taskCount := len(m.tasks)
 		worktreeCount := len(m.sessions)
@@ -767,6 +763,15 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.applyBoardNavigationAction(action, columns) {
 		return m, nil
+	}
+	if m.globalBoard {
+		switch action {
+		case keybinds.ActionQuit, keybinds.ActionEnterGoto, keybinds.ActionEnterSearch,
+			keybinds.ActionOpenFilter, keybinds.ActionOpenSort, keybinds.ActionOpenHelp:
+			// These actions are projection-local and cannot mutate a project.
+		default:
+			return m.leaveGlobalBoardForCurrentTask()
+		}
 	}
 
 	switch action {
@@ -884,33 +889,9 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		pane := overlay.NewGitPaneOverlay(m.resolveBaseBranch())
 		return m, tea.Batch(m.openOverlay(pane), m.gitPaneStatusCmd(true))
 
-	case keybinds.ActionToggleView: // Toggle view mode
-		switch m.viewMode {
-		case ViewModeBoard:
-			m.viewMode = ViewModeCompact
-			m.addToast(Toast{
-				Level:   ToastInfo,
-				Message: "Switched to compact view",
-				Expires: time.Now().Add(2 * time.Second),
-			})
-			return m, m.persistUIViewModeCmd(m.viewMode)
-		case ViewModeCompact:
-			m.viewMode = ViewModeOverview
-			m.addToast(Toast{
-				Level:   ToastInfo,
-				Message: "Switched to orchestration overview",
-				Expires: time.Now().Add(2 * time.Second),
-			})
-			return m, tea.Batch(m.persistUIViewModeCmd(m.viewMode), m.loadOrchestrationOverviewCmd())
-		default:
-			m.viewMode = ViewModeBoard
-			m.addToast(Toast{
-				Level:   ToastInfo,
-				Message: "Switched to board view",
-				Expires: time.Now().Add(2 * time.Second),
-			})
-			return m, m.persistUIViewModeCmd(m.viewMode)
-		}
+	case keybinds.ActionToggleView:
+		m.boardRefreshing = true
+		return m, m.cycleBoardViewCmd()
 	}
 
 	return m, nil
@@ -924,6 +905,14 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	action, ok := keybinds.LookupAction(types.ModeGoto, msg.String())
 	if !ok {
+		return m, nil
+	}
+	if m.globalBoard && action == keybinds.ActionGotoSpec {
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: "Open an issue's project before viewing its spec",
+			Expires: time.Now().Add(4 * time.Second),
+		})
 		return m, nil
 	}
 
@@ -1176,22 +1165,24 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Message types for async operations
 
 type issuesLoadedMsg struct {
-	refreshSeq     uint64
-	projectID      string
-	scopedParentID string
-	tasks          []domain.Task
-	boardView      domain.BoardView
-	boardColumns   []domain.BoardViewColumnSnapshot
-	revision       uint64
-	lastCheckedAt  time.Time
-	freshness      protocol.TaskListFreshness
-	events         <-chan protocol.EventEnvelope
-	eventsCancel   context.CancelFunc
-	daemonClient   *daemonclient.Client
-	daemonSocket   string
-	stale          bool
-	freshnessHint  string
-	reconcileWarn  error
+	refreshSeq      uint64
+	projectID       string
+	scopedParentID  string
+	tasks           []domain.Task
+	boardView       domain.BoardView
+	boardColumns    []domain.BoardViewColumnSnapshot
+	boardOrdered    []domain.Task
+	boardProjection domain.BoardViewProjection
+	revision        uint64
+	lastCheckedAt   time.Time
+	freshness       protocol.TaskListFreshness
+	events          <-chan protocol.EventEnvelope
+	eventsCancel    context.CancelFunc
+	daemonClient    *daemonclient.Client
+	daemonSocket    string
+	stale           bool
+	freshnessHint   string
+	reconcileWarn   error
 }
 
 type issuesErrorMsg struct {
@@ -1201,20 +1192,22 @@ type issuesErrorMsg struct {
 }
 
 type projectSwitchResultMsg struct {
-	switchSeq     uint64
-	project       config.Project
-	projectConfig *config.Config
-	tasks         []domain.Task
-	boardView     domain.BoardView
-	boardColumns  []domain.BoardViewColumnSnapshot
-	revision      uint64
-	lastCheckedAt time.Time
-	freshness     protocol.TaskListFreshness
-	events        <-chan protocol.EventEnvelope
-	eventsCancel  context.CancelFunc
-	daemonClient  *daemonclient.Client
-	daemonSocket  string
-	err           error
+	switchSeq       uint64
+	project         config.Project
+	projectConfig   *config.Config
+	tasks           []domain.Task
+	boardView       domain.BoardView
+	boardColumns    []domain.BoardViewColumnSnapshot
+	boardOrdered    []domain.Task
+	boardProjection domain.BoardViewProjection
+	revision        uint64
+	lastCheckedAt   time.Time
+	freshness       protocol.TaskListFreshness
+	events          <-chan protocol.EventEnvelope
+	eventsCancel    context.CancelFunc
+	daemonClient    *daemonclient.Client
+	daemonSocket    string
+	err             error
 }
 
 const (
@@ -1286,17 +1279,6 @@ type notificationCopyDetailsResultMsg struct {
 	err error
 }
 
-type uiViewModeLoadedMsg struct {
-	viewMode ViewMode
-	found    bool
-	err      error
-}
-
-type uiViewModeSavedMsg struct {
-	viewMode ViewMode
-	err      error
-}
-
 type boardViewsLoadedMsg struct {
 	views          []domain.BoardViewRecord
 	selectedViewID string
@@ -1314,12 +1296,9 @@ type boardViewMutatedMsg struct {
 	err    error
 }
 
-type orchestrationOverviewLoadedMsg struct {
-	projects       []orchestrationProjectOverview
-	hiddenProjects int
-	hiddenTasks    int
-	backendErrors  int
-	hiddenLabels   []string
+type projectOrchestratorLoadedMsg struct {
+	project projectOrchestratorSnapshot
+	err     error
 }
 
 type projectOrchestratorActionMsg struct {
@@ -1759,15 +1738,17 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: err}
 		}
 		return issuesLoadedMsg{
-			refreshSeq:     refreshSeq,
-			projectID:      projectID,
-			scopedParentID: scopedParentID,
-			tasks:          snapshot.Tasks,
-			boardView:      snapshot.View,
-			boardColumns:   snapshot.Columns,
-			revision:       snapshot.Revision,
-			lastCheckedAt:  snapshot.LastCheckedAt,
-			freshness:      snapshot.Freshness,
+			refreshSeq:      refreshSeq,
+			projectID:       projectID,
+			scopedParentID:  scopedParentID,
+			tasks:           snapshot.Tasks,
+			boardView:       snapshot.View,
+			boardColumns:    snapshot.Columns,
+			boardOrdered:    snapshot.Projection.OrderedTasks(),
+			boardProjection: snapshot.Projection,
+			revision:        snapshot.Revision,
+			lastCheckedAt:   snapshot.LastCheckedAt,
+			freshness:       snapshot.Freshness,
 		}
 	}
 }
@@ -1813,43 +1794,6 @@ func (m *Model) finishIssuesRefreshCmd(refreshSeq uint64) tea.Cmd {
 	return m.scheduleIssuesRefreshCmd()
 }
 
-func (m Model) loadUIViewModeCmd() tea.Cmd {
-	client := m.daemonClient
-	if client == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		resp, err := client.GetUIStateForProject(ctx, protocol.DefaultProjectID, protocol.UIStateKeyUIViewMode)
-		if err != nil {
-			return uiViewModeLoadedMsg{err: err}
-		}
-		mode, ok := viewModeFromPersistedValue(resp.Value)
-		if !resp.Found || !ok {
-			return uiViewModeLoadedMsg{found: false}
-		}
-		return uiViewModeLoadedMsg{viewMode: mode, found: true}
-	}
-}
-
-func (m Model) persistUIViewModeCmd(mode ViewMode) tea.Cmd {
-	client := m.daemonClient
-	if client == nil {
-		return nil
-	}
-	value, ok := persistedValueForViewMode(mode)
-	if !ok {
-		return nil
-	}
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_, err := client.SetUIStateForProject(ctx, protocol.DefaultProjectID, protocol.UIStateKeyUIViewMode, value)
-		return uiViewModeSavedMsg{viewMode: mode, err: err}
-	}
-}
-
 func (m Model) loadBoardViewsCmd() tea.Cmd {
 	client := m.daemonClient
 	if client == nil {
@@ -1866,6 +1810,43 @@ func (m Model) loadBoardViewsCmd() tea.Cmd {
 			views:          resp.Views,
 			selectedViewID: resp.SelectedViewID,
 		}
+	}
+}
+
+func (m Model) cycleBoardViewCmd() tea.Cmd {
+	client := m.daemonClient
+	selected := domain.NormalizeBoardViewID(m.selectedBoardViewID)
+	if client == nil {
+		return func() tea.Msg {
+			return boardViewSelectedMsg{viewID: selected, err: fmt.Errorf("daemon client unavailable")}
+		}
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		resp, err := client.ListBoardViews(ctx)
+		if err != nil {
+			return boardViewSelectedMsg{viewID: selected, err: err}
+		}
+		if len(resp.Views) == 0 {
+			return boardViewSelectedMsg{viewID: selected, err: fmt.Errorf("no configured views available")}
+		}
+		current := selected
+		if current == "" {
+			current = domain.NormalizeBoardViewID(resp.SelectedViewID)
+		}
+		next := 0
+		for i, record := range resp.Views {
+			if string(record.View.ID) == current {
+				next = (i + 1) % len(resp.Views)
+				break
+			}
+		}
+		result, err := client.SelectBoardView(ctx, string(resp.Views[next].View.ID))
+		if err != nil {
+			return boardViewSelectedMsg{viewID: current, err: err}
+		}
+		return boardViewSelectedMsg{viewID: result.ViewID}
 	}
 }
 
@@ -1912,32 +1893,6 @@ func (m Model) deleteBoardViewCmd(viewID string) tea.Cmd {
 	}
 }
 
-func persistedValueForViewMode(mode ViewMode) (string, bool) {
-	switch mode {
-	case ViewModeBoard:
-		return "board", true
-	case ViewModeCompact:
-		return "compact", true
-	case ViewModeOverview:
-		return "overview", true
-	default:
-		return "", false
-	}
-}
-
-func viewModeFromPersistedValue(value string) (ViewMode, bool) {
-	switch strings.TrimSpace(strings.ToLower(value)) {
-	case "board":
-		return ViewModeBoard, true
-	case "compact":
-		return ViewModeCompact, true
-	case "overview", "orchestration":
-		return ViewModeOverview, true
-	default:
-		return ViewModeBoard, false
-	}
-}
-
 func (m Model) loadIssuesAfterRuntimeReconcileCmd() tea.Cmd {
 	projectID := m.daemonProjectID()
 	refreshSeq := m.issueRefreshSeq
@@ -1973,16 +1928,18 @@ func (m Model) loadIssuesAfterRuntimeReconcileCmd() tea.Cmd {
 		}
 
 		return issuesLoadedMsg{
-			refreshSeq:     refreshSeq,
-			projectID:      projectID,
-			scopedParentID: scopedParentID,
-			tasks:          snapshot.Tasks,
-			boardView:      snapshot.View,
-			boardColumns:   snapshot.Columns,
-			revision:       snapshot.Revision,
-			lastCheckedAt:  snapshot.LastCheckedAt,
-			freshness:      snapshot.Freshness,
-			reconcileWarn:  reconcileWarn,
+			refreshSeq:      refreshSeq,
+			projectID:       projectID,
+			scopedParentID:  scopedParentID,
+			tasks:           snapshot.Tasks,
+			boardView:       snapshot.View,
+			boardColumns:    snapshot.Columns,
+			boardOrdered:    snapshot.Projection.OrderedTasks(),
+			boardProjection: snapshot.Projection,
+			revision:        snapshot.Revision,
+			lastCheckedAt:   snapshot.LastCheckedAt,
+			freshness:       snapshot.Freshness,
+			reconcileWarn:   reconcileWarn,
 		}
 	}
 }
@@ -2040,16 +1997,18 @@ func (m Model) loadIssuesAfterIssueReconcileCmd(issueIDs []string) tea.Cmd {
 		}
 
 		return issuesLoadedMsg{
-			refreshSeq:     refreshSeq,
-			projectID:      projectID,
-			scopedParentID: scopedParentID,
-			tasks:          snapshot.Tasks,
-			boardView:      snapshot.View,
-			boardColumns:   snapshot.Columns,
-			revision:       snapshot.Revision,
-			lastCheckedAt:  snapshot.LastCheckedAt,
-			freshness:      snapshot.Freshness,
-			reconcileWarn:  reconcileWarn,
+			refreshSeq:      refreshSeq,
+			projectID:       projectID,
+			scopedParentID:  scopedParentID,
+			tasks:           snapshot.Tasks,
+			boardView:       snapshot.View,
+			boardColumns:    snapshot.Columns,
+			boardOrdered:    snapshot.Projection.OrderedTasks(),
+			boardProjection: snapshot.Projection,
+			revision:        snapshot.Revision,
+			lastCheckedAt:   snapshot.LastCheckedAt,
+			freshness:       snapshot.Freshness,
+			reconcileWarn:   reconcileWarn,
 		}
 	}
 }
@@ -2367,19 +2326,21 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		}
 
 		return projectSwitchResultMsg{
-			switchSeq:     switchSeq,
-			project:       project,
-			projectConfig: projectConfig,
-			tasks:         snapshot.Tasks,
-			boardView:     snapshot.View,
-			boardColumns:  snapshot.Columns,
-			revision:      snapshot.Revision,
-			lastCheckedAt: snapshot.LastCheckedAt,
-			freshness:     snapshot.Freshness,
-			events:        events,
-			eventsCancel:  streamCancel,
-			daemonClient:  daemonClient,
-			daemonSocket:  socketPath,
+			switchSeq:       switchSeq,
+			project:         project,
+			projectConfig:   projectConfig,
+			tasks:           snapshot.Tasks,
+			boardView:       snapshot.View,
+			boardColumns:    snapshot.Columns,
+			boardOrdered:    snapshot.Projection.OrderedTasks(),
+			boardProjection: snapshot.Projection,
+			revision:        snapshot.Revision,
+			lastCheckedAt:   snapshot.LastCheckedAt,
+			freshness:       snapshot.Freshness,
+			events:          events,
+			eventsCancel:    streamCancel,
+			daemonClient:    daemonClient,
+			daemonSocket:    socketPath,
 		}
 	}
 }
@@ -2447,17 +2408,19 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		}
 
 		return issuesLoadedMsg{
-			projectID:     projectID,
-			tasks:         snapshot.Tasks,
-			boardView:     snapshot.View,
-			boardColumns:  snapshot.Columns,
-			revision:      snapshot.Revision,
-			lastCheckedAt: snapshot.LastCheckedAt,
-			freshness:     snapshot.Freshness,
-			events:        events,
-			eventsCancel:  streamCancel,
-			daemonClient:  daemonClient,
-			daemonSocket:  socketPath,
+			projectID:       projectID,
+			tasks:           snapshot.Tasks,
+			boardView:       snapshot.View,
+			boardColumns:    snapshot.Columns,
+			boardOrdered:    snapshot.Projection.OrderedTasks(),
+			boardProjection: snapshot.Projection,
+			revision:        snapshot.Revision,
+			lastCheckedAt:   snapshot.LastCheckedAt,
+			freshness:       snapshot.Freshness,
+			events:          events,
+			eventsCancel:    streamCancel,
+			daemonClient:    daemonClient,
+			daemonSocket:    socketPath,
 		}
 	}
 }
@@ -4977,6 +4940,11 @@ type taskStatusResultMsg struct {
 	err            error
 }
 
+type ancestorWorktreeCloseRetryResultMsg struct {
+	action overlay.CloseFailureActionMsg
+	err    error
+}
+
 type taskLifecycleResultMsg struct {
 	taskID        string
 	previousTask  domain.Task
@@ -5426,8 +5394,37 @@ func (m Model) closeFailureDialogCmd(msg taskStatusResultMsg) tea.Cmd {
 		AllowForceWorktree:      closeFailureSupportsForceWorktree(msg.err),
 		AllowActiveSessionRetry: closeFailureSupportsActiveSessionRetry(msg.err),
 		AllowCloseCleanChildren: closeFailureSupportsCloseCleanChildren(msg.err),
+		AllowCreateAncestor:     closeFailureSupportsCreateAncestor(msg.err, closeContext.parentID),
 	}
 	return m.openOverlay(overlay.NewCloseFailureDialog(msg.taskID, msg.err.Error(), options))
+}
+
+func closeFailureSupportsCreateAncestor(err error, parentID string) bool {
+	if err == nil || strings.TrimSpace(parentID) == "" {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "no active ancestor worktree branch was found") &&
+		strings.Contains(message, "az worktree create "+strings.ToLower(strings.TrimSpace(parentID)))
+}
+
+func (m Model) createAncestorWorktreeAndRetryCloseCmd(action overlay.CloseFailureActionMsg) tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return ancestorWorktreeCloseRetryResultMsg{action: action, err: fmt.Errorf("daemon client unavailable")}
+		}
+		parentID := strings.TrimSpace(action.ParentID)
+		if parentID == "" {
+			return ancestorWorktreeCloseRetryResultMsg{action: action, err: fmt.Errorf("parent issue id is unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
+		defer cancel()
+		_, err := m.daemonClient.CreateWorktreeResult(ctx, parentID, strings.TrimSpace(action.BaseBranch))
+		if err != nil {
+			err = fmt.Errorf("create ancestor worktree %s: %w", parentID, err)
+		}
+		return ancestorWorktreeCloseRetryResultMsg{action: action, err: err}
+	}
 }
 
 func closeFailureSupportsForceWorktree(err error) bool {

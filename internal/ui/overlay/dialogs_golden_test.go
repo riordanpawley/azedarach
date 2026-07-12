@@ -48,6 +48,7 @@ func TestDialogs_View_Golden(t *testing.T) {
 		{name: "orchestration", view: goldenOrchestrationView},
 		{name: "orchestration_empty", view: goldenOrchestrationEmptyView},
 		{name: "board_view", view: goldenBoardView},
+		{name: "view_configurator", view: goldenViewConfigurator},
 		{name: "interaction", view: goldenInteractionView},
 	}
 
@@ -90,6 +91,7 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 		{name: "create_task_attachments_small", view: goldenCreateTaskAttachmentsSmallView},
 		{name: "orchestration_small", view: goldenOrchestrationSmallView},
 		{name: "board_view_small", view: goldenBoardViewSmall},
+		{name: "view_configurator_small", view: goldenViewConfiguratorSmall},
 		{name: "interaction_small", view: goldenInteractionSmallView},
 	}
 
@@ -145,6 +147,22 @@ func goldenGitPaneSmallView(t *testing.T) string {
 func goldenBoardViewSmall(t *testing.T) string {
 	o := NewBoardViewOverlay(goldenBuiltInBoardViews(), domain.DefaultBoardViewID)
 	model, _ := o.Update(tea.WindowSizeMsg{Width: 54, Height: 18})
+	return model.(*BoardViewOverlay).View()
+}
+
+func goldenViewConfigurator(t *testing.T) string {
+	o := NewBoardViewOverlay(goldenBuiltInBoardViews(), domain.DefaultBoardViewID)
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	o = model.(*BoardViewOverlay)
+	model, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	return model.(*BoardViewOverlay).View()
+}
+
+func goldenViewConfiguratorSmall(t *testing.T) string {
+	o := NewBoardViewOverlay(goldenBuiltInBoardViews(), domain.DefaultBoardViewID)
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 54, Height: 18})
+	o = model.(*BoardViewOverlay)
+	model, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	return model.(*BoardViewOverlay).View()
 }
 
@@ -252,14 +270,14 @@ func goldenCleanupSmallView(t *testing.T) string {
 func goldenCloseFailureView(t *testing.T) string {
 	t.Helper()
 	dialog := NewCloseFailureDialog(
-		"az-321",
-		"cannot close issue az-321: unresolved child issues remain: az-400 (open). Next: close or clean up the listed child issues first, then retry",
+		"gav",
+		"refusing to merge child issue gav directly into base: no active ancestor worktree branch was found; run `az worktree create gat`, then close the child into that target",
 		CloseFailureDialogOptions{
-			PreviousStatus:          "in_review",
-			TargetStatus:            "closed",
-			AllowAIMerge:            true,
-			AllowForceWorktree:      true,
-			AllowCloseCleanChildren: true,
+			ParentID:            "gat",
+			PreviousStatus:      "in_review",
+			TargetStatus:        "closed",
+			AllowAIMerge:        true,
+			AllowCreateAncestor: true,
 		},
 	)
 	model, _ := dialog.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
@@ -269,13 +287,14 @@ func goldenCloseFailureView(t *testing.T) string {
 func goldenCloseFailureSmallView(t *testing.T) string {
 	t.Helper()
 	dialog := NewCloseFailureDialog(
-		"az-321",
-		"cannot close issue az-321: worktree has local changes: main.go. Next: commit, discard, or merge the worktree changes first, then retry",
+		"gav",
+		"refusing to merge child issue gav directly into base: no active ancestor worktree branch was found; run `az worktree create gat`, then close the child into that target",
 		CloseFailureDialogOptions{
-			PreviousStatus:     "in_review",
-			TargetStatus:       "closed",
-			AllowAIMerge:       true,
-			AllowForceWorktree: true,
+			ParentID:            "gat",
+			PreviousStatus:      "in_review",
+			TargetStatus:        "closed",
+			AllowAIMerge:        true,
+			AllowCreateAncestor: true,
 		},
 	)
 	model, _ := dialog.Update(tea.WindowSizeMsg{Width: 72, Height: 22})

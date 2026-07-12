@@ -4919,6 +4919,9 @@ func ImplMigrateCommand(deps *Dependencies, opts ImplMigrateOptions) error {
 }
 
 func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
+	if protocol.NormalizeProjectID(opts.Project) == "global" {
+		return globalIssueListCommand(deps, opts)
+	}
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
@@ -5065,6 +5068,77 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		fmt.Println("Window note: additional matching issues may exist beyond current limit.")
 	} else {
 		fmt.Println("Window note: all matching issues are shown.")
+	}
+	return nil
+}
+
+func globalIssueListCommand(deps *Dependencies, opts IssueListOptions) error {
+	if deps == nil || deps.DaemonClient == nil {
+		return fmt.Errorf("daemon client unavailable")
+	}
+	archiveMode, err := protocol.NormalizeArchiveMode(opts.Archived)
+	if err != nil {
+		return err
+	}
+	if opts.Deps || len(opts.DependsOnIDs) > 0 {
+		return fmt.Errorf("global issue queries do not support --deps or --depends-on; query a specific project")
+	}
+	if archiveMode != protocol.ArchiveModeExclude {
+		return fmt.Errorf("global issue queries support only --archived exclude")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	consumer := protocol.GlobalViewConsumerSearch
+	for _, state := range opts.States {
+		if state == domain.IssueDisplayReview {
+			consumer = protocol.GlobalViewConsumerReview
+			break
+		}
+	}
+	snapshot, err := deps.DaemonClient.GlobalViewSnapshot(ctx, protocol.GlobalSnapshotRequestBody{Query: strings.TrimSpace(opts.Query), Consumer: consumer})
+	if err != nil {
+		return fmt.Errorf("failed to query global issues: %w", err)
+	}
+	items := append([]protocol.GlobalViewProjectedItem(nil), snapshot.Projection.Items...)
+	filtered := items[:0]
+	for _, item := range items {
+		task := item.Task
+		if len(opts.IDs) > 0 && len(filterTasksByIDs([]domain.Task{task}, opts.IDs)) == 0 {
+			continue
+		}
+		if len(opts.States) > 0 && len(filterTasksByIssueDisplayPhase([]domain.Task{task}, opts.States)) == 0 {
+			continue
+		}
+		if len(opts.ParentIDs) > 0 && len(filterTasksByParentIDs([]domain.Task{task}, opts.ParentIDs)) == 0 {
+			continue
+		}
+		if len(filterTasksByTimeRange([]domain.Task{task}, opts.CreatedAfter, opts.CreatedBefore, opts.UpdatedAfter, opts.UpdatedBefore)) == 0 {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	limit := opts.Limit
+	if limit < 1 {
+		limit = defaultIssueListLimit
+	}
+	truncated := len(filtered) > limit
+	if truncated {
+		filtered = filtered[:limit]
+	}
+	if opts.JSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(filtered)
+	}
+	if len(filtered) == 0 {
+		fmt.Println("No issues found.")
+		return nil
+	}
+	for _, item := range filtered {
+		fmt.Printf("%-24s %-12s %s\n", formatProjectIssueRef(item.Identity.ProjectID.String(), item.Identity.IssueID.String()), item.Task.Status, item.Task.Title)
+	}
+	if truncated {
+		fmt.Printf("Showing %d of %d issues; use --limit to expand.\n", len(filtered), len(items))
 	}
 	return nil
 }

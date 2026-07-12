@@ -1,22 +1,22 @@
 ╭──────────────────────────────────────────────────────────────────────────────────────────────╮
-│Board View                                                                                    │
+│Views                                                                                         │
 │──────────────────────────────────────────────────────────────────────────────────────────────│
-││ ▸ * Default default  4 cols  built-in                        Columns                        │
-││     Planning planning  4 cols  built-in                      ───────────────────────────────│
-││     Orchestration orchestration  4 cols  built-in            default                        │
-││     Closeout closeout  3 cols  built-in                                                     │
-││                                                              Columns are query predicates   │
-││                                                              over issue facts.              │
+││ ▸ * Default default  Board  built-in                         Columns                        │
+││     Planning planning  Board  built-in                       ───────────────────────────────│
+││     Orchestration orchestration  Board  built-in             default                        │
+││     Closeout closeout  Board  built-in                                                      │
+││                                                              Board places issues into       │
+││                                                              configured columns.            │
 ││                                                              hide empty columns: false      │
+││                                                                                             │
+││                                                              Built-in · immutable           │
+││                                                              Press d to duplicate before    │
+││                                                              editing.                       │
 ││                                                                                             │
 ││                                                              Open: lifecycle=open           │
 ││                                                              In Progress: phase=active      │
 ││                                                              In Review: review_ready        │
 ││                                                              Done: outcome=completed        │
-││                                                                                             │
-││                                                                                             │
-││                                                                                             │
-││                                                                                             │
 ││                                                                                             │
 ││                                                                                             │
 ││                                                                                             │

@@ -15,6 +15,7 @@ const (
 	CloseFailureActionRetry              CloseFailureAction = "retry"
 	CloseFailureActionAIMerge            CloseFailureAction = "ai_merge"
 	CloseFailureActionCreatePR           CloseFailureAction = "create_pr"
+	CloseFailureActionCreateAncestor     CloseFailureAction = "create_ancestor"
 	CloseFailureActionForceWorktree      CloseFailureAction = "force_worktree"
 	CloseFailureActionAllowActiveSession CloseFailureAction = "allow_active_session"
 	CloseFailureActionCloseCleanChildren CloseFailureAction = "close_clean_children"
@@ -55,6 +56,7 @@ type CloseFailureDialogOptions struct {
 	AllowForceWorktree      bool
 	AllowActiveSessionRetry bool
 	AllowCloseCleanChildren bool
+	AllowCreateAncestor     bool
 }
 
 type CloseFailureDialog struct {
@@ -118,6 +120,8 @@ func (c *CloseFailureDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return c, c.selectionForAction(CloseFailureActionAIMerge)
 		case "p", "P":
 			return c, c.selectionForAction(CloseFailureActionCreatePR)
+		case "w", "W":
+			return c, c.selectionForAction(CloseFailureActionCreateAncestor)
 		case "f", "F":
 			if c.options.AllowActiveSessionRetry {
 				return c, c.selectionForAction(CloseFailureActionAllowActiveSession)
@@ -173,6 +177,9 @@ func (c *CloseFailureDialog) StatusBindings() []keybinds.Binding {
 	}
 	if c.allowCreatePR() {
 		bindings = append(bindings, keybinds.Binding{Key: "p", Description: "create PR"})
+	}
+	if c.options.AllowCreateAncestor {
+		bindings = append(bindings, keybinds.Binding{Key: "w", Description: "create ancestor"})
 	}
 	if c.options.AllowActiveSessionRetry {
 		bindings = append(bindings, keybinds.Binding{Key: "f", Description: "force active close"})
@@ -331,6 +338,17 @@ func (c *CloseFailureDialog) closeFailureActions() []closeFailureActionItem {
 			activeClose: c.options.AllowActiveSession,
 		})
 	}
+	if c.options.AllowCreateAncestor {
+		actions = append(actions, closeFailureActionItem{
+			key:         "w",
+			label:       "Create ancestor & retry",
+			description: "Create the missing parent worktree, then retry close.",
+			action:      CloseFailureActionCreateAncestor,
+			force:       c.options.ForceWorktree,
+			cleanKids:   c.options.CloseCleanChildren,
+			activeClose: c.options.AllowActiveSession,
+		})
+	}
 	if c.options.AllowActiveSessionRetry {
 		actions = append(actions, closeFailureActionItem{
 			key:         "f",
@@ -398,6 +416,9 @@ func (c *CloseFailureDialog) nextStepLines() []string {
 	}
 	if c.options.AllowCloseCleanChildren {
 		lines = append(lines, "- Close clean children only affects descendants without sessions, dirt, conflicts, or branch diff.")
+	}
+	if c.options.AllowCreateAncestor {
+		lines = append(lines, "- Create ancestor & retry preserves child-to-parent integration.")
 	}
 	return lines
 }

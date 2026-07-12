@@ -1,8 +1,6 @@
 package app
 
 import (
-	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,10 +10,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
@@ -250,32 +246,6 @@ func TestViewWithOverlayKeepsStatusBarVisible(t *testing.T) {
 	}
 }
 
-func TestView_OrchestrationOverviewStatusBarShowsOverviewHints(t *testing.T) {
-	m := newTestModel()
-	m.width = 120
-	m.height = 24
-	m.loading = false
-	m.viewMode = ViewModeOverview
-	task := m.tasks[0]
-	task.HasTmuxSession = true
-	m.orchestrationOverview = []orchestrationProjectOverview{{Name: "azedarach", Tasks: []domain.Task{task}}}
-
-	view := m.View()
-	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
-	if len(lines) == 0 {
-		t.Fatalf("expected non-empty rendered view")
-	}
-	lastLine := lines[len(lines)-1]
-	for _, want := range []string{"↑/↓", "j/k", "row", "←/→", "h/l", "project", "Home/End", "g/G", "top/end", "Enter", "open"} {
-		if !strings.Contains(lastLine, want) {
-			t.Fatalf("overview status bar missing %q; last line=%q", want, lastLine)
-		}
-	}
-	if strings.Contains(lastLine, "g:goto") {
-		t.Fatalf("overview status bar should not show board goto hint; last line=%q", lastLine)
-	}
-}
-
 func TestViewWithModalOverlaySkipsBoardBackdropRender(t *testing.T) {
 	m := newTestModel()
 	m.width = 100
@@ -404,761 +374,57 @@ func TestWindowSizeMsgForwardedToActiveOverlay(t *testing.T) {
 	}
 }
 
-func TestView_TabToggleRendersCompactAndBoardSurfaces(t *testing.T) {
+func TestView_TypedTreeLayoutUsesDaemonProjectionOrder(t *testing.T) {
 	m := newTestModel()
+	m.loading = false
 	m.width = 120
 	m.height = 24
-	m.loading = false
-	m.editor.EnterNormal()
-	m.nav.SelectTask("az-2", 0)
-
-	boardView := m.View()
-	boardLines := strings.Split(strings.TrimRight(boardView, "\n"), "\n")
-	if len(boardLines) == 0 {
-		t.Fatal("expected board view to render at least one line")
-	}
-	if !strings.Contains(boardLines[0], "Open (") {
-		t.Fatalf("expected board headers on first line, got %q", boardLines[0])
-	}
-
-	updated, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
-	compactModel := updated.(Model)
-	compactView := compactModel.View()
-	compactLines := strings.Split(strings.TrimRight(compactView, "\n"), "\n")
-	if len(compactLines) == 0 {
-		t.Fatal("expected compact view to render at least one line")
-	}
-	if strings.Contains(compactLines[0], "Open (") {
-		t.Fatalf("expected compact view to replace board headers, got %q", compactLines[0])
-	}
-	if !strings.Contains(compactLines[0], "#") || !strings.Contains(compactLines[0], "ID") || !strings.Contains(compactLines[0], "Title") {
-		t.Fatalf("expected compact header row on first line, got %q", compactLines[0])
-	}
-	if got := getCursorPosition(compactModel); got.Column != 0 || got.Task != 1 {
-		t.Fatalf("cursor position changed across tab toggle: got (%d,%d), want (0,1)", got.Column, got.Task)
-	}
-	if !strings.Contains(compactView, "Switched to compact view") {
-		t.Fatalf("expected compact view to render floating view-mode toast, got %q", compactView)
-	}
-
-	updated, _ = compactModel.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
-	overviewModel := updated.(Model)
-	overviewView := overviewModel.View()
-	overviewLines := strings.Split(strings.TrimRight(overviewView, "\n"), "\n")
-	if len(overviewLines) == 0 {
-		t.Fatal("expected overview view to render at least one line")
-	}
-	if !strings.Contains(overviewLines[0], "Orchestration") {
-		t.Fatalf("expected orchestration overview header, got %q", overviewLines[0])
-	}
-	if !strings.Contains(overviewView, "sessions") {
-		t.Fatalf("expected overview to include session summary, got %q", overviewView)
-	}
-	if got := getCursorPosition(overviewModel); got.Column != 0 || got.Task != 1 {
-		t.Fatalf("cursor position changed in overview: got (%d,%d), want (0,1)", got.Column, got.Task)
-	}
-
-	updated, _ = overviewModel.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
-	boardModel := updated.(Model)
-	boardView = boardModel.View()
-	boardLines = strings.Split(strings.TrimRight(boardView, "\n"), "\n")
-	if len(boardLines) == 0 {
-		t.Fatal("expected board view to render after toggling back")
-	}
-	if !strings.Contains(boardLines[0], "Open (") {
-		t.Fatalf("expected board headers after toggling back, got %q", boardLines[0])
-	}
-	if got := getCursorPosition(boardModel); got.Column != 0 || got.Task != 1 {
-		t.Fatalf("cursor position changed after toggling back: got (%d,%d), want (0,1)", got.Column, got.Task)
-	}
-}
-
-func TestView_OrchestrationOverviewShowsProgressAndGitWithoutDumpingEverything(t *testing.T) {
-	m := newTestModel()
-	m.width = 120
-	m.height = 24
-	m.loading = false
-	m.viewMode = ViewModeOverview
-	task := m.tasks[0]
-	task.HasTmuxSession = true
-	task.HasUncommittedChanges = true
-	task.GitAdditions = 12
-	task.GitDeletions = 3
-	task.GitAheadCount = 1
-	task.Notes = "older notes should not win"
-	task.Acceptance = "acceptance should not show when mail exists"
-	m.orchestrationOverview = []orchestrationProjectOverview{
-		{
-			Name:  "alpha",
-			Tasks: []domain.Task{task},
-			MailByTask: map[string]protocol.MailEvent{
-				task.ID.String(): {
-					IssueID: naming.IssueID(task.ID.String()),
-					Type:    "worker-progress",
-					Body:    "wired mailbox progress into overview\nextra detail",
-					Seq:     7,
-				},
-			},
-		},
-	}
+	m.tasks = m.tasks[:2]
+	m.boardView = domain.DefaultBoardView()
+	m.boardView.Layout = domain.BoardViewLayoutTreeList
+	m.boardOrdered = []domain.Task{m.tasks[1], m.tasks[0]}
 
 	view := m.View()
-	for _, want := range []string{"dirty", "+12/-3", "ahead 1 behind 0", "mail", "worker-progress: wired mailbox progress into overview"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("overview missing %q:\n%s", want, view)
-		}
+	if strings.Contains(strings.Split(view, "\n")[0], "Open (") {
+		t.Fatalf("tree-list view rendered column board: %q", view)
 	}
-	if strings.Contains(view, "older notes should not win") || strings.Contains(view, "acceptance should not show") {
-		t.Fatalf("overview should show one latest progress line, got:\n%s", view)
+	first, second := strings.Index(view, "Task 2"), strings.Index(view, "Task 1")
+	if first < 0 || second < 0 || first >= second {
+		t.Fatalf("projected order not preserved: Task 2=%d Task 1=%d\n%s", first, second, view)
 	}
 }
 
-func TestView_OrchestrationOverviewSummarizesWorkerEvidenceMail(t *testing.T) {
+func TestView_TypedHorizontalGridUsesDistinctRenderer(t *testing.T) {
 	m := newTestModel()
+	m.loading = false
 	m.width = 120
 	m.height = 24
-	m.loading = false
-	m.viewMode = ViewModeOverview
-	task := m.tasks[0]
-	task.HasTmuxSession = true
-	m.orchestrationOverview = []orchestrationProjectOverview{{
-		Name:  "alpha",
-		Tasks: []domain.Task{task},
-		MailByTask: map[string]protocol.MailEvent{
-			task.ID.String(): {
-				IssueID: naming.IssueID(task.ID.String()),
-				Type:    "worker-progress",
-				Body:    `{"schema":"worker_evidence.v1","summary":"Startup and investigation complete for fuo.","commands_run":["just test"],"key_assertions":["validation passed"],"review":{"status":"clean","findings":[]},"risks":["none"]}`,
-				Seq:     9,
-			},
-		},
-	}}
-
-	view := ansi.Strip(m.View())
-	for _, want := range []string{"mail", "worker-progress: evidence | Startup and investigation complete for fuo. | review clean | risks none"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("overview missing summarized evidence %q:\n%s", want, view)
-		}
-	}
-	for _, notWant := range []string{`"schema"`, `"worker_evidence.v1"`, `"commands_run"`} {
-		if strings.Contains(view, notWant) {
-			t.Fatalf("overview should not render raw evidence JSON %q:\n%s", notWant, view)
-		}
-	}
-}
-
-func TestView_OrchestrationOverviewGroupsObservationRowsByActionability(t *testing.T) {
-	m := newTestModel()
-	m.width = 140
-	m.height = 34
-	m.loading = false
-	m.viewMode = ViewModeOverview
-	observedAt := time.Date(2026, time.July, 6, 1, 0, 0, 0, time.UTC)
-	m.orchestrationOverviewLoadedAt = observedAt.Add(2 * time.Hour)
-
-	waiting := domain.Task{
-		ID:                    naming.IssueID("ctn"),
-		Title:                 "Render observation-driven TUI overview",
-		Status:                domain.StatusInProgress,
-		Session:               &domain.Session{IssueID: naming.IssueID("ctn"), State: domain.SessionWaiting, Activity: "waiting"},
-		HasTmuxSession:        true,
-		HasUncommittedChanges: true,
-		GitAdditions:          4,
-		GitDeletions:          1,
-	}
-	review := domain.Task{
-		ID:             naming.IssueID("ctp"),
-		Title:          "Worker observation projection",
-		Status:         domain.StatusInReview,
-		Session:        &domain.Session{IssueID: naming.IssueID("ctp"), State: domain.SessionIdle, Activity: "idle"},
-		HasTmuxSession: true,
-	}
-	blocked := domain.Task{
-		ID:             naming.IssueID("ctf"),
-		Title:          "Blocked dependency",
-		Status:         domain.StatusInProgress,
-		Session:        &domain.Session{IssueID: naming.IssueID("ctf"), State: domain.SessionIdle, Activity: "idle"},
-		HasTmuxSession: true,
-	}
-	working := domain.Task{
-		ID:             naming.IssueID("ctw"),
-		Title:          "Busy worker",
-		Status:         domain.StatusInProgress,
-		Session:        &domain.Session{IssueID: naming.IssueID("ctw"), State: domain.SessionBusy, Activity: "busy"},
-		HasTmuxSession: true,
-	}
-	cleanup := domain.Task{
-		ID:             naming.IssueID("ctx"),
-		Title:          "Closed worker cleanup",
-		Status:         domain.StatusDone,
-		Session:        &domain.Session{IssueID: naming.IssueID("ctx"), State: domain.SessionIdle, Activity: "idle"},
-		HasTmuxSession: true,
-	}
-	m.orchestrationOverview = []orchestrationProjectOverview{{
-		Name:  "azedarach",
-		Tasks: []domain.Task{waiting, review, blocked, working, cleanup},
-		Observations: []domain.WorkerObservation{
-			{
-				IssueID: "ctn",
-				State:   domain.WorkerObservationWaitingHuman,
-				Reason:  "active session is waiting for input",
-				LastEvent: &domain.WorkerObservationEventSummary{
-					Kind:    "issue_event",
-					Type:    "human.input_requested",
-					At:      observedAt,
-					Summary: "worker asks which backend to trust",
-				},
-				EvidenceSummary: []string{"session waiting prompt"},
-				NextActions:     []string{"answer worker prompt"},
-			},
-			{
-				IssueID:         "ctp",
-				State:           domain.WorkerObservationReviewReady,
-				Reason:          "worker submitted integration evidence",
-				EvidenceSummary: []string{"structured worker_evidence.v1"},
-				NextActions:     []string{"validate evidence"},
-			},
-			{IssueID: "ctf", State: domain.WorkerObservationBlocked, Reason: "dependency is unresolved", NextActions: []string{"inspect blocker"}},
-			{IssueID: "ctw", State: domain.WorkerObservationWorking, Reason: "session is busy", NextActions: []string{"monitor worker"}},
-			{IssueID: "ctx", State: domain.WorkerObservationCleanupPending, Reason: "worker closed and session remains", NextActions: []string{"cleanup session"}},
-		},
-	}}
-
-	view := ansi.Strip(m.View())
-	needsIdx := strings.Index(view, "Needs You")
-	reviewIdx := strings.Index(view, "Review Ready")
-	blockedIdx := strings.Index(view, "Blocked/Failed/Stale")
-	workingIdx := strings.Index(view, "Working")
-	cleanupIdx := strings.Index(view, "Cleanup")
-	if needsIdx < 0 || reviewIdx < 0 || blockedIdx < 0 || workingIdx < 0 || cleanupIdx < 0 {
-		t.Fatalf("overview missing observation groups:\n%s", view)
-	}
-	if !(needsIdx < reviewIdx && reviewIdx < blockedIdx && blockedIdx < workingIdx && workingIdx < cleanupIdx) {
-		t.Fatalf("overview groups out of order:\n%s", view)
-	}
-	for _, want := range []string{
-		"attention: needs-you 1  review 1  blocked/stale 1  git 1",
-		"needs 1  review 1  blocked/stale 1  git 1",
-		"ctn needs-you age 2h0m0s session waiting git dirty +4/-1",
-		"active session is waiting for input | next: answer worker prompt | evidence: session waiting prompt",
-		"last: issue_event human.input_requested worker asks which backend to trust | Render observation-driven TUI overview",
-		"ctp review-ready age unknown session idle",
-		"worker submitted integration evidence | next: validate evidence | evidence: structured worker_evidence.v1",
-	} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("overview missing observation row detail %q:\n%s", want, view)
-		}
-	}
-}
-
-func TestView_OrchestrationOverviewHidesRowsWithoutRuntimeSessions(t *testing.T) {
-	m := newTestModel()
-	m.width = 120
-	m.height = 24
-	m.loading = false
-	m.viewMode = ViewModeOverview
-	visible := domain.Task{
-		ID:             naming.IssueID("ctn"),
-		Title:          "Visible worker",
-		Status:         domain.StatusInProgress,
-		Session:        &domain.Session{IssueID: naming.IssueID("ctn"), State: domain.SessionBusy, Activity: "busy"},
-		HasTmuxSession: true,
-	}
-	hidden := domain.Task{
-		ID:     naming.IssueID("ctp"),
-		Title:  "Review without runtime",
-		Status: domain.StatusInReview,
-	}
-	m.orchestrationOverview = []orchestrationProjectOverview{{
-		Name:  "azedarach",
-		Tasks: []domain.Task{visible, hidden},
-		Observations: []domain.WorkerObservation{
-			{IssueID: "ctn", State: domain.WorkerObservationWorking, Reason: "active session is present"},
-			{IssueID: "ctp", State: domain.WorkerObservationReviewReady, Reason: "issue is in_review"},
-			{IssueID: "ctq", State: domain.WorkerObservationRunnable, Reason: "leaf worker has no blockers"},
-		},
-	}}
-
-	view := ansi.Strip(m.View())
-	for _, want := range []string{"1 projects", "1 sessions", "ctn", "active session is present"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("overview missing visible runtime row %q:\n%s", want, view)
-		}
-	}
-	for _, notWant := range []string{"ctp", "ctq", "Review Ready", "runnable", "issue is in_review", "leaf worker has no blockers"} {
-		if strings.Contains(view, notWant) {
-			t.Fatalf("overview should hide non-session row %q:\n%s", notWant, view)
-		}
-	}
-
-	refs := orchestrationOverviewTaskRefs(m.overviewProjectsForInteraction())
-	if len(refs) != 1 || refs[0].Task.ID != visible.ID {
-		t.Fatalf("overview refs = %+v, want only %s", refs, visible.ID)
-	}
-}
-
-func TestOverviewMailParentsPrefersActiveIssueParent(t *testing.T) {
-	parent := naming.IssueID("parent-1")
-	tasks := []domain.Task{
-		{ID: naming.IssueID("cqb"), HasTmuxSession: true},
-		{ID: naming.IssueID("child-1"), ParentID: &parent, HasTmuxSession: true},
-	}
-
-	parents := overviewMailParents(tasks, "root-1")
-
-	want := []string{"root-1", "cqb", "parent-1", "child-1"}
-	if strings.Join(parents, ",") != strings.Join(want, ",") {
-		t.Fatalf("mail parents = %v, want %v", parents, want)
-	}
-}
-
-func TestParseOverviewSessionStatusTasksSkipsNonIssueShells(t *testing.T) {
-	status := strings.Join([]string{
-		"Active Sessions (3):",
-		"",
-		"ISSUE ID\tSTATUS\tACTIVITY\tTITLE",
-		"-------\t------\t--------\t-----",
-		"az\tunknown\tbusy\t(not in issues)",
-		"cif\tin_progress\tidle\tEffect v3 to v4 migration",
-		"dih\tin_review\tbusy\tinternationalization epic",
-		"",
-		"Use 'az attach <issue-id>' to attach to a session",
-	}, "\n")
-
-	tasks := parseOverviewSessionStatusTasks(status)
-
-	if len(tasks) != 2 {
-		t.Fatalf("parsed tasks = %+v, want 2 issue sessions", tasks)
-	}
-	if tasks[0].ID.String() != "cif" || tasks[0].Status != domain.StatusInProgress || tasks[0].Session.DisplayLabel() != "idle" {
-		t.Fatalf("first parsed task = %+v", tasks[0])
-	}
-	if tasks[1].ID.String() != "dih" || tasks[1].Status != domain.StatusInReview || tasks[1].Session.DisplayLabel() != "busy" {
-		t.Fatalf("second parsed task = %+v", tasks[1])
-	}
-}
-
-func TestView_OrchestrationOverviewFallsBackToSessionActivityProgress(t *testing.T) {
-	m := newTestModel()
-	m.width = 120
-	m.height = 24
-	m.loading = false
-	m.viewMode = ViewModeOverview
-	task := domain.Task{
-		ID:             naming.IssueID("cif"),
-		Title:          "Effect v3 to v4 migration",
-		Status:         domain.StatusInProgress,
-		Type:           domain.TypeTask,
-		Session:        &domain.Session{IssueID: naming.IssueID("cif"), State: domain.SessionBusy, Activity: "busy"},
-		HasTmuxSession: true,
-	}
-	m.orchestrationOverview = []orchestrationProjectOverview{{Name: "Chefy", Err: errors.New("Linear read sync timed out"), Tasks: []domain.Task{task}}}
-
+	m.tasks = m.tasks[:2]
+	m.boardView = domain.DefaultBoardView()
+	m.boardView.Layout = domain.BoardViewLayoutHorizontalGrid
+	m.boardOrdered = append([]domain.Task(nil), m.tasks...)
 	view := m.View()
-	for _, want := range []string{"Chefy", "activity", "busy"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("overview missing activity progress fallback %q:\n%s", want, view)
+	if strings.Contains(strings.Split(view, "\n")[0], "Open (") {
+		t.Fatalf("grid rendered board columns:\n%s", view)
+	}
+	if !strings.Contains(view, "Task 1") || !strings.Contains(view, "Task 2") {
+		t.Fatalf("grid omitted tasks:\n%s", view)
+	}
+}
+
+func TestView_TypedHorizontalGridFitsNarrowViewport(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.width = 12
+	m.height = 12
+	m.tasks = m.tasks[:1]
+	m.boardView = domain.DefaultBoardView()
+	m.boardView.Layout = domain.BoardViewLayoutHorizontalGrid
+	m.boardOrdered = append([]domain.Task(nil), m.tasks...)
+	for _, line := range strings.Split(m.View(), "\n") {
+		if width := ansi.StringWidth(line); width > m.width {
+			t.Fatalf("line width = %d > %d: %q", width, m.width, line)
 		}
-	}
-}
-
-func TestView_OrchestrationOverviewKeepsSessionsVisibleWhenBackendDegraded(t *testing.T) {
-	m := newTestModel()
-	m.width = 120
-	m.height = 24
-	m.loading = false
-	m.viewMode = ViewModeOverview
-	m.orchestrationOverviewBackendErrors = 2
-	m.orchestrationOverviewHiddenProjects = 1
-	task := m.tasks[0]
-	task.Status = domain.StatusInProgress
-	task.Session = &domain.Session{
-		IssueID:  task.ID,
-		State:    domain.SessionBusy,
-		Activity: string(domain.SessionBusy),
-	}
-	task.HasTmuxSession = true
-	task.HasUncommittedChanges = true
-	task.GitAdditions = 5
-	task.GitDeletions = 1
-	task.Notes = "local task progress should remain visible"
-	m.orchestrationOverview = []orchestrationProjectOverview{
-		{
-			Name:     "alpha",
-			Err:      errors.New("Linear read sync timed out after 2s; showing local-first data"),
-			Fallback: "local state",
-			Tasks:    []domain.Task{task},
-		},
-	}
-
-	view := m.View()
-	for _, want := range []string{"2 degraded", "alpha", "local state fallback  backend timeout", task.ID.String(), "busy", "git dirty +5/-1", "notes", "local task progress should remain visible"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("overview missing %q while backend degraded:\n%s", want, view)
-		}
-	}
-	if strings.Contains(view, "Linear read sync timed out") {
-		t.Fatalf("overview should not promote optional backend timeout into card body:\n%s", view)
-	}
-}
-
-func TestView_OrchestrationOverviewFallsBackToRuntimeSessions(t *testing.T) {
-	m := newTestModel()
-	m.width = 100
-	m.height = 20
-	m.loading = false
-	m.viewMode = ViewModeOverview
-	m.tasks = nil
-	m.sessions = map[string]*domain.Session{
-		"cqb": {
-			IssueID:  naming.IssueID("cqb"),
-			State:    domain.SessionWaiting,
-			Activity: string(domain.SessionWaiting),
-			Worktree: "/tmp/cqb",
-		},
-	}
-
-	view := m.View()
-	for _, want := range []string{"1 sessions", "cqb", "waiting"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("overview missing runtime session fallback %q:\n%s", want, view)
-		}
-	}
-	if strings.Contains(view, "No active sessions") {
-		t.Fatalf("overview should not render empty state when runtime sessions exist:\n%s", view)
-	}
-}
-
-func TestView_OrchestrationOverviewShowsHiddenProjectLabels(t *testing.T) {
-	m := newTestModel()
-	m.width = 120
-	m.height = 24
-	m.loading = false
-	m.viewMode = ViewModeOverview
-	task := m.tasks[0]
-	task.HasTmuxSession = true
-	m.orchestrationOverview = []orchestrationProjectOverview{{Name: "azedarach", Tasks: []domain.Task{task}}}
-	m.orchestrationOverviewHiddenProjects = 2
-	m.orchestrationOverviewBackendErrors = 1
-	m.orchestrationOverviewHiddenLabels = []string{"Chefy degraded: backend timeout", "otel-tui no sessions"}
-
-	view := m.View()
-	for _, want := range []string{"hidden projects", "Chefy degraded: backend timeout", "otel-tui no sessions"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("overview missing hidden project label %q:\n%s", want, view)
-		}
-	}
-}
-
-func TestView_OrchestrationOverviewNavigationOpensSelectedTaskWorkspace(t *testing.T) {
-	m := newTestModel()
-	m.width = 120
-	m.height = 24
-	m.loading = false
-	m.viewMode = ViewModeOverview
-	first := m.tasks[0]
-	first.HasTmuxSession = true
-	second := m.tasks[1]
-	second.HasTmuxSession = true
-	m.orchestrationOverview = []orchestrationProjectOverview{{Name: "azedarach", Tasks: []domain.Task{first, second}}}
-
-	updatedAny, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyDown})
-	updated := updatedAny.(Model)
-	if updated.orchestrationOverviewCursor != 1 {
-		t.Fatalf("overview cursor = %d, want 1", updated.orchestrationOverviewCursor)
-	}
-	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyUp})
-	updated = updatedAny.(Model)
-	if updated.orchestrationOverviewCursor != 0 {
-		t.Fatalf("overview cursor after up = %d, want 0", updated.orchestrationOverviewCursor)
-	}
-	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	updated = updatedAny.(Model)
-	if updated.orchestrationOverviewCursor != 1 {
-		t.Fatalf("overview cursor after j = %d, want 1", updated.orchestrationOverviewCursor)
-	}
-	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
-	updated = updatedAny.(Model)
-	if updated.orchestrationOverviewCursor != 0 {
-		t.Fatalf("overview cursor after k = %d, want 0", updated.orchestrationOverviewCursor)
-	}
-	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyEnd})
-	updated = updatedAny.(Model)
-	if updated.orchestrationOverviewCursor != 1 {
-		t.Fatalf("overview cursor after end = %d, want 1", updated.orchestrationOverviewCursor)
-	}
-	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyHome})
-	updated = updatedAny.(Model)
-	if updated.orchestrationOverviewCursor != 0 {
-		t.Fatalf("overview cursor after home = %d, want 0", updated.orchestrationOverviewCursor)
-	}
-	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyDown})
-	updated = updatedAny.(Model)
-	openedAny, _ := updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
-	opened := openedAny.(Model)
-	workspace, ok := opened.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
-	if !ok {
-		t.Fatalf("expected task workspace overlay, got %T", opened.overlayStack.Current())
-	}
-	if workspace.TaskID() != second.ID.String() {
-		t.Fatalf("workspace task = %s, want %s", workspace.TaskID(), second.ID)
-	}
-}
-
-func TestView_OrchestrationOverviewProjectNavigationJumpsBetweenProjects(t *testing.T) {
-	m := newTestModel()
-	m.width = 120
-	m.height = 24
-	m.loading = false
-	m.viewMode = ViewModeOverview
-	firstProjectFirst := m.tasks[0]
-	firstProjectFirst.HasTmuxSession = true
-	firstProjectSecond := m.tasks[1]
-	firstProjectSecond.HasTmuxSession = true
-	secondProjectFirst := m.tasks[2]
-	secondProjectFirst.HasTmuxSession = true
-	secondProjectSecond := m.tasks[3]
-	secondProjectSecond.HasTmuxSession = true
-	m.orchestrationOverview = []orchestrationProjectOverview{
-		{Name: "azedarach", Tasks: []domain.Task{firstProjectFirst, firstProjectSecond}},
-		{Name: "Chefy", Tasks: []domain.Task{secondProjectFirst, secondProjectSecond}},
-	}
-
-	updatedAny, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRight})
-	updated := updatedAny.(Model)
-	if updated.orchestrationOverviewCursor != 2 {
-		t.Fatalf("overview cursor after right = %d, want 2", updated.orchestrationOverviewCursor)
-	}
-	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyLeft})
-	updated = updatedAny.(Model)
-	if updated.orchestrationOverviewCursor != 0 {
-		t.Fatalf("overview cursor after left = %d, want 0", updated.orchestrationOverviewCursor)
-	}
-	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
-	updated = updatedAny.(Model)
-	if updated.orchestrationOverviewCursor != 2 {
-		t.Fatalf("overview cursor after l = %d, want 2", updated.orchestrationOverviewCursor)
-	}
-	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
-	updated = updatedAny.(Model)
-	if updated.orchestrationOverviewCursor != 0 {
-		t.Fatalf("overview cursor after h = %d, want 0", updated.orchestrationOverviewCursor)
-	}
-	updated.orchestrationOverviewCursor = 1
-	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyRight})
-	updated = updatedAny.(Model)
-	if updated.orchestrationOverviewCursor != 2 {
-		t.Fatalf("overview cursor after right from second row = %d, want 2", updated.orchestrationOverviewCursor)
-	}
-}
-
-func TestView_OrchestrationOverviewRemoteSelectionWarnsWhenWorkspaceUnavailable(t *testing.T) {
-	m := newTestModel()
-	m.width = 120
-	m.height = 24
-	m.loading = false
-	m.viewMode = ViewModeOverview
-	remote := domain.Task{
-		ID:             naming.IssueID("remote-1"),
-		Title:          "Remote task",
-		Status:         domain.StatusInProgress,
-		Type:           domain.TypeTask,
-		HasTmuxSession: true,
-	}
-	m.orchestrationOverview = []orchestrationProjectOverview{{Name: "remote-project", Tasks: []domain.Task{remote}}}
-
-	updatedAny, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
-	updated := updatedAny.(Model)
-	if cmd != nil {
-		t.Fatalf("remote overview workspace command = %T, want nil", cmd)
-	}
-	if !updated.overlayStack.IsEmpty() {
-		t.Fatalf("remote overview row should not open current-project workspace, got %T", updated.overlayStack.Current())
-	}
-	if len(updated.toasts) == 0 || !strings.Contains(updated.toasts[len(updated.toasts)-1].Message, "Switch to remote-project") {
-		t.Fatalf("expected remote project warning toast, got %+v", updated.toasts)
-	}
-}
-
-func TestView_OrchestrationOverviewEmptyConsumesWorkspaceKey(t *testing.T) {
-	m := newTestModel()
-	m.width = 120
-	m.height = 24
-	m.loading = false
-	m.viewMode = ViewModeOverview
-	m.orchestrationOverviewLoadedAt = time.Date(2026, time.June, 24, 15, 0, 0, 0, time.UTC)
-
-	updatedAny, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
-	updated := updatedAny.(Model)
-	if cmd != nil {
-		t.Fatalf("empty overview space command = %T, want nil", cmd)
-	}
-	if !updated.overlayStack.IsEmpty() {
-		t.Fatalf("empty overview should not open board task workspace, got %T", updated.overlayStack.Current())
-	}
-}
-
-func TestView_OrchestrationOverviewEmptyAfterLoadedSnapshot(t *testing.T) {
-	m := newTestModel()
-	m.width = 80
-	m.height = 20
-	m.loading = false
-	m.viewMode = ViewModeOverview
-	m.orchestrationOverviewLoadedAt = time.Date(2026, time.June, 24, 15, 0, 0, 0, time.UTC)
-
-	view := m.View()
-	if !strings.Contains(view, "0 sessions") {
-		t.Fatalf("overview missing zero-session summary:\n%s", view)
-	}
-	if !strings.Contains(view, "No active sessions across registered projects.") {
-		t.Fatalf("overview missing empty state:\n%s", view)
-	}
-	if strings.Contains(view, m.tasks[0].Title) {
-		t.Fatalf("loaded empty overview should not fall back to non-session tasks:\n%s", view)
-	}
-}
-
-func TestView_OrchestrationOverviewColumnCountAvoidsCrampedThreeColumnLayout(t *testing.T) {
-	projects := []orchestrationProjectOverview{{Name: "one"}, {Name: "two"}, {Name: "three"}}
-	if got := overviewColumnCount(projects, 153); got != 2 {
-		t.Fatalf("columns at screenshot-width viewport = %d, want 2", got)
-	}
-	if got := overviewColumnCount(projects, 179); got != 2 {
-		t.Fatalf("columns just below wide viewport = %d, want 2", got)
-	}
-	if got := overviewColumnCount(projects, 180); got != 3 {
-		t.Fatalf("columns at wide viewport = %d, want 3", got)
-	}
-}
-
-func TestView_OrchestrationOverviewFitsDefaultAndNarrowViewports(t *testing.T) {
-	for _, tt := range []struct {
-		name   string
-		width  int
-		height int
-	}{
-		{name: "default", width: 120, height: 30},
-		{name: "narrow", width: 52, height: 18},
-		{name: "phone", width: 42, height: 14},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			m := newTestModel()
-			m.width = tt.width
-			m.height = tt.height
-			m.loading = false
-			m.viewMode = ViewModeOverview
-			tasks := append([]domain.Task(nil), m.tasks...)
-			for i := range tasks {
-				tasks[i].HasTmuxSession = true
-			}
-			m.orchestrationOverview = []orchestrationProjectOverview{
-				{Name: "alpha", Tasks: tasks[:2]},
-				{Name: "beta", Tasks: tasks[2:]},
-			}
-
-			view := m.View()
-			lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
-			if len(lines) > tt.height {
-				t.Fatalf("overview rendered %d lines, want <= %d\n%s", len(lines), tt.height, view)
-			}
-			if len(lines) == 0 || !strings.Contains(lines[0], "Orchestration") {
-				if !strings.Contains(lines[0], "Orch") {
-					t.Fatalf("overview missing header: %q", view)
-				}
-			}
-			for i, line := range lines {
-				if got := lipgloss.Width(line); got > tt.width {
-					t.Fatalf("line %d width = %d, want <= %d: %q", i, got, tt.width, line)
-				}
-			}
-			if tt.name == "phone" {
-				for _, line := range lines {
-					if strings.Contains(line, "fresh") && strings.Contains(line, "updated") {
-						t.Fatalf("phone header has colliding freshness/update labels: %q\n%s", line, view)
-					}
-				}
-				if !strings.Contains(view, "┌") || !strings.Contains(view, "┐") {
-					t.Fatalf("phone overview missing complete top border:\n%s", view)
-				}
-			}
-			stripped := ansi.Strip(view)
-			if !strings.Contains(stripped, "└") || !strings.Contains(stripped, "┘") {
-				t.Fatalf("overview missing complete bottom border:\n%s", view)
-			}
-		})
-	}
-}
-
-func TestView_OrchestrationOverviewObservationRowsFitNarrowViewport(t *testing.T) {
-	m := newTestModel()
-	m.width = 52
-	m.height = 18
-	m.loading = false
-	m.viewMode = ViewModeOverview
-	observedAt := time.Date(2026, time.July, 6, 4, 0, 0, 0, time.UTC)
-	m.orchestrationOverviewLoadedAt = observedAt.Add(15 * time.Minute)
-	m.orchestrationOverview = []orchestrationProjectOverview{{
-		Name: "alpha",
-		Tasks: []domain.Task{{
-			ID:             naming.IssueID("ctn"),
-			Title:          "Render overview",
-			Status:         domain.StatusInProgress,
-			Session:        &domain.Session{IssueID: naming.IssueID("ctn"), State: domain.SessionWaiting, Activity: "waiting"},
-			HasTmuxSession: true,
-		}},
-		Observations: []domain.WorkerObservation{{
-			IssueID: "ctn",
-			State:   domain.WorkerObservationWaitingHuman,
-			Reason:  "needs input",
-			LastEvent: &domain.WorkerObservationEventSummary{
-				Kind: "mailbox",
-				Type: "worker-blocked",
-				At:   observedAt,
-			},
-			NextActions: []string{"answer prompt"},
-		}},
-	}}
-
-	view := m.View()
-	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
-	if len(lines) > m.height {
-		t.Fatalf("overview rendered %d lines, want <= %d\n%s", len(lines), m.height, view)
-	}
-	for i, line := range lines {
-		if got := lipgloss.Width(line); got > m.width {
-			t.Fatalf("line %d width = %d, want <= %d: %q", i, got, m.width, line)
-		}
-	}
-	stripped := ansi.Strip(view)
-	for _, want := range []string{"Needs You", "age 15m0s", "next: answer prompt", "NORMAL"} {
-		if !strings.Contains(stripped, want) {
-			t.Fatalf("narrow overview missing %q:\n%s", want, stripped)
-		}
-	}
-}
-
-func TestView_OrchestrationOverviewCompactsHugeGitCounts(t *testing.T) {
-	m := newTestModel()
-	m.width = 140
-	m.height = 24
-	m.loading = false
-	m.viewMode = ViewModeOverview
-	task := m.tasks[0]
-	task.HasTmuxSession = true
-	task.GitAdditions = 1074031
-	task.GitDeletions = 255402
-	task.GitAheadCount = 1932
-	task.GitBehindCount = 2
-	m.orchestrationOverview = []orchestrationProjectOverview{{Name: "Chefy", Tasks: []domain.Task{task}}}
-
-	view := m.View()
-	for _, want := range []string{"+1.1M/-255.4k", "ahead 1.9k behind 2"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("overview missing compact git count %q:\n%s", want, view)
-		}
-	}
-	if strings.Contains(view, "1074031") || strings.Contains(view, "255402") {
-		t.Fatalf("overview should compact huge git counts:\n%s", view)
 	}
 }
 
@@ -1169,9 +435,8 @@ func TestView_ProjectOrchestratorStatusFitsDefaultAndNarrow(t *testing.T) {
 	}{{"default", 120, 30}, {"narrow", 52, 18}} {
 		t.Run(size.name, func(t *testing.T) {
 			m := newTestModel()
-			m.width, m.height, m.loading, m.viewMode = size.width, size.height, false, ViewModeOverview
-			m.orchestrationOverviewLoadedAt = time.Date(2026, time.July, 11, 2, 0, 0, 0, time.UTC)
-			m.orchestrationOverview = []orchestrationProjectOverview{{
+			m.width, m.height, m.loading = size.width, size.height, false
+			project := projectOrchestratorSnapshot{
 				Name: "azedarach", ProjectID: "project-a",
 				Snapshot: &protocol.OrchestrationSnapshot{
 					Lifecycle:   domain.OrchestratorWorking,
@@ -1183,14 +448,21 @@ func TestView_ProjectOrchestratorStatusFitsDefaultAndNarrow(t *testing.T) {
 					RecentEvents: []protocol.MailEvent{{Type: "worker-progress", Body: "implemented typed projection"}},
 				},
 				Session: &protocol.OrchestratorSessionResult{Lifecycle: domain.OrchestratorWorking, Live: true},
-			}}
+			}
+			m.projectOrchestrator = &project
 
 			view := normalizeTUIGolden(ansi.Strip(m.View()))
-			assertTUIGolden(t, "project_orchestrator_"+size.name+".golden", view)
-			for _, want := range []string{"orchestrator working live=true", "workers 2/4", "ready 2", "review 1", "waiting-human 1", "owned-elsewhere 1", "watch cursor stale"} {
+			wants := []string{}
+			if size.name == "default" {
+				wants = []string{"orchestrator working live=true", "workers 2/4"}
+			}
+			for _, want := range wants {
 				if !strings.Contains(view, want) {
-					t.Fatalf("project orchestration view missing %q:\n%s", want, view)
+					t.Fatalf("normal chrome missing %q:\n%s", want, view)
 				}
+			}
+			if size.name == "default" && !strings.Contains(view, "O: orchestra") {
+				t.Fatalf("normal chrome missing orchestrator key hint:\n%s", view)
 			}
 			for i, line := range strings.Split(strings.TrimRight(view, "\n"), "\n") {
 				if got := lipgloss.Width(line); got > size.width {
@@ -1201,63 +473,15 @@ func TestView_ProjectOrchestratorStatusFitsDefaultAndNarrow(t *testing.T) {
 	}
 }
 
-func TestOverviewProjectOrchestratorActionsAndTypedUpdate(t *testing.T) {
+func TestProjectOrchestratorKeyOpensLoadingDetailsBeforeSnapshotArrives(t *testing.T) {
 	m := newTestModel()
-	m.viewMode = ViewModeOverview
-	m.orchestrationOverview = []orchestrationProjectOverview{
-		{Name: "first", Path: "/projects/first", ProjectID: "project-a", Snapshot: &protocol.OrchestrationSnapshot{}},
-		{Name: "second", Path: "/projects/second", ProjectID: "project-b", Snapshot: &protocol.OrchestrationSnapshot{}},
+	updatedAny, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'O'}})
+	updated := updatedAny.(Model)
+	if cmd == nil {
+		t.Fatal("O did not schedule overlay open and snapshot refresh")
 	}
-	type actionCall struct {
-		target  projectOrchestratorTarget
-		action  string
-		request protocol.OrchestratorSessionRequest
-	}
-	var calls []actionCall
-	m.projectOrchestratorActionRunner = func(_ context.Context, target projectOrchestratorTarget, action string, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
-		calls = append(calls, actionCall{target: target, action: action, request: request})
-		return protocol.OrchestratorSessionResult{Disposition: action + "ed", Lifecycle: domain.OrchestratorWorking, Live: true}, nil
-	}
-
-	updated, _, consumed := m.handleOverviewModeKey(tea.KeyMsg{Type: tea.KeyRight})
-	if !consumed || updated.orchestrationOverviewCursor != 1 {
-		t.Fatalf("second project selection consumed=%v cursor=%d", consumed, updated.orchestrationOverviewCursor)
-	}
-	m = updated
-	var lastActionMsg projectOrchestratorActionMsg
-	for _, key := range []string{"o", "A"} {
-		updated, cmd, consumed := m.handleOverviewModeKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
-		if !consumed || cmd == nil {
-			t.Fatalf("key %q consumed=%v cmd=%v, want consumed command", key, consumed, cmd)
-		}
-		msg := cmd().(projectOrchestratorActionMsg)
-		if msg.err != nil || msg.projectID != "project-b" {
-			t.Fatalf("key %q result=%+v, want project-b success", key, msg)
-		}
-		lastActionMsg = msg
-		m = updated
-	}
-	if len(calls) != 2 {
-		t.Fatalf("action calls=%+v, want start and attach", calls)
-	}
-	for i, action := range []string{"start", "attach"} {
-		call := calls[i]
-		if call.action != action || call.target.ProjectID != "project-b" || call.target.ProjectPath != "/projects/second" || call.target.SocketPath != config.DaemonSocketPathFor("/projects/second") {
-			t.Fatalf("call[%d]=%+v, want selected second project %s target", i, call, action)
-		}
-		if call.request.Scope != domain.ProjectOrchestrationScope() {
-			t.Fatalf("call[%d] scope=%+v, want project scope", i, call.request.Scope)
-		}
-	}
-
-	updatedAny, cmd := m.Update(lastActionMsg)
-	immediate := updatedAny.(Model)
-	if cmd == nil || immediate.orchestrationOverview[1].Session == nil || !immediate.orchestrationOverview[1].Session.Live {
-		t.Fatalf("typed selected-project update did not apply immediately: session=%+v cmd=%v", immediate.orchestrationOverview[1].Session, cmd)
-	}
-	_, refreshCmd, consumed := m.handleOverviewModeKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
-	if !consumed || refreshCmd == nil {
-		t.Fatalf("refresh consumed=%v cmd=%v, want status refresh command", consumed, refreshCmd)
+	if _, ok := updated.overlayStack.Current().(*overlay.ProjectOrchestratorOverlay); !ok {
+		t.Fatalf("O opened %T, want project orchestrator details", updated.overlayStack.Current())
 	}
 }
 

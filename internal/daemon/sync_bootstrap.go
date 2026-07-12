@@ -115,6 +115,9 @@ func (d *Daemon) defaultSyncBootstrap(ctx context.Context) error {
 			d.cfg.Logger.Warn("migrate runtime state store failed during bootstrap", "error", err)
 		}
 	}
+	if err := d.refreshUserProjection(ctx); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("refresh user cross-project projection during bootstrap completed partially", "error", err)
+	}
 	return nil
 }
 

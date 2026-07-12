@@ -2,6 +2,7 @@ package issues
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -26,9 +27,135 @@ import (
 	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
+// ProjectionExport is a transactionally consistent, fully hydrated snapshot
+// consumed by the user-level cross-project projection.
+type ProjectionExport struct {
+	Tasks             []domain.Task
+	Checkpoint        uint64
+	SchemaVersion     int
+	SchemaFingerprint string
+}
+
+// ExportProjection reads the source contract, composite issue/runtime
+// checkpoint, issues, dependencies, and runtime projections in one SQLite
+// read transaction. A successful export therefore never acknowledges state
+// newer than the rows it contains.
+func (c *Client) ExportProjection(ctx context.Context, projectID string) (ProjectionExport, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return ProjectionExport{}, err
+	}
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return ProjectionExport{}, fmt.Errorf("begin projection export: %w", err)
+	}
+	defer tx.Rollback()
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	version, fingerprint, err := projectionSchemaContract(ctx, tx)
+	if err != nil {
+		return ProjectionExport{}, err
+	}
+	checkpoint, err := projectionCompositeCheckpoint(ctx, tx, projectID)
+	if err != nil {
+		return ProjectionExport{}, err
+	}
+	tasks, err := c.queryTasksWithRuntimeArchiveMode(ctx, tx, projectID, ArchiveInclude)
+	if err != nil {
+		return ProjectionExport{}, c.wrapError("export-projection", projectID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return ProjectionExport{}, fmt.Errorf("commit projection export read: %w", err)
+	}
+	return ProjectionExport{Tasks: tasks, Checkpoint: checkpoint, SchemaVersion: version, SchemaFingerprint: fingerprint}, nil
+}
+
+func projectionSchemaContract(ctx context.Context, q sqlIssueDBTX) (int, string, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id FROM schema_migrations ORDER BY id`)
+	if err != nil {
+		return 0, "", fmt.Errorf("read projection schema migrations: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, "", err
+		}
+		ids = append(ids, id)
+	}
+	if err = rows.Close(); err != nil {
+		return 0, "", err
+	}
+	rows, err = q.QueryContext(ctx, `SELECT type,name,COALESCE(sql,'') FROM sqlite_master WHERE type IN ('table','index','trigger','view') AND name NOT LIKE 'sqlite_%' ORDER BY type,name`)
+	if err != nil {
+		return 0, "", fmt.Errorf("read projection schema contract: %w", err)
+	}
+	h := sha256.New()
+	for _, id := range ids {
+		fmt.Fprintf(h, "migration\x00%s\n", id)
+	}
+	for rows.Next() {
+		var typ, name, ddl string
+		if err = rows.Scan(&typ, &name, &ddl); err != nil {
+			rows.Close()
+			return 0, "", err
+		}
+		fmt.Fprintf(h, "%s\x00%s\x00%s\n", typ, name, strings.Join(strings.Fields(ddl), " "))
+	}
+	if err = rows.Close(); err != nil {
+		return 0, "", err
+	}
+	return len(ids), fmt.Sprintf("sha256:%x", h.Sum(nil)), nil
+}
+
+func projectionCompositeCheckpoint(ctx context.Context, q sqlIssueDBTX, projectID string) (uint64, error) {
+	_ = projectID // The project database has one revision domain; project ID scopes runtime rows within it.
+	var revision int64
+	if err := q.QueryRowContext(ctx, `SELECT revision FROM projection_source_revision WHERE singleton=1`).Scan(&revision); err != nil {
+		return 0, fmt.Errorf("read projection source revision: %w", err)
+	}
+	if revision < 0 {
+		return 0, fmt.Errorf("invalid negative projection source revision %d", revision)
+	}
+	return uint64(revision), nil
+}
+
 type dependencyRemovalConfirmationKey struct{}
 type parentChildOrphanConfirmationKey struct{}
 type issueMutationLockKey struct{}
+
+// ProjectionSourceVersion reports the applied project-schema migration count.
+func (c *Client) ProjectionSourceVersion(ctx context.Context) (int, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return 0, err
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("read projection source schema version: %w", err)
+	}
+	return count, nil
+}
+
+// ProjectionSourceCheckpoint returns the same durable revision used by
+// ExportProjection. It is retained for callers that only need freshness.
+func (c *Client) ProjectionSourceCheckpoint(ctx context.Context) (uint64, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return 0, err
+	}
+	var value int64
+	if err := db.QueryRowContext(ctx, `SELECT revision FROM projection_source_revision WHERE singleton=1`).Scan(&value); err != nil {
+		return 0, fmt.Errorf("read projection source checkpoint: %w", err)
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("invalid negative projection source revision %d", value)
+	}
+	return uint64(value), nil
+}
 
 type ArchiveMode string
 
@@ -1065,6 +1192,12 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 
 // ListWithRuntime fetches active issues and runtime projection fields using a single joined SQLite query.
 func (c *Client) ListWithRuntime(ctx context.Context, projectID string) ([]domain.Task, error) {
+	return c.ListWithRuntimeArchiveMode(ctx, projectID, ArchiveExclude)
+}
+
+// ListWithRuntimeArchiveMode fetches full issue bodies, all dependency edges,
+// and joined runtime projections for user-level cross-project projection.
+func (c *Client) ListWithRuntimeArchiveMode(ctx context.Context, projectID string, archiveMode ArchiveMode) ([]domain.Task, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return nil, err
@@ -1073,7 +1206,7 @@ func (c *Client) ListWithRuntime(ctx context.Context, projectID string) ([]domai
 	if projectID == "" {
 		projectID = "default"
 	}
-	tasks, err := c.queryTasksWithRuntime(ctx, db, projectID)
+	tasks, err := c.queryTasksWithRuntimeArchiveMode(ctx, db, projectID, archiveMode)
 	if err != nil {
 		return nil, c.wrapError("list-with-runtime", projectID, err)
 	}
@@ -4176,7 +4309,7 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 	return c.queryTasksWithRuntimeArchiveMode(ctx, db, projectID, ArchiveExclude, issueIDs...)
 }
 
-func (c *Client) queryTasksWithRuntimeArchiveMode(ctx context.Context, db *sql.DB, projectID string, archiveMode ArchiveMode, issueIDs ...string) ([]domain.Task, error) {
+func (c *Client) queryTasksWithRuntimeArchiveMode(ctx context.Context, db sqlIssueDBTX, projectID string, archiveMode ArchiveMode, issueIDs ...string) ([]domain.Task, error) {
 	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, true, taskDependencyLoadAll, archiveMode, issueIDs...)
 }
 
@@ -4321,7 +4454,7 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 	return tasks, nil
 }
 
-func (c *Client) loadCoordinationLeasesForTasks(ctx context.Context, db *sql.DB, tasks []domain.Task) error {
+func (c *Client) loadCoordinationLeasesForTasks(ctx context.Context, db sqlIssueDBTX, tasks []domain.Task) error {
 	if len(tasks) == 0 {
 		return nil
 	}
@@ -4451,7 +4584,7 @@ const (
 	taskDependencyLoadParentOnly
 )
 
-func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB, projectID string, includeDetails bool, dependencyMode taskDependencyLoadMode, archiveMode ArchiveMode, issueIDs ...string) ([]domain.Task, error) {
+func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db sqlIssueDBTX, projectID string, includeDetails bool, dependencyMode taskDependencyLoadMode, archiveMode ArchiveMode, issueIDs ...string) ([]domain.Task, error) {
 	startedAt := time.Now()
 	issueCount := len(uniqueIssueIDStrings(issueIDs))
 	query, args := taskRuntimeProjectionQuery(projectID, includeDetails, archiveMode, issueIDs...)
@@ -4615,7 +4748,7 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 	return tasks, nil
 }
 
-func (c *Client) loadPullRequestsForTasks(ctx context.Context, db *sql.DB, tasks []domain.Task) error {
+func (c *Client) loadPullRequestsForTasks(ctx context.Context, db sqlIssueDBTX, tasks []domain.Task) error {
 	if len(tasks) == 0 {
 		return nil
 	}
@@ -5056,7 +5189,7 @@ func mapRuntimeSessionState(value string) domain.SessionState {
 
 func (c *Client) loadDependenciesForTasks(
 	ctx context.Context,
-	db *sql.DB,
+	db sqlIssueDBTX,
 	taskIDs []naming.IssueID,
 	taskIndexByID map[naming.IssueID]int,
 	tasks []domain.Task,

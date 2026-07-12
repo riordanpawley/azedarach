@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 )
 
@@ -20,10 +21,10 @@ type boardMouseHit struct {
 }
 
 type mouseDragState struct {
-	active  bool
-	compact bool
-	column  int
-	lastY   int
+	active   bool
+	treeList bool
+	column   int
+	lastY    int
 }
 
 type mouseTapState struct {
@@ -79,10 +80,10 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleMousePress(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	switch m.viewMode {
-	case ViewModeCompact:
-		if taskID := m.compactTaskAtMouse(msg); taskID != "" {
-			m.mouseDrag = mouseDragState{active: true, compact: true, lastY: msg.Y}
+	switch m.boardView.Normalized().Layout {
+	case domain.BoardViewLayoutTreeList:
+		if taskID := m.treeTaskAtMouse(msg); taskID != "" {
+			m.mouseDrag = mouseDragState{active: true, treeList: true, lastY: msg.Y}
 			columns := m.buildColumns()
 			if m.nav.JumpToTaskByID(columns, taskID) {
 				m.ensureCursorVisible(columns)
@@ -127,7 +128,7 @@ func (m Model) handleMouseDrag(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 	deltaY := msg.Y - m.mouseDrag.lastY
 	step := 1
-	if !m.mouseDrag.compact {
+	if !m.mouseDrag.treeList {
 		columns := m.buildColumns()
 		layout := m.boardColumnLayout(columns)
 		columnWidth := layout.WidthForColumn(m.mouseDrag.column)
@@ -156,7 +157,7 @@ func (m Model) handleMouseDrag(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 
 	columns := m.buildColumns()
-	if m.mouseDrag.compact {
+	if m.mouseDrag.treeList {
 		for i := 0; i < count; i++ {
 			if direction > 0 {
 				m.nav.MoveDown(columns)
@@ -184,9 +185,9 @@ func (m Model) handleMouseDrag(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleMouseAttach(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	var taskID string
-	switch m.viewMode {
-	case ViewModeCompact:
-		taskID = m.compactTaskAtMouse(msg)
+	switch m.boardView.Normalized().Layout {
+	case domain.BoardViewLayoutTreeList:
+		taskID = m.treeTaskAtMouse(msg)
 		if taskID == "" {
 			return m, nil
 		}
@@ -203,6 +204,9 @@ func (m Model) handleMouseAttach(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		taskID = task.ID.String()
 		m.nav.JumpToTaskByID(columns, taskID)
 		m.ensureCursorVisible(columns)
+	}
+	if m.globalBoard {
+		return m.leaveGlobalBoardForCurrentTask()
 	}
 	return m.attachFocusedTask(taskID)
 }
@@ -226,13 +230,13 @@ func (m *Model) rememberMouseTap(taskID string) {
 }
 
 func (m Model) handleMouseWheel(msg tea.MouseMsg, delta int) (tea.Model, tea.Cmd) {
-	switch m.viewMode {
-	case ViewModeCompact:
-		if !m.compactMouseInBounds(msg) {
+	switch m.boardView.Normalized().Layout {
+	case domain.BoardViewLayoutTreeList:
+		if !m.treeMouseInBounds(msg) {
 			return m, nil
 		}
 		columns := m.buildColumns()
-		if taskID := m.compactTaskAtMouse(msg); taskID != "" {
+		if taskID := m.treeTaskAtMouse(msg); taskID != "" {
 			m.nav.JumpToTaskByID(columns, taskID)
 		}
 		if delta < 0 {
@@ -262,7 +266,7 @@ func (m Model) handleMouseWheel(msg tea.MouseMsg, delta int) (tea.Model, tea.Cmd
 }
 
 func (m Model) handleMouseHorizontalWheel(msg tea.MouseMsg, delta int) (tea.Model, tea.Cmd) {
-	if m.viewMode == ViewModeCompact {
+	if m.boardView.Normalized().Layout == domain.BoardViewLayoutTreeList {
 		return m, nil
 	}
 	columns := m.buildColumns()
@@ -392,19 +396,19 @@ func (m *Model) selectNearestTaskInColumn(columns []board.Column, col int) {
 	m.nav.JumpToTaskByID(columns, task.ID.String())
 }
 
-func (m Model) compactTaskAtMouse(msg tea.MouseMsg) string {
-	if !m.compactMouseInBounds(msg) {
+func (m Model) treeTaskAtMouse(msg tea.MouseMsg) string {
+	if !m.treeMouseInBounds(msg) {
 		return ""
 	}
 	row := msg.Y - 2
-	tasks := m.compactRenderedTasks()
+	tasks := m.treeRenderedTasks()
 	if row < 0 || row >= len(tasks) {
 		return ""
 	}
 	return tasks[row].ID.String()
 }
 
-func (m Model) compactMouseInBounds(msg tea.MouseMsg) bool {
+func (m Model) treeMouseInBounds(msg tea.MouseMsg) bool {
 	if msg.X < 0 || msg.X >= m.width {
 		return false
 	}

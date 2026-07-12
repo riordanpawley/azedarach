@@ -13,4 +13,3 @@ func refreshInterval(lastRefreshSucceeded bool) time.Duration {
 	}
 	return refreshFailureInterval
 }
-

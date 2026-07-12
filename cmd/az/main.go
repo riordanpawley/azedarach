@@ -70,6 +70,10 @@ func main() {
 		runTUI(cfg)
 		return
 	}
+	if len(args) == 1 && args[0] == "global" {
+		runTUIWithOptions(cfg, app.WithGlobalBoardOnLoad())
+		return
+	}
 
 	shutdownObservability := configureProcessObservability("az", cfg)
 	defer shutdownObservability()
@@ -138,6 +142,11 @@ func main() {
 
 	case "board":
 		if err := runBoardCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	case "view":
+		if err := runViewCommand(cfg, commandArgs); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -1529,7 +1538,7 @@ func printRootUsage() {
 	for old, new := range replacements {
 		usage = strings.ReplaceAll(usage, old, new)
 	}
-	usage = strings.TrimRight(usage, "\n") + "\n\nDeprecated aliases:\n  az session kill <issue-id> [--wait]  Alias for az session stop\n  az kill <issue-id> [--wait]          Alias for az stop\n"
+	usage = strings.TrimRight(usage, "\n") + "\n\nCompatibility aliases:\n  az board view ...                    Alias for az view ...\n\nDeprecated aliases:\n  az session kill <issue-id> [--wait]  Alias for az session stop\n  az kill <issue-id> [--wait]          Alias for az stop\n"
 	fmt.Print(usage)
 }
 

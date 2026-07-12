@@ -1223,7 +1223,7 @@ func mustMarshalBoardSnapshot(t *testing.T, protocolVersion protocol.Version, re
 		ProjectID:        naming.ProjectID(projectID),
 		LastCheckedAt:    daemonSnapshotCheckedAt(),
 		Freshness:        protocol.TaskListFreshnessFresh,
-		Tasks:            protocol.BoardTaskSummariesFromDomain(tasks),
+		Projection:       protocol.BoardViewProjectionFromDomain(testTUIBoardProjection(tasks, nil, domain.BoardView{})),
 	})
 	if err != nil {
 		t.Fatalf("marshal board snapshot: %v", err)
@@ -1240,14 +1240,42 @@ func mustMarshalBoardSnapshotWithView(t *testing.T, protocolVersion protocol.Ver
 		ProjectID:        naming.ProjectID(projectID),
 		LastCheckedAt:    daemonSnapshotCheckedAt(),
 		Freshness:        protocol.TaskListFreshnessFresh,
-		View:             view,
-		Columns:          protocol.BoardSnapshotColumnsFromDomain(columns),
-		Tasks:            protocol.BoardTaskSummariesFromDomain(tasks),
+		Projection:       protocol.BoardViewProjectionFromDomain(testTUIBoardProjection(tasks, columns, view)),
 	})
 	if err != nil {
 		t.Fatalf("marshal board snapshot: %v", err)
 	}
 	return body
+}
+
+func testTUIBoardProjection(tasks []domain.Task, columns []domain.BoardViewColumnSnapshot, view domain.BoardView) domain.BoardViewProjection {
+	if view.ID == "" {
+		view = domain.DefaultBoardView()
+		view.ID = "test"
+		view.Layout = domain.BoardViewLayoutHorizontalGrid
+		view.Columns = []domain.BoardColumn{{ID: "test", Title: "Test", Predicates: view.Columns[0].Predicates}}
+		columns = []domain.BoardViewColumnSnapshot{{Definition: view.Columns[0], Tasks: tasks}}
+	}
+	projection := domain.BoardViewProjection{View: view}
+	groupByTask := map[string]domain.BoardColumnID{}
+	for _, column := range columns {
+		group := domain.BoardViewProjectedGroup{GroupID: column.Definition.ID}
+		for _, task := range column.Tasks {
+			group.TaskIDs = append(group.TaskIDs, task.ID)
+			groupByTask[task.ID.String()] = column.Definition.ID
+		}
+		projection.Groups = append(projection.Groups, group)
+	}
+	for _, task := range tasks {
+		groupID := groupByTask[task.ID.String()]
+		if groupID == "" && len(projection.Groups) > 0 {
+			groupID = projection.Groups[0].GroupID
+			projection.Groups[0].TaskIDs = append(projection.Groups[0].TaskIDs, task.ID)
+		}
+		projection.KnownTaskIDs = append(projection.KnownTaskIDs, task.ID)
+		projection.Items = append(projection.Items, domain.BoardViewProjectedItem{Task: task, GroupID: groupID})
+	}
+	return projection
 }
 
 func worktreeListResponse(t *testing.T, req protocol.RequestEnvelope, issueID, path, branch string) protocol.ResponseEnvelope {
@@ -1327,7 +1355,10 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		msg := m.loadIssuesCmd()()
 		loaded, ok := msg.(issuesLoadedMsg)
 		if !ok {
-			t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+			if failed, isFailure := msg.(issuesErrorMsg); isFailure {
+				t.Fatalf("load failed: %v", failed.err)
+			}
+			t.Fatalf("message = %#v (%T), want issuesLoadedMsg", msg, msg)
 		}
 		if len(loaded.tasks) != 1 || loaded.tasks[0].ID != "az-1" {
 			t.Fatalf("loaded tasks = %+v", loaded.tasks)
@@ -1348,11 +1379,11 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		task := domain.Task{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}
 		columns := []domain.BoardViewColumnSnapshot{
 			{
-				Definition: domain.BoardColumn{ID: domain.BoardColumnWaitingAI, Title: "Waiting AI"},
+				Definition: view.Columns[1],
 				Tasks:      []domain.Task{task},
 			},
 			{
-				Definition: domain.BoardColumn{ID: domain.BoardColumnOpen, Title: "Open"},
+				Definition: view.Columns[0],
 			},
 		}
 		transport := &recordingDaemonTransport{
@@ -1374,7 +1405,10 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		msg := m.loadIssuesCmd()()
 		loaded, ok := msg.(issuesLoadedMsg)
 		if !ok {
-			t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+			if failed, isFailure := msg.(issuesErrorMsg); isFailure {
+				t.Fatalf("load configured board failed: %v", failed.err)
+			}
+			t.Fatalf("message = %#v (%T), want issuesLoadedMsg", msg, msg)
 		}
 		if got, want := loaded.boardView.ID, view.ID; got != want {
 			t.Fatalf("loaded board view id=%q want=%q", got, want)
@@ -2980,6 +3014,123 @@ func TestCloseFailureRetryUsesFailedOperationProjectAfterProjectSwitch(t *testin
 	}
 	if got, want := closeProjects, []string{"project-a"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("close projects = %v, want %v", got, want)
+	}
+}
+
+func TestCloseFailureCreatesAncestorThenRetriesClose(t *testing.T) {
+	var commands []string
+	var projects []string
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			commands = append(commands, req.Command)
+			projects = append(projects, req.Meta.ProjectID.String())
+			var body any
+			switch req.Command {
+			case daemonclient.CommandWorktreeCreate:
+				var request struct {
+					IssueID    string `json:"issue_id"`
+					BaseBranch string `json:"base_branch"`
+				}
+				if err := json.Unmarshal(req.Body, &request); err != nil {
+					t.Fatalf("unmarshal worktree request: %v", err)
+				}
+				if request.IssueID != "gat" || request.BaseBranch != "main" {
+					t.Fatalf("worktree request = %+v, want parent gat from main", request)
+				}
+				body = map[string]any{
+					"project_id": "project-a", "base_branch": "main",
+					"worktree": map[string]any{"path": "/tmp/gat", "branch": "user/gat/parent", "issue_id": "gat"},
+				}
+			case daemonclient.CommandTaskClose:
+				body = daemonclient.TaskCloseResult{TaskID: "gav", Status: string(domain.StatusDone)}
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			respBody, err := json.Marshal(body)
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, OK: true, Body: respBody}, nil
+		},
+	}
+
+	parentID := naming.IssueID("gat")
+	m := newDaemonTestModel(transport)
+	m.daemonClient.WithProjectID("project-a")
+	m.daemonProjectRouteID = "project-a"
+	m.currentProject = "project-a"
+	m.tasks = []domain.Task{{ID: "gav", ParentID: &parentID, Status: domain.StatusInReview}}
+	dialogCmd := m.closeFailureDialogCmd(taskStatusResultMsg{
+		taskID: "gav", previousStatus: domain.StatusInReview, newStatus: domain.StatusDone,
+		err: errors.New("refusing to merge child issue gav directly into base: no active ancestor worktree branch was found; run `az worktree create gat`, then close the child into that target"),
+	})
+	if dialogCmd == nil {
+		t.Fatal("expected close failure dialog command")
+	}
+	openedAny, _ := m.Update(dialogCmd())
+	opened := openedAny.(Model)
+	if !strings.Contains(opened.overlayStack.Current().View(), "Create ancestor & retry") {
+		t.Fatal("close failure dialog missing ancestor recovery action")
+	}
+
+	opened.daemonClient.WithProjectID("project-b")
+	opened.daemonProjectRouteID = "project-b"
+	afterKeyAny, selectionCmd := opened.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	selection := selectionCmd().(overlay.SelectionMsg)
+	afterSelectionAny, createCmd := afterKeyAny.(Model).Update(selection)
+	createResult := createCmd()
+	result, ok := createResult.(ancestorWorktreeCloseRetryResultMsg)
+	if !ok || result.err != nil {
+		t.Fatalf("create result = %+v (%T), want success", createResult, createResult)
+	}
+	retryingAny, retryCmd := afterSelectionAny.(Model).Update(createResult)
+	if retryCmd == nil {
+		t.Fatal("expected automatic close retry command")
+	}
+	closeResult := retryCmd().(taskStatusResultMsg)
+	if closeResult.err != nil {
+		t.Fatalf("close retry error: %v", closeResult.err)
+	}
+	if got, want := commands, []string{daemonclient.CommandWorktreeCreate, daemonclient.CommandTaskClose}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("commands = %v, want %v", got, want)
+	}
+	if got, want := projects, []string{"project-a", "project-a"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("projects = %v, want %v", got, want)
+	}
+	if len(transport.commandBudgets) < 1 || transport.commandBudgets[0] < worktreeCleanupMutationTimeout-10*time.Second {
+		t.Fatalf("worktree create timeout budget = %v, want near %s", transport.commandBudgets, worktreeCleanupMutationTimeout)
+	}
+	if retryingAny.(Model).tasks[0].Status != domain.StatusDone {
+		t.Fatalf("optimistic retry status = %s, want done", retryingAny.(Model).tasks[0].Status)
+	}
+}
+
+func TestCloseFailureSurfacesAncestorWorktreeCreationFailure(t *testing.T) {
+	m := newDaemonTestModel(&recordingDaemonTransport{})
+	action := overlay.CloseFailureActionMsg{
+		TaskID: "gav", ProjectID: "project-a", BaseBranch: "main", ParentID: "gat",
+		PreviousStatus: string(domain.StatusInReview), TargetStatus: string(domain.StatusDone),
+		Action: overlay.CloseFailureActionCreateAncestor,
+	}
+
+	failedAny, dialogCmd := m.Update(ancestorWorktreeCloseRetryResultMsg{
+		action: action,
+		err:    errors.New("create ancestor worktree gat: hook failed"),
+	})
+	if dialogCmd == nil {
+		t.Fatal("expected failure dialog command")
+	}
+	openedAny, _ := failedAny.(Model).Update(dialogCmd())
+	dialog, ok := openedAny.(Model).overlayStack.Current().(*overlay.CloseFailureDialog)
+	if !ok {
+		t.Fatalf("overlay = %T, want CloseFailureDialog", openedAny.(Model).overlayStack.Current())
+	}
+	view := dialog.View()
+	if !strings.Contains(view, "create ancestor worktree gat: hook failed") {
+		t.Fatalf("dialog does not surface worktree creation failure: %q", view)
+	}
+	if strings.Contains(view, "Create ancestor & retry") {
+		t.Fatalf("dialog should not offer a blind repeated create after creation failure: %q", view)
 	}
 }
 
@@ -11238,7 +11389,6 @@ func TestDaemonEventRevisionReducer(t *testing.T) {
 
 func TestOrchestrationLoopEventRefreshesVisibleOverview(t *testing.T) {
 	m := newTestModel()
-	m.viewMode = ViewModeOverview
 	m.daemonRevision = 4
 
 	result := m.applyDaemonStreamEvent(protocol.EventEnvelope{
@@ -11253,14 +11403,13 @@ func TestOrchestrationLoopEventRefreshesVisibleOverview(t *testing.T) {
 		t.Fatalf("daemon revision=%d, want 5", m.daemonRevision)
 	}
 
-	m.viewMode = ViewModeBoard
 	result = m.applyDaemonStreamEvent(protocol.EventEnvelope{
 		ProjectID: naming.ProjectID(m.daemonProjectID()),
 		Revision:  6,
 		Event:     protocol.EventOrchestrationLoopUpdated,
 	}, false)
-	if result.cmd != nil {
-		t.Fatalf("hidden overview refresh command=%T, want nil", result.cmd)
+	if result.cmd == nil {
+		t.Fatal("orchestration event did not refresh current-project snapshot")
 	}
 }
 

@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -16,7 +17,7 @@ const (
 	CommandBoardViewSave       = "board.view.save"
 	CommandBoardViewDelete     = "board.view.delete"
 	CommandBoardViewSelect     = "board.view.select"
-	BoardSnapshotSchemaVersion = 3
+	BoardSnapshotSchemaVersion = 5
 )
 
 // BoardSnapshotPayload is the daemon/client contract for board view snapshots.
@@ -25,15 +26,76 @@ const (
 // fields needed to render and route board actions, but omit long detail fields
 // such as description, notes, design, and acceptance.
 type BoardSnapshotPayload struct {
-	SchemaVersion    uint16                `json:"schema_version" msgpack:"schema_version"`
-	ProtocolVersion  Version               `json:"protocol_version" msgpack:"protocol_version"`
-	SnapshotRevision uint64                `json:"snapshot_revision" msgpack:"snapshot_revision"`
-	ProjectID        naming.ProjectID      `json:"project_id" msgpack:"project_id"`
-	LastCheckedAt    time.Time             `json:"last_checked_at" msgpack:"last_checked_at"`
-	Freshness        TaskListFreshness     `json:"freshness" msgpack:"freshness"`
-	View             domain.BoardView      `json:"view" msgpack:"view"`
-	Columns          []BoardSnapshotColumn `json:"columns" msgpack:"columns"`
-	Tasks            []BoardTaskSummary    `json:"tasks" msgpack:"tasks"`
+	SchemaVersion    uint16              `json:"schema_version" msgpack:"schema_version"`
+	ProtocolVersion  Version             `json:"protocol_version" msgpack:"protocol_version"`
+	SnapshotRevision uint64              `json:"snapshot_revision" msgpack:"snapshot_revision"`
+	ProjectID        naming.ProjectID    `json:"project_id" msgpack:"project_id"`
+	LastCheckedAt    time.Time           `json:"last_checked_at" msgpack:"last_checked_at"`
+	Freshness        TaskListFreshness   `json:"freshness" msgpack:"freshness"`
+	Projection       BoardViewProjection `json:"projection" msgpack:"projection"`
+}
+
+type BoardViewProjection struct {
+	View         domain.BoardView          `json:"view" msgpack:"view"`
+	Groups       []BoardViewProjectedGroup `json:"groups" msgpack:"groups"`
+	Items        []BoardViewProjectedItem  `json:"items" msgpack:"items"`
+	KnownTaskIDs []naming.IssueID          `json:"known_task_ids,omitempty" msgpack:"known_task_ids,omitempty"`
+}
+
+type BoardViewProjectedGroup struct {
+	GroupID domain.BoardColumnID `json:"group_id" msgpack:"group_id"`
+	TaskIDs []naming.IssueID     `json:"task_ids" msgpack:"task_ids"`
+}
+
+type BoardViewProjectedItem struct {
+	Task               BoardTaskSummary              `json:"task" msgpack:"task"`
+	GroupID            domain.BoardColumnID          `json:"group_id" msgpack:"group_id"`
+	Depth              int                           `json:"depth,omitempty" msgpack:"depth,omitempty"`
+	OrchestrationState domain.OrchestrationViewState `json:"orchestration_state,omitempty" msgpack:"orchestration_state,omitempty"`
+}
+
+func BoardViewProjectionFromDomain(projection domain.BoardViewProjection) BoardViewProjection {
+	out := BoardViewProjection{
+		View:         projection.View,
+		KnownTaskIDs: append([]naming.IssueID(nil), projection.KnownTaskIDs...),
+	}
+	for _, group := range projection.Groups {
+		out.Groups = append(out.Groups, BoardViewProjectedGroup{GroupID: group.GroupID, TaskIDs: append([]naming.IssueID(nil), group.TaskIDs...)})
+	}
+	for _, item := range projection.Items {
+		out.Items = append(out.Items, BoardViewProjectedItem{Task: BoardTaskSummaryFromDomain(item.Task), GroupID: item.GroupID, Depth: item.Depth, OrchestrationState: item.OrchestrationState})
+	}
+	return out
+}
+
+func (p BoardViewProjection) TaskSummaries() []BoardTaskSummary {
+	out := make([]BoardTaskSummary, 0, len(p.Items))
+	for _, item := range p.Items {
+		out = append(out, item.Task)
+	}
+	return out
+}
+
+func (p BoardViewProjection) ColumnSnapshots() []BoardSnapshotColumn {
+	items := make(map[string]BoardTaskSummary, len(p.Items))
+	for _, item := range p.Items {
+		items[item.Task.ID.String()] = item.Task
+	}
+	out := make([]BoardSnapshotColumn, 0, len(p.Groups))
+	definitions := make(map[domain.BoardColumnID]BoardColumn, len(p.View.Columns))
+	for _, definition := range p.View.Columns {
+		definitions[definition.ID] = definition
+	}
+	for _, group := range p.Groups {
+		column := BoardSnapshotColumn{Definition: definitions[group.GroupID]}
+		for _, taskID := range group.TaskIDs {
+			if task, ok := items[taskID.String()]; ok {
+				column.Tasks = append(column.Tasks, task)
+			}
+		}
+		out = append(out, column)
+	}
+	return out
 }
 
 type BoardSnapshotRequestBody struct {
@@ -60,6 +122,7 @@ type BoardViewGetRequestBody struct {
 type BoardViewSaveRequestBody struct {
 	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
 	View      domain.BoardView `json:"view" msgpack:"view"`
+	Scope     GlobalViewScope  `json:"scope,omitempty" msgpack:"scope,omitempty"`
 }
 
 type BoardViewDeleteRequestBody struct {
@@ -68,19 +131,24 @@ type BoardViewDeleteRequestBody struct {
 }
 
 type BoardViewSelectRequestBody struct {
-	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
-	ViewID    string           `json:"view_id" msgpack:"view_id"`
+	ProjectID naming.ProjectID   `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	ViewID    string             `json:"view_id" msgpack:"view_id"`
+	Consumer  GlobalViewConsumer `json:"consumer,omitempty" msgpack:"consumer,omitempty"`
 }
 
 type BoardViewListResponseBody struct {
-	ProjectID      naming.ProjectID         `json:"project_id" msgpack:"project_id"`
-	SelectedViewID string                   `json:"selected_view_id,omitempty" msgpack:"selected_view_id,omitempty"`
-	Views          []domain.BoardViewRecord `json:"views" msgpack:"views"`
+	ProjectID      naming.ProjectID              `json:"project_id" msgpack:"project_id"`
+	SelectedViewID string                        `json:"selected_view_id,omitempty" msgpack:"selected_view_id,omitempty"`
+	Views          []domain.BoardViewRecord      `json:"views" msgpack:"views"`
+	GlobalViews    []GlobalViewRecord            `json:"global_views,omitempty" msgpack:"global_views,omitempty"`
+	Selections     map[GlobalViewConsumer]string `json:"selections,omitempty" msgpack:"selections,omitempty"`
 }
 
 type BoardViewResponseBody struct {
-	ProjectID naming.ProjectID       `json:"project_id" msgpack:"project_id"`
-	View      domain.BoardViewRecord `json:"view" msgpack:"view"`
+	ProjectID  naming.ProjectID              `json:"project_id" msgpack:"project_id"`
+	View       domain.BoardViewRecord        `json:"view" msgpack:"view"`
+	GlobalView *GlobalViewRecord             `json:"global_view,omitempty" msgpack:"global_view,omitempty"`
+	Selections map[GlobalViewConsumer]string `json:"selections,omitempty" msgpack:"selections,omitempty"`
 }
 
 type BoardViewSelectResponseBody struct {
@@ -118,20 +186,6 @@ type BoardTaskSummary struct {
 	Ownership             *domain.IssueOwnership `json:"ownership,omitempty" msgpack:"ownership,omitempty"`
 	CreatedAt             time.Time              `json:"created_at" msgpack:"created_at"`
 	UpdatedAt             time.Time              `json:"updated_at" msgpack:"updated_at"`
-}
-
-func BoardSnapshotColumnsFromDomain(columns []domain.BoardViewColumnSnapshot) []BoardSnapshotColumn {
-	if len(columns) == 0 {
-		return nil
-	}
-	out := make([]BoardSnapshotColumn, 0, len(columns))
-	for _, column := range columns {
-		out = append(out, BoardSnapshotColumn{
-			Definition: column.Definition,
-			Tasks:      BoardTaskSummariesFromDomain(column.Tasks),
-		})
-	}
-	return out
 }
 
 func BoardTaskSummaryFromDomain(task domain.Task) BoardTaskSummary {
@@ -256,12 +310,96 @@ func DecodeBoardSnapshotPayload(data []byte) (BoardSnapshotPayload, error) {
 	if !payload.Freshness.Valid() {
 		return BoardSnapshotPayload{}, fmt.Errorf("board snapshot freshness mismatch: expected one of [%s %s], actual %q", TaskListFreshnessFresh, TaskListFreshnessStale, payload.Freshness)
 	}
-	if payload.View.ID != "" || payload.View.Title != "" || len(payload.View.Columns) > 0 {
-		if err := payload.View.Validate(); err != nil {
+	if payload.Projection.View.ID != "" || payload.Projection.View.Title != "" || len(payload.Projection.View.Columns) > 0 {
+		if err := payload.Projection.View.Validate(); err != nil {
 			return BoardSnapshotPayload{}, fmt.Errorf("board snapshot view invalid: %w", err)
 		}
+		viewGroups := make(map[domain.BoardColumnID]struct{}, len(payload.Projection.View.Columns))
+		for _, column := range payload.Projection.View.Columns {
+			viewGroups[column.ID] = struct{}{}
+		}
+		for _, group := range payload.Projection.Groups {
+			if _, ok := viewGroups[group.GroupID]; !ok {
+				return BoardSnapshotPayload{}, fmt.Errorf("board snapshot projection contains unknown group %q", group.GroupID)
+			}
+		}
+	}
+	if err := payload.Projection.Validate(); err != nil {
+		return BoardSnapshotPayload{}, fmt.Errorf("board snapshot projection invalid: %w", err)
 	}
 	return payload, nil
+}
+
+func (p BoardViewProjection) Validate() error {
+	switch p.View.Normalized().Layout {
+	case domain.BoardViewLayoutColumnBoard, domain.BoardViewLayoutTreeList, domain.BoardViewLayoutHorizontalGrid:
+	default:
+		return fmt.Errorf("unsupported layout %q", p.View.Layout)
+	}
+	known := make(map[string]struct{}, len(p.KnownTaskIDs))
+	for _, taskID := range p.KnownTaskIDs {
+		id := strings.TrimSpace(taskID.String())
+		if id == "" {
+			return fmt.Errorf("known task id is empty")
+		}
+		if _, exists := known[id]; exists {
+			return fmt.Errorf("duplicate known task id %q", id)
+		}
+		known[id] = struct{}{}
+	}
+	items := make(map[string]BoardViewProjectedItem, len(p.Items))
+	viewGroups := make(map[domain.BoardColumnID]struct{}, len(p.View.Columns))
+	for _, column := range p.View.Columns {
+		viewGroups[column.ID] = struct{}{}
+	}
+	for _, item := range p.Items {
+		id := strings.TrimSpace(item.Task.ID.String())
+		if id == "" {
+			return fmt.Errorf("projected item task id is empty")
+		}
+		if _, exists := items[id]; exists {
+			return fmt.Errorf("duplicate projected item %q", id)
+		}
+		if _, exists := known[id]; !exists {
+			return fmt.Errorf("projected item %q is not a known task", id)
+		}
+		if item.Depth < 0 {
+			return fmt.Errorf("projected item %q has negative depth", id)
+		}
+		if _, exists := viewGroups[item.GroupID]; !exists {
+			return fmt.Errorf("projected item %q references unknown group %q", id, item.GroupID)
+		}
+		items[id] = item
+	}
+	grouped := make(map[string]struct{}, len(items))
+	seenGroups := make(map[domain.BoardColumnID]struct{}, len(p.Groups))
+	for _, group := range p.Groups {
+		if strings.TrimSpace(string(group.GroupID)) == "" {
+			return fmt.Errorf("projected group id is empty")
+		}
+		if _, exists := seenGroups[group.GroupID]; exists {
+			return fmt.Errorf("duplicate projected group %q", group.GroupID)
+		}
+		seenGroups[group.GroupID] = struct{}{}
+		for _, taskID := range group.TaskIDs {
+			id := taskID.String()
+			item, exists := items[id]
+			if !exists {
+				return fmt.Errorf("group %q references unknown item %q", group.GroupID, id)
+			}
+			if item.GroupID != group.GroupID {
+				return fmt.Errorf("item %q group mismatch", id)
+			}
+			if _, exists := grouped[id]; exists {
+				return fmt.Errorf("item %q appears in multiple groups", id)
+			}
+			grouped[id] = struct{}{}
+		}
+	}
+	if len(grouped) != len(items) {
+		return fmt.Errorf("%d projected items are not assigned to exactly one group", len(items)-len(grouped))
+	}
+	return nil
 }
 
 func cloneIntPointer(value *int) *int {

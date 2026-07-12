@@ -6,8 +6,20 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
+
+func TestSelectedBoardViewMigratesRetiredUIViewMode(t *testing.T) {
+	d := &Daemon{cfg: Config{RepoDir: t.TempDir()}, uiState: map[string]string{}}
+	d.setUIStateValue("default", protocol.UIStateKeyUIViewMode, "compact")
+	if got := d.selectedBoardViewID("default"); got != string(domain.BoardViewTreeID) {
+		t.Fatalf("selected view = %q, want tree", got)
+	}
+	if got, ok := d.getUIStateValue("default", protocol.UIStateKeyBoardSelectedView); !ok || got != string(domain.BoardViewTreeID) {
+		t.Fatalf("migrated UI state = %q, %t", got, ok)
+	}
+}
 
 func TestLoadSelectedBoardViewPreferenceCanonicalizesLegacyAlias(t *testing.T) {
 	repoDir := t.TempDir()

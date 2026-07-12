@@ -22,6 +22,96 @@ type fakeSnapshotLoader struct {
 	err      error
 }
 
+func TestLoadedTypedViewOwnsSelectorLayoutAndTabOverrideIsTransient(t *testing.T) {
+	view := domain.DefaultBoardView()
+	view.Layout = domain.BoardViewLayoutTreeList
+	model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+	next, _ := model.Update(LoadedMsg{Snapshot: Snapshot{View: view}})
+	loaded := next.(Model)
+	if loaded.activeTab != selectorTabTree {
+		t.Fatalf("active tab = %v, want tree from typed view", loaded.activeTab)
+	}
+	next, cmd := loaded.Update(tea.KeyMsg{Type: tea.KeyTab})
+	overridden := next.(Model)
+	if overridden.activeTab != selectorTabGrid {
+		t.Fatalf("active tab = %v, want transient grid override", overridden.activeTab)
+	}
+	if cmd != nil {
+		t.Fatal("typed-view tab override unexpectedly persisted selector tab")
+	}
+}
+
+func TestTypedColumnBoardRendersProjectedGroups(t *testing.T) {
+	view := domain.DefaultBoardView()
+	model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+	model.loading = false
+	model.snapshot = Snapshot{View: view, Entries: []InventoryEntry{
+		{IssueID: "one", TaskTitle: "One", ViewProjected: true, ViewGroupID: domain.BoardColumnOpen, ViewGroupTitle: "Open"},
+		{IssueID: "two", TaskTitle: "Two", ViewProjected: true, ViewGroupID: domain.BoardColumnActive, ViewGroupTitle: "In Progress"},
+	}}
+	rendered := model.View()
+	if !strings.Contains(rendered, "Open (1)") || !strings.Contains(rendered, "In Progress (1)") {
+		t.Fatalf("column board missing projected groups:\n%s", rendered)
+	}
+}
+
+func TestTypedColumnBoardKeepsSelectedGroupVisibleOnNarrowViewport(t *testing.T) {
+	view := domain.DefaultBoardView()
+	model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+	model.loading, model.width, model.height, model.cursor = false, 60, 20, 2
+	model.snapshot = Snapshot{View: view, Entries: []InventoryEntry{
+		{IssueID: "one", TaskTitle: "One", ViewGroupID: "one", ViewGroupTitle: "One"},
+		{IssueID: "two", TaskTitle: "Two", ViewGroupID: "two", ViewGroupTitle: "Two"},
+		{IssueID: "three", TaskTitle: "Three", ViewGroupID: "three", ViewGroupTitle: "Three"},
+	}}
+	rendered := model.View()
+	if !strings.Contains(rendered, "Three (1)") {
+		t.Fatalf("selected group not visible:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "One (1)") {
+		t.Fatalf("narrow viewport rendered off-screen group:\n%s", rendered)
+	}
+}
+
+func TestTypedColumnBoardHorizontalMovementClampsAcrossUnevenColumns(t *testing.T) {
+	view := domain.DefaultBoardView()
+	entries := []InventoryEntry{
+		{IssueID: "left-1", TaskTitle: "Left one", ViewGroupID: "left", ViewGroupTitle: "Left"},
+		{IssueID: "left-2", TaskTitle: "Left two", ViewGroupID: "left", ViewGroupTitle: "Left"},
+		{IssueID: "left-3", TaskTitle: "Left three", ViewGroupID: "left", ViewGroupTitle: "Left"},
+		{IssueID: "middle-1", TaskTitle: "Middle one", ViewGroupID: "middle", ViewGroupTitle: "Middle"},
+		{IssueID: "right-1", TaskTitle: "Right one", ViewGroupID: "right", ViewGroupTitle: "Right"},
+		{IssueID: "right-2", TaskTitle: "Right two", ViewGroupID: "right", ViewGroupTitle: "Right"},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{View: view, Entries: entries}})
+	model.loading, model.width, model.height, model.cursor = false, 90, 14, 2
+	model.snapshot = Snapshot{View: view, Entries: entries}
+
+	model = updateKey(t, model, "right")
+	if model.cursor != 3 {
+		t.Fatalf("right into shorter column cursor = %d, want clamped middle row 0", model.cursor)
+	}
+	model = updateKey(t, model, "right")
+	if model.cursor != 4 {
+		t.Fatalf("right into next column cursor = %d, want right row 0", model.cursor)
+	}
+	model = updateKey(t, model, "down")
+	if model.cursor != 5 {
+		t.Fatalf("down cursor = %d, want column-local right row 1", model.cursor)
+	}
+	model = updateKey(t, model, "left")
+	if model.cursor != 3 {
+		t.Fatalf("left into shorter column cursor = %d, want clamped middle row 0", model.cursor)
+	}
+
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 50, Height: 10})
+	model = updated.(Model)
+	rendered := model.View()
+	if !strings.Contains(rendered, "Middle one") {
+		t.Fatalf("selected card lost after resize/scroll:\n%s", rendered)
+	}
+}
+
 func (f fakeSnapshotLoader) ListTasksSnapshot(context.Context) (Snapshot, error) {
 	return f.snapshot, f.err
 }
@@ -1771,6 +1861,73 @@ func TestModelViewUsesCompactCardsOnMobileViewport(t *testing.T) {
 	}
 	if !strings.Contains(view, "az-one") || !strings.Contains(view, "az-two") {
 		t.Fatalf("mobile view should show multiple compact session cards:\n%s", view)
+	}
+}
+
+func TestModelGridSmallViewportKeepsIssueAndSessionMetadataVisible(t *testing.T) {
+	entries := []InventoryEntry{{
+		SessionID:         "az-one",
+		IssueID:           "one",
+		TaskTitle:         "One",
+		IssueStatus:       domain.StatusInProgress,
+		State:             domain.SessionBusy,
+		Activity:          "working",
+		HasTmuxSession:    true,
+		TmuxAttached:      true,
+		TmuxAttachedCount: 2,
+	}}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 9})
+	model = updated.(Model)
+	updated, _ = model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+
+	view := ansi.Strip(model.View())
+	for _, want := range []string{"one", "issue in_progress", "tmux az-one", "attached x2"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("small grid view missing projected metadata %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestModelGridSmallViewportNavigationKeepsSelectionVisibleAfterResize(t *testing.T) {
+	entries := make([]InventoryEntry, 12)
+	for i := range entries {
+		id := string(rune('a' + i))
+		entries[i] = InventoryEntry{SessionID: "az-" + id, IssueID: id, TaskTitle: "Issue " + id, HasTmuxSession: true}
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 12})
+	model = updated.(Model)
+	updated, _ = model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+
+	for _, key := range []tea.KeyType{tea.KeyRight, tea.KeyDown, tea.KeyDown} {
+		updated, _ = model.Update(tea.KeyMsg{Type: key})
+		model = updated.(Model)
+		selected, ok := model.selectedEntry()
+		if !ok || !strings.Contains(ansi.Strip(model.View()), selected.SessionID) {
+			t.Fatalf("selection not visible after %s: cursor=%d selected=%#v\n%s", key, model.cursor, selected, ansi.Strip(model.View()))
+		}
+	}
+
+	updated, _ = model.Update(tea.WindowSizeMsg{Width: 32, Height: 8})
+	model = updated.(Model)
+	selected, ok := model.selectedEntry()
+	resizedView := model.View()
+	if !ok || !strings.Contains(ansi.Strip(resizedView), selected.SessionID) {
+		t.Fatalf("selection not visible after narrow resize: cursor=%d selected=%#v\n%s", model.cursor, selected, ansi.Strip(model.View()))
+	}
+	for _, line := range strings.Split(resizedView, "\n") {
+		if got := ansi.StringWidth(line); got > model.width {
+			t.Fatalf("narrow resize left content horizontally off-screen: line width=%d viewport=%d\n%s", got, model.width, ansi.Strip(resizedView))
+		}
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	selected, ok = model.selectedEntry()
+	if !ok || !strings.Contains(ansi.Strip(model.View()), selected.SessionID) {
+		t.Fatalf("selection not visible after vertical scroll: cursor=%d selected=%#v\n%s", model.cursor, selected, ansi.Strip(model.View()))
 	}
 }
 

@@ -9,6 +9,11 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if dir, err := os.MkdirTemp("", "azedarach-daemon-user-db-"); err == nil {
+		defer os.RemoveAll(dir)
+		_ = os.Setenv("AZEDARACH_USER_DB_PATH", filepath.Join(dir, "azedarach.db"))
+	}
+	_ = os.Setenv("AZEDARACH_DISABLE_USER_DB", "1")
 	if repoRoot, err := config.ResolveProjectRoot("."); err == nil {
 		_ = os.Setenv("AZEDARACH_REFUSE_DB_PATH", filepath.Join(repoRoot, ".azedarach", "azedarach.db"))
 	}

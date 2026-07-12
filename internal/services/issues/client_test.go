@@ -3918,6 +3918,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0035_interaction_requests",
 		"0036_advisor_sessions",
 		"0037_learning_activation_feedback",
+		"0037_projection_source_revision",
 		"0038_learning_consolidation",
 		"0039_contextual_learning_activation",
 		"0040_typed_learning_observations",

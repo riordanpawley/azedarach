@@ -71,3 +71,25 @@ func TestBoardViewClientCommandsUseTypedProtocol(t *testing.T) {
 		t.Fatalf("SelectBoardView response = %+v", selectResp)
 	}
 }
+
+func TestSelectGlobalViewCarriesTypedConsumerAndGlobalScope(t *testing.T) {
+	transport := &taskRecordingTransport{replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		var body protocol.BoardViewSelectRequestBody
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			t.Fatalf("unmarshal select body: %v", err)
+		}
+		if body.ProjectID != "global" || body.Consumer != protocol.GlobalViewConsumerTmuxSelector || body.ViewID != "orchestration" {
+			t.Fatalf("select body = %+v", body)
+		}
+		return responseWithJSON(t, req, protocol.BoardViewSelectResponseBody{ProjectID: "global", ViewID: body.ViewID}), nil
+	}}
+	client := New(transport).WithProjectID("project-local")
+
+	resp, err := client.SelectGlobalView(context.Background(), protocol.GlobalViewConsumerTmuxSelector, " orchestration ")
+	if err != nil {
+		t.Fatalf("SelectGlobalView error: %v", err)
+	}
+	if resp.ProjectID != "global" || resp.ViewID != "orchestration" {
+		t.Fatalf("SelectGlobalView response = %+v", resp)
+	}
+}

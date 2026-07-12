@@ -45,6 +45,15 @@ func (c *Client) SaveBoardView(ctx context.Context, view domain.BoardView) (prot
 	return out, nil
 }
 
+func (c *Client) SaveGlobalView(ctx context.Context, record protocol.GlobalViewRecord) (protocol.BoardViewResponseBody, error) {
+	body := protocol.BoardViewSaveRequestBody{ProjectID: "global", View: record.View, Scope: record.Scope}
+	var out protocol.BoardViewResponseBody
+	if err := c.commandJSON(ctx, protocol.CommandBoardViewSave, body, &out); err != nil {
+		return protocol.BoardViewResponseBody{}, err
+	}
+	return out, nil
+}
+
 func (c *Client) DeleteBoardView(ctx context.Context, viewID string) error {
 	body := protocol.BoardViewDeleteRequestBody{ViewID: strings.TrimSpace(viewID)}
 	if strings.TrimSpace(c.projectID.String()) != "" {
@@ -73,6 +82,15 @@ func (c *Client) SelectBoardViewForProject(ctx context.Context, projectID, viewI
 	var out protocol.BoardViewSelectResponseBody
 	if err := c.commandJSON(ctx, protocol.CommandBoardViewSelect, body, &out); err != nil {
 		return protocol.BoardViewSelectResponseBody{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) SelectGlobalView(ctx context.Context, consumer protocol.GlobalViewConsumer, viewID string) (protocol.BoardViewSelectResponseBody, error) {
+	body := protocol.BoardViewSelectRequestBody{ProjectID: "global", ViewID: strings.TrimSpace(viewID), Consumer: consumer}
+	var out protocol.BoardViewSelectResponseBody
+	if err := c.commandJSON(ctx, protocol.CommandBoardViewSelect, body, &out); err != nil {
+		return out, err
 	}
 	return out, nil
 }

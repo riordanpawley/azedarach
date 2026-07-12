@@ -23,6 +23,25 @@ func (d *Daemon) handleBoardViewList(ctx context.Context, req protocol.RequestEn
 	if strings.TrimSpace(body.ProjectID.String()) != "" {
 		projectID = d.canonicalProjectID(body.ProjectID.String())
 	}
+	if projectID == "global" {
+		if d.userStore == nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, "user view store unavailable"), nil
+		}
+		views, err := d.userStore.ListViews(ctx)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		view, _ := d.userStore.ResolveView(ctx, "", string(protocol.GlobalViewConsumerBoard))
+		globalViews, err := d.userStore.ListGlobalViews(ctx)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		selections, err := d.userStore.ListViewSelections(ctx)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		return d.marshalBoardResponse(req, protocol.BoardViewListResponseBody{ProjectID: "global", SelectedViewID: string(view.ID), Views: views, GlobalViews: globalViews, Selections: selections})
+	}
 	client := d.issueClientForProject(projectID)
 	if client == nil {
 		return d.errorResponse(req, protocol.ErrorCodeUnavailable, "issue store unavailable"), nil
@@ -48,6 +67,20 @@ func (d *Daemon) handleBoardViewGet(ctx context.Context, req protocol.RequestEnv
 	if strings.TrimSpace(body.ProjectID.String()) != "" {
 		projectID = d.canonicalProjectID(body.ProjectID.String())
 	}
+	if projectID == "global" {
+		if d.userStore == nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, "user view store unavailable"), nil
+		}
+		record, err := d.userStore.ResolveGlobalView(ctx, body.ViewID, string(protocol.GlobalViewConsumerBoard))
+		if err != nil {
+			return d.boardViewErrorResponse(req, err), nil
+		}
+		selections, err := d.userStore.ListViewSelections(ctx)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		return d.marshalBoardResponse(req, protocol.BoardViewResponseBody{ProjectID: "global", View: domain.BoardViewRecord{ProjectID: "global", View: record.View}, GlobalView: &record, Selections: selections})
+	}
 	viewID := domain.NormalizeBoardViewID(body.ViewID)
 	if viewID == "" {
 		viewID = d.selectedBoardViewID(projectID)
@@ -70,6 +103,28 @@ func (d *Daemon) handleBoardViewSave(ctx context.Context, req protocol.RequestEn
 	}
 	if strings.TrimSpace(body.ProjectID.String()) != "" {
 		projectID = d.canonicalProjectID(body.ProjectID.String())
+	}
+	if projectID == "global" {
+		if d.userStore == nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, "user view store unavailable"), nil
+		}
+		scope := body.Scope
+		if scope.Kind == "" {
+			if existing, existingErr := d.userStore.ResolveGlobalView(ctx, string(body.View.ID), ""); existingErr == nil {
+				scope = existing.Scope
+			} else {
+				scope = protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeAllProjects}
+			}
+		}
+		if err := d.validateGlobalViewScopeProjects(ctx, scope); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+		}
+		globalRecord, err := d.userStore.SaveGlobalView(ctx, protocol.GlobalViewRecord{View: body.View, Scope: scope})
+		if err != nil {
+			return d.boardViewErrorResponse(req, err), nil
+		}
+		record := domain.BoardViewRecord{ProjectID: "global", View: globalRecord.View}
+		return d.marshalBoardResponse(req, protocol.BoardViewResponseBody{ProjectID: "global", View: record, GlobalView: &globalRecord})
 	}
 	client := d.issueClientForProject(projectID)
 	if client == nil {
@@ -99,6 +154,15 @@ func (d *Daemon) handleBoardViewDelete(ctx context.Context, req protocol.Request
 	if strings.TrimSpace(body.ProjectID.String()) != "" {
 		projectID = d.canonicalProjectID(body.ProjectID.String())
 	}
+	if projectID == "global" {
+		if d.userStore == nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, "user view store unavailable"), nil
+		}
+		if err := d.userStore.DeleteView(ctx, body.ViewID); err != nil {
+			return d.boardViewErrorResponse(req, err), nil
+		}
+		return d.successResponse(req), nil
+	}
 	client := d.issueClientForProject(projectID)
 	if client == nil {
 		return d.errorResponse(req, protocol.ErrorCodeUnavailable, "issue store unavailable"), nil
@@ -125,6 +189,26 @@ func (d *Daemon) handleBoardViewSelect(ctx context.Context, req protocol.Request
 	}
 	if strings.TrimSpace(body.ProjectID.String()) != "" {
 		projectID = d.canonicalProjectID(body.ProjectID.String())
+	}
+	if projectID == "global" {
+		if d.userStore == nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, "user view store unavailable"), nil
+		}
+		viewID := domain.NormalizeBoardViewID(body.ViewID)
+		if viewID == "" {
+			viewID = domain.DefaultBoardViewID
+		}
+		consumer := body.Consumer
+		if consumer == "" {
+			consumer = protocol.GlobalViewConsumerBoard
+		}
+		if !consumer.Valid() {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid global view consumer %q", consumer)), nil
+		}
+		if err := d.userStore.SelectView(ctx, string(consumer), viewID); err != nil {
+			return d.boardViewErrorResponse(req, err), nil
+		}
+		return d.marshalBoardResponse(req, protocol.BoardViewSelectResponseBody{ProjectID: "global", ViewID: viewID, UpdatedAt: time.Now().UTC()})
 	}
 	viewID := domain.NormalizeBoardViewID(body.ViewID)
 	if viewID == "" {
@@ -163,6 +247,13 @@ func (d *Daemon) selectedBoardViewID(projectID string) string {
 		if persisted, ok := d.loadSelectedBoardViewPreference(projectID); ok {
 			d.setUIStateValue(projectID, protocol.UIStateKeyBoardSelectedView, persisted)
 			return persisted
+		}
+		if legacy, ok := d.getUIStateValue(projectID, protocol.UIStateKeyUIViewMode); ok {
+			if migrated, recognized := domain.BoardViewIDFromLegacyUIMode(legacy); recognized {
+				d.setUIStateValue(projectID, protocol.UIStateKeyBoardSelectedView, migrated)
+				_ = d.saveSelectedBoardViewPreference(projectID, migrated)
+				return migrated
+			}
 		}
 		return domain.DefaultBoardViewID
 	}

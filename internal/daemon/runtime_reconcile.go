@@ -61,8 +61,8 @@ func newRuntimeReconcileService(d *Daemon) *runtimeReconcileService {
 	return &runtimeReconcileService{daemon: d}
 }
 
-func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID string) (protocol.RuntimeReconcileResponseBody, error) {
-	result := protocol.RuntimeReconcileResponseBody{
+func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID string) (result protocol.RuntimeReconcileResponseBody, resultErr error) {
+	result = protocol.RuntimeReconcileResponseBody{
 		ProjectID:        naming.ProjectID(protocol.NormalizeProjectID(projectID)),
 		InvariantSources: invariantSourceDebugMap(),
 	}
@@ -71,6 +71,7 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 		return result, nil
 	}
 	ctx = withDaemonProjectIDContext(ctx, result.ProjectID.String())
+	defer d.refreshCrossProjectProjectionAfterReconcile(ctx, result.ProjectID.String(), &result)
 	shouldReconcileInteractionStaleness := d.reconcileInteractionStalenessFn != nil || d.hasConfiguredInteractionStore()
 	var errs []error
 	hasSessionRuntime := d.tmux != nil && d.sessionStore != nil && d.sessionRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil
@@ -120,8 +121,8 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 	return result, errors.Join(errs...)
 }
 
-func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID string, issueIDs []string) (protocol.RuntimeReconcileResponseBody, error) {
-	result := protocol.RuntimeReconcileResponseBody{
+func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID string, issueIDs []string) (result protocol.RuntimeReconcileResponseBody, resultErr error) {
+	result = protocol.RuntimeReconcileResponseBody{
 		ProjectID:        naming.ProjectID(protocol.NormalizeProjectID(projectID)),
 		InvariantSources: invariantSourceDebugMap(),
 	}
@@ -130,6 +131,7 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 		return result, nil
 	}
 	ctx = withDaemonProjectIDContext(ctx, result.ProjectID.String())
+	defer d.refreshCrossProjectProjectionAfterReconcile(ctx, result.ProjectID.String(), &result)
 	shouldReconcileInteractionStaleness := d.reconcileInteractionStalenessFn != nil || d.hasConfiguredInteractionStore()
 	issueIDs = normalizeRuntimeReconcileIssueIDs(issueIDs)
 	if len(issueIDs) == 0 {
@@ -181,6 +183,29 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 		}
 	}
 	return result, errors.Join(errs...)
+}
+
+func (d *Daemon) refreshCrossProjectProjectionAfterReconcile(ctx context.Context, projectID string, result *protocol.RuntimeReconcileResponseBody) {
+	if d == nil || d.userStore == nil || d.cfg.ScopedRuntime || result == nil {
+		return
+	}
+	// Reconcile may consume its caller deadline while repairing runtime state.
+	// Give the local projection write a small independent closeout budget so the
+	// returned health describes the state reconciliation just produced.
+	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_ = d.refreshUserProject(refreshCtx, projectID)
+	snapshot, err := d.userStore.Snapshot(refreshCtx, "")
+	if err != nil {
+		return
+	}
+	for _, project := range snapshot.Projects {
+		if project.ProjectID == projectID {
+			project.Tasks = nil
+			result.CrossProjectProjection = &project
+			return
+		}
+	}
 }
 
 func (d *Daemon) reconcileInteractionStaleness(ctx context.Context, projectID string) error {

@@ -12,17 +12,21 @@ import (
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 type BoardViewOptions struct {
-	Command string
-	Project string
-	ViewID  string
-	IssueID string
-	File    string
-	Select  bool
-	Confirm bool
-	JSON    bool
+	Command       string
+	Project       string
+	Consumer      string
+	Scope         string
+	ScopeProjects string
+	ViewID        string
+	IssueID       string
+	File          string
+	Select        bool
+	Confirm       bool
+	JSON          bool
 }
 
 func ParseBoardViewArgs(command string, args []string) (BoardViewOptions, error) {
@@ -33,11 +37,16 @@ func ParseBoardViewArgs(command string, args []string) (BoardViewOptions, error)
 	switch command {
 	case "list":
 	case "get":
+		fs.StringVar(&opts.ViewID, "view", "", "board view id")
 	case "select":
+		fs.StringVar(&opts.Consumer, "consumer", "global_board", "global view consumer (global_board, tmux_selector, search, review)")
+		fs.StringVar(&opts.ViewID, "view", "", "board view id")
 	case "explain":
 		fs.StringVar(&opts.ViewID, "view", "", "board view id")
 	case "create", "update":
 		fs.StringVar(&opts.File, "file", "", "board view JSON file, or '-' for stdin")
+		fs.StringVar(&opts.Scope, "scope", "", "global view scope (all_projects, selected_projects, current_project); update preserves scope when omitted")
+		fs.StringVar(&opts.ScopeProjects, "scope-projects", "", "comma-separated canonical project ids for selected/current scope")
 		fs.BoolVar(&opts.Select, "select", false, "select the view after saving it")
 	case "delete":
 		fs.BoolVar(&opts.Confirm, "confirm", false, "confirm deletion")
@@ -103,9 +112,29 @@ func BoardViewCommand(deps *Dependencies, opts BoardViewOptions) error {
 		if err != nil {
 			return err
 		}
+		if resp.GlobalView != nil {
+			if opts.JSON {
+				return printJSON(map[string]any{"global_view": resp.GlobalView, "selections": resp.Selections})
+			}
+			if err := printGlobalViewRecord(*resp.GlobalView, false); err != nil {
+				return err
+			}
+			printGlobalViewSelections(resp.Selections)
+			return nil
+		}
 		return printBoardViewRecord(resp.View, opts.JSON)
 	case "select":
-		resp, err := client.SelectBoardView(ctx, opts.ViewID)
+		var resp protocol.BoardViewSelectResponseBody
+		var err error
+		if strings.TrimSpace(opts.Project) == "global" {
+			consumer := protocol.GlobalViewConsumer(strings.TrimSpace(opts.Consumer))
+			if !consumer.Valid() {
+				return fmt.Errorf("invalid global view consumer %q (want global_board, tmux_selector, search, or review)", opts.Consumer)
+			}
+			resp, err = client.SelectGlobalView(ctx, consumer, opts.ViewID)
+		} else {
+			resp, err = client.SelectBoardView(ctx, opts.ViewID)
+		}
 		if err != nil {
 			return err
 		}
@@ -119,13 +148,35 @@ func BoardViewCommand(deps *Dependencies, opts BoardViewOptions) error {
 		if err != nil {
 			return err
 		}
-		resp, err := client.SaveBoardView(ctx, view)
+		var resp protocol.BoardViewResponseBody
+		if strings.TrimSpace(opts.Project) == "global" {
+			var scope protocol.GlobalViewScope
+			var scopeErr error
+			if strings.TrimSpace(opts.Scope) != "" || strings.TrimSpace(opts.ScopeProjects) != "" {
+				scope, scopeErr = parseGlobalViewScope(opts.Scope, opts.ScopeProjects)
+			}
+			if scopeErr != nil {
+				return scopeErr
+			}
+			resp, err = client.SaveGlobalView(ctx, protocol.GlobalViewRecord{View: view, Scope: scope})
+		} else {
+			resp, err = client.SaveBoardView(ctx, view)
+		}
 		if err != nil {
 			return err
 		}
 		var selected *protocol.BoardViewSelectResponseBody
 		if opts.Select {
-			selectResp, err := client.SelectBoardView(ctx, string(resp.View.View.ID))
+			var selectResp protocol.BoardViewSelectResponseBody
+			if strings.TrimSpace(opts.Project) == "global" {
+				consumer := protocol.GlobalViewConsumer(strings.TrimSpace(opts.Consumer))
+				if consumer == "" {
+					consumer = protocol.GlobalViewConsumerBoard
+				}
+				selectResp, err = client.SelectGlobalView(ctx, consumer, string(resp.View.View.ID))
+			} else {
+				selectResp, err = client.SelectBoardView(ctx, string(resp.View.View.ID))
+			}
 			if err != nil {
 				return err
 			}
@@ -133,11 +184,17 @@ func BoardViewCommand(deps *Dependencies, opts BoardViewOptions) error {
 		}
 		if opts.JSON {
 			if selected != nil {
-				return printJSON(map[string]any{"view": resp.View, "selected": selected})
+				return printJSON(map[string]any{"view": resp.View, "global_view": resp.GlobalView, "selected": selected})
+			}
+			if resp.GlobalView != nil {
+				return printJSON(resp.GlobalView)
 			}
 			return printJSON(resp.View)
 		}
 		fmt.Printf("Saved board view %s (%s)\n", resp.View.View.ID, resp.View.View.Title)
+		if resp.GlobalView != nil {
+			fmt.Printf("Scope: %s\n", formatGlobalViewScope(resp.GlobalView.Scope))
+		}
 		if selected != nil {
 			fmt.Printf("Selected board view %s for project %s\n", selected.ViewID, selected.ProjectID)
 		}
@@ -159,6 +216,29 @@ func BoardViewCommand(deps *Dependencies, opts BoardViewOptions) error {
 	default:
 		return fmt.Errorf("unknown board view command: %s", opts.Command)
 	}
+}
+
+func parseGlobalViewScope(kind, rawProjects string) (protocol.GlobalViewScope, error) {
+	if strings.TrimSpace(kind) == "" && strings.TrimSpace(rawProjects) != "" {
+		return protocol.GlobalViewScope{}, fmt.Errorf("--scope is required with --scope-projects")
+	}
+	scope := protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeKind(strings.TrimSpace(kind))}
+	for _, raw := range strings.Split(rawProjects, ",") {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		if id := protocol.NormalizeProjectID(raw); id != "" {
+			scope.ProjectIDs = append(scope.ProjectIDs, naming.ProjectID(id))
+		}
+	}
+	if scope.Kind == protocol.GlobalViewScopeCurrentProject && len(scope.ProjectIDs) == 1 {
+		scope.CurrentProjectID = scope.ProjectIDs[0]
+		scope.ProjectIDs = nil
+	}
+	if err := scope.Validate(); err != nil {
+		return protocol.GlobalViewScope{}, err
+	}
+	return scope, nil
 }
 
 func loadBoardViewDefinition(path string) (domain.BoardView, error) {
@@ -202,6 +282,10 @@ func printBoardViewList(resp protocol.BoardViewListResponseBody, asJSON bool) er
 		return printJSON(resp)
 	}
 	fmt.Printf("Board views for project %s:\n", resp.ProjectID)
+	scopes := make(map[domain.BoardViewID]protocol.GlobalViewScope, len(resp.GlobalViews))
+	for _, record := range resp.GlobalViews {
+		scopes[record.View.ID] = record.Scope
+	}
 	for _, record := range resp.Views {
 		marker := " "
 		if string(record.View.ID) == resp.SelectedViewID {
@@ -211,12 +295,57 @@ func printBoardViewList(resp protocol.BoardViewListResponseBody, asJSON bool) er
 		if record.BuiltIn {
 			builtIn = " built-in"
 		}
-		fmt.Printf("%s %s\t%s\t%d columns%s\n", marker, record.View.ID, record.View.Title, len(record.View.Columns), builtIn)
+		scope := ""
+		if value, ok := scopes[record.View.ID]; ok {
+			scope = " scope=" + formatGlobalViewScope(value)
+		}
+		fmt.Printf("%s %s\t%s\t%d columns%s%s\n", marker, record.View.ID, record.View.Title, len(record.View.Columns), builtIn, scope)
 	}
+	printGlobalViewSelections(resp.Selections)
 	fmt.Println()
 	fmt.Println("A board view is a saved column projection over issue lifecycle, review, close, and runtime facts; it does not change issue lifecycle status.")
 	fmt.Println("Built-ins: default (delivery), planning (intake), orchestration (waiting/activity), closeout (review and closed outcomes). Legacy current/activity IDs alias to default/orchestration.")
 	return nil
+}
+
+func printGlobalViewSelections(selections map[protocol.GlobalViewConsumer]string) {
+	if len(selections) == 0 {
+		return
+	}
+	fmt.Println("Consumer selections:")
+	for _, consumer := range []protocol.GlobalViewConsumer{protocol.GlobalViewConsumerBoard, protocol.GlobalViewConsumerTmuxSelector, protocol.GlobalViewConsumerSearch, protocol.GlobalViewConsumerReview} {
+		fmt.Printf("- %s: %s\n", consumer, selections[consumer])
+	}
+}
+
+func printGlobalViewRecord(record protocol.GlobalViewRecord, asJSON bool) error {
+	if asJSON {
+		return printJSON(record)
+	}
+	fmt.Printf("%s - %s\n", record.View.ID, record.View.Title)
+	fmt.Printf("Project: global\nScope: %s\n", formatGlobalViewScope(record.Scope))
+	fmt.Println("Columns:")
+	for _, column := range record.View.Columns {
+		fmt.Printf("- %s (%s): %s\n", column.Title, column.ID, formatBoardColumnPredicates(column.Predicates))
+	}
+	return nil
+}
+
+func formatGlobalViewScope(scope protocol.GlobalViewScope) string {
+	switch scope.Kind {
+	case protocol.GlobalViewScopeSelectedProjects:
+		ids := make([]string, 0, len(scope.ProjectIDs))
+		for _, id := range scope.ProjectIDs {
+			ids = append(ids, id.String())
+		}
+		return string(scope.Kind) + " (" + strings.Join(ids, ",") + ")"
+	case protocol.GlobalViewScopeCurrentProject:
+		return string(scope.Kind) + " (" + scope.CurrentProjectID.String() + ")"
+	case "":
+		return string(protocol.GlobalViewScopeAllProjects)
+	default:
+		return string(scope.Kind)
+	}
 }
 
 func printBoardViewRecord(record domain.BoardViewRecord, asJSON bool) error {

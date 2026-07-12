@@ -506,16 +506,18 @@ func TestBuildBoardSnapshotPayloadOmitsDetailFields(t *testing.T) {
 	if got, want := decoded.SchemaVersion, uint16(protocol.BoardSnapshotSchemaVersion); got != want {
 		t.Fatalf("schema version = %d, want %d", got, want)
 	}
-	if got, want := len(decoded.Tasks), 1; got != want {
+	tasks := decoded.Projection.TaskSummaries()
+	columns := decoded.Projection.ColumnSnapshots()
+	if got, want := len(tasks), 1; got != want {
 		t.Fatalf("task count = %d, want %d", got, want)
 	}
-	if got, want := string(decoded.View.ID), domain.DefaultBoardViewID; got != want {
+	if got, want := string(decoded.Projection.View.ID), domain.DefaultBoardViewID; got != want {
 		t.Fatalf("view id = %q, want %q", got, want)
 	}
-	if got := len(decoded.Columns); got == 0 {
+	if got := len(columns); got == 0 {
 		t.Fatal("expected grouped board columns")
 	}
-	if got, want := decoded.Tasks[0].Title, "Board task"; got != want {
+	if got, want := tasks[0].Title, "Board task"; got != want {
 		t.Fatalf("title = %q, want %q", got, want)
 	}
 }
@@ -535,7 +537,7 @@ func TestBuildBoardSnapshotPayloadAppliesViewSortPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build board payload: %v", err)
 	}
-	for _, column := range payload.Columns {
+	for _, column := range payload.Projection.ColumnSnapshots() {
 		if column.Definition.ID != domain.BoardColumnActive {
 			continue
 		}
@@ -631,23 +633,25 @@ func TestHandleBoardFetchGroupsBySelectedView(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeBoardSnapshotPayload error: %v", err)
 	}
-	if got, want := string(payload.View.ID), "active-only"; got != want {
+	if got, want := string(payload.Projection.View.ID), "active-only"; got != want {
 		t.Fatalf("payload view id = %q, want %q", got, want)
 	}
-	if got, want := len(payload.Columns), 1; got != want {
+	columns := payload.Projection.ColumnSnapshots()
+	tasks := payload.Projection.TaskSummaries()
+	if got, want := len(columns), 1; got != want {
 		t.Fatalf("len(columns) = %d, want %d", got, want)
 	}
-	if got, want := len(payload.Columns[0].Tasks), 1; got != want {
+	if got, want := len(columns[0].Tasks), 1; got != want {
 		t.Fatalf("len(active tasks) = %d, want %d", got, want)
 	}
-	if got, want := payload.Columns[0].Tasks[0].Title, "Active issue"; got != want {
+	if got, want := columns[0].Tasks[0].Title, "Active issue"; got != want {
 		t.Fatalf("active task title = %q, want %q", got, want)
 	}
-	if payload.Tasks[0].Facts.DisplayPhase != domain.IssueDisplayActive {
-		t.Fatalf("issue facts display phase = %s, want %s", payload.Tasks[0].Facts.DisplayPhase, domain.IssueDisplayActive)
+	if tasks[0].Facts.DisplayPhase != domain.IssueDisplayActive {
+		t.Fatalf("issue facts display phase = %s, want %s", tasks[0].Facts.DisplayPhase, domain.IssueDisplayActive)
 	}
-	if !slices.Contains(payload.Tasks[0].Facts.ReasonMessages(), "lifecycle is active") {
-		t.Fatalf("issue facts reasons = %#v, want lifecycle reason", payload.Tasks[0].Facts.ReasonMessages())
+	if !slices.Contains(tasks[0].Facts.ReasonMessages(), "lifecycle is active") {
+		t.Fatalf("issue facts reasons = %#v, want lifecycle reason", tasks[0].Facts.ReasonMessages())
 	}
 }
 
@@ -706,10 +710,10 @@ func TestHandleBoardFetchFallsBackToDefaultWhenSelectedViewPreferenceIsCorrupt(t
 	if err != nil {
 		t.Fatalf("DecodeBoardSnapshotPayload error: %v", err)
 	}
-	if got, want := string(payload.View.ID), domain.DefaultBoardViewID; got != want {
+	if got, want := string(payload.Projection.View.ID), domain.DefaultBoardViewID; got != want {
 		t.Fatalf("payload view id = %q, want %q", got, want)
 	}
-	if got, want := len(payload.Columns), len(domain.DefaultBoardView().Columns); got != want {
+	if got, want := len(payload.Projection.Groups), len(domain.DefaultBoardView().Columns); got != want {
 		t.Fatalf("len(columns) = %d, want default view column count %d", got, want)
 	}
 }
@@ -2171,10 +2175,11 @@ func TestHandleBoardFetchComposesRuntimeProjectionOverCachedTaskSnapshot(t *test
 	if err != nil {
 		t.Fatalf("decode board.fetch body: %v", err)
 	}
-	if got, want := len(payload.Tasks), 1; got != want {
+	tasks := payload.Projection.TaskSummaries()
+	if got, want := len(tasks), 1; got != want {
 		t.Fatalf("payload.Tasks len = %d, want %d", got, want)
 	}
-	task := payload.Tasks[0]
+	task := tasks[0]
 	if got, want := task.Title, "cached durable title"; got != want {
 		t.Fatalf("task.Title = %q, want cached durable title %q", got, want)
 	}
@@ -2262,7 +2267,7 @@ func TestHandleBoardFetchDerivesInReviewPhaseFromSessionActivity(t *testing.T) {
 	}
 	statusByID := map[string]domain.Status{}
 	factsByID := map[string]domain.IssueFacts{}
-	for _, task := range payload.Tasks {
+	for _, task := range payload.Projection.TaskSummaries() {
 		statusByID[task.ID.String()] = task.Status
 		factsByID[task.ID.String()] = task.Facts
 	}
@@ -2725,7 +2730,8 @@ func TestHandleTaskListIncludesDependenciesOnlyWhenRequested(t *testing.T) {
 		t.Fatalf("decode board body: %v", err)
 	}
 	foundChild := false
-	for _, task := range boardPayload.Tasks {
+	boardTasks := boardPayload.Projection.TaskSummaries()
+	for _, task := range boardTasks {
 		if task.ID.String() != childID {
 			continue
 		}
@@ -2735,7 +2741,7 @@ func TestHandleTaskListIncludesDependenciesOnlyWhenRequested(t *testing.T) {
 		}
 	}
 	if !foundChild {
-		t.Fatalf("board payload missing child %s: %+v", childID, boardPayload.Tasks)
+		t.Fatalf("board payload missing child %s: %+v", childID, boardTasks)
 	}
 }
 

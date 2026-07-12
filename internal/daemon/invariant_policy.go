@@ -37,6 +37,7 @@ const (
 	daemonInvariantInteractionStaleness daemonInvariantID = "interaction.staleness"
 
 	daemonInvariantRuntimeKnownProjectIDs  daemonInvariantID = "runtime.known_project_ids"
+	daemonInvariantCrossProjectViews       daemonInvariantID = "cross_project.view_projection"
 	daemonInvariantIssueResourceLifecycle  daemonInvariantID = "issue_resources.lifecycle"
 	daemonInvariantOrchestrationScope      daemonInvariantID = "orchestration.scope_identity"
 	daemonInvariantOrchestrationSingleton  daemonInvariantID = "orchestration.scope_singleton"
@@ -68,6 +69,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantTaskFollowOnMerge:       daemonInvariantSourceProjection,
 	daemonInvariantWorkerObservation:       daemonInvariantSourceHybrid,
 	daemonInvariantRuntimeKnownProjectIDs:  daemonInvariantSourceProjection,
+	daemonInvariantCrossProjectViews:       daemonInvariantSourceProjection,
 	daemonInvariantIssueResourceLifecycle:  daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationScope:      daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationSingleton:  daemonInvariantSourceHybrid,

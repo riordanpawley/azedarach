@@ -1,9 +1,12 @@
 package domain
 
 import (
+	"bytes"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWaitingHumanPredicateDistinguishesDecisionFromRuntimePrompt(t *testing.T) {
@@ -56,12 +59,101 @@ func TestBoardViewSortPolicyJSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBoardViewSchemaV1MigratesToColumnLayoutAndAttentionSort(t *testing.T) {
+	legacy := []byte(`{"schema_version":1,"id":"legacy","title":"Legacy","columns":[{"id":"active","title":"Active","predicates":[{"kind":"lifecycle","lifecycle":["active"]}]}],"options":{"sort_policy":"human_attention"}}`)
+	view, err := DecodeBoardViewDefinitionJSON(legacy)
+	if err != nil {
+		t.Fatalf("DecodeBoardViewDefinitionJSON(v1): %v", err)
+	}
+	if view.Layout != BoardViewLayoutColumnBoard {
+		t.Fatalf("layout = %q, want %q", view.Layout, BoardViewLayoutColumnBoard)
+	}
+	if len(view.Sort) != 1 || view.Sort[0].Key != BoardViewSortKeyHumanAttention {
+		t.Fatalf("sort = %#v, want migrated human-attention rule", view.Sort)
+	}
+	encoded, err := EncodeBoardViewDefinitionJSON(view)
+	if err != nil {
+		t.Fatalf("EncodeBoardViewDefinitionJSON: %v", err)
+	}
+	if !bytes.Contains(encoded, []byte(`"schema_version":2`)) {
+		t.Fatalf("encoded definition = %s, want schema v2", encoded)
+	}
+}
+
+func TestProjectTasksByBoardViewAppliesFiltersOrderedRulesAndTreeLayout(t *testing.T) {
+	now := time.Now().UTC()
+	parentID := Task{ID: "parent"}.ID
+	view := DefaultBoardView()
+	view.Layout = BoardViewLayoutTreeList
+	view.Filters = []BoardColumnPredicate{{Kind: BoardPredicateLifecycle, Lifecycle: []IssueWorkflow{IssueWorkflowActive}}}
+	view.Sort = []BoardViewSortRule{
+		{Key: BoardViewSortKeyPriority, Direction: BoardViewSortAscending},
+		{Key: BoardViewSortKeyUpdated, Direction: BoardViewSortDescending},
+	}
+	tasks := []Task{
+		{ID: "child", ParentID: &parentID, Status: StatusInProgress, Priority: P0, UpdatedAt: now},
+		{ID: parentID, Status: StatusInProgress, Priority: P2, UpdatedAt: now.Add(-time.Hour)},
+		{ID: "filtered", Status: StatusOpen, Priority: P0, UpdatedAt: now.Add(time.Hour)},
+	}
+	projection, err := ProjectTasksByBoardView(view, tasks)
+	if err != nil {
+		t.Fatalf("ProjectTasksByBoardView: %v", err)
+	}
+	if projection.View.Layout != BoardViewLayoutTreeList {
+		t.Fatalf("layout = %q", projection.View.Layout)
+	}
+	if got := taskIDs(projection.OrderedTasks()); !slices.Equal(got, []string{"parent", "child"}) {
+		t.Fatalf("ordered = %v, want parent-before-child and filtered task omitted", got)
+	}
+}
+
+func TestTreeProjectionPromotesChildWhenParentIsFiltered(t *testing.T) {
+	parentID := Task{ID: "parent"}.ID
+	view := DefaultBoardView()
+	view.Layout = BoardViewLayoutTreeList
+	view.Filters = []BoardColumnPredicate{{Kind: BoardPredicateLifecycle, Lifecycle: []IssueWorkflow{IssueWorkflowActive}}}
+	projection, err := ProjectTasksByBoardView(view, []Task{
+		{ID: parentID, Status: StatusOpen},
+		{ID: "child", ParentID: &parentID, Status: StatusInProgress},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Items) != 1 || projection.Items[0].Task.ID != "child" || projection.Items[0].Depth != 0 {
+		t.Fatalf("projection items = %+v, want child promoted to root", projection.Items)
+	}
+}
+
+func TestBoardViewAllowsCustomGroupIDs(t *testing.T) {
+	view := DefaultBoardView()
+	view.Columns[0].ID = "needs_attention"
+	if err := view.Validate(); err != nil {
+		t.Fatalf("custom group id rejected: %v", err)
+	}
+}
+
+func TestCustomGroupIDDoesNotUseLegacyViewAliases(t *testing.T) {
+	column := DefaultBoardView().Columns[0]
+	column.ID = "current"
+	if got := column.Normalized().ID; got != "current" {
+		t.Fatalf("group id = %q, want current", got)
+	}
+}
+
+func taskIDs(tasks []Task) []string {
+	out := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		out = append(out, task.ID.String())
+	}
+	return out
+}
+
 func TestBuiltInBoardViewCatalogAndLegacyAliases(t *testing.T) {
 	set := BuiltInBoardViewSet()
 	if set.DefaultViewID != BoardViewDefaultID {
 		t.Fatalf("default view id = %q, want %q", set.DefaultViewID, BoardViewDefaultID)
 	}
-	want := []BoardViewID{BoardViewDefaultID, BoardViewPlanningID, BoardViewOrchestrationID, BoardViewCloseoutID}
+	want := []BoardViewID{BoardViewDefaultID, BoardViewPlanningID, BoardViewOrchestrationID, BoardViewCloseoutID, BoardViewGridID, BoardViewTreeID}
 	if len(set.Views) != len(want) {
 		t.Fatalf("built-in views = %d, want %d", len(set.Views), len(want))
 	}
@@ -75,6 +167,40 @@ func TestBuiltInBoardViewCatalogAndLegacyAliases(t *testing.T) {
 	}
 	if got := NormalizeBoardViewID("activity"); got != string(BoardViewOrchestrationID) {
 		t.Fatalf("activity alias = %q", got)
+	}
+}
+
+func TestBuiltInViewsExposeAllSupportedLayouts(t *testing.T) {
+	want := map[BoardViewLayout]bool{
+		BoardViewLayoutColumnBoard:    true,
+		BoardViewLayoutHorizontalGrid: true,
+		BoardViewLayoutTreeList:       true,
+	}
+	for _, view := range BuiltInBoardViewSet().Views {
+		delete(want, view.Normalized().Layout)
+	}
+	if len(want) != 0 {
+		t.Fatalf("built-in catalog missing layouts: %v", want)
+	}
+}
+
+func TestLegacyUIViewModesMigrateToConfiguredViews(t *testing.T) {
+	tests := map[string]string{"board": string(BoardViewDefaultID), "compact": string(BoardViewTreeID), "overview": string(BoardViewOrchestrationID)}
+	for legacy, want := range tests {
+		if got, ok := BoardViewIDFromLegacyUIMode(legacy); !ok || got != want {
+			t.Fatalf("BoardViewIDFromLegacyUIMode(%q) = %q, %t; want %q, true", legacy, got, ok, want)
+		}
+	}
+}
+
+func TestProjectionExposesOrchestrationViewState(t *testing.T) {
+	task := Task{ID: "waiting", Title: "Waiting", Status: StatusInProgress, Session: &Session{Activity: "waiting-for-human"}}
+	projection, err := ProjectTasksByBoardView(DefaultBoardView(), []Task{task})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Items) != 1 || projection.Items[0].OrchestrationState != OrchestrationViewWaitingHuman {
+		t.Fatalf("projection items = %#v", projection.Items)
 	}
 }
 
@@ -482,7 +608,7 @@ func TestBoardViewValidationRejectsInvalidDefinitions(t *testing.T) {
 					Kind: BoardColumnPredicateKind("sql"),
 				}},
 			}}},
-			want: "unknown board column id",
+			want: "unsupported board column predicate kind",
 		},
 		{
 			name: "unsupported predicate kind",

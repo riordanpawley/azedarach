@@ -4,13 +4,14 @@
 ││ Panes:                                                                                      │
 ││ ────────────────────────────────────────────────                                            │
 ││   ?                     Open this help reference                                            │
-││   B                     Open board view selector                                            │
+││   O                     Open project orchestrator details                                   │
+││   V                     Open View Configurator                                              │
 ││   G                     Open project root Git pane                                          │
 ││   Space                 Open task workspace                                                 │
 ││   Q                     Open operation queue                                                │
 ││   L                     Open event log                                                      │
 ││   N                     Open notification action center                                     │
-││   O                     Open tmux sessions                                                  │
+││   O                     Open project orchestrator details                                   │
 ││   D                     Open system diagnostics                                             │
 ││   n                     Open async failure recovery                                         │
 ││   s                     Open settings                                                       │
@@ -21,7 +22,6 @@
 ││   /                     Open search                                                         │
 ││   g then p              Open project selector                                               │
 ││   g then s              Open spec workspace                                                 │
-││                                                                                             │
 ││                                                                                             │
 ││ [j/k/ctrl+u/d to scroll, g/G to jump]                                                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
