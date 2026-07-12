@@ -93,6 +93,24 @@ func (d *Daemon) migrateLegacyRuntimeState(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("load legacy physical session observations %s: %w", rawProjectID, err)
 		}
+		physicalBySessionID := make(map[string]struct{}, len(sourcePhysical))
+		for _, observation := range sourcePhysical {
+			physicalBySessionID[observation.SessionID] = struct{}{}
+		}
+		legacyCandidates, err := source.ListLegacyPhysicalObservationCandidates(ctx, rawProjectID)
+		if err != nil {
+			return fmt.Errorf("load legacy physical observation candidates %s: %w", rawProjectID, err)
+		}
+		for _, candidate := range legacyCandidates {
+			if _, exists := physicalBySessionID[candidate.SessionID]; exists {
+				continue
+			}
+			if _, _, err := source.ApplyPhysicalSessionObservation(ctx, candidate); err != nil {
+				return fmt.Errorf("bootstrap legacy physical session observation %s/%s: %w", rawProjectID, candidate.SessionID, err)
+			}
+			physicalBySessionID[candidate.SessionID] = struct{}{}
+			sourcePhysical = append(sourcePhysical, candidate)
+		}
 		if len(sourceSessions) == 0 && len(sourceWorktrees) == 0 && len(sourcePhysical) == 0 {
 			continue
 		}

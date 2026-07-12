@@ -175,6 +175,65 @@ func TestMigrateLegacyRuntimeStateCopiesRowsToProjectScopedStore(t *testing.T) {
 	}
 }
 
+func TestMigrateLegacyRuntimeStateBootstrapsPrePhysicalSchemaMirror(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	baseRepo := newRuntimeRouterTestRepo(t, "base-legacy")
+	legacyRepo := newRuntimeRouterTestRepo(t, "legacy-target")
+	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{Projects: []appconfig.Project{{Name: "legacy", Path: legacyRepo}}}); err != nil {
+		t.Fatalf("save projects registry: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	source := daemonstate.NewRuntimeStateStore(baseRepo, logger)
+	observedAt := time.Date(2026, time.April, 3, 9, 0, 0, 0, time.UTC)
+	if err := source.UpsertSessionState(context.Background(), "legacy", daemonstate.Session{
+		ID: "legacy-runtime", IssueID: "az-legacy", State: daemonstate.SessionStatePaused, UpdatedAt: observedAt,
+	}); err != nil {
+		t.Fatalf("seed legacy desired session: %v", err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatalf("close seeded legacy store: %v", err)
+	}
+	rawDB, err := sql.Open("sqlite", filepath.Join(baseRepo, ".azedarach", "azedarach.db"))
+	if err != nil {
+		t.Fatalf("open pre-physical legacy db: %v", err)
+	}
+	if _, err := rawDB.Exec(`UPDATE daemon_session_projections SET observed_state='running',activity='busy',activity_source='legacy-hook',updated_at=? WHERE project_id='legacy' AND session_id='legacy-runtime'`, observedAt.Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed explicit legacy observed mirror: %v", err)
+	}
+	if _, err := rawDB.Exec(`DROP TABLE daemon_physical_session_observations`); err != nil {
+		t.Fatalf("remove post-change physical table from legacy fixture: %v", err)
+	}
+	_ = rawDB.Close()
+
+	source = daemonstate.NewRuntimeStateStore(baseRepo, logger)
+	t.Cleanup(func() { _ = source.Close() })
+	d := &Daemon{
+		cfg:                    Config{RepoDir: baseRepo, Logger: logger},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{"default": source},
+		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{baseRepo: source},
+	}
+	if err := d.migrateLegacyRuntimeState(context.Background()); err != nil {
+		t.Fatalf("migrate pre-physical legacy runtime state: %v", err)
+	}
+	canonicalProjectID, err := appconfig.ProjectIDForRoot(legacyRepo)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot(legacy): %v", err)
+	}
+	target := d.runtimeStateStoreForProject("legacy")
+	if target == nil {
+		t.Fatal("legacy target runtime store nil")
+	}
+	t.Cleanup(func() { _ = target.Close() })
+	physical, found, err := target.GetPhysicalSessionObservation(context.Background(), canonicalProjectID, "legacy-runtime")
+	if err != nil || !found || physical.ObservedState != daemonstate.SessionStateRunning || physical.Activity != "busy" || physical.ActivitySource != "legacy-hook" || physical.ObservedVersion != observedAt.UnixNano() {
+		t.Fatalf("bootstrapped legacy physical observation = %+v found=%v err=%v", physical, found, err)
+	}
+	intent, found, err := target.GetSessionState(context.Background(), canonicalProjectID, "legacy-runtime")
+	if err != nil || !found || intent.State != daemonstate.SessionStatePaused || intent.ObservedState != daemonstate.SessionStateRunning || intent.Activity != "busy" {
+		t.Fatalf("hydrated legacy intent = %+v found=%v err=%v", intent, found, err)
+	}
+}
+
 func TestStoreRoutersReuseBaseRepoHandlesForLinkedWorktreeRoutes(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PATH", "")

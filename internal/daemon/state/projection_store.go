@@ -264,6 +264,52 @@ func (s *RuntimeStateStore) ListPhysicalSessionObservations(ctx context.Context,
 	return out, nil
 }
 
+// ListLegacyPhysicalObservationCandidates returns the freshest explicit
+// observed mirror per physical session. It exists only for routed migration of
+// databases created before physical observation authority was introduced.
+func (s *RuntimeStateStore) ListLegacyPhysicalObservationCandidates(ctx context.Context, projectID string) ([]PhysicalSessionObservation, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT session_id,observed_state,COALESCE(activity,''),COALESCE(activity_source,''),updated_at
+		FROM (`+sessionProjectionUnionSQL()+`)
+		WHERE project_id=? AND trim(COALESCE(observed_state,''))<>''
+		ORDER BY session_id,updated_at DESC,role,scope_kind,scope_id`, normalizedProjectID(projectID))
+	if err != nil {
+		return nil, fmt.Errorf("list legacy physical observation candidates: %w", err)
+	}
+	defer rows.Close()
+	seen := map[string]struct{}{}
+	var out []PhysicalSessionObservation
+	for rows.Next() {
+		var candidate PhysicalSessionObservation
+		var state, updated string
+		if err := rows.Scan(&candidate.SessionID, &state, &candidate.Activity, &candidate.ActivitySource, &updated); err != nil {
+			return nil, fmt.Errorf("scan legacy physical observation candidate: %w", err)
+		}
+		if _, ok := seen[candidate.SessionID]; ok {
+			continue
+		}
+		candidate.ProjectID = normalizedProjectID(projectID)
+		candidate.ObservedState = NormalizeSessionState(SessionState(state))
+		candidate.UpdatedAt, err = parseRuntimeStateTime(updated)
+		if err != nil {
+			return nil, fmt.Errorf("parse legacy physical observation candidate: %w", err)
+		}
+		candidate.ObservedVersion = candidate.UpdatedAt.UnixNano()
+		if _, err := normalizePhysicalSessionObservation(candidate); err != nil {
+			continue
+		}
+		seen[candidate.SessionID] = struct{}{}
+		out = append(out, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate legacy physical observation candidates: %w", err)
+	}
+	return out, nil
+}
+
 // RuntimeStateStore persists daemon-owned session/worktree state in sqlite.
 type RuntimeStateStore struct {
 	dbPath string
@@ -428,7 +474,7 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 	}
 	if err == nil && found {
 		if !metadataProvided {
-			session.Role, session.ScopeKind, session.ScopeID = existing.Role, existing.ScopeKind, existing.ScopeID
+			session.IssueID, session.Role, session.ScopeKind, session.ScopeID = existing.IssueID, existing.Role, existing.ScopeKind, existing.ScopeID
 		}
 		if strings.TrimSpace(string(session.ObservedState)) == "" && strings.TrimSpace(string(existing.ObservedState)) != "" {
 			session.ObservedState = existing.ObservedState

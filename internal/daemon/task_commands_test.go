@@ -1560,6 +1560,11 @@ func TestRefreshExistingSessionRuntimeStateSkipsUnchangedProjectionWrites(t *tes
 		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, session); err != nil {
 			t.Fatalf("seed session %s: %v", session.ID, err)
 		}
+		if _, _, err := runtimeStateStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+			ProjectID: projectID, SessionID: session.ID, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: seededAt,
+		}); err != nil {
+			t.Fatalf("seed physical observation %s: %v", session.ID, err)
+		}
 	}
 
 	tmuxRunner := &testTmuxRunner{
