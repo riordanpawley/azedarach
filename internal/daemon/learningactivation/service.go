@@ -48,6 +48,32 @@ func (s *Service) Propose(ctx context.Context, req Request) (Proposal, error) {
 		byID[row.LocalID] = row
 	}
 	selection := domain.SelectContextualLearnings(candidates, suppressed, req.TokenBudget)
+	if recorder, ok := s.store.(interface {
+		RecordLearningActivationExclusion(context.Context, string, string, string, string, string, int) error
+	}); ok {
+		selected := make(map[string]struct{}, len(selection.IDs))
+		for _, id := range selection.IDs {
+			selected[id] = struct{}{}
+		}
+		suppressedCount, budgetCount := 0, 0
+		for _, row := range rows {
+			if _, found := suppressed[row.LocalID]; found {
+				suppressedCount++
+			} else if _, found := selected[row.LocalID]; !found {
+				budgetCount++
+			}
+		}
+		if suppressedCount > 0 {
+			if err := recorder.RecordLearningActivationExclusion(ctx, req.ProjectID, req.Surface, req.Purpose, req.SessionID, "suppressed", suppressedCount); err != nil {
+				return Proposal{}, err
+			}
+		}
+		if budgetCount > 0 {
+			if err := recorder.RecordLearningActivationExclusion(ctx, req.ProjectID, req.Surface, req.Purpose, req.SessionID, "budget", budgetCount); err != nil {
+				return Proposal{}, err
+			}
+		}
+	}
 	if len(selection.IDs) == 0 {
 		return Proposal{Explanation: "no eligible guidance within budget or all guidance already delivered to session"}, nil
 	}

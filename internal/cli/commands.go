@@ -8702,6 +8702,7 @@ func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID
 		section = append(section, fmt.Sprintf("- %s [%s]: %s%s", learning.ID, learning.Status, learning.Summary, reason))
 	}
 	section = append(section, "Use `az learn show <learning-id>` for evidence; long evidence is not injected by default.")
+	section = append(section, fmt.Sprintf("Record the activation outcome with `az learn feedback --idempotency-key <key> --outcome helpful|followed|contradicted|unknown %s`.", resp.Proposal.ActivationID))
 	rendered := strings.Join(section, "\n")
 	lines = append(lines, section...)
 	return primeLearningSection{Text: strings.Join(lines, "\n"), Confirmation: &protocol.LearnActivationConfirmRequestBody{ActivationID: resp.Proposal.ActivationID, TokenCost: domain.RenderedLearningTokenCost(rendered)}}

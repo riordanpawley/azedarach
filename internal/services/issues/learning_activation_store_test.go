@@ -141,6 +141,6 @@ func TestLearningActivationProposalExpiresLostResponses(t *testing.T) {
 	_, err = client.ProposeLearningActivation(ctx, RecordLearningActivationParams{ProjectID: "proj", Surface: "prime", ContextFingerprint: "sha256:y", Purpose: "session_start", SessionID: "s", LearningIDs: []string{learning.LocalID}})
 	require.NoError(t, err)
 	var count int
-	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM learning_activation_proposals WHERE activation_id=?`, p.ActivationID).Scan(&count))
-	require.Zero(t, count)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM learning_activation_proposals WHERE activation_id=? AND status='abandoned'`, p.ActivationID).Scan(&count))
+	require.Equal(t, 1, count, "expired proposals remain as auditable abandoned-delivery telemetry")
 }

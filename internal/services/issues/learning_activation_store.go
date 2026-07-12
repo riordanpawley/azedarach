@@ -61,7 +61,7 @@ func (c *Client) ProposeLearningActivation(ctx context.Context, p RecordLearning
 	}
 	b, _ := json.Marshal(ids)
 	now := time.Now().UTC()
-	if _, err = db.ExecContext(ctx, `DELETE FROM learning_activation_proposals WHERE project_id=? AND proposed_at<?`, p.ProjectID, formatTimestamp(domain.LearningActivationProposalExpiry(now))); err != nil {
+	if _, err = db.ExecContext(ctx, `UPDATE learning_activation_proposals SET status='abandoned' WHERE project_id=? AND status='proposed' AND proposed_at<?`, p.ProjectID, formatTimestamp(domain.LearningActivationProposalExpiry(now))); err != nil {
 		return LearningActivationProposal{}, fmt.Errorf("expire learning activation proposals: %w", err)
 	}
 	out := LearningActivationProposal{ActivationID: "act-" + uuid.NewString(), ProjectID: p.ProjectID, Surface: p.Surface, ContextFingerprint: p.ContextFingerprint, Purpose: strings.TrimSpace(p.Purpose), SessionID: strings.TrimSpace(p.SessionID), Explanation: strings.TrimSpace(p.Explanation), LearningIDs: ids, ProposedAt: now}
@@ -89,7 +89,7 @@ func (c *Client) ConfirmLearningActivation(ctx context.Context, projectID, activ
 	defer tx.Rollback()
 	var out LearningActivation
 	var idsJSON, purpose, sessionID, proposedAt string
-	err = tx.QueryRowContext(ctx, `SELECT project_id,surface,context_fingerprint,learning_ids_json,explanation,purpose,session_id,proposed_at FROM learning_activation_proposals WHERE activation_id=? AND project_id=?`, activationID, projectID).Scan(&out.ProjectID, &out.Surface, &out.ContextFingerprint, &idsJSON, &out.Explanation, &purpose, &sessionID, &proposedAt)
+	err = tx.QueryRowContext(ctx, `SELECT project_id,surface,context_fingerprint,learning_ids_json,explanation,purpose,session_id,proposed_at FROM learning_activation_proposals WHERE activation_id=? AND project_id=? AND status='proposed'`, activationID, projectID).Scan(&out.ProjectID, &out.Surface, &out.ContextFingerprint, &idsJSON, &out.Explanation, &purpose, &sessionID, &proposedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		var delivered string
 		err = tx.QueryRowContext(ctx, `SELECT project_id,surface,context_fingerprint,learning_ids_json,token_cost,explanation,delivered_at FROM learning_activations WHERE activation_id=? AND project_id=?`, activationID, projectID).Scan(&out.ProjectID, &out.Surface, &out.ContextFingerprint, &idsJSON, &out.TokenCost, &out.Explanation, &delivered)
@@ -125,13 +125,26 @@ func (c *Client) ConfirmLearningActivation(ctx context.Context, projectID, activ
 			return LearningActivation{}, fmt.Errorf("confirm delivery %s: %w", id, classifySQLiteConstraint(err))
 		}
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM learning_activation_proposals WHERE activation_id=?`, activationID); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE learning_activation_proposals SET status='confirmed',confirmed_at=? WHERE activation_id=?`, formatTimestamp(out.DeliveredAt), activationID); err != nil {
 		return LearningActivation{}, err
 	}
 	if err = tx.Commit(); err != nil {
 		return LearningActivation{}, err
 	}
 	return out, nil
+}
+
+func (c *Client) RecordLearningActivationExclusion(ctx context.Context, projectID, surface, purpose, sessionID, reason string, learningCount int) error {
+	projectID, surface, purpose, sessionID, reason = strings.TrimSpace(projectID), strings.TrimSpace(surface), strings.TrimSpace(purpose), strings.TrimSpace(sessionID), strings.TrimSpace(reason)
+	if projectID == "" || surface == "" || (reason != "suppressed" && reason != "budget") || learningCount < 0 {
+		return errors.New("valid activation exclusion is required")
+	}
+	db, err := c.dbHandle()
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO learning_activation_exclusions(project_id,surface,purpose,session_id,reason,learning_count,recorded_at) VALUES(?,?,?,?,?,?,?)`, projectID, surface, purpose, sessionID, reason, learningCount, formatTimestamp(time.Now().UTC()))
+	return err
 }
 
 func (c *Client) validateActiveLearningIDs(ctx context.Context, db *sql.DB, projectID string, input []string) ([]string, error) {

@@ -146,6 +146,7 @@ func renderContextualLearningGuidance(activationID string, learnings []protocol.
 	for _, learning := range learnings {
 		fmt.Fprintf(&b, "- %s: %s\n", learning.ID, learning.Summary)
 	}
+	fmt.Fprintf(&b, "Feedback: `az learn feedback --idempotency-key <key> --outcome helpful|followed|contradicted|unknown %s`\n", activationID)
 	return strings.TrimSpace(b.String())
 }
 

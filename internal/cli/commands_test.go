@@ -12998,7 +12998,7 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 	if strings.Contains(output, "Private local handling detail") || strings.Contains(output, "private raw evidence should not be injected") {
 		t.Fatalf("prime output injected private learning: %q", output)
 	}
-	wantSection := "\nRelevant accepted/promoted learnings [activation: act-prime]:\n- learn-1 [accepted]: Keep durable choices in decisions (why: issue=az-1; query)\nUse `az learn show <learning-id>` for evidence; long evidence is not injected by default."
+	wantSection := "\nRelevant accepted/promoted learnings [activation: act-prime]:\n- learn-1 [accepted]: Keep durable choices in decisions (why: issue=az-1; query)\nUse `az learn show <learning-id>` for evidence; long evidence is not injected by default.\nRecord the activation outcome with `az learn feedback --idempotency-key <key> --outcome helpful|followed|contradicted|unknown act-prime`."
 	if confirmCalls != 1 || confirmReq.ActivationID != "act-prime" || confirmReq.TokenCost != domain.RenderedLearningTokenCost(wantSection) {
 		t.Fatalf("prime confirmation=%+v calls=%d want token cost=%d", confirmReq, confirmCalls, domain.RenderedLearningTokenCost(wantSection))
 	}

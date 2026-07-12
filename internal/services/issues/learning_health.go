@@ -16,9 +16,14 @@ func (c *Client) LearningPortfolioHealth(ctx context.Context, projectID string, 
 		return domain.LearningPortfolioHealth{}, err
 	}
 	now = now.UTC()
-	out := domain.LearningPortfolioHealth{ProjectID: projectID, GeneratedAt: now.Format(time.RFC3339Nano)}
+	windowStart, windowEnd := domain.LearningHealthWindow(now)
+	out := domain.LearningPortfolioHealth{ProjectID: projectID, GeneratedAt: now.Format(time.RFC3339Nano), WindowStart: windowStart.Format(time.RFC3339Nano), WindowEnd: windowEnd.Format(time.RFC3339Nano), WindowDays: domain.LearningHealthWindowDays}
+	// Expiry is telemetry, not deletion: abandoned proposals remain auditable.
+	if _, err = db.ExecContext(ctx, `UPDATE learning_activation_proposals SET status='abandoned' WHERE project_id=? AND status='proposed' AND proposed_at<?`, projectID, formatTimestamp(domain.LearningActivationProposalExpiry(now))); err != nil {
+		return out, fmt.Errorf("expire activation proposals: %w", err)
+	}
 	var oldest, totalAge sql.NullFloat64
-	err = db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(AVG((julianday(?) - julianday(created_at))*24),0), COALESCE(MAX((julianday(?) - julianday(created_at))*24),0) FROM agent_learnings WHERE project_id=? AND status='candidate' AND deleted_at IS NULL`, formatTimestamp(now), formatTimestamp(now), projectID).Scan(&out.CandidateCount, &totalAge, &oldest)
+	err = db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(AVG((julianday(?) - julianday(created_at))*24),0), COALESCE(MAX((julianday(?) - julianday(created_at))*24),0) FROM agent_learnings WHERE project_id=? AND status='candidate' AND evidence_private=0 AND deleted_at IS NULL`, formatTimestamp(now), formatTimestamp(now), projectID).Scan(&out.CandidateCount, &totalAge, &oldest)
 	if err != nil {
 		return out, fmt.Errorf("candidate health: %w", err)
 	}
@@ -31,17 +36,17 @@ func (c *Client) LearningPortfolioHealth(ctx context.Context, projectID string, 
 		return out, err
 	}
 	pairs := publicCount * (publicCount - 1) / 2
-	out.DuplicateDensity = domain.NewLearningHealthRate(duplicates, pairs)
 	var labeled, useful, contradicted int
-	if err = db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(resolved_outcome IN ('helpful','followed')),0), COALESCE(SUM(resolved_outcome='contradicted'),0) FROM learning_activations WHERE project_id=? AND resolved_outcome NOT IN ('','unknown')`, projectID).Scan(&labeled, &useful, &contradicted); err != nil {
+	if err = db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(resolved_outcome IN ('helpful','followed')),0), COALESCE(SUM(resolved_outcome='contradicted'),0) FROM learning_activations WHERE project_id=? AND delivered_at>=? AND resolved_outcome NOT IN ('','unknown')`, projectID, formatTimestamp(windowStart)).Scan(&labeled, &useful, &contradicted); err != nil {
 		return out, fmt.Errorf("outcome health: %w", err)
 	}
-	out.UsefulnessRate, out.ContradictionRate = domain.NewLearningHealthRate(useful, labeled), domain.NewLearningHealthRate(contradicted, labeled)
 	var reviewed, promoted int
-	if err = db.QueryRowContext(ctx, `SELECT COALESCE(SUM(reviewed_at IS NOT NULL),0), COALESCE(SUM(promoted_at IS NOT NULL),0) FROM agent_learnings WHERE project_id=? AND deleted_at IS NULL`, projectID).Scan(&reviewed, &promoted); err != nil {
+	if err = db.QueryRowContext(ctx, `SELECT COALESCE(SUM(reviewed_at IS NOT NULL),0), COALESCE(SUM(promoted_at IS NOT NULL),0) FROM agent_learnings WHERE project_id=? AND evidence_private=0 AND deleted_at IS NULL`, projectID).Scan(&reviewed, &promoted); err != nil {
 		return out, err
 	}
-	out.PromotionThroughput = domain.NewLearningHealthRate(promoted, reviewed)
+	if err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_learnings WHERE project_id=? AND evidence_private=0 AND deleted_at IS NULL AND promoted_at>=?`, projectID, formatTimestamp(windowStart)).Scan(&out.PromotionEventCount); err != nil {
+		return out, err
+	}
 	var eligible, deliveredUnique int
 	activePredicate, activeArgs := learningActiveSQL("l", now)
 	populationArgs := append([]any{projectID}, activeArgs...)
@@ -52,12 +57,19 @@ func (c *Client) LearningPortfolioHealth(ctx context.Context, projectID string, 
 		return out, err
 	}
 	out.ContextualCoverage = domain.NewLearningHealthRate(deliveredUnique, eligible)
-	if err = db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(token_cost),0) FROM learning_activations WHERE project_id=?`, projectID).Scan(&out.DeliveryCount, &out.DeliveredTokenCost); err != nil {
+	if err = db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(token_cost),0) FROM learning_activations WHERE project_id=? AND delivered_at>=?`, projectID, formatTimestamp(windowStart)).Scan(&out.DeliveryCount, &out.DeliveredTokenCost); err != nil {
 		return out, err
 	}
-	if err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM learning_activations WHERE project_id=? AND resolved_outcome IN ('helpful','followed')`, projectID).Scan(&out.UsefulDeliveryCount); err != nil {
+	if err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM learning_activations WHERE project_id=? AND delivered_at>=? AND resolved_outcome IN ('helpful','followed')`, projectID, formatTimestamp(windowStart)).Scan(&out.UsefulDeliveryCount); err != nil {
 		return out, fmt.Errorf("useful activation health: %w", err)
 	}
-	out.TokensPerUsefulActivation = domain.NewLearningHealthRate(out.DeliveredTokenCost, out.UsefulDeliveryCount)
+	if err = db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(status='abandoned'),0),COALESCE(SUM(status='proposed'),0) FROM learning_activation_proposals WHERE project_id=? AND proposed_at>=?`, projectID, formatTimestamp(windowStart)).Scan(&out.ProposalCount, &out.AbandonedProposalCount, &out.PendingProposalCount); err != nil {
+		return out, fmt.Errorf("proposal health: %w", err)
+	}
+	out.SelectionCount = out.ProposalCount
+	if err = db.QueryRowContext(ctx, `SELECT COALESCE(SUM(CASE WHEN reason='suppressed' THEN learning_count ELSE 0 END),0),COALESCE(SUM(CASE WHEN reason='budget' THEN learning_count ELSE 0 END),0) FROM learning_activation_exclusions WHERE project_id=? AND recorded_at>=?`, projectID, formatTimestamp(windowStart)).Scan(&out.SuppressionExclusionCount, &out.BudgetExclusionCount); err != nil {
+		return out, fmt.Errorf("exclusion health: %w", err)
+	}
+	domain.DeriveLearningHealthMetrics(&out, duplicates, pairs, useful, contradicted, labeled, reviewed, promoted)
 	return out, nil
 }
