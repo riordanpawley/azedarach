@@ -71,32 +71,13 @@ func (s issueLearnService) issueClient(ctx context.Context) (*issues.Client, err
 }
 
 func (s issueLearnService) Add(ctx context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
-	preferred := strings.TrimSpace(req.Summary)
-	if preferred == "" {
-		preferred = summarizeLearningEvidenceForAdapter(req.Evidence)
-	}
-	sensitivity := "public"
-	if req.Private {
-		sensitivity = "private"
-	}
-	captured, err := s.Capture(ctx, protocol.LearnCaptureRequestBody{ProjectID: req.ProjectID, IssueID: req.IssueID, ReqID: req.ReqID, SessionID: req.SessionID, ObservedBehavior: req.Evidence, PreferredBehavior: preferred, Provenance: protocol.LearningObservationProvenance{Source: "az.learn.add"}, Sensitivity: sensitivity, Tags: req.Tags, Files: req.Files})
+	legacy := domain.LegacyLearningCapture(firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)), req.Summary, req.Evidence, req.Private, req.Tags, req.Files)
+	captured, err := s.Capture(ctx, protocol.LearnCaptureRequestBody{ProjectID: legacy.ProjectID, IssueID: req.IssueID, ReqID: req.ReqID, SessionID: req.SessionID, ObservedBehavior: legacy.ObservedBehavior, PreferredBehavior: legacy.PreferredBehavior, Provenance: protocol.LearningObservationProvenance{Source: legacy.Provenance.Source}, Sensitivity: string(legacy.Sensitivity), Tags: legacy.Tags, Files: legacy.Files})
 	if err != nil {
 		return protocol.LearnAddResponseBody{}, err
 	}
 	learning := captured.Observation.Learning
-	if req.Private {
-		learning.Evidence = req.Evidence
-	}
 	return protocol.LearnAddResponseBody{Learning: learning}, nil
-}
-
-func summarizeLearningEvidenceForAdapter(evidence string) string {
-	summary := strings.Join(strings.Fields(evidence), " ")
-	runes := []rune(summary)
-	if len(runes) > 120 {
-		summary = strings.TrimSpace(string(runes[:120]))
-	}
-	return summary
 }
 
 func (s issueLearnService) Capture(ctx context.Context, req protocol.LearnCaptureRequestBody) (protocol.LearnCaptureResponseBody, error) {
@@ -128,7 +109,9 @@ func (s issueLearnService) Capture(ctx context.Context, req protocol.LearnCaptur
 		out.Outcome = ""
 		out.Impact = ""
 		out.Context = nil
+		out.Provenance = protocol.LearningObservationProvenance{}
 		out.SafeFingerprint = ""
+		out.DuplicateLearningIDs = nil
 	}
 	return protocol.LearnCaptureResponseBody{Observation: out}, nil
 }

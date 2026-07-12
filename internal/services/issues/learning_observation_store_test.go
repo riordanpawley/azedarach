@@ -30,6 +30,7 @@ func TestCaptureLearningObservationTypedDuplicateAndPrivateIsolation(t *testing.
 	secret, err := client.CaptureLearningObservation(ctx, private)
 	require.NoError(t, err)
 	require.Empty(t, secret.SafeFingerprint)
+	require.Empty(t, secret.DuplicateLearningIDs)
 	require.Equal(t, "Private learning observation", secret.Learning.Summary)
 	require.Empty(t, secret.Learning.Tags)
 	require.Empty(t, secret.Learning.Files)
@@ -39,10 +40,13 @@ func TestCaptureLearningObservationTypedDuplicateAndPrivateIsolation(t *testing.
 	var stored string
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT observed_behavior FROM learning_observations WHERE local_id=?`, secret.LocalID).Scan(&stored))
 	require.Equal(t, "token=SECRETVALUE123", stored)
+	var storedContext string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT context_json FROM learning_observations WHERE local_id=?`, secret.LocalID).Scan(&storedContext))
+	require.Contains(t, storedContext, "PRIVATE-123")
 }
 
 func TestCaptureLearningObservationReusesLearningValidation(t *testing.T) {
 	client := newTestClient(t)
 	_, err := client.CaptureLearningObservation(context.Background(), CaptureLearningObservationParams{ProjectID: "proj", ObservedBehavior: strings.Repeat("x", maxLearningEvidenceRunes+1), PreferredBehavior: "safe", Provenance: LearningObservationProvenance{Source: "test"}, Sensitivity: domain.LearningSensitivityPublic})
-	require.ErrorContains(t, err, "evidence exceeds")
+	require.ErrorContains(t, err, "observed behavior exceeds")
 }
