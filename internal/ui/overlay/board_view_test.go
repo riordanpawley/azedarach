@@ -5,8 +5,33 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
+
+func TestGlobalBoardViewOverlayGuidesAndValidatesProjectScope(t *testing.T) {
+	o := NewGlobalBoardViewOverlay([]protocol.GlobalViewRecord{{View: domain.DefaultBoardView(), Scope: protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeAllProjects}}}, "default")
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRight})
+	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	if cmd != nil || !strings.Contains(o.errorText, "requires project_ids") {
+		t.Fatalf("empty selected-project scope cmd=%v error=%q", cmd, o.errorText)
+	}
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("alpha,beta")})
+	_, cmd = o.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	saved := cmd().(SelectionMsg).Value.(BoardViewSaveMsg)
+	if len(saved.Scope.ProjectIDs) != 2 || saved.Scope.ProjectIDs[0] != "alpha" {
+		t.Fatalf("saved scope = %+v", saved.Scope)
+	}
+	_, _ = o.Update(tea.WindowSizeMsg{Width: 54, Height: 18})
+	width, height := o.Size()
+	if width > 52 || height > 16 {
+		t.Fatalf("global configurator %dx%d exceeds narrow viewport", width, height)
+	}
+}
 
 func TestBoardViewOverlaySelectsCurrentView(t *testing.T) {
 	records := []domain.BoardViewRecord{

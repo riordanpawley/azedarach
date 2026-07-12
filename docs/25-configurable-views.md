@@ -27,6 +27,12 @@ advanced JSON editor remains available with `Ctrl+J`, but is never required by
 the primary TUI workflow. `V` is deliberately scoped to normal mode; the
 existing select-mode dev-server binding does not conflict.
 
+The tmux selector uses the same `V` workflow for global views selected by the
+`tmux_selector` consumer. Scope is a guided field: all projects, a comma-separated
+set of canonical project IDs, or one current project ID. Selection and edits are
+applied only after Enter or explicit save; Escape leaves the persisted view and
+selection unchanged.
+
 The project-local daemon board snapshot schema v5 carries one typed `projection`: ordered
 groups reference a single ordered item collection, items carry tree depth, and
 `known_task_ids` distinguishes filtered durable issues from tmux-only runtime

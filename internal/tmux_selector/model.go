@@ -135,6 +135,13 @@ type UIStateStore interface {
 	SetUIStateForProject(context.Context, string, string, string) (protocol.UIStateResponseBody, error)
 }
 
+type GlobalViewStore interface {
+	ListGlobalViews(context.Context) (protocol.BoardViewListResponseBody, error)
+	SelectGlobalView(context.Context, protocol.GlobalViewConsumer, string) (protocol.BoardViewSelectResponseBody, error)
+	SaveGlobalView(context.Context, protocol.GlobalViewRecord) (protocol.BoardViewResponseBody, error)
+	DeleteGlobalView(context.Context, string) error
+}
+
 type PopupCloser interface {
 	ClosePopup(context.Context) error
 }
@@ -179,6 +186,10 @@ func WithUIStateStore(store UIStateStore) Option {
 	}
 }
 
+func WithGlobalViewStore(store GlobalViewStore) Option {
+	return func(m *Model) { m.globalViewStore = store }
+}
+
 type selectorTab int
 
 const (
@@ -194,13 +205,14 @@ const (
 )
 
 type Model struct {
-	loader       SnapshotLoader
-	switcher     Switcher
-	popupCloser  PopupCloser
-	killer       Killer
-	detailOpener DetailOpener
-	uiStateStore UIStateStore
-	styles       *styles.Styles
+	loader          SnapshotLoader
+	switcher        Switcher
+	popupCloser     PopupCloser
+	killer          Killer
+	detailOpener    DetailOpener
+	uiStateStore    UIStateStore
+	globalViewStore GlobalViewStore
+	styles          *styles.Styles
 
 	snapshot           Snapshot
 	cursor             int
@@ -217,11 +229,13 @@ type Model struct {
 	startedAt          time.Time
 	readyLogged        bool
 
-	searchMode  bool
-	searchQuery string
-	gotoArmed   bool
-	jumpMode    *overlay.JumpMode
-	jumpTargets []int
+	searchMode   bool
+	searchQuery  string
+	gotoArmed    bool
+	jumpMode     *overlay.JumpMode
+	jumpTargets  []int
+	viewOverlay  *overlay.BoardViewOverlay
+	viewsLoading bool
 }
 
 type LoadedMsg struct {
@@ -264,6 +278,18 @@ type selectorTabLoadedMsg struct {
 type selectorTabSavedMsg struct {
 	tab selectorTab
 	err error
+}
+
+type globalViewsLoadedMsg struct {
+	views    []protocol.GlobalViewRecord
+	selected string
+	err      error
+}
+
+type globalViewMutationMsg struct {
+	action string
+	viewID string
+	err    error
 }
 
 func New(loader SnapshotLoader, opts ...Option) Model {
@@ -321,11 +347,72 @@ func (m *Model) logReadyToRender(trigger string) {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width, m.height = size.Width, size.Height
+		if m.viewOverlay != nil {
+			_, _ = m.viewOverlay.Update(size)
+		}
 		return m, nil
+	}
+	if m.viewOverlay != nil {
+		if mouse, ok := msg.(tea.MouseMsg); ok {
+			next, cmd := m.viewOverlay.Update(mouse)
+			if updated, ok := next.(*overlay.BoardViewOverlay); ok {
+				m.viewOverlay = updated
+			}
+			return m, cmd
+		}
+	}
+	switch msg := msg.(type) {
+	case overlay.CloseOverlayMsg:
+		m.viewOverlay = nil
+		m.viewsLoading = false
+		m.clearJumpMode()
+		return m, nil
+	case overlay.SelectionMsg:
+		if m.viewOverlay == nil || m.globalViewStore == nil {
+			return m, nil
+		}
+		switch msg.Key {
+		case overlay.BoardViewSelectKey:
+			selected, _ := msg.Value.(overlay.BoardViewSelectMsg)
+			m.viewOverlay, m.viewsLoading = nil, true
+			return m, m.selectGlobalViewCmd(selected.ViewID)
+		case overlay.BoardViewSaveKey:
+			saved, _ := msg.Value.(overlay.BoardViewSaveMsg)
+			m.viewOverlay, m.viewsLoading = nil, true
+			return m, m.saveGlobalViewCmd(saved.View, saved.Scope)
+		case overlay.BoardViewDeleteKey:
+			deleted, _ := msg.Value.(overlay.BoardViewDeleteMsg)
+			m.viewOverlay, m.viewsLoading = nil, true
+			return m, m.deleteGlobalViewCmd(deleted.ViewID)
+		}
+	case globalViewsLoadedMsg:
+		if !m.viewsLoading {
+			return m, nil
+		}
+		m.viewsLoading = false
+		if msg.err != nil {
+			m.err = msg.err
+			m.status = "could not load views"
+			return m, nil
+		}
+		m.err = nil
+		m.viewOverlay = overlay.NewGlobalBoardViewOverlay(msg.views, msg.selected)
+		_, _ = m.viewOverlay.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
+		return m, nil
+	case globalViewMutationMsg:
+		m.viewsLoading = false
+		if msg.err != nil {
+			m.err = msg.err
+			m.status = fmt.Sprintf("view %s failed", msg.action)
+			return m, nil
+		}
+		m.err = nil
+		m.status = fmt.Sprintf("view %s: %s", msg.action, msg.viewID)
+		m.loading = true
+		m.defaultedToCurrent = false
+		return m, m.loadCmd()
 	case LoadedMsg:
 		m.loading = false
 		m.err = nil
@@ -417,10 +504,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.clearJumpMode()
 		return m, nil
-	case overlay.CloseOverlayMsg:
-		m.clearJumpMode()
-		return m, nil
 	case tea.KeyMsg:
+		if m.viewOverlay != nil {
+			next, cmd := m.viewOverlay.Update(msg)
+			if updated, ok := next.(*overlay.BoardViewOverlay); ok {
+				m.viewOverlay = updated
+			}
+			return m, cmd
+		}
+		if m.viewsLoading {
+			switch msg.String() {
+			case "esc", "q", "ctrl+c":
+				m.viewsLoading = false
+				return m, nil
+			default:
+				return m, nil
+			}
+		}
 		if m.loading {
 			switch msg.String() {
 			case "ctrl+c", "q", "esc":
@@ -505,6 +605,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "refreshing"
 			m.defaultedToCurrent = false
 			return m, m.loadCmd()
+		case "V", "v":
+			if m.globalViewStore == nil {
+				m.err = fmt.Errorf("view management is unavailable")
+				return m, nil
+			}
+			m.viewsLoading = true
+			m.err = nil
+			m.status = "loading views"
+			return m, m.loadGlobalViewsCmd()
 		case "enter":
 			entry, ok := m.selectedEntry()
 			if !ok {
@@ -607,6 +716,12 @@ func (m *Model) selectAttachedSnapshotSession() bool {
 }
 
 func (m Model) View() string {
+	if m.viewOverlay != nil {
+		return m.viewOverlay.View()
+	}
+	if m.viewsLoading {
+		return "Loading saved views...  Esc cancel\n"
+	}
 	if m.loading {
 		return "Loading tmux sessions...\n"
 	}
@@ -753,6 +868,7 @@ func (m Model) renderFooter() string {
 		{Key: "a", Description: "switch"},
 		{Key: "x", Description: "kill"},
 		{Key: "o/Sp", Description: "open"},
+		{Key: "V", Description: "views"},
 	}
 	if m.activeTab == selectorTabTree {
 		bindings = append([]keybinds.Binding{{Key: "u", Description: "sort"}}, bindings...)
@@ -1457,6 +1573,46 @@ func (m Model) persistSelectorTabCmd(tab selectorTab) tea.Cmd {
 			)
 		}
 		return selectorTabSavedMsg{tab: tab, err: err}
+	}
+}
+
+func (m Model) loadGlobalViewsCmd() tea.Cmd {
+	store := m.globalViewStore
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		resp, err := store.ListGlobalViews(ctx)
+		return globalViewsLoadedMsg{views: resp.GlobalViews, selected: resp.Selections[protocol.GlobalViewConsumerTmuxSelector], err: err}
+	}
+}
+
+func (m Model) selectGlobalViewCmd(viewID string) tea.Cmd {
+	store := m.globalViewStore
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := store.SelectGlobalView(ctx, protocol.GlobalViewConsumerTmuxSelector, viewID)
+		return globalViewMutationMsg{action: "selected", viewID: viewID, err: err}
+	}
+}
+
+func (m Model) saveGlobalViewCmd(view domain.BoardView, scope protocol.GlobalViewScope) tea.Cmd {
+	store := m.globalViewStore
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := store.SaveGlobalView(ctx, protocol.GlobalViewRecord{View: view, Scope: scope})
+		return globalViewMutationMsg{action: "saved", viewID: string(view.ID), err: err}
+	}
+}
+
+func (m Model) deleteGlobalViewCmd(viewID string) tea.Cmd {
+	store := m.globalViewStore
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err := store.DeleteGlobalView(ctx, viewID)
+		return globalViewMutationMsg{action: "deleted", viewID: viewID, err: err}
 	}
 }
 

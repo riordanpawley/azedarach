@@ -21,6 +21,16 @@ func (c *Client) ListBoardViews(ctx context.Context) (protocol.BoardViewListResp
 	return out, nil
 }
 
+// ListGlobalViews returns user-level view definitions and per-consumer selections.
+func (c *Client) ListGlobalViews(ctx context.Context) (protocol.BoardViewListResponseBody, error) {
+	body := protocol.BoardViewListRequestBody{ProjectID: "global"}
+	var out protocol.BoardViewListResponseBody
+	if err := c.commandJSON(ctx, protocol.CommandBoardViewList, body, &out); err != nil {
+		return protocol.BoardViewListResponseBody{}, err
+	}
+	return out, nil
+}
+
 func (c *Client) GetBoardView(ctx context.Context, viewID string) (protocol.BoardViewResponseBody, error) {
 	body := protocol.BoardViewGetRequestBody{ViewID: strings.TrimSpace(viewID)}
 	if strings.TrimSpace(c.projectID.String()) != "" {
@@ -59,6 +69,11 @@ func (c *Client) DeleteBoardView(ctx context.Context, viewID string) error {
 	if strings.TrimSpace(c.projectID.String()) != "" {
 		body.ProjectID = c.projectID
 	}
+	return c.commandJSON(ctx, protocol.CommandBoardViewDelete, body, nil)
+}
+
+func (c *Client) DeleteGlobalView(ctx context.Context, viewID string) error {
+	body := protocol.BoardViewDeleteRequestBody{ProjectID: "global", ViewID: strings.TrimSpace(viewID)}
 	return c.commandJSON(ctx, protocol.CommandBoardViewDelete, body, nil)
 }
 

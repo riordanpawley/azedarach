@@ -232,6 +232,81 @@ type fakeUIStateStore struct {
 	err    error
 }
 
+type fakeGlobalViewStore struct {
+	list     protocol.BoardViewListResponseBody
+	selected string
+	saved    *protocol.GlobalViewRecord
+	deleted  string
+	err      error
+}
+
+func (f *fakeGlobalViewStore) ListGlobalViews(context.Context) (protocol.BoardViewListResponseBody, error) {
+	return f.list, f.err
+}
+func (f *fakeGlobalViewStore) SelectGlobalView(_ context.Context, consumer protocol.GlobalViewConsumer, id string) (protocol.BoardViewSelectResponseBody, error) {
+	if consumer != protocol.GlobalViewConsumerTmuxSelector {
+		return protocol.BoardViewSelectResponseBody{}, errors.New("wrong consumer")
+	}
+	f.selected = id
+	return protocol.BoardViewSelectResponseBody{ProjectID: "global", ViewID: id}, f.err
+}
+func (f *fakeGlobalViewStore) SaveGlobalView(_ context.Context, record protocol.GlobalViewRecord) (protocol.BoardViewResponseBody, error) {
+	f.saved = &record
+	return protocol.BoardViewResponseBody{}, f.err
+}
+func (f *fakeGlobalViewStore) DeleteGlobalView(_ context.Context, id string) error {
+	f.deleted = id
+	return f.err
+}
+
+func TestSelectorManagesGlobalViewsThroughTypedStore(t *testing.T) {
+	store := &fakeGlobalViewStore{list: protocol.BoardViewListResponseBody{
+		GlobalViews: []protocol.GlobalViewRecord{{View: domain.OrchestrationBoardView(), Scope: protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeAllProjects}}},
+		Selections:  map[protocol.GlobalViewConsumer]string{protocol.GlobalViewConsumerTmuxSelector: "orchestration"},
+	}}
+	model := New(fakeSnapshotLoader{}, WithGlobalViewStore(store))
+	model.loading = false
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'V'}})
+	model = next.(Model)
+	if !model.viewsLoading || cmd == nil {
+		t.Fatal("V did not enter view loading state")
+	}
+	next, _ = model.Update(cmd())
+	model = next.(Model)
+	if model.viewOverlay == nil || !strings.Contains(model.View(), "Orchestration") {
+		t.Fatalf("global view overlay not rendered:\n%s", model.View())
+	}
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("view selection command = nil")
+	}
+	next, cmd = model.Update(cmd())
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("typed selection did not issue daemon mutation")
+	}
+	_ = cmd()
+	if store.selected != "orchestration" {
+		t.Fatalf("selected = %q", store.selected)
+	}
+}
+
+func TestSelectorIgnoresViewLoadThatCompletesAfterCancel(t *testing.T) {
+	model := New(fakeSnapshotLoader{}, WithGlobalViewStore(&fakeGlobalViewStore{}))
+	model.loading = false
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'V'}})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = next.(Model)
+	next, _ = model.Update(globalViewsLoadedMsg{views: []protocol.GlobalViewRecord{{View: domain.DefaultBoardView()}}})
+	model = next.(Model)
+	if model.viewOverlay != nil || model.viewsLoading {
+		t.Fatal("cancelled load reopened the view overlay")
+	}
+}
+
 func (f *fakeUIStateStore) GetUIStateForProject(_ context.Context, _ string, key string) (protocol.UIStateResponseBody, error) {
 	f.gets = append(f.gets, key)
 	if f.err != nil {

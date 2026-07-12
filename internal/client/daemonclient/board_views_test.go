@@ -93,3 +93,37 @@ func TestSelectGlobalViewCarriesTypedConsumerAndGlobalScope(t *testing.T) {
 		t.Fatalf("SelectGlobalView response = %+v", resp)
 	}
 }
+
+func TestGlobalViewListAndDeleteUseExplicitGlobalProject(t *testing.T) {
+	commands := []string{}
+	transport := &taskRecordingTransport{replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		commands = append(commands, req.Command)
+		switch req.Command {
+		case protocol.CommandBoardViewList:
+			var body protocol.BoardViewListRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil || body.ProjectID != "global" {
+				t.Fatalf("global list body=%+v err=%v", body, err)
+			}
+			return responseWithJSON(t, req, protocol.BoardViewListResponseBody{ProjectID: "global"}), nil
+		case protocol.CommandBoardViewDelete:
+			var body protocol.BoardViewDeleteRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil || body.ProjectID != "global" || body.ViewID != "custom" {
+				t.Fatalf("global delete body=%+v err=%v", body, err)
+			}
+			return responseWithJSON(t, req, struct{}{}), nil
+		default:
+			t.Fatalf("unexpected command %q", req.Command)
+			return protocol.ResponseEnvelope{}, nil
+		}
+	}}
+	client := New(transport).WithProjectID("local")
+	if _, err := client.ListGlobalViews(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.DeleteGlobalView(context.Background(), " custom "); err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) != 2 {
+		t.Fatalf("commands=%v", commands)
+	}
+}

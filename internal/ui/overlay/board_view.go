@@ -9,7 +9,9 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
@@ -24,7 +26,10 @@ type BoardViewSelectMsg struct {
 	ViewID string
 }
 
-type BoardViewSaveMsg struct{ View domain.BoardView }
+type BoardViewSaveMsg struct {
+	View  domain.BoardView
+	Scope protocol.GlobalViewScope
+}
 type BoardViewDeleteMsg struct{ ViewID string }
 
 type boardViewOverlayMode int
@@ -43,6 +48,8 @@ type viewConfigurator struct {
 	filter                                      int
 	grouping                                    int
 	sortPreset                                  int
+	scope                                       int
+	projects                                    textinput.Model
 	filterChanged, groupingChanged, sortChanged bool
 }
 
@@ -57,7 +64,28 @@ type BoardViewOverlay struct {
 	configurator   viewConfigurator
 	errorText      string
 	lockedEditID   domain.BoardViewID
+	global         bool
+	globalScopes   map[domain.BoardViewID]protocol.GlobalViewScope
 	styles         *Styles
+}
+
+// NewGlobalBoardViewOverlay configures user-level views while retaining their
+// daemon-owned project scopes.
+func NewGlobalBoardViewOverlay(views []protocol.GlobalViewRecord, selectedViewID string) *BoardViewOverlay {
+	records := make([]domain.BoardViewRecord, 0, len(views))
+	scopes := make(map[domain.BoardViewID]protocol.GlobalViewScope, len(views))
+	builtIns := make(map[domain.BoardViewID]struct{})
+	for _, view := range domain.BuiltInBoardViews() {
+		builtIns[view.ID] = struct{}{}
+	}
+	for _, record := range views {
+		_, builtIn := builtIns[record.View.ID]
+		records = append(records, domain.BoardViewRecord{ProjectID: "global", View: record.View, BuiltIn: builtIn})
+		scopes[record.View.ID] = record.Scope
+	}
+	o := NewBoardViewOverlay(records, selectedViewID)
+	o.global, o.globalScopes = true, scopes
+	return o
 }
 
 func NewBoardViewOverlay(views []domain.BoardViewRecord, selectedViewID string) *BoardViewOverlay {
@@ -115,7 +143,9 @@ func (o *BoardViewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					o.errorText = "Validation: " + err.Error()
 					return o, nil
 				}
-				return o, func() tea.Msg { return SelectionMsg{Key: BoardViewSaveKey, Value: BoardViewSaveMsg{View: view}} }
+				return o, func() tea.Msg {
+					return SelectionMsg{Key: BoardViewSaveKey, Value: BoardViewSaveMsg{View: view, Scope: o.configuredScope()}}
+				}
 			}
 		}
 		var cmd tea.Cmd
@@ -132,6 +162,15 @@ func (o *BoardViewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				o.mode = boardViewBrowse
 				return o, nil
 			}
+		}
+		return o, nil
+	}
+	if mouse, ok := msg.(tea.MouseMsg); ok {
+		switch mouse.Button {
+		case tea.MouseButtonWheelUp:
+			o.moveCursor(-1)
+		case tea.MouseButtonWheelDown:
+			o.moveCursor(1)
 		}
 		return o, nil
 	}
@@ -166,9 +205,13 @@ func (o *BoardViewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case keybinds.ActionBoardViewDuplicate:
 			if len(o.views) > 0 {
 				view := o.views[o.cursor].View
+				scope := o.scopeForView(view.ID)
 				view.ID = domain.BoardViewID(o.uniqueViewID(string(view.ID) + "-copy"))
 				view.Title += " Copy"
 				view.Options.SortPolicy = domain.BoardViewSortDefault
+				if o.global {
+					o.globalScopes[view.ID] = scope
+				}
 				o.beginEdit(view, "")
 				return o, textinput.Blink
 			}
@@ -188,7 +231,9 @@ func (o *BoardViewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(o.views) > 0 && !o.views[o.cursor].BuiltIn {
 				view := o.views[o.cursor].View
 				view.Options.HideEmptyColumns = !view.Options.HideEmptyColumns
-				return o, func() tea.Msg { return SelectionMsg{Key: BoardViewSaveKey, Value: BoardViewSaveMsg{View: view}} }
+				return o, func() tea.Msg {
+					return SelectionMsg{Key: BoardViewSaveKey, Value: BoardViewSaveMsg{View: view, Scope: o.scopeForView(view.ID)}}
+				}
 			}
 			o.errorText = "Built-in views cannot be edited; duplicate it first."
 		}
@@ -329,7 +374,10 @@ func (o *BoardViewOverlay) beginEdit(view domain.BoardView, lockedID domain.Boar
 	title := textinput.New()
 	title.SetValue(view.Title)
 	title.Focus()
-	o.configurator = viewConfigurator{view: view, title: title, filter: filterPresetIndex(view.Filters), grouping: groupingPresetIndex(view), sortPreset: sortPresetIndex(view.Sort)}
+	projects := textinput.New()
+	scope := o.scopeForView(view.ID)
+	projects.SetValue(scopeProjectValue(scope))
+	o.configurator = viewConfigurator{view: view, title: title, filter: filterPresetIndex(view.Filters), grouping: groupingPresetIndex(view), sortPreset: sortPresetIndex(view.Sort), scope: globalScopePresetIndex(scope), projects: projects}
 	o.lockedEditID = lockedID
 	o.mode, o.errorText = boardViewEdit, ""
 }
@@ -344,6 +392,8 @@ func (o *BoardViewOverlay) beginAdvancedEdit() {
 }
 
 var configuratorFields = []string{"Title", "Layout", "Filters", "Grouping", "Ordered sorting", "Hide empty"}
+var globalConfiguratorFields = []string{"Title", "Layout", "Project scope", "Scope projects", "Filters", "Grouping", "Ordered sorting", "Hide empty"}
+var globalScopePresets = []string{"All projects", "Selected projects", "Current project"}
 var filterPresets = []string{"All issues", "Open only", "Active only", "Review ready"}
 var groupingPresets = []string{"Workflow columns", "Single list"}
 var sortPresets = []string{"Attention ↓, priority ↑, updated ↓", "Priority ↑, updated ↓", "Updated ↓", "Issue ID ↑"}
@@ -359,9 +409,9 @@ func (o *BoardViewOverlay) updateConfigurator(msg tea.Msg) (tea.Model, tea.Cmd) 
 		o.mode, o.errorText = boardViewBrowse, ""
 		return o, nil
 	case "tab", "down":
-		o.configurator.field = (o.configurator.field + 1) % len(configuratorFields)
+		o.configurator.field = (o.configurator.field + 1) % len(o.configuratorFieldLabels())
 	case "shift+tab", "up":
-		o.configurator.field = (o.configurator.field - 1 + len(configuratorFields)) % len(configuratorFields)
+		o.configurator.field = (o.configurator.field - 1 + len(o.configuratorFieldLabels())) % len(o.configuratorFieldLabels())
 	case "left":
 		o.adjustConfigurator(-1)
 	case "right", "enter":
@@ -372,26 +422,56 @@ func (o *BoardViewOverlay) updateConfigurator(msg tea.Msg) (tea.Model, tea.Cmd) 
 			o.errorText = "Validation: " + err.Error()
 			return o, nil
 		}
-		return o, func() tea.Msg { return SelectionMsg{Key: BoardViewSaveKey, Value: BoardViewSaveMsg{View: view}} }
+		scope := o.configuredScope()
+		if o.global {
+			if err := scope.Validate(); err != nil {
+				o.errorText = "Validation: " + err.Error()
+				return o, nil
+			}
+		}
+		return o, func() tea.Msg {
+			return SelectionMsg{Key: BoardViewSaveKey, Value: BoardViewSaveMsg{View: view, Scope: scope}}
+		}
 	case "ctrl+j":
 		o.beginAdvancedEdit()
 		return o, textarea.Blink
 	default:
-		if o.configurator.field == 0 {
+		if o.configurator.field == 0 || (o.global && o.configurator.field == 3) {
 			var cmd tea.Cmd
-			o.configurator.title, cmd = o.configurator.title.Update(msg)
+			if o.configurator.field == 0 {
+				o.configurator.title, cmd = o.configurator.title.Update(msg)
+			} else {
+				o.configurator.projects, cmd = o.configurator.projects.Update(msg)
+			}
 			return o, cmd
 		}
 	}
 	o.configurator.title.Blur()
+	o.configurator.projects.Blur()
 	if o.configurator.field == 0 {
 		o.configurator.title.Focus()
+	} else if o.global && o.configurator.field == 3 {
+		o.configurator.projects.Focus()
 	}
 	return o, nil
 }
 
 func (o *BoardViewOverlay) adjustConfigurator(delta int) {
 	c := &o.configurator
+	if o.global {
+		switch c.field {
+		case 2:
+			c.scope = (c.scope + delta + len(globalScopePresets)) % len(globalScopePresets)
+			return
+		case 3:
+			return
+		default:
+			if c.field > 3 {
+				c.field -= 2
+				defer func() { c.field += 2 }()
+			}
+		}
+	}
 	switch c.field {
 	case 1:
 		layouts := []domain.BoardViewLayout{domain.BoardViewLayoutHorizontalGrid, domain.BoardViewLayoutColumnBoard, domain.BoardViewLayoutTreeList}
@@ -451,9 +531,13 @@ func (o *BoardViewOverlay) configuredView() domain.BoardView {
 
 func (o *BoardViewOverlay) renderConfigurator(width, height int) string {
 	view := o.configuredView()
+	labels := o.configuratorFieldLabels()
 	values := []string{o.configurator.title.View(), viewLayoutLabel(view.Layout), filterPresets[o.configurator.filter], groupingPresets[o.configurator.grouping], sortPresets[o.configurator.sortPreset], fmt.Sprintf("%t", view.Options.HideEmptyColumns)}
+	if o.global {
+		values = []string{o.configurator.title.View(), viewLayoutLabel(view.Layout), globalScopePresets[o.configurator.scope], o.configurator.projects.View(), filterPresets[o.configurator.filter], groupingPresets[o.configurator.grouping], sortPresets[o.configurator.sortPreset], fmt.Sprintf("%t", view.Options.HideEmptyColumns)}
+	}
 	lines := []string{"Configure the View with guided fields; no JSON required.", ""}
-	for i, label := range configuratorFields {
+	for i, label := range labels {
 		prefix := "  "
 		if i == o.configurator.field {
 			prefix = "▸ "
@@ -464,6 +548,63 @@ func (o *BoardViewOverlay) renderConfigurator(width, height int) string {
 		lines = append(lines, "", o.errorText)
 	}
 	return o.renderSingleDialog(width, height, "View Configurator", strings.Join(lines, "\n"), []keybinds.Binding{{Key: "Tab", Description: "field"}, {Key: "←/→", Description: "choice"}, {Key: "Ctrl+S", Description: "save"}, {Key: "Ctrl+J", Description: "advanced JSON"}, {Key: "Esc", Description: "cancel"}})
+}
+
+func (o *BoardViewOverlay) configuratorFieldLabels() []string {
+	if o.global {
+		return globalConfiguratorFields
+	}
+	return configuratorFields
+}
+
+func (o *BoardViewOverlay) scopeForView(id domain.BoardViewID) protocol.GlobalViewScope {
+	if scope, ok := o.globalScopes[id]; ok {
+		return scope
+	}
+	return protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeAllProjects}
+}
+
+func globalScopePresetIndex(scope protocol.GlobalViewScope) int {
+	switch scope.Kind {
+	case protocol.GlobalViewScopeSelectedProjects:
+		return 1
+	case protocol.GlobalViewScopeCurrentProject:
+		return 2
+	default:
+		return 0
+	}
+}
+
+func scopeProjectValue(scope protocol.GlobalViewScope) string {
+	if scope.Kind == protocol.GlobalViewScopeCurrentProject {
+		return scope.CurrentProjectID.String()
+	}
+	parts := make([]string, 0, len(scope.ProjectIDs))
+	for _, id := range scope.ProjectIDs {
+		parts = append(parts, id.String())
+	}
+	return strings.Join(parts, ",")
+}
+
+func (o *BoardViewOverlay) configuredScope() protocol.GlobalViewScope {
+	if !o.global {
+		return protocol.GlobalViewScope{}
+	}
+	value := strings.TrimSpace(o.configurator.projects.Value())
+	switch o.configurator.scope {
+	case 1:
+		ids := make([]naming.ProjectID, 0)
+		for _, part := range strings.Split(value, ",") {
+			if id := strings.TrimSpace(part); id != "" {
+				ids = append(ids, naming.ProjectID(id))
+			}
+		}
+		return protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeSelectedProjects, ProjectIDs: ids}
+	case 2:
+		return protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeCurrentProject, CurrentProjectID: naming.ProjectID(value)}
+	default:
+		return protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeAllProjects}
+	}
 }
 
 func viewLayoutLabel(layout domain.BoardViewLayout) string {

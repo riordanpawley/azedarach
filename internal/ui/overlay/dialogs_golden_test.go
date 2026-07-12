@@ -49,6 +49,7 @@ func TestDialogs_View_Golden(t *testing.T) {
 		{name: "orchestration_empty", view: goldenOrchestrationEmptyView},
 		{name: "board_view", view: goldenBoardView},
 		{name: "view_configurator", view: goldenViewConfigurator},
+		{name: "global_view_configurator", view: goldenGlobalViewConfigurator},
 		{name: "interaction", view: goldenInteractionView},
 	}
 
@@ -92,6 +93,7 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 		{name: "orchestration_small", view: goldenOrchestrationSmallView},
 		{name: "board_view_small", view: goldenBoardViewSmall},
 		{name: "view_configurator_small", view: goldenViewConfiguratorSmall},
+		{name: "global_view_configurator_small", view: goldenGlobalViewConfiguratorSmall},
 		{name: "interaction_small", view: goldenInteractionSmallView},
 	}
 
@@ -163,6 +165,22 @@ func goldenViewConfiguratorSmall(t *testing.T) string {
 	model, _ := o.Update(tea.WindowSizeMsg{Width: 54, Height: 18})
 	o = model.(*BoardViewOverlay)
 	model, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	return model.(*BoardViewOverlay).View()
+}
+
+func goldenGlobalViewConfigurator(t *testing.T) string {
+	o := NewGlobalBoardViewOverlay([]protocol.GlobalViewRecord{{View: domain.OrchestrationBoardView(), Scope: protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeAllProjects}}}, "orchestration")
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	o = model.(*BoardViewOverlay)
+	model, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	return model.(*BoardViewOverlay).View()
+}
+
+func goldenGlobalViewConfiguratorSmall(t *testing.T) string {
+	o := NewGlobalBoardViewOverlay([]protocol.GlobalViewRecord{{View: domain.OrchestrationBoardView(), Scope: protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeAllProjects}}}, "orchestration")
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 54, Height: 18})
+	o = model.(*BoardViewOverlay)
+	model, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	return model.(*BoardViewOverlay).View()
 }
 

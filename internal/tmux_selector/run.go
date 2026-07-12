@@ -44,18 +44,20 @@ func Run(cfg *config.Config) error {
 		"total_elapsed_ms", time.Since(processStart).Milliseconds(),
 		"socket_path", uiStateSocketPath,
 	)
+	daemonClient := daemonclient.New(transport.NewClient(uiStateSocketPath))
 	model := New(
 		NewDefaultGlobalInventoryLoader(tmuxClient, logger),
 		WithSwitcher(tmuxClient),
 		WithKiller(NewDaemonKiller(tmuxClient, logger)),
 		WithDetailOpener(NewDaemonDetailOpener(logger)),
-		WithUIStateStore(daemonclient.New(transport.NewClient(uiStateSocketPath))),
+		WithUIStateStore(daemonClient),
+		WithGlobalViewStore(daemonClient),
 	)
 	logger.Info("tmux selector model constructed",
 		"elapsed_ms", time.Since(processStart).Milliseconds(),
 		"ui_state_store", true,
 	)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	runStart := time.Now()
 	logger.Info("tmux selector tea program starting",
 		"elapsed_ms", runStart.Sub(processStart).Milliseconds(),
