@@ -483,6 +483,7 @@ should invest in:
 - review findings linked to worker issues
 - one repair worker per review batch
 - complete-check that includes review evidence, not only graph/session state
+- investigation disposition evidence: human-facing findings remain explicitly human-gated, while declared internal review children become closeable only after accepted reviewer evidence and are blocked again by returned findings
 
 ## Suggested Roadmap
 

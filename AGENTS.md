@@ -154,7 +154,7 @@ fd "filename" -t f internal cmd
    - `session.start`/`session.attach`/`session.pause`/`session.resume`/`session.stop` runtime-presence checks -> `tmux`
    - advisor-session singleton/recovery/cleanup per interaction request -> `hybrid` (refreshed durable request/session-role projection + live tmux runtime; terminal requests and project removal clean advisor resources)
    - session recovery/reconcile -> `hybrid`
-   - `task.close`/`task.close_preflight`/`task.delete`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle and orchestration checks -> `hybrid` (read v2 issue lifecycle projection first, then compare with live runtime)
+   - `task.close`/`task.close_preflight`/`task.delete`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle, investigation disposition/acceptance, and orchestration checks -> `hybrid` (read v2 issue lifecycle and evidence projection first, then compare with live runtime)
    - `task.review_handoff` external busy-equivalent session activity gate before moving to `in_review` -> `projection` (durable issue v2 lifecycle/review projection + session activity projection; active issue self-handoff remains allowed)
    - `task.integration_readiness` worker evidence gate and `task.context_risk_closeout` repeated-local-failure gate -> `projection` (durable issue projection + mailbox/observation evidence)
    - `task.merge_base_target` branch integration target gate -> `projection` (durable issue graph + worktree projection; explicit root-to-base requests also require issue-scoped `human.input_provided` acceptance evidence)
@@ -209,9 +209,10 @@ If any are missing, keep issue state `in_progress` or `open`.
 
 1. Use the durable `investigation` issue type for research, discovery, spikes, analysis, experiments, audits, and issues whose primary deliverable is findings, options, recommendations, or an AI Agent Band/session discussion, even when they have no code diff or repository artifact.
 2. Whenever issue intent and type disagree, correct the type with `az issue update --type <type>` and record why. Until corrected, apply this gate based on actual intent so legacy or misclassified work is not closed accidentally.
-3. Investigation-like issues require explicit, issue-specific human acceptance before integration, terminal close, cancellation, session stop, or worktree cleanup. An integration-sweep request, `in_review` state, agent/reviewer approval, or lack of a diff does not satisfy this gate.
-4. Before asking for human review, surface the findings and identify all artifacts plus the relevant Agent Band/session location. Preserve the issue, session, and worktree in review/waiting-human state and record durable evidence that human review is pending.
-5. Immediately before any terminal action, re-check the issue's type, intent, and durable evidence. Proceed only when explicit human acceptance of the investigation findings and disposition is recorded for that issue.
+3. Investigations default to the `human_findings` disposition for migration safety. Human-facing investigations require explicit, issue-specific `human.input_provided` evidence with `investigation_findings_accepted=true` before integration, terminal close, cancellation, session stop, or worktree cleanup. An integration sweep, `in_review`, reviewer approval, or lack of a diff is insufficient.
+4. AI-initiated read-only review/audit children may instead declare `internal_review` with an `investigation.disposition_declared` issue record when their findings are intermediate verification inputs consumed by implementation. They may close only after a durable orchestration `review.completed` outcome of `accepted`; a later `returned` or `integration_failed` outcome revokes readiness until a new acceptance.
+5. Before asking for human review of `human_findings`, surface the findings and identify all artifacts plus the relevant Agent Band/session location. Preserve the issue, session, and worktree in review/waiting-human state and record durable evidence that human review is pending.
+6. Immediately before any terminal action, re-check the issue's type, disposition, and durable evidence. Never infer `internal_review` from title, parentage, read-only work, or agent authorship; missing/invalid declarations remain human-facing.
 
 ## CLI/Binary Rules
 

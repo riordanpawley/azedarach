@@ -3006,6 +3006,53 @@ func TestTaskClosePreflightBlocksDirtyWorktreeInDaemonPolicy(t *testing.T) {
 	}
 }
 
+func TestTaskClosePreflightEnforcesInvestigationDispositionAcceptance(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	projectID := "proj-investigation-acceptance"
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: logger}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}}
+
+	tests := []struct {
+		name       string
+		events     []issues.IssueObservationEventParams
+		wantReason string
+	}{
+		{name: "human facing remains gated", wantReason: "human-facing investigation lacks explicit issue-specific findings acceptance"},
+		{name: "internal accepted", events: []issues.IssueObservationEventParams{
+			{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+		}},
+		{name: "internal returned findings remain blocked", events: []issues.IssueObservationEventParams{
+			{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"outcome": "returned", "actor_id": "reviewer"}},
+		}, wantReason: "unresolved returned findings"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: tt.name, Type: domain.TypeInvestigation, Status: domain.StatusInReview})
+			if err != nil {
+				t.Fatalf("create investigation: %v", err)
+			}
+			for _, event := range tt.events {
+				if _, err := issuesClient.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
+					t.Fatalf("append event: %v", err)
+				}
+			}
+			_, err = d.validateTaskClosePreflight(ctx, projectID, issueID, taskClosePreflightOptions{}, protocol.RequestEnvelope{})
+			if tt.wantReason == "" && err != nil {
+				t.Fatalf("accepted internal review blocked: %v", err)
+			}
+			if tt.wantReason != "" && (err == nil || !strings.Contains(err.Error(), tt.wantReason)) {
+				t.Fatalf("error = %v, want reason %q", err, tt.wantReason)
+			}
+		})
+	}
+}
+
 func TestTaskCloseBlocksActiveSessionActivity(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -9294,6 +9341,51 @@ func TestTaskCompleteCheckReportsMixedStaleCloseableAndIncompleteChildren(t *tes
 	}
 	if !strings.Contains(advice, "az orchestrate start --root "+rootID+" --issue "+incompleteID+" --json") {
 		t.Fatalf("advice = %+v, missing runnable incomplete child start command", result.Advice)
+	}
+}
+
+func TestTaskCompleteCheckClassifiesInvestigationChildrenByAcceptance(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-complete-check-investigations"
+	repoDir := t.TempDir()
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	humanID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Human findings", Type: domain.TypeInvestigation, Status: domain.StatusInReview, ParentID: &rootID})
+	if err != nil {
+		t.Fatalf("create human investigation: %v", err)
+	}
+	internalID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Internal review", Type: domain.TypeInvestigation, Status: domain.StatusInReview, ParentID: &rootID})
+	if err != nil {
+		t.Fatalf("create internal investigation: %v", err)
+	}
+	for _, event := range []issues.IssueObservationEventParams{
+		{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
+		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+	} {
+		if _, err := issuesClient.AppendIssueObservationEvent(ctx, internalID, event); err != nil {
+			t.Fatalf("append internal review event: %v", err)
+		}
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: logger}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
+	result, err := d.taskCompleteCheck(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskCompleteCheck: %v", err)
+	}
+	if len(result.StaleCloseableChildren) != 1 || result.StaleCloseableChildren[0].IssueID != internalID {
+		t.Fatalf("stale closeable = %+v, want accepted internal review %s only", result.StaleCloseableChildren, internalID)
+	}
+	evidence := strings.Join(result.StaleCloseableChildren[0].Evidence, "\n")
+	if !strings.Contains(evidence, "investigation disposition=internal_review") || !strings.Contains(evidence, "durable acceptance satisfied") {
+		t.Fatalf("internal review evidence = %q", evidence)
+	}
+	reasons := strings.Join(result.Reasons, "\n")
+	if !strings.Contains(reasons, "investigation "+humanID+" acceptance blocked") || strings.Contains(reasons, "investigation "+internalID+" acceptance blocked") {
+		t.Fatalf("reasons = %q", reasons)
 	}
 }
 
