@@ -69,6 +69,12 @@ az view select --project global --consumer tmux_selector orchestration
 az view get --project global --json orchestration
 ```
 
+The tmux selector status line identifies its selected saved view and prints the
+`az view select --project global --consumer tmux_selector VIEW` command used to
+change it. Arrow keys, `h/j/k/l`, and the mouse wheel move the active item;
+Page Up and Page Down move by the visible page while keeping the active session
+on screen in Grid, Board, and Tree layouts.
+
 `az global` opens the cross-project TUI. Its navigation keys operate on scoped
 `(project_id, issue_id)` identities. Before opening an issue or offering a
 project mutation, the TUI switches to and hydrates that issue's authoritative
