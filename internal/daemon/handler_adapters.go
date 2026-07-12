@@ -203,6 +203,63 @@ func (s issueLearnService) Review(ctx context.Context, req protocol.LearnReviewR
 	return protocol.LearnReviewResponseBody{Learnings: mapLearningsToProtocol(rows, false)}, nil
 }
 
+func (s issueLearnService) Suggest(ctx context.Context, req protocol.LearnSuggestRequestBody) (protocol.LearnSuggestResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnSuggestResponseBody{}, err
+	}
+	projectID := firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx))
+	var rows []issues.LearningSuggestion
+	if req.Refresh {
+		rows, err = client.SuggestLearningConsolidations(ctx, projectID)
+	} else {
+		rows, err = client.ListLearningSuggestions(ctx, issues.LearningSuggestionFilter{ProjectID: projectID, Status: issues.LearningSuggestionStatus(req.Status), Limit: req.Limit})
+	}
+	if err != nil {
+		return protocol.LearnSuggestResponseBody{}, err
+	}
+	return protocol.LearnSuggestResponseBody{Suggestions: mapLearningSuggestionsToProtocol(rows)}, nil
+}
+
+func (s issueLearnService) Consolidate(ctx context.Context, req protocol.LearnConsolidateRequestBody) (protocol.LearnConsolidateResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnConsolidateResponseBody{}, err
+	}
+	row, err := client.ConfirmLearningConsolidation(ctx, issues.ConfirmLearningConsolidationParams{SuggestionID: req.SuggestionID, CanonicalLearningID: req.CanonicalLearningID, Summary: req.Summary, Note: req.Note})
+	if err != nil {
+		return protocol.LearnConsolidateResponseBody{}, err
+	}
+	learning, err := client.GetLearning(ctx, req.CanonicalLearningID)
+	if err != nil {
+		return protocol.LearnConsolidateResponseBody{}, err
+	}
+	return protocol.LearnConsolidateResponseBody{Suggestion: mapLearningSuggestionToProtocol(row), Learning: mapLearningToProtocol(learning, false), SourceLearningIDs: []string{row.LeftLearningID, row.RightLearningID}}, nil
+}
+
+func (s issueLearnService) RejectSuggestion(ctx context.Context, req protocol.LearnSuggestionRejectRequestBody) (protocol.LearnSuggestionRejectResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnSuggestionRejectResponseBody{}, err
+	}
+	row, err := client.RejectLearningSuggestion(ctx, req.SuggestionID, req.Note)
+	if err != nil {
+		return protocol.LearnSuggestionRejectResponseBody{}, err
+	}
+	return protocol.LearnSuggestionRejectResponseBody{Suggestion: mapLearningSuggestionToProtocol(row)}, nil
+}
+
+func mapLearningSuggestionsToProtocol(rows []issues.LearningSuggestion) []protocol.LearningSuggestion {
+	out := make([]protocol.LearningSuggestion, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, mapLearningSuggestionToProtocol(row))
+	}
+	return out
+}
+func mapLearningSuggestionToProtocol(row issues.LearningSuggestion) protocol.LearningSuggestion {
+	return protocol.LearningSuggestion{ID: row.LocalID, ProjectID: row.ProjectID, Kind: string(row.Kind), LeftLearningID: row.LeftLearningID, RightLearningID: row.RightLearningID, Score: row.Score, Reason: row.Reason, Status: string(row.Status), ReviewNote: row.ReviewNote, CanonicalLearningID: row.CanonicalLearningID, CreatedAt: row.CreatedAt.Format(time.RFC3339Nano), UpdatedAt: row.UpdatedAt.Format(time.RFC3339Nano)}
+}
+
 func (s issueLearnService) Stale(ctx context.Context, req protocol.LearnStaleRequestBody) (protocol.LearnStaleResponseBody, error) {
 	client, err := s.issueClient(ctx)
 	if err != nil {

@@ -7,9 +7,9 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-func TestProtocolV34PreservesCombinedOrchestrationContracts(t *testing.T) {
-	if CurrentVersion != 34 {
-		t.Fatalf("protocol version = %d, want 34", CurrentVersion)
+func TestProtocolV35PreservesCombinedOrchestrationContracts(t *testing.T) {
+	if CurrentVersion != 35 {
+		t.Fatalf("protocol version = %d, want 35", CurrentVersion)
 	}
 	if CommandOrchestratorSessionStart == "" || CommandOrchestratorSessionAttach == "" || CommandOrchestratorSessionStatus == "" || EventOrchestrationLoopUpdated == "" {
 		t.Fatal("combined orchestration session and loop commands must remain registered")

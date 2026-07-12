@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -140,6 +141,20 @@ type learnGCOpts struct {
 	Confirm                bool
 }
 
+type learnSuggestOpts struct {
+	JSON, Refresh bool
+	Status        string
+	Limit         int
+}
+type learnConsolidateOpts struct {
+	JSON                                     bool
+	SuggestionID, CanonicalID, Summary, Note string
+}
+type learnSuggestionRejectOpts struct {
+	JSON               bool
+	SuggestionID, Note string
+}
+
 func runLearnCommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		printLearnUsage()
@@ -234,9 +249,119 @@ func runLearnCommand(cfg *config.Config, args []string) error {
 			return err
 		}
 		return runLearnGCRPC(cfg, opts)
+	case "suggest":
+		opts, err := parseLearnSuggestArgs(args[1:])
+		if err != nil {
+			return err
+		}
+		return runLearnSuggestRPC(cfg, opts)
+	case "consolidate":
+		opts, err := parseLearnConsolidateArgs(args[1:])
+		if err != nil {
+			return err
+		}
+		return runLearnConsolidateRPC(cfg, opts)
+	case "suggestion-reject":
+		opts, err := parseLearnSuggestionRejectArgs(args[1:])
+		if err != nil {
+			return err
+		}
+		return runLearnSuggestionRejectRPC(cfg, opts)
 	default:
 		return fmt.Errorf("unknown learn command: %s", args[0])
 	}
+}
+
+func runLearnSuggestRPC(cfg *config.Config, opts learnSuggestOpts) error {
+	var out protocol.LearnSuggestResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnSuggest, protocol.LearnSuggestRequestBody{Refresh: opts.Refresh, Status: opts.Status, Limit: opts.Limit}, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	if len(out.Suggestions) == 0 {
+		fmt.Println("No learning consolidation suggestions.")
+		return nil
+	}
+	for _, s := range out.Suggestions {
+		fmt.Printf("%s [%s/%s] %s + %s score=%d: %s\n", s.ID, s.Kind, s.Status, s.LeftLearningID, s.RightLearningID, s.Score, s.Reason)
+	}
+	return nil
+}
+func runLearnConsolidateRPC(cfg *config.Config, opts learnConsolidateOpts) error {
+	var out protocol.LearnConsolidateResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnConsolidate, protocol.LearnConsolidateRequestBody{SuggestionID: opts.SuggestionID, CanonicalLearningID: opts.CanonicalID, Summary: opts.Summary, Note: opts.Note}, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Consolidated %s into %s\n", out.Suggestion.ID, out.Learning.ID)
+	return nil
+}
+func runLearnSuggestionRejectRPC(cfg *config.Config, opts learnSuggestionRejectOpts) error {
+	var out protocol.LearnSuggestionRejectResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnSuggestionReject, protocol.LearnSuggestionRejectRequestBody{SuggestionID: opts.SuggestionID, Note: opts.Note}, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Rejected learning suggestion: %s\n", out.Suggestion.ID)
+	return nil
+}
+
+func parseLearnSuggestArgs(args []string) (learnSuggestOpts, error) {
+	opts := learnSuggestOpts{Status: "pending", Limit: 100}
+	fs := flag.NewFlagSet("learn suggest", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json")
+	fs.BoolVar(&opts.Refresh, "refresh", false, "refresh suggestions")
+	fs.StringVar(&opts.Status, "status", opts.Status, "status")
+	fs.IntVar(&opts.Limit, "limit", opts.Limit, "limit")
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	if fs.NArg() != 0 {
+		return opts, fmt.Errorf("usage: az learn suggest [--refresh] [--status pending|rejected|confirmed] [--limit N] [--json]")
+	}
+	if opts.Limit < 0 {
+		return opts, errors.New("limit must be non-negative")
+	}
+	return opts, nil
+}
+func parseLearnConsolidateArgs(args []string) (learnConsolidateOpts, error) {
+	var opts learnConsolidateOpts
+	fs := flag.NewFlagSet("learn consolidate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json")
+	fs.StringVar(&opts.CanonicalID, "canonical", "", "canonical learning id")
+	fs.StringVar(&opts.Summary, "summary", "", "merged summary")
+	fs.StringVar(&opts.Note, "note", "", "audit note")
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	if fs.NArg() != 1 || strings.TrimSpace(opts.CanonicalID) == "" || strings.TrimSpace(opts.Note) == "" {
+		return opts, fmt.Errorf("usage: az learn consolidate --canonical <learning-id> --note <text> [--summary <text>] <suggestion-id> [--json]")
+	}
+	opts.SuggestionID = strings.TrimSpace(fs.Arg(0))
+	return opts, nil
+}
+func parseLearnSuggestionRejectArgs(args []string) (learnSuggestionRejectOpts, error) {
+	var opts learnSuggestionRejectOpts
+	fs := flag.NewFlagSet("learn suggestion-reject", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json")
+	fs.StringVar(&opts.Note, "note", "", "audit note")
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	if fs.NArg() != 1 || strings.TrimSpace(opts.Note) == "" {
+		return opts, fmt.Errorf("usage: az learn suggestion-reject --note <text> <suggestion-id> [--json]")
+	}
+	opts.SuggestionID = strings.TrimSpace(fs.Arg(0))
+	return opts, nil
 }
 
 func runLearnAddRPC(cfg *config.Config, opts learnAddOpts) error {
@@ -1128,7 +1253,7 @@ func parseLearningAgeDuration(raw string) (time.Duration, error) {
 }
 
 func printLearnUsage() {
-	fmt.Println("Usage: az learn <add|recall|show|review|stale|demote|promote|retire|relate|supersede|doctor|gc> [arguments]")
+	fmt.Println("Usage: az learn <add|recall|show|review|stale|demote|promote|retire|relate|supersede|suggest|consolidate|suggestion-reject|doctor|gc> [arguments]")
 	fmt.Println("  add      Capture an evidence-backed candidate learning")
 	fmt.Println("  recall   Search accepted/promoted learning summaries")
 	fmt.Println("  show     Show a learning with full evidence")
@@ -1139,6 +1264,9 @@ func printLearnUsage() {
 	fmt.Println("  retire   Retire an Az-managed promoted guidance block")
 	fmt.Println("  relate   Record supersession or conflict between learnings")
 	fmt.Println("  supersede Record that a newer learning supersedes an older one")
+	fmt.Println("  suggest  Review or refresh deterministic duplicate/conflict suggestions")
+	fmt.Println("  consolidate Human-confirm a suggestion into a canonical learning")
+	fmt.Println("  suggestion-reject Reject a suggestion with an audit note")
 	fmt.Println("  doctor   Report learning lifecycle maintenance problems without mutation")
 	fmt.Println("  gc       Dry-run or confirm bounded cleanup of inactive learnings")
 	fmt.Println("")
@@ -1155,6 +1283,9 @@ func printLearnUsage() {
 	fmt.Println("  az learn retire --note <text> <learning-id> [--json]")
 	fmt.Println("  az learn relate --type supersedes|conflicts --note <text> [--scope-issue <id>] [--scope-req <id>] [--scope-session <id>] [--scope-tag <tag> ...] [--scope-file <path> ...] <source-learning-id> <target-learning-id> [--json]")
 	fmt.Println("  az learn supersede --note <text> [--scope-issue <id>] [--scope-req <id>] [--scope-session <id>] [--scope-tag <tag> ...] [--scope-file <path> ...] <new-learning-id> <old-learning-id> [--json]")
+	fmt.Println("  az learn suggest [--refresh] [--status pending|rejected|confirmed] [--limit N] [--json]")
+	fmt.Println("  az learn consolidate --canonical <learning-id> --note <text> [--summary <text>] <suggestion-id> [--json]")
+	fmt.Println("  az learn suggestion-reject --note <text> <suggestion-id> [--json]")
 	fmt.Println("  az learn doctor [--candidate-older-than-days N] [--inactive-older-than-days N] [--limit N] [--json]")
 	fmt.Println("  az learn gc [--confirm] [--candidate-older-than-days N] [--inactive-older-than-days N] [--limit N] [--json]")
 }
