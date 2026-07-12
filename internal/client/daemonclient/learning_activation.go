@@ -29,3 +29,11 @@ func (c *Client) CaptureLearningObservation(ctx context.Context, req protocol.Le
 	}
 	return out, nil
 }
+
+func (c *Client) ActivateContextualLearnings(ctx context.Context, req protocol.LearnContextualActivateRequestBody) (protocol.LearnContextualActivateResponseBody, error) {
+	var out protocol.LearnContextualActivateResponseBody
+	if err := c.commandJSON(ctx, protocol.CommandLearnContextualActivate, req, &out); err != nil {
+		return protocol.LearnContextualActivateResponseBody{}, err
+	}
+	return out, nil
+}

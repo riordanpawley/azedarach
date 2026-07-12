@@ -69,6 +69,7 @@ var orderedMigrations = []migration{
 	{id: "0036_advisor_sessions", path: "migrations/0036_advisor_sessions.sql"},
 	{id: "0037_learning_activation_feedback", path: "migrations/0037_learning_activation_feedback.sql"},
 	{id: "0038_learning_consolidation", path: "migrations/0038_learning_consolidation.sql"},
+	{id: "0039_contextual_learning_activation", path: "migrations/0039_contextual_learning_activation.sql"},
 	{id: "0040_typed_learning_observations", path: "migrations/0040_typed_learning_observations.sql"},
 }
 

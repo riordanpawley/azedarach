@@ -11,20 +11,28 @@ import (
 )
 
 type fakeLearnService struct {
-	activateFn  func(context.Context, protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error)
-	feedbackFn  func(context.Context, protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error)
-	addFn       func(context.Context, protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error)
-	recallFn    func(context.Context, protocol.LearnRecallRequestBody) (protocol.LearnRecallResponseBody, error)
-	showFn      func(context.Context, protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error)
-	reviewFn    func(context.Context, protocol.LearnReviewRequestBody) (protocol.LearnReviewResponseBody, error)
-	staleFn     func(context.Context, protocol.LearnStaleRequestBody) (protocol.LearnStaleResponseBody, error)
-	demoteFn    func(context.Context, protocol.LearnDemoteRequestBody) (protocol.LearnDemoteResponseBody, error)
-	promoteFn   func(context.Context, protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error)
-	retireFn    func(context.Context, protocol.LearnRetireRequestBody) (protocol.LearnRetireResponseBody, error)
-	relateFn    func(context.Context, protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error)
-	supersedeFn func(context.Context, protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error)
-	doctorFn    func(context.Context, protocol.LearnDoctorRequestBody) (protocol.LearnDoctorResponseBody, error)
-	gcFn        func(context.Context, protocol.LearnGCRequestBody) (protocol.LearnGCResponseBody, error)
+	contextualActivateFn func(context.Context, protocol.LearnContextualActivateRequestBody) (protocol.LearnContextualActivateResponseBody, error)
+	activateFn           func(context.Context, protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error)
+	feedbackFn           func(context.Context, protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error)
+	addFn                func(context.Context, protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error)
+	recallFn             func(context.Context, protocol.LearnRecallRequestBody) (protocol.LearnRecallResponseBody, error)
+	showFn               func(context.Context, protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error)
+	reviewFn             func(context.Context, protocol.LearnReviewRequestBody) (protocol.LearnReviewResponseBody, error)
+	staleFn              func(context.Context, protocol.LearnStaleRequestBody) (protocol.LearnStaleResponseBody, error)
+	demoteFn             func(context.Context, protocol.LearnDemoteRequestBody) (protocol.LearnDemoteResponseBody, error)
+	promoteFn            func(context.Context, protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error)
+	retireFn             func(context.Context, protocol.LearnRetireRequestBody) (protocol.LearnRetireResponseBody, error)
+	relateFn             func(context.Context, protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error)
+	supersedeFn          func(context.Context, protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error)
+	doctorFn             func(context.Context, protocol.LearnDoctorRequestBody) (protocol.LearnDoctorResponseBody, error)
+	gcFn                 func(context.Context, protocol.LearnGCRequestBody) (protocol.LearnGCResponseBody, error)
+}
+
+func (f *fakeLearnService) ContextualActivate(ctx context.Context, req protocol.LearnContextualActivateRequestBody) (protocol.LearnContextualActivateResponseBody, error) {
+	if f.contextualActivateFn != nil {
+		return f.contextualActivateFn(ctx, req)
+	}
+	return protocol.LearnContextualActivateResponseBody{}, nil
 }
 
 func (f *fakeLearnService) Capture(context.Context, protocol.LearnCaptureRequestBody) (protocol.LearnCaptureResponseBody, error) {

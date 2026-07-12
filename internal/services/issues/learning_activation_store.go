@@ -29,10 +29,10 @@ type LearningActivationOutcome struct {
 	RecordedAt                   time.Time
 }
 type RecordLearningActivationParams struct {
-	ProjectID, Surface, ContextFingerprint string
-	LearningIDs                            []string
-	TokenCost                              int
-	Explanation                            string
+	ProjectID, Surface, ContextFingerprint, Purpose, SessionID string
+	LearningIDs                                                []string
+	TokenCost                                                  int
+	Explanation                                                string
 }
 
 func (c *Client) RecordLearningActivation(ctx context.Context, p RecordLearningActivationParams) (LearningActivation, error) {
@@ -74,11 +74,47 @@ func (c *Client) RecordLearningActivation(ctx context.Context, p RecordLearningA
 	b, _ := json.Marshal(ids)
 	now := time.Now().UTC()
 	out := LearningActivation{ActivationID: "act-" + uuid.NewString(), ProjectID: p.ProjectID, Surface: p.Surface, ContextFingerprint: p.ContextFingerprint, LearningIDs: ids, TokenCost: p.TokenCost, Explanation: p.Explanation, DeliveredAt: now}
-	_, err = db.ExecContext(ctx, `INSERT INTO learning_activations(activation_id,project_id,surface,context_fingerprint,learning_ids_json,token_cost,explanation,delivered_at) VALUES(?,?,?,?,?,?,?,?)`, out.ActivationID, out.ProjectID, out.Surface, out.ContextFingerprint, string(b), out.TokenCost, out.Explanation, formatTimestamp(now))
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return LearningActivation{}, fmt.Errorf("begin learning activation: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO learning_activations(activation_id,project_id,surface,context_fingerprint,learning_ids_json,token_cost,explanation,delivered_at,purpose,session_id) VALUES(?,?,?,?,?,?,?,?,?,?)`, out.ActivationID, out.ProjectID, out.Surface, out.ContextFingerprint, string(b), out.TokenCost, out.Explanation, formatTimestamp(now), strings.TrimSpace(p.Purpose), strings.TrimSpace(p.SessionID))
 	if err != nil {
 		return LearningActivation{}, fmt.Errorf("record learning activation: %w", err)
 	}
+	if sessionID := strings.TrimSpace(p.SessionID); sessionID != "" {
+		for _, id := range ids {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO learning_activation_deliveries(activation_id,project_id,session_id,learning_id) VALUES(?,?,?,?)`, out.ActivationID, out.ProjectID, sessionID, id); err != nil {
+				return LearningActivation{}, fmt.Errorf("record session learning delivery %s: %w", id, classifySQLiteConstraint(err))
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return LearningActivation{}, fmt.Errorf("commit learning activation: %w", err)
+	}
 	return out, nil
+}
+
+func (c *Client) DeliveredLearningIDs(ctx context.Context, projectID, sessionID string) (map[string]struct{}, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT learning_id FROM learning_activation_deliveries WHERE project_id=? AND session_id=?`, strings.TrimSpace(projectID), strings.TrimSpace(sessionID))
+	if err != nil {
+		return nil, fmt.Errorf("list session learning activations: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = struct{}{}
+	}
+	return out, rows.Err()
 }
 
 func (c *Client) RecordLearningActivationOutcome(ctx context.Context, in LearningActivationOutcome) (LearningActivationOutcome, bool, error) {

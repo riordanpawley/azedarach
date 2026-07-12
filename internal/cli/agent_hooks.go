@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -61,6 +62,7 @@ type AgentHookOutcome struct {
 // their agent's hook protocol expects.
 func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookContext) (AgentHookOutcome, error) {
 	outcome := AgentHookOutcome{GuardResponse: map[string]any{}}
+	contextualGuidance := ""
 
 	agent := hookCtx.Agent
 	if !agent.IsKnown() {
@@ -76,6 +78,25 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 		notifyCtx, cancel := context.WithTimeout(ctx, hookBestEffortDaemonTimeout)
 		_ = ingestAgentHookRuntimeSignalBestEffort(notifyCtx, deps, hookCtx, event)
 		cancel()
+	}
+	if deps != nil && deps.DaemonClient != nil && (event == hookEventSessionStart || event == hookEventUserPromptSubmit) && strings.TrimSpace(hookCtx.IssueID) != "" {
+		activationCtx, cancel := context.WithTimeout(ctx, hookBestEffortDaemonTimeout)
+		purpose := domain.LearningPurposeContextTransition
+		if event == hookEventSessionStart {
+			purpose = domain.LearningPurposeSessionStart
+		}
+		query := agentHookPromptText(hookCtx.Payload)
+		projectID := strings.TrimSpace(deps.ProjectID)
+		if projectID == "" {
+			projectID = protocol.DefaultProjectID
+		}
+		activation, activationErr := deps.DaemonClient.ActivateContextualLearnings(activationCtx, protocol.LearnContextualActivateRequestBody{
+			Purpose: string(purpose), Surface: "agent_hook", SessionID: naming.SessionID(naming.CanonicalSessionID(projectID, hookCtx.IssueID)), ContextIssueID: naming.IssueID(hookCtx.IssueID), Query: query, TokenBudget: 192,
+		})
+		cancel()
+		if activationErr == nil && len(activation.Learnings) > 0 {
+			contextualGuidance = renderContextualLearningGuidance(activation.Learnings)
+		}
 	}
 
 	switch agent {
@@ -94,8 +115,32 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 	case AgentClaude:
 		// Claude has no port-layer guard today.
 	}
+	if contextualGuidance != "" {
+		if existing, _ := outcome.GuardResponse["systemMessage"].(string); strings.TrimSpace(existing) != "" {
+			contextualGuidance = strings.TrimSpace(existing) + "\n\n" + contextualGuidance
+		}
+		outcome.GuardResponse["systemMessage"] = contextualGuidance
+	}
 
 	return outcome, nil
+}
+
+func agentHookPromptText(payload map[string]any) string {
+	for _, key := range []string{"prompt", "user_prompt", "message"} {
+		if value, ok := payload[key].(string); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func renderContextualLearningGuidance(learnings []protocol.Learning) string {
+	var b strings.Builder
+	b.WriteString("Relevant project guidance:\n")
+	for _, learning := range learnings {
+		fmt.Fprintf(&b, "- %s: %s\n", learning.ID, learning.Summary)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func shouldAppendHookLogEvent(event string) bool {

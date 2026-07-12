@@ -16,6 +16,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 )
 
@@ -882,6 +883,35 @@ func TestAIHookRunCommandRoutesCodexAgentThroughRuntimeSignalPort(t *testing.T) 
 		signal.SessionID != "pr-az-port-1.pane-12" ||
 		!signal.Log {
 		t.Fatalf("runtime signal = %+v", signal)
+	}
+}
+
+func TestRunAgentHookActivatesGuidanceOnUserPromptTransition(t *testing.T) {
+	t.Setenv("TMUX_PANE", "%7")
+	var activationReq protocol.LearnContextualActivateRequestBody
+	transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		switch req.Command {
+		case protocol.CommandRuntimeSignalIngest:
+			return responseWithJSON(req, protocol.RuntimeSignalIngestResponseBody{Accepted: true}), nil
+		case protocol.CommandLearnContextualActivate:
+			if err := json.Unmarshal(req.Body, &activationReq); err != nil {
+				t.Fatal(err)
+			}
+			return responseWithJSON(req, protocol.LearnContextualActivateResponseBody{Learnings: []protocol.Learning{{ID: "learn-1", Summary: "Keep authority in the daemon."}}}), nil
+		default:
+			return responseWithJSON(req, map[string]any{}), nil
+		}
+	}}
+	deps := &Dependencies{DaemonClient: daemonclient.New(transport).WithProjectID("proj"), ProjectID: "proj"}
+	out, err := RunAgentHook(context.Background(), deps, AgentHookContext{Agent: AgentCodex, Event: hookEventUserPromptSubmit, IssueID: "az-1", ProjectDir: t.TempDir(), Payload: map[string]any{"prompt": "change session behavior"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activationReq.Purpose != string(domain.LearningPurposeContextTransition) || activationReq.Query != "change session behavior" || activationReq.SessionID != "pr-az-1" {
+		t.Fatalf("activation request = %+v", activationReq)
+	}
+	if got, _ := out.GuardResponse["systemMessage"].(string); !strings.Contains(got, "learn-1: Keep authority in the daemon.") {
+		t.Fatalf("system message = %q", got)
 	}
 }
 

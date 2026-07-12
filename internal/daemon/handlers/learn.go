@@ -31,6 +31,7 @@ type LearnService interface {
 	Activate(context.Context, protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error)
 	Feedback(context.Context, protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error)
 	Capture(context.Context, protocol.LearnCaptureRequestBody) (protocol.LearnCaptureResponseBody, error)
+	ContextualActivate(context.Context, protocol.LearnContextualActivateRequestBody) (protocol.LearnContextualActivateResponseBody, error)
 }
 
 type LearnHandler struct {
@@ -71,6 +72,19 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 			return learnInvalidRequest(resp, "sensitivity must be public|private")
 		}
 		return learnJSONResponse(ctx, resp, h.service.Capture, cmd)
+	case protocol.CommandLearnContextualActivate:
+		var cmd protocol.LearnContextualActivateRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.Purpose, cmd.Surface, cmd.Query = strings.TrimSpace(cmd.Purpose), strings.TrimSpace(cmd.Surface), strings.TrimSpace(cmd.Query)
+		if !domain.LearningActivationPurpose(cmd.Purpose).Valid() || cmd.Surface == "" || strings.TrimSpace(cmd.SessionID.String()) == "" {
+			return learnInvalidRequest(resp, "valid purpose, surface, and session_id are required")
+		}
+		if cmd.TokenBudget <= 0 || cmd.TokenBudget > 32768 {
+			return learnInvalidRequest(resp, "token_budget must be between 1 and 32768")
+		}
+		return learnJSONResponse(ctx, resp, h.service.ContextualActivate, cmd)
 	case protocol.CommandLearnActivate:
 		var cmd protocol.LearnActivateRequestBody
 		if !decodeLearnRequest(req.Body, &cmd, &resp) {

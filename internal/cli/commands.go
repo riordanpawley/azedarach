@@ -8660,34 +8660,19 @@ func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	payload, err := json.Marshal(protocol.LearnRecallRequestBody{
-		ContextIssueID: naming.IssueID(issueID),
-		Statuses:       []protocol.LearningStatus{protocol.LearningStatusAccepted, protocol.LearningStatusPromoted},
-		Limit:          3,
-	})
-	if err != nil {
-		return strings.Join(lines, "\n")
+	projectID := strings.TrimSpace(deps.ProjectID)
+	if projectID == "" {
+		projectID = protocol.DefaultProjectID
 	}
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
 	finish := primePhase(deps, "learning_recall", fmt.Sprintf("loading learning recall for %s", issueID))
-	resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       naming.RequestID(fmt.Sprintf("prime-learn-%d", time.Now().UnixNano())),
-		Kind:            protocol.EnvelopeKindCommand,
-		Command:         protocol.CommandLearnRecall,
-		SentAt:          time.Now().UTC(),
-		Body:            payload,
-		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(deps.ProjectID)},
-	})
+	resp, err := deps.DaemonClient.ActivateContextualLearnings(ctx, protocol.LearnContextualActivateRequestBody{Purpose: string(domain.LearningPurposeSessionStart), Surface: "prime", SessionID: naming.SessionID(sessionID), ContextIssueID: naming.IssueID(issueID), TokenBudget: 256})
 	finish(err)
-	if err != nil || !resp.OK || len(resp.Body) == 0 {
-		return strings.Join(lines, "\n")
-	}
-	var out protocol.LearnRecallResponseBody
-	if err := json.Unmarshal(resp.Body, &out); err != nil || len(out.Learnings) == 0 {
+	if err != nil || len(resp.Learnings) == 0 {
 		return strings.Join(lines, "\n")
 	}
 	lines = append(lines, "", "Relevant accepted/promoted learnings:")
-	for _, learning := range out.Learnings {
+	for _, learning := range resp.Learnings {
 		reason := strings.TrimSpace(learning.RecallReason)
 		if reason != "" {
 			reason = " (why: " + reason + ")"
