@@ -92,7 +92,7 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			deletion:   IssueDeletionPresent,
 		},
 		{
-			name:       "archive and tombstone are represented separately",
+			name:       "legacy issue tombstone is not durable issue state",
 			input:      LegacyIssueStateInput{Status: StatusOpen, Priority: P2, Archived: true, Tombstoned: true},
 			workflow:   IssueWorkflowOpen,
 			review:     IssueReviewNone,
@@ -100,7 +100,7 @@ func TestIssueStateFromLegacyMapsWorkflowReviewAndCloseState(t *testing.T) {
 			boardPhase: IssueBoardOpen,
 			display:    IssueDisplayOpen,
 			archive:    IssueArchiveArchived,
-			deletion:   IssueDeletionTombstoned,
+			deletion:   IssueDeletionPresent,
 		},
 	}
 

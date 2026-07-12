@@ -19,6 +19,34 @@ const (
 	IssueWorkflowClosed  IssueWorkflow = "closed"
 )
 
+// IssueDisposition is durable lifecycle authority. "Open" is deliberately not
+// represented here: it is the presentation phase of ready + idle.
+type IssueDisposition string
+
+const (
+	IssueDispositionBacklog   IssueDisposition = "backlog"
+	IssueDispositionReady     IssueDisposition = "ready"
+	IssueDispositionCompleted IssueDisposition = "completed"
+	IssueDispositionCancelled IssueDisposition = "cancelled"
+)
+
+// IssueEngagement records whether ready work is idle, being worked, or has
+// requested review. Non-ready dispositions are always idle.
+type IssueEngagement string
+
+const (
+	IssueEngagementIdle            IssueEngagement = "idle"
+	IssueEngagementWorking         IssueEngagement = "working"
+	IssueEngagementReviewRequested IssueEngagement = "review_requested"
+)
+
+type IssueVisibility string
+
+const (
+	IssueVisibilityLive     IssueVisibility = "live"
+	IssueVisibilityArchived IssueVisibility = "archived"
+)
+
 type IssueReviewState string
 
 const (
@@ -80,11 +108,15 @@ type IssueStateParts struct {
 }
 
 type IssueState struct {
-	LifecycleState IssueWorkflow      `json:"lifecycle_state" msgpack:"lifecycle_state"`
-	ReviewState    IssueReviewState   `json:"review_state" msgpack:"review_state"`
-	ClosedOutcome  IssueCloseOutcome  `json:"closed_outcome" msgpack:"closed_outcome"`
-	ArchiveState   IssueArchiveState  `json:"archive_state" msgpack:"archive_state"`
-	DeletionState  IssueDeletionState `json:"deletion_state" msgpack:"deletion_state"`
+	Disposition IssueDisposition `json:"disposition" msgpack:"disposition"`
+	Engagement  IssueEngagement  `json:"engagement" msgpack:"engagement"`
+	Visibility  IssueVisibility  `json:"visibility" msgpack:"visibility"`
+}
+
+type CanonicalIssueStateParts struct {
+	Disposition IssueDisposition
+	Engagement  IssueEngagement
+	Visibility  IssueVisibility
 }
 
 type LegacyIssueStateInput struct {
@@ -169,46 +201,99 @@ func NewIssueState(parts IssueStateParts) (IssueState, error) {
 	if err := validateIssueStateParts(parts); err != nil {
 		return IssueState{}, err
 	}
-	return IssueState{
-		LifecycleState: parts.Workflow,
-		ReviewState:    parts.Review,
-		ClosedOutcome:  parts.CloseOutcome,
-		ArchiveState:   parts.Archive,
-		DeletionState:  parts.Deletion,
-	}, nil
+	canonical := CanonicalIssueStateParts{Visibility: IssueVisibilityLive, Engagement: IssueEngagementIdle}
+	if parts.Archive == IssueArchiveArchived {
+		canonical.Visibility = IssueVisibilityArchived
+	}
+	switch parts.Workflow {
+	case IssueWorkflowBacklog:
+		canonical.Disposition = IssueDispositionBacklog
+	case IssueWorkflowOpen:
+		canonical.Disposition = IssueDispositionReady
+	case IssueWorkflowActive:
+		canonical.Disposition = IssueDispositionReady
+		canonical.Engagement = IssueEngagementWorking
+	case IssueWorkflowClosed:
+		if parts.CloseOutcome == IssueCloseCancelled {
+			canonical.Disposition = IssueDispositionCancelled
+		} else {
+			canonical.Disposition = IssueDispositionCompleted
+		}
+	}
+	if parts.Review == IssueReviewRequested {
+		canonical.Engagement = IssueEngagementReviewRequested
+	}
+	return NewCanonicalIssueState(canonical)
+}
+
+func NewCanonicalIssueState(parts CanonicalIssueStateParts) (IssueState, error) {
+	if parts.Engagement == "" {
+		parts.Engagement = IssueEngagementIdle
+	}
+	if parts.Visibility == "" {
+		parts.Visibility = IssueVisibilityLive
+	}
+	s := IssueState{Disposition: parts.Disposition, Engagement: parts.Engagement, Visibility: parts.Visibility}
+	if err := s.Validate(); err != nil {
+		return IssueState{}, err
+	}
+	return s, nil
 }
 
 func (s IssueState) Workflow() IssueWorkflow {
-	return s.LifecycleState
+	switch s.Disposition {
+	case IssueDispositionBacklog:
+		return IssueWorkflowBacklog
+	case IssueDispositionReady:
+		if s.Engagement == IssueEngagementIdle {
+			return IssueWorkflowOpen
+		}
+		return IssueWorkflowActive
+	default:
+		return IssueWorkflowClosed
+	}
 }
 
 func (s IssueState) Review() IssueReviewState {
-	return s.ReviewState
+	if s.Engagement == IssueEngagementReviewRequested {
+		return IssueReviewRequested
+	}
+	return IssueReviewNone
 }
 
 func (s IssueState) CloseOutcome() IssueCloseOutcome {
-	return s.ClosedOutcome
+	switch s.Disposition {
+	case IssueDispositionCompleted:
+		return IssueCloseCompleted
+	case IssueDispositionCancelled:
+		return IssueCloseCancelled
+	default:
+		return IssueCloseNone
+	}
 }
 
 func (s IssueState) Archive() IssueArchiveState {
-	return s.ArchiveState
+	if s.Visibility == IssueVisibilityArchived {
+		return IssueArchiveArchived
+	}
+	return IssueArchiveLive
 }
 
 func (s IssueState) Deletion() IssueDeletionState {
-	return s.DeletionState
+	return IssueDeletionPresent
 }
 
 func (s IssueState) BoardPhase() IssueBoardPhase {
 	if err := s.Validate(); err != nil {
 		return IssueBoardUnknown
 	}
-	if s.LifecycleState == IssueWorkflowClosed {
+	if s.IsClosed() {
 		return IssueBoardClosed
 	}
-	if s.ReviewState == IssueReviewRequested {
+	if s.Review() == IssueReviewRequested {
 		return IssueBoardReview
 	}
-	switch s.LifecycleState {
+	switch s.Workflow() {
 	case IssueWorkflowBacklog:
 		return IssueBoardBacklog
 	case IssueWorkflowActive:
@@ -222,16 +307,16 @@ func (s IssueState) DisplayPhase() IssueDisplayPhase {
 	if err := s.Validate(); err != nil {
 		return IssueDisplayUnknown
 	}
-	if s.LifecycleState == IssueWorkflowClosed {
-		if s.ClosedOutcome == IssueCloseCancelled {
+	if s.IsClosed() {
+		if s.CloseOutcome() == IssueCloseCancelled {
 			return IssueDisplayCancelled
 		}
 		return IssueDisplayDone
 	}
-	if s.ReviewState == IssueReviewRequested {
+	if s.Review() == IssueReviewRequested {
 		return IssueDisplayReview
 	}
-	switch s.LifecycleState {
+	switch s.Workflow() {
 	case IssueWorkflowBacklog:
 		return IssueDisplayBacklog
 	case IssueWorkflowActive:
@@ -242,15 +327,15 @@ func (s IssueState) DisplayPhase() IssueDisplayPhase {
 }
 
 func (s IssueState) IsArchived() bool {
-	return s.ArchiveState == IssueArchiveArchived
+	return s.Visibility == IssueVisibilityArchived
 }
 
 func (s IssueState) IsTombstoned() bool {
-	return s.DeletionState == IssueDeletionTombstoned
+	return false
 }
 
 func (s IssueState) IsClosed() bool {
-	return s.Validate() == nil && s.LifecycleState == IssueWorkflowClosed
+	return s.Validate() == nil && (s.Disposition == IssueDispositionCompleted || s.Disposition == IssueDispositionCancelled)
 }
 
 func (s IssueState) IsZero() bool {
@@ -258,13 +343,25 @@ func (s IssueState) IsZero() bool {
 }
 
 func (s IssueState) Validate() error {
-	return validateIssueStateParts(IssueStateParts{
-		Workflow:     s.LifecycleState,
-		Review:       s.ReviewState,
-		CloseOutcome: s.ClosedOutcome,
-		Archive:      s.ArchiveState,
-		Deletion:     s.DeletionState,
-	})
+	switch s.Disposition {
+	case IssueDispositionBacklog, IssueDispositionReady, IssueDispositionCompleted, IssueDispositionCancelled:
+	default:
+		return fmt.Errorf("invalid issue disposition: %s", s.Disposition)
+	}
+	switch s.Engagement {
+	case IssueEngagementIdle, IssueEngagementWorking, IssueEngagementReviewRequested:
+	default:
+		return fmt.Errorf("invalid issue engagement: %s", s.Engagement)
+	}
+	switch s.Visibility {
+	case IssueVisibilityLive, IssueVisibilityArchived:
+	default:
+		return fmt.Errorf("invalid issue visibility: %s", s.Visibility)
+	}
+	if s.Disposition != IssueDispositionReady && s.Engagement != IssueEngagementIdle {
+		return fmt.Errorf("issue disposition %s requires idle engagement, got %s", s.Disposition, s.Engagement)
+	}
+	return nil
 }
 
 func ValidateIssueStateTransition(from, to IssueState) error {
@@ -361,16 +458,16 @@ const (
 )
 
 func (s IssueState) transitionKey() issueStateTransition {
-	if s.LifecycleState == IssueWorkflowClosed {
-		if s.ClosedOutcome == IssueCloseCancelled {
+	if s.IsClosed() {
+		if s.CloseOutcome() == IssueCloseCancelled {
 			return issueTransitionCancel
 		}
 		return issueTransitionComplete
 	}
-	if s.ReviewState == IssueReviewRequested {
+	if s.Review() == IssueReviewRequested {
 		return issueTransitionReview
 	}
-	switch s.LifecycleState {
+	switch s.Workflow() {
 	case IssueWorkflowBacklog:
 		return issueTransitionBacklog
 	case IssueWorkflowActive:

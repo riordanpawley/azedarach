@@ -5889,6 +5889,122 @@ func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
 	}
 }
 
+func TestReconcileRepairsReadyIdleIssueWithLiveManagedRuntime(t *testing.T) {
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "live ready issue", Type: domain.TypeBug, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	tmuxRunner := newTestTmuxRunner(sessionID)
+	store := daemonstate.NewStore()
+	d := &Daemon{
+		cfg:  Config{RepoDir: repoDir, CLITool: "claude", Logger: slog.Default()},
+		tmux: tmux.NewClient(tmuxRunner, slog.Default()), session: daemonhandlers.NewSessionHandler(store), sessionStore: store,
+		worktreeManagersByRoot:    map[string]*git.WorktreeManager{repoDir: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)}, repoDir, slog.Default())},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)}, repoDir, slog.Default())},
+	}
+	result, err := d.reconcileTmuxAndDaemonSessions(context.Background(), projectID, issueID)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RepairedIssueLifecycle != 1 {
+		t.Fatalf("repaired lifecycle = %d, want 1", result.RepairedIssueLifecycle)
+	}
+	task, err := issueClient.GetWithRuntime(context.Background(), projectID, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.State.Disposition != domain.IssueDispositionReady || task.State.Engagement != domain.IssueEngagementWorking {
+		t.Fatalf("state = %+v, want ready/working", task.State)
+	}
+}
+
+func TestReconcileRejectsBacklogLiveRuntimeWithoutDestroyingIt(t *testing.T) {
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "live backlog issue", Type: domain.TypeBug, Status: domain.StatusOpen, Priority: domain.P4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlog := domain.IssueWorkflowBacklog
+	if err := issueClient.UpdateDetails(context.Background(), issueID, issues.UpdateTaskParams{Title: "live backlog issue", Type: domain.TypeBug, Priority: domain.P4, Lifecycle: &backlog}); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	tmuxRunner := newTestTmuxRunner(sessionID)
+	store := daemonstate.NewStore()
+	d := &Daemon{
+		cfg:  Config{RepoDir: repoDir, CLITool: "claude", Logger: slog.Default()},
+		tmux: tmux.NewClient(tmuxRunner, slog.Default()), session: daemonhandlers.NewSessionHandler(store), sessionStore: store,
+		worktreeManagersByRoot:    map[string]*git.WorktreeManager{repoDir: git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default())},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default())},
+	}
+	_, err = d.reconcileTmuxAndDaemonSessions(context.Background(), projectID, issueID)
+	if err == nil || !strings.Contains(err.Error(), "backlog issue") {
+		t.Fatalf("reconcile err = %v, want backlog invariant", err)
+	}
+	tmuxRunner.mu.Lock()
+	live := tmuxRunner.sessions[sessionID]
+	tmuxRunner.mu.Unlock()
+	if !live {
+		t.Fatal("live runtime was destroyed during invariant rejection")
+	}
+}
+
+func TestReconcileRefreshesLifecycleBeforeRepairAcrossDaemons(t *testing.T) {
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientA := issues.NewClient(repoDir, slog.Default())
+	clientB := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = clientA.CloseDB(); _ = clientB.CloseDB() })
+	issueID, err := clientA.Create(context.Background(), issues.CreateTaskParams{Title: "cross daemon", Type: domain.TypeBug, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate another daemon writing ready+idle after daemon A has already
+	// observed the issue. Reconcile must refresh the durable projection.
+	if _, err := clientA.GetWithRuntime(context.Background(), projectID, issueID); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientB.Update(context.Background(), issueID, domain.StatusOpen); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	tmuxRunner := newTestTmuxRunner(sessionID)
+	store := daemonstate.NewStore()
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, tmux: tmux.NewClient(tmuxRunner, slog.Default()), session: daemonhandlers.NewSessionHandler(store), sessionStore: store,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default())}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default())}}
+	result, err := d.reconcileTmuxAndDaemonSessions(context.Background(), projectID, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RepairedIssueLifecycle != 1 {
+		t.Fatalf("repairs=%d, want 1", result.RepairedIssueLifecycle)
+	}
+	task, err := clientB.GetWithRuntime(context.Background(), projectID, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.State.Engagement != domain.IssueEngagementWorking {
+		t.Fatalf("engagement=%s, want working", task.State.Engagement)
+	}
+}
+
 func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)

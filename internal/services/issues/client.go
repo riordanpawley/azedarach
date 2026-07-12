@@ -2271,6 +2271,55 @@ func (c *Client) Update(ctx context.Context, id string, status domain.Status) er
 	})
 }
 
+// RepairReadyIdleEngagement atomically promotes the compatibility store shape
+// for canonical ready+idle to ready+working. It deliberately uses a guarded
+// update so a concurrent terminal/backlog/archive transition always wins.
+func (c *Client) RepairReadyIdleEngagement(ctx context.Context, id string) (bool, error) {
+	var repaired bool
+	err := retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return sqliteutil.WithWriteLock(c.dbPath, func() error {
+				db, err := c.dbHandle()
+				if err != nil {
+					return err
+				}
+				tx, err := db.BeginTx(ctx, nil)
+				if err != nil {
+					return c.wrapError("repair-ready-idle", id, err)
+				}
+				defer func() {
+					if tx != nil {
+						_ = tx.Rollback()
+					}
+				}()
+				now := time.Now().UTC().Format(time.RFC3339Nano)
+				res, err := tx.ExecContext(ctx, `UPDATE issues
+					SET status=?, lifecycle_state='active', review_state='none', closed_outcome='none', updated_at=?
+					WHERE id=? AND lifecycle_state='open' AND review_state='none' AND closed_outcome='none' AND archived_at IS NULL`, domain.StatusInProgress, now, strings.TrimSpace(id))
+				if err != nil {
+					return c.wrapError("repair-ready-idle", id, err)
+				}
+				affected, err := res.RowsAffected()
+				if err != nil {
+					return c.wrapError("repair-ready-idle", id, err)
+				}
+				if affected == 1 {
+					if err := c.appendIssueObservationEvent(ctx, tx, strings.TrimSpace(id), domain.IssueEventIssueStatusChanged, map[string]any{"from_status": string(domain.StatusOpen), "to_status": string(domain.StatusInProgress), "reason": "live_managed_runtime"}); err != nil {
+						return c.wrapError("repair-ready-idle", id, err)
+					}
+					repaired = true
+				}
+				if err := tx.Commit(); err != nil {
+					return c.wrapError("repair-ready-idle", id, err)
+				}
+				tx = nil
+				return nil
+			})
+		})
+	})
+	return repaired, err
+}
+
 func (c *Client) updateLocked(ctx context.Context, id string, status domain.Status) error {
 	db, err := c.dbHandle()
 	if err != nil {

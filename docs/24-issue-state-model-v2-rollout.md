@@ -1,4 +1,4 @@
-# Issue State Model V2 Rollout
+# Factored Issue State and Managed Runtime Rollout
 
 ## Scope
 
@@ -7,11 +7,22 @@ CLI/TUI phases derived from that authority. The rollout is implemented through
 the issue domain model, SQLite startup migration, issue-store read/write paths,
 daemon readiness policy, and CLI/TUI display filters.
 
-The linked spec requirement is `cyp-v2-issue-state-domain`.
+The current corrective requirement is `dec-lifecycle-runtime-state-product`.
 
 ## Durable State
 
-The durable issue-store authority is:
+The canonical domain authority is the product of three small enums:
+
+- disposition: `backlog`, `ready`, `completed`, or `cancelled`;
+- engagement: `idle`, `working`, or `review_requested`, and non-ready
+  dispositions are constrained to idle;
+- visibility: `live` or `archived`.
+
+`open` is derived from `ready + idle`; it is not durable lifecycle authority.
+Issue deletion is not part of this state product. Dependency-edge tombstones
+remain separate relationship authority.
+
+The staged store adapter currently persists:
 
 - `lifecycle_state`: `backlog`, `open`, `active`, or `closed`.
 - `review_state`: `none` or `requested`; review is valid only for active
@@ -43,11 +54,11 @@ session activity:
 | Derived phase | Source |
 | --- | --- |
 | `backlog` | `lifecycle_state=backlog` |
-| `open` | `lifecycle_state=open` |
-| `active` | `lifecycle_state=active` and no review-ready presentation |
-| `review` | `lifecycle_state=active`, `review_state=requested`, and session activity is idle/done/no-agent or equivalent |
-| `done` | `lifecycle_state=closed` and `closed_outcome=completed` |
-| `cancelled` | `lifecycle_state=closed` and `closed_outcome=cancelled` |
+| `open` | disposition `ready`, engagement `idle` |
+| `active` | disposition `ready`, engagement `working` |
+| `review` | disposition `ready`, engagement `review_requested`, and review-ready runtime activity |
+| `done` | disposition `completed` |
+| `cancelled` | disposition `cancelled` |
 
 Review handoff is a derived readiness phase, not a durable workflow. An issue
 with `review_state=requested` remains operationally active while its session
@@ -79,6 +90,11 @@ authority. Closed-runtime guards now read `lifecycle_state` and `archived_at`
 instead of legacy `status` and `deleted_at`.
 
 ## Invariant Sources
+
+- `session.issue_lifecycle_runtime` is `hybrid`: refresh factored issue state,
+  then compare it with live tmux. A live runtime repairs `ready + idle` to
+  `ready + working`. Backlog, terminal, or archived divergence returns an
+  explicit invariant error and preserves the runtime for safe reconciliation.
 
 State-model v2 does not change the daemon invariant source categories, but it
 changes the durable projection fields those invariants must read:

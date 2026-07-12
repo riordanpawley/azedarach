@@ -8559,10 +8559,12 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 	}
 	runDaemonTestGit(t, repoDir, "commit", "-am", closedID.String()+": generate typed materializer rpc")
 	evidenceCommit := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
+	activeWorktree := filepath.Join(t.TempDir(), "active-worktree")
+	runDaemonTestGit(t, repoDir, "worktree", "add", "-q", activeWorktree, activeBranch)
 
 	for _, state := range []daemonstate.WorktreeState{
 		{ProjectID: projectID, IssueID: rootID.String(), Path: repoDir, Branch: rootBranch, UpdatedAt: time.Now().UTC()},
-		{ProjectID: projectID, IssueID: activeID.String(), Path: repoDir, Branch: activeBranch, UpdatedAt: time.Now().UTC()},
+		{ProjectID: projectID, IssueID: activeID.String(), Path: activeWorktree, Branch: activeBranch, UpdatedAt: time.Now().UTC()},
 	} {
 		if err := runtimeStateStore.UpsertWorktreeState(ctx, state); err != nil {
 			t.Fatalf("seed worktree state: %v", err)

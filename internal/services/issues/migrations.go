@@ -76,6 +76,19 @@ var orderedMigrations = []migration{
 	{id: "0042_learning_consolidation_scan_cursor", path: "migrations/0042_learning_consolidation_scan_cursor.sql"},
 	{id: "0043_learning_activation_telemetry", path: "migrations/0043_learning_activation_telemetry.sql"},
 	{id: "0044_learning_activation_abandonment", path: "migrations/0044_learning_activation_abandonment.sql"},
+	{id: "0045_issue_state_runtime_constraints", path: "migrations/0045_issue_state_runtime_constraints.sql", apply: applyIssueStateRuntimeConstraintsMigration},
+}
+
+func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB, id string) error {
+	var client Client
+	if err := client.ensureRuntimeProjectionSchema(db); err != nil {
+		return fmt.Errorf("repair runtime projection schema before migration %s: %w", id, err)
+	}
+	sqlText, err := loadMigrationSQL("migrations/0045_issue_state_runtime_constraints.sql")
+	if err != nil {
+		return fmt.Errorf("load migration %s: %w", id, err)
+	}
+	return client.applyMigration(ctx, db, id, sqlText)
 }
 
 const (

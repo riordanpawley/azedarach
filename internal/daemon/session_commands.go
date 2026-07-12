@@ -53,8 +53,9 @@ type resolvedSessionTarget struct {
 }
 
 type sessionRecoveryResult struct {
-	RecreatedTmuxSessions int `json:"recreated_tmux_sessions"`
-	AlignedDaemonSessions int `json:"aligned_daemon_sessions"`
+	RecreatedTmuxSessions  int `json:"recreated_tmux_sessions"`
+	AlignedDaemonSessions  int `json:"aligned_daemon_sessions"`
+	RepairedIssueLifecycle int `json:"repaired_issue_lifecycle"`
 }
 
 type issueResourceLifecycleContext struct {
@@ -3032,7 +3033,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		}
 	}
 	validationIssueIDs := reconcileSessionValidationIssueIDs(targetIssueKeys, tmuxSet, snapshotSessions, namingScope)
-	validIssueKeys, issueValidationEnabled, err := d.reconcileIssueKeyIndex(ctx, projectID, validationIssueIDs)
+	issuesByKey, issueValidationEnabled, err := d.reconcileIssueKeyIndex(ctx, projectID, validationIssueIDs)
 	if err != nil {
 		return result, err
 	}
@@ -3040,8 +3041,66 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		if !issueValidationEnabled {
 			return true
 		}
-		_, ok := validIssueKeys[issueKey]
+		_, ok := issuesByKey[issueKey]
 		return ok
+	}
+	var lifecycleInvariantErrs []error
+	enforceManagedRuntimeLifecycle := func(issueKey string) bool {
+		if !issueValidationEnabled {
+			return true
+		}
+		task, ok := issuesByKey[issueKey]
+		if !ok {
+			return true
+		}
+		issueClient := d.issueClientForProject(projectID)
+		action, invariantErr := domain.EvaluateManagedRuntimeLifecycle(task.State, true)
+		if action == domain.ManagedRuntimeLifecycleReject {
+			lifecycleInvariantErrs = append(lifecycleInvariantErrs, fmt.Errorf("managed session lifecycle invariant for issue %s: %w", task.ID, invariantErr))
+			return false
+		}
+		if action != domain.ManagedRuntimeLifecycleRepairWorking {
+			return true
+		}
+		repaired, updateErr := issueClient.RepairReadyIdleEngagement(ctx, task.ID.String())
+		if updateErr != nil {
+			lifecycleInvariantErrs = append(lifecycleInvariantErrs, fmt.Errorf("repair live managed session lifecycle for issue %s: %w", task.ID, updateErr))
+			return false
+		}
+		if !repaired {
+			refreshed, refreshErr := issueClient.GetWithRuntime(ctx, projectID, task.ID.String())
+			if refreshErr != nil {
+				lifecycleInvariantErrs = append(lifecycleInvariantErrs, fmt.Errorf("refresh live managed session lifecycle for issue %s: %w", task.ID, refreshErr))
+				return false
+			}
+			postAction, postErr := domain.EvaluateManagedRuntimeLifecycle(refreshed.State, true)
+			if postAction != domain.ManagedRuntimeLifecycleNoop {
+				lifecycleInvariantErrs = append(lifecycleInvariantErrs, fmt.Errorf("managed session lifecycle invariant for issue %s after concurrent transition: action=%s: %w", task.ID, postAction, postErr))
+				return false
+			}
+			issuesByKey[issueKey] = refreshed
+			return true
+		}
+		result.RepairedIssueLifecycle++
+		if repairedTask, getErr := issueClient.GetWithRuntime(ctx, projectID, task.ID.String()); getErr == nil {
+			issuesByKey[issueKey] = repairedTask
+			if d.hub != nil {
+				revision := d.nextRevision(projectID)
+				body, _ := json.Marshal(taskEventBodyFromTask(projectID, repairedTask))
+				d.hub.Publish(protocol.EventEnvelope{ProtocolVersion: protocol.CurrentVersion, ProjectID: naming.ProjectID(projectID), Revision: revision, Event: protocol.EventTaskUpdated, Kind: protocol.EnvelopeKindEvent, EmittedAt: time.Now().UTC(), Body: body})
+			}
+		}
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Info("session reconciliation repaired issue engagement", "project_id", projectID, "issue_id", task.ID.String(), "engagement", string(domain.IssueEngagementWorking))
+		}
+		return true
+	}
+	if issueValidationEnabled {
+		for issueKey := range tmuxSet {
+			if !enforceManagedRuntimeLifecycle(issueKey) {
+				delete(tmuxSet, issueKey)
+			}
+		}
 	}
 	for _, session := range snapshotSessions {
 		if session.Role == daemonstate.SessionRoleAdvisor {
@@ -3063,6 +3122,11 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			continue
 		}
 		if _, ok := tmuxSet[issueKey]; ok {
+			continue
+		}
+		// Recreating tmux makes the runtime live, so gate the prospective
+		// runtime through the same lifecycle invariant first.
+		if !enforceManagedRuntimeLifecycle(issueKey) {
 			continue
 		}
 		wt, getErr := worktreeManager.Get(ctx, issueID)
@@ -3234,10 +3298,10 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			"target_issue_id", targetIssueID,
 			"recreated_tmux_sessions", result.RecreatedTmuxSessions,
 			"aligned_daemon_sessions", result.AlignedDaemonSessions,
+			"repaired_issue_lifecycle", result.RepairedIssueLifecycle,
 		)
 	}
-
-	return result, nil
+	return result, errors.Join(lifecycleInvariantErrs...)
 }
 
 func runtimeReconcileTargetIssueKeySet(issueIDs []string) map[string]struct{} {
@@ -3287,7 +3351,7 @@ func reconcileSessionValidationIssueIDs(targetIssueKeys map[string]struct{}, tmu
 	return normalizeRuntimeReconcileIssueIDs(ids)
 }
 
-func (d *Daemon) reconcileIssueKeyIndex(ctx context.Context, projectID string, issueIDs []string) (map[string]struct{}, bool, error) {
+func (d *Daemon) reconcileIssueKeyIndex(ctx context.Context, projectID string, issueIDs []string) (map[string]domain.Task, bool, error) {
 	if d == nil {
 		return nil, false, nil
 	}
@@ -3314,13 +3378,13 @@ func (d *Daemon) reconcileIssueKeyIndex(ctx context.Context, projectID string, i
 		}
 		return nil, false, nil
 	}
-	index := make(map[string]struct{}, len(tasks))
+	index := make(map[string]domain.Task, len(tasks))
 	for _, task := range tasks {
 		key := sessionKey(task.ID.String())
 		if key == "" {
 			continue
 		}
-		index[key] = struct{}{}
+		index[key] = task
 	}
 	return index, true, nil
 }

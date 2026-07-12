@@ -106,7 +106,7 @@ func TestIssueFactsExposeClosedArchiveTombstoneAndOperationBlockers(t *testing.T
 		Workflow:     IssueWorkflowClosed,
 		CloseOutcome: IssueCloseCancelled,
 		Archive:      IssueArchiveArchived,
-		Deletion:     IssueDeletionTombstoned,
+		Deletion:     IssueDeletionPresent,
 	})
 	facts := DeriveIssueFacts(IssueFactsInput{
 		Status: StatusDone,
@@ -123,8 +123,8 @@ func TestIssueFactsExposeClosedArchiveTombstoneAndOperationBlockers(t *testing.T
 	if facts.DisplayPhase != IssueDisplayCancelled || facts.ClosedOutcome != IssueCloseCancelled {
 		t.Fatalf("facts = %+v, want cancelled display with cancelled outcome", facts)
 	}
-	if facts.ArchiveState != IssueArchiveArchived || facts.DeletionState != IssueDeletionTombstoned {
-		t.Fatalf("archive/deletion = %s/%s, want archived/tombstoned", facts.ArchiveState, facts.DeletionState)
+	if facts.ArchiveState != IssueArchiveArchived || facts.DeletionState != IssueDeletionPresent {
+		t.Fatalf("archive/deletion = %s/%s, want archived/present", facts.ArchiveState, facts.DeletionState)
 	}
 	if !facts.DelegatedOperation || len(facts.OperationBlockers) != 1 {
 		t.Fatalf("operation blockers = %+v, delegated=%t", facts.OperationBlockers, facts.DelegatedOperation)
@@ -139,7 +139,7 @@ func TestIssueFactsExposeClosedArchiveTombstoneAndOperationBlockers(t *testing.T
 	}).OperationBlockers[0].BlockedResourceKeys[0]; got != "issue:az-1" {
 		t.Fatalf("operation blocker resources were not cloned, got %q", got)
 	}
-	for _, want := range []string{"closed outcome is cancelled", "issue is archived", "issue is tombstoned"} {
+	for _, want := range []string{"closed outcome is cancelled", "issue is archived"} {
 		if !issueFactReasonsContain(facts, want) {
 			t.Fatalf("reasons = %#v, want %q", facts.ReasonMessages(), want)
 		}

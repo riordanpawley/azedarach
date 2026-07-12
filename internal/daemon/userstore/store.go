@@ -1087,7 +1087,10 @@ WHERE i.project_id=?`
 			&worktreeIssue, &worktreePath, &ahead, &behind, &additions, &deletions, &uncommitted, &hasConflicts, &conflicts); err != nil {
 			return nil, err
 		}
-		t.State = domain.IssueState{LifecycleState: domain.IssueWorkflow(lifecycle), ReviewState: domain.IssueReviewState(review), ClosedOutcome: domain.IssueCloseOutcome(outcome), ArchiveState: domain.IssueArchiveState(archive), DeletionState: domain.IssueDeletionState(deletion)}
+		t.State, err = domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflow(lifecycle), Review: domain.IssueReviewState(review), CloseOutcome: domain.IssueCloseOutcome(outcome), Archive: domain.IssueArchiveState(archive), Deletion: domain.IssueDeletionState(deletion)})
+		if err != nil {
+			return nil, fmt.Errorf("hydrate projected issue %s state: %w", t.ID, err)
+		}
 		t.Facts.LifecycleState, t.Facts.ReviewState, t.Facts.ClosedOutcome, t.Facts.ArchiveState, t.Facts.DeletionState = t.State.Workflow(), t.State.Review(), t.State.CloseOutcome(), t.State.Archive(), t.State.Deletion()
 		t.Facts.BoardPhase, t.Facts.DisplayPhase, t.Facts.DisplayStatus = t.State.BoardPhase(), t.State.DisplayPhase(), t.State.DisplayPhase().FilterStatus()
 		t.HasTmuxSession = hasTmux
