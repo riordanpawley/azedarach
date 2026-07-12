@@ -199,24 +199,25 @@ type LearningGCReport struct {
 }
 
 type LearningFilter struct {
-	ProjectID       string
-	IssueID         string
-	RequirementID   string
-	ContextIssueID  string
-	ContextReqID    string
-	ContextTags     []string
-	ContextFiles    []string
-	Query           string
-	Statuses        []LearningStatus
-	TargetStates    []LearningTargetState
-	Tags            []string
-	Files           []string
-	Limit           int
-	IncludeEvidence bool
-	ExcludePrivate  bool
-	IncludeDeleted  bool
-	ActiveOnly      bool
-	UpdatedBefore   *time.Time
+	ProjectID          string
+	IssueID            string
+	RequirementID      string
+	ContextIssueID     string
+	ContextReqID       string
+	ContextTags        []string
+	ContextFiles       []string
+	Query              string
+	Statuses           []LearningStatus
+	TargetStates       []LearningTargetState
+	Tags               []string
+	Files              []string
+	Limit              int
+	IncludeEvidence    bool
+	ExcludePrivate     bool
+	IncludeDeleted     bool
+	ActiveOnly         bool
+	SkipRecallTracking bool
+	UpdatedBefore      *time.Time
 }
 
 type learningRecord struct {
@@ -487,7 +488,7 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 	if filter.ActiveOnly && filter.Limit > 0 && len(records) > filter.Limit {
 		records = records[:filter.Limit]
 	}
-	if filter.ActiveOnly && len(records) > 0 {
+	if filter.ActiveOnly && !filter.SkipRecallTracking && len(records) > 0 {
 		recalledAt := time.Now().UTC()
 		for i := range records {
 			if _, err := db.ExecContext(ctx, `

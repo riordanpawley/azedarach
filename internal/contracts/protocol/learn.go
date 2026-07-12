@@ -3,20 +3,21 @@ package protocol
 import "github.com/riordanpawley/azedarach/internal/naming"
 
 const (
-	CommandLearnAdd       = "learn.add"
-	CommandLearnRecall    = "learn.recall"
-	CommandLearnShow      = "learn.show"
-	CommandLearnReview    = "learn.review"
-	CommandLearnPromote   = "learn.promote"
-	CommandLearnRetire    = "learn.retire"
-	CommandLearnRelate    = "learn.relate"
-	CommandLearnStale     = "learn.stale"
-	CommandLearnDemote    = "learn.demote"
-	CommandLearnSupersede = "learn.supersede"
-	CommandLearnDoctor    = "learn.doctor"
-	CommandLearnGC        = "learn.gc"
-	CommandLearnActivate  = "learn.activate"
-	CommandLearnFeedback  = "learn.feedback"
+	CommandLearnAdd                = "learn.add"
+	CommandLearnRecall             = "learn.recall"
+	CommandLearnShow               = "learn.show"
+	CommandLearnReview             = "learn.review"
+	CommandLearnPromote            = "learn.promote"
+	CommandLearnRetire             = "learn.retire"
+	CommandLearnRelate             = "learn.relate"
+	CommandLearnStale              = "learn.stale"
+	CommandLearnDemote             = "learn.demote"
+	CommandLearnSupersede          = "learn.supersede"
+	CommandLearnDoctor             = "learn.doctor"
+	CommandLearnGC                 = "learn.gc"
+	CommandLearnActivate           = "learn.activate"
+	CommandLearnFeedback           = "learn.feedback"
+	CommandLearnContextualActivate = "learn.contextual_activate"
 )
 
 type LearningStatus string
@@ -164,6 +165,25 @@ type LearningActivation struct {
 }
 type LearnActivateResponseBody struct {
 	Activation LearningActivation `json:"activation" msgpack:"activation"`
+}
+
+type LearnContextualActivateRequestBody struct {
+	ProjectID      string               `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	Purpose        string               `json:"purpose" msgpack:"purpose"`
+	Surface        string               `json:"surface" msgpack:"surface"`
+	SessionID      naming.SessionID     `json:"session_id" msgpack:"session_id"`
+	ContextIssueID naming.IssueID       `json:"context_issue_id,omitempty" msgpack:"context_issue_id,omitempty"`
+	ContextReqID   naming.RequirementID `json:"context_req_id,omitempty" msgpack:"context_req_id,omitempty"`
+	ContextTags    []string             `json:"context_tags,omitempty" msgpack:"context_tags,omitempty"`
+	ContextFiles   []string             `json:"context_files,omitempty" msgpack:"context_files,omitempty"`
+	Query          string               `json:"query,omitempty" msgpack:"query,omitempty"`
+	TokenBudget    int                  `json:"token_budget" msgpack:"token_budget"`
+}
+
+type LearnContextualActivateResponseBody struct {
+	Activation  *LearningActivation `json:"activation,omitempty" msgpack:"activation,omitempty"`
+	Learnings   []Learning          `json:"learnings,omitempty" msgpack:"learnings,omitempty"`
+	Explanation string              `json:"explanation" msgpack:"explanation"`
 }
 
 type LearnFeedbackRequestBody struct {

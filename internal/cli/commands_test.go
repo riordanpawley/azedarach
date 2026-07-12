@@ -12923,7 +12923,7 @@ func TestPrimeCommandShowsRootExitContractForTaskRootWithActiveReadiness(t *test
 func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
 	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
-	var learnReq protocol.LearnRecallRequestBody
+	var learnReq protocol.LearnContextualActivateRequestBody
 
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -12943,7 +12943,7 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 						t.Fatalf("marshal task list: %v", err)
 					}
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt, Body: body}, nil
-				case protocol.CommandLearnRecall:
+				case protocol.CommandLearnContextualActivate:
 					if err := json.Unmarshal(req.Body, &learnReq); err != nil {
 						t.Fatalf("decode learn recall request: %v", err)
 					}
@@ -12955,17 +12955,7 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 						Status:       protocol.LearningStatusAccepted,
 						RecallReason: "issue=az-1; query",
 					}}
-					if learnReq.IncludePrivate {
-						learnings = append(learnings, protocol.Learning{
-							ID:              "learn-private",
-							IssueID:         naming.IssueID("az-1"),
-							Summary:         "Private local handling detail",
-							Evidence:        "private raw evidence should not be injected",
-							EvidencePrivate: true,
-							Status:          protocol.LearningStatusAccepted,
-						})
-					}
-					body, err := json.Marshal(protocol.LearnRecallResponseBody{Learnings: learnings})
+					body, err := json.Marshal(protocol.LearnContextualActivateResponseBody{Learnings: learnings})
 					if err != nil {
 						t.Fatalf("marshal learn recall response: %v", err)
 					}
@@ -12983,23 +12973,11 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
-	if learnReq.IssueID != "" {
-		t.Fatalf("prime should not hard-filter learn recall issue, got %q", learnReq.IssueID)
-	}
 	if learnReq.ContextIssueID != naming.IssueID("az-1") {
 		t.Fatalf("learn recall context issue = %q, want az-1", learnReq.ContextIssueID)
 	}
-	if learnReq.Limit != 3 {
-		t.Fatalf("learn recall limit = %d, want 3", learnReq.Limit)
-	}
-	if learnReq.IncludeEvidence {
-		t.Fatal("prime learn recall should not request evidence")
-	}
-	if learnReq.IncludePrivate {
-		t.Fatal("prime learn recall should not request private rows")
-	}
-	if !reflect.DeepEqual(learnReq.Statuses, []protocol.LearningStatus{protocol.LearningStatusAccepted, protocol.LearningStatusPromoted}) {
-		t.Fatalf("learn recall statuses = %#v", learnReq.Statuses)
+	if learnReq.Purpose != string(domain.LearningPurposeSessionStart) || learnReq.Surface != "prime" || learnReq.TokenBudget != 256 {
+		t.Fatalf("contextual activation request = %+v", learnReq)
 	}
 	if !strings.Contains(output, "Relevant accepted/promoted learnings:") ||
 		!strings.Contains(output, "- learn-1 [accepted]: Keep durable choices in decisions (why: issue=az-1; query)") {

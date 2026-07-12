@@ -451,6 +451,48 @@ func TestIssueLearnServiceOmitEvidenceFromReviewAndPromoteResponses(t *testing.T
 	}
 }
 
+func TestIssueLearnServiceContextualActivationIsPrivateSafeBudgetedAndSessionDeduplicated(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	service := newTestIssueLearnService(client, repoDir)
+	public, err := client.CreateLearning(ctx, issues.CreateLearningParams{ProjectID: protocol.DefaultProjectID, Summary: "Use the daemon boundary.", Evidence: "public"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err = client.UpdateLearningStatus(ctx, public.LocalID, issues.LearningStatusAccepted, "reviewed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	private, err := client.CreateLearning(ctx, issues.CreateLearningParams{ProjectID: protocol.DefaultProjectID, Summary: "Never expose this.", Evidence: "secret", EvidencePrivate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.UpdateLearningStatus(ctx, private.LocalID, issues.LearningStatusAccepted, "reviewed privately")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := protocol.LearnContextualActivateRequestBody{Purpose: string(domain.LearningPurposeSessionStart), Surface: "prime", SessionID: "session-1", TokenBudget: 64}
+	first, err := service.ContextualActivate(ctx, req)
+	if err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	if first.Activation == nil || len(first.Learnings) != 1 || first.Learnings[0].ID != public.LocalID || first.Learnings[0].EvidencePrivate {
+		t.Fatalf("first activation = %+v", first)
+	}
+	second, err := service.ContextualActivate(ctx, req)
+	if err != nil {
+		t.Fatalf("repeat activate: %v", err)
+	}
+	if second.Activation != nil || len(second.Learnings) != 0 {
+		t.Fatalf("repeat activation = %+v, want suppressed", second)
+	}
+	req.SessionID = "session-2"
+	third, err := service.ContextualActivate(ctx, req)
+	if err != nil || third.Activation == nil {
+		t.Fatalf("new session activation = %+v, err=%v", third, err)
+	}
+}
+
 func TestIssueLearnServiceReviewQueuesAndBulkSelectedReview(t *testing.T) {
 	ctx := context.Background()
 	client, repoDir := newTestIssueClient(t)
