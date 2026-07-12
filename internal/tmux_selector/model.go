@@ -1178,7 +1178,7 @@ func (m *Model) moveCursor(dx int, dy int) {
 }
 
 func (m *Model) moveColumnBoardCursor(entries []InventoryEntry, dx, dy int) {
-	_, positions := selectorBoardColumns(entries)
+	columns, positions := selectorBoardColumns(entries)
 	current, ok := positions[m.cursor]
 	if !ok {
 		m.cursor = 0
@@ -1186,7 +1186,10 @@ func (m *Model) moveColumnBoardCursor(entries []InventoryEntry, dx, dy int) {
 	}
 	targetColumn, targetTask := current.Column+dx, current.Task+dy
 	if dx != 0 {
-		targetTask = current.Task
+		if targetColumn < 0 || targetColumn >= len(columns) || len(columns[targetColumn].Tasks) == 0 {
+			return
+		}
+		targetTask = min(current.Task, len(columns[targetColumn].Tasks)-1)
 	}
 	for entryIndex, position := range positions {
 		if position.Column == targetColumn && position.Task == targetTask {

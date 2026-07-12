@@ -164,6 +164,66 @@ func TestGlobalInventoryLoaderUsesTmuxFirstAcrossProjects(t *testing.T) {
 	}
 }
 
+func TestGlobalInventoryLoaderHydratesEveryProjectWithScopedIdentity(t *testing.T) {
+	root := t.TempDir()
+	alphaDir := filepath.Join(root, "alpha-app")
+	archiveDir := filepath.Join(root, "alpine-app")
+	alphaID := projectIDForPath(alphaDir)
+	archiveID := projectIDForPath(archiveDir)
+	sharedIssueID := "shared"
+	alphaSession := naming.CanonicalSessionID(alphaDir, sharedIssueID)
+	archiveSession := naming.CanonicalSessionID(archiveDir, sharedIssueID)
+	if alphaSession != archiveSession {
+		t.Fatalf("fixture requires colliding session prefixes: %q != %q", alphaSession, archiveSession)
+	}
+
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{infos: []tmux.SessionInfo{
+			{Name: alphaSession, Path: filepath.Join(alphaDir, "worktrees", sharedIssueID)},
+			{Name: archiveSession + "-other", Path: filepath.Join(archiveDir, "worktrees", sharedIssueID)},
+			{Name: "plain-tmux", Path: filepath.Join(root, "scratch")},
+		}},
+		nil,
+		WithProjectDirs(alphaDir, archiveDir),
+		WithProjectSnapshotSource(fakeProjectSnapshotSource{snapshots: []ProjectInventorySnapshot{
+			{
+				ProjectID: alphaID, ProjectPath: alphaDir,
+				Tasks: []domain.Task{{ID: naming.IssueID(sharedIssueID), Title: "Alpha issue", Priority: domain.P1, Status: domain.StatusInProgress}},
+			},
+			{
+				ProjectID: archiveID, ProjectPath: archiveDir,
+				Tasks: []domain.Task{{ID: naming.IssueID(sharedIssueID + "-other"), Title: "Archive issue", Priority: domain.P2, Status: domain.StatusInReview}},
+			},
+		}}),
+	)
+
+	snapshot, err := loader.ListTasksSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ListTasksSnapshot: %v", err)
+	}
+	if len(snapshot.Entries) != 3 {
+		t.Fatalf("entries = %#v, want two hydrated and one tmux-only", snapshot.Entries)
+	}
+	bySession := make(map[string]InventoryEntry, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		bySession[entry.SessionID] = entry
+	}
+	for _, want := range []struct {
+		session, projectID, projectPath, title string
+	}{
+		{alphaSession, alphaID, alphaDir, "Alpha issue"},
+		{archiveSession + "-other", archiveID, archiveDir, "Archive issue"},
+	} {
+		entry := bySession[want.session]
+		if entry.ProjectID != want.projectID || entry.ProjectPath != want.projectPath || entry.TaskTitle != want.title {
+			t.Errorf("entry %q = project %q path %q title %q, want %q %q %q", want.session, entry.ProjectID, entry.ProjectPath, entry.TaskTitle, want.projectID, want.projectPath, want.title)
+		}
+	}
+	if entry := bySession["plain-tmux"]; !entry.HasTmuxSession || entry.Task.ID.String() != "" {
+		t.Fatalf("plain tmux discovery = %#v, want retained sparse entry", entry)
+	}
+}
+
 func TestGlobalInventoryLoaderClosedProjectedTaskKeepsLiveSessionState(t *testing.T) {
 	started := time.Unix(1775209200, 0).UTC()
 	projectDir := t.TempDir()
@@ -698,6 +758,24 @@ func TestTaskIDsByProjectDirDeduplicatesByProject(t *testing.T) {
 	key := cleanProjectDirKey(root)
 	if len(got[key]) != 1 || got[key][0] != "az-1" {
 		t.Fatalf("deduplicated task ids = %#v, want one az-1", got)
+	}
+}
+
+func TestTaskIDsByProjectDirUsesWorktreeWhenProjectPrefixesCollide(t *testing.T) {
+	root := t.TempDir()
+	alphaDir := filepath.Join(root, "alpha-app")
+	alpineDir := filepath.Join(root, "alpine-app")
+	entries := []InventoryEntry{
+		{SessionID: "al-alpha", IssueID: "alpha", ProjectID: "al", Worktree: filepath.Join(alphaDir, "worktrees", "alpha")},
+		{SessionID: "al-alpine", IssueID: "alpine", ProjectID: "al", Worktree: filepath.Join(alpineDir, "worktrees", "alpine")},
+	}
+
+	got := taskIDsByProjectDir(entries, []string{alphaDir, alpineDir})
+	if ids := got[cleanProjectDirKey(alphaDir)]; !slices.Equal(ids, []string{"alpha"}) {
+		t.Fatalf("alpha task ids = %v, want [alpha]", ids)
+	}
+	if ids := got[cleanProjectDirKey(alpineDir)]; !slices.Equal(ids, []string{"alpine"}) {
+		t.Fatalf("alpine task ids = %v, want [alpine]", ids)
 	}
 }
 
