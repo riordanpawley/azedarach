@@ -55,7 +55,7 @@ func Run(cfg *config.Config) error {
 		"elapsed_ms", time.Since(processStart).Milliseconds(),
 		"ui_state_store", true,
 	)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	runStart := time.Now()
 	logger.Info("tmux selector tea program starting",
 		"elapsed_ms", runStart.Sub(processStart).Milliseconds(),

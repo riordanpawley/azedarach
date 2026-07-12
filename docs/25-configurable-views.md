@@ -19,6 +19,11 @@ definitions rather than hardcoded application modes. In the TUI, Tab advances
 to the next configured view through the daemon selection contract; it does not
 toggle a surface-local Compact or Orchestration Overview mode.
 
+The built-in **Orchestration** board is the focused tmux-selector default: its
+three columns are Human Review, AI Review, and In Progress, and issues outside
+those active-attention states are omitted. The built-in **Tree** view preserves
+issue hierarchy while sorting human-attention work ahead of ordinary work.
+
 Press `V` in normal mode to open **Views**. Create and edit open the **View
 Configurator**, whose guided fields cover title, Grid/Board/Tree layout,
 filters, grouping/columns, ordered sorting, and display options. Built-ins are
@@ -68,6 +73,12 @@ az view create --project global --file view.json --scope selected_projects --sco
 az view select --project global --consumer tmux_selector orchestration
 az view get --project global --json orchestration
 ```
+
+The tmux selector status line identifies its selected saved view and prints the
+`az view select --project global --consumer tmux_selector VIEW` command used to
+change it. Arrow keys, `h/j/k/l`, and the mouse wheel move the active item;
+Page Up and Page Down move by the visible page while keeping the active session
+on screen in Grid, Board, and Tree layouts.
 
 `az global` opens the cross-project TUI. Its navigation keys operate on scoped
 `(project_id, issue_id)` identities. Before opening an issue or offering a

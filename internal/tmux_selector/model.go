@@ -420,6 +420,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case overlay.CloseOverlayMsg:
 		m.clearJumpMode()
 		return m, nil
+	case tea.MouseMsg:
+		if m.loading || m.jumpMode != nil || m.searchMode || m.gotoArmed {
+			return m, nil
+		}
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			m.moveCursor(0, -1)
+		case tea.MouseButtonWheelDown:
+			m.moveCursor(0, 1)
+		case tea.MouseButtonWheelLeft:
+			m.moveCursor(-1, 0)
+		case tea.MouseButtonWheelRight:
+			m.moveCursor(1, 0)
+		}
+		return m, nil
 	case tea.KeyMsg:
 		if m.loading {
 			switch msg.String() {
@@ -492,6 +507,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "k", "up":
 			m.moveCursor(0, -1)
+			return m, nil
+		case "pgdown":
+			m.movePage(1)
+			return m, nil
+		case "pgup":
+			m.movePage(-1)
 			return m, nil
 		case "h", "left":
 			m.moveCursor(-1, 0)
@@ -664,6 +685,16 @@ func (m Model) renderProjectedColumnBoard(entries []InventoryEntry) string {
 		columns = columns[start:end]
 		cursor.Column -= start
 	}
+	activeViewportStart := 0
+	if cursor.Column >= 0 && cursor.Column < len(columns) {
+		activeViewportStart = selectorColumnViewportStart(
+			len(columns[cursor.Column].Tasks),
+			cursor.Task,
+			board.NewVisibleColumnLayout(len(columns), m.width).WidthForLocalColumn(cursor.Column),
+			m.gridAvailableHeight(),
+			m.styles,
+		)
+	}
 	signals := make(map[string]board.RuntimeSignals, len(entries))
 	jumpLabels := make(map[string]string)
 	labelsByEntry := m.labelsByEntry()
@@ -680,7 +711,30 @@ func (m Model) renderProjectedColumnBoard(entries []InventoryEntry) string {
 			GitAdditions: entry.GitAdditions, GitDeletions: entry.GitDeletions,
 		}
 	}
-	return board.Render(columns, cursor, nil, signals, nil, nil, false, jumpLabels, 0, m.styles, m.width, m.gridAvailableHeight()) + "\n"
+	return board.Render(columns, cursor, nil, signals, nil, nil, false, jumpLabels, activeViewportStart, m.styles, m.width, m.gridAvailableHeight()) + "\n"
+}
+
+func selectorColumnViewportStart(taskCount, cursorTask, columnWidth, height int, s *styles.Styles) int {
+	if taskCount <= 0 || cursorTask <= 0 {
+		return 0
+	}
+	bodyHeight := board.ColumnBodyHeight(height)
+	linesPerCard := board.CardLineFootprint(s, board.CardContentWidth(columnWidth))
+	start := 0
+	for i := 0; i < 8; i++ {
+		windowStart, windowEnd := board.VisibleTaskWindow(taskCount, start, bodyHeight, linesPerCard)
+		if cursorTask < windowStart {
+			start = cursorTask
+			continue
+		}
+		if cursorTask >= windowEnd {
+			windowSize := maxInt(1, windowEnd-windowStart)
+			start = maxInt(0, cursorTask-windowSize+1)
+			continue
+		}
+		return windowStart
+	}
+	return clampInt(start, 0, taskCount-1)
 }
 
 func selectorBoardColumns(entries []InventoryEntry) ([]board.Column, map[int]board.Cursor) {
@@ -746,12 +800,13 @@ func (m Model) renderFooter() string {
 	bindings := []keybinds.Binding{
 		{Key: "Tab", Description: "tab"},
 		{Key: "h/j/k/l", Description: "move"},
+		{Key: "Pg", Description: "page"},
 		{Key: "q/Esc", Description: "close"},
+		{Key: "x", Description: "kill"},
 		{Key: "/", Description: "search"},
 		{Key: "gw", Description: "labels"},
 		{Key: "Enter", Description: "drill"},
 		{Key: "a", Description: "switch"},
-		{Key: "x", Description: "kill"},
 		{Key: "o/Sp", Description: "open"},
 	}
 	if m.activeTab == selectorTabTree {
@@ -1174,6 +1229,35 @@ func (m *Model) moveCursor(dx int, dy int) {
 	next := nextRow*columns + nextCol
 	if next >= 0 && next < count {
 		m.cursor = next
+	}
+}
+
+func (m *Model) movePage(direction int) {
+	entries := m.filteredEntries()
+	if len(entries) == 0 || direction == 0 {
+		return
+	}
+	pageSize := maxInt(1, len(m.visibleEntryIndices()))
+	if m.activeTab == selectorTabTree {
+		pageSize = maxInt(1, m.treeAvailableHeight())
+	} else if m.snapshot.View.ID != "" && m.snapshot.View.Normalized().Layout == domain.BoardViewLayoutColumnBoard {
+		columns, positions := selectorBoardColumns(entries)
+		position, ok := positions[m.cursor]
+		if !ok || position.Column < 0 || position.Column >= len(columns) {
+			return
+		}
+		layout := board.NewColumnLayout(len(columns), m.width, 0).WithColumnVisible(position.Column)
+		columnWidth := layout.WidthForColumn(position.Column)
+		linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
+		start, end := board.VisibleTaskWindow(len(columns[position.Column].Tasks), 0, board.ColumnBodyHeight(m.gridAvailableHeight()), linesPerCard)
+		pageSize = maxInt(1, end-start)
+	}
+	for range pageSize {
+		before := m.cursor
+		m.moveCursor(0, direction)
+		if m.cursor == before {
+			break
+		}
 	}
 }
 
@@ -2729,6 +2813,9 @@ func formatSnapshotStatus(snapshot Snapshot, rows int) string {
 	}
 	if snapshot.Freshness != "" {
 		parts = append(parts, snapshot.Freshness)
+	}
+	if snapshot.View.ID != "" {
+		parts = append(parts, fmt.Sprintf("view %s", snapshot.View.ID), "configure: az view select --project global --consumer tmux_selector VIEW")
 	}
 	return strings.Join(parts, "  ")
 }

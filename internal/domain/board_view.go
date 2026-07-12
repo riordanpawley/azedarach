@@ -279,6 +279,7 @@ func GridBoardView() BoardView {
 func TreeBoardView() BoardView {
 	view := DefaultBoardView()
 	view.ID, view.Title, view.Layout = BoardViewTreeID, "Tree", BoardViewLayoutTreeList
+	view.Sort = DefaultBoardViewSortRules()
 	return view
 }
 
@@ -383,25 +384,24 @@ func OrchestrationBoardView() BoardView {
 	view.Title = "Orchestration"
 	view.Columns = []BoardColumn{
 		{
-			ID:    BoardColumnWaitingHuman,
-			Title: "Waiting Human",
+			ID:    BoardColumnReviewReady,
+			Title: "Human Review",
 			Predicates: []BoardColumnPredicate{{
-				Kind: BoardPredicateWaitingHuman,
+				Kind: BoardPredicateReviewReady,
 			}},
 		},
 		{
 			ID:    BoardColumnWaitingAI,
-			Title: "Waiting AI",
+			Title: "AI Review",
 			Predicates: []BoardColumnPredicate{{
 				Kind: BoardPredicateWaitingAIDelegated,
 			}},
 		},
 		{
 			ID:         BoardColumnActive,
-			Title:      "Working",
+			Title:      "In Progress",
 			Predicates: view.Columns[1].Predicates,
 		},
-		view.Columns[2],
 	}
 	return view
 }
@@ -504,6 +504,7 @@ func ProjectTasksByBoardView(view BoardView, tasks []Task) (BoardViewProjection,
 		}
 	}
 	if view.Layout == BoardViewLayoutTreeList {
+		ordered = ApplyBoardViewSortRulesInPlace(view.effectiveSortRules(), ordered)
 		ordered = boardViewTreeOrder(ordered)
 	}
 	depths := boardViewTreeDepths(ordered)
