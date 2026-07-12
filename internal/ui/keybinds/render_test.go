@@ -120,17 +120,17 @@ func TestBoardViewRegistryDrivesActionsHintsAndHelp(t *testing.T) {
 	categories := HelpCategories()
 	var boardViews Category
 	for _, category := range categories {
-		if category.Name == "Board Views" {
+		if category.Name == "Views" {
 			boardViews = category
 			break
 		}
 	}
 	boardHelp := RenderPlain(boardViews.Bindings, "  ")
 	for _, want := range []string{
-		"B: Open board view selector",
-		"CLI create: az board view create --file PATH",
-		"CLI edit: az board view update --file PATH",
-		"CLI delete: az board view delete --confirm VIEW",
+		"V: Open View Configurator",
+		"CLI create: az view create --file PATH",
+		"CLI edit: az view update --file PATH",
+		"CLI delete: az view delete --confirm VIEW",
 	} {
 		if !strings.Contains(boardHelp, want) {
 			t.Fatalf("Board Views category = %q, missing %q", boardHelp, want)
@@ -139,12 +139,12 @@ func TestBoardViewRegistryDrivesActionsHintsAndHelp(t *testing.T) {
 
 	help := RenderCategories(categories, KeyColumnWidth(categories, 8), Theme{})
 	for _, want := range []string{
-		"Board Views:",
-		"B",
-		"Open board view selector",
-		"az board view create --file PATH",
-		"az board view update --file PATH",
-		"az board view delete --confirm VIEW",
+		"Views:",
+		"V",
+		"Open View Configurator",
+		"az view create --file PATH",
+		"az view update --file PATH",
+		"az view delete --confirm VIEW",
 	} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("help = %q, missing %q", help, want)

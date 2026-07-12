@@ -87,6 +87,10 @@ func printHelpForPath(path []string) bool {
 		printBoardViewCommandUsage("delete")
 	case "board view explain":
 		printBoardViewCommandUsage("explain")
+	case "view":
+		printBoardViewUsage()
+	case "view list", "view get", "view select", "view create", "view update", "view delete", "view explain":
+		printBoardViewCommandUsage(path[1])
 	case "worktree":
 		printWorktreeUsage()
 	case "worktree create":

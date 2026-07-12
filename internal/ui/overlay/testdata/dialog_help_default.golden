@@ -5,7 +5,7 @@
 ││ ────────────────────────────────────────────────                                            │
 ││   ?                     Open this help reference                                            │
 ││   O                     Open project orchestrator details                                   │
-││   B                     Open board view selector                                            │
+││   V                     Open View Configurator                                              │
 ││   G                     Open project root Git pane                                          │
 ││   Space                 Open task workspace                                                 │
 ││   Q                     Open operation queue                                                │

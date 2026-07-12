@@ -4,7 +4,7 @@ Commands:
   (no command)         Start the Azedarach TUI
   session <subcommand>  Session commands (start|attach|stop|status|diagnose)
   branch <subcommand>   Branch commands (merge)
-  board view <subcommand> Board view commands (list|get|select|create|update|delete|explain)
+  view <subcommand>      View commands (list|get|select|create|update|delete|explain)
   pr <subcommand>       Pull request commands (list|status|checks|open|create|merge)
   worktree <subcommand> Worktree commands (create)
   start <issue-id>      Alias for 'az session start <issue-id>'
@@ -88,9 +88,9 @@ Examples:
   az branch merge --source az-123 --target az-parent  # Explicit child-to-parent repair merge
   az branch merge --source az-parent --target az-123  # Explicit ancestor-to-descendant materialization
   az branch merge --source az-root --target base      # Root-to-base; durable human acceptance required
-  az board view list
-  az board view select current
-  az board view explain az-123
+  az view list
+  az view select default
+  az view explain az-123
   az worktree create az-123 # Create an issue worktree without starting a session
   az issue list
   az issue list --query "runtime cache" --updated-after 2026-03-01
