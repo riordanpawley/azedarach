@@ -12484,8 +12484,8 @@ func TestPrimeCommandWithActiveIssueUsesTargetedSnapshot(t *testing.T) {
 						RootIssueID: "az-1",
 						Blocked:     map[string]string{},
 					}), nil
-				case protocol.CommandLearnRecall:
-					return responseWithJSON(req, protocol.LearnRecallResponseBody{}), nil
+				case protocol.CommandLearnContextualActivate:
+					return responseWithJSON(req, protocol.LearnContextualActivateResponseBody{}), nil
 				default:
 					t.Fatalf("unexpected daemon command: %q", req.Command)
 				}
@@ -12558,8 +12558,8 @@ func TestPrimeCommandStopsOnActiveIssueOwnershipConflict(t *testing.T) {
 					}, nil
 				case daemonclient.CommandTaskGraphReadiness:
 					t.Fatal("prime must not continue to readiness after ownership conflict")
-				case protocol.CommandLearnRecall:
-					t.Fatal("prime must not continue to learning recall after ownership conflict")
+				case protocol.CommandLearnContextualActivate:
+					t.Fatal("prime must not continue to contextual learning activation after ownership conflict")
 				default:
 					t.Fatalf("unexpected daemon command: %q", req.Command)
 				}
@@ -13013,8 +13013,8 @@ func TestPrimeCommandShowsLearningCaptureGuidanceWithoutRecallRows(t *testing.T)
 						t.Fatalf("marshal task list: %v", err)
 					}
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt, Body: body}, nil
-				case protocol.CommandLearnRecall:
-					body, err := json.Marshal(protocol.LearnRecallResponseBody{})
+				case protocol.CommandLearnContextualActivate:
+					body, err := json.Marshal(protocol.LearnContextualActivateResponseBody{})
 					if err != nil {
 						t.Fatalf("marshal learn recall response: %v", err)
 					}
