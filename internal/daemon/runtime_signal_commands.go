@@ -267,7 +267,7 @@ func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.Req
 // runtime, then fans its observed state and activity into every logical intent
 // associated with that runtime. Desired logical state and typed identity are
 // deliberately preserved.
-func (d *Daemon) recordPhysicalSessionObservation(ctx context.Context, meta protocol.Metadata, projectID, sessionID, issueID string, observedState daemonstate.SessionState, activity, activitySource string) ([]uint64, error) {
+func (d *Daemon) recordPhysicalSessionObservation(ctx context.Context, meta protocol.Metadata, projectID, sessionID, _ string, observedState daemonstate.SessionState, activity, activitySource string) ([]uint64, error) {
 	store := d.sessionRuntimeStateStore(projectID)
 	if store == nil {
 		return nil, errors.New("session runtime store unavailable")
@@ -278,37 +278,19 @@ func (d *Daemon) recordPhysicalSessionObservation(ctx context.Context, meta prot
 	if observedState == daemonstate.SessionStateStopped {
 		activity, activitySource = "", ""
 	}
-	if err := store.UpsertPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+	changed, applied, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
 		ProjectID: projectID, SessionID: sessionID, ObservedState: observedState,
 		Activity: activity, ActivitySource: activitySource, UpdatedAt: now,
-	}); err != nil {
-		return nil, fmt.Errorf("persist physical session observation: %w", err)
-	}
-	rows, err := store.ListSessionIntentStates(ctx, projectID)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("list logical session intents: %w", err)
+		return nil, err
 	}
-	matches := make([]daemonstate.Session, 0, 2)
-	for _, row := range rows {
-		if strings.TrimSpace(row.ID) == strings.TrimSpace(sessionID) {
-			matches = append(matches, row)
-		}
+	if !applied {
+		return nil, nil
 	}
-	if len(matches) == 0 {
-		matches = append(matches, daemonstate.Session{
-			ID: sessionID, IssueID: issueID, Role: daemonstate.SessionRoleWorker,
-			ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID,
-			State: observedState, StartedAt: &now,
-		})
-	}
-	revisions := make([]uint64, 0, len(matches))
+	revisions := make([]uint64, 0, len(changed))
 	writer := d.runtimeProjectionStateWriter()
-	for _, row := range matches {
-		row.ObservedState = observedState
-		row.Activity, row.ActivitySource, row.UpdatedAt = activity, activitySource, now
-		if err := writer.PersistSessionProjection(ctx, projectID, row); err != nil {
-			return revisions, fmt.Errorf("fan physical observation into %s/%s/%s intent: %w", row.Role, row.ScopeKind, row.ScopeID, err)
-		}
+	for _, row := range changed {
 		revisions = appendRevision(revisions, writer.PublishSessionProjectionEvent(ctx, projectID, meta, row))
 	}
 	return revisions, nil

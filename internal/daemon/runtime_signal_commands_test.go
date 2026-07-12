@@ -148,19 +148,17 @@ func TestRuntimeSignalIngestAgentHookPersistsActivityAndHookLog(t *testing.T) {
 		t.Fatalf("runtime signal stages = %+v", body.Stages)
 	}
 
-	session, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, sessionID)
+	store := d.sessionRuntimeStateStore(projectID)
+	session, found, err := store.GetSessionState(context.Background(), projectID, sessionID)
 	if err != nil {
 		t.Fatalf("GetSessionState: %v", err)
 	}
-	if !found {
-		rows, _ := d.sessionRuntimeStateStore(projectID).ListSessionStates(context.Background(), projectID)
-		t.Fatalf("expected session projection for %s; rows=%+v", sessionID, rows)
+	if found {
+		t.Fatalf("agent pane observation invented desired intent: %+v", session)
 	}
-	if session.IssueID != issueID ||
-		session.State != daemonstate.SessionStatePaused ||
-		session.Activity != "waiting" ||
-		session.ActivitySource != "hooks" {
-		t.Fatalf("session projection = %+v", session)
+	paneObservation, found, err := store.GetPhysicalSessionObservation(context.Background(), projectID, sessionID)
+	if err != nil || !found || paneObservation.ObservedState != daemonstate.SessionStatePaused || paneObservation.Activity != "waiting" {
+		t.Fatalf("pane physical observation=%+v found=%v err=%v", paneObservation, found, err)
 	}
 	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, parentSessionID)
 	if err != nil {
@@ -229,6 +227,11 @@ func TestRuntimeSignalIngestKeepsCanonicalBusyWhenAnotherPaneWaits(t *testing.T)
 	projectID := "proj-signals"
 	issueID := "az-42"
 	parentSessionID := "pr-az-42"
+	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID: parentSessionID, IssueID: issueID, State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
 		ID:             parentSessionID,
@@ -301,6 +304,11 @@ func TestRuntimeSignalIngestCanonicalStopClearsStalePaneBusyForDisplay(t *testin
 	})
 	projectID := "proj-signals"
 	issueID := "az-42"
+	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID: "pr-az-42", IssueID: issueID, State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	parentSessionID := "pr-az-42"
 
 	signals := []protocol.RuntimeSignalIngestCommandBody{
@@ -358,7 +366,7 @@ func TestRuntimeSignalIngestCanonicalStopClearsStalePaneBusyForDisplay(t *testin
 	}
 }
 
-func TestRuntimeSignalIngestAgentHookCreatesRunningCanonicalProjection(t *testing.T) {
+func TestRuntimeSignalIngestAgentHookStoresObservationWithoutCreatingIntent(t *testing.T) {
 	repoDir := initRuntimeSignalGitRepo(t)
 	d := New(Config{
 		RepoDir: repoDir,
@@ -391,19 +399,20 @@ func TestRuntimeSignalIngestAgentHookCreatesRunningCanonicalProjection(t *testin
 		t.Fatalf("runtime.signal.ingest response not ok: %+v", resp.Error)
 	}
 
-	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, "pr-az-42")
+	store := d.sessionRuntimeStateStore(projectID)
+	canonical, found, err := store.GetSessionState(context.Background(), projectID, "pr-az-42")
 	if err != nil {
 		t.Fatalf("GetSessionState canonical: %v", err)
 	}
-	if !found {
-		t.Fatal("expected canonical session projection")
+	if found {
+		t.Fatalf("hook observation invented desired canonical intent: %+v", canonical)
 	}
-	if canonical.IssueID != issueID ||
-		canonical.State != daemonstate.SessionStateRunning ||
-		canonical.ObservedState != daemonstate.SessionStateRunning ||
-		canonical.Activity != "waiting" ||
-		canonical.ActivitySource != "hooks" {
-		t.Fatalf("canonical session projection = %+v", canonical)
+	observation, found, err := store.GetPhysicalSessionObservation(context.Background(), projectID, "pr-az-42")
+	if err != nil || !found {
+		t.Fatalf("canonical physical observation found=%v err=%v", found, err)
+	}
+	if observation.ObservedState != daemonstate.SessionStateRunning || observation.Activity != "waiting" || observation.ActivitySource != "hooks" {
+		t.Fatalf("canonical physical observation = %+v", observation)
 	}
 }
 
@@ -422,7 +431,7 @@ func TestRuntimeSignalIngestFansPhysicalObservationAcrossSharedLogicalIntents(t 
 	worker := daemonstate.Session{
 		ID: sessionID, IssueID: issueID, Role: daemonstate.SessionRoleWorker,
 		ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID,
-		State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: now,
+		State: daemonstate.SessionStateStopped, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: now,
 	}
 	rooted := daemonstate.Session{
 		ID: sessionID, IssueID: issueID, Role: daemonstate.SessionRoleOrchestrator,
@@ -443,7 +452,7 @@ func TestRuntimeSignalIngestFansPhysicalObservationAcrossSharedLogicalIntents(t 
 		Command:         protocol.CommandRuntimeSignalIngest,
 		Body: mustMarshal(t, protocol.RuntimeSignalIngestCommandBody{
 			Source: protocol.RuntimeSignalSourceAgentHook, Kind: protocol.RuntimeSignalKindAgentActivityChanged,
-			IssueID: issueID, SessionID: sessionID, Agent: "codex", Event: "permission_request",
+			IssueID: issueID, SessionID: sessionID, Agent: "codex", Event: "pre_tool_use",
 		}),
 	})
 	if err != nil || !resp.OK {
@@ -461,7 +470,7 @@ func TestRuntimeSignalIngestFansPhysicalObservationAcrossSharedLogicalIntents(t 
 	if err != nil || !found {
 		t.Fatalf("physical observation found=%v err=%v", found, err)
 	}
-	if observation.ObservedState != daemonstate.SessionStatePaused || observation.Activity != "waiting" {
+	if observation.ObservedState != daemonstate.SessionStateRunning || observation.Activity != "busy" {
 		t.Fatalf("physical observation = %+v", observation)
 	}
 	for _, want := range []struct {
@@ -469,14 +478,14 @@ func TestRuntimeSignalIngestFansPhysicalObservationAcrossSharedLogicalIntents(t 
 		scopeKind daemonstate.SessionScopeKind
 		state     daemonstate.SessionState
 	}{
-		{daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, daemonstate.SessionStateRunning},
+		{daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, daemonstate.SessionStateStopped},
 		{daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, daemonstate.SessionStatePaused},
 	} {
 		got, found, err := store.GetSessionIntent(ctx, projectID, want.role, want.scopeKind, issueID)
 		if err != nil || !found {
 			t.Fatalf("load %s intent found=%v err=%v", want.role, found, err)
 		}
-		if got.State != want.state || got.ObservedState != daemonstate.SessionStatePaused || got.Activity != "waiting" || got.ActivitySource != "hooks" {
+		if got.State != want.state || got.ObservedState != daemonstate.SessionStateRunning || got.Activity != "busy" || got.ActivitySource != "hooks" {
 			t.Fatalf("%s intent = %+v; desired state must remain %s", want.role, got, want.state)
 		}
 	}
@@ -490,6 +499,11 @@ func TestRuntimeSignalIngestAgentIdlePromptPersistsWaitingActivity(t *testing.T)
 	})
 	projectID := "proj-signals"
 	issueID := "az-42"
+	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID: "pr-az-42", IssueID: issueID, State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -648,7 +662,7 @@ func TestRuntimeSignalMaterializesBusyWhenAnyPaneEvidenceBusy(t *testing.T) {
 	}
 }
 
-func TestRuntimeSignalActivityEvidenceDoesNotReviveStoppedCanonicalSession(t *testing.T) {
+func TestRuntimeSignalActivityEvidencePreservesStoppedDesiredLiveObservedDivergence(t *testing.T) {
 	repoDir := initRuntimeSignalGitRepo(t)
 	d := New(Config{
 		RepoDir: repoDir,
@@ -695,10 +709,10 @@ func TestRuntimeSignalActivityEvidenceDoesNotReviveStoppedCanonicalSession(t *te
 		t.Fatal("expected canonical session projection")
 	}
 	if canonical.State != daemonstate.SessionStateStopped ||
-		canonical.ObservedState != daemonstate.SessionStateStopped ||
-		canonical.Activity != "" ||
-		canonical.ActivitySource != "" {
-		t.Fatalf("canonical session projection = %+v, want stopped without activity", canonical)
+		canonical.ObservedState != daemonstate.SessionStateRunning ||
+		canonical.Activity != "idle" ||
+		canonical.ActivitySource != "hooks" {
+		t.Fatalf("canonical session projection = %+v, want stopped desired with live idle observation", canonical)
 	}
 }
 

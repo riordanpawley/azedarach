@@ -1066,3 +1066,109 @@ func TestRuntimeStateStoreUntypedSharedRuntimeMutationFailsClosed(t *testing.T) 
 		t.Fatal("untyped mutation of shared physical runtime succeeded")
 	}
 }
+
+func TestRuntimeStateStorePhysicalObservationFanoutIsMonotonicAcrossStores(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	stores := []*RuntimeStateStore{
+		NewRuntimeStateStoreAtPath(dbPath, slog.Default()),
+		NewRuntimeStateStoreAtPath(dbPath, slog.Default()),
+	}
+	for _, store := range stores {
+		t.Cleanup(func() { _ = store.Close() })
+	}
+	ctx := context.Background()
+	base := time.Now().UTC().Add(-time.Minute)
+	for _, seed := range []Session{
+		{ID: "az-root", IssueID: "root", Role: SessionRoleWorker, ScopeKind: SessionScopeIssue, ScopeID: "root", State: SessionStateStopped, ObservedState: SessionStateStopped, UpdatedAt: base},
+		{ID: "az-root", IssueID: "root", Role: SessionRoleOrchestrator, ScopeKind: SessionScopeOrchestration, ScopeID: "root", State: SessionStatePaused, ObservedState: SessionStatePaused, UpdatedAt: base},
+	} {
+		if err := stores[0].UpsertSessionState(ctx, "p", seed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	newer := PhysicalSessionObservation{ProjectID: "p", SessionID: "az-root", ObservedState: SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: base.Add(2 * time.Second)}
+	older := PhysicalSessionObservation{ProjectID: "p", SessionID: "az-root", ObservedState: SessionStatePaused, Activity: "waiting", ActivitySource: "hooks", UpdatedAt: base.Add(time.Second)}
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for i, observation := range []PhysicalSessionObservation{older, newer} {
+		go func(store *RuntimeStateStore, observation PhysicalSessionObservation) {
+			<-start
+			_, _, err := store.ApplyPhysicalSessionObservation(ctx, observation)
+			errs <- err
+		}(stores[i], observation)
+	}
+	close(start)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	observation, found, err := stores[1].GetPhysicalSessionObservation(ctx, "p", "az-root")
+	if err != nil || !found || observation.ObservedState != SessionStateRunning || observation.Activity != "busy" {
+		t.Fatalf("physical observation=%+v found=%v err=%v", observation, found, err)
+	}
+	for _, role := range []SessionRole{SessionRoleWorker, SessionRoleOrchestrator} {
+		scope := SessionScopeIssue
+		if role == SessionRoleOrchestrator {
+			scope = SessionScopeOrchestration
+		}
+		intent, found, err := stores[0].GetSessionIntent(ctx, "p", role, scope, "root")
+		if err != nil || !found || intent.ObservedState != SessionStateRunning || intent.Activity != "busy" {
+			t.Fatalf("%s intent=%+v found=%v err=%v", role, intent, found, err)
+		}
+		if role == SessionRoleWorker && intent.State != SessionStateStopped {
+			t.Fatalf("worker desired state changed: %+v", intent)
+		}
+	}
+	changed, applied, err := stores[0].ApplyPhysicalSessionObservation(ctx, older)
+	if err != nil || applied || len(changed) != 0 {
+		t.Fatalf("stale observation changed state: applied=%v changed=%+v err=%v", applied, changed, err)
+	}
+	observation, found, err = stores[1].GetPhysicalSessionObservation(ctx, "p", "az-root")
+	if err != nil || !found || observation.ObservedState != SessionStateRunning || observation.Activity != "busy" {
+		t.Fatalf("stale observation regressed physical fact: %+v found=%v err=%v", observation, found, err)
+	}
+}
+
+func TestRuntimeStateStorePhysicalObservationFanoutRollsBackTogether(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	base := time.Now().UTC().Add(-time.Minute)
+	for _, seed := range []Session{
+		{ID: "az-root", IssueID: "root", Role: SessionRoleWorker, ScopeKind: SessionScopeIssue, ScopeID: "root", State: SessionStateStopped, UpdatedAt: base},
+		{ID: "az-root", IssueID: "root", Role: SessionRoleOrchestrator, ScopeKind: SessionScopeOrchestration, ScopeID: "root", State: SessionStatePaused, UpdatedAt: base},
+	} {
+		if err := store.UpsertSessionState(ctx, "p", seed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := store.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TRIGGER inject_physical_fanout_failure BEFORE UPDATE ON daemon_session_projections WHEN OLD.role='orchestrator' BEGIN SELECT RAISE(ABORT,'injected fanout failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = store.ApplyPhysicalSessionObservation(ctx, PhysicalSessionObservation{
+		ProjectID: "p", SessionID: "az-root", ObservedState: SessionStateRunning,
+		Activity: "busy", ActivitySource: "hooks", UpdatedAt: base.Add(time.Second),
+	})
+	if err == nil {
+		t.Fatal("expected injected fanout failure")
+	}
+	if observation, found, err := store.GetPhysicalSessionObservation(ctx, "p", "az-root"); err != nil || found {
+		t.Fatalf("physical observation escaped rollback: %+v found=%v err=%v", observation, found, err)
+	}
+	for _, role := range []SessionRole{SessionRoleWorker, SessionRoleOrchestrator} {
+		scope := SessionScopeIssue
+		wantObserved := SessionStateStopped
+		if role == SessionRoleOrchestrator {
+			scope, wantObserved = SessionScopeOrchestration, SessionStatePaused
+		}
+		intent, found, err := store.GetSessionIntent(ctx, "p", role, scope, "root")
+		if err != nil || !found || intent.ObservedState != wantObserved {
+			t.Fatalf("%s intent escaped rollback: %+v found=%v err=%v", role, intent, found, err)
+		}
+	}
+}

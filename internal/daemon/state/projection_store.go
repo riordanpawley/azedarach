@@ -68,6 +68,134 @@ type PhysicalSessionObservation struct {
 	UpdatedAt      time.Time
 }
 
+// ApplyPhysicalSessionObservation atomically records a monotonic physical
+// runtime fact and fans its observed fields into every existing logical intent
+// linked by physical session ID. It never creates desired intent authority and
+// never changes an intent's desired state or typed identity. Returned rows are
+// safe to publish because they are produced only after the transaction commits.
+func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context, observation PhysicalSessionObservation) ([]Session, bool, error) {
+	var changed []Session
+	var applied bool
+	err := sqliteutil.WithWriteLock(s.dbPath, func() error {
+		db, err := s.dbHandle()
+		if err != nil {
+			return err
+		}
+		observation, err = normalizePhysicalSessionObservation(observation)
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin physical session observation fan-out: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		result, err := tx.ExecContext(ctx, `INSERT INTO `+physicalSessionObservationTable+`
+			(project_id,session_id,observed_state,activity,activity_source,updated_at,observed_version)
+			VALUES(?,?,?,?,?,?,?)
+			ON CONFLICT(project_id,session_id) DO UPDATE SET
+				observed_state=excluded.observed_state,
+				activity=excluded.activity,
+				activity_source=excluded.activity_source,
+				updated_at=excluded.updated_at,
+				observed_version=excluded.observed_version
+			WHERE excluded.observed_version > `+physicalSessionObservationTable+`.observed_version`,
+			observation.ProjectID, observation.SessionID, observation.ObservedState,
+			observation.Activity, observation.ActivitySource,
+			observation.UpdatedAt.Format(time.RFC3339Nano), observation.UpdatedAt.UnixNano())
+		if err != nil {
+			return fmt.Errorf("persist physical session observation: %w", err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("inspect physical session observation write: %w", err)
+		}
+		if affected == 0 {
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("commit stale physical session observation no-op: %w", err)
+			}
+			return nil
+		}
+
+		if _, err := tx.ExecContext(ctx, `UPDATE `+sessionStateTable+`
+			SET observed_state=?, activity=?, activity_source=?
+			WHERE project_id=? AND session_id=?`, observation.ObservedState,
+			observation.Activity, observation.ActivitySource, observation.ProjectID,
+			observation.SessionID); err != nil {
+			return fmt.Errorf("fan physical session observation into logical intents: %w", err)
+		}
+		changed, err = listSessionIntentsByPhysicalIDTx(ctx, tx, observation.ProjectID, observation.SessionID)
+		if err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit physical session observation fan-out: %w", err)
+		}
+		applied = true
+		return nil
+	})
+	return changed, applied, err
+}
+
+func normalizePhysicalSessionObservation(observation PhysicalSessionObservation) (PhysicalSessionObservation, error) {
+	observation.ProjectID = normalizedProjectID(observation.ProjectID)
+	observation.SessionID = strings.TrimSpace(observation.SessionID)
+	observation.ObservedState = NormalizeSessionState(observation.ObservedState)
+	observation.Activity = strings.TrimSpace(observation.Activity)
+	observation.ActivitySource = strings.TrimSpace(observation.ActivitySource)
+	if observation.SessionID == "" {
+		return observation, fmt.Errorf("physical session observation: missing session id")
+	}
+	if !validSessionProductState(observation.ObservedState, false) {
+		return observation, fmt.Errorf("physical session observation: invalid observed state %q", observation.ObservedState)
+	}
+	if observation.ObservedState == SessionStateStopped && (observation.Activity != "" || observation.ActivitySource != "") {
+		return observation, fmt.Errorf("physical session observation: stopped runtime cannot retain activity")
+	}
+	if observation.UpdatedAt.IsZero() {
+		observation.UpdatedAt = time.Now().UTC()
+	} else {
+		observation.UpdatedAt = observation.UpdatedAt.UTC()
+	}
+	return observation, nil
+}
+
+func listSessionIntentsByPhysicalIDTx(ctx context.Context, tx *sql.Tx, projectID, sessionID string) ([]Session, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT session_id,issue_id,role,scope_kind,scope_id,state,
+		COALESCE(observed_state,state),COALESCE(activity,''),COALESCE(activity_source,''),
+		COALESCE(tmux_attached_count,0),COALESCE(started_at,''),updated_at
+		FROM `+sessionStateTable+` WHERE project_id=? AND session_id=?
+		ORDER BY logical_id`, projectID, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("list physical session logical intents: %w", err)
+	}
+	defer rows.Close()
+	var sessions []Session
+	for rows.Next() {
+		var session Session
+		var role, scopeKind, state, observed, startedAt, updatedAt string
+		if err := rows.Scan(&session.ID, &session.IssueID, &role, &scopeKind, &session.ScopeID,
+			&state, &observed, &session.Activity, &session.ActivitySource,
+			&session.TmuxAttachedCount, &startedAt, &updatedAt); err != nil {
+			return nil, fmt.Errorf("scan physical session logical intent: %w", err)
+		}
+		session.Role, session.ScopeKind = SessionRole(role), SessionScopeKind(scopeKind)
+		session.State, session.ObservedState = NormalizeSessionState(SessionState(state)), NormalizeSessionState(SessionState(observed))
+		if session.StartedAt, err = parseOptionalRuntimeStateTime(startedAt); err != nil {
+			return nil, err
+		}
+		if session.UpdatedAt, err = parseRuntimeStateTime(updatedAt); err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, session)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate physical session logical intents: %w", err)
+	}
+	return sessions, nil
+}
+
 func (s *RuntimeStateStore) UpsertPhysicalSessionObservation(ctx context.Context, observation PhysicalSessionObservation) error {
 	return sqliteutil.WithWriteLock(s.dbPath, func() error {
 		return s.upsertPhysicalSessionObservationLocked(ctx, observation)
@@ -79,33 +207,22 @@ func (s *RuntimeStateStore) upsertPhysicalSessionObservationLocked(ctx context.C
 	if err != nil {
 		return err
 	}
-	observation.ProjectID = normalizedProjectID(observation.ProjectID)
-	observation.SessionID = strings.TrimSpace(observation.SessionID)
-	observation.ObservedState = NormalizeSessionState(observation.ObservedState)
-	observation.Activity = strings.TrimSpace(observation.Activity)
-	observation.ActivitySource = strings.TrimSpace(observation.ActivitySource)
-	if observation.SessionID == "" {
-		return fmt.Errorf("upsert physical session observation: missing session id")
-	}
-	if observation.ObservedState == "" {
-		return fmt.Errorf("upsert physical session observation: missing observed state")
-	}
-	if observation.ObservedState == SessionStateStopped && (observation.Activity != "" || observation.ActivitySource != "") {
-		return fmt.Errorf("upsert physical session observation: stopped runtime cannot retain activity")
-	}
-	if observation.UpdatedAt.IsZero() {
-		observation.UpdatedAt = time.Now().UTC()
+	observation, err = normalizePhysicalSessionObservation(observation)
+	if err != nil {
+		return err
 	}
 	_, err = db.ExecContext(ctx, `INSERT INTO `+physicalSessionObservationTable+`
-		(project_id,session_id,observed_state,activity,activity_source,updated_at)
-		VALUES(?,?,?,?,?,?)
+		(project_id,session_id,observed_state,activity,activity_source,updated_at,observed_version)
+		VALUES(?,?,?,?,?,?,?)
 		ON CONFLICT(project_id,session_id) DO UPDATE SET
 			observed_state=excluded.observed_state,
 			activity=excluded.activity,
 			activity_source=excluded.activity_source,
-			updated_at=excluded.updated_at`, observation.ProjectID, observation.SessionID,
+			updated_at=excluded.updated_at,
+			observed_version=excluded.observed_version
+		WHERE excluded.observed_version > `+physicalSessionObservationTable+`.observed_version`, observation.ProjectID, observation.SessionID,
 		observation.ObservedState, observation.Activity, observation.ActivitySource,
-		observation.UpdatedAt.Format(time.RFC3339Nano))
+		observation.UpdatedAt.Format(time.RFC3339Nano), observation.UpdatedAt.UnixNano())
 	return err
 }
 
@@ -1768,6 +1885,7 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 			activity TEXT NOT NULL DEFAULT '',
 			activity_source TEXT NOT NULL DEFAULT '',
 			updated_at TEXT NOT NULL,
+			observed_version INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY(project_id, session_id),
 			CHECK (observed_state <> 'stopped' OR (activity = '' AND activity_source = ''))
 		)`,
@@ -1882,6 +2000,9 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("ensure runtime-state schema: %w", err)
 		}
+	}
+	if err := ensureColumn(ctx, db, physicalSessionObservationTable, "observed_version", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
 	}
 	if err := ensureColumn(ctx, db, sessionStateTable, "started_at", "TEXT"); err != nil {
 		return err
