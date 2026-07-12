@@ -3296,6 +3296,13 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 	}
 
 	reasons := make([]string, 0, 3)
+	acceptance, err := d.investigationAcceptance(ctx, projectID, task)
+	if err != nil {
+		return taskClosePreflightResult{}, err
+	}
+	if !acceptance.Accepted {
+		reasons = append(reasons, acceptance.Reason)
+	}
 	reasons = append(reasons, daemonCloseGuardRuntimeBlockers(task, opts)...)
 	reasons = append(reasons, daemonCloseGuardChildBlockers(task.ID, tasks, opts)...)
 	if len(reasons) > 0 {
@@ -3398,6 +3405,29 @@ func (d *Daemon) loadTaskClosePreflightDomainTasks(ctx context.Context, projectI
 		return nil, err
 	}
 	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
+}
+
+func (d *Daemon) investigationAcceptance(ctx context.Context, projectID string, task domain.Task) (domain.InvestigationAcceptance, error) {
+	if task.Type != domain.TypeInvestigation {
+		return domain.InvestigationAcceptance{Accepted: true}, nil
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return domain.InvestigationAcceptance{}, fmt.Errorf("issue store unavailable")
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, task.ID.String(), issues.IssueObservationEventListOptions{
+		Types: []domain.IssueObservationEventType{
+			domain.IssueEventInvestigationDisposition,
+			domain.IssueEventReviewCompleted,
+			domain.IssueEventHumanInputProvided,
+		},
+		Limit:       5000,
+		NewestFirst: true,
+	})
+	if err != nil {
+		return domain.InvestigationAcceptance{}, fmt.Errorf("read investigation acceptance for %s: %w", task.ID, err)
+	}
+	return domain.EvaluateInvestigationAcceptance(task, events), nil
 }
 
 type daemonCloseGuardStatusRepair struct {
@@ -4400,6 +4430,30 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 
 	desc := daemonTaskGraphDescendants(rootID, children)
 	staleCloseable := daemonTaskGraphStaleCloseableCandidates(rootID, byID, children)
+	acceptanceByIssue := make(map[string]domain.InvestigationAcceptance)
+	for _, id := range desc {
+		task := byID[id]
+		if task.Type != domain.TypeInvestigation || task.IssueClosed() {
+			continue
+		}
+		acceptance, err := d.investigationAcceptance(ctx, projectID, task)
+		if err != nil {
+			return taskCompleteCheckResult{}, err
+		}
+		acceptanceByIssue[id.String()] = acceptance
+	}
+	filteredStale := staleCloseable[:0]
+	for _, candidate := range staleCloseable {
+		acceptance, investigation := acceptanceByIssue[candidate.IssueID]
+		if investigation && !acceptance.Accepted {
+			continue
+		}
+		if investigation {
+			candidate.Evidence = append(candidate.Evidence, "investigation disposition="+string(acceptance.Disposition), "durable acceptance satisfied")
+		}
+		filteredStale = append(filteredStale, candidate)
+	}
+	staleCloseable = filteredStale
 	staleCloseableSet := make(map[string]struct{}, len(staleCloseable))
 	for _, candidate := range staleCloseable {
 		staleCloseableSet[candidate.IssueID] = struct{}{}
@@ -4445,6 +4499,12 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 	if len(activeSessions) > 0 {
 		reasons = append(reasons, fmt.Sprintf("active child sessions remain: %s", strings.Join(activeSessions, ",")))
 	}
+	for issueID, acceptance := range acceptanceByIssue {
+		if !acceptance.Accepted {
+			reasons = append(reasons, fmt.Sprintf("investigation %s acceptance blocked: %s", issueID, acceptance.Reason))
+		}
+	}
+	sort.Strings(reasons)
 	return taskCompleteCheckResult{
 		RootIssueID:            rootID.String(),
 		Pass:                   len(reasons) == 0,
@@ -5546,7 +5606,8 @@ func workerObservationIssueEventMeaningful(evt domain.IssueObservationEvent) boo
 		domain.IssueEventRiskRecorded,
 		domain.IssueEventBlockerReported,
 		domain.IssueEventHumanInputRequested,
-		domain.IssueEventHumanInputProvided:
+		domain.IssueEventHumanInputProvided,
+		domain.IssueEventInvestigationDisposition:
 		return true
 	case domain.IssueEventIssueDependencyAdded, domain.IssueEventIssueDependencyRemoved:
 		return workerObservationDependencyEventMeaningful(evt)
@@ -5603,7 +5664,8 @@ func workerObservationEvidenceEvents(events []domain.IssueObservationEvent) []do
 			domain.IssueEventRiskRecorded,
 			domain.IssueEventBlockerReported,
 			domain.IssueEventHumanInputRequested,
-			domain.IssueEventHumanInputProvided:
+			domain.IssueEventHumanInputProvided,
+			domain.IssueEventInvestigationDisposition:
 			out = append(out, evt)
 		}
 	}
