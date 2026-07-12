@@ -254,7 +254,7 @@ func (d *Daemon) cleanupAdvisorSessionRuntime(ctx context.Context, projectID, re
 		}
 		projection.State, projection.ObservedState, projection.Activity, projection.ActivitySource, projection.UpdatedAt = daemonstate.SessionStateStopped, daemonstate.SessionStateStopped, "", "", time.Now().UTC()
 		d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(protocol.NormalizeProjectID(projectID))}, projection)
-		if err := store.DeleteSessionState(ctx, projectID, sessionID); err != nil {
+		if err := store.DeleteSessionIntentState(ctx, projectID, projection); err != nil {
 			return fmt.Errorf("delete advisor session projection %s: %w", sessionID, err)
 		}
 	}

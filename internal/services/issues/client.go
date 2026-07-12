@@ -806,6 +806,22 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 }
 
 func migrateRuntimeSessionObservations(db *sql.DB) error {
+	logicalIdentity := false
+	var logicalColumns int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_xinfo('daemon_session_observations') WHERE name='logical_id'`).Scan(&logicalColumns); err == nil {
+		logicalIdentity = logicalColumns > 0
+	}
+	if logicalIdentity {
+		if _, err := db.Exec(`DELETE FROM daemon_session_observations WHERE EXISTS(SELECT 1 FROM daemon_session_projections p WHERE p.project_id=daemon_session_observations.project_id AND p.session_id=daemon_session_observations.session_id AND instr(p.session_id,'.pane-')>0);
+			INSERT INTO daemon_session_observations(project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at)
+			SELECT project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,COALESCE(tmux_attached_count,0),started_at,updated_at
+			FROM daemon_session_projections WHERE instr(session_id,'.pane-')>0
+			ON CONFLICT DO UPDATE SET session_id=excluded.session_id,issue_id=excluded.issue_id,role=excluded.role,scope_kind=excluded.scope_kind,scope_id=excluded.scope_id,state=excluded.state,observed_state=excluded.observed_state,activity=excluded.activity,activity_source=excluded.activity_source,tmux_attached_count=excluded.tmux_attached_count,started_at=excluded.started_at,updated_at=excluded.updated_at;
+			DELETE FROM daemon_session_projections WHERE instr(session_id,'.pane-')>0`); err != nil {
+			return err
+		}
+		return nil
+	}
 	if _, err := db.Exec(`
 		INSERT INTO daemon_session_observations (
 			project_id,

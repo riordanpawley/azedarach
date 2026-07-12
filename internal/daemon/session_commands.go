@@ -2979,7 +2979,8 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		if sessionIDToDelete == "" {
 			return
 		}
-		if err := runtimeStore.DeleteSessionState(ctx, projectID, sessionIDToDelete); err != nil && d.cfg.Logger != nil {
+		session.ID = sessionIDToDelete
+		if err := runtimeStore.DeleteSessionIntentState(ctx, projectID, session); err != nil && d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("session reconciliation failed to prune invalid desired session",
 				"project_id", projectID,
 				"issue_id", issueID,
@@ -3008,7 +3009,8 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		if sessionIDToDelete == "" {
 			return
 		}
-		if err := runtimeStore.DeleteSessionState(ctx, projectID, sessionIDToDelete); err != nil {
+		session.ID = sessionIDToDelete
+		if err := runtimeStore.DeleteSessionIntentState(ctx, projectID, session); err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("session reconciliation failed to prune missing-worktree desired session",
 					"project_id", projectID,
@@ -3094,7 +3096,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			return result, fmt.Errorf("recover rooted orchestrator %s: %s", session.ScopeID, response.Error.Message)
 		}
 		if strings.TrimSpace(session.ID) != canonicalSessionID {
-			if err := d.sessionRuntimeStateStoreIfConfigured(projectID).DeleteSessionState(ctx, projectID, session.ID); err != nil {
+			if err := d.sessionRuntimeStateStoreIfConfigured(projectID).DeleteSessionIntentState(ctx, projectID, session); err != nil {
 				return result, fmt.Errorf("remove noncanonical orchestrator projection %s: %w", session.ID, err)
 			}
 		}

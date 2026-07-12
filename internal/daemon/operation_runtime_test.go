@@ -804,7 +804,7 @@ func TestWorkerLifecyclePathsIgnoreNewerNonWorkerSessions(t *testing.T) {
 	seeds := []daemonstate.Session{
 		{ID: workerID, IssueID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: now},
 		{ID: issueID, IssueID: issueID, Role: daemonstate.SessionRoleAdvisor, ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: "request-1", State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: now.Add(time.Minute)},
-		{ID: "root-newest", IssueID: issueID, Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: now.Add(2 * time.Minute)},
+		{ID: workerID, IssueID: issueID, Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: now.Add(2 * time.Minute)},
 	}
 	for _, seed := range seeds {
 		if err := store.UpsertSessionState(ctx, projectID, seed); err != nil {
@@ -826,11 +826,18 @@ func TestWorkerLifecyclePathsIgnoreNewerNonWorkerSessions(t *testing.T) {
 	if worker.ID != workerID || worker.State != daemonstate.SessionStateStopped {
 		t.Fatalf("worker stop selected %+v", worker)
 	}
-	for _, id := range []string{issueID, "root-newest"} {
-		row, found, err := store.GetSessionState(ctx, projectID, id)
-		if err != nil || !found || row.State != daemonstate.SessionStateRunning {
-			t.Fatalf("non-worker %s changed: %+v found=%t err=%v", id, row, found, err)
+	intents, err := store.ListSessionIntentStates(ctx, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preserved := map[daemonstate.SessionRole]bool{}
+	for _, row := range intents {
+		if row.IssueID == issueID && row.Role != daemonstate.SessionRoleWorker && row.State == daemonstate.SessionStateRunning {
+			preserved[row.Role] = true
 		}
+	}
+	if !preserved[daemonstate.SessionRoleAdvisor] || !preserved[daemonstate.SessionRoleOrchestrator] {
+		t.Fatalf("non-worker intents not preserved: %+v", intents)
 	}
 	worker.State, worker.ObservedState, worker.UpdatedAt = daemonstate.SessionStateRunning, daemonstate.SessionStateRunning, now.Add(4*time.Minute)
 	if err := store.UpsertSessionState(ctx, projectID, worker); err != nil {

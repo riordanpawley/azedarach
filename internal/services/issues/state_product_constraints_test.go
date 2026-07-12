@@ -397,7 +397,10 @@ func TestCanonicalMigrationConvergesDuplicateLogicalSessions(t *testing.T) {
 	}
 	db, _ := client.dbHandle()
 	dropCanonicalStateMigrationGuards(t, db)
-	if _, err := db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_daemon_session_projections_logical_scope_unique; DROP INDEX IF EXISTS idx_daemon_session_observations_logical_scope_unique; DELETE FROM schema_migrations WHERE id='0045_issue_state_runtime_constraints'`); err != nil {
+	legacySessionTable := func(name string) string {
+		return `CREATE TABLE ` + name + `(project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL,scope_kind TEXT NOT NULL,scope_id TEXT NOT NULL,state TEXT NOT NULL,observed_state TEXT,activity TEXT,activity_source TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,started_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,session_id));`
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE daemon_session_projections; DROP TABLE daemon_session_observations; `+legacySessionTable("daemon_session_projections")+legacySessionTable("daemon_session_observations")+` DELETE FROM schema_migrations WHERE id='0045_issue_state_runtime_constraints'`); err != nil {
 		t.Fatal(err)
 	}
 	insert := `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`
@@ -415,8 +418,8 @@ func TestCanonicalMigrationConvergesDuplicateLogicalSessions(t *testing.T) {
 	}
 	observationInsert := strings.Replace(insert, "daemon_session_projections", "daemon_session_observations", 1)
 	for _, row := range [][]any{
-		{"p", "pr-" + workerID, workerID, "worker", "issue", workerID, "running", "running", "idle", "", 0, "2026-07-13T00:00:00Z", "2026-07-13T00:00:00Z"},
-		{"p", "worker-new", workerID, "worker", "issue", workerID, "paused", "paused", "busy", "hooks", 0, "2026-07-13T00:01:00Z", "2026-07-13T00:02:00Z"},
+		{"p", "observation-old", workerID, "worker", "issue", workerID, "running", "running", "idle", "", 0, "2026-07-13T00:00:00Z", "2026-07-13T00:00:00Z"},
+		{"p", "observation-new", workerID, "worker", "issue", workerID, "paused", "paused", "busy", "hooks", 0, "2026-07-13T00:01:00Z", "2026-07-13T00:02:00Z"},
 	} {
 		if _, err := db.ExecContext(ctx, observationInsert, row...); err != nil {
 			t.Fatal(err)
@@ -437,6 +440,13 @@ func TestCanonicalMigrationConvergesDuplicateLogicalSessions(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("canonical observation rows=%d want 1", count)
+	}
+	var observedRuntimeID string
+	if err := db.QueryRowContext(ctx, `SELECT session_id FROM daemon_session_observations WHERE project_id='p'`).Scan(&observedRuntimeID); err != nil {
+		t.Fatal(err)
+	}
+	if observedRuntimeID != "pr-"+workerID {
+		t.Fatalf("observation runtime association=%s want %s", observedRuntimeID, "pr-"+workerID)
 	}
 	for _, id := range []string{"pr-" + workerID, "pr-orchestrator-project", "pr-" + rootID} {
 		var state, activity, started string

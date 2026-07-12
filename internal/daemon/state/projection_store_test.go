@@ -683,14 +683,18 @@ func TestRuntimeStateStoreRejectsInvalidSessionProducts(t *testing.T) {
 		t.Fatalf("valid project orchestrator: %v", err)
 	}
 	valid.ID = "project-duplicate"
-	if err := store.UpsertSessionState(ctx, "project", valid); err == nil {
-		t.Fatal("duplicate logical project orchestrator scope accepted")
+	if err := store.UpsertSessionState(ctx, "project", valid); err != nil {
+		t.Fatalf("logical project orchestrator runtime reassociation: %v", err)
+	}
+	rows, err := store.ListSessionIntentStates(ctx, "project")
+	if err != nil || len(rows) != 1 || rows[0].ID != "project-duplicate" {
+		t.Fatalf("logical project orchestrator rows=%+v err=%v", rows, err)
 	}
 	db, err := store.dbHandle()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE daemon_session_projections SET tmux_attached_count=-1 WHERE session_id='project'`); err == nil {
+	if _, err := db.ExecContext(ctx, `UPDATE daemon_session_projections SET tmux_attached_count=-1 WHERE session_id='project-duplicate'`); err == nil {
 		t.Fatal("direct SQL bypassed authoritative session product trigger")
 	}
 }
@@ -731,8 +735,8 @@ func TestRuntimeStateStoreUpgradeCanonicalizesDuplicateLogicalSessions(t *testin
 		('p','pr-root','root','orchestrator','orchestration','root','running','running','idle','',0,'2026-07-13T00:00:00Z','2026-07-13T00:00:00Z'),
 		('p','root-new','root','orchestrator','orchestration','root','paused','paused','busy','hooks',0,'2026-07-13T00:01:00Z','2026-07-13T00:02:00Z');
 		INSERT INTO daemon_session_observations VALUES
-		('p','pr-worker','worker','worker','issue','worker','running','running','idle','',0,'2026-07-13T00:00:00Z','2026-07-13T00:00:00Z'),
-		('p','worker-new','worker','worker','issue','worker','paused','paused','busy','hooks',0,'2026-07-13T00:01:00Z','2026-07-13T00:02:00Z')`); err != nil {
+		('p','observation-old','worker','worker','issue','worker','running','running','idle','',0,'2026-07-13T00:00:00Z','2026-07-13T00:00:00Z'),
+		('p','observation-new','worker','worker','issue','worker','paused','paused','busy','hooks',0,'2026-07-13T00:01:00Z','2026-07-13T00:02:00Z')`); err != nil {
 		t.Fatal(err)
 	}
 	_ = db.Close()
@@ -756,6 +760,11 @@ func TestRuntimeStateStoreUpgradeCanonicalizesDuplicateLogicalSessions(t *testin
 	}
 	if len(all) != 4 {
 		t.Fatalf("projection plus canonical observation rows=%d want 4", len(all))
+	}
+	for _, row := range all {
+		if row.Role == SessionRoleWorker && row.State == SessionStatePaused && row.ID != "pr-worker" {
+			t.Fatalf("desired/observed runtime association diverged: %+v", all)
+		}
 	}
 }
 

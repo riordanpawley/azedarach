@@ -138,6 +138,14 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 	if _, err := tx.ExecContext(ctx, `UPDATE daemon_session_projections SET state='running' WHERE state='attached'; UPDATE daemon_session_projections SET observed_state='running' WHERE observed_state='attached'`); err != nil {
 		return fmt.Errorf("normalize legacy attached session state: %w", err)
 	}
+	for _, name := range []string{"issue_closed_runtime_guard_insert", "issue_closed_runtime_guard_update", "daemon_session_closed_issue_guard_insert", "daemon_session_closed_issue_guard_update", "issue_dependency_closed_runtime_guard_insert", "issue_dependency_closed_runtime_guard_update", "issue_descendant_closed_ancestor_guard_update", "issue_session_archived_guard", "issue_session_archived_guard_update", "daemon_session_state_product_guard_insert", "daemon_session_state_product_guard_update", "daemon_session_observation_product_guard_insert", "daemon_session_observation_product_guard_update"} {
+		if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+name); err != nil {
+			return err
+		}
+	}
+	if err := migrateIssueSessionLogicalIdentity(ctx, tx); err != nil {
+		return fmt.Errorf("migrate logical session identity: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS issue_coordination_leases (
 		issue_id TEXT NOT NULL, purpose TEXT NOT NULL CHECK (purpose IN ('execution','orchestration','review')),
 		owner_id TEXT NOT NULL, owner_kind TEXT NOT NULL, claimed_at TEXT NOT NULL, expires_at TEXT,
@@ -207,6 +215,20 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 	if _, err := tx.ExecContext(ctx, canonicalRuntimeGuards); err != nil {
 		return fmt.Errorf("install canonical runtime aggregate guards: %w", err)
 	}
+	var revisionTables int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projection_source_revision'`).Scan(&revisionTables); err != nil {
+		return err
+	}
+	if revisionTables > 0 {
+		for _, table := range []struct{ prefix, name string }{{"sessions", "daemon_session_projections"}, {"session_observations", "daemon_session_observations"}} {
+			for _, action := range []string{"insert", "update", "delete"} {
+				trigger := "projection_source_revision_" + table.prefix + "_" + action
+				if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+trigger+`; CREATE TRIGGER `+trigger+` AFTER `+strings.ToUpper(action)+` ON `+table.name+` BEGIN UPDATE projection_source_revision SET revision=revision+1 WHERE singleton=1; END`); err != nil {
+					return fmt.Errorf("restore projection revision trigger %s: %w", trigger, err)
+				}
+			}
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(id,applied_at) VALUES(?,?)`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
@@ -214,6 +236,50 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 		return err
 	}
 	tx = nil
+	return nil
+}
+
+func migrateIssueSessionLogicalIdentity(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE logical_runtime_winners AS
+		SELECT DISTINCT project_id,role,scope_kind,scope_id,
+		FIRST_VALUE(session_id) OVER (PARTITION BY project_id,role,scope_kind,scope_id ORDER BY
+		CASE WHEN length(session_id)>3 AND substr(session_id,3,1)='-' AND substr(session_id,4)=CASE WHEN role='orchestrator' AND scope_id='project' THEN 'orchestrator-project' ELSE scope_id END THEN 0 ELSE 1 END,
+		updated_at DESC,session_id ASC) winner_id
+		FROM (SELECT project_id,session_id,role,scope_kind,scope_id,updated_at FROM daemon_session_projections WHERE instr(session_id,'.pane-')=0
+		UNION ALL SELECT project_id,session_id,role,scope_kind,scope_id,updated_at FROM daemon_session_observations WHERE instr(session_id,'.pane-')=0)`); err != nil {
+		return err
+	}
+	for _, table := range []string{"daemon_session_projections", "daemon_session_observations"} {
+		merged := "merged_" + table
+		if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE `+merged+` AS SELECT DISTINCT t.project_id,w.winner_id session_id,
+		FIRST_VALUE(t.issue_id) OVER newest issue_id,t.role,t.scope_kind,t.scope_id,FIRST_VALUE(t.state) OVER newest state,
+		FIRST_VALUE(t.observed_state) OVER newest observed_state,FIRST_VALUE(t.activity) OVER newest activity,
+		FIRST_VALUE(t.activity_source) OVER newest activity_source,FIRST_VALUE(t.tmux_attached_count) OVER newest tmux_attached_count,
+		MIN(NULLIF(t.started_at,'')) OVER logical_scope started_at,MAX(t.updated_at) OVER logical_scope updated_at
+		FROM `+table+` t JOIN logical_runtime_winners w USING(project_id,role,scope_kind,scope_id) WHERE instr(t.session_id,'.pane-')=0
+		WINDOW logical_scope AS (PARTITION BY t.project_id,t.role,t.scope_kind,t.scope_id),newest AS (PARTITION BY t.project_id,t.role,t.scope_kind,t.scope_id ORDER BY t.updated_at DESC,t.session_id ASC);
+		DELETE FROM `+table+` WHERE instr(session_id,'.pane-')=0;
+		INSERT INTO `+table+`(project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at)
+		SELECT project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at FROM `+merged+`; DROP TABLE `+merged+`;`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE logical_runtime_winners`); err != nil {
+		return err
+	}
+	for _, table := range []string{"daemon_session_projections", "daemon_session_observations"} {
+		newTable := table + "_logical_identity_v3"
+		if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS `+newTable+`; CREATE TABLE `+newTable+`(
+		project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'worker',scope_kind TEXT NOT NULL DEFAULT 'issue',scope_id TEXT NOT NULL DEFAULT '',
+		state TEXT NOT NULL,observed_state TEXT,activity TEXT,activity_source TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,started_at TEXT,updated_at TEXT NOT NULL,
+		logical_id TEXT GENERATED ALWAYS AS (role||':'||scope_kind||':'||scope_id||CASE WHEN instr(session_id,'.pane-')>0 THEN ':pane:'||session_id ELSE '' END) STORED,
+		UNIQUE(project_id,logical_id));
+		INSERT INTO `+newTable+`(project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at)
+		SELECT project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at FROM `+table+`;
+		DROP TABLE `+table+`; ALTER TABLE `+newTable+` RENAME TO `+table+`;`); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
