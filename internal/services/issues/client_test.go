@@ -3972,6 +3972,98 @@ func TestClient_RenumberedInteractionMigrationsUpgradeLegacyHistories(t *testing
 	assert.Equal(t, 2, applied)
 }
 
+func TestClient_RenumberedContextualLearningMigrationUpgradesHistoricalIdentity(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+
+	client := NewClientAtPath(dbPath, slog.Default())
+	_, err := client.Create(ctx, CreateTaskParams{
+		Title:    "migration seed",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.CloseDB())
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.ExecContext(ctx, `
+		DELETE FROM schema_migrations
+		WHERE id = '0039_contextual_learning_activation';
+		INSERT INTO schema_migrations (id, applied_at)
+		VALUES ('0038_contextual_learning_activation', ?);
+	`, now)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	upgraded := NewClientAtPath(dbPath, slog.Default())
+	_, err = upgraded.List(ctx)
+	require.NoError(t, err)
+	require.NoError(t, upgraded.CloseDB())
+
+	db, err = sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+	var applied int
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM schema_migrations
+		WHERE id = '0039_contextual_learning_activation'
+	`).Scan(&applied))
+	assert.Equal(t, 1, applied)
+}
+
+func TestClient_RenumberedContextualLearningMigrationCompletesHistoricalSchema(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+
+	client := NewClientAtPath(dbPath, slog.Default())
+	_, err := client.Create(ctx, CreateTaskParams{
+		Title:    "migration seed",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.CloseDB())
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+		DELETE FROM schema_migrations
+		WHERE id = '0039_contextual_learning_activation';
+		INSERT INTO schema_migrations (id, applied_at)
+		VALUES ('0038_contextual_learning_activation', '2026-07-12T00:00:00Z');
+		DROP INDEX idx_learning_activations_session;
+		DROP TABLE learning_activation_deliveries;
+	`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	upgraded := NewClientAtPath(dbPath, slog.Default())
+	_, err = upgraded.List(ctx)
+	require.NoError(t, err)
+	require.NoError(t, upgraded.CloseDB())
+
+	db, err = sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+	var applied, repairedObjects int
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM schema_migrations
+		WHERE id = '0039_contextual_learning_activation'
+	`).Scan(&applied))
+	assert.Equal(t, 1, applied)
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE (type = 'table' AND name = 'learning_activation_deliveries')
+		   OR (type = 'index' AND name IN (
+			'idx_learning_activations_session',
+			'idx_learning_activation_deliveries_activation'
+		   ))
+	`).Scan(&repairedObjects))
+	assert.Equal(t, 3, repairedObjects)
+}
+
 func TestClient_RepairsLegacyIssueColumnsBeforeSearchFTSMigration(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")

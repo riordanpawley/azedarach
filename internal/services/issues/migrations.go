@@ -70,7 +70,7 @@ var orderedMigrations = []migration{
 	{id: "0037_projection_source_revision", path: "migrations/0037_projection_source_revision.sql"},
 	{id: "0037_learning_activation_feedback", path: "migrations/0037_learning_activation_feedback.sql"},
 	{id: "0038_learning_consolidation", path: "migrations/0038_learning_consolidation.sql"},
-	{id: "0039_contextual_learning_activation", path: "migrations/0039_contextual_learning_activation.sql"},
+	{id: contextualLearningMigrationID, apply: applyContextualLearningActivationMigration},
 	{id: "0040_typed_learning_observations", path: "migrations/0040_typed_learning_observations.sql"},
 	{id: "0041_learning_activation_confirmation", path: "migrations/0041_learning_activation_confirmation.sql"},
 	{id: "0042_learning_consolidation_scan_cursor", path: "migrations/0042_learning_consolidation_scan_cursor.sql"},
@@ -84,6 +84,8 @@ const (
 	issueStateModelV2CutoverMarkerKey = "issue:state_model_v2_cutover"
 	issueStateModelV2Version          = "2"
 	boardViewsMigrationID             = "0031_board_views"
+	contextualLearningMigrationID     = "0039_contextual_learning_activation"
+	legacyContextualLearningMigration = "0038_contextual_learning_activation"
 )
 
 type issueStateModelV2CutoverMarker struct {
@@ -530,6 +532,81 @@ func applyOrchestratorLifecycleClockMigration(ctx context.Context, db *sql.DB, i
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	return nil
+}
+
+func applyContextualLearningActivationMigration(ctx context.Context, db *sql.DB, id string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var legacyApplied bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id = ?)
+	`, legacyContextualLearningMigration).Scan(&legacyApplied); err != nil {
+		return fmt.Errorf("inspect legacy migration %s: %w", legacyContextualLearningMigration, err)
+	}
+
+	if legacyApplied {
+		if err := completeHistoricalContextualLearningSchema(ctx, tx); err != nil {
+			return fmt.Errorf("complete legacy migration %s before aliasing to %s: %w", legacyContextualLearningMigration, id, err)
+		}
+	} else {
+		sqlText, err := loadMigrationSQL("migrations/0039_contextual_learning_activation.sql")
+		if err != nil {
+			return fmt.Errorf("load migration %s: %w", id, err)
+		}
+		if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+			return fmt.Errorf("apply migration %s: %w", id, err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)
+	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	return nil
+}
+
+func completeHistoricalContextualLearningSchema(ctx context.Context, tx *sql.Tx) error {
+	for _, column := range []struct {
+		name string
+		ddl  string
+	}{
+		{name: "purpose", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "session_id", ddl: "TEXT NOT NULL DEFAULT ''"},
+	} {
+		exists, err := txColumnExists(ctx, tx, "learning_activations", column.name)
+		if err != nil {
+			return fmt.Errorf("inspect learning_activations.%s: %w", column.name, err)
+		}
+		if !exists {
+			if _, err := tx.ExecContext(ctx, "ALTER TABLE learning_activations ADD COLUMN "+column.name+" "+column.ddl); err != nil {
+				return fmt.Errorf("add learning_activations.%s: %w", column.name, err)
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_learning_activations_session
+			ON learning_activations(project_id, session_id, delivered_at DESC);
+		CREATE TABLE IF NOT EXISTS learning_activation_deliveries (
+			activation_id TEXT NOT NULL REFERENCES learning_activations(activation_id) ON DELETE CASCADE,
+			project_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			learning_id TEXT NOT NULL,
+			PRIMARY KEY (project_id, session_id, learning_id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_learning_activation_deliveries_activation
+			ON learning_activation_deliveries(activation_id);
+	`); err != nil {
+		return fmt.Errorf("complete contextual learning tables and indexes: %w", err)
 	}
 	return nil
 }
