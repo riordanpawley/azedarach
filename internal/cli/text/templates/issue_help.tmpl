@@ -1,38 +1,38 @@
-Usage: az issue <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|cleanup|delete|unarchive|image|document|dep|bulk-create|bulk-update|fanout> [arguments]
+Usage: az ticket <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|cleanup|delete|unarchive|image|document|dep|bulk-create|bulk-update|fanout> [arguments]
 
 Commands:
-  list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c]  List issues from daemon-backed store
+  list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c]  List tickets from daemon-backed store
   search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)  Search title, description, notes, design, acceptance, labels, and implementations
-  get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]  Show a single issue by ID
-  claim [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<issue-id>]  Claim an issue ownership lease
-  takeover [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--json] [<issue-id>]  Force-claim an issue ownership lease
-  release [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--force] [--json] [<issue-id>]  Release an issue ownership lease
-  events [--project <project-id>] [--id <issue-id>] [--json] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]  List an issue's durable observation event stream
-  record [--project <project-id>] [--id <issue-id>] [--type <event-type>] [--summary <text>] [--body <text>] [--data <json-object>] [--follow-up <issue-id> ...] [--json] [<issue-id>]  Append durable issue activity/evidence without mailbox delivery
-  context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--summary|--full] [--json] [<issue-id>]  Show compact repeated local failure/overlap risk context
-  get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]  Fetch many issues in requested order
-  check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Alias for get
-  doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Run integrity checks for one issue
-  create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an issue; auto-parents to AZEDARACH_ISSUE_ID when set
-  split [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create a child issue and launch it with az orchestrate start
-  update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields and durable lifecycle actions (backlog/open/active/review/closed/cancelled)
-  close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]  Integrate, clean up, and close an issue
-  cleanup [--project <project-id>] [--id <issue-id> ...|--ids a,b] [--status <status> ...] [--query text] [--updated-before date] [--limit N] [--action closed|cancelled] [--dry-run] [--per-issue-timeout duration] [--json]  Safely clean up issue lifecycles in one daemon operation
-  delete [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]  Permanently delete an issue
-  unarchive [--project <project-id>] [--id <issue-id>] [--json] [--with-parents] [--cascade-children] [<issue-id>]  Restore archived issues to active reads
-  image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]  Attach an image to an issue
-  image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]  Remove an image attachment from an issue
-  document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]  Attach a report/document to an issue
-  document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]  List report/document attachments for an issue
-  document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]  Remove a document attachment from an issue
-  dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]  Add a dependency edge
-  dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]  Remove a dependency edge
+  get [--project <project-id>] [--id <ticket-id>] [--json] [--with-notes] [<ticket-id>]  Show a single ticket by ID
+  claim [--project <project-id>] [--id <ticket-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<ticket-id>]  Claim a ticket ownership lease
+  takeover [--project <project-id>] [--id <ticket-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--json] [<ticket-id>]  Force-claim a ticket ownership lease
+  release [--project <project-id>] [--id <ticket-id>] [--owner <owner-id>] [--force] [--json] [<ticket-id>]  Release a ticket ownership lease
+  events [--project <project-id>] [--id <ticket-id>] [--json] [--type <event-type> ...] [--types a,b] [--limit N] [<ticket-id>]  List a ticket's durable observation event stream
+  record [--project <project-id>] [--id <ticket-id>] [--type <event-type>] [--summary <text>] [--body <text>] [--data <json-object>] [--follow-up <ticket-id> ...] [--json] [<ticket-id>]  Append durable ticket activity/evidence without mailbox delivery
+  context-risk [--project <project-id>] [--id <ticket-id>] [--since 14d] [--summary|--full] [--json] [<ticket-id>]  Show compact repeated local failure/overlap risk context
+  get-many [--project <project-id>] --id <ticket-id> [--id <ticket-id> ...] [--ids a,b,c] [--json] [--with-notes]  Fetch many tickets in requested order
+  check [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>]  Alias for get
+  doctor [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>]  Run integrity checks for one ticket
+  create [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create a ticket; auto-parents to AZEDARACH_ISSUE_ID when set
+  split [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create a child ticket and launch it with az orchestrate start
+  update [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update ticket fields and durable lifecycle actions (backlog/open/active/review/closed/cancelled)
+  close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [<ticket-id>]  Integrate, clean up, and close a ticket
+  cleanup [--project <project-id>] [--id <ticket-id> ...|--ids a,b] [--status <status> ...] [--query text] [--updated-before date] [--limit N] [--action closed|cancelled] [--dry-run] [--per-issue-timeout duration] [--json]  Safely clean up ticket lifecycles in one daemon operation
+  delete [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]  Permanently delete a ticket
+  unarchive [--project <project-id>] [--id <ticket-id>] [--json] [--with-parents] [--cascade-children] [<ticket-id>]  Restore archived tickets to active reads
+  image add [--project <project-id>] [--issue-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]  Attach an image to a ticket
+  image remove [--project <project-id>] [--issue-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]  Remove an image attachment from a ticket
+  document add [--project <project-id>] [--issue-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]  Attach a report/document to a ticket
+  document list [--project <project-id>] [--issue-id <ticket-id>] [<ticket-id>] [--json]  List report/document attachments for a ticket
+  document remove [--project <project-id>] [--issue-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]  Remove a document attachment from a ticket
+  dep add [--project <project-id>] [--issue-id <ticket-id>] [--depends-on-id <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]  Add a dependency edge
+  dep remove [--project <project-id>] [--issue-id <ticket-id>] [--depends-on-id <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]  Remove a dependency edge
   dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]  Apply dependency edge mutations
-  bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Create issues, epics, or nested children trees from JSON
+  bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Create tickets, epics, or nested children trees from JSON
   bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Execute bulk update operations
-  fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply a pre-authored nested issue tree from JSON
-  fanout ready [--project <project-id>] --root <issue-id> [--json]  List runnable leaf issues under a fanout root
-  fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
+  fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply a pre-authored nested ticket tree from JSON
+  fanout ready [--project <project-id>] --root <ticket-id> [--json]  List runnable leaf tickets under a fanout root
+  fanout drift [--project <project-id>] --issue <ticket-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
 
 Status semantics:
   open         Not yet active
@@ -40,13 +40,13 @@ Status semantics:
   in_review   Complete and waiting for review/integration
   closed      Accepted/integrated and complete
   Blocked work is represented with `dep add --type blocks`, not a status.
-  Agent progress, validation, review facts, and worker closeout belong in mail/observation evidence, not issue notes.
+  Agent progress, validation, review facts, and worker closeout belong in mail/observation evidence, not ticket notes.
 
 Graph/root membership:
-  To create a child under the active issue, run `az issue create "Child task"` from a session with AZEDARACH_ISSUE_ID set.
-  To attach to a different parent/root at creation time, pass `--parent <issue-id>`.
+  To create a child under the active ticket, run `az ticket create "Child task"` from a session with AZEDARACH_ISSUE_ID set.
+  To attach to a different parent/root at creation time, pass `--parent <ticket-id>`.
   Child/root membership comes from AZEDARACH_ISSUE_ID auto-parenting, `--parent`, or `dep add --type parent-child`.
   Do not use `--impl <id>` when you mean "parent this under <id>".
-  `--impl` assigns implementation/spec variant metadata only; it never attaches an issue to a graph/root.
+  `--impl` assigns implementation/spec variant metadata only; it never attaches a ticket to a graph/root.
 
 Argument ordering: place flags/options before positional arguments for deterministic parsing.

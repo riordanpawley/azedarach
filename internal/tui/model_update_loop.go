@@ -380,7 +380,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if wasLoading {
 			m.addToast(Toast{
 				Level:   ToastSuccess,
-				Message: "Issues loaded",
+				Message: "Tickets loaded",
 				Expires: time.Now().Add(3 * time.Second),
 			})
 		}
@@ -2130,7 +2130,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if len(msg.issues) > 0 {
 			level = ToastWarning
-			summary = fmt.Sprintf("%s, %d reported issues (%s)", summary, len(msg.issues), summarizeBulkIssues(msg.issues))
+			summary = fmt.Sprintf("%s, %d reported tickets (%s)", summary, len(msg.issues), summarizeBulkIssues(msg.issues))
 		}
 		if msg.failed > 0 {
 			level = ToastWarning

@@ -76,5 +76,7 @@ This directory primarily contains **developer/internal documentation**.
 
 ## Spec Records
 
+- [Ticket terminology migration](25-ticket-terminology-migration.md) defines the canonical language and compatibility boundaries.
+
 - `az spec read --json` reads daemon-backed requirement/link records.
 - Markdown spec export is disabled until it can export the real stored spec data.

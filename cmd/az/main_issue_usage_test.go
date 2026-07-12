@@ -12,7 +12,7 @@ func TestIssueCreateUsageExplainsImplIsNotParentage(t *testing.T) {
 	text := out.String()
 
 	for _, want := range []string{
-		"Usage: az issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...]",
+		"Usage: az ticket create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...]",
 		"`az issue create \"Child task\"` auto-parents to AZEDARACH_ISSUE_ID when set",
 		"use `--parent <issue-id>` for another parent/root",
 		"--impl only assigns implementation/spec variant metadata; it is not parent/root selection.",
@@ -29,7 +29,7 @@ func TestIssueSplitUsageExplainsParentFlagOwnsParentage(t *testing.T) {
 	text := out.String()
 
 	for _, want := range []string{
-		"Usage: az issue split [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...]",
+		"Usage: az ticket split [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...]",
 		"use --parent or AZEDARACH_ISSUE_ID for parentage",
 		"--impl only assigns implementation/spec variant metadata",
 	} {
