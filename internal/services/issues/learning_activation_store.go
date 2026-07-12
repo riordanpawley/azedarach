@@ -14,8 +14,7 @@ import (
 )
 
 const (
-	MaxLearningActivationTokens   = 32768
-	learningActivationProposalTTL = 24 * time.Hour
+	MaxLearningActivationTokens = 32768
 )
 
 type LearningActivation struct {
@@ -62,7 +61,7 @@ func (c *Client) ProposeLearningActivation(ctx context.Context, p RecordLearning
 	}
 	b, _ := json.Marshal(ids)
 	now := time.Now().UTC()
-	if _, err = db.ExecContext(ctx, `DELETE FROM learning_activation_proposals WHERE project_id=? AND proposed_at<?`, p.ProjectID, formatTimestamp(now.Add(-learningActivationProposalTTL))); err != nil {
+	if _, err = db.ExecContext(ctx, `DELETE FROM learning_activation_proposals WHERE project_id=? AND proposed_at<?`, p.ProjectID, formatTimestamp(domain.LearningActivationProposalExpiry(now))); err != nil {
 		return LearningActivationProposal{}, fmt.Errorf("expire learning activation proposals: %w", err)
 	}
 	out := LearningActivationProposal{ActivationID: "act-" + uuid.NewString(), ProjectID: p.ProjectID, Surface: p.Surface, ContextFingerprint: p.ContextFingerprint, Purpose: strings.TrimSpace(p.Purpose), SessionID: strings.TrimSpace(p.SessionID), Explanation: strings.TrimSpace(p.Explanation), LearningIDs: ids, ProposedAt: now}
@@ -253,7 +252,8 @@ func (c *Client) RecordLearningActivationOutcome(ctx context.Context, in Learnin
 	}
 	n, _ := res.RowsAffected()
 	if n == 1 {
-		_, err = tx.ExecContext(ctx, `UPDATE learning_activations SET resolved_outcome=?, resolved_source=? WHERE activation_id=? AND (resolved_source='' OR CASE ? WHEN 'human' THEN 3 WHEN 'explicit' THEN 3 WHEN 'agent' THEN 2 ELSE 1 END > CASE resolved_source WHEN 'human' THEN 3 WHEN 'explicit' THEN 3 WHEN 'agent' THEN 2 ELSE 1 END)`, in.Outcome, in.Source, in.ActivationID, in.Source)
+		priority := in.Source.ResolutionPriority()
+		_, err = tx.ExecContext(ctx, `UPDATE learning_activations SET resolved_outcome=?, resolved_source=?, resolved_priority=? WHERE activation_id=? AND ?>resolved_priority`, in.Outcome, in.Source, priority, in.ActivationID, priority)
 		if err != nil {
 			return LearningActivationOutcome{}, false, err
 		}

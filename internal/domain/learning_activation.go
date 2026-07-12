@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 type LearningActivationOutcome string
@@ -39,6 +40,21 @@ func (s LearningOutcomeSource) Valid() bool {
 	return s == LearningOutcomeExplicit || s == LearningOutcomeHuman || s == LearningOutcomeAgent || s == LearningOutcomeInferred
 }
 
+func (s LearningOutcomeSource) ResolutionPriority() int {
+	switch s {
+	case LearningOutcomeHuman, LearningOutcomeExplicit:
+		return 3
+	case LearningOutcomeAgent:
+		return 2
+	case LearningOutcomeInferred:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func LearningActivationProposalExpiry(now time.Time) time.Time { return now.UTC().Add(-24 * time.Hour) }
+
 // LearningContextFingerprint deliberately accepts only structured, non-evidence context.
 func LearningContextFingerprint(issueID, requirementID string, tags, files []string) (string, error) {
 	canonical := struct {
@@ -52,6 +68,19 @@ func LearningContextFingerprint(issueID, requirementID string, tags, files []str
 	b, err := json.Marshal(canonical)
 	if err != nil {
 		return "", fmt.Errorf("marshal activation context: %w", err)
+	}
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+func LearningActivationContextFingerprint(purpose, sessionID, issueID, requirementID, query string, tags, files []string) (string, error) {
+	canonical := struct {
+		Purpose, Session, Issue, Requirement, Query string
+		Tags, Files                                 []string
+	}{strings.TrimSpace(purpose), strings.TrimSpace(sessionID), strings.TrimSpace(issueID), strings.TrimSpace(requirementID), strings.TrimSpace(query), canonicalKeys(tags), canonicalKeys(files)}
+	b, err := json.Marshal(canonical)
+	if err != nil {
+		return "", fmt.Errorf("marshal contextual activation: %w", err)
 	}
 	sum := sha256.Sum256(b)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil

@@ -50,7 +50,8 @@ type AgentHookContext struct {
 type AgentHookOutcome struct {
 	// GuardResponse holds JSON fields agents may act on (systemMessage,
 	// decision, etc.). Always non-nil; empty means "allow / no advice".
-	GuardResponse map[string]any
+	GuardResponse          map[string]any
+	ActivationConfirmation *protocol.LearnActivationConfirmRequestBody
 }
 
 // RunAgentHook is the shared hook-handling port called by every CLI adapter.
@@ -80,7 +81,7 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 		_ = ingestAgentHookRuntimeSignalBestEffort(notifyCtx, deps, hookCtx, event)
 		cancel()
 	}
-	if deps != nil && deps.DaemonClient != nil && (event == hookEventSessionStart || event == hookEventUserPromptSubmit) && strings.TrimSpace(hookCtx.IssueID) != "" {
+	if agent == AgentCodex && deps != nil && deps.DaemonClient != nil && (event == hookEventSessionStart || event == hookEventUserPromptSubmit) && strings.TrimSpace(hookCtx.IssueID) != "" {
 		activationCtx, cancel := context.WithTimeout(ctx, hookBestEffortDaemonTimeout)
 		purpose := domain.LearningPurposeContextTransition
 		if event == hookEventSessionStart {
@@ -124,16 +125,7 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 			contextualGuidance = strings.TrimSpace(existing) + "\n\n" + contextualGuidance
 		}
 		outcome.GuardResponse["systemMessage"] = contextualGuidance
-		confirmCtx, cancel := context.WithTimeout(ctx, hookBestEffortDaemonTimeout)
-		_, confirmErr := deps.DaemonClient.ConfirmLearningActivation(confirmCtx, protocol.LearnActivationConfirmRequestBody{ActivationID: contextualActivationID, TokenCost: domain.RenderedLearningTokenCost(renderedGuidance)})
-		cancel()
-		if confirmErr != nil {
-			if strings.TrimSpace(existing) == "" {
-				delete(outcome.GuardResponse, "systemMessage")
-			} else {
-				outcome.GuardResponse["systemMessage"] = existing
-			}
-		}
+		outcome.ActivationConfirmation = &protocol.LearnActivationConfirmRequestBody{ActivationID: contextualActivationID, TokenCost: domain.RenderedLearningTokenCost(renderedGuidance)}
 	}
 
 	return outcome, nil
@@ -348,6 +340,10 @@ func ParseAIHookRunArgs(args []string) (AIHookRunOptions, error) {
 // AIHookRunCommand is the unified CLI entrypoint that delegates to the
 // shared RunAgentHook port. Agent-specific output rendering happens here.
 func AIHookRunCommand(deps *Dependencies, opts AIHookRunOptions) error {
+	return aiHookRunCommandTo(deps, opts, os.Stdout)
+}
+
+func aiHookRunCommandTo(deps *Dependencies, opts AIHookRunOptions, stdout io.Writer) error {
 	projectDir, err := resolveProjectDir("", deps)
 	if err != nil {
 		return err
@@ -370,7 +366,10 @@ func AIHookRunCommand(deps *Dependencies, opts AIHookRunOptions) error {
 	if err != nil {
 		return err
 	}
+	return emitAgentHookOutcome(deps, opts, outcome, stdout)
+}
 
+func emitAgentHookOutcome(deps *Dependencies, opts AIHookRunOptions, outcome AgentHookOutcome, stdout io.Writer) error {
 	switch opts.Agent {
 	case AgentCodex:
 		if opts.JSON {
@@ -378,21 +377,36 @@ func AIHookRunCommand(deps *Dependencies, opts AIHookRunOptions) error {
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(encoded))
-			return nil
+			if _, err := fmt.Fprintln(stdout, string(encoded)); err != nil {
+				return err
+			}
+			break
 		}
 		notifyOutput, err := renderNotifyOutput(opts.Event, false, false, "")
 		if err != nil {
 			return err
 		}
-		fmt.Println(notifyOutput)
-		printCodexGuardResponse(outcome.GuardResponse)
+		if _, err := fmt.Fprintln(stdout, notifyOutput); err != nil {
+			return err
+		}
+		if err := writeCodexGuardResponse(stdout, outcome.GuardResponse); err != nil {
+			return err
+		}
 	default: // claude
 		notifyOutput, err := renderNotifyOutput(opts.Event, opts.JSON, false, "")
 		if err != nil {
 			return err
 		}
-		fmt.Println(notifyOutput)
+		if _, err := fmt.Fprintln(stdout, notifyOutput); err != nil {
+			return err
+		}
+	}
+	if outcome.ActivationConfirmation != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), hookBestEffortDaemonTimeout)
+		defer cancel()
+		if _, err := deps.DaemonClient.ConfirmLearningActivation(ctx, *outcome.ActivationConfirmation); err != nil {
+			return err
+		}
 	}
 	return nil
 }

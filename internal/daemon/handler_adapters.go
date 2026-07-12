@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +17,7 @@ import (
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	activationmodule "github.com/riordanpawley/azedarach/internal/daemon/learningactivation"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -183,36 +182,20 @@ func (s issueLearnService) ContextualActivate(ctx context.Context, req protocol.
 		return protocol.LearnContextualActivateResponseBody{}, err
 	}
 	projectID := firstNonEmptyDaemon(daemonProjectIDFromContext(ctx), req.ProjectID, protocol.DefaultProjectID)
-	rows, err := client.ListLearnings(ctx, issues.LearningFilter{ProjectID: projectID, ContextIssueID: req.ContextIssueID.String(), ContextReqID: req.ContextReqID.String(), ContextTags: req.ContextTags, ContextFiles: req.ContextFiles, Query: req.Query, Statuses: []issues.LearningStatus{issues.LearningStatusAccepted, issues.LearningStatusPromoted}, IncludeEvidence: false, ExcludePrivate: true, ActiveOnly: true, SkipRecallTracking: true})
+	result, err := activationmodule.New(client).Propose(ctx, activationmodule.Request{ProjectID: projectID, Purpose: req.Purpose, Surface: req.Surface, SessionID: req.SessionID.String(), IssueID: req.ContextIssueID.String(), RequirementID: req.ContextReqID.String(), Query: req.Query, Tags: req.ContextTags, Files: req.ContextFiles, TokenBudget: req.TokenBudget})
 	if err != nil {
 		return protocol.LearnContextualActivateResponseBody{}, err
 	}
-	suppressed, err := client.DeliveredLearningIDs(ctx, projectID, req.SessionID.String())
-	if err != nil {
-		return protocol.LearnContextualActivateResponseBody{}, err
+	if result.Activation.ActivationID == "" {
+		return protocol.LearnContextualActivateResponseBody{Explanation: result.Explanation}, nil
 	}
-	candidates := make([]domain.LearningActivationCandidate, 0, len(rows))
-	byID := make(map[string]issues.Learning, len(rows))
-	for _, row := range rows {
-		candidates = append(candidates, domain.LearningActivationCandidate{ID: row.LocalID, Summary: row.Summary, Score: row.RecallScore, Reason: row.RecallReason})
-		byID[row.LocalID] = row
+	learnings := make([]protocol.Learning, 0, len(result.Learnings))
+	for _, row := range result.Learnings {
+		learnings = append(learnings, mapLearningToProtocol(row, false))
 	}
-	selection := domain.SelectContextualLearnings(candidates, suppressed, req.TokenBudget)
-	if len(selection.IDs) == 0 {
-		return protocol.LearnContextualActivateResponseBody{Explanation: "no eligible guidance within budget or all guidance already delivered to session"}, nil
-	}
-	learnings := make([]protocol.Learning, 0, len(selection.IDs))
-	for _, id := range selection.IDs {
-		learnings = append(learnings, mapLearningToProtocol(byID[id], false))
-	}
-	explanation := strings.Join(selection.Explanations, "; ")
-	fingerprint := contextualActivationFingerprint(req)
-	a, err := client.ProposeLearningActivation(ctx, issues.RecordLearningActivationParams{ProjectID: projectID, Surface: req.Surface, ContextFingerprint: fingerprint, Purpose: req.Purpose, SessionID: req.SessionID.String(), LearningIDs: selection.IDs, Explanation: explanation})
-	if err != nil {
-		return protocol.LearnContextualActivateResponseBody{}, err
-	}
+	a := result.Activation
 	proposal := protocol.LearningActivationProposal{ActivationID: a.ActivationID, Surface: a.Surface, ContextFingerprint: a.ContextFingerprint, LearningIDs: a.LearningIDs, Explanation: a.Explanation}
-	return protocol.LearnContextualActivateResponseBody{Proposal: &proposal, Learnings: learnings, Explanation: explanation}, nil
+	return protocol.LearnContextualActivateResponseBody{Proposal: &proposal, Learnings: learnings, Explanation: result.Explanation}, nil
 }
 
 func (s issueLearnService) ConfirmActivation(ctx context.Context, req protocol.LearnActivationConfirmRequestBody) (protocol.LearnActivationConfirmResponseBody, error) {
@@ -220,24 +203,11 @@ func (s issueLearnService) ConfirmActivation(ctx context.Context, req protocol.L
 	if err != nil {
 		return protocol.LearnActivationConfirmResponseBody{}, err
 	}
-	a, err := client.ConfirmLearningActivation(ctx, firstNonEmptyDaemon(daemonProjectIDFromContext(ctx), protocol.DefaultProjectID), req.ActivationID, req.TokenCost)
+	a, err := activationmodule.New(client).Confirm(ctx, firstNonEmptyDaemon(daemonProjectIDFromContext(ctx), protocol.DefaultProjectID), req.ActivationID, req.TokenCost)
 	if err != nil {
 		return protocol.LearnActivationConfirmResponseBody{}, err
 	}
 	return protocol.LearnActivationConfirmResponseBody{Activation: protocol.LearningActivation{ActivationID: a.ActivationID, Surface: a.Surface, ContextFingerprint: a.ContextFingerprint, LearningIDs: a.LearningIDs, TokenCost: a.TokenCost, Explanation: a.Explanation, DeliveredAt: formatProtocolTime(a.DeliveredAt)}}, nil
-}
-
-func contextualActivationFingerprint(req protocol.LearnContextualActivateRequestBody) string {
-	tags := append([]string(nil), req.ContextTags...)
-	files := append([]string(nil), req.ContextFiles...)
-	sort.Strings(tags)
-	sort.Strings(files)
-	payload, _ := json.Marshal(struct {
-		Purpose, Session, Issue, Requirement, Query string
-		Tags, Files                                 []string
-	}{req.Purpose, req.SessionID.String(), req.ContextIssueID.String(), req.ContextReqID.String(), req.Query, tags, files})
-	sum := sha256.Sum256(payload)
-	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func (s issueLearnService) Activate(ctx context.Context, req protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error) {
@@ -261,7 +231,7 @@ func (s issueLearnService) Feedback(ctx context.Context, req protocol.LearnFeedb
 	if err != nil {
 		return protocol.LearnFeedbackResponseBody{}, err
 	}
-	out, created, err := client.RecordLearningActivationOutcome(ctx, issues.LearningActivationOutcome{ProjectID: firstNonEmptyDaemon(daemonProjectIDFromContext(ctx), protocol.DefaultProjectID), ActivationID: req.ActivationID, IdempotencyKey: req.IdempotencyKey, Outcome: domain.LearningActivationOutcome(req.Outcome), Source: domain.LearningOutcomeSource(req.Source), Explanation: req.Explanation})
+	out, created, err := activationmodule.New(client).Feedback(ctx, issues.LearningActivationOutcome{ProjectID: firstNonEmptyDaemon(daemonProjectIDFromContext(ctx), protocol.DefaultProjectID), ActivationID: req.ActivationID, IdempotencyKey: req.IdempotencyKey, Outcome: domain.LearningActivationOutcome(req.Outcome), Source: domain.LearningOutcomeSource(req.Source), Explanation: req.Explanation})
 	if err != nil {
 		return protocol.LearnFeedbackResponseBody{}, err
 	}

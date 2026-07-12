@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS learning_activation_proposals (
 );
 ALTER TABLE learning_activations ADD COLUMN resolved_outcome TEXT NOT NULL DEFAULT '' CHECK(resolved_outcome IN ('','helpful','followed','contradicted','unknown'));
 ALTER TABLE learning_activations ADD COLUMN resolved_source TEXT NOT NULL DEFAULT '' CHECK(resolved_source IN ('','explicit','human','agent','inferred'));
+ALTER TABLE learning_activations ADD COLUMN resolved_priority INTEGER NOT NULL DEFAULT 0 CHECK(resolved_priority BETWEEN 0 AND 3);
 ALTER TABLE learning_activation_outcomes RENAME TO learning_activation_outcomes_legacy;
 CREATE TABLE learning_activation_outcomes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,5 +27,6 @@ INSERT INTO learning_activation_outcomes SELECT * FROM learning_activation_outco
 DROP TABLE learning_activation_outcomes_legacy;
 UPDATE learning_activations
 SET resolved_outcome = (SELECT o.outcome FROM learning_activation_outcomes o WHERE o.activation_id=learning_activations.activation_id ORDER BY CASE o.source WHEN 'human' THEN 3 WHEN 'explicit' THEN 3 WHEN 'agent' THEN 2 ELSE 1 END DESC, o.id ASC LIMIT 1),
-    resolved_source = (SELECT o.source FROM learning_activation_outcomes o WHERE o.activation_id=learning_activations.activation_id ORDER BY CASE o.source WHEN 'human' THEN 3 WHEN 'explicit' THEN 3 WHEN 'agent' THEN 2 ELSE 1 END DESC, o.id ASC LIMIT 1)
+    resolved_source = (SELECT o.source FROM learning_activation_outcomes o WHERE o.activation_id=learning_activations.activation_id ORDER BY CASE o.source WHEN 'human' THEN 3 WHEN 'explicit' THEN 3 WHEN 'agent' THEN 2 ELSE 1 END DESC, o.id ASC LIMIT 1),
+    resolved_priority = (SELECT CASE o.source WHEN 'human' THEN 3 WHEN 'explicit' THEN 3 WHEN 'agent' THEN 2 ELSE 1 END FROM learning_activation_outcomes o WHERE o.activation_id=learning_activations.activation_id ORDER BY CASE o.source WHEN 'human' THEN 3 WHEN 'explicit' THEN 3 WHEN 'agent' THEN 2 ELSE 1 END DESC, o.id ASC LIMIT 1)
 WHERE EXISTS (SELECT 1 FROM learning_activation_outcomes o WHERE o.activation_id=learning_activations.activation_id);
