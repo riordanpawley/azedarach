@@ -54,7 +54,7 @@ func TestStateProductMigrationRejectsDirectSQLContradictions(t *testing.T) {
 		t.Fatalf("negative attachment err=%v", err)
 	}
 	_, err = db.ExecContext(ctx, `INSERT INTO daemon_worktree_projections(project_id,issue_id,path,branch,updated_at) VALUES('p',?,'','b',?)`, issueID, now)
-	if err == nil || !strings.Contains(err.Error(), "must be nonempty") {
+	if err == nil || !strings.Contains(err.Error(), "nonempty identity") {
 		t.Fatalf("empty worktree err=%v", err)
 	}
 }
@@ -121,6 +121,21 @@ func TestLeasePurposeEligibilityAcrossIssueStateProduct(t *testing.T) {
 	}
 	if err := claim(readyID, domain.CoordinationLeaseExecution); err != nil {
 		t.Fatalf("ready execution claim: %v", err)
+	}
+	if err := claim(readyID, domain.CoordinationLeaseReview); err == nil || !strings.Contains(err.Error(), "ineligible") {
+		t.Fatalf("idle review claim err=%v", err)
+	}
+	if err := client.Update(ctx, readyID, domain.StatusInProgress); err != nil {
+		t.Fatal(err)
+	}
+	if err := claim(readyID, domain.CoordinationLeaseReview); err == nil || !strings.Contains(err.Error(), "ineligible") {
+		t.Fatalf("working review claim err=%v", err)
+	}
+	if err := client.Update(ctx, readyID, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
+	if err := claim(readyID, domain.CoordinationLeaseReview); err != nil {
+		t.Fatalf("review_requested review claim: %v", err)
 	}
 	if err := claim(backlogID, domain.CoordinationLeaseOrchestration); err != nil {
 		t.Fatalf("backlog orchestration claim: %v", err)
@@ -201,6 +216,92 @@ func TestCanonicalClaimMigrationPreflight(t *testing.T) {
 				t.Fatalf("lease owner=%q want %q", owner, want)
 			}
 		})
+	}
+}
+
+func TestCanonicalMigrationRejectsHistoricalReviewLeaseWithoutReviewRequest(t *testing.T) {
+	client := NewClient(t.TempDir(), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	ctx := context.Background()
+	id, err := client.Create(ctx, CreateTaskParams{Title: "invalid review lease", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, _ := client.dbHandle()
+	dropCanonicalStateMigrationGuards(t, db)
+	if _, err := db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE id='0045_issue_state_runtime_constraints'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO issue_coordination_leases(issue_id,purpose,owner_id,owner_kind,claimed_at) VALUES(?,'review','r','agent','2026-07-13T00:00:00Z')`, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyIssueStateRuntimeConstraintsMigration(ctx, db, "0045_issue_state_runtime_constraints"); err == nil || !strings.Contains(err.Error(), "constraint failed") {
+		t.Fatalf("migration err=%v, want invalid historical review lease rejection", err)
+	}
+}
+
+func TestCanonicalMigrationRejectsOrphanAuthorityRows(t *testing.T) {
+	for _, kind := range []string{"lease", "session", "worktree"} {
+		t.Run(kind, func(t *testing.T) {
+			client := NewClient(t.TempDir(), slog.Default())
+			t.Cleanup(func() { _ = client.CloseDB() })
+			ctx := context.Background()
+			db, _ := client.dbHandle()
+			db.SetMaxOpenConns(1)
+			dropCanonicalStateMigrationGuards(t, db)
+			if _, err := db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE id='0045_issue_state_runtime_constraints'`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+				t.Fatal(err)
+			}
+			now := "2026-07-13T00:00:00Z"
+			var err error
+			switch kind {
+			case "lease":
+				_, err = db.ExecContext(ctx, `INSERT INTO issue_coordination_leases(issue_id,purpose,owner_id,owner_kind,claimed_at) VALUES('missing','execution','a','agent',?)`, now)
+			case "session":
+				_, err = db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,state,tmux_attached_count,updated_at) VALUES('p','s','missing','stopped',0,?)`, now)
+			case "worktree":
+				_, err = db.ExecContext(ctx, `INSERT INTO daemon_worktree_projections(project_id,issue_id,path,branch,updated_at) VALUES('p','missing','/tmp/orphan','b',?)`, now)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := applyIssueStateRuntimeConstraintsMigration(ctx, db, "0045_issue_state_runtime_constraints"); err == nil || !strings.Contains(err.Error(), "constraint failed") {
+				t.Fatalf("migration err=%v, want orphan %s rejection", err, kind)
+			}
+		})
+	}
+}
+
+func TestReviewLeaseDirectSQLCartesian(t *testing.T) {
+	client := NewClient(t.TempDir(), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	ctx := context.Background()
+	id, err := client.Create(ctx, CreateTaskParams{Title: "review cartesian", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, _ := client.dbHandle()
+	insert := func() error {
+		_, err := db.ExecContext(ctx, `INSERT INTO issue_coordination_leases(issue_id,purpose,owner_id,owner_kind,claimed_at) VALUES(?,'review','r','agent','2026-07-13T00:00:00Z')`, id)
+		return err
+	}
+	if err := insert(); err == nil || !strings.Contains(err.Error(), "ineligible") {
+		t.Fatalf("idle insert err=%v", err)
+	}
+	if err := client.Update(ctx, id, domain.StatusInProgress); err != nil {
+		t.Fatal(err)
+	}
+	if err := insert(); err == nil || !strings.Contains(err.Error(), "ineligible") {
+		t.Fatalf("working insert err=%v", err)
+	}
+	if err := client.Update(ctx, id, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
+	if err := insert(); err != nil {
+		t.Fatalf("review_requested insert: %v", err)
 	}
 }
 

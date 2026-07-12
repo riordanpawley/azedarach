@@ -7696,6 +7696,9 @@ func TestTaskOwnershipClaimCommandKeepsReviewSeparateFromExecution(t *testing.T)
 	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{OwnerID: "worker-a"}); err != nil {
 		t.Fatalf("seed execution ownership: %v", err)
 	}
+	if err := issuesClient.Update(ctx, taskID, domain.StatusInReview); err != nil {
+		t.Fatalf("request review: %v", err)
+	}
 	d := &Daemon{cfg: Config{Logger: slog.Default()}, hub: publish.NewHub(16, 8, slog.Default()), issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{}}
 	body, err := json.Marshal(taskOwnershipRequest{TaskID: taskID, OwnerID: "reviewer-a", Purpose: domain.CoordinationLeaseReview})
 	if err != nil {
@@ -12828,7 +12831,7 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 		sessionID string
 		issueID   string
 	}{
-		{name: "target", sessionID: targetSessionID, issueID: targetSessionID},
+		{name: "target", sessionID: targetSessionID, issueID: targetID},
 		{name: "context", sessionID: contextSessionID, issueID: contextID},
 	} {
 		if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
@@ -12845,6 +12848,9 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 	otherUpdatedAt := time.Date(2026, time.April, 2, 9, 0, 0, 0, time.UTC)
 	for i := 0; i < 25; i++ {
 		issueID := fmt.Sprintf("other-%02d", i)
+		if _, err := db.ExecContext(ctx, `INSERT INTO issues(id,title,status,disposition,engagement,visibility,lifecycle_state,closed_outcome,review_state,priority,issue_type,created_at,updated_at) VALUES(?,?,?,'ready','idle','live','open','none','none',?,?,?,?)`, issueID, issueID, string(domain.StatusOpen), int(domain.P3), string(domain.TypeTask), now, now); err != nil {
+			t.Fatalf("seed unrelated issue %s: %v", issueID, err)
+		}
 		if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
 			ID:            naming.CanonicalSessionID(projectID, issueID),
 			IssueID:       issueID,

@@ -6005,6 +6005,50 @@ func TestReconcileResolvesLifecycleDivergenceAfterStoppedRuntime(t *testing.T) {
 	}
 }
 
+func TestUntargetedReconcileResolvesDivergenceWithoutRuntimeProjection(t *testing.T) {
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "removed divergence", Type: domain.TypeBug, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := issueClient.RecordRuntimeDivergence(context.Background(), issueID, "runtime removed"); err != nil {
+		t.Fatal(err)
+	}
+	store := daemonstate.NewStore()
+	tmuxRunner := newTestTmuxRunner("")
+	delete(tmuxRunner.sessions, "")
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, tmux: tmux.NewClient(tmuxRunner, slog.Default()), session: daemonhandlers.NewSessionHandler(store), sessionStore: store,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default())}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default())}}
+	if _, err := d.reconcileTmuxAndDaemonSessions(context.Background(), projectID, ""); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(repoDir, ".azedarach", "azedarach.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var active int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM issue_runtime_divergences WHERE issue_id=? AND resolved_at IS NULL`, issueID).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 {
+		t.Fatalf("active divergence=%d, want resolved", active)
+	}
+	exported, err := issueClient.ExportProjection(context.Background(), projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exported.Tasks) != 1 {
+		t.Fatalf("projection tasks=%d, want unquarantined issue", len(exported.Tasks))
+	}
+}
+
 func TestReconcileRefreshesLifecycleBeforeRepairAcrossDaemons(t *testing.T) {
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)

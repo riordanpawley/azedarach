@@ -45,8 +45,14 @@ SELECT 0 WHERE EXISTS (
 );
 INSERT INTO issue_state_runtime_constraint_validation(ok)
 SELECT 0 WHERE EXISTS (
+  -- This projection is issue-scoped. Advisor/project/root sessions live in the
+  -- typed daemon runtime-state tables and are not represented here.
   SELECT 1 FROM daemon_session_projections WHERE
     trim(project_id)='' OR trim(session_id)='' OR trim(issue_id)='' OR
+    role NOT IN ('worker','advisor','orchestrator') OR scope_kind NOT IN ('issue','interaction','orchestration') OR
+    (role='worker' AND (scope_kind!='issue' OR NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_session_projections.issue_id))) OR
+    (role='advisor' AND (scope_kind!='interaction' OR trim(scope_id)='')) OR
+    (role='orchestrator' AND (scope_kind!='orchestration' OR trim(scope_id)='')) OR
     state NOT IN ('starting','running','attached','stopping','paused','stopped','idle','busy','waiting','done','error','unknown') OR
     (observed_state IS NOT NULL AND observed_state NOT IN ('','starting','running','attached','stopping','paused','stopped','idle','busy','waiting','done','error','unknown')) OR
     tmux_attached_count < 0 OR
@@ -54,14 +60,15 @@ SELECT 0 WHERE EXISTS (
 );
 INSERT INTO issue_state_runtime_constraint_validation(ok)
 SELECT 0 WHERE EXISTS (
-  SELECT 1 FROM daemon_worktree_projections WHERE trim(project_id)='' OR trim(issue_id)='' OR trim(path)=''
+  SELECT 1 FROM daemon_worktree_projections WHERE trim(project_id)='' OR trim(issue_id)='' OR trim(path)='' OR
+    NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_worktree_projections.issue_id)
 );
 INSERT INTO issue_state_runtime_constraint_validation(ok)
 SELECT 0 WHERE EXISTS (
-  SELECT 1 FROM issue_coordination_leases l JOIN issues i ON i.id=l.issue_id WHERE
-    i.visibility!='live' OR i.disposition IN ('completed','cancelled') OR
+  SELECT 1 FROM issue_coordination_leases l LEFT JOIN issues i ON i.id=l.issue_id WHERE
+    i.id IS NULL OR i.visibility!='live' OR i.disposition IN ('completed','cancelled') OR
     (l.purpose='execution' AND i.disposition!='ready') OR
-    (l.purpose='review' AND i.disposition!='ready') OR
+    (l.purpose='review' AND (i.disposition!='ready' OR i.engagement!='review_requested')) OR
     (l.purpose='orchestration' AND i.disposition NOT IN ('backlog','ready'))
 );
 DROP TABLE issue_state_runtime_constraint_validation;
@@ -97,7 +104,7 @@ BEGIN
   SELECT CASE WHEN EXISTS(SELECT 1 FROM issue_coordination_leases l WHERE l.issue_id=NEW.id AND NOT (
     NEW.visibility='live' AND NEW.disposition NOT IN ('completed','cancelled') AND
     ((l.purpose='execution' AND NEW.disposition='ready') OR
-     (l.purpose='review' AND NEW.disposition='ready') OR
+     (l.purpose='review' AND NEW.disposition='ready' AND NEW.engagement='review_requested') OR
      (l.purpose='orchestration' AND NEW.disposition IN ('backlog','ready')))))
     THEN RAISE(ABORT, 'issue state is ineligible for existing lease purpose') END;
 END;
@@ -133,7 +140,7 @@ BEGIN
   SELECT CASE WHEN EXISTS(SELECT 1 FROM issue_coordination_leases l WHERE l.issue_id=NEW.id AND NOT (
     NEW.visibility='live' AND NEW.disposition NOT IN ('completed','cancelled') AND
     ((l.purpose='execution' AND NEW.disposition='ready') OR
-     (l.purpose='review' AND NEW.disposition='ready') OR
+     (l.purpose='review' AND NEW.disposition='ready' AND NEW.engagement='review_requested') OR
      (l.purpose='orchestration' AND NEW.disposition IN ('backlog','ready')))))
     THEN RAISE(ABORT, 'issue state is ineligible for existing lease purpose') END;
 END;
@@ -154,7 +161,7 @@ CREATE TRIGGER issue_lease_archived_guard
 BEFORE INSERT ON issue_coordination_leases
 WHEN NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=NEW.issue_id AND i.visibility='live' AND i.disposition NOT IN ('completed','cancelled') AND
   ((NEW.purpose='execution' AND i.disposition='ready') OR
-   (NEW.purpose='review' AND i.disposition='ready') OR
+   (NEW.purpose='review' AND i.disposition='ready' AND i.engagement='review_requested') OR
    (NEW.purpose='orchestration' AND i.disposition IN ('backlog','ready'))))
 BEGIN SELECT RAISE(ABORT, 'issue state is ineligible for lease purpose'); END;
 
@@ -162,7 +169,7 @@ CREATE TRIGGER issue_lease_state_guard_update
 BEFORE UPDATE ON issue_coordination_leases
 WHEN NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=NEW.issue_id AND i.visibility='live' AND i.disposition NOT IN ('completed','cancelled') AND
   ((NEW.purpose='execution' AND i.disposition='ready') OR
-   (NEW.purpose='review' AND i.disposition='ready') OR
+   (NEW.purpose='review' AND i.disposition='ready' AND i.engagement='review_requested') OR
    (NEW.purpose='orchestration' AND i.disposition IN ('backlog','ready'))))
 BEGIN SELECT RAISE(ABORT, 'issue state is ineligible for lease purpose'); END;
 
@@ -191,6 +198,14 @@ BEFORE INSERT ON daemon_session_projections
 BEGIN
   SELECT CASE WHEN trim(NEW.project_id)='' OR trim(NEW.session_id)='' OR trim(NEW.issue_id)=''
     THEN RAISE(ABORT, 'session projection identity must be nonempty') END;
+  SELECT CASE WHEN NEW.role NOT IN ('worker','advisor','orchestrator') OR NEW.scope_kind NOT IN ('issue','interaction','orchestration')
+    THEN RAISE(ABORT, 'invalid session role or scope') END;
+  SELECT CASE WHEN NEW.role='worker' AND (NEW.scope_kind!='issue' OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))
+    THEN RAISE(ABORT, 'worker session projection requires existing issue scope') END;
+  SELECT CASE WHEN NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.scope_id)='')
+    THEN RAISE(ABORT, 'advisor session requires interaction scope') END;
+  SELECT CASE WHEN NEW.role='orchestrator' AND (NEW.scope_kind!='orchestration' OR trim(NEW.scope_id)='')
+    THEN RAISE(ABORT, 'orchestrator session requires orchestration scope') END;
   SELECT CASE WHEN NEW.state NOT IN ('starting','running','attached','stopping','paused','stopped','idle','busy','waiting','done','error','unknown')
     THEN RAISE(ABORT, 'invalid desired session state') END;
   SELECT CASE WHEN NEW.observed_state IS NOT NULL AND NEW.observed_state NOT IN ('','starting','running','attached','stopping','paused','stopped','idle','busy','waiting','done','error','unknown')
@@ -206,6 +221,14 @@ BEFORE UPDATE ON daemon_session_projections
 BEGIN
   SELECT CASE WHEN trim(NEW.project_id)='' OR trim(NEW.session_id)='' OR trim(NEW.issue_id)=''
     THEN RAISE(ABORT, 'session projection identity must be nonempty') END;
+  SELECT CASE WHEN NEW.role NOT IN ('worker','advisor','orchestrator') OR NEW.scope_kind NOT IN ('issue','interaction','orchestration')
+    THEN RAISE(ABORT, 'invalid session role or scope') END;
+  SELECT CASE WHEN NEW.role='worker' AND (NEW.scope_kind!='issue' OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))
+    THEN RAISE(ABORT, 'worker session projection requires existing issue scope') END;
+  SELECT CASE WHEN NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.scope_id)='')
+    THEN RAISE(ABORT, 'advisor session requires interaction scope') END;
+  SELECT CASE WHEN NEW.role='orchestrator' AND (NEW.scope_kind!='orchestration' OR trim(NEW.scope_id)='')
+    THEN RAISE(ABORT, 'orchestrator session requires orchestration scope') END;
   SELECT CASE WHEN NEW.state NOT IN ('starting','running','attached','stopping','paused','stopped','idle','busy','waiting','done','error','unknown')
     THEN RAISE(ABORT, 'invalid desired session state') END;
   SELECT CASE WHEN NEW.observed_state IS NOT NULL AND NEW.observed_state NOT IN ('','starting','running','attached','stopping','paused','stopped','idle','busy','waiting','done','error','unknown')
@@ -218,13 +241,13 @@ END;
 
 CREATE TRIGGER daemon_worktree_state_product_guard_insert
 BEFORE INSERT ON daemon_worktree_projections
-WHEN trim(NEW.project_id)='' OR trim(NEW.issue_id)='' OR trim(NEW.path)=''
-BEGIN SELECT RAISE(ABORT, 'worktree projection identity and path must be nonempty'); END;
+WHEN trim(NEW.project_id)='' OR trim(NEW.issue_id)='' OR trim(NEW.path)='' OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id)
+BEGIN SELECT RAISE(ABORT, 'worktree projection requires nonempty identity, path, and existing issue'); END;
 
 CREATE TRIGGER daemon_worktree_state_product_guard_update
 BEFORE UPDATE ON daemon_worktree_projections
-WHEN trim(NEW.project_id)='' OR trim(NEW.issue_id)='' OR trim(NEW.path)=''
-BEGIN SELECT RAISE(ABORT, 'worktree projection identity and path must be nonempty'); END;
+WHEN trim(NEW.project_id)='' OR trim(NEW.issue_id)='' OR trim(NEW.path)='' OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id)
+BEGIN SELECT RAISE(ABORT, 'worktree projection requires nonempty identity, path, and existing issue'); END;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_daemon_worktree_projections_project_nonempty_path
   ON daemon_worktree_projections(project_id, path)

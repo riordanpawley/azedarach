@@ -3034,6 +3034,15 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		}
 	}
 	validationIssueIDs := reconcileSessionValidationIssueIDs(targetIssueKeys, tmuxSet, snapshotSessions, namingScope)
+	if len(targetIssueKeys) == 0 && strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID)) != "" {
+		if issueClient := d.issueClientForProject(projectID); issueClient != nil {
+			divergentIssueIDs, divergenceErr := issueClient.ListActiveRuntimeDivergenceIssueIDs(ctx)
+			if divergenceErr != nil {
+				return result, fmt.Errorf("list unresolved lifecycle runtime divergences: %w", divergenceErr)
+			}
+			validationIssueIDs = normalizeRuntimeReconcileIssueIDs(append(validationIssueIDs, divergentIssueIDs...))
+		}
+	}
 	issuesByKey, issueValidationEnabled, err := d.reconcileIssueKeyIndex(ctx, projectID, validationIssueIDs)
 	if err != nil {
 		return result, err

@@ -2404,6 +2404,7 @@ func TestClient_CoordinationLeasesArePurposeScopedAndPreserveExecutionOwner(t *t
 	require.NoError(t, err)
 	require.NotNil(t, worker.Ownership)
 	assert.Equal(t, "worker-a", worker.Ownership.OwnerID)
+	require.NoError(t, client.Update(ctx, taskID, domain.StatusInReview))
 
 	reviewed, err := client.ClaimOwnershipWithRuntime(ctx, "project-1", taskID, OwnershipClaimParams{
 		OwnerID: "reviewer-a", OwnerKind: "agent", Purpose: domain.CoordinationLeaseReview,
@@ -3577,7 +3578,7 @@ func TestClient_CreateRepairsAllocatorFromDeletedIssueHistory(t *testing.T) {
 	assert.Equal(t, "c", thirdID)
 }
 
-func TestClient_CreateRepairsAllocatorFromOldWorktreeProjection(t *testing.T) {
+func TestClient_CreateRejectsOldOrphanWorktreeAndPreservesAllocator(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	client := NewClientAtPath(dbPath, slog.Default())
@@ -3597,7 +3598,8 @@ func TestClient_CreateRepairsAllocatorFromOldWorktreeProjection(t *testing.T) {
 		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at)
 		VALUES (?, ?, ?, ?, ?)
 	`, "default", secondID, filepath.Join(t.TempDir(), "repo-"+secondID), "riordan/"+secondID+"/old-branch", now)
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "existing issue")
 	_, err = db.ExecContext(ctx, `DELETE FROM issue_id_allocations WHERE id = ?`, secondID)
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `UPDATE meta SET value = '1' WHERE key = ?`, nextAlphaIssueIndexMetaKey)

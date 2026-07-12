@@ -117,6 +117,27 @@ func (c *Client) ClearRuntimeDivergence(ctx context.Context, issueID string) err
 	return err
 }
 
+func (c *Client) ListActiveRuntimeDivergenceIssueIDs(ctx context.Context) ([]string, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT issue_id FROM issue_runtime_divergences WHERE kind='lifecycle_runtime' AND resolved_at IS NULL ORDER BY issue_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func projectionSchemaContract(ctx context.Context, q sqlIssueDBTX) (int, string, error) {
 	rows, err := q.QueryContext(ctx, `SELECT id FROM schema_migrations ORDER BY id`)
 	if err != nil {
@@ -756,6 +777,11 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 	if err := ensureSQLiteColumn(db, "daemon_session_projections", "activity_source", "TEXT"); err != nil {
 		return fmt.Errorf("ensure runtime projection schema: %w", err)
 	}
+	for _, column := range []struct{ name, ddl string }{{"role", "TEXT NOT NULL DEFAULT 'worker'"}, {"scope_kind", "TEXT NOT NULL DEFAULT 'issue'"}, {"scope_id", "TEXT NOT NULL DEFAULT ''"}} {
+		if err := ensureSQLiteColumn(db, "daemon_session_projections", column.name, column.ddl); err != nil {
+			return fmt.Errorf("ensure runtime projection schema: %w", err)
+		}
+	}
 	for _, column := range []struct {
 		name string
 		ddl  string
@@ -765,6 +791,9 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 		{"activity", "TEXT"},
 		{"activity_source", "TEXT"},
 		{"tmux_attached_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"role", "TEXT NOT NULL DEFAULT 'worker'"},
+		{"scope_kind", "TEXT NOT NULL DEFAULT 'issue'"},
+		{"scope_id", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := ensureSQLiteColumn(db, "daemon_session_observations", column.name, column.ddl); err != nil {
 			return fmt.Errorf("ensure runtime projection schema: %w", err)
@@ -2567,7 +2596,7 @@ func issueLeaseEligibilityForUpdate(ctx context.Context, tx *sql.Tx, issueID str
 	case domain.CoordinationLeaseExecution:
 		eligible = eligible && disposition == string(domain.IssueDispositionReady)
 	case domain.CoordinationLeaseReview:
-		eligible = eligible && disposition == string(domain.IssueDispositionReady)
+		eligible = eligible && disposition == string(domain.IssueDispositionReady) && engagement == string(domain.IssueEngagementReviewRequested)
 	case domain.CoordinationLeaseOrchestration:
 		eligible = eligible && (disposition == string(domain.IssueDispositionBacklog) || disposition == string(domain.IssueDispositionReady))
 	default:
