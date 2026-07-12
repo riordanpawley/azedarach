@@ -2,13 +2,14 @@ package issues
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestLearningConsolidationSuggestionsAreDeterministicPrivacySafeAndNonMutating(t *testing.T) {
+func TestLearningConsolidationSuggestionsExcludePrivateAndRemainNonMutating(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
 	left, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "Use bounded retries for daemon operations", Evidence: "PRIVATE-TOKEN-123", EvidencePrivate: true, Tags: []string{"daemon"}})
@@ -17,13 +18,16 @@ func TestLearningConsolidationSuggestionsAreDeterministicPrivacySafeAndNonMutati
 	require.NoError(t, err)
 	first, err := client.SuggestLearningConsolidations(ctx, "proj")
 	require.NoError(t, err)
-	require.Len(t, first, 1)
-	assert.Equal(t, LearningSuggestionDuplicate, first[0].Kind)
-	assert.Equal(t, 100, first[0].Score)
-	assert.NotContains(t, first[0].Reason, "PRIVATE-TOKEN-123")
+	require.Empty(t, first)
+	_, err = client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "Use bounded retries for daemon operations", Evidence: "another public source"})
+	require.NoError(t, err)
 	second, err := client.SuggestLearningConsolidations(ctx, "proj")
 	require.NoError(t, err)
-	require.Equal(t, first, second)
+	require.Len(t, second, 1)
+	assert.Equal(t, LearningSuggestionDuplicate, second[0].Kind)
+	assert.NotEqual(t, left.LocalID, second[0].LeftLearningID)
+	assert.NotEqual(t, left.LocalID, second[0].RightLearningID)
+	assert.NotContains(t, second[0].Reason, "PRIVATE-TOKEN-123")
 	gotLeft, err := client.GetLearning(ctx, left.LocalID)
 	require.NoError(t, err)
 	gotRight, err := client.GetLearning(ctx, right.LocalID)
@@ -35,7 +39,7 @@ func TestLearningConsolidationSuggestionsAreDeterministicPrivacySafeAndNonMutati
 func TestLearningConsolidationConfirmPreservesSourcesAndPromotionState(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
-	left, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "Prefer deterministic ordering for review queues", Evidence: "left evidence", EvidencePrivate: true, Tags: []string{"ordering"}})
+	left, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "Prefer deterministic ordering for review queues", Evidence: "left evidence", Tags: []string{"ordering"}})
 	require.NoError(t, err)
 	right, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "Prefer deterministic ordering for review queues", Evidence: "right evidence", Files: []string{"queue.go"}})
 	require.NoError(t, err)
@@ -53,6 +57,10 @@ func TestLearningConsolidationConfirmPreservesSourcesAndPromotionState(t *testin
 	suggestions, err := client.SuggestLearningConsolidations(ctx, "proj")
 	require.NoError(t, err)
 	require.Len(t, suggestions, 1)
+	// Privacy may tighten after generation; confirmation preserves the source
+	// snapshot and never weakens the canonical row's privacy.
+	_, err = db.ExecContext(ctx, `UPDATE agent_learnings SET evidence_private=1 WHERE local_id=?`, left.LocalID)
+	require.NoError(t, err)
 	resolved, err := client.ConfirmLearningConsolidation(ctx, ConfirmLearningConsolidationParams{SuggestionID: suggestions[0].LocalID, CanonicalLearningID: left.LocalID, Summary: "Use deterministic ordering for review queues", Note: "human confirmed duplicate"})
 	require.NoError(t, err)
 	assert.Equal(t, LearningSuggestionConfirmed, resolved.Status)
@@ -84,6 +92,57 @@ func TestLearningConsolidationConfirmPreservesSourcesAndPromotionState(t *testin
 	assert.Equal(t, 2, members)
 	assert.Equal(t, 1, audit)
 	assert.Equal(t, 1, relations)
+}
+
+func TestLearningConsolidationSuggestionsExcludeLifecycleIneligibleRows(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	base, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "Keep bounded daemon retry operations deterministic", Evidence: "base"})
+	require.NoError(t, err)
+	statuses := []LearningStatus{LearningStatusRejected, LearningStatusStale}
+	for _, status := range statuses {
+		row, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "Keep bounded daemon retry operations deterministic", Evidence: string(status)})
+		require.NoError(t, err)
+		_, err = client.UpdateLearningStatus(ctx, row.LocalID, status, "terminal")
+		require.NoError(t, err)
+	}
+	rows, err := client.SuggestLearningConsolidations(ctx, "proj")
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+	got, err := client.GetLearning(ctx, base.LocalID)
+	require.NoError(t, err)
+	assert.Equal(t, LearningStatusCandidate, got.Status)
+}
+
+func TestLearningConsolidationCandidateRetrievalIsBounded(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	for i := 0; i < 180; i++ {
+		summary := fmt.Sprintf("Unique learning topic %03d has isolated vocabulary token%03d", i, i)
+		if i < 2 {
+			summary = "Use bounded retries for daemon operations"
+		}
+		_, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: summary, Evidence: "scale"})
+		require.NoError(t, err)
+	}
+	rows, err := client.SuggestLearningConsolidations(ctx, "proj")
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, LearningSuggestionDuplicate, rows[0].Kind)
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	plan, err := db.QueryContext(ctx, `EXPLAIN QUERY PLAN SELECT rowid FROM agent_learning_search_fts WHERE agent_learning_search_fts MATCH ? ORDER BY rank,rowid LIMIT ?`, `"bounded" OR "retries"`, 12)
+	require.NoError(t, err)
+	defer plan.Close()
+	var details string
+	for plan.Next() {
+		var id, parent, unused int
+		var detail string
+		require.NoError(t, plan.Scan(&id, &parent, &unused, &detail))
+		details += detail
+	}
+	assert.Contains(t, details, "VIRTUAL TABLE INDEX")
 }
 
 func TestLearningConsolidationAuditFailureRollsBack(t *testing.T) {

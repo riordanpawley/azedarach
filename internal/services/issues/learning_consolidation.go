@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
@@ -65,15 +65,24 @@ func (c *Client) suggestLearningConsolidationsOnce(ctx context.Context, projectI
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT local_id, summary FROM agent_learnings WHERE project_id = ? AND deleted_at IS NULL AND consolidated_into_id IS NULL ORDER BY local_id`, projectID)
+	const seedLimit = 128
+	now := time.Now().UTC()
+	eligibleSQL, eligibleArgs := learningConsolidationEligibleSQL("l", now)
+	query := `SELECT l.id,l.local_id,l.summary FROM agent_learnings l WHERE l.project_id=? AND ` + eligibleSQL + ` ORDER BY l.local_id LIMIT ?`
+	args := append([]any{projectID}, eligibleArgs...)
+	args = append(args, seedLimit)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, c.wrapError("suggest-learning-consolidations", "", err)
 	}
-	type candidate struct{ id, summary string }
+	type candidate struct {
+		rowID       int64
+		id, summary string
+	}
 	var candidates []candidate
 	for rows.Next() {
 		var v candidate
-		if err := rows.Scan(&v.id, &v.summary); err != nil {
+		if err := rows.Scan(&v.rowID, &v.id, &v.summary); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -82,6 +91,62 @@ func (c *Client) suggestLearningConsolidationsOnce(ctx context.Context, projectI
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
+	byRowID := make(map[int64]candidate, len(candidates))
+	for _, v := range candidates {
+		byRowID[v.rowID] = v
+	}
+	type proposed struct {
+		left, right candidate
+		match       domain.LearningConsolidationMatch
+	}
+	proposals := map[string]proposed{}
+	const matchesPerSeed = 12
+	for _, seed := range candidates {
+		terms := domain.LearningConsolidationSearchTerms(seed.summary)
+		if len(terms) == 0 {
+			continue
+		}
+		quoted := make([]string, len(terms))
+		for i, term := range terms {
+			quoted[i] = `"` + strings.ReplaceAll(term, `"`, `""`) + `"`
+		}
+		matchRows, queryErr := db.QueryContext(ctx, `SELECT rowid FROM agent_learning_search_fts WHERE agent_learning_search_fts MATCH ? AND rowid != ? ORDER BY rank,rowid LIMIT ?`, strings.Join(quoted, " OR "), seed.rowID, matchesPerSeed)
+		if queryErr != nil {
+			return nil, c.wrapError("suggest-learning-consolidations", seed.id, queryErr)
+		}
+		for matchRows.Next() {
+			var otherID int64
+			if err := matchRows.Scan(&otherID); err != nil {
+				matchRows.Close()
+				return nil, err
+			}
+			other, ok := byRowID[otherID]
+			if !ok {
+				continue
+			}
+			left, right := seed, other
+			if left.id > right.id {
+				left, right = right, left
+			}
+			match, ok := domain.ClassifyLearningConsolidation(left.summary, right.summary)
+			if ok {
+				proposals[left.id+"\x00"+right.id] = proposed{left: left, right: right, match: match}
+			}
+		}
+		if err := matchRows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	ordered := make([]proposed, 0, len(proposals))
+	for _, p := range proposals {
+		ordered = append(ordered, p)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].left.id != ordered[j].left.id {
+			return ordered[i].left.id < ordered[j].left.id
+		}
+		return ordered[i].right.id < ordered[j].right.id
+	})
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -91,35 +156,28 @@ func (c *Client) suggestLearningConsolidationsOnce(ctx context.Context, projectI
 			_ = tx.Rollback()
 		}
 	}()
-	now := time.Now().UTC()
-	for i := 0; i < len(candidates); i++ {
-		for j := i + 1; j < len(candidates); j++ {
-			kind, score, reason, ok := classifyLearningPair(candidates[i].summary, candidates[j].summary)
-			if !ok {
-				continue
-			}
-			left, err := c.lookupLearningByLocalID(ctx, tx, candidates[i].id, false)
-			if err != nil {
+	for _, p := range ordered {
+		leftEligible, leftArgs := learningConsolidationEligibleSQL("l", now)
+		rightEligible, rightArgs := learningConsolidationEligibleSQL("r", now)
+		insert := `INSERT OR IGNORE INTO agent_learning_suggestions(local_id,project_id,kind,left_learning_id,right_learning_id,score,reason,status,created_at,updated_at)
+			SELECT ?,?,?,?,?,?,?,?,?,? FROM agent_learnings l,agent_learnings r
+			WHERE l.id=? AND r.id=? AND l.project_id=? AND r.project_id=? AND ` + leftEligible + ` AND ` + rightEligible
+		insertArgs := []any{"pending", projectID, p.match.Kind, p.left.rowID, p.right.rowID, p.match.Score, p.match.Reason, LearningSuggestionPending, formatTimestamp(now), formatTimestamp(now), p.left.rowID, p.right.rowID, projectID, projectID}
+		insertArgs = append(insertArgs, leftArgs...)
+		insertArgs = append(insertArgs, rightArgs...)
+		result, err := tx.ExecContext(ctx, insert, insertArgs...)
+		if err != nil {
+			return nil, err
+		}
+		id, _ := result.LastInsertId()
+		if id > 0 {
+			localID := fmt.Sprintf("learn-sug-%d", id)
+			if _, err := tx.ExecContext(ctx, `UPDATE agent_learning_suggestions SET local_id=? WHERE id=?`, localID, id); err != nil {
 				return nil, err
 			}
-			right, err := c.lookupLearningByLocalID(ctx, tx, candidates[j].id, false)
-			if err != nil {
+			detail, _ := json.Marshal(map[string]any{"kind": p.match.Kind, "left": p.left.id, "right": p.right.id, "score": p.match.Score, "reason": p.match.Reason})
+			if _, err := tx.ExecContext(ctx, `INSERT INTO agent_learning_consolidation_audit(suggestion_id,action,detail_json,created_at) VALUES(?,?,?,?)`, id, "suggested", string(detail), formatTimestamp(now)); err != nil {
 				return nil, err
-			}
-			result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO agent_learning_suggestions(local_id,project_id,kind,left_learning_id,right_learning_id,score,reason,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, "pending", projectID, kind, left.rowID, right.rowID, score, reason, LearningSuggestionPending, formatTimestamp(now), formatTimestamp(now))
-			if err != nil {
-				return nil, err
-			}
-			id, _ := result.LastInsertId()
-			if id > 0 {
-				localID := fmt.Sprintf("learn-sug-%d", id)
-				if _, err := tx.ExecContext(ctx, `UPDATE agent_learning_suggestions SET local_id=? WHERE id=?`, localID, id); err != nil {
-					return nil, err
-				}
-				detail, _ := json.Marshal(map[string]any{"kind": kind, "left": left.LocalID, "right": right.LocalID, "score": score, "reason": reason})
-				if _, err := tx.ExecContext(ctx, `INSERT INTO agent_learning_consolidation_audit(suggestion_id,action,detail_json,created_at) VALUES(?,?,?,?)`, id, "suggested", string(detail), formatTimestamp(now)); err != nil {
-					return nil, err
-				}
 			}
 		}
 	}
@@ -130,64 +188,13 @@ func (c *Client) suggestLearningConsolidationsOnce(ctx context.Context, projectI
 	return c.ListLearningSuggestions(ctx, LearningSuggestionFilter{ProjectID: projectID, Status: LearningSuggestionPending})
 }
 
-func classifyLearningPair(a, b string) (LearningSuggestionKind, int, string, bool) {
-	aw, an := learningMatchWords(a)
-	bw, bn := learningMatchWords(b)
-	if len(aw) == 0 || len(bw) == 0 {
-		return "", 0, "", false
+func learningConsolidationEligibleSQL(alias string, now time.Time) (string, []any) {
+	p := strings.TrimSpace(alias)
+	if p != "" {
+		p += "."
 	}
-	intersection := 0
-	union := map[string]struct{}{}
-	for w := range aw {
-		union[w] = struct{}{}
-		if _, ok := bw[w]; ok {
-			intersection++
-		}
-	}
-	for w := range bw {
-		union[w] = struct{}{}
-	}
-	score := intersection * 100 / len(union)
-	if score < 60 {
-		return "", 0, "", false
-	}
-	if an != bn {
-		return LearningSuggestionConflict, score, "high summary overlap with opposite negation", true
-	}
-	if score >= 75 {
-		return LearningSuggestionDuplicate, score, "high normalized summary overlap", true
-	}
-	return "", 0, "", false
-}
-
-func learningMatchWords(s string) (map[string]struct{}, bool) {
-	words := map[string]struct{}{}
-	var b strings.Builder
-	neg := false
-	flush := func() {
-		if b.Len() == 0 {
-			return
-		}
-		w := b.String()
-		b.Reset()
-		switch w {
-		case "not", "never", "avoid", "without", "mustnt", "dont", "cannot":
-			neg = true
-		default:
-			if len([]rune(w)) > 2 {
-				words[w] = struct{}{}
-			}
-		}
-	}
-	for _, r := range strings.ToLower(s) {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(r)
-		} else {
-			flush()
-		}
-	}
-	flush()
-	return words, neg
+	f := formatTimestamp(now.UTC())
+	return p + `evidence_private=0 AND ` + p + `deleted_at IS NULL AND ` + p + `consolidated_into_id IS NULL AND ` + p + `status IN (?,?,?) AND (` + p + `expires_at IS NULL OR ` + p + `expires_at>?) AND (` + p + `stale_at IS NULL OR ` + p + `stale_at>?) AND ` + p + `superseded_at IS NULL AND ` + p + `target_retired_at IS NULL AND ` + p + `target_drifted_at IS NULL AND (` + p + `status!=? OR COALESCE(NULLIF(` + p + `target_state,''),?)=?)`, []any{string(LearningStatusCandidate), string(LearningStatusAccepted), string(LearningStatusPromoted), f, f, string(LearningStatusPromoted), string(LearningTargetStateActive), string(LearningTargetStateActive)}
 }
 
 func (c *Client) ListLearningSuggestions(ctx context.Context, filter LearningSuggestionFilter) ([]LearningSuggestion, error) {
@@ -264,8 +271,12 @@ func (c *Client) resolveLearningSuggestion(ctx context.Context, id, canonical, n
 	if err := tx.QueryRowContext(ctx, `SELECT id,project_id,kind,left_learning_id,right_learning_id,status FROM agent_learning_suggestions WHERE local_id=?`, id).Scan(&rowID, &project, &kind, &leftID, &rightID, &status); err != nil {
 		return LearningSuggestion{}, err
 	}
-	if status != string(LearningSuggestionPending) {
-		return LearningSuggestion{}, fmt.Errorf("%w: suggestion is already %s", domain.ErrConflict, status)
+	var leftLocalID, rightLocalID string
+	if err := tx.QueryRowContext(ctx, `SELECT l.local_id,r.local_id FROM agent_learnings l,agent_learnings r WHERE l.id=? AND r.id=?`, leftID, rightID).Scan(&leftLocalID, &rightLocalID); err != nil {
+		return LearningSuggestion{}, err
+	}
+	if err := domain.ValidateLearningConsolidationResolution(domain.LearningConsolidationResolution{SuggestionStatus: status, Confirm: confirm, CanonicalID: canonical, MemberIDs: []string{leftLocalID, rightLocalID}, ReviewNote: note}); err != nil {
+		return LearningSuggestion{}, fmt.Errorf("%w: %v", domain.ErrConflict, err)
 	}
 	now := time.Now().UTC()
 	action := "rejected"
@@ -278,7 +289,7 @@ func (c *Client) resolveLearningSuggestion(ctx context.Context, id, canonical, n
 		if err != nil {
 			return LearningSuggestion{}, err
 		}
-		if rec.ProjectID != project || (rec.rowID != fmt.Sprint(leftID) && rec.rowID != fmt.Sprint(rightID)) {
+		if rec.ProjectID != project {
 			return LearningSuggestion{}, fmt.Errorf("%w: canonical learning must be a suggestion member", domain.ErrConflict)
 		}
 		canonicalRow = &rec
