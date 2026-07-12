@@ -97,6 +97,9 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 			_ = tx.Rollback()
 		}
 	}()
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS interaction_requests (id TEXT PRIMARY KEY,issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,decision_key TEXT NOT NULL,state TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),request_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`); err != nil {
+		return fmt.Errorf("ensure interaction request authority before migration %s: %w", id, err)
+	}
 	for _, column := range []struct{ name, ddl string }{{"disposition", "TEXT"}, {"engagement", "TEXT"}, {"visibility", "TEXT"}} {
 		exists, err := txColumnExists(ctx, tx, "issues", column.name)
 		if err != nil {

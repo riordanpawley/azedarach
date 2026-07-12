@@ -1951,6 +1951,9 @@ func migrateSessionObservations(ctx context.Context, db *sql.DB) error {
 		WHERE instr(session_id, '.pane-') > 0
 		ON CONFLICT(project_id, session_id) DO UPDATE SET
 			issue_id = excluded.issue_id,
+			role = excluded.role,
+			scope_kind = excluded.scope_kind,
+			scope_id = excluded.scope_id,
 			state = excluded.state,
 			observed_state = excluded.observed_state,
 			activity = excluded.activity,
@@ -1974,6 +1977,10 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 	var issuesTableCount int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='issues'`).Scan(&issuesTableCount); err != nil {
 		return fmt.Errorf("inspect relational issue authority: %w", err)
+	}
+	var interactionTableCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='interaction_requests'`).Scan(&interactionTableCount); err != nil {
+		return fmt.Errorf("inspect relational interaction authority: %w", err)
 	}
 	for _, table := range []string{sessionStateTable, sessionObservationTable} {
 		if _, err := db.ExecContext(ctx, `UPDATE `+table+` SET state=CASE WHEN state='attached' THEN 'running' ELSE state END, observed_state=CASE WHEN observed_state='attached' THEN 'running' ELSE observed_state END WHERE state='attached' OR observed_state='attached'`); err != nil {
@@ -1999,16 +2006,27 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 				_ = rows.Close()
 				return fmt.Errorf("invalid historical runtime authority %s/%s: %w", table, session.ID, err)
 			}
-			if issuesTableCount > 0 && session.Role == SessionRoleOrchestrator && strings.TrimSpace(session.ScopeID) != "project" {
+			if issuesTableCount > 0 && (session.Role == SessionRoleWorker || (session.Role == SessionRoleOrchestrator && strings.TrimSpace(session.ScopeID) != "project")) {
 				var count int
 				if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id=?`, strings.TrimSpace(session.IssueID)).Scan(&count); err != nil || count != 1 {
 					_ = rows.Close()
-					return fmt.Errorf("invalid historical runtime authority %s/%s: rooted orchestrator issue does not exist", table, session.ID)
+					return fmt.Errorf("invalid historical runtime authority %s/%s: issue does not exist", table, session.ID)
+				}
+			}
+			if interactionTableCount > 0 && session.Role == SessionRoleAdvisor {
+				var count int
+				if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM interaction_requests WHERE id=? AND issue_id=?`, strings.TrimSpace(session.ScopeID), strings.TrimSpace(session.IssueID)).Scan(&count); err != nil || count != 1 {
+					_ = rows.Close()
+					return fmt.Errorf("invalid historical runtime authority %s/%s: advisor interaction scope does not match issue", table, session.ID)
 				}
 			}
 		}
 		if err := rows.Close(); err != nil {
 			return fmt.Errorf("close %s session product validation: %w", table, err)
+		}
+		indexName := "idx_" + table + "_logical_scope_unique"
+		if _, err := db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS `+indexName+` ON `+table+`(project_id,role,scope_kind,scope_id) WHERE instr(session_id,'.pane-')=0`); err != nil {
+			return fmt.Errorf("enforce %s logical session uniqueness: %w", table, err)
 		}
 		prefix := "runtime_" + table + "_product"
 		for _, suffix := range []string{"insert", "update"} {
@@ -2019,16 +2037,19 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 			if suffix == "update" {
 				action = "UPDATE"
 			}
-			rootExistenceGuard := ""
+			relationalGuards := ""
 			if issuesTableCount > 0 {
-				rootExistenceGuard = `SELECT CASE WHEN NEW.role='orchestrator' AND NEW.scope_id!='project' AND NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id) THEN RAISE(ABORT,'rooted orchestrator issue does not exist') END;`
+				relationalGuards += `SELECT CASE WHEN NEW.role IN ('worker','orchestrator') AND NOT (NEW.role='orchestrator' AND NEW.scope_id='project') AND NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id) THEN RAISE(ABORT,'session issue does not exist') END;`
+			}
+			if interactionTableCount > 0 {
+				relationalGuards += `SELECT CASE WHEN NEW.role='advisor' AND NOT EXISTS(SELECT 1 FROM interaction_requests WHERE id=NEW.scope_id AND issue_id=NEW.issue_id) THEN RAISE(ABORT,'advisor interaction scope does not match issue') END;`
 			}
 			trigger := `CREATE TRIGGER ` + prefix + `_` + suffix + ` BEFORE ` + action + ` ON ` + table + ` BEGIN
 				SELECT CASE WHEN trim(NEW.project_id)='' OR trim(NEW.session_id)='' THEN RAISE(ABORT,'session projection identity must be nonempty') END;
 				SELECT CASE WHEN NEW.role='worker' AND (NEW.scope_kind!='issue' OR trim(NEW.issue_id)='' OR trim(NEW.scope_id)='' OR NEW.scope_id!=NEW.issue_id) THEN RAISE(ABORT,'worker session requires matching issue scope') END;
-				SELECT CASE WHEN NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.scope_id)='') THEN RAISE(ABORT,'advisor session requires interaction scope') END;
+				SELECT CASE WHEN NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.issue_id)='' OR trim(NEW.scope_id)='') THEN RAISE(ABORT,'advisor session requires interaction scope') END;
 				SELECT CASE WHEN NEW.role='orchestrator' AND (NEW.scope_kind!='orchestration' OR trim(NEW.scope_id)='' OR (NEW.scope_id='project' AND trim(NEW.issue_id)!='') OR (NEW.scope_id!='project' AND NEW.issue_id!=NEW.scope_id)) THEN RAISE(ABORT,'invalid orchestrator session scope') END;
-				` + rootExistenceGuard + `
+				` + relationalGuards + `
 				SELECT CASE WHEN NEW.role NOT IN ('worker','advisor','orchestrator') OR NEW.scope_kind NOT IN ('issue','interaction','orchestration') THEN RAISE(ABORT,'invalid session role or scope') END;
 				SELECT CASE WHEN NEW.state NOT IN ('starting','running','stopping','paused','stopped') OR COALESCE(NEW.observed_state,'') NOT IN ('','starting','running','stopping','paused','stopped') THEN RAISE(ABORT,'invalid session state') END;
 				SELECT CASE WHEN NEW.tmux_attached_count<0 THEN RAISE(ABORT,'tmux attachment count cannot be negative') END;

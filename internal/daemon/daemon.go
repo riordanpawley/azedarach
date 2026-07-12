@@ -1445,12 +1445,20 @@ func (d *Daemon) closeRuntimeStateStores() {
 }
 
 func (d *Daemon) persistSessionState(projectID string, session daemonstate.Session) error {
-	if d.sessionRuntimeStateStore(projectID) == nil {
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(ctx, projectID, session); err != nil {
+	if (session.Role == "" || session.Role == daemonstate.SessionRoleWorker) && !isAgentScopedSessionID(session.ID) {
+		if existing, found, err := store.GetSessionStateByIssueID(ctx, projectID, session.IssueID); err != nil {
+			return fmt.Errorf("load logical worker session before persist: %w", err)
+		} else if found && !isAgentScopedSessionID(existing.ID) {
+			session.ID = existing.ID
+		}
+	}
+	if err := store.UpsertSessionState(ctx, projectID, session); err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn(
 				"persist session runtime state failed",
@@ -1838,7 +1846,7 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 
 	var session *daemonstate.Session
 	if issueID != "" {
-		if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil {
+		if runtimeStore := d.sessionRuntimeStateStoreIfConfigured(projectID); runtimeStore != nil {
 			if loaded, err := runtimeStore.ListSessionStates(ctx, projectID); err == nil {
 				aggregated := sessionProjectionAggregateByIssueKey(loaded, d.sessionNamingScope(projectID))
 				if merged, found := aggregated[sessionKey(issueID)]; found {

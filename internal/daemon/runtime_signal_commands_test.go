@@ -17,6 +17,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -92,11 +93,15 @@ func TestRuntimeSignalIngestAgentHookPersistsActivityAndHookLog(t *testing.T) {
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	projectID := "proj-signals"
-	issueID := "az-42"
-	sessionID := "pr-az-42.pane-12"
+	issueID, err := d.issueClientForProject(projectID).Create(context.Background(), issues.CreateTaskParams{Title: "runtime signal", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentSessionID := naming.CanonicalSessionID(repoDir, issueID)
+	sessionID := parentSessionID + ".pane-12"
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-		ID:             "pr-az-42",
+		ID:             parentSessionID,
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
 		ObservedState:  daemonstate.SessionStateRunning,
@@ -148,7 +153,8 @@ func TestRuntimeSignalIngestAgentHookPersistsActivityAndHookLog(t *testing.T) {
 		t.Fatalf("GetSessionState: %v", err)
 	}
 	if !found {
-		t.Fatalf("expected session projection for %s", sessionID)
+		rows, _ := d.sessionRuntimeStateStore(projectID).ListSessionStates(context.Background(), projectID)
+		t.Fatalf("expected session projection for %s; rows=%+v", sessionID, rows)
 	}
 	if session.IssueID != issueID ||
 		session.State != daemonstate.SessionStatePaused ||
@@ -156,7 +162,7 @@ func TestRuntimeSignalIngestAgentHookPersistsActivityAndHookLog(t *testing.T) {
 		session.ActivitySource != "hooks" {
 		t.Fatalf("session projection = %+v", session)
 	}
-	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, "pr-az-42")
+	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, parentSessionID)
 	if err != nil {
 		t.Fatalf("GetSessionState canonical: %v", err)
 	}
@@ -169,7 +175,7 @@ func TestRuntimeSignalIngestAgentHookPersistsActivityAndHookLog(t *testing.T) {
 		canonical.ActivitySource != "hooks" {
 		t.Fatalf("canonical session projection = %+v", canonical)
 	}
-	evidence, found, err := d.sessionRuntimeStateStore(projectID).GetSessionActivityEvidence(context.Background(), projectID, "pr-az-42")
+	evidence, found, err := d.sessionRuntimeStateStore(projectID).GetSessionActivityEvidence(context.Background(), projectID, parentSessionID)
 	if err != nil {
 		t.Fatalf("GetSessionActivityEvidence: %v", err)
 	}

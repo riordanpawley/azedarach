@@ -331,6 +331,15 @@ func TestWorkerSessionScopeDirectSQLRejectsEmptyAndMismatch(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,role,scope_kind,scope_id,state,tmux_attached_count,updated_at) VALUES('p','project-orchestrator','','orchestrator','orchestration','project','running',0,?)`, now); err != nil {
 		t.Fatalf("project orchestrator without issue identity: %v", err)
 	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO interaction_requests(id,issue_id,decision_key,state,revision,request_json,created_at,updated_at) VALUES('request-scope',?,'decision','open',1,'{}',?,?)`, id, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,role,scope_kind,scope_id,state,updated_at) VALUES('p','advisor-valid',?,'advisor','interaction','request-scope','running',?)`, id, now); err != nil {
+		t.Fatalf("valid advisor: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE daemon_session_projections SET issue_id='missing' WHERE session_id='advisor-valid'`); err == nil {
+		t.Fatal("advisor orphan/mismatch direct mutation accepted")
+	}
 	for _, statement := range []string{
 		`INSERT INTO daemon_session_projections(project_id,session_id,issue_id,role,scope_kind,scope_id,state,updated_at) VALUES('p','project-bad',?,'orchestrator','orchestration','project','running',?)`,
 		`INSERT INTO daemon_session_projections(project_id,session_id,issue_id,role,scope_kind,scope_id,state,updated_at) VALUES('p','root-bad',?,'orchestrator','orchestration','other','running',?)`,

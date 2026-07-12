@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"testing"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -146,5 +148,47 @@ func TestProjectOrchestratorSessionStartAttachesExactScopeSingleton(t *testing.T
 	}
 	if projection.State != daemonstate.SessionStateRunning || projection.ObservedState != daemonstate.SessionStateRunning {
 		t.Fatalf("projection lifecycle = %+v", projection)
+	}
+}
+
+func TestFullReconcileRecoversMissingProjectOrchestratorThroughAuthority(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	cache := daemonstate.NewStore()
+	manager := git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default())
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: store}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: cache, worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: manager}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager}}
+	body, _ := json.Marshal(protocol.OrchestratorSessionRequest{Scope: domain.ProjectOrchestrationScope()})
+	request := protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body}
+	response, err := d.handleOrchestratorSession(ctx, request)
+	if err != nil || response.Error != nil {
+		t.Fatalf("start: response=%+v err=%v", response.Error, err)
+	}
+	sessionID := d.orchestratorSessionID(projectID, domain.ProjectOrchestrationScope())
+	before, found, err := store.GetSessionState(ctx, projectID, sessionID)
+	if err != nil || !found || !orchestratorSessionProjection(before) || !sessionProjectionCanRecreateTmuxSession(before) {
+		t.Fatalf("pre-reconcile projection=%+v found=%v err=%v", before, found, err)
+	}
+	intents, err := store.ListSessionIntentStates(ctx, projectID)
+	if err != nil || len(intents) != 1 {
+		t.Fatalf("intent projections=%+v err=%v", intents, err)
+	}
+	delete(runner.sessions, sessionID)
+	result, err := d.reconcileTmuxAndDaemonSessions(ctx, projectID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RecreatedTmuxSessions != 1 || !runner.sessions[sessionID] {
+		t.Fatalf("result=%+v live=%v", result, runner.sessions[sessionID])
+	}
+	projection, found, err := store.GetSessionState(ctx, projectID, sessionID)
+	if err != nil || !found || projection.Role != daemonstate.SessionRoleOrchestrator || projection.ScopeID != "project" || projection.IssueID != "" {
+		t.Fatalf("projection=%+v found=%v err=%v", projection, found, err)
 	}
 }

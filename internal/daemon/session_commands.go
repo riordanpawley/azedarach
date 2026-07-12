@@ -314,7 +314,14 @@ func sessionProjectionAggregateByIssueKey(sessions []daemonstate.Session, naming
 }
 
 func nonAgentSessionProjectionByIssue(sessions []daemonstate.Session, namingScope, issueID string) (daemonstate.Session, bool) {
-	byIssueKey := sessionProjectionAggregateByIssueKey(sessions, namingScope)
+	intent := make([]daemonstate.Session, 0, len(sessions))
+	for _, session := range sessions {
+		if isAgentScopedSessionID(session.ID) || !lifecycleManagedSessionProjection(session) {
+			continue
+		}
+		intent = append(intent, session)
+	}
+	byIssueKey := sessionProjectionAggregateByIssueKey(intent, namingScope)
 	session, found := byIssueKey[sessionKey(issueID)]
 	return session, found
 }
@@ -2224,6 +2231,12 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 	if issueID == "" {
 		issueID = sessionID
 	}
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if existing, found, err := store.GetSessionStateByIssueID(context.Background(), projectID, issueID); err != nil {
+		return fmt.Errorf("load logical session before stop projection: %w", err)
+	} else if found && !isAgentScopedSessionID(existing.ID) {
+		sessionID = existing.ID
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -2234,7 +2247,7 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 		ObservedState: daemonstate.SessionStateStopped,
 		UpdatedAt:     time.Now().UTC(),
 	}
-	if err := d.sessionRuntimeStateStoreIfConfigured(projectID).UpsertSessionState(ctx, projectID, session); err != nil {
+	if err := store.UpsertSessionState(ctx, projectID, session); err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("write-through stop session runtime state failed",
 				"project_id", projectID,
@@ -2244,6 +2257,22 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 			)
 		}
 		return err
+	}
+	rows, err := store.ListSessionStates(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("list logical session observations before stop: %w", err)
+	}
+	for _, row := range rows {
+		if strings.TrimSpace(row.IssueID) != issueID || !isAgentScopedSessionID(row.ID) {
+			continue
+		}
+		row.State = daemonstate.SessionStateStopped
+		row.ObservedState = daemonstate.SessionStateStopped
+		row.TmuxAttachedCount = 0
+		row.UpdatedAt = time.Now().UTC()
+		if err := store.UpsertSessionState(ctx, projectID, row); err != nil {
+			return fmt.Errorf("stop session observation %s: %w", row.ID, err)
+		}
 	}
 	return nil
 }
@@ -3027,15 +3056,29 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		if suppress, _ := ctx.Value(rootedOrchestratorRecoveryContextKey{}).(bool); suppress {
 			break
 		}
-		if !rootedOrchestratorSessionProjection(session) || !matchesTargetIssue(sessionKey(session.ScopeID)) || !sessionProjectionCanRecreateTmuxSession(session) {
+		if !orchestratorSessionProjection(session) || !sessionProjectionCanRecreateTmuxSession(session) {
 			continue
 		}
-		if _, live := liveTmuxNames[strings.TrimSpace(session.ID)]; live {
+		isProjectScope := strings.TrimSpace(session.ScopeID) == string(domain.OrchestrationScopeProject)
+		if isProjectScope && len(targetIssueKeys) != 0 {
 			continue
 		}
-		scope, scopeErr := domain.RootedOrchestrationScope(session.ScopeID)
-		if scopeErr != nil {
-			return result, fmt.Errorf("recover rooted orchestrator %s: %w", session.ScopeID, scopeErr)
+		if !isProjectScope && !matchesTargetIssue(sessionKey(session.ScopeID)) {
+			continue
+		}
+		var scope domain.OrchestrationScope
+		if isProjectScope {
+			scope = domain.ProjectOrchestrationScope()
+		} else {
+			var scopeErr error
+			scope, scopeErr = domain.RootedOrchestrationScope(session.ScopeID)
+			if scopeErr != nil {
+				return result, fmt.Errorf("recover rooted orchestrator %s: %w", session.ScopeID, scopeErr)
+			}
+		}
+		canonicalSessionID := d.orchestratorSessionID(projectID, scope)
+		if _, live := liveTmuxNames[strings.TrimSpace(canonicalSessionID)]; live {
+			continue
 		}
 		body, marshalErr := json.Marshal(protocol.OrchestratorSessionRequest{Scope: scope})
 		if marshalErr != nil {
@@ -3048,6 +3091,11 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		}
 		if response.Error != nil {
 			return result, fmt.Errorf("recover rooted orchestrator %s: %s", session.ScopeID, response.Error.Message)
+		}
+		if strings.TrimSpace(session.ID) != canonicalSessionID {
+			if err := d.sessionRuntimeStateStoreIfConfigured(projectID).DeleteSessionState(ctx, projectID, session.ID); err != nil {
+				return result, fmt.Errorf("remove noncanonical orchestrator projection %s: %w", session.ID, err)
+			}
 		}
 		result.RecreatedTmuxSessions++
 	}
@@ -3460,8 +3508,14 @@ func lifecycleManagedSessionProjection(session daemonstate.Session) bool {
 	}
 }
 
-func rootedOrchestratorSessionProjection(session daemonstate.Session) bool {
-	return session.Role == daemonstate.SessionRoleOrchestrator && session.ScopeKind == daemonstate.SessionScopeOrchestration && strings.TrimSpace(session.ScopeID) != "" && strings.TrimSpace(session.ScopeID) != string(domain.OrchestrationScopeProject) && strings.TrimSpace(session.IssueID) == strings.TrimSpace(session.ScopeID)
+func orchestratorSessionProjection(session daemonstate.Session) bool {
+	if session.Role != daemonstate.SessionRoleOrchestrator || session.ScopeKind != daemonstate.SessionScopeOrchestration || strings.TrimSpace(session.ScopeID) == "" {
+		return false
+	}
+	if strings.TrimSpace(session.ScopeID) == string(domain.OrchestrationScopeProject) {
+		return strings.TrimSpace(session.IssueID) == ""
+	}
+	return strings.TrimSpace(session.IssueID) == strings.TrimSpace(session.ScopeID)
 }
 
 func (d *Daemon) reconcileIssueKeyIndex(ctx context.Context, projectID string, issueIDs []string) (map[string]domain.Task, bool, error) {

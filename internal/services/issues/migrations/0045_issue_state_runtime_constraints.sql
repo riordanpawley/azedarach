@@ -45,11 +45,19 @@ SELECT 0 WHERE EXISTS (
 );
 INSERT INTO issue_state_runtime_constraint_validation(ok)
 SELECT 0 WHERE EXISTS (
+  SELECT 1 FROM daemon_session_projections WHERE instr(session_id,'.pane-')=0 GROUP BY project_id,role,scope_kind,scope_id HAVING COUNT(*)>1
+);
+INSERT INTO issue_state_runtime_constraint_validation(ok)
+SELECT 0 WHERE EXISTS (
+  SELECT 1 FROM daemon_session_observations WHERE instr(session_id,'.pane-')=0 GROUP BY project_id,role,scope_kind,scope_id HAVING COUNT(*)>1
+);
+INSERT INTO issue_state_runtime_constraint_validation(ok)
+SELECT 0 WHERE EXISTS (
   SELECT 1 FROM daemon_session_observations WHERE
     trim(project_id)='' OR trim(session_id)='' OR
     role NOT IN ('worker','advisor','orchestrator') OR scope_kind NOT IN ('issue','interaction','orchestration') OR
     (role='worker' AND (scope_kind!='issue' OR trim(issue_id)='' OR trim(scope_id)='' OR scope_id!=issue_id OR NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_session_observations.issue_id))) OR
-    (role='advisor' AND (scope_kind!='interaction' OR trim(scope_id)='')) OR
+    (role='advisor' AND (scope_kind!='interaction' OR trim(issue_id)='' OR trim(scope_id)='' OR NOT EXISTS(SELECT 1 FROM interaction_requests r WHERE r.id=daemon_session_observations.scope_id AND r.issue_id=daemon_session_observations.issue_id))) OR
     (role='orchestrator' AND (scope_kind!='orchestration' OR trim(scope_id)='' OR (scope_id='project' AND trim(issue_id)!='') OR (scope_id!='project' AND (issue_id!=scope_id OR NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_session_observations.issue_id))))) OR
     state NOT IN ('starting','running','stopping','paused','stopped') OR
     (observed_state IS NOT NULL AND observed_state NOT IN ('','starting','running','stopping','paused','stopped')) OR
@@ -63,7 +71,7 @@ SELECT 0 WHERE EXISTS (
     trim(project_id)='' OR trim(session_id)='' OR
     role NOT IN ('worker','advisor','orchestrator') OR scope_kind NOT IN ('issue','interaction','orchestration') OR
     (role='worker' AND (scope_kind!='issue' OR trim(scope_id)='' OR scope_id!=issue_id OR NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_session_projections.issue_id))) OR
-    (role='advisor' AND (scope_kind!='interaction' OR trim(scope_id)='')) OR
+    (role='advisor' AND (scope_kind!='interaction' OR trim(issue_id)='' OR trim(scope_id)='' OR NOT EXISTS(SELECT 1 FROM interaction_requests r WHERE r.id=daemon_session_projections.scope_id AND r.issue_id=daemon_session_projections.issue_id))) OR
     (role='orchestrator' AND (scope_kind!='orchestration' OR trim(scope_id)='' OR
       (scope_id='project' AND trim(issue_id)!='') OR
       (scope_id!='project' AND (issue_id!=scope_id OR NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_session_projections.issue_id))))) OR
@@ -86,6 +94,11 @@ SELECT 0 WHERE EXISTS (
     (l.purpose='orchestration' AND i.disposition NOT IN ('backlog','ready'))
 );
 DROP TABLE issue_state_runtime_constraint_validation;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_daemon_session_projections_logical_scope_unique
+  ON daemon_session_projections(project_id,role,scope_kind,scope_id) WHERE instr(session_id,'.pane-')=0;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_daemon_session_observations_logical_scope_unique
+  ON daemon_session_observations(project_id,role,scope_kind,scope_id) WHERE instr(session_id,'.pane-')=0;
 
 CREATE TRIGGER issue_state_product_guard_insert
 BEFORE INSERT ON issues
@@ -216,7 +229,7 @@ BEGIN
     THEN RAISE(ABORT, 'invalid session role or scope') END;
   SELECT CASE WHEN NEW.role='worker' AND (NEW.scope_kind!='issue' OR trim(NEW.scope_id)='' OR NEW.scope_id!=NEW.issue_id OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))
     THEN RAISE(ABORT, 'worker session projection requires existing issue scope') END;
-  SELECT CASE WHEN NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.scope_id)='')
+  SELECT CASE WHEN NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.issue_id)='' OR trim(NEW.scope_id)='' OR NOT EXISTS(SELECT 1 FROM interaction_requests WHERE id=NEW.scope_id AND issue_id=NEW.issue_id))
     THEN RAISE(ABORT, 'advisor session requires interaction scope') END;
   SELECT CASE WHEN NEW.role='orchestrator' AND (NEW.scope_kind!='orchestration' OR trim(NEW.scope_id)='' OR (NEW.scope_id='project' AND trim(NEW.issue_id)!='') OR (NEW.scope_id!='project' AND (NEW.issue_id!=NEW.scope_id OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))))
     THEN RAISE(ABORT, 'orchestrator session requires orchestration scope') END;
@@ -239,7 +252,7 @@ BEGIN
     THEN RAISE(ABORT, 'invalid session role or scope') END;
   SELECT CASE WHEN NEW.role='worker' AND (NEW.scope_kind!='issue' OR trim(NEW.scope_id)='' OR NEW.scope_id!=NEW.issue_id OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))
     THEN RAISE(ABORT, 'worker session projection requires existing issue scope') END;
-  SELECT CASE WHEN NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.scope_id)='')
+  SELECT CASE WHEN NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.issue_id)='' OR trim(NEW.scope_id)='' OR NOT EXISTS(SELECT 1 FROM interaction_requests WHERE id=NEW.scope_id AND issue_id=NEW.issue_id))
     THEN RAISE(ABORT, 'advisor session requires interaction scope') END;
   SELECT CASE WHEN NEW.role='orchestrator' AND (NEW.scope_kind!='orchestration' OR trim(NEW.scope_id)='' OR (NEW.scope_id='project' AND trim(NEW.issue_id)!='') OR (NEW.scope_id!='project' AND (NEW.issue_id!=NEW.scope_id OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))))
     THEN RAISE(ABORT, 'orchestrator session requires orchestration scope') END;
@@ -260,7 +273,7 @@ BEFORE INSERT ON daemon_session_observations
 WHEN trim(NEW.project_id)='' OR trim(NEW.session_id)='' OR
   NEW.role NOT IN ('worker','advisor','orchestrator') OR NEW.scope_kind NOT IN ('issue','interaction','orchestration') OR
   (NEW.role='worker' AND (NEW.scope_kind!='issue' OR trim(NEW.issue_id)='' OR trim(NEW.scope_id)='' OR NEW.scope_id!=NEW.issue_id OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))) OR
-  (NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.scope_id)='')) OR
+  (NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.issue_id)='' OR trim(NEW.scope_id)='' OR NOT EXISTS(SELECT 1 FROM interaction_requests WHERE id=NEW.scope_id AND issue_id=NEW.issue_id))) OR
   (NEW.role='orchestrator' AND (NEW.scope_kind!='orchestration' OR trim(NEW.scope_id)='' OR (NEW.scope_id='project' AND trim(NEW.issue_id)!='') OR (NEW.scope_id!='project' AND (NEW.issue_id!=NEW.scope_id OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))))) OR
   NEW.state NOT IN ('starting','running','stopping','paused','stopped') OR COALESCE(NEW.observed_state,'') NOT IN ('','starting','running','stopping','paused','stopped') OR NEW.tmux_attached_count<0 OR ((NEW.state='stopped' OR NEW.observed_state='stopped') AND NEW.tmux_attached_count!=0)
 BEGIN SELECT RAISE(ABORT, 'invalid session observation product'); END;
@@ -270,7 +283,7 @@ BEFORE UPDATE ON daemon_session_observations
 WHEN trim(NEW.project_id)='' OR trim(NEW.session_id)='' OR
   NEW.role NOT IN ('worker','advisor','orchestrator') OR NEW.scope_kind NOT IN ('issue','interaction','orchestration') OR
   (NEW.role='worker' AND (NEW.scope_kind!='issue' OR trim(NEW.issue_id)='' OR trim(NEW.scope_id)='' OR NEW.scope_id!=NEW.issue_id OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))) OR
-  (NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.scope_id)='')) OR
+  (NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.issue_id)='' OR trim(NEW.scope_id)='' OR NOT EXISTS(SELECT 1 FROM interaction_requests WHERE id=NEW.scope_id AND issue_id=NEW.issue_id))) OR
   (NEW.role='orchestrator' AND (NEW.scope_kind!='orchestration' OR trim(NEW.scope_id)='' OR (NEW.scope_id='project' AND trim(NEW.issue_id)!='') OR (NEW.scope_id!='project' AND (NEW.issue_id!=NEW.scope_id OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))))) OR
   NEW.state NOT IN ('starting','running','stopping','paused','stopped') OR COALESCE(NEW.observed_state,'') NOT IN ('','starting','running','stopping','paused','stopped') OR NEW.tmux_attached_count<0 OR ((NEW.state='stopped' OR NEW.observed_state='stopped') AND NEW.tmux_attached_count!=0)
 BEGIN SELECT RAISE(ABORT, 'invalid session observation product'); END;

@@ -17,7 +17,7 @@ func ValidateSessionProduct(session Session) error {
 			return fmt.Errorf("worker session requires matching issue scope")
 		}
 	case SessionRoleAdvisor:
-		if session.ScopeKind != SessionScopeInteraction || scopeID == "" {
+		if session.ScopeKind != SessionScopeInteraction || issueID == "" || scopeID == "" {
 			return fmt.Errorf("advisor session requires interaction scope")
 		}
 	case SessionRoleOrchestrator:

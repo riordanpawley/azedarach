@@ -1279,6 +1279,14 @@ func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
 	}
 }
 
+func attachIsolatedRuntimeStore(t *testing.T, d *Daemon, projectID string) {
+	t.Helper()
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	d.runtimeStoresByRoot = map[string]*daemonstate.RuntimeStateStore{d.cfg.RepoDir: store}
+	d.runtimeStoresByProject = map[string]*daemonstate.RuntimeStateStore{projectID: store}
+}
+
 func requireNewSessionLaunchCommand(t *testing.T, runner *sessionStartTmuxRunner, sessionID string) string {
 	t.Helper()
 	for _, command := range runner.commands {
@@ -3762,6 +3770,12 @@ func TestReconcileSkipsRecreateWhileStopInProgress(t *testing.T) {
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		session:      daemonhandlers.NewSessionHandler(store),
 		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
 		worktreeManagersByRoot: map[string]*git.WorktreeManager{
 			".": git.NewWorktreeManager(&testGitRunner{worktreePath: "/tmp/proj-az-1", branchName: "riordan/az-1/test"}, ".", slog.Default()),
 		},
@@ -3877,6 +3891,7 @@ func TestHandleSessionStopDirectMarksStoppedWhenTmuxSessionMissing(t *testing.T)
 	if err != nil {
 		t.Fatalf("marshal request body: %v", err)
 	}
+	attachIsolatedRuntimeStore(t, daemon, projectID)
 	req := protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-stop-missing",
@@ -4058,6 +4073,7 @@ func TestHandleSessionStopDirectKillsLegacyIssueNamedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal request body: %v", err)
 	}
+	attachIsolatedRuntimeStore(t, daemon, projectID)
 	req := protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-stop-legacy-name",
@@ -4671,6 +4687,7 @@ func TestSessionAttachDoesNotRequireRuntimeReconcile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal request body: %v", err)
 	}
+	attachIsolatedRuntimeStore(t, daemon, projectID)
 	resp, err := daemon.handleSessionAttach(context.Background(), protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-attach-refresh",
@@ -4717,6 +4734,7 @@ func TestSessionPauseResumeUseIssueScopedRuntimeReconcile(t *testing.T) {
 		runtimeReconciler: recorder,
 	}
 
+	attachIsolatedRuntimeStore(t, daemon, projectID)
 	req := protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-pause",
@@ -5234,6 +5252,7 @@ func TestHandleSessionStopDirectDoesNotWaitForRuntimeFreshness(t *testing.T) {
 		}
 	})
 
+	attachIsolatedRuntimeStore(t, daemon, projectID)
 	resp, err := daemon.handleSessionStopDirect(context.Background(), protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-stop-fallback",
@@ -5291,6 +5310,7 @@ func TestHandleSessionStopDirectStopsTmuxWhenRuntimeFreshnessWouldTimeout(t *tes
 		}
 	})
 
+	attachIsolatedRuntimeStore(t, daemon, projectID)
 	resp, err := daemon.handleSessionStopDirect(context.Background(), protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-stop-timeout-continue",
@@ -5601,6 +5621,7 @@ func TestHandleSessionStopDirectCanceledContextDoesNotContinueAfterFreshnessFail
 		}
 	})
 
+	attachIsolatedRuntimeStore(t, daemon, projectID)
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 	resp, err := daemon.handleSessionStopDirect(canceledCtx, protocol.RequestEnvelope{
@@ -5842,6 +5863,7 @@ func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
 		},
 	}
 
+	attachIsolatedRuntimeStore(t, daemon, projectID)
 	ch, cancel := daemon.hub.Subscribe(projectID, 0)
 	defer cancel()
 

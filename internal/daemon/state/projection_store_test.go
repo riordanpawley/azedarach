@@ -174,7 +174,7 @@ func TestRuntimeStateStoreSessionGetters(t *testing.T) {
 	now := time.Date(2026, time.April, 1, 8, 20, 0, 0, time.UTC)
 	rows := []Session{
 		{ID: "sess-1", IssueID: "bja", State: SessionStateAttached, Activity: "busy", ActivitySource: "runtime", UpdatedAt: now},
-		{ID: "sess-2", IssueID: "bja", State: SessionStatePaused, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now.Add(1 * time.Minute)},
+		{ID: "sess-1.pane-2", IssueID: "bja", State: SessionStatePaused, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now.Add(1 * time.Minute)},
 	}
 	if err := store.ReplaceSessionStates(context.Background(), "proj-a", rows); err != nil {
 		t.Fatalf("ReplaceSessionStates: %v", err)
@@ -198,7 +198,7 @@ func TestRuntimeStateStoreSessionGetters(t *testing.T) {
 	if !found {
 		t.Fatal("expected session state by issue id")
 	}
-	if session.ID != "sess-2" || session.State != SessionStatePaused {
+	if session.ID != "sess-1.pane-2" || session.State != SessionStatePaused {
 		t.Fatalf("session by issue = %+v", session)
 	}
 	if session.Activity != "idle" || session.ActivitySource != "hooks" {
@@ -682,6 +682,10 @@ func TestRuntimeStateStoreRejectsInvalidSessionProducts(t *testing.T) {
 	if err := store.UpsertSessionState(ctx, "project", valid); err != nil {
 		t.Fatalf("valid project orchestrator: %v", err)
 	}
+	valid.ID = "project-duplicate"
+	if err := store.UpsertSessionState(ctx, "project", valid); err == nil {
+		t.Fatal("duplicate logical project orchestrator scope accepted")
+	}
 	db, err := store.dbHandle()
 	if err != nil {
 		t.Fatal(err)
@@ -706,6 +710,61 @@ func TestRuntimeStateStoreUpgradeFailsClosedOnInvalidHistoricalSessionProduct(t 
 	t.Cleanup(func() { _ = store.Close() })
 	if _, err := store.ListSessionStates(context.Background(), "p"); err == nil || !strings.Contains(err.Error(), "invalid historical runtime authority") {
 		t.Fatalf("upgrade error=%v", err)
+	}
+}
+
+func TestRuntimeStateStoreEnforcesRelationalSessionIdentity(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE issues(id TEXT PRIMARY KEY); CREATE TABLE interaction_requests(id TEXT PRIMARY KEY,issue_id TEXT NOT NULL); INSERT INTO issues VALUES('a'),('b'); INSERT INTO interaction_requests VALUES('request-a','a')`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	if err := store.UpsertSessionState(ctx, "p", Session{ID: "worker-missing", IssueID: "missing", State: SessionStateRunning}); err == nil {
+		t.Fatal("worker orphan accepted")
+	}
+	if err := store.UpsertSessionState(ctx, "p", Session{ID: "advisor-mismatch", IssueID: "b", Role: SessionRoleAdvisor, ScopeKind: SessionScopeInteraction, ScopeID: "request-a", State: SessionStateRunning}); err == nil {
+		t.Fatal("advisor interaction/issue mismatch accepted")
+	}
+	if err := store.UpsertSessionState(ctx, "p", Session{ID: "advisor-valid", IssueID: "a", Role: SessionRoleAdvisor, ScopeKind: SessionScopeInteraction, ScopeID: "request-a", State: SessionStateRunning}); err != nil {
+		t.Fatalf("valid advisor: %v", err)
+	}
+	handle, err := store.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handle.ExecContext(ctx, `UPDATE daemon_session_projections SET issue_id='b' WHERE session_id='advisor-valid'`); err == nil {
+		t.Fatal("direct advisor retarget bypassed relational guard")
+	}
+}
+
+func TestRuntimeStateStorePaneMigrationReplacesStaleObservationMetadata(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := func(table string) string {
+		return `CREATE TABLE ` + table + `(project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'worker',scope_kind TEXT NOT NULL DEFAULT 'issue',scope_id TEXT NOT NULL DEFAULT '',state TEXT NOT NULL,observed_state TEXT,activity TEXT,activity_source TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,started_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,session_id));`
+	}
+	if _, err := db.Exec(schema(sessionStateTable) + schema(sessionObservationTable) + `INSERT INTO daemon_session_observations(project_id,session_id,issue_id,role,scope_kind,scope_id,state,updated_at) VALUES('p','advisor.pane-1','a','worker','issue','a','running','2026-07-13T00:00:00Z'); INSERT INTO daemon_session_projections(project_id,session_id,issue_id,role,scope_kind,scope_id,state,updated_at) VALUES('p','advisor.pane-1','a','advisor','interaction','request-a','running','2026-07-13T00:01:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	session, found, err := store.GetSessionState(context.Background(), "p", "advisor.pane-1")
+	if err != nil || !found {
+		t.Fatalf("found=%v err=%v", found, err)
+	}
+	if session.Role != SessionRoleAdvisor || session.ScopeKind != SessionScopeInteraction || session.ScopeID != "request-a" || session.IssueID != "a" {
+		t.Fatalf("migrated observation=%+v", session)
 	}
 }
 
