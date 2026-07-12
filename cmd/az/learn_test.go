@@ -11,6 +11,29 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
 
+func TestParseLearnActivationFeedbackArgs(t *testing.T) {
+	activation, err := parseLearnActivateArgs([]string{"--surface", "primer", "--token-cost", "42", "--issue", "ddh", "--tag", "go", "learn-1", "learn-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activation.Surface != "primer" || activation.TokenCost != 42 || activation.Issue != "ddh" || len(activation.LearningIDs) != 2 {
+		t.Fatalf("activation opts = %+v", activation)
+	}
+	feedback, err := parseLearnFeedbackArgs([]string{"--idempotency-key", "turn-1", "--outcome", "followed", "--source", "inferred", "act-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if feedback.ActivationID != "act-1" || feedback.Source != "inferred" {
+		t.Fatalf("feedback opts = %+v", feedback)
+	}
+	if _, err := parseLearnActivateArgs([]string{"--surface", "primer", "--token-cost", "32769", "learn-1"}); err == nil {
+		t.Fatal("expected token bound error")
+	}
+	if _, err := parseLearnFeedbackArgs([]string{"--idempotency-key", "turn-1", "--outcome", "maybe", "act-1"}); err == nil {
+		t.Fatal("expected outcome validation error")
+	}
+}
+
 func TestRunLearnCommandHelpArgsReturnUsage(t *testing.T) {
 	for _, args := range [][]string{
 		{"--help"},

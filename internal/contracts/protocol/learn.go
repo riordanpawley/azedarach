@@ -15,6 +15,8 @@ const (
 	CommandLearnSupersede = "learn.supersede"
 	CommandLearnDoctor    = "learn.doctor"
 	CommandLearnGC        = "learn.gc"
+	CommandLearnActivate  = "learn.activate"
+	CommandLearnFeedback  = "learn.feedback"
 )
 
 type LearningStatus string
@@ -138,6 +140,50 @@ type LearnRecallRequestBody struct {
 
 type LearnRecallResponseBody struct {
 	Learnings []Learning `json:"learnings" msgpack:"learnings"`
+}
+
+type LearnActivateRequestBody struct {
+	ProjectID      string               `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	Surface        string               `json:"surface" msgpack:"surface"`
+	ContextIssueID naming.IssueID       `json:"context_issue_id,omitempty" msgpack:"context_issue_id,omitempty"`
+	ContextReqID   naming.RequirementID `json:"context_req_id,omitempty" msgpack:"context_req_id,omitempty"`
+	ContextTags    []string             `json:"context_tags,omitempty" msgpack:"context_tags,omitempty"`
+	ContextFiles   []string             `json:"context_files,omitempty" msgpack:"context_files,omitempty"`
+	LearningIDs    []string             `json:"learning_ids" msgpack:"learning_ids"`
+	TokenCost      int                  `json:"token_cost" msgpack:"token_cost"`
+	Explanation    string               `json:"explanation,omitempty" msgpack:"explanation,omitempty"`
+}
+type LearningActivation struct {
+	ActivationID       string   `json:"activation_id" msgpack:"activation_id"`
+	Surface            string   `json:"surface" msgpack:"surface"`
+	ContextFingerprint string   `json:"context_fingerprint" msgpack:"context_fingerprint"`
+	LearningIDs        []string `json:"learning_ids" msgpack:"learning_ids"`
+	TokenCost          int      `json:"token_cost" msgpack:"token_cost"`
+	Explanation        string   `json:"explanation,omitempty" msgpack:"explanation,omitempty"`
+	DeliveredAt        string   `json:"delivered_at" msgpack:"delivered_at"`
+}
+type LearnActivateResponseBody struct {
+	Activation LearningActivation `json:"activation" msgpack:"activation"`
+}
+
+type LearnFeedbackRequestBody struct {
+	ActivationID   string `json:"activation_id" msgpack:"activation_id"`
+	IdempotencyKey string `json:"idempotency_key" msgpack:"idempotency_key"`
+	Outcome        string `json:"outcome" msgpack:"outcome"`
+	Source         string `json:"source" msgpack:"source"`
+	Explanation    string `json:"explanation,omitempty" msgpack:"explanation,omitempty"`
+}
+type LearningActivationFeedback struct {
+	ActivationID   string `json:"activation_id" msgpack:"activation_id"`
+	IdempotencyKey string `json:"idempotency_key" msgpack:"idempotency_key"`
+	Outcome        string `json:"outcome" msgpack:"outcome"`
+	Source         string `json:"source" msgpack:"source"`
+	Explanation    string `json:"explanation,omitempty" msgpack:"explanation,omitempty"`
+	RecordedAt     string `json:"recorded_at" msgpack:"recorded_at"`
+}
+type LearnFeedbackResponseBody struct {
+	Feedback LearningActivationFeedback `json:"feedback" msgpack:"feedback"`
+	Created  bool                       `json:"created" msgpack:"created"`
 }
 
 type LearnShowRequestBody struct {

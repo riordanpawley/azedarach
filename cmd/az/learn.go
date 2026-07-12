@@ -14,6 +14,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/cli"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -40,6 +41,16 @@ type learnRecallOpts struct {
 	Limit           int
 	IncludeEvidence bool
 	IncludePrivate  bool
+}
+type learnActivateOpts struct {
+	JSON                             bool
+	Surface, Issue, Req, Explanation string
+	Tags, Files, LearningIDs         []string
+	TokenCost                        int
+}
+type learnFeedbackOpts struct {
+	JSON                                                       bool
+	ActivationID, IdempotencyKey, Outcome, Source, Explanation string
 }
 
 type learnShowOpts struct {
@@ -150,6 +161,20 @@ func runLearnCommand(cfg *config.Config, args []string) error {
 		return nil
 	}
 	switch args[0] {
+	case "activate":
+		opts, err := parseLearnActivateArgs(args[1:])
+		if err != nil {
+			printLearnUsage()
+			return err
+		}
+		return runLearnActivateRPC(cfg, opts)
+	case "feedback":
+		opts, err := parseLearnFeedbackArgs(args[1:])
+		if err != nil {
+			printLearnUsage()
+			return err
+		}
+		return runLearnFeedbackRPC(cfg, opts)
 	case "add":
 		opts, err := parseLearnAddArgs(args[1:])
 		if err != nil {
@@ -237,6 +262,80 @@ func runLearnCommand(cfg *config.Config, args []string) error {
 	default:
 		return fmt.Errorf("unknown learn command: %s", args[0])
 	}
+}
+
+func runLearnActivateRPC(cfg *config.Config, o learnActivateOpts) error {
+	var out protocol.LearnActivateResponseBody
+	err := runLearnRPC(cfg, protocol.CommandLearnActivate, protocol.LearnActivateRequestBody{Surface: o.Surface, ContextIssueID: naming.IssueID(o.Issue), ContextReqID: naming.RequirementID(o.Req), ContextTags: o.Tags, ContextFiles: o.Files, LearningIDs: o.LearningIDs, TokenCost: o.TokenCost, Explanation: o.Explanation}, &out)
+	if err != nil {
+		return err
+	}
+	if o.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Delivered learning activation: %s\n", out.Activation.ActivationID)
+	return nil
+}
+func runLearnFeedbackRPC(cfg *config.Config, o learnFeedbackOpts) error {
+	var out protocol.LearnFeedbackResponseBody
+	err := runLearnRPC(cfg, protocol.CommandLearnFeedback, protocol.LearnFeedbackRequestBody{ActivationID: o.ActivationID, IdempotencyKey: o.IdempotencyKey, Outcome: o.Outcome, Source: o.Source, Explanation: o.Explanation}, &out)
+	if err != nil {
+		return err
+	}
+	if o.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Recorded activation feedback: %s created=%t\n", out.Feedback.Outcome, out.Created)
+	return nil
+}
+
+func parseLearnActivateArgs(args []string) (learnActivateOpts, error) {
+	var o learnActivateOpts
+	fs := flag.NewFlagSet("learn activate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&o.JSON, "json", false, "json output")
+	fs.StringVar(&o.Surface, "surface", "", "delivery surface")
+	fs.StringVar(&o.Issue, "issue", "", "context issue")
+	fs.StringVar(&o.Req, "req", "", "context requirement")
+	fs.StringVar(&o.Explanation, "explanation", "", "ranking explanation")
+	fs.IntVar(&o.TokenCost, "token-cost", 0, "delivered token cost")
+	addRepeatedStringFlag(fs, "learning", &o.LearningIDs)
+	addRepeatedStringFlag(fs, "tag", &o.Tags)
+	addRepeatedStringFlag(fs, "file", &o.Files)
+	if err := fs.Parse(args); err != nil {
+		return o, err
+	}
+	o.LearningIDs = append(o.LearningIDs, fs.Args()...)
+	o.LearningIDs = compactCLIStrings(o.LearningIDs)
+	o.Surface = strings.TrimSpace(o.Surface)
+	if o.Surface == "" || len(o.LearningIDs) == 0 {
+		return o, fmt.Errorf("--surface and at least one learning id are required")
+	}
+	if o.TokenCost < 0 || o.TokenCost > 32768 {
+		return o, fmt.Errorf("--token-cost must be between 0 and 32768")
+	}
+	return o, nil
+}
+func parseLearnFeedbackArgs(args []string) (learnFeedbackOpts, error) {
+	var o learnFeedbackOpts
+	fs := flag.NewFlagSet("learn feedback", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&o.JSON, "json", false, "json output")
+	fs.StringVar(&o.IdempotencyKey, "idempotency-key", "", "deduplication key")
+	fs.StringVar(&o.Outcome, "outcome", "", "helpful|followed|contradicted|unknown")
+	fs.StringVar(&o.Source, "source", "explicit", "explicit|inferred")
+	fs.StringVar(&o.Explanation, "explanation", "", "outcome explanation")
+	if err := fs.Parse(args); err != nil {
+		return o, err
+	}
+	if fs.NArg() != 1 {
+		return o, fmt.Errorf("activation id is required")
+	}
+	o.ActivationID = strings.TrimSpace(fs.Arg(0))
+	if o.IdempotencyKey == "" || !domain.LearningActivationOutcome(o.Outcome).Valid() || !domain.LearningOutcomeSource(o.Source).Valid() {
+		return o, fmt.Errorf("valid --idempotency-key, --outcome, and --source are required")
+	}
+	return o, nil
 }
 
 func runLearnAddRPC(cfg *config.Config, opts learnAddOpts) error {
@@ -1128,9 +1227,11 @@ func parseLearningAgeDuration(raw string) (time.Duration, error) {
 }
 
 func printLearnUsage() {
-	fmt.Println("Usage: az learn <add|recall|show|review|stale|demote|promote|retire|relate|supersede|doctor|gc> [arguments]")
+	fmt.Println("Usage: az learn <add|recall|activate|feedback|show|review|stale|demote|promote|retire|relate|supersede|doctor|gc> [arguments]")
 	fmt.Println("  add      Capture an evidence-backed candidate learning")
 	fmt.Println("  recall   Search accepted/promoted learning summaries")
+	fmt.Println("  activate Record actual delivery of selected public learnings")
+	fmt.Println("  feedback Record an idempotent explicit or inferred activation outcome")
 	fmt.Println("  show     Show a learning with full evidence")
 	fmt.Println("  review   List review queues or bulk update selected learnings")
 	fmt.Println("  stale    Mark a learning stale with an audit note")
@@ -1145,6 +1246,8 @@ func printLearnUsage() {
 	fmt.Println("Commands:")
 	fmt.Println("  az learn add --evidence <text> [--summary <text>] [--private] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--json]")
 	fmt.Println("  az learn recall [--query <text>] [--issue <id>] [--req <id>] [--status <status> ...] [--tag <tag> ...] [--file <path> ...] [--limit N] [--include-evidence] [--include-private] [--json]")
+	fmt.Println("  az learn activate --surface <name> [--token-cost N] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--explanation <text>] <learning-id> ... [--json]")
+	fmt.Println("  az learn feedback --idempotency-key <key> --outcome helpful|followed|contradicted|unknown [--source explicit|inferred] [--explanation <text>] <activation-id> [--json]")
 	fmt.Println("  az learn show <learning-id> [--json]")
 	fmt.Println("  az learn review [--queue-status <status> ...] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--target-state active|retired|drifted|missing ...] [--older-than 30d] [--limit N] [--json]")
 	fmt.Println("  az learn review --id <learning-id> [--id <learning-id> ...] --status accepted|rejected|stale --note <text> [--json]")

@@ -11,6 +11,8 @@ import (
 )
 
 type fakeLearnService struct {
+	activateFn  func(context.Context, protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error)
+	feedbackFn  func(context.Context, protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error)
 	addFn       func(context.Context, protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error)
 	recallFn    func(context.Context, protocol.LearnRecallRequestBody) (protocol.LearnRecallResponseBody, error)
 	showFn      func(context.Context, protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error)
@@ -23,6 +25,19 @@ type fakeLearnService struct {
 	supersedeFn func(context.Context, protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error)
 	doctorFn    func(context.Context, protocol.LearnDoctorRequestBody) (protocol.LearnDoctorResponseBody, error)
 	gcFn        func(context.Context, protocol.LearnGCRequestBody) (protocol.LearnGCResponseBody, error)
+}
+
+func (f *fakeLearnService) Activate(ctx context.Context, req protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error) {
+	if f.activateFn != nil {
+		return f.activateFn(ctx, req)
+	}
+	return protocol.LearnActivateResponseBody{}, nil
+}
+func (f *fakeLearnService) Feedback(ctx context.Context, req protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error) {
+	if f.feedbackFn != nil {
+		return f.feedbackFn(ctx, req)
+	}
+	return protocol.LearnFeedbackResponseBody{}, nil
 }
 
 func (f *fakeLearnService) Add(ctx context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
@@ -121,7 +136,17 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	var gotSupersede protocol.LearnSupersedeRequestBody
 	var gotDoctor protocol.LearnDoctorRequestBody
 	var gotGC protocol.LearnGCRequestBody
+	var gotActivate protocol.LearnActivateRequestBody
+	var gotFeedback protocol.LearnFeedbackRequestBody
 	handler := NewLearnHandler(&fakeLearnService{
+		activateFn: func(_ context.Context, req protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error) {
+			gotActivate = req
+			return protocol.LearnActivateResponseBody{Activation: protocol.LearningActivation{ActivationID: "act-1"}}, nil
+		},
+		feedbackFn: func(_ context.Context, req protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error) {
+			gotFeedback = req
+			return protocol.LearnFeedbackResponseBody{Created: true}, nil
+		},
 		addFn: func(_ context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
 			gotAdd = req
 			return protocol.LearnAddResponseBody{Learning: protocol.Learning{ID: "learn-1"}}, nil
@@ -168,6 +193,14 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 			return protocol.LearnGCResponseBody{DryRun: !req.Confirm, Deleted: []protocol.LearnMaintenanceFinding{{LearningID: "learn-1", Type: "old_candidate"}}}, nil
 		},
 	})
+	activateResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnActivate, protocol.LearnActivateRequestBody{Surface: " primer ", LearningIDs: []string{" learn-1 ", "learn-1"}, TokenCost: 12}))
+	if !activateResp.OK || gotActivate.Surface != "primer" || len(gotActivate.LearningIDs) != 1 {
+		t.Fatalf("activate response=%+v got=%+v", activateResp, gotActivate)
+	}
+	feedbackResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnFeedback, protocol.LearnFeedbackRequestBody{ActivationID: " act-1 ", IdempotencyKey: " turn-1 ", Outcome: "helpful", Source: "explicit"}))
+	if !feedbackResp.OK || gotFeedback.ActivationID != "act-1" || gotFeedback.IdempotencyKey != "turn-1" {
+		t.Fatalf("feedback response=%+v got=%+v", feedbackResp, gotFeedback)
+	}
 
 	addResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnAdd, protocol.LearnAddRequestBody{
 		IssueID:  naming.IssueID("csk"),

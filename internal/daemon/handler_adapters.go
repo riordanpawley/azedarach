@@ -131,6 +131,34 @@ func (s issueLearnService) Recall(ctx context.Context, req protocol.LearnRecallR
 	return protocol.LearnRecallResponseBody{Learnings: out}, nil
 }
 
+func (s issueLearnService) Activate(ctx context.Context, req protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnActivateResponseBody{}, err
+	}
+	fingerprint, err := domain.LearningContextFingerprint(req.ContextIssueID.String(), req.ContextReqID.String(), req.ContextTags, req.ContextFiles)
+	if err != nil {
+		return protocol.LearnActivateResponseBody{}, err
+	}
+	a, err := client.RecordLearningActivation(ctx, issues.RecordLearningActivationParams{ProjectID: firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)), Surface: req.Surface, ContextFingerprint: fingerprint, LearningIDs: req.LearningIDs, TokenCost: req.TokenCost, Explanation: req.Explanation})
+	if err != nil {
+		return protocol.LearnActivateResponseBody{}, err
+	}
+	return protocol.LearnActivateResponseBody{Activation: protocol.LearningActivation{ActivationID: a.ActivationID, Surface: a.Surface, ContextFingerprint: a.ContextFingerprint, LearningIDs: a.LearningIDs, TokenCost: a.TokenCost, Explanation: a.Explanation, DeliveredAt: formatProtocolTime(a.DeliveredAt)}}, nil
+}
+
+func (s issueLearnService) Feedback(ctx context.Context, req protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnFeedbackResponseBody{}, err
+	}
+	out, created, err := client.RecordLearningActivationOutcome(ctx, issues.LearningActivationOutcome{ActivationID: req.ActivationID, IdempotencyKey: req.IdempotencyKey, Outcome: domain.LearningActivationOutcome(req.Outcome), Source: domain.LearningOutcomeSource(req.Source), Explanation: req.Explanation})
+	if err != nil {
+		return protocol.LearnFeedbackResponseBody{}, err
+	}
+	return protocol.LearnFeedbackResponseBody{Created: created, Feedback: protocol.LearningActivationFeedback{ActivationID: out.ActivationID, IdempotencyKey: out.IdempotencyKey, Outcome: string(out.Outcome), Source: string(out.Source), Explanation: out.Explanation, RecordedAt: formatProtocolTime(out.RecordedAt)}}, nil
+}
+
 func (s issueLearnService) Show(ctx context.Context, req protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error) {
 	client, err := s.issueClient(ctx)
 	if err != nil {

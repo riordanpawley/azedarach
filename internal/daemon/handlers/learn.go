@@ -25,6 +25,8 @@ type LearnService interface {
 	Supersede(context.Context, protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error)
 	Doctor(context.Context, protocol.LearnDoctorRequestBody) (protocol.LearnDoctorResponseBody, error)
 	GC(context.Context, protocol.LearnGCRequestBody) (protocol.LearnGCResponseBody, error)
+	Activate(context.Context, protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error)
+	Feedback(context.Context, protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error)
 }
 
 type LearnHandler struct {
@@ -52,6 +54,36 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 		return resp
 	}
 	switch req.Command {
+	case protocol.CommandLearnActivate:
+		var cmd protocol.LearnActivateRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.Surface, cmd.Explanation = strings.TrimSpace(cmd.Surface), strings.TrimSpace(cmd.Explanation)
+		cmd.LearningIDs = compactStrings(cmd.LearningIDs)
+		if cmd.Surface == "" || len(cmd.LearningIDs) == 0 {
+			return learnInvalidRequest(resp, "surface and learning_ids are required")
+		}
+		if cmd.TokenCost < 0 || cmd.TokenCost > 32768 {
+			return learnInvalidRequest(resp, "token_cost must be between 0 and 32768")
+		}
+		return learnJSONResponse(ctx, resp, h.service.Activate, cmd)
+	case protocol.CommandLearnFeedback:
+		var cmd protocol.LearnFeedbackRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.ActivationID, cmd.IdempotencyKey, cmd.Outcome, cmd.Source, cmd.Explanation = strings.TrimSpace(cmd.ActivationID), strings.TrimSpace(cmd.IdempotencyKey), strings.TrimSpace(cmd.Outcome), strings.TrimSpace(cmd.Source), strings.TrimSpace(cmd.Explanation)
+		if cmd.ActivationID == "" || cmd.IdempotencyKey == "" {
+			return learnInvalidRequest(resp, "activation_id and idempotency_key are required")
+		}
+		if !domain.LearningActivationOutcome(cmd.Outcome).Valid() {
+			return learnInvalidRequest(resp, "outcome must be helpful|followed|contradicted|unknown")
+		}
+		if !domain.LearningOutcomeSource(cmd.Source).Valid() {
+			return learnInvalidRequest(resp, "source must be explicit|inferred")
+		}
+		return learnJSONResponse(ctx, resp, h.service.Feedback, cmd)
 	case protocol.CommandLearnAdd:
 		var cmd protocol.LearnAddRequestBody
 		if !decodeLearnRequest(req.Body, &cmd, &resp) {
