@@ -3010,7 +3010,23 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 	tmuxSet := make(map[string]struct{}, len(tmuxSessions))
 	tmuxNameByIssueKey := make(map[string]string, len(tmuxSessions))
 	namingScope := d.sessionNamingScope(projectID)
+	snapshotSessions := []daemonstate.Session{}
+	if usesProjectionSource(source) {
+		snapshotSessions, err = d.sessionSnapshotForReconcile(ctx, projectID)
+		if err != nil {
+			return result, err
+		}
+	}
+	excludedTmuxNames := make(map[string]struct{})
+	for _, session := range snapshotSessions {
+		if !lifecycleManagedSessionProjection(session) {
+			excludedTmuxNames[strings.TrimSpace(session.ID)] = struct{}{}
+		}
+	}
 	for _, name := range tmuxSessions {
+		if _, excluded := excludedTmuxNames[strings.TrimSpace(name)]; excluded {
+			continue
+		}
 		issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
 		if !ok {
 			continue
@@ -3026,13 +3042,6 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		tmuxNameByIssueKey[key] = name
 	}
 
-	snapshotSessions := []daemonstate.Session{}
-	if usesProjectionSource(source) {
-		snapshotSessions, err = d.sessionSnapshotForReconcile(ctx, projectID)
-		if err != nil {
-			return result, err
-		}
-	}
 	validationIssueIDs := reconcileSessionValidationIssueIDs(targetIssueKeys, tmuxSet, snapshotSessions, namingScope)
 	if len(targetIssueKeys) == 0 && strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID)) != "" {
 		if issueClient := d.issueClientForProject(projectID); issueClient != nil {
@@ -3131,7 +3140,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			runtimeIntent[issueKey] = struct{}{}
 		}
 		for _, session := range snapshotSessions {
-			if session.Role == daemonstate.SessionRoleAdvisor || !sessionProjectionCanRecreateTmuxSession(session) {
+			if !lifecycleManagedSessionProjection(session) || !sessionProjectionCanRecreateTmuxSession(session) {
 				continue
 			}
 			issueID := sessionProjectionIssueID(session, namingScope)
@@ -3160,7 +3169,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		}
 	}
 	for _, session := range snapshotSessions {
-		if session.Role == daemonstate.SessionRoleAdvisor {
+		if !lifecycleManagedSessionProjection(session) {
 			continue
 		}
 		issueID := sessionProjectionIssueID(session, namingScope)
@@ -3392,7 +3401,7 @@ func reconcileSessionValidationIssueIDs(targetIssueKeys map[string]struct{}, tmu
 		ids = append(ids, issueKey)
 	}
 	for _, session := range snapshotSessions {
-		if session.Role == daemonstate.SessionRoleAdvisor {
+		if !lifecycleManagedSessionProjection(session) {
 			continue
 		}
 		issueID := sessionProjectionIssueID(session, namingScope)
@@ -3406,6 +3415,17 @@ func reconcileSessionValidationIssueIDs(targetIssueKeys map[string]struct{}, tmu
 		ids = append(ids, issueKey)
 	}
 	return normalizeRuntimeReconcileIssueIDs(ids)
+}
+
+func lifecycleManagedSessionProjection(session daemonstate.Session) bool {
+	switch session.Role {
+	case "", daemonstate.SessionRoleWorker:
+		return session.ScopeKind == "" || session.ScopeKind == daemonstate.SessionScopeIssue
+	case daemonstate.SessionRoleOrchestrator:
+		return session.ScopeKind == daemonstate.SessionScopeOrchestration && strings.TrimSpace(session.ScopeID) != "" && strings.TrimSpace(session.ScopeID) != string(domain.OrchestrationScopeProject) && strings.TrimSpace(session.IssueID) == strings.TrimSpace(session.ScopeID)
+	default:
+		return false
+	}
 }
 
 func (d *Daemon) reconcileIssueKeyIndex(ctx context.Context, projectID string, issueIDs []string) (map[string]domain.Task, bool, error) {
@@ -3624,7 +3644,7 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 func activeSessionIssueKeysFromProjection(sessions []daemonstate.Session, namingScope string) map[string]struct{} {
 	active := make(map[string]struct{}, len(sessions))
 	for _, session := range sessions {
-		if session.Role == daemonstate.SessionRoleAdvisor {
+		if !lifecycleManagedSessionProjection(session) {
 			continue
 		}
 		state := session.State

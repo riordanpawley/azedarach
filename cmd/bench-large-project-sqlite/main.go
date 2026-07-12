@@ -409,8 +409,8 @@ func seedFixture(ctx context.Context, db *sql.DB, cfg harnessConfig) (ids fixtur
 	}
 	defer depStmt.Close()
 	sessionStmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, observed_state, activity, activity_source, tmux_attached_count, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, observed_state, activity, activity_source, tmux_attached_count, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fixtureIDs{}, fixtureSummary{}, err
@@ -511,7 +511,7 @@ func seedFixture(ctx context.Context, db *sql.DB, cfg harnessConfig) (ids fixtur
 			source = "hook"
 			attached = 1
 		}
-		if _, err := sessionStmt.ExecContext(ctx, cfg.ProjectID, "sess-"+id, id, state, "", activity, source, attached, now, timestampForIndex(i)); err != nil {
+		if _, err := sessionStmt.ExecContext(ctx, cfg.ProjectID, "sess-"+id, id, id, state, "", activity, source, attached, now, timestampForIndex(i)); err != nil {
 			return fixtureIDs{}, fixtureSummary{}, err
 		}
 		summary.SessionCount++

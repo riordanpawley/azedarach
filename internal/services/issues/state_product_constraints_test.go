@@ -49,7 +49,7 @@ func TestStateProductMigrationRejectsDirectSQLContradictions(t *testing.T) {
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,state,tmux_attached_count,updated_at) VALUES('p','s',?,'running',-1,?)`, issueID, now)
+	_, err = db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,scope_id,state,tmux_attached_count,updated_at) VALUES('p','s',?,?,'running',-1,?)`, issueID, issueID, now)
 	if err == nil || !strings.Contains(err.Error(), "cannot be negative") {
 		t.Fatalf("negative attachment err=%v", err)
 	}
@@ -76,10 +76,10 @@ func TestArchivedResourceGuardsRejectUpdatesAndStoppedRows(t *testing.T) {
 	}
 	db, _ := client.dbHandle()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,state,tmux_attached_count,updated_at) VALUES('p','s',?,'stopped',0,?)`, liveID, now); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,scope_id,state,tmux_attached_count,updated_at) VALUES('p','s',?,?,'stopped',0,?)`, liveID, liveID, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE daemon_session_projections SET issue_id=? WHERE session_id='s'`, archivedID); err == nil || !strings.Contains(err.Error(), "cannot attach session") {
+	if _, err := db.ExecContext(ctx, `UPDATE daemon_session_projections SET issue_id=?,scope_id=? WHERE session_id='s'`, archivedID, archivedID); err == nil || !strings.Contains(err.Error(), "cannot attach session") {
 		t.Fatalf("session retarget err=%v", err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO daemon_worktree_projections(project_id,issue_id,path,branch,updated_at) VALUES('p',?,'/tmp/live','b',?)`, liveID, now); err != nil {
@@ -261,7 +261,7 @@ func TestCanonicalMigrationRejectsOrphanAuthorityRows(t *testing.T) {
 			case "lease":
 				_, err = db.ExecContext(ctx, `INSERT INTO issue_coordination_leases(issue_id,purpose,owner_id,owner_kind,claimed_at) VALUES('missing','execution','a','agent',?)`, now)
 			case "session":
-				_, err = db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,state,tmux_attached_count,updated_at) VALUES('p','s','missing','stopped',0,?)`, now)
+				_, err = db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,scope_id,state,tmux_attached_count,updated_at) VALUES('p','s','missing','missing','stopped',0,?)`, now)
 			case "worktree":
 				_, err = db.ExecContext(ctx, `INSERT INTO daemon_worktree_projections(project_id,issue_id,path,branch,updated_at) VALUES('p','missing','/tmp/orphan','b',?)`, now)
 			}
@@ -302,6 +302,59 @@ func TestReviewLeaseDirectSQLCartesian(t *testing.T) {
 	}
 	if err := insert(); err != nil {
 		t.Fatalf("review_requested insert: %v", err)
+	}
+}
+
+func TestWorkerSessionScopeDirectSQLRejectsEmptyAndMismatch(t *testing.T) {
+	client := NewClient(t.TempDir(), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	ctx := context.Background()
+	id, err := client.Create(ctx, CreateTaskParams{Title: "scope", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, _ := client.dbHandle()
+	now := "2026-07-13T00:00:00Z"
+	insert := func(sessionID, scopeID string) error {
+		_, err := db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,role,scope_kind,scope_id,state,tmux_attached_count,updated_at) VALUES('p',?,?,'worker','issue',?,'stopped',0,?)`, sessionID, id, scopeID, now)
+		return err
+	}
+	if err := insert("empty", ""); err == nil || !strings.Contains(err.Error(), "existing issue scope") {
+		t.Fatalf("empty scope err=%v", err)
+	}
+	if err := insert("mismatch", "other"); err == nil || !strings.Contains(err.Error(), "existing issue scope") {
+		t.Fatalf("mismatched scope err=%v", err)
+	}
+	if err := insert("valid", id); err != nil {
+		t.Fatalf("matching scope: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,role,scope_kind,scope_id,state,tmux_attached_count,updated_at) VALUES('p','project-orchestrator','','orchestrator','orchestration','project','running',0,?)`, now); err != nil {
+		t.Fatalf("project orchestrator without issue identity: %v", err)
+	}
+}
+
+func TestCanonicalMigrationBackfillsPreColumnWorkerScope(t *testing.T) {
+	client := NewClient(t.TempDir(), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	ctx := context.Background()
+	id, err := client.Create(ctx, CreateTaskParams{Title: "legacy scope", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, _ := client.dbHandle()
+	dropCanonicalStateMigrationGuards(t, db)
+	if _, err := db.ExecContext(ctx, `DROP TABLE daemon_session_projections; CREATE TABLE daemon_session_projections(project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,state TEXT NOT NULL,tmux_attached_count INTEGER NOT NULL DEFAULT 0,observed_state TEXT,activity TEXT,activity_source TEXT,started_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,session_id)); INSERT INTO daemon_session_projections(project_id,session_id,issue_id,state,updated_at) VALUES('p','legacy',?,'stopped','2026-07-13T00:00:00Z'); DELETE FROM schema_migrations WHERE id='0045_issue_state_runtime_constraints'`, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyIssueStateRuntimeConstraintsMigration(ctx, db, "0045_issue_state_runtime_constraints"); err != nil {
+		t.Fatal(err)
+	}
+	var role, scopeKind, scopeID string
+	if err := db.QueryRowContext(ctx, `SELECT role,scope_kind,scope_id FROM daemon_session_projections WHERE session_id='legacy'`).Scan(&role, &scopeKind, &scopeID); err != nil {
+		t.Fatal(err)
+	}
+	if role != "worker" || scopeKind != "issue" || scopeID != id {
+		t.Fatalf("scope=%s/%s/%s want worker/issue/%s", role, scopeKind, scopeID, id)
 	}
 }
 
@@ -470,7 +523,7 @@ func TestRuntimeDivergenceQuarantinesSelectorProjectionUntilRecovery(t *testing.
 	}
 	db, _ := client.dbHandle()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err = db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,state,updated_at) VALUES('project','s',?,'running',?)`, id, now); err != nil {
+	if _, err = db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,scope_id,state,updated_at) VALUES('project','s',?,?,'running',?)`, id, id, now); err != nil {
 		t.Fatal(err)
 	}
 	if err = client.RecordRuntimeDivergence(ctx, id, "terminal/live"); err != nil {

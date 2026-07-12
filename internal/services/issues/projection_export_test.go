@@ -36,7 +36,7 @@ func TestExportProjectionUsesStableSchemaFingerprintAndMonotonicSourceRevision(t
 		t.Fatal(err)
 	}
 	updated := time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano)
-	_, err = db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,state,observed_state,activity,updated_at) VALUES(?,?,?,?,?,?,?)`, `project-a`, `session-1`, `issue-1`, `running`, `running`, `busy`, updated)
+	_, err = db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,scope_id,state,observed_state,activity,updated_at) VALUES(?,?,?,?,?,?,?,?)`, `project-a`, `session-1`, `issue-1`, `issue-1`, `running`, `running`, `busy`, updated)
 	if err != nil {
 		t.Fatal(err)
 	}

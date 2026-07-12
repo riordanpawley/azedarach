@@ -6049,6 +6049,34 @@ func TestUntargetedReconcileResolvesDivergenceWithoutRuntimeProjection(t *testin
 	}
 }
 
+func TestUntargetedReconcilePreservesProjectOrchestratorRuntime(t *testing.T) {
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	sessionID := naming.CanonicalSessionID(repoDir, "orchestrator-project")
+	store := daemonstate.NewStore()
+	store.ReplaceProjectSessions(projectID, []daemonstate.Session{{ID: sessionID, IssueID: "", Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: string(domain.OrchestrationScopeProject), State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning}})
+	tmuxRunner := newTestTmuxRunner(sessionID)
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, tmux: tmux.NewClient(tmuxRunner, slog.Default()), session: daemonhandlers.NewSessionHandler(store), sessionStore: store,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default())}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default())}}
+	if _, err := d.reconcileTmuxAndDaemonSessions(context.Background(), projectID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Session(projectID, sessionID); err != nil {
+		t.Fatalf("project orchestrator projection was pruned: %v", err)
+	}
+	tmuxRunner.mu.Lock()
+	live := tmuxRunner.sessions[sessionID]
+	tmuxRunner.mu.Unlock()
+	if !live {
+		t.Fatal("project orchestrator tmux runtime was removed")
+	}
+}
+
 func TestReconcileRefreshesLifecycleBeforeRepairAcrossDaemons(t *testing.T) {
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)

@@ -45,12 +45,12 @@ SELECT 0 WHERE EXISTS (
 );
 INSERT INTO issue_state_runtime_constraint_validation(ok)
 SELECT 0 WHERE EXISTS (
-  -- This projection is issue-scoped. Advisor/project/root sessions live in the
-  -- typed daemon runtime-state tables and are not represented here.
+  -- Desired session projections are discriminated by role and scope. Storage
+  -- selection is table-based, not role-based.
   SELECT 1 FROM daemon_session_projections WHERE
-    trim(project_id)='' OR trim(session_id)='' OR trim(issue_id)='' OR
+    trim(project_id)='' OR trim(session_id)='' OR
     role NOT IN ('worker','advisor','orchestrator') OR scope_kind NOT IN ('issue','interaction','orchestration') OR
-    (role='worker' AND (scope_kind!='issue' OR NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_session_projections.issue_id))) OR
+    (role='worker' AND (scope_kind!='issue' OR trim(scope_id)='' OR scope_id!=issue_id OR NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_session_projections.issue_id))) OR
     (role='advisor' AND (scope_kind!='interaction' OR trim(scope_id)='')) OR
     (role='orchestrator' AND (scope_kind!='orchestration' OR trim(scope_id)='')) OR
     state NOT IN ('starting','running','attached','stopping','paused','stopped','idle','busy','waiting','done','error','unknown') OR
@@ -196,11 +196,11 @@ BEGIN SELECT RAISE(ABORT, 'cannot attach session to archived issue'); END;
 CREATE TRIGGER daemon_session_state_product_guard_insert
 BEFORE INSERT ON daemon_session_projections
 BEGIN
-  SELECT CASE WHEN trim(NEW.project_id)='' OR trim(NEW.session_id)='' OR trim(NEW.issue_id)=''
+  SELECT CASE WHEN trim(NEW.project_id)='' OR trim(NEW.session_id)=''
     THEN RAISE(ABORT, 'session projection identity must be nonempty') END;
   SELECT CASE WHEN NEW.role NOT IN ('worker','advisor','orchestrator') OR NEW.scope_kind NOT IN ('issue','interaction','orchestration')
     THEN RAISE(ABORT, 'invalid session role or scope') END;
-  SELECT CASE WHEN NEW.role='worker' AND (NEW.scope_kind!='issue' OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))
+  SELECT CASE WHEN NEW.role='worker' AND (NEW.scope_kind!='issue' OR trim(NEW.scope_id)='' OR NEW.scope_id!=NEW.issue_id OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))
     THEN RAISE(ABORT, 'worker session projection requires existing issue scope') END;
   SELECT CASE WHEN NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.scope_id)='')
     THEN RAISE(ABORT, 'advisor session requires interaction scope') END;
@@ -219,11 +219,11 @@ END;
 CREATE TRIGGER daemon_session_state_product_guard_update
 BEFORE UPDATE ON daemon_session_projections
 BEGIN
-  SELECT CASE WHEN trim(NEW.project_id)='' OR trim(NEW.session_id)='' OR trim(NEW.issue_id)=''
+  SELECT CASE WHEN trim(NEW.project_id)='' OR trim(NEW.session_id)=''
     THEN RAISE(ABORT, 'session projection identity must be nonempty') END;
   SELECT CASE WHEN NEW.role NOT IN ('worker','advisor','orchestrator') OR NEW.scope_kind NOT IN ('issue','interaction','orchestration')
     THEN RAISE(ABORT, 'invalid session role or scope') END;
-  SELECT CASE WHEN NEW.role='worker' AND (NEW.scope_kind!='issue' OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))
+  SELECT CASE WHEN NEW.role='worker' AND (NEW.scope_kind!='issue' OR trim(NEW.scope_id)='' OR NEW.scope_id!=NEW.issue_id OR NOT EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id))
     THEN RAISE(ABORT, 'worker session projection requires existing issue scope') END;
   SELECT CASE WHEN NEW.role='advisor' AND (NEW.scope_kind!='interaction' OR trim(NEW.scope_id)='')
     THEN RAISE(ABORT, 'advisor session requires interaction scope') END;

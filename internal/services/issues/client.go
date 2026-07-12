@@ -1130,8 +1130,8 @@ func (c *Client) migrateProviderDisplayKeyIssueID(ctx context.Context, tx *sql.T
 		{`UPDATE spec_requirements SET issue_id = ? WHERE issue_id = ?`, []any{migration.NewID, migration.OldID}},
 		{`UPDATE spec_links SET issue_id = ? WHERE issue_id = ?`, []any{migration.NewID, migration.OldID}},
 		{`UPDATE issue_external_refs SET issue_id = ?, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, now, migration.OldID}},
-		{`UPDATE daemon_session_projections SET issue_id = ?, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, now, migration.OldID}},
-		{`UPDATE daemon_session_observations SET issue_id = ?, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, now, migration.OldID}},
+		{`UPDATE daemon_session_projections SET issue_id = ?, scope_id = CASE WHEN scope_id = ? THEN ? ELSE scope_id END, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, migration.OldID, migration.NewID, now, migration.OldID}},
+		{`UPDATE daemon_session_observations SET issue_id = ?, scope_id = CASE WHEN scope_id = ? THEN ? ELSE scope_id END, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, migration.OldID, migration.NewID, now, migration.OldID}},
 		{`UPDATE daemon_worktree_projections SET issue_id = ?, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, now, migration.OldID}},
 	}
 	for _, stmt := range statements {
