@@ -8444,6 +8444,12 @@ type primeTemplateData struct {
 }
 
 func PrimeCommand(deps *Dependencies) error {
+	return primeCommandTo(deps, os.Stdout, clitext.Render)
+}
+
+type primeRenderFunc func(string, any) (string, error)
+
+func primeCommandTo(deps *Dependencies, stdout io.Writer, render primeRenderFunc) error {
 	commandStartedAt := time.Now()
 	issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID"))
 	issueIDSource := ""
@@ -8460,6 +8466,7 @@ func PrimeCommand(deps *Dependencies) error {
 	implementationSection := ""
 	implementationGuardrails := "- `--impl` selects implementation/spec variants; it never establishes parentage or graph membership. Use the active issue context or an explicit parent-child edge for hierarchy."
 	learningSection := ""
+	var learningConfirmation *protocol.LearnActivationConfirmRequestBody
 	specEnabled := deps != nil && deps.Config != nil && deps.Config.Spec.Enabled
 	orchestrationVia := primeOrchestrationVia(deps)
 	orchestrationViaAz := strings.EqualFold(orchestrationVia, "az")
@@ -8588,11 +8595,12 @@ func PrimeCommand(deps *Dependencies) error {
 		}
 	}
 	if !primeOrchestrator && issueID != "" {
-		learningSection = renderPrimeLearningSection(context.Background(), deps, issueID)
+		learning := renderPrimeLearningSection(context.Background(), deps, issueID)
+		learningSection, learningConfirmation = learning.Text, learning.Confirmation
 	}
 
 	finishRender := primePhase(deps, "render", "rendering primer output")
-	output, err := clitext.Render("prime_output", primeTemplateData{
+	output, err := render("prime_output", primeTemplateData{
 		ActiveIssueID:            issueID,
 		SpecEnabled:              specEnabled,
 		PrimeEvidenceKey:         primeEvidenceKey,
@@ -8615,7 +8623,16 @@ func PrimeCommand(deps *Dependencies) error {
 	if err != nil {
 		return fmt.Errorf("render prime output: %w", err)
 	}
-	fmt.Print(output)
+	if _, err := io.WriteString(stdout, output); err != nil {
+		return fmt.Errorf("write prime output: %w", err)
+	}
+	if learningConfirmation != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if _, err := deps.DaemonClient.ConfirmLearningActivation(ctx, *learningConfirmation); err != nil {
+			return fmt.Errorf("confirm prime learning delivery: %w", err)
+		}
+	}
 	latencytrace.LogPhaseContext(primeTraceContext(deps), primeLogger(deps), "cli", "prime.total", commandStartedAt, "issue_id", issueID)
 	return nil
 }
@@ -8645,10 +8662,15 @@ func primeTraceContext(deps *Dependencies) context.Context {
 	return deps.TraceContext
 }
 
-func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID string) string {
+type primeLearningSection struct {
+	Text         string
+	Confirmation *protocol.LearnActivationConfirmRequestBody
+}
+
+func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID string) primeLearningSection {
 	issueID = strings.TrimSpace(issueID)
 	if issueID == "" {
-		return ""
+		return primeLearningSection{}
 	}
 	lines := []string{
 		"Learning capture:",
@@ -8656,7 +8678,7 @@ func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID
 		"- Use `--private` for sensitive local details; promote durable guidance later with `az learn review` and `az learn promote`.",
 	}
 	if deps == nil || deps.DaemonClient == nil {
-		return strings.Join(lines, "\n")
+		return primeLearningSection{Text: strings.Join(lines, "\n")}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
@@ -8668,19 +8690,21 @@ func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID
 	finish := primePhase(deps, "learning_recall", fmt.Sprintf("loading learning recall for %s", issueID))
 	resp, err := deps.DaemonClient.ActivateContextualLearnings(ctx, protocol.LearnContextualActivateRequestBody{Purpose: string(domain.LearningPurposeSessionStart), Surface: "prime", SessionID: naming.SessionID(sessionID), ContextIssueID: naming.IssueID(issueID), TokenBudget: 256})
 	finish(err)
-	if err != nil || len(resp.Learnings) == 0 {
-		return strings.Join(lines, "\n")
+	if err != nil || resp.Proposal == nil || len(resp.Learnings) == 0 {
+		return primeLearningSection{Text: strings.Join(lines, "\n")}
 	}
-	lines = append(lines, "", "Relevant accepted/promoted learnings:")
+	section := []string{"", fmt.Sprintf("Relevant accepted/promoted learnings [activation: %s]:", resp.Proposal.ActivationID)}
 	for _, learning := range resp.Learnings {
 		reason := strings.TrimSpace(learning.RecallReason)
 		if reason != "" {
 			reason = " (why: " + reason + ")"
 		}
-		lines = append(lines, fmt.Sprintf("- %s [%s]: %s%s", learning.ID, learning.Status, learning.Summary, reason))
+		section = append(section, fmt.Sprintf("- %s [%s]: %s%s", learning.ID, learning.Status, learning.Summary, reason))
 	}
-	lines = append(lines, "Use `az learn show <learning-id>` for evidence; long evidence is not injected by default.")
-	return strings.Join(lines, "\n")
+	section = append(section, "Use `az learn show <learning-id>` for evidence; long evidence is not injected by default.")
+	rendered := strings.Join(section, "\n")
+	lines = append(lines, section...)
+	return primeLearningSection{Text: strings.Join(lines, "\n"), Confirmation: &protocol.LearnActivationConfirmRequestBody{ActivationID: resp.Proposal.ActivationID, TokenCost: domain.RenderedLearningTokenCost(rendered)}}
 }
 
 func activeIssueIDFromTmuxPane(ctx context.Context, deps *Dependencies) (string, bool) {

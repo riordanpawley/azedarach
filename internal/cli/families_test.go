@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -889,6 +890,7 @@ func TestAIHookRunCommandRoutesCodexAgentThroughRuntimeSignalPort(t *testing.T) 
 func TestRunAgentHookActivatesGuidanceOnUserPromptTransition(t *testing.T) {
 	t.Setenv("TMUX_PANE", "%7")
 	var activationReq protocol.LearnContextualActivateRequestBody
+	var confirmCalls int
 	transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 		switch req.Command {
 		case protocol.CommandRuntimeSignalIngest:
@@ -897,7 +899,10 @@ func TestRunAgentHookActivatesGuidanceOnUserPromptTransition(t *testing.T) {
 			if err := json.Unmarshal(req.Body, &activationReq); err != nil {
 				t.Fatal(err)
 			}
-			return responseWithJSON(req, protocol.LearnContextualActivateResponseBody{Learnings: []protocol.Learning{{ID: "learn-1", Summary: "Keep authority in the daemon."}}}), nil
+			return responseWithJSON(req, protocol.LearnContextualActivateResponseBody{Proposal: &protocol.LearningActivationProposal{ActivationID: "act-hook", LearningIDs: []string{"learn-1"}}, Learnings: []protocol.Learning{{ID: "learn-1", Summary: "Keep authority in the daemon."}}}), nil
+		case protocol.CommandLearnActivationConfirm:
+			confirmCalls++
+			return responseWithJSON(req, protocol.LearnActivationConfirmResponseBody{Activation: protocol.LearningActivation{ActivationID: "act-hook"}}), nil
 		default:
 			return responseWithJSON(req, map[string]any{}), nil
 		}
@@ -912,6 +917,70 @@ func TestRunAgentHookActivatesGuidanceOnUserPromptTransition(t *testing.T) {
 	}
 	if got, _ := out.GuardResponse["systemMessage"].(string); !strings.Contains(got, "learn-1: Keep authority in the daemon.") {
 		t.Fatalf("system message = %q", got)
+	}
+	if confirmCalls != 0 || out.ActivationConfirmation == nil {
+		t.Fatalf("confirmation must remain pending until output: calls=%d pending=%+v", confirmCalls, out.ActivationConfirmation)
+	}
+}
+
+func TestRunAgentHookDoesNotActivateUnsupportedProviderGuidance(t *testing.T) {
+	for _, agent := range []AgentSource{AgentClaude, AgentOpenCode} {
+		t.Run(string(agent), func(t *testing.T) {
+			var activationCalls int
+			transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command == protocol.CommandLearnContextualActivate {
+					activationCalls++
+				}
+				return responseWithJSON(req, map[string]any{}), nil
+			}}
+			deps := &Dependencies{DaemonClient: daemonclient.New(transport).WithProjectID("proj"), ProjectID: "proj"}
+			out, err := RunAgentHook(context.Background(), deps, AgentHookContext{Agent: agent, Event: hookEventUserPromptSubmit, IssueID: "az-1", ProjectDir: t.TempDir(), Payload: map[string]any{"prompt": "x"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if activationCalls != 0 || out.ActivationConfirmation != nil {
+				t.Fatalf("unsupported provider activated guidance: calls=%d pending=%+v", activationCalls, out.ActivationConfirmation)
+			}
+		})
+	}
+}
+
+type failingHookWriter struct{}
+
+func (failingHookWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+func TestEmitAgentHookOutcomeDoesNotConfirmAfterWriteFailure(t *testing.T) {
+	var confirmCalls int
+	transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		if req.Command == protocol.CommandLearnActivationConfirm {
+			confirmCalls++
+		}
+		return responseWithJSON(req, protocol.LearnActivationConfirmResponseBody{}), nil
+	}}
+	deps := &Dependencies{DaemonClient: daemonclient.New(transport).WithProjectID("proj"), ProjectID: "proj"}
+	out := AgentHookOutcome{GuardResponse: map[string]any{"systemMessage": "guidance"}, ActivationConfirmation: &protocol.LearnActivationConfirmRequestBody{ActivationID: "act-1", TokenCost: 3}}
+	err := emitAgentHookOutcome(deps, AIHookRunOptions{Agent: AgentCodex, Event: hookEventUserPromptSubmit, JSON: true}, out, failingHookWriter{})
+	if err == nil || confirmCalls != 0 {
+		t.Fatalf("write failure must prevent confirmation: err=%v calls=%d", err, confirmCalls)
+	}
+}
+
+func TestEmitAgentHookOutcomeConfirmsAfterSuccessfulCodexWrite(t *testing.T) {
+	var confirmCalls int
+	transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		if req.Command == protocol.CommandLearnActivationConfirm {
+			confirmCalls++
+		}
+		return responseWithJSON(req, protocol.LearnActivationConfirmResponseBody{}), nil
+	}}
+	deps := &Dependencies{DaemonClient: daemonclient.New(transport).WithProjectID("proj"), ProjectID: "proj"}
+	var stdout bytes.Buffer
+	out := AgentHookOutcome{GuardResponse: map[string]any{"systemMessage": "guidance"}, ActivationConfirmation: &protocol.LearnActivationConfirmRequestBody{ActivationID: "act-1", TokenCost: 3}}
+	if err := emitAgentHookOutcome(deps, AIHookRunOptions{Agent: AgentCodex, Event: hookEventUserPromptSubmit, JSON: true}, out, &stdout); err != nil {
+		t.Fatal(err)
+	}
+	if confirmCalls != 1 || !strings.Contains(stdout.String(), "guidance") {
+		t.Fatalf("successful output must confirm once: output=%q calls=%d", stdout.String(), confirmCalls)
 	}
 }
 

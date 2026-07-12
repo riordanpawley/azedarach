@@ -33,7 +33,7 @@ func (c *Client) LearningPortfolioHealth(ctx context.Context, projectID string, 
 	pairs := publicCount * (publicCount - 1) / 2
 	out.DuplicateDensity = domain.NewLearningHealthRate(duplicates, pairs)
 	var labeled, useful, contradicted int
-	if err = db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(outcome IN ('helpful','followed')),0), COALESCE(SUM(outcome='contradicted'),0) FROM learning_activation_outcomes o JOIN learning_activations a ON a.activation_id=o.activation_id WHERE a.project_id=? AND outcome<>'unknown'`, projectID).Scan(&labeled, &useful, &contradicted); err != nil {
+	if err = db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(resolved_outcome IN ('helpful','followed')),0), COALESCE(SUM(resolved_outcome='contradicted'),0) FROM learning_activations WHERE project_id=? AND resolved_outcome NOT IN ('','unknown')`, projectID).Scan(&labeled, &useful, &contradicted); err != nil {
 		return out, fmt.Errorf("outcome health: %w", err)
 	}
 	out.UsefulnessRate, out.ContradictionRate = domain.NewLearningHealthRate(useful, labeled), domain.NewLearningHealthRate(contradicted, labeled)
@@ -55,7 +55,7 @@ func (c *Client) LearningPortfolioHealth(ctx context.Context, projectID string, 
 	if err = db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(token_cost),0) FROM learning_activations WHERE project_id=?`, projectID).Scan(&out.DeliveryCount, &out.DeliveredTokenCost); err != nil {
 		return out, err
 	}
-	if err = db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT o.activation_id) FROM learning_activation_outcomes o JOIN learning_activations a ON a.activation_id=o.activation_id WHERE a.project_id=? AND o.outcome IN ('helpful','followed')`, projectID).Scan(&out.UsefulDeliveryCount); err != nil {
+	if err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM learning_activations WHERE project_id=? AND resolved_outcome IN ('helpful','followed')`, projectID).Scan(&out.UsefulDeliveryCount); err != nil {
 		return out, fmt.Errorf("useful activation health: %w", err)
 	}
 	out.TokensPerUsefulActivation = domain.NewLearningHealthRate(out.DeliveredTokenCost, out.UsefulDeliveryCount)

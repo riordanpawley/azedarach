@@ -32,6 +32,7 @@ type LearnService interface {
 	Feedback(context.Context, protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error)
 	Capture(context.Context, protocol.LearnCaptureRequestBody) (protocol.LearnCaptureResponseBody, error)
 	ContextualActivate(context.Context, protocol.LearnContextualActivateRequestBody) (protocol.LearnContextualActivateResponseBody, error)
+	ConfirmActivation(context.Context, protocol.LearnActivationConfirmRequestBody) (protocol.LearnActivationConfirmResponseBody, error)
 	Health(context.Context, protocol.LearnHealthRequestBody) (protocol.LearnHealthResponseBody, error)
 }
 
@@ -60,6 +61,16 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 		return resp
 	}
 	switch req.Command {
+	case protocol.CommandLearnActivationConfirm:
+		var cmd protocol.LearnActivationConfirmRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.ActivationID = strings.TrimSpace(cmd.ActivationID)
+		if cmd.ActivationID == "" || cmd.TokenCost < 0 || cmd.TokenCost > 32768 {
+			return learnInvalidRequest(resp, "valid activation_id and token_cost are required")
+		}
+		return learnJSONResponse(ctx, resp, h.service.ConfirmActivation, cmd)
 	case protocol.CommandLearnHealth:
 		var cmd protocol.LearnHealthRequestBody
 		if !decodeLearnRequest(req.Body, &cmd, &resp) {
@@ -119,7 +130,7 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 			return learnInvalidRequest(resp, "outcome must be helpful|followed|contradicted|unknown")
 		}
 		if !domain.LearningOutcomeSource(cmd.Source).Valid() {
-			return learnInvalidRequest(resp, "source must be explicit|inferred")
+			return learnInvalidRequest(resp, "source must be human|agent|inferred (explicit is retained for compatibility)")
 		}
 		return learnJSONResponse(ctx, resp, h.service.Feedback, cmd)
 	case protocol.CommandLearnAdd:

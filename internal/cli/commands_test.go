@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	clitext "github.com/riordanpawley/azedarach/internal/cli/text"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -12924,6 +12925,8 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
 	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
 	var learnReq protocol.LearnContextualActivateRequestBody
+	var confirmReq protocol.LearnActivationConfirmRequestBody
+	var confirmCalls int
 
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -12955,11 +12958,17 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 						Status:       protocol.LearningStatusAccepted,
 						RecallReason: "issue=az-1; query",
 					}}
-					body, err := json.Marshal(protocol.LearnContextualActivateResponseBody{Learnings: learnings})
+					body, err := json.Marshal(protocol.LearnContextualActivateResponseBody{Proposal: &protocol.LearningActivationProposal{ActivationID: "act-prime", LearningIDs: []string{"learn-1"}}, Learnings: learnings})
 					if err != nil {
 						t.Fatalf("marshal learn recall response: %v", err)
 					}
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt, Body: body}, nil
+				case protocol.CommandLearnActivationConfirm:
+					confirmCalls++
+					if err := json.Unmarshal(req.Body, &confirmReq); err != nil {
+						t.Fatal(err)
+					}
+					return responseWithJSON(req, protocol.LearnActivationConfirmResponseBody{Activation: protocol.LearningActivation{ActivationID: "act-prime"}}), nil
 				default:
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt}, nil
 				}
@@ -12979,7 +12988,7 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 	if learnReq.Purpose != string(domain.LearningPurposeSessionStart) || learnReq.Surface != "prime" || learnReq.TokenBudget != 256 {
 		t.Fatalf("contextual activation request = %+v", learnReq)
 	}
-	if !strings.Contains(output, "Relevant accepted/promoted learnings:") ||
+	if !strings.Contains(output, "Relevant accepted/promoted learnings [activation: act-prime]:") ||
 		!strings.Contains(output, "- learn-1 [accepted]: Keep durable choices in decisions (why: issue=az-1; query)") {
 		t.Fatalf("prime output missing learning section: %q", output)
 	}
@@ -12988,6 +12997,23 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 	}
 	if strings.Contains(output, "Private local handling detail") || strings.Contains(output, "private raw evidence should not be injected") {
 		t.Fatalf("prime output injected private learning: %q", output)
+	}
+	wantSection := "\nRelevant accepted/promoted learnings [activation: act-prime]:\n- learn-1 [accepted]: Keep durable choices in decisions (why: issue=az-1; query)\nUse `az learn show <learning-id>` for evidence; long evidence is not injected by default."
+	if confirmCalls != 1 || confirmReq.ActivationID != "act-prime" || confirmReq.TokenCost != domain.RenderedLearningTokenCost(wantSection) {
+		t.Fatalf("prime confirmation=%+v calls=%d want token cost=%d", confirmReq, confirmCalls, domain.RenderedLearningTokenCost(wantSection))
+	}
+	if err := primeCommandTo(deps, failingHookWriter{}, clitext.Render); err == nil {
+		t.Fatal("expected output write failure")
+	}
+	if confirmCalls != 1 {
+		t.Fatalf("write failure confirmed activation: calls=%d", confirmCalls)
+	}
+	var rendered bytes.Buffer
+	if err := primeCommandTo(deps, &rendered, func(string, any) (string, error) { return "", errors.New("render failed") }); err == nil {
+		t.Fatal("expected render failure")
+	}
+	if confirmCalls != 1 {
+		t.Fatalf("render failure confirmed activation: calls=%d", confirmCalls)
 	}
 }
 

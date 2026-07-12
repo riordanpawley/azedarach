@@ -151,6 +151,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandLearnActivate:           {Command: protocol.CommandLearnActivate, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnFeedback:           {Command: protocol.CommandLearnFeedback, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnContextualActivate: {Command: protocol.CommandLearnContextualActivate, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
+	protocol.CommandLearnActivationConfirm:   {Command: protocol.CommandLearnActivationConfirm, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnHealth:             {Command: protocol.CommandLearnHealth, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	CommandGitFetch:                         {Command: CommandGitFetch, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitPullBase:                      {Command: CommandGitPullBase, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},

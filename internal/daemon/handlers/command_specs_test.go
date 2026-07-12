@@ -177,6 +177,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		protocol.CommandLearnActivate,
 		protocol.CommandLearnFeedback,
 		protocol.CommandLearnContextualActivate,
+		protocol.CommandLearnActivationConfirm,
 		protocol.CommandLearnHealth,
 		protocol.CommandLearnSuggest,
 		protocol.CommandLearnConsolidate,

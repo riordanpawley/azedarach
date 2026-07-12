@@ -1234,16 +1234,25 @@ func codexGuardResponse(projectDir, event string, payloadMap map[string]any) (ma
 }
 
 func printCodexGuardResponse(response map[string]any) {
+	_ = writeCodexGuardResponse(os.Stdout, response)
+}
+
+func writeCodexGuardResponse(w io.Writer, response map[string]any) error {
 	if len(response) == 0 {
-		fmt.Println("codex guard: allow")
-		return
+		_, err := fmt.Fprintln(w, "codex guard: allow")
+		return err
 	}
 	if message, ok := response["systemMessage"].(string); ok {
-		fmt.Println(message)
+		if _, err := fmt.Fprintln(w, message); err != nil {
+			return err
+		}
 	}
 	if reason, ok := response["reason"].(string); ok {
-		fmt.Println(reason)
+		if _, err := fmt.Fprintln(w, reason); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func PrintGitHooksUsage() {
