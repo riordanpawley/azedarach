@@ -43,10 +43,12 @@ func (c *Client) LearningPortfolioHealth(ctx context.Context, projectID string, 
 	}
 	out.PromotionThroughput = domain.NewLearningHealthRate(promoted, reviewed)
 	var eligible, deliveredUnique int
-	if err = db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(recall_count),0) FROM agent_learnings WHERE project_id=? AND evidence_private=0 AND consolidated_into_id IS NULL AND deleted_at IS NULL AND status IN ('accepted','promoted')`, projectID).Scan(&eligible, &out.SelectionCount); err != nil {
+	activePredicate, activeArgs := learningActiveSQL("l", now)
+	populationArgs := append([]any{projectID}, activeArgs...)
+	if err = db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(l.recall_count),0) FROM agent_learnings l WHERE l.project_id=? AND l.evidence_private=0 AND `+activePredicate, populationArgs...).Scan(&eligible, &out.SelectionCount); err != nil {
 		return out, err
 	}
-	if err = db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT d.learning_id) FROM learning_activation_deliveries d JOIN agent_learnings l ON l.local_id=d.learning_id WHERE d.project_id=? AND l.evidence_private=0`, projectID).Scan(&deliveredUnique); err != nil {
+	if err = db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT d.learning_id) FROM learning_activation_deliveries d JOIN agent_learnings l ON l.local_id=d.learning_id WHERE d.project_id=? AND l.evidence_private=0 AND `+activePredicate, populationArgs...).Scan(&deliveredUnique); err != nil {
 		return out, err
 	}
 	out.ContextualCoverage = domain.NewLearningHealthRate(deliveredUnique, eligible)

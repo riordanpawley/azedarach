@@ -366,6 +366,7 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 	if err != nil {
 		return nil, err
 	}
+	activeAt := time.Now().UTC()
 	query := strings.Builder{}
 	args := make([]any, 0, 8)
 	query.WriteString(`
@@ -397,15 +398,9 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		args = append(args, fileKey)
 	}
 	if filter.ActiveOnly {
-		query.WriteString(`
-			AND l.deleted_at IS NULL
-			AND l.status IN (?, ?)
-			AND l.superseded_at IS NULL
-			AND l.target_retired_at IS NULL
-			AND l.target_drifted_at IS NULL
-			AND (l.status != ? OR COALESCE(NULLIF(l.target_state, ''), ?) = ?)
-		`)
-		args = append(args, string(LearningStatusAccepted), string(LearningStatusPromoted), string(LearningStatusPromoted), string(LearningTargetStateActive), string(LearningTargetStateActive))
+		predicate, predicateArgs := learningActiveSQL("l", activeAt)
+		query.WriteString(` AND ` + predicate)
+		args = append(args, predicateArgs...)
 	}
 	if filter.ExcludePrivate {
 		query.WriteString(` AND l.evidence_private = 0`)
@@ -461,7 +456,6 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		return nil, c.wrapError("list-learnings", "", err)
 	}
 	defer rows.Close()
-	activeAt := time.Now().UTC()
 	records := make([]learningRecord, 0, 16)
 	for rows.Next() {
 		record, scanErr := scanLearningRecord(rows)
@@ -507,6 +501,20 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		out = append(out, record.Learning)
 	}
 	return out, nil
+}
+
+// learningActiveSQL is the store-level form of learningActiveAt. Keep both in
+// lockstep so recall, activation, and aggregate reporting share one population.
+func learningActiveSQL(alias string, now time.Time) (string, []any) {
+	prefix := strings.TrimSpace(alias)
+	if prefix != "" {
+		prefix += "."
+	}
+	p := func(column string) string { return prefix + column }
+	predicate := fmt.Sprintf(`%s IS NULL AND %s IS NULL AND %s IN (?, ?) AND (%s IS NULL OR %s > ?) AND (%s IS NULL OR %s > ?) AND %s IS NULL AND %s IS NULL AND %s IS NULL AND (%s != ? OR COALESCE(NULLIF(%s, ''), ?) = ?)`,
+		p("deleted_at"), p("consolidated_into_id"), p("status"), p("expires_at"), p("expires_at"), p("stale_at"), p("stale_at"), p("superseded_at"), p("target_retired_at"), p("target_drifted_at"), p("status"), p("target_state"))
+	formatted := formatTimestamp(now.UTC())
+	return predicate, []any{string(LearningStatusAccepted), string(LearningStatusPromoted), formatted, formatted, string(LearningStatusPromoted), string(LearningTargetStateActive), string(LearningTargetStateActive)}
 }
 
 func (c *Client) DoctorLearnings(ctx context.Context, params LearningMaintenanceParams) (LearningDoctorReport, error) {
