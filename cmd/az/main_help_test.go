@@ -24,7 +24,7 @@ func TestMaybePrintCommandHelpUsesSpecificUsage(t *testing.T) {
 		{name: "config leaf", args: []string{"config", "set", "--help"}, want: "Usage: az config set <key> <value> [--project-dir <dir>]"},
 		{name: "spec nested leaf", args: []string{"spec", "req", "get", "--help"}, want: "Usage: az spec req get --id <req-id> [--json]"},
 		{name: "decision nested leaf", args: []string{"decision", "link", "add", "--help"}, want: "Usage: az decision link add --id <decision-id>"},
-		{name: "learn root", args: []string{"learn", "--help"}, want: "Usage: az learn <capture|add|recall|activate|feedback|show|review|stale|demote|promote|retire|relate|supersede|suggest|consolidate|suggestion-reject|doctor|gc>"},
+		{name: "learn root", args: []string{"learn", "--help"}, want: "Usage: az learn <capture|add|recall|activate|feedback|health|show|review|stale|demote|promote|retire|relate|supersede|suggest|consolidate|suggestion-reject|doctor|gc>"},
 		{name: "learn nested leaf", args: []string{"learn", "doctor", "--help"}, want: "Usage: az learn doctor"},
 		{name: "interaction resolve", args: []string{"interaction", "resolve", "--help"}, want: "--significance is always required for a human final answer"},
 		{name: "githooks leaf", args: []string{"githooks", "hook", "--help"}, want: "Usage: az githooks hook --hook <name>"},

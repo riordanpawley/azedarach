@@ -11,6 +11,7 @@ import (
 )
 
 type fakeLearnService struct {
+	healthFn             func(context.Context, protocol.LearnHealthRequestBody) (protocol.LearnHealthResponseBody, error)
 	contextualActivateFn func(context.Context, protocol.LearnContextualActivateRequestBody) (protocol.LearnContextualActivateResponseBody, error)
 	activateFn           func(context.Context, protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error)
 	feedbackFn           func(context.Context, protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error)
@@ -26,6 +27,25 @@ type fakeLearnService struct {
 	supersedeFn          func(context.Context, protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error)
 	doctorFn             func(context.Context, protocol.LearnDoctorRequestBody) (protocol.LearnDoctorResponseBody, error)
 	gcFn                 func(context.Context, protocol.LearnGCRequestBody) (protocol.LearnGCResponseBody, error)
+}
+
+func (f *fakeLearnService) Health(ctx context.Context, req protocol.LearnHealthRequestBody) (protocol.LearnHealthResponseBody, error) {
+	if f.healthFn != nil {
+		return f.healthFn(ctx, req)
+	}
+	return protocol.LearnHealthResponseBody{}, nil
+}
+
+func TestLearnHandlerHealthDispatch(t *testing.T) {
+	called := false
+	h := NewLearnHandler(&fakeLearnService{healthFn: func(context.Context, protocol.LearnHealthRequestBody) (protocol.LearnHealthResponseBody, error) {
+		called = true
+		return protocol.LearnHealthResponseBody{}, nil
+	}})
+	resp := h.Handle(context.Background(), specRequest(t, protocol.CommandLearnHealth, protocol.LearnHealthRequestBody{}))
+	if resp.Error != nil || !called {
+		t.Fatalf("health dispatch failed: error=%v called=%v", resp.Error, called)
+	}
 }
 
 func (f *fakeLearnService) ContextualActivate(ctx context.Context, req protocol.LearnContextualActivateRequestBody) (protocol.LearnContextualActivateResponseBody, error) {

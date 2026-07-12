@@ -136,7 +136,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandInteractionSupersede:    {Command: protocol.CommandInteractionSupersede, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
 	protocol.CommandInteractionRecover:      {Command: protocol.CommandInteractionRecover, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
 	protocol.CommandLearnAdd:                {Command: protocol.CommandLearnAdd, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
-	protocol.CommandLearnCapture:           {Command: protocol.CommandLearnCapture, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
+	protocol.CommandLearnCapture:            {Command: protocol.CommandLearnCapture, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnRecall:             {Command: protocol.CommandLearnRecall, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnShow:               {Command: protocol.CommandLearnShow, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnReview:             {Command: protocol.CommandLearnReview, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
@@ -151,6 +151,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandLearnActivate:           {Command: protocol.CommandLearnActivate, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnFeedback:           {Command: protocol.CommandLearnFeedback, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnContextualActivate: {Command: protocol.CommandLearnContextualActivate, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
+	protocol.CommandLearnHealth:             {Command: protocol.CommandLearnHealth, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	CommandGitFetch:                         {Command: CommandGitFetch, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitPullBase:                      {Command: CommandGitPullBase, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitPush:                          {Command: CommandGitPush, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
@@ -229,9 +230,9 @@ var commandSpecRegistry = map[string]CommandSpec{
 	commandSyncRun:                          {Command: commandSyncRun, RequiresProjectID: true},
 	commandSyncConflicts:                    {Command: commandSyncConflicts, RequiresProjectID: true},
 	protocol.CommandTaskBulkApply:           {Command: protocol.CommandTaskBulkApply, RequiresProjectID: true},
-	protocol.CommandLearnSuggest:           {Command: protocol.CommandLearnSuggest, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
-	protocol.CommandLearnConsolidate:       {Command: protocol.CommandLearnConsolidate, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
-	protocol.CommandLearnSuggestionReject:  {Command: protocol.CommandLearnSuggestionReject, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
+	protocol.CommandLearnSuggest:            {Command: protocol.CommandLearnSuggest, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
+	protocol.CommandLearnConsolidate:        {Command: protocol.CommandLearnConsolidate, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
+	protocol.CommandLearnSuggestionReject:   {Command: protocol.CommandLearnSuggestionReject, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 }
 
 // LookupCommandSpec returns the typed command specification for a command.

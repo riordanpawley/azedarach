@@ -32,6 +32,7 @@ type LearnService interface {
 	Feedback(context.Context, protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error)
 	Capture(context.Context, protocol.LearnCaptureRequestBody) (protocol.LearnCaptureResponseBody, error)
 	ContextualActivate(context.Context, protocol.LearnContextualActivateRequestBody) (protocol.LearnContextualActivateResponseBody, error)
+	Health(context.Context, protocol.LearnHealthRequestBody) (protocol.LearnHealthResponseBody, error)
 }
 
 type LearnHandler struct {
@@ -59,6 +60,12 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 		return resp
 	}
 	switch req.Command {
+	case protocol.CommandLearnHealth:
+		var cmd protocol.LearnHealthRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		return learnJSONResponse(ctx, resp, h.service.Health, cmd)
 	case protocol.CommandLearnCapture:
 		var cmd protocol.LearnCaptureRequestBody
 		if !decodeLearnRequest(req.Body, &cmd, &resp) {

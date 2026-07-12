@@ -1,6 +1,9 @@
 package protocol
 
-import "github.com/riordanpawley/azedarach/internal/naming"
+import (
+	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
+)
 
 const (
 	CommandLearnAdd                = "learn.add"
@@ -22,7 +25,15 @@ const (
 	CommandLearnFeedback           = "learn.feedback"
 	CommandLearnCapture            = "learn.capture"
 	CommandLearnContextualActivate = "learn.contextual_activate"
+	CommandLearnHealth             = "learn.health"
 )
+
+type LearnHealthRequestBody struct {
+	ProjectID string `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+}
+type LearnHealthResponseBody struct {
+	Health domain.LearningPortfolioHealth `json:"health" msgpack:"health"`
+}
 
 type LearningStatus string
 

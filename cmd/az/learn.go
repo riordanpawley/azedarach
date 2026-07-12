@@ -182,6 +182,8 @@ func runLearnCommand(cfg *config.Config, args []string) error {
 		return nil
 	}
 	switch args[0] {
+	case "health":
+		return runLearnHealthRPC(cfg, args[1:])
 	case "capture":
 		opts, err := parseLearnCaptureArgs(args[1:])
 		if err != nil {
@@ -308,6 +310,27 @@ func runLearnCommand(cfg *config.Config, args []string) error {
 	default:
 		return fmt.Errorf("unknown learn command: %s", args[0])
 	}
+}
+
+func runLearnHealthRPC(cfg *config.Config, args []string) error {
+	fs := flag.NewFlagSet("learn health", flag.ContinueOnError)
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("learn health takes no positional arguments")
+	}
+	var out protocol.LearnHealthResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnHealth, protocol.LearnHealthRequestBody{}, &out); err != nil {
+		return err
+	}
+	if *jsonOut {
+		return printJSON(out)
+	}
+	h := out.Health
+	fmt.Printf("Learning portfolio health (%s)\nCandidates: %d (average %.1fh, maximum %.1fh)\nDuplicate density: %d/%d (%.2f%%)\nUsefulness: %d/%d (%.2f%%); contradictions: %d/%d (%.2f%%)\nPromotion throughput: %d/%d (%.2f%%)\nContextual coverage: %d/%d (%.2f%%)\nSelections: %d; deliveries: %d; delivered tokens: %d; tokens/useful activation: %d/%d (%.2f)\n", h.ProjectID, h.CandidateCount, h.CandidateAgeAverageHours, h.CandidateAgeMaximumHours, h.DuplicateDensity.Numerator, h.DuplicateDensity.Denominator, h.DuplicateDensity.Value*100, h.UsefulnessRate.Numerator, h.UsefulnessRate.Denominator, h.UsefulnessRate.Value*100, h.ContradictionRate.Numerator, h.ContradictionRate.Denominator, h.ContradictionRate.Value*100, h.PromotionThroughput.Numerator, h.PromotionThroughput.Denominator, h.PromotionThroughput.Value*100, h.ContextualCoverage.Numerator, h.ContextualCoverage.Denominator, h.ContextualCoverage.Value*100, h.SelectionCount, h.DeliveryCount, h.DeliveredTokenCost, h.TokensPerUsefulActivation.Numerator, h.TokensPerUsefulActivation.Denominator, h.TokensPerUsefulActivation.Value)
+	return nil
 }
 
 func runLearnSuggestRPC(cfg *config.Config, opts learnSuggestOpts) error {
@@ -1403,12 +1426,13 @@ func parseLearningAgeDuration(raw string) (time.Duration, error) {
 }
 
 func printLearnUsage() {
-	fmt.Println("Usage: az learn <capture|add|recall|activate|feedback|show|review|stale|demote|promote|retire|relate|supersede|suggest|consolidate|suggestion-reject|doctor|gc> [arguments]")
+	fmt.Println("Usage: az learn <capture|add|recall|activate|feedback|health|show|review|stale|demote|promote|retire|relate|supersede|suggest|consolidate|suggestion-reject|doctor|gc> [arguments]")
 	fmt.Println("  capture  Capture a typed learning correction or observation")
 	fmt.Println("  add      Capture an evidence-backed candidate learning")
 	fmt.Println("  recall   Search accepted/promoted learning summaries")
 	fmt.Println("  activate Record actual delivery of selected public learnings")
 	fmt.Println("  feedback Record an idempotent explicit or inferred activation outcome")
+	fmt.Println("  health   Report deterministic privacy-safe portfolio metrics")
 	fmt.Println("  show     Show a learning with full evidence")
 	fmt.Println("  review   List review queues or bulk update selected learnings")
 	fmt.Println("  stale    Mark a learning stale with an audit note")
@@ -1429,6 +1453,7 @@ func printLearnUsage() {
 	fmt.Println("  az learn recall [--query <text>] [--issue <id>] [--req <id>] [--status <status> ...] [--tag <tag> ...] [--file <path> ...] [--limit N] [--include-evidence] [--include-private] [--json]")
 	fmt.Println("  az learn activate --surface <name> [--token-cost N] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--explanation <text>] <learning-id> ... [--json]")
 	fmt.Println("  az learn feedback --idempotency-key <key> --outcome helpful|followed|contradicted|unknown [--source explicit|inferred] [--explanation <text>] <activation-id> [--json]")
+	fmt.Println("  az learn health [--json]")
 	fmt.Println("  az learn show <learning-id> [--json]")
 	fmt.Println("  az learn review [--queue-status <status> ...] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--target-state active|retired|drifted|missing ...] [--older-than 30d] [--limit N] [--json]")
 	fmt.Println("  az learn review --id <learning-id> [--id <learning-id> ...] --status accepted|rejected|stale --note <text> [--json]")

@@ -36,6 +36,19 @@ type issueLearnService struct {
 	daemon *Daemon
 }
 
+func (s issueLearnService) Health(ctx context.Context, req protocol.LearnHealthRequestBody) (protocol.LearnHealthResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnHealthResponseBody{}, err
+	}
+	projectID := firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx))
+	health, err := client.LearningPortfolioHealth(ctx, projectID, time.Now().UTC())
+	if err != nil {
+		return protocol.LearnHealthResponseBody{}, err
+	}
+	return protocol.LearnHealthResponseBody{Health: health}, nil
+}
+
 func (s issueSpecService) issueClient(ctx context.Context) (*issues.Client, error) {
 	if s.daemon == nil {
 		return nil, errors.New("issue store unavailable")
