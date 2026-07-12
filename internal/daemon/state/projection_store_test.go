@@ -1024,3 +1024,45 @@ func TestRuntimeStateStoreListProjectIDs(t *testing.T) {
 		t.Fatalf("ListProjectIDs() = %v, want %v", got, want)
 	}
 }
+
+func TestRuntimeStateStorePhysicalObservationConstraints(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	want := PhysicalSessionObservation{
+		ProjectID: "p", SessionID: "az-root", ObservedState: SessionStatePaused,
+		Activity: "waiting", ActivitySource: "hooks", UpdatedAt: time.Now().UTC(),
+	}
+	if err := store.UpsertPhysicalSessionObservation(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := store.GetPhysicalSessionObservation(ctx, "p", "az-root")
+	if err != nil || !found || got.ObservedState != want.ObservedState || got.Activity != want.Activity {
+		t.Fatalf("observation=%+v found=%v err=%v", got, found, err)
+	}
+	db, err := store.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO daemon_physical_session_observations(project_id,session_id,observed_state,activity,activity_source,updated_at) VALUES('p','bad','stopped','busy','hooks',?)`, time.Now().UTC().Format(time.RFC3339Nano)); err == nil {
+		t.Fatal("direct SQL accepted stopped physical observation with activity")
+	}
+}
+
+func TestRuntimeStateStoreUntypedSharedRuntimeMutationFailsClosed(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, seed := range []Session{
+		{ID: "az-root", IssueID: "root", Role: SessionRoleWorker, ScopeKind: SessionScopeIssue, ScopeID: "root", State: SessionStateRunning, UpdatedAt: now},
+		{ID: "az-root", IssueID: "root", Role: SessionRoleOrchestrator, ScopeKind: SessionScopeOrchestration, ScopeID: "root", State: SessionStateRunning, UpdatedAt: now},
+	} {
+		if err := store.UpsertSessionState(ctx, "p", seed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.UpsertSessionState(ctx, "p", Session{ID: "az-root", IssueID: "root", State: SessionStatePaused, UpdatedAt: now}); err == nil {
+		t.Fatal("untyped mutation of shared physical runtime succeeded")
+	}
+}

@@ -20,13 +20,14 @@ import (
 )
 
 const (
-	sessionStateTable       = "daemon_session_projections"
-	sessionObservationTable = "daemon_session_observations"
-	sessionActivityTable    = "daemon_session_activity_evidence"
-	worktreeStateTable      = "daemon_worktree_projections"
-	orchestratorLeaseTable  = "daemon_orchestrator_scope_leases"
-	advisorSessionTable     = "daemon_advisor_sessions"
-	orchestratorLoopTable   = "daemon_orchestrator_loop_checkpoints"
+	sessionStateTable               = "daemon_session_projections"
+	sessionObservationTable         = "daemon_session_observations"
+	sessionActivityTable            = "daemon_session_activity_evidence"
+	physicalSessionObservationTable = "daemon_physical_session_observations"
+	worktreeStateTable              = "daemon_worktree_projections"
+	orchestratorLeaseTable          = "daemon_orchestrator_scope_leases"
+	advisorSessionTable             = "daemon_advisor_sessions"
+	orchestratorLoopTable           = "daemon_orchestrator_loop_checkpoints"
 )
 
 // WorktreeState captures durable daemon worktree state stored in sqlite.
@@ -54,6 +55,80 @@ type SessionActivityEvidence struct {
 	Event           string
 	ObservedAt      time.Time
 	UpdatedAt       time.Time
+}
+
+// PhysicalSessionObservation records tmux/hook facts independently from any
+// desired logical worker, advisor, or orchestrator intent.
+type PhysicalSessionObservation struct {
+	ProjectID      string
+	SessionID      string
+	ObservedState  SessionState
+	Activity       string
+	ActivitySource string
+	UpdatedAt      time.Time
+}
+
+func (s *RuntimeStateStore) UpsertPhysicalSessionObservation(ctx context.Context, observation PhysicalSessionObservation) error {
+	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+		return s.upsertPhysicalSessionObservationLocked(ctx, observation)
+	})
+}
+
+func (s *RuntimeStateStore) upsertPhysicalSessionObservationLocked(ctx context.Context, observation PhysicalSessionObservation) error {
+	db, err := s.dbHandle()
+	if err != nil {
+		return err
+	}
+	observation.ProjectID = normalizedProjectID(observation.ProjectID)
+	observation.SessionID = strings.TrimSpace(observation.SessionID)
+	observation.ObservedState = NormalizeSessionState(observation.ObservedState)
+	observation.Activity = strings.TrimSpace(observation.Activity)
+	observation.ActivitySource = strings.TrimSpace(observation.ActivitySource)
+	if observation.SessionID == "" {
+		return fmt.Errorf("upsert physical session observation: missing session id")
+	}
+	if observation.ObservedState == "" {
+		return fmt.Errorf("upsert physical session observation: missing observed state")
+	}
+	if observation.ObservedState == SessionStateStopped && (observation.Activity != "" || observation.ActivitySource != "") {
+		return fmt.Errorf("upsert physical session observation: stopped runtime cannot retain activity")
+	}
+	if observation.UpdatedAt.IsZero() {
+		observation.UpdatedAt = time.Now().UTC()
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO `+physicalSessionObservationTable+`
+		(project_id,session_id,observed_state,activity,activity_source,updated_at)
+		VALUES(?,?,?,?,?,?)
+		ON CONFLICT(project_id,session_id) DO UPDATE SET
+			observed_state=excluded.observed_state,
+			activity=excluded.activity,
+			activity_source=excluded.activity_source,
+			updated_at=excluded.updated_at`, observation.ProjectID, observation.SessionID,
+		observation.ObservedState, observation.Activity, observation.ActivitySource,
+		observation.UpdatedAt.Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *RuntimeStateStore) GetPhysicalSessionObservation(ctx context.Context, projectID, sessionID string) (PhysicalSessionObservation, bool, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return PhysicalSessionObservation{}, false, err
+	}
+	var out PhysicalSessionObservation
+	var state, updated string
+	err = db.QueryRowContext(ctx, `SELECT project_id,session_id,observed_state,activity,activity_source,updated_at
+		FROM `+physicalSessionObservationTable+` WHERE project_id=? AND session_id=?`,
+		normalizedProjectID(projectID), strings.TrimSpace(sessionID)).Scan(
+		&out.ProjectID, &out.SessionID, &state, &out.Activity, &out.ActivitySource, &updated)
+	if err == sql.ErrNoRows {
+		return out, false, nil
+	}
+	if err != nil {
+		return out, false, err
+	}
+	out.ObservedState = NormalizeSessionState(SessionState(state))
+	out.UpdatedAt, err = parseRuntimeStateTime(updated)
+	return out, true, err
 }
 
 // RuntimeStateStore persists daemon-owned session/worktree state in sqlite.
@@ -190,7 +265,21 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 	session.ActivitySource = strings.ToLower(strings.TrimSpace(session.ActivitySource))
 	var existing Session
 	var found bool
-	if !metadataProvided {
+	if !metadataProvided && sessionStorageTableForID(session.ID) == sessionStateTable {
+		rows, listErr := s.ListSessionIntentStates(ctx, projectID)
+		err = listErr
+		if err == nil {
+			for _, candidate := range rows {
+				if strings.TrimSpace(candidate.ID) != strings.TrimSpace(session.ID) {
+					continue
+				}
+				if found {
+					return fmt.Errorf("upsert session state %s/%s: logical intent identity required for shared physical runtime", projectID, session.ID)
+				}
+				existing, found = candidate, true
+			}
+		}
+	} else if !metadataProvided {
 		existing, found, err = s.GetSessionState(ctx, projectID, session.ID)
 	} else if sessionStorageTableForID(session.ID) == sessionStateTable {
 		rows, listErr := s.ListSessionIntentStates(ctx, projectID)
@@ -1672,6 +1761,16 @@ func (s *RuntimeStateStore) dbHandle() (*sql.DB, error) {
 
 func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 	statements := []string{
+		`CREATE TABLE IF NOT EXISTS ` + physicalSessionObservationTable + ` (
+			project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
+			session_id TEXT NOT NULL CHECK (trim(session_id) <> ''),
+			observed_state TEXT NOT NULL CHECK (observed_state IN ('starting','running','stopping','paused','stopped')),
+			activity TEXT NOT NULL DEFAULT '',
+			activity_source TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(project_id, session_id),
+			CHECK (observed_state <> 'stopped' OR (activity = '' AND activity_source = ''))
+		)`,
 		`CREATE TABLE IF NOT EXISTS ` + sessionStateTable + ` (
 			project_id TEXT NOT NULL,
 			logical_id TEXT GENERATED ALWAYS AS (role||':'||scope_kind||':'||scope_id||CASE WHEN instr(session_id,'.pane-')>0 THEN ':pane:'||session_id ELSE '' END) STORED,

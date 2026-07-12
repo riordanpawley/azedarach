@@ -407,6 +407,81 @@ func TestRuntimeSignalIngestAgentHookCreatesRunningCanonicalProjection(t *testin
 	}
 }
 
+func TestRuntimeSignalIngestFansPhysicalObservationAcrossSharedLogicalIntents(t *testing.T) {
+	repoDir := initRuntimeSignalGitRepo(t)
+	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	ctx := context.Background()
+	projectID := "proj-shared-runtime-signal"
+	issueID, err := d.issueClientForProject(projectID).Create(ctx, issues.CreateTaskParams{Title: "shared runtime root", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	store := d.sessionRuntimeStateStore(projectID)
+	now := time.Now().UTC()
+	worker := daemonstate.Session{
+		ID: sessionID, IssueID: issueID, Role: daemonstate.SessionRoleWorker,
+		ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID,
+		State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: now,
+	}
+	rooted := daemonstate.Session{
+		ID: sessionID, IssueID: issueID, Role: daemonstate.SessionRoleOrchestrator,
+		ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: issueID,
+		State: daemonstate.SessionStatePaused, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: now,
+	}
+	for _, seed := range []daemonstate.Session{worker, rooted} {
+		if err := store.UpsertSessionState(ctx, projectID, seed); err != nil {
+			t.Fatalf("seed %s intent: %v", seed.Role, err)
+		}
+	}
+
+	resp, err := d.command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "runtime-signal-shared-physical",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         protocol.CommandRuntimeSignalIngest,
+		Body: mustMarshal(t, protocol.RuntimeSignalIngestCommandBody{
+			Source: protocol.RuntimeSignalSourceAgentHook, Kind: protocol.RuntimeSignalKindAgentActivityChanged,
+			IssueID: issueID, SessionID: sessionID, Agent: "codex", Event: "permission_request",
+		}),
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("runtime signal response=%+v err=%v", resp, err)
+	}
+	var body protocol.RuntimeSignalIngestResponseBody
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if !runtimeSignalStageOK(body.Stages, "agent_activity") {
+		t.Fatalf("runtime signal stages = %+v", body.Stages)
+	}
+
+	observation, found, err := store.GetPhysicalSessionObservation(ctx, projectID, sessionID)
+	if err != nil || !found {
+		t.Fatalf("physical observation found=%v err=%v", found, err)
+	}
+	if observation.ObservedState != daemonstate.SessionStatePaused || observation.Activity != "waiting" {
+		t.Fatalf("physical observation = %+v", observation)
+	}
+	for _, want := range []struct {
+		role      daemonstate.SessionRole
+		scopeKind daemonstate.SessionScopeKind
+		state     daemonstate.SessionState
+	}{
+		{daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, daemonstate.SessionStateRunning},
+		{daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, daemonstate.SessionStatePaused},
+	} {
+		got, found, err := store.GetSessionIntent(ctx, projectID, want.role, want.scopeKind, issueID)
+		if err != nil || !found {
+			t.Fatalf("load %s intent found=%v err=%v", want.role, found, err)
+		}
+		if got.State != want.state || got.ObservedState != daemonstate.SessionStatePaused || got.Activity != "waiting" || got.ActivitySource != "hooks" {
+			t.Fatalf("%s intent = %+v; desired state must remain %s", want.role, got, want.state)
+		}
+	}
+}
+
 func TestRuntimeSignalIngestAgentIdlePromptPersistsWaitingActivity(t *testing.T) {
 	repoDir := initRuntimeSignalGitRepo(t)
 	d := New(Config{

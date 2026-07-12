@@ -1464,6 +1464,10 @@ func (d *Daemon) persistSessionState(projectID string, session daemonstate.Sessi
 			return fmt.Errorf("load logical worker session before persist: %w", err)
 		} else if found && !isAgentScopedSessionID(existing.ID) {
 			session.ID = existing.ID
+			session.IssueID = existing.IssueID
+			session.Role = existing.Role
+			session.ScopeKind = existing.ScopeKind
+			session.ScopeID = existing.ScopeID
 		}
 	}
 	if err := store.UpsertSessionState(ctx, projectID, session); err != nil {

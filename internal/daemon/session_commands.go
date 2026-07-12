@@ -2244,6 +2244,9 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 	session := daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       issueID,
+		Role:          daemonstate.SessionRoleWorker,
+		ScopeKind:     daemonstate.SessionScopeIssue,
+		ScopeID:       issueID,
 		State:         daemonstate.SessionStateStopped,
 		ObservedState: daemonstate.SessionStateStopped,
 		UpdatedAt:     time.Now().UTC(),

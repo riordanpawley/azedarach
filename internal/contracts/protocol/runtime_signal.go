@@ -10,6 +10,10 @@ const (
 	RuntimeSignalKindAgentActivityChanged = "agent_activity_changed"
 )
 
+// RuntimeSignalIngestCommandBody reports facts observed from a physical runtime.
+// SessionID identifies the tmux runtime, not one desired logical worker,
+// advisor, or orchestrator intent. The daemon fans observations into every
+// linked intent; commands that mutate desired intent remain role/scope typed.
 type RuntimeSignalIngestCommandBody struct {
 	Source     string         `json:"source" msgpack:"source"`
 	Kind       string         `json:"kind" msgpack:"kind"`
