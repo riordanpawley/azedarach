@@ -11921,13 +11921,17 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 		{name: "context", sessionID: firstSessionID, issueID: firstID},
 	} {
 		if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
-			ID:            row.sessionID,
-			IssueID:       row.issueID,
-			State:         daemonstate.SessionStateRunning,
-			ObservedState: daemonstate.SessionStateStopped,
-			UpdatedAt:     staleUpdatedAt,
+			ID:        row.sessionID,
+			IssueID:   row.issueID,
+			State:     daemonstate.SessionStateRunning,
+			UpdatedAt: staleUpdatedAt,
 		}); err != nil {
 			t.Fatalf("seed %s session state: %v", row.name, err)
+		}
+		if _, _, err := runtimeStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+			ProjectID: projectID, SessionID: row.sessionID, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: staleUpdatedAt,
+		}); err != nil {
+			t.Fatalf("seed %s stale physical observation: %v", row.name, err)
 		}
 	}
 	tmuxRunner := &testTmuxRunner{
@@ -11939,6 +11943,7 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 		killRelease: make(chan struct{}),
 	}
 
+	const initialRevision uint64 = 9
 	d := &Daemon{
 		cfg:  Config{RepoDir: ".", Logger: logger},
 		tmux: tmux.NewClient(tmuxRunner, logger),
@@ -11948,7 +11953,7 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 		sessionStore:           daemonstate.NewStore(),
 		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{},
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
-		revision:               map[string]uint64{projectID: 9},
+		revision:               map[string]uint64{projectID: initialRevision},
 	}
 
 	body, err := json.Marshal(map[string][]string{
@@ -11976,7 +11981,7 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 	if err != nil {
 		t.Fatalf("decode task.get_many body: %v", err)
 	}
-	if got, want := payload.SnapshotRevision, uint64(9); got != want {
+	if got, want := payload.SnapshotRevision, initialRevision+2; got != want {
 		t.Fatalf("snapshot revision = %d, want %d", got, want)
 	}
 	taskByID := map[string]domain.Task{}
