@@ -412,8 +412,8 @@ func TestIssueLearnServiceOmitEvidenceFromReviewAndPromoteResponses(t *testing.T
 	if err != nil {
 		t.Fatalf("add learning: %v", err)
 	}
-	if added.Learning.Evidence == "" || !added.Learning.EvidencePrivate {
-		t.Fatalf("add response should echo explicit capture evidence and private flag: %+v", added.Learning)
+	if added.Learning.Evidence != "" || !added.Learning.EvidencePrivate {
+		t.Fatalf("add response must redact private capture evidence and retain private flag: %+v", added.Learning)
 	}
 
 	reviewed, err := service.Review(ctx, protocol.LearnReviewRequestBody{
@@ -448,6 +448,23 @@ func TestIssueLearnServiceOmitEvidenceFromReviewAndPromoteResponses(t *testing.T
 	}
 	if promoted.Learning.Evidence != "" || !promoted.Learning.EvidencePrivate {
 		t.Fatalf("promote response evidence/private = %q/%v, want no evidence and private marker", promoted.Learning.Evidence, promoted.Learning.EvidencePrivate)
+	}
+}
+
+func TestIssueLearnServiceCapturePrivateResponseHasNoSensitiveProjection(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	service := newTestIssueLearnService(client, repoDir)
+	out, err := service.Capture(ctx, protocol.LearnCaptureRequestBody{ObservedBehavior: "token=PRIVATE123", PreferredBehavior: "do not expose PRIVATE123", Outcome: "PRIVATE outcome", Impact: "PRIVATE impact", Context: map[string]string{"secret": "PRIVATE123"}, Provenance: protocol.LearningObservationProvenance{Source: "hook", Actor: "private actor", Ref: "private ref"}, Sensitivity: "private", Tags: []string{"private-tag"}, Files: []string{"private.go"}})
+	if err != nil {
+		t.Fatalf("capture private observation: %v", err)
+	}
+	obs := out.Observation
+	if obs.ObservedBehavior != "" || obs.PreferredBehavior != "" || obs.Outcome != "" || obs.Impact != "" || obs.Context != nil || obs.Provenance != (protocol.LearningObservationProvenance{}) || obs.SafeFingerprint != "" || len(obs.DuplicateLearningIDs) != 0 {
+		t.Fatalf("private capture response leaked sensitive projection: %+v", obs)
+	}
+	if obs.Learning.Evidence != "" || obs.Learning.Summary != "Private learning observation" || len(obs.Learning.Tags) != 0 || len(obs.Learning.Files) != 0 || !obs.Learning.EvidencePrivate {
+		t.Fatalf("private learning response leaked indexed fields: %+v", obs.Learning)
 	}
 }
 
