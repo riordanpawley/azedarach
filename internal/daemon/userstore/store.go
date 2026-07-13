@@ -3,6 +3,7 @@ package userstore
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -16,8 +17,26 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/sqlitemigration"
 	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
+
+//go:embed migrations/*
+var migrationFiles embed.FS
+
+var migrationArtifacts = []sqlitemigration.Artifact{
+	{ID: "user_0001_cross_project_projection", Path: "migrations/user_0001_cross_project_projection.manifest.sql", Checksum: "a313332cc21b8c02be4125bfddc9a05299d41b4dc76414abe51163ae88f97d41"},
+	{ID: "user_0002_normalized_projection", Path: "migrations/user_0002_normalized_projection.manifest.sql", Checksum: "15a9ef67dd84425a0d29ab62f7107755134799567b6671b477782467496c5434"},
+	{ID: "user_0003_canonical_issue_state_repair", Path: "migrations/user_0003_canonical_issue_state_repair.manifest.sql", Checksum: "981bf427d53fe031296d27659293494c48c63f8865333a08340a0fe542c4883f"},
+	{ID: "user_0004_canonical_archive_state_repair", Path: "migrations/user_0004_canonical_archive_state_repair.manifest.sql", Checksum: "302f16948cea6ddef8ea11e3a6fac09f9234817e9d3e29d9b9b516f707e83941"},
+}
+
+var migrationRegistrations = []sqlitemigration.Artifact{
+	{ID: "user_0001_cross_project_projection", Path: "migrations/user_0001_cross_project_projection.manifest.sql"},
+	{ID: "user_0002_normalized_projection", Path: "migrations/user_0002_normalized_projection.manifest.sql"},
+	{ID: "user_0003_canonical_issue_state_repair", Path: "migrations/user_0003_canonical_issue_state_repair.manifest.sql"},
+	{ID: "user_0004_canonical_archive_state_repair", Path: "migrations/user_0004_canonical_archive_state_repair.manifest.sql"},
+}
 
 const projectionVersion = 2
 const DefaultProjectionMaxAge = 2 * time.Minute
@@ -98,6 +117,12 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
+	if err := sqlitemigration.Validate(migrationFiles, migrationArtifacts); err != nil {
+		return fmt.Errorf("validate user migration registry: %w", err)
+	}
+	if err := sqlitemigration.ValidateRegistrations(migrationArtifacts, migrationRegistrations); err != nil {
+		return fmt.Errorf("validate user migration artifact coverage: %w", err)
+	}
 	if _, err := s.db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
 		return fmt.Errorf("enable user database WAL: %w", err)
 	}
@@ -168,6 +193,9 @@ INSERT OR IGNORE INTO schema_migrations(id,applied_at) VALUES('user_0001_cross_p
 	if err != nil {
 		return fmt.Errorf("migrate user cross-project projection: %w", err)
 	}
+	if err := sqlitemigration.EnsureLedgerChecksums(ctx, tx, migrationArtifacts); err != nil {
+		return err
+	}
 	if err := s.ensureColumn(ctx, tx, "projects", "refresh_generation", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
@@ -192,6 +220,9 @@ INSERT OR IGNORE INTO schema_migrations(id,applied_at) VALUES('user_0001_cross_p
 		if err := s.migrationBeforeCommit(); err != nil {
 			return fmt.Errorf("before user database migration commit: %w", err)
 		}
+	}
+	if err := sqlitemigration.EnsureLedgerChecksums(ctx, tx, migrationArtifacts); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit user database migrations: %w", err)

@@ -1,0 +1,5 @@
+-- Go-assisted migration manifest.
+-- Schema: replaces legacy task_json projection tables with normalized columns.
+-- Data: decodes and rewrites every legacy projected task through domain encoding.
+-- Validation: absence of task_json is the verified no-op path.
+-- Ledger: preserves user_0002_normalized_projection.

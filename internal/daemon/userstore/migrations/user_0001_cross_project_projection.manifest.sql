@@ -1,0 +1,5 @@
+-- Go-assisted migration manifest.
+-- Schema: creates the root-user cross-project projection, search, view, and ledger tables.
+-- Data: initializes the empty projection authority without touching project databases.
+-- Validation: table/index creation and ledger write share the migration transaction.
+-- Ledger: preserves user_0001_cross_project_projection.

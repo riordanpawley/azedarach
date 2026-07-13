@@ -1,0 +1,5 @@
+-- Go-assisted migration manifest.
+-- Schema: installs issue/runtime/dependency triggers for closed issue invariants.
+-- Data: no row transformation.
+-- Validation: trigger installation must succeed as one transaction.
+-- Ledger: Go orchestration records 0030_issue_closed_runtime_v2_triggers.

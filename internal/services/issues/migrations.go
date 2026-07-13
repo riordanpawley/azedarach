@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/sqlitemigration"
 )
 
 //go:embed migrations/*.sql
@@ -58,26 +59,90 @@ var orderedMigrations = []migration{
 	{id: "0026_decision_search_fts", path: "migrations/0026_decision_search_fts.sql", apply: applyDecisionSearchFTSMigration},
 	{id: "0027_issue_id_allocations", path: "migrations/0027_issue_id_allocations.sql"},
 	{id: "0028_runtime_projection_order_indexes", path: "migrations/0028_runtime_projection_order_indexes.sql"},
-	{id: "0029_issue_state_model_v2"},
-	{id: "0030_issue_closed_runtime_v2_triggers", apply: applyIssueClosedRuntimeV2TriggersMigration},
+	{id: "0029_issue_state_model_v2", path: "migrations/0029_issue_state_model_v2.sql"},
+	{id: "0030_issue_closed_runtime_v2_triggers", path: "migrations/0030_issue_closed_runtime_v2_triggers.sql", apply: applyIssueClosedRuntimeV2TriggersMigration},
 	{id: "0031_board_views", path: "migrations/0031_board_views.sql"},
 	{id: "0032_coordination_leases", path: "migrations/0032_coordination_leases.sql"},
 	{id: "0033_orchestrator_scope_leases", path: "migrations/0033_orchestrator_scope_leases.sql"},
 	{id: "0034_orchestration_start_attempts", path: "migrations/0034_orchestration_start_attempts.sql"},
-	{id: "0034_orchestrator_lifecycle_clock", apply: applyOrchestratorLifecycleClockMigration},
+	{id: "0034_orchestrator_lifecycle_clock", path: "migrations/0034_orchestrator_lifecycle_clock.sql", apply: applyOrchestratorLifecycleClockMigration},
 	{id: "0035_interaction_requests", path: "migrations/0035_interaction_requests.sql"},
 	{id: "0036_advisor_sessions", path: "migrations/0036_advisor_sessions.sql"},
 	{id: "0037_projection_source_revision", path: "migrations/0037_projection_source_revision.sql"},
 	{id: "0037_learning_activation_feedback", path: "migrations/0037_learning_activation_feedback.sql"},
 	{id: "0038_learning_consolidation", path: "migrations/0038_learning_consolidation.sql"},
-	{id: contextualLearningMigrationID, apply: applyContextualLearningActivationMigration},
+	{id: contextualLearningMigrationID, path: "migrations/0039_contextual_learning_activation.sql", apply: applyContextualLearningActivationMigration},
 	{id: "0040_typed_learning_observations", path: "migrations/0040_typed_learning_observations.sql"},
 	{id: "0041_learning_activation_confirmation", path: "migrations/0041_learning_activation_confirmation.sql"},
 	{id: "0042_learning_consolidation_scan_cursor", path: "migrations/0042_learning_consolidation_scan_cursor.sql"},
 	{id: "0043_learning_activation_telemetry", path: "migrations/0043_learning_activation_telemetry.sql"},
 	{id: "0044_learning_activation_abandonment", path: "migrations/0044_learning_activation_abandonment.sql"},
 	{id: "0045_issue_state_runtime_constraints", path: "migrations/0045_issue_state_runtime_constraints.sql", apply: applyIssueStateRuntimeConstraintsMigration},
-	{id: "0046_repair_issue_state_runtime_constraints", apply: applyIssueStateRuntimeConstraintsRepairMigration},
+	{id: "0046_repair_issue_state_runtime_constraints", path: "migrations/0046_repair_issue_state_runtime_constraints.manifest.sql", apply: applyIssueStateRuntimeConstraintsRepairMigration},
+}
+
+var migrationArtifacts = []sqlitemigration.Artifact{
+	{ID: "0001_bootstrap_tables", Path: "migrations/0001_bootstrap_tables.sql", Checksum: "0bf3ae46504d70064277484bf9e2145a26be64b985989500b1c84e83020007d0"},
+	{ID: "0002_dependency_foreign_keys", Path: "migrations/0002_dependency_foreign_keys.sql", Checksum: "f63f418c52c26730976c6c8115ec7c3b17856051cdb4926487e9b1294deb8faa"},
+	{ID: "0003_issue_indexes", Path: "migrations/0003_issue_indexes.sql", Checksum: "0471d2d0c7e99d5634bf91c5b2647351a3216f15190a6a89d75c63d45ac33f3d"},
+	{ID: "0004_spec_tables", Path: "migrations/0004_spec_tables.sql", Checksum: "65f997c26f9baff2d27c335d8a4721cbf0b87c7d447f04ca383652ffddc3524c"},
+	{ID: "0005_spec_audit_log", Path: "migrations/0005_spec_audit_log.sql", Checksum: "d58cbb0ea6e2d2aaa6a6f3a323fccabc788419cad394283fe93c9581cdd782a9"},
+	{ID: "0006_external_issue_sync", Path: "migrations/0006_external_issue_sync.sql", Checksum: "b69f1e807dd2002d6a3698a2a0f1635244cfabdc9af90e9bae75db15baec0cab"},
+	{ID: "0006_issue_external_refs", Path: "migrations/0006_issue_external_refs.sql", Checksum: "3c0156e286d82b94462749495abae9e64dcc89b4c200e717ad78e6fbe83747dd"},
+	{ID: "0007_external_issue_sync_payload", Path: "migrations/0007_external_issue_sync_payload.sql", Checksum: "e59b21ce4bc6ecead279770f70d09f6f06f63dc9ef9862a5cfdd4453537ca6f1"},
+	{ID: "0008_decision_tables", Path: "migrations/0008_decision_tables.sql", Checksum: "d2a1678febb10e1036d8135f004738b053ea1c39b7663ab903c52e7c9a69ac94"},
+	{ID: "0009_decision_audit_log", Path: "migrations/0009_decision_audit_log.sql", Checksum: "9c4c26e8b49eef6404fa2b08ad7f8d38c2cea4be1beccb5f7032e4c41783791c"},
+	{ID: "0010_decisions_refresh", Path: "migrations/0010_decisions_refresh.sql", Checksum: "09df612b84cb9b660ef50c2f42e0df93dd17b9c4eb6f2755ebdb72163d27fde7"},
+	{ID: "0011_decisions_consequences", Path: "migrations/0011_decisions_consequences.sql", Checksum: "68e30438aed5aa883772107459e43114f7bd743cd525cb30b597cdbd0c777474"},
+	{ID: "0012_blocked_status_to_open", Path: "migrations/0012_blocked_status_to_open.sql", Checksum: "5a770520b605af1c4c0aa57c471b8dbb81c888b403cd1a93e3e00ed920f50ad1"},
+	{ID: "0013_closed_runtime_invariants", Path: "migrations/0013_closed_runtime_invariants.sql", Checksum: "4ddfa055a9561c6a95601898774058559ae77122fb6fa6f194d57861ef726143"},
+	{ID: "0014_linear_sync_external_refs_backfill", Path: "migrations/0014_linear_sync_external_refs_backfill.sql", Checksum: "8a71492754fe53e7b5bb784941c730522ab3dfa1a786785c896d5a7e454b3a24"},
+	{ID: "0015_issue_attachments", Path: "migrations/0015_issue_attachments.sql", Checksum: "dd5f93a99ed0c84401796ec46044f48f8471fa23f22abb79279d4be3030b6400"},
+	{ID: "0016_issue_search_fts", Path: "migrations/0016_issue_search_fts.sql", Checksum: "ccaae29ac521b2c487ada8966373803c9ae918fba7799bb6f0f663d9d65a0b64"},
+	{ID: "0017_spec_requirement_search_fts", Path: "migrations/0017_spec_requirement_search_fts.sql", Checksum: "7cd22a727a9f2da7934d1f454f392104766da106b6d4ef86446c8e51d360b330"},
+	{ID: "0018_issue_graph_closure", Path: "migrations/0018_issue_graph_closure.sql", Checksum: "ee360245b281908d8f7e4a14db31533788d9b3804ffc07c41656c7d009420f77"},
+	{ID: "0019_agent_learnings", Path: "migrations/0019_agent_learnings.sql", Checksum: "90e4c418659b81bc38591759713d9eff9cacd47910b87d26433c8d326003e463"},
+	{ID: "0019_issue_observation_events", Path: "migrations/0019_issue_observation_events.sql", Checksum: "7862370ddf094f860b6ae97f92c96bb3a1c937ce8c6402075619228624f55daa"},
+	{ID: "0020_agent_learning_lifecycle", Path: "migrations/0020_agent_learning_lifecycle.sql", Checksum: "27fd546057a312954c3f44960c55ed56934fc4280c5cf672442d57f78e7d1587"},
+	{ID: "0021_agent_learning_metadata", Path: "migrations/0021_agent_learning_metadata.sql", Checksum: "efdb0a78edf46f056c52b203f7a20cb12ac3365d18a314fba3a058f50e2cd2d8"},
+	{ID: "0021_agent_learning_relations", Path: "migrations/0021_agent_learning_relations.sql", Checksum: "1be17d65f2bed296c4d70719adbb44375267b9a201390b7a744b067ef73c68c4"},
+	{ID: "0021_agent_learning_target_state", Path: "migrations/0021_agent_learning_target_state.sql", Checksum: "0bc218f33abed5ccfd705ee02f2b2b54927361e2bf9013acdea369fd693e90f6"},
+	{ID: "0025_agent_learning_privacy", Path: "migrations/0025_agent_learning_privacy.sql", Checksum: "a4454d74dc05fa6bb9117230a626e892de15fe9fd80db526e58b7fd10dab433e"},
+	{ID: "0026_decision_search_fts", Path: "migrations/0026_decision_search_fts.sql", Checksum: "88f9c2e2810ff084699a88999fc3771ed917d0a946c211457a89407efb59aeda"},
+	{ID: "0026_issue_ownership", Path: "migrations/0026_issue_ownership.sql", Checksum: "7d4d80fd698eafa9d7d85b84718138fa408668b3b6d1f9226837bd1989478664"},
+	{ID: "0027_issue_id_allocations", Path: "migrations/0027_issue_id_allocations.sql", Checksum: "d7e05669a900b0c3c40fb188a3edc76fce0582be5ba8230979ac999d7438cd48"},
+	{ID: "0028_runtime_projection_order_indexes", Path: "migrations/0028_runtime_projection_order_indexes.sql", Checksum: "ef8b0cffb8a3ea879d6e5cf44f36b69a6f3ba76154effedf2f36cd9acb0a5a8f"},
+	{ID: "0029_issue_state_model_v2", Path: "migrations/0029_issue_state_model_v2.sql", Checksum: "ca0030ade7b737ae91e6ac81f37cfedceb581beb5384d3302406166d3756ce0f"},
+	{ID: "0030_issue_closed_runtime_v2_triggers", Path: "migrations/0030_issue_closed_runtime_v2_triggers.sql", Checksum: "3019b99cb750044a48230af4dcd7ffba03e87345e5ee5c1cbc7f5650028a3ce4"},
+	{ID: "0031_board_views", Path: "migrations/0031_board_views.sql", Checksum: "cd1c7d9222499d4a35f156eb62a810eb021e0c5aa91634b98c2759560757d931"},
+	{ID: "0032_coordination_leases", Path: "migrations/0032_coordination_leases.sql", Checksum: "0cd1f81ea34f483635269e8235b822eb845a10b950c41702c8c3068b839837f3"},
+	{ID: "0033_orchestrator_scope_leases", Path: "migrations/0033_orchestrator_scope_leases.sql", Checksum: "e00edd244f0ae6dd8ab005ae66a0abd173fd7becae2ce68d809df2c7a85fd7fb"},
+	{ID: "0034_orchestration_start_attempts", Path: "migrations/0034_orchestration_start_attempts.sql", Checksum: "571141c87792a69e6da0b053e4a2604881b4f0741436148a6ac1284b1bbcc8fb"},
+	{ID: "0034_orchestrator_lifecycle_clock", Path: "migrations/0034_orchestrator_lifecycle_clock.sql", Checksum: "4f1be08c0c843afe7cd59cdd57d32a8b709afec037db10babf7b652fd6b3d50f"},
+	{ID: "0035_interaction_requests", Path: "migrations/0035_interaction_requests.sql", Checksum: "e04f344237c144670ae1f013536f2c5200908caa313d97ceaf2e47f5b1a9c529"},
+	{ID: "0036_advisor_sessions", Path: "migrations/0036_advisor_sessions.sql", Checksum: "a492b56a0e64fcf7a305f6a894e855f7f7f9c67c5e9fc1c6d0c9fdbabe83359d"},
+	{ID: "0037_learning_activation_feedback", Path: "migrations/0037_learning_activation_feedback.sql", Checksum: "16524bb983b9d4a6d5aac9a9ef3eee719405e55f4451a0c1c13044c22e7fcc69"},
+	{ID: "0037_projection_source_revision", Path: "migrations/0037_projection_source_revision.sql", Checksum: "62b6aabb965fb823d23951e50ab8dc70a45f52b454c82053153ca8f3467c9f51"},
+	{ID: "0038_learning_consolidation", Path: "migrations/0038_learning_consolidation.sql", Checksum: "268ff879069de8eddb66fcfc7ed4daa7e3d749d7dd8eb09fec8a54afef3a6d7f"},
+	{ID: "0039_contextual_learning_activation", Path: "migrations/0039_contextual_learning_activation.sql", Checksum: "fd5871a322c1e7961c94e3feba1c68667458f71fa3b01b49e93fd96c60489c1e"},
+	{ID: "0040_typed_learning_observations", Path: "migrations/0040_typed_learning_observations.sql", Checksum: "18a03aee58698cee1fd46081ea99fed3f1a33592d27474c8031c7233d4c8f0fa"},
+	{ID: "0041_learning_activation_confirmation", Path: "migrations/0041_learning_activation_confirmation.sql", Checksum: "966ecb2589dac579a0efd894665b00ec0dfff823bae3931fde8d36c53e595677"},
+	{ID: "0042_learning_consolidation_scan_cursor", Path: "migrations/0042_learning_consolidation_scan_cursor.sql", Checksum: "5d83042f5f7e7e53e38b9d92228a4d2f0fc66435b29a1632e55914620297c731"},
+	{ID: "0043_learning_activation_telemetry", Path: "migrations/0043_learning_activation_telemetry.sql", Checksum: "fc665da364e9cafe07864cfeca8884929cf8c65982c4f61bcd12a4a20b526642"},
+	{ID: "0044_learning_activation_abandonment", Path: "migrations/0044_learning_activation_abandonment.sql", Checksum: "56276dedf6d63e8db3e0a58e49cd29d7d862bc83ec7fdf1eb9615127004f607c"},
+	{ID: "0045_issue_state_runtime_constraints", Path: "migrations/0045_issue_state_runtime_constraints.sql", Checksum: "67a11506f5d49059280d6406cbf1e66155549e4e573978f78f3e43b5ea944f23"},
+	{ID: "0046_repair_issue_state_runtime_constraints", Path: "migrations/0046_repair_issue_state_runtime_constraints.manifest.sql", Checksum: "6420b559de666287450e274b283b2e481c1472e3b02914f3023019975216e20d"},
+}
+
+func validateMigrationRegistry() error {
+	if err := sqlitemigration.Validate(migrationFiles, migrationArtifacts); err != nil {
+		return err
+	}
+	registered := make([]sqlitemigration.Artifact, 0, len(orderedMigrations))
+	for _, migration := range orderedMigrations {
+		registered = append(registered, sqlitemigration.Artifact{ID: migration.id, Path: migration.path})
+	}
+	return sqlitemigration.ValidateRegistrations(migrationArtifacts, registered)
 }
 
 func applyIssueStateRuntimeConstraintsRepairMigration(ctx context.Context, db *sql.DB, id string) error {
@@ -372,7 +437,13 @@ type issueStateModelV2CutoverMarker struct {
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
+	if err := validateMigrationRegistry(); err != nil {
+		return fmt.Errorf("validate migration registry: %w", err)
+	}
 	if err := ensureMigrationTable(ctx, db); err != nil {
+		return err
+	}
+	if err := sqlitemigration.EnsureLedgerChecksums(ctx, db, migrationArtifacts); err != nil {
 		return err
 	}
 	if err := refusePartialIssueStateModelV2Cutover(ctx, db); err != nil {
@@ -474,8 +545,7 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := c.seedBuiltInBoardViews(ctx, db, "default"); err != nil {
 		return fmt.Errorf("seed built-in board views: %w", err)
 	}
-
-	return nil
+	return sqlitemigration.EnsureLedgerChecksums(ctx, db, migrationArtifacts)
 }
 
 func repairIssueIDAllocationSchema(ctx context.Context, db *sql.DB) error {

@@ -11,10 +11,12 @@ Treat migrations as release-critical persistence code. Preserve user data, immut
 
 1. Diff the merge base against the integration head, including migration registries and embedded SQL.
 2. Treat every migration present on the merge base or recorded by a shared/user database as immutable.
-3. Default to exactly one new migration for the entire merge to main. Consolidate all branch-local, unmerged migration steps into one coherent forward migration and one ledger ID before clone testing or integration.
-4. Do not renumber or squash migrations already merged to main or plausibly executed against any real database, including a developer database from the branch. Once executed outside a disposable fixture/clone, treat the migration as immutable and repair it forward.
-5. Allow more than one new migration only when independently versioned database authorities are both changed, or when a real intermediate commit/transaction boundary is required for correctness or compatibility. Still consolidate to one migration per affected authority where possible. Record why further consolidation is unsafe in closure evidence; convenience, separate worker ownership, or incremental development is not sufficient.
-6. Re-run the base-versus-head diff after consolidation and reject mutated historical migrations, duplicate IDs, gaps caused by renumbering, or dead branch-local migrations.
+3. Require exactly one embedded artifact for every registered ID and verify its pinned SHA-256. Reject callback-only registrations, duplicate IDs, missing/empty artifacts, registry/artifact mismatches, and any historical checksum change.
+4. For Go-assisted migrations, inspect the SQL/manifest artifact for explicit schema, data, validation, and ledger effects. Go may provide transactional orchestration or data-dependent execution only; it must not be the sole migration record.
+5. Default to exactly one new migration for the entire merge to main. Consolidate all branch-local, unmerged migration steps into one coherent forward migration and one ledger ID before clone testing or integration.
+6. Do not renumber or squash migrations already merged to main or plausibly executed against any real database, including a developer database from the branch. Once executed outside a disposable fixture/clone, treat the migration as immutable and repair it forward.
+7. Allow more than one new migration only when independently versioned database authorities are both changed, or when a real intermediate commit/transaction boundary is required for correctness or compatibility. Still consolidate to one migration per affected authority where possible. Record why further consolidation is unsafe in closure evidence; convenience, separate worker ownership, or incremental development is not sufficient.
+8. Re-run the base-versus-head diff after consolidation and reject mutated historical migrations, duplicate IDs, gaps caused by renumbering, or dead branch-local migrations.
 
 ## Design gate
 
@@ -56,6 +58,7 @@ If real databases contain private content, keep clones local, restrict permissio
 For every fixture and clone, assert:
 
 - expected ledger IDs/checksums appear exactly once
+- every applied known ID has a non-empty `artifact_checksum` equal to the pinned artifact SHA-256
 - expected columns, constraints, triggers, and indexes exist
 - deprecated schema objects are absent only when contraction is authorized
 - row counts, IDs, timestamps, archive/terminal state, and user-authored data are preserved

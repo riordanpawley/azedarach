@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"strings"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/sqlitemigration"
 )
 
 //go:embed migrations/*.sql
@@ -22,8 +24,25 @@ var orderedMigrations = []migration{
 	{id: "daemon_notices_0001", path: "migrations/0001_daemon_notices.sql"},
 }
 
+var migrationArtifacts = []sqlitemigration.Artifact{
+	{ID: "daemon_notices_0001", Path: "migrations/0001_daemon_notices.sql", Checksum: "05a47c2b8c1e16e79062f0d19762bce056c7fd56c05bc33d06ccf5b2ea7e008a"},
+}
+
 func runMigrations(ctx context.Context, db *sql.DB) error {
+	if err := sqlitemigration.Validate(migrationFiles, migrationArtifacts); err != nil {
+		return fmt.Errorf("validate migration registry: %w", err)
+	}
+	registrations := make([]sqlitemigration.Artifact, 0, len(orderedMigrations))
+	for _, migration := range orderedMigrations {
+		registrations = append(registrations, sqlitemigration.Artifact{ID: migration.id, Path: migration.path})
+	}
+	if err := sqlitemigration.ValidateRegistrations(migrationArtifacts, registrations); err != nil {
+		return fmt.Errorf("validate migration artifact coverage: %w", err)
+	}
 	if err := ensureMigrationTable(ctx, db); err != nil {
+		return err
+	}
+	if err := sqlitemigration.EnsureLedgerChecksums(ctx, db, migrationArtifacts); err != nil {
 		return err
 	}
 	for _, migration := range orderedMigrations {
@@ -42,7 +61,7 @@ func runMigrations(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
-	return nil
+	return sqlitemigration.EnsureLedgerChecksums(ctx, db, migrationArtifacts)
 }
 
 func ensureMigrationTable(ctx context.Context, db *sql.DB) error {
