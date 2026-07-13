@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -20,6 +22,31 @@ import (
 
 type trackingWriteCloser struct {
 	closed atomic.Bool
+}
+
+type recordingDaemonProcess struct {
+	stopCalls atomic.Int32
+	stopErr   error
+}
+
+func (p *recordingDaemonProcess) stopAndWait(context.Context) error {
+	p.stopCalls.Add(1)
+	return p.stopErr
+}
+
+type recordingDaemonStarter struct {
+	process *recordingDaemonProcess
+	specs   []daemonProcessSpec
+}
+
+func useRecordingDaemonStarter(launcher *Launcher) *recordingDaemonStarter {
+	starter := &recordingDaemonStarter{process: &recordingDaemonProcess{}}
+	launcher.startProcess = func(spec daemonProcessSpec) (daemonProcess, error) {
+		spec.args = append([]string(nil), spec.args...)
+		starter.specs = append(starter.specs, spec)
+		return starter.process, nil
+	}
+	return starter
 }
 
 func (w *trackingWriteCloser) Write(p []byte) (int, error) {
@@ -65,6 +92,7 @@ func TestLauncherStartClosesDaemonLog(t *testing.T) {
 	writeLauncherConfig(t, repoDir, logDir)
 
 	launcher := NewLauncher(repoDir, socketPath)
+	starter := useRecordingDaemonStarter(launcher)
 	if launcher.LockPath != filepath.Join(socketRoot, "daemon.lock") {
 		t.Fatalf("launcher.LockPath = %q, want %q", launcher.LockPath, filepath.Join(socketRoot, "daemon.lock"))
 	}
@@ -90,6 +118,17 @@ func TestLauncherStartClosesDaemonLog(t *testing.T) {
 	}
 	if !tracker.closed.Load() {
 		t.Fatal("daemon log file was not closed after Start() returned")
+	}
+	if len(starter.specs) != 1 {
+		t.Fatalf("daemon starts = %d, want 1", len(starter.specs))
+	}
+	spec := starter.specs[0]
+	wantArgs := []string{"--repo", repoDir, "--socket", socketPath, "--lock", launcher.LockPath}
+	if spec.command.executable != launcher.BinPath || !reflect.DeepEqual(spec.args, wantArgs) || spec.command.dir != "" {
+		t.Fatalf("daemon start spec = command %+v args %v, want executable %q args %v", spec.command, spec.args, launcher.BinPath, wantArgs)
+	}
+	if spec.stdout != tracker || spec.stderr != tracker {
+		t.Fatalf("daemon start stdio = %T/%T, want shared tracked log", spec.stdout, spec.stderr)
 	}
 }
 
@@ -124,6 +163,7 @@ func TestLauncherStartUsesWorktreeLocalDaemonLogForScopedRuntime(t *testing.T) {
 	tracker := &trackingWriteCloser{}
 
 	launcher := NewLauncher(nested, socketPath)
+	useRecordingDaemonStarter(launcher)
 	launcher.BinPath = writeTestExecutable(t)
 	readyCalls := 0
 	launcher.waitForReady = func(context.Context, string) error {
@@ -490,6 +530,7 @@ func TestLauncherStart_SpawnsWhenLockOwnerAliveButSocketUnready(t *testing.T) {
 	tracker := &trackingWriteCloser{}
 
 	launcher := NewLauncher(repoDir, socketPath)
+	useRecordingDaemonStarter(launcher)
 	launcher.BinPath = "true"
 	launcher.sleepFn = func(time.Duration) {}
 	terminateCalls := 0
@@ -539,6 +580,7 @@ func TestLauncherReplaceTerminatesBeforeStart(t *testing.T) {
 	tracker := &trackingWriteCloser{}
 
 	launcher := NewLauncher(repoDir, socketPath)
+	useRecordingDaemonStarter(launcher)
 	launcher.BinPath = "true"
 	launcher.sleepFn = func(time.Duration) {}
 
@@ -589,6 +631,7 @@ func TestLauncherReplaceGracefullyStopsSocketBeforeStart(t *testing.T) {
 	tracker := &trackingWriteCloser{}
 
 	launcher := NewLauncher(repoDir, socketPath)
+	useRecordingDaemonStarter(launcher)
 	launcher.BinPath = "true"
 	launcher.sleepFn = func(time.Duration) {}
 
@@ -636,6 +679,7 @@ func TestLauncherReplaceAttributesGracefulShutdownReason(t *testing.T) {
 	tracker := &trackingWriteCloser{}
 
 	launcher := NewLauncher(repoDir, socketPath)
+	useRecordingDaemonStarter(launcher)
 	launcher.BinPath = "true"
 	launcher.sleepFn = func(time.Duration) {}
 
@@ -676,6 +720,7 @@ func TestLauncherReplaceReasonOverride(t *testing.T) {
 	tracker := &trackingWriteCloser{}
 
 	launcher := NewLauncher(repoDir, socketPath).WithReplaceReason("manual-restart")
+	useRecordingDaemonStarter(launcher)
 	launcher.BinPath = "true"
 	launcher.sleepFn = func(time.Duration) {}
 
@@ -743,6 +788,7 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsEPERM(t *testing.T) {
 	tracker := &trackingWriteCloser{}
 
 	launcher := NewLauncher(repoDir, socketPath)
+	useRecordingDaemonStarter(launcher)
 	launcher.BinPath = "true"
 	launcher.sleepFn = func(time.Duration) {}
 	terminateCalls := 0
@@ -795,6 +841,7 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsWrappedPermissionDenie
 	tracker := &trackingWriteCloser{}
 
 	launcher := NewLauncher(repoDir, socketPath)
+	useRecordingDaemonStarter(launcher)
 	launcher.BinPath = "true"
 	launcher.sleepFn = func(time.Duration) {}
 	terminateCalls := 0
@@ -847,6 +894,7 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsTerminationTimeout(t *
 	tracker := &trackingWriteCloser{}
 
 	launcher := NewLauncher(repoDir, socketPath)
+	useRecordingDaemonStarter(launcher)
 	launcher.BinPath = "true"
 	launcher.sleepFn = func(time.Duration) {}
 	terminateCalls := 0
@@ -899,6 +947,7 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsPermissionDeniedString
 	tracker := &trackingWriteCloser{}
 
 	launcher := NewLauncher(repoDir, socketPath)
+	useRecordingDaemonStarter(launcher)
 	launcher.BinPath = "true"
 	launcher.sleepFn = func(time.Duration) {}
 	terminateCalls := 0
@@ -987,6 +1036,7 @@ func TestLauncherStartHonorsCallerContextDeadlineForReadyWait(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
 
 	launcher := NewLauncher(repoDir, socketPath)
+	starter := useRecordingDaemonStarter(launcher)
 	launcher.BinPath = "true"
 	launcher.waitForReady = func(ctx context.Context, _ string) error {
 		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) > 100*time.Millisecond {
@@ -1010,6 +1060,129 @@ func TestLauncherStartHonorsCallerContextDeadlineForReadyWait(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 700*time.Millisecond {
 		t.Fatalf("Start() elapsed = %s, want < 700ms", elapsed)
+	}
+	if got := starter.process.stopCalls.Load(); got != 1 {
+		t.Fatalf("spawn cleanup calls = %d, want 1", got)
+	}
+}
+
+func TestLauncherStartReportsSpawnCleanupFailure(t *testing.T) {
+	repoDir := t.TempDir()
+	launcher := NewLauncher(repoDir, filepath.Join(t.TempDir(), "daemon.sock"))
+	starter := useRecordingDaemonStarter(launcher)
+	starter.process.stopErr = errors.New("cleanup denied")
+	launcher.BinPath = "azd-test"
+	launcher.waitForReady = func(context.Context, string) error { return context.DeadlineExceeded }
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+
+	err := launcher.Start(context.Background())
+	if err == nil || !errors.Is(err, starter.process.stopErr) || !strings.Contains(err.Error(), "cleanup spawned daemon") {
+		t.Fatalf("Start() error = %v, want readiness and cleanup failure", err)
+	}
+	if got := starter.process.stopCalls.Load(); got != 1 {
+		t.Fatalf("spawn cleanup calls = %d, want 1", got)
+	}
+}
+
+func TestRealProcessProfileLauncherReportsExitBeforeReadiness(t *testing.T) {
+	root := t.TempDir()
+	executable := filepath.Join(root, "azd-test")
+	exited := filepath.Join(root, "exited")
+	script := fmt.Sprintf("#!/bin/sh\n: > %q\nexit 7\n", exited)
+	if err := os.WriteFile(executable, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launcher := NewLauncher(filepath.Join(root, "repo"), filepath.Join(root, "daemon.sock"))
+	launcher.BinPath = executable
+	readyCalls := 0
+	launcher.waitForReady = func(ctx context.Context, _ string) error {
+		readyCalls++
+		if readyCalls < 3 {
+			return context.DeadlineExceeded
+		}
+		for {
+			if _, err := os.Stat(exited); err == nil {
+				// Give the process-reaper goroutine a chance to publish Wait's
+				// result before cleanup inspects it.
+				time.Sleep(10 * time.Millisecond)
+				return context.DeadlineExceeded
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) {
+		return os.OpenFile(filepath.Join(root, "daemon.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	}
+
+	err := launcher.Start(context.Background())
+	if err == nil || !errors.Is(err, errSpawnedDaemonExited) || !strings.Contains(err.Error(), "exit status 7") {
+		t.Fatalf("Start() error = %v, want observable pre-readiness exit status", err)
+	}
+}
+
+func TestRealProcessProfileLauncherReadinessFailureCleansExactLaunch(t *testing.T) {
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pidPath := filepath.Join(root, "pid")
+	argsPath := filepath.Join(root, "args")
+	readyPath := filepath.Join(root, "ready")
+	executable := filepath.Join(root, "azd-test")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$$\" > %q\nprintf '%%s\\n' \"$@\" > %q\n: > %q\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n", pidPath, argsPath, readyPath)
+	if err := os.WriteFile(executable, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launcher := NewLauncher(repoDir, filepath.Join(root, "daemon.sock"))
+	launcher.BinPath = executable
+	readyCalls := 0
+	launcher.waitForReady = func(ctx context.Context, _ string) error {
+		readyCalls++
+		if readyCalls < 3 {
+			return context.DeadlineExceeded
+		}
+		for {
+			if _, err := os.Stat(readyPath); err == nil {
+				return context.DeadlineExceeded
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) {
+		return os.OpenFile(filepath.Join(root, "daemon.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	}
+
+	err := launcher.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "spawned daemon cleaned up") {
+		t.Fatalf("Start() error = %v, want observable spawned-process cleanup", err)
+	}
+	pidText, readErr := os.ReadFile(pidPath)
+	if readErr != nil {
+		t.Fatalf("read spawned pid: %v", readErr)
+	}
+	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(pidText)))
+	if parseErr != nil {
+		t.Fatalf("parse spawned pid %q: %v", pidText, parseErr)
+	}
+	if signalErr := syscall.Kill(pid, 0); !errors.Is(signalErr, syscall.ESRCH) {
+		t.Fatalf("spawned daemon pid %d still exists after readiness failure: %v", pid, signalErr)
+	}
+	argsText, readErr := os.ReadFile(argsPath)
+	if readErr != nil {
+		t.Fatalf("read spawned args: %v", readErr)
+	}
+	wantArgs := strings.Join([]string{"--repo", repoDir, "--socket", launcher.SocketPath, "--lock", launcher.LockPath}, "\n") + "\n"
+	if string(argsText) != wantArgs {
+		t.Fatalf("spawned args = %q, want exact isolated launch %q", argsText, wantArgs)
 	}
 }
 

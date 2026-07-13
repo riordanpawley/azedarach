@@ -1200,7 +1200,7 @@ func TestNewWorktreeManager_DefaultLogger(t *testing.T) {
 	assert.NotNil(t, manager.logger)
 }
 
-func TestExecRunner(t *testing.T) {
+func TestRealProcessProfileExecRunnerGitVersion(t *testing.T) {
 	// This test requires actual git installation
 	// Skip if git is not available
 	ctx := context.Background()
@@ -1228,7 +1228,7 @@ func TestExecRunner_WorkDir(t *testing.T) {
 	assert.Equal(t, workDir, runner.workDir)
 }
 
-func TestExecRunner_IgnoresConflictingGitEnv(t *testing.T) {
+func TestRealProcessProfileExecRunnerIgnoresConflictingGitEnv(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}

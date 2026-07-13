@@ -158,6 +158,8 @@ type Daemon struct {
 	sessionStore                       *daemonstate.Store
 	runtimeProjectionWriter            runtimeProjectionWriter
 	sessionLongRunning                 SessionLongRunningExecutor
+	sessionResumeWait                  func(context.Context, time.Duration) error
+	sessionShellRun                    func(context.Context, string, string, string, []string) ([]byte, error)
 	runtimeReconciler                  runtimeReconciler
 	runtimeReconcileQueue              *reconcileQueue[protocol.RuntimeReconcileResponseBody]
 	gitStatusRefreshQueue              *reconcileQueue[*git.GitStatus]

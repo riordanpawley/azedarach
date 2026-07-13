@@ -845,6 +845,8 @@ func TestRuntimeReconcileIssuesSummarizesSharedTmuxSnapshotFailure(t *testing.T)
 	}
 }
 
+func immediateSessionResumeWait(context.Context, time.Duration) error { return nil }
+
 func TestSessionRestartAllRestartsBusySessionsByDefault(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -873,8 +875,13 @@ func TestSessionRestartAllRestartsBusySessionsByDefault(t *testing.T) {
 	tmuxRunner.sessions[idleSession] = true
 	tmuxRunner.sessions[busySession] = true
 	store := daemonstate.NewStore()
+	var resumeWaits []time.Duration
 	daemon := &Daemon{
-		cfg:          Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		cfg: Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		sessionResumeWait: func(_ context.Context, delay time.Duration) error {
+			resumeWaits = append(resumeWaits, delay)
+			return nil
+		},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		issues:       issuesClient,
 		session:      daemonhandlers.NewSessionHandler(store),
@@ -929,6 +936,9 @@ func TestSessionRestartAllRestartsBusySessionsByDefault(t *testing.T) {
 	if !foundContinuationPrompt {
 		t.Fatalf("missing continuation prompt paste in tmux commands: %+v", tmuxRunner.commands)
 	}
+	if want := []time.Duration{250 * time.Millisecond, 250 * time.Millisecond, sessionRestartContinuePromptDelay}; !reflect.DeepEqual(resumeWaits, want) {
+		t.Fatalf("resume waits = %v, want %v", resumeWaits, want)
+	}
 }
 
 func TestSessionRestartAllForceBusyIncludesBusySessionsAndConfiguredFlags(t *testing.T) {
@@ -968,10 +978,11 @@ func TestSessionRestartAllForceBusyIncludesBusySessionsAndConfiguredFlags(t *tes
 			SessionShell:               "zsh",
 			Logger:                     slog.Default(),
 		},
-		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
-		issues:       issuesClient,
-		session:      daemonhandlers.NewSessionHandler(store),
-		sessionStore: store,
+		sessionResumeWait: immediateSessionResumeWait,
+		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:            issuesClient,
+		session:           daemonhandlers.NewSessionHandler(store),
+		sessionStore:      store,
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
 			projectID: runtimeStateStore,
 		},
@@ -1070,11 +1081,12 @@ func TestSessionRestartAllDiscoversKnownProjectSessionsAndReportsPartialFailures
 	tmuxRunner.sendKeysErrOnCall = 4
 	stateStore := daemonstate.NewStore()
 	daemon := &Daemon{
-		cfg:          Config{RepoDir: repoA, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
-		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
-		issues:       newMigratedIssueClient(t, repoA, slog.Default()),
-		session:      daemonhandlers.NewSessionHandler(stateStore),
-		sessionStore: stateStore,
+		cfg:               Config{RepoDir: repoA, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		sessionResumeWait: immediateSessionResumeWait,
+		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:            newMigratedIssueClient(t, repoA, slog.Default()),
+		session:           daemonhandlers.NewSessionHandler(stateStore),
+		sessionStore:      stateStore,
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
 			projectA: storeA,
 			projectB: storeB,
@@ -1153,10 +1165,11 @@ func TestSessionRestartAllSkipsTmuxSessionWithoutLivePane(t *testing.T) {
 	tmuxRunner.sessionsWithoutPanes[sessionID] = true
 	store := daemonstate.NewStore()
 	daemon := &Daemon{
-		cfg:          Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
-		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
-		session:      daemonhandlers.NewSessionHandler(store),
-		sessionStore: store,
+		cfg:               Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		sessionResumeWait: immediateSessionResumeWait,
+		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
+		session:           daemonhandlers.NewSessionHandler(store),
+		sessionStore:      store,
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
 			projectID: runtimeStateStore,
 		},
@@ -1221,10 +1234,11 @@ func TestSessionRestartAllRestartsNoAgentPaneWithoutContinuePrompt(t *testing.T)
 	tmuxRunner.sessions[sessionID] = true
 	store := daemonstate.NewStore()
 	daemon := &Daemon{
-		cfg:          Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
-		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
-		session:      daemonhandlers.NewSessionHandler(store),
-		sessionStore: store,
+		cfg:               Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		sessionResumeWait: immediateSessionResumeWait,
+		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
+		session:           daemonhandlers.NewSessionHandler(store),
+		sessionStore:      store,
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
 			projectID: runtimeStateStore,
 		},
@@ -1297,10 +1311,11 @@ func TestSessionRestartAllForceBusyAllowsSessionSourcedAgent(t *testing.T) {
 	tmuxRunner.sessions[sessionID] = true
 	store := daemonstate.NewStore()
 	daemon := &Daemon{
-		cfg:          Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
-		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
-		session:      daemonhandlers.NewSessionHandler(store),
-		sessionStore: store,
+		cfg:               Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		sessionResumeWait: immediateSessionResumeWait,
+		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
+		session:           daemonhandlers.NewSessionHandler(store),
+		sessionStore:      store,
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
 			projectID: runtimeStateStore,
 		},
@@ -8928,7 +8943,7 @@ func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsFromConfigAcrossTo
 	}
 }
 
-func TestRunWorktreeInitCommandsExecutesInWorktreeDirectory(t *testing.T) {
+func TestRealProcessProfileWorktreeInitCommandsPreserveDirectoryAndEnvironment(t *testing.T) {
 	worktree := t.TempDir()
 	parentWorktree := t.TempDir()
 	repoDir := t.TempDir()
@@ -8978,6 +8993,9 @@ func TestRunWorktreeInitCommandsExecutesInWorktreeDirectory(t *testing.T) {
 }
 
 func TestRunWorktreeInitCommandsReturnsCommandFailure(t *testing.T) {
+	worktree := t.TempDir()
+	var gotShell, gotDir, gotCommand string
+	var gotEnv []string
 	d := &Daemon{
 		cfg: Config{
 			SessionShell: "sh",
@@ -8985,14 +9003,25 @@ func TestRunWorktreeInitCommandsReturnsCommandFailure(t *testing.T) {
 				"exit 7",
 			},
 		},
+		sessionShellRun: func(_ context.Context, shell, dir, command string, env []string) ([]byte, error) {
+			gotShell, gotDir, gotCommand = shell, dir, command
+			gotEnv = append([]string(nil), env...)
+			return []byte("deterministic failure"), errors.New("exit status 7")
+		},
 	}
 
-	err := d.runWorktreeInitCommands(context.Background(), protocol.DefaultProjectID, t.TempDir())
+	err := d.runWorktreeInitCommands(context.Background(), protocol.DefaultProjectID, worktree)
 	if err == nil {
 		t.Fatal("runWorktreeInitCommands error = nil, want failure")
 	}
 	if !strings.Contains(err.Error(), "exit 7") {
 		t.Fatalf("error = %q, want failed command context", err.Error())
+	}
+	if gotShell != "sh" || gotDir != worktree || gotCommand != "exit 7" {
+		t.Fatalf("shell run = shell %q dir %q command %q, want sh/%s/exit 7", gotShell, gotDir, gotCommand, worktree)
+	}
+	if joined := strings.Join(gotEnv, "\n"); !strings.Contains(joined, "AZEDARACH_WORKTREE_PATH="+worktree) || !strings.Contains(joined, "AZEDARACH_WORKTREE_INIT_PHASE=sync") {
+		t.Fatalf("shell env missing worktree init contract: %v", gotEnv)
 	}
 }
 
@@ -9003,6 +9032,9 @@ func TestRunWorktreeInitCommandsMissingCommandReturnsFailure(t *testing.T) {
 			WorktreeInitCommands: []string{
 				"definitely-missing-command-xyz",
 			},
+		},
+		sessionShellRun: func(_ context.Context, _, _, command string, _ []string) ([]byte, error) {
+			return []byte("sh: " + command + ": not found"), errors.New("exit status 127")
 		},
 	}
 
@@ -9020,13 +9052,35 @@ func TestRunWorktreeInitCommandsMissingCommandReturnsFailure(t *testing.T) {
 
 func TestStartWorktreeAsyncInitCommandsDoesNotBlock(t *testing.T) {
 	worktree := t.TempDir()
-	marker := filepath.Join(worktree, "async-marker")
+	runnerStarted := make(chan struct{})
+	releaseRunner := make(chan struct{})
+	runnerDone := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-releaseRunner:
+		default:
+			close(releaseRunner)
+		}
+	})
 	d := &Daemon{
 		cfg: Config{
 			RepoDir:                   t.TempDir(),
 			SessionShell:              "sh",
-			WorktreeAsyncInitCommands: []string{"sleep 0.2; printf async > async-marker"},
+			WorktreeAsyncInitCommands: []string{"async command"},
 			Logger:                    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		sessionShellRun: func(ctx context.Context, _, dir, command string, _ []string) ([]byte, error) {
+			if dir != worktree || command != "async command" {
+				return nil, fmt.Errorf("unexpected async shell run dir=%q command=%q", dir, command)
+			}
+			close(runnerStarted)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-releaseRunner:
+				close(runnerDone)
+				return nil, nil
+			}
 		},
 	}
 
@@ -9040,20 +9094,20 @@ func TestStartWorktreeAsyncInitCommandsDoesNotBlock(t *testing.T) {
 		t.Fatalf("startWorktreeAsyncInitCommands blocked for %s", elapsed)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		data, err := os.ReadFile(marker)
-		if err == nil && strings.TrimSpace(string(data)) == "async" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("async marker not written before deadline")
-		}
-		time.Sleep(20 * time.Millisecond)
+	select {
+	case <-runnerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("async runner did not start")
+	}
+	close(releaseRunner)
+	select {
+	case <-runnerDone:
+	case <-time.After(time.Second):
+		t.Fatal("async runner did not finish")
 	}
 }
 
-func TestIssueResourceCommandsReceiveContextAndConfiguredEnv(t *testing.T) {
+func TestRealProcessProfileIssueResourceCommandsReceiveContextAndConfiguredEnv(t *testing.T) {
 	worktree := t.TempDir()
 	d := &Daemon{
 		cfg: Config{
@@ -9098,7 +9152,7 @@ func TestIssueResourceCommandsReceiveContextAndConfiguredEnv(t *testing.T) {
 	}
 }
 
-func TestIssueResourceReconcileCommandReceivesDesiredState(t *testing.T) {
+func TestRealProcessProfileIssueResourceReconcileCommandReceivesDesiredState(t *testing.T) {
 	worktree := t.TempDir()
 	root := t.TempDir()
 	d := &Daemon{
@@ -9143,7 +9197,7 @@ func TestIssueResourceReconcileCommandReceivesDesiredState(t *testing.T) {
 	}
 }
 
-func TestIssueResourceCommandsUseRootPathWhenWorktreeMissing(t *testing.T) {
+func TestRealProcessProfileIssueResourceCommandsUseRootPathWhenWorktreeMissing(t *testing.T) {
 	root := t.TempDir()
 	d := &Daemon{
 		cfg: Config{

@@ -408,7 +408,7 @@ func TestMergeAbortsIncompleteNonConflictMerge(t *testing.T) {
 	})
 }
 
-func TestMergePreservesCommitHooksAndAbortsIncompleteMerge(t *testing.T) {
+func TestRealProcessProfileMergePreservesCommitHooksAndAbortsIncompleteMerge(t *testing.T) {
 	repo := initDivergedRepo(t)
 	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
 	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\necho hook failed >&2\nexit 1\n"), 0o755); err != nil {
@@ -445,7 +445,7 @@ func TestMergePreservesCommitHooksAndAbortsIncompleteMerge(t *testing.T) {
 	}
 }
 
-func TestMergeReportsSlowHookDiagnostics(t *testing.T) {
+func TestRealProcessProfileMergeReportsSlowHookDiagnostics(t *testing.T) {
 	repo := initDivergedRepo(t)
 	hooks := map[string]string{
 		"commit-msg": "#!/bin/sh\nsleep 0.05\nexit 0\n",
@@ -512,7 +512,7 @@ func TestMergeCommandContextAddsDefaultTimeout(t *testing.T) {
 	}
 }
 
-func TestMergeCleanlyDiscardsDirtyPostMergeHookAndReportsFailure(t *testing.T) {
+func TestRealProcessProfileMergeCleanlyDiscardsDirtyPostMergeHookAndReportsFailure(t *testing.T) {
 	repo := initDivergedRepo(t)
 	hookPath := filepath.Join(repo, ".git", "hooks", "post-merge")
 	hook := "#!/bin/sh\nprintf hook-dirty\\n > hook-created.txt\ngit add hook-created.txt\necho post-merge hook dirtied target >&2\nexit 0\n"
@@ -550,7 +550,7 @@ func TestMergeCleanlyDiscardsDirtyPostMergeHookAndReportsFailure(t *testing.T) {
 	}
 }
 
-func TestMergeCleanlyDiscardsDirtyCommitMsgHookAfterAbort(t *testing.T) {
+func TestRealProcessProfileMergeCleanlyDiscardsDirtyCommitMsgHookAfterAbort(t *testing.T) {
 	repo := initDivergedRepo(t)
 	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
 	hook := "#!/bin/sh\nprintf hook-dirty\\n > hook-created.txt\necho commit-msg hook dirtied target >&2\nexit 1\n"
@@ -587,7 +587,7 @@ func TestMergeCleanlyDiscardsDirtyCommitMsgHookAfterAbort(t *testing.T) {
 	}
 }
 
-func TestMergeCleanlyTransactionalAppliesScratchMergeToCleanTarget(t *testing.T) {
+func TestRealProcessProfileMergeCleanlyTransactionalAppliesScratchMergeToCleanTarget(t *testing.T) {
 	repo := initDivergedRepo(t)
 	originalHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
 
@@ -621,7 +621,7 @@ func TestMergeCleanlyTransactionalAppliesScratchMergeToCleanTarget(t *testing.T)
 	}
 }
 
-func TestMergeCleanlyTransactionalRunsScratchHooksAndKeepsTargetCleanWhenHookFails(t *testing.T) {
+func TestRealProcessProfileMergeCleanlyTransactionalRunsScratchHooksAndKeepsTargetCleanWhenHookFails(t *testing.T) {
 	repo := initDivergedRepo(t)
 	originalHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
 	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
@@ -664,7 +664,7 @@ func TestMergeCleanlyTransactionalRunsScratchHooksAndKeepsTargetCleanWhenHookFai
 	}
 }
 
-func TestRecoverIntegrationJournalCompletesInterruptedFinalReset(t *testing.T) {
+func TestRealProcessProfileRecoverIntegrationJournalCompletesInterruptedFinalReset(t *testing.T) {
 	repo := initDivergedRepo(t)
 	client := NewClient(NewExecRunner(repo), slog.Default())
 	ctx := context.Background()
@@ -1865,7 +1865,7 @@ func TestRuntimeStatus(t *testing.T) {
 	}
 }
 
-func TestRuntimeStatusUsesLocalBaseBeforeCurrentRemoteBase(t *testing.T) {
+func TestRealProcessProfileRuntimeStatusUsesLocalBaseBeforeCurrentRemoteBase(t *testing.T) {
 	repo := t.TempDir()
 	runClientTestGit(t, repo, "init", "-q", "-b", "preview")
 	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
@@ -1907,7 +1907,7 @@ func TestRuntimeStatusUsesLocalBaseBeforeCurrentRemoteBase(t *testing.T) {
 	}
 }
 
-func TestRuntimeStatusWithRemoteBasePreferenceUsesCurrentRemoteBase(t *testing.T) {
+func TestRealProcessProfileRuntimeStatusWithRemoteBasePreferenceUsesCurrentRemoteBase(t *testing.T) {
 	repo := t.TempDir()
 	runClientTestGit(t, repo, "init", "-q", "-b", "preview")
 	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
