@@ -3798,6 +3798,44 @@ func TestModeTransitions(t *testing.T) {
 			t.Fatalf("cursor position changed while selecting next view: before=%+v after=%+v", before, got)
 		}
 	})
+
+	t.Run("shift tab switches configured views without changing cursor position", func(t *testing.T) {
+		m.editor.EnterNormal()
+		m.nav.SelectTask("az-2", 0)
+		before := getCursorPosition(m)
+
+		result, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyShiftTab})
+		updated := result.(Model)
+		if cmd == nil {
+			t.Fatal("Shift+Tab did not schedule configured-view selection")
+		}
+		if got := getCursorPosition(updated); got != before {
+			t.Fatalf("cursor position changed while selecting previous view: before=%+v after=%+v", before, got)
+		}
+	})
+}
+
+func TestBoardViewCycleIndex(t *testing.T) {
+	viewIDs := []string{"first", "middle", "last"}
+	tests := []struct {
+		name      string
+		current   string
+		direction int
+		want      int
+	}{
+		{name: "next", current: "middle", direction: 1, want: 2},
+		{name: "next wraps", current: "last", direction: 1, want: 0},
+		{name: "previous", current: "middle", direction: -1, want: 0},
+		{name: "previous wraps", current: "first", direction: -1, want: 2},
+		{name: "missing current defaults to first", current: "missing", direction: -1, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := boardViewCycleIndex(viewIDs, tt.current, tt.direction); got != tt.want {
+				t.Fatalf("boardViewCycleIndex(%v, %q, %d) = %d, want %d", viewIDs, tt.current, tt.direction, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestActionModeUnavailablePRKeyFailsFastWithGuidance(t *testing.T) {

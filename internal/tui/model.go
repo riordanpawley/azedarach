@@ -895,7 +895,11 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keybinds.ActionToggleView:
 		m.boardRefreshing = true
-		return m, m.cycleBoardViewCmd()
+		direction := 1
+		if msg.String() == "shift+tab" {
+			direction = -1
+		}
+		return m, m.cycleBoardViewCmd(direction)
 	}
 
 	return m, nil
@@ -1833,7 +1837,19 @@ func (m Model) loadBoardViewsCmd() tea.Cmd {
 	}
 }
 
-func (m Model) cycleBoardViewCmd() tea.Cmd {
+func boardViewCycleIndex(viewIDs []string, current string, direction int) int {
+	if len(viewIDs) == 0 {
+		return -1
+	}
+	for i, viewID := range viewIDs {
+		if viewID == current {
+			return (i + direction%len(viewIDs) + len(viewIDs)) % len(viewIDs)
+		}
+	}
+	return 0
+}
+
+func (m Model) cycleBoardViewCmd(direction int) tea.Cmd {
 	client := m.daemonClient
 	scope := m.currentBoardViewCommandScope()
 	selected := domain.NormalizeBoardViewID(m.selectedBoardViewID)
@@ -1872,13 +1888,7 @@ func (m Model) cycleBoardViewCmd() tea.Cmd {
 		if current == "" {
 			current = domain.NormalizeBoardViewID(resp.SelectedViewID)
 		}
-		next := 0
-		for i, viewID := range viewIDs {
-			if viewID == current {
-				next = (i + 1) % len(viewIDs)
-				break
-			}
-		}
+		next := boardViewCycleIndex(viewIDs, current, direction)
 		var result protocol.BoardViewSelectResponseBody
 		if scope.global {
 			result, err = client.SelectGlobalView(ctx, protocol.GlobalViewConsumerBoard, viewIDs[next])

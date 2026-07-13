@@ -90,6 +90,26 @@ func TestNormalModeAttachShortcutLookup(t *testing.T) {
 	}
 }
 
+func TestNormalModeViewCycleShortcutsLookup(t *testing.T) {
+	tests := []string{"tab", "shift+tab"}
+	for _, input := range tests {
+		t.Run(input, func(t *testing.T) {
+			action, ok := LookupAction(types.ModeNormal, input)
+			if !ok {
+				t.Fatalf("expected normal mode %s key to resolve", input)
+			}
+			if action != ActionToggleView {
+				t.Fatalf("action = %q, want %q", action, ActionToggleView)
+			}
+		})
+	}
+
+	help := RenderCategories(HelpCategories(), KeyColumnWidth(HelpCategories(), 8), Theme{})
+	if !strings.Contains(help, "Tab/Shift+Tab") || !strings.Contains(help, "Switch to next/previous configured view") {
+		t.Fatalf("help = %q, want bidirectional configured-view navigation guidance", help)
+	}
+}
+
 func TestBoardViewRegistryDrivesActionsHintsAndHelp(t *testing.T) {
 	tests := []struct {
 		key  string
