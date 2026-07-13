@@ -1,0 +1,5 @@
+-- Go-assisted migration manifest.
+-- Schema: no root-user schema change.
+-- Data: marks registered project projections stale so canonical issue state is reread.
+-- Validation: update is conditional on the missing historical ledger ID.
+-- Ledger: preserves user_0003_canonical_issue_state_repair.

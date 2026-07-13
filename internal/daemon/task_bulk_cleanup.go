@@ -17,7 +17,7 @@ type taskBulkCleanupItem = protocol.TaskBulkCleanupItem
 type taskBulkCleanupResult = protocol.TaskBulkCleanupResult
 
 const (
-	taskBulkCleanupDefaultPerIssueTimeout = 10 * time.Minute
+	taskBulkCleanupDefaultPerIssueTimeout = domain.IntegrationCloseTimeout
 	taskBulkCleanupMaxPerIssueTimeout     = time.Hour
 )
 

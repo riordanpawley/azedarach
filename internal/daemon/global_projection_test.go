@@ -86,6 +86,45 @@ func TestProjectGlobalViewLeavesHydratedOutOfViewTaskOutOfOrdering(t *testing.T)
 	}
 }
 
+func TestProjectGlobalTreeViewPreservesBranchesAcrossProjects(t *testing.T) {
+	now := time.Now().UTC()
+	alphaRoot := naming.IssueID("alpha-root")
+	betaRoot := naming.IssueID("beta-root")
+	projects := []protocol.GlobalProjectSnapshot{
+		{ProjectID: "alpha", Tasks: []domain.Task{
+			{ID: alphaRoot, Title: "Ordinary root", Status: domain.StatusInProgress, Priority: domain.P0, UpdatedAt: now},
+			{ID: "alpha-child", Title: "Human-waiting child", Status: domain.StatusInProgress, Priority: domain.P4, ParentID: &alphaRoot, Session: &domain.Session{Activity: "waiting-for-human"}, HasTmuxSession: true, UpdatedAt: now},
+		}},
+		{ProjectID: "beta", Tasks: []domain.Task{
+			{ID: betaRoot, Title: "Review root", Status: domain.StatusInReview, Priority: domain.P4, Session: &domain.Session{Activity: string(domain.SessionIdle)}, HasTmuxSession: true, UpdatedAt: now},
+			{ID: "beta-child", Title: "Review child", Status: domain.StatusInProgress, Priority: domain.P2, ParentID: &betaRoot, UpdatedAt: now},
+		}},
+	}
+
+	projection, err := projectGlobalView(domain.TreeBoardView(), projects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []protocol.ScopedIssueID{
+		{ProjectID: "beta", IssueID: betaRoot},
+		{ProjectID: "beta", IssueID: "beta-child"},
+		{ProjectID: "alpha", IssueID: alphaRoot},
+		{ProjectID: "alpha", IssueID: "alpha-child"},
+	}
+	if len(projection.Items) != len(want) {
+		t.Fatalf("items = %+v, want %d tree items", projection.Items, len(want))
+	}
+	for i, identity := range want {
+		if projection.Items[i].Identity != identity {
+			t.Fatalf("item identities = %+v, want %+v", projection.Items, want)
+		}
+		wantDepth := i % 2
+		if projection.Items[i].Depth != wantDepth {
+			t.Fatalf("item %s depth = %d, want %d", identity.IssueID, projection.Items[i].Depth, wantDepth)
+		}
+	}
+}
+
 func TestFilterGlobalProjectsUsesCanonicalScopedIdentity(t *testing.T) {
 	projects := []protocol.GlobalProjectSnapshot{{ProjectID: "alpha"}, {ProjectID: "beta"}}
 	selected := filterGlobalProjects(projects, protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeSelectedProjects, ProjectIDs: []naming.ProjectID{"beta"}})

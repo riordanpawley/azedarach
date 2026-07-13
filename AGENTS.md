@@ -41,6 +41,9 @@ just check-boundaries
 # Full Go test sweep
 go test ./...
 
+# Aggregate daemon race sweep (four sequential shards; 15m/shard, 45m aggregate)
+just test-race-daemon
+
 # Focused daemon/client boundary checks
 go test ./internal/tui ./internal/cli
 go test ./internal/daemon/... ./internal/client/...
@@ -207,6 +210,8 @@ fd "filename" -t f internal cmd
 3. Pre-merge review must test the candidate through real startup/store paths against safe temporary clones of the root user database and every registered project database. Never test candidate migrations on the originals.
 4. Require fresh, historical-upgrade, idempotent-reopen, rollback, drift, and real-database-clone evidence. Fresh-database tests alone are insufficient.
 5. Migration changes remain high risk and require three clean review passes after the final migration-affecting edit.
+6. Every migration ID must have exactly one embedded immutable artifact and a pinned SHA-256 checksum. Go-assisted migrations require a SQL/manifest artifact describing schema, data, validation, and ledger effects; callbacks may orchestrate but never replace the artifact.
+7. Registration must fail for duplicate IDs, missing/empty artifacts, checksum drift, or a registry/artifact mismatch. Applied ledger rows must record `artifact_checksum`; legacy rows may be backfilled once from the pinned catalog and must reject later mismatch.
 
 ## Active-Path Placeholder Policy
 

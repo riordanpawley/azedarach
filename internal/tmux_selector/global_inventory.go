@@ -692,6 +692,42 @@ func applyProjectViewOrdering(snapshot *Snapshot, projects []ProjectInventorySna
 	}
 }
 
+func visibleGlobalTreeDepths(items []protocol.GlobalViewProjectedItem, entries []InventoryEntry) map[string]int {
+	visible := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		visible[protocol.NormalizeProjectID(entry.ProjectID)+":"+entry.IssueID] = struct{}{}
+	}
+	depths := make(map[string]int, len(visible))
+	var ancestorDepths []int
+	var projectID string
+	for _, item := range items {
+		itemProjectID := protocol.NormalizeProjectID(item.Identity.ProjectID.String())
+		if itemProjectID != projectID {
+			projectID = itemProjectID
+			ancestorDepths = nil
+		}
+		rawDepth := maxInt(0, item.Depth)
+		if rawDepth < len(ancestorDepths) {
+			ancestorDepths = ancestorDepths[:rawDepth]
+		}
+		parentDepth := -1
+		if rawDepth > 0 && len(ancestorDepths) >= rawDepth {
+			parentDepth = ancestorDepths[rawDepth-1]
+		}
+		key := itemProjectID + ":" + item.Identity.IssueID.String()
+		effectiveDepth := parentDepth
+		if _, ok := visible[key]; ok {
+			effectiveDepth = parentDepth + 1
+			depths[key] = effectiveDepth
+		}
+		for len(ancestorDepths) < rawDepth {
+			ancestorDepths = append(ancestorDepths, parentDepth)
+		}
+		ancestorDepths = append(ancestorDepths, effectiveDepth)
+	}
+	return depths
+}
+
 func applyGlobalViewOrdering(snapshot *Snapshot, projection protocol.GlobalViewProjection) {
 	if snapshot == nil {
 		return
@@ -737,6 +773,15 @@ func applyGlobalViewOrdering(snapshot *Snapshot, projection protocol.GlobalViewP
 		filtered = append(filtered, entry)
 	}
 	snapshot.Entries = filtered
+	if projection.View.Layout == domain.BoardViewLayoutTreeList {
+		depths := visibleGlobalTreeDepths(projection.Items, snapshot.Entries)
+		for i := range snapshot.Entries {
+			key := protocol.NormalizeProjectID(snapshot.Entries[i].ProjectID) + ":" + snapshot.Entries[i].IssueID
+			if depth, ok := depths[key]; ok {
+				snapshot.Entries[i].ViewDepth = depth
+			}
+		}
+	}
 	sort.SliceStable(snapshot.Entries, func(i, j int) bool {
 		li, lok := ranks[protocol.NormalizeProjectID(snapshot.Entries[i].ProjectID)+":"+snapshot.Entries[i].IssueID]
 		rj, rok := ranks[protocol.NormalizeProjectID(snapshot.Entries[j].ProjectID)+":"+snapshot.Entries[j].IssueID]

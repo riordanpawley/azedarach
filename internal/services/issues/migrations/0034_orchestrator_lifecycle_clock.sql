@@ -1,0 +1,5 @@
+-- Go-assisted migration manifest.
+-- Schema: adds the orchestrator lifecycle clock projection fields when absent.
+-- Data: preserves existing orchestration rows and initializes new clock state.
+-- Validation: column inspection makes replay safe for partially upgraded stores.
+-- Ledger: Go orchestration records 0034_orchestrator_lifecycle_clock.

@@ -58,10 +58,11 @@ const (
 	defaultIssueContextRiskDays = 14
 	defaultOperationListLimit   = 50
 	sessionStartCommandTimeout  = 5 * time.Minute
-	branchMergeToBaseTimeout    = 2 * time.Minute
+	branchMergeToBaseTimeout    = domain.IntegrationClientTimeout
 	daemonCommandTimeout        = 15 * time.Second
 	prCommandTimeout            = 2 * time.Minute
-	issueCloseCleanupTimeout    = 10 * time.Minute
+	issueCloseCleanupTimeout    = domain.IntegrationClientTimeout
+	issueBulkCleanupItemTimeout = domain.IntegrationCloseTimeout
 	issueCreateCommandTimeout   = 10 * time.Second
 	issueCreateAutostartTimeout = 12 * time.Second
 	exitCodeHardFailure         = 1
@@ -437,6 +438,7 @@ type SessionCaptureOptions struct {
 	IssueID string
 	Lines   int
 	JSON    bool
+	Raw     bool
 }
 
 type WorktreeCreateOptions struct {
@@ -609,6 +611,14 @@ func ParseSessionRestartAllArgs(args []string) (SessionRestartAllOptions, error)
 }
 
 func ParseSessionCaptureArgs(args []string) (SessionCaptureOptions, error) {
+	return parseSessionCaptureArgs(args, false)
+}
+
+func ParseOrchestrateCaptureArgs(args []string) (SessionCaptureOptions, error) {
+	return parseSessionCaptureArgs(args, true)
+}
+
+func parseSessionCaptureArgs(args []string, allowRaw bool) (SessionCaptureOptions, error) {
 	opts := SessionCaptureOptions{Lines: 120}
 	fs := flag.NewFlagSet("session capture", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -617,6 +627,9 @@ func ParseSessionCaptureArgs(args []string) (SessionCaptureOptions, error) {
 	fs.StringVar(&opts.IssueID, "id", "", "issue id")
 	fs.IntVar(&opts.Lines, "lines", opts.Lines, "number of recent pane lines to capture")
 	fs.BoolVar(&opts.JSON, "json", false, "print JSON output")
+	if allowRaw {
+		fs.BoolVar(&opts.Raw, "raw", false, "print the unparsed pane capture")
+	}
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return SessionCaptureOptions{}, err
 	}
@@ -1311,29 +1324,9 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 }
 
 func SessionCaptureCommand(deps *Dependencies, opts SessionCaptureOptions) error {
-	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
-	defer cancel()
-	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
-		return err
-	}
-
-	var target sessionIssueTarget
-	var err error
-	if strings.TrimSpace(opts.Project) != "" {
-		target, err = resolveExplicitSessionStatusTarget(deps, opts.IssueID, opts.Project, opts.IssueID)
-	} else {
-		target, err = resolveSessionStatusTarget(deps, opts.IssueID)
-	}
+	result, err := captureSessionPane(deps, opts, "capturing session pane")
 	if err != nil {
 		return err
-	}
-	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
-	defer restoreProject()
-
-	deps.Logger.Info("capturing session pane", "project_id", target.ProjectID, "issue_id", target.IssueID, "lines", opts.Lines)
-	result, err := deps.DaemonClient.CaptureSession(ctx, target.IssueID, daemonclient.CaptureSessionOptions{Lines: opts.Lines})
-	if err != nil {
-		return fmt.Errorf("failed to capture session pane: %w", err)
 	}
 	if opts.JSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -1347,8 +1340,36 @@ func SessionCaptureCommand(deps *Dependencies, opts SessionCaptureOptions) error
 	return nil
 }
 
+func captureSessionPane(deps *Dependencies, opts SessionCaptureOptions, logMessage string) (protocol.SessionCaptureResponseBody, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return protocol.SessionCaptureResponseBody{}, err
+	}
+
+	var target sessionIssueTarget
+	var err error
+	if strings.TrimSpace(opts.Project) != "" {
+		target, err = resolveExplicitSessionStatusTarget(deps, opts.IssueID, opts.Project, opts.IssueID)
+	} else {
+		target, err = resolveSessionStatusTarget(deps, opts.IssueID)
+	}
+	if err != nil {
+		return protocol.SessionCaptureResponseBody{}, err
+	}
+	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
+	defer restoreProject()
+
+	deps.Logger.Info(logMessage, "project_id", target.ProjectID, "issue_id", target.IssueID, "lines", opts.Lines, "raw", opts.Raw)
+	result, err := deps.DaemonClient.CaptureSession(ctx, target.IssueID, daemonclient.CaptureSessionOptions{Lines: opts.Lines})
+	if err != nil {
+		return protocol.SessionCaptureResponseBody{}, fmt.Errorf("failed to capture session pane: %w", err)
+	}
+	return result, nil
+}
+
 func OrchestrateCaptureCommand(deps *Dependencies, opts SessionCaptureOptions) error {
-	return SessionCaptureCommand(deps, opts)
+	return orchestrateCaptureCommand(deps, opts)
 }
 
 func SessionDiagnoseCommand(deps *Dependencies, issueID string) error {
@@ -3762,7 +3783,7 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 }
 
 func ParseIssueCleanupArgs(args []string) (IssueCleanupOptions, error) {
-	opts := IssueCleanupOptions{Action: "closed", PerIssueTimeout: issueCloseCleanupTimeout}
+	opts := IssueCleanupOptions{Action: "closed", PerIssueTimeout: issueBulkCleanupItemTimeout}
 	var idsCSV, statusesCSV, updatedBefore string
 	fs := flag.NewFlagSet("issue cleanup", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -3777,8 +3798,8 @@ func ParseIssueCleanupArgs(args []string) (IssueCleanupOptions, error) {
 	fs.StringVar(&opts.Action, "action", "closed", "lifecycle action: closed or cancelled")
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "preview ordered actions without changing issues")
 	fs.BoolVar(&opts.JSON, "json", false, "output structured per-issue results")
-	fs.DurationVar(&opts.PerIssueTimeout, "per-ticket-timeout", issueCloseCleanupTimeout, "maximum time for each ticket cleanup")
-	fs.DurationVar(&opts.PerIssueTimeout, "per-issue-timeout", issueCloseCleanupTimeout, "deprecated alias for --per-ticket-timeout")
+	fs.DurationVar(&opts.PerIssueTimeout, "per-ticket-timeout", issueBulkCleanupItemTimeout, "maximum time for each ticket cleanup")
+	fs.DurationVar(&opts.PerIssueTimeout, "per-issue-timeout", issueBulkCleanupItemTimeout, "deprecated alias for --per-ticket-timeout")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCleanupOptions{}, err
 	}

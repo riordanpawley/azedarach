@@ -2,16 +2,20 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
 // mockRunner is a test implementation of CommandRunner.
@@ -499,16 +503,151 @@ func TestMergeCommandContextAddsDefaultTimeout(t *testing.T) {
 		t.Fatal("merge command context has no deadline")
 	}
 	remaining := time.Until(deadline)
-	if remaining <= mergeCommandTimeout-time.Second || remaining > mergeCommandTimeout {
-		t.Fatalf("merge command timeout remaining = %v, want close to %v", remaining, mergeCommandTimeout)
+	if remaining <= domain.IntegrationMergeTimeout-time.Second || remaining > domain.IntegrationMergeTimeout {
+		t.Fatalf("merge command timeout remaining = %v, want close to %v", remaining, domain.IntegrationMergeTimeout)
 	}
 
 	parent, parentCancel := context.WithTimeout(context.Background(), time.Hour)
 	defer parentCancel()
 	ctx, cancel = mergeCommandContext(parent)
 	defer cancel()
-	if ctx != parent {
-		t.Fatal("merge command context should preserve caller deadline context")
+	deadline, ok = ctx.Deadline()
+	if !ok {
+		t.Fatal("merge command context derived from long parent has no deadline")
+	}
+	remaining = time.Until(deadline)
+	if remaining <= domain.IntegrationMergeTimeout-time.Second || remaining > domain.IntegrationMergeTimeout {
+		t.Fatalf("merge command timeout with long parent = %v, want close to %v", remaining, domain.IntegrationMergeTimeout)
+	}
+
+	shortParent, shortCancel := context.WithTimeout(context.Background(), time.Minute)
+	defer shortCancel()
+	ctx, cancel = mergeCommandContext(shortParent)
+	defer cancel()
+	deadline, ok = ctx.Deadline()
+	if !ok || time.Until(deadline) > time.Minute {
+		t.Fatalf("merge command should preserve shorter parent deadline, deadline=%v ok=%t", deadline, ok)
+	}
+}
+
+func TestMergeGateBudgetLeavesFinalizationReserve(t *testing.T) {
+	if got := domain.IntegrationMergeTimeout - domain.IntegrationValidationTimeout; got < domain.IntegrationFinalizeReserve {
+		t.Fatalf("merge finalization reserve = %v, want at least %v", got, domain.IntegrationFinalizeReserve)
+	}
+	scriptsDir := filepath.Join("..", "..", "..", "scripts")
+	gate, err := os.ReadFile(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"))
+	if err != nil {
+		t.Fatalf("read merge gate: %v", err)
+	}
+	wantWall := fmt.Sprintf("AZEDARACH_MERGE_GATE_TIMEOUT:-%.0fm", domain.IntegrationValidationTimeout.Minutes())
+	if !strings.Contains(string(gate), wantWall) {
+		t.Fatalf("merge gate does not enforce shared wall validation budget %q", wantWall)
+	}
+	body, err := os.ReadFile(filepath.Join(scriptsDir, "git-merge-rebase-gate-body.sh"))
+	if err != nil {
+		t.Fatalf("read merge gate body: %v", err)
+	}
+	wantTest := fmt.Sprintf("go test -timeout %.0fm ./...", domain.IntegrationTestBinaryTimeout.Minutes())
+	if !strings.Contains(string(body), wantTest) {
+		t.Fatalf("merge gate body does not enforce test binary budget %q", wantTest)
+	}
+}
+
+func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
+	// The wall budget includes scheduling the gate body and fake Go process.
+	// Keep enough startup reserve for this test to remain meaningful when all
+	// repository packages are being compiled and tested concurrently.
+	const timeoutBudget = 10 * time.Second
+
+	timeoutPath, err := exec.LookPath("timeout")
+	if err != nil {
+		timeoutPath, err = exec.LookPath("gtimeout")
+	}
+	if err != nil {
+		t.Skip("GNU timeout unavailable")
+	}
+	killPath, err := exec.LookPath("kill")
+	if err != nil {
+		t.Skip("POSIX kill unavailable")
+	}
+
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	scriptsDir := filepath.Join(repo, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	sourceScriptsDir := filepath.Join("..", "..", "..", "scripts")
+	for _, name := range []string{"git-merge-rebase-gate.sh", "git-merge-rebase-gate-body.sh"} {
+		content, readErr := os.ReadFile(filepath.Join(sourceScriptsDir, name))
+		if readErr != nil {
+			t.Fatalf("read %s: %v", name, readErr)
+		}
+		if writeErr := os.WriteFile(filepath.Join(scriptsDir, name), content, 0o755); writeErr != nil {
+			t.Fatalf("write %s: %v", name, writeErr)
+		}
+	}
+	fakeBin := filepath.Join(repo, "fake-bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	childPIDFile := filepath.Join(repo, "timeout-child.pid")
+	fakeGo := "#!/bin/sh\nif [ \"$1\" = build ]; then exit 0; fi\nsleep 30 &\nchild_pid=$!\nprintf '%s\\n' \"$child_pid\" >\"$AZEDARACH_TEST_CHILD_PID_FILE\"\necho retained-timeout-marker\nwait \"$child_pid\"\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "go"), []byte(fakeGo), 0o755); err != nil {
+		t.Fatalf("write fake go: %v", err)
+	}
+
+	cmd := exec.Command(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"))
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"AZEDARACH_MERGE_GATE_TIMEOUT="+timeoutBudget.String(),
+		"AZEDARACH_TEST_CHILD_PID_FILE="+childPIDFile,
+		"PATH="+fakeBin+string(os.PathListSeparator)+filepath.Dir(timeoutPath)+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	startedAt := time.Now()
+	output, runErr := cmd.CombinedOutput()
+	elapsed := time.Since(startedAt)
+	if runErr == nil {
+		t.Fatal("merge gate timeout error = nil")
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != 124 {
+		t.Fatalf("merge gate timeout error = %v, output=%s", runErr, output)
+	}
+	if !strings.Contains(string(output), "retained-timeout-marker") || !strings.Contains(string(output), timeoutBudget.String()+" wall-clock budget") {
+		t.Fatalf("merge gate timeout output did not retain child diagnostics:\n%s", output)
+	}
+	if elapsed < timeoutBudget-time.Second {
+		t.Fatalf("merge gate timeout elapsed = %v, want wall-clock budget enforcement", elapsed)
+	}
+	if elapsed > timeoutBudget+5*time.Second {
+		t.Fatalf("merge gate timeout elapsed = %v, want return within %v", elapsed, timeoutBudget+5*time.Second)
+	}
+	childPIDBytes, err := os.ReadFile(childPIDFile)
+	if err != nil {
+		t.Fatalf("read timed-out child PID: %v", err)
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(childPIDBytes)))
+	if err != nil {
+		t.Fatalf("parse timed-out child PID %q: %v", childPIDBytes, err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		probeOutput, probeErr := exec.Command(killPath, "-0", strconv.Itoa(childPID)).CombinedOutput()
+		if probeErr != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(probeErr, &exitErr) {
+				t.Fatalf("probe timed-out child process %d: %v", childPID, probeErr)
+			}
+			if strings.Contains(strings.ToLower(string(probeOutput)), "not permitted") {
+				t.Fatalf("probe timed-out child process %d: %s", childPID, probeOutput)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed-out child process %d still running after merge gate returned", childPID)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
