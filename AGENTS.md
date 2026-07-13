@@ -56,6 +56,15 @@ go test ./internal/tui ./internal/cli ./internal/daemon/...
   - stop tests should seed desired-stopped intent before runtime cleanup
   - do not seed a desired-stopped row when the assertion is about runtime recovery or reattachment
 
+## Complete Test-Failure Batch Workflow
+
+- When a broad validation command fails, do not fix the first visible test and repeatedly rerun in a one-test-at-a-time loop.
+- Run the complete relevant suite once with machine-readable output, such as `go test -json ./... -count=1 -timeout 10m`, and preserve the output outside the repository worktree when it is too large for the terminal.
+- Extract the full set of failed tests and packages from that run, then inspect the associated output and classify failures by shared root cause. Truncated terminal output is not evidence that only the visible failure exists.
+- Repair each coherent failure class as a batch. Prefer one shared fixture or production-boundary correction when many tests violate the same contract; do not bulk-relax expectations until the intended production semantics are established.
+- After the batch repair, rerun the complete suite and collect the next complete failure set. Use focused tests for diagnosis and regression development, but never substitute isolated green tests for the complete rerun.
+- If a complete rerun exposes unrelated or flaky failures, reproduce and classify them explicitly. Fix them in scope when appropriate; otherwise create durable follow-up issues with the failing commands and evidence before accepting the scoped change.
+
 ## Fast Search Commands
 
 ```bash

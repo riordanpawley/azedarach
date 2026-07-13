@@ -52,8 +52,12 @@ Reset the clean-pass count to 0 after any code or test change. Do not reset it f
    - Leave unrelated cleanup alone; create follow-up work only when it is real and outside scope.
 
 5. Validate.
-   - Run targeted tests first, then broader checks when risk or repo policy requires them.
-   - If validation fails, treat the failure as a finding and continue the loop.
+   - Run targeted tests while developing a regression, then run the complete relevant suite when risk or repo policy requires it.
+   - When a broad suite fails, capture one complete machine-readable run (for Go, prefer `go test -json ... -count=1`), extract every failed test/package, and classify the full failure set before editing.
+   - Fix failures by coherent root-cause batch rather than repairing the first visible test and rerunning serially. Truncated console output must not be treated as the complete failure set.
+   - Rerun the complete suite after the batch. Focused green tests support diagnosis but do not replace the complete rerun.
+   - Classify unrelated or flaky failures explicitly; fix them when in scope or preserve durable follow-up evidence rather than silently ignoring them.
+   - If validation fails, treat the complete classified failure set as findings and continue the loop.
    - Record commands and key assertions for the final report and issue notes.
 
 6. Repeat.
