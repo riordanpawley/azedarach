@@ -11,6 +11,7 @@ import (
 )
 
 func TestBoardViewsSeedDefaultsAndIsolateProjects(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	t.Cleanup(func() {
@@ -51,6 +52,7 @@ func TestBoardViewsSeedDefaultsAndIsolateProjects(t *testing.T) {
 }
 
 func TestBoardViewCorruptDefinitionFailsSafely(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	t.Cleanup(func() {
@@ -80,6 +82,7 @@ func TestBoardViewCorruptDefinitionFailsSafely(t *testing.T) {
 }
 
 func TestBoardViewInvalidTypedDefinitionFailsSafely(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	t.Cleanup(func() {
@@ -110,6 +113,7 @@ func TestBoardViewInvalidTypedDefinitionFailsSafely(t *testing.T) {
 }
 
 func TestBoardViewsReseedBuiltInDefinitions(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	t.Cleanup(func() {
@@ -146,6 +150,7 @@ func TestBoardViewsReseedBuiltInDefinitions(t *testing.T) {
 }
 
 func TestBoardViewsMigrateLegacyBuiltInsAndPreserveCustomIDConflict(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	t.Cleanup(func() { _ = client.CloseDB() })
@@ -199,6 +204,7 @@ func TestBoardViewsMigrateLegacyBuiltInsAndPreserveCustomIDConflict(t *testing.T
 }
 
 func TestBoardViewsCatalogMigrationRollsBackOnCorruptIDConflict(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	t.Cleanup(func() { _ = client.CloseDB() })

@@ -10,6 +10,7 @@ import (
 )
 
 func TestListProjectIssueObservationEventsProvidesDurableCursor(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	writer := newTestClientAtPath(t, path, slog.Default())

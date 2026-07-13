@@ -12,6 +12,7 @@ import (
 )
 
 func TestBeginOrchestrationStartIsCrossProcessAtomic(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	first := newTestClientAtPath(t, path, slog.Default())
@@ -60,6 +61,7 @@ func TestBeginOrchestrationStartIsCrossProcessAtomic(t *testing.T) {
 }
 
 func TestCompensateOrchestrationStartDurablyReleasesOnlyAcquiredClaim(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	t.Cleanup(func() { _ = client.CloseDB() })
@@ -115,6 +117,7 @@ func TestCompensateOrchestrationStartDurablyReleasesOnlyAcquiredClaim(t *testing
 }
 
 func TestCompleteOrchestrationStartIsIdempotent(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	t.Cleanup(func() { _ = client.CloseDB() })
@@ -138,6 +141,7 @@ func TestCompleteOrchestrationStartIsIdempotent(t *testing.T) {
 }
 
 func TestOrchestrationStartResumesSameIntentAfterClientRestart(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	first := newTestClientAtPath(t, path, slog.Default())

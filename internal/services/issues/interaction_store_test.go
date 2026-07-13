@@ -12,6 +12,7 @@ import (
 )
 
 func TestResolveInteractionAtomicEffectsAndRollback(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	c := newTestClient(t)
 	issueID, err := c.Create(ctx, CreateTaskParams{Title: "before", Type: domain.TypeTask, Status: domain.StatusOpen})
@@ -67,6 +68,7 @@ func TestResolveInteractionAtomicEffectsAndRollback(t *testing.T) {
 }
 
 func TestResolveInteractionAnswerOnlyPreservesIssueMetadataAndObservations(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	c := newTestClient(t)
 	issueID, err := c.Create(ctx, CreateTaskParams{Title: "unchanged", Type: domain.TypeTask, Status: domain.StatusOpen})
@@ -110,6 +112,7 @@ func TestResolveInteractionAnswerOnlyPreservesIssueMetadataAndObservations(t *te
 }
 
 func TestResolveInteractionSignificantAnswerWithoutDurableEffects(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	c := newTestClient(t)
 	issueID, err := c.Create(ctx, CreateTaskParams{Title: "unchanged", Type: domain.TypeTask, Status: domain.StatusOpen})
@@ -145,6 +148,7 @@ func TestResolveInteractionSignificantAnswerWithoutDurableEffects(t *testing.T) 
 }
 
 func TestResolveInteractionUpdatesLinkedRequirementAndTracesSignificantAnswer(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	c := newTestClient(t)
 	issueID, err := c.Create(ctx, CreateTaskParams{Title: "issue", Type: domain.TypeTask, Status: domain.StatusOpen})
@@ -189,6 +193,7 @@ func TestResolveInteractionUpdatesLinkedRequirementAndTracesSignificantAnswer(t 
 }
 
 func TestResolveInteractionCreatesExplicitDecision(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	c := newTestClient(t)
 	issueID, err := c.Create(ctx, CreateTaskParams{Title: "issue", Type: domain.TypeTask, Status: domain.StatusOpen})
@@ -221,6 +226,7 @@ func TestResolveInteractionCreatesExplicitDecision(t *testing.T) {
 }
 
 func TestResolveInteractionLinksExistingDecision(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	c := newTestClient(t)
 	issueID, err := c.Create(ctx, CreateTaskParams{Title: "issue", Type: domain.TypeTask, Status: domain.StatusOpen})
@@ -257,6 +263,7 @@ func TestResolveInteractionLinksExistingDecision(t *testing.T) {
 }
 
 func TestResolveInteractionSpecFailureRollsBackIssueAndResolution(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	c := newTestClient(t)
 	issueID, err := c.Create(ctx, CreateTaskParams{Title: "before", Description: "before", Type: domain.TypeTask, Status: domain.StatusOpen})
@@ -308,6 +315,7 @@ func interactionTestTask(t *testing.T, ctx context.Context, c *Client, id string
 }
 
 func TestInteractionStoreDurabilityDecisionKeyAndStaleCache(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	writer, reader := newTestClientAtPath(t, path, nil), newTestClientAtPath(t, path, nil)
@@ -354,6 +362,7 @@ func TestInteractionStoreDurabilityDecisionKeyAndStaleCache(t *testing.T) {
 }
 
 func TestInteractionStoreRejectsStaleRevision(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	c := newTestClient(t)
 	if _, err := c.List(ctx); err != nil {
@@ -381,6 +390,7 @@ func TestInteractionStoreRejectsStaleRevision(t *testing.T) {
 }
 
 func TestInteractionStoreRejectsBypassedTransition(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	c := newTestClient(t)
 	if _, err := c.List(ctx); err != nil {
@@ -401,6 +411,7 @@ func TestInteractionStoreRejectsBypassedTransition(t *testing.T) {
 }
 
 func TestInteractionStoreReadsLegacyStringAnswerAuditAndRewritesStructuredFinal(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	c := newTestClient(t)
 	issueID, err := c.Create(ctx, CreateTaskParams{Title: "Issue", Type: domain.TypeTask, Status: domain.StatusOpen})

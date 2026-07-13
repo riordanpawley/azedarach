@@ -7,6 +7,7 @@ import (
 )
 
 func TestExportProjectionUsesStableSchemaFingerprintAndMonotonicSourceRevision(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	c := newTestClient(t)
 	first, err := c.ExportProjection(ctx, "project-a")

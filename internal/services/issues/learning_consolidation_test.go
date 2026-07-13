@@ -12,6 +12,7 @@ import (
 )
 
 func TestLearningConsolidationSuggestionsExcludePrivateAndRemainNonMutating(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	left, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "Use bounded retries for daemon operations", Evidence: "PRIVATE-TOKEN-123", EvidencePrivate: true, Tags: []string{"daemon"}})
@@ -39,6 +40,7 @@ func TestLearningConsolidationSuggestionsExcludePrivateAndRemainNonMutating(t *t
 }
 
 func TestLearningConsolidationConfirmPreservesSourcesAndPromotionState(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	left, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "Prefer deterministic ordering for review queues", Evidence: "left evidence", Tags: []string{"ordering"}})
@@ -97,6 +99,7 @@ func TestLearningConsolidationConfirmPreservesSourcesAndPromotionState(t *testin
 }
 
 func TestLearningConsolidationSuggestionsExcludeLifecycleIneligibleRows(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	base, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "Keep bounded daemon retry operations deterministic", Evidence: "base"})
@@ -117,6 +120,7 @@ func TestLearningConsolidationSuggestionsExcludeLifecycleIneligibleRows(t *testi
 }
 
 func TestLearningConsolidationCandidateRetrievalIsBounded(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	db, err := client.dbHandle()
@@ -153,6 +157,7 @@ func TestLearningConsolidationCandidateRetrievalIsBounded(t *testing.T) {
 }
 
 func TestLearningConsolidationCursorEventuallyCoversBeyondFirstWindow(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	db, err := client.dbHandle()
@@ -207,6 +212,7 @@ func TestLearningConsolidationCursorEventuallyCoversBeyondFirstWindow(t *testing
 }
 
 func TestLearningConsolidationAuditFailureRollsBack(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	left, _ := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "Keep daemon events ordered deterministically", Evidence: "a"})
@@ -231,6 +237,7 @@ func TestLearningConsolidationAuditFailureRollsBack(t *testing.T) {
 }
 
 func TestLearningConflictSuggestionCanBeRejectedWithoutLifecycleMutation(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	left, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "Use automatic promotion after human review", Evidence: "a"})
@@ -257,6 +264,7 @@ func TestLearningConflictSuggestionCanBeRejectedWithoutLifecycleMutation(t *test
 }
 
 func TestLearningConsolidationRejectsStaleSuggestionMember(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	left, _ := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "Use stable ordering for learning review", Evidence: "a"})

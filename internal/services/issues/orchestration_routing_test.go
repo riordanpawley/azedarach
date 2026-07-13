@@ -14,6 +14,7 @@ import (
 )
 
 func TestRouteOrchestrationCandidateBacklogsAndReleasesOnlyExecution(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	id, err := client.Create(ctx, CreateTaskParams{Title: "Thin issue", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
@@ -46,6 +47,7 @@ func TestRouteOrchestrationCandidateBacklogsAndReleasesOnlyExecution(t *testing.
 }
 
 func TestRouteOrchestrationCandidateCreatesIdempotentInteractionAndProjectsWaitingHuman(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	id, err := client.Create(ctx, CreateTaskParams{Title: "Needs decision", Description: "Choose deployment policy", Acceptance: "Policy is explicit", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
@@ -75,6 +77,7 @@ func TestRouteOrchestrationCandidateCreatesIdempotentInteractionAndProjectsWaiti
 }
 
 func TestRouteOrchestrationCandidateRejectsForeignExecutionOwner(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	id, err := client.Create(ctx, CreateTaskParams{Title: "Thin issue", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
@@ -91,6 +94,7 @@ func TestRouteOrchestrationCandidateRejectsForeignExecutionOwner(t *testing.T) {
 }
 
 func TestRouteOrchestrationCandidateInteractionIsIdempotentAcrossClients(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	first := newTestClientAtPath(t, path, slog.Default())

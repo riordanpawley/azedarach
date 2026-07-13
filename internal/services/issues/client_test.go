@@ -28,6 +28,7 @@ import (
 )
 
 func TestClientSQLiteBusyPolicyDefaultsAndOverrides(t *testing.T) {
+	parallelIssueStoreTest(t)
 	defaultClient := NewClientAtPath(filepath.Join(t.TempDir(), "default.db"), nil)
 	t.Cleanup(func() { require.NoError(t, defaultClient.CloseDB()) })
 	assert.Equal(t, 5*time.Second, defaultClient.sqliteBusyTimeout)
@@ -55,6 +56,7 @@ func TestClientSQLiteBusyPolicyDefaultsAndOverrides(t *testing.T) {
 }
 
 func TestClient_CRUDLifecycle(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -185,6 +187,7 @@ func TestClient_CRUDLifecycle(t *testing.T) {
 }
 
 func TestClient_V2StateAuthorityDrivesLifecycleAndBacklogReadiness(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -293,6 +296,7 @@ func TestClient_V2StateAuthorityDrivesLifecycleAndBacklogReadiness(t *testing.T)
 }
 
 func TestClient_CancelledOutcomeCountsAsClosedForParentClosure(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -329,6 +333,7 @@ func TestClient_CancelledOutcomeCountsAsClosedForParentClosure(t *testing.T) {
 }
 
 func TestClient_ArchiveVisibilityUsesArchivedAtAuthority(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-v2-archive"
@@ -369,6 +374,7 @@ func TestClient_ArchiveVisibilityUsesArchivedAtAuthority(t *testing.T) {
 }
 
 func TestClient_UpdateDetailsPreservesImplementationsWhenUnset(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -397,6 +403,7 @@ func TestClient_UpdateDetailsPreservesImplementationsWhenUnset(t *testing.T) {
 }
 
 func TestClient_ExternalIssueRefsAreBackendNeutralMetadata(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -447,6 +454,7 @@ func TestClient_ExternalIssueRefsAreBackendNeutralMetadata(t *testing.T) {
 }
 
 func TestClient_GitHubExternalRefHydratesPullRequestSummary(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -483,6 +491,7 @@ func TestClient_GitHubExternalRefHydratesPullRequestSummary(t *testing.T) {
 }
 
 func TestClient_GetManyWithRuntimeFiltersRequestedActiveIssues(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -527,6 +536,7 @@ func TestClient_GetManyWithRuntimeFiltersRequestedActiveIssues(t *testing.T) {
 }
 
 func TestClient_ArchiveModeRuntimeReads(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-archive-mode"
@@ -578,6 +588,7 @@ func TestClient_ArchiveModeRuntimeReads(t *testing.T) {
 }
 
 func TestClient_UnarchiveRestoresActiveRuntimeReadsAndSearch(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-unarchive"
@@ -609,6 +620,7 @@ func TestClient_UnarchiveRestoresActiveRuntimeReadsAndSearch(t *testing.T) {
 }
 
 func TestClient_UnarchiveChildWithArchivedParentIsBlockedUnlessParentsIncluded(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -643,6 +655,7 @@ func TestClient_UnarchiveChildWithArchivedParentIsBlockedUnlessParentsIncluded(t
 }
 
 func TestClient_UnarchiveCascadeChildrenRestoresArchivedSubtree(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -668,6 +681,7 @@ func TestClient_UnarchiveCascadeChildrenRestoresArchivedSubtree(t *testing.T) {
 }
 
 func TestClient_LinearSyncExternalRefsUseCanonicalOriginTable(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -717,6 +731,7 @@ func TestClient_LinearSyncExternalRefsUseCanonicalOriginTable(t *testing.T) {
 }
 
 func TestClient_LinearSyncExternalRefsSynthesizeBaselineForLegacyOriginRows(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -751,6 +766,7 @@ func TestClient_LinearSyncExternalRefsSynthesizeBaselineForLegacyOriginRows(t *t
 }
 
 func TestClient_MigratesLinearSyncRefsIntoCanonicalOriginTable(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	client := NewClientAtPath(dbPath, slog.Default())
@@ -804,6 +820,7 @@ func TestClient_MigratesLinearSyncRefsIntoCanonicalOriginTable(t *testing.T) {
 }
 
 func TestClient_NormalizeProviderDisplayKeyIssueIDsMigratesDurableRefs(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -929,6 +946,7 @@ func intPtr(value int) *int {
 }
 
 func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-runtime"
@@ -1001,6 +1019,7 @@ func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
 }
 
 func TestClient_SearchWithRuntimeUsesFTSIndexAndHydratesMatches(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-search-runtime"
@@ -1064,6 +1083,7 @@ func TestClient_SearchWithRuntimeUsesFTSIndexAndHydratesMatches(t *testing.T) {
 }
 
 func TestClient_SearchWithRuntimeMaintainsFTSOnUpdateAndArchive(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-search-maintenance"
@@ -1102,6 +1122,7 @@ func TestClient_SearchWithRuntimeMaintainsFTSOnUpdateAndArchive(t *testing.T) {
 }
 
 func TestClient_ListWithRuntimeReadsSessionObservations(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-runtime-observation"
@@ -1139,6 +1160,7 @@ func TestClient_ListWithRuntimeReadsSessionObservations(t *testing.T) {
 }
 
 func TestClient_ListWithRuntimeReadsCanonicalHookActivityProjection(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-hook-pane-activity"
@@ -1216,6 +1238,7 @@ func TestClient_ListWithRuntimeReadsCanonicalHookActivityProjection(t *testing.T
 }
 
 func TestClient_ListSummariesWithRuntimeKeepsParentAndRuntimeProjection(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-summary-runtime"
@@ -1307,6 +1330,7 @@ func TestClient_ListSummariesWithRuntimeKeepsParentAndRuntimeProjection(t *testi
 }
 
 func TestClient_HydrateRuntimePreservesDurableFieldsAndOverlaysProjection(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-hydrate-runtime"
@@ -1392,6 +1416,7 @@ func TestClient_HydrateRuntimePreservesDurableFieldsAndOverlaysProjection(t *tes
 }
 
 func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-graph-readiness"
@@ -1475,6 +1500,7 @@ func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
 }
 
 func TestClient_ListGraphReadinessWithRuntimeBoundsProjectCandidatesAndCountsAllOpen(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	for i := 0; i < 12; i++ {
@@ -1496,6 +1522,7 @@ func TestClient_ListGraphReadinessWithRuntimeBoundsProjectCandidatesAndCountsAll
 }
 
 func TestClient_ListGraphReadinessWithRuntimeHydratesBoundedProjectContracts(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	_, err := client.Create(ctx, CreateTaskParams{
@@ -1516,6 +1543,7 @@ func TestClient_ListGraphReadinessWithRuntimeHydratesBoundedProjectContracts(t *
 }
 
 func TestClient_ListParentChildSubtreeWithRuntimeScopesToTargetClosure(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-close-subtree"
@@ -1614,6 +1642,7 @@ func TestClient_ListParentChildSubtreeWithRuntimeScopesToTargetClosure(t *testin
 }
 
 func TestGraphReadinessContextIDsQueryUsesClosureIndexes(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	db, err := client.dbHandle()
@@ -1628,6 +1657,7 @@ func TestGraphReadinessContextIDsQueryUsesClosureIndexes(t *testing.T) {
 }
 
 func TestClient_ListWithRuntimeUsesObservedSessionState(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-runtime-observed"
@@ -1659,6 +1689,7 @@ func TestClient_ListWithRuntimeUsesObservedSessionState(t *testing.T) {
 }
 
 func TestClient_GetManyWithDependencyContextRuntimeIncludesRequestedAndDirectContext(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-batch-context"
@@ -1702,6 +1733,7 @@ func TestClient_GetManyWithDependencyContextRuntimeIncludesRequestedAndDirectCon
 }
 
 func TestClient_GetManyWithDependencyContextRuntimeIncludesAncestorContextWhenRequested(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-batch-ancestor-context"
@@ -1752,6 +1784,7 @@ func TestClient_GetManyWithDependencyContextRuntimeIncludesAncestorContextWhenRe
 }
 
 func TestClient_GetManyWithDependencyContextRuntimeCanOmitDependents(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-batch-no-dependents"
@@ -1798,6 +1831,7 @@ func TestClient_GetManyWithDependencyContextRuntimeCanOmitDependents(t *testing.
 }
 
 func TestClient_GetManyWithDependencyContextRuntimeCanLimitDependentsToParentChild(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-parent-child-dependents"
@@ -1839,6 +1873,7 @@ func TestClient_GetManyWithDependencyContextRuntimeCanLimitDependentsToParentChi
 }
 
 func TestClient_GetManyMetadataWithAncestorContextRuntimeIsLean(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-batch-metadata-ancestor"
@@ -1888,6 +1923,7 @@ func TestClient_GetManyMetadataWithAncestorContextRuntimeIsLean(t *testing.T) {
 }
 
 func TestClient_GetManyMetadataWithRuntimeIncludesCachedGitProjection(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-metadata-runtime-git"
@@ -1949,6 +1985,7 @@ func TestClient_GetManyMetadataWithRuntimeIncludesCachedGitProjection(t *testing
 }
 
 func TestClient_MetadataRuntimeUpdatedAtIgnoresProjectionRefreshTimestamps(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-runtime-refresh"
@@ -1997,6 +2034,7 @@ func TestClient_MetadataRuntimeUpdatedAtIgnoresProjectionRefreshTimestamps(t *te
 }
 
 func TestTaskRuntimeProjectionQueryFiltersRuntimeCTEsForRequestedIDs(t *testing.T) {
+	parallelIssueStoreTest(t)
 	query, args := taskRuntimeProjectionQuery("proj-batch-context", true, " second ", "", "second", "third")
 
 	assert.Equal(t, []any{
@@ -2019,6 +2057,7 @@ func TestTaskRuntimeProjectionQueryFiltersRuntimeCTEsForRequestedIDs(t *testing.
 }
 
 func TestTaskRuntimeProjectionFilteredQueryUsesProjectionIndexes(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	db, err := client.dbHandle()
@@ -2033,6 +2072,7 @@ func TestTaskRuntimeProjectionFilteredQueryUsesProjectionIndexes(t *testing.T) {
 }
 
 func TestTaskDependencyRowsParentOnlyQueryUsesActiveIssueTypeIndex(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	db, err := client.dbHandle()
@@ -2060,6 +2100,7 @@ func TestTaskDependencyRowsParentOnlyQueryUsesActiveIssueTypeIndex(t *testing.T)
 }
 
 func TestClient_GetRuntimeWorktreeIssueContextScopesToRequestedIssuesAndAncestors(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2117,6 +2158,7 @@ func TestClient_GetRuntimeWorktreeIssueContextScopesToRequestedIssuesAndAncestor
 }
 
 func TestSQLiteHotQueryPlansUseExpectedIndexes(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	db, err := client.dbHandle()
@@ -2215,6 +2257,7 @@ func TestSQLiteHotQueryPlansUseExpectedIndexes(t *testing.T) {
 }
 
 func TestClient_SQLiteReadLogsIncludeStableAttribution(t *testing.T) {
+	parallelIssueStoreTest(t)
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	client := newTestClientWithLogger(t, logger)
@@ -2241,6 +2284,7 @@ func TestClient_SQLiteReadLogsIncludeStableAttribution(t *testing.T) {
 }
 
 func TestClient_UpdateWithRuntimeReturnsChangedTask(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-update-runtime"
@@ -2282,6 +2326,7 @@ func TestClient_UpdateWithRuntimeReturnsChangedTask(t *testing.T) {
 }
 
 func TestClient_AppendNotes(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2306,6 +2351,7 @@ func TestClient_AppendNotes(t *testing.T) {
 }
 
 func TestClient_IssueObservationEventsRecordIssueMutations(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2350,6 +2396,7 @@ func TestClient_IssueObservationEventsRecordIssueMutations(t *testing.T) {
 }
 
 func TestClient_IssueOwnershipClaimConflictReleaseAndExpiredTakeover(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2425,6 +2472,7 @@ func TestClient_IssueOwnershipClaimConflictReleaseAndExpiredTakeover(t *testing.
 }
 
 func TestClient_CoordinationLeasesArePurposeScopedAndPreserveExecutionOwner(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	t.Cleanup(func() { require.NoError(t, client.CloseDB()) })
@@ -2463,6 +2511,7 @@ func TestClient_CoordinationLeasesArePurposeScopedAndPreserveExecutionOwner(t *t
 }
 
 func TestClient_AppendIssueObservationEventRecordsSourceMetadata(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2506,6 +2555,7 @@ func TestClient_AppendIssueObservationEventRecordsSourceMetadata(t *testing.T) {
 }
 
 func TestClient_ListIssueObservationEventsNewestFirst(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2552,6 +2602,7 @@ func TestClient_ListIssueObservationEventsNewestFirst(t *testing.T) {
 }
 
 func TestClient_IssueObservationEventsSurviveHardDelete(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2574,6 +2625,7 @@ func TestClient_IssueObservationEventsSurviveHardDelete(t *testing.T) {
 }
 
 func TestClient_CreateWithParentDependency(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2600,6 +2652,7 @@ func TestClient_CreateWithParentDependency(t *testing.T) {
 }
 
 func TestClient_CreateWithOpenChildReopensClosedParent(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2626,6 +2679,7 @@ func TestClient_CreateWithOpenChildReopensClosedParent(t *testing.T) {
 }
 
 func TestClient_UpdatePreventsClosingParentWithOpenChildren(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2660,6 +2714,7 @@ func TestClient_UpdatePreventsClosingParentWithOpenChildren(t *testing.T) {
 }
 
 func TestClient_UpdateAllowsClosingParentWhenChildrenAreClosed(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2688,6 +2743,7 @@ func TestClient_UpdateAllowsClosingParentWhenChildrenAreClosed(t *testing.T) {
 }
 
 func TestClient_AddAndRemoveDependency(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2747,6 +2803,7 @@ func TestClient_AddAndRemoveDependency(t *testing.T) {
 }
 
 func TestClient_RemoveDependencyConfirmationIsNotRequiredForRelatedEdges(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2784,6 +2841,7 @@ func TestClient_RemoveDependencyConfirmationIsNotRequiredForRelatedEdges(t *test
 }
 
 func TestClient_RemoveParentChildActiveChildRequiresParentOrphanConfirmation(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2813,6 +2871,7 @@ func TestClient_RemoveParentChildActiveChildRequiresParentOrphanConfirmation(t *
 }
 
 func TestClient_RemoveParentChildRuntimeChildRequiresParentOrphanConfirmation(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-parent-orphan"
@@ -2853,6 +2912,7 @@ func TestClient_RemoveParentChildRuntimeChildRequiresParentOrphanConfirmation(t 
 }
 
 func TestClient_AddDependencyCanonicalizesLegacyAliasesOnNonEpicTasks(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2925,6 +2985,7 @@ func TestClient_AddDependencyCanonicalizesLegacyAliasesOnNonEpicTasks(t *testing
 }
 
 func TestClient_AddDependencyPreventsDuplicateEdges(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2965,6 +3026,7 @@ func TestClient_AddDependencyPreventsDuplicateEdges(t *testing.T) {
 }
 
 func TestClient_AddParentChildDependencyReopensClosedParentForOpenChild(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -2992,6 +3054,7 @@ func TestClient_AddParentChildDependencyReopensClosedParentForOpenChild(t *testi
 }
 
 func TestClient_AddParentChildDependencyKeepsClosedParentWhenChildClosed(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -3020,6 +3083,7 @@ func TestClient_AddParentChildDependencyKeepsClosedParentWhenChildClosed(t *test
 }
 
 func TestClient_AddParentChildDependencyGuardsParentMoves(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -3076,6 +3140,7 @@ func TestClient_AddParentChildDependencyGuardsParentMoves(t *testing.T) {
 }
 
 func TestClient_GraphClosureMaintainsParentChildMutations(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -3150,6 +3215,7 @@ func TestClient_GraphClosureMaintainsParentChildMutations(t *testing.T) {
 }
 
 func TestClient_GraphClosureCyclePreventionLeavesProjectionUnchanged(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -3196,6 +3262,7 @@ func TestClient_GraphClosureCyclePreventionLeavesProjectionUnchanged(t *testing.
 }
 
 func TestClient_GraphClosureReadAPIsRejectUnsupportedDependencyTypes(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -3209,6 +3276,7 @@ func TestClient_GraphClosureReadAPIsRejectUnsupportedDependencyTypes(t *testing.
 }
 
 func TestClient_ListHydratesParentChildAfterTaskSliceGrowth(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -3258,6 +3326,7 @@ func TestClient_ListHydratesParentChildAfterTaskSliceGrowth(t *testing.T) {
 }
 
 func TestClient_AddDependencyRequiresExistingTargetIssue(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -3284,6 +3353,7 @@ func TestClient_AddDependencyRequiresExistingTargetIssue(t *testing.T) {
 }
 
 func TestClient_AddDependencyRejectsCycle(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -3321,6 +3391,7 @@ func TestClient_AddDependencyRejectsCycle(t *testing.T) {
 }
 
 func TestClient_DeleteRemovesIssue(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -3340,6 +3411,7 @@ func TestClient_DeleteRemovesIssue(t *testing.T) {
 }
 
 func TestClient_DeleteParentWithUndeletedDescendantsIsBlocked(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -3380,6 +3452,7 @@ func TestClient_DeleteParentWithUndeletedDescendantsIsBlocked(t *testing.T) {
 }
 
 func TestClient_DeleteBlockedWhenTaskHasWorktreeProjection(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-delete-worktree"
@@ -3411,6 +3484,7 @@ func TestClient_DeleteBlockedWhenTaskHasWorktreeProjection(t *testing.T) {
 }
 
 func TestClient_DeleteBlockedWhenTaskHasActiveSessionProjection(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-delete-session"
@@ -3442,6 +3516,7 @@ func TestClient_DeleteBlockedWhenTaskHasActiveSessionProjection(t *testing.T) {
 }
 
 func TestClient_DeleteAllowsStoppedSessionWithoutWorktreeProjection(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-delete-stopped"
@@ -3471,6 +3546,7 @@ func TestClient_DeleteAllowsStoppedSessionWithoutWorktreeProjection(t *testing.T
 }
 
 func TestClient_ArchiveParentWithUndeletedDescendantsIsBlocked(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -3514,6 +3590,7 @@ func assertTaskPresent(t *testing.T, tasks []domain.Task, taskID string) {
 }
 
 func TestClient_CreateDoesNotReuseDeletedLocalIssueIDs(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -3540,6 +3617,7 @@ func TestClient_CreateDoesNotReuseDeletedLocalIssueIDs(t *testing.T) {
 }
 
 func TestClient_CreateDoesNotReuseClosedLocalIssueIDsWhenMetaIndexDrifts(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -3560,6 +3638,7 @@ func TestClient_CreateDoesNotReuseClosedLocalIssueIDsWhenMetaIndexDrifts(t *test
 }
 
 func TestClient_CreateSkipsHistoricallyUsedIDsWhenMetaIndexDrifts(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -3583,6 +3662,7 @@ func TestClient_CreateSkipsHistoricallyUsedIDsWhenMetaIndexDrifts(t *testing.T) 
 }
 
 func TestClient_CreateRepairsAllocatorFromDeletedIssueHistory(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	client := NewClientAtPath(dbPath, slog.Default())
@@ -3612,6 +3692,7 @@ func TestClient_CreateRepairsAllocatorFromDeletedIssueHistory(t *testing.T) {
 }
 
 func TestClient_CreateRejectsOldOrphanWorktreeAndPreservesAllocator(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	client := NewClientAtPath(dbPath, slog.Default())
@@ -3648,6 +3729,7 @@ func TestClient_CreateRejectsOldOrphanWorktreeAndPreservesAllocator(t *testing.T
 }
 
 func TestClient_ErrorWrapping(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -3661,6 +3743,7 @@ func TestClient_ErrorWrapping(t *testing.T) {
 }
 
 func TestClient_DBHandleReusedUntilExplicitClose(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := newTestClient(t)
 
 	first, err := client.dbHandle()
@@ -3678,6 +3761,7 @@ func TestClient_DBHandleReusedUntilExplicitClose(t *testing.T) {
 }
 
 func TestClient_DBHandleCreatesMissingParentDirectory(t *testing.T) {
+	parallelIssueStoreTest(t)
 	base := t.TempDir()
 	dbPath := filepath.Join(base, "missing", "nested", "azedarach.db")
 	client := NewClientAtPath(dbPath, slog.Default())
@@ -3693,6 +3777,7 @@ func TestClient_DBHandleCreatesMissingParentDirectory(t *testing.T) {
 }
 
 func TestClient_ConfiguresSQLitePragmas(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	db, err := client.dbHandle()
@@ -3718,6 +3803,7 @@ func TestClient_ConfiguresSQLitePragmas(t *testing.T) {
 }
 
 func TestClient_EnsuresDependencyForeignKeysAndIndexes(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := newTestClient(t)
 	db, err := client.dbHandle()
 	require.NoError(t, err)
@@ -3786,6 +3872,7 @@ func TestClient_EnsuresDependencyForeignKeysAndIndexes(t *testing.T) {
 }
 
 func TestClient_GraphClosureMigrationBackfillsParentChildEdges(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
 	db, err := sql.Open("sqlite", "file:"+dbPath)
@@ -3853,6 +3940,7 @@ func TestClient_GraphClosureMigrationBackfillsParentChildEdges(t *testing.T) {
 }
 
 func TestClient_MigratesLegacySchemaShape(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
 
@@ -3973,6 +4061,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 }
 
 func TestClient_RenumberedInteractionMigrationsUpgradeLegacyHistories(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
 
@@ -4016,6 +4105,7 @@ func TestClient_RenumberedInteractionMigrationsUpgradeLegacyHistories(t *testing
 }
 
 func TestClient_RenumberedContextualLearningMigrationUpgradesHistoricalIdentity(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
 
@@ -4057,6 +4147,7 @@ func TestClient_RenumberedContextualLearningMigrationUpgradesHistoricalIdentity(
 }
 
 func TestClient_RenumberedContextualLearningMigrationCompletesHistoricalSchema(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
 
@@ -4108,6 +4199,7 @@ func TestClient_RenumberedContextualLearningMigrationCompletesHistoricalSchema(t
 }
 
 func TestClient_RepairsLegacyIssueColumnsBeforeSearchFTSMigration(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
 
@@ -4203,6 +4295,7 @@ func TestClient_RepairsLegacyIssueColumnsBeforeSearchFTSMigration(t *testing.T) 
 }
 
 func TestClient_ReplaysAgentLearningPrivacyMigrationWhenColumnAlreadyExists(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
 
@@ -4250,6 +4343,7 @@ func TestClient_ReplaysAgentLearningPrivacyMigrationWhenColumnAlreadyExists(t *t
 }
 
 func TestClient_ReplaysIssueOwnershipMigrationWhenColumnsAlreadyExist(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
 
@@ -4297,6 +4391,7 @@ func TestClient_ReplaysIssueOwnershipMigrationWhenColumnsAlreadyExist(t *testing
 }
 
 func TestClient_RepairsAppliedAgentLearningMigrationMissingBaseColumns(t *testing.T) {
+	parallelIssueStoreTest(t)
 	for _, tc := range []struct {
 		name         string
 		seedLearning bool
@@ -4404,6 +4499,7 @@ func TestClient_RepairsAppliedAgentLearningMigrationMissingBaseColumns(t *testin
 }
 
 func TestClient_MigratesClosedRuntimeInvariantViolationsToInReview(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	db, err := sql.Open("sqlite", "file:"+dbPath)
@@ -4513,6 +4609,7 @@ func TestClient_MigratesClosedRuntimeInvariantViolationsToInReview(t *testing.T)
 }
 
 func TestClient_ClosedRuntimeInvariantTriggers(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	db, err := client.dbHandle()
@@ -4600,6 +4697,7 @@ func TestClient_ClosedRuntimeInvariantTriggers(t *testing.T) {
 }
 
 func TestClient_MigratesLegacyBlockedStatusToOpen(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	db, err := sql.Open("sqlite", "file:"+dbPath)
@@ -4673,6 +4771,7 @@ func TestClient_MigratesLegacyBlockedStatusToOpen(t *testing.T) {
 }
 
 func TestClient_MigratesLegacyBlockedStatusAllocatesUniqueBlockerID(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	db, err := sql.Open("sqlite", "file:"+dbPath)
@@ -5046,6 +5145,7 @@ func TestClient_UpsertExternalSyncStateRetriesAfterSQLiteBusyTimeout(t *testing.
 }
 
 func TestClient_SQLiteWALDiagnosticsAndCheckpoint(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	_, err := client.Create(ctx, CreateTaskParams{
@@ -5165,6 +5265,7 @@ func migratedIssueTestTemplate(tb testing.TB) *sqlitetest.Template {
 }
 
 func TestMigratedIssueTestTemplateClonesAreIsolatedAndComplete(t *testing.T) {
+	parallelIssueStoreTest(t)
 	first := newTestClient(t)
 	second := newTestClient(t)
 	firstDB, err := first.dbHandle()

@@ -10,6 +10,7 @@ import (
 )
 
 func TestCaptureLearningObservationTypedDuplicateAndPrivateIsolation(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := newTestClient(t)
 	db, err := client.dbHandle()
 	require.NoError(t, err)
@@ -46,6 +47,7 @@ func TestCaptureLearningObservationTypedDuplicateAndPrivateIsolation(t *testing.
 }
 
 func TestCaptureLearningObservationReusesLearningValidation(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := newTestClient(t)
 	_, err := client.CaptureLearningObservation(context.Background(), CaptureLearningObservationParams{ProjectID: "proj", ObservedBehavior: strings.Repeat("x", maxLearningEvidenceRunes+1), PreferredBehavior: "safe", Provenance: LearningObservationProvenance{Source: "test"}, Sensitivity: domain.LearningSensitivityPublic})
 	require.ErrorContains(t, err, "observed behavior exceeds")

@@ -17,6 +17,7 @@ import (
 )
 
 func TestClient_LearningLifecycleRecallReviewAndPromote(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -111,6 +112,7 @@ func TestClient_LearningLifecycleRecallReviewAndPromote(t *testing.T) {
 }
 
 func TestClient_PromoteLearningCreatesDecisionTargetAndLinksScopesIdempotently(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -180,6 +182,7 @@ func TestClient_PromoteLearningCreatesDecisionTargetAndLinksScopesIdempotently(t
 }
 
 func TestClient_PromoteLearningCreatesAndUpdatesSpecTarget(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -235,6 +238,7 @@ func TestClient_PromoteLearningCreatesAndUpdatesSpecTarget(t *testing.T) {
 }
 
 func TestClient_PromoteLearningMissingStructuredTargetRequiresCreateTarget(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	learning := createAcceptedLearning(t, ctx, client, "proj", "Missing target learning")
@@ -262,6 +266,7 @@ func TestClient_PromoteLearningMissingStructuredTargetRequiresCreateTarget(t *te
 }
 
 func TestClient_RetireLearningTargetPreservesStructuredTargetHistory(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	specLearning := createAcceptedLearning(t, ctx, client, "proj", "Retire spec target")
@@ -300,6 +305,7 @@ func TestClient_RetireLearningTargetPreservesStructuredTargetHistory(t *testing.
 }
 
 func TestClient_ListLearningsAppliesLimitAfterTagAndFileFilters(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -337,6 +343,7 @@ func TestClient_ListLearningsAppliesLimitAfterTagAndFileFilters(t *testing.T) {
 }
 
 func TestClient_ListLearningsRanksContextAndExplainsRecall(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -409,6 +416,7 @@ func TestClient_ListLearningsRanksContextAndExplainsRecall(t *testing.T) {
 }
 
 func TestClient_ListLearningReviewQueueFiltersByStatusAgeScopeAndTargetState(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -504,6 +512,7 @@ func TestClient_ListLearningReviewQueueFiltersByStatusAgeScopeAndTargetState(t *
 }
 
 func TestClient_BulkReviewLearningsUpdatesFrozenSelectedRows(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -555,6 +564,7 @@ func TestClient_BulkReviewLearningsUpdatesFrozenSelectedRows(t *testing.T) {
 }
 
 func TestClient_ListLearningsTagAndFileFiltersUseIndexedMetadata(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	db, err := client.dbHandle()
@@ -577,6 +587,7 @@ func TestClient_ListLearningsTagAndFileFiltersUseIndexedMetadata(t *testing.T) {
 }
 
 func TestMergeLearningFilterKeysDeduplicatesContextAndHardFilters(t *testing.T) {
+	parallelIssueStoreTest(t)
 	got := mergeLearningFilterKeys(
 		[]string{"Daemon", "config"},
 		[]string{"daemon", "review"},
@@ -585,6 +596,7 @@ func TestMergeLearningFilterKeysDeduplicatesContextAndHardFilters(t *testing.T) 
 }
 
 func TestClient_ListLearningsIncludeDeletedUsesIndexedMetadata(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -626,6 +638,7 @@ func TestClient_ListLearningsIncludeDeletedUsesIndexedMetadata(t *testing.T) {
 }
 
 func TestClient_MigratesLearningTagAndFileMetadataBackfill(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	db, err := sql.Open("sqlite", "file:"+dbPath)
@@ -721,6 +734,7 @@ func TestClient_MigratesLearningTagAndFileMetadataBackfill(t *testing.T) {
 }
 
 func TestClient_ListLearningsActiveOnlyExcludesInactiveLifecycleRows(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -841,6 +855,7 @@ func TestClient_ListLearningsActiveOnlyExcludesInactiveLifecycleRows(t *testing.
 }
 
 func TestClient_LearningMaintenanceDoctorReportsWithoutMutation(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -892,6 +907,7 @@ func TestClient_LearningMaintenanceDoctorReportsWithoutMutation(t *testing.T) {
 }
 
 func TestClient_LearningMaintenanceDoctorReportsEmptyAdoption(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -905,6 +921,7 @@ func TestClient_LearningMaintenanceDoctorReportsEmptyAdoption(t *testing.T) {
 }
 
 func TestClient_LearningGCIsBoundedAndRequiresConfirmation(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -961,6 +978,7 @@ func TestClient_LearningGCIsBoundedAndRequiresConfirmation(t *testing.T) {
 }
 
 func TestClient_MigratesPromotedLearningTargetState(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	db, err := sql.Open("sqlite", "file:"+dbPath)
@@ -1004,6 +1022,7 @@ func TestClient_MigratesPromotedLearningTargetState(t *testing.T) {
 }
 
 func TestClient_UpdateLearningTargetStateRecordsLifecycle(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -1043,6 +1062,7 @@ func TestClient_UpdateLearningTargetStateRecordsLifecycle(t *testing.T) {
 }
 
 func TestClient_DemoteLearningReturnsActiveLearningToCandidateWithAudit(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -1068,6 +1088,7 @@ func TestClient_DemoteLearningReturnsActiveLearningToCandidateWithAudit(t *testi
 }
 
 func TestClient_DemoteLearningRequiresPromotedTargetRetiredFirst(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -1095,6 +1116,7 @@ func TestClient_DemoteLearningRequiresPromotedTargetRetiredFirst(t *testing.T) {
 }
 
 func TestClient_RelateLearningSupersedesScopedGuidanceAndExcludesTargetFromActiveRecall(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -1171,6 +1193,7 @@ func TestClient_RelateLearningSupersedesScopedGuidanceAndExcludesTargetFromActiv
 }
 
 func TestClient_RelateLearningConflictIsAuditableWithoutSuperseding(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -1202,6 +1225,7 @@ func TestClient_RelateLearningConflictIsAuditableWithoutSuperseding(t *testing.T
 }
 
 func TestClient_RelateLearningSupersedesRequiresActiveSource(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -1223,6 +1247,7 @@ func TestClient_RelateLearningSupersedesRequiresActiveSource(t *testing.T) {
 }
 
 func TestClient_ListLearningsCanExcludePrivateEvidenceRows(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -1274,6 +1299,7 @@ func TestClient_ListLearningsCanExcludePrivateEvidenceRows(t *testing.T) {
 }
 
 func TestLearningActiveAtUsesParsedTimestampBoundaries(t *testing.T) {
+	parallelIssueStoreTest(t)
 	now := time.Date(2026, 7, 2, 3, 45, 0, 500, time.UTC)
 	expiresAtBoundary := now.Truncate(time.Second)
 	staleAtBoundary := now.Truncate(time.Second)
@@ -1294,6 +1320,7 @@ func TestLearningActiveAtUsesParsedTimestampBoundaries(t *testing.T) {
 }
 
 func TestClient_PromoteLearningRequiresAcceptedStatus(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -1312,6 +1339,7 @@ func TestClient_PromoteLearningRequiresAcceptedStatus(t *testing.T) {
 }
 
 func TestClient_LearningStatusRequiresReviewAndPromotionTarget(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -1351,6 +1379,7 @@ func TestClient_LearningStatusRequiresReviewAndPromotionTarget(t *testing.T) {
 }
 
 func TestClient_CreateLearningRejectsOversizedEvidence(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -1363,6 +1392,7 @@ func TestClient_CreateLearningRejectsOversizedEvidence(t *testing.T) {
 }
 
 func TestClient_CreateLearningRejectsControlCharacters(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -1391,6 +1421,7 @@ func TestClient_CreateLearningRejectsControlCharacters(t *testing.T) {
 }
 
 func TestClient_CreateLearningRejectsOversizedSummary(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
