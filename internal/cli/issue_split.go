@@ -156,7 +156,7 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 	fmt.Println("Integration model:")
 	fmt.Println("- Child work runs in its own az/tmux session/worktree.")
 	fmt.Println("- It is not merged at creation; review it from the parent/orchestrator session, then close it to integrate and clean up.")
-	fmt.Println("- `az issue close` owns merge, stopped session cleanup, worktree cleanup, and issue closure.")
+	fmt.Println("- `az ticket close` owns merge, stopped session cleanup, worktree cleanup, and ticket closure.")
 	printOrchestrateStartResult(startResult)
 	fmt.Println("When the child is ready:")
 	fmt.Printf("- %s\n", result.Advice.CloseCommand)

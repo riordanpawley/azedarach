@@ -9552,6 +9552,21 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	if !containsString(commands, protocol.CommandOrchestrationIntent) || containsString(commands, protocol.CommandOperationSubmit) || containsString(commands, protocol.CommandMailSend) {
 		t.Fatalf("commands = %+v, want daemon orchestration intent without client-side operation submit or immediate mail send", commands)
 	}
+
+	textOutput := captureStdout(t, func() error {
+		return IssueSplitCommand(deps, IssueSplitOptions{
+			ParentIssueID: root.String(),
+			Title:         "Child work",
+			Type:          domain.TypeTask,
+			Priority:      domain.P2,
+		})
+	})
+	if !strings.Contains(textOutput, "`az ticket close` owns") || !strings.Contains(textOutput, "az ticket close --id "+child.String()) {
+		t.Fatalf("split output missing canonical ticket close guidance: %s", textOutput)
+	}
+	if strings.Contains(textOutput, "az issue close") {
+		t.Fatalf("split output contains legacy issue close guidance: %s", textOutput)
+	}
 }
 
 func TestIssueCreateCommandAutoDefaultsImplWhenSingleConfigured(t *testing.T) {

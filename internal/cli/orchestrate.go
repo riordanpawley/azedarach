@@ -109,7 +109,7 @@ type OrchestrateMessageOptions struct {
 }
 
 func issueCloseCommand(issueID string) string {
-	return fmt.Sprintf("az issue close --id %s", issueID)
+	return fmt.Sprintf("az ticket close --id %s", issueID)
 }
 
 func issueCloseCommandForProject(issueID, projectID string) string {
@@ -117,7 +117,7 @@ func issueCloseCommandForProject(issueID, projectID string) string {
 	if projectID == "" {
 		return issueCloseCommand(issueID)
 	}
-	return fmt.Sprintf("az issue close --project %s --id %s", projectID, issueID)
+	return fmt.Sprintf("az ticket close --project %s --id %s", projectID, issueID)
 }
 
 func issueGetCommandForProject(issueID, projectID string) string {

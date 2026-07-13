@@ -38,3 +38,26 @@ func TestRenderIssueHelpPrefersNamedFlagForms(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderRootUsageUsesCanonicalTicketFlags(t *testing.T) {
+	output, err := Render("root_usage", nil)
+	if err != nil {
+		t.Fatalf("Render(root_usage) error = %v", err)
+	}
+
+	for _, want := range []string{
+		"ticket image add [--project <project-id>] [--ticket-id <ticket-id>]",
+		"ticket dep add [--project <project-id>] --ticket-id <ticket-id>",
+		"ticket fanout drift [--project <project-id>] --ticket <ticket-id>",
+		"[--per-ticket-timeout duration]",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("root_usage missing %q in output: %q", want, output)
+		}
+	}
+	for _, legacy := range []string{"--issue-id", "--issue <ticket-id>", "--per-issue-timeout"} {
+		if strings.Contains(output, legacy) {
+			t.Fatalf("root_usage contains legacy ticket flag %q: %q", legacy, output)
+		}
+	}
+}
