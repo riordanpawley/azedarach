@@ -2703,6 +2703,33 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 }
 
 func canonicalizeRuntimeLogicalSessions(ctx context.Context, db *sql.DB) error {
+	hasIssueVisibility := false
+	columns, err := db.QueryContext(ctx, `PRAGMA table_info(issues)`)
+	if err != nil {
+		return fmt.Errorf("inspect issue visibility before logical session canonicalization: %w", err)
+	}
+	for columns.Next() {
+		var cid, notNull, primaryKey int
+		var name, typ string
+		var defaultValue any
+		if err := columns.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = columns.Close()
+			return fmt.Errorf("scan issue visibility before logical session canonicalization: %w", err)
+		}
+		if name == "visibility" {
+			hasIssueVisibility = true
+		}
+	}
+	if err := columns.Close(); err != nil {
+		return fmt.Errorf("close issue visibility inspection: %w", err)
+	}
+	eligibleRows := func(table string) string {
+		if !hasIssueVisibility {
+			return ""
+		}
+		return ` AND ((role='orchestrator' AND scope_id='project') OR EXISTS(
+			SELECT 1 FROM issues i WHERE i.id=` + table + `.issue_id AND i.visibility='live'))`
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin logical session canonicalization: %w", err)
@@ -2713,8 +2740,8 @@ func canonicalizeRuntimeLogicalSessions(ctx context.Context, db *sql.DB) error {
 		FIRST_VALUE(session_id) OVER (PARTITION BY project_id,role,scope_kind,scope_id ORDER BY
 			CASE WHEN length(session_id)>3 AND substr(session_id,3,1)='-' AND substr(session_id,4)=CASE WHEN role='orchestrator' AND scope_id='project' THEN 'orchestrator-project' ELSE scope_id END THEN 0 ELSE 1 END,
 			updated_at DESC,session_id ASC) AS winner_id
-		FROM (SELECT project_id,session_id,role,scope_kind,scope_id,updated_at FROM `+sessionStateTable+` WHERE instr(session_id,'.pane-')=0
-			UNION ALL SELECT project_id,session_id,role,scope_kind,scope_id,updated_at FROM `+sessionObservationTable+` WHERE instr(session_id,'.pane-')=0);`); err != nil {
+		FROM (SELECT project_id,session_id,role,scope_kind,scope_id,updated_at FROM `+sessionStateTable+` WHERE instr(session_id,'.pane-')=0`+eligibleRows(sessionStateTable)+`
+			UNION ALL SELECT project_id,session_id,role,scope_kind,scope_id,updated_at FROM `+sessionObservationTable+` WHERE instr(session_id,'.pane-')=0`+eligibleRows(sessionObservationTable)+`);`); err != nil {
 		return fmt.Errorf("select shared logical runtime winners: %w", err)
 	}
 	for _, table := range []string{sessionStateTable, sessionObservationTable} {
@@ -2730,7 +2757,8 @@ func canonicalizeRuntimeLogicalSessions(ctx context.Context, db *sql.DB) error {
 			WHERE instr(t.session_id,'.pane-')=0
 			WINDOW logical_scope AS (PARTITION BY t.project_id,t.role,t.scope_kind,t.scope_id),
 			newest AS (PARTITION BY t.project_id,t.role,t.scope_kind,t.scope_id ORDER BY t.updated_at DESC,t.session_id ASC);
-			DELETE FROM `+table+` WHERE instr(session_id,'.pane-')=0;
+			DELETE FROM `+table+` WHERE instr(session_id,'.pane-')=0 AND EXISTS(
+				SELECT 1 FROM `+merged+` m WHERE m.project_id=`+table+`.project_id AND m.role=`+table+`.role AND m.scope_kind=`+table+`.scope_kind AND m.scope_id=`+table+`.scope_id);
 			INSERT INTO `+table+`(project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at)
 			SELECT project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at FROM `+merged+`;
 			DROP TABLE `+merged+`;`); err != nil {
