@@ -81,10 +81,6 @@ func (d *Daemon) migrateLegacyRuntimeState(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("check migrated worktree state %s: %w", canonicalProjectID, err)
 		}
-		if len(existingSessions) > 0 || len(existingWorktrees) > 0 {
-			continue
-		}
-
 		sourceSessions, err := source.ListSessionStates(ctx, rawProjectID)
 		if err != nil {
 			return fmt.Errorf("load legacy session state %s: %w", rawProjectID, err)
@@ -93,14 +89,48 @@ func (d *Daemon) migrateLegacyRuntimeState(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("load legacy worktree state %s: %w", rawProjectID, err)
 		}
-		if len(sourceSessions) == 0 && len(sourceWorktrees) == 0 {
+		sourcePhysical, err := source.ListPhysicalSessionObservations(ctx, rawProjectID)
+		if err != nil {
+			return fmt.Errorf("load legacy physical session observations %s: %w", rawProjectID, err)
+		}
+		physicalBySessionID := make(map[string]struct{}, len(sourcePhysical))
+		for _, observation := range sourcePhysical {
+			physicalBySessionID[observation.SessionID] = struct{}{}
+		}
+		legacyCandidates, err := source.ListLegacyPhysicalObservationCandidates(ctx, rawProjectID)
+		if err != nil {
+			return fmt.Errorf("load legacy physical observation candidates %s: %w", rawProjectID, err)
+		}
+		for _, candidate := range legacyCandidates {
+			if _, exists := physicalBySessionID[candidate.SessionID]; exists {
+				continue
+			}
+			if _, _, err := source.ApplyPhysicalSessionObservation(ctx, candidate); err != nil {
+				return fmt.Errorf("bootstrap legacy physical session observation %s/%s: %w", rawProjectID, candidate.SessionID, err)
+			}
+			physicalBySessionID[candidate.SessionID] = struct{}{}
+			sourcePhysical = append(sourcePhysical, candidate)
+		}
+		if len(sourceSessions) == 0 && len(sourceWorktrees) == 0 && len(sourcePhysical) == 0 {
 			continue
 		}
-		if err := target.ReplaceSessionStates(ctx, canonicalProjectID, sourceSessions); err != nil {
-			return fmt.Errorf("migrate session state %s: %w", canonicalProjectID, err)
+		// Physical observations migrate first so desired logical intents hydrate
+		// from the preserved versioned authority rather than legacy mirror fields.
+		for _, observation := range sourcePhysical {
+			observation.ProjectID = canonicalProjectID
+			if _, _, err := target.ApplyPhysicalSessionObservation(ctx, observation); err != nil {
+				return fmt.Errorf("migrate physical session observation %s/%s: %w", canonicalProjectID, observation.SessionID, err)
+			}
 		}
-		if err := target.ReplaceWorktreeStates(ctx, canonicalProjectID, sourceWorktrees); err != nil {
-			return fmt.Errorf("migrate worktree state %s: %w", canonicalProjectID, err)
+		if len(existingSessions) == 0 && len(sourceSessions) > 0 {
+			if err := target.ReplaceSessionStates(ctx, canonicalProjectID, sourceSessions); err != nil {
+				return fmt.Errorf("migrate session state %s: %w", canonicalProjectID, err)
+			}
+		}
+		if len(existingWorktrees) == 0 && len(sourceWorktrees) > 0 {
+			if err := target.ReplaceWorktreeStates(ctx, canonicalProjectID, sourceWorktrees); err != nil {
+				return fmt.Errorf("migrate worktree state %s: %w", canonicalProjectID, err)
+			}
 		}
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Info(
@@ -108,6 +138,7 @@ func (d *Daemon) migrateLegacyRuntimeState(ctx context.Context) error {
 				"project_id", canonicalProjectID,
 				"legacy_project_id", rawProjectID,
 				"session_rows", len(sourceSessions),
+				"physical_observation_rows", len(sourcePhysical),
 				"worktree_rows", len(sourceWorktrees),
 			)
 		}

@@ -43,7 +43,6 @@ type IssueFacts struct {
 	ReviewReadyVisible bool                    `json:"review_ready_visible" msgpack:"review_ready_visible"`
 	ClosedOutcome      IssueCloseOutcome       `json:"closed_outcome" msgpack:"closed_outcome"`
 	ArchiveState       IssueArchiveState       `json:"archive_state" msgpack:"archive_state"`
-	DeletionState      IssueDeletionState      `json:"deletion_state" msgpack:"deletion_state"`
 	BoardPhase         IssueBoardPhase         `json:"board_phase" msgpack:"board_phase"`
 	DisplayPhase       IssueDisplayPhase       `json:"display_phase" msgpack:"display_phase"`
 	DisplayStatus      Status                  `json:"display_status,omitempty" msgpack:"display_status,omitempty"`
@@ -88,7 +87,6 @@ func (f IssueFacts) IsZero() bool {
 		!f.ReviewReadyVisible &&
 		f.ClosedOutcome == "" &&
 		f.ArchiveState == "" &&
-		f.DeletionState == "" &&
 		f.BoardPhase == "" &&
 		f.DisplayPhase == "" &&
 		f.DisplayStatus == "" &&
@@ -152,7 +150,6 @@ func DeriveIssueFacts(input IssueFactsInput) IssueFacts {
 		ReviewState:        state.Review(),
 		ClosedOutcome:      state.CloseOutcome(),
 		ArchiveState:       state.Archive(),
-		DeletionState:      state.Deletion(),
 		BoardPhase:         state.BoardPhase(),
 		DisplayPhase:       state.DisplayPhase(),
 		DisplayStatus:      state.DisplayPhase().FilterStatus(),
@@ -179,12 +176,6 @@ func DeriveIssueFacts(input IssueFactsInput) IssueFacts {
 		facts.Reasons = append(facts.Reasons, IssueFactReason{
 			Code:    "archived",
 			Message: "issue is archived",
-		})
-	}
-	if state.IsTombstoned() {
-		facts.Reasons = append(facts.Reasons, IssueFactReason{
-			Code:    "tombstoned",
-			Message: "issue is tombstoned",
 		})
 	}
 

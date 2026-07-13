@@ -30,8 +30,13 @@ func TestExportProjectionUsesStableSchemaFingerprintAndMonotonicSourceRevision(t
 	if err != nil {
 		t.Fatal(err)
 	}
+	older := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano)
+	_, err = db.ExecContext(ctx, `INSERT INTO issues(id,title,description,status,disposition,engagement,visibility,lifecycle_state,closed_outcome,review_state,priority,issue_type,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, `issue-1`, `before`, ``, `open`, `ready`, `idle`, `live`, `open`, `none`, `none`, 2, `task`, older, older)
+	if err != nil {
+		t.Fatal(err)
+	}
 	updated := time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano)
-	_, err = db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,state,observed_state,activity,updated_at) VALUES(?,?,?,?,?,?,?)`, `project-a`, `session-1`, `issue-1`, `running`, `running`, `busy`, updated)
+	_, err = db.ExecContext(ctx, `INSERT INTO daemon_session_projections(project_id,session_id,issue_id,scope_id,state,observed_state,activity,updated_at) VALUES(?,?,?,?,?,?,?,?)`, `project-a`, `session-1`, `issue-1`, `issue-1`, `running`, `running`, `busy`, updated)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,8 +52,7 @@ func TestExportProjectionUsesStableSchemaFingerprintAndMonotonicSourceRevision(t
 	}
 	// Use a deliberately older timestamp: checkpoint ordering must follow durable
 	// writes, not wall-clock values or incomparable issue/runtime counters.
-	older := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano)
-	_, err = db.ExecContext(ctx, `INSERT INTO issues(id,title,description,status,priority,issue_type,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, `issue-1`, `before`, ``, `open`, 2, `task`, older, older)
+	_, err = db.ExecContext(ctx, `UPDATE issues SET title='after-runtime',updated_at=? WHERE id='issue-1'`, older)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +86,7 @@ func TestExportProjectionUsesStableSchemaFingerprintAndMonotonicSourceRevision(t
 	}
 
 	observedAt := time.Now().UTC().Add(2 * time.Second).Format(time.RFC3339Nano)
-	if _, err = db.ExecContext(ctx, `INSERT INTO daemon_session_observations(project_id,session_id,issue_id,state,observed_state,activity,updated_at) VALUES(?,?,?,?,?,?,?)`, "project-a", "observed-1", "issue-1", "running", "running", "waiting", observedAt); err != nil {
+	if _, err = db.ExecContext(ctx, `INSERT INTO daemon_session_observations(project_id,session_id,issue_id,scope_id,state,observed_state,activity,updated_at) VALUES(?,?,?,?,?,?,?,?)`, "project-a", "observed-1", "issue-1", "issue-1", "running", "running", "waiting", observedAt); err != nil {
 		t.Fatal(err)
 	}
 	exported := assertAdvanced("session observation insert")
@@ -109,7 +113,7 @@ func TestExportProjectionUsesStableSchemaFingerprintAndMonotonicSourceRevision(t
 		t.Fatalf("deleted external ref remains: %+v", exported.Tasks[0].PullRequest)
 	}
 
-	if _, err = db.ExecContext(ctx, `INSERT INTO issue_coordination_leases(issue_id,purpose,owner_id,owner_kind,claimed_at) VALUES(?,?,?,?,?)`, "issue-1", "review", "reviewer", "agent", observedAt); err != nil {
+	if _, err = db.ExecContext(ctx, `INSERT INTO issue_coordination_leases(issue_id,purpose,owner_id,owner_kind,claimed_at) VALUES(?,?,?,?,?)`, "issue-1", "execution", "reviewer", "agent", observedAt); err != nil {
 		t.Fatal(err)
 	}
 	exported = assertAdvanced("coordination lease insert")

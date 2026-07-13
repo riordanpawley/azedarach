@@ -59,11 +59,11 @@ func TestRootedOrchestratorIdleWakeCarriesDurableCursorAndDirectNestedRoots(t *t
 		t.Fatal(err)
 	}
 	for _, session := range []daemonstate.Session{
-		{ID: parentSession, IssueID: rootID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: time.Now().UTC()},
-		{ID: "nested-orchestrator", IssueID: nestedID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: time.Now().UTC()},
+		{ID: parentSession, IssueID: rootID, Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: rootID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: time.Now().UTC()},
+		{ID: "nested-orchestrator", IssueID: nestedID, Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: nestedID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: time.Now().UTC()},
 		{ID: "nested-leaf", IssueID: leafID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: time.Now().UTC()},
 	} {
-		if err := store.UpsertSessionState(ctx, projectID, session); err != nil {
+		if err := upsertSessionStateFixture(store, ctx, projectID, session); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -147,8 +147,8 @@ func TestBootstrapRecoveryResumesReplacedRootedOrchestratorOnceWithDurableCursor
 	if err != nil || replaced.Disposition != daemonstate.OrchestratorLeaseRecoveredStale || replaced.Lease.Cursor != 23 {
 		t.Fatalf("replacement = %+v err=%v", replaced, err)
 	}
-	if err := storeB.UpsertSessionState(ctx, projectID, daemonstate.Session{
-		ID: "replacement-session", IssueID: rootID, State: daemonstate.SessionStateRunning,
+	if err := upsertSessionStateFixture(storeB, ctx, projectID, daemonstate.Session{
+		ID: "replacement-session", IssueID: rootID, Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: rootID, State: daemonstate.SessionStateRunning,
 		ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)

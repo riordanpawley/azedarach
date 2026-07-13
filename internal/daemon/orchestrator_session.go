@@ -140,7 +140,7 @@ func (d *Daemon) handleOrchestratorSession(ctx context.Context, req protocol.Req
 }
 
 func (d *Daemon) persistOrchestratorSessionProjection(ctx context.Context, meta protocol.Metadata, projectID string, scope domain.OrchestrationScope, sessionID string) error {
-	projection, found, err := d.sessionRuntimeStateStoreIfConfigured(projectID).GetSessionState(ctx, projectID, sessionID)
+	projection, found, err := d.sessionRuntimeStateStoreIfConfigured(projectID).GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, orchestrationScopeID(scope))
 	if err != nil {
 		return fmt.Errorf("load orchestrator session projection: %w", err)
 	}
@@ -157,8 +157,7 @@ func (d *Daemon) persistOrchestratorSessionProjection(ctx context.Context, meta 
 	if err := writer.PersistSessionProjection(ctx, projectID, projection); err != nil {
 		return fmt.Errorf("persist orchestrator session projection: %w", err)
 	}
-	writer.PublishSessionProjectionEvent(ctx, projectID, meta, projection)
-	return nil
+	return d.persistObservedRuntimeProjection(ctx, projectID, meta, projection)
 }
 
 func (d *Daemon) orchestratorSessionID(projectID string, scope domain.OrchestrationScope) string {

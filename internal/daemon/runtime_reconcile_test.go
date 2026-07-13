@@ -231,7 +231,7 @@ func (r *blockingIssueProjectionReconciler) ReconcileIssues(ctx context.Context,
 		if sessionID == "" {
 			sessionID = naming.CanonicalSessionID(projectID, issueID)
 		}
-		if err := r.store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		if err := upsertSessionStateFixture(r.store, ctx, projectID, daemonstate.Session{
 			ID:            sessionID,
 			IssueID:       issueID,
 			State:         daemonstate.SessionStateAttached,
@@ -1479,7 +1479,7 @@ func TestEnsureFreshRuntimeForIssueMutationUsesIssueScopedReconcile(t *testing.T
 	}
 }
 
-func TestRuntimeReconcileIssuesUsesBatchedSessionRefreshForLargeIssueSets(t *testing.T) {
+func TestRuntimeReconcileIssuesChunksLargeIssueSetsThroughHybridReconciler(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-large-issue-reconcile"
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
@@ -1489,7 +1489,7 @@ func TestRuntimeReconcileIssuesUsesBatchedSessionRefreshForLargeIssueSets(t *tes
 	for i := 0; i <= runtimeReconcileIssueRepairLimit; i++ {
 		issueID := fmt.Sprintf("az-%d", i+1)
 		issueIDs = append(issueIDs, issueID)
-		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 			ID:            naming.CanonicalSessionID(projectID, issueID),
 			IssueID:       issueID,
 			State:         daemonstate.SessionStateRunning,
@@ -1519,18 +1519,59 @@ func TestRuntimeReconcileIssuesUsesBatchedSessionRefreshForLargeIssueSets(t *tes
 		t.Fatalf("ReconcileIssues returned error: %v", err)
 	}
 
-	if got := tmuxRunner.listSessionCallCount(); got != 1 {
-		t.Fatalf("tmux list-sessions calls = %d, want one batched liveness refresh", got)
+	if got := tmuxRunner.listSessionCallCount(); got != 2 {
+		t.Fatalf("tmux list-sessions calls = %d, want two bounded hybrid chunks", got)
 	}
-	row, found, err := runtimeStateStore.GetSessionState(ctx, projectID, naming.CanonicalSessionID(projectID, issueIDs[0]))
+	if _, found, err := runtimeStateStore.GetSessionState(ctx, projectID, naming.CanonicalSessionID(projectID, issueIDs[0])); err != nil || !found {
+		t.Fatalf("durable session intent missing after hybrid chunk: found=%t err=%v", found, err)
+	}
+}
+
+func TestRuntimeReconcileIssuesRepairsLifecycleAcrossSixtyFiveIssueBoundary(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
 	if err != nil {
-		t.Fatalf("get refreshed session projection: %v", err)
+		t.Fatal(err)
 	}
-	if !found {
-		t.Fatal("refreshed session projection not found")
+	issueClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	issueIDs := make([]string, 0, runtimeReconcileIssueRepairLimit+1)
+	sessions := map[string]bool{}
+	for i := 0; i <= runtimeReconcileIssueRepairLimit; i++ {
+		id, createErr := issueClient.Create(ctx, issues.CreateTaskParams{Title: fmt.Sprintf("ready-%d", i), Type: domain.TypeTask, Status: domain.StatusOpen})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		issueIDs = append(issueIDs, id)
+		sessions[naming.CanonicalSessionID(repoDir, id)] = true
 	}
-	if row.ObservedState != daemonstate.SessionStateStopped {
-		t.Fatalf("observed state = %s, want %s", row.ObservedState, daemonstate.SessionStateStopped)
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	tmuxRunner := &testTmuxRunner{sessions: sessions, panes: map[string][]string{}, killEntered: make(chan struct{}), killRelease: make(chan struct{})}
+	store := daemonstate.NewStore()
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, tmux: tmux.NewClient(tmuxRunner, slog.Default()), sessionStore: store,
+		worktreeManagersByRoot:    map[string]*git.WorktreeManager{repoDir: git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default())},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default())},
+		runtimeStoresByRoot:       map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore}}
+	result, err := newRuntimeReconcileService(d).ReconcileIssues(ctx, projectID, issueIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IssueLifecycleRepairs != len(issueIDs) {
+		t.Fatalf("repairs=%d want=%d", result.IssueLifecycleRepairs, len(issueIDs))
+	}
+	if tmuxRunner.listSessionCallCount() != 2 {
+		t.Fatalf("tmux calls=%d want=2", tmuxRunner.listSessionCallCount())
+	}
+	for _, id := range issueIDs {
+		task, getErr := issueClient.GetWithRuntime(ctx, projectID, id)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if task.State.Engagement != domain.IssueEngagementWorking {
+			t.Fatalf("%s engagement=%s", id, task.State.Engagement)
+		}
 	}
 }
 
@@ -1888,7 +1929,7 @@ func TestRuntimeReconcileRefreshesSessionProjectionWithoutWorktreeManager(t *tes
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
 	sessionID := projectID + "-" + issueID
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,

@@ -21,6 +21,11 @@ func TestRuntimeSignalIngestProjectsTerminalAgentError(t *testing.T) {
 	projectID := "proj-signals"
 	issueID := "dae"
 	parentSessionID := "az-dae"
+	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID: parentSessionID, IssueID: issueID, State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -70,6 +75,11 @@ func TestRuntimeSignalIngestKeepsOrdinaryIdlePromptWaiting(t *testing.T) {
 	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	projectID := "proj-signals-idle"
 	parentSessionID := "az-dae-idle"
+	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID: parentSessionID, IssueID: "dae", State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,

@@ -20,8 +20,9 @@ import (
 )
 
 type recordingRuntimeProjectionWriter struct {
-	mu    sync.Mutex
-	calls []string
+	mu                sync.Mutex
+	calls             []string
+	publishedSessions []daemonstate.Session
 }
 
 func (r *recordingRuntimeProjectionWriter) record(call string) {
@@ -36,6 +37,12 @@ func (r *recordingRuntimeProjectionWriter) snapshot() []string {
 	return append([]string(nil), r.calls...)
 }
 
+func (r *recordingRuntimeProjectionWriter) sessionSnapshot() []daemonstate.Session {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]daemonstate.Session(nil), r.publishedSessions...)
+}
+
 func (r *recordingRuntimeProjectionWriter) PersistSessionProjection(context.Context, string, daemonstate.Session) error {
 	r.record("session.persist")
 	return nil
@@ -46,8 +53,11 @@ func (r *recordingRuntimeProjectionWriter) PersistSessionProjectionAndPublish(co
 	return 1
 }
 
-func (r *recordingRuntimeProjectionWriter) PublishSessionProjectionEvent(context.Context, string, protocol.Metadata, daemonstate.Session) uint64 {
-	r.record("session.publish")
+func (r *recordingRuntimeProjectionWriter) PublishSessionProjectionEvent(_ context.Context, _ string, _ protocol.Metadata, session daemonstate.Session) uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, "session.publish")
+	r.publishedSessions = append(r.publishedSessions, session)
 	return 2
 }
 

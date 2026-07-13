@@ -46,7 +46,7 @@ func TestNewScopedRuntimeUsesWorktreeRuntimeStore(t *testing.T) {
 	if store == nil {
 		t.Fatal("session runtime store nil")
 	}
-	if err := store.UpsertSessionState(context.Background(), d.canonicalProjectID(protocol.DefaultProjectID), daemonstate.Session{
+	if err := upsertSessionStateFixture(store, context.Background(), d.canonicalProjectID(protocol.DefaultProjectID), daemonstate.Session{
 		ID:        "sess-cmg",
 		IssueID:   "cmg",
 		State:     daemonstate.SessionStateRunning,

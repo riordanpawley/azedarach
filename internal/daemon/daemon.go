@@ -1042,6 +1042,12 @@ func (d *Daemon) applySessionLifecycleTransition(
 	return d.applySessionLifecycleTransitionWithActivity(ctx, req, projectID, sessionID, issueID, command, "", "")
 }
 
+type sessionIntentSelector struct {
+	Role      daemonstate.SessionRole
+	ScopeKind daemonstate.SessionScopeKind
+	ScopeID   string
+}
+
 func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 	ctx context.Context,
 	req protocol.RequestEnvelope,
@@ -1052,6 +1058,10 @@ func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 	activity string,
 	activitySource string,
 ) error {
+	return d.applyTypedSessionLifecycleTransition(ctx, req, projectID, sessionID, issueID, command, activity, activitySource, sessionIntentSelector{Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID})
+}
+
+func (d *Daemon) applyTypedSessionLifecycleTransition(ctx context.Context, req protocol.RequestEnvelope, projectID, sessionID, issueID, command, activity, activitySource string, selector sessionIntentSelector) error {
 	if d.sessionStore == nil {
 		return errors.New("session store unavailable")
 	}
@@ -1075,8 +1085,17 @@ func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 	if err != nil {
 		return err
 	}
+	runtimeObservedFound := false
 	if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil && strings.TrimSpace(sessionID) != "" {
-		if observed, found, loadErr := runtimeStore.GetSessionState(ctx, projectID, sessionID); loadErr == nil && found {
+		if observed, found, loadErr := runtimeStore.GetSessionIntent(ctx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID); loadErr == nil && found {
+			runtimeObservedFound = strings.TrimSpace(string(observed.ObservedState)) != ""
+			// Durable projection identity is authoritative. The transient lifecycle
+			// store carries only physical session/issue strings and must not erase a
+			// typed advisor or orchestrator product during a state transition.
+			session.IssueID = observed.IssueID
+			session.Role = observed.Role
+			session.ScopeKind = observed.ScopeKind
+			session.ScopeID = observed.ScopeID
 			if strings.TrimSpace(string(observed.ObservedState)) != "" {
 				session.ObservedState = observed.ObservedState
 			}
@@ -1094,6 +1113,9 @@ func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 		} else if loadErr != nil && d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("load runtime session projection for transition failed", "project_id", projectID, "session_id", sessionID, "error", loadErr)
 		}
+	}
+	if !runtimeObservedFound {
+		session.ObservedState = ""
 	}
 	if state == daemonstate.SessionStateStopped {
 		session.Activity = ""
@@ -1117,6 +1139,15 @@ func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 	writer := d.runtimeProjectionStateWriter()
 	if err := writer.PersistSessionProjection(ctx, projectID, session); err != nil {
 		return err
+	}
+	if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil {
+		persisted, found, err := runtimeStore.GetSessionIntent(ctx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID)
+		if err != nil {
+			return fmt.Errorf("reload persisted session intent for publication: %w", err)
+		}
+		if found {
+			session = persisted
+		}
 	}
 	writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, session)
 	return nil
@@ -1248,28 +1279,18 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 	if store == nil {
 		return interruptedOperationRecovery{}, false
 	}
-	session, found, err := store.GetSessionState(ctx, projectID, record.IssueID)
-	if err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Warn("failed to inspect interrupted session.start projection",
-			"operation_id", record.ID,
-			"project_id", projectID,
-			"issue_id", record.IssueID,
-			"error", err,
-		)
-	}
-	if err != nil || !found {
-		session, found, err = store.GetSessionStateByIssueID(ctx, projectID, record.IssueID)
-		if err != nil {
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Warn("failed to inspect interrupted session.start projection by issue",
-					"operation_id", record.ID,
-					"project_id", projectID,
-					"issue_id", record.IssueID,
-					"error", err,
-				)
-			}
-			return interruptedOperationRecovery{}, false
+	canonicalID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), record.IssueID)
+	session, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, record.IssueID, canonicalID)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("failed to inspect interrupted worker session.start projection",
+				"operation_id", record.ID,
+				"project_id", projectID,
+				"issue_id", record.IssueID,
+				"error", err,
+			)
 		}
+		return interruptedOperationRecovery{}, false
 	}
 	if !found || strings.TrimSpace(session.IssueID) != strings.TrimSpace(record.IssueID) {
 		return interruptedOperationRecovery{}, false
@@ -1445,12 +1466,25 @@ func (d *Daemon) closeRuntimeStateStores() {
 }
 
 func (d *Daemon) persistSessionState(projectID string, session daemonstate.Session) error {
-	if d.sessionRuntimeStateStore(projectID) == nil {
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(ctx, projectID, session); err != nil {
+	if (session.Role == "" || session.Role == daemonstate.SessionRoleWorker) && !isAgentScopedSessionID(session.ID) {
+		canonicalID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), session.IssueID)
+		if existing, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, session.IssueID, canonicalID); err != nil {
+			return fmt.Errorf("load logical worker session before persist: %w", err)
+		} else if found && !isAgentScopedSessionID(existing.ID) {
+			session.ID = existing.ID
+			session.IssueID = existing.IssueID
+			session.Role = existing.Role
+			session.ScopeKind = existing.ScopeKind
+			session.ScopeID = existing.ScopeID
+		}
+	}
+	if err := store.UpsertSessionState(ctx, projectID, session); err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn(
 				"persist session runtime state failed",
@@ -1838,7 +1872,7 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 
 	var session *daemonstate.Session
 	if issueID != "" {
-		if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil {
+		if runtimeStore := d.sessionRuntimeStateStoreIfConfigured(projectID); runtimeStore != nil {
 			if loaded, err := runtimeStore.ListSessionStates(ctx, projectID); err == nil {
 				aggregated := sessionProjectionAggregateByIssueKey(loaded, d.sessionNamingScope(projectID))
 				if merged, found := aggregated[sessionKey(issueID)]; found {

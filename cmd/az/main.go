@@ -780,7 +780,7 @@ func main() {
 			opts, err := cli.ParseIssueUpdateArgs(issueArgs)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]\n")
-				fmt.Fprintf(os.Stderr, "Note: --status backlog/open writes durable lifecycle state; --status in_progress marks active work; --status in_review requests review and may still display active until runtime activity is idle/done/no-agent.\n")
+				fmt.Fprintf(os.Stderr, "Note: --status open selects ready+idle; --status backlog selects backlog+idle; --status in_progress selects ready+working; --status in_review requests ready+review_requested and may still display active until runtime activity is idle/done/no-agent.\n")
 				fmt.Fprintf(os.Stderr, "Note: --status closed integrates the issue branch and closes with completed outcome; --status cancelled closes with cancelled outcome without integration; --force-worktree only applies to terminal close actions.\n")
 				fmt.Fprintf(os.Stderr, "Note: --cascade-children only applies to review requests and moves open/in_progress descendants to in_review first.\n")
 				fmt.Fprintf(os.Stderr, "Note: --update-impl is only for changing implementation assignments; normal field updates do not require it.\n")

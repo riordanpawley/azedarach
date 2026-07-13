@@ -324,7 +324,6 @@ func TestGroupTasksByBoardViewUsesTypedPlacementAndFirstMatch(t *testing.T) {
 		Review:       IssueReviewRequested,
 		CloseOutcome: IssueCloseNone,
 		Archive:      IssueArchiveLive,
-		Deletion:     IssueDeletionPresent,
 	})
 	if err != nil {
 		t.Fatalf("new review state: %v", err)
@@ -334,7 +333,6 @@ func TestGroupTasksByBoardViewUsesTypedPlacementAndFirstMatch(t *testing.T) {
 		Review:       IssueReviewNone,
 		CloseOutcome: IssueCloseCompleted,
 		Archive:      IssueArchiveLive,
-		Deletion:     IssueDeletionPresent,
 	})
 	if err != nil {
 		t.Fatalf("new done state: %v", err)
