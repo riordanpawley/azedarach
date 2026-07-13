@@ -20,6 +20,7 @@ Start here:
 
 {{ end }}Session Contract
 
+- Active git workflow mode: `{{ .GitWorkflowMode }}`.{{ if .OriginWorkflow }} Root integration is PR-only: push the issue branch with `git push -u origin HEAD`, run `az pr create --issue <root> --draft=false`, inspect it with `az pr status --issue <root>`, merge it with `az pr merge --issue <root> --confirm`, fetch `origin/<base>`, then retry `az ticket close --id <root>`. Do not merge or push the configured base branch directly.{{ end }}
 - `AZEDARACH_TICKET_ID` selects the default ticket scope. `AZEDARACH_ISSUE_ID` remains a legacy compatibility alias. Refresh stale context with `az ticket get <ticket-id>`; do not silently switch tickets.
 - Use `az ticket` as the task authority. Record non-trivial work in tickets and perform implementation in the ticket worktree/session.
 - When the user asks to start a ticket, start or attach its session; changing lifecycle state alone does not start execution. Agents start sessions only on explicit user or orchestrator direction.
@@ -70,7 +71,8 @@ Parent And Child Scope
 - Parent-child edges express hierarchy, not readiness. Pause/supersede work by changing lifecycle intent and adding a blocker; do not orphan active work by removing its parent edge.
 - Before using `--deferred`, ask whether the parent can land correctly without the work. Required work belongs in the parent's merge unit; only independently landable later work is deferred.
 - Child integration targets the closest active ancestor worktree. Materialize a missing ancestor with `az worktree create <ancestor-ticket>`; do not route normal child completion directly to the base branch. Low-level repair merges require both endpoints: `az branch merge --source <child> --target <ancestor>`.
-- Ancestor-to-descendant materialization is a distinct explicit flow: `az branch merge --source <ancestor> --target <descendant>`. Root-to-base uses `--target base` and is refused until the root has durable, ticket-specific human acceptance.
+- Ancestor-to-descendant materialization is a distinct explicit flow: `az branch merge --source <ancestor> --target <descendant>`. In non-origin workflow modes, root-to-base uses `--target base` and is refused until the root has durable, ticket-specific human acceptance. Origin mode never permits this local base integration path; use the PR-only workflow named above.
+- Cross-project follow-up work must be handed to a separate managed session with `az session start --project <project> <ticket>`. Do not switch projects in-band, and do not treat `az worktree create` as a worker handoff; it only materializes a worktree.
 
 Orchestration
 
@@ -121,7 +123,7 @@ Workflow Playbook
 - Graphs: `az ticket dep add` and `az ticket dep remove` own `blocks`, `parent-child`, `related`, `discovered-from`, and `created-in` edges. `az ticket dep bulk apply`, `az ticket fanout ready`, and `az ticket fanout drift` support larger plans. Parent-child defines containment; `blocks` defines readiness.
 - Evidence and resources: `az ticket record`, `az ticket events`, `az ticket context-risk`, `az observe`, and `az evidence validate` carry durable execution and closeout facts. `az ticket image` and `az ticket document` attach inspectable artifacts. Mail is for active coordination, not routine notes.
 - Execution: `az session start|attach|status|diagnose|stop|restart-all|resolve-conflict` controls managed tmux sessions. `az worktree create` materializes an integration target without starting an agent. The short aliases `az start`, `az attach`, `az status`, and `az stop` map to session operations.
-- Integration: accepted child work normally closes through `az ticket close`. `az branch merge --source <ticket> --target <ticket|base>` and `az branch agent-merge` are low-level conflict/repair tools; merge never infers its target from the caller's worktree. `az pr list|status|checks|open|create|merge` covers remote pull-request workflows when configured.
+- Integration: accepted child work normally closes through `az ticket close`. `az branch merge --source <ticket> --target <ticket|base>` and `az branch agent-merge` are low-level conflict/repair tools; merge never infers its target from the caller's worktree, and origin workflow mode refuses their direct base path. `az pr list|status|checks|open|create|merge` owns origin-mode base integration.
 - Orchestration: `az orchestrate status|start|group|watch|observe|capture|prompt|message|complete-check|integrate|close-session` runs tracked graphs. `az mail send|list|watch|validate-evidence` carries worker events, and `az evidence validate` checks `worker_evidence.v1` before delivery.
 - Board views: `az board view list|get|select|create|update|delete|explain` manages persistent typed projections. Use `explain` to understand first-match placement rather than inferring durable state from a column title.
 - Requirements and decisions: `az spec req|link|read|pack|lint|parity` owns behavioral traceability. `az decision list|get|record|update|delete|revisit|sync|import|link` owns durable rationale and relationships.

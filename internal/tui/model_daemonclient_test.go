@@ -7475,6 +7475,70 @@ func TestResolveMergeBaseTargetFallsBackWhenNoAncestorWorktreeExists(t *testing.
 	}
 }
 
+func TestMergeToBaseCmdOriginRefusalPrecedesGitMutation(t *testing.T) {
+	transport := originBaseRefusalTransport(t)
+	m := newDaemonTestModel(transport)
+
+	msg := m.mergeToBaseCmd("/tmp/az-root", "az-root", true)()
+	result, ok := msg.(mergeResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want mergeResultMsg", msg)
+	}
+	if result.err == nil || !strings.Contains(result.err.Error(), "workflow mode is origin") {
+		t.Fatalf("merge result error = %v, want origin-mode refusal", result.err)
+	}
+	if got := transport.requests; !reflect.DeepEqual(got, []string{daemonclient.CommandTaskMergeBaseTarget}) {
+		t.Fatalf("requests = %v, want refusal before git mutation", got)
+	}
+}
+
+func TestAgentMergeToBaseCmdOriginRefusalPrecedesPreflight(t *testing.T) {
+	transport := originBaseRefusalTransport(t)
+	m := newDaemonTestModel(transport)
+
+	msg := m.agentMergeToBaseCmd("/tmp/az-root", "az-root", true)()
+	result, ok := msg.(conflictResolveAgentResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want conflictResolveAgentResultMsg", msg)
+	}
+	if result.err == nil || !strings.Contains(result.err.Error(), "workflow mode is origin") {
+		t.Fatalf("agent merge result error = %v, want origin-mode refusal", result.err)
+	}
+	if got := transport.requests; !reflect.DeepEqual(got, []string{daemonclient.CommandTaskMergeBaseTarget}) {
+		t.Fatalf("requests = %v, want refusal before merge preflight", got)
+	}
+}
+
+func originBaseRefusalTransport(t *testing.T) *recordingDaemonTransport {
+	t.Helper()
+	return &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskMergeBaseTarget {
+				t.Fatalf("unexpected command after origin refusal: %s", req.Command)
+			}
+			var body struct {
+				RequireHumanAcceptance bool `json:"require_human_acceptance"`
+			}
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal merge target request: %v", err)
+			}
+			if !body.RequireHumanAcceptance {
+				t.Fatal("merge target request omitted protected integration authorization")
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              false,
+				Error: &protocol.ErrorEnvelope{
+					Code:    protocol.ErrorCodeInvalidRequest,
+					Message: "refusing direct base integration because git workflow mode is origin",
+				},
+			}, nil
+		},
+	}
+}
+
 func TestDiscardChangesCmdUsesDaemonClient(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
