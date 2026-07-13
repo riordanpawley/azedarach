@@ -102,6 +102,11 @@ type Daemon struct {
 	userStoreRefreshMu                 sync.Mutex
 	userStoreRefreshPending            map[string]bool
 	userStoreRefreshDirty              map[string]bool
+	userStoreRefreshActive             map[string]bool
+	userStoreRefreshInterval           time.Duration
+	userStoreRefreshProjectFn          func(context.Context, string) error
+	userStoreProjectLockHook           func(string, bool)
+	userStoreProjectRefreshLocks       sync.Map
 	userStoreRefreshWG                 sync.WaitGroup
 	userStoreRefreshStopping           bool
 	userStoreRefreshCtx                context.Context
@@ -350,6 +355,7 @@ func New(cfg Config) *Daemon {
 		revision:                           map[string]uint64{},
 		userStoreRefreshPending:            map[string]bool{},
 		userStoreRefreshDirty:              map[string]bool{},
+		userStoreRefreshActive:             map[string]bool{},
 		shutdownReqCh:                      make(chan struct{}),
 	}
 	if !cfg.ScopedRuntime && strings.TrimSpace(os.Getenv("AZEDARACH_DISABLE_USER_DB")) != "1" {

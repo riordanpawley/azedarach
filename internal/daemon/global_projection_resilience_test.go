@@ -100,6 +100,41 @@ func TestGlobalSnapshotScopeExcludesUnavailableProjectFromPartialHealth(t *testi
 	}
 }
 
+func TestGlobalSnapshotDoesNotReconcileProjectCatalog(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{Projects: []appconfig.Project{{ID: "p1", Name: "P1", Path: root}}}); err != nil {
+		t.Fatal(err)
+	}
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err = store.ReplaceProject(context.Background(), userstore.ProjectInput{ProjectID: "p1", Name: "P1", Path: root, DBPath: filepath.Join(root, ".azedarach", "azedarach.db")}); err != nil {
+		t.Fatal(err)
+	}
+	if err = appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{userStore: store}
+	resp, err := d.handleGlobalSnapshot(context.Background(), protocol.RequestEnvelope{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK {
+		t.Fatalf("response error: %+v", resp.Error)
+	}
+	snapshot, err := store.Snapshot(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 1 || !snapshot.Projects[0].Registered {
+		t.Fatalf("global snapshot mutated catalog registration: %+v", snapshot.Projects)
+	}
+}
+
 func TestScopedRuntimeNeverOpensOrCreatesUserProjectionDatabase(t *testing.T) {
 	home := t.TempDir()
 	repo := t.TempDir()
