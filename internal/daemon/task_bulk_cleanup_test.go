@@ -149,6 +149,31 @@ func TestTaskBulkCleanupLaterItemGetsFreshTimeoutBudget(t *testing.T) {
 	}
 }
 
+func TestTaskBulkCleanupDefaultPreservesMergeAndCleanupBudgets(t *testing.T) {
+	if taskBulkCleanupDefaultPerIssueTimeout != domain.IntegrationCloseTimeout {
+		t.Fatalf("bulk cleanup daemon default = %v, want %v", taskBulkCleanupDefaultPerIssueTimeout, domain.IntegrationCloseTimeout)
+	}
+	itemCtx, itemCancel := context.WithTimeout(context.Background(), taskBulkCleanupDefaultPerIssueTimeout)
+	defer itemCancel()
+	mergeCtx, mergeCancel, err := taskCloseIntegrationContext(itemCtx)
+	if err != nil {
+		t.Fatalf("derive bulk cleanup merge context: %v", err)
+	}
+	defer mergeCancel()
+	deadline, ok := mergeCtx.Deadline()
+	if !ok {
+		t.Fatal("bulk cleanup merge context has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining <= domain.IntegrationMergeTimeout-time.Second || remaining > domain.IntegrationMergeTimeout {
+		t.Fatalf("bulk cleanup merge budget = %v, want close to %v", remaining, domain.IntegrationMergeTimeout)
+	}
+	itemDeadline, _ := itemCtx.Deadline()
+	if reserve := itemDeadline.Sub(deadline); reserve < domain.IntegrationCloseReserve-time.Second {
+		t.Fatalf("bulk cleanup reserve = %v, want at least %v", reserve, domain.IntegrationCloseReserve)
+	}
+}
+
 func TestTaskBulkCleanupRejectsOutOfRangePerIssueTimeout(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-bulk-timeout-validation"

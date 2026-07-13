@@ -61,7 +61,7 @@ const (
 	eventLogCapacity                 = 256
 	notificationHistoryCapacity      = 100
 	eventSummaryMaxRunes             = 140
-	taskCloseMutationTimeout         = 10 * time.Minute
+	taskCloseMutationTimeout         = domain.IntegrationClientTimeout
 	worktreeCleanupMutationTimeout   = 2 * time.Minute
 	orphanedWorktreeCleanupTimeout   = 2 * time.Minute
 	issueScopedRuntimeReconcileLimit = 64

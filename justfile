@@ -36,6 +36,11 @@ bench-parallel-cli-latency:
 test:
     go test -v ./...
 
+# Aggregate daemon race validation has a larger budget than focused race tests.
+# The timeout remains inside `go test` so genuine hangs emit goroutine stacks.
+test-race-daemon:
+    ./scripts/test-daemon-race-sharded.sh
+
 test-coverage:
     go test -coverprofile=coverage.out ./...
     go tool cover -html=coverage.out -o coverage.html

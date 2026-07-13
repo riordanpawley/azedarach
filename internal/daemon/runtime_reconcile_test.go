@@ -564,7 +564,9 @@ func TestRunInvokesStartupRuntimeReconcileWithBoundedTimeout(t *testing.T) {
 }
 
 func TestStartupRuntimeReconcileBeginsSessionRecoveryBeforeInteractionStaleness(t *testing.T) {
-	const waitForSessionRecovery = 5 * time.Second
+	// This test asserts startup ordering, not a five-second performance SLO.
+	// Race instrumentation can delay the second asynchronously scheduled phase.
+	const waitForSessionRecovery = 15 * time.Second
 
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)

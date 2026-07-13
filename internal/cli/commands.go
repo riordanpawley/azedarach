@@ -58,10 +58,11 @@ const (
 	defaultIssueContextRiskDays = 14
 	defaultOperationListLimit   = 50
 	sessionStartCommandTimeout  = 5 * time.Minute
-	branchMergeToBaseTimeout    = 2 * time.Minute
+	branchMergeToBaseTimeout    = domain.IntegrationClientTimeout
 	daemonCommandTimeout        = 15 * time.Second
 	prCommandTimeout            = 2 * time.Minute
-	issueCloseCleanupTimeout    = 10 * time.Minute
+	issueCloseCleanupTimeout    = domain.IntegrationClientTimeout
+	issueBulkCleanupItemTimeout = domain.IntegrationCloseTimeout
 	issueCreateCommandTimeout   = 10 * time.Second
 	issueCreateAutostartTimeout = 12 * time.Second
 	exitCodeHardFailure         = 1
@@ -3762,7 +3763,7 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 }
 
 func ParseIssueCleanupArgs(args []string) (IssueCleanupOptions, error) {
-	opts := IssueCleanupOptions{Action: "closed", PerIssueTimeout: issueCloseCleanupTimeout}
+	opts := IssueCleanupOptions{Action: "closed", PerIssueTimeout: issueBulkCleanupItemTimeout}
 	var idsCSV, statusesCSV, updatedBefore string
 	fs := flag.NewFlagSet("issue cleanup", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -3777,8 +3778,8 @@ func ParseIssueCleanupArgs(args []string) (IssueCleanupOptions, error) {
 	fs.StringVar(&opts.Action, "action", "closed", "lifecycle action: closed or cancelled")
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "preview ordered actions without changing issues")
 	fs.BoolVar(&opts.JSON, "json", false, "output structured per-issue results")
-	fs.DurationVar(&opts.PerIssueTimeout, "per-ticket-timeout", issueCloseCleanupTimeout, "maximum time for each ticket cleanup")
-	fs.DurationVar(&opts.PerIssueTimeout, "per-issue-timeout", issueCloseCleanupTimeout, "deprecated alias for --per-ticket-timeout")
+	fs.DurationVar(&opts.PerIssueTimeout, "per-ticket-timeout", issueBulkCleanupItemTimeout, "maximum time for each ticket cleanup")
+	fs.DurationVar(&opts.PerIssueTimeout, "per-issue-timeout", issueBulkCleanupItemTimeout, "deprecated alias for --per-ticket-timeout")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCleanupOptions{}, err
 	}

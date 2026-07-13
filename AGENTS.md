@@ -41,6 +41,9 @@ just check-boundaries
 # Full Go test sweep
 go test ./...
 
+# Aggregate daemon race sweep (four sequential shards; 15m/shard, 45m aggregate)
+just test-race-daemon
+
 # Focused daemon/client boundary checks
 go test ./internal/tui ./internal/cli
 go test ./internal/daemon/... ./internal/client/...

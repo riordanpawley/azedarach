@@ -1967,6 +1967,8 @@ func parseTaskOwnershipTTL(raw string) (time.Duration, error) {
 }
 
 func (d *Daemon) handleTaskClose(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	ctx, cancel := context.WithTimeout(ctx, domain.IntegrationCloseTimeout)
+	defer cancel()
 	projectID := d.projectID(req.Meta)
 	var cmd taskCloseRequest
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
@@ -2063,7 +2065,13 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	}
 
 	phaseStartedAt = time.Now()
-	integration, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, cmd.IntegrateBeforeClose)
+	integrationCtx, cancelIntegration, integrationBudgetErr := taskCloseIntegrationContext(ctx)
+	if integrationBudgetErr != nil && cmd.IntegrateBeforeClose {
+		recordPhase("integrate_before_close", phaseStartedAt, false)
+		return result, fmt.Errorf("phase integrate_before_close for issue %s: %w", taskID, integrationBudgetErr)
+	}
+	integration, err := d.integrateTaskBeforeClose(integrationCtx, projectID, taskID, cmd.IntegrateBeforeClose)
+	cancelIntegration()
 	recordPhase("integrate_before_close", phaseStartedAt, !cmd.IntegrateBeforeClose)
 	recordTaskCloseHookPhases(ctx, &result, d.cfg.Logger, req, projectID, taskID, integration.HookDiagnostics)
 	if err != nil {
@@ -2147,6 +2155,21 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	}
 	d.publishTaskEvent(req, protocol.EventTaskUpdated, rev, taskEventBodyFromTask(projectID, task))
 	return result, nil
+}
+
+func taskCloseIntegrationContext(ctx context.Context) (context.Context, context.CancelFunc, error) {
+	budget := domain.IntegrationMergeTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		available := time.Until(deadline) - domain.IntegrationCloseReserve
+		if available <= 0 {
+			return ctx, func() {}, fmt.Errorf("close lifecycle budget exhausted before integration; %s cleanup reserve is required", domain.IntegrationCloseReserve)
+		}
+		if available < budget {
+			budget = available
+		}
+	}
+	integrationCtx, cancel := context.WithTimeout(ctx, budget)
+	return integrationCtx, cancel, nil
 }
 
 func daemonTaskCloseOutcomeStatus(raw string) (domain.IssueCloseOutcome, domain.Status, error) {

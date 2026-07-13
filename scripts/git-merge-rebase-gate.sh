@@ -7,57 +7,34 @@ if [ "${AZEDARACH_SKIP_MERGE_REBASE_GATE:-0}" = "1" ]; then
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
-cd "$repo_root"
 
-# Hooks can run with git routing variables (e.g. GIT_DIR/GIT_WORK_TREE)
-# inherited from the active repository/worktree. Clear them so nested git
-# usage inside go tests operates on each test's own temporary repository.
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
-unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+timeout_cmd=""
+if command -v timeout >/dev/null 2>&1; then
+	timeout_cmd="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+	timeout_cmd="gtimeout"
+else
+	echo "[gate] GNU timeout is required (provided by the repository Nix shell or Homebrew coreutils)" >&2
+	exit 1
+fi
 
-echo "[gate] running build check (go build ./...)"
-go build ./...
-
-test_log="$(mktemp -t azedarach-merge-gate.XXXXXX)"
+validation_timeout="${AZEDARACH_MERGE_GATE_TIMEOUT:-10m}"
+validation_status="$(mktemp -t azedarach-merge-gate-wrapper-status.XXXXXX)"
 cleanup() {
-	rm -f "$test_log"
+	rm -f "$validation_status"
 }
-trap cleanup EXIT INT TERM HUP
-
-run_tests() {
-	echo "[gate] running test check (go test ./...)"
-	if go test ./... >"$test_log" 2>&1; then
-		cat "$test_log"
-		return 0
-	fi
-	cat "$test_log"
-	return 1
-}
-
-run_tests || {
-	refreshed=0
-
-	if grep -q 'run UPDATE_GOLDEN=1 go test ./internal/ui/overlay to accept' "$test_log"; then
-		echo "[gate] detected overlay golden drift; refreshing fixtures"
-		UPDATE_GOLDEN=1 go test ./internal/ui/overlay
-		git add internal/ui/overlay/testdata/*.golden
-		refreshed=1
-	fi
-
-	if grep -Eq 'FAIL[[:space:]].*internal/ui/board' "$test_log" &&
-		grep -Eq 'Render\(\) output mismatch|RenderCard\(\) output mismatch' "$test_log"; then
-		echo "[gate] detected board golden drift candidate; refreshing fixtures"
-		go test ./internal/ui/board -update
-		git add internal/ui/board/testdata/*.golden
-		refreshed=1
-	fi
-
-	if [ "$refreshed" -eq 1 ]; then
-		echo "[gate] re-running full test suite after golden refresh"
-		run_tests
-	else
-		exit 1
-	fi
-}
-
-echo "[gate] build+tests passed"
+trap cleanup EXIT
+(
+	set +e
+	"$timeout_cmd" --signal=TERM --kill-after=15s "$validation_timeout" "$repo_root/scripts/git-merge-rebase-gate-body.sh"
+	printf '%s\n' "$?" >"$validation_status"
+) 2>&1 | tee
+if [ ! -s "$validation_status" ]; then
+	echo "[gate] validation runner ended without a status" >&2
+	exit 1
+fi
+status="$(cat "$validation_status")"
+if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+	echo "[gate] validation exceeded the $validation_timeout wall-clock budget; inspect retained Go timeout stacks/output above" >&2
+fi
+exit "$status"

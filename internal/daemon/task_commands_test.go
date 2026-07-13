@@ -2291,16 +2291,13 @@ func TestHandleBoardFetchDerivesInReviewPhaseFromSessionActivity(t *testing.T) {
 }
 
 func TestHandleTaskListReadsSQLiteProjection(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
 	logger := slog.Default()
 	projectID := "proj-local-first-list"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
-	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+	taskID, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
 		Title:    "foreground reads local projection",
 		Type:     domain.TypeTask,
 		Priority: domain.P2,
@@ -2309,6 +2306,10 @@ func TestHandleTaskListReadsSQLiteProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
+	// The deadline covers the list operation under test, not lazy,
+	// race-instrumented schema setup performed by the fixture create.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 
 	d := &Daemon{
 		cfg: Config{Logger: logger},
@@ -3869,6 +3870,36 @@ func taskClosePhaseNames(phases []taskClosePhaseTiming) []string {
 	return names
 }
 
+func TestTaskCloseIntegrationContextReservesCleanupBudget(t *testing.T) {
+	parent, parentCancel := context.WithTimeout(context.Background(), domain.IntegrationCloseReserve+2*time.Second)
+	defer parentCancel()
+
+	ctx, cancel, err := taskCloseIntegrationContext(parent)
+	if err != nil {
+		t.Fatalf("taskCloseIntegrationContext() error = %v", err)
+	}
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("integration context has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining < time.Second || remaining > 2*time.Second {
+		t.Fatalf("integration budget = %v, want close to 2s after cleanup reserve", remaining)
+	}
+}
+
+func TestTaskCloseIntegrationContextRejectsExhaustedCleanupReserve(t *testing.T) {
+	parent, parentCancel := context.WithTimeout(context.Background(), domain.IntegrationCloseReserve-time.Second)
+	defer parentCancel()
+
+	_, cancel, err := taskCloseIntegrationContext(parent)
+	cancel()
+	if err == nil || !strings.Contains(err.Error(), "cleanup reserve is required") {
+		t.Fatalf("taskCloseIntegrationContext() error = %v, want exhausted cleanup reserve", err)
+	}
+}
+
 func taskClosePhaseByName(phases []taskClosePhaseTiming, name string) (taskClosePhaseTiming, bool) {
 	for _, phase := range phases {
 		if phase.Name == name {
@@ -4872,6 +4903,7 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
 	commands := make([]string, 0, 12)
 	var scratchWorktree string
+	var mergeBudget time.Duration
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		switch {
@@ -4931,6 +4963,11 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			}
 		}
 		startedAt := time.Now().UTC()
+		if len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge" {
+			if deadline, ok := runCtx.Deadline(); ok {
+				mergeBudget = time.Until(deadline)
+			}
+		}
 		output, err := runner.Run(runCtx, args...)
 		endedAt := time.Now().UTC()
 		if tracePath != "" && len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge" {
@@ -5001,6 +5038,9 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	}
 	if !resp.OK {
 		t.Fatalf("handleTaskClose response = %+v", resp)
+	}
+	if mergeBudget < domain.IntegrationMergeTimeout-time.Second || mergeBudget > domain.IntegrationMergeTimeout {
+		t.Fatalf("daemon close merge budget = %v, want close to %v with cleanup reserve retained", mergeBudget, domain.IntegrationMergeTimeout)
 	}
 	var result taskCloseResult
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
@@ -8018,17 +8058,14 @@ func TestTaskGraphReadinessRefreshesOnlyRootScopedSessions(t *testing.T) {
 }
 
 func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
 	projectID := "proj-graph-shared-load"
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := issues.NewClientAtPath(dbPath, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-
-	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+	setupCtx := context.Background()
+	rootID, err := issuesClient.Create(setupCtx, issues.CreateTaskParams{
 		Title:  "Shared readiness root",
 		Type:   domain.TypeEpic,
 		Status: domain.StatusInProgress,
@@ -8036,7 +8073,7 @@ func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create root: %v", err)
 	}
-	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+	childID, err := issuesClient.Create(setupCtx, issues.CreateTaskParams{
 		Title:    "Shared readiness child",
 		Type:     domain.TypeTask,
 		Status:   domain.StatusInProgress,
@@ -8046,7 +8083,7 @@ func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
 		t.Fatalf("create child: %v", err)
 	}
 	sessionID := naming.CanonicalSessionID(projectID, childID)
-	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, setupCtx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       childID,
 		State:         daemonstate.SessionStateRunning,
@@ -8079,6 +8116,10 @@ func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
 		revision: map[string]uint64{projectID: 1},
 	}
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+	// Keep fixture initialization outside the operation deadline. Under -race,
+	// lazy migrations can exceed the intended three-second readiness assertion.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 
 	type readinessResult struct {
 		ready taskGraphReadinessResult
