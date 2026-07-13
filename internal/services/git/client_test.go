@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -553,12 +554,21 @@ func TestMergeGateBudgetLeavesFinalizationReserve(t *testing.T) {
 }
 
 func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
+	// The wall budget includes scheduling the gate body and fake Go process.
+	// Keep enough startup reserve for this test to remain meaningful when all
+	// repository packages are being compiled and tested concurrently.
+	const timeoutBudget = 10 * time.Second
+
 	timeoutPath, err := exec.LookPath("timeout")
 	if err != nil {
 		timeoutPath, err = exec.LookPath("gtimeout")
 	}
 	if err != nil {
 		t.Skip("GNU timeout unavailable")
+	}
+	killPath, err := exec.LookPath("kill")
+	if err != nil {
+		t.Skip("POSIX kill unavailable")
 	}
 
 	repo := t.TempDir()
@@ -581,7 +591,8 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
 		t.Fatalf("mkdir fake bin: %v", err)
 	}
-	fakeGo := "#!/bin/sh\nif [ \"$1\" = build ]; then exit 0; fi\necho retained-timeout-marker\nsleep 30\n"
+	childPIDFile := filepath.Join(repo, "timeout-child.pid")
+	fakeGo := "#!/bin/sh\nif [ \"$1\" = build ]; then exit 0; fi\nsleep 30 &\nchild_pid=$!\nprintf '%s\\n' \"$child_pid\" >\"$AZEDARACH_TEST_CHILD_PID_FILE\"\necho retained-timeout-marker\nwait \"$child_pid\"\n"
 	if err := os.WriteFile(filepath.Join(fakeBin, "go"), []byte(fakeGo), 0o755); err != nil {
 		t.Fatalf("write fake go: %v", err)
 	}
@@ -589,10 +600,13 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 	cmd := exec.Command(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"))
 	cmd.Dir = repo
 	cmd.Env = append(os.Environ(),
-		"AZEDARACH_MERGE_GATE_TIMEOUT=2s",
+		"AZEDARACH_MERGE_GATE_TIMEOUT="+timeoutBudget.String(),
+		"AZEDARACH_TEST_CHILD_PID_FILE="+childPIDFile,
 		"PATH="+fakeBin+string(os.PathListSeparator)+filepath.Dir(timeoutPath)+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
+	startedAt := time.Now()
 	output, runErr := cmd.CombinedOutput()
+	elapsed := time.Since(startedAt)
 	if runErr == nil {
 		t.Fatal("merge gate timeout error = nil")
 	}
@@ -600,8 +614,40 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 	if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != 124 {
 		t.Fatalf("merge gate timeout error = %v, output=%s", runErr, output)
 	}
-	if !strings.Contains(string(output), "retained-timeout-marker") || !strings.Contains(string(output), "2s wall-clock budget") {
+	if !strings.Contains(string(output), "retained-timeout-marker") || !strings.Contains(string(output), timeoutBudget.String()+" wall-clock budget") {
 		t.Fatalf("merge gate timeout output did not retain child diagnostics:\n%s", output)
+	}
+	if elapsed < timeoutBudget-time.Second {
+		t.Fatalf("merge gate timeout elapsed = %v, want wall-clock budget enforcement", elapsed)
+	}
+	if elapsed > timeoutBudget+5*time.Second {
+		t.Fatalf("merge gate timeout elapsed = %v, want return within %v", elapsed, timeoutBudget+5*time.Second)
+	}
+	childPIDBytes, err := os.ReadFile(childPIDFile)
+	if err != nil {
+		t.Fatalf("read timed-out child PID: %v", err)
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(childPIDBytes)))
+	if err != nil {
+		t.Fatalf("parse timed-out child PID %q: %v", childPIDBytes, err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		probeOutput, probeErr := exec.Command(killPath, "-0", strconv.Itoa(childPID)).CombinedOutput()
+		if probeErr != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(probeErr, &exitErr) {
+				t.Fatalf("probe timed-out child process %d: %v", childPID, probeErr)
+			}
+			if strings.Contains(strings.ToLower(string(probeOutput)), "not permitted") {
+				t.Fatalf("probe timed-out child process %d: %s", childPID, probeOutput)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed-out child process %d still running after merge gate returned", childPID)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
