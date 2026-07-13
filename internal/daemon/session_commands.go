@@ -1094,6 +1094,17 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v%s", err, cleanupNote)), nil
 	}
+	// The tmux session exists at this point. Record that physical fact through
+	// the versioned observation authority; the lifecycle transition above owns
+	// desired intent only and must not fabricate observed activity.
+	if err := d.persistObservedRuntimeProjection(ctx, cmd.ProjectID, req.Meta, daemonstate.Session{
+		ID: cmd.SessionID, ObservedState: daemonstate.SessionStateRunning,
+		Activity: initialActivity, ActivitySource: initialActivitySource, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		d.rollbackSessionStartLifecycle(cmd.ProjectID, cmd.SessionID, cmd.IssueID)
+		cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session runtime observation: %v%s", err, cleanupNote)), nil
+	}
 	if task.Type == domain.TypeEpic {
 		if err := d.acquireRootedOrchestratorLease(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
 			d.rollbackSessionStartLifecycle(cmd.ProjectID, cmd.SessionID, cmd.IssueID)

@@ -5671,10 +5671,11 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvent(t *testing.T) {
 		_ = runtimeStateStore.Close()
 	})
 	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
-		ID:        sessionID,
-		IssueID:   issueID,
-		State:     daemonstate.SessionStateStopped,
-		UpdatedAt: time.Now().UTC(),
+		ID:            sessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateStopped,
+		ObservedState: daemonstate.SessionStateStopped,
+		UpdatedAt:     time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seed runtime session projection: %v", err)
 	}
@@ -5847,7 +5848,7 @@ func TestTmuxObservationAuthoritySupersedesOldHookAndLaterDesiredWrite(t *testin
 	if err != nil || !found || physical.ObservedState != daemonstate.SessionStateStopped {
 		t.Fatalf("tmux stopped observation=%+v found=%v err=%v", physical, found, err)
 	}
-	if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
+	if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
 		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStatePaused,
 		ObservedState: daemonstate.SessionStateRunning, Activity: "stale", UpdatedAt: time.Now().UTC(),
 	}); err != nil {
@@ -5887,10 +5888,11 @@ func TestApplySessionLifecycleTransitionPreservesObservedRuntimeState(t *testing
 		_ = runtimeStateStore.Close()
 	})
 	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
-		ID:        sessionID,
-		IssueID:   issueID,
-		State:     daemonstate.SessionStateAttached,
-		UpdatedAt: time.Now().UTC(),
+		ID:            sessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateAttached,
+		UpdatedAt:     time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seed durable attached session: %v", err)
 	}
