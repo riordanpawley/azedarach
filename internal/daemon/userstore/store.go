@@ -40,6 +40,7 @@ var migrationRegistrations = []sqlitemigration.Artifact{
 
 const projectionVersion = 2
 const DefaultProjectionMaxAge = 2 * time.Minute
+const migrationArtifactAuthority sqlitemigration.Authority = "user.projection"
 
 type Store struct {
 	db                    *sql.DB
@@ -192,7 +193,7 @@ CREATE TABLE IF NOT EXISTS user_view_selections (
 	if err != nil {
 		return fmt.Errorf("migrate user cross-project projection: %w", err)
 	}
-	if err := sqlitemigration.EnsureLedgerChecksums(ctx, tx, migrationArtifacts); err != nil {
+	if err := sqlitemigration.EnsureLedgerChecksumsInTransaction(ctx, tx, migrationArtifactAuthority, migrationArtifacts); err != nil {
 		return err
 	}
 	if err := recordAppliedUserMigration(ctx, tx, "user_0001_cross_project_projection"); err != nil {
@@ -226,7 +227,7 @@ CREATE TABLE IF NOT EXISTS user_view_selections (
 			return fmt.Errorf("before user database migration commit: %w", err)
 		}
 	}
-	if err := sqlitemigration.EnsureLedgerChecksums(ctx, tx, migrationArtifacts); err != nil {
+	if err := sqlitemigration.EnsureLedgerChecksumsInTransaction(ctx, tx, migrationArtifactAuthority, migrationArtifacts); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

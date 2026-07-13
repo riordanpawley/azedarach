@@ -28,6 +28,8 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "daemon_notices_0001", Path: "migrations/0001_daemon_notices.sql", Checksum: "05a47c2b8c1e16e79062f0d19762bce056c7fd56c05bc33d06ccf5b2ea7e008a"},
 }
 
+const migrationArtifactAuthority sqlitemigration.Authority = "project.daemon_notices"
+
 func runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := sqlitemigration.Validate(migrationFiles, migrationArtifacts); err != nil {
 		return fmt.Errorf("validate migration registry: %w", err)
@@ -42,7 +44,7 @@ func runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := ensureMigrationTable(ctx, db); err != nil {
 		return err
 	}
-	if err := sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifacts); err != nil {
+	if err := sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts); err != nil {
 		return err
 	}
 	for _, migration := range orderedMigrations {
@@ -61,7 +63,7 @@ func runMigrations(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
-	return sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifacts)
+	return sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts)
 }
 
 func ensureMigrationTable(ctx context.Context, db *sql.DB) error {

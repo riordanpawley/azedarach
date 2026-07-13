@@ -419,13 +419,14 @@ func migrateIssueSessionLogicalIdentity(ctx context.Context, tx *sql.Tx) error {
 }
 
 const (
-	issueStateModelV2MigrationID      = "0029_issue_state_model_v2"
-	issueStateModelVersionMetaKey     = "issue:state_model_version"
-	issueStateModelV2CutoverMarkerKey = "issue:state_model_v2_cutover"
-	issueStateModelV2Version          = "2"
-	boardViewsMigrationID             = "0031_board_views"
-	contextualLearningMigrationID     = "0039_contextual_learning_activation"
-	legacyContextualLearningMigration = "0038_contextual_learning_activation"
+	migrationArtifactAuthority        sqlitemigration.Authority = "project.issues"
+	issueStateModelV2MigrationID                                = "0029_issue_state_model_v2"
+	issueStateModelVersionMetaKey                               = "issue:state_model_version"
+	issueStateModelV2CutoverMarkerKey                           = "issue:state_model_v2_cutover"
+	issueStateModelV2Version                                    = "2"
+	boardViewsMigrationID                                       = "0031_board_views"
+	contextualLearningMigrationID                               = "0039_contextual_learning_activation"
+	legacyContextualLearningMigration                           = "0038_contextual_learning_activation"
 )
 
 type issueStateModelV2CutoverMarker struct {
@@ -443,7 +444,7 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := ensureMigrationTable(ctx, db); err != nil {
 		return err
 	}
-	if err := sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifacts); err != nil {
+	if err := sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts); err != nil {
 		return err
 	}
 	if err := refusePartialIssueStateModelV2Cutover(ctx, db); err != nil {
@@ -545,7 +546,7 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := c.seedBuiltInBoardViews(ctx, db, "default"); err != nil {
 		return fmt.Errorf("seed built-in board views: %w", err)
 	}
-	return sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifacts)
+	return sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts)
 }
 
 func repairIssueIDAllocationSchema(ctx context.Context, db *sql.DB) error {

@@ -2,6 +2,7 @@ package notices
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,43 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
+
+func TestSQLiteStoreBackfillsLegacyNoticesAfterOtherAuthorityConversion(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_migrations(id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, artifact_checksum TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	sqlText, err := loadMigrationSQL(orderedMigrations[0].path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(sqlText); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_migrations(id,applied_at) VALUES(?, 'legacy')`, orderedMigrations[0].id); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewAtPath(dbPath, nil)
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.List(context.Background(), Query{Limit: 1}); err != nil {
+		t.Fatalf("active notice store open: %v", err)
+	}
+	var checksum string
+	if err := store.db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, migrationArtifacts[0].ID).Scan(&checksum); err != nil {
+		t.Fatal(err)
+	}
+	if checksum != migrationArtifacts[0].Checksum {
+		t.Fatalf("checksum = %q, want %q", checksum, migrationArtifacts[0].Checksum)
+	}
+}
 
 func TestSQLiteStoreUpsertActiveDedupesWithinProject(t *testing.T) {
 	ctx := context.Background()
