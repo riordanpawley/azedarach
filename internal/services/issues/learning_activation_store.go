@@ -47,6 +47,16 @@ type LearningActivationProposal struct {
 }
 
 func (c *Client) ProposeLearningActivation(ctx context.Context, p RecordLearningActivationParams) (LearningActivationProposal, error) {
+	var out LearningActivationProposal
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		out, err = c.proposeLearningActivationLocked(lockCtx, p)
+		return err
+	})
+	return out, err
+}
+
+func (c *Client) proposeLearningActivationLocked(ctx context.Context, p RecordLearningActivationParams) (LearningActivationProposal, error) {
 	p.ProjectID, p.Surface, p.ContextFingerprint = strings.TrimSpace(p.ProjectID), strings.TrimSpace(p.Surface), strings.TrimSpace(p.ContextFingerprint)
 	if p.ProjectID == "" || p.Surface == "" || p.ContextFingerprint == "" || strings.TrimSpace(p.SessionID) == "" || len(p.LearningIDs) == 0 {
 		return LearningActivationProposal{}, errors.New("proposal requires project, surface, context fingerprint, session, and learning ids")
@@ -73,6 +83,16 @@ func (c *Client) ProposeLearningActivation(ctx context.Context, p RecordLearning
 }
 
 func (c *Client) ConfirmLearningActivation(ctx context.Context, projectID, activationID string, tokenCost int) (LearningActivation, error) {
+	var out LearningActivation
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		out, err = c.confirmLearningActivationLocked(lockCtx, projectID, activationID, tokenCost)
+		return err
+	})
+	return out, err
+}
+
+func (c *Client) confirmLearningActivationLocked(ctx context.Context, projectID, activationID string, tokenCost int) (LearningActivation, error) {
 	projectID = strings.TrimSpace(projectID)
 	activationID = strings.TrimSpace(activationID)
 	if projectID == "" || activationID == "" || tokenCost < 0 || tokenCost > MaxLearningActivationTokens {
@@ -135,6 +155,12 @@ func (c *Client) ConfirmLearningActivation(ctx context.Context, projectID, activ
 }
 
 func (c *Client) RecordLearningActivationExclusion(ctx context.Context, projectID, surface, purpose, sessionID, reason string, learningCount int) error {
+	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		return c.recordLearningActivationExclusionLocked(lockCtx, projectID, surface, purpose, sessionID, reason, learningCount)
+	})
+}
+
+func (c *Client) recordLearningActivationExclusionLocked(ctx context.Context, projectID, surface, purpose, sessionID, reason string, learningCount int) error {
 	projectID, surface, purpose, sessionID, reason = strings.TrimSpace(projectID), strings.TrimSpace(surface), strings.TrimSpace(purpose), strings.TrimSpace(sessionID), strings.TrimSpace(reason)
 	if projectID == "" || surface == "" || (reason != "suppressed" && reason != "budget") || learningCount < 0 {
 		return errors.New("valid activation exclusion is required")
@@ -148,6 +174,16 @@ func (c *Client) RecordLearningActivationExclusion(ctx context.Context, projectI
 }
 
 func (c *Client) AbandonLearningActivation(ctx context.Context, projectID, activationID, reason string) (bool, error) {
+	var abandoned bool
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		abandoned, err = c.abandonLearningActivationLocked(lockCtx, projectID, activationID, reason)
+		return err
+	})
+	return abandoned, err
+}
+
+func (c *Client) abandonLearningActivationLocked(ctx context.Context, projectID, activationID, reason string) (bool, error) {
 	projectID, activationID, reason = strings.TrimSpace(projectID), strings.TrimSpace(activationID), strings.TrimSpace(reason)
 	if projectID == "" || activationID == "" || reason == "" {
 		return false, errors.New("project, activation id, and abandonment reason are required")
@@ -192,6 +228,16 @@ func (c *Client) validateActiveLearningIDs(ctx context.Context, db *sql.DB, proj
 }
 
 func (c *Client) RecordLearningActivation(ctx context.Context, p RecordLearningActivationParams) (LearningActivation, error) {
+	var out LearningActivation
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		out, err = c.recordLearningActivationLocked(lockCtx, p)
+		return err
+	})
+	return out, err
+}
+
+func (c *Client) recordLearningActivationLocked(ctx context.Context, p RecordLearningActivationParams) (LearningActivation, error) {
 	p.ProjectID, p.Surface, p.ContextFingerprint, p.Explanation = strings.TrimSpace(p.ProjectID), strings.TrimSpace(p.Surface), strings.TrimSpace(p.ContextFingerprint), strings.TrimSpace(p.Explanation)
 	if p.ProjectID == "" || p.Surface == "" || p.ContextFingerprint == "" || len(p.LearningIDs) == 0 {
 		return LearningActivation{}, fmt.Errorf("activation requires project, surface, context fingerprint, and learning ids")
@@ -257,6 +303,17 @@ func (c *Client) DeliveredLearningIDs(ctx context.Context, projectID, sessionID 
 }
 
 func (c *Client) RecordLearningActivationOutcome(ctx context.Context, in LearningActivationOutcome) (LearningActivationOutcome, bool, error) {
+	var out LearningActivationOutcome
+	var created bool
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		out, created, err = c.recordLearningActivationOutcomeLocked(lockCtx, in)
+		return err
+	})
+	return out, created, err
+}
+
+func (c *Client) recordLearningActivationOutcomeLocked(ctx context.Context, in LearningActivationOutcome) (LearningActivationOutcome, bool, error) {
 	in.ActivationID, in.IdempotencyKey, in.Explanation = strings.TrimSpace(in.ActivationID), strings.TrimSpace(in.IdempotencyKey), strings.TrimSpace(in.Explanation)
 	in.ProjectID = strings.TrimSpace(in.ProjectID)
 	if in.ProjectID == "" || in.ActivationID == "" || in.IdempotencyKey == "" || !in.Outcome.Valid() || !in.Source.Valid() {

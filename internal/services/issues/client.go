@@ -99,6 +99,12 @@ func runtimeDivergentIssueIDs(ctx context.Context, q sqlIssueQueryer) (map[strin
 }
 
 func (c *Client) RecordRuntimeDivergence(ctx context.Context, issueID, reason string) error {
+	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		return c.recordRuntimeDivergenceLocked(lockCtx, issueID, reason)
+	})
+}
+
+func (c *Client) recordRuntimeDivergenceLocked(ctx context.Context, issueID, reason string) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
@@ -109,6 +115,12 @@ func (c *Client) RecordRuntimeDivergence(ctx context.Context, issueID, reason st
 }
 
 func (c *Client) ClearRuntimeDivergence(ctx context.Context, issueID string) error {
+	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		return c.clearRuntimeDivergenceLocked(lockCtx, issueID)
+	})
+}
+
+func (c *Client) clearRuntimeDivergenceLocked(ctx context.Context, issueID string) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
@@ -192,6 +204,8 @@ func projectionCompositeCheckpoint(ctx context.Context, q sqlIssueDBTX, projectI
 type dependencyRemovalConfirmationKey struct{}
 type parentChildOrphanConfirmationKey struct{}
 type issueMutationLockKey struct{}
+
+var issueOperationLocks sync.Map
 
 // ProjectionSourceVersion reports the applied project-schema migration count.
 func (c *Client) ProjectionSourceVersion(ctx context.Context) (int, error) {
@@ -492,11 +506,12 @@ const (
 
 // Client wraps local SQLite task store operations.
 type Client struct {
-	dbPath               string
-	logger               *slog.Logger
-	sqliteBusyTimeout    time.Duration
-	sqliteBusyRetryDelay time.Duration
-	sqliteBusyWait       func(context.Context, time.Duration) error
+	dbPath                string
+	logger                *slog.Logger
+	sqliteBusyTimeout     time.Duration
+	sqliteBusyRetryBudget time.Duration
+	sqliteBusyRetryDelay  time.Duration
+	sqliteBusyWait        func(context.Context, time.Duration) error
 
 	mu             sync.Mutex
 	db             *sql.DB
@@ -520,9 +535,18 @@ func WithSQLiteBusyPolicy(timeout, retryDelay time.Duration) ClientOption {
 	return func(c *Client) {
 		if timeout > 0 {
 			c.sqliteBusyTimeout = timeout
+			c.sqliteBusyRetryBudget = timeout
 		}
 		if retryDelay > 0 {
 			c.sqliteBusyRetryDelay = retryDelay
+		}
+	}
+}
+
+func withSQLiteBusyRetryBudget(budget time.Duration) ClientOption {
+	return func(c *Client) {
+		if budget > 0 {
+			c.sqliteBusyRetryBudget = budget
 		}
 	}
 }
@@ -561,17 +585,30 @@ type sqlIssueDBTX interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-var issueMutationLocks sync.Map
-
 // WithMutationLock serializes issue-store writes that must not interleave with
 // multi-step daemon side effects for the same SQLite database.
 func (c *Client) WithMutationLock(ctx context.Context, fn func(context.Context) error) error {
-	return c.withMutationLock(ctx, fn)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if locked, _ := ctx.Value(issueMutationLockKey{}).(bool); locked {
+		return fn(ctx)
+	}
+	lock := issueOperationLockForPath(c.dbPath)
+	lock.Lock()
+	defer lock.Unlock()
+	return fn(context.WithValue(ctx, issueMutationLockKey{}, true))
 }
 
 func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) error) error {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	// Initialization performs coordinated startup repairs of its own. Complete
+	// it before taking the steady-state write lock so a first mutation cannot
+	// recursively acquire the same canonical database lock.
+	if _, err := c.dbHandle(); err != nil {
+		return err
 	}
 	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "issue_store.mutation_lock",
 		"dependency.name", "sqlite",
@@ -579,31 +616,26 @@ func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) 
 	)
 	var spanErr error
 	defer func() { endSpan(spanErr) }()
-	if locked, _ := ctx.Value(issueMutationLockKey{}).(bool); locked {
-		spanErr = fn(ctx)
-		return spanErr
+	runWrite := func(lockCtx context.Context) error {
+		return sqliteutil.WithWriteLockContext(lockCtx, c.dbPath, fn)
 	}
-	lock := issueMutationLockForPath(c.dbPath)
-	spanErr = func() error {
-		lock.Lock()
-		defer lock.Unlock()
-		return fn(context.WithValue(ctx, issueMutationLockKey{}, true))
-	}()
+	if locked, _ := ctx.Value(issueMutationLockKey{}).(bool); locked {
+		spanErr = runWrite(ctx)
+	} else {
+		spanErr = c.WithMutationLock(ctx, runWrite)
+	}
 	if spanErr == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
 	}
 	return spanErr
 }
 
-func issueMutationLockForPath(dbPath string) *sync.Mutex {
-	key := strings.TrimSpace(dbPath)
-	if abs, err := filepath.Abs(key); err == nil {
-		key = filepath.Clean(abs)
-	}
+func issueOperationLockForPath(dbPath string) *sync.Mutex {
+	key := sqliteutil.CanonicalPath(dbPath)
 	if key == "" {
 		key = "."
 	}
-	value, _ := issueMutationLocks.LoadOrStore(key, &sync.Mutex{})
+	value, _ := issueOperationLocks.LoadOrStore(key, &sync.Mutex{})
 	return value.(*sync.Mutex)
 }
 
@@ -633,11 +665,12 @@ func NewClientAtPath(dbPath string, logger *slog.Logger, opts ...ClientOption) *
 		logger = slog.Default()
 	}
 	client := &Client{
-		dbPath:               dbPath,
-		logger:               logger,
-		sqliteBusyTimeout:    defaultSQLiteBusyTimeout,
-		sqliteBusyRetryDelay: defaultSQLiteBusyRetryDelay,
-		sqliteBusyWait:       waitSQLiteBusyRetry,
+		dbPath:                dbPath,
+		logger:                logger,
+		sqliteBusyTimeout:     defaultSQLiteBusyTimeout,
+		sqliteBusyRetryBudget: defaultSQLiteBusyTimeout,
+		sqliteBusyRetryDelay:  defaultSQLiteBusyRetryDelay,
+		sqliteBusyWait:        waitSQLiteBusyRetry,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -670,7 +703,7 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		}
 	}
 
-	busyTimeoutMillis := max(c.sqliteBusyTimeout.Milliseconds(), int64(1))
+	busyTimeoutMillis := max(min(c.sqliteBusyTimeout, c.sqliteBusyRetryDelay).Milliseconds(), int64(1))
 	dsn := fmt.Sprintf(
 		"file:%s?_pragma=busy_timeout(%d)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate",
 		filepath.ToSlash(c.dbPath),
@@ -2375,9 +2408,7 @@ func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 func (c *Client) Update(ctx context.Context, id string, status domain.Status) error {
 	return c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
-			return sqliteutil.WithWriteLock(c.dbPath, func() error {
-				return c.updateLocked(ctx, id, status)
-			})
+			return c.updateLocked(ctx, id, status)
 		})
 	})
 }
@@ -2389,43 +2420,41 @@ func (c *Client) RepairReadyIdleEngagement(ctx context.Context, id string) (bool
 	var repaired bool
 	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
-			return sqliteutil.WithWriteLock(c.dbPath, func() error {
-				db, err := c.dbHandle()
-				if err != nil {
-					return err
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return c.wrapError("repair-ready-idle", id, err)
+			}
+			defer func() {
+				if tx != nil {
+					_ = tx.Rollback()
 				}
-				tx, err := db.BeginTx(ctx, nil)
-				if err != nil {
-					return c.wrapError("repair-ready-idle", id, err)
-				}
-				defer func() {
-					if tx != nil {
-						_ = tx.Rollback()
-					}
-				}()
-				now := time.Now().UTC().Format(time.RFC3339Nano)
-				res, err := tx.ExecContext(ctx, `UPDATE issues
+			}()
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			res, err := tx.ExecContext(ctx, `UPDATE issues
 					SET engagement='working', status=?, lifecycle_state='active', review_state='none', closed_outcome='none', updated_at=?
 					WHERE id=? AND disposition='ready' AND engagement='idle' AND visibility='live'`, domain.StatusInProgress, now, strings.TrimSpace(id))
-				if err != nil {
+			if err != nil {
+				return c.wrapError("repair-ready-idle", id, err)
+			}
+			affected, err := res.RowsAffected()
+			if err != nil {
+				return c.wrapError("repair-ready-idle", id, err)
+			}
+			if affected == 1 {
+				if err := c.appendIssueObservationEvent(ctx, tx, strings.TrimSpace(id), domain.IssueEventIssueStatusChanged, map[string]any{"from_status": string(domain.StatusOpen), "to_status": string(domain.StatusInProgress), "reason": "live_managed_runtime"}); err != nil {
 					return c.wrapError("repair-ready-idle", id, err)
 				}
-				affected, err := res.RowsAffected()
-				if err != nil {
-					return c.wrapError("repair-ready-idle", id, err)
-				}
-				if affected == 1 {
-					if err := c.appendIssueObservationEvent(ctx, tx, strings.TrimSpace(id), domain.IssueEventIssueStatusChanged, map[string]any{"from_status": string(domain.StatusOpen), "to_status": string(domain.StatusInProgress), "reason": "live_managed_runtime"}); err != nil {
-						return c.wrapError("repair-ready-idle", id, err)
-					}
-					repaired = true
-				}
-				if err := tx.Commit(); err != nil {
-					return c.wrapError("repair-ready-idle", id, err)
-				}
-				tx = nil
-				return nil
-			})
+				repaired = true
+			}
+			if err := tx.Commit(); err != nil {
+				return c.wrapError("repair-ready-idle", id, err)
+			}
+			tx = nil
+			return nil
 		})
 	})
 	return repaired, err
@@ -2585,69 +2614,67 @@ func (c *Client) claimOwnership(ctx context.Context, issueID string, params Owne
 		return c.wrapError("claim-ownership", issueID, fmt.Errorf("invalid ownership purpose %q", purpose))
 	}
 	return c.withMutationLock(ctx, func(ctx context.Context) error {
-		return sqliteutil.WithWriteLock(c.dbPath, func() error {
-			db, err := c.dbHandle()
-			if err != nil {
-				return err
+		db, err := c.dbHandle()
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return c.wrapError("claim-ownership", issueID, err)
+		}
+		defer func() {
+			if tx != nil {
+				_ = tx.Rollback()
 			}
-			tx, err := db.BeginTx(ctx, nil)
-			if err != nil {
-				return c.wrapError("claim-ownership", issueID, err)
-			}
-			defer func() {
-				if tx != nil {
-					_ = tx.Rollback()
-				}
-			}()
+		}()
 
-			_, err = c.issueOwnershipForUpdate(ctx, tx, issueID)
-			if err != nil {
-				return c.wrapError("claim-ownership", issueID, err)
-			}
-			if err := issueLeaseEligibilityForUpdate(ctx, tx, issueID, purpose); err != nil {
-				return c.wrapError("claim-ownership", issueID, err)
-			}
-			now := time.Now().UTC()
-			var lease *domain.CoordinationLease
-			lease, err = coordinationLeaseForUpdate(ctx, tx, issueID, purpose)
-			if err != nil {
-				return c.wrapError("claim-ownership", issueID, err)
-			}
-			if lease != nil && !lease.IsExpired(now) && !strings.EqualFold(lease.OwnerID, ownerID) && !params.Force {
-				return c.wrapError("claim-ownership", issueID, fmt.Errorf("%w: %s lease owned by %s", domain.ErrConflict, purpose, lease.OwnerID))
-			}
-			var expiresAt any
-			var expiresPayload any
-			if params.TTL > 0 {
-				expires := now.Add(params.TTL).UTC()
-				expiresAt = expires.Format(time.RFC3339Nano)
-				expiresPayload = expiresAt
-			}
-			nowRaw := now.Format(time.RFC3339Nano)
-			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_coordination_leases
+		_, err = c.issueOwnershipForUpdate(ctx, tx, issueID)
+		if err != nil {
+			return c.wrapError("claim-ownership", issueID, err)
+		}
+		if err := issueLeaseEligibilityForUpdate(ctx, tx, issueID, purpose); err != nil {
+			return c.wrapError("claim-ownership", issueID, err)
+		}
+		now := time.Now().UTC()
+		var lease *domain.CoordinationLease
+		lease, err = coordinationLeaseForUpdate(ctx, tx, issueID, purpose)
+		if err != nil {
+			return c.wrapError("claim-ownership", issueID, err)
+		}
+		if lease != nil && !lease.IsExpired(now) && !strings.EqualFold(lease.OwnerID, ownerID) && !params.Force {
+			return c.wrapError("claim-ownership", issueID, fmt.Errorf("%w: %s lease owned by %s", domain.ErrConflict, purpose, lease.OwnerID))
+		}
+		var expiresAt any
+		var expiresPayload any
+		if params.TTL > 0 {
+			expires := now.Add(params.TTL).UTC()
+			expiresAt = expires.Format(time.RFC3339Nano)
+			expiresPayload = expiresAt
+		}
+		nowRaw := now.Format(time.RFC3339Nano)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_coordination_leases
 				(issue_id, purpose, owner_id, owner_kind, claimed_at, expires_at)
 				VALUES (?, ?, ?, ?, ?, ?)
 				ON CONFLICT(issue_id, purpose) DO UPDATE SET owner_id=excluded.owner_id,
 				owner_kind=excluded.owner_kind, claimed_at=excluded.claimed_at, expires_at=excluded.expires_at`,
-				issueID, purpose, ownerID, ownerKind, nowRaw, expiresAt); err != nil {
-				return c.wrapError("claim-ownership", issueID, err)
-			}
-			if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, map[string]any{
-				"action":           "claimed",
-				"owner_id":         ownerID,
-				"owner_kind":       ownerKind,
-				"owner_expires_at": expiresPayload,
-				"forced":           params.Force,
-				"purpose":          purpose,
-			}); err != nil {
-				return c.wrapError("claim-ownership", issueID, err)
-			}
-			if err := tx.Commit(); err != nil {
-				return c.wrapError("claim-ownership", issueID, err)
-			}
-			tx = nil
-			return nil
-		})
+			issueID, purpose, ownerID, ownerKind, nowRaw, expiresAt); err != nil {
+			return c.wrapError("claim-ownership", issueID, err)
+		}
+		if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, map[string]any{
+			"action":           "claimed",
+			"owner_id":         ownerID,
+			"owner_kind":       ownerKind,
+			"owner_expires_at": expiresPayload,
+			"forced":           params.Force,
+			"purpose":          purpose,
+		}); err != nil {
+			return c.wrapError("claim-ownership", issueID, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return c.wrapError("claim-ownership", issueID, err)
+		}
+		tx = nil
+		return nil
 	})
 }
 
@@ -2690,51 +2717,49 @@ func (c *Client) releaseOwnership(ctx context.Context, issueID string, params Ow
 		return c.wrapError("release-ownership", issueID, fmt.Errorf("invalid ownership purpose %q", purpose))
 	}
 	return c.withMutationLock(ctx, func(ctx context.Context) error {
-		return sqliteutil.WithWriteLock(c.dbPath, func() error {
-			db, err := c.dbHandle()
-			if err != nil {
-				return err
+		db, err := c.dbHandle()
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return c.wrapError("release-ownership", issueID, err)
+		}
+		defer func() {
+			if tx != nil {
+				_ = tx.Rollback()
 			}
-			tx, err := db.BeginTx(ctx, nil)
-			if err != nil {
-				return c.wrapError("release-ownership", issueID, err)
-			}
-			defer func() {
-				if tx != nil {
-					_ = tx.Rollback()
-				}
-			}()
+		}()
 
-			_, err = c.issueOwnershipForUpdate(ctx, tx, issueID)
-			if err != nil {
-				return c.wrapError("release-ownership", issueID, err)
-			}
-			now := time.Now().UTC()
-			var lease *domain.CoordinationLease
-			lease, err = coordinationLeaseForUpdate(ctx, tx, issueID, purpose)
-			if err != nil {
-				return c.wrapError("release-ownership", issueID, err)
-			}
-			if lease != nil && !lease.IsExpired(now) && !strings.EqualFold(lease.OwnerID, actorID) && !params.Force {
-				return c.wrapError("release-ownership", issueID, fmt.Errorf("%w: %s lease owned by %s", domain.ErrConflict, purpose, lease.OwnerID))
-			}
-			if _, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases WHERE issue_id = ? AND purpose = ?`, issueID, purpose); err != nil {
-				return c.wrapError("release-ownership", issueID, err)
-			}
-			if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, map[string]any{
-				"action":      "released",
-				"released_by": actorID,
-				"forced":      params.Force,
-				"purpose":     purpose,
-			}); err != nil {
-				return c.wrapError("release-ownership", issueID, err)
-			}
-			if err := tx.Commit(); err != nil {
-				return c.wrapError("release-ownership", issueID, err)
-			}
-			tx = nil
-			return nil
-		})
+		_, err = c.issueOwnershipForUpdate(ctx, tx, issueID)
+		if err != nil {
+			return c.wrapError("release-ownership", issueID, err)
+		}
+		now := time.Now().UTC()
+		var lease *domain.CoordinationLease
+		lease, err = coordinationLeaseForUpdate(ctx, tx, issueID, purpose)
+		if err != nil {
+			return c.wrapError("release-ownership", issueID, err)
+		}
+		if lease != nil && !lease.IsExpired(now) && !strings.EqualFold(lease.OwnerID, actorID) && !params.Force {
+			return c.wrapError("release-ownership", issueID, fmt.Errorf("%w: %s lease owned by %s", domain.ErrConflict, purpose, lease.OwnerID))
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases WHERE issue_id = ? AND purpose = ?`, issueID, purpose); err != nil {
+			return c.wrapError("release-ownership", issueID, err)
+		}
+		if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, map[string]any{
+			"action":      "released",
+			"released_by": actorID,
+			"forced":      params.Force,
+			"purpose":     purpose,
+		}); err != nil {
+			return c.wrapError("release-ownership", issueID, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return c.wrapError("release-ownership", issueID, err)
+		}
+		tx = nil
+		return nil
 	})
 }
 
@@ -2842,11 +2867,9 @@ func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, e
 func (c *Client) createOnce(ctx context.Context, params CreateTaskParams) (string, error) {
 	var issueID string
 	err := c.withMutationLock(ctx, func(ctx context.Context) error {
-		return sqliteutil.WithWriteLock(c.dbPath, func() error {
-			var err error
-			issueID, err = c.createOnceLocked(ctx, params)
-			return err
-		})
+		var err error
+		issueID, err = c.createOnceLocked(ctx, params)
+		return err
 	})
 	return issueID, err
 }
@@ -3037,8 +3060,16 @@ func (c *Client) retrySQLiteBusy(ctx context.Context, fn func() error) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	retryCtx, cancel := context.WithTimeout(ctx, c.sqliteBusyRetryBudget)
+	defer cancel()
 	var lastErr error
 	for {
+		if retryCtx.Err() != nil {
+			if lastErr != nil {
+				return lastErr
+			}
+			return retryCtx.Err()
+		}
 		err := fn()
 		if err == nil {
 			return nil
@@ -3047,7 +3078,10 @@ func (c *Client) retrySQLiteBusy(ctx context.Context, fn func() error) error {
 			return err
 		}
 		lastErr = err
-		if err := c.sqliteBusyWait(ctx, c.sqliteBusyRetryDelay); err != nil {
+		if retryCtx.Err() != nil {
+			return lastErr
+		}
+		if err := c.sqliteBusyWait(retryCtx, c.sqliteBusyRetryDelay); err != nil {
 			return lastErr
 		}
 	}
@@ -3066,6 +3100,16 @@ func IsSQLiteBusy(err error) bool {
 }
 
 func (c *Client) UpsertExternalIssueRef(ctx context.Context, params UpsertExternalIssueRefParams) (domain.ExternalIssueRef, error) {
+	var out domain.ExternalIssueRef
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		out, err = c.upsertExternalIssueRefLocked(lockCtx, params)
+		return err
+	})
+	return out, err
+}
+
+func (c *Client) upsertExternalIssueRefLocked(ctx context.Context, params UpsertExternalIssueRefParams) (domain.ExternalIssueRef, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return domain.ExternalIssueRef{}, err
@@ -4124,9 +4168,7 @@ type UpdateTaskParams struct {
 // AppendNotes appends a single line to task notes.
 func (c *Client) AppendNotes(ctx context.Context, id, line string) error {
 	return c.withMutationLock(ctx, func(ctx context.Context) error {
-		return sqliteutil.WithWriteLock(c.dbPath, func() error {
-			return c.appendNotesLocked(ctx, id, line)
-		})
+		return c.appendNotesLocked(ctx, id, line)
 	})
 }
 
@@ -4190,9 +4232,7 @@ func (c *Client) AppendNotesWithRuntime(ctx context.Context, projectID, id, line
 // UpdateDetails updates non-status issue metadata.
 func (c *Client) UpdateDetails(ctx context.Context, id string, params UpdateTaskParams) error {
 	return c.withMutationLock(ctx, func(ctx context.Context) error {
-		return sqliteutil.WithWriteLock(c.dbPath, func() error {
-			return c.updateDetailsLocked(ctx, id, params)
-		})
+		return c.updateDetailsLocked(ctx, id, params)
 	})
 }
 

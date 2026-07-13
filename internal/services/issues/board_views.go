@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,9 +21,6 @@ func (c *Client) ListBoardViews(ctx context.Context, projectID string) ([]domain
 		return nil, err
 	}
 	projectID = normalizeBoardViewProjectID(projectID)
-	if err := c.seedBuiltInBoardViews(ctx, db, projectID); err != nil {
-		return nil, c.wrapError("board-view-list", projectID, err)
-	}
 	rows, err := db.QueryContext(ctx, `
 		SELECT project_id, id, name, definition_json, built_in, created_at, updated_at
 		FROM board_views
@@ -44,6 +42,7 @@ func (c *Client) ListBoardViews(ctx context.Context, projectID string) ([]domain
 	if err := rows.Err(); err != nil {
 		return nil, c.wrapError("board-view-list", projectID, err)
 	}
+	out = mergeBuiltInBoardViewRecords(projectID, out)
 	return out, nil
 }
 
@@ -53,9 +52,6 @@ func (c *Client) GetBoardView(ctx context.Context, projectID, viewID string) (do
 		return domain.BoardViewRecord{}, err
 	}
 	projectID = normalizeBoardViewProjectID(projectID)
-	if err := c.seedBuiltInBoardViews(ctx, db, projectID); err != nil {
-		return domain.BoardViewRecord{}, c.wrapError("board-view-get", projectID, err)
-	}
 	viewID = domain.NormalizeBoardViewID(viewID)
 	if viewID == "" {
 		viewID = domain.DefaultBoardViewID
@@ -67,6 +63,9 @@ func (c *Client) GetBoardView(ctx context.Context, projectID, viewID string) (do
 	`, projectID, viewID)
 	record, err := scanBoardViewRecord(row)
 	if errors.Is(err, sql.ErrNoRows) {
+		if builtIn, ok := builtInBoardViewRecord(projectID, viewID); ok {
+			return builtIn, nil
+		}
 		return domain.BoardViewRecord{}, ErrBoardViewNotFound
 	}
 	if err != nil {
@@ -75,13 +74,48 @@ func (c *Client) GetBoardView(ctx context.Context, projectID, viewID string) (do
 	return record, nil
 }
 
+func mergeBuiltInBoardViewRecords(projectID string, records []domain.BoardViewRecord) []domain.BoardViewRecord {
+	present := make(map[domain.BoardViewID]struct{}, len(records))
+	for _, record := range records {
+		present[record.View.ID] = struct{}{}
+	}
+	for _, view := range domain.BuiltInBoardViews() {
+		view = view.Normalized()
+		if _, ok := present[view.ID]; ok {
+			continue
+		}
+		records = append(records, domain.BoardViewRecord{ProjectID: projectID, View: view, BuiltIn: true})
+	}
+	sort.SliceStable(records, func(i, j int) bool {
+		if records[i].BuiltIn != records[j].BuiltIn {
+			return records[i].BuiltIn
+		}
+		left, right := strings.ToLower(records[i].View.Title), strings.ToLower(records[j].View.Title)
+		if left != right {
+			return left < right
+		}
+		return records[i].View.ID < records[j].View.ID
+	})
+	return records
+}
+
+func builtInBoardViewRecord(projectID, viewID string) (domain.BoardViewRecord, bool) {
+	for _, view := range domain.BuiltInBoardViews() {
+		view = view.Normalized()
+		if string(view.ID) == viewID {
+			return domain.BoardViewRecord{ProjectID: projectID, View: view, BuiltIn: true}, true
+		}
+	}
+	return domain.BoardViewRecord{}, false
+}
+
 func (c *Client) SaveBoardView(ctx context.Context, projectID string, view domain.BoardView) (domain.BoardViewRecord, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return domain.BoardViewRecord{}, err
 	}
 	projectID = normalizeBoardViewProjectID(projectID)
-	if err := c.seedBuiltInBoardViews(ctx, db, projectID); err != nil {
+	if err := c.EnsureBoardViews(ctx, projectID); err != nil {
 		return domain.BoardViewRecord{}, c.wrapError("board-view-save", projectID, err)
 	}
 	view = view.Normalized()
@@ -126,7 +160,7 @@ func (c *Client) DeleteBoardView(ctx context.Context, projectID, viewID string) 
 		return err
 	}
 	projectID = normalizeBoardViewProjectID(projectID)
-	if err := c.seedBuiltInBoardViews(ctx, db, projectID); err != nil {
+	if err := c.EnsureBoardViews(ctx, projectID); err != nil {
 		return c.wrapError("board-view-delete", projectID, err)
 	}
 	viewID = domain.NormalizeBoardViewID(viewID)
@@ -163,6 +197,22 @@ func (c *Client) DeleteBoardView(ctx context.Context, projectID, viewID string) 
 			return ErrBoardViewNotFound
 		}
 		return nil
+	})
+}
+
+// EnsureBoardViews performs the authoritative, idempotent built-in catalog
+// initialization and repair for projectID. Read paths deliberately do not call
+// it so board polling remains a pure SQLite read.
+func (c *Client) EnsureBoardViews(ctx context.Context, projectID string) error {
+	db, err := c.dbHandle()
+	if err != nil {
+		return err
+	}
+	projectID = normalizeBoardViewProjectID(projectID)
+	return c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			return c.seedBuiltInBoardViews(lockCtx, db, projectID)
+		})
 	})
 }
 

@@ -32,13 +32,14 @@ func TestClientSQLiteBusyPolicyDefaultsAndOverrides(t *testing.T) {
 	defaultClient := NewClientAtPath(filepath.Join(t.TempDir(), "default.db"), nil)
 	t.Cleanup(func() { require.NoError(t, defaultClient.CloseDB()) })
 	assert.Equal(t, 5*time.Second, defaultClient.sqliteBusyTimeout)
+	assert.Equal(t, 5*time.Second, defaultClient.sqliteBusyRetryBudget)
 	assert.Equal(t, 100*time.Millisecond, defaultClient.sqliteBusyRetryDelay)
 	require.NotNil(t, defaultClient.sqliteBusyWait)
 	defaultDB, err := defaultClient.dbHandle()
 	require.NoError(t, err)
 	var defaultBusyTimeout int
 	require.NoError(t, defaultDB.QueryRow(`PRAGMA busy_timeout`).Scan(&defaultBusyTimeout))
-	assert.Equal(t, 5000, defaultBusyTimeout)
+	assert.Equal(t, 100, defaultBusyTimeout)
 
 	configured := NewClientAtPath(
 		filepath.Join(t.TempDir(), "configured.db"),
@@ -47,6 +48,7 @@ func TestClientSQLiteBusyPolicyDefaultsAndOverrides(t *testing.T) {
 	)
 	t.Cleanup(func() { require.NoError(t, configured.CloseDB()) })
 	assert.Equal(t, 2*time.Millisecond, configured.sqliteBusyTimeout)
+	assert.Equal(t, 2*time.Millisecond, configured.sqliteBusyRetryBudget)
 	assert.Equal(t, 3*time.Millisecond, configured.sqliteBusyRetryDelay)
 	configuredDB, err := configured.dbHandle()
 	require.NoError(t, err)
@@ -5048,6 +5050,94 @@ func TestClient_CreateRetriesAfterSQLiteBusyTimeout(t *testing.T) {
 	case <-opCtx.Done():
 		t.Fatal("create did not complete after retrying past busy timeout")
 	}
+	var created int
+	require.NoError(t, client.db.QueryRow(`SELECT COUNT(*) FROM issues WHERE title = 'retry-after-busy'`).Scan(&created))
+	assert.Equal(t, 1, created, "transaction retry must not replay the create side effect")
+}
+
+func TestClient_CreateBusyRetryIsBoundedWithoutCallerDeadline(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t, WithSQLiteBusyPolicy(10*time.Millisecond, time.Millisecond))
+	_, err := client.Create(ctx, CreateTaskParams{
+		Title:    "warmup",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+
+	lockDB, err := sql.Open("sqlite", "file:"+client.dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lockDB.Close() })
+	require.NoError(t, func() error {
+		_, err := lockDB.Exec(`BEGIN IMMEDIATE`)
+		return err
+	}())
+
+	done := make(chan error, 1)
+	go func() {
+		_, createErr := client.Create(ctx, CreateTaskParams{
+			Title:    "bounded-busy-retry",
+			Type:     domain.TypeTask,
+			Priority: domain.P3,
+		})
+		done <- createErr
+	}()
+
+	select {
+	case createErr := <-done:
+		require.Error(t, createErr)
+		assert.True(t, IsSQLiteBusy(createErr), "error = %v, want preserved SQLite busy error", createErr)
+	case <-time.After(250 * time.Millisecond):
+		_, _ = lockDB.Exec(`ROLLBACK`)
+		createErr := <-done
+		t.Fatalf("Create exceeded configured busy policy without caller deadline; eventual error = %v", createErr)
+	}
+	_, _ = lockDB.Exec(`ROLLBACK`)
+}
+
+func TestClient_CreateBusyRetryStopsAtEarlierCallerDeadline(t *testing.T) {
+	client := newTestClient(t, WithSQLiteBusyPolicy(time.Second, 10*time.Millisecond))
+	_, err := client.Create(context.Background(), CreateTaskParams{Title: "warmup", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	lockDB, err := sql.Open("sqlite", "file:"+client.dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lockDB.Close() })
+	_, err = lockDB.Exec(`BEGIN IMMEDIATE`)
+	require.NoError(t, err)
+	defer func() { _, _ = lockDB.Exec(`ROLLBACK`) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err = client.Create(ctx, CreateTaskParams{Title: "cancelled-busy-retry", Type: domain.TypeTask, Priority: domain.P3})
+	require.Error(t, err)
+	assert.True(t, IsSQLiteBusy(err), "error = %v, want preserved SQLite busy error", err)
+	assert.Less(t, time.Since(started), 500*time.Millisecond)
+}
+
+func TestIsSQLiteBusyRecognizesBusySnapshotExtendedCode(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	issueID, err := client.Create(ctx, CreateTaskParams{Title: "snapshot target", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	reader, err := db.Conn(ctx)
+	require.NoError(t, err)
+	defer reader.Close()
+	writer, err := db.Conn(ctx)
+	require.NoError(t, err)
+	defer writer.Close()
+	_, err = reader.ExecContext(ctx, `BEGIN`)
+	require.NoError(t, err)
+	defer func() { _, _ = reader.ExecContext(context.Background(), `ROLLBACK`) }()
+	var title string
+	require.NoError(t, reader.QueryRowContext(ctx, `SELECT title FROM issues WHERE id = ?`, issueID).Scan(&title))
+	_, err = writer.ExecContext(ctx, `UPDATE issues SET notes = 'writer committed' WHERE id = ?`, issueID)
+	require.NoError(t, err)
+	_, err = reader.ExecContext(ctx, `UPDATE issues SET notes = 'stale snapshot' WHERE id = ?`, issueID)
+	require.Error(t, err)
+	assert.True(t, IsSQLiteBusy(err), "error = %v, want SQLITE_BUSY_SNAPSHOT classification", err)
 }
 
 func TestClient_UpdateRetriesAfterSQLiteBusyTimeout(t *testing.T) {
@@ -5398,6 +5488,7 @@ func newBusyRetryTestClient(t *testing.T) (*Client, <-chan struct{}, chan struct
 	releaseRetry := make(chan struct{})
 	client := newTestClient(t,
 		WithSQLiteBusyPolicy(time.Millisecond, time.Hour),
+		withSQLiteBusyRetryBudget(5*time.Second),
 		withSQLiteBusyWait(func(ctx context.Context, _ time.Duration) error {
 			select {
 			case retryStarted <- struct{}{}:

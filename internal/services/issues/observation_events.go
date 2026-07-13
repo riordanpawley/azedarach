@@ -10,7 +10,6 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
-	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 const defaultIssueObservationEventLimit = 500
@@ -78,34 +77,32 @@ func (c *Client) AppendIssueObservationEvent(ctx context.Context, issueID string
 	var eventID int64
 	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
-			return sqliteutil.WithWriteLock(c.dbPath, func() error {
-				db, err := c.dbHandle()
-				if err != nil {
-					return err
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return c.wrapError("append-observation-event", issueID, err)
+			}
+			defer func() {
+				if tx != nil {
+					_ = tx.Rollback()
 				}
-				tx, err := db.BeginTx(ctx, nil)
-				if err != nil {
-					return c.wrapError("append-observation-event", issueID, err)
-				}
-				defer func() {
-					if tx != nil {
-						_ = tx.Rollback()
-					}
-				}()
-				if err := c.requireIssueExists(ctx, tx, issueID, "append-observation-event"); err != nil {
-					return err
-				}
-				id, err := c.insertIssueObservationEvent(ctx, tx, issueID, params)
-				if err != nil {
-					return c.wrapError("append-observation-event", issueID, err)
-				}
-				if err := tx.Commit(); err != nil {
-					return c.wrapError("append-observation-event", issueID, err)
-				}
-				tx = nil
-				eventID = id
-				return nil
-			})
+			}()
+			if err := c.requireIssueExists(ctx, tx, issueID, "append-observation-event"); err != nil {
+				return err
+			}
+			id, err := c.insertIssueObservationEvent(ctx, tx, issueID, params)
+			if err != nil {
+				return c.wrapError("append-observation-event", issueID, err)
+			}
+			if err := tx.Commit(); err != nil {
+				return c.wrapError("append-observation-event", issueID, err)
+			}
+			tx = nil
+			eventID = id
+			return nil
 		})
 	})
 	if err != nil {

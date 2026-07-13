@@ -77,7 +77,7 @@ type PhysicalSessionObservation struct {
 func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context, observation PhysicalSessionObservation) ([]Session, bool, error) {
 	var changed []Session
 	var applied bool
-	err := sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err := s.withWriteLock(ctx, func() error {
 		db, err := s.dbHandle()
 		if err != nil {
 			return err
@@ -155,7 +155,7 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, projectID, sessionID, issueID string, desiredState, observedState SessionState, activity, activitySource string, updatedAt time.Time) ([]Session, SessionState, error) {
 	var changed []Session
 	effectiveState := NormalizeSessionState(desiredState)
-	err := sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err := s.withWriteLock(ctx, func() error {
 		db, err := s.dbHandle()
 		if err != nil {
 			return err
@@ -453,6 +453,8 @@ var (
 	_ WorktreeStateStore = (*RuntimeStateStore)(nil)
 )
 
+const runtimeStateMaxOpenConns = 2
+
 // NewRuntimeStateStore returns a sqlite-backed daemon runtime-state store rooted at the repo db path.
 func NewRuntimeStateStore(repoDir string, logger *slog.Logger) *RuntimeStateStore {
 	if logger == nil {
@@ -500,7 +502,7 @@ func (s *RuntimeStateStore) Close() error {
 }
 
 func (s *RuntimeStateStore) UpsertSessionState(ctx context.Context, projectID string, session Session) error {
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+	return s.withWriteLock(ctx, func() error {
 		return s.upsertSessionStateLocked(ctx, projectID, session)
 	})
 }
@@ -685,13 +687,13 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 }
 
 func (s *RuntimeStateStore) DeleteSessionState(ctx context.Context, projectID, sessionID string) error {
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+	return s.withWriteLock(ctx, func() error {
 		return s.deleteSessionStateLocked(ctx, projectID, sessionID)
 	})
 }
 
 func (s *RuntimeStateStore) DeleteSessionIntentState(ctx context.Context, projectID string, session Session) error {
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+	return s.withWriteLock(ctx, func() error {
 		db, err := s.dbHandle()
 		if err != nil {
 			return err
@@ -737,7 +739,7 @@ func (s *RuntimeStateStore) deleteSessionStateLocked(ctx context.Context, projec
 }
 
 func (s *RuntimeStateStore) UpsertSessionActivityEvidence(ctx context.Context, evidence SessionActivityEvidence) error {
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+	return s.withWriteLock(ctx, func() error {
 		return s.upsertSessionActivityEvidenceLocked(ctx, evidence)
 	})
 }
@@ -1033,7 +1035,7 @@ func scanSessionActivityEvidence(scanner sessionActivityEvidenceScanner) (Sessio
 }
 
 func (s *RuntimeStateStore) ReplaceSessionStates(ctx context.Context, projectID string, sessions []Session) error {
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+	return s.withWriteLock(ctx, func() error {
 		return s.replaceSessionStatesLocked(ctx, projectID, sessions)
 	})
 }
@@ -1636,7 +1638,7 @@ func (s *RuntimeStateStore) ListProjectIDs(ctx context.Context) ([]string, error
 }
 
 func (s *RuntimeStateStore) UpsertWorktreeState(ctx context.Context, worktreeState WorktreeState) error {
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+	return s.withWriteLock(ctx, func() error {
 		return s.upsertWorktreeStateLocked(ctx, worktreeState)
 	})
 }
@@ -1679,7 +1681,7 @@ func (s *RuntimeStateStore) upsertWorktreeStateLocked(ctx context.Context, workt
 }
 
 func (s *RuntimeStateStore) DeleteWorktreeState(ctx context.Context, projectID, issueID string) error {
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+	return s.withWriteLock(ctx, func() error {
 		return s.deleteWorktreeStateLocked(ctx, projectID, issueID)
 	})
 }
@@ -1704,7 +1706,7 @@ func (s *RuntimeStateStore) deleteWorktreeStateLocked(ctx context.Context, proje
 }
 
 func (s *RuntimeStateStore) ReplaceWorktreeStates(ctx context.Context, projectID string, worktreeStates []WorktreeState) error {
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+	return s.withWriteLock(ctx, func() error {
 		return s.replaceWorktreeStatesLocked(ctx, projectID, worktreeStates)
 	})
 }
@@ -1969,7 +1971,7 @@ func (s *RuntimeStateStore) GetWorktreeStateByIssueID(ctx context.Context, proje
 }
 
 func (s *RuntimeStateStore) UpsertWorktreeStateGitStatus(ctx context.Context, projectID, issueID string, statusRaw json.RawMessage, updatedAt time.Time) error {
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+	return s.withWriteLock(ctx, func() error {
 		return s.upsertWorktreeStateGitStatusLocked(ctx, projectID, issueID, statusRaw, updatedAt)
 	})
 }
@@ -2068,12 +2070,30 @@ func (s *RuntimeStateStore) dbHandle() (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
-	if err := ensureRuntimeStateSchema(context.Background(), db); err != nil {
+	// One runtime writer plus one concurrent projection reader is sufficient;
+	// bounding this pool prevents background projection work from multiplying
+	// connections beside the issue store's foreground pool.
+	db.SetMaxOpenConns(runtimeStateMaxOpenConns)
+	db.SetMaxIdleConns(runtimeStateMaxOpenConns)
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(0)
+	if err := sqliteutil.WithWriteLock(s.dbPath, func() error {
+		return ensureRuntimeStateSchema(context.Background(), db)
+	}); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	s.db = db
 	return s.db, nil
+}
+
+func (s *RuntimeStateStore) withWriteLock(ctx context.Context, fn func() error) error {
+	if _, err := s.dbHandle(); err != nil {
+		return err
+	}
+	return sqliteutil.WithWriteLockContext(ctx, s.dbPath, func(context.Context) error {
+		return fn()
+	})
 }
 
 func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
