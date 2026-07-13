@@ -36,6 +36,7 @@ This directory primarily contains **developer/internal documentation**.
 - [25-configurable-views.md](25-configurable-views.md)
 - [25-cross-project-user-database.md](25-cross-project-user-database.md)
 - [25-rootless-orchestrator-contracts.md](25-rootless-orchestrator-contracts.md)
+- [26-test-timing-profiles.md](26-test-timing-profiles.md)
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 - [adr/2-daemon-owned-async-notices.md](adr/2-daemon-owned-async-notices.md)
 
