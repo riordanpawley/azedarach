@@ -270,6 +270,9 @@ func TestCanonicalStateRepairRunsAfterRecordedBroken0045(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, err := db.ExecContext(ctx, `UPDATE issues SET owner_id='legacy-owner',owner_kind='agent',owner_claimed_at='2026-07-13T00:00:00Z' WHERE id=?`, archivedID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.ExecContext(ctx, `CREATE TRIGGER issue_state_product_guard_insert BEFORE INSERT ON issues BEGIN
 		SELECT CASE WHEN (NEW.owner_id IS NULL)!=(NEW.owner_kind IS NULL) OR (NEW.owner_id IS NULL)!=(NEW.owner_claimed_at IS NULL)
 		THEN RAISE(ABORT,'issue owner fields must form a complete tuple') END; END`); err != nil {
@@ -302,6 +305,10 @@ func TestCanonicalStateRepairRunsAfterRecordedBroken0045(t *testing.T) {
 	}
 	if disposition != "ready" || engagement != "idle" || visibility != "archived" || status != string(domain.StatusOpen) || lifecycle != "open" || review != "none" || outcome != "none" || deletedAt.Valid {
 		t.Fatalf("repaired archived state=%s/%s/%s status=%s legacy=%s/%s/%s deleted=%v", disposition, engagement, visibility, status, lifecycle, review, outcome, deletedAt)
+	}
+	var archivedLeases int
+	if err := repairedDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_coordination_leases WHERE issue_id=?`, archivedID).Scan(&archivedLeases); err != nil || archivedLeases != 0 {
+		t.Fatalf("archived legacy leases=%d err=%v", archivedLeases, err)
 	}
 	var applied int
 	if err := repairedDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE id='0046_repair_issue_state_runtime_constraints'`).Scan(&applied); err != nil || applied != 1 {
