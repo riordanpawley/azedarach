@@ -202,20 +202,11 @@ fd "filename" -t f internal cmd
 
 ## Database Migration Safety Gate (Critical)
 
-1. Treat every committed or previously executed migration ID and file as immutable. Never change the meaning or contents of an existing migration and expect databases that already recorded it to rerun. Ship corrections as a new forward-only migration with a new ID.
-2. Before adding a migration, inspect the current migration ledger, schema, triggers, indexes, and the immediately previous production schema. Review the full migration chain, not only the fresh-database result.
-3. Migration validation must cover all of these paths:
-   - fresh empty database -> latest schema
-   - real immediately previous production schema/data fixture -> latest schema
-   - already-migrated latest database -> startup again (idempotent no-op)
-   - interrupted or invalid migration -> atomic rollback with the old database still usable
-   - schema/ledger drift relevant to the change, such as a migration ID recorded while required columns, triggers, indexes, or backfills are absent
-4. Historical upgrade fixtures must represent the actual old schema before new tables or columns exist. Do not build an "old" fixture by opening it with new schema-ensure code or seeding through APIs introduced by the migration under test.
-5. Assert both schema and data outcomes: migration ledger entries/checksums, columns and constraints, triggers/indexes, row counts, canonical backfills, preserved IDs/timestamps, and active query behavior through the real store/client startup path.
-6. Use expand-and-contract sequencing for compatibility-sensitive changes. Add/backfill new authority first, deploy readers/writers that tolerate both shapes when required, and remove legacy columns or adapters only in a later migration after active binaries no longer need them.
-7. Never repair a migration failure by editing production SQLite data or manually adding a column as the durable solution. Diagnose the code path, add a forward repair migration, test it against a copy/fixture of the broken shape, and preserve user data transactionally.
-8. A migration-changing issue is high risk: require three clean review passes after the final change. At least one pass must explicitly compare base-versus-head migration files and reject modified historical migrations, and another must review upgrade/rollback behavior rather than fresh-schema tests.
-9. Closure evidence for migration work must list the exact historical fixtures, upgrade commands, schema/data assertions, rollback result, full-suite result, and any compatibility window. Fresh-database tests alone are insufficient for merge.
+1. For any migration, schema ensure/repair logic, trigger/index change, persistence-authority change, migration failure, or pre-merge review containing database changes, use `$database-migration-review` at [.codex/skills/database-migration-review/SKILL.md](.codex/skills/database-migration-review/SKILL.md).
+2. Default to exactly one new migration per merge to main, or one per independently versioned database authority when a merge genuinely changes more than one. Consolidate branch-local steps before clone testing; never squash or mutate migrations already merged or executed against any real database.
+3. Pre-merge review must test the candidate through real startup/store paths against safe temporary clones of the root user database and every registered project database. Never test candidate migrations on the originals.
+4. Require fresh, historical-upgrade, idempotent-reopen, rollback, drift, and real-database-clone evidence. Fresh-database tests alone are insufficient.
+5. Migration changes remain high risk and require three clean review passes after the final migration-affecting edit.
 
 ## Active-Path Placeholder Policy
 

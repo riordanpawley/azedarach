@@ -79,12 +79,9 @@ Use the repo's domain-specific review skills when they apply, but keep this loop
 
 For any database migration, schema ensure/repair logic, persistence authority change, or migration-adjacent trigger/index edit:
 
-- Treat migration files and IDs already present on the base branch or executed by a shared/user database as immutable. Reject edits to historical migrations; require a new forward migration.
-- Diff the base and head migration directories explicitly so a mutated old migration cannot hide inside a large change set.
-- Validate fresh install, a byte-for-byte/DDL-faithful previous-production fixture, idempotent reopen, and failure rollback. The historical fixture must not be opened or prepared by the new schema code before the migration runs.
-- Exercise the real startup/store/client path after upgrade, not only direct SQL or an isolated migration function.
-- Assert schema objects, ledger/checksum state, canonical data backfills, and preserved user data. Include relevant drift fixtures where the ledger says applied but required schema is missing.
-- Review expand-and-contract compatibility with old/new binaries and readers before destructive drops or authority cutovers.
+- Use `$database-migration-review` and apply its full pre-merge gate.
+- Default to one consolidated new migration per merge to main; reject unconsolidated branch-local migration sequences unless the skill's documented correctness exception applies.
+- Require safe clone-based upgrade testing against the root user database and every registered project database, in addition to fresh, historical, rollback, drift, and idempotent paths.
 - Require 3 clean passes after the last migration-affecting change. A fresh-database-only green pass is not clean.
 
 ## Reporting
