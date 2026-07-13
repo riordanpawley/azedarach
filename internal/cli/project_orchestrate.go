@@ -31,9 +31,11 @@ func orchestrationSnapshot(ctx context.Context, deps *Dependencies, scope domain
 		return protocol.OrchestrationSnapshot{}, err
 	}
 	return deps.DaemonClient.OrchestrationSnapshot(ctx, protocol.OrchestrationSnapshotRequest{
-		Scope: scope, ActorID: orchestrateOwnerID(), Limit: limit, ObservedCursor: cursor,
+		Scope: scope, ActorID: orchestrateOwnerID(), Limit: limit, ObservedCursor: cursor, RepoDir: deps.RepoDir,
 	})
 }
+
+const projectOrchestrationWatchMinPollInterval = time.Second
 
 func projectOrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions, scope domain.OrchestrationScope) error {
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -155,10 +157,17 @@ func projectOrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOpt
 		if opts.Once {
 			return nil
 		}
-		if err := sleepWatchPoll(watchCtx, opts.PollInterval); err != nil {
+		if err := sleepWatchPoll(watchCtx, projectOrchestrationWatchPollInterval(opts.PollInterval)); err != nil {
 			return nil
 		}
 	}
+}
+
+func projectOrchestrationWatchPollInterval(requested time.Duration) time.Duration {
+	if requested < projectOrchestrationWatchMinPollInterval {
+		return projectOrchestrationWatchMinPollInterval
+	}
+	return requested
 }
 
 func projectOrchestrationWatchKey(snapshot protocol.OrchestrationSnapshot) (string, error) {

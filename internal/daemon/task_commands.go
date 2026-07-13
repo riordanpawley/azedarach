@@ -113,6 +113,16 @@ type taskGraphReadinessCacheEntry struct {
 	result    taskGraphReadinessResult
 }
 
+type taskGraphRuntimeValidationEntry struct {
+	revision    uint64
+	validatedAt time.Time
+}
+
+type taskGraphRuntimeValidationLoad struct {
+	done chan struct{}
+	err  error
+}
+
 type taskClosePreflightOptions struct {
 	AllowTargetSession  bool `json:"allow_target_session,omitempty"`
 	AllowActiveSession  bool `json:"allow_active_session,omitempty"`
@@ -4554,7 +4564,7 @@ func (d *Daemon) taskGraphReadinessForActor(ctx context.Context, projectID, root
 		}
 		if cached, ok := d.taskGraphReadinessCache[cacheKey]; ok && cached.revision == revision && (cached.expiresAt.IsZero() || time.Now().Before(cached.expiresAt)) {
 			d.taskGraphReadinessMu.Unlock()
-			if err := d.refreshIssueSessionRuntimeState(ctx, projectID, cached.result.scopeIssueIDs); err != nil && d.cfg.Logger != nil {
+			if err := d.validateTaskGraphRuntime(ctx, projectID, cached.result.scopeIssueIDs, revision); err != nil && d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("validate cached graph readiness runtime", "project_id", projectID, "root_issue_id", rootIssueID, "error", err)
 			}
 			if d.currentRevision(projectID) != revision {
@@ -4606,6 +4616,59 @@ func (d *Daemon) taskGraphReadinessForActor(ctx context.Context, projectID, root
 
 		return result, err
 	}
+}
+
+const taskGraphRuntimeValidationTTL = time.Second
+
+// validateTaskGraphRuntime bounds the hybrid projection/tmux observation work
+// shared by rooted watches, project watches, and finite snapshot readers. The
+// projection revision remains part of the authority key, while the short TTL
+// ensures out-of-band tmux changes are still observed without making every
+// poll independently query SQLite and tmux.
+func (d *Daemon) validateTaskGraphRuntime(ctx context.Context, projectID string, issueIDs []string, revision uint64) error {
+	if d == nil || d.tmux == nil || d.sessionRuntimeStateStoreIfConfigured(projectID) == nil || len(issueIDs) == 0 {
+		return nil
+	}
+	projectID = d.canonicalProjectID(projectID)
+	ids := uniqueStrings(append([]string(nil), issueIDs...))
+	sort.Strings(ids)
+	cacheKey := projectID + "\x00" + strings.Join(ids, "\x00")
+	loadKey := fmt.Sprintf("%s\x00%d", cacheKey, revision)
+
+	d.taskGraphRuntimeValidationMu.Lock()
+	if d.taskGraphRuntimeValidations == nil {
+		d.taskGraphRuntimeValidations = map[string]taskGraphRuntimeValidationEntry{}
+	}
+	if cached, ok := d.taskGraphRuntimeValidations[cacheKey]; ok && cached.revision == revision && time.Since(cached.validatedAt) <= taskGraphRuntimeValidationTTL {
+		d.taskGraphRuntimeValidationMu.Unlock()
+		return nil
+	}
+	if d.taskGraphRuntimeValidationLoads == nil {
+		d.taskGraphRuntimeValidationLoads = map[string]*taskGraphRuntimeValidationLoad{}
+	}
+	if load := d.taskGraphRuntimeValidationLoads[loadKey]; load != nil {
+		d.taskGraphRuntimeValidationMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-load.done:
+			return load.err
+		}
+	}
+	load := &taskGraphRuntimeValidationLoad{done: make(chan struct{})}
+	d.taskGraphRuntimeValidationLoads[loadKey] = load
+	d.taskGraphRuntimeValidationMu.Unlock()
+
+	err := d.refreshIssueSessionRuntimeState(ctx, projectID, ids)
+	load.err = err
+	d.taskGraphRuntimeValidationMu.Lock()
+	delete(d.taskGraphRuntimeValidationLoads, loadKey)
+	if err == nil && d.currentRevision(projectID) == revision {
+		d.taskGraphRuntimeValidations[cacheKey] = taskGraphRuntimeValidationEntry{revision: revision, validatedAt: time.Now()}
+	}
+	close(load.done)
+	d.taskGraphRuntimeValidationMu.Unlock()
+	return err
 }
 
 func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID, rootIssueID, actorID string) (taskGraphReadinessResult, error) {
@@ -4691,7 +4754,7 @@ func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectI
 	canRefreshSessionRuntime := d != nil && d.tmux != nil && d.sessionRuntimeStateStoreIfConfigured(projectID) != nil
 	if canRefreshSessionRuntime && len(contextTaskIDs) > 0 {
 		refreshStartedAt := time.Now()
-		if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil {
+		if err := d.validateTaskGraphRuntime(ctx, projectID, contextTaskIDs, d.currentRevision(projectID)); err != nil {
 			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.scoped_session_runtime_refresh", refreshStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs), "error", err)
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("task graph scoped session runtime refresh failed", "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs), "error", err)

@@ -188,10 +188,14 @@ type Daemon struct {
 	taskGraphReadinessMu               sync.Mutex
 	taskGraphReadinessLoads            map[string]*taskGraphReadinessLoad
 	taskGraphReadinessCache            map[string]taskGraphReadinessCacheEntry
+	taskGraphRuntimeValidationMu       sync.Mutex
+	taskGraphRuntimeValidations        map[string]taskGraphRuntimeValidationEntry
+	taskGraphRuntimeValidationLoads    map[string]*taskGraphRuntimeValidationLoad
 	orchestrationMu                    sync.Mutex
 	orchestrationSnapshotMu            sync.Mutex
 	orchestrationSnapshotCache         map[string]orchestrationSnapshotCacheEntry
 	orchestrationSnapshotLoads         map[string]*orchestrationSnapshotLoad
+	orchestrationSnapshotBuild         orchestrationSnapshotBuilder
 	watchClientsMu                     sync.Mutex
 	watchClients                       map[string]watchClientObservation
 	terminalFailureProbeMu             sync.Mutex
@@ -339,6 +343,8 @@ func New(cfg Config) *Daemon {
 		issueAutoArchiveLastRun:            map[string]time.Time{},
 		taskGraphReadinessLoads:            map[string]*taskGraphReadinessLoad{},
 		taskGraphReadinessCache:            map[string]taskGraphReadinessCacheEntry{},
+		taskGraphRuntimeValidations:        map[string]taskGraphRuntimeValidationEntry{},
+		taskGraphRuntimeValidationLoads:    map[string]*taskGraphRuntimeValidationLoad{},
 		orchestrationSnapshotCache:         map[string]orchestrationSnapshotCacheEntry{},
 		orchestrationSnapshotLoads:         map[string]*orchestrationSnapshotLoad{},
 		revision:                           map[string]uint64{},
@@ -1709,6 +1715,13 @@ func (d *Daemon) invalidateTaskGraphReadinessCache(projectID string) {
 		}
 	}
 	d.taskGraphReadinessMu.Unlock()
+	d.taskGraphRuntimeValidationMu.Lock()
+	for key := range d.taskGraphRuntimeValidations {
+		if strings.HasPrefix(key, prefix) {
+			delete(d.taskGraphRuntimeValidations, key)
+		}
+	}
+	d.taskGraphRuntimeValidationMu.Unlock()
 }
 
 func (d *Daemon) invalidateOrchestrationSnapshotCache(projectID string) {

@@ -298,6 +298,12 @@ func (r *testTmuxRunner) listSessionCallCount() int {
 	return r.listSessionsCalls
 }
 
+func (r *testTmuxRunner) listPaneCallCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.listPanesCalls
+}
+
 type failingListSessionsTmuxRunner struct {
 	listSessionsCalls int
 }

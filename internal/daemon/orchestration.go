@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -94,17 +95,13 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 		body.ActorID = strings.TrimSpace(req.Meta.ClientActor)
 	}
 	projectID := d.projectID(req.Meta)
-	var snapshot protocol.OrchestrationSnapshot
-	var snapshotRevision uint64
-	stable := false
-	for attempt := 0; attempt < 3; attempt++ {
-		snapshot, snapshotRevision, stable, err = d.loadOrchestrationSnapshot(ctx, projectID, body, d.orchestrationAuthority().Snapshot)
-		if err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-		}
-		if stable {
-			break
-		}
+	build := d.orchestrationAuthority().Snapshot
+	if d.orchestrationSnapshotBuild != nil {
+		build = d.orchestrationSnapshotBuild
+	}
+	snapshot, snapshotRevision, stable, err := d.loadOrchestrationSnapshot(ctx, projectID, body, build)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	if !stable {
 		return d.errorResponse(req, protocol.ErrorCodeConflict, "orchestration projection changed while building snapshot; retry"), nil
@@ -138,6 +135,7 @@ func (d *Daemon) loadOrchestrationSnapshot(
 	build orchestrationSnapshotBuilder,
 ) (protocol.OrchestrationSnapshot, uint64, bool, error) {
 	projectID = d.canonicalProjectID(projectID)
+	request = d.normalizeOrchestrationSnapshotRequest(projectID, request)
 	cacheKey := orchestrationSnapshotCacheKey(projectID, request)
 	revision := d.currentRevision(projectID)
 	loadKey := fmt.Sprintf("%s\x00%d", cacheKey, revision)
@@ -156,7 +154,7 @@ func (d *Daemon) loadOrchestrationSnapshot(
 				return protocol.OrchestrationSnapshot{}, d.currentRevision(projectID), false, nil
 			}
 		} else if len(cached.runtimeIssueIDs) > 0 {
-			if err := d.refreshIssueSessionRuntimeState(ctx, projectID, cached.runtimeIssueIDs); err != nil && d.cfg.Logger != nil {
+			if err := d.validateTaskGraphRuntime(ctx, projectID, cached.runtimeIssueIDs, revision); err != nil && d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("validate cached orchestration runtime", "project_id", projectID, "scope_kind", request.Scope.Kind, "error", err)
 			}
 			if d.currentRevision(projectID) != revision {
@@ -217,7 +215,26 @@ func (d *Daemon) loadOrchestrationSnapshot(
 }
 
 func orchestrationSnapshotCacheKey(projectID string, request protocol.OrchestrationSnapshotRequest) string {
-	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d", strings.TrimSpace(projectID), request.Scope.Kind, request.Scope.RootIssueID, strings.TrimSpace(request.ActorID), request.Limit)
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%s", strings.TrimSpace(projectID), request.Scope.Kind, request.Scope.RootIssueID, strings.TrimSpace(request.ActorID), request.Limit, strings.TrimSpace(request.RepoDir))
+}
+
+func (d *Daemon) normalizeOrchestrationSnapshotRequest(projectID string, request protocol.OrchestrationSnapshotRequest) protocol.OrchestrationSnapshotRequest {
+	repoDir := strings.TrimSpace(request.RepoDir)
+	if repoDir == "" {
+		repoDir = strings.TrimSpace(d.resolveRepoDirForProject(projectID))
+	}
+	if repoDir == "" {
+		return request
+	}
+	if absolute, err := filepath.Abs(repoDir); err == nil {
+		repoDir = absolute
+	}
+	repoDir = filepath.Clean(repoDir)
+	if resolved, err := filepath.EvalSymlinks(repoDir); err == nil {
+		repoDir = filepath.Clean(resolved)
+	}
+	request.RepoDir = repoDir
+	return request
 }
 
 func cloneOrchestrationSnapshot(snapshot protocol.OrchestrationSnapshot) (protocol.OrchestrationSnapshot, error) {

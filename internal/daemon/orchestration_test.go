@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -529,6 +530,76 @@ func TestOrchestrationSnapshotCacheRecoversFromRevisionChurn(t *testing.T) {
 	}
 	if builds != 2 {
 		t.Fatalf("snapshot builds = %d, want one churned build plus one stable build", builds)
+	}
+}
+
+func TestOrchestrationSnapshotHandlerReturnsPromptConflictDuringContinuousChurn(t *testing.T) {
+	const projectID = "project"
+	d := &Daemon{revision: map[string]uint64{projectID: 1}}
+	builds := 0
+	d.orchestrationSnapshotBuild = func(_ context.Context, gotProjectID string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		d.nextRevision(gotProjectID)
+		return protocol.OrchestrationSnapshot{Scope: request.Scope, Blocked: map[string]string{}}, nil
+	}
+	body, err := json.Marshal(protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	resp, err := d.handleOrchestrationSnapshot(context.Background(), protocol.RequestEnvelope{
+		Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body,
+	})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeConflict {
+		t.Fatalf("response = %+v, want projection conflict", resp)
+	}
+	if builds != 1 {
+		t.Fatalf("snapshot builds = %d, want one prompt attempt", builds)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("continuous churn conflict took %s, want <= 100ms", elapsed)
+	}
+}
+
+func TestOrchestrationSnapshotCacheIncludesCanonicalEffectiveRepoDir(t *testing.T) {
+	projectID := "project"
+	firstRepo := t.TempDir()
+	secondRepo := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "repo-alias")
+	if err := os.Symlink(firstRepo, alias); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{revision: map[string]uint64{projectID: 1}}
+	request := protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), RepoDir: firstRepo}
+	builds := 0
+	var builtRepoDirs []string
+	build := func(_ context.Context, _ string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		builtRepoDirs = append(builtRepoDirs, request.RepoDir)
+		return protocol.OrchestrationSnapshot{Scope: request.Scope, Blocked: map[string]string{}}, nil
+	}
+	for _, repoDir := range []string{firstRepo, alias, secondRepo} {
+		request.RepoDir = repoDir
+		if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+			t.Fatalf("load repo %q stable=%v err=%v", repoDir, stable, err)
+		}
+	}
+	if builds != 2 {
+		t.Fatalf("snapshot builds = %d, want alias reuse plus distinct-repo rebuild", builds)
+	}
+	wantFirst, err := filepath.EvalSymlinks(firstRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSecond, err := filepath.EvalSymlinks(secondRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(builtRepoDirs) != 2 || builtRepoDirs[0] != filepath.Clean(wantFirst) || builtRepoDirs[1] != filepath.Clean(wantSecond) {
+		t.Fatalf("canonical build repo dirs = %v", builtRepoDirs)
 	}
 }
 
