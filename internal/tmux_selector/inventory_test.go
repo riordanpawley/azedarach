@@ -884,14 +884,14 @@ func TestGlobalOrchestrationProjectionRendersOnlyUnmatchedSessionsInFallback(t *
 	view := domain.OrchestrationBoardView()
 	snapshot := Snapshot{Entries: []InventoryEntry{
 		{ProjectID: "alpha", IssueID: "human", SessionID: "alpha-human", HasTmuxSession: true},
-		{ProjectID: "alpha", IssueID: "filtered", SessionID: "alpha-filtered", HasTmuxSession: true},
+		{ProjectID: "beta", IssueID: "outside-scope", SessionID: "beta-outside-scope", HasTmuxSession: true},
 		{ProjectID: "external", IssueID: "plain", SessionID: "plain", TaskTitle: "Plain session", HasTmuxSession: true, ViewProjected: true, ViewDepth: 3, ViewGroupID: view.Columns[0].ID, ViewGroupTitle: view.Columns[0].Title},
 	}}
 	projection := protocol.GlobalViewProjection{
 		View: view,
 		KnownTaskIDs: []protocol.ScopedIssueID{
 			{ProjectID: "alpha", IssueID: "human"},
-			{ProjectID: "alpha", IssueID: "filtered"},
+			{ProjectID: "beta", IssueID: "outside-scope"},
 		},
 		Groups: []protocol.GlobalViewProjectedGroup{
 			{GroupID: view.Columns[0].ID},
@@ -927,7 +927,7 @@ func TestGlobalOrchestrationProjectionRendersOnlyUnmatchedSessionsInFallback(t *
 			if !strings.Contains(rendered, "Live tmux (1)") {
 				t.Fatalf("fallback column missing:\n%s", rendered)
 			}
-			if strings.Contains(rendered, "alpha-filtered") {
+			if strings.Contains(rendered, "beta-outside-scope") {
 				t.Fatalf("durable filtered issue re-entered fallback:\n%s", rendered)
 			}
 		})

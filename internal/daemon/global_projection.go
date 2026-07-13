@@ -282,6 +282,7 @@ func (d *Daemon) handleGlobalSnapshot(ctx context.Context, req protocol.RequestE
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
+	projection.KnownTaskIDs = augmentGlobalProjectionKnownTasks(projection.KnownTaskIDs, snapshot.Projects)
 	snapshot.Projection = projection
 	raw, err := json.Marshal(snapshot)
 	if err != nil {
@@ -290,6 +291,29 @@ func (d *Daemon) handleGlobalSnapshot(ctx context.Context, req protocol.RequestE
 	resp := d.successResponse(req)
 	resp.Body = raw
 	return resp, nil
+}
+
+func augmentGlobalProjectionKnownTasks(known []protocol.ScopedIssueID, projects []protocol.GlobalProjectSnapshot) []protocol.ScopedIssueID {
+	seen := make(map[protocol.ScopedIssueID]struct{}, len(known))
+	for _, identity := range known {
+		identity.ProjectID = naming.ProjectID(protocol.NormalizeProjectID(identity.ProjectID.String()))
+		seen[identity] = struct{}{}
+	}
+	for _, project := range projects {
+		projectID := protocol.NormalizeProjectID(project.ProjectID)
+		for _, task := range project.Tasks {
+			if projectID == "" || task.ID == "" {
+				continue
+			}
+			identity := protocol.ScopedIssueID{ProjectID: naming.ProjectID(projectID), IssueID: task.ID}
+			if _, ok := seen[identity]; ok {
+				continue
+			}
+			seen[identity] = struct{}{}
+			known = append(known, identity)
+		}
+	}
+	return known
 }
 
 func (d *Daemon) reconcileUserProjectCatalog(ctx context.Context) error {

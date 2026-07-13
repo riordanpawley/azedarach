@@ -98,11 +98,31 @@ func TestFilterGlobalProjectsUsesCanonicalScopedIdentity(t *testing.T) {
 	}
 }
 
-func TestConfiguredScopeExcludesMetadataOnlyHydrationFromProjection(t *testing.T) {
-	projects := []protocol.GlobalProjectSnapshot{{ProjectID: "alpha"}, {ProjectID: "beta"}}
+func TestScopedViewKeepsHydratedOutsideScopeTaskKnownButUnprojected(t *testing.T) {
+	projects := []protocol.GlobalProjectSnapshot{
+		{ProjectID: "alpha", Tasks: []domain.Task{{ID: "same", Status: domain.StatusInProgress}}},
+		{ProjectID: "beta", Tasks: []domain.Task{{ID: "same", Status: domain.StatusOpen}}},
+	}
 	scope := protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeSelectedProjects, ProjectIDs: []naming.ProjectID{"alpha"}}
 	projected := filterGlobalProjects(projects, scope)
 	if len(projected) != 1 || projected[0].ProjectID != "alpha" {
 		t.Fatalf("projection projects = %+v, want alpha only", projected)
+	}
+	projection, err := projectGlobalView(domain.OrchestrationBoardView(), projected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection.KnownTaskIDs = augmentGlobalProjectionKnownTasks(projection.KnownTaskIDs, projects)
+	if len(projection.Items) != 1 || projection.Items[0].Identity.ProjectID != "alpha" {
+		t.Fatalf("scoped items = %+v, want alpha only", projection.Items)
+	}
+	wantKnown := []protocol.ScopedIssueID{{ProjectID: "alpha", IssueID: "same"}, {ProjectID: "beta", IssueID: "same"}}
+	if len(projection.KnownTaskIDs) != len(wantKnown) {
+		t.Fatalf("known identities = %+v, want %+v", projection.KnownTaskIDs, wantKnown)
+	}
+	for i := range wantKnown {
+		if projection.KnownTaskIDs[i] != wantKnown[i] {
+			t.Fatalf("known identities = %+v, want %+v", projection.KnownTaskIDs, wantKnown)
+		}
 	}
 }
