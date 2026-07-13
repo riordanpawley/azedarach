@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -554,10 +556,11 @@ func TestMergeGateBudgetLeavesFinalizationReserve(t *testing.T) {
 }
 
 func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
-	// The wall budget includes scheduling the gate body and fake Go process.
-	// Keep enough startup reserve for this test to remain meaningful when all
-	// repository packages are being compiled and tested concurrently.
-	const timeoutBudget = 10 * time.Second
+	// Use a long safety budget, then trigger GNU timeout only after the fake Go
+	// process confirms that it emitted its diagnostic. This keeps aggregate
+	// scheduler load out of the test precondition while exercising the real
+	// timeout, output-retention, and process-tree cleanup path.
+	const timeoutBudget = "1h"
 
 	timeoutPath, err := exec.LookPath("timeout")
 	if err != nil {
@@ -591,41 +594,118 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
 		t.Fatalf("mkdir fake bin: %v", err)
 	}
+	timeoutPIDFile := filepath.Join(repo, "timeout.pid")
+	timeoutWrapper := "#!/bin/sh\nprintf '%s\\n' \"$$\" >\"$AZEDARACH_TEST_TIMEOUT_PID_FILE\"\nexec \"$AZEDARACH_TEST_TIMEOUT_PATH\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "timeout"), []byte(timeoutWrapper), 0o755); err != nil {
+		t.Fatalf("write timeout wrapper: %v", err)
+	}
 	childPIDFile := filepath.Join(repo, "timeout-child.pid")
-	fakeGo := "#!/bin/sh\nif [ \"$1\" = build ]; then exit 0; fi\nsleep 30 &\nchild_pid=$!\nprintf '%s\\n' \"$child_pid\" >\"$AZEDARACH_TEST_CHILD_PID_FILE\"\necho retained-timeout-marker\nwait \"$child_pid\"\n"
+	diagnosticEmittedFile := filepath.Join(repo, "diagnostic-emitted")
+	fakeGo := "#!/bin/sh\nif [ \"$1\" = build ]; then exit 0; fi\nsleep 30 &\nchild_pid=$!\nprintf '%s\\n' \"$child_pid\" >\"$AZEDARACH_TEST_CHILD_PID_FILE\"\necho retained-timeout-marker\nprintf 'emitted\\n' >\"$AZEDARACH_TEST_DIAGNOSTIC_EMITTED_FILE\"\nwait \"$child_pid\"\n"
 	if err := os.WriteFile(filepath.Join(fakeBin, "go"), []byte(fakeGo), 0o755); err != nil {
 		t.Fatalf("write fake go: %v", err)
 	}
 
 	cmd := exec.Command(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"))
 	cmd.Dir = repo
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = append(os.Environ(),
-		"AZEDARACH_MERGE_GATE_TIMEOUT="+timeoutBudget.String(),
+		"AZEDARACH_MERGE_GATE_TIMEOUT="+timeoutBudget,
 		"AZEDARACH_TEST_CHILD_PID_FILE="+childPIDFile,
+		"AZEDARACH_TEST_DIAGNOSTIC_EMITTED_FILE="+diagnosticEmittedFile,
+		"AZEDARACH_TEST_TIMEOUT_PATH="+timeoutPath,
+		"AZEDARACH_TEST_TIMEOUT_PID_FILE="+timeoutPIDFile,
 		"PATH="+fakeBin+string(os.PathListSeparator)+filepath.Dir(timeoutPath)+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
-	startedAt := time.Now()
-	output, runErr := cmd.CombinedOutput()
-	elapsed := time.Since(startedAt)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start merge gate: %v", err)
+	}
+	// Keep the entire gate process tree in a dedicated group.  Readiness and
+	// assertion failures must not leave the one-hour timeout (or its children)
+	// running after this test exits.
+	var runErr error
+	done := make(chan struct{})
+	cleanup := func() {
+		if cmd.Process == nil {
+			return
+		}
+		if syscall.Kill(-cmd.Process.Pid, 0) != nil {
+			return
+		}
+		killProcessGroupWithGrace(-cmd.Process.Pid)
+		select {
+		case <-done:
+		default:
+		}
+		<-done
+	}
+	defer cleanup()
+	go func() {
+		runErr = cmd.Wait()
+		close(done)
+	}()
+
+	waitForFile := func(path, description string) []byte {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			content, readErr := os.ReadFile(path)
+			if readErr == nil && len(content) > 0 {
+				return content
+			}
+			select {
+			case <-done:
+				t.Fatalf("merge gate exited before %s: %v\n%s", description, runErr, output.String())
+			default:
+			}
+			if time.Now().After(deadline) {
+				cleanup()
+				<-done
+				t.Fatalf("timed out waiting for %s\n%s", description, output.String())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	timeoutPIDBytes := waitForFile(timeoutPIDFile, "GNU timeout startup")
+	childPIDBytes := waitForFile(childPIDFile, "fake Go child startup")
+	waitForFile(diagnosticEmittedFile, "fake Go diagnostic emission")
+	select {
+	case <-done:
+		t.Fatalf("merge gate exited before timeout was triggered: %v\n%s", runErr, output.String())
+	default:
+	}
+	timeoutPID, err := strconv.Atoi(strings.TrimSpace(string(timeoutPIDBytes)))
+	if err != nil {
+		t.Fatalf("parse GNU timeout PID %q: %v", timeoutPIDBytes, err)
+	}
+	timeoutTriggeredAt := time.Now()
+	if signalOutput, signalErr := exec.Command(killPath, "-ALRM", strconv.Itoa(timeoutPID)).CombinedOutput(); signalErr != nil {
+		t.Fatalf("trigger GNU timeout process %d: %v: %s", timeoutPID, signalErr, signalOutput)
+	}
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		cleanup()
+		<-done
+		t.Fatalf("merge gate did not return within timeout kill-after reserve\n%s", output.String())
+	}
+	elapsedAfterTrigger := time.Since(timeoutTriggeredAt)
 	if runErr == nil {
 		t.Fatal("merge gate timeout error = nil")
 	}
 	var exitErr *exec.ExitError
 	if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != 124 {
-		t.Fatalf("merge gate timeout error = %v, output=%s", runErr, output)
+		t.Fatalf("merge gate timeout error = %v, output=%s", runErr, output.String())
 	}
-	if !strings.Contains(string(output), "retained-timeout-marker") || !strings.Contains(string(output), timeoutBudget.String()+" wall-clock budget") {
-		t.Fatalf("merge gate timeout output did not retain child diagnostics:\n%s", output)
+	if !strings.Contains(output.String(), "retained-timeout-marker") || !strings.Contains(output.String(), timeoutBudget+" wall-clock budget") {
+		t.Fatalf("merge gate timeout output did not retain child diagnostics:\n%s", output.String())
 	}
-	if elapsed < timeoutBudget-time.Second {
-		t.Fatalf("merge gate timeout elapsed = %v, want wall-clock budget enforcement", elapsed)
-	}
-	if elapsed > timeoutBudget+5*time.Second {
-		t.Fatalf("merge gate timeout elapsed = %v, want return within %v", elapsed, timeoutBudget+5*time.Second)
-	}
-	childPIDBytes, err := os.ReadFile(childPIDFile)
-	if err != nil {
-		t.Fatalf("read timed-out child PID: %v", err)
+	if elapsedAfterTrigger > 20*time.Second {
+		t.Fatalf("merge gate timeout return after trigger = %v, want within kill-after reserve", elapsedAfterTrigger)
 	}
 	childPID, err := strconv.Atoi(strings.TrimSpace(string(childPIDBytes)))
 	if err != nil {
@@ -648,6 +728,41 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 			t.Fatalf("timed-out child process %d still running after merge gate returned", childPID)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func killProcessGroupWithGrace(pgid int) {
+	if syscall.Kill(pgid, 0) != nil {
+		return
+	}
+	_ = syscall.Kill(pgid, syscall.SIGTERM)
+	time.Sleep(500 * time.Millisecond)
+	if syscall.Kill(pgid, 0) == nil {
+		_ = syscall.Kill(pgid, syscall.SIGKILL)
+	}
+}
+
+func TestProcessGroupCleanupKillsTermIgnoringMemberAfterOuterDone(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "trap '' TERM; sleep 30 & exit 0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start process group: %v", err)
+	}
+	defer killProcessGroupWithGrace(-cmd.Process.Pid)
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("outer process: %v", err)
+	}
+	pgid := -cmd.Process.Pid
+	if err := syscall.Kill(pgid, 0); err != nil {
+		t.Fatalf("term-ignoring member did not keep process group alive: %v", err)
+	}
+	killProcessGroupWithGrace(pgid)
+	deadline := time.Now().Add(2 * time.Second)
+	for syscall.Kill(pgid, 0) == nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if syscall.Kill(pgid, 0) == nil {
+		t.Fatal("term-ignoring process-group member survived KILL")
 	}
 }
 
