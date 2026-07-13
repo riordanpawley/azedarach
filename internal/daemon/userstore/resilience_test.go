@@ -57,11 +57,69 @@ func TestMigrationFailureRollsBackSchemaDataAndMarkers(t *testing.T) {
 	}
 	defer store.Close()
 	var markers int
-	if err = store.db.QueryRow(`SELECT count(*) FROM schema_migrations WHERE id IN ('user_0001_cross_project_projection','user_0002_normalized_projection')`).Scan(&markers); err != nil {
+	if err = store.db.QueryRow(`SELECT count(*) FROM schema_migrations WHERE id IN ('user_0001_cross_project_projection','user_0002_normalized_projection','user_0003_canonical_issue_state_repair','user_0004_canonical_archive_state_repair')`).Scan(&markers); err != nil {
 		t.Fatal(err)
 	}
-	if markers != 2 {
-		t.Fatalf("migration markers after retry=%d want=2", markers)
+	if markers != 4 {
+		t.Fatalf("migration markers after retry=%d want=4", markers)
+	}
+}
+
+func TestCanonicalIssueRepairMigrationInvalidatesRootUserProjections(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "azedarach.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO projects(project_id,name,path,db_path,projection_version,freshness) VALUES('p','P','/p','/p/.azedarach/azedarach.db',2,'ready'); DELETE FROM schema_migrations WHERE id='user_0003_canonical_issue_state_repair'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	var freshness string
+	if err := reopened.db.QueryRow(`SELECT freshness FROM projects WHERE project_id='p'`).Scan(&freshness); err != nil {
+		t.Fatal(err)
+	}
+	if freshness != "stale" {
+		t.Fatalf("freshness=%q want stale", freshness)
+	}
+	var marker int
+	if err := reopened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='user_0003_canonical_issue_state_repair'`).Scan(&marker); err != nil || marker != 1 {
+		t.Fatalf("repair marker=%d err=%v", marker, err)
+	}
+}
+
+func TestCanonicalArchiveRepairReinvalidatesRootUserProjections(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "azedarach.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO projects(project_id,name,path,db_path,projection_version,freshness) VALUES('p','P','/p','/p/.azedarach/azedarach.db',2,'ready'); DELETE FROM schema_migrations WHERE id='user_0004_canonical_archive_state_repair'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	var freshness string
+	if err := reopened.db.QueryRow(`SELECT freshness FROM projects WHERE project_id='p'`).Scan(&freshness); err != nil {
+		t.Fatal(err)
+	}
+	if freshness != "stale" {
+		t.Fatalf("freshness=%q want stale", freshness)
 	}
 }
 

@@ -176,6 +176,9 @@ func newTestModel() Model {
 
 func TestBoardViewSaveSelectionRoutesThroughDaemonMutationCommand(t *testing.T) {
 	m := newTestModel()
+	// This test verifies message routing, not daemon integration. Avoid coupling
+	// it to whichever user-global daemon happens to be running on the host.
+	m.daemonClient = nil
 	m.overlayStack.Push(overlay.NewBoardViewOverlay(nil, ""))
 	view := domain.DefaultBoardView()
 	view.ID = "custom"

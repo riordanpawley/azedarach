@@ -75,6 +75,18 @@ Rotate emphasis across passes so the loop does not repeat the same shallow inspe
 
 Use the repo's domain-specific review skills when they apply, but keep this loop responsible for convergence.
 
+## Migration Review Gate
+
+For any database migration, schema ensure/repair logic, persistence authority change, or migration-adjacent trigger/index edit:
+
+- Treat migration files and IDs already present on the base branch or executed by a shared/user database as immutable. Reject edits to historical migrations; require a new forward migration.
+- Diff the base and head migration directories explicitly so a mutated old migration cannot hide inside a large change set.
+- Validate fresh install, a byte-for-byte/DDL-faithful previous-production fixture, idempotent reopen, and failure rollback. The historical fixture must not be opened or prepared by the new schema code before the migration runs.
+- Exercise the real startup/store/client path after upgrade, not only direct SQL or an isolated migration function.
+- Assert schema objects, ledger/checksum state, canonical data backfills, and preserved user data. Include relevant drift fixtures where the ledger says applied but required schema is missing.
+- Review expand-and-contract compatibility with old/new binaries and readers before destructive drops or authority cutovers.
+- Require 3 clean passes after the last migration-affecting change. A fresh-database-only green pass is not clean.
+
 ## Reporting
 
 During an active loop, keep user updates short and evidence-oriented. Do not report every non-finding.

@@ -219,6 +219,96 @@ func TestCanonicalClaimMigrationPreflight(t *testing.T) {
 	}
 }
 
+func TestCanonicalStateRepairRunsAfterRecordedBroken0045(t *testing.T) {
+	dir := t.TempDir()
+	client := NewClient(dir, slog.Default())
+	ctx := context.Background()
+	id, err := client.Create(ctx, CreateTaskParams{Title: "repair drift", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedID, err := client.Create(ctx, CreateTaskParams{Title: "legacy archived active", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := client.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropCanonicalStateMigrationGuards(t, db)
+	triggerRows, err := db.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='trigger'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var triggerNames []string
+	for triggerRows.Next() {
+		var name string
+		if err := triggerRows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		triggerNames = append(triggerNames, name)
+	}
+	if err := triggerRows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range triggerNames {
+		if _, err := db.ExecContext(ctx, `DROP TRIGGER IF EXISTS "`+strings.ReplaceAll(name, `"`, `""`)+`"`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	archiveAt := "2026-07-13T00:00:00Z"
+	if _, err := db.ExecContext(ctx, `UPDATE issues SET archived_at=?,deleted_at=? WHERE id=?`, archiveAt, archiveAt, archivedID); err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range []string{"visibility", "engagement", "disposition"} {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE issues DROP COLUMN `+column); err != nil {
+			t.Fatalf("drop %s: %v", column, err)
+		}
+	}
+	for _, ddl := range []string{"ALTER TABLE issues ADD COLUMN owner_id TEXT", "ALTER TABLE issues ADD COLUMN owner_kind TEXT", "ALTER TABLE issues ADD COLUMN owner_claimed_at TEXT", "ALTER TABLE issues ADD COLUMN owner_expires_at TEXT"} {
+		if _, err := db.ExecContext(ctx, ddl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TRIGGER issue_state_product_guard_insert BEFORE INSERT ON issues BEGIN
+		SELECT CASE WHEN (NEW.owner_id IS NULL)!=(NEW.owner_kind IS NULL) OR (NEW.owner_id IS NULL)!=(NEW.owner_claimed_at IS NULL)
+		THEN RAISE(ABORT,'issue owner fields must form a complete tuple') END; END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE id='0046_repair_issue_state_runtime_constraints'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CloseDB(); err != nil {
+		t.Fatal(err)
+	}
+
+	repaired := NewClient(dir, slog.Default())
+	t.Cleanup(func() { _ = repaired.CloseDB() })
+	repairedDB, err := repaired.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var disposition, engagement, visibility, status string
+	if err := repairedDB.QueryRowContext(ctx, `SELECT disposition,engagement,visibility,status FROM issues WHERE id=?`, id).Scan(&disposition, &engagement, &visibility, &status); err != nil {
+		t.Fatal(err)
+	}
+	if disposition != "ready" || engagement != "working" || visibility != "live" || status != string(domain.StatusInProgress) {
+		t.Fatalf("repaired state=%s/%s/%s status=%s", disposition, engagement, visibility, status)
+	}
+	var lifecycle, review, outcome string
+	var deletedAt sql.NullString
+	if err := repairedDB.QueryRowContext(ctx, `SELECT disposition,engagement,visibility,status,lifecycle_state,review_state,closed_outcome,deleted_at FROM issues WHERE id=?`, archivedID).Scan(&disposition, &engagement, &visibility, &status, &lifecycle, &review, &outcome, &deletedAt); err != nil {
+		t.Fatal(err)
+	}
+	if disposition != "ready" || engagement != "idle" || visibility != "archived" || status != string(domain.StatusOpen) || lifecycle != "open" || review != "none" || outcome != "none" || deletedAt.Valid {
+		t.Fatalf("repaired archived state=%s/%s/%s status=%s legacy=%s/%s/%s deleted=%v", disposition, engagement, visibility, status, lifecycle, review, outcome, deletedAt)
+	}
+	var applied int
+	if err := repairedDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE id='0046_repair_issue_state_runtime_constraints'`).Scan(&applied); err != nil || applied != 1 {
+		t.Fatalf("repair migration applied=%d err=%v", applied, err)
+	}
+}
+
 func TestCanonicalMigrationRejectsHistoricalReviewLeaseWithoutReviewRequest(t *testing.T) {
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })

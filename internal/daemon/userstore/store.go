@@ -180,6 +180,14 @@ INSERT OR IGNORE INTO schema_migrations(id,applied_at) VALUES('user_0001_cross_p
 	if err := s.migrateLegacyTaskJSON(ctx, tx); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE projects SET freshness='stale',last_error=''
+		WHERE NOT EXISTS(SELECT 1 FROM schema_migrations WHERE id='user_0003_canonical_issue_state_repair');
+		INSERT OR IGNORE INTO schema_migrations(id,applied_at) VALUES('user_0003_canonical_issue_state_repair',strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+		UPDATE projects SET freshness='stale',last_error=''
+		WHERE NOT EXISTS(SELECT 1 FROM schema_migrations WHERE id='user_0004_canonical_archive_state_repair');
+		INSERT OR IGNORE INTO schema_migrations(id,applied_at) VALUES('user_0004_canonical_archive_state_repair',strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("schedule project refresh after canonical issue state repair: %w", err)
+	}
 	if s.migrationBeforeCommit != nil {
 		if err := s.migrationBeforeCommit(); err != nil {
 			return fmt.Errorf("before user database migration commit: %w", err)

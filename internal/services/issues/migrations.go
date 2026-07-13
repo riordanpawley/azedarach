@@ -77,6 +77,40 @@ var orderedMigrations = []migration{
 	{id: "0043_learning_activation_telemetry", path: "migrations/0043_learning_activation_telemetry.sql"},
 	{id: "0044_learning_activation_abandonment", path: "migrations/0044_learning_activation_abandonment.sql"},
 	{id: "0045_issue_state_runtime_constraints", path: "migrations/0045_issue_state_runtime_constraints.sql", apply: applyIssueStateRuntimeConstraintsMigration},
+	{id: "0046_repair_issue_state_runtime_constraints", apply: applyIssueStateRuntimeConstraintsRepairMigration},
+}
+
+func applyIssueStateRuntimeConstraintsRepairMigration(ctx context.Context, db *sql.DB, id string) error {
+	for _, column := range []string{"disposition", "engagement", "visibility"} {
+		exists, err := columnExistsDB(ctx, db, "issues", column)
+		if err != nil {
+			return fmt.Errorf("inspect canonical issue state column %s: %w", column, err)
+		}
+		if !exists {
+			return applyIssueStateRuntimeConstraintsMigration(ctx, db, id)
+		}
+	}
+	return nil
+}
+
+func columnExistsDB(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, typ string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB, id string) error {
@@ -100,6 +134,7 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS interaction_requests (id TEXT PRIMARY KEY,issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,decision_key TEXT NOT NULL,state TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),request_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`); err != nil {
 		return fmt.Errorf("ensure interaction request authority before migration %s: %w", id, err)
 	}
+	addedCanonicalStateColumn := false
 	for _, column := range []struct{ name, ddl string }{{"disposition", "TEXT"}, {"engagement", "TEXT"}, {"visibility", "TEXT"}} {
 		exists, err := txColumnExists(ctx, tx, "issues", column.name)
 		if err != nil {
@@ -111,6 +146,7 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 		if _, err := tx.ExecContext(ctx, `ALTER TABLE issues ADD COLUMN `+column.name+` `+column.ddl); err != nil {
 			return fmt.Errorf("add canonical issue state column %s: %w", column.name, err)
 		}
+		addedCanonicalStateColumn = true
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE issues SET
 		disposition = CASE
@@ -128,6 +164,21 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 		WHERE disposition IS NULL OR engagement IS NULL OR visibility IS NULL`); err != nil {
 		return fmt.Errorf("backfill canonical issue state: %w", err)
 	}
+	if addedCanonicalStateColumn {
+		// The pre-canonical archive adapter represented archive intent by copying
+		// deleted_at to archived_at without stopping active lifecycle state. Archive
+		// is orthogonal to disposition in the canonical product, but an archived
+		// issue cannot remain engaged. Normalize the canonical tuple, then regenerate
+		// all legacy mirrors from it before installing the product guards.
+		if _, err := tx.ExecContext(ctx, `UPDATE issues SET engagement='idle' WHERE visibility='archived';
+			UPDATE issues SET
+				lifecycle_state = CASE WHEN disposition='backlog' THEN 'backlog' WHEN disposition='ready' AND engagement='idle' THEN 'open' WHEN disposition='ready' THEN 'active' ELSE 'closed' END,
+				review_state = CASE WHEN engagement='review_requested' THEN 'requested' ELSE 'none' END,
+				closed_outcome = CASE WHEN disposition='completed' THEN 'completed' WHEN disposition='cancelled' THEN 'cancelled' ELSE 'none' END,
+				status = CASE WHEN disposition='completed' THEN 'closed' WHEN disposition='cancelled' THEN 'cancelled' WHEN engagement='review_requested' THEN 'in_review' WHEN engagement='working' THEN 'in_progress' ELSE 'open' END`); err != nil {
+			return fmt.Errorf("normalize legacy issue state mirrors: %w", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE daemon_session_projections SET scope_id=issue_id
 		WHERE role='worker' AND scope_kind='issue' AND COALESCE(trim(scope_id),'')=''`); err != nil {
 		return fmt.Errorf("backfill legacy worker session scope identity: %w", err)
@@ -138,7 +189,7 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 	if _, err := tx.ExecContext(ctx, `UPDATE daemon_session_projections SET state='running' WHERE state='attached'; UPDATE daemon_session_projections SET observed_state='running' WHERE observed_state='attached'`); err != nil {
 		return fmt.Errorf("normalize legacy attached session state: %w", err)
 	}
-	for _, name := range []string{"issue_closed_runtime_guard_insert", "issue_closed_runtime_guard_update", "daemon_session_closed_issue_guard_insert", "daemon_session_closed_issue_guard_update", "issue_dependency_closed_runtime_guard_insert", "issue_dependency_closed_runtime_guard_update", "issue_descendant_closed_ancestor_guard_update", "issue_session_archived_guard", "issue_session_archived_guard_update", "daemon_session_state_product_guard_insert", "daemon_session_state_product_guard_update", "daemon_session_observation_product_guard_insert", "daemon_session_observation_product_guard_update"} {
+	for _, name := range []string{"issue_state_product_guard_insert", "issue_state_product_guard_update", "issue_closed_runtime_guard_insert", "issue_closed_runtime_guard_update", "daemon_session_closed_issue_guard_insert", "daemon_session_closed_issue_guard_update", "issue_dependency_closed_runtime_guard_insert", "issue_dependency_closed_runtime_guard_update", "issue_descendant_closed_ancestor_guard_update", "issue_session_archived_guard", "issue_session_archived_guard_update", "daemon_session_state_product_guard_insert", "daemon_session_state_product_guard_update", "daemon_session_observation_product_guard_insert", "daemon_session_observation_product_guard_update"} {
 		if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+name); err != nil {
 			return err
 		}
