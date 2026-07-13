@@ -296,14 +296,16 @@ func TestProjectSelector_SearchFiltersLargeRegistryAndKeepsStableShortcut(t *tes
 	if len(entries) != 2 || !entries[0].global || entries[1].project.Name != "gamma" || entries[1].projectIndex != 2 {
 		t.Fatalf("filtered entries = %+v", entries)
 	}
-	selector.Update(tea.KeyMsg{Type: tea.KeyDown})
-	_, cmd := selector.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := selector.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
 	selected, ok := cmd().(ScopeSelectedMsg)
 	if !ok || selected.Project.Name != "gamma" {
 		t.Fatalf("selection = %#v", selected)
 	}
 	if view := selector.View(); !strings.Contains(view, "3. gamma") || strings.Contains(view, "1. alpha") {
 		t.Fatalf("filtered view = %q", view)
+	}
+	if selector.query != "gam" {
+		t.Fatalf("numeric shortcut was appended to search query: %q", selector.query)
 	}
 }
 

@@ -199,7 +199,7 @@ func TestBoardViewSaveSelectionRoutesThroughDaemonMutationCommand(t *testing.T) 
 
 func TestBoardViewMutationSuccessRefreshesViewsAndBoard(t *testing.T) {
 	m := newTestModel()
-	updatedAny, cmd := m.Update(boardViewMutatedMsg{action: "save", viewID: "custom"})
+	updatedAny, cmd := m.Update(boardViewMutatedMsg{action: "save", viewID: "custom", scope: m.currentBoardViewCommandScope()})
 	updated := updatedAny.(Model)
 	if !updated.boardRefreshing || cmd == nil {
 		t.Fatalf("refreshing=%v cmd=%v", updated.boardRefreshing, cmd)

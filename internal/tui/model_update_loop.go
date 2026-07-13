@@ -485,7 +485,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.waitForLogStreamEventCmd()
 
 	case boardViewsLoadedMsg:
-		if msg.global != m.scope.IsGlobal() {
+		if msg.scope != m.currentBoardViewCommandScope() {
 			return m, nil
 		}
 		if msg.err != nil {
@@ -500,13 +500,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(msg.selectedViewID) != "" {
 			m.selectedBoardViewID = domain.NormalizeBoardViewID(msg.selectedViewID)
 		}
-		if msg.global {
+		if msg.scope.global {
 			return m, m.openOverlay(overlay.NewGlobalBoardViewOverlay(msg.globalViews, m.selectedBoardViewID))
 		}
 		return m, m.openOverlay(overlay.NewBoardViewOverlay(m.boardViews, m.selectedBoardViewID))
 
 	case boardViewSelectedMsg:
-		if msg.global != m.scope.IsGlobal() {
+		if msg.scope != m.currentBoardViewCommandScope() {
 			return m, nil
 		}
 		m.boardRefreshing = false
@@ -525,14 +525,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(2 * time.Second),
 		})
 		m.boardRefreshing = true
-		if msg.global {
+		if msg.scope.global {
 			m.globalLoadSeq++
 			return m, m.loadGlobalBoardCmd(m.globalLoadSeq)
 		}
 		return m, m.scheduleIssuesRefreshCmd()
 
 	case boardViewMutatedMsg:
-		if msg.global != m.scope.IsGlobal() {
+		if msg.scope != m.currentBoardViewCommandScope() {
 			return m, nil
 		}
 		if msg.err != nil {
@@ -541,7 +541,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.addToast(Toast{Level: ToastSuccess, Message: fmt.Sprintf("Board view %s: %s", msg.action, msg.viewID), Expires: time.Now().Add(3 * time.Second)})
 		m.boardRefreshing = true
-		if msg.global {
+		if msg.scope.global {
 			m.globalLoadSeq++
 			return m, tea.Batch(m.loadGlobalBoardCmd(m.globalLoadSeq), m.loadBoardViewsCmd())
 		}
@@ -1275,6 +1275,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.boardRefreshing = true
 		m.clearDrillDown()
 		if msg.Global {
+			m.beginBoardViewScopeTransition()
 			m.globalScopeSwitchPending = !m.scope.IsGlobal()
 			m.projectSwitchFromGlobal = false
 			m.projectSwitchInFlight = true
@@ -1289,6 +1290,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.projectSwitchFromGlobal = m.scope.IsGlobal()
+		m.beginBoardViewScopeTransition()
 		m.scope = projectTUIScope()
 		m.projectSwitchInFlight = true
 		m.issueRefreshSeq++
@@ -2429,6 +2431,7 @@ func (m *Model) applyUICommandEvent(event protocol.EventEnvelope) tea.Cmd {
 		m.loading = false
 		m.boardRefreshing = true
 		m.projectSwitchInFlight = true
+		m.beginBoardViewScopeTransition()
 		m.issueRefreshSeq++
 		m.projectSwitchSeq++
 		m.beginMutationFeedback(fmt.Sprintf("Switching project: %s", project.Name))

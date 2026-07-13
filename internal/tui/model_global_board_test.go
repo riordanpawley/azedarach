@@ -134,11 +134,11 @@ func TestGlobalBoardViewKeysStayInGlobalScope(t *testing.T) {
 		}
 		switch msg := cmd().(type) {
 		case boardViewsLoadedMsg:
-			if !msg.global {
+			if !msg.scope.global {
 				t.Fatalf("key=%q loaded project views", tc.key.String())
 			}
 		case boardViewSelectedMsg:
-			if !msg.global {
+			if !msg.scope.global {
 				t.Fatalf("key=%q selected project view", tc.key.String())
 			}
 		default:
@@ -187,20 +187,65 @@ func TestGlobalScopeBoardViewCommandsUseRootViewContracts(t *testing.T) {
 	m.daemonClient = daemonclient.New(transport).WithProjectID("project-local")
 
 	loaded := m.loadBoardViewsCmd()().(boardViewsLoadedMsg)
-	if loaded.err != nil || !loaded.global || len(loaded.globalViews) != 1 || loaded.globalViews[0].Scope.Kind != scope.Kind {
+	if loaded.err != nil || !loaded.scope.global || len(loaded.globalViews) != 1 || loaded.globalViews[0].Scope.Kind != scope.Kind {
 		t.Fatalf("loaded = %+v", loaded)
 	}
 	selected := m.selectBoardViewCmd("custom")().(boardViewSelectedMsg)
-	if selected.err != nil || !selected.global || selected.viewID != "custom" {
+	if selected.err != nil || !selected.scope.global || selected.viewID != "custom" {
 		t.Fatalf("selected = %+v", selected)
 	}
 	mutated := m.saveBoardViewCmd(view, scope)().(boardViewMutatedMsg)
-	if mutated.err != nil || !mutated.global || mutated.viewID != "custom" {
+	if mutated.err != nil || !mutated.scope.global || mutated.viewID != "custom" {
 		t.Fatalf("saved = %+v", mutated)
 	}
 	deleted := m.deleteBoardViewCmd("custom")().(boardViewMutatedMsg)
-	if deleted.err != nil || !deleted.global {
+	if deleted.err != nil || !deleted.scope.global {
 		t.Fatalf("deleted = %+v", deleted)
+	}
+}
+
+func TestBoardViewCallbacksRejectStaleProjectIdentity(t *testing.T) {
+	base := New(config.DefaultConfig())
+	base.scope = projectTUIScope()
+	base.currentProject = "project-a"
+	staleScope := base.currentBoardViewCommandScope()
+	base.currentProject = "project-b"
+	base.selectedBoardViewID = "current"
+	base.boardViews = []domain.BoardViewRecord{{View: domain.DefaultBoardView()}}
+
+	tests := []struct {
+		name string
+		msg  tea.Msg
+	}{
+		{name: "list", msg: boardViewsLoadedMsg{scope: staleScope, selectedViewID: "stale"}},
+		{name: "select", msg: boardViewSelectedMsg{scope: staleScope, viewID: "stale"}},
+		{name: "save", msg: boardViewMutatedMsg{scope: staleScope, action: "save", viewID: "stale"}},
+		{name: "delete", msg: boardViewMutatedMsg{scope: staleScope, action: "delete", viewID: "stale"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := base
+			next, cmd := m.Update(tc.msg)
+			got := next.(Model)
+			if cmd != nil || got.selectedBoardViewID != "current" || len(got.toasts) != 0 || got.overlayStack.Current() != nil {
+				t.Fatalf("stale callback mutated project B: selected=%q toasts=%v overlay=%T cmd=%v", got.selectedBoardViewID, got.toasts, got.overlayStack.Current(), cmd != nil)
+			}
+		})
+	}
+}
+
+func TestBoardViewCallbacksRejectPriorGlobalGeneration(t *testing.T) {
+	m := New(config.DefaultConfig())
+	m.scope = globalTUIScope()
+	m.selectedBoardViewID = "current"
+	staleScope := m.currentBoardViewCommandScope()
+	m.beginBoardViewScopeTransition()
+	m.beginBoardViewScopeTransition()
+
+	next, cmd := m.Update(boardViewSelectedMsg{scope: staleScope, viewID: "stale"})
+	got := next.(Model)
+	if cmd != nil || got.selectedBoardViewID != "current" || len(got.toasts) != 0 {
+		t.Fatalf("prior Global generation was accepted: selected=%q toasts=%v cmd=%v", got.selectedBoardViewID, got.toasts, cmd != nil)
 	}
 }
 

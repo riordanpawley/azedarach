@@ -98,6 +98,12 @@ func (m *ProjectSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			default:
+				if msg.String() == "0" {
+					return m, m.selectScopeByProjectIndex(-1)
+				}
+				if index, ok := parseOneBasedProjectIndex(msg.String()); ok && index < len(m.registry.Projects) {
+					return m, m.selectScopeByProjectIndex(index)
+				}
 				if msg.Type == tea.KeyRunes {
 					for _, r := range msg.Runes {
 						if unicode.IsPrint(r) {
@@ -173,13 +179,11 @@ func (m *ProjectSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			if m.mode == projectModeList {
 				if msg.String() == "0" {
-					m.cursor = 0
-					return m, m.selectProject()
+					return m, m.selectScopeByProjectIndex(-1)
 				}
 				index, ok := parseOneBasedProjectIndex(msg.String())
 				if ok && index < len(m.registry.Projects) {
-					m.cursor = m.cursorForProjectIndex(index)
-					return m, m.selectProject()
+					return m, m.selectScopeByProjectIndex(index)
 				}
 			}
 		}
@@ -216,7 +220,7 @@ func (m *ProjectSelector) viewList() string {
 			return m.renderProjectListContent(height)
 		},
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
-			return keybinds.RenderKeyTable([]keybinds.Binding{
+			bindings := []keybinds.Binding{
 				{Key: "0-9", Description: "switch scope"},
 				{Key: "Enter", Description: "switch"},
 				{Key: "/", Description: "search"},
@@ -225,7 +229,17 @@ func (m *ProjectSelector) viewList() string {
 				{Key: "a", Description: "add"},
 				{Key: "D", Description: "detect"},
 				{Key: "Esc", Description: "close"},
-			}, 0, keybinds.Theme{
+			}
+			if mode == dialogLayoutStacked {
+				bindings = []keybinds.Binding{
+					{Key: "0-9/Enter", Description: "switch"},
+					{Key: "/", Description: "search"},
+					{Key: "d/x", Description: "default/remove"},
+					{Key: "a/D", Description: "add/detect"},
+					{Key: "Esc", Description: "close"},
+				}
+			}
+			return keybinds.RenderKeyTable(bindings, 0, keybinds.Theme{
 				KeyStyle:         m.styles.MenuKey,
 				DescriptionStyle: m.styles.Footer.MarginTop(0),
 				FooterStyle:      m.styles.Footer.MarginTop(0),
@@ -386,6 +400,21 @@ func (m *ProjectSelector) selectProject() tea.Cmd {
 	return func() tea.Msg {
 		return ScopeSelectedMsg{Global: entry.global, Project: entry.project}
 	}
+}
+
+// selectScopeByProjectIndex preserves the stable 0-9 shortcuts even when the
+// visible list is filtered. Global is represented by projectIndex -1.
+func (m *ProjectSelector) selectScopeByProjectIndex(projectIndex int) tea.Cmd {
+	if projectIndex < 0 {
+		m.cursor = 0
+		return func() tea.Msg { return ScopeSelectedMsg{Global: true} }
+	}
+	if projectIndex >= len(m.registry.Projects) {
+		return nil
+	}
+	m.cursor = m.cursorForProjectIndex(projectIndex)
+	project := m.registry.Projects[projectIndex]
+	return func() tea.Msg { return ScopeSelectedMsg{Project: project} }
 }
 
 // setAsDefault sets the current project as default

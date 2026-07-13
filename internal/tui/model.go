@@ -237,6 +237,7 @@ type Model struct {
 	createTaskOverlay               *overlay.CreateTaskOverlay
 	boardViews                      []domain.BoardViewRecord
 	selectedBoardViewID             string
+	boardViewScopeGeneration        uint64
 	projectOrchestrator             *projectOrchestratorSnapshot
 	projectOrchestratorActionRunner projectOrchestratorActionRunner
 	jumpMode                        *overlay.JumpMode
@@ -1287,20 +1288,20 @@ type boardViewsLoadedMsg struct {
 	views          []domain.BoardViewRecord
 	globalViews    []protocol.GlobalViewRecord
 	selectedViewID string
-	global         bool
+	scope          boardViewCommandScope
 	err            error
 }
 
 type boardViewSelectedMsg struct {
 	viewID string
-	global bool
+	scope  boardViewCommandScope
 	err    error
 }
 
 type boardViewMutatedMsg struct {
 	action string
 	viewID string
-	global bool
+	scope  boardViewCommandScope
 	err    error
 }
 
@@ -1804,10 +1805,10 @@ func (m *Model) finishIssuesRefreshCmd(refreshSeq uint64) tea.Cmd {
 
 func (m Model) loadBoardViewsCmd() tea.Cmd {
 	client := m.daemonClient
-	global := m.scope.IsGlobal()
+	scope := m.currentBoardViewCommandScope()
 	if client == nil {
 		return func() tea.Msg {
-			return boardViewsLoadedMsg{global: global, err: fmt.Errorf("daemon client unavailable")}
+			return boardViewsLoadedMsg{scope: scope, err: fmt.Errorf("daemon client unavailable")}
 		}
 	}
 	return func() tea.Msg {
@@ -1815,30 +1816,30 @@ func (m Model) loadBoardViewsCmd() tea.Cmd {
 		defer cancel()
 		var resp protocol.BoardViewListResponseBody
 		var err error
-		if global {
+		if scope.global {
 			resp, err = client.ListGlobalViews(ctx)
 		} else {
 			resp, err = client.ListBoardViews(ctx)
 		}
 		if err != nil {
-			return boardViewsLoadedMsg{global: global, err: err}
+			return boardViewsLoadedMsg{scope: scope, err: err}
 		}
 		return boardViewsLoadedMsg{
 			views:          resp.Views,
 			globalViews:    resp.GlobalViews,
 			selectedViewID: resp.SelectedViewID,
-			global:         global,
+			scope:          scope,
 		}
 	}
 }
 
 func (m Model) cycleBoardViewCmd() tea.Cmd {
 	client := m.daemonClient
-	global := m.scope.IsGlobal()
+	scope := m.currentBoardViewCommandScope()
 	selected := domain.NormalizeBoardViewID(m.selectedBoardViewID)
 	if client == nil {
 		return func() tea.Msg {
-			return boardViewSelectedMsg{viewID: selected, global: global, err: fmt.Errorf("daemon client unavailable")}
+			return boardViewSelectedMsg{viewID: selected, scope: scope, err: fmt.Errorf("daemon client unavailable")}
 		}
 	}
 	return func() tea.Msg {
@@ -1846,26 +1847,26 @@ func (m Model) cycleBoardViewCmd() tea.Cmd {
 		defer cancel()
 		var resp protocol.BoardViewListResponseBody
 		var err error
-		if global {
+		if scope.global {
 			resp, err = client.ListGlobalViews(ctx)
 		} else {
 			resp, err = client.ListBoardViews(ctx)
 		}
 		if err != nil {
-			return boardViewSelectedMsg{viewID: selected, global: global, err: err}
+			return boardViewSelectedMsg{viewID: selected, scope: scope, err: err}
 		}
 		viewIDs := make([]string, 0, len(resp.Views)+len(resp.GlobalViews))
 		for _, record := range resp.Views {
 			viewIDs = append(viewIDs, string(record.View.ID))
 		}
-		if global {
+		if scope.global {
 			viewIDs = viewIDs[:0]
 			for _, record := range resp.GlobalViews {
 				viewIDs = append(viewIDs, string(record.View.ID))
 			}
 		}
 		if len(viewIDs) == 0 {
-			return boardViewSelectedMsg{viewID: selected, global: global, err: fmt.Errorf("no configured views available")}
+			return boardViewSelectedMsg{viewID: selected, scope: scope, err: fmt.Errorf("no configured views available")}
 		}
 		current := selected
 		if current == "" {
@@ -1879,25 +1880,25 @@ func (m Model) cycleBoardViewCmd() tea.Cmd {
 			}
 		}
 		var result protocol.BoardViewSelectResponseBody
-		if global {
+		if scope.global {
 			result, err = client.SelectGlobalView(ctx, protocol.GlobalViewConsumerBoard, viewIDs[next])
 		} else {
 			result, err = client.SelectBoardView(ctx, viewIDs[next])
 		}
 		if err != nil {
-			return boardViewSelectedMsg{viewID: current, global: global, err: err}
+			return boardViewSelectedMsg{viewID: current, scope: scope, err: err}
 		}
-		return boardViewSelectedMsg{viewID: result.ViewID, global: global}
+		return boardViewSelectedMsg{viewID: result.ViewID, scope: scope}
 	}
 }
 
 func (m Model) selectBoardViewCmd(viewID string) tea.Cmd {
 	client := m.daemonClient
-	global := m.scope.IsGlobal()
+	scope := m.currentBoardViewCommandScope()
 	viewID = strings.TrimSpace(viewID)
 	if client == nil {
 		return func() tea.Msg {
-			return boardViewSelectedMsg{viewID: viewID, global: global, err: fmt.Errorf("daemon client unavailable")}
+			return boardViewSelectedMsg{viewID: viewID, scope: scope, err: fmt.Errorf("daemon client unavailable")}
 		}
 	}
 	return func() tea.Msg {
@@ -1905,52 +1906,52 @@ func (m Model) selectBoardViewCmd(viewID string) tea.Cmd {
 		defer cancel()
 		var resp protocol.BoardViewSelectResponseBody
 		var err error
-		if global {
+		if scope.global {
 			resp, err = client.SelectGlobalView(ctx, protocol.GlobalViewConsumerBoard, viewID)
 		} else {
 			resp, err = client.SelectBoardView(ctx, viewID)
 		}
 		if err != nil {
-			return boardViewSelectedMsg{viewID: viewID, global: global, err: err}
+			return boardViewSelectedMsg{viewID: viewID, scope: scope, err: err}
 		}
-		return boardViewSelectedMsg{viewID: resp.ViewID, global: global}
+		return boardViewSelectedMsg{viewID: resp.ViewID, scope: scope}
 	}
 }
 
 func (m Model) saveBoardViewCmd(view domain.BoardView, scope protocol.GlobalViewScope) tea.Cmd {
-	global := m.scope.IsGlobal()
+	commandScope := m.currentBoardViewCommandScope()
 	return func() tea.Msg {
 		if m.daemonClient == nil {
-			return boardViewMutatedMsg{action: "save", viewID: string(view.ID), global: global, err: fmt.Errorf("daemon client unavailable")}
+			return boardViewMutatedMsg{action: "save", viewID: string(view.ID), scope: commandScope, err: fmt.Errorf("daemon client unavailable")}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		var resp protocol.BoardViewResponseBody
 		var err error
-		if global {
+		if commandScope.global {
 			resp, err = m.daemonClient.SaveGlobalView(ctx, protocol.GlobalViewRecord{View: view, Scope: scope})
 		} else {
 			resp, err = m.daemonClient.SaveBoardView(ctx, view)
 		}
-		return boardViewMutatedMsg{action: "save", viewID: string(resp.View.View.ID), global: global, err: err}
+		return boardViewMutatedMsg{action: "save", viewID: string(resp.View.View.ID), scope: commandScope, err: err}
 	}
 }
 
 func (m Model) deleteBoardViewCmd(viewID string) tea.Cmd {
-	global := m.scope.IsGlobal()
+	commandScope := m.currentBoardViewCommandScope()
 	return func() tea.Msg {
 		if m.daemonClient == nil {
-			return boardViewMutatedMsg{action: "delete", viewID: viewID, global: global, err: fmt.Errorf("daemon client unavailable")}
+			return boardViewMutatedMsg{action: "delete", viewID: viewID, scope: commandScope, err: fmt.Errorf("daemon client unavailable")}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		var err error
-		if global {
+		if commandScope.global {
 			err = m.daemonClient.DeleteGlobalView(ctx, viewID)
 		} else {
 			err = m.daemonClient.DeleteBoardView(ctx, viewID)
 		}
-		return boardViewMutatedMsg{action: "delete", viewID: viewID, global: global, err: err}
+		return boardViewMutatedMsg{action: "delete", viewID: viewID, scope: commandScope, err: err}
 	}
 }
 

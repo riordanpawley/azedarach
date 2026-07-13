@@ -66,6 +66,15 @@ func TestProjectSelector_SizeResponsiveInListMode(t *testing.T) {
 	if width, height := selector.Size(); width != 70 || height != 20 {
 		t.Fatalf("expected small list size to use viewport clamp 70x20, got %dx%d", width, height)
 	}
+	view := selector.View()
+	for _, action := range []string{"D", "detect", "Esc", "close"} {
+		if !strings.Contains(view, action) {
+			t.Fatalf("small selector clipped %q action:\n%s", action, view)
+		}
+	}
+	if lipgloss.Width(view) > 70 || lipgloss.Height(view) > 20 {
+		t.Fatalf("small selector exceeds bounds: %dx%d", lipgloss.Width(view), lipgloss.Height(view))
+	}
 }
 
 func TestDevServerOverlay_SizeUsesDialogHelper(t *testing.T) {

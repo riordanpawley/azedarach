@@ -11,10 +11,10 @@
 │                                                                    │
 │Actions                                                             │
 │────────────────────────────────────────────────────────────────────│
-│  0-9       switch scope                                            │
-│  Enter     switch                                                  │
-│  /         search                                                  │
-│  d         default                                                 │
-│  x         remove                                                  │
-│  a         add                                                     │
+│  0-9/Enter  switch                                                 │
+│  /          search                                                 │
+│  d/x        default/remove                                         │
+│  a/D        add/detect                                             │
+│  Esc        close                                                  │
+│                                                                    │
 ╰────────────────────────────────────────────────────────────────────╯

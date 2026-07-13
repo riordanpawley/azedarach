@@ -92,6 +92,7 @@ func (m Model) leaveGlobalBoardForCurrentTask() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.scope = projectTUIScope()
+	m.beginBoardViewScopeTransition()
 	m.projectSwitchFromGlobal = true
 	m.pendingUIOpenTaskID = identity.IssueID.String()
 	m.loading = false
