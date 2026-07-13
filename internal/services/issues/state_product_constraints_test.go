@@ -316,6 +316,19 @@ func TestCanonicalStateRepairRunsAfterRecordedBroken0045(t *testing.T) {
 	}
 }
 
+func TestCanonicalStateRepairRecordsNoOpOnCanonicalSchema(t *testing.T) {
+	client := NewClient(t.TempDir(), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	db, err := client.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var applied int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='0046_repair_issue_state_runtime_constraints'`).Scan(&applied); err != nil || applied != 1 {
+		t.Fatalf("repair migration marker=%d err=%v", applied, err)
+	}
+}
+
 func TestCanonicalMigrationRejectsHistoricalReviewLeaseWithoutReviewRequest(t *testing.T) {
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })

@@ -90,6 +90,9 @@ func applyIssueStateRuntimeConstraintsRepairMigration(ctx context.Context, db *s
 			return applyIssueStateRuntimeConstraintsMigration(ctx, db, id)
 		}
 	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(id,applied_at) VALUES(?,?)`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("record canonical issue state repair migration: %w", err)
+	}
 	return nil
 }
 
