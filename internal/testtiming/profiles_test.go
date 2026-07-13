@@ -41,6 +41,10 @@ func TestCanonicalProfilesMakeCacheAndScopeExplicit(t *testing.T) {
 		})
 	}
 	assert.Equal(t, []string{"boundary", "cached", "cold", "focused", "integration", "migration-clone", "race"}, ProfileNames())
+	cold, err := ResolveProfile("cold", nil, "")
+	require.NoError(t, err)
+	assert.Contains(t, cold.GoTestArgs, "-timeout=8m")
+	assert.Contains(t, cold.GoTestArgs, "-p=4")
 }
 
 func TestFocusedProfileOverridesAreRecordedInExactCommand(t *testing.T) {

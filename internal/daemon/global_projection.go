@@ -282,6 +282,7 @@ func (d *Daemon) handleGlobalSnapshot(ctx context.Context, req protocol.RequestE
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
+	projection.KnownTaskIDs = augmentGlobalProjectionKnownTasks(projection.KnownTaskIDs, snapshot.Projects)
 	snapshot.Projection = projection
 	raw, err := json.Marshal(snapshot)
 	if err != nil {
@@ -290,6 +291,29 @@ func (d *Daemon) handleGlobalSnapshot(ctx context.Context, req protocol.RequestE
 	resp := d.successResponse(req)
 	resp.Body = raw
 	return resp, nil
+}
+
+func augmentGlobalProjectionKnownTasks(known []protocol.ScopedIssueID, projects []protocol.GlobalProjectSnapshot) []protocol.ScopedIssueID {
+	seen := make(map[protocol.ScopedIssueID]struct{}, len(known))
+	for _, identity := range known {
+		identity.ProjectID = naming.ProjectID(protocol.NormalizeProjectID(identity.ProjectID.String()))
+		seen[identity] = struct{}{}
+	}
+	for _, project := range projects {
+		projectID := protocol.NormalizeProjectID(project.ProjectID)
+		for _, task := range project.Tasks {
+			if projectID == "" || task.ID == "" {
+				continue
+			}
+			identity := protocol.ScopedIssueID{ProjectID: naming.ProjectID(projectID), IssueID: task.ID}
+			if _, ok := seen[identity]; ok {
+				continue
+			}
+			seen[identity] = struct{}{}
+			known = append(known, identity)
+		}
+	}
+	return known
 }
 
 func (d *Daemon) reconcileUserProjectCatalog(ctx context.Context) error {
@@ -387,6 +411,7 @@ func (d *Daemon) handleGlobalProjectionRebuild(ctx context.Context, req protocol
 func projectGlobalView(view domain.BoardView, projects []protocol.GlobalProjectSnapshot) (protocol.GlobalViewProjection, error) {
 	out := protocol.GlobalViewProjection{View: view}
 	groups := make(map[domain.BoardColumnID][]protocol.GlobalViewProjectedItem, len(view.Columns))
+	allItems := make([]protocol.GlobalViewProjectedItem, 0)
 	groupOrder := make([]domain.BoardColumnID, 0, len(view.Columns))
 	for _, c := range view.Columns {
 		groupOrder = append(groupOrder, c.ID)
@@ -400,39 +425,77 @@ func projectGlobalView(view domain.BoardView, projects []protocol.GlobalProjectS
 			out.KnownTaskIDs = append(out.KnownTaskIDs, protocol.ScopedIssueID{ProjectID: naming.ProjectID(project.ProjectID), IssueID: id})
 		}
 		for _, item := range p.Items {
-			groups[item.GroupID] = append(groups[item.GroupID], protocol.GlobalViewProjectedItem{Identity: protocol.ScopedIssueID{ProjectID: naming.ProjectID(project.ProjectID), IssueID: item.Task.ID}, Task: item.Task, GroupID: item.GroupID, Depth: item.Depth, OrchestrationState: item.OrchestrationState})
+			projected := protocol.GlobalViewProjectedItem{Identity: protocol.ScopedIssueID{ProjectID: naming.ProjectID(project.ProjectID), IssueID: item.Task.ID}, Task: item.Task, GroupID: item.GroupID, Depth: item.Depth, OrchestrationState: item.OrchestrationState}
+			groups[item.GroupID] = append(groups[item.GroupID], projected)
+			allItems = append(allItems, projected)
 		}
 	}
 	rules := view.Sort
 	if len(rules) == 0 && view.Options.SortPolicy == domain.BoardViewSortHumanAttention {
 		rules = []domain.BoardViewSortRule{{Key: domain.BoardViewSortKeyHumanAttention, Direction: domain.BoardViewSortDescending}}
 	}
+	if view.Layout == domain.BoardViewLayoutTreeList {
+		out.Items = sortGlobalTreeBranches(allItems, rules)
+		groups = make(map[domain.BoardColumnID][]protocol.GlobalViewProjectedItem, len(view.Columns))
+		for _, item := range out.Items {
+			groups[item.GroupID] = append(groups[item.GroupID], item)
+		}
+	}
 	for _, groupID := range groupOrder {
 		items := groups[groupID]
-		sort.SliceStable(items, func(i, j int) bool {
-			for _, rule := range rules {
-				cmp := domain.CompareBoardViewTasks(rule.Key, items[i].Task, items[j].Task)
-				if cmp == 0 {
-					continue
-				}
-				if rule.Direction == domain.BoardViewSortDescending {
-					return cmp > 0
-				}
-				return cmp < 0
-			}
-			if items[i].Identity.ProjectID != items[j].Identity.ProjectID {
-				return items[i].Identity.ProjectID < items[j].Identity.ProjectID
-			}
-			return items[i].Identity.IssueID < items[j].Identity.IssueID
-		})
+		if view.Layout != domain.BoardViewLayoutTreeList {
+			sort.SliceStable(items, func(i, j int) bool {
+				return globalProjectedItemLess(items[i], items[j], rules)
+			})
+		}
 		g := protocol.GlobalViewProjectedGroup{GroupID: groupID}
 		for _, item := range items {
 			g.TaskIDs = append(g.TaskIDs, item.Identity)
-			out.Items = append(out.Items, item)
+			if view.Layout != domain.BoardViewLayoutTreeList {
+				out.Items = append(out.Items, item)
+			}
 		}
 		if !view.Options.HideEmptyColumns || len(g.TaskIDs) > 0 {
 			out.Groups = append(out.Groups, g)
 		}
 	}
 	return out, nil
+}
+
+func sortGlobalTreeBranches(items []protocol.GlobalViewProjectedItem, rules []domain.BoardViewSortRule) []protocol.GlobalViewProjectedItem {
+	if len(items) < 2 {
+		return items
+	}
+	branches := make([][]protocol.GlobalViewProjectedItem, 0, len(items))
+	for _, item := range items {
+		if item.Depth <= 0 || len(branches) == 0 {
+			branches = append(branches, nil)
+		}
+		branches[len(branches)-1] = append(branches[len(branches)-1], item)
+	}
+	sort.SliceStable(branches, func(i, j int) bool {
+		return globalProjectedItemLess(branches[i][0], branches[j][0], rules)
+	})
+	ordered := make([]protocol.GlobalViewProjectedItem, 0, len(items))
+	for _, branch := range branches {
+		ordered = append(ordered, branch...)
+	}
+	return ordered
+}
+
+func globalProjectedItemLess(left, right protocol.GlobalViewProjectedItem, rules []domain.BoardViewSortRule) bool {
+	for _, rule := range rules {
+		cmp := domain.CompareBoardViewTasks(rule.Key, left.Task, right.Task)
+		if cmp == 0 {
+			continue
+		}
+		if rule.Direction == domain.BoardViewSortDescending {
+			return cmp > 0
+		}
+		return cmp < 0
+	}
+	if left.Identity.ProjectID != right.Identity.ProjectID {
+		return left.Identity.ProjectID < right.Identity.ProjectID
+	}
+	return left.Identity.IssueID < right.Identity.IssueID
 }

@@ -46,6 +46,9 @@ just test-integration
 just test-migration-clone
 just test-race
 
+# Aggregate daemon race sweep (four sequential shards; 15m/shard, 45m aggregate)
+just test-race-daemon
+
 # Focused daemon/client boundary checks
 go test ./internal/tui ./internal/cli
 go test ./internal/daemon/... ./internal/client/...
@@ -63,7 +66,7 @@ go test ./internal/tui ./internal/cli ./internal/daemon/...
 
 ## Complete Test-Failure Batch Workflow
 
-- Use `just test` (or `just test-timing cold`) for the canonical uncached machine-readable full run. It preserves the complete `go test -json` stream, emits sorted package/test durations and all failures, and enforces the committed baseline/budgets documented in [docs/26-test-timing-profiles.md](docs/26-test-timing-profiles.md). Use the distinct `cached`, `focused`, `integration`, `migration-clone`, `race`, or `boundary` profiles only for their documented semantics; do not present a focused or cached result as cold full-suite evidence.
+- Use `just test` (or `just test-timing cold`) for the canonical uncached machine-readable full run. It preserves the complete `go test -json` stream, bounds package concurrency with `-p=4`, emits sorted package/test durations and all failures, and enforces the committed baseline/budgets documented in [docs/26-test-timing-profiles.md](docs/26-test-timing-profiles.md). Use the distinct `cached`, `focused`, `integration`, `migration-clone`, `race`, or `boundary` profiles only for their documented semantics; do not present a focused or cached result as cold full-suite evidence.
 - `just merge-gate` is the required local merge contract: build once, run the cold semantic suite once, then run static and focused executable boundary guards. Integration/subprocess, migration-clone, and race profiles are change-sensitive execution-mode gates; they intentionally rerun only the contracts that need those modes.
 - When a broad validation command fails, do not fix the first visible test and repeatedly rerun in a one-test-at-a-time loop.
 - Run the complete relevant suite once with machine-readable output, such as `go test -json ./... -count=1 -timeout 10m`, and preserve the output outside the repository worktree when it is too large for the terminal.
@@ -214,6 +217,8 @@ fd "filename" -t f internal cmd
 3. Pre-merge review must test the candidate through real startup/store paths against safe temporary clones of the root user database and every registered project database. Never test candidate migrations on the originals.
 4. Require fresh, historical-upgrade, idempotent-reopen, rollback, drift, and real-database-clone evidence. Fresh-database tests alone are insufficient.
 5. Migration changes remain high risk and require three clean review passes after the final migration-affecting edit.
+6. Every migration ID must have exactly one embedded immutable artifact and a pinned SHA-256 checksum. Go-assisted migrations require a SQL/manifest artifact describing schema, data, validation, and ledger effects; callbacks may orchestrate but never replace the artifact.
+7. Registration must fail for duplicate IDs, missing/empty artifacts, checksum drift, or a registry/artifact mismatch. Applied ledger rows must record `artifact_checksum`; legacy rows may be backfilled once from the pinned catalog and must reject later mismatch.
 
 ## Active-Path Placeholder Policy
 

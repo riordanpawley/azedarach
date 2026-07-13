@@ -199,7 +199,7 @@ func TestBoardViewSaveSelectionRoutesThroughDaemonMutationCommand(t *testing.T) 
 
 func TestBoardViewMutationSuccessRefreshesViewsAndBoard(t *testing.T) {
 	m := newTestModel()
-	updatedAny, cmd := m.Update(boardViewMutatedMsg{action: "save", viewID: "custom"})
+	updatedAny, cmd := m.Update(boardViewMutatedMsg{action: "save", viewID: "custom", scope: m.currentBoardViewCommandScope()})
 	updated := updatedAny.(Model)
 	if !updated.boardRefreshing || cmd == nil {
 		t.Fatalf("refreshing=%v cmd=%v", updated.boardRefreshing, cmd)
@@ -3835,7 +3835,7 @@ func TestLoadingStateAcceptsImmediateInteraction(t *testing.T) {
 	m.editor.EnterNormal()
 	m.nav.SelectTask("az-1", 0)
 
-	if got := m.View(); !strings.Contains(got, "Loading issues") {
+	if got := m.View(); !strings.Contains(got, "Loading tickets") {
 		t.Fatalf("expected loading view while hydrated state is pending, got %q", got)
 	}
 

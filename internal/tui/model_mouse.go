@@ -205,7 +205,7 @@ func (m Model) handleMouseAttach(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.nav.JumpToTaskByID(columns, taskID)
 		m.ensureCursorVisible(columns)
 	}
-	if m.globalBoard {
+	if m.scope.IsGlobal() {
 		return m.leaveGlobalBoardForCurrentTask()
 	}
 	return m.attachFocusedTask(taskID)

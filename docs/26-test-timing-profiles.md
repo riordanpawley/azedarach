@@ -57,7 +57,7 @@ failures or reports only the last failing package.
 
 | Profile | Cache | Scope | Purpose |
 |---|---|---|---|
-| `cold` | cleared, plus `-count=1` | `./...` | Canonical complete before/after measurement and all-failures run. |
+| `cold` | cleared, plus `-count=1` | `./...` with `-p=4` | Canonical complete before/after measurement and all-failures run with bounded package concurrency. |
 | `cached` | explicitly permitted | `./...` | Measures normal repeat developer feedback; cached packages remain visible in the JSON stream. |
 | `focused` | bypassed with `-count=1` | defaults to `./internal/testtiming`; override with repeated `--package` | Fast development checks without pretending to be complete coverage. |
 | `integration` | bypassed with `-count=1` | daemon, daemon-process, Git, and tmux tests named `RealProcessProfile…` | Real subprocess and lifecycle contracts only. |
@@ -72,6 +72,10 @@ or baseline files. `--package` and `--run` are intentionally accepted only by th
 a narrow run cannot be mislabeled or compared with full-suite budgets.
 
 ## Completion and merge gates
+
+The cold profile fixes Go package concurrency at four workers. This avoids
+SQLite and subprocess contention transferring work into the daemon and Git
+packages on high-core hosts while retaining package-level parallel execution.
 
 `just test` is deliberately the cold profile, rather than a second `go test
 ./...` path. `just merge-gate` performs three non-overlapping responsibilities:

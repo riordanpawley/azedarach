@@ -55,8 +55,61 @@ func TestTypedColumnBoardRendersProjectedGroups(t *testing.T) {
 	}
 }
 
+func TestOrchestrationColumnBoardRendersConfiguredColumnsAtDefaultAndNarrowWidths(t *testing.T) {
+	view := domain.OrchestrationBoardView()
+	entries := []InventoryEntry{
+		{IssueID: "human", TaskTitle: "Human review", ViewProjected: true, ViewGroupID: view.Columns[0].ID, ViewGroupTitle: view.Columns[0].Title},
+		{IssueID: "active", TaskTitle: "Active work", ViewProjected: true, ViewGroupID: view.Columns[2].ID, ViewGroupTitle: view.Columns[2].Title},
+	}
+	t.Run("default", func(t *testing.T) {
+		model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+		model.loading, model.width, model.height = false, 120, 20
+		model.snapshot = Snapshot{View: view, Entries: entries}
+		rendered := ansi.Strip(model.View())
+		for _, column := range view.Columns {
+			if !strings.Contains(rendered, column.Title+" (") {
+				t.Fatalf("configured column %q missing:\n%s", column.Title, rendered)
+			}
+		}
+	})
+	t.Run("narrow navigation", func(t *testing.T) {
+		model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+		model.loading, model.width, model.height = false, 60, 20
+		model.snapshot = Snapshot{View: view, Entries: entries}
+		if rendered := ansi.Strip(model.View()); !strings.Contains(rendered, view.Columns[0].Title+" (1)") {
+			t.Fatalf("first column missing:\n%s", rendered)
+		}
+		model = updateKey(t, model, "right")
+		if rendered := ansi.Strip(model.View()); model.cursor != 1 || !strings.Contains(rendered, view.Columns[2].Title+" (1)") {
+			t.Fatalf("active column not reachable across empty column: cursor=%d\n%s", model.cursor, rendered)
+		}
+	})
+	t.Run("daemon group visibility", func(t *testing.T) {
+		model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+		model.loading, model.width, model.height = false, 120, 20
+		model.snapshot = Snapshot{View: view, ProjectedGroups: []domain.BoardColumnID{view.Columns[0].ID, view.Columns[2].ID}, Entries: entries}
+		rendered := ansi.Strip(model.View())
+		if strings.Contains(rendered, view.Columns[1].Title+" (") {
+			t.Fatalf("column omitted by daemon projection was rendered:\n%s", rendered)
+		}
+	})
+	t.Run("unknown projected group has stable title", func(t *testing.T) {
+		model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+		model.loading, model.width, model.height = false, 120, 20
+		model.snapshot = Snapshot{View: view, ProjectedGroups: []domain.BoardColumnID{"custom"}, Entries: []InventoryEntry{{IssueID: "custom", ViewGroupID: "custom"}}}
+		if rendered := ansi.Strip(model.View()); !strings.Contains(rendered, "custom (1)") {
+			t.Fatalf("unknown projected group missing stable title:\n%s", rendered)
+		}
+	})
+}
+
 func TestTypedColumnBoardKeepsSelectedGroupVisibleOnNarrowViewport(t *testing.T) {
 	view := domain.DefaultBoardView()
+	view.Columns = []domain.BoardColumn{
+		{ID: "one", Title: "One"},
+		{ID: "two", Title: "Two"},
+		{ID: "three", Title: "Three"},
+	}
 	model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
 	model.loading, model.width, model.height, model.cursor = false, 60, 20, 2
 	model.snapshot = Snapshot{View: view, Entries: []InventoryEntry{
@@ -162,6 +215,11 @@ func TestTypedViewStatusExplainsSelectorConfiguration(t *testing.T) {
 
 func TestTypedColumnBoardHorizontalMovementClampsAcrossUnevenColumns(t *testing.T) {
 	view := domain.DefaultBoardView()
+	view.Columns = []domain.BoardColumn{
+		{ID: "left", Title: "Left"},
+		{ID: "middle", Title: "Middle"},
+		{ID: "right", Title: "Right"},
+	}
 	entries := []InventoryEntry{
 		{IssueID: "left-1", TaskTitle: "Left one", ViewGroupID: "left", ViewGroupTitle: "Left"},
 		{IssueID: "left-2", TaskTitle: "Left two", ViewGroupID: "left", ViewGroupTitle: "Left"},
@@ -1040,6 +1098,72 @@ func TestModelTabTogglesTreeViewAndPersistsGlobally(t *testing.T) {
 	model = updateKey(t, model, "down")
 	if model.cursor != 1 {
 		t.Fatalf("tree down cursor = %d, want child index 1", model.cursor)
+	}
+}
+
+func TestProjectedSessionTreeRowsRenderCoherentConnectors(t *testing.T) {
+	entries := []InventoryEntry{
+		{IssueID: "root-one", ViewDepth: 0},
+		{IssueID: "child-one", ViewDepth: 1},
+		{IssueID: "grandchild", ViewDepth: 2},
+		{IssueID: "child-two", ViewDepth: 1},
+		{IssueID: "root-two", ViewDepth: 0},
+		{IssueID: "only-child", ViewDepth: 1},
+	}
+	rows := projectedSessionTreeRows(entries)
+	want := []string{"", "|- ", "|  `- ", "`- ", "", "`- "}
+	for i, row := range rows {
+		if got := treePrefix(row.ancestorLast, row.last); got != want[i] {
+			t.Fatalf("row %s prefix = %q, want %q", row.entry.IssueID, got, want[i])
+		}
+	}
+}
+
+func TestModelTreeReconstructsHierarchyForConfiguredColumnView(t *testing.T) {
+	parentID := naming.IssueID("parent")
+	entries := []InventoryEntry{
+		{
+			ProjectID: "alpha", SessionID: "alpha-child", IssueID: "child", TaskTitle: "Child", HasTmuxSession: true,
+			Task: domain.Task{ID: "child", Title: "Child", ParentID: &parentID},
+		},
+		{
+			ProjectID: "alpha", SessionID: "alpha-parent", IssueID: "parent", TaskTitle: "Parent", HasTmuxSession: true,
+			Task: domain.Task{ID: parentID, Title: "Parent"},
+		},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	model.snapshot = Snapshot{Entries: entries, View: domain.OrchestrationBoardView()}
+	model.activeTab = selectorTabTree
+	model.loading = false
+
+	view := ansi.Strip(model.View())
+	parentPos, childPos := strings.Index(view, "alpha-parent"), strings.Index(view, "alpha-child")
+	if parentPos < 0 || childPos < 0 || parentPos > childPos {
+		t.Fatalf("configured-view tree did not render parent before child:\n%s", view)
+	}
+	if !strings.Contains(view, "`- alpha-child") {
+		t.Fatalf("configured-view tree did not nest child under parent:\n%s", view)
+	}
+}
+
+func TestConfiguredViewTreeScopesCollidingIssueIDsByProject(t *testing.T) {
+	parentID := naming.IssueID("parent")
+	entries := []InventoryEntry{
+		{ProjectID: "alpha", SessionID: "alpha-child", IssueID: "child", Task: domain.Task{ID: "child", ParentID: &parentID}},
+		{ProjectID: "beta", SessionID: "beta-child", IssueID: "child", Task: domain.Task{ID: "child", ParentID: &parentID}},
+		{ProjectID: "alpha", SessionID: "alpha-parent", IssueID: "parent", Task: domain.Task{ID: parentID}},
+		{ProjectID: "beta", SessionID: "beta-parent", IssueID: "parent", Task: domain.Task{ID: parentID}},
+	}
+	model := Model{snapshot: Snapshot{View: domain.OrchestrationBoardView()}}
+	rows := model.activeSessionTreeRows(entries)
+	if len(rows) != 4 {
+		t.Fatalf("tree rows = %+v, want both scoped parent-child pairs", rows)
+	}
+	want := []string{"alpha-parent", "alpha-child", "beta-parent", "beta-child"}
+	for i, sessionID := range want {
+		if rows[i].entry.SessionID != sessionID {
+			t.Fatalf("tree row sessions = %+v, want %v", rows, want)
+		}
 	}
 }
 

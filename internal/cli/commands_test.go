@@ -5301,12 +5301,12 @@ func TestParseIssueGetArgs(t *testing.T) {
 		{
 			name:        "missing issue id",
 			args:        []string{},
-			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [--archived exclude|include|only] [<issue-id>]",
+			errContains: "usage: az ticket get [--project <project-id>] [--id <ticket-id>] [--json] [--with-notes] [--archived exclude|include|only] [<ticket-id>]",
 		},
 		{
 			name:        "too many args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]",
+			errContains: "usage: az ticket get [--project <project-id>] [--id <ticket-id>] [--json] [--with-notes] [<ticket-id>]",
 		},
 		{
 			name:        "deps flag rejected",
@@ -5391,7 +5391,7 @@ func TestParseIssueEventsArgs(t *testing.T) {
 	}
 
 	_, err = ParseIssueEventsArgs([]string{"--json"})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue events") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az ticket events") {
 		t.Fatalf("expected missing id usage error, got %v", err)
 	}
 	_, err = ParseIssueEventsArgs([]string{"az-1", "--limit", "-1"})
@@ -5478,7 +5478,7 @@ func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 		t.Fatalf("ParseIssueCheckArgs() = %+v", check)
 	}
 	_, err = ParseIssueCheckArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az ticket check [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>]") {
 		t.Fatalf("expected check usage error, got %v", err)
 	}
 
@@ -5522,7 +5522,7 @@ func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 		t.Fatalf("expected mutually exclusive wal flag error, got %v", err)
 	}
 	_, err = ParseIssueDoctorArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<issue-id>]") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az ticket doctor [--project <project-id>] [--id <ticket-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<ticket-id>]") {
 		t.Fatalf("expected doctor usage error, got %v", err)
 	}
 }
@@ -5562,7 +5562,7 @@ func TestParseIssueSearchArgs(t *testing.T) {
 		},
 		{
 			name:        "missing query",
-			errContains: "usage: az issue search",
+			errContains: "usage: az ticket search",
 		},
 		{
 			name:        "duplicate query sources",
@@ -5616,7 +5616,7 @@ func TestParseIssueGetManyArgs(t *testing.T) {
 	}
 
 	_, err = ParseIssueGetManyArgs([]string{"--json"})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue get-many [--project <project-id>] --id <issue-id>") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az ticket get-many [--project <project-id>] --id <ticket-id>") {
 		t.Fatalf("expected usage error for missing ids, got %v", err)
 	}
 }
@@ -5724,7 +5724,7 @@ func TestParseIssueCreateArgs(t *testing.T) {
 		{
 			name:        "missing title",
 			args:        []string{},
-			errContains: "usage: az issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred]",
+			errContains: "usage: az ticket create [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--deferred]",
 		},
 		{
 			name:        "title flag and positional are ambiguous",
@@ -5794,12 +5794,12 @@ func TestParseIssueCloseArgs(t *testing.T) {
 		{
 			name:        "missing id",
 			args:        []string{},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]",
+			errContains: "usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]",
 		},
 		{
 			name:        "extra args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]",
+			errContains: "usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]",
 		},
 		{
 			name: "named id",
@@ -5858,12 +5858,19 @@ func TestParseIssueCloseArgs(t *testing.T) {
 }
 
 func TestParseIssueCleanupArgs(t *testing.T) {
-	opts, err := ParseIssueCleanupArgs([]string{"--id", "az-1", "--statuses", "open,in_review", "--action", "cancelled", "--dry-run", "--per-issue-timeout", "2s"})
+	opts, err := ParseIssueCleanupArgs([]string{"--id", "az-1", "--statuses", "open,in_review", "--action", "cancelled", "--dry-run", "--per-ticket-timeout", "2s"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(opts.IDs) != 1 || len(opts.Statuses) != 2 || opts.Action != "cancelled" || !opts.DryRun || opts.PerIssueTimeout != 2*time.Second {
 		t.Fatalf("opts = %+v", opts)
+	}
+	legacy, err := ParseIssueCleanupArgs([]string{"--id", "az-1", "--per-issue-timeout", "2s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.PerIssueTimeout != opts.PerIssueTimeout {
+		t.Fatalf("legacy timeout = %s, canonical timeout = %s", legacy.PerIssueTimeout, opts.PerIssueTimeout)
 	}
 	if _, err := ParseIssueCleanupArgs(nil); err == nil || !strings.Contains(err.Error(), "at least one") {
 		t.Fatalf("missing selector error = %v", err)
@@ -5938,7 +5945,7 @@ func TestParseIssueUnarchiveArgs(t *testing.T) {
 	}
 
 	_, err = ParseIssueUnarchiveArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue unarchive") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az ticket unarchive") {
 		t.Fatalf("expected usage error, got %v", err)
 	}
 }
@@ -6039,7 +6046,7 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 		{
 			name:        "invalid status arg count",
 			args:        []string{},
-			errContains: "usage: az issue update [--project <project-id>] [--id <issue-id>]",
+			errContains: "usage: az ticket update [--project <project-id>] [--id <ticket-id>]",
 		},
 		{
 			name: "named id",
@@ -6250,6 +6257,33 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 	if remove.IssueID != "az-3" || remove.DependsOnID != "az-4" || !remove.Confirm {
 		t.Fatalf("ParseIssueDependencyRemoveArgs() interspersed id+flags = %+v", remove)
 	}
+}
+
+func TestTicketNamedFlagsAndLegacyAliasesMatch(t *testing.T) {
+	assertIssueID := func(t *testing.T, want string, parse func([]string) (string, error), canonical, legacy []string) {
+		t.Helper()
+		for name, args := range map[string][]string{"canonical": canonical, "legacy": legacy} {
+			got, err := parse(args)
+			if err != nil {
+				t.Fatalf("%s args %v: %v", name, args, err)
+			}
+			if got != want {
+				t.Fatalf("%s args resolved %q, want %q", name, got, want)
+			}
+		}
+	}
+	assertIssueID(t, "az-1", func(args []string) (string, error) {
+		opts, err := ParseIssueDependencyAddArgs(args)
+		return opts.IssueID, err
+	}, []string{"--ticket-id", "az-1", "--depends-on-id", "az-2"}, []string{"--issue-id", "az-1", "--depends-on-id", "az-2"})
+	assertIssueID(t, "az-1", func(args []string) (string, error) {
+		opts, err := ParseIssueImageAddArgs(args)
+		return opts.IssueID, err
+	}, []string{"--ticket-id", "az-1", "--path", "image.png"}, []string{"--issue-id", "az-1", "--path", "image.png"})
+	assertIssueID(t, "az-1", func(args []string) (string, error) {
+		opts, err := ParseIssueDocumentListArgs(args)
+		return opts.IssueID, err
+	}, []string{"--ticket-id", "az-1"}, []string{"--issue-id", "az-1"})
 }
 
 func TestParseIssueImageArgs(t *testing.T) {
@@ -9522,6 +9556,21 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	if !containsString(commands, protocol.CommandOrchestrationIntent) || containsString(commands, protocol.CommandOperationSubmit) || containsString(commands, protocol.CommandMailSend) {
 		t.Fatalf("commands = %+v, want daemon orchestration intent without client-side operation submit or immediate mail send", commands)
 	}
+
+	textOutput := captureStdout(t, func() error {
+		return IssueSplitCommand(deps, IssueSplitOptions{
+			ParentIssueID: root.String(),
+			Title:         "Child work",
+			Type:          domain.TypeTask,
+			Priority:      domain.P2,
+		})
+	})
+	if !strings.Contains(textOutput, "`az ticket close` owns") || !strings.Contains(textOutput, "az ticket close --id "+child.String()) {
+		t.Fatalf("split output missing canonical ticket close guidance: %s", textOutput)
+	}
+	if strings.Contains(textOutput, "az issue close") {
+		t.Fatalf("split output contains legacy issue close guidance: %s", textOutput)
+	}
 }
 
 func TestIssueCreateCommandAutoDefaultsImplWhenSingleConfigured(t *testing.T) {
@@ -12379,10 +12428,10 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Do not create needless decomposition for a single-scope plan") {
 		t.Fatalf("prime output missing single-scope plan guidance: %q", output)
 	}
-	if strings.Contains(output, "Active issue ID:") || strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=") {
+	if strings.Contains(output, "Active ticket ID:") || strings.Contains(output, "Active ticket context (ticket=") {
 		t.Fatalf("prime without issue rendered active issue context: %q", output)
 	}
-	for _, want := range []string{"Issue Types", "`investigation` for research", "az issue update --type <type>", "explicit, issue-specific human acceptance"} {
+	for _, want := range []string{"Ticket Types", "`investigation` for research", "az ticket update --type <type>", "explicit, ticket-specific human acceptance"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("prime output missing investigation guidance %q: %q", want, output)
 		}
@@ -12458,7 +12507,7 @@ func TestPrimeCommandRendersPersistedRootedOrchestratorScope(t *testing.T) {
 		}), nil
 	}})}
 	output := captureStdout(t, func() error { return PrimeCommand(deps) })
-	for _, want := range []string{"Active issue ID: `az-root`", "scope=rooted:az-root", "rooted orchestrator for `az-root`", "az orchestrate status --root az-root", "Orchestrator Exit Contract (root az-root)"} {
+	for _, want := range []string{"Active ticket ID: `az-root`", "scope=rooted:az-root", "rooted orchestrator for `az-root`", "az orchestrate status --root az-root", "Orchestrator Exit Contract (root az-root)"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("rooted prime output missing %q: %s", want, output)
 		}
@@ -12750,13 +12799,13 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
-	if !strings.Contains(output, "Active issue ID: `az-1`") {
+	if !strings.Contains(output, "Active ticket ID: `az-1`") {
 		t.Fatalf("prime output missing explicit active issue id: %q", output)
 	}
 	if !strings.Contains(output, "Run `az spec read --issue az-1` before behavior changes") {
 		t.Fatalf("prime output missing active-issue spec read command: %q", output)
 	}
-	if !strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=az-1)") {
+	if !strings.Contains(output, "Active ticket context (ticket=az-1)") {
 		t.Fatalf("prime output missing active issue section: %q", output)
 	}
 	if !strings.Contains(output, "az-1: Prime issue [status=open priority=P2 type=task impl=go-bubbletea]") {
@@ -13196,7 +13245,7 @@ func TestPrimeCommandRecommendsChildIssuesForEpicContext(t *testing.T) {
 	if !strings.Contains(output, "Parent context: `az-1` is an epic or has children") {
 		t.Fatalf("prime output missing epic child-work recommendation: %q", output)
 	}
-	if !strings.Contains(output, "az issue split \"Child task\"") {
+	if !strings.Contains(output, "az ticket split \"Child task\"") {
 		t.Fatalf("tmux-capable parent context omitted split option: %q", output)
 	}
 }
@@ -13268,7 +13317,7 @@ func TestPrimeCommandRecommendsChildIssuesWhenActiveIssueHasChildren(t *testing.
 	if !strings.Contains(output, "Parent context: `az-1` is an epic or has children") {
 		t.Fatalf("prime output missing child-work recommendation for parent task: %q", output)
 	}
-	if strings.Contains(output, "Parent context: `az-1` is an epic or has children. Keep implementation-sized scope in child issues using `az issue create \"Child task\"` for tracking-only work or `az issue split") {
+	if strings.Contains(output, "Parent context: `az-1` is an epic or has children. Keep implementation-sized scope in child tickets using `az ticket create \"Child task\"` for tracking-only work or `az ticket split") {
 		t.Fatalf("prime output should not mention split command when tmux is unavailable: %q", output)
 	}
 }
@@ -13333,13 +13382,13 @@ func TestPrimeCommandUsesTmuxSessionContextWhenEnvMissing(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
-	if !strings.Contains(output, "Active issue ID: `az-1`") {
+	if !strings.Contains(output, "Active ticket ID: `az-1`") {
 		t.Fatalf("prime output missing tmux-derived active issue id: %q", output)
 	}
-	if !strings.Contains(output, "`AZEDARACH_ISSUE_ID` is absent, but the current tmux session resolves to issue `az-1`") {
+	if !strings.Contains(output, "`AZEDARACH_TICKET_ID` is absent, but the current tmux session resolves to ticket `az-1`") {
 		t.Fatalf("prime output missing missing-env tmux warning: %q", output)
 	}
-	if !strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=az-1)") {
+	if !strings.Contains(output, "Active ticket context (ticket=az-1)") {
 		t.Fatalf("prime output missing tmux-derived active issue section: %q", output)
 	}
 }
@@ -13465,7 +13514,7 @@ func TestPrimeCommandTruncatesLargeIssueDescription(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
-	if !strings.Contains(output, "… (truncated; run `az issue get az-1` for full context)") {
+	if !strings.Contains(output, "… (truncated; run `az ticket get az-1` for full context)") {
 		t.Fatalf("prime output should include truncated description sentinel: %q", output)
 	}
 	if strings.Count(output, "line content for noisy transcript output") >= 12 {
@@ -13482,8 +13531,8 @@ func TestPrimeCommandWarnsWhenActiveIssueClosed(t *testing.T) {
 		status domain.Status
 		want   string
 	}{
-		{name: "completed", id: "az-closed", status: domain.StatusDone, want: "Active issue `az-closed` is currently `closed`"},
-		{name: "cancelled", id: "az-cancelled", status: domain.StatusCancelled, want: "Active issue `az-cancelled` is currently `cancelled`"},
+		{name: "completed", id: "az-closed", status: domain.StatusDone, want: "Active ticket `az-closed` is currently `closed`"},
+		{name: "cancelled", id: "az-cancelled", status: domain.StatusCancelled, want: "Active ticket `az-cancelled` is currently `cancelled`"},
 	}
 
 	for _, tt := range tests {

@@ -33,6 +33,7 @@ This directory primarily contains **developer/internal documentation**.
 - [22-event-sourcing-detailed-map-and-risk-register.md](22-event-sourcing-detailed-map-and-risk-register.md)
 - [23-sqlite-wal-policy.md](23-sqlite-wal-policy.md)
 - [24-issue-state-model-v2-rollout.md](24-issue-state-model-v2-rollout.md)
+- [25-migration-artifacts.md](25-migration-artifacts.md) — immutable migration artifact and checksum convention
 - [25-configurable-views.md](25-configurable-views.md)
 - [25-cross-project-user-database.md](25-cross-project-user-database.md)
 - [25-rootless-orchestrator-contracts.md](25-rootless-orchestrator-contracts.md)
@@ -78,6 +79,8 @@ This directory primarily contains **developer/internal documentation**.
 - Treat this as the required cross-daemon safety contract for session/worktree/runtime invariants.
 
 ## Spec Records
+
+- [Ticket terminology migration](25-ticket-terminology-migration.md) defines the canonical language and compatibility boundaries.
 
 - `az spec read --json` reads daemon-backed requirement/link records.
 - Markdown spec export is disabled until it can export the real stored spec data.

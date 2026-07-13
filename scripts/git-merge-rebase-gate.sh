@@ -7,15 +7,34 @@ if [ "${AZEDARACH_SKIP_MERGE_REBASE_GATE:-0}" = "1" ]; then
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
-cd "$repo_root"
 
-# Hooks can run with git routing variables (e.g. GIT_DIR/GIT_WORK_TREE)
-# inherited from the active repository/worktree. Clear them so nested git
-# usage inside go tests operates on each test's own temporary repository.
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
-unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+timeout_cmd=""
+if command -v timeout >/dev/null 2>&1; then
+	timeout_cmd="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+	timeout_cmd="gtimeout"
+else
+	echo "[gate] GNU timeout is required (provided by the repository Nix shell or Homebrew coreutils)" >&2
+	exit 1
+fi
 
-echo "[gate] running canonical build, cold semantic suite, and boundary gates"
-just merge-gate
-
-echo "[gate] merge gates passed"
+validation_timeout="${AZEDARACH_MERGE_GATE_TIMEOUT:-10m}"
+validation_status="$(mktemp -t azedarach-merge-gate-wrapper-status.XXXXXX)"
+cleanup() {
+	rm -f "$validation_status"
+}
+trap cleanup EXIT
+(
+	set +e
+	"$timeout_cmd" --signal=TERM --kill-after=15s "$validation_timeout" "$repo_root/scripts/git-merge-rebase-gate-body.sh"
+	printf '%s\n' "$?" >"$validation_status"
+) 2>&1 | tee
+if [ ! -s "$validation_status" ]; then
+	echo "[gate] validation runner ended without a status" >&2
+	exit 1
+fi
+status="$(cat "$validation_status")"
+if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+	echo "[gate] validation exceeded the $validation_timeout wall-clock budget; inspect retained Go timeout stacks/output above" >&2
+fi
+exit "$status"
