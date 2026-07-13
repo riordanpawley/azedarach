@@ -12357,10 +12357,10 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Do not create needless decomposition for a single-scope plan") {
 		t.Fatalf("prime output missing single-scope plan guidance: %q", output)
 	}
-	if strings.Contains(output, "Active issue ID:") || strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=") {
+	if strings.Contains(output, "Active ticket ID:") || strings.Contains(output, "Active ticket context (ticket=") {
 		t.Fatalf("prime without issue rendered active issue context: %q", output)
 	}
-	for _, want := range []string{"Issue Types", "`investigation` for research", "az issue update --type <type>", "explicit, issue-specific human acceptance"} {
+	for _, want := range []string{"Ticket Types", "`investigation` for research", "az ticket update --type <type>", "explicit, ticket-specific human acceptance"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("prime output missing investigation guidance %q: %q", want, output)
 		}
@@ -12436,7 +12436,7 @@ func TestPrimeCommandRendersPersistedRootedOrchestratorScope(t *testing.T) {
 		}), nil
 	}})}
 	output := captureStdout(t, func() error { return PrimeCommand(deps) })
-	for _, want := range []string{"Active issue ID: `az-root`", "scope=rooted:az-root", "rooted orchestrator for `az-root`", "az orchestrate status --root az-root", "Orchestrator Exit Contract (root az-root)"} {
+	for _, want := range []string{"Active ticket ID: `az-root`", "scope=rooted:az-root", "rooted orchestrator for `az-root`", "az orchestrate status --root az-root", "Orchestrator Exit Contract (root az-root)"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("rooted prime output missing %q: %s", want, output)
 		}
@@ -12728,13 +12728,13 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
-	if !strings.Contains(output, "Active issue ID: `az-1`") {
+	if !strings.Contains(output, "Active ticket ID: `az-1`") {
 		t.Fatalf("prime output missing explicit active issue id: %q", output)
 	}
 	if !strings.Contains(output, "Run `az spec read --issue az-1` before behavior changes") {
 		t.Fatalf("prime output missing active-issue spec read command: %q", output)
 	}
-	if !strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=az-1)") {
+	if !strings.Contains(output, "Active ticket context (ticket=az-1)") {
 		t.Fatalf("prime output missing active issue section: %q", output)
 	}
 	if !strings.Contains(output, "az-1: Prime issue [status=open priority=P2 type=task impl=go-bubbletea]") {
@@ -13174,7 +13174,7 @@ func TestPrimeCommandRecommendsChildIssuesForEpicContext(t *testing.T) {
 	if !strings.Contains(output, "Parent context: `az-1` is an epic or has children") {
 		t.Fatalf("prime output missing epic child-work recommendation: %q", output)
 	}
-	if !strings.Contains(output, "az issue split \"Child task\"") {
+	if !strings.Contains(output, "az ticket split \"Child task\"") {
 		t.Fatalf("tmux-capable parent context omitted split option: %q", output)
 	}
 }
@@ -13246,7 +13246,7 @@ func TestPrimeCommandRecommendsChildIssuesWhenActiveIssueHasChildren(t *testing.
 	if !strings.Contains(output, "Parent context: `az-1` is an epic or has children") {
 		t.Fatalf("prime output missing child-work recommendation for parent task: %q", output)
 	}
-	if strings.Contains(output, "Parent context: `az-1` is an epic or has children. Keep implementation-sized scope in child issues using `az issue create \"Child task\"` for tracking-only work or `az issue split") {
+	if strings.Contains(output, "Parent context: `az-1` is an epic or has children. Keep implementation-sized scope in child tickets using `az ticket create \"Child task\"` for tracking-only work or `az ticket split") {
 		t.Fatalf("prime output should not mention split command when tmux is unavailable: %q", output)
 	}
 }
@@ -13311,13 +13311,13 @@ func TestPrimeCommandUsesTmuxSessionContextWhenEnvMissing(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
-	if !strings.Contains(output, "Active issue ID: `az-1`") {
+	if !strings.Contains(output, "Active ticket ID: `az-1`") {
 		t.Fatalf("prime output missing tmux-derived active issue id: %q", output)
 	}
-	if !strings.Contains(output, "`AZEDARACH_ISSUE_ID` is absent, but the current tmux session resolves to issue `az-1`") {
+	if !strings.Contains(output, "`AZEDARACH_TICKET_ID` is absent, but the current tmux session resolves to ticket `az-1`") {
 		t.Fatalf("prime output missing missing-env tmux warning: %q", output)
 	}
-	if !strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=az-1)") {
+	if !strings.Contains(output, "Active ticket context (ticket=az-1)") {
 		t.Fatalf("prime output missing tmux-derived active issue section: %q", output)
 	}
 }
@@ -13443,7 +13443,7 @@ func TestPrimeCommandTruncatesLargeIssueDescription(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
-	if !strings.Contains(output, "… (truncated; run `az issue get az-1` for full context)") {
+	if !strings.Contains(output, "… (truncated; run `az ticket get az-1` for full context)") {
 		t.Fatalf("prime output should include truncated description sentinel: %q", output)
 	}
 	if strings.Count(output, "line content for noisy transcript output") >= 12 {
@@ -13460,8 +13460,8 @@ func TestPrimeCommandWarnsWhenActiveIssueClosed(t *testing.T) {
 		status domain.Status
 		want   string
 	}{
-		{name: "completed", id: "az-closed", status: domain.StatusDone, want: "Active issue `az-closed` is currently `closed`"},
-		{name: "cancelled", id: "az-cancelled", status: domain.StatusCancelled, want: "Active issue `az-cancelled` is currently `cancelled`"},
+		{name: "completed", id: "az-closed", status: domain.StatusDone, want: "Active ticket `az-closed` is currently `closed`"},
+		{name: "cancelled", id: "az-cancelled", status: domain.StatusCancelled, want: "Active ticket `az-cancelled` is currently `cancelled`"},
 	}
 
 	for _, tt := range tests {

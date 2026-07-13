@@ -8531,14 +8531,14 @@ func primeCommandTo(deps *Dependencies, stdout io.Writer, render primeRenderFunc
 		issueIDSource = "env"
 	}
 	primeMode := strings.TrimSpace(os.Getenv("AZEDARACH_PRIME_MODE"))
-	guardrail := "- No active issue is preselected. When work starts, set `AZEDARACH_ISSUE_ID` or run `az issue get <issue-id>`."
+	guardrail := "- No active ticket is preselected. When work starts, set `AZEDARACH_TICKET_ID` (or legacy `AZEDARACH_ISSUE_ID`) or run `az ticket get <ticket-id>`."
 	issueSection := ""
 	activeIssueClosedWarning := ""
 	specGuardrails := ""
 	questionFirstGuardrails := ""
 	orchestratorExitContract := ""
 	implementationSection := ""
-	implementationGuardrails := "- `--impl` selects implementation/spec variants; it never establishes parentage or graph membership. Use the active issue context or an explicit parent-child edge for hierarchy."
+	implementationGuardrails := "- `--impl` selects implementation/spec variants; it never establishes parentage or graph membership. Use the active ticket context or an explicit parent-child edge for hierarchy."
 	learningSection := ""
 	var learningConfirmation *protocol.LearnActivationConfirmRequestBody
 	specEnabled := deps != nil && deps.Config != nil && deps.Config.Spec.Enabled
@@ -8624,13 +8624,13 @@ func primeCommandTo(deps *Dependencies, stdout io.Writer, render primeRenderFunc
 
 	if !primeOrchestrator && issueID != "" {
 		if issueIDSource == "tmux" {
-			guardrail = fmt.Sprintf("- `AZEDARACH_ISSUE_ID` is absent, but the current tmux session resolves to issue `%s`; use it as the default issue scope and refresh stale context with `az issue get %s`.", issueID, issueID)
+			guardrail = fmt.Sprintf("- `AZEDARACH_TICKET_ID` is absent, but the current tmux session resolves to ticket `%s`; use it as the default ticket scope and refresh stale context with `az ticket get %s`.", issueID, issueID)
 		} else {
-			guardrail = fmt.Sprintf("- `AZEDARACH_ISSUE_ID` is set to `%s`; use it as the default issue scope and refresh stale context with `az issue get %s`.", issueID, issueID)
+			guardrail = fmt.Sprintf("- The active ticket scope is `%s`; refresh stale context with `az ticket get %s`. `AZEDARACH_ISSUE_ID` remains a legacy compatibility variable.", issueID, issueID)
 		}
 		ownerID := defaultIssueOwnerID()
 		if !snapshotLoaded {
-			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nCould not load issue details automatically; run `az issue get %s`.\n", issueID, issueID)
+			issueSection = fmt.Sprintf("Active ticket context (ticket=%s):\nCould not load ticket details automatically; run `az ticket get %s`.\n", issueID, issueID)
 		} else if task, ok := findTaskByID(snapshot.Tasks, issueID); ok {
 			if err := snapshot.RequireFullDetails("prime active issue snapshot"); err != nil {
 				if detailTask, err := loadPrimeIssueDetailTask(context.Background(), deps, issueID); err == nil {
@@ -8658,14 +8658,14 @@ func primeCommandTo(deps *Dependencies, stdout io.Writer, render primeRenderFunc
 			}
 			issueSection = renderPrimeIssueSection(issueID, task, snapshot.Tasks, observations, containmentRisks, tmuxAvailable)
 			if task.IssueClosed() {
-				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `%s`; start by picking/opening actionable work (for example `az issue list --limit 20` or `az issue create \"Next task\"`). Use `--deferred` only for standalone backlog work.", task.ID, task.IssueDisplayStatusText())
+				activeIssueClosedWarning = fmt.Sprintf("- Active ticket `%s` is currently `%s`; start by picking/opening actionable work (for example `az ticket list --limit 20` or `az ticket create \"Next task\"`). Use `--deferred` only for standalone backlog work.", task.ID, task.IssueDisplayStatusText())
 			}
 		} else {
 			readiness, hasReadiness := loadPrimeTaskGraphReadiness(context.Background(), deps, issueID, ownerID)
 			if orchestrationViaAz && hasReadiness && primeTaskGraphReadinessHasGraphState(issueID, readiness) {
 				orchestratorExitContract = renderPrimeOrchestratorExitContract(issueID)
 			}
-			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nIssue not found in current project snapshot; run `az issue get %s`.\n", issueID, issueID)
+			issueSection = fmt.Sprintf("Active ticket context (ticket=%s):\nTicket not found in current project snapshot; run `az ticket get %s`.\n", issueID, issueID)
 		}
 	}
 	if !primeOrchestrator && issueID != "" {
@@ -8983,7 +8983,7 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 	observationSection := renderPrimeWorkerObservationSection(observations)
 	containmentSection := renderPrimeContainmentRiskSection(issueID, containmentRisks)
 	return fmt.Sprintf(
-		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s impl=%s]%s%s\nDependencies:\n%s\n```\n%s%s%s%s",
+		"Active ticket context (ticket=%s):\nRefresh with `az ticket get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s impl=%s]%s%s\nDependencies:\n%s\n```\n%s%s%s%s",
 		issueID,
 		issueID,
 		task.ID,
@@ -9268,11 +9268,11 @@ func renderPrimeChildWorkRecommendation(task domain.Task, tasks []domain.Task, t
 	if task.Type != domain.TypeEpic && !issueHasChildren(task.ID, tasks) {
 		return ""
 	}
-	commands := "`az issue create \"Child task\"` for tracking-only work"
+	commands := "`az ticket create \"Child task\"` for tracking-only work"
 	if tmuxAvailable {
-		commands += " or `az issue split \"Child task\"` for an immediate isolated worker"
+		commands += " or `az ticket split \"Child task\"` for an immediate isolated worker"
 	}
-	return fmt.Sprintf("- Parent context: `%s` is an epic or has children. Keep implementation-sized scope in child issues using %s; execute each child from its own worktree/session and account for every child before root handoff.\n", task.ID, commands)
+	return fmt.Sprintf("- Parent context: `%s` is an epic or has children. Keep implementation-sized scope in child tickets using %s; execute each child from its own worktree/session and account for every child before root handoff.\n", task.ID, commands)
 }
 
 func issueHasChildren(issueID naming.IssueID, tasks []domain.Task) bool {
@@ -9315,7 +9315,7 @@ func summarizePrimeDescription(issueID, description string) string {
 	if !truncated {
 		return snippet
 	}
-	return fmt.Sprintf("%s\n… (truncated; run `az issue get %s` for full context)", snippet, issueID)
+	return fmt.Sprintf("%s\n… (truncated; run `az ticket get %s` for full context)", snippet, issueID)
 }
 
 func formatPrimeImplementations(implementations []string) string {
