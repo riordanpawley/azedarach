@@ -2582,11 +2582,34 @@ func ensureRuntimeLogicalSessionIdentitySchema(ctx context.Context, db *sql.DB) 
 		if logicalPrimary {
 			continue
 		}
+		triggerRows, err := db.QueryContext(ctx, `SELECT name,sql FROM sqlite_master WHERE type='trigger' AND sql IS NOT NULL AND (tbl_name=? OR instr(lower(sql),lower(?))>0) ORDER BY name`, table, table)
+		if err != nil {
+			return fmt.Errorf("list %s triggers before logical identity rebuild: %w", table, err)
+		}
+		type triggerDefinition struct{ name, sql string }
+		var triggers []triggerDefinition
+		for triggerRows.Next() {
+			var trigger triggerDefinition
+			if err := triggerRows.Scan(&trigger.name, &trigger.sql); err != nil {
+				_ = triggerRows.Close()
+				return fmt.Errorf("scan %s trigger before logical identity rebuild: %w", table, err)
+			}
+			triggers = append(triggers, trigger)
+		}
+		if err := triggerRows.Close(); err != nil {
+			return fmt.Errorf("close %s trigger inspection: %w", table, err)
+		}
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
 		newTable := table + "_logical_identity_v3"
+		for _, trigger := range triggers {
+			if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS "`+strings.ReplaceAll(trigger.name, `"`, `""`)+`"`); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("drop %s trigger before logical identity rebuild: %w", table, err)
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS `+newTable+`; CREATE TABLE `+newTable+`(
 			project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,
 			role TEXT NOT NULL DEFAULT 'worker',scope_kind TEXT NOT NULL DEFAULT 'issue',scope_id TEXT NOT NULL DEFAULT '',state TEXT NOT NULL,
@@ -2595,10 +2618,20 @@ func ensureRuntimeLogicalSessionIdentitySchema(ctx context.Context, db *sql.DB) 
 			logical_id TEXT GENERATED ALWAYS AS (role||':'||scope_kind||':'||scope_id||CASE WHEN instr(session_id,'.pane-')>0 THEN ':pane:'||session_id ELSE '' END) STORED,
 			UNIQUE(project_id,logical_id));
 			INSERT INTO `+newTable+`(project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at)
-			SELECT project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at FROM `+table+`;
+			SELECT project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at FROM (
+				SELECT *,ROW_NUMBER() OVER(PARTITION BY project_id,role,scope_kind,scope_id,CASE WHEN instr(session_id,'.pane-')>0 THEN session_id ELSE '' END ORDER BY
+					CASE WHEN length(session_id)>3 AND substr(session_id,3,1)='-' AND substr(session_id,4)=CASE WHEN role='orchestrator' AND scope_id='project' THEN 'orchestrator-project' ELSE scope_id END THEN 0 ELSE 1 END,
+					updated_at DESC,session_id ASC) AS logical_rank FROM `+table+`
+			) WHERE logical_rank=1;
 			DROP TABLE `+table+`; ALTER TABLE `+newTable+` RENAME TO `+table+`;`); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("rebuild %s logical identity: %w", table, err)
+		}
+		for _, trigger := range triggers {
+			if _, err := tx.ExecContext(ctx, trigger.sql); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("restore %s trigger after logical identity rebuild: %w", table, err)
+			}
 		}
 		if err := tx.Commit(); err != nil {
 			return err
@@ -2617,6 +2650,16 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='issues'`).Scan(&issuesTableCount); err != nil {
 		return fmt.Errorf("inspect relational issue authority: %w", err)
 	}
+	var visibilityColumns, deletedAtColumns int
+	if issuesTableCount > 0 {
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='visibility'`).Scan(&visibilityColumns); err != nil {
+			return fmt.Errorf("inspect canonical issue visibility authority: %w", err)
+		}
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('issues') WHERE name='deleted_at'`).Scan(&deletedAtColumns); err != nil {
+			return fmt.Errorf("inspect legacy issue archive authority: %w", err)
+		}
+	}
+	legacyRootIssueProjection := visibilityColumns == 0 && deletedAtColumns > 0
 	var interactionTableCount int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='interaction_requests'`).Scan(&interactionTableCount); err != nil {
 		return fmt.Errorf("inspect relational interaction authority: %w", err)
@@ -2647,14 +2690,22 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 			}
 			if issuesTableCount > 0 && (session.Role == SessionRoleWorker || (session.Role == SessionRoleOrchestrator && strings.TrimSpace(session.ScopeID) != "project")) {
 				var count int
-				if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id=?`, strings.TrimSpace(session.IssueID)).Scan(&count); err != nil || count != 1 {
+				if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id=?`, strings.TrimSpace(session.IssueID)).Scan(&count); err != nil {
+					_ = rows.Close()
+					return fmt.Errorf("inspect historical runtime authority %s/%s issue: %w", table, session.ID, err)
+				}
+				if count != 1 && !legacyRootIssueProjection {
 					_ = rows.Close()
 					return fmt.Errorf("invalid historical runtime authority %s/%s: issue does not exist", table, session.ID)
 				}
 			}
 			if interactionTableCount > 0 && session.Role == SessionRoleAdvisor {
 				var count int
-				if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM interaction_requests WHERE id=? AND issue_id=?`, strings.TrimSpace(session.ScopeID), strings.TrimSpace(session.IssueID)).Scan(&count); err != nil || count != 1 {
+				if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM interaction_requests WHERE id=? AND issue_id=?`, strings.TrimSpace(session.ScopeID), strings.TrimSpace(session.IssueID)).Scan(&count); err != nil {
+					_ = rows.Close()
+					return fmt.Errorf("inspect historical runtime authority %s/%s interaction: %w", table, session.ID, err)
+				}
+				if count != 1 && !legacyRootIssueProjection {
 					_ = rows.Close()
 					return fmt.Errorf("invalid historical runtime authority %s/%s: advisor interaction scope does not match issue", table, session.ID)
 				}
@@ -2704,6 +2755,7 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 
 func canonicalizeRuntimeLogicalSessions(ctx context.Context, db *sql.DB) error {
 	hasIssueVisibility := false
+	hasIssueDeletedAt := false
 	columns, err := db.QueryContext(ctx, `PRAGMA table_info(issues)`)
 	if err != nil {
 		return fmt.Errorf("inspect issue visibility before logical session canonicalization: %w", err)
@@ -2719,16 +2771,25 @@ func canonicalizeRuntimeLogicalSessions(ctx context.Context, db *sql.DB) error {
 		if name == "visibility" {
 			hasIssueVisibility = true
 		}
+		if name == "deleted_at" {
+			hasIssueDeletedAt = true
+		}
 	}
 	if err := columns.Close(); err != nil {
 		return fmt.Errorf("close issue visibility inspection: %w", err)
 	}
 	eligibleRows := func(table string) string {
-		if !hasIssueVisibility {
+		liveIssuePredicate := ""
+		switch {
+		case hasIssueVisibility:
+			liveIssuePredicate = "i.visibility='live'"
+		case hasIssueDeletedAt:
+			liveIssuePredicate = "i.deleted_at IS NULL"
+		default:
 			return ""
 		}
 		return ` AND ((role='orchestrator' AND scope_id='project') OR EXISTS(
-			SELECT 1 FROM issues i WHERE i.id=` + table + `.issue_id AND i.visibility='live'))`
+			SELECT 1 FROM issues i WHERE i.id=` + table + `.issue_id AND ` + liveIssuePredicate + `))`
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {

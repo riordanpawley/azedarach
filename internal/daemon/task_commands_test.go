@@ -13115,7 +13115,19 @@ func TestRefreshWorktreeRuntimeStateSuppressesMissingWorktreeFromGitList(t *test
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE issues(id TEXT PRIMARY KEY); INSERT INTO issues(id) VALUES(?)`, missingID); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed durable issue authority: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
 	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
 		ProjectID: projectID,

@@ -887,6 +887,89 @@ func TestCanonicalizeRuntimeLogicalSessionsPreservesArchivedRowsWithoutReinserti
 	}
 }
 
+func TestCanonicalizeRuntimeLogicalSessionsSupportsRootDeletedAtArchiveAuthority(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "runtime.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	schema := func(table string) string {
+		return `CREATE TABLE ` + table + `(project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL,scope_kind TEXT NOT NULL,scope_id TEXT NOT NULL,state TEXT NOT NULL,observed_state TEXT,activity TEXT,activity_source TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,started_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,session_id));`
+	}
+	if _, err := db.Exec(`CREATE TABLE issues(id TEXT PRIMARY KEY,deleted_at TEXT);` + schema(sessionStateTable) + schema(sessionObservationTable) + `
+		INSERT INTO issues VALUES('archived','2026-07-13T00:00:00Z'),('live',NULL);
+		INSERT INTO daemon_session_projections VALUES
+		('p','archived','archived','worker','issue','archived','running','running','', '',0,NULL,'2026-07-13T00:00:00Z'),
+		('p','live-old','live','worker','issue','live','running','running','', '',0,NULL,'2026-07-13T00:00:00Z'),
+		('p','live-new','live','worker','issue','live','paused','paused','', '',0,NULL,'2026-07-13T00:01:00Z');
+		CREATE TRIGGER reject_deleted_session_insert BEFORE INSERT ON daemon_session_projections
+		WHEN EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id AND deleted_at IS NOT NULL)
+		BEGIN SELECT RAISE(ABORT,'cannot attach session to archived issue'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := canonicalizeRuntimeLogicalSessions(context.Background(), db); err != nil {
+		t.Fatalf("canonicalize root-shaped archive authority: %v", err)
+	}
+	var archivedRows, liveRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM daemon_session_projections WHERE issue_id='archived'`).Scan(&archivedRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM daemon_session_projections WHERE issue_id='live'`).Scan(&liveRows); err != nil {
+		t.Fatal(err)
+	}
+	if archivedRows != 1 || liveRows != 1 {
+		t.Fatalf("root-shaped rows archived/live=%d/%d want 1/1", archivedRows, liveRows)
+	}
+}
+
+func TestRuntimeStateStoreOpensRootShapeWithDuplicateArchivedLogicalSessions(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := func(table string) string {
+		return `CREATE TABLE ` + table + `(project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL,scope_kind TEXT NOT NULL,scope_id TEXT NOT NULL,state TEXT NOT NULL,observed_state TEXT,activity TEXT,activity_source TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,started_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,session_id));`
+	}
+	if _, err := db.Exec(`CREATE TABLE issues(id TEXT PRIMARY KEY,deleted_at TEXT);` + schema(sessionStateTable) + schema(sessionObservationTable) + `
+		INSERT INTO issues VALUES('archived','2026-07-13T00:00:00Z'),('live',NULL);
+		INSERT INTO daemon_session_projections VALUES
+		('p','archived-old','archived','worker','issue','archived','running','running','', '',0,NULL,'2026-07-13T00:00:00Z'),
+		('p','archived-new','archived','worker','issue','archived','stopped','stopped','', '',0,NULL,'2026-07-13T00:01:00Z'),
+		('p','orphan','orphan','worker','issue','orphan','running','running','', '',0,NULL,'2026-07-13T00:01:00Z'),
+		('p','live','live','worker','issue','live','running','running','', '',0,NULL,'2026-07-13T00:00:00Z');
+		CREATE TRIGGER reject_deleted_session_insert BEFORE INSERT ON daemon_session_projections
+		WHEN EXISTS(SELECT 1 FROM issues WHERE id=NEW.issue_id AND deleted_at IS NOT NULL)
+		BEGIN SELECT RAISE(ABORT,'cannot attach session to archived issue'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.ListSessionStates(context.Background(), "p"); err != nil {
+		t.Fatalf("open root-shaped runtime store: %v", err)
+	}
+	handle, err := store.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var archivedRows int
+	if err := handle.QueryRow(`SELECT COUNT(*) FROM daemon_session_projections WHERE issue_id='archived'`).Scan(&archivedRows); err != nil {
+		t.Fatal(err)
+	}
+	if archivedRows != 1 {
+		t.Fatalf("archived logical rows=%d want 1", archivedRows)
+	}
+	if _, err := handle.Exec(`INSERT INTO daemon_session_projections(project_id,session_id,issue_id,role,scope_kind,scope_id,state,updated_at) VALUES('p','archived-third','archived','worker','issue','archived','running','2026-07-13T00:02:00Z')`); err == nil || !strings.Contains(err.Error(), "cannot attach session to archived issue") {
+		t.Fatalf("restored archive guard error=%v", err)
+	}
+	if _, err := handle.Exec(`INSERT INTO daemon_session_projections(project_id,session_id,issue_id,role,scope_kind,scope_id,state,updated_at) VALUES('p','orphan-new','missing','worker','issue','missing','running','2026-07-13T00:02:00Z')`); err == nil || !strings.Contains(err.Error(), "session issue does not exist") {
+		t.Fatalf("new orphan guard error=%v", err)
+	}
+}
+
 func TestRuntimeStateStorePaneMigrationReplacesStaleObservationMetadata(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "runtime.db")
 	db, err := sql.Open("sqlite", dbPath)

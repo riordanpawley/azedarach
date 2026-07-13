@@ -3939,6 +3939,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0043_learning_activation_telemetry",
 		"0044_learning_activation_abandonment",
 		"0045_issue_state_runtime_constraints",
+		"0046_repair_issue_state_runtime_constraints",
 	}, got)
 }
 
