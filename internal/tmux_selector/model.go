@@ -241,6 +241,7 @@ type Model struct {
 
 type LoadedMsg struct {
 	Snapshot Snapshot
+	ViewErr  error
 }
 
 type LoadFailedMsg struct {
@@ -416,7 +417,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadCmd()
 	case LoadedMsg:
 		m.loading = false
-		m.err = nil
+		m.err = msg.ViewErr
 		m.snapshot = msg.Snapshot
 		m.normalizeSnapshot()
 		m.applySnapshotViewLayout()
@@ -457,6 +458,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			selectedSessionID = strings.TrimSpace(selected.SessionID)
 		}
 		m.snapshot = msg.Snapshot
+		m.err = nil
 		m.normalizeSnapshot()
 		m.applySnapshotViewLayout()
 		if selectedSessionID != "" {
@@ -1589,6 +1591,24 @@ func (m Model) loadCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if liveLoader, ok := m.loader.(LiveSnapshotLoader); ok {
+			type selectedViewResult struct {
+				view domain.BoardView
+				err  error
+			}
+			var selectedView <-chan selectedViewResult
+			if m.globalViewStore != nil {
+				results := make(chan selectedViewResult, 1)
+				selectedView = results
+				go func() {
+					resp, err := m.globalViewStore.ListGlobalViews(ctx)
+					if err != nil {
+						results <- selectedViewResult{err: fmt.Errorf("load selected tmux selector view: %w", err)}
+						return
+					}
+					view, err := selectedGlobalView(resp)
+					results <- selectedViewResult{view: view, err: err}
+				}()
+			}
 			snapshot, err := liveLoader.ListLiveSnapshot(ctx)
 			if err != nil {
 				slog.Default().Warn("tmux selector live load command failed",
@@ -1602,7 +1622,21 @@ func (m Model) loadCmd() tea.Cmd {
 				"session_count", len(snapshot.Entries),
 				"enriching", snapshot.Enriching,
 			)
-			return LoadedMsg{Snapshot: snapshot}
+			var viewErr error
+			if selectedView != nil {
+				result := <-selectedView
+				viewErr = result.err
+				if result.err == nil {
+					snapshot.View = result.view
+				}
+				if result.err != nil {
+					slog.Default().Warn("tmux selector initial view load failed",
+						"elapsed_ms", time.Since(start).Milliseconds(),
+						"error", result.err,
+					)
+				}
+			}
+			return LoadedMsg{Snapshot: snapshot, ViewErr: viewErr}
 		}
 		snapshot, err := m.loader.ListTasksSnapshot(ctx)
 		if err != nil {
@@ -1619,6 +1653,19 @@ func (m Model) loadCmd() tea.Cmd {
 		)
 		return LoadedMsg{Snapshot: snapshot}
 	}
+}
+
+func selectedGlobalView(resp protocol.BoardViewListResponseBody) (domain.BoardView, error) {
+	selected := strings.TrimSpace(resp.Selections[protocol.GlobalViewConsumerTmuxSelector])
+	if selected == "" {
+		return domain.BoardView{}, fmt.Errorf("tmux selector view selection is empty")
+	}
+	for _, record := range resp.GlobalViews {
+		if strings.TrimSpace(string(record.View.ID)) == selected {
+			return record.View, nil
+		}
+	}
+	return domain.BoardView{}, fmt.Errorf("selected tmux selector view %q is unavailable", selected)
 }
 
 func (m Model) loadSelectorTabCmd() tea.Cmd {
