@@ -8,21 +8,21 @@ Commands:
   view <subcommand>      View commands (list|get|select|create|update|delete|explain)
   pr <subcommand>       Pull request commands (list|status|checks|open|create|merge)
   worktree <subcommand> Worktree commands (create)
-  start <issue-id>      Alias for 'az session start <issue-id>'
-  attach <issue-id>     Alias for 'az session attach <issue-id>'
-  stop <issue-id>       Alias for 'az session stop <issue-id>'
-  status [issue-id]     Alias for 'az session status [issue-id]'
+  start <ticket-id>      Alias for 'az session start <ticket-id>'
+  attach <ticket-id>     Alias for 'az session attach <ticket-id>'
+  stop <ticket-id>       Alias for 'az session stop <ticket-id>'
+  status [ticket-id]     Alias for 'az session status [ticket-id]'
   githooks <install|update|run|notify|hook>      Manage repo git hooks and run configured hook tasks
-  gate <issue-id>            Run quality gates for an issue
-  dev gate <issue-id>        Dev-family gate alias
-  dev start <issue-id>       Start a dev server for an issue
-  dev stop <issue-id>        Stop a dev server for an issue
-  dev restart <issue-id>     Restart a dev server for an issue
-  dev status <issue-id>      Show dev server status for an issue
-  dev list                   List running dev servers across issues
+  gate <ticket-id>            Run quality gates for a ticket
+  dev gate <ticket-id>        Dev-family gate alias
+  dev start <ticket-id>       Start a dev server for a ticket
+  dev stop <ticket-id>        Stop a dev server for a ticket
+  dev restart <ticket-id>     Restart a dev server for a ticket
+  dev status <ticket-id>      Show dev server status for a ticket
+  dev list                   List running dev servers across tickets
   project <subcommand>       Project registry management (list|add|remove)
-  impl list                          List implementations currently assigned to issues
-  impl delete --confirm <implementation>  Remove an implementation assignment from all issues
+  impl list                          List implementations currently assigned to tickets
+  impl delete --confirm <implementation>  Remove an implementation assignment from all tickets
   impl migrate <from> <to>           Migrate implementation assignments from one value to another
   operation <subcommand>     Inspect/cancel background operations (get|list|logs|cancel)
   log [sources]              Tail/stream daemon, TUI, and CLI log files
@@ -34,44 +34,44 @@ Commands:
   tmux <selector|install-selector|uninstall-selector>  Manage tmux selector integration
   spec <subcommand>          Spec workflows (req|link|read|pack|lint|parity)
   decision <subcommand>      Decision records with rationale (list|get|record|update|delete|revisit|sync|import|link)
-  issue list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c]  List issues from daemon-backed store
-  issue search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)  Search title, description, notes, design, acceptance, labels, and implementations
-  issue get [--project <project-id>] [--id <id>] [--json] [--with-notes] [<id>]  Show a single issue from daemon-backed store
-  issue claim [--project <project-id>] [--id <id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<id>]  Claim an issue ownership lease
-  issue takeover [--project <project-id>] [--id <id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--json] [<id>]  Force-claim an issue ownership lease
-  issue release [--project <project-id>] [--id <id>] [--owner <owner-id>] [--force] [--json] [<id>]  Release an issue ownership lease
-  issue get-many [--project <project-id>] --id <id> [--id <id> ...] [--ids a,b,c] [--json] [--with-notes]  Fetch many issues in requested order
-  issue check [--project <project-id>] [--id <id>] [--json] [<id>]  Alias for issue get
-  issue doctor [--project <project-id>] [--id <id>] [--json] [<id>]  Run integrity checks for one issue
-  issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--title ...] [--description ...] [--json] [<title>]  Create an issue (auto-parent when AZEDARACH_ISSUE_ID is set; --parent selects parentage; --impl is not parentage)
-  issue split [--project <project-id>] [--parent <id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an isolated child issue/session for later parent-side merge
-  issue update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields and durable lifecycle actions (backlog/open/active/review/closed/cancelled)
-  issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--force-worktree] [<id>]  Integrate, clean up, and close an issue
-  issue cleanup [--project <project-id>] [--id <id> ...|--ids a,b] [--status <status> ...] [--query text] [--updated-before date] [--limit N] [--action closed|cancelled] [--dry-run] [--json]  Safely clean up issue lifecycles
-  issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]  Permanently delete an issue
-  issue unarchive [--project <project-id>] [--id <id>] [--json] [--with-parents] [--cascade-children] [<id>]  Restore archived issues to active reads
-  issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]  Attach an image to an issue
-  issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]  Remove an image attachment from an issue
-  issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]  Attach a report/document to an issue
-  issue document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]  List report/document attachments for an issue
-  issue document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]  Remove a document attachment from an issue
-  issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--force-parent-change] [--json]  Add a dependency edge
-  issue dep remove [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm] [--confirm-parent-orphan] [--json]  Remove a dependency edge
-  issue dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]  Apply dependency edge mutations
-  issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Create issues, epics, or nested children trees from JSON
-  issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Execute bulk update operations
-  issue fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply a pre-authored nested issue tree from JSON
-  issue fanout ready [--project <project-id>] --root <issue-id> [--json]  List runnable leaf issues under a fanout root
-  issue fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
+  ticket list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c]  List tickets from daemon-backed store
+  ticket search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)  Search title, description, notes, design, acceptance, labels, and implementations
+  ticket get [--project <project-id>] [--id <id>] [--json] [--with-notes] [<id>]  Show a single ticket from daemon-backed store
+  ticket claim [--project <project-id>] [--id <id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<id>]  Claim a ticket ownership lease
+  ticket takeover [--project <project-id>] [--id <id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--json] [<id>]  Force-claim a ticket ownership lease
+  ticket release [--project <project-id>] [--id <id>] [--owner <owner-id>] [--force] [--json] [<id>]  Release a ticket ownership lease
+  ticket get-many [--project <project-id>] --id <id> [--id <id> ...] [--ids a,b,c] [--json] [--with-notes]  Fetch many tickets in requested order
+  ticket check [--project <project-id>] [--id <id>] [--json] [<id>]  Alias for ticket get
+  ticket doctor [--project <project-id>] [--id <id>] [--json] [<id>]  Run integrity checks for one ticket
+  ticket create [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--title ...] [--description ...] [--json] [<title>]  Create a ticket (auto-parent when AZEDARACH_ISSUE_ID is set; --parent selects parentage; --impl is not parentage)
+  ticket split [--project <project-id>] [--parent <id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an isolated child ticket/session for later parent-side merge
+  ticket update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update ticket fields and durable lifecycle actions (backlog/open/active/review/closed/cancelled)
+  ticket close [--project <project-id>] [--id <id>|-i <id>] [--json] [--force-worktree] [<id>]  Integrate, clean up, and close a ticket
+  ticket cleanup [--project <project-id>] [--id <id> ...|--ids a,b] [--status <status> ...] [--query text] [--updated-before date] [--limit N] [--action closed|cancelled] [--dry-run] [--per-ticket-timeout duration] [--json]  Safely clean up ticket lifecycles
+  ticket delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]  Permanently delete a ticket
+  ticket unarchive [--project <project-id>] [--id <id>] [--json] [--with-parents] [--cascade-children] [<id>]  Restore archived tickets to active reads
+  ticket image add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]  Attach an image to a ticket
+  ticket image remove [--project <project-id>] [--ticket-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]  Remove an image attachment from a ticket
+  ticket document add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]  Attach a report/document to a ticket
+  ticket document list [--project <project-id>] [--ticket-id <ticket-id>] [<ticket-id>] [--json]  List report/document attachments for a ticket
+  ticket document remove [--project <project-id>] [--ticket-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]  Remove a document attachment from a ticket
+  ticket dep add [--project <project-id>] --ticket-id <ticket-id> --depends-on-id <depends-on-id> [--type ...] [--force-parent-change] [--json]  Add a dependency edge
+  ticket dep remove [--project <project-id>] --ticket-id <ticket-id> --depends-on-id <depends-on-id> [--type ...] [--confirm] [--confirm-parent-orphan] [--json]  Remove a dependency edge
+  ticket dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]  Apply dependency edge mutations
+  ticket bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Create tickets, epics, or nested children trees from JSON
+  ticket bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Execute bulk update operations
+  ticket fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply a pre-authored nested ticket tree from JSON
+  ticket fanout ready [--project <project-id>] --root <ticket-id> [--json]  List runnable leaf tickets under a fanout root
+  ticket fanout drift [--project <project-id>] --ticket <ticket-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
   mail <send|list|watch|validate-evidence>  Mailbox event operations for orchestrator/worker coordination
   evidence validate [--body <json>|--file <path>] [--fix] [--template] [--json]  Validate worker_evidence.v1 packets locally
-  observe [--root <issue-id>] [--json]  Show artifact-backed observations for active work
+  observe [--root <ticket-id>] [--json]  Show artifact-backed observations for active work
   orchestrate <status|start|group|watch|observe|prompt|message|complete-check|integrate|close-session>  Rooted or project orchestration operations
   orchestrator-session <start|attach|status>  Manage the singleton orchestrator session for the resolved scope
   interaction <list|get|discuss|answer|resolve|withdraw>  Human decision requests and read-only AI discussions
   config set <key> <value> [--project-dir <dir>]  Update project config
-  sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]  Refresh issue tracker state for the current project or all worktrees
-  prime                Print AI session primer with current issue context
+  sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]  Refresh ticket tracker state for the current project or all worktrees
+  prime                Print AI session primer with current ticket context
   export               Export a snapshot (use --format json [--out <path>])
   daemon start         Start daemon and verify client attach
   daemon stop          Stop daemon for current runtime scope
@@ -81,9 +81,9 @@ Commands:
 
 Examples:
   az                   # Start TUI
-  az session start az-123   # Start session for issue az-123
-  az session attach az-123  # Attach to issue az-123's session
-  az session stop az-123    # Stop issue az-123's session
+  az session start az-123   # Start session for ticket az-123
+  az session attach az-123  # Attach to ticket az-123's session
+  az session stop az-123    # Stop ticket az-123's session
   az session status         # Show all active sessions
   az session status az-123  # Show status for az-123
   az branch merge --source az-123 --target az-parent  # Explicit child-to-parent repair merge
@@ -92,56 +92,56 @@ Examples:
   az view list
   az view select default
   az view explain az-123
-  az worktree create az-123 # Create an issue worktree without starting a session
-  az issue list
-  az issue list --query "runtime cache" --updated-after 2026-03-01
-  az issue search --status open --query "runtime cache"
-  az issue list --status in_progress
-  az issue list --id az-1 --id az-2
-  az issue list --deps
-  az issue get --id az-123 --json
-  az issue get-many --id az-123 --id az-456 --json
-  az issue get-many --id az-123 --id az-456 --json --with-notes
-  az issue get --id az-123
-  az issue get --id az-123 --with-notes
-  az issue check --id az-123
-  az issue doctor --id az-123
-  az issue create "New task"
-  az issue create "Follow-up task"                # child under AZEDARACH_ISSUE_ID; no --impl needed for parentage
-  az issue dep add --issue-id az-456 --depends-on-id az-123 --type parent-child  # attach an existing issue to another parent/root
-  az issue create --impl go-bubbletea "Implementation-specific task"  # only assigns implementation metadata; still not parentage
-  az issue split "Implement child task"           # auto-parent and launch isolated child worktree; merge explicitly later
-  az issue create --deferred "Investigate later"  # deferred follow-up (defaults priority to P4)
-  az issue update --id az-123 --status in_progress --title "Renamed task" --priority P1
-  az issue update --id az-123 --status backlog    # move to backlog lifecycle
-  az issue update --id az-123 --status in_review  # request review/integration, not blocked
-  az issue update --id az-123 --status closed
-  az issue update --id az-123 --update-impl go-bubbletea
-  # Agent progress, validation, review facts, and worker closeout belong in mail/observation evidence, not issue notes.
-  az issue close --id az-123        # integrates, cleans, then closes
-  az issue close --id az-123 --force-worktree  # force worktree removal after integration
-  az issue delete az-123 --confirm --cleanup
-  az issue delete --id az-123 --confirm
-  az issue unarchive az-123 --with-parents
-  az issue image add --issue-id az-123 --path ./screenshot.png
-  az issue image remove --issue-id az-123 --attachment-id 1a2b3c4d
-  az issue document add --issue-id az-123 --path ./report.md
-  az issue document list --issue-id az-123
-  az issue dep add --issue-id az-456 --depends-on-id az-123 --type blocks
-  az issue dep remove --issue-id az-456 --depends-on-id az-123 --type blocks --confirm
-  az issue dep bulk apply --input ./dep-bulk.json --dry-run --json
-  az issue bulk-create --impl go-bubbletea --input ./bulk-create.json  # supports nested children
-  az issue bulk-update --impl go-bubbletea --input ./bulk-update.json --dry-run
-  az issue fanout --input ./fanout.json
-  az issue fanout --input ./fanout.json --apply
-  az issue fanout ready --root az-123 --json
-  az issue fanout drift --issue az-456 --worktree /tmp/az-456
+  az worktree create az-123 # Create a ticket worktree without starting a session
+  az ticket list
+  az ticket list --query "runtime cache" --updated-after 2026-03-01
+  az ticket search --status open --query "runtime cache"
+  az ticket list --status in_progress
+  az ticket list --id az-1 --id az-2
+  az ticket list --deps
+  az ticket get --id az-123 --json
+  az ticket get-many --id az-123 --id az-456 --json
+  az ticket get-many --id az-123 --id az-456 --json --with-notes
+  az ticket get --id az-123
+  az ticket get --id az-123 --with-notes
+  az ticket check --id az-123
+  az ticket doctor --id az-123
+  az ticket create "New task"
+  az ticket create "Follow-up task"                # child under AZEDARACH_ISSUE_ID; no --impl needed for parentage
+  az ticket dep add --ticket-id az-456 --depends-on-id az-123 --type parent-child  # attach an existing ticket to another parent/root
+  az ticket create --impl go-bubbletea "Implementation-specific task"  # only assigns implementation metadata; still not parentage
+  az ticket split "Implement child task"           # auto-parent and launch isolated child worktree; merge explicitly later
+  az ticket create --deferred "Investigate later"  # deferred follow-up (defaults priority to P4)
+  az ticket update --id az-123 --status in_progress --title "Renamed task" --priority P1
+  az ticket update --id az-123 --status backlog    # move to backlog lifecycle
+  az ticket update --id az-123 --status in_review  # request review/integration, not blocked
+  az ticket update --id az-123 --status closed
+  az ticket update --id az-123 --update-impl go-bubbletea
+  # Agent progress, validation, review facts, and worker closeout belong in mail/observation evidence, not ticket notes.
+  az ticket close --id az-123        # integrates, cleans, then closes
+  az ticket close --id az-123 --force-worktree  # force worktree removal after integration
+  az ticket delete az-123 --confirm --cleanup
+  az ticket delete --id az-123 --confirm
+  az ticket unarchive az-123 --with-parents
+  az ticket image add --ticket-id az-123 --path ./screenshot.png
+  az ticket image remove --ticket-id az-123 --attachment-id 1a2b3c4d
+  az ticket document add --ticket-id az-123 --path ./report.md
+  az ticket document list --ticket-id az-123
+  az ticket dep add --ticket-id az-456 --depends-on-id az-123 --type blocks
+  az ticket dep remove --ticket-id az-456 --depends-on-id az-123 --type blocks --confirm
+  az ticket dep bulk apply --input ./dep-bulk.json --dry-run --json
+  az ticket bulk-create --impl go-bubbletea --input ./bulk-create.json  # supports nested children
+  az ticket bulk-update --impl go-bubbletea --input ./bulk-update.json --dry-run
+  az ticket fanout --input ./fanout.json
+  az ticket fanout --input ./fanout.json --apply
+  az ticket fanout ready --root az-123 --json
+  az ticket fanout drift --ticket az-456 --worktree /tmp/az-456
   az mail send --parent az-123 --type dependency-ready --body "contract merged"
   az mail validate-evidence --template
   az mail validate-evidence --fix --body '{"schema":"worker_evidence.v1",...}'
   az observe --json
   az observe --root az-123
-  az issue events az-123 --json
+  az ticket events az-123 --json
   az orchestrate observe --root az-123 --json
   az mail send --parent az-123 --issue az-456 --type worker-integration-ready --body '{"schema":"worker_evidence.v1",...}'
   az mail list --parent az-123 --since 40 --json
@@ -154,7 +154,7 @@ Examples:
   az orchestrate watch --root az-123 --since 41 --jsonl
   # Leave compact orchestrate watch running in another pane/session while workers are active; use --verbose/--full for debugging and --once only for diagnostic single polls.
   az orchestrate integrate --issue az-456      # Inspect worker evidence / repair guidance
-  az orchestrate close-session --issue az-456  # Repair-only daemon stop; normal accepted-worker cleanup uses az issue close
+  az orchestrate close-session --issue az-456  # Repair-only daemon stop; normal accepted-worker cleanup uses az ticket close
   az orchestrate complete-check --root az-123
   env -u AZEDARACH_ISSUE_ID az orchestrator-session start
   az orchestrator-session status --root az-123 --json

@@ -12,6 +12,20 @@ func TestParseIssueID(t *testing.T) {
 	}
 }
 
+func TestParseTicketIDMatchesLegacyParser(t *testing.T) {
+	ticketID, err := ParseTicketID("az-123")
+	if err != nil {
+		t.Fatalf("ParseTicketID() error = %v", err)
+	}
+	issueID, err := ParseIssueID("az-123")
+	if err != nil {
+		t.Fatalf("ParseIssueID() error = %v", err)
+	}
+	if ticketID != issueID {
+		t.Fatalf("canonical ID %q != compatibility ID %q", ticketID, issueID)
+	}
+}
+
 func TestParseIssueIDRejectsInvalid(t *testing.T) {
 	if _, err := ParseIssueID("bra/session"); err == nil {
 		t.Fatal("ParseIssueID() expected error for slash-separated value")
