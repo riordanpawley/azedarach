@@ -21,15 +21,18 @@
   "budgets": {
     "regression_factor": 1.25,
     "max_wall_seconds": {
-      "cold": 360,
+      "cold": 120,
       "cached": 180,
       "focused": 60,
-      "race": 1800,
-      "integration": 180
+      "race": 300,
+      "integration": 180,
+      "migration-clone": 180,
+      "boundary": 60
     },
     "default_package_seconds": 60,
     "package_seconds": {
-      "github.com/riordanpawley/azedarach/internal/services/issues": 220
+      "github.com/riordanpawley/azedarach/internal/services/issues": 60,
+      "github.com/riordanpawley/azedarach/internal/daemon": 120
     },
     "default_test_seconds": 30,
     "test_seconds": {}

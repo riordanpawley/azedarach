@@ -10,14 +10,22 @@ import (
 func TestCompareUsesStricterRegressionAndPathologyBudgets(t *testing.T) {
 	baseline := Baseline{
 		Schema: BaselineSchema, RecordedAt: "2026-07-13",
-		Profiles: map[string]BaselineProfile{"cold": {WallSeconds: 100, Packages: []Duration{{Name: "slow/pkg", Seconds: 40}}}},
+		Profiles: map[string]BaselineProfile{"cold": {WallSeconds: 100, UserCPUSeconds: 50, SystemCPUSeconds: 10, PeakRSSBytes: 1000, Packages: []Duration{{Name: "slow/pkg", Seconds: 40}}}},
 		Budgets:  Budgets{RegressionFactor: 1.25, MaxWallSeconds: map[string]float64{"cold": 200}, DefaultPackageSeconds: 60, PackageSeconds: map[string]float64{"special/pkg": 100}, DefaultTestSeconds: 10, TestSeconds: map[string]float64{"slow/pkg::TestAllowed": 25}},
 	}
-	measurement := Measurement{Profile: "cold", WallSeconds: 130, Packages: []Duration{{Name: "slow/pkg", Seconds: 51}, {Name: "new/pkg", Seconds: 61}, {Name: "special/pkg", Seconds: 90}, {Name: "cached/pkg", Seconds: 999, Cached: true}}, Tests: []Duration{{Name: "slow/pkg::TestPathological", Seconds: 11}, {Name: "slow/pkg::TestAllowed", Seconds: 20}, {Name: "cached/pkg::TestReplay", Seconds: 999, Cached: true}}}
+	measurement := Measurement{Profile: "cold", WallSeconds: 130, UserCPUSeconds: 40, SystemCPUSeconds: 8, PeakRSSBytes: 800, Packages: []Duration{{Name: "slow/pkg", Seconds: 51}, {Name: "new/pkg", Seconds: 61}, {Name: "special/pkg", Seconds: 90}, {Name: "cached/pkg", Seconds: 999, Cached: true}}, Tests: []Duration{{Name: "slow/pkg::TestPathological", Seconds: 11}, {Name: "slow/pkg::TestAllowed", Seconds: 20}, {Name: "cached/pkg::TestReplay", Seconds: 999, Cached: true}}}
 
 	comparison := Compare(measurement, baseline)
 	require.NotNil(t, comparison.WallDelta)
 	assert.InDelta(t, 30, comparison.WallDelta.Percent, 0.001)
+	require.NotNil(t, comparison.UserCPUDelta)
+	require.NotNil(t, comparison.SystemCPUDelta)
+	require.NotNil(t, comparison.PeakRSSDelta)
+	assert.InDelta(t, -20, comparison.UserCPUDelta.Percent, 0.001)
+	assert.InDelta(t, -20, comparison.SystemCPUDelta.Percent, 0.001)
+	assert.EqualValues(t, 800, comparison.PeakRSSDelta.CurrentBytes)
+	assert.EqualValues(t, 1000, comparison.PeakRSSDelta.BaselineBytes)
+	assert.InDelta(t, -20, comparison.PeakRSSDelta.Percent, 0.001)
 	require.Len(t, comparison.Violations, 4)
 	assert.ElementsMatch(t, []string{"wall:cold", "package:slow/pkg", "package:new/pkg", "test:slow/pkg::TestPathological"}, violationNames(comparison.Violations))
 	// Explicitly assert all expected names without depending on severity order.
@@ -36,7 +44,10 @@ func violationNames(violations []Violation) []string {
 }
 
 func TestValidateBaselineRejectsWeakOrUnversionedConfiguration(t *testing.T) {
-	valid := Baseline{Schema: BaselineSchema, RecordedAt: "2026-07-13", Source: "fixture", Profiles: map[string]BaselineProfile{"cold": {WallSeconds: 80}}, Budgets: Budgets{RegressionFactor: 1.25, MaxWallSeconds: map[string]float64{"cold": 100, "cached": 100, "focused": 100, "race": 100, "integration": 100}, DefaultPackageSeconds: 60, PackageSeconds: map[string]float64{}, DefaultTestSeconds: 30, TestSeconds: map[string]float64{}}}
+	valid := Baseline{Schema: BaselineSchema, RecordedAt: "2026-07-13", Source: "fixture", Profiles: map[string]BaselineProfile{"cold": {WallSeconds: 80}}, Budgets: Budgets{RegressionFactor: 1.25, MaxWallSeconds: map[string]float64{}, DefaultPackageSeconds: 60, PackageSeconds: map[string]float64{}, DefaultTestSeconds: 30, TestSeconds: map[string]float64{}}}
+	for _, profile := range ProfileNames() {
+		valid.Budgets.MaxWallSeconds[profile] = 100
+	}
 	require.NoError(t, ValidateBaseline(valid))
 	valid.Schema = ""
 	assert.Error(t, ValidateBaseline(valid))

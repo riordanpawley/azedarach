@@ -33,10 +33,12 @@ type Failure struct {
 type Measurement struct {
 	Schema           string     `json:"schema"`
 	Profile          string     `json:"profile"`
+	CacheMode        string     `json:"cache_mode"`
 	StartedAt        time.Time  `json:"started_at"`
 	WallSeconds      float64    `json:"wall_seconds"`
 	UserCPUSeconds   float64    `json:"user_cpu_seconds"`
 	SystemCPUSeconds float64    `json:"system_cpu_seconds"`
+	PeakRSSBytes     int64      `json:"peak_rss_bytes"`
 	ExitCode         int        `json:"exit_code"`
 	Packages         []Duration `json:"packages"`
 	Tests            []Duration `json:"tests"`
@@ -80,6 +82,13 @@ type Delta struct {
 	Percent         float64 `json:"percent"`
 }
 
+type ByteDelta struct {
+	Name          string  `json:"name"`
+	CurrentBytes  int64   `json:"current_bytes"`
+	BaselineBytes int64   `json:"baseline_bytes"`
+	Percent       float64 `json:"percent"`
+}
+
 type Violation struct {
 	Kind          string  `json:"kind"`
 	Name          string  `json:"name"`
@@ -91,6 +100,9 @@ type Violation struct {
 type Comparison struct {
 	BaselineRecordedAt string      `json:"baseline_recorded_at"`
 	WallDelta          *Delta      `json:"wall_delta,omitempty"`
+	UserCPUDelta       *Delta      `json:"user_cpu_delta,omitempty"`
+	SystemCPUDelta     *Delta      `json:"system_cpu_delta,omitempty"`
+	PeakRSSDelta       *ByteDelta  `json:"peak_rss_delta,omitempty"`
 	PackageDeltas      []Delta     `json:"package_deltas"`
 	Violations         []Violation `json:"violations"`
 }

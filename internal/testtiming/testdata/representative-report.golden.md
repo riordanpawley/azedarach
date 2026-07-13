@@ -2,10 +2,13 @@
 
 - Started: 2026-07-13T01:02:03Z
 - Command: `go test -json -count=1 ./...`
-- Result: exit 1; 12.50s wall; 8.20s user CPU; 1.10s system CPU
+- Cache: cleared-and-bypassed
+- Result: exit 1; 12.50s wall; 8.20s user CPU; 1.10s system CPU; 64.0 MiB peak RSS
 - Events: 2 packages; 1 tests; 1 failures; 0 invalid lines
 - Raw events: `.tmp/test-timing/cold/events.jsonl`; stderr: `.tmp/test-timing/cold/stderr.txt`
 - Baseline (2026-07-13): 10.00s (+25.0%)
+- CPU baseline: 10.00s user (-18.0%); 2.00s system (-45.0%)
+- Peak RSS baseline: 128.0 MiB (-50.0%)
 - Budget violations: 1
 
 ## Slowest packages

@@ -13,11 +13,18 @@ func WriteMarkdown(w io.Writer, m Measurement) error {
 	write("# Test timing report: %s\n\n", m.Profile)
 	write("- Started: %s\n", m.StartedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	write("- Command: `%s`\n", strings.Join(m.Command, " "))
-	write("- Result: exit %d; %.2fs wall; %.2fs user CPU; %.2fs system CPU\n", m.ExitCode, m.WallSeconds, m.UserCPUSeconds, m.SystemCPUSeconds)
+	write("- Cache: %s\n", m.CacheMode)
+	write("- Result: exit %d; %.2fs wall; %.2fs user CPU; %.2fs system CPU; %.1f MiB peak RSS\n", m.ExitCode, m.WallSeconds, m.UserCPUSeconds, m.SystemCPUSeconds, float64(m.PeakRSSBytes)/(1024*1024))
 	write("- Events: %d packages; %d tests; %d failures; %d invalid lines\n", len(m.Packages), len(m.Tests), len(m.Failures), m.InvalidEvents)
 	write("- Raw events: `%s`; stderr: `%s`\n", filepath.ToSlash(m.RawJSONPath), filepath.ToSlash(m.StderrPath))
 	if m.Comparison.WallDelta != nil {
 		write("- Baseline (%s): %.2fs (%+.1f%%)\n", m.Comparison.BaselineRecordedAt, m.Comparison.WallDelta.BaselineSeconds, m.Comparison.WallDelta.Percent)
+	}
+	if m.Comparison.UserCPUDelta != nil && m.Comparison.SystemCPUDelta != nil {
+		write("- CPU baseline: %.2fs user (%+.1f%%); %.2fs system (%+.1f%%)\n", m.Comparison.UserCPUDelta.BaselineSeconds, m.Comparison.UserCPUDelta.Percent, m.Comparison.SystemCPUDelta.BaselineSeconds, m.Comparison.SystemCPUDelta.Percent)
+	}
+	if m.Comparison.PeakRSSDelta != nil {
+		write("- Peak RSS baseline: %.1f MiB (%+.1f%%)\n", float64(m.Comparison.PeakRSSDelta.BaselineBytes)/(1024*1024), m.Comparison.PeakRSSDelta.Percent)
 	}
 	write("- Budget violations: %d\n\n", len(m.Comparison.Violations))
 	write("## Slowest packages\n\n| Package | Seconds | Result | Baseline delta |\n|---|---:|---|---:|\n")

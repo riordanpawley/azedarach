@@ -17,21 +17,30 @@ func TestCanonicalProfilesMakeCacheAndScopeExplicit(t *testing.T) {
 		{name: "cold", cleanCache: true, wantArg: "-count=1", wantPkg: "./..."},
 		{name: "cached", wantArg: "-json", wantPkg: "./..."},
 		{name: "focused", wantArg: "-count=1", wantPkg: "./internal/testtiming"},
-		{name: "race", wantArg: "-race", wantPkg: "./..."},
-		{name: "integration", wantArg: "-count=1", wantPkg: "./internal/daemon/testharness"},
+		{name: "race", wantArg: "-race", wantPkg: "./internal/services/issues"},
+		{name: "integration", wantArg: "-count=1", wantPkg: "./internal/daemon"},
+		{name: "migration-clone", wantArg: "-count=1", wantPkg: "./internal/daemon/userstore"},
+		{name: "boundary", wantArg: "-count=1", wantPkg: "./internal/tui"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			profile, err := ResolveProfile(tt.name, nil, "")
 			require.NoError(t, err)
 			assert.Equal(t, tt.cleanCache, profile.CleanCache)
+			if tt.cleanCache {
+				assert.Equal(t, "cleared-and-bypassed", profile.CachePolicy())
+			} else if tt.name == "cached" {
+				assert.Equal(t, "permitted", profile.CachePolicy())
+			} else {
+				assert.Equal(t, "bypassed", profile.CachePolicy())
+			}
 			assert.Contains(t, profile.GoTestArgs, tt.wantArg)
 			assert.Contains(t, profile.Packages, tt.wantPkg)
 			assert.Equal(t, "go", profile.Command()[0])
 			assert.Equal(t, "test", profile.Command()[1])
 		})
 	}
-	assert.Equal(t, []string{"cached", "cold", "focused", "integration", "race"}, ProfileNames())
+	assert.Equal(t, []string{"boundary", "cached", "cold", "focused", "integration", "migration-clone", "race"}, ProfileNames())
 }
 
 func TestFocusedProfileOverridesAreRecordedInExactCommand(t *testing.T) {
@@ -42,7 +51,7 @@ func TestFocusedProfileOverridesAreRecordedInExactCommand(t *testing.T) {
 }
 
 func TestCompleteProfilesRejectScopeChangingOverrides(t *testing.T) {
-	for _, name := range []string{"cold", "cached", "race", "integration"} {
+	for _, name := range []string{"cold", "cached", "race", "integration", "migration-clone", "boundary"} {
 		_, err := ResolveProfile(name, []string{"./internal/testtiming"}, "")
 		assert.ErrorContains(t, err, "canonical scope", name)
 		_, err = ResolveProfile(name, nil, "TestOnlyOne")

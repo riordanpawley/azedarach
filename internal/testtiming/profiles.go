@@ -16,17 +16,27 @@ var profiles = map[string]Profile{
 		Packages: []string{"./..."}, GoTestArgs: []string{"-json", "-timeout=15m"},
 	},
 	"focused": {
-		Name: "focused", Description: "developer-selected packages and optional test regexp",
+		Name: "focused", Description: "fast test-tooling self-check or developer-selected scope",
 		Packages: []string{"./internal/testtiming"}, GoTestArgs: []string{"-json", "-count=1", "-timeout=5m"},
 	},
 	"race": {
-		Name: "race", Description: "complete uncached suite under the race detector",
-		Packages: []string{"./..."}, GoTestArgs: []string{"-json", "-race", "-count=1", "-timeout=30m"},
+		Name: "race", Description: "focused shared-state and process-lifecycle contracts under the race detector",
+		Packages: []string{"./internal/services/issues", "./internal/client/daemonprocess", "./internal/services/git"}, GoTestArgs: []string{"-json", "-race", "-count=1", "-timeout=10m", "-run", "Test(MigratedIssueTestTemplateClonesAreIsolatedAndComplete|LauncherStartProcessSupervisorPreservesExitAfterSignalPermissionRace|RealProcessProfileLauncher.*|MergeCleanlyTransactionalAllowsConcurrentScratchValidationAndRejectsStaleFinalApply)$"},
 	},
 	"integration": {
-		Name: "integration", Description: "real daemon, transport, git, tmux, and monitor boundary packages",
-		Packages:   []string{"./internal/daemon/testharness", "./internal/ipc/transport", "./internal/services/git", "./internal/services/tmux", "./internal/services/monitor"},
-		GoTestArgs: []string{"-json", "-count=1", "-timeout=15m"},
+		Name: "integration", Description: "real subprocess lifecycle contracts",
+		Packages:   []string{"./internal/daemon", "./internal/client/daemonprocess", "./internal/services/git", "./internal/services/tmux"},
+		GoTestArgs: []string{"-json", "-count=1", "-timeout=15m", "-run", "RealProcessProfile"},
+	},
+	"migration-clone": {
+		Name: "migration-clone", Description: "fresh, historical, repair, drift, rollback, and clone isolation contracts",
+		Packages:   []string{"./internal/services/issues", "./internal/daemon/userstore", "./internal/daemon/state", "./internal/daemon"},
+		GoTestArgs: []string{"-json", "-count=1", "-timeout=15m", "-run", "(Migration|Migrate|Migrates|Migrated|Repair|SchemaDrift)"},
+	},
+	"boundary": {
+		Name: "boundary", Description: "thin-client and session-projection executable boundary guards",
+		Packages:   []string{"./internal/tui", "./internal/cli"},
+		GoTestArgs: []string{"-json", "-count=1", "-timeout=5m", "-run", "^(TestIntegrationBoundaryGuard_|TestMigrationGuard_|TestSessionProjectionGuard_)"},
 	},
 }
 
@@ -62,4 +72,14 @@ func (p Profile) Command() []string {
 	command := []string{"go", "test"}
 	command = append(command, p.GoTestArgs...)
 	return append(command, p.Packages...)
+}
+
+func (p Profile) CachePolicy() string {
+	if p.CleanCache {
+		return "cleared-and-bypassed"
+	}
+	if slices.Contains(p.GoTestArgs, "-count=1") {
+		return "bypassed"
+	}
+	return "permitted"
 }

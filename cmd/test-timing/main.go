@@ -27,7 +27,7 @@ func main() {
 
 func run() error {
 	var packages packageList
-	profileName := flag.String("profile", "focused", "profile: cold, cached, focused, race, or integration")
+	profileName := flag.String("profile", "focused", "profile: "+strings.Join(testtiming.ProfileNames(), ", "))
 	baselinePath := flag.String("baseline", "testdata/test-timing-baseline-2026-07-13.json", "committed baseline and budgets")
 	outputRoot := flag.String("output", ".tmp/test-timing", "artifact root directory")
 	runPattern := flag.String("run", "", "optional Go test regexp")
