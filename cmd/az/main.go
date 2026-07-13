@@ -1296,9 +1296,9 @@ func main() {
 				os.Exit(1)
 			}
 		case "capture":
-			opts, err := cli.ParseSessionCaptureArgs(commandArgs[1:])
+			opts, err := cli.ParseOrchestrateCaptureArgs(commandArgs[1:])
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az orchestrate capture --issue <issue-id> [--project <project-id>] [--lines N] [--json]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az orchestrate capture --issue <issue-id> [--project <project-id>] [--lines N] [--raw] [--json]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
