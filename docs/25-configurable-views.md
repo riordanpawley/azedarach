@@ -38,6 +38,12 @@ set of canonical project IDs, or one current project ID. Selection and edits are
 applied only after Enter or explicit save; Escape leaves the persisted view and
 selection unchanged.
 
+On startup, the selector resolves that lightweight selected-view definition in
+parallel with live tmux discovery, so its first interactive content frame already
+uses the configured Grid, Board, or Tree layout. Full issue projection remains
+asynchronous: until it arrives, raw sessions use the final **Live tmux** fallback
+placement rather than client-side guesses about durable grouping or ordering.
+
 The project-local daemon board snapshot schema v5 carries one typed `projection`: ordered
 groups reference a single ordered item collection, items carry tree depth, and
 `known_task_ids` distinguishes filtered durable issues from tmux-only runtime

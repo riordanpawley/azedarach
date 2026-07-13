@@ -266,14 +266,26 @@ type fakeLiveSnapshotLoader struct {
 	enrichCalls int
 	live        Snapshot
 	enriched    Snapshot
+	liveStarted chan<- struct{}
+	waitForView <-chan struct{}
 }
 
 func (f *fakeLiveSnapshotLoader) ListTasksSnapshot(context.Context) (Snapshot, error) {
 	return f.enriched, nil
 }
 
-func (f *fakeLiveSnapshotLoader) ListLiveSnapshot(context.Context) (Snapshot, error) {
+func (f *fakeLiveSnapshotLoader) ListLiveSnapshot(ctx context.Context) (Snapshot, error) {
 	f.liveCalls++
+	if f.liveStarted != nil {
+		close(f.liveStarted)
+	}
+	if f.waitForView != nil {
+		select {
+		case <-f.waitForView:
+		case <-ctx.Done():
+			return Snapshot{}, ctx.Err()
+		}
+	}
 	return f.live, nil
 }
 
@@ -378,14 +390,28 @@ type fakeUIStateStore struct {
 }
 
 type fakeGlobalViewStore struct {
-	list     protocol.BoardViewListResponseBody
-	selected string
-	saved    *protocol.GlobalViewRecord
-	deleted  string
-	err      error
+	list        protocol.BoardViewListResponseBody
+	listCalls   int
+	listStarted chan<- struct{}
+	waitForLive <-chan struct{}
+	selected    string
+	saved       *protocol.GlobalViewRecord
+	deleted     string
+	err         error
 }
 
-func (f *fakeGlobalViewStore) ListGlobalViews(context.Context) (protocol.BoardViewListResponseBody, error) {
+func (f *fakeGlobalViewStore) ListGlobalViews(ctx context.Context) (protocol.BoardViewListResponseBody, error) {
+	f.listCalls++
+	if f.listStarted != nil {
+		close(f.listStarted)
+	}
+	if f.waitForLive != nil {
+		select {
+		case <-f.waitForLive:
+		case <-ctx.Done():
+			return protocol.BoardViewListResponseBody{}, ctx.Err()
+		}
+	}
 	return f.list, f.err
 }
 func (f *fakeGlobalViewStore) SelectGlobalView(_ context.Context, consumer protocol.GlobalViewConsumer, id string) (protocol.BoardViewSelectResponseBody, error) {
@@ -1603,6 +1629,146 @@ func TestModelInitialLoadUsesLiveSnapshotBeforeEnrichment(t *testing.T) {
 	}
 	if enrichedMsg.Snapshot.Entries[0].TaskTitle != "Standalone selector performance" {
 		t.Fatalf("enriched title = %q", enrichedMsg.Snapshot.Entries[0].TaskTitle)
+	}
+}
+
+func TestModelInitialLiveSnapshotUsesSelectedViewLayoutBeforeEnrichment(t *testing.T) {
+	entry := InventoryEntry{
+		SessionID:      "az-dfo",
+		IssueID:        "dfo",
+		TaskTitle:      "dfo",
+		HasTmuxSession: true,
+	}
+	tests := []struct {
+		name      string
+		view      domain.BoardView
+		width     int
+		want      []string
+		doNotWant string
+	}{
+		{
+			name:      "column board default viewport",
+			view:      domain.OrchestrationBoardView(),
+			width:     120,
+			want:      []string{"view orchestration", "[ Cards ]", "Live tmux (1)"},
+			doNotWant: "az-dfo  dfo",
+		},
+		{
+			name:      "column board narrow viewport",
+			view:      domain.OrchestrationBoardView(),
+			width:     54,
+			want:      []string{"view orchestration", "[ Cards ]", "Live tmux (1)"},
+			doNotWant: "az-dfo  dfo",
+		},
+		{
+			name:      "tree viewport",
+			view:      domain.TreeBoardView(),
+			width:     80,
+			want:      []string{"view tree", "[ Tree ]", "az-dfo"},
+			doNotWant: "[ Cards ]",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loader := &fakeLiveSnapshotLoader{live: Snapshot{Enriching: true, Entries: []InventoryEntry{entry}}}
+			store := &fakeGlobalViewStore{list: protocol.BoardViewListResponseBody{
+				GlobalViews: []protocol.GlobalViewRecord{{View: tt.view}},
+				Selections: map[protocol.GlobalViewConsumer]string{
+					protocol.GlobalViewConsumerTmuxSelector: string(tt.view.ID),
+				},
+			}}
+			model := New(loader, WithGlobalViewStore(store))
+			model.width, model.height = tt.width, 18
+
+			msg, ok := model.Init()().(LoadedMsg)
+			if !ok {
+				t.Fatalf("init msg = %T, want LoadedMsg", model.Init()())
+			}
+			if msg.ViewErr != nil || msg.Snapshot.View.ID != tt.view.ID {
+				t.Fatalf("initial view = %q err=%v, want %q", msg.Snapshot.View.ID, msg.ViewErr, tt.view.ID)
+			}
+			if store.listCalls != 1 || loader.liveCalls != 1 || loader.enrichCalls != 0 {
+				t.Fatalf("startup calls views=%d live=%d enrich=%d, want 1,1,0", store.listCalls, loader.liveCalls, loader.enrichCalls)
+			}
+			updated, cmd := model.Update(msg)
+			model = updated.(Model)
+			if cmd == nil {
+				t.Fatal("initial snapshot did not schedule asynchronous enrichment")
+			}
+			rendered := ansi.Strip(model.View())
+			for _, want := range tt.want {
+				if !strings.Contains(rendered, want) {
+					t.Fatalf("initial selected-view frame missing %q:\n%s", want, rendered)
+				}
+			}
+			if tt.doNotWant != "" && strings.Contains(rendered, tt.doNotWant) {
+				t.Fatalf("initial selected-view frame contains legacy rendering %q:\n%s", tt.doNotWant, rendered)
+			}
+		})
+	}
+}
+
+func TestModelLoadsLiveInventoryAndSelectedViewConcurrently(t *testing.T) {
+	liveStarted := make(chan struct{})
+	viewStarted := make(chan struct{})
+	view := domain.OrchestrationBoardView()
+	loader := &fakeLiveSnapshotLoader{
+		live:        Snapshot{Enriching: true, Entries: []InventoryEntry{{SessionID: "az-dfo"}}},
+		liveStarted: liveStarted,
+		waitForView: viewStarted,
+	}
+	store := &fakeGlobalViewStore{
+		list: protocol.BoardViewListResponseBody{
+			GlobalViews: []protocol.GlobalViewRecord{{View: view}},
+			Selections:  map[protocol.GlobalViewConsumer]string{protocol.GlobalViewConsumerTmuxSelector: string(view.ID)},
+		},
+		listStarted: viewStarted,
+		waitForLive: liveStarted,
+	}
+	model := New(loader, WithGlobalViewStore(store))
+
+	msg, ok := model.Init()().(LoadedMsg)
+	if !ok {
+		t.Fatalf("init msg = %T, want concurrent LoadedMsg", msg)
+	}
+	if msg.ViewErr != nil || msg.Snapshot.View.ID != view.ID {
+		t.Fatalf("concurrent initial view = %q err=%v, want %q", msg.Snapshot.View.ID, msg.ViewErr, view.ID)
+	}
+}
+
+func TestModelInitialViewLoadFailureKeepsLiveSelectorUsable(t *testing.T) {
+	tests := []struct {
+		name    string
+		store   *fakeGlobalViewStore
+		wantErr string
+	}{
+		{name: "store error", store: &fakeGlobalViewStore{err: errors.New("view store unavailable")}, wantErr: "view store unavailable"},
+		{name: "missing selection", store: &fakeGlobalViewStore{}, wantErr: "view selection is empty"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loader := &fakeLiveSnapshotLoader{live: Snapshot{Enriching: true, Entries: []InventoryEntry{{
+				SessionID: "plain-tmux", TaskTitle: "plain-tmux", HasTmuxSession: true,
+			}}}}
+			model := New(loader, WithGlobalViewStore(tt.store))
+
+			msg, ok := model.Init()().(LoadedMsg)
+			if !ok {
+				t.Fatalf("init msg = %T, want LoadedMsg", model.Init()())
+			}
+			if msg.ViewErr == nil || msg.Snapshot.View.ID != "" {
+				t.Fatalf("view error = %v view=%q, want explicit fallback error and no typed view", msg.ViewErr, msg.Snapshot.View.ID)
+			}
+			updated, cmd := model.Update(msg)
+			model = updated.(Model)
+			if cmd == nil {
+				t.Fatal("view failure prevented asynchronous enrichment")
+			}
+			rendered := ansi.Strip(model.View())
+			if !strings.Contains(rendered, tt.wantErr) || !strings.Contains(rendered, "plain-tmux") {
+				t.Fatalf("fallback selector is not explicit and usable:\n%s", rendered)
+			}
+		})
 	}
 }
 
