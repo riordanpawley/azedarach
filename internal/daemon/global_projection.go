@@ -245,6 +245,7 @@ func (d *Daemon) exportProjectToUserProjection(ctx context.Context, projectID, n
 	if err != nil {
 		return err
 	}
+	export.Tasks = d.enrichTasksWithSessionState(ctx, projectID, export.Tasks)
 	return d.userStore.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: projectID, Name: name, Path: root, DBPath: dbPath, SchemaVersion: export.SchemaVersion, SchemaFingerprint: export.SchemaFingerprint, Checkpoint: export.Checkpoint, RefreshGeneration: generation, Tasks: export.Tasks})
 }
 

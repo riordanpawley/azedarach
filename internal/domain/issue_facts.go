@@ -8,8 +8,9 @@ import (
 type WaitingHumanSource string
 
 const (
-	WaitingHumanSourceInteractionRequest WaitingHumanSource = "interaction_request"
-	WaitingHumanSourceRuntimePrompt      WaitingHumanSource = "runtime_prompt"
+	WaitingHumanSourceInteractionRequest      WaitingHumanSource = "interaction_request"
+	WaitingHumanSourceRuntimePrompt           WaitingHumanSource = "runtime_prompt"
+	WaitingHumanSourceInvestigationAcceptance WaitingHumanSource = "investigation_acceptance"
 )
 
 type IssueFactReason struct {
@@ -27,14 +28,16 @@ type IssueOperationBlocker struct {
 }
 
 type IssueFactsInput struct {
-	Status             Status
-	Priority           Priority
-	State              IssueState
-	Session            *Session
-	HasTmuxSession     bool
-	OperationBlockers  []IssueOperationBlocker
-	DecisionWaiting    bool
-	DecisionWaitReason string
+	Status                  Status
+	Priority                Priority
+	Type                    TaskType
+	State                   IssueState
+	Session                 *Session
+	HasTmuxSession          bool
+	OperationBlockers       []IssueOperationBlocker
+	DecisionWaiting         bool
+	DecisionWaitReason      string
+	InvestigationAcceptance *InvestigationAcceptance
 }
 
 type IssueFacts struct {
@@ -186,6 +189,14 @@ func DeriveIssueFacts(input IssueFactsInput) IssueFacts {
 		facts.WaitingHumanReason = strings.TrimSpace(input.DecisionWaitReason)
 		facts.Reasons = append(facts.Reasons, IssueFactReason{Code: "interaction_request", Message: facts.WaitingHumanReason})
 	}
+	if input.Type == TypeInvestigation && input.InvestigationAcceptance != nil &&
+		input.InvestigationAcceptance.Disposition == InvestigationDispositionHumanFindings &&
+		!input.InvestigationAcceptance.Accepted {
+		facts.WaitingHuman = true
+		facts.WaitingHumanSource = WaitingHumanSourceInvestigationAcceptance
+		facts.WaitingHumanReason = strings.TrimSpace(input.InvestigationAcceptance.Reason)
+		facts.Reasons = append(facts.Reasons, IssueFactReason{Code: "investigation_acceptance", Message: facts.WaitingHumanReason})
+	}
 	applyReviewReadyFacts(&facts, state, input.Session, input.HasTmuxSession)
 	facts.Reasons = append(facts.Reasons, IssueFactReason{
 		Code:    "display_phase",
@@ -201,6 +212,7 @@ func (t Task) IssueFacts() IssueFacts {
 	return DeriveIssueFacts(IssueFactsInput{
 		Status:         t.Status,
 		Priority:       t.Priority,
+		Type:           t.Type,
 		State:          t.State,
 		Session:        t.Session,
 		HasTmuxSession: t.HasTmuxSession,

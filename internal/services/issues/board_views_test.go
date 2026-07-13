@@ -201,6 +201,9 @@ func TestBoardViewsMigrateLegacyBuiltInsAndPreserveCustomIDConflict(t *testing.T
 	if preserved.BuiltIn || preserved.View.Title != custom.Title {
 		t.Fatalf("preserved custom = %+v", preserved)
 	}
+	if got := preserved.UpdatedAt.Format(time.RFC3339Nano); got != now {
+		t.Fatalf("preserved custom updated_at = %q, want %q", got, now)
+	}
 }
 
 func TestBoardViewsCatalogMigrationRollsBackOnCorruptIDConflict(t *testing.T) {

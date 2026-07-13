@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,6 +49,7 @@ type Store struct {
 	maxProjectionAge      time.Duration
 	now                   func() time.Time
 	migrationBeforeCommit func() error
+	seedBeforeCommit      func() error
 	snapshotAfterProjects func()
 }
 type queryer interface {
@@ -65,6 +67,9 @@ func WithMaxProjectionAge(age time.Duration) Option {
 func withClock(now func() time.Time) Option { return func(s *Store) { s.now = now } }
 func withMigrationBeforeCommit(hook func() error) Option {
 	return func(s *Store) { s.migrationBeforeCommit = hook }
+}
+func withSeedBeforeCommit(hook func() error) Option {
+	return func(s *Store) { s.seedBeforeCommit = hook }
 }
 func withSnapshotAfterProjects(hook func()) Option {
 	return func(s *Store) { s.snapshotAfterProjects = hook }
@@ -339,20 +344,81 @@ CREATE TABLE project_issue_dependency_projection (project_id TEXT NOT NULL,issue
 }
 
 func (s *Store) seedViews(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin user view seed: %w", err)
+	}
+	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, view := range []domain.BoardView{domain.DefaultBoardView(), domain.PlanningBoardView(), domain.OrchestrationBoardView(), domain.CloseoutBoardView(), domain.GridBoardView(), domain.TreeBoardView()} {
+		if err := preserveUserViewIDConflict(ctx, tx, view.ID); err != nil {
+			return err
+		}
 		raw, err := domain.EncodeBoardViewDefinitionJSON(view)
 		if err != nil {
 			return err
 		}
-		if _, err = s.db.ExecContext(ctx, `INSERT INTO user_views(view_id,title,definition_json,built_in,created_at,updated_at) VALUES(?,?,?,1,?,?) ON CONFLICT(view_id) DO UPDATE SET title=excluded.title,definition_json=excluded.definition_json,built_in=1,updated_at=excluded.updated_at WHERE user_views.built_in=1`, view.ID, view.Title, raw, now, now); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO user_views(view_id,title,definition_json,built_in,created_at,updated_at) VALUES(?,?,?,1,?,?) ON CONFLICT(view_id) DO UPDATE SET title=excluded.title,definition_json=excluded.definition_json,built_in=1,updated_at=excluded.updated_at,deleted_at=NULL WHERE user_views.built_in=1 AND (user_views.title<>excluded.title OR user_views.definition_json<>excluded.definition_json OR user_views.deleted_at IS NOT NULL)`, view.ID, view.Title, raw, now, now); err != nil {
 			return err
 		}
 	}
 	for consumer, viewID := range map[string]string{"global_board": string(domain.BoardViewDefaultID), "tmux_selector": string(domain.BoardViewOrchestrationID), "search": string(domain.BoardViewDefaultID), "review": string(domain.BoardViewCloseoutID)} {
-		if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO user_view_selections(consumer,view_id,updated_at) VALUES(?,?,?)`, consumer, viewID, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO user_view_selections(consumer,view_id,updated_at) VALUES(?,?,?)`, consumer, viewID, now); err != nil {
 			return err
 		}
+	}
+	if s.seedBeforeCommit != nil {
+		if err := s.seedBeforeCommit(); err != nil {
+			return fmt.Errorf("before user view seed commit: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit user view seed: %w", err)
+	}
+	return nil
+}
+
+func preserveUserViewIDConflict(ctx context.Context, tx *sql.Tx, builtInID domain.BoardViewID) error {
+	var raw, projectIDs []byte
+	var title, scope, createdAt, updatedAt string
+	var deletedAt sql.NullString
+	var builtIn int
+	err := tx.QueryRowContext(ctx, `SELECT title,definition_json,project_scope,project_ids_json,built_in,created_at,updated_at,deleted_at FROM user_views WHERE view_id=?`, builtInID).Scan(&title, &raw, &scope, &projectIDs, &builtIn, &createdAt, &updatedAt, &deletedAt)
+	if errors.Is(err, sql.ErrNoRows) || builtIn != 0 {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect user view id conflict %q: %w", builtInID, err)
+	}
+	view, err := domain.DecodeBoardViewDefinitionJSON(raw)
+	if err != nil {
+		return fmt.Errorf("preserve custom user view conflicting with built-in %q: %w", builtInID, err)
+	}
+	base := string(builtInID) + "-custom"
+	candidate := base
+	for suffix := 2; ; suffix++ {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_views WHERE view_id=?)`, candidate).Scan(&exists); err != nil {
+			return fmt.Errorf("find conflict-free user view id for %q: %w", builtInID, err)
+		}
+		if !exists {
+			break
+		}
+		candidate = fmt.Sprintf("%s-%d", base, suffix)
+	}
+	view.ID = domain.BoardViewID(candidate)
+	encoded, err := domain.EncodeBoardViewDefinitionJSON(view)
+	if err != nil {
+		return fmt.Errorf("encode preserved custom user view %q: %w", builtInID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO user_views(view_id,title,definition_json,project_scope,project_ids_json,built_in,created_at,updated_at,deleted_at) VALUES(?,?,?,?,?,0,?,?,?)`, candidate, title, encoded, scope, projectIDs, createdAt, updatedAt, deletedAt); err != nil {
+		return fmt.Errorf("preserve custom user view %q as %q: %w", builtInID, candidate, err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE user_view_selections SET view_id=? WHERE view_id=?`, candidate, builtInID); err != nil {
+		return fmt.Errorf("preserve custom user view selections for %q: %w", builtInID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM user_views WHERE view_id=? AND built_in=0`, builtInID); err != nil {
+		return fmt.Errorf("remove conflicting custom user view %q: %w", builtInID, err)
 	}
 	return nil
 }
@@ -1246,8 +1312,12 @@ WHERE i.project_id=?`
 			}
 		}
 		// Session-derived facts are reconstructed from normalized rows while persisted
-		// decision-waiting and operation facts remain authoritative materialized facts.
-		derived := domain.DeriveIssueFacts(domain.IssueFactsInput{Status: t.Status, Priority: t.Priority, State: t.State, Session: t.Session, HasTmuxSession: t.HasTmuxSession, OperationBlockers: t.Facts.OperationBlockers, DecisionWaiting: t.Facts.WaitingHuman && t.Facts.WaitingHumanSource == domain.WaitingHumanSourceInteractionRequest, DecisionWaitReason: t.Facts.WaitingHumanReason})
+		// human-authority and operation facts remain authoritative materialized facts.
+		var investigationAcceptance *domain.InvestigationAcceptance
+		if t.Facts.WaitingHuman && t.Facts.WaitingHumanSource == domain.WaitingHumanSourceInvestigationAcceptance {
+			investigationAcceptance = &domain.InvestigationAcceptance{Disposition: domain.InvestigationDispositionHumanFindings, Reason: t.Facts.WaitingHumanReason}
+		}
+		derived := domain.DeriveIssueFacts(domain.IssueFactsInput{Status: t.Status, Priority: t.Priority, Type: t.Type, State: t.State, Session: t.Session, HasTmuxSession: t.HasTmuxSession, OperationBlockers: t.Facts.OperationBlockers, DecisionWaiting: t.Facts.WaitingHuman && t.Facts.WaitingHumanSource == domain.WaitingHumanSourceInteractionRequest, DecisionWaitReason: t.Facts.WaitingHumanReason, InvestigationAcceptance: investigationAcceptance})
 		derived.Reasons = t.Facts.Reasons
 		t.Facts = derived
 		out = append(out, t)

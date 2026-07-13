@@ -3,12 +3,16 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 func TestGlobalBoardViewCommandsReturnUnavailableWithoutUserStore(t *testing.T) {
@@ -38,6 +42,48 @@ func TestGlobalBoardViewCommandsReturnUnavailableWithoutUserStore(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestGlobalProjectionSharesInvestigationHumanAuthorityAndAcceptance(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "authority-project"
+	projectRoot := t.TempDir()
+	issueDBPath := filepath.Join(projectRoot, ".azedarach", "azedarach.db")
+	issueClient := issues.NewClientAtPath(issueDBPath, slog.Default())
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	issueID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "Human findings", Type: domain.TypeInvestigation, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	globalStore, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = globalStore.Close() })
+	d := &Daemon{cfg: Config{RepoDir: projectRoot, Logger: slog.Default()}, issues: issueClient, issueClientsByProject: map[string]*issues.Client{projectID: issueClient}, userStore: globalStore}
+	assertPlacement := func(want domain.BoardColumnID) {
+		t.Helper()
+		if err := d.exportProjectToUserProjection(ctx, projectID, "Authority", projectRoot, issueDBPath, 0); err != nil {
+			t.Fatal(err)
+		}
+		view := domain.OrchestrationBoardView()
+		snapshot, err := globalStore.SnapshotForView(ctx, "", &view)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 {
+			t.Fatalf("snapshot = %+v", snapshot.Projects)
+		}
+		placement, err := view.PlaceTask(snapshot.Projects[0].Tasks[0])
+		if err != nil || placement.ColumnID != want {
+			t.Fatalf("placement = %+v err=%v want=%s", placement, err, want)
+		}
+	}
+	assertPlacement(domain.BoardColumnWaitingHuman)
+	if _, err := issueClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventHumanInputProvided, Source: "human", Payload: map[string]any{"investigation_findings_accepted": true}}); err != nil {
+		t.Fatal(err)
+	}
+	assertPlacement(domain.BoardColumnReviewReady)
 }
 
 func TestCommandMutatesProjectProjectionIsExplicit(t *testing.T) {

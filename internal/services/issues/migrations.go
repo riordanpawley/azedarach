@@ -79,6 +79,7 @@ var orderedMigrations = []migration{
 	{id: "0044_learning_activation_abandonment", path: "migrations/0044_learning_activation_abandonment.sql"},
 	{id: "0045_issue_state_runtime_constraints", path: "migrations/0045_issue_state_runtime_constraints.sql", apply: applyIssueStateRuntimeConstraintsMigration},
 	{id: "0046_repair_issue_state_runtime_constraints", path: "migrations/0046_repair_issue_state_runtime_constraints.manifest.sql", apply: applyIssueStateRuntimeConstraintsRepairMigration},
+	{id: humanAuthorityProjectionMigrationID, path: "migrations/0047_human_authority_projection_revision.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -132,6 +133,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "0044_learning_activation_abandonment", Path: "migrations/0044_learning_activation_abandonment.sql", Checksum: "56276dedf6d63e8db3e0a58e49cd29d7d862bc83ec7fdf1eb9615127004f607c"},
 	{ID: "0045_issue_state_runtime_constraints", Path: "migrations/0045_issue_state_runtime_constraints.sql", Checksum: "67a11506f5d49059280d6406cbf1e66155549e4e573978f78f3e43b5ea944f23"},
 	{ID: "0046_repair_issue_state_runtime_constraints", Path: "migrations/0046_repair_issue_state_runtime_constraints.manifest.sql", Checksum: "6420b559de666287450e274b283b2e481c1472e3b02914f3023019975216e20d"},
+	{ID: humanAuthorityProjectionMigrationID, Path: "migrations/0047_human_authority_projection_revision.sql", Checksum: "ac3a48512b2e6e9c018d58a68db24a2465e9d172139d22f8378f69677073a0ab"},
 }
 
 func validateMigrationRegistry() error {
@@ -425,6 +427,7 @@ const (
 	issueStateModelV2CutoverMarkerKey                           = "issue:state_model_v2_cutover"
 	issueStateModelV2Version                                    = "2"
 	boardViewsMigrationID                                       = "0031_board_views"
+	humanAuthorityProjectionMigrationID = "0047_human_authority_projection_revision"
 	contextualLearningMigrationID                               = "0039_contextual_learning_activation"
 	legacyContextualLearningMigration                           = "0038_contextual_learning_activation"
 )
@@ -506,6 +509,12 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 				}
 				continue
 			}
+			if m.id == humanAuthorityProjectionMigrationID {
+				if err := c.applyHumanAuthorityProjectionMigration(ctx, db, m.id); err != nil {
+					return err
+				}
+				continue
+			}
 			if m.apply != nil {
 				if err := m.apply(ctx, db, m.id); err != nil {
 					return err
@@ -525,6 +534,9 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		if err := recordAppliedMigration(ctx, db, m.id); err != nil {
 			return fmt.Errorf("record skipped migration %s: %w", m.id, err)
 		}
+	}
+	if err := validateHumanAuthorityProjectionRevisionTriggers(ctx, db); err != nil {
+		return err
 	}
 
 	canonicalApplied, err := isMigrationApplied(ctx, db, "0045_issue_state_runtime_constraints")
@@ -1008,6 +1020,66 @@ func (c *Client) runBoardViewsMigrationFailureHook(stage string) error {
 	}
 	if err := c.boardViewsMigrationFailureHook(stage); err != nil {
 		return fmt.Errorf("injected board views migration failure at %s: %w", stage, err)
+	}
+	return nil
+}
+
+var humanAuthorityProjectionRevisionTriggers = []string{
+	"projection_source_revision_issue_observations_insert",
+	"projection_source_revision_issue_observations_update",
+	"projection_source_revision_issue_observations_delete",
+	"projection_source_revision_interactions_insert",
+	"projection_source_revision_interactions_update",
+	"projection_source_revision_interactions_delete",
+}
+
+func (c *Client) applyHumanAuthorityProjectionMigration(ctx context.Context, db *sql.DB, id string) error {
+	sqlText, err := loadMigrationSQL("migrations/0047_human_authority_projection_revision.sql")
+	if err != nil {
+		return fmt.Errorf("load migration %s: %w", id, err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+		return fmt.Errorf("apply migration %s: %w", id, err)
+	}
+	if err := c.runHumanAuthorityMigrationFailureHook("after_schema"); err != nil {
+		return fmt.Errorf("migration %s rolled back: %w", id, err)
+	}
+	if err := validateHumanAuthorityProjectionRevisionTriggers(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s: %w", id, err)
+	}
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	return nil
+}
+
+func (c *Client) runHumanAuthorityMigrationFailureHook(stage string) error {
+	if c.humanAuthorityMigrationFailureHook == nil {
+		return nil
+	}
+	if err := c.humanAuthorityMigrationFailureHook(stage); err != nil {
+		return fmt.Errorf("injected human authority migration failure at %s: %w", stage, err)
+	}
+	return nil
+}
+
+func validateHumanAuthorityProjectionRevisionTriggers(ctx context.Context, q sqlIssueQueryer) error {
+	for _, name := range humanAuthorityProjectionRevisionTriggers {
+		var exists bool
+		if err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?)`, name).Scan(&exists); err != nil {
+			return fmt.Errorf("inspect human authority projection revision trigger %s: %w", name, err)
+		}
+		if !exists {
+			return fmt.Errorf("applied migration %s is missing required trigger %s", humanAuthorityProjectionMigrationID, name)
+		}
 	}
 	return nil
 }

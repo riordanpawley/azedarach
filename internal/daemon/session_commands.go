@@ -3713,12 +3713,31 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("refresh interaction projection while enriching tasks failed", "project_id", projectID, "error", err)
 			}
-			return
+			waiting = map[string]struct{}{}
+		}
+		investigationAcceptances, err := issueClient.InvestigationAcceptances(ctx, tasks)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("refresh investigation acceptance projection while enriching tasks failed", "project_id", projectID, "error", err)
+			}
+			// Fail closed for human-facing investigations without discarding
+			// independently refreshed interaction authority.
+			investigationAcceptances = make(map[string]domain.InvestigationAcceptance)
+			for _, task := range tasks {
+				if task.Type == domain.TypeInvestigation {
+					investigationAcceptances[task.ID.String()] = domain.EvaluateInvestigationAcceptance(task, nil)
+				}
+			}
 		}
 		for i := range tasks {
 			_, decisionWaiting := waiting[tasks[i].ID.String()]
 			base := tasks[i].IssueFacts()
-			tasks[i].Facts = domain.DeriveIssueFacts(domain.IssueFactsInput{Status: tasks[i].Status, Priority: tasks[i].Priority, State: tasks[i].State, Session: tasks[i].Session, HasTmuxSession: tasks[i].HasTmuxSession, OperationBlockers: base.OperationBlockers, DecisionWaiting: decisionWaiting, DecisionWaitReason: "unresolved interaction request requires human decision"})
+			acceptance, hasAcceptance := investigationAcceptances[tasks[i].ID.String()]
+			var acceptancePtr *domain.InvestigationAcceptance
+			if hasAcceptance {
+				acceptancePtr = &acceptance
+			}
+			tasks[i].Facts = domain.DeriveIssueFacts(domain.IssueFactsInput{Status: tasks[i].Status, Priority: tasks[i].Priority, Type: tasks[i].Type, State: tasks[i].State, Session: tasks[i].Session, HasTmuxSession: tasks[i].HasTmuxSession, OperationBlockers: base.OperationBlockers, DecisionWaiting: decisionWaiting, DecisionWaitReason: "unresolved interaction request requires human decision", InvestigationAcceptance: acceptancePtr})
 		}
 	}()
 	if d.sessionStore == nil {

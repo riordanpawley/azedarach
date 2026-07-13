@@ -45,6 +45,7 @@ func TestProjectOrchestrationEndToEndAcceptanceInventory(t *testing.T) {
 		daemonInvariantOrchestrationLoop:       daemonInvariantSourceProjection,
 		daemonInvariantOrchestrationParentWake: daemonInvariantSourceHybrid,
 		daemonInvariantInteractionWaiting:      daemonInvariantSourceProjection,
+		daemonInvariantInvestigationWaiting:    daemonInvariantSourceProjection,
 		daemonInvariantInteractionStaleness:    daemonInvariantSourceProjection,
 		daemonInvariantAdvisorSingleton:        daemonInvariantSourceHybrid,
 	}
