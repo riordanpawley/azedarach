@@ -1248,19 +1248,27 @@ func (d *Daemon) compensateSessionStartFailure(ctx context.Context, req protocol
 	}
 	updatedAt := time.Now().UTC()
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	alignTransient := false
 	if store != nil {
 		rows, winner, err := store.ApplyWorkerSessionCompensation(ctx, projectID, sessionID, issueID, desired, observed, activity, source, updatedAt)
 		if err != nil {
 			note += fmt.Sprintf("; failed-start durable session compensation also failed: %v", err)
+			if durable, found, loadErr := store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, sessionID); loadErr == nil && found {
+				desired = durable.State
+				alignTransient = true
+			} else if loadErr != nil {
+				note += fmt.Sprintf("; failed-start durable session reload also failed: %v", loadErr)
+			}
 		} else {
 			desired = winner
+			alignTransient = true
 			writer := d.runtimeProjectionStateWriter()
 			for _, row := range rows {
 				writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, row)
 			}
 		}
 	}
-	if d != nil && d.sessionStore != nil {
+	if alignTransient && d != nil && d.sessionStore != nil {
 		if _, err := d.sessionStore.ForceUpsertSession(projectID, sessionID, issueID, desired); err != nil {
 			note += fmt.Sprintf("; failed-start transient session compensation also failed: %v", err)
 		}

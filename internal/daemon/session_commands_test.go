@@ -75,17 +75,21 @@ func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
 		name, failure string
 		seedPhysical  bool
 		winnerAhead   bool
+		durableFail   bool
+		noEvent       bool
 		killErr       error
 		want          daemonstate.SessionState
 	}{
 		{name: "physical write failure cleanup succeeds", failure: "physical-write", want: daemonstate.SessionStateStopped},
 		{name: "post-observation lease failure cleanup fails", failure: "lease", seedPhysical: true, killErr: errors.New("kill failed"), want: daemonstate.SessionStateRunning},
 		{name: "newer physical winner defeats stopped compensation", failure: "higher-version-race", seedPhysical: true, winnerAhead: true, want: daemonstate.SessionStateRunning},
+		{name: "durable transaction failure reloads existing desired", failure: "transaction-failure", seedPhysical: true, durableFail: true, noEvent: true, want: daemonstate.SessionStateStarting},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			const projectID, issueID, sessionID = "p", "root", "az-root"
-			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+			runtimeDBPath := filepath.Join(t.TempDir(), "runtime.db")
+			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(runtimeDBPath, slog.Default())
 			t.Cleanup(func() { _ = runtimeStore.Close() })
 			seed := daemonstate.Session{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateStarting, UpdatedAt: time.Now().UTC().Add(-time.Second)}
 			if err := runtimeStore.UpsertSessionState(ctx, projectID, seed); err != nil {
@@ -100,6 +104,16 @@ func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if tc.durableFail {
+				db, err := sql.Open("sqlite", runtimeDBPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				if _, err := db.Exec(`CREATE TRIGGER inject_compensation_failure BEFORE UPDATE ON daemon_session_projections BEGIN SELECT RAISE(ABORT,'injected compensation failure'); END`); err != nil {
+					t.Fatal(err)
+				}
+			}
 			transient := daemonstate.NewStore()
 			_, _ = transient.ForceUpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStarting)
 			runner := &sessionStartCompensationTmuxRunner{live: true, killErr: tc.killErr}
@@ -109,16 +123,28 @@ func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
 			defer cancel()
 			d.compensateSessionStartFailure(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: projectID}}, projectID, sessionID, issueID, issueResourceLifecycleContext{}, "busy", "session")
 			intent, found, err := runtimeStore.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, issueID)
-			if err != nil || !found || intent.State != tc.want || intent.ObservedState != tc.want {
+			wantObserved := tc.want
+			if tc.durableFail {
+				wantObserved = daemonstate.SessionStateRunning
+			}
+			if err != nil || !found || intent.State != tc.want || intent.ObservedState != wantObserved {
 				t.Fatalf("%s durable intent=%+v found=%v err=%v", tc.failure, intent, found, err)
 			}
 			physical, found, err := runtimeStore.GetPhysicalSessionObservation(ctx, projectID, sessionID)
-			if err != nil || !found || physical.ObservedState != tc.want {
+			if err != nil || !found || physical.ObservedState != wantObserved {
 				t.Fatalf("%s physical=%+v found=%v err=%v", tc.failure, physical, found, err)
 			}
 			got, err := transient.Session(projectID, sessionID)
 			if err != nil || got.State != tc.want {
 				t.Fatalf("%s transient=%+v err=%v", tc.failure, got, err)
+			}
+			if tc.noEvent {
+				select {
+				case event := <-ch:
+					t.Fatalf("%s unexpected event=%+v", tc.failure, event)
+				case <-time.After(50 * time.Millisecond):
+				}
+				return
 			}
 			events := collectSessionProjectionEvents(t, ch, 1)
 			var body protocol.SessionProjectionEventBody
@@ -2300,8 +2326,8 @@ func TestSessionStartFailsAndRollsBackWhenSessionProjectionPersistFails(t *testi
 		t.Fatalf("tmux session %q still exists after projection failure", sessionID)
 	}
 	snapshot := store.ReadSnapshot(projectID)
-	if got := snapshot.Sessions[sessionID]; got.State != daemonstate.SessionStateStopped {
-		t.Fatalf("session store state = %+v, want stopped rollback", got)
+	if got := snapshot.Sessions[sessionID]; got.State != daemonstate.SessionStateStarting {
+		t.Fatalf("session store state = %+v, want unchanged starting state when durable compensation has no winner", got)
 	}
 	if !worktreeRunner.worktreeRemoved {
 		t.Fatal("expected new worktree cleanup after session projection failure")
