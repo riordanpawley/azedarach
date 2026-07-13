@@ -19,6 +19,7 @@ import (
 	sqlite "modernc.org/sqlite"
 
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/dbpathguard"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -229,7 +230,7 @@ const (
 	ArchiveExclude  ArchiveMode = "exclude"
 	ArchiveInclude  ArchiveMode = "include"
 	ArchiveOnly     ArchiveMode = "only"
-	refuseDBPathEnv             = "AZEDARACH_REFUSE_DB_PATH"
+	refuseDBPathEnv             = dbpathguard.LegacyRefusePathEnv
 )
 
 func NormalizeArchiveMode(value string) ArchiveMode {
@@ -655,12 +656,8 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 	if c.db != nil {
 		return c.db, nil
 	}
-	if refusedPath := strings.TrimSpace(os.Getenv(refuseDBPathEnv)); refusedPath != "" {
-		dbPath, dbPathErr := canonicalDBPath(c.dbPath)
-		refusedDBPath, refusedPathErr := canonicalDBPath(refusedPath)
-		if dbPathErr == nil && refusedPathErr == nil && dbPath == refusedDBPath {
-			return nil, c.wrapError("open-db", "", fmt.Errorf("refusing configured issue database path: %s", dbPath))
-		}
+	if err := dbpathguard.Check(c.dbPath); err != nil {
+		return nil, c.wrapError("open-db", "", fmt.Errorf("refuse issue database: %w", err))
 	}
 
 	dbDir := filepath.Dir(c.dbPath)
@@ -752,17 +749,6 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		)
 	}
 	return c.db, nil
-}
-
-func canonicalDBPath(path string) (string, error) {
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	if resolvedPath, err := filepath.EvalSymlinks(absPath); err == nil {
-		absPath = resolvedPath
-	}
-	return filepath.Clean(absPath), nil
 }
 
 func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
@@ -5732,10 +5718,6 @@ func encodeAlphaIssueIndex(index int) string {
 }
 
 func resolveDBPath(repoDir string) (string, error) {
-	if fromEnv := strings.TrimSpace(os.Getenv("AZEDARACH_DB_PATH")); fromEnv != "" {
-		return fromEnv, nil
-	}
-
 	startDir := repoDir
 	if strings.TrimSpace(startDir) == "" {
 		cwd, err := os.Getwd()
@@ -5751,7 +5733,17 @@ func resolveDBPath(repoDir string) (string, error) {
 
 	baseRoot, err := config.ResolveProjectRoot(absStart)
 	if err == nil {
-		return filepath.Join(baseRoot, ".azedarach", "azedarach.db"), nil
+		candidate := filepath.Join(baseRoot, ".azedarach", "azedarach.db")
+		if fromEnv := strings.TrimSpace(os.Getenv("AZEDARACH_DB_PATH")); fromEnv != "" {
+			useOverride, useErr := dbpathguard.UseProjectOverride(candidate, fromEnv)
+			if useErr != nil {
+				return "", fmt.Errorf("resolve test database override: %w", useErr)
+			}
+			if useOverride {
+				return fromEnv, nil
+			}
+		}
+		return candidate, nil
 	}
 	return "", fmt.Errorf("resolve project root: %w", err)
 }

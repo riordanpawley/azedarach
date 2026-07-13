@@ -18,3 +18,4 @@ Projects remain independently hosted, authorized, exported, backed up, restored,
 ## Links
 
 - applies-to issue:dda
+- applies-to issue:dgv — Event streams and projections remain project scoped: one deployment, project, and repository.

@@ -1,28 +1,29 @@
 package main
 
 import (
+	"fmt"
 	"os"
-	"path/filepath"
 	"testing"
+
+	"github.com/riordanpawley/azedarach/internal/testisolation"
 )
 
 func TestMain(m *testing.M) {
-	tmpRoot, err := os.MkdirTemp("", "azedarach-cmd-az-test-*")
+	environment, err := testisolation.NewTemporary(".")
 	if err != nil {
 		panic(err)
 	}
-	defer os.RemoveAll(tmpRoot)
-
-	if err := os.Setenv("HOME", filepath.Join(tmpRoot, "home")); err != nil {
+	restore, err := environment.Apply()
+	if err != nil {
 		panic(err)
 	}
-	dbDir := filepath.Join(tmpRoot, "db")
-	if err := os.MkdirAll(dbDir, 0o755); err != nil {
-		panic(err)
+	code := m.Run()
+	restore()
+	if err := environment.Close(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "remove command test isolation: %v\n", err)
+		if code == 0 {
+			code = 1
+		}
 	}
-	if err := os.Setenv("AZEDARACH_DB_PATH", filepath.Join(dbDir, "azedarach.db")); err != nil {
-		panic(err)
-	}
-
-	os.Exit(m.Run())
+	os.Exit(code)
 }

@@ -15,12 +15,16 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/testisolation"
 )
 
 func TestRealUserDatabaseMigrationClone(t *testing.T) {
 	path := strings.TrimSpace(os.Getenv("AZEDARACH_USER_DB_CLONE"))
 	if path == "" {
 		t.Skip("AZEDARACH_USER_DB_CLONE is not set")
+	}
+	if err := testisolation.CheckDatabaseClone(path, "."); err != nil {
+		t.Fatalf("refuse unsafe user database clone before SQLite open: %v", err)
 	}
 	raw, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro")
 	if err != nil {

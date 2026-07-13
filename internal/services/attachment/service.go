@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/dbpathguard"
 	"github.com/riordanpawley/azedarach/internal/observability/tracesqlite"
 	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
@@ -479,6 +480,9 @@ func (s *Service) openDB() (*sql.DB, error) {
 	if strings.TrimSpace(s.dbPath) == "" {
 		return nil, fmt.Errorf("attachment database path is empty")
 	}
+	if err := dbpathguard.Check(s.dbPath); err != nil {
+		return nil, fmt.Errorf("refuse attachment database: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(s.dbPath), 0755); err != nil {
 		return nil, fmt.Errorf("create attachment database directory: %w", err)
 	}
@@ -535,10 +539,13 @@ func (s *Service) ensureIssueAttachmentSchema(db *sql.DB) error {
 }
 
 func resolveDBPath(issuesPath string) string {
+	candidate := filepath.Join(issuesPath, "azedarach.db")
 	if fromEnv := strings.TrimSpace(os.Getenv("AZEDARACH_DB_PATH")); fromEnv != "" {
-		return fromEnv
+		if useOverride, err := dbpathguard.UseProjectOverride(candidate, fromEnv); err == nil && useOverride {
+			return fromEnv
+		}
 	}
-	return filepath.Join(issuesPath, "azedarach.db")
+	return candidate
 }
 
 func (s *Service) pathFromRelative(relative string) string {

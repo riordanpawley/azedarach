@@ -18,4 +18,5 @@ CLI/TUI stay thin clients and request WAL diagnostics through daemon protocol. O
 ## Links
 
 - applies-to issue:cxz
+- applies-to issue:dgv — Server/client SQLite design must preserve WAL maintenance and safe idempotent busy handling.
 - applies-to requirement:req-sqlite-local-first-wal

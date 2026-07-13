@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/dbpathguard"
 	"github.com/riordanpawley/azedarach/internal/observability/tracesqlite"
 )
 
@@ -522,6 +523,9 @@ func (s *SQLiteStore) dbHandle() (*sql.DB, error) {
 	if s.db != nil {
 		return s.db, nil
 	}
+	if err := dbpathguard.Check(s.dbPath); err != nil {
+		return nil, fmt.Errorf("refuse operation database: %w", err)
+	}
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_txlock=immediate", filepath.ToSlash(s.dbPath))
 	db, err := tracesqlite.Open(dsn)
 	if err != nil {
@@ -562,9 +566,6 @@ func configureSQLite(db *sql.DB) error {
 }
 
 func resolveDBPath(repoDir string) (string, error) {
-	if fromEnv := strings.TrimSpace(os.Getenv("AZEDARACH_DB_PATH")); fromEnv != "" {
-		return fromEnv, nil
-	}
 	startDir := strings.TrimSpace(repoDir)
 	if startDir == "" {
 		cwd, err := os.Getwd()
@@ -579,7 +580,17 @@ func resolveDBPath(repoDir string) (string, error) {
 	}
 	baseRoot, err := config.ResolveProjectRoot(absStart)
 	if err == nil {
-		return filepath.Join(baseRoot, ".azedarach", "azedarach.db"), nil
+		candidate := filepath.Join(baseRoot, ".azedarach", "azedarach.db")
+		if fromEnv := strings.TrimSpace(os.Getenv("AZEDARACH_DB_PATH")); fromEnv != "" {
+			useOverride, useErr := dbpathguard.UseProjectOverride(candidate, fromEnv)
+			if useErr != nil {
+				return "", fmt.Errorf("resolve test database override: %w", useErr)
+			}
+			if useOverride {
+				return fromEnv, nil
+			}
+		}
+		return candidate, nil
 	}
 	return "", fmt.Errorf("resolve operation db path from %s: %w", absStart, err)
 }

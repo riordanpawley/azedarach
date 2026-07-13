@@ -5,6 +5,17 @@ complete `go test -json` stream even when tests fail, then emits deterministic
 package/test duration tables, every failure identity and output, baseline
 deltas, and budget violations.
 
+The runner establishes the mandatory database-isolation boundary before any
+test binary starts. It snapshots the configured root-user database, the current
+project database, and every registered project database into a pre-open refusal
+set, then supplies temporary `HOME`, `XDG_CONFIG_HOME`, user database, project
+registry, and project database roots. Use `just test` for broad validation; do
+not substitute a bare `go test ./...` when claiming the safe broad-suite
+contract. Real-database migration checks require explicit
+`AZEDARACH_USER_DB_CLONE` or `AZEDARACH_PROJECT_DB_CLONES` paths to safe
+temporary clones. Configured originals remain refused even if one is supplied
+through a clone variable.
+
 ## Commands
 
 Flags precede positional arguments; the runner accepts no positional arguments.

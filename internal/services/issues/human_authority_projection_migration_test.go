@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/riordanpawley/azedarach/internal/testisolation"
 )
 
 func TestRealProjectDatabaseMigrationClones(t *testing.T) {
@@ -19,6 +21,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 	for _, path := range filepath.SplitList(rawPaths) {
 		path := path
 		t.Run(filepath.Base(filepath.Dir(filepath.Dir(path))), func(t *testing.T) {
+			if err := testisolation.CheckDatabaseClone(path, "."); err != nil {
+				t.Fatalf("refuse unsafe project database clone before SQLite open: %v", err)
+			}
 			ctx := context.Background()
 			beforeDB, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro")
 			if err != nil {

@@ -14,4 +14,5 @@ Issue cro was reopened to consider massive Azedarach changes with clear authorit
 ## Links
 
 - applies-to issue:cro
+- applies-to issue:dgv — Use whole authority-plane framing; do not mistake noisy runtime telemetry for the target event source.
 - revises decision:dec-4 — Supersedes the narrow runtime-only recommendation while preserving its warning that old events cannot replace live tmux/git/filesystem observation.
