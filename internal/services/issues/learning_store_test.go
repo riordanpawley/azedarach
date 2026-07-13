@@ -1448,7 +1448,14 @@ func decisionLinkKinds(links []DecisionLink) []DecisionTargetKind {
 
 func applyIssueMigrationsThrough(t *testing.T, ctx context.Context, db *sql.DB, throughID string) {
 	t.Helper()
-	require.NoError(t, ensureMigrationTable(ctx, db))
+	// This fixture models a database produced before artifact checksums existed.
+	// Keep its historical ledger shape so startup exercises the one-time legacy
+	// column addition and backfill path.
+	_, err := db.ExecContext(ctx, `CREATE TABLE schema_migrations (
+		id TEXT PRIMARY KEY,
+		applied_at TEXT NOT NULL
+	)`)
+	require.NoError(t, err)
 	for _, migration := range orderedMigrations {
 		sqlText, err := loadMigrationSQL(migration.path)
 		require.NoError(t, err)

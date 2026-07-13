@@ -1,0 +1,5 @@
+-- Go-assisted migration manifest.
+-- Schema: repairs the canonical issue-state/runtime constraint shape from 0045.
+-- Data: replays the 0045 transformation only when canonical columns are absent.
+-- Validation: a canonical database takes the verified no-op ledger path.
+-- Ledger: preserves ID 0046_repair_issue_state_runtime_constraints exactly.

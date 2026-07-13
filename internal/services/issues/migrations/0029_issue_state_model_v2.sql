@@ -1,0 +1,6 @@
+-- Go-assisted migration manifest.
+-- Schema: replaces legacy issue status authority with lifecycle_state,
+-- review_state, closed_outcome, and archived_at while retaining compatibility.
+-- Data: maps every legacy status/archive row to the canonical lifecycle tuple.
+-- Validation: rejects unknown or internally inconsistent legacy states.
+-- Ledger: Go orchestration records 0029_issue_state_model_v2 atomically.
