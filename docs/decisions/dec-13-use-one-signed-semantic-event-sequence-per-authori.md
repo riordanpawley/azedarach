@@ -5,15 +5,15 @@
 
 ## Rationale
 
-Give each durable authority exactly one canonical sequence: one root sequence for user-global config, registry, views, and preferences, plus one independent sequence per project. Project deltas and root/project projections carry source ranges or vector cursors instead of allocating a competing scalar order. Receipt-bearing signed batches preserve idempotency and tamper evidence, while live tmux, Git, and filesystem observations remain externally authoritative.
+Give each durable authority exactly one canonical sequence: one user-global sequence, one device-local sequence per device, and one independent sequence per project. Authority deltas and cross-authority projections carry source ranges or vector cursors instead of allocating a competing scalar order. Accepted command batches include signed canonical results; rejected/no-op results remain in bounded idempotency storage unless explicitly promoted to semantic audit facts. Live tmux, Git, filesystem, and process observations remain externally authoritative.
 
 ## Context
 
-Investigation dgv reconciles whole-authority-plane event sourcing with dew incremental project projections, an event-sourced root user database, exact-match client/service protocol upgrades, permanent compact semantic history, signed recovery, and honest root/project genesis imports.
+Investigation dgv reconciles whole-authority-plane event sourcing with dew incremental project projections, user-global synchronization, device-local durable state, an exact-match client/service protocol, permanent historical-event upcasters, signed event chains, and honest user/device/project genesis imports.
 
 ## Consequences
 
-Root and project authorities have independent identity, sequence, hash chain, signing keys, transactions, snapshots, and recovery. Root owns user-global config/registry/views/preferences and composes project-qualified read models at a vector cursor; projects retain their own canonical facts and outboxes. There is no cross-authority atomic batch or total order. Client/service protocol identifiers match exactly; stored-event upcasters remain required. Implementation is gated on config-authority inventory, separate migration-reviewed root/project stores, root and session shadow parity, recovery drills, and continue/stop decisions.
+User, device, and project authorities have independent identity, sequence, hash chain, signing keys, transactions, snapshots, and recovery. User owns portable views/preferences; device owns local registration/paths/capabilities; projects own shared project facts and outboxes. Cross-project read models use a user/device/project vector cursor with no cross-authority atomic batch or total order. Offline recovery is mandatory for projects and optional for user/device authorities. Config keys must be classified as project, user, device, secret, or ephemeral. Implementation is gated on authority inventory, separate migration-reviewed stores, user/device and session shadow parity, recovery drills, and continue/stop decisions.
 
 ## Links
 
