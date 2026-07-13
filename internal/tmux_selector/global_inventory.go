@@ -694,8 +694,11 @@ func applyGlobalViewOrdering(snapshot *Snapshot, projection protocol.GlobalViewP
 	}
 	ranks := map[string]int{}
 	known := map[string]struct{}{}
+	projectedItems := map[string]protocol.GlobalViewProjectedItem{}
 	for i, item := range projection.Items {
-		ranks[protocol.NormalizeProjectID(item.Identity.ProjectID.String())+":"+item.Identity.IssueID.String()] = i
+		key := protocol.NormalizeProjectID(item.Identity.ProjectID.String()) + ":" + item.Identity.IssueID.String()
+		ranks[key] = i
+		projectedItems[key] = item
 	}
 	for _, identity := range projection.KnownTaskIDs {
 		known[protocol.NormalizeProjectID(identity.ProjectID.String())+":"+identity.IssueID.String()] = struct{}{}
@@ -707,6 +710,11 @@ func applyGlobalViewOrdering(snapshot *Snapshot, projection protocol.GlobalViewP
 			if _, visible := ranks[key]; !visible {
 				continue
 			}
+		}
+		if item, ok := projectedItems[key]; ok {
+			entry.ViewProjected = true
+			entry.ViewDepth = item.Depth
+			entry.ViewGroupID = item.GroupID
 		}
 		filtered = append(filtered, entry)
 	}
