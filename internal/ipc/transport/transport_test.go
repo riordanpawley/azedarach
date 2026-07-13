@@ -361,49 +361,18 @@ func spanStringAttr(span sdktrace.ReadOnlySpan, key string) string {
 }
 
 func TestCommandHonorsContextDeadlineOverDefaultTimeout(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
+	client := NewClient("unused")
+	if client.timeout != 30*time.Second {
+		t.Fatalf("default client timeout = %v, want 30s", client.timeout)
+	}
+
+	want := time.Now().Add(time.Hour).Round(0)
+	ctx, cancel := context.WithDeadline(context.Background(), want)
 	defer cancel()
-
-	socket := tempSocketPath(t)
-	defer os.Remove(socket)
-	srv := NewServer(socket, Handlers{
-		Handshake: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
-			return protocol.HelloAck{Accepted: true}, nil
-		},
-		Command: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			time.Sleep(6 * time.Second)
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				CompletedAt:     time.Now().UTC(),
-				OK:              true,
-			}, nil
-		},
-		Subscribe: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, func(), error) {
-			ch := make(chan protocol.EventEnvelope)
-			close(ch)
-			return ch, func() {}, nil
-		},
-	})
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(ctx) }()
-	waitForSocket(t, socket, errCh)
-
-	client := NewClient(socket)
-	cmdCtx, cmdCancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cmdCancel()
-
-	_, err := client.Command(cmdCtx, protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-context-deadline",
-		Kind:            protocol.EnvelopeKindCommand,
-		Command:         "task.list",
-		SentAt:          time.Now().UTC(),
-	})
-	if err != nil {
-		t.Fatalf("command: %v", err)
+	conn := &deadlineRecordingConn{}
+	client.setDeadline(ctx, conn)
+	if !conn.deadline.Equal(want) {
+		t.Fatalf("socket deadline = %v, want context deadline %v", conn.deadline, want)
 	}
 }
 
@@ -419,7 +388,9 @@ func TestCommandTimesOutWhenContextDeadlineIsShorterThanClientTimeout(t *testing
 			return protocol.HelloAck{Accepted: true}, nil
 		},
 		Command: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			time.Sleep(800 * time.Millisecond)
+			// This is the minimum real-time smoke coverage: a Unix socket must
+			// surface the OS deadline as net.Error rather than only storing it.
+			time.Sleep(25 * time.Millisecond)
 			return protocol.ResponseEnvelope{
 				ProtocolVersion: req.ProtocolVersion,
 				RequestID:       req.RequestID,
@@ -438,8 +409,8 @@ func TestCommandTimesOutWhenContextDeadlineIsShorterThanClientTimeout(t *testing
 	go func() { errCh <- srv.Serve(ctx) }()
 	waitForSocket(t, socket, errCh)
 
-	client := NewClient(socket).WithTimeout(10 * time.Second)
-	cmdCtx, cmdCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	client := NewClient(socket).WithTimeout(100 * time.Millisecond)
+	cmdCtx, cmdCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cmdCancel()
 
 	_, err := client.Command(cmdCtx, protocol.RequestEnvelope{
@@ -554,6 +525,19 @@ type deadlineRaceConn struct {
 	closeOnce             sync.Once
 	futureBlocked         atomic.Bool
 }
+
+type deadlineRecordingConn struct {
+	deadline time.Time
+}
+
+func (c *deadlineRecordingConn) Read([]byte) (int, error)          { return 0, nil }
+func (c *deadlineRecordingConn) Write(p []byte) (int, error)       { return len(p), nil }
+func (c *deadlineRecordingConn) Close() error                      { return nil }
+func (c *deadlineRecordingConn) LocalAddr() net.Addr               { return dummyAddr("local") }
+func (c *deadlineRecordingConn) RemoteAddr() net.Addr              { return dummyAddr("remote") }
+func (c *deadlineRecordingConn) SetDeadline(value time.Time) error { c.deadline = value; return nil }
+func (c *deadlineRecordingConn) SetReadDeadline(time.Time) error   { return nil }
+func (c *deadlineRecordingConn) SetWriteDeadline(time.Time) error  { return nil }
 
 func newDeadlineRaceConn() *deadlineRaceConn {
 	return &deadlineRaceConn{
@@ -745,6 +729,35 @@ func TestSocketDialStaleClassification(t *testing.T) {
 	}
 }
 
+func TestSocketReadinessRequiresDialableListener(t *testing.T) {
+	socket := tempSocketPath(t)
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	if unixListener, ok := listener.(*net.UnixListener); ok {
+		unixListener.SetUnlinkOnClose(false)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close unix socket: %v", err)
+	}
+	if socketDialReady(socket) {
+		t.Fatal("stale socket path reported ready without a listener")
+	}
+
+	if err := os.Remove(socket); err != nil {
+		t.Fatalf("remove stale socket: %v", err)
+	}
+	listener, err = net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen replacement unix socket: %v", err)
+	}
+	defer listener.Close()
+	if !socketDialReady(socket) {
+		t.Fatal("live unix listener did not report ready")
+	}
+}
+
 func waitForSocket(t *testing.T, socket string, errCh <-chan error) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -760,12 +773,21 @@ func waitForSocket(t *testing.T, socket string, errCh <-chan error) {
 			t.Fatalf("server exited before socket became ready")
 		default:
 		}
-		if _, err := os.Stat(socket); err == nil {
+		if socketDialReady(socket) {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("socket did not become ready: %s", socket)
+}
+
+func socketDialReady(socket string) bool {
+	conn, err := net.DialTimeout("unix", socket, 50*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func isSocketPermissionError(err error) bool {

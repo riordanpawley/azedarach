@@ -123,7 +123,7 @@ func TestNoticeListReconcilesDurableInteractionProjectionAcrossRestart(t *testin
 	ctx := context.Background()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "azedarach.db")
-	issueClient := issues.NewClientAtPath(dbPath, nil)
+	issueClient := newMigratedIssueClientAtPath(t, dbPath, nil)
 	defer issueClient.CloseDB()
 	request := testInteractionNoticeRequest()
 	issueID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "Needs decision", Type: domain.TypeTask, Status: domain.StatusInProgress})

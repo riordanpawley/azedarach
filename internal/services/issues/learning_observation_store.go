@@ -34,7 +34,7 @@ type LearningObservation struct {
 
 func (c *Client) CaptureLearningObservation(ctx context.Context, params CaptureLearningObservationParams) (LearningObservation, error) {
 	var out LearningObservation
-	err := retrySQLiteBusy(ctx, func() error { var err error; out, err = c.captureLearningObservationOnce(ctx, params); return err })
+	err := c.retrySQLiteBusy(ctx, func() error { var err error; out, err = c.captureLearningObservationOnce(ctx, params); return err })
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
 	}

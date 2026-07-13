@@ -414,7 +414,7 @@ func TestMergeAbortsIncompleteNonConflictMerge(t *testing.T) {
 	})
 }
 
-func TestMergePreservesCommitHooksAndAbortsIncompleteMerge(t *testing.T) {
+func TestRealProcessProfileMergePreservesCommitHooksAndAbortsIncompleteMerge(t *testing.T) {
 	repo := initDivergedRepo(t)
 	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
 	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\necho hook failed >&2\nexit 1\n"), 0o755); err != nil {
@@ -451,7 +451,7 @@ func TestMergePreservesCommitHooksAndAbortsIncompleteMerge(t *testing.T) {
 	}
 }
 
-func TestMergeReportsSlowHookDiagnostics(t *testing.T) {
+func TestRealProcessProfileMergeReportsSlowHookDiagnostics(t *testing.T) {
 	repo := initDivergedRepo(t)
 	hooks := map[string]string{
 		"commit-msg": "#!/bin/sh\nsleep 0.05\nexit 0\n",
@@ -556,10 +556,11 @@ func TestMergeGateBudgetLeavesFinalizationReserve(t *testing.T) {
 }
 
 func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
-	// Use a long safety budget, then trigger GNU timeout only after the fake Go
-	// process confirms that it emitted its diagnostic. This keeps aggregate
-	// scheduler load out of the test precondition while exercising the real
-	// timeout, output-retention, and process-tree cleanup path.
+	// A direct synthetic body isolates wrapper timeout/output semantics from
+	// task-runner and Go startup scheduling. Use a long safety budget, then
+	// trigger GNU timeout only after the synthetic body confirms that it emitted
+	// its diagnostic. The separate budget test inspects the production body, and
+	// the merge hook executes it end to end.
 	const timeoutBudget = "1h"
 
 	timeoutPath, err := exec.LookPath("timeout")
@@ -581,7 +582,7 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 		t.Fatalf("mkdir scripts: %v", err)
 	}
 	sourceScriptsDir := filepath.Join("..", "..", "..", "scripts")
-	for _, name := range []string{"git-merge-rebase-gate.sh", "git-merge-rebase-gate-body.sh"} {
+	for _, name := range []string{"git-merge-rebase-gate.sh"} {
 		content, readErr := os.ReadFile(filepath.Join(sourceScriptsDir, name))
 		if readErr != nil {
 			t.Fatalf("read %s: %v", name, readErr)
@@ -601,9 +602,9 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 	}
 	childPIDFile := filepath.Join(repo, "timeout-child.pid")
 	diagnosticEmittedFile := filepath.Join(repo, "diagnostic-emitted")
-	fakeGo := "#!/bin/sh\nif [ \"$1\" = build ]; then exit 0; fi\nsleep 30 &\nchild_pid=$!\nprintf '%s\\n' \"$child_pid\" >\"$AZEDARACH_TEST_CHILD_PID_FILE\"\necho retained-timeout-marker\nprintf 'emitted\\n' >\"$AZEDARACH_TEST_DIAGNOSTIC_EMITTED_FILE\"\nwait \"$child_pid\"\n"
-	if err := os.WriteFile(filepath.Join(fakeBin, "go"), []byte(fakeGo), 0o755); err != nil {
-		t.Fatalf("write fake go: %v", err)
+	fakeBody := "#!/bin/sh\nsleep 30 &\nchild_pid=$!\nprintf '%s\\n' \"$child_pid\" >\"$AZEDARACH_TEST_CHILD_PID_FILE\"\necho retained-timeout-marker\nprintf 'emitted\\n' >\"$AZEDARACH_TEST_DIAGNOSTIC_EMITTED_FILE\"\nwait \"$child_pid\"\n"
+	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate-body.sh"), []byte(fakeBody), 0o755); err != nil {
+		t.Fatalf("write fake gate body: %v", err)
 	}
 
 	cmd := exec.Command(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"))
@@ -766,7 +767,7 @@ func TestProcessGroupCleanupKillsTermIgnoringMemberAfterOuterDone(t *testing.T) 
 	}
 }
 
-func TestMergeCleanlyDiscardsDirtyPostMergeHookAndReportsFailure(t *testing.T) {
+func TestRealProcessProfileMergeCleanlyDiscardsDirtyPostMergeHookAndReportsFailure(t *testing.T) {
 	repo := initDivergedRepo(t)
 	hookPath := filepath.Join(repo, ".git", "hooks", "post-merge")
 	hook := "#!/bin/sh\nprintf hook-dirty\\n > hook-created.txt\ngit add hook-created.txt\necho post-merge hook dirtied target >&2\nexit 0\n"
@@ -804,7 +805,7 @@ func TestMergeCleanlyDiscardsDirtyPostMergeHookAndReportsFailure(t *testing.T) {
 	}
 }
 
-func TestMergeCleanlyDiscardsDirtyCommitMsgHookAfterAbort(t *testing.T) {
+func TestRealProcessProfileMergeCleanlyDiscardsDirtyCommitMsgHookAfterAbort(t *testing.T) {
 	repo := initDivergedRepo(t)
 	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
 	hook := "#!/bin/sh\nprintf hook-dirty\\n > hook-created.txt\necho commit-msg hook dirtied target >&2\nexit 1\n"
@@ -841,7 +842,7 @@ func TestMergeCleanlyDiscardsDirtyCommitMsgHookAfterAbort(t *testing.T) {
 	}
 }
 
-func TestMergeCleanlyTransactionalAppliesScratchMergeToCleanTarget(t *testing.T) {
+func TestRealProcessProfileMergeCleanlyTransactionalAppliesScratchMergeToCleanTarget(t *testing.T) {
 	repo := initDivergedRepo(t)
 	originalHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
 
@@ -875,7 +876,7 @@ func TestMergeCleanlyTransactionalAppliesScratchMergeToCleanTarget(t *testing.T)
 	}
 }
 
-func TestMergeCleanlyTransactionalRunsScratchHooksAndKeepsTargetCleanWhenHookFails(t *testing.T) {
+func TestRealProcessProfileMergeCleanlyTransactionalRunsScratchHooksAndKeepsTargetCleanWhenHookFails(t *testing.T) {
 	repo := initDivergedRepo(t)
 	originalHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
 	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
@@ -918,7 +919,7 @@ func TestMergeCleanlyTransactionalRunsScratchHooksAndKeepsTargetCleanWhenHookFai
 	}
 }
 
-func TestRecoverIntegrationJournalCompletesInterruptedFinalReset(t *testing.T) {
+func TestRealProcessProfileRecoverIntegrationJournalCompletesInterruptedFinalReset(t *testing.T) {
 	repo := initDivergedRepo(t)
 	client := NewClient(NewExecRunner(repo), slog.Default())
 	ctx := context.Background()
@@ -2119,7 +2120,7 @@ func TestRuntimeStatus(t *testing.T) {
 	}
 }
 
-func TestRuntimeStatusUsesLocalBaseBeforeCurrentRemoteBase(t *testing.T) {
+func TestRealProcessProfileRuntimeStatusUsesLocalBaseBeforeCurrentRemoteBase(t *testing.T) {
 	repo := t.TempDir()
 	runClientTestGit(t, repo, "init", "-q", "-b", "preview")
 	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
@@ -2161,7 +2162,7 @@ func TestRuntimeStatusUsesLocalBaseBeforeCurrentRemoteBase(t *testing.T) {
 	}
 }
 
-func TestRuntimeStatusWithRemoteBasePreferenceUsesCurrentRemoteBase(t *testing.T) {
+func TestRealProcessProfileRuntimeStatusWithRemoteBasePreferenceUsesCurrentRemoteBase(t *testing.T) {
 	repo := t.TempDir()
 	runClientTestGit(t, repo, "init", "-q", "-b", "preview")
 	runClientTestGit(t, repo, "config", "user.email", "test@example.com")

@@ -58,7 +58,7 @@ type ExternalSyncState struct {
 // identifier. It is intentionally narrow and used by sync import paths only.
 func (c *Client) UpsertSyncedTask(ctx context.Context, task domain.Task) (bool, error) {
 	var changed bool
-	err := retrySQLiteBusy(ctx, func() error {
+	err := c.retrySQLiteBusy(ctx, func() error {
 		var err error
 		changed, err = c.upsertSyncedTaskOnce(ctx, task)
 		return err
@@ -149,7 +149,7 @@ func (c *Client) upsertSyncedTaskOnce(ctx context.Context, task domain.Task) (bo
 }
 
 func (c *Client) UpsertExternalRef(ctx context.Context, ref ExternalRef) error {
-	err := retrySQLiteBusy(ctx, func() error {
+	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.upsertExternalRefOnce(ctx, ref)
 	})
 	if err == nil {
@@ -399,7 +399,7 @@ func (c *Client) GetExternalSyncState(ctx context.Context, provider, projectID s
 }
 
 func (c *Client) UpsertExternalSyncState(ctx context.Context, state ExternalSyncState) error {
-	err := retrySQLiteBusy(ctx, func() error {
+	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.upsertExternalSyncStateOnce(ctx, state)
 	})
 	if err == nil {
@@ -439,7 +439,7 @@ func (c *Client) upsertExternalSyncStateOnce(ctx context.Context, state External
 }
 
 func (c *Client) RecordSyncConflict(ctx context.Context, conflict SyncConflict) error {
-	err := retrySQLiteBusy(ctx, func() error {
+	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.recordSyncConflictOnce(ctx, conflict)
 	})
 	if err == nil {

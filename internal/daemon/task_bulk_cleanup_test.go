@@ -47,7 +47,7 @@ func TestTaskBulkCleanupContinuesAfterUnresolvedDescendantFailure(t *testing.T) 
 	ctx := context.Background()
 	projectID := "proj-bulk-cleanup"
 	repoDir := t.TempDir()
-	client := issues.NewClient(repoDir, slog.Default())
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	parent, err := client.Create(ctx, issues.CreateTaskParams{Title: "blocked parent", Type: domain.TypeTask})
 	if err != nil {
@@ -178,7 +178,7 @@ func TestTaskBulkCleanupRejectsOutOfRangePerIssueTimeout(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-bulk-timeout-validation"
 	repoDir := t.TempDir()
-	client := issues.NewClient(repoDir, slog.Default())
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	store := state.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })

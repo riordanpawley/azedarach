@@ -10,10 +10,11 @@ import (
 )
 
 func TestListProjectIssueObservationEventsProvidesDurableCursor(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
-	writer := NewClientAtPath(path, slog.Default())
-	reader := NewClientAtPath(path, slog.Default())
+	writer := newTestClientAtPath(t, path, slog.Default())
+	reader := newTestClientAtPath(t, path, slog.Default())
 	t.Cleanup(func() { _ = writer.CloseDB(); _ = reader.CloseDB() })
 	first, err := writer.Create(ctx, CreateTaskParams{Title: "first", Description: "scope", Acceptance: "done", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {

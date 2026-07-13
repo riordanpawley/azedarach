@@ -142,7 +142,7 @@ func TestInteractionRoutineAnswerRemainsEvidenceOnly(t *testing.T) {
 func newInteractionAnswerTestService(t *testing.T, requestID string) (context.Context, issueInteractionService, *issues.Client, domain.InteractionRequest) {
 	t.Helper()
 	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
-	client := issues.NewClient(t.TempDir(), slog.Default())
+	client := newMigratedIssueClient(t, t.TempDir(), slog.Default())
 	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "before", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)

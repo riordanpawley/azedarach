@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/testutil/issuestest"
 )
 
 func TestMain(m *testing.M) {
@@ -19,5 +21,12 @@ func TestMain(m *testing.M) {
 	}
 	_ = os.Setenv("AZEDARACH_REFUSE_REAL_TMUX_MUTATION", "1")
 	_ = os.Unsetenv("AZEDARACH_ALLOW_REAL_TMUX_IN_TESTS")
-	os.Exit(m.Run())
+	code := m.Run()
+	if err := issuestest.CloseTemplate(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "remove daemon SQLite test template: %v\n", err)
+		if code == 0 {
+			code = 1
+		}
+	}
+	os.Exit(code)
 }

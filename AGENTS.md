@@ -28,7 +28,7 @@ cd .
 Use these as primary checks after code changes:
 
 ```bash
-# Build and test
+# Build and canonical cold test (machine-readable, uncached)
 just build
 just test
 
@@ -38,8 +38,13 @@ just run
 # Optional focused quality gates
 just check-boundaries
 
-# Full Go test sweep
-go test ./...
+# Fast focused development feedback
+just test-fast --package ./internal/cli --run TestCommand
+
+# Specialized execution-mode profiles (run when relevant)
+just test-integration
+just test-migration-clone
+just test-race
 
 # Aggregate daemon race sweep (four sequential shards; 15m/shard, 45m aggregate)
 just test-race-daemon
@@ -61,6 +66,8 @@ go test ./internal/tui ./internal/cli ./internal/daemon/...
 
 ## Complete Test-Failure Batch Workflow
 
+- Use `just test` (or `just test-timing cold`) for the canonical uncached machine-readable full run. It preserves the complete `go test -json` stream, bounds package concurrency with `-p=4`, emits sorted package/test durations and all failures, and enforces the committed baseline/budgets documented in [docs/26-test-timing-profiles.md](docs/26-test-timing-profiles.md). Use the distinct `cached`, `focused`, `integration`, `migration-clone`, `race`, or `boundary` profiles only for their documented semantics; do not present a focused or cached result as cold full-suite evidence.
+- `just merge-gate` is the required local merge contract: build once, run the cold semantic suite once, then run static and focused executable boundary guards. Integration/subprocess, migration-clone, and race profiles are change-sensitive execution-mode gates; they intentionally rerun only the contracts that need those modes.
 - When a broad validation command fails, do not fix the first visible test and repeatedly rerun in a one-test-at-a-time loop.
 - Run the complete relevant suite once with machine-readable output, such as `go test -json ./... -count=1 -timeout 10m`, and preserve the output outside the repository worktree when it is too large for the terminal.
 - Extract the full set of failed tests and packages from that run, then inspect the associated output and classify failures by shared root cause. Truncated terminal output is not evidence that only the visible failure exists.

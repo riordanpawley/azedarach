@@ -10,6 +10,7 @@ import (
 )
 
 func TestLearningPortfolioHealthUsesExplicitDeliveryDenominators(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	learning, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "public", Evidence: "safe"})
@@ -32,6 +33,7 @@ func TestLearningPortfolioHealthUsesExplicitDeliveryDenominators(t *testing.T) {
 }
 
 func TestLearningPortfolioHealthUsesProposalConfirmationAndExclusionLedger(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	learning, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "public", Evidence: "safe"})
@@ -64,6 +66,7 @@ func TestLearningPortfolioHealthUsesProposalConfirmationAndExclusionLedger(t *te
 }
 
 func TestLearningPortfolioHealthCoverageUsesCurrentRecallEligibility(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	db, err := client.dbHandle()

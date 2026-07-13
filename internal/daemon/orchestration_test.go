@@ -25,7 +25,7 @@ func TestRootedOrchestratorIdleWakeCarriesDurableCursorAndDirectNestedRoots(t *t
 	ctx := context.Background()
 	projectID := "proj-continuation"
 	repoDir := t.TempDir()
-	issueClient := issues.NewClient(repoDir, slog.Default())
+	issueClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issueClient.CloseDB() })
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
@@ -99,7 +99,7 @@ func TestRootedOrchestratorIdleWakeCarriesDurableCursorAndDirectNestedRoots(t *t
 func TestBootstrapRecoveryResumesReplacedRootedOrchestratorOnceWithDurableCursor(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	issueClient := issues.NewClient(repoDir, slog.Default())
+	issueClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issueClient.CloseDB() })
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
 	projectID := d.canonicalProjectID(protocol.DefaultProjectID)
@@ -326,7 +326,7 @@ func TestOrchestrationIntentRejectsInvalidShapeBeforeMutation(t *testing.T) {
 
 func TestProjectOrchestrationApplyAutomaticallyBacklogsPrematureCandidate(t *testing.T) {
 	ctx := context.Background()
-	client := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	id, err := client.Create(ctx, issues.CreateTaskParams{Title: "Thin candidate", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
 	if err != nil {
@@ -364,7 +364,7 @@ func TestProjectCandidateRoutesDoNotAutomaticallyRouteOwnedPrematureWork(t *test
 
 func TestProjectOrchestrationRoutesContinueAfterCandidateFailure(t *testing.T) {
 	ctx := context.Background()
-	client := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	foreignID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Foreign", Description: "Choose policy", Acceptance: "Policy chosen", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
 	if err != nil {
@@ -652,8 +652,8 @@ func TestOrchestrationGlobalActiveCountIncludesUninspectedRoots(t *testing.T) {
 func TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
-	reader := issues.NewClientAtPath(path, slog.Default())
-	writer := issues.NewClientAtPath(path, slog.Default())
+	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
+	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
 	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
 	id, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Description: "Executable", Acceptance: "Worker completes the scoped change", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
 	if err != nil {
@@ -716,8 +716,8 @@ func TestExplainOrchestrationCandidatesRejectsInsufficientContracts(t *testing.T
 func TestProjectOrchestrationSnapshotRefreshesCrossProcessInteractions(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
-	reader := issues.NewClientAtPath(path, slog.Default())
-	writer := issues.NewClientAtPath(path, slog.Default())
+	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
+	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
 	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
 	id, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
 	if err != nil {

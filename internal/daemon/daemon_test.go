@@ -15,7 +15,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
-	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 func TestDrainInFlightCommandsWaitsForCompletionAndRejectsNewIntake(t *testing.T) {
@@ -194,7 +193,7 @@ func TestCommandCanonicalizesProjectIDAcrossTaskCommands(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(dbPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, dbPath, logger)
 	t.Cleanup(func() {
 		if err := issuesClient.CloseDB(); err != nil {
 			t.Fatalf("close issues db: %v", err)
@@ -483,7 +482,7 @@ func TestCommandDefaultsBlankProjectID(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(dbPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, dbPath, logger)
 	t.Cleanup(func() {
 		if err := issuesClient.CloseDB(); err != nil {
 			t.Fatalf("close issues db: %v", err)

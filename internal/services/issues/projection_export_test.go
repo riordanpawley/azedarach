@@ -2,15 +2,14 @@ package issues
 
 import (
 	"context"
-	"log/slog"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestExportProjectionUsesStableSchemaFingerprintAndMonotonicSourceRevision(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	c := NewClientAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	c := newTestClient(t)
 	first, err := c.ExportProjection(ctx, "project-a")
 	if err != nil {
 		t.Fatal(err)

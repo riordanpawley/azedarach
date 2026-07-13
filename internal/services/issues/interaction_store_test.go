@@ -12,8 +12,9 @@ import (
 )
 
 func TestResolveInteractionAtomicEffectsAndRollback(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	c := NewClient(t.TempDir(), nil)
+	c := newTestClient(t)
 	issueID, err := c.Create(ctx, CreateTaskParams{Title: "before", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -67,8 +68,9 @@ func TestResolveInteractionAtomicEffectsAndRollback(t *testing.T) {
 }
 
 func TestResolveInteractionAnswerOnlyPreservesIssueMetadataAndObservations(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	c := NewClient(t.TempDir(), nil)
+	c := newTestClient(t)
 	issueID, err := c.Create(ctx, CreateTaskParams{Title: "unchanged", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -110,8 +112,9 @@ func TestResolveInteractionAnswerOnlyPreservesIssueMetadataAndObservations(t *te
 }
 
 func TestResolveInteractionSignificantAnswerWithoutDurableEffects(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	c := NewClient(t.TempDir(), nil)
+	c := newTestClient(t)
 	issueID, err := c.Create(ctx, CreateTaskParams{Title: "unchanged", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -145,8 +148,9 @@ func TestResolveInteractionSignificantAnswerWithoutDurableEffects(t *testing.T) 
 }
 
 func TestResolveInteractionUpdatesLinkedRequirementAndTracesSignificantAnswer(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	c := NewClient(t.TempDir(), nil)
+	c := newTestClient(t)
 	issueID, err := c.Create(ctx, CreateTaskParams{Title: "issue", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -189,8 +193,9 @@ func TestResolveInteractionUpdatesLinkedRequirementAndTracesSignificantAnswer(t 
 }
 
 func TestResolveInteractionCreatesExplicitDecision(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	c := NewClient(t.TempDir(), nil)
+	c := newTestClient(t)
 	issueID, err := c.Create(ctx, CreateTaskParams{Title: "issue", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -221,8 +226,9 @@ func TestResolveInteractionCreatesExplicitDecision(t *testing.T) {
 }
 
 func TestResolveInteractionLinksExistingDecision(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	c := NewClient(t.TempDir(), nil)
+	c := newTestClient(t)
 	issueID, err := c.Create(ctx, CreateTaskParams{Title: "issue", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -257,8 +263,9 @@ func TestResolveInteractionLinksExistingDecision(t *testing.T) {
 }
 
 func TestResolveInteractionSpecFailureRollsBackIssueAndResolution(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	c := NewClient(t.TempDir(), nil)
+	c := newTestClient(t)
 	issueID, err := c.Create(ctx, CreateTaskParams{Title: "before", Description: "before", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -308,9 +315,10 @@ func interactionTestTask(t *testing.T, ctx context.Context, c *Client, id string
 }
 
 func TestInteractionStoreDurabilityDecisionKeyAndStaleCache(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
-	writer, reader := NewClientAtPath(path, nil), NewClientAtPath(path, nil)
+	writer, reader := newTestClientAtPath(t, path, nil), newTestClientAtPath(t, path, nil)
 	if _, err := writer.List(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -348,14 +356,15 @@ func TestInteractionStoreDurabilityDecisionKeyAndStaleCache(t *testing.T) {
 	if err != nil || waiting {
 		t.Fatalf("reader retained stale waiting projection: waiting=%v err=%v", waiting, err)
 	}
-	if _, ok, err := NewClientAtPath(path, nil).GetInteraction(ctx, r.ID); err != nil || !ok {
+	if _, ok, err := newTestClientAtPath(t, path, nil).GetInteraction(ctx, r.ID); err != nil || !ok {
 		t.Fatalf("restart lookup ok=%v err=%v", ok, err)
 	}
 }
 
 func TestInteractionStoreRejectsStaleRevision(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	c := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	c := newTestClient(t)
 	if _, err := c.List(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -381,8 +390,9 @@ func TestInteractionStoreRejectsStaleRevision(t *testing.T) {
 }
 
 func TestInteractionStoreRejectsBypassedTransition(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	c := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	c := newTestClient(t)
 	if _, err := c.List(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -401,8 +411,9 @@ func TestInteractionStoreRejectsBypassedTransition(t *testing.T) {
 }
 
 func TestInteractionStoreReadsLegacyStringAnswerAuditAndRewritesStructuredFinal(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	c := NewClient(t.TempDir(), nil)
+	c := newTestClient(t)
 	issueID, err := c.Create(ctx, CreateTaskParams{Title: "Issue", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)

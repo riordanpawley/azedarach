@@ -909,7 +909,7 @@ func newTestIssueClient(t *testing.T) (*issues.Client, string) {
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	client := issues.NewClient(repoDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	client := newMigratedIssueClient(t, repoDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { _ = client.CloseDB() })
 	return client, repoDir
 }

@@ -302,6 +302,10 @@ func TestRuntimeProjectionWriterCoalescesProjectionBurstsByIssue(t *testing.T) {
 		if rev := writer.PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktree, status, true, true); rev != 0 {
 			t.Fatalf("scheduled git revision %d = %d, want 0 before delayed publish", i, rev)
 		}
+		// Keep the burst active for longer than one coalescing window while each
+		// update still arrives well within that window. Publication must wait for
+		// the quiet period after the final update, not fire mid-burst.
+		time.Sleep(20 * time.Millisecond)
 	}
 
 	evt := waitForRuntimeProjectionEvent(t, ch)

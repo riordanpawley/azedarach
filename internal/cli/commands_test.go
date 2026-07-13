@@ -17,7 +17,9 @@ import (
 	"time"
 
 	clitext "github.com/riordanpawley/azedarach/internal/cli/text"
+	autoclient "github.com/riordanpawley/azedarach/internal/client"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -8813,6 +8815,7 @@ func TestIssueCreateCommandUsesInheritedImplsWhenTaskSnapshotTimesOut(t *testing
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
 	}
+	deps.DaemonClient.WithReconnectPolicy(reconnect.Policy{MaxAttempts: 1})
 
 	parentID := "az-parent"
 	_ = captureStdout(t, func() error {
@@ -8887,6 +8890,7 @@ func TestIssueCreateCommandOmitsImplWhenTaskSnapshotTimesOutWithoutInferenceSign
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
 	}
+	deps.DaemonClient.WithReconnectPolicy(reconnect.Policy{MaxAttempts: 1})
 
 	parentID := "az-parent"
 	err := IssueCreateCommand(deps, IssueCreateOptions{
@@ -10965,6 +10969,9 @@ func TestIssueContextRiskCommandTimeoutReturnsDegradedSummary(t *testing.T) {
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+				return protocol.HelloAck{Accepted: true}, nil
+			},
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				return protocol.ResponseEnvelope{}, context.DeadlineExceeded
 			},
@@ -10972,6 +10979,7 @@ func TestIssueContextRiskCommandTimeoutReturnsDegradedSummary(t *testing.T) {
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
 	}
+	deps.DaemonClient.WithReconnectPolicy(reconnect.Policy{MaxAttempts: 1})
 
 	output := captureStdout(t, func() error {
 		return IssueContextRiskCommand(deps, IssueContextRiskOptions{IssueID: "az-1", JSON: true})
@@ -10982,6 +10990,20 @@ func TestIssueContextRiskCommandTimeoutReturnsDegradedSummary(t *testing.T) {
 	}
 	if !summary.Degraded || !summary.Timeout || summary.IssueID != "az-1" {
 		t.Fatalf("summary = %+v, want degraded timeout summary for az-1", summary)
+	}
+}
+
+func TestShouldAutostartAfterDaemonReadErrorSeparatesReadWaitFromTransportFailure(t *testing.T) {
+	readWait := &daemonclient.ReadWaitTimeoutError{
+		Mode:   daemonclient.ReadWaitModeDefault,
+		Budget: 2 * time.Second,
+		Err:    context.DeadlineExceeded,
+	}
+	if shouldAutostartAfterDaemonReadError(readWait) {
+		t.Fatal("typed snapshot read timeout triggered daemon autostart")
+	}
+	if !shouldAutostartAfterDaemonReadError(errors.New("dial unix /tmp/azedarach.sock: connection refused")) {
+		t.Fatal("transport connection failure did not trigger daemon autostart")
 	}
 }
 
@@ -13752,6 +13774,8 @@ func TestIssueCreateCommandUsesExtendedDaemonAttachTimeout(t *testing.T) {
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
 	}
+	deps.AutostartRetryPolicy = &autoclient.AutostartRetryPolicy{}
+	deps.DaemonClient.WithReconnectPolicy(reconnect.Policy{MaxAttempts: 1})
 
 	err := IssueCreateCommand(deps, IssueCreateOptions{
 		Title:           "timeout budget",
