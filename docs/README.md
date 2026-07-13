@@ -59,6 +59,7 @@ This directory primarily contains **developer/internal documentation**.
 - `orchestration.project_review`: `projection` (durable issue/review/ownership, mailbox/observation evidence, and worktree projections; accepted outcomes delegate integration and cleanup to hybrid `task.close`).
 - `orchestration.claim_start`: `hybrid` (durable ownership/start-attempt projection plus daemon session-start operation/runtime compensation).
 - `orchestration.project_loop`: `projection` (durable issue-observation cursor and loop checkpoint refreshed before deterministic review-first action replay).
+- `projection.delta_stream`: `projection` (durable project delta ledger and version history; cursor replay and snapshot reads never reconcile or poll tmux).
 - `task.review_handoff`: `projection` (durable issue v2 lifecycle/review projection + session activity projection; active issue self-handoff remains allowed).
 - `task.integration_readiness` and `task.context_risk_closeout`: `projection` (durable issue projection + mailbox/observation evidence).
 - `task.merge_base_target`: `projection` (durable issue graph + worktree projection; explicit root-to-base requests also require issue-scoped `human.input_provided` acceptance evidence).

@@ -182,6 +182,7 @@ fd "filename" -t f internal cmd
    - orchestration scope singleton -> `hybrid` (refreshed durable scope lease + live tmux runtime)
    - rooted parent orchestration continuation -> `hybrid` (durable rooted lease/cursor + refreshed direct nested-root, interaction, completion, and session projections + live tmux wake delivery)
    - project orchestration completion -> `hybrid` (refreshed issue/review/interaction/session projections + live tmux runtime)
+   - keyed monotonic projection delta replay, consumer cursors, and snapshot-at-cursor reads -> `projection` (durable project delta ledger and version history; reads never reconcile or poll tmux)
 
 ### Adding New Invariants (Required Checklist)
 

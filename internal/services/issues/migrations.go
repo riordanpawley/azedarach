@@ -78,6 +78,7 @@ var orderedMigrations = []migration{
 	{id: "0044_learning_activation_abandonment", path: "migrations/0044_learning_activation_abandonment.sql"},
 	{id: "0045_issue_state_runtime_constraints", path: "migrations/0045_issue_state_runtime_constraints.sql", apply: applyIssueStateRuntimeConstraintsMigration},
 	{id: "0046_repair_issue_state_runtime_constraints", apply: applyIssueStateRuntimeConstraintsRepairMigration},
+	{id: "0047_projection_delta_authority", path: "migrations/0047_projection_delta_authority.sql", apply: applyProjectionDeltaAuthorityMigration},
 }
 
 func applyIssueStateRuntimeConstraintsRepairMigration(ctx context.Context, db *sql.DB, id string) error {
@@ -454,6 +455,9 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("record skipped migration %s: %w", m.id, err)
 		}
 	}
+	if err := validateProjectionDeltaAuthoritySchema(ctx, db); err != nil {
+		return fmt.Errorf("validate projection delta authority schema: %w", err)
+	}
 
 	canonicalApplied, err := isMigrationApplied(ctx, db, "0045_issue_state_runtime_constraints")
 	if err != nil {
@@ -475,6 +479,101 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("seed built-in board views: %w", err)
 	}
 
+	return nil
+}
+
+func applyProjectionDeltaAuthorityMigration(ctx context.Context, db *sql.DB, id string) error {
+	sqlText, err := loadMigrationSQL("migrations/0047_projection_delta_authority.sql")
+	if err != nil {
+		return fmt.Errorf("load migration %s: %w", id, err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+		return fmt.Errorf("apply migration %s: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(id,applied_at) VALUES(?,?)`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	return nil
+}
+
+func validateProjectionDeltaAuthoritySchema(ctx context.Context, db *sql.DB) error {
+	required := []struct{ kind, name string }{
+		{"table", "projection_streams"},
+		{"table", "projection_deltas"},
+		{"table", "projection_consumer_cursors"},
+		{"index", "idx_projection_deltas_key_history"},
+	}
+	for _, object := range required {
+		var exists bool
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type=? AND name=?)`, object.kind, object.name).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("applied migration 0047_projection_delta_authority is missing %s %s", object.kind, object.name)
+		}
+	}
+	columns := map[string][]string{
+		"projection_streams":          {"project_id", "head_cursor", "updated_at"},
+		"projection_deltas":           {"project_id", "cursor", "kind", "key", "operation", "idempotency_key", "payload_json", "committed_at"},
+		"projection_consumer_cursors": {"project_id", "consumer", "cursor", "updated_at"},
+	}
+	for table, requiredColumns := range columns {
+		rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+		if err != nil {
+			return err
+		}
+		found := map[string]bool{}
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, typ string
+			var defaultValue any
+			if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
+				rows.Close()
+				return err
+			}
+			found[name] = true
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, column := range requiredColumns {
+			if !found[column] {
+				return fmt.Errorf("applied migration 0047_projection_delta_authority is missing column %s.%s", table, column)
+			}
+		}
+	}
+	for _, table := range []string{"projection_deltas", "projection_consumer_cursors"} {
+		rows, err := db.QueryContext(ctx, `PRAGMA foreign_key_list(`+table+`)`)
+		if err != nil {
+			return err
+		}
+		hasStreamFK := false
+		for rows.Next() {
+			var id, seq int
+			var target, from, to, onUpdate, onDelete, match string
+			if err := rows.Scan(&id, &seq, &target, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+				rows.Close()
+				return err
+			}
+			if target == "projection_streams" && from == "project_id" && to == "project_id" && onDelete == "CASCADE" {
+				hasStreamFK = true
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if !hasStreamFK {
+			return fmt.Errorf("applied migration 0047_projection_delta_authority is missing project stream foreign key on %s", table)
+		}
+	}
 	return nil
 }
 

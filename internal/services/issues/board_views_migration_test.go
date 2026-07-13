@@ -212,7 +212,7 @@ func seedBoardViewsPreMigrationDB(t *testing.T, dbPath string, includeCustomBoar
 	require.NoError(t, err)
 
 	for _, migration := range orderedMigrations {
-		if migration.id == boardViewsMigrationID || migration.id == "0045_issue_state_runtime_constraints" {
+		if migration.id == boardViewsMigrationID || migration.id == "0045_issue_state_runtime_constraints" || migration.id == "0047_projection_delta_authority" {
 			continue
 		}
 		_, err := db.Exec(`INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, migration.id, now)

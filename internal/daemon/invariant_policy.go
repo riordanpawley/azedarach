@@ -48,6 +48,7 @@ const (
 	daemonInvariantOrchestrationReview     daemonInvariantID = "orchestration.project_review"
 	daemonInvariantOrchestrationClaimStart daemonInvariantID = "orchestration.claim_start"
 	daemonInvariantOrchestrationLoop       daemonInvariantID = "orchestration.project_loop"
+	daemonInvariantProjectionDeltaStream   daemonInvariantID = "projection.delta_stream"
 )
 
 var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
@@ -84,6 +85,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantOrchestrationReview:     daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationClaimStart: daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationLoop:       daemonInvariantSourceProjection,
+	daemonInvariantProjectionDeltaStream:   daemonInvariantSourceProjection,
 }
 
 func sourceForInvariant(id daemonInvariantID) daemonInvariantSource {
