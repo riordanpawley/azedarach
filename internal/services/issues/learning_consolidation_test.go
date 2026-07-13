@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
+	"github.com/riordanpawley/azedarach/internal/testutil/issuefixture"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -117,21 +119,26 @@ func TestLearningConsolidationSuggestionsExcludeLifecycleIneligibleRows(t *testi
 func TestLearningConsolidationCandidateRetrievalIsBounded(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	learnings := make([]issuefixture.Learning, 180)
 	for i := 0; i < 180; i++ {
 		summary := fmt.Sprintf("Unique learning topic %03d has isolated vocabulary token%03d", i, i)
 		if i < 2 {
 			summary = "Use bounded retries for daemon operations"
 		}
-		_, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: summary, Evidence: "scale"})
-		require.NoError(t, err)
+		learnings[i] = issuefixture.Learning{LocalID: fmt.Sprintf("learn-scale-%03d", i), ProjectID: "proj", Summary: summary, Evidence: "scale"}
 	}
+	setup, err := issuefixture.SeedDB(ctx, db, issuefixture.Fixture{Learnings: learnings})
+	require.NoError(t, err)
+	queryStarted := time.Now()
 	rows, err := client.SuggestLearningConsolidations(ctx, "proj")
+	queryDuration := time.Since(queryStarted)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, LearningSuggestionDuplicate, rows[0].Kind)
+	t.Logf("learning boundedness timing: setup=%s query=%s rows=%d", setup.Duration, queryDuration, setup.Rows)
 
-	db, err := client.dbHandle()
-	require.NoError(t, err)
 	plan, err := db.QueryContext(ctx, `EXPLAIN QUERY PLAN SELECT rowid FROM agent_learning_search_fts WHERE agent_learning_search_fts MATCH ? ORDER BY rank,rowid LIMIT ?`, `"bounded" OR "retries"`, 12)
 	require.NoError(t, err)
 	defer plan.Close()
@@ -148,7 +155,10 @@ func TestLearningConsolidationCandidateRetrievalIsBounded(t *testing.T) {
 func TestLearningConsolidationCursorEventuallyCoversBeyondFirstWindow(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
+	db, err := client.dbHandle()
+	require.NoError(t, err)
 	lateIDs := map[int]string{}
+	learnings := make([]issuefixture.Learning, 140)
 	for i := 0; i < 140; i++ {
 		summary := fmt.Sprintf("Independent portfolio guidance %03d token%03d", i, i)
 		private := false
@@ -159,30 +169,33 @@ func TestLearningConsolidationCursorEventuallyCoversBeyondFirstWindow(t *testing
 			summary = "Never automatically promote learning guidance after review"
 			private = true
 		}
-		row, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: summary, Evidence: "cursor", EvidencePrivate: private})
-		require.NoError(t, err)
-		if i >= 136 {
-			lateIDs[i] = row.LocalID
-		}
+		localID := fmt.Sprintf("learn-cursor-%03d", i)
+		status := string(LearningStatusCandidate)
 		if i == 136 {
-			_, err = client.UpdateLearningStatus(ctx, row.LocalID, LearningStatusRejected, "ineligible")
-			require.NoError(t, err)
+			status = string(LearningStatusRejected)
+		}
+		learnings[i] = issuefixture.Learning{LocalID: localID, ProjectID: "proj", Summary: summary, Evidence: "cursor", EvidencePrivate: private, Status: status}
+		if i >= 136 {
+			lateIDs[i] = localID
 		}
 	}
-	db, err := client.dbHandle()
+	setup, err := issuefixture.SeedDB(ctx, db, issuefixture.Fixture{Learnings: learnings})
 	require.NoError(t, err)
 	for i, localID := range lateIDs {
 		_, err = db.ExecContext(ctx, `UPDATE agent_learnings SET local_id=? WHERE local_id=?`, fmt.Sprintf("zz-late-%d", i), localID)
 		require.NoError(t, err)
 	}
 	var suggestions []LearningSuggestion
+	queryStarted := time.Now()
 	for attempt := 0; attempt < 3 && len(suggestions) == 0; attempt++ {
 		var err error
 		suggestions, err = client.SuggestLearningConsolidations(ctx, "proj")
 		require.NoError(t, err)
 	}
+	queryDuration := time.Since(queryStarted)
 	require.Len(t, suggestions, 1)
 	assert.Equal(t, LearningSuggestionDuplicate, suggestions[0].Kind)
+	t.Logf("learning cursor timing: setup=%s query=%s rows=%d", setup.Duration, queryDuration, setup.Rows)
 
 	var cursor string
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT cursor_local_id FROM agent_learning_consolidation_scan_state WHERE project_id=?`, "proj").Scan(&cursor))
