@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -372,10 +373,11 @@ func startModelTestDaemon(t *testing.T, repoDir, socketPath, lockPath string) fu
 	t.Helper()
 
 	d := daemon.New(daemon.Config{
-		RepoDir:    repoDir,
-		SocketPath: socketPath,
-		LockPath:   lockPath,
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RepoDir:       repoDir,
+		SocketPath:    socketPath,
+		LockPath:      lockPath,
+		ScopedRuntime: true,
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -396,7 +398,7 @@ func startModelTestDaemon(t *testing.T, repoDir, socketPath, lockPath string) fu
 			t.Fatalf("daemon exited before socket became ready")
 		default:
 		}
-		if _, err := os.Stat(socketPath); err == nil {
+		if modelDaemonSocketReady(socketPath) {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -422,6 +424,15 @@ func startModelTestDaemon(t *testing.T, repoDir, socketPath, lockPath string) fu
 			t.Fatalf("daemon shutdown timed out")
 		}
 	}
+}
+
+func modelDaemonSocketReady(socketPath string) bool {
+	conn, err := net.DialTimeout("unix", socketPath, 50*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func captureStdoutForParity(t *testing.T, fn func() error) string {
@@ -456,9 +467,9 @@ func captureStdoutForParity(t *testing.T, fn func() error) string {
 func newModelTestRuntimePaths(t *testing.T) (string, string) {
 	t.Helper()
 
-	runtimeDir, err := os.MkdirTemp(".", "azd-")
+	runtimeDir, err := os.MkdirTemp("", "azd-")
 	if err != nil {
-		t.Fatalf("MkdirTemp(.): %v", err)
+		t.Fatalf("MkdirTemp: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
 	return filepath.Join(runtimeDir, "s.sock"), filepath.Join(runtimeDir, "l.lock")

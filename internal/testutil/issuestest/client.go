@@ -56,6 +56,15 @@ func TemplateCreationDuration(tb testing.TB) time.Duration {
 	return migratedTemplate(tb).CreationDuration()
 }
 
+// CloseTemplate removes the process-local migrated template after all package
+// tests have finished. Callers should invoke it from TestMain, after m.Run.
+func CloseTemplate() error {
+	if templateDB == nil {
+		return nil
+	}
+	return templateDB.Close()
+}
+
 func migratedTemplate(tb testing.TB) *sqlitetest.Template {
 	tb.Helper()
 	templateOnce.Do(func() {
