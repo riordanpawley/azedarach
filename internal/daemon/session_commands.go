@@ -4142,11 +4142,11 @@ func (d *Daemon) refreshIssueSessionRuntimeState(ctx context.Context, projectID 
 		return nil
 	}
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
-	existingSessions, err := store.ListSessionStates(ctx, projectID)
+	existingSessions, err := store.ListSessionStatesByIssueIDs(ctx, projectID, issueIDs)
 	if err != nil {
 		return err
 	}
-	targetSessions := make([]daemonstate.Session, 0, len(issueSet))
+	targetSessions := make([]daemonstate.Session, 0, len(existingSessions))
 	namingScope := d.sessionNamingScope(projectID)
 	for _, session := range existingSessions {
 		if _, ok := issueSet[sessionKey(sessionProjectionIssueID(session, namingScope))]; ok {

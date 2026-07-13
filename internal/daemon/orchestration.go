@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ const (
 	defaultOrchestrationStartLimit     = 3
 	defaultOrchestrationAgentCapacity  = 12
 	defaultOrchestrationOpenIssueLimit = 100
+	orchestrationSnapshotCacheTTL      = 10 * time.Second
 )
 
 // orchestrationAuthority is the deliberately small daemon boundary for all
@@ -31,6 +33,23 @@ type orchestrationAuthority interface {
 }
 
 type daemonOrchestrationAuthority struct{ daemon *Daemon }
+
+type orchestrationSnapshotBuilder func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error)
+
+type orchestrationSnapshotCacheEntry struct {
+	revision        uint64
+	cachedAt        time.Time
+	snapshot        protocol.OrchestrationSnapshot
+	runtimeIssueIDs []string
+}
+
+type orchestrationSnapshotLoad struct {
+	done     chan struct{}
+	revision uint64
+	stable   bool
+	snapshot protocol.OrchestrationSnapshot
+	err      error
+}
 
 func (d *Daemon) orchestrationAuthority() orchestrationAuthority {
 	return daemonOrchestrationAuthority{daemon: d}
@@ -76,21 +95,13 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 		body.ActorID = strings.TrimSpace(req.Meta.ClientActor)
 	}
 	projectID := d.projectID(req.Meta)
-	var snapshot protocol.OrchestrationSnapshot
-	var snapshotRevision uint64
-	stable := false
-	for attempt := 0; attempt < 3; attempt++ {
-		before := d.currentRevision(projectID)
-		snapshot, err = d.orchestrationAuthority().Snapshot(ctx, projectID, body)
-		if err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-		}
-		after := d.currentRevision(projectID)
-		if before == after {
-			snapshotRevision = after
-			stable = true
-			break
-		}
+	build := d.orchestrationAuthority().Snapshot
+	if d.orchestrationSnapshotBuild != nil {
+		build = d.orchestrationSnapshotBuild
+	}
+	snapshot, snapshotRevision, stable, err := d.loadOrchestrationSnapshot(ctx, projectID, body, build)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	if !stable {
 		return d.errorResponse(req, protocol.ErrorCodeConflict, "orchestration projection changed while building snapshot; retry"), nil
@@ -115,6 +126,157 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 	resp := d.successResponse(req)
 	resp.Body, resp.Revision = encoded, snapshot.Revision
 	return resp, nil
+}
+
+func (d *Daemon) loadOrchestrationSnapshot(
+	ctx context.Context,
+	projectID string,
+	request protocol.OrchestrationSnapshotRequest,
+	build orchestrationSnapshotBuilder,
+) (protocol.OrchestrationSnapshot, uint64, bool, error) {
+	projectID = d.canonicalProjectID(projectID)
+	request = d.normalizeOrchestrationSnapshotRequest(projectID, request)
+	cacheKey := orchestrationSnapshotCacheKey(projectID, request)
+	revision := d.currentRevision(projectID)
+	loadKey := fmt.Sprintf("%s\x00%d", cacheKey, revision)
+
+	d.orchestrationSnapshotMu.Lock()
+	if d.orchestrationSnapshotCache == nil {
+		d.orchestrationSnapshotCache = map[string]orchestrationSnapshotCacheEntry{}
+	}
+	if cached, ok := d.orchestrationSnapshotCache[cacheKey]; ok && cached.revision == revision && time.Since(cached.cachedAt) <= orchestrationSnapshotCacheTTL {
+		d.orchestrationSnapshotMu.Unlock()
+		if request.Scope.Kind == domain.OrchestrationScopeRooted && d.issueClientForProject(projectID) != nil {
+			if _, err := d.taskGraphReadinessForActor(ctx, projectID, request.Scope.RootIssueID.String(), request.ActorID); err != nil {
+				return protocol.OrchestrationSnapshot{}, revision, false, err
+			}
+			if d.currentRevision(projectID) != revision {
+				return protocol.OrchestrationSnapshot{}, d.currentRevision(projectID), false, nil
+			}
+		} else if len(cached.runtimeIssueIDs) > 0 {
+			if err := d.validateTaskGraphRuntime(ctx, projectID, cached.runtimeIssueIDs, revision); err != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("validate cached orchestration runtime", "project_id", projectID, "scope_kind", request.Scope.Kind, "error", err)
+			}
+			if d.currentRevision(projectID) != revision {
+				return protocol.OrchestrationSnapshot{}, d.currentRevision(projectID), false, nil
+			}
+		}
+		clone, err := cloneOrchestrationSnapshot(cached.snapshot)
+		return clone, revision, err == nil, err
+	}
+	if d.orchestrationSnapshotLoads == nil {
+		d.orchestrationSnapshotLoads = map[string]*orchestrationSnapshotLoad{}
+	}
+	if load := d.orchestrationSnapshotLoads[loadKey]; load != nil {
+		d.orchestrationSnapshotMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return protocol.OrchestrationSnapshot{}, revision, false, ctx.Err()
+		case <-load.done:
+			clone, cloneErr := cloneOrchestrationSnapshot(load.snapshot)
+			if load.err != nil {
+				return protocol.OrchestrationSnapshot{}, load.revision, load.stable, load.err
+			}
+			stable := load.stable && d.currentRevision(projectID) == load.revision
+			return clone, load.revision, stable && cloneErr == nil, cloneErr
+		}
+	}
+	load := &orchestrationSnapshotLoad{done: make(chan struct{}), revision: revision}
+	d.orchestrationSnapshotLoads[loadKey] = load
+	d.orchestrationSnapshotMu.Unlock()
+
+	snapshot, err := build(ctx, projectID, request)
+	finishedRevision := d.currentRevision(projectID)
+	stable := err == nil && finishedRevision == revision
+	load.snapshot = snapshot
+	load.revision = finishedRevision
+	load.stable = stable
+	load.err = err
+
+	d.orchestrationSnapshotMu.Lock()
+	delete(d.orchestrationSnapshotLoads, loadKey)
+	if stable {
+		d.orchestrationSnapshotCache[cacheKey] = orchestrationSnapshotCacheEntry{
+			revision:        revision,
+			cachedAt:        time.Now(),
+			snapshot:        snapshot,
+			runtimeIssueIDs: orchestrationSnapshotRuntimeIssueIDs(snapshot),
+		}
+	}
+	close(load.done)
+	d.orchestrationSnapshotMu.Unlock()
+
+	clone, cloneErr := cloneOrchestrationSnapshot(snapshot)
+	if err != nil {
+		return protocol.OrchestrationSnapshot{}, finishedRevision, false, err
+	}
+	stable = stable && d.currentRevision(projectID) == finishedRevision
+	return clone, finishedRevision, stable && cloneErr == nil, cloneErr
+}
+
+func orchestrationSnapshotCacheKey(projectID string, request protocol.OrchestrationSnapshotRequest) string {
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%s", strings.TrimSpace(projectID), request.Scope.Kind, request.Scope.RootIssueID, strings.TrimSpace(request.ActorID), request.Limit, strings.TrimSpace(request.RepoDir))
+}
+
+func (d *Daemon) normalizeOrchestrationSnapshotRequest(projectID string, request protocol.OrchestrationSnapshotRequest) protocol.OrchestrationSnapshotRequest {
+	repoDir := strings.TrimSpace(request.RepoDir)
+	if repoDir == "" {
+		repoDir = strings.TrimSpace(d.resolveRepoDirForProject(projectID))
+	}
+	if repoDir == "" {
+		return request
+	}
+	if absolute, err := filepath.Abs(repoDir); err == nil {
+		repoDir = absolute
+	}
+	repoDir = filepath.Clean(repoDir)
+	if resolved, err := filepath.EvalSymlinks(repoDir); err == nil {
+		repoDir = filepath.Clean(resolved)
+	}
+	request.RepoDir = repoDir
+	return request
+}
+
+func cloneOrchestrationSnapshot(snapshot protocol.OrchestrationSnapshot) (protocol.OrchestrationSnapshot, error) {
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		return protocol.OrchestrationSnapshot{}, fmt.Errorf("clone orchestration snapshot: %w", err)
+	}
+	var clone protocol.OrchestrationSnapshot
+	if err := json.Unmarshal(encoded, &clone); err != nil {
+		return protocol.OrchestrationSnapshot{}, fmt.Errorf("clone orchestration snapshot: %w", err)
+	}
+	return clone, nil
+}
+
+func orchestrationSnapshotRuntimeIssueIDs(snapshot protocol.OrchestrationSnapshot) []string {
+	seen := make(map[string]struct{})
+	add := func(issueID string) {
+		issueID = strings.TrimSpace(issueID)
+		if issueID != "" {
+			seen[issueID] = struct{}{}
+		}
+	}
+	for _, issueID := range snapshot.Active {
+		add(issueID)
+	}
+	for _, session := range snapshot.ActiveSessions {
+		add(session.IssueID)
+	}
+	for _, pending := range snapshot.Pending {
+		add(pending.IssueID)
+	}
+	for _, nested := range snapshot.NestedRoots {
+		if nested.ActiveSession != nil {
+			add(nested.IssueID)
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for issueID := range seen {
+		out = append(out, issueID)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func applyOrchestratorContinuationProjection(snapshot *protocol.OrchestrationSnapshot, lease daemonstate.OrchestratorScopeLease) {

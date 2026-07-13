@@ -31,6 +31,15 @@ func TestRootlessOrchestrateParsersAcceptProjectScope(t *testing.T) {
 	}
 }
 
+func TestProjectOrchestrationWatchPollIntervalIsBounded(t *testing.T) {
+	if got := projectOrchestrationWatchPollInterval(250 * time.Millisecond); got != time.Second {
+		t.Fatalf("default project watch interval = %s, want %s", got, time.Second)
+	}
+	if got := projectOrchestrationWatchPollInterval(3 * time.Second); got != 3*time.Second {
+		t.Fatalf("explicit slow project watch interval = %s, want %s", got, 3*time.Second)
+	}
+}
+
 func TestOrchestratorSessionAttachIsDeclarativeCLICommand(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "")
 	var gotCommand string

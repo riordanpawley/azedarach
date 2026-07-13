@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -8017,8 +8018,8 @@ func TestTaskGraphReadinessRefreshesOnlyRootScopedSessions(t *testing.T) {
 	}
 }
 
-func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+func TestTaskGraphRuntimeValidationCoalescesMultiWatchAndTUIP95(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
 	projectID := "proj-graph-shared-load"
@@ -8127,6 +8128,119 @@ func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
 	}
 	if len(second.ready.Active) != 1 || second.ready.Active[0] != childID {
 		t.Fatalf("second active = %v, want [%s]", second.ready.Active, childID)
+	}
+
+	third, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("cached readiness error: %v", err)
+	}
+	if len(third.Active) != 1 || third.Active[0] != childID {
+		t.Fatalf("cached active = %v, want [%s]", third.Active, childID)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 1 {
+		t.Fatalf("tmux list-sessions calls after sequential duplicate = %d, want cached hybrid runtime observation", got)
+	}
+
+	d.nextRevision(projectID)
+	if _, err := d.taskGraphReadiness(ctx, projectID, rootID); err != nil {
+		t.Fatalf("readiness after revision change: %v", err)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 2 {
+		t.Fatalf("tmux list-sessions calls after revision change = %d, want cache invalidation", got)
+	}
+
+	rootedScope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.OrchestrationSnapshotRequest{Scope: rootedScope}
+	build := func(_ context.Context, _ string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		return protocol.OrchestrationSnapshot{Scope: request.Scope, Active: []string{childID}, Blocked: map[string]string{}}, nil
+	}
+	if _, _, stable, err := d.loadOrchestrationSnapshot(ctx, projectID, request, build); err != nil || !stable {
+		t.Fatalf("warm orchestration snapshot stable=%v err=%v", stable, err)
+	}
+
+	const (
+		watchers   = 5
+		iterations = 20
+		p95Budget  = 25 * time.Millisecond
+	)
+	durations := make([]time.Duration, 0, (watchers+1)*iterations)
+	for range iterations {
+		d.taskGraphRuntimeValidationMu.Lock()
+		d.taskGraphRuntimeValidations = map[string]taskGraphRuntimeValidationEntry{}
+		d.taskGraphRuntimeValidationMu.Unlock()
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		tmuxRunner.mu.Lock()
+		tmuxRunner.listSessionsEntered = entered
+		tmuxRunner.listSessionsRelease = release
+		tmuxRunner.mu.Unlock()
+
+		type timedResult struct {
+			duration time.Duration
+			err      error
+		}
+		results := make(chan timedResult, watchers+1)
+		go func() {
+			started := time.Now()
+			_, err := d.taskGraphReadiness(ctx, projectID, rootID)
+			results <- timedResult{duration: time.Since(started), err: err}
+		}()
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for coalesced runtime validation: %v", ctx.Err())
+		}
+		for range watchers - 1 {
+			go func() {
+				started := time.Now()
+				_, err := d.taskGraphReadiness(ctx, projectID, rootID)
+				results <- timedResult{duration: time.Since(started), err: err}
+			}()
+		}
+		go func() {
+			started := time.Now()
+			_, _, _, err := d.loadOrchestrationSnapshot(ctx, projectID, request, build)
+			results <- timedResult{duration: time.Since(started), err: err}
+		}()
+		close(release)
+		for range watchers + 1 {
+			result := <-results
+			if result.err != nil {
+				t.Fatalf("multi-watch/TUI cached read: %v", result.err)
+			}
+			durations = append(durations, result.duration)
+		}
+	}
+	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	p95 := durations[(len(durations)*95+99)/100-1]
+	if p95 > p95Budget {
+		t.Fatalf("multi-watch plus TUI hybrid p95 = %s, budget %s", p95, p95Budget)
+	}
+	wantRuntimeCalls := 2 + iterations
+	if got := tmuxRunner.listSessionCallCount(); got != wantRuntimeCalls {
+		t.Fatalf("list-sessions calls = %d, want %d (one per forced observation, not per reader)", got, wantRuntimeCalls)
+	}
+	if got := tmuxRunner.listPaneCallCount(); got != wantRuntimeCalls {
+		t.Fatalf("list-panes calls = %d, want %d (one per forced observation, not per reader)", got, wantRuntimeCalls)
+	}
+	t.Logf("multi-watch plus TUI hybrid p95=%s budget=%s samples=%d runtime_validations=%d", p95, p95Budget, len(durations), iterations)
+}
+
+func TestTaskGraphReadinessOwnershipExpiryBoundsCache(t *testing.T) {
+	now := time.Date(2026, time.July, 13, 5, 30, 0, 0, time.UTC)
+	early := now.Add(2 * time.Second)
+	late := now.Add(time.Minute)
+	expired := now.Add(-time.Second)
+	tasks := []domain.Task{
+		{Ownership: &domain.IssueOwnership{ExpiresAt: &late}},
+		{Ownership: &domain.IssueOwnership{ExpiresAt: &early}},
+		{Ownership: &domain.IssueOwnership{ExpiresAt: &expired}},
+	}
+	if got := taskGraphReadinessOwnershipExpiry(tasks, now); !got.Equal(early) {
+		t.Fatalf("cache expiry = %s, want earliest active ownership expiry %s", got, early)
 	}
 }
 
@@ -8784,7 +8898,16 @@ func TestTaskGraphReadinessMarksFailedNestedRootStartAsBlockedCapacity(t *testin
 		t.Fatalf("create nested child: %v", err)
 	}
 
-	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, nextRevision: sequentialRevision()})
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger},
+		hub: publish.NewHub(16, 8, logger),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{},
+	}
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, hub: d.hub, nextRevision: d.nextRevision})
+	d.operationRuntime = runtime
 	if _, err := runtime.manager.Submit(ctx, daemonops.SubmitRequest{
 		ID:           "op-nested-start",
 		ProjectID:    projectID,
@@ -8798,13 +8921,6 @@ func TestTaskGraphReadinessMarksFailedNestedRootStartAsBlockedCapacity(t *testin
 	}
 	_ = waitForRuntimeState(t, runtime, "op-nested-start", daemonops.StateFailed)
 
-	d := &Daemon{
-		cfg:              Config{RepoDir: repoDir, Logger: logger},
-		operationRuntime: runtime,
-		issueClientsByProject: map[string]*issues.Client{
-			projectID: issuesClient,
-		},
-	}
 	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
 	if err != nil {
 		t.Fatalf("taskGraphReadiness error: %v", err)

@@ -294,6 +294,70 @@ func TestRuntimeStateStoreSeparatesSessionIntentAndObservations(t *testing.T) {
 	}
 }
 
+func TestRuntimeStateStoreListsSessionStatesByIssueIDs(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+	now := time.Date(2026, time.July, 13, 5, 0, 0, 0, time.UTC)
+	for _, session := range []Session{
+		{ID: "target-intent", IssueID: "det", State: SessionStateRunning, UpdatedAt: now},
+		{ID: "target-intent.pane-1", IssueID: "det", State: SessionStateRunning, UpdatedAt: now.Add(time.Second)},
+		{ID: "historical", IssueID: "old", State: SessionStateStopped, UpdatedAt: now.Add(-time.Hour)},
+	} {
+		if err := store.UpsertSessionState(ctx, "project", session); err != nil {
+			t.Fatalf("seed %s: %v", session.ID, err)
+		}
+	}
+
+	sessions, err := store.ListSessionStatesByIssueIDs(ctx, "project", []string{"det"})
+	if err != nil {
+		t.Fatalf("ListSessionStatesByIssueIDs: %v", err)
+	}
+	if got, want := len(sessions), 2; got != want {
+		t.Fatalf("scoped sessions = %d, want %d: %+v", got, want, sessions)
+	}
+	for _, session := range sessions {
+		if session.IssueID != "det" {
+			t.Fatalf("scoped query returned unrelated session: %+v", session)
+		}
+	}
+
+	db, err := sql.Open("sqlite", store.dbPath)
+	if err != nil {
+		t.Fatalf("open query-plan db: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, `
+		EXPLAIN QUERY PLAN
+		SELECT session_id
+		FROM (`+sessionProjectionUnionSQL()+`)
+		WHERE project_id = ? AND issue_id IN (?)
+	`, "project", "det")
+	if err != nil {
+		t.Fatalf("explain scoped session query: %v", err)
+	}
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatalf("scan query plan: %v", err)
+		}
+		plan.WriteString(detail)
+		plan.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate query plan: %v", err)
+	}
+	for _, table := range []string{sessionStateTable, sessionObservationTable} {
+		if !strings.Contains(plan.String(), "SEARCH "+table+" USING INDEX") {
+			t.Fatalf("scoped query plan does not use issue index for %s:\n%s", table, plan.String())
+		}
+	}
+}
+
 func TestRuntimeStateStoreKeepsHookObservationSeparateFromCanonicalSession(t *testing.T) {
 	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
 	t.Cleanup(func() {

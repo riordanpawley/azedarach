@@ -187,7 +187,15 @@ type Daemon struct {
 	taskListSnapshotLoads              map[string]*taskListSnapshotLoad
 	taskGraphReadinessMu               sync.Mutex
 	taskGraphReadinessLoads            map[string]*taskGraphReadinessLoad
+	taskGraphReadinessCache            map[string]taskGraphReadinessCacheEntry
+	taskGraphRuntimeValidationMu       sync.Mutex
+	taskGraphRuntimeValidations        map[string]taskGraphRuntimeValidationEntry
+	taskGraphRuntimeValidationLoads    map[string]*taskGraphRuntimeValidationLoad
 	orchestrationMu                    sync.Mutex
+	orchestrationSnapshotMu            sync.Mutex
+	orchestrationSnapshotCache         map[string]orchestrationSnapshotCacheEntry
+	orchestrationSnapshotLoads         map[string]*orchestrationSnapshotLoad
+	orchestrationSnapshotBuild         orchestrationSnapshotBuilder
 	watchClientsMu                     sync.Mutex
 	watchClients                       map[string]watchClientObservation
 	terminalFailureProbeMu             sync.Mutex
@@ -334,6 +342,11 @@ func New(cfg Config) *Daemon {
 		taskListSnapshotCache:              map[string]taskListSnapshotCacheEntry{},
 		issueAutoArchiveLastRun:            map[string]time.Time{},
 		taskGraphReadinessLoads:            map[string]*taskGraphReadinessLoad{},
+		taskGraphReadinessCache:            map[string]taskGraphReadinessCacheEntry{},
+		taskGraphRuntimeValidations:        map[string]taskGraphRuntimeValidationEntry{},
+		taskGraphRuntimeValidationLoads:    map[string]*taskGraphRuntimeValidationLoad{},
+		orchestrationSnapshotCache:         map[string]orchestrationSnapshotCacheEntry{},
+		orchestrationSnapshotLoads:         map[string]*orchestrationSnapshotLoad{},
 		revision:                           map[string]uint64{},
 		userStoreRefreshPending:            map[string]bool{},
 		userStoreRefreshDirty:              map[string]bool{},
@@ -1688,7 +1701,38 @@ func (d *Daemon) nextRevision(projectID string) uint64 {
 	rev := d.revision[projectID]
 	d.revMu.Unlock()
 	d.invalidateTaskListSnapshotCache(projectID)
+	d.invalidateTaskGraphReadinessCache(projectID)
+	d.invalidateOrchestrationSnapshotCache(projectID)
 	return rev
+}
+
+func (d *Daemon) invalidateTaskGraphReadinessCache(projectID string) {
+	prefix := strings.TrimSpace(projectID) + "\x00"
+	d.taskGraphReadinessMu.Lock()
+	for key := range d.taskGraphReadinessCache {
+		if strings.HasPrefix(key, prefix) {
+			delete(d.taskGraphReadinessCache, key)
+		}
+	}
+	d.taskGraphReadinessMu.Unlock()
+	d.taskGraphRuntimeValidationMu.Lock()
+	for key := range d.taskGraphRuntimeValidations {
+		if strings.HasPrefix(key, prefix) {
+			delete(d.taskGraphRuntimeValidations, key)
+		}
+	}
+	d.taskGraphRuntimeValidationMu.Unlock()
+}
+
+func (d *Daemon) invalidateOrchestrationSnapshotCache(projectID string) {
+	prefix := strings.TrimSpace(projectID) + "\x00"
+	d.orchestrationSnapshotMu.Lock()
+	for key := range d.orchestrationSnapshotCache {
+		if strings.HasPrefix(key, prefix) {
+			delete(d.orchestrationSnapshotCache, key)
+		}
+	}
+	d.orchestrationSnapshotMu.Unlock()
 }
 
 func (d *Daemon) currentRevision(projectID string) uint64 {

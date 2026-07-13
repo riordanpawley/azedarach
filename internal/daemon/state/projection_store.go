@@ -406,6 +406,7 @@ type RuntimeStateStore struct {
 // SessionStateReader loads persisted session state rows for a project.
 type SessionStateReader interface {
 	ListSessionStates(context.Context, string) ([]Session, error)
+	ListSessionStatesByIssueIDs(context.Context, string, []string) ([]Session, error)
 	ListSessionIntentStates(context.Context, string) ([]Session, error)
 	GetSessionState(context.Context, string, string) (Session, bool, error)
 	GetSessionIntent(context.Context, string, SessionRole, SessionScopeKind, string) (Session, bool, error)
@@ -1278,11 +1279,40 @@ func sessionProjectionUnionSQL() string {
 }
 
 func (s *RuntimeStateStore) ListSessionStates(ctx context.Context, projectID string) ([]Session, error) {
-	return s.listSessionStatesFromQuery(ctx, projectID, sessionProjectionUnionSQL())
+	return s.listSessionStatesFromQuery(ctx, projectID, sessionProjectionUnionSQL(), "", nil)
+}
+
+// ListSessionStatesByIssueIDs loads only runtime rows in the requested issue
+// scope. The physical tables' project/issue indexes keep historical rows
+// outside the graph from being scanned and materialized.
+func (s *RuntimeStateStore) ListSessionStatesByIssueIDs(ctx context.Context, projectID string, issueIDs []string) ([]Session, error) {
+	unique := make([]string, 0, len(issueIDs))
+	seen := make(map[string]struct{}, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" {
+			continue
+		}
+		if _, ok := seen[issueID]; ok {
+			continue
+		}
+		seen[issueID] = struct{}{}
+		unique = append(unique, issueID)
+	}
+	if len(unique) == 0 {
+		return []Session{}, nil
+	}
+	sort.Strings(unique)
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(unique)), ",")
+	args := make([]any, 0, len(unique))
+	for _, issueID := range unique {
+		args = append(args, issueID)
+	}
+	return s.listSessionStatesFromQuery(ctx, projectID, sessionProjectionUnionSQL(), "AND issue_id IN ("+placeholders+")", args)
 }
 
 func (s *RuntimeStateStore) ListSessionIntentStates(ctx context.Context, projectID string) ([]Session, error) {
-	return s.listSessionStatesFromQuery(ctx, projectID, `
+	sourceQuery := `
 		SELECT
 			project_id,
 			session_id,
@@ -1297,15 +1327,17 @@ func (s *RuntimeStateStore) ListSessionIntentStates(ctx context.Context, project
 			tmux_attached_count,
 			started_at,
 			updated_at
-		FROM `+sessionStateTable)
+		FROM ` + sessionStateTable
+	return s.listSessionStatesFromQuery(ctx, projectID, sourceQuery, "", nil)
 }
 
-func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, projectID, sourceQuery string) ([]Session, error) {
+func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, projectID, sourceQuery, filterSQL string, filterArgs []any) ([]Session, error) {
 	db, err := s.dbHandle()
 	if err != nil {
 		return nil, err
 	}
 	projectID = normalizedProjectID(projectID)
+	queryArgs := append([]any{projectID}, filterArgs...)
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 			session_id,
@@ -1321,9 +1353,9 @@ func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, proj
 			COALESCE(started_at, ''),
 			updated_at
 		FROM (`+sourceQuery+`)
-		WHERE project_id = ?
+		WHERE project_id = ? `+filterSQL+`
 		ORDER BY updated_at DESC, session_id ASC
-	`, projectID)
+	`, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("list session state rows %s: %w", projectID, err)
 	}
