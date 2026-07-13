@@ -202,28 +202,29 @@ type notificationHistoryEntry struct {
 // Model is the main application state
 type Model struct {
 	// Core data
-	tasks                   []domain.Task
-	boardView               domain.BoardView
-	boardColumns            []domain.BoardViewColumnSnapshot
-	boardOrdered            []domain.Task
-	boardProjection         domain.BoardViewProjection
-	globalBoard             bool
-	globalTaskScopes        map[string]protocol.ScopedIssueID
-	globalTaskProjects      map[string]config.Project
-	projectSwitchFromGlobal bool
-	globalLoadSeq           uint64
-	sessions                map[string]*domain.Session
-	suppressedTasks         map[string]struct{}
-	pendingStatuses         map[string]pendingTaskStatus
-	pendingDetails          map[string]pendingTaskDetails
-	operationTaskID         map[string]string
-	pendingOpsByTask        map[string]pendingOperationProgress
-	pendingFailures         map[string]taskMutationFailure
-	pendingCleanupOps       map[string]pendingWorktreeCleanupConfirmation
-	pendingCleanup          *pendingWorktreeCleanupConfirmation
-	pendingBulkCleanup      *pendingBulkCleanupConfirmation
-	pendingClose            *pendingCloseCleanupConfirmation
-	pendingReviewCascade    *pendingReviewCascadeConfirmation
+	tasks                    []domain.Task
+	boardView                domain.BoardView
+	boardColumns             []domain.BoardViewColumnSnapshot
+	boardOrdered             []domain.Task
+	boardProjection          domain.BoardViewProjection
+	scope                    tuiScope
+	globalTaskScopes         map[string]protocol.ScopedIssueID
+	globalTaskProjects       map[string]config.Project
+	globalScopeSwitchPending bool
+	projectSwitchFromGlobal  bool
+	globalLoadSeq            uint64
+	sessions                 map[string]*domain.Session
+	suppressedTasks          map[string]struct{}
+	pendingStatuses          map[string]pendingTaskStatus
+	pendingDetails           map[string]pendingTaskDetails
+	operationTaskID          map[string]string
+	pendingOpsByTask         map[string]pendingOperationProgress
+	pendingFailures          map[string]taskMutationFailure
+	pendingCleanupOps        map[string]pendingWorktreeCleanupConfirmation
+	pendingCleanup           *pendingWorktreeCleanupConfirmation
+	pendingBulkCleanup       *pendingBulkCleanupConfirmation
+	pendingClose             *pendingCloseCleanupConfirmation
+	pendingReviewCascade     *pendingReviewCascadeConfirmation
 
 	// Navigation (using NavigationService)
 	nav *navigation.Service
@@ -236,6 +237,7 @@ type Model struct {
 	createTaskOverlay               *overlay.CreateTaskOverlay
 	boardViews                      []domain.BoardViewRecord
 	selectedBoardViewID             string
+	boardViewScopeGeneration        uint64
 	projectOrchestrator             *projectOrchestratorSnapshot
 	projectOrchestratorActionRunner projectOrchestratorActionRunner
 	jumpMode                        *overlay.JumpMode
@@ -354,7 +356,7 @@ func WithSessionSelectorOnLoad() Option {
 // Actions leave the global projection and hydrate the selected authoritative
 // project before any mutation is offered.
 func WithGlobalBoardOnLoad() Option {
-	return func(m *Model) { m.globalBoard, m.globalLoadSeq = true, 1 }
+	return func(m *Model) { m.scope, m.globalLoadSeq = globalTUIScope(), 1 }
 }
 
 // New creates a new application model with the given config
@@ -394,6 +396,7 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 	deps := appdeps.Build(cfg, repoDir, logger)
 
 	m := Model{
+		scope:                       projectTUIScope(),
 		tasks:                       []domain.Task{},
 		sessions:                    make(map[string]*domain.Session),
 		pendingStatuses:             make(map[string]pendingTaskStatus),
@@ -662,7 +665,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		if m.editor.GetMode() != ModeAction {
 			m.boardRefreshing = true
-			if m.globalBoard {
+			if m.scope.IsGlobal() {
 				m.globalLoadSeq++
 				return m, m.loadGlobalBoardCmd(m.globalLoadSeq)
 			}
@@ -727,7 +730,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // handleNormalMode processes keyboard input in normal mode
 func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
-	if m.globalBoard {
+	if m.scope.IsGlobal() {
 		switch msg.String() {
 		case overlay.EventLogHotkey, overlay.OperationQueueHotkey, "O", "X":
 			m.addToast(Toast{Level: ToastInfo, Message: "Open a ticket's project before using project operations", Expires: time.Now().Add(4 * time.Second)})
@@ -764,10 +767,11 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.applyBoardNavigationAction(action, columns) {
 		return m, nil
 	}
-	if m.globalBoard {
+	if m.scope.IsGlobal() {
 		switch action {
 		case keybinds.ActionQuit, keybinds.ActionEnterGoto, keybinds.ActionEnterSearch,
-			keybinds.ActionOpenFilter, keybinds.ActionOpenSort, keybinds.ActionOpenHelp:
+			keybinds.ActionOpenFilter, keybinds.ActionToggleSessionTreeFilter, keybinds.ActionOpenSort, keybinds.ActionOpenHelp,
+			keybinds.ActionOpenBoardViews, keybinds.ActionToggleView:
 			// These actions are projection-local and cannot mutate a project.
 		default:
 			return m.leaveGlobalBoardForCurrentTask()
@@ -907,7 +911,7 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	if m.globalBoard && action == keybinds.ActionGotoSpec {
+	if m.scope.IsGlobal() && action == keybinds.ActionGotoSpec {
 		m.addToast(Toast{
 			Level:   ToastInfo,
 			Message: "Open a ticket's project before viewing its spec",
@@ -942,6 +946,7 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.projectRegistry,
 			overlay.WithInitialCursor(m.projectSelectorCursor()),
 			overlay.WithCurrentProjectName(m.currentProject),
+			overlay.WithGlobalScope(m.scope.IsGlobal()),
 		))
 	case keybinds.ActionGotoSpec:
 		// Dedicated Spec workspace
@@ -1281,18 +1286,22 @@ type notificationCopyDetailsResultMsg struct {
 
 type boardViewsLoadedMsg struct {
 	views          []domain.BoardViewRecord
+	globalViews    []protocol.GlobalViewRecord
 	selectedViewID string
+	scope          boardViewCommandScope
 	err            error
 }
 
 type boardViewSelectedMsg struct {
 	viewID string
+	scope  boardViewCommandScope
 	err    error
 }
 
 type boardViewMutatedMsg struct {
 	action string
 	viewID string
+	scope  boardViewCommandScope
 	err    error
 }
 
@@ -1796,100 +1805,153 @@ func (m *Model) finishIssuesRefreshCmd(refreshSeq uint64) tea.Cmd {
 
 func (m Model) loadBoardViewsCmd() tea.Cmd {
 	client := m.daemonClient
+	scope := m.currentBoardViewCommandScope()
 	if client == nil {
-		return func() tea.Msg { return boardViewsLoadedMsg{err: fmt.Errorf("daemon client unavailable")} }
+		return func() tea.Msg {
+			return boardViewsLoadedMsg{scope: scope, err: fmt.Errorf("daemon client unavailable")}
+		}
 	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		resp, err := client.ListBoardViews(ctx)
+		var resp protocol.BoardViewListResponseBody
+		var err error
+		if scope.global {
+			resp, err = client.ListGlobalViews(ctx)
+		} else {
+			resp, err = client.ListBoardViews(ctx)
+		}
 		if err != nil {
-			return boardViewsLoadedMsg{err: err}
+			return boardViewsLoadedMsg{scope: scope, err: err}
 		}
 		return boardViewsLoadedMsg{
 			views:          resp.Views,
+			globalViews:    resp.GlobalViews,
 			selectedViewID: resp.SelectedViewID,
+			scope:          scope,
 		}
 	}
 }
 
 func (m Model) cycleBoardViewCmd() tea.Cmd {
 	client := m.daemonClient
+	scope := m.currentBoardViewCommandScope()
 	selected := domain.NormalizeBoardViewID(m.selectedBoardViewID)
 	if client == nil {
 		return func() tea.Msg {
-			return boardViewSelectedMsg{viewID: selected, err: fmt.Errorf("daemon client unavailable")}
+			return boardViewSelectedMsg{viewID: selected, scope: scope, err: fmt.Errorf("daemon client unavailable")}
 		}
 	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		resp, err := client.ListBoardViews(ctx)
-		if err != nil {
-			return boardViewSelectedMsg{viewID: selected, err: err}
+		var resp protocol.BoardViewListResponseBody
+		var err error
+		if scope.global {
+			resp, err = client.ListGlobalViews(ctx)
+		} else {
+			resp, err = client.ListBoardViews(ctx)
 		}
-		if len(resp.Views) == 0 {
-			return boardViewSelectedMsg{viewID: selected, err: fmt.Errorf("no configured views available")}
+		if err != nil {
+			return boardViewSelectedMsg{viewID: selected, scope: scope, err: err}
+		}
+		viewIDs := make([]string, 0, len(resp.Views)+len(resp.GlobalViews))
+		for _, record := range resp.Views {
+			viewIDs = append(viewIDs, string(record.View.ID))
+		}
+		if scope.global {
+			viewIDs = viewIDs[:0]
+			for _, record := range resp.GlobalViews {
+				viewIDs = append(viewIDs, string(record.View.ID))
+			}
+		}
+		if len(viewIDs) == 0 {
+			return boardViewSelectedMsg{viewID: selected, scope: scope, err: fmt.Errorf("no configured views available")}
 		}
 		current := selected
 		if current == "" {
 			current = domain.NormalizeBoardViewID(resp.SelectedViewID)
 		}
 		next := 0
-		for i, record := range resp.Views {
-			if string(record.View.ID) == current {
-				next = (i + 1) % len(resp.Views)
+		for i, viewID := range viewIDs {
+			if viewID == current {
+				next = (i + 1) % len(viewIDs)
 				break
 			}
 		}
-		result, err := client.SelectBoardView(ctx, string(resp.Views[next].View.ID))
-		if err != nil {
-			return boardViewSelectedMsg{viewID: current, err: err}
+		var result protocol.BoardViewSelectResponseBody
+		if scope.global {
+			result, err = client.SelectGlobalView(ctx, protocol.GlobalViewConsumerBoard, viewIDs[next])
+		} else {
+			result, err = client.SelectBoardView(ctx, viewIDs[next])
 		}
-		return boardViewSelectedMsg{viewID: result.ViewID}
+		if err != nil {
+			return boardViewSelectedMsg{viewID: current, scope: scope, err: err}
+		}
+		return boardViewSelectedMsg{viewID: result.ViewID, scope: scope}
 	}
 }
 
 func (m Model) selectBoardViewCmd(viewID string) tea.Cmd {
 	client := m.daemonClient
+	scope := m.currentBoardViewCommandScope()
 	viewID = strings.TrimSpace(viewID)
 	if client == nil {
 		return func() tea.Msg {
-			return boardViewSelectedMsg{viewID: viewID, err: fmt.Errorf("daemon client unavailable")}
+			return boardViewSelectedMsg{viewID: viewID, scope: scope, err: fmt.Errorf("daemon client unavailable")}
 		}
 	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		resp, err := client.SelectBoardView(ctx, viewID)
-		if err != nil {
-			return boardViewSelectedMsg{viewID: viewID, err: err}
+		var resp protocol.BoardViewSelectResponseBody
+		var err error
+		if scope.global {
+			resp, err = client.SelectGlobalView(ctx, protocol.GlobalViewConsumerBoard, viewID)
+		} else {
+			resp, err = client.SelectBoardView(ctx, viewID)
 		}
-		return boardViewSelectedMsg{viewID: resp.ViewID}
+		if err != nil {
+			return boardViewSelectedMsg{viewID: viewID, scope: scope, err: err}
+		}
+		return boardViewSelectedMsg{viewID: resp.ViewID, scope: scope}
 	}
 }
 
-func (m Model) saveBoardViewCmd(view domain.BoardView) tea.Cmd {
+func (m Model) saveBoardViewCmd(view domain.BoardView, scope protocol.GlobalViewScope) tea.Cmd {
+	commandScope := m.currentBoardViewCommandScope()
 	return func() tea.Msg {
 		if m.daemonClient == nil {
-			return boardViewMutatedMsg{action: "save", viewID: string(view.ID), err: fmt.Errorf("daemon client unavailable")}
+			return boardViewMutatedMsg{action: "save", viewID: string(view.ID), scope: commandScope, err: fmt.Errorf("daemon client unavailable")}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		resp, err := m.daemonClient.SaveBoardView(ctx, view)
-		return boardViewMutatedMsg{action: "save", viewID: string(resp.View.View.ID), err: err}
+		var resp protocol.BoardViewResponseBody
+		var err error
+		if commandScope.global {
+			resp, err = m.daemonClient.SaveGlobalView(ctx, protocol.GlobalViewRecord{View: view, Scope: scope})
+		} else {
+			resp, err = m.daemonClient.SaveBoardView(ctx, view)
+		}
+		return boardViewMutatedMsg{action: "save", viewID: string(resp.View.View.ID), scope: commandScope, err: err}
 	}
 }
 
 func (m Model) deleteBoardViewCmd(viewID string) tea.Cmd {
+	commandScope := m.currentBoardViewCommandScope()
 	return func() tea.Msg {
 		if m.daemonClient == nil {
-			return boardViewMutatedMsg{action: "delete", viewID: viewID, err: fmt.Errorf("daemon client unavailable")}
+			return boardViewMutatedMsg{action: "delete", viewID: viewID, scope: commandScope, err: fmt.Errorf("daemon client unavailable")}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		err := m.daemonClient.DeleteBoardView(ctx, viewID)
-		return boardViewMutatedMsg{action: "delete", viewID: viewID, err: err}
+		var err error
+		if commandScope.global {
+			err = m.daemonClient.DeleteGlobalView(ctx, viewID)
+		} else {
+			err = m.daemonClient.DeleteBoardView(ctx, viewID)
+		}
+		return boardViewMutatedMsg{action: "delete", viewID: viewID, scope: commandScope, err: err}
 	}
 }
 
@@ -2841,6 +2903,9 @@ func findProjectByCwdBasenamePrefix(registry *config.ProjectsRegistry, cwd strin
 }
 
 func (m Model) projectSelectorCursor() int {
+	if m.scope.IsGlobal() {
+		return 0
+	}
 	if m.projectRegistry == nil || len(m.projectRegistry.Projects) == 0 {
 		return 0
 	}
@@ -2852,7 +2917,7 @@ func (m Model) projectSelectorCursor() int {
 
 	for i, project := range m.projectRegistry.Projects {
 		if project.Name == target {
-			return i
+			return i + 1
 		}
 	}
 

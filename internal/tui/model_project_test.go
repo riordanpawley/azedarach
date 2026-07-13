@@ -78,8 +78,8 @@ func TestProjectSelectorCursor(t *testing.T) {
 			repoDir:         "/work/alpha",
 		}
 
-		if got := m.projectSelectorCursor(); got != 1 {
-			t.Fatalf("projectSelectorCursor() = %d, want %d", got, 1)
+		if got := m.projectSelectorCursor(); got != 2 {
+			t.Fatalf("projectSelectorCursor() = %d, want %d", got, 2)
 		}
 	})
 
@@ -89,8 +89,15 @@ func TestProjectSelectorCursor(t *testing.T) {
 			repoDir:         "/work/alpha/subdir",
 		}
 
+		if got := m.projectSelectorCursor(); got != 1 {
+			t.Fatalf("projectSelectorCursor() = %d, want %d", got, 1)
+		}
+	})
+
+	t.Run("uses zero for global scope", func(t *testing.T) {
+		m := Model{scope: globalTUIScope(), currentProject: "beta", projectRegistry: registry}
 		if got := m.projectSelectorCursor(); got != 0 {
-			t.Fatalf("projectSelectorCursor() = %d, want %d", got, 0)
+			t.Fatalf("projectSelectorCursor() = %d, want 0", got)
 		}
 	})
 }
@@ -310,7 +317,7 @@ func TestProjectSwitchResultRebindsProjectScopedServices(t *testing.T) {
 	}
 }
 
-func TestProjectSelectedMsgStartsVisibleRefreshWithoutDiscardingCurrentBoard(t *testing.T) {
+func TestProjectScopeSelectedMsgStartsVisibleRefreshWithoutDiscardingCurrentBoard(t *testing.T) {
 	m := newTestModel()
 	m.loading = false
 	m.tasks = []domain.Task{
@@ -320,7 +327,7 @@ func TestProjectSelectedMsgStartsVisibleRefreshWithoutDiscardingCurrentBoard(t *
 		"old-1": {Worktree: "/tmp/old-1"},
 	}
 
-	next, cmd := m.Update(overlay.ProjectSelectedMsg{
+	next, cmd := m.Update(overlay.ScopeSelectedMsg{
 		Project: config.Project{Name: "beta", Path: "/work/beta"},
 	})
 
@@ -428,6 +435,7 @@ func TestProjectSwitchResultOpensPendingUICommandWorkspace(t *testing.T) {
 			Path: betaPath,
 		},
 		projectConfig: &config.Config{},
+		boardView:     domain.TreeBoardView(),
 		tasks: []domain.Task{
 			{ID: "che-1", Title: "Cross project task", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
 		},
@@ -450,6 +458,9 @@ func TestProjectSwitchResultOpensPendingUICommandWorkspace(t *testing.T) {
 	}
 	if updated.currentProject != "beta" {
 		t.Fatalf("currentProject = %q, want beta", updated.currentProject)
+	}
+	if updated.selectedBoardViewID != string(updated.boardView.ID) {
+		t.Fatalf("selectedBoardViewID = %q, want switched project view %q", updated.selectedBoardViewID, updated.boardView.ID)
 	}
 	if updated.daemonRevision != 7 {
 		t.Fatalf("daemonRevision = %d, want project switch snapshot revision 7", updated.daemonRevision)

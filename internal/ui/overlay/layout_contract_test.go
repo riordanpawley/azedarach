@@ -15,7 +15,7 @@ import (
 func TestProjectSelector_UsesActionsSectionLayout(t *testing.T) {
 	selector := NewProjectSelector(&config.ProjectsRegistry{})
 	view := selector.View()
-	if !strings.Contains(view, "PROJECT SELECTOR") {
+	if !strings.Contains(view, "SCOPE SELECTOR") {
 		t.Fatalf("expected selector title, got %q", view)
 	}
 	if !strings.Contains(view, "Actions") {
@@ -65,6 +65,15 @@ func TestProjectSelector_SizeResponsiveInListMode(t *testing.T) {
 	selector.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	if width, height := selector.Size(); width != 70 || height != 20 {
 		t.Fatalf("expected small list size to use viewport clamp 70x20, got %dx%d", width, height)
+	}
+	view := selector.View()
+	for _, action := range []string{"D", "detect", "Esc", "close"} {
+		if !strings.Contains(view, action) {
+			t.Fatalf("small selector clipped %q action:\n%s", action, view)
+		}
+	}
+	if lipgloss.Width(view) > 70 || lipgloss.Height(view) > 20 {
+		t.Fatalf("small selector exceeds bounds: %dx%d", lipgloss.Width(view), lipgloss.Height(view))
 	}
 }
 

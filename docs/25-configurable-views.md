@@ -80,6 +80,15 @@ az view select --project global --consumer tmux_selector orchestration
 az view get --project global --json orchestration
 ```
 
+In the TUI, `g` then `p` opens the scope selector. `0` selects **Global** and
+loads the root cross-project projection; numbered project entries select a
+single project's projection. Use `/` to filter larger project registries and
+arrow keys to navigate the filtered results. The status bar always identifies
+the active scope. Opening `V` manages views in that scope: Global uses
+user-level definitions and the `global_board` selection, while Project uses
+definitions and selection persisted by that project. Switching back restores
+that scope's selected view.
+
 The tmux selector status line identifies its selected saved view and prints the
 `az view select --project global --consumer tmux_selector VIEW` command used to
 change it. Arrow keys, `h/j/k/l`, and the mouse wheel move the active item;

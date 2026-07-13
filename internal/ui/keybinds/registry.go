@@ -187,7 +187,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "f", Help: "Open filter menu"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: ",", Help: "Open sort menu"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "/", Help: "Open search"},
-	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "g then p", Help: "Open project selector"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "g then p", Help: "Open Global/project scope selector"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "g then s", Help: "Open spec workspace"},
 
 	{Mode: types.ModeNormal, Category: "Navigation", HelpKey: "h/l", Help: "Move between columns"},

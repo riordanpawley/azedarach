@@ -20,7 +20,7 @@
 ││   f                     Open filter menu                                                    │
 ││   ,                     Open sort menu                                                      │
 ││   /                     Open search                                                         │
-││   g then p              Open project selector                                               │
+││   g then p              Open Global/project scope selector                                  │
 ││   g then s              Open spec workspace                                                 │
 ││                                                                                             │
 ││ [j/k/ctrl+u/d to scroll, g/G to jump]                                                       │
