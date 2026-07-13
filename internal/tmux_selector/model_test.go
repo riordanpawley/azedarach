@@ -1101,6 +1101,72 @@ func TestModelTabTogglesTreeViewAndPersistsGlobally(t *testing.T) {
 	}
 }
 
+func TestProjectedSessionTreeRowsRenderCoherentConnectors(t *testing.T) {
+	entries := []InventoryEntry{
+		{IssueID: "root-one", ViewDepth: 0},
+		{IssueID: "child-one", ViewDepth: 1},
+		{IssueID: "grandchild", ViewDepth: 2},
+		{IssueID: "child-two", ViewDepth: 1},
+		{IssueID: "root-two", ViewDepth: 0},
+		{IssueID: "only-child", ViewDepth: 1},
+	}
+	rows := projectedSessionTreeRows(entries)
+	want := []string{"", "|- ", "|  `- ", "`- ", "", "`- "}
+	for i, row := range rows {
+		if got := treePrefix(row.ancestorLast, row.last); got != want[i] {
+			t.Fatalf("row %s prefix = %q, want %q", row.entry.IssueID, got, want[i])
+		}
+	}
+}
+
+func TestModelTreeReconstructsHierarchyForConfiguredColumnView(t *testing.T) {
+	parentID := naming.IssueID("parent")
+	entries := []InventoryEntry{
+		{
+			ProjectID: "alpha", SessionID: "alpha-child", IssueID: "child", TaskTitle: "Child", HasTmuxSession: true,
+			Task: domain.Task{ID: "child", Title: "Child", ParentID: &parentID},
+		},
+		{
+			ProjectID: "alpha", SessionID: "alpha-parent", IssueID: "parent", TaskTitle: "Parent", HasTmuxSession: true,
+			Task: domain.Task{ID: parentID, Title: "Parent"},
+		},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	model.snapshot = Snapshot{Entries: entries, View: domain.OrchestrationBoardView()}
+	model.activeTab = selectorTabTree
+	model.loading = false
+
+	view := ansi.Strip(model.View())
+	parentPos, childPos := strings.Index(view, "alpha-parent"), strings.Index(view, "alpha-child")
+	if parentPos < 0 || childPos < 0 || parentPos > childPos {
+		t.Fatalf("configured-view tree did not render parent before child:\n%s", view)
+	}
+	if !strings.Contains(view, "`- alpha-child") {
+		t.Fatalf("configured-view tree did not nest child under parent:\n%s", view)
+	}
+}
+
+func TestConfiguredViewTreeScopesCollidingIssueIDsByProject(t *testing.T) {
+	parentID := naming.IssueID("parent")
+	entries := []InventoryEntry{
+		{ProjectID: "alpha", SessionID: "alpha-child", IssueID: "child", Task: domain.Task{ID: "child", ParentID: &parentID}},
+		{ProjectID: "beta", SessionID: "beta-child", IssueID: "child", Task: domain.Task{ID: "child", ParentID: &parentID}},
+		{ProjectID: "alpha", SessionID: "alpha-parent", IssueID: "parent", Task: domain.Task{ID: parentID}},
+		{ProjectID: "beta", SessionID: "beta-parent", IssueID: "parent", Task: domain.Task{ID: parentID}},
+	}
+	model := Model{snapshot: Snapshot{View: domain.OrchestrationBoardView()}}
+	rows := model.activeSessionTreeRows(entries)
+	if len(rows) != 4 {
+		t.Fatalf("tree rows = %+v, want both scoped parent-child pairs", rows)
+	}
+	want := []string{"alpha-parent", "alpha-child", "beta-parent", "beta-child"}
+	for i, sessionID := range want {
+		if rows[i].entry.SessionID != sessionID {
+			t.Fatalf("tree row sessions = %+v, want %v", rows, want)
+		}
+	}
+}
+
 func TestModelTreeViewShowsNonSelectableAncestorsForActiveLeaves(t *testing.T) {
 	rootID := naming.IssueID("az-root")
 	parentID := naming.IssueID("az-parent")
