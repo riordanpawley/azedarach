@@ -27,6 +27,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestClientSQLiteBusyPolicyDefaultsAndOverrides(t *testing.T) {
+	defaultClient := NewClientAtPath(filepath.Join(t.TempDir(), "default.db"), nil)
+	t.Cleanup(func() { require.NoError(t, defaultClient.CloseDB()) })
+	assert.Equal(t, 5*time.Second, defaultClient.sqliteBusyTimeout)
+	assert.Equal(t, 100*time.Millisecond, defaultClient.sqliteBusyRetryDelay)
+	require.NotNil(t, defaultClient.sqliteBusyWait)
+	defaultDB, err := defaultClient.dbHandle()
+	require.NoError(t, err)
+	var defaultBusyTimeout int
+	require.NoError(t, defaultDB.QueryRow(`PRAGMA busy_timeout`).Scan(&defaultBusyTimeout))
+	assert.Equal(t, 5000, defaultBusyTimeout)
+
+	configured := NewClientAtPath(
+		filepath.Join(t.TempDir(), "configured.db"),
+		nil,
+		WithSQLiteBusyPolicy(2*time.Millisecond, 3*time.Millisecond),
+	)
+	t.Cleanup(func() { require.NoError(t, configured.CloseDB()) })
+	assert.Equal(t, 2*time.Millisecond, configured.sqliteBusyTimeout)
+	assert.Equal(t, 3*time.Millisecond, configured.sqliteBusyRetryDelay)
+	configuredDB, err := configured.dbHandle()
+	require.NoError(t, err)
+	var configuredBusyTimeout int
+	require.NoError(t, configuredDB.QueryRow(`PRAGMA busy_timeout`).Scan(&configuredBusyTimeout))
+	assert.Equal(t, 2, configuredBusyTimeout)
+}
+
 func TestClient_CRUDLifecycle(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -4878,10 +4905,8 @@ func TestClient_AddDependencyWithRuntimeWaitsForIssueMutationLock(t *testing.T) 
 }
 
 func TestClient_CreateRetriesAfterSQLiteBusyTimeout(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-
-	client := newTestClient(t)
+	ctx := context.Background()
+	client, retryStarted, releaseRetry := newBusyRetryTestClient(t)
 	_, err := client.Create(ctx, CreateTaskParams{
 		Title:    "warmup",
 		Type:     domain.TypeTask,
@@ -4895,11 +4920,12 @@ func TestClient_CreateRetriesAfterSQLiteBusyTimeout(t *testing.T) {
 
 	_, err = lockDB.Exec(`BEGIN IMMEDIATE`)
 	require.NoError(t, err)
+	opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 
 	done := make(chan error, 1)
-	start := time.Now()
 	go func() {
-		_, createErr := client.Create(ctx, CreateTaskParams{
+		_, createErr := client.Create(opCtx, CreateTaskParams{
 			Title:    "retry-after-busy",
 			Type:     domain.TypeTask,
 			Priority: domain.P3,
@@ -4907,25 +4933,26 @@ func TestClient_CreateRetriesAfterSQLiteBusyTimeout(t *testing.T) {
 		done <- createErr
 	}()
 
-	time.Sleep(5500 * time.Millisecond)
+	select {
+	case <-retryStarted:
+	case <-opCtx.Done():
+		t.Fatal("create did not reach SQLite busy retry")
+	}
 	_, err = lockDB.Exec(`COMMIT`)
 	require.NoError(t, err)
+	close(releaseRetry)
 
 	select {
 	case err := <-done:
 		require.NoError(t, err)
-	case <-time.After(3 * time.Second):
+	case <-opCtx.Done():
 		t.Fatal("create did not complete after retrying past busy timeout")
 	}
-
-	assert.GreaterOrEqual(t, time.Since(start), 5*time.Second)
 }
 
 func TestClient_UpdateRetriesAfterSQLiteBusyTimeout(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-
-	client := newTestClient(t)
+	ctx := context.Background()
+	client, retryStarted, releaseRetry := newBusyRetryTestClient(t)
 	issueID, err := client.Create(ctx, CreateTaskParams{
 		Title:    "update-retry-target",
 		Type:     domain.TypeTask,
@@ -4939,35 +4966,38 @@ func TestClient_UpdateRetriesAfterSQLiteBusyTimeout(t *testing.T) {
 
 	_, err = lockDB.Exec(`BEGIN IMMEDIATE`)
 	require.NoError(t, err)
+	opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 
 	done := make(chan error, 1)
-	start := time.Now()
 	go func() {
-		done <- client.Update(ctx, issueID, domain.StatusInReview)
+		done <- client.Update(opCtx, issueID, domain.StatusInReview)
 	}()
 
-	time.Sleep(5500 * time.Millisecond)
+	select {
+	case <-retryStarted:
+	case <-opCtx.Done():
+		t.Fatal("update did not reach SQLite busy retry")
+	}
 	_, err = lockDB.Exec(`COMMIT`)
 	require.NoError(t, err)
+	close(releaseRetry)
 
 	select {
 	case err := <-done:
 		require.NoError(t, err)
-	case <-time.After(3 * time.Second):
+	case <-opCtx.Done():
 		t.Fatal("update did not complete after retrying past busy timeout")
 	}
 
-	assert.GreaterOrEqual(t, time.Since(start), 5*time.Second)
 	task, err := client.GetWithRuntime(ctx, protocol.DefaultProjectID, issueID)
 	require.NoError(t, err)
 	assert.Equal(t, domain.StatusInReview, task.Status)
 }
 
 func TestClient_UpsertExternalSyncStateRetriesAfterSQLiteBusyTimeout(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	client := newTestClient(t)
+	ctx := context.Background()
+	client, retryStarted, releaseRetry := newBusyRetryTestClient(t)
 	_, err := client.Create(ctx, CreateTaskParams{
 		Title:    "sync-state-retry-warmup",
 		Type:     domain.TypeTask,
@@ -4981,29 +5011,34 @@ func TestClient_UpsertExternalSyncStateRetriesAfterSQLiteBusyTimeout(t *testing.
 
 	_, err = lockDB.Exec(`BEGIN IMMEDIATE`)
 	require.NoError(t, err)
+	opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 
 	done := make(chan error, 1)
-	start := time.Now()
 	go func() {
-		done <- client.UpsertExternalSyncState(ctx, ExternalSyncState{
+		done <- client.UpsertExternalSyncState(opCtx, ExternalSyncState{
 			Provider:  "linear",
 			ProjectID: "project-1",
 			Cursor:    "cursor-1",
 		})
 	}()
 
-	time.Sleep(5500 * time.Millisecond)
+	select {
+	case <-retryStarted:
+	case <-opCtx.Done():
+		t.Fatal("external sync state upsert did not reach SQLite busy retry")
+	}
 	_, err = lockDB.Exec(`COMMIT`)
 	require.NoError(t, err)
+	close(releaseRetry)
 
 	select {
 	case err := <-done:
 		require.NoError(t, err)
-	case <-time.After(3 * time.Second):
+	case <-opCtx.Done():
 		t.Fatal("external sync state upsert did not complete after retrying past busy timeout")
 	}
 
-	assert.GreaterOrEqual(t, time.Since(start), 5*time.Second)
 	state, ok, err := client.GetExternalSyncState(ctx, "linear", "project-1")
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -5079,9 +5114,9 @@ func explainQueryPlan(t *testing.T, ctx context.Context, db *sql.DB, query strin
 	return plan.String()
 }
 
-func newTestClient(t *testing.T) *Client {
+func newTestClient(t *testing.T, opts ...ClientOption) *Client {
 	t.Helper()
-	return newTestClientWithLogger(t, slog.Default())
+	return newTestClientWithLogger(t, slog.Default(), opts...)
 }
 
 var (
@@ -5090,12 +5125,12 @@ var (
 	issueTestTemplateErr  error
 )
 
-func newTestClientWithLogger(t *testing.T, logger *slog.Logger) *Client {
+func newTestClientWithLogger(t *testing.T, logger *slog.Logger, opts ...ClientOption) *Client {
 	t.Helper()
-	return newTestClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger)
+	return newTestClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger, opts...)
 }
 
-func newTestClientAtPath(t *testing.T, dbPath string, logger *slog.Logger) *Client {
+func newTestClientAtPath(t *testing.T, dbPath string, logger *slog.Logger, opts ...ClientOption) *Client {
 	t.Helper()
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		template := migratedIssueTestTemplate(t)
@@ -5104,7 +5139,7 @@ func newTestClientAtPath(t *testing.T, dbPath string, logger *slog.Logger) *Clie
 	} else {
 		require.NoError(t, err)
 	}
-	client := NewClientAtPath(dbPath, logger)
+	client := NewClientAtPath(dbPath, logger, opts...)
 	_, err := client.ProjectionSourceVersion(t.Context())
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -5253,6 +5288,28 @@ func newMigratingTestClient(t *testing.T) *Client {
 		require.NoError(t, client.CloseDB())
 	})
 	return client
+}
+
+func newBusyRetryTestClient(t *testing.T) (*Client, <-chan struct{}, chan struct{}) {
+	t.Helper()
+	retryStarted := make(chan struct{}, 1)
+	releaseRetry := make(chan struct{})
+	client := newTestClient(t,
+		WithSQLiteBusyPolicy(time.Millisecond, time.Hour),
+		withSQLiteBusyWait(func(ctx context.Context, _ time.Duration) error {
+			select {
+			case retryStarted <- struct{}{}:
+			default:
+			}
+			select {
+			case <-releaseRetry:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}),
+	)
+	return client, retryStarted, releaseRetry
 }
 
 func TestResolveDBPathUsesEnvOverride(t *testing.T) {

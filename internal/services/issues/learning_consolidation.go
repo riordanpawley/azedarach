@@ -49,7 +49,7 @@ func (c *Client) SuggestLearningConsolidations(ctx context.Context, projectID st
 		return nil, errors.New("project id is required")
 	}
 	var out []LearningSuggestion
-	err := retrySQLiteBusy(ctx, func() error {
+	err := c.retrySQLiteBusy(ctx, func() error {
 		var err error
 		out, err = c.suggestLearningConsolidationsOnce(ctx, projectID)
 		return err

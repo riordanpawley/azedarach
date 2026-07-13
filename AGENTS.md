@@ -58,6 +58,7 @@ go test ./internal/tui ./internal/cli ./internal/daemon/...
 
 ## Complete Test-Failure Batch Workflow
 
+- Use `just test-timing cold` for the canonical uncached machine-readable full run. It preserves the complete `go test -json` stream, emits sorted package/test durations and all failures, and enforces the committed baseline/budgets documented in [docs/26-test-timing-profiles.md](docs/26-test-timing-profiles.md). Use the distinct `cached`, `focused`, `race`, or `integration` profiles only for their documented semantics; do not present a focused or cached result as cold full-suite evidence.
 - When a broad validation command fails, do not fix the first visible test and repeatedly rerun in a one-test-at-a-time loop.
 - Run the complete relevant suite once with machine-readable output, such as `go test -json ./... -count=1 -timeout 10m`, and preserve the output outside the repository worktree when it is too large for the terminal.
 - Extract the full set of failed tests and packages from that run, then inspect the associated output and classify failures by shared root cause. Truncated terminal output is not evidence that only the visible failure exists.

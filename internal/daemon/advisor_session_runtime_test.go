@@ -516,7 +516,9 @@ func TestRealProcessProfileAdvisorExactLaunchDoesNotSourceStartupFiles(t *testin
 			// Keep the exact post-exit hook shape without letting this isolated
 			// process profile contact the developer's daemon through the real az.
 			hookCalled := filepath.Join(t.TempDir(), "az-hook-called")
-			azWrapper := "#!/bin/sh\nprintf called > " + singleQuoteForShell(hookCalled) + "\n"
+			hookChannel := "advisor-hook-" + shellCase.name
+			azWrapper := "#!/bin/sh\nprintf called > " + singleQuoteForShell(hookCalled) + "\n" +
+				singleQuoteForShell(tmuxPath) + " -S " + singleQuoteForShell(tmuxSocket) + " wait-for -S " + singleQuoteForShell(hookChannel) + "\n"
 			if err := os.WriteFile(filepath.Join(binDir, "az"), []byte(azWrapper), 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -548,7 +550,9 @@ func TestRealProcessProfileAdvisorExactLaunchDoesNotSourceStartupFiles(t *testin
 			for _, tool := range []string{"codex"} {
 				t.Run(tool, func(t *testing.T) {
 					launched := filepath.Join(t.TempDir(), "trusted-"+tool)
-					wrapper := "#!/bin/sh\nprintf launched > " + singleQuoteForShell(launched) + "\n"
+					launchChannel := "advisor-launch-" + shellCase.name + "-" + tool
+					wrapper := "#!/bin/sh\nprintf launched > " + singleQuoteForShell(launched) + "\n" +
+						singleQuoteForShell(tmuxPath) + " -S " + singleQuoteForShell(tmuxSocket) + " wait-for -S " + singleQuoteForShell(launchChannel) + "\n"
 					if err := os.WriteFile(filepath.Join(binDir, tool), []byte(wrapper), 0o755); err != nil {
 						t.Fatal(err)
 					}
@@ -563,27 +567,14 @@ func TestRealProcessProfileAdvisorExactLaunchDoesNotSourceStartupFiles(t *testin
 						t.Fatalf("start exact %s advisor launch: %v", tool, err)
 					}
 					t.Cleanup(func() { _ = client.KillSession(context.Background(), sessionID) })
-					deadline := time.Now().Add(10 * time.Second)
-					for {
-						if _, err := os.Stat(launched); err == nil {
-							break
-						}
-						if time.Now().After(deadline) {
-							output, _ := tmuxRunner.run(context.Background(), "capture-pane", "-p", "-t", sessionID)
-							t.Fatalf("trusted %s executable was not launched; pane output:\n%s", tool, output)
-						}
-						time.Sleep(10 * time.Millisecond)
+					waitCtx, cancelWait := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancelWait()
+					if output, err := tmuxRunner.run(waitCtx, "wait-for", launchChannel); err != nil {
+						paneOutput, _ := tmuxRunner.run(context.Background(), "capture-pane", "-p", "-t", sessionID)
+						t.Fatalf("trusted %s executable was not launched: %v (%s); pane output:\n%s", tool, err, output, paneOutput)
 					}
-					exitDeadline := time.Now().Add(10 * time.Second)
-					for {
-						dead, paneErr := tmuxRunner.run(context.Background(), "display-message", "-p", "-t", sessionID, "#{pane_dead}")
-						if paneErr == nil && strings.TrimSpace(dead) == "1" {
-							break
-						}
-						if time.Now().After(exitDeadline) {
-							t.Fatalf("trusted %s executable did not exit before cleanup: %v (%q)", tool, paneErr, dead)
-						}
-						time.Sleep(10 * time.Millisecond)
+					if output, err := tmuxRunner.run(waitCtx, "wait-for", hookChannel); err != nil {
+						t.Fatalf("trusted %s executable did not exit through the post-exit hook: %v (%s)", tool, err, output)
 					}
 					if _, err := os.Stat(sideEffect); !os.IsNotExist(err) {
 						t.Fatalf("%s startup file side effect occurred for %s: stat err=%v", shellCase.name, tool, err)

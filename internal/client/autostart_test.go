@@ -11,6 +11,16 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
 
+func TestDefaultAutostartRetryPolicy(t *testing.T) {
+	policy := DefaultAutostartRetryPolicy()
+	if policy.PreStartRetries != 3 || policy.PreStartBackoff != 100*time.Millisecond {
+		t.Fatalf("pre-start policy = %+v, want 3 retries at 100ms", policy)
+	}
+	if policy.MaxAttachRetries != 20 || policy.AttachBackoffStep != 100*time.Millisecond {
+		t.Fatalf("attach policy = %+v, want 20 retries at 100ms steps", policy)
+	}
+}
+
 type fakeStarter struct {
 	startCalls   atomic.Int32
 	replaceCalls atomic.Int32

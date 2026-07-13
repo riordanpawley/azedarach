@@ -9,6 +9,40 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
+const defaultSessionMonitorPollInterval = 500 * time.Millisecond
+
+type sessionMonitorTicker struct {
+	ticks <-chan time.Time
+	stop  func()
+}
+
+type sessionMonitorTickerFactory func(time.Duration) sessionMonitorTicker
+
+// SessionMonitorOption configures optional monitor behavior.
+type SessionMonitorOption func(*SessionMonitor)
+
+// WithSessionMonitorPollInterval overrides the pane polling interval.
+func WithSessionMonitorPollInterval(interval time.Duration) SessionMonitorOption {
+	return func(m *SessionMonitor) {
+		if interval > 0 {
+			m.pollInterval = interval
+		}
+	}
+}
+
+func withSessionMonitorTickerFactory(factory sessionMonitorTickerFactory) SessionMonitorOption {
+	return func(m *SessionMonitor) {
+		if factory != nil {
+			m.newTicker = factory
+		}
+	}
+}
+
+func newRealSessionMonitorTicker(interval time.Duration) sessionMonitorTicker {
+	ticker := time.NewTicker(interval)
+	return sessionMonitorTicker{ticks: ticker.C, stop: ticker.Stop}
+}
+
 // TmuxClient defines the interface for tmux operations needed by the monitor
 type TmuxClient interface {
 	// CapturePane captures the content of a tmux pane
@@ -22,10 +56,12 @@ type ProgramSender interface {
 
 // SessionMonitor monitors tmux sessions and detects state changes
 type SessionMonitor struct {
-	tmux     TmuxClient
-	mu       sync.RWMutex
-	sessions map[string]*monitoredSession
-	wg       sync.WaitGroup
+	tmux         TmuxClient
+	pollInterval time.Duration
+	newTicker    sessionMonitorTickerFactory
+	mu           sync.RWMutex
+	sessions     map[string]*monitoredSession
+	wg           sync.WaitGroup
 }
 
 // monitoredSession represents a session being monitored
@@ -42,11 +78,19 @@ type SessionStateMsg struct {
 }
 
 // NewSessionMonitor creates a new session monitor
-func NewSessionMonitor(tmux TmuxClient) *SessionMonitor {
-	return &SessionMonitor{
-		tmux:     tmux,
-		sessions: make(map[string]*monitoredSession),
+func NewSessionMonitor(tmux TmuxClient, opts ...SessionMonitorOption) *SessionMonitor {
+	monitor := &SessionMonitor{
+		tmux:         tmux,
+		pollInterval: defaultSessionMonitorPollInterval,
+		newTicker:    newRealSessionMonitorTicker,
+		sessions:     make(map[string]*monitoredSession),
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(monitor)
+		}
+	}
+	return monitor
 }
 
 // Start begins monitoring a session
@@ -72,7 +116,7 @@ func (m *SessionMonitor) Start(ctx context.Context, issueID string, program Prog
 
 	// Start monitoring goroutine
 	m.wg.Add(1)
-	go m.monitor(monitorCtx, issueID, program)
+	go m.monitor(monitorCtx, session, program)
 }
 
 // Stop stops monitoring a session
@@ -111,17 +155,18 @@ func (m *SessionMonitor) StopAll() {
 }
 
 // monitor is the main monitoring loop for a session
-func (m *SessionMonitor) monitor(ctx context.Context, issueID string, program ProgramSender) {
+func (m *SessionMonitor) monitor(ctx context.Context, session *monitoredSession, program ProgramSender) {
 	defer m.wg.Done()
+	issueID := session.issueID
 
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
+	ticker := m.newTicker(m.pollInterval)
+	defer ticker.stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-ticker.ticks:
 			// Capture tmux pane output
 			output, err := m.tmux.CapturePane(ctx, issueID)
 			if err != nil {
@@ -134,14 +179,14 @@ func (m *SessionMonitor) monitor(ctx context.Context, issueID string, program Pr
 
 			// Check if state changed
 			m.mu.Lock()
-			session, ok := m.sessions[issueID]
-			if !ok {
+			current, ok := m.sessions[issueID]
+			if !ok || current != session {
 				m.mu.Unlock()
-				return // Session was stopped
+				return // Session was stopped or replaced.
 			}
 
-			if session.state != newState {
-				session.state = newState
+			if current.state != newState {
+				current.state = newState
 				m.mu.Unlock()
 
 				// Send state change message to program

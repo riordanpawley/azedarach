@@ -1,0 +1,37 @@
+{
+  "schema": "azedarach.test_timing_baseline.v1",
+  "recorded_at": "2026-07-13",
+  "source": "go test -json ./... -count=1 -timeout 15m; same-machine duration baseline recorded on parent issue deq; exit 1 from the known TestHandleTaskListReadsSQLiteProjection contention failure while the complete run continued",
+  "profiles": {
+    "cold": {
+      "wall_seconds": 283.26,
+      "user_cpu_seconds": 134.59,
+      "system_cpu_seconds": 62.86,
+      "peak_rss_bytes": 519045120,
+      "packages": [
+        {"name": "github.com/riordanpawley/azedarach/internal/services/issues", "seconds": 173.47},
+        {"name": "github.com/riordanpawley/azedarach/internal/cli", "seconds": 39.62},
+        {"name": "github.com/riordanpawley/azedarach/internal/tui", "seconds": 21.36},
+        {"name": "github.com/riordanpawley/azedarach/internal/services/git", "seconds": 17.23},
+        {"name": "github.com/riordanpawley/azedarach/internal/ipc/transport", "seconds": 9.40},
+        {"name": "github.com/riordanpawley/azedarach/internal/services/monitor", "seconds": 6.71}
+      ]
+    }
+  },
+  "budgets": {
+    "regression_factor": 1.25,
+    "max_wall_seconds": {
+      "cold": 360,
+      "cached": 180,
+      "focused": 60,
+      "race": 1800,
+      "integration": 180
+    },
+    "default_package_seconds": 60,
+    "package_seconds": {
+      "github.com/riordanpawley/azedarach/internal/services/issues": 220
+    },
+    "default_test_seconds": 30,
+    "test_seconds": {}
+  }
+}
