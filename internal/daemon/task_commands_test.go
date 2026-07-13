@@ -30,6 +30,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
+	"github.com/riordanpawley/azedarach/internal/testutil/issuefixture"
 )
 
 func TestBuildTaskSnapshotExportBodyIsDeterministic(t *testing.T) {
@@ -7823,7 +7824,8 @@ func TestTaskGraphReadinessStopsAtNestedRoots(t *testing.T) {
 func TestTaskGraphReadinessLoadsRootScopedTasksWithLargeUnrelatedProject(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-root-scoped-readiness"
-	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -7857,19 +7859,13 @@ func TestTaskGraphReadinessLoadsRootScopedTasksWithLargeUnrelatedProject(t *test
 	if err := issuesClient.AddDependency(ctx, childID, blockerID, string(domain.DependencyBlocks)); err != nil {
 		t.Fatalf("add blocker dependency: %v", err)
 	}
-	for i := 0; i < 250; i++ {
-		unrelatedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-			Title:    fmt.Sprintf("Unrelated %03d", i),
-			Type:     domain.TypeTask,
-			Priority: domain.P3,
-			Status:   domain.StatusOpen,
-		})
-		if err != nil {
-			t.Fatalf("create unrelated %d: %v", i, err)
-		}
-		if unrelatedID == rootID || unrelatedID == childID || unrelatedID == blockerID {
-			t.Fatalf("unexpected duplicate unrelated id %s", unrelatedID)
-		}
+	unrelated := make([]issuefixture.Issue, 250)
+	for i := range unrelated {
+		unrelated[i] = issuefixture.Issue{ID: fmt.Sprintf("fixture-readiness-unrelated-%03d", i), Title: fmt.Sprintf("Unrelated %03d", i), Type: domain.TypeTask, Priority: domain.P3, Status: domain.StatusOpen}
+	}
+	setup, err := issuefixture.SeedPath(ctx, dbPath, issuefixture.Fixture{Issues: unrelated})
+	if err != nil {
+		t.Fatalf("seed unrelated issues: %v", err)
 	}
 
 	d := &Daemon{
@@ -7878,10 +7874,13 @@ func TestTaskGraphReadinessLoadsRootScopedTasksWithLargeUnrelatedProject(t *test
 			projectID: issuesClient,
 		},
 	}
+	queryStarted := time.Now()
 	tasks, err := d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootID)
+	queryDuration := time.Since(queryStarted)
 	if err != nil {
 		t.Fatalf("loadTaskGraphReadinessDomainTasks error: %v", err)
 	}
+	t.Logf("graph readiness scale timing: setup=%s query=%s rows=%d", setup.Duration, queryDuration, setup.Rows)
 	byID := map[string]domain.Task{}
 	for _, task := range tasks {
 		byID[task.ID.String()] = task
@@ -8133,7 +8132,8 @@ func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
 func TestTaskClosePreflightLoadsRootScopedSubtreeWithLargeUnrelatedProject(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-close-scoped-subtree"
-	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -8165,19 +8165,13 @@ func TestTaskClosePreflightLoadsRootScopedSubtreeWithLargeUnrelatedProject(t *te
 	if err != nil {
 		t.Fatalf("create grandchild: %v", err)
 	}
-	for i := 0; i < 250; i++ {
-		unrelatedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-			Title:    fmt.Sprintf("Unrelated %03d", i),
-			Type:     domain.TypeTask,
-			Priority: domain.P3,
-			Status:   domain.StatusOpen,
-		})
-		if err != nil {
-			t.Fatalf("create unrelated %d: %v", i, err)
-		}
-		if unrelatedID == rootID || unrelatedID == childID || unrelatedID == grandchildID {
-			t.Fatalf("unexpected duplicate unrelated id %s", unrelatedID)
-		}
+	unrelated := make([]issuefixture.Issue, 250)
+	for i := range unrelated {
+		unrelated[i] = issuefixture.Issue{ID: fmt.Sprintf("fixture-close-unrelated-%03d", i), Title: fmt.Sprintf("Unrelated %03d", i), Type: domain.TypeTask, Priority: domain.P3, Status: domain.StatusOpen}
+	}
+	setup, err := issuefixture.SeedPath(ctx, dbPath, issuefixture.Fixture{Issues: unrelated})
+	if err != nil {
+		t.Fatalf("seed unrelated issues: %v", err)
 	}
 
 	d := &Daemon{
@@ -8186,10 +8180,13 @@ func TestTaskClosePreflightLoadsRootScopedSubtreeWithLargeUnrelatedProject(t *te
 			projectID: issuesClient,
 		},
 	}
+	queryStarted := time.Now()
 	tasks, err := d.loadTaskClosePreflightDomainTasks(ctx, projectID, rootID)
+	queryDuration := time.Since(queryStarted)
 	if err != nil {
 		t.Fatalf("loadTaskClosePreflightDomainTasks error: %v", err)
 	}
+	t.Logf("close preflight scale timing: setup=%s query=%s rows=%d", setup.Duration, queryDuration, setup.Rows)
 	byID := map[string]domain.Task{}
 	for _, task := range tasks {
 		byID[task.ID.String()] = task
