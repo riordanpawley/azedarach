@@ -730,7 +730,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.globalBoard {
 		switch msg.String() {
 		case overlay.EventLogHotkey, overlay.OperationQueueHotkey, "O", "X":
-			m.addToast(Toast{Level: ToastInfo, Message: "Open an issue's project before using project operations", Expires: time.Now().Add(4 * time.Second)})
+			m.addToast(Toast{Level: ToastInfo, Message: "Open a ticket's project before using project operations", Expires: time.Now().Add(4 * time.Second)})
 			return m, nil
 		}
 	}
@@ -802,7 +802,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.sessionTreeFilterOnly {
 			m.addToast(Toast{
 				Level:   ToastInfo,
-				Message: "Showing issues with sessions in their tree",
+				Message: "Showing tickets with sessions in their tree",
 				Expires: time.Now().Add(2 * time.Second),
 			})
 		} else {
@@ -910,7 +910,7 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.globalBoard && action == keybinds.ActionGotoSpec {
 		m.addToast(Toast{
 			Level:   ToastInfo,
-			Message: "Open an issue's project before viewing its spec",
+			Message: "Open a ticket's project before viewing its spec",
 			Expires: time.Now().Add(4 * time.Second),
 		})
 		return m, nil
@@ -1023,7 +1023,7 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task == nil {
 			m.addToast(Toast{
 				Level:   ToastWarning,
-				Message: "No focused issue to update",
+				Message: "No focused ticket to update",
 				Expires: time.Now().Add(3 * time.Second),
 			})
 			return m, nil
@@ -4190,7 +4190,7 @@ func (m Model) renderLoading() string {
 	content := lipgloss.JoinVertical(
 		lipgloss.Center,
 		m.spinner.View(),
-		"Loading issues...",
+		"Loading tickets...",
 	)
 
 	return lipgloss.Place(

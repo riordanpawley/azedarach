@@ -339,9 +339,13 @@ func seedModelIssueStore(t *testing.T, repoDir, id, title, status string, priori
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var closedAt any
+	if status == "closed" || status == "cancelled" {
+		closedAt = now
+	}
 	if _, err := db.Exec(
-		`INSERT INTO issues (id, title, description, status, priority, issue_type, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-		id, title, "", status, priority, issueType, now, now,
+		`INSERT INTO issues (id, title, description, status, priority, issue_type, created_at, updated_at, closed_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+		id, title, "", status, priority, issueType, now, now, closedAt,
 	); err != nil {
 		t.Fatalf("insert issue: %v", err)
 	}

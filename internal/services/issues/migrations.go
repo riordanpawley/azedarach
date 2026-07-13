@@ -76,6 +76,281 @@ var orderedMigrations = []migration{
 	{id: "0042_learning_consolidation_scan_cursor", path: "migrations/0042_learning_consolidation_scan_cursor.sql"},
 	{id: "0043_learning_activation_telemetry", path: "migrations/0043_learning_activation_telemetry.sql"},
 	{id: "0044_learning_activation_abandonment", path: "migrations/0044_learning_activation_abandonment.sql"},
+	{id: "0045_issue_state_runtime_constraints", path: "migrations/0045_issue_state_runtime_constraints.sql", apply: applyIssueStateRuntimeConstraintsMigration},
+	{id: "0046_repair_issue_state_runtime_constraints", apply: applyIssueStateRuntimeConstraintsRepairMigration},
+}
+
+func applyIssueStateRuntimeConstraintsRepairMigration(ctx context.Context, db *sql.DB, id string) error {
+	for _, column := range []string{"disposition", "engagement", "visibility"} {
+		exists, err := columnExistsDB(ctx, db, "issues", column)
+		if err != nil {
+			return fmt.Errorf("inspect canonical issue state column %s: %w", column, err)
+		}
+		if !exists {
+			return applyIssueStateRuntimeConstraintsMigration(ctx, db, id)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(id,applied_at) VALUES(?,?)`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("record canonical issue state repair migration: %w", err)
+	}
+	return nil
+}
+
+func columnExistsDB(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, typ string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB, id string) error {
+	var client Client
+	if err := client.ensureRuntimeProjectionSchema(db); err != nil {
+		return fmt.Errorf("repair runtime projection schema before migration %s: %w", id, err)
+	}
+	sqlText, err := loadMigrationSQL("migrations/0045_issue_state_runtime_constraints.sql")
+	if err != nil {
+		return fmt.Errorf("load migration %s: %w", id, err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS interaction_requests (id TEXT PRIMARY KEY,issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,decision_key TEXT NOT NULL,state TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),request_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`); err != nil {
+		return fmt.Errorf("ensure interaction request authority before migration %s: %w", id, err)
+	}
+	for _, name := range []string{"issue_state_product_guard_insert", "issue_state_product_guard_update", "issue_archive_aggregate_guard", "issue_lease_archived_guard", "issue_lease_state_guard_update", "issue_worktree_archived_guard", "issue_worktree_archived_guard_update", "issue_session_archived_guard", "issue_session_archived_guard_update", "daemon_session_state_product_guard_insert", "daemon_session_state_product_guard_update", "daemon_session_observation_product_guard_insert", "daemon_session_observation_product_guard_update", "daemon_worktree_state_product_guard_insert", "daemon_worktree_state_product_guard_update", "issue_closed_runtime_guard_insert", "issue_closed_runtime_guard_update", "daemon_session_closed_issue_guard_insert", "daemon_session_closed_issue_guard_update", "issue_dependency_closed_runtime_guard_insert", "issue_dependency_closed_runtime_guard_update", "issue_descendant_closed_ancestor_guard_update"} {
+		if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+name); err != nil {
+			return err
+		}
+	}
+	addedCanonicalStateColumn := false
+	for _, column := range []struct{ name, ddl string }{{"disposition", "TEXT"}, {"engagement", "TEXT"}, {"visibility", "TEXT"}} {
+		exists, err := txColumnExists(ctx, tx, "issues", column.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE issues ADD COLUMN `+column.name+` `+column.ddl); err != nil {
+			return fmt.Errorf("add canonical issue state column %s: %w", column.name, err)
+		}
+		addedCanonicalStateColumn = true
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE issues SET
+		disposition = CASE
+			WHEN lifecycle_state='backlog' THEN 'backlog'
+			WHEN lifecycle_state IN ('open','active') THEN 'ready'
+			WHEN lifecycle_state='closed' AND closed_outcome='completed' THEN 'completed'
+			WHEN lifecycle_state='closed' AND closed_outcome='cancelled' THEN 'cancelled'
+		END,
+		engagement = CASE
+			WHEN lifecycle_state='active' AND review_state='requested' THEN 'review_requested'
+			WHEN lifecycle_state='active' THEN 'working'
+			ELSE 'idle'
+		END,
+		visibility = CASE WHEN archived_at IS NULL THEN 'live' ELSE 'archived' END
+		WHERE disposition IS NULL OR engagement IS NULL OR visibility IS NULL`); err != nil {
+		return fmt.Errorf("backfill canonical issue state: %w", err)
+	}
+	if addedCanonicalStateColumn {
+		// The pre-canonical archive adapter represented archive intent by copying
+		// deleted_at to archived_at without stopping active lifecycle state. Archive
+		// is orthogonal to disposition in the canonical product, but an archived
+		// issue cannot remain engaged. Normalize the canonical tuple, then regenerate
+		// all legacy mirrors from it before installing the product guards.
+		if _, err := tx.ExecContext(ctx, `UPDATE issues SET engagement='idle' WHERE visibility='archived';
+			UPDATE issues SET
+				lifecycle_state = CASE WHEN disposition='backlog' THEN 'backlog' WHEN disposition='ready' AND engagement='idle' THEN 'open' WHEN disposition='ready' THEN 'active' ELSE 'closed' END,
+				review_state = CASE WHEN engagement='review_requested' THEN 'requested' ELSE 'none' END,
+				closed_outcome = CASE WHEN disposition='completed' THEN 'completed' WHEN disposition='cancelled' THEN 'cancelled' ELSE 'none' END,
+				status = CASE WHEN disposition='completed' THEN 'closed' WHEN disposition='cancelled' THEN 'cancelled' WHEN engagement='review_requested' THEN 'in_review' WHEN engagement='working' THEN 'in_progress' ELSE 'open' END`); err != nil {
+			return fmt.Errorf("normalize legacy issue state mirrors: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM daemon_session_observations WHERE NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_session_observations.issue_id);
+			DELETE FROM daemon_session_projections WHERE NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_session_projections.issue_id);
+			DELETE FROM daemon_worktree_projections WHERE NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_worktree_projections.issue_id)`); err != nil {
+			return fmt.Errorf("prune impossible legacy issue authority: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE daemon_session_projections SET scope_id=issue_id
+		WHERE role='worker' AND scope_kind='issue' AND COALESCE(trim(scope_id),'')=''`); err != nil {
+		return fmt.Errorf("backfill legacy worker session scope identity: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE daemon_session_observations SET scope_id=issue_id WHERE role='worker' AND scope_kind='issue' AND COALESCE(trim(scope_id),'')=''; UPDATE daemon_session_observations SET state='running' WHERE state='attached'; UPDATE daemon_session_observations SET observed_state='running' WHERE observed_state='attached'`); err != nil {
+		return fmt.Errorf("normalize legacy session observations: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE daemon_session_projections SET state='running' WHERE state='attached'; UPDATE daemon_session_projections SET observed_state='running' WHERE observed_state='attached'`); err != nil {
+		return fmt.Errorf("normalize legacy attached session state: %w", err)
+	}
+	if err := migrateIssueSessionLogicalIdentity(ctx, tx); err != nil {
+		return fmt.Errorf("migrate logical session identity: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS issue_coordination_leases (
+		issue_id TEXT NOT NULL, purpose TEXT NOT NULL CHECK (purpose IN ('execution','orchestration','review')),
+		owner_id TEXT NOT NULL, owner_kind TEXT NOT NULL, claimed_at TEXT NOT NULL, expires_at TEXT,
+		PRIMARY KEY(issue_id,purpose), FOREIGN KEY(issue_id) REFERENCES issues(id) ON DELETE CASCADE)`); err != nil {
+		return fmt.Errorf("ensure canonical claim authority: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS idx_issues_owner_active`); err != nil {
+		return err
+	}
+	hasOwnerColumns, err := txColumnExists(ctx, tx, "issues", "owner_id")
+	if err != nil {
+		return err
+	}
+	if hasOwnerColumns {
+		var invalidOwnerRows int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE
+			(COALESCE(trim(owner_id),'')='' AND (COALESCE(trim(owner_kind),'')!='' OR COALESCE(trim(owner_claimed_at),'')!='' OR COALESCE(trim(owner_expires_at),'')!='')) OR
+			(COALESCE(trim(owner_id),'')!='' AND (COALESCE(trim(owner_kind),'')='' OR COALESCE(trim(owner_claimed_at),'')=''))`).Scan(&invalidOwnerRows); err != nil {
+			return fmt.Errorf("validate legacy issue claim tuples: %w", err)
+		}
+		if invalidOwnerRows != 0 {
+			return fmt.Errorf("legacy issue claim authority contains %d partial tuples", invalidOwnerRows)
+		}
+		var conflictingOwnerRows int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues i JOIN issue_coordination_leases l ON l.issue_id=i.id AND l.purpose='execution'
+			WHERE COALESCE(trim(i.owner_id),'')!='' AND (l.owner_id!=i.owner_id OR l.owner_kind!=i.owner_kind OR l.claimed_at!=i.owner_claimed_at OR COALESCE(l.expires_at,'')!=COALESCE(i.owner_expires_at,''))`).Scan(&conflictingOwnerRows); err != nil {
+			return fmt.Errorf("compare legacy and canonical issue claims: %w", err)
+		}
+		if conflictingOwnerRows != 0 {
+			return fmt.Errorf("legacy and canonical issue claim authority conflict on %d rows", conflictingOwnerRows)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_coordination_leases(issue_id,purpose,owner_id,owner_kind,claimed_at,expires_at)
+			SELECT i.id,'execution',i.owner_id,i.owner_kind,i.owner_claimed_at,i.owner_expires_at FROM issues i
+			WHERE COALESCE(trim(i.owner_id),'')!='' AND NOT EXISTS(SELECT 1 FROM issue_coordination_leases l WHERE l.issue_id=i.id AND l.purpose='execution')`); err != nil {
+			return fmt.Errorf("migrate unambiguous legacy issue claims: %w", err)
+		}
+	}
+	for _, name := range []string{"owner_expires_at", "owner_claimed_at", "owner_kind", "owner_id"} {
+		exists, err := txColumnExists(ctx, tx, "issues", name)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE issues DROP COLUMN `+name); err != nil {
+			return fmt.Errorf("drop legacy issue claim mirror %s: %w", name, err)
+		}
+	}
+	if addedCanonicalStateColumn {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases WHERE NOT EXISTS(
+			SELECT 1 FROM issues i WHERE i.id=issue_coordination_leases.issue_id
+			AND i.visibility='live' AND i.disposition NOT IN ('completed','cancelled')
+			AND ((issue_coordination_leases.purpose='execution' AND i.disposition='ready')
+				OR (issue_coordination_leases.purpose='review' AND i.disposition='ready' AND i.engagement='review_requested')
+				OR (issue_coordination_leases.purpose='orchestration' AND i.disposition IN ('backlog','ready')))
+		)`); err != nil {
+			return fmt.Errorf("prune impossible legacy issue claims: %w", err)
+		}
+	}
+	for _, name := range []string{"issue_closed_runtime_guard_insert", "issue_closed_runtime_guard_update", "daemon_worktree_closed_issue_guard_insert", "daemon_worktree_closed_issue_guard_update", "daemon_session_closed_issue_guard_insert", "daemon_session_closed_issue_guard_update", "issue_dependency_closed_runtime_guard_insert", "issue_dependency_closed_runtime_guard_update", "issue_descendant_closed_ancestor_guard_update"} {
+		if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+name); err != nil {
+			return fmt.Errorf("drop legacy lifecycle authority trigger %s: %w", name, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+		return fmt.Errorf("apply migration %s: %w", id, err)
+	}
+	canonicalRuntimeGuards := issueClosedRuntimeV2TriggersSQL
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "BEFORE UPDATE OF lifecycle_state", "BEFORE UPDATE OF disposition")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "NEW.lifecycle_state = 'closed'", "NEW.disposition IN ('completed','cancelled')")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "NEW.lifecycle_state <> 'closed'", "NEW.disposition NOT IN ('completed','cancelled')")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "child.lifecycle_state <> 'closed'", "child.disposition NOT IN ('completed','cancelled')")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "i.lifecycle_state = 'closed'", "i.disposition IN ('completed','cancelled')")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "NEW.archived_at IS NULL", "NEW.visibility = 'live'")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "child.archived_at IS NULL", "child.visibility = 'live'")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "i.archived_at IS NULL", "i.visibility = 'live'")
+	if _, err := tx.ExecContext(ctx, canonicalRuntimeGuards); err != nil {
+		return fmt.Errorf("install canonical runtime aggregate guards: %w", err)
+	}
+	var revisionTables int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projection_source_revision'`).Scan(&revisionTables); err != nil {
+		return err
+	}
+	if revisionTables > 0 {
+		for _, table := range []struct{ prefix, name string }{{"sessions", "daemon_session_projections"}, {"session_observations", "daemon_session_observations"}} {
+			for _, action := range []string{"insert", "update", "delete"} {
+				trigger := "projection_source_revision_" + table.prefix + "_" + action
+				if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+trigger+`; CREATE TRIGGER `+trigger+` AFTER `+strings.ToUpper(action)+` ON `+table.name+` BEGIN UPDATE projection_source_revision SET revision=revision+1 WHERE singleton=1; END`); err != nil {
+					return fmt.Errorf("restore projection revision trigger %s: %w", trigger, err)
+				}
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(id,applied_at) VALUES(?,?)`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	tx = nil
+	return nil
+}
+
+func migrateIssueSessionLogicalIdentity(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE logical_runtime_winners AS
+		SELECT DISTINCT project_id,role,scope_kind,scope_id,
+		FIRST_VALUE(session_id) OVER (PARTITION BY project_id,role,scope_kind,scope_id ORDER BY
+		CASE WHEN length(session_id)>3 AND substr(session_id,3,1)='-' AND substr(session_id,4)=CASE WHEN role='orchestrator' AND scope_id='project' THEN 'orchestrator-project' ELSE scope_id END THEN 0 ELSE 1 END,
+		updated_at DESC,session_id ASC) winner_id
+		FROM (SELECT project_id,session_id,role,scope_kind,scope_id,updated_at FROM daemon_session_projections WHERE instr(session_id,'.pane-')=0
+		UNION ALL SELECT project_id,session_id,role,scope_kind,scope_id,updated_at FROM daemon_session_observations WHERE instr(session_id,'.pane-')=0)`); err != nil {
+		return err
+	}
+	for _, table := range []string{"daemon_session_projections", "daemon_session_observations"} {
+		merged := "merged_" + table
+		if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE `+merged+` AS SELECT DISTINCT t.project_id,w.winner_id session_id,
+		FIRST_VALUE(t.issue_id) OVER newest issue_id,t.role,t.scope_kind,t.scope_id,FIRST_VALUE(t.state) OVER newest state,
+		FIRST_VALUE(t.observed_state) OVER newest observed_state,FIRST_VALUE(t.activity) OVER newest activity,
+		FIRST_VALUE(t.activity_source) OVER newest activity_source,FIRST_VALUE(t.tmux_attached_count) OVER newest tmux_attached_count,
+		MIN(NULLIF(t.started_at,'')) OVER logical_scope started_at,MAX(t.updated_at) OVER logical_scope updated_at
+		FROM `+table+` t JOIN logical_runtime_winners w USING(project_id,role,scope_kind,scope_id) WHERE instr(t.session_id,'.pane-')=0
+		WINDOW logical_scope AS (PARTITION BY t.project_id,t.role,t.scope_kind,t.scope_id),newest AS (PARTITION BY t.project_id,t.role,t.scope_kind,t.scope_id ORDER BY t.updated_at DESC,t.session_id ASC);
+		DELETE FROM `+table+` WHERE instr(session_id,'.pane-')=0;
+		INSERT INTO `+table+`(project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at)
+		SELECT project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at FROM `+merged+`; DROP TABLE `+merged+`;`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE logical_runtime_winners`); err != nil {
+		return err
+	}
+	for _, table := range []string{"daemon_session_projections", "daemon_session_observations"} {
+		newTable := table + "_logical_identity_v3"
+		if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS `+newTable+`; CREATE TABLE `+newTable+`(
+		project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'worker',scope_kind TEXT NOT NULL DEFAULT 'issue',scope_id TEXT NOT NULL DEFAULT '',
+		state TEXT NOT NULL,observed_state TEXT,activity TEXT,activity_source TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,started_at TEXT,updated_at TEXT NOT NULL,
+		logical_id TEXT GENERATED ALWAYS AS (role||':'||scope_kind||':'||scope_id||CASE WHEN instr(session_id,'.pane-')>0 THEN ':pane:'||session_id ELSE '' END) STORED,
+		UNIQUE(project_id,logical_id));
+		INSERT INTO `+newTable+`(project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at)
+		SELECT project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at FROM `+table+`;
+		DROP TABLE `+table+`; ALTER TABLE `+newTable+` RENAME TO `+table+`;`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 const (
@@ -180,8 +455,14 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
-	if err := c.reconcileIssueStateModelV2Drift(ctx, db); err != nil {
-		return err
+	canonicalApplied, err := isMigrationApplied(ctx, db, "0045_issue_state_runtime_constraints")
+	if err != nil {
+		return fmt.Errorf("check canonical issue state migration: %w", err)
+	}
+	if !canonicalApplied {
+		if err := c.reconcileIssueStateModelV2Drift(ctx, db); err != nil {
+			return err
+		}
 	}
 
 	if err := repairAgentLearningBaseSchema(ctx, db); err != nil {
@@ -1496,7 +1777,6 @@ func issueStateModelV2Reconciliations(ctx context.Context, db sqlIssueQueryer) (
 				Review:       domain.IssueReviewState(reviewState),
 				CloseOutcome: domain.IssueCloseOutcome(closedOutcome),
 				Archive:      issueArchiveStateFromTimestamp(archivedAt),
-				Deletion:     domain.IssueDeletionPresent,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("issue %s v2 state: %w", id, err)
@@ -1519,7 +1799,6 @@ func issueStateModelV2Reconciliations(ctx context.Context, db sqlIssueQueryer) (
 			Review:       authoritativeState.Review(),
 			CloseOutcome: authoritativeState.CloseOutcome(),
 			Archive:      issueArchiveStateFromTimestamp(deletedAt),
-			Deletion:     authoritativeState.Deletion(),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("issue %s reconciled state: %w", id, err)

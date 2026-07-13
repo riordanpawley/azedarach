@@ -2850,7 +2850,7 @@ func TestOrchestrateIntegrateCommandPrintsGuidance(t *testing.T) {
 	output := captureStdout(t, func() error {
 		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2"})
 	})
-	for _, want := range []string{"Worktree: /repo-az-2", "az branch merge --source az-2 --target <issue-id|base>", "az issue close --id az-2"} {
+	for _, want := range []string{"Worktree: /repo-az-2", "az branch merge --source az-2 --target <issue-id|base>", "az ticket close --id az-2"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
@@ -3265,7 +3265,7 @@ func TestOrchestrateCloseSessionCommandStopsSession(t *testing.T) {
 	if gotCommand != commandSessionStop {
 		t.Fatalf("command = %q, want %q", gotCommand, commandSessionStop)
 	}
-	if !strings.Contains(output, "az issue close --id az-2") || strings.Contains(output, "--cleanup") {
+	if !strings.Contains(output, "az ticket close --id az-2") || strings.Contains(output, "--cleanup") {
 		t.Fatalf("output = %q, want cleanup-close guidance", output)
 	}
 }

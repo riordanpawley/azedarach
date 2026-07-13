@@ -25,7 +25,13 @@ type Dependency struct {
 	Type DependencyType `json:"dependency_type"`
 }
 
-// Task represents a issue
+// Ticket is Azedarach's canonical work-item domain type.
+//
+// Task remains the concrete representation during the compatibility window so
+// existing Go consumers, JSON payloads, and persisted data remain unchanged.
+type Ticket = Task
+
+// Task is the legacy concrete name for a ticket.
 type Task struct {
 	ID                    naming.IssueID      `json:"id"`
 	Title                 string              `json:"title"`
@@ -75,7 +81,10 @@ type PullRequest struct {
 	ChecksStatus string `json:"checks_status,omitempty"`
 }
 
-// IssueOwnership is a durable issue claim used to prevent duplicate agent pickup.
+// TicketOwnership is the canonical name for a durable ticket claim.
+type TicketOwnership = IssueOwnership
+
+// IssueOwnership is the deprecated compatibility name for a durable ticket claim.
 type IssueOwnership struct {
 	OwnerID   string     `json:"owner_id"`
 	OwnerKind string     `json:"owner_kind"`

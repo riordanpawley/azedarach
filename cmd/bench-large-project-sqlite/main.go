@@ -393,8 +393,8 @@ func seedFixture(ctx context.Context, db *sql.DB, cfg harnessConfig) (ids fixtur
 	defer tx.Rollback()
 
 	issueStmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO issues (id, title, description, status, priority, issue_type, created_at, updated_at, labels_json, implementations_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO issues (id, title, description, status, priority, issue_type, created_at, updated_at, labels_json, implementations_json, disposition, engagement, visibility, lifecycle_state, review_state, closed_outcome)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, ?, 'none')
 	`)
 	if err != nil {
 		return fixtureIDs{}, fixtureSummary{}, err
@@ -409,8 +409,8 @@ func seedFixture(ctx context.Context, db *sql.DB, cfg harnessConfig) (ids fixtur
 	}
 	defer depStmt.Close()
 	sessionStmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, observed_state, activity, activity_source, tmux_attached_count, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, observed_state, activity, activity_source, tmux_attached_count, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fixtureIDs{}, fixtureSummary{}, err
@@ -449,7 +449,7 @@ func seedFixture(ctx context.Context, db *sql.DB, cfg harnessConfig) (ids fixtur
 
 	for i := 0; i < cfg.RootCount; i++ {
 		id := rootID(i)
-		if _, err := issueStmt.ExecContext(ctx, id, "Large project root "+strconv.Itoa(i), "Synthetic Azedarach root graph", string(domain.StatusInProgress), int(domain.P1), string(domain.TypeEpic), now, now, `["perf","root"]`, `["default"]`); err != nil {
+		if _, err := issueStmt.ExecContext(ctx, id, "Large project root "+strconv.Itoa(i), "Synthetic Azedarach root graph", string(domain.StatusInProgress), int(domain.P1), string(domain.TypeEpic), now, now, `["perf","root"]`, `["default"]`, "ready", "working", "active", "none"); err != nil {
 			return fixtureIDs{}, fixtureSummary{}, err
 		}
 		summary.IssueCount++
@@ -463,7 +463,13 @@ func seedFixture(ctx context.Context, db *sql.DB, cfg harnessConfig) (ids fixtur
 		} else if i%7 == 0 {
 			status = domain.StatusInProgress
 		}
-		if _, err := issueStmt.ExecContext(ctx, id, "Large project task "+strconv.Itoa(i), "large project task body with workspace traces and selector context", string(status), int(domain.Priority(i%5)), string(domain.TypeTask), now, timestampForIndex(i), `["perf","synthetic"]`, `["default"]`); err != nil {
+		engagement, lifecycle, review := "idle", "open", "none"
+		if status == domain.StatusInProgress {
+			engagement, lifecycle = "working", "active"
+		} else if status == domain.StatusInReview {
+			engagement, lifecycle, review = "review_requested", "active", "requested"
+		}
+		if _, err := issueStmt.ExecContext(ctx, id, "Large project task "+strconv.Itoa(i), "large project task body with workspace traces and selector context", string(status), int(domain.Priority(i%5)), string(domain.TypeTask), now, timestampForIndex(i), `["perf","synthetic"]`, `["default"]`, "ready", engagement, lifecycle, review); err != nil {
 			return fixtureIDs{}, fixtureSummary{}, err
 		}
 		summary.IssueCount++
@@ -505,7 +511,7 @@ func seedFixture(ctx context.Context, db *sql.DB, cfg harnessConfig) (ids fixtur
 			source = "hook"
 			attached = 1
 		}
-		if _, err := sessionStmt.ExecContext(ctx, cfg.ProjectID, "sess-"+id, id, state, "", activity, source, attached, now, timestampForIndex(i)); err != nil {
+		if _, err := sessionStmt.ExecContext(ctx, cfg.ProjectID, "sess-"+id, id, id, state, "", activity, source, attached, now, timestampForIndex(i)); err != nil {
 			return fixtureIDs{}, fixtureSummary{}, err
 		}
 		summary.SessionCount++
@@ -529,7 +535,7 @@ func seedFixture(ctx context.Context, db *sql.DB, cfg harnessConfig) (ids fixtur
 	}
 	for i := 0; i < closeCandidateCount; i++ {
 		id := "bench-close-" + fmt.Sprintf("%05d", i)
-		if _, err := issueStmt.ExecContext(ctx, id, "Close candidate "+strconv.Itoa(i), "close preflight candidate", string(domain.StatusOpen), int(domain.P3), string(domain.TypeTask), now, timestampForIndex(i), `["perf","close"]`, `["default"]`); err != nil {
+		if _, err := issueStmt.ExecContext(ctx, id, "Close candidate "+strconv.Itoa(i), "close preflight candidate", string(domain.StatusOpen), int(domain.P3), string(domain.TypeTask), now, timestampForIndex(i), `["perf","close"]`, `["default"]`, "ready", "idle", "open", "none"); err != nil {
 			return fixtureIDs{}, fixtureSummary{}, err
 		}
 		ids.CloseCandidates = append(ids.CloseCandidates, id)

@@ -20,7 +20,9 @@ var (
 	ErrInvalidRequirementID = errors.New("invalid requirement id")
 	// ErrInvalidSpecLinkID indicates the supplied spec link identifier is malformed.
 	ErrInvalidSpecLinkID = errors.New("invalid spec link id")
-	// ErrInvalidIssueID indicates the supplied issue identifier is malformed.
+	// ErrInvalidTicketID indicates the supplied ticket identifier is malformed.
+	ErrInvalidTicketID = errors.New("invalid ticket id")
+	// ErrInvalidIssueID is the deprecated compatibility error.
 	ErrInvalidIssueID = errors.New("invalid issue id")
 	// ErrInvalidSessionID indicates the supplied session identifier is malformed.
 	ErrInvalidSessionID = errors.New("invalid session id")
@@ -45,8 +47,15 @@ type RequirementID string
 // SpecLinkID is a validated spec link identifier.
 type SpecLinkID string
 
-// IssueID is a validated issue identifier.
-type IssueID string
+// TicketID is a validated Azedarach ticket identifier.
+//
+// The wire and storage representation remains issue_id during the
+// compatibility window. IssueID below is retained as a source-compatible
+// alias for integrations that have not migrated terminology yet.
+type TicketID string
+
+// IssueID is the deprecated compatibility name for TicketID.
+type IssueID = TicketID
 
 // SessionID is a validated tmux session identifier.
 type SessionID string
@@ -208,18 +217,29 @@ func (id *SpecLinkID) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// ParseTicketID validates a canonical ticket identifier.
+func ParseTicketID(raw string) (TicketID, error) {
+	return parseTicketID(raw, ErrInvalidTicketID)
+}
+
+// ParseIssueID is the deprecated compatibility name for ParseTicketID. It
+// preserves the legacy sentinel and error text for callers that inspect them.
 func ParseIssueID(raw string) (IssueID, error) {
+	return parseTicketID(raw, ErrInvalidIssueID)
+}
+
+func parseTicketID(raw string, invalidError error) (TicketID, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return "", fmt.Errorf("%w: empty", ErrInvalidIssueID)
+		return "", fmt.Errorf("%w: empty", invalidError)
 	}
 	for _, r := range trimmed {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == '.' {
 			continue
 		}
-		return "", fmt.Errorf("%w: disallowed character %q", ErrInvalidIssueID, r)
+		return "", fmt.Errorf("%w: disallowed character %q", invalidError, r)
 	}
-	return IssueID(trimmed), nil
+	return TicketID(trimmed), nil
 }
 
 func (id IssueID) String() string {

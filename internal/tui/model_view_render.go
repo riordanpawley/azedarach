@@ -281,12 +281,12 @@ func (m Model) renderModalBackdrop(contentHeight int) string {
 		return ""
 	}
 	header := m.styles.StatusInfo.Render(fmt.Sprintf(
-		" %s  %d issues ",
+		" %s  %d tickets ",
 		strings.TrimSpace(m.currentProject),
 		len(m.tasks),
 	))
 	if strings.TrimSpace(m.currentProject) == "" {
-		header = m.styles.StatusInfo.Render(fmt.Sprintf(" %d issues ", len(m.tasks)))
+		header = m.styles.StatusInfo.Render(fmt.Sprintf(" %d tickets ", len(m.tasks)))
 	}
 	return lipgloss.NewStyle().
 		Width(m.width).

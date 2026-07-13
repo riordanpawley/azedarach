@@ -201,6 +201,14 @@ func TestRuntimeProjectionForEventFallbackIgnoresAgentScopedSessionRows(t *testi
 		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
 		sessionStore: store,
 	}
+	snapshot := store.ReadSnapshot("proj-runtime")
+	rows := make([]daemonstate.Session, 0, len(snapshot.Sessions))
+	for _, row := range snapshot.Sessions {
+		rows = append(rows, row)
+	}
+	if selected, ok := nonAgentSessionProjectionByIssue(rows, daemon.sessionNamingScope("proj-runtime"), "az-7"); !ok || selected.State != daemonstate.SessionStateRunning {
+		t.Fatalf("non-agent selection=%+v found=%v", selected, ok)
+	}
 
 	projection := daemon.runtimeProjectionForEvent(context.Background(), "proj-runtime", "az-7", "", nil)
 	if projection.Session.SessionID != "proj-runtime-az-7" {
@@ -274,7 +282,7 @@ func TestPublishSessionProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	)
 	sessionUpdatedAt := time.Date(2026, time.April, 1, 13, 0, 0, 0, time.UTC)
 	worktreeUpdatedAt := time.Date(2026, time.April, 1, 13, 5, 0, 0, time.UTC)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -362,7 +370,7 @@ func TestPublishGitStatusProjectionEventIncludesRuntimeDelta(t *testing.T) {
 		worktree  = "/tmp/repo-az-2"
 		branch    = "riordan/az-2/task"
 	)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateStarting,
@@ -458,7 +466,7 @@ func TestPublishWorktreeProjectionEventIncludesRuntimeDelta(t *testing.T) {
 		worktree  = "/tmp/repo-az-3"
 		branch    = "riordan/az-3/task"
 	)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStatePaused,

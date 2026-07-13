@@ -56,6 +56,15 @@ go test ./internal/tui ./internal/cli ./internal/daemon/...
   - stop tests should seed desired-stopped intent before runtime cleanup
   - do not seed a desired-stopped row when the assertion is about runtime recovery or reattachment
 
+## Complete Test-Failure Batch Workflow
+
+- When a broad validation command fails, do not fix the first visible test and repeatedly rerun in a one-test-at-a-time loop.
+- Run the complete relevant suite once with machine-readable output, such as `go test -json ./... -count=1 -timeout 10m`, and preserve the output outside the repository worktree when it is too large for the terminal.
+- Extract the full set of failed tests and packages from that run, then inspect the associated output and classify failures by shared root cause. Truncated terminal output is not evidence that only the visible failure exists.
+- Repair each coherent failure class as a batch. Prefer one shared fixture or production-boundary correction when many tests violate the same contract; do not bulk-relax expectations until the intended production semantics are established.
+- After the batch repair, rerun the complete suite and collect the next complete failure set. Use focused tests for diagnosis and regression development, but never substitute isolated green tests for the complete rerun.
+- If a complete rerun exposes unrelated or flaky failures, reproduce and classify them explicitly. Fix them in scope when appropriate; otherwise create durable follow-up issues with the failing commands and evidence before accepting the scoped change.
+
 ## Fast Search Commands
 
 ```bash
@@ -154,6 +163,7 @@ fd "filename" -t f internal cmd
    - `session.start`/`session.attach`/`session.pause`/`session.resume`/`session.stop` runtime-presence checks -> `tmux`
    - advisor-session singleton/recovery/cleanup per interaction request -> `hybrid` (refreshed durable request/session-role projection + live tmux runtime; terminal requests and project removal clean advisor resources)
    - session recovery/reconcile -> `hybrid`
+   - `session.issue_lifecycle_runtime` live managed-session lifecycle gate -> `hybrid` (refresh durable factored issue disposition/engagement/visibility projection, then compare with live tmux; repair ready+idle to working, reject backlog/terminal/archived divergence without destroying runtime)
    - `task.close`/`task.close_preflight`/`task.delete`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle, investigation disposition/acceptance, and orchestration checks -> `hybrid` (read v2 issue lifecycle and evidence projection first, then compare with live runtime)
    - `task.review_handoff` external busy-equivalent session activity gate before moving to `in_review` -> `projection` (durable issue v2 lifecycle/review projection + session activity projection; active issue self-handoff remains allowed)
    - `task.integration_readiness` worker evidence gate and `task.context_risk_closeout` repeated-local-failure gate -> `projection` (durable issue projection + mailbox/observation evidence)
@@ -189,6 +199,14 @@ fd "filename" -t f internal cmd
 1. Do not mark migrations complete while active entrypoints still depend on transitional adapters or legacy execution paths.
 2. Runtime acceptance criteria must prove the intended production path is wired on active entrypoints, not only isolated package/tests.
 3. Cross-process boundaries must use typed protocol/domain payloads, not UI-framework message types.
+
+## Database Migration Safety Gate (Critical)
+
+1. For any migration, schema ensure/repair logic, trigger/index change, persistence-authority change, migration failure, or pre-merge review containing database changes, use `$database-migration-review` at [.codex/skills/database-migration-review/SKILL.md](.codex/skills/database-migration-review/SKILL.md).
+2. Default to exactly one new migration per merge to main, or one per independently versioned database authority when a merge genuinely changes more than one. Consolidate branch-local steps before clone testing; never squash or mutate migrations already merged or executed against any real database.
+3. Pre-merge review must test the candidate through real startup/store paths against safe temporary clones of the root user database and every registered project database. Never test candidate migrations on the originals.
+4. Require fresh, historical-upgrade, idempotent-reopen, rollback, drift, and real-database-clone evidence. Fresh-database tests alone are insufficient.
+5. Migration changes remain high risk and require three clean review passes after the final migration-affecting edit.
 
 ## Active-Path Placeholder Policy
 

@@ -758,7 +758,7 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 
 	sessionStartedAt := time.Date(2026, time.April, 2, 10, 59, 0, 0, time.UTC)
 	sessionUpdatedAt := time.Date(2026, time.April, 2, 11, 0, 0, 0, time.UTC)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   taskID,
 		State:     daemonstate.SessionStateAttached,
@@ -1254,7 +1254,7 @@ func TestHandleTaskListRefreshesMissingTmuxSessionBeforeReportingActive(t *testi
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	sessionID := naming.CanonicalSessionID(projectID, taskID)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       taskID,
 		State:         daemonstate.SessionStateAttached,
@@ -1348,7 +1348,7 @@ func TestHandleTaskListThrottlesSessionRuntimeRefresh(t *testing.T) {
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	sessionID := naming.CanonicalSessionID(projectID, taskID)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       taskID,
 		State:         daemonstate.SessionStateAttached,
@@ -1431,7 +1431,7 @@ func TestTaskListSessionRuntimeRefreshSharesInFlightRefresh(t *testing.T) {
 	)
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            naming.CanonicalSessionID(projectID, issueID),
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateAttached,
@@ -1557,8 +1557,13 @@ func TestRefreshExistingSessionRuntimeStateSkipsUnchangedProjectionWrites(t *tes
 			UpdatedAt:     seededAt,
 		},
 	} {
-		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, session); err != nil {
+		if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, session); err != nil {
 			t.Fatalf("seed session %s: %v", session.ID, err)
+		}
+		if _, _, err := runtimeStateStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+			ProjectID: projectID, SessionID: session.ID, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: seededAt,
+		}); err != nil {
+			t.Fatalf("seed physical observation %s: %v", session.ID, err)
 		}
 	}
 
@@ -1586,8 +1591,8 @@ func TestRefreshExistingSessionRuntimeStateSkipsUnchangedProjectionWrites(t *tes
 	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil {
 		t.Fatalf("refreshExistingSessionRuntimeState: %v", err)
 	}
-	if got := writer.sessionPersistCount(); got != 1 {
-		t.Fatalf("session projection persists = %d, want only stale row persisted", got)
+	if got := writer.sessionPersistCount(); got != 0 {
+		t.Fatalf("logical session persists = %d, runtime observations must use physical authority", got)
 	}
 
 	live, found, err := runtimeStateStore.GetSessionState(ctx, projectID, liveSessionID)
@@ -1642,7 +1647,7 @@ func TestHandleTaskListKeepsFreshResponseWhenRuntimeRefreshSkipsUnchangedRows(t 
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	sessionID := naming.CanonicalSessionID(projectID, taskID)
 	seededAt := now.Add(-time.Minute)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       taskID,
 		State:         daemonstate.SessionStateRunning,
@@ -1733,7 +1738,7 @@ func TestHandleTaskListIgnoresAgentPaneStatusForTaskLifecycle(t *testing.T) {
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	startedAt := time.Date(2026, time.May, 29, 8, 0, 0, 0, time.UTC)
 	containerID := naming.CanonicalSessionID(projectID, taskID)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:                containerID,
 		IssueID:           taskID,
 		State:             daemonstate.SessionStateAttached,
@@ -1744,7 +1749,7 @@ func TestHandleTaskListIgnoresAgentPaneStatusForTaskLifecycle(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed container session: %v", err)
 	}
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            containerID + ".pane-190",
 		IssueID:       taskID,
 		State:         daemonstate.SessionStatePaused,
@@ -2223,7 +2228,7 @@ func TestHandleBoardFetchDerivesInReviewPhaseFromSessionActivity(t *testing.T) {
 		{issueID: busyID, activity: "busy"},
 		{issueID: idleID, activity: "idle"},
 	} {
-		if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 			ID:             naming.CanonicalSessionID(projectID, seed.issueID),
 			IssueID:        seed.issueID,
 			State:          daemonstate.SessionStateRunning,
@@ -2543,7 +2548,7 @@ func TestHandleTaskListQuerySkipsLiveRuntimeRefresh(t *testing.T) {
 
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            naming.CanonicalSessionID(projectID, matchID),
 		IssueID:       matchID,
 		State:         daemonstate.SessionStateAttached,
@@ -3089,7 +3094,7 @@ func TestTaskCloseBlocksActiveSessionActivity(t *testing.T) {
 				t.Fatalf("create issue: %v", err)
 			}
 			sessionID := naming.CanonicalSessionID(projectID, taskID)
-			if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 				ID:             sessionID,
 				IssueID:        taskID,
 				State:          daemonstate.SessionStateRunning,
@@ -3178,7 +3183,7 @@ func TestTaskCloseAllowsExplicitActiveSessionOverride(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 	sessionID := naming.CanonicalSessionID(projectID, taskID)
-	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 		ID:             sessionID,
 		IssueID:        taskID,
 		State:          daemonstate.SessionStateRunning,
@@ -3272,7 +3277,7 @@ func TestTaskCloseAllowsTerminalOrIdleSessionActivity(t *testing.T) {
 				t.Fatalf("create issue: %v", err)
 			}
 			sessionID := naming.CanonicalSessionID(projectID, taskID)
-			if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 				ID:             sessionID,
 				IssueID:        taskID,
 				State:          daemonstate.SessionStateRunning,
@@ -4015,7 +4020,7 @@ func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.
 		t.Fatalf("create issue: %v", err)
 	}
 	sessionID := "legacy-" + taskID
-	if err := runtimeStore.UpsertSessionState(ctx, legacyProjectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, ctx, legacyProjectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   taskID,
 		State:     daemonstate.SessionStateRunning,
@@ -4087,7 +4092,7 @@ func TestTaskCloseRepairsStaleBusyHookProjectionBeforePreflight(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 	sessionID := "ch-" + taskID
-	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 		ID:             sessionID,
 		IssueID:        taskID,
 		State:          daemonstate.SessionStateRunning,
@@ -4250,7 +4255,7 @@ func TestTaskCloseBlocksUnverifiedLegacyProjectSessionProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
-	if err := runtimeStore.UpsertSessionState(ctx, legacyProjectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, ctx, legacyProjectID, daemonstate.Session{
 		ID:        "legacy-" + taskID,
 		IssueID:   taskID,
 		State:     daemonstate.SessionStateRunning,
@@ -4470,7 +4475,7 @@ func TestTaskCloseRunsIssueResourceCleanupWithSessionBeforeWorktreeRemoval(t *te
 		t.Fatalf("seed worktree projection: %v", err)
 	}
 	sessionID := naming.CanonicalSessionID(projectID, taskID)
-	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 		ID:             sessionID,
 		IssueID:        taskID,
 		State:          daemonstate.SessionStateAttached,
@@ -4671,7 +4676,7 @@ func TestTaskUpdateStatusRejectsRawCloseActiveRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
-	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 		ID:            "sess-" + taskID,
 		IssueID:       taskID,
 		State:         daemonstate.SessionStateAttached,
@@ -7696,6 +7701,9 @@ func TestTaskOwnershipClaimCommandKeepsReviewSeparateFromExecution(t *testing.T)
 	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{OwnerID: "worker-a"}); err != nil {
 		t.Fatalf("seed execution ownership: %v", err)
 	}
+	if err := issuesClient.Update(ctx, taskID, domain.StatusInReview); err != nil {
+		t.Fatalf("request review: %v", err)
+	}
 	d := &Daemon{cfg: Config{Logger: slog.Default()}, hub: publish.NewHub(16, 8, slog.Default()), issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{}}
 	body, err := json.Marshal(taskOwnershipRequest{TaskID: taskID, OwnerID: "reviewer-a", Purpose: domain.CoordinationLeaseReview})
 	if err != nil {
@@ -7953,7 +7961,7 @@ func TestTaskGraphReadinessRefreshesOnlyRootScopedSessions(t *testing.T) {
 			UpdatedAt:     seededAt,
 		},
 	} {
-		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, session); err != nil {
+		if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, session); err != nil {
 			t.Fatalf("seed session %s: %v", session.ID, err)
 		}
 	}
@@ -8038,7 +8046,7 @@ func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
 		t.Fatalf("create child: %v", err)
 	}
 	sessionID := naming.CanonicalSessionID(projectID, childID)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       childID,
 		State:         daemonstate.SessionStateRunning,
@@ -8393,7 +8401,7 @@ func TestTaskGraphReadinessStoppedProjectionSuppressesNewerSnapshotAfterClose(t 
 
 	sessionID := naming.CanonicalSessionID(projectID, childID)
 	stoppedAt := time.Date(2026, time.July, 7, 9, 0, 0, 0, time.UTC)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       childID,
 		State:         daemonstate.SessionStateStopped,
@@ -8559,10 +8567,12 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 	}
 	runDaemonTestGit(t, repoDir, "commit", "-am", closedID.String()+": generate typed materializer rpc")
 	evidenceCommit := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
+	activeWorktree := filepath.Join(t.TempDir(), "active-worktree")
+	runDaemonTestGit(t, repoDir, "worktree", "add", "-q", activeWorktree, activeBranch)
 
 	for _, state := range []daemonstate.WorktreeState{
 		{ProjectID: projectID, IssueID: rootID.String(), Path: repoDir, Branch: rootBranch, UpdatedAt: time.Now().UTC()},
-		{ProjectID: projectID, IssueID: activeID.String(), Path: repoDir, Branch: activeBranch, UpdatedAt: time.Now().UTC()},
+		{ProjectID: projectID, IssueID: activeID.String(), Path: activeWorktree, Branch: activeBranch, UpdatedAt: time.Now().UTC()},
 	} {
 		if err := runtimeStateStore.UpsertWorktreeState(ctx, state); err != nil {
 			t.Fatalf("seed worktree state: %v", err)
@@ -10815,7 +10825,7 @@ func TestTaskDeleteCleanupRepairsStaleMissingWorktreeProjection(t *testing.T) {
 		t.Fatalf("mark task in progress: %v", err)
 	}
 	sessionID := naming.CanonicalSessionID(projectID, taskID)
-	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   taskID,
 		State:     daemonstate.SessionStateAttached,
@@ -11765,7 +11775,7 @@ func seedReviewGuardSessionProjection(t *testing.T, d *Daemon, projectID, taskID
 	if store == nil {
 		t.Fatal("missing runtime store")
 	}
-	if err := store.UpsertSessionState(context.Background(), projectID, session); err != nil {
+	if err := upsertSessionStateFixture(store, context.Background(), projectID, session); err != nil {
 		t.Fatalf("seed session projection: %v", err)
 	}
 }
@@ -11910,14 +11920,18 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 		{name: "requested", sessionID: secondSessionID, issueID: secondID},
 		{name: "context", sessionID: firstSessionID, issueID: firstID},
 	} {
-		if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
-			ID:            row.sessionID,
-			IssueID:       row.issueID,
-			State:         daemonstate.SessionStateRunning,
-			ObservedState: daemonstate.SessionStateStopped,
-			UpdatedAt:     staleUpdatedAt,
+		if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
+			ID:        row.sessionID,
+			IssueID:   row.issueID,
+			State:     daemonstate.SessionStateRunning,
+			UpdatedAt: staleUpdatedAt,
 		}); err != nil {
 			t.Fatalf("seed %s session state: %v", row.name, err)
+		}
+		if _, _, err := runtimeStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+			ProjectID: projectID, SessionID: row.sessionID, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: staleUpdatedAt,
+		}); err != nil {
+			t.Fatalf("seed %s stale physical observation: %v", row.name, err)
 		}
 	}
 	tmuxRunner := &testTmuxRunner{
@@ -11929,6 +11943,7 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 		killRelease: make(chan struct{}),
 	}
 
+	const initialRevision uint64 = 9
 	d := &Daemon{
 		cfg:  Config{RepoDir: ".", Logger: logger},
 		tmux: tmux.NewClient(tmuxRunner, logger),
@@ -11938,7 +11953,7 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 		sessionStore:           daemonstate.NewStore(),
 		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{},
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
-		revision:               map[string]uint64{projectID: 9},
+		revision:               map[string]uint64{projectID: initialRevision},
 	}
 
 	body, err := json.Marshal(map[string][]string{
@@ -11966,7 +11981,7 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 	if err != nil {
 		t.Fatalf("decode task.get_many body: %v", err)
 	}
-	if got, want := payload.SnapshotRevision, uint64(9); got != want {
+	if got, want := payload.SnapshotRevision, initialRevision+2; got != want {
 		t.Fatalf("snapshot revision = %d, want %d", got, want)
 	}
 	taskByID := map[string]domain.Task{}
@@ -12107,7 +12122,7 @@ func TestTaskListSnapshotFreshnessRefreshesSessionCacheBeforeEvaluation(t *testi
 	)
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
 	durableUpdatedAt := time.Date(2026, time.April, 2, 11, 4, 45, 0, time.UTC)
-	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -12567,7 +12582,7 @@ func TestHandleTaskSnapshotExportUsesProjectionSessions(t *testing.T) {
 
 	projectID := "proj-snapshot-export"
 	sessionID := naming.CanonicalSessionID(projectID, taskID)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   taskID,
 		State:     daemonstate.SessionStateAttached,
@@ -12799,11 +12814,11 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 	} {
 		if _, err := db.ExecContext(ctx, `
 			INSERT INTO issues (
-				id, title, description, status, priority, issue_type,
+				id, title, description, status, disposition, engagement, visibility, lifecycle_state, closed_outcome, review_state, priority, issue_type,
 				created_at, updated_at, closed_at, assignee, labels_json,
 				implementations_json, design, notes, acceptance, estimate, deleted_at
 			)
-			VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+			VALUES (?, ?, NULL, ?, 'ready', 'idle', 'live', 'open', 'none', 'none', ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
 		`, row.id, row.title, string(domain.StatusOpen), int(domain.P3), string(domain.TypeTask), now, now); err != nil {
 			t.Fatalf("insert issue %s: %v", row.id, err)
 		}
@@ -12826,10 +12841,10 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 		sessionID string
 		issueID   string
 	}{
-		{name: "target", sessionID: targetSessionID, issueID: targetSessionID},
+		{name: "target", sessionID: targetSessionID, issueID: targetID},
 		{name: "context", sessionID: contextSessionID, issueID: contextID},
 	} {
-		if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
 			ID:            row.sessionID,
 			IssueID:       row.issueID,
 			State:         daemonstate.SessionStateRunning,
@@ -12843,7 +12858,10 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 	otherUpdatedAt := time.Date(2026, time.April, 2, 9, 0, 0, 0, time.UTC)
 	for i := 0; i < 25; i++ {
 		issueID := fmt.Sprintf("other-%02d", i)
-		if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		if _, err := db.ExecContext(ctx, `INSERT INTO issues(id,title,status,disposition,engagement,visibility,lifecycle_state,closed_outcome,review_state,priority,issue_type,created_at,updated_at) VALUES(?,?,?,'ready','idle','live','open','none','none',?,?,?,?)`, issueID, issueID, string(domain.StatusOpen), int(domain.P3), string(domain.TypeTask), now, now); err != nil {
+			t.Fatalf("seed unrelated issue %s: %v", issueID, err)
+		}
+		if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
 			ID:            naming.CanonicalSessionID(projectID, issueID),
 			IssueID:       issueID,
 			State:         daemonstate.SessionStateStopped,
@@ -13097,7 +13115,19 @@ func TestRefreshWorktreeRuntimeStateSuppressesMissingWorktreeFromGitList(t *test
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE issues(id TEXT PRIMARY KEY); INSERT INTO issues(id) VALUES(?)`, missingID); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed durable issue authority: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
 	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
 		ProjectID: projectID,

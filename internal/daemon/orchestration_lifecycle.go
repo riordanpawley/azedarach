@@ -64,7 +64,7 @@ func (d *Daemon) enforceRootedOrchestratorContinuation(ctx context.Context, auth
 		return nil
 	}
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
-	parent, found, err := store.GetSessionState(ctx, projectID, lease.SessionID)
+	parent, found, err := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, lease.Identity.Scope.RootIssueID.String())
 	if err != nil {
 		return fmt.Errorf("refresh parent orchestrator activity: %w", err)
 	}

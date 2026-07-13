@@ -103,6 +103,9 @@ func applyRuntimeSessionCounts(projection *protocol.RuntimeProjection, counts se
 	if counts.PaneScoped == 0 {
 		return
 	}
+	if !isAgentScopedSessionID(string(projection.Session.SessionID)) {
+		return
+	}
 	if counts.Active > 0 {
 		projection.Session.State = protocol.SessionLifecycleState(daemonstate.SessionStateRunning)
 	} else {

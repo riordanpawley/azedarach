@@ -796,6 +796,12 @@ func TestClient_NormalizeProviderDisplayKeyIssueIDsMigratesDurableRefs(t *testin
 			title,
 			description,
 			status,
+			disposition,
+			engagement,
+			visibility,
+			lifecycle_state,
+			closed_outcome,
+			review_state,
 			priority,
 			issue_type,
 			created_at,
@@ -803,7 +809,7 @@ func TestClient_NormalizeProviderDisplayKeyIssueIDsMigratesDurableRefs(t *testin
 			labels_json,
 			implementations_json
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, 'ready', 'working', 'live', 'active', 'none', 'none', ?, ?, ?, ?, ?, ?)
 	`, "CHE-02091", "Imported Linear issue", "legacy id", string(domain.StatusInProgress), int(domain.P1), string(domain.TypeTask), now, now, "[]", "[]")
 	require.NoError(t, err)
 
@@ -839,9 +845,9 @@ func TestClient_NormalizeProviderDisplayKeyIssueIDsMigratesDurableRefs(t *testin
 	require.NoError(t, err)
 
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, "proj", "session-CHE-02091", "CHE-02091", "attached", now, now)
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, "proj", "session-CHE-02091", "CHE-02091", "CHE-02091", "running", now, now)
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at)
@@ -866,6 +872,8 @@ func TestClient_NormalizeProviderDisplayKeyIssueIDsMigratesDurableRefs(t *testin
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM spec_links WHERE issue_id = 'b'`).Scan(&count))
 	assert.Equal(t, 1, count)
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_session_projections WHERE issue_id = 'b'`).Scan(&count))
+	assert.Equal(t, 1, count)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_session_projections WHERE issue_id = 'b' AND scope_id = 'b'`).Scan(&count))
 	assert.Equal(t, 1, count)
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_worktree_projections WHERE issue_id = 'b'`).Scan(&count))
 	assert.Equal(t, 1, count)
@@ -912,9 +920,9 @@ func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
 	startedAt := time.Date(2026, time.April, 4, 12, 0, 0, 0, time.UTC)
 	updatedAt := startedAt.Add(2 * time.Minute)
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, activity, activity_source, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, projectID, sessionID, taskID, "attached", "no-agent", "session", startedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, activity, activity_source, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, sessionID, taskID, taskID, "running", "no-agent", "session", startedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	statusRaw, err := json.Marshal(git.GitStatus{
@@ -993,9 +1001,9 @@ func TestClient_SearchWithRuntimeUsesFTSIndexAndHydratesMatches(t *testing.T) {
 
 	now := time.Date(2026, time.April, 4, 12, 0, 0, 0, time.UTC)
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, activity, activity_source, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, projectID, "sess-search-runtime", matchingID, "attached", "busy", "session", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, activity, activity_source, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-search-runtime", matchingID, matchingID, "running", "busy", "session", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	tasks, err := client.SearchWithRuntime(ctx, projectID, "runtime cache")
@@ -1085,10 +1093,10 @@ func TestClient_ListWithRuntimeReadsSessionObservations(t *testing.T) {
 	updatedAt := startedAt.Add(time.Minute)
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO daemon_session_observations (
-			project_id, session_id, issue_id, state, observed_state, activity, activity_source, started_at, updated_at
+			project_id, session_id, issue_id, scope_id, state, observed_state, activity, activity_source, started_at, updated_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, projectID, "sess-runtime-observation.pane-535", taskID, "running", "running", "busy", "runtime", startedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-runtime-observation.pane-535", taskID, taskID, "running", "running", "busy", "runtime", startedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	tasks, err := client.ListWithRuntime(ctx, projectID)
@@ -1122,14 +1130,16 @@ func TestClient_ListWithRuntimeReadsCanonicalHookActivityProjection(t *testing.T
 	})
 	started := startedAt
 	err = runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
-		ID:             "az-" + taskID,
-		IssueID:        taskID,
-		State:          daemonstate.SessionStateRunning,
-		ObservedState:  daemonstate.SessionStateRunning,
-		Activity:       "idle",
-		ActivitySource: "hooks",
-		StartedAt:      &started,
-		UpdatedAt:      hookUpdatedAt,
+		ID:        "az-" + taskID,
+		IssueID:   taskID,
+		State:     daemonstate.SessionStateRunning,
+		StartedAt: &started,
+		UpdatedAt: hookUpdatedAt,
+	})
+	require.NoError(t, err)
+	_, _, err = runtimeStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+		ProjectID: projectID, SessionID: "az-" + taskID, ObservedState: daemonstate.SessionStateRunning,
+		Activity: "idle", ActivitySource: "hooks", UpdatedAt: hookUpdatedAt,
 	})
 	require.NoError(t, err)
 	err = runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
@@ -1215,9 +1225,9 @@ func TestClient_ListSummariesWithRuntimeKeepsParentAndRuntimeProjection(t *testi
 
 	now := time.Date(2026, time.April, 4, 12, 0, 0, 0, time.UTC)
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, activity, activity_source, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, projectID, "sess-summary-runtime", childID, "attached", "idle", "hooks", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, activity, activity_source, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-summary-runtime", childID, childID, "running", "idle", "hooks", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	statusRaw, err := json.Marshal(git.GitStatus{HasChanges: true, GitAdditions: 5, GitDeletions: 1})
@@ -1410,9 +1420,9 @@ func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
 	defer db.Close()
 	now := time.Date(2026, time.June, 30, 11, 30, 0, 0, time.UTC)
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, activity, activity_source, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, projectID, "sess-graph-readiness", childID, "attached", "busy", "hooks", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, activity, activity_source, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-graph-readiness", childID, childID, "running", "busy", "hooks", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	tasks, err := client.ListGraphReadinessWithRuntime(ctx, projectID, rootID)
@@ -1534,9 +1544,9 @@ func TestClient_ListParentChildSubtreeWithRuntimeScopesToTargetClosure(t *testin
 	defer db.Close()
 	now := time.Date(2026, time.June, 30, 12, 15, 0, 0, time.UTC)
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, activity, activity_source, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, projectID, "sess-close-subtree", childID, "running", "busy", "hooks", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, activity, activity_source, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-close-subtree", childID, childID, "running", "busy", "hooks", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	require.NoError(t, err)
 	statusRaw, err := json.Marshal(git.GitStatus{
 		HasChanges:    true,
@@ -1607,9 +1617,9 @@ func TestClient_ListWithRuntimeUsesObservedSessionState(t *testing.T) {
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, observed_state, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, projectID, "sess-runtime-stale", taskID, "running", "stopped", now, now)
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, observed_state, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-runtime-stale", taskID, taskID, "running", "stopped", now, now)
 	require.NoError(t, err)
 
 	tasks, err := client.ListWithRuntime(ctx, projectID)
@@ -1878,9 +1888,9 @@ func TestClient_GetManyMetadataWithRuntimeIncludesCachedGitProjection(t *testing
 
 	updatedAt := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, activity, activity_source, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, projectID, "sess-metadata-runtime", taskID, "running", "no-agent", "session", updatedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, activity, activity_source, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-metadata-runtime", taskID, taskID, "running", "no-agent", "session", updatedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	_, err = db.ExecContext(ctx, `
@@ -1936,9 +1946,9 @@ func TestClient_MetadataRuntimeUpdatedAtIgnoresProjectionRefreshTimestamps(t *te
 	require.NoError(t, err)
 
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, activity, activity_source, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, projectID, "sess-runtime-refresh", taskID, "running", "idle", "hooks", projectionRefreshedAt.Format(time.RFC3339Nano), projectionRefreshedAt.Format(time.RFC3339Nano))
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, activity, activity_source, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-runtime-refresh", taskID, taskID, "running", "idle", "hooks", projectionRefreshedAt.Format(time.RFC3339Nano), projectionRefreshedAt.Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	_, err = db.ExecContext(ctx, `
@@ -2360,7 +2370,7 @@ func TestClient_IssueOwnershipClaimConflictReleaseAndExpiredTakeover(t *testing.
 	require.NoError(t, err)
 	defer db.Close()
 	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
-	_, err = db.ExecContext(ctx, `UPDATE issues SET owner_expires_at = ? WHERE id = ?`, past, taskID)
+	_, err = db.ExecContext(ctx, `UPDATE issue_coordination_leases SET expires_at = ? WHERE issue_id = ? AND purpose = 'execution'`, past, taskID)
 	require.NoError(t, err)
 
 	takenOver, err := client.ClaimOwnershipWithRuntime(ctx, "project-1", taskID, OwnershipClaimParams{
@@ -2398,6 +2408,7 @@ func TestClient_CoordinationLeasesArePurposeScopedAndPreserveExecutionOwner(t *t
 	require.NoError(t, err)
 	require.NotNil(t, worker.Ownership)
 	assert.Equal(t, "worker-a", worker.Ownership.OwnerID)
+	require.NoError(t, client.Update(ctx, taskID, domain.StatusInReview))
 
 	reviewed, err := client.ClaimOwnershipWithRuntime(ctx, "project-1", taskID, OwnershipClaimParams{
 		OwnerID: "reviewer-a", OwnerKind: "agent", Purpose: domain.CoordinationLeaseReview,
@@ -3387,9 +3398,9 @@ func TestClient_DeleteBlockedWhenTaskHasActiveSessionProjection(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, projectID, "sess-"+taskID, taskID, "attached", time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-"+taskID, taskID, taskID, "running", time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	err = client.Delete(ctx, taskID)
@@ -3418,9 +3429,9 @@ func TestClient_DeleteAllowsStoppedSessionWithoutWorktreeProjection(t *testing.T
 	t.Cleanup(func() { _ = db.Close() })
 
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, projectID, "sess-"+taskID, taskID, "stopped", "", time.Now().UTC().Format(time.RFC3339Nano))
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-"+taskID, taskID, taskID, "stopped", "", time.Now().UTC().Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	require.NoError(t, client.Delete(ctx, taskID))
@@ -3571,7 +3582,7 @@ func TestClient_CreateRepairsAllocatorFromDeletedIssueHistory(t *testing.T) {
 	assert.Equal(t, "c", thirdID)
 }
 
-func TestClient_CreateRepairsAllocatorFromOldWorktreeProjection(t *testing.T) {
+func TestClient_CreateRejectsOldOrphanWorktreeAndPreservesAllocator(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	client := NewClientAtPath(dbPath, slog.Default())
@@ -3591,7 +3602,8 @@ func TestClient_CreateRepairsAllocatorFromOldWorktreeProjection(t *testing.T) {
 		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at)
 		VALUES (?, ?, ?, ?, ?)
 	`, "default", secondID, filepath.Join(t.TempDir(), "repo-"+secondID), "riordan/"+secondID+"/old-branch", now)
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "existing issue")
 	_, err = db.ExecContext(ctx, `DELETE FROM issue_id_allocations WHERE id = ?`, secondID)
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `UPDATE meta SET value = '1' WHERE key = ?`, nextAlphaIssueIndexMetaKey)
@@ -3926,6 +3938,8 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0042_learning_consolidation_scan_cursor",
 		"0043_learning_activation_telemetry",
 		"0044_learning_activation_abandonment",
+		"0045_issue_state_runtime_constraints",
+		"0046_repair_issue_state_runtime_constraints",
 	}, got)
 }
 
@@ -4524,9 +4538,9 @@ func TestClient_ClosedRuntimeInvariantTriggers(t *testing.T) {
 	require.NoError(t, client.Update(ctx, childID, domain.StatusDone))
 	require.NoError(t, client.Update(ctx, parentID, domain.StatusDone))
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, started_at, updated_at)
-		VALUES ('proj', 'sess-child', ?, 'running', ?, ?)
-	`, childID, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, started_at, updated_at)
+		VALUES ('proj', 'sess-child', ?, ?, 'running', ?, ?)
+	`, childID, childID, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot attach active session to closed issue or closed ancestor")
 
@@ -4544,9 +4558,9 @@ func TestClient_ClosedRuntimeInvariantTriggers(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, client.Update(ctx, newParentID, domain.StatusDone))
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, started_at, updated_at)
-		VALUES ('proj', 'sess-dirty-child', ?, 'running', ?, ?)
-	`, dirtyChildID, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, scope_id, state, started_at, updated_at)
+		VALUES ('proj', 'sess-dirty-child', ?, ?, 'running', ?, ?)
+	`, dirtyChildID, dirtyChildID, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)

@@ -176,6 +176,9 @@ func newTestModel() Model {
 
 func TestBoardViewSaveSelectionRoutesThroughDaemonMutationCommand(t *testing.T) {
 	m := newTestModel()
+	// This test verifies message routing, not daemon integration. Avoid coupling
+	// it to whichever user-global daemon happens to be running on the host.
+	m.daemonClient = nil
 	m.overlayStack.Push(overlay.NewBoardViewOverlay(nil, ""))
 	view := domain.DefaultBoardView()
 	view.ID = "custom"
@@ -3832,7 +3835,7 @@ func TestLoadingStateAcceptsImmediateInteraction(t *testing.T) {
 	m.editor.EnterNormal()
 	m.nav.SelectTask("az-1", 0)
 
-	if got := m.View(); !strings.Contains(got, "Loading issues") {
+	if got := m.View(); !strings.Contains(got, "Loading tickets") {
 		t.Fatalf("expected loading view while hydrated state is pending, got %q", got)
 	}
 

@@ -823,8 +823,8 @@ func TestApplyGlobalViewOrderingFiltersOnlyTrackedExcludedSessions(t *testing.T)
 			{ProjectID: "alpha", IssueID: "one"}, {ProjectID: "alpha", IssueID: "two"}, {ProjectID: "beta", IssueID: "one"},
 		},
 		Items: []protocol.GlobalViewProjectedItem{
-			{Identity: protocol.ScopedIssueID{ProjectID: "beta", IssueID: "one"}},
-			{Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "one"}},
+			{Identity: protocol.ScopedIssueID{ProjectID: "beta", IssueID: "one"}, Depth: 0},
+			{Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "one"}, GroupID: "active", Depth: 1},
 		},
 	}
 	applyGlobalViewOrdering(&snapshot, projection)
@@ -834,6 +834,13 @@ func TestApplyGlobalViewOrderingFiltersOnlyTrackedExcludedSessions(t *testing.T)
 	}
 	if !slices.Equal(got, []string{"beta-one", "alpha-one", "external"}) {
 		t.Fatalf("ordered sessions = %v", got)
+	}
+	if got := snapshot.Entries[1]; !got.ViewProjected || got.ViewDepth != 1 || got.ViewGroupID != "active" {
+		t.Fatalf("projected tree metadata = %+v, want projected depth 1 in active group", got)
+	}
+	rows := projectedSessionTreeRows(snapshot.Entries[:2])
+	if len(rows) != 2 || len(rows[1].ancestorLast) != 1 {
+		t.Fatalf("projected tree rows = %+v, want second row nested one level", rows)
 	}
 }
 

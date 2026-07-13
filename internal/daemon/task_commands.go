@@ -2192,6 +2192,12 @@ func (d *Daemon) repairStaleSessionRuntimeProjections(ctx context.Context, proje
 			if err := store.UpsertSessionState(ctx, projectionProjectID, session); err != nil {
 				return err
 			}
+			if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+				ProjectID: projectionProjectID, SessionID: session.ID,
+				ObservedState: daemonstate.SessionStateStopped, UpdatedAt: session.UpdatedAt,
+			}); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -2264,6 +2270,12 @@ func (d *Daemon) repairStaleRuntimeProjections(ctx context.Context, projectID, t
 				if _, live := liveSessions[session.ID]; !live {
 					markSessionProjectionStopped(&session)
 					if err := store.UpsertSessionState(ctx, projectionProjectID, session); err != nil {
+						return err
+					}
+					if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+						ProjectID: projectionProjectID, SessionID: session.ID,
+						ObservedState: daemonstate.SessionStateStopped, UpdatedAt: session.UpdatedAt,
+					}); err != nil {
 						return err
 					}
 					continue
