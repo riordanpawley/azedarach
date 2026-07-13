@@ -5432,7 +5432,7 @@ func TestClientRefusesConfiguredDBPathThroughSymlink(t *testing.T) {
 	client := NewClientAtPath(aliasPath, slog.Default())
 	_, err := client.dbHandle()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "refusing configured issue database path")
+	assert.Contains(t, err.Error(), "refusing configured database path")
 }
 
 func TestResolveDBPathUsesBaseRepoForWorktree(t *testing.T) {

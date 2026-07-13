@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/testisolation"
 )
 
 type RunOptions struct {
@@ -30,6 +32,11 @@ func Run(ctx context.Context, opts RunOptions) (Measurement, error) {
 	if err := os.MkdirAll(opts.OutputDir, 0o755); err != nil {
 		return Measurement{}, fmt.Errorf("create output directory: %w", err)
 	}
+	isolation, err := testisolation.NewTemporary(opts.WorkingDir)
+	if err != nil {
+		return Measurement{}, fmt.Errorf("prepare test database isolation: %w", err)
+	}
+	defer isolation.Close()
 	if opts.Profile.CleanCache {
 		cmd := exec.CommandContext(ctx, "go", "clean", "-testcache")
 		cmd.Dir = opts.WorkingDir
@@ -54,6 +61,7 @@ func Run(ctx context.Context, opts RunOptions) (Measurement, error) {
 	command := opts.Profile.Command()
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	cmd.Dir = opts.WorkingDir
+	cmd.Env = isolation.Environ(os.Environ())
 	collector := NewEventCollector(raw)
 	cmd.Stdout = collector
 	cmd.Stderr = stderr
