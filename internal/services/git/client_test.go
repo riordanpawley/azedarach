@@ -554,9 +554,9 @@ func TestMergeGateBudgetLeavesFinalizationReserve(t *testing.T) {
 }
 
 func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
-	// Exercise timeout output retention in the first fake Go process. Requiring
-	// the build phase to finish before a second process emits the marker makes
-	// this test depend on aggregate-suite scheduling rather than gate behavior.
+	// The wall budget includes scheduling the gate body and fake Go process.
+	// Keep enough startup reserve for this test to remain meaningful when all
+	// repository packages are being compiled and tested concurrently.
 	const timeoutBudget = 10 * time.Second
 
 	timeoutPath, err := exec.LookPath("timeout")
@@ -592,7 +592,7 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 		t.Fatalf("mkdir fake bin: %v", err)
 	}
 	childPIDFile := filepath.Join(repo, "timeout-child.pid")
-	fakeGo := "#!/bin/sh\necho retained-timeout-marker\nsleep 30 &\nchild_pid=$!\nprintf '%s\\n' \"$child_pid\" >\"$AZEDARACH_TEST_CHILD_PID_FILE\"\nwait \"$child_pid\"\n"
+	fakeGo := "#!/bin/sh\nif [ \"$1\" = build ]; then exit 0; fi\nsleep 30 &\nchild_pid=$!\nprintf '%s\\n' \"$child_pid\" >\"$AZEDARACH_TEST_CHILD_PID_FILE\"\necho retained-timeout-marker\nwait \"$child_pid\"\n"
 	if err := os.WriteFile(filepath.Join(fakeBin, "go"), []byte(fakeGo), 0o755); err != nil {
 		t.Fatalf("write fake go: %v", err)
 	}
