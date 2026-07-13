@@ -471,7 +471,7 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := repairIssueIDAllocationSchema(ctx, db); err != nil {
 		return fmt.Errorf("repair issue id allocation schema: %w", err)
 	}
-	if err := c.seedBuiltInBoardViews(ctx, db, "default"); err != nil {
+	if err := c.seedAllBuiltInBoardViews(ctx, db); err != nil {
 		return fmt.Errorf("seed built-in board views: %w", err)
 	}
 

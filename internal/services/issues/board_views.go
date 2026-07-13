@@ -20,15 +20,21 @@ func (c *Client) ListBoardViews(ctx context.Context, projectID string) ([]domain
 		return nil, err
 	}
 	projectID = normalizeBoardViewProjectID(projectID)
-	if err := c.seedBuiltInBoardViews(ctx, db, projectID); err != nil {
-		return nil, c.wrapError("board-view-list", projectID, err)
-	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT project_id, id, name, definition_json, built_in, created_at, updated_at
-		FROM board_views
-		WHERE project_id = ? AND deleted_at IS NULL
+		SELECT ?, id, name, definition_json, built_in, created_at, updated_at
+		FROM board_views AS candidate
+		WHERE deleted_at IS NULL AND (
+			project_id = ? OR (
+				project_id = 'default' AND built_in = 1 AND NOT EXISTS (
+					SELECT 1
+					FROM board_views AS project_view
+					WHERE project_view.project_id = ? AND project_view.id = candidate.id
+						AND project_view.deleted_at IS NULL
+				)
+			)
+		)
 		ORDER BY built_in DESC, name COLLATE NOCASE ASC, id ASC
-	`, projectID)
+	`, projectID, projectID, projectID)
 	if err != nil {
 		return nil, c.wrapError("board-view-list", projectID, err)
 	}
@@ -53,18 +59,18 @@ func (c *Client) GetBoardView(ctx context.Context, projectID, viewID string) (do
 		return domain.BoardViewRecord{}, err
 	}
 	projectID = normalizeBoardViewProjectID(projectID)
-	if err := c.seedBuiltInBoardViews(ctx, db, projectID); err != nil {
-		return domain.BoardViewRecord{}, c.wrapError("board-view-get", projectID, err)
-	}
 	viewID = domain.NormalizeBoardViewID(viewID)
 	if viewID == "" {
 		viewID = domain.DefaultBoardViewID
 	}
 	row := db.QueryRowContext(ctx, `
-		SELECT project_id, id, name, definition_json, built_in, created_at, updated_at
+		SELECT ?, id, name, definition_json, built_in, created_at, updated_at
 		FROM board_views
-		WHERE project_id = ? AND id = ? AND deleted_at IS NULL
-	`, projectID, viewID)
+		WHERE id = ? AND deleted_at IS NULL
+			AND (project_id = ? OR (project_id = 'default' AND built_in = 1))
+		ORDER BY CASE WHEN project_id = ? THEN 0 ELSE 1 END
+		LIMIT 1
+	`, projectID, viewID, projectID, projectID)
 	record, err := scanBoardViewRecord(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.BoardViewRecord{}, ErrBoardViewNotFound
@@ -81,10 +87,10 @@ func (c *Client) SaveBoardView(ctx context.Context, projectID string, view domai
 		return domain.BoardViewRecord{}, err
 	}
 	projectID = normalizeBoardViewProjectID(projectID)
-	if err := c.seedBuiltInBoardViews(ctx, db, projectID); err != nil {
-		return domain.BoardViewRecord{}, c.wrapError("board-view-save", projectID, err)
-	}
 	view = view.Normalized()
+	if isBuiltInBoardViewID(view.ID) {
+		return domain.BoardViewRecord{}, ErrBoardViewBuiltIn
+	}
 	definitionJSON, err := domain.EncodeBoardViewDefinitionJSON(view)
 	if err != nil {
 		return domain.BoardViewRecord{}, err
@@ -126,12 +132,12 @@ func (c *Client) DeleteBoardView(ctx context.Context, projectID, viewID string) 
 		return err
 	}
 	projectID = normalizeBoardViewProjectID(projectID)
-	if err := c.seedBuiltInBoardViews(ctx, db, projectID); err != nil {
-		return c.wrapError("board-view-delete", projectID, err)
-	}
 	viewID = domain.NormalizeBoardViewID(viewID)
 	if viewID == "" {
 		return ErrBoardViewNotFound
+	}
+	if isBuiltInBoardViewID(domain.BoardViewID(viewID)) {
+		return ErrBoardViewBuiltIn
 	}
 	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
 		var builtIn int
@@ -171,6 +177,13 @@ func (c *Client) seedBuiltInBoardViews(ctx context.Context, db *sql.DB, projectI
 		return err
 	}
 	projectID = normalizeBoardViewProjectID(projectID)
+	required, err := boardViewSeedRequired(ctx, db, projectID)
+	if err != nil {
+		return fmt.Errorf("inspect built-in board view seed: %w", err)
+	}
+	if !required {
+		return nil
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin built-in board view seed: %w", err)
@@ -211,6 +224,87 @@ func (c *Client) seedBuiltInBoardViews(ctx context.Context, db *sql.DB, projectI
 		return fmt.Errorf("commit built-in board view seed: %w", err)
 	}
 	return nil
+}
+
+func (c *Client) seedAllBuiltInBoardViews(ctx context.Context, db *sql.DB) error {
+	if err := ensureBoardViewsSchema(db); err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT DISTINCT project_id FROM board_views ORDER BY project_id`)
+	if err != nil {
+		return fmt.Errorf("list board view project scopes: %w", err)
+	}
+	projectIDs := []string{"default"}
+	for rows.Next() {
+		var projectID string
+		if err := rows.Scan(&projectID); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan board view project scope: %w", err)
+		}
+		projectID = normalizeBoardViewProjectID(projectID)
+		if projectID != "default" {
+			projectIDs = append(projectIDs, projectID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("list board view project scopes: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close board view project scopes: %w", err)
+	}
+	for _, projectID := range projectIDs {
+		if err := c.seedBuiltInBoardViews(ctx, db, projectID); err != nil {
+			return fmt.Errorf("seed project scope %q: %w", projectID, err)
+		}
+	}
+	return nil
+}
+
+func boardViewSeedRequired(ctx context.Context, db *sql.DB, projectID string) (bool, error) {
+	projectID = normalizeBoardViewProjectID(projectID)
+	var legacyCount int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM board_views
+		WHERE project_id = ? AND built_in = 1 AND id IN (?, ?)
+	`, projectID, domain.BoardViewCurrentID, domain.BoardViewActivityID).Scan(&legacyCount); err != nil {
+		return false, err
+	}
+	if legacyCount != 0 {
+		return true, nil
+	}
+	for _, view := range domain.BuiltInBoardViews() {
+		view = view.Normalized()
+		definitionJSON, err := domain.EncodeBoardViewDefinitionJSON(view)
+		if err != nil {
+			return false, err
+		}
+		var matches bool
+		if err := db.QueryRowContext(ctx, `
+			SELECT EXISTS(
+				SELECT 1
+				FROM board_views
+				WHERE project_id = ? AND id = ? AND name = ? AND definition_json = ?
+					AND built_in = 1 AND deleted_at IS NULL
+			)
+		`, projectID, view.ID, view.Title, string(definitionJSON)).Scan(&matches); err != nil {
+			return false, err
+		}
+		if !matches {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func isBuiltInBoardViewID(id domain.BoardViewID) bool {
+	for _, view := range domain.BuiltInBoardViews() {
+		if view.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func preserveBoardViewIDConflict(ctx context.Context, tx *sql.Tx, projectID string, builtInID domain.BoardViewID, now string) error {

@@ -2,6 +2,7 @@ package issues
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -118,12 +119,15 @@ func TestBoardViewsReseedBuiltInDefinitions(t *testing.T) {
 		}
 	})
 	projectID := "proj-reseed-board"
-	if _, err := client.ListBoardViews(ctx, projectID); err != nil {
-		t.Fatalf("ListBoardViews seed error: %v", err)
-	}
 	db, err := client.dbHandle()
 	if err != nil {
 		t.Fatalf("dbHandle error: %v", err)
+	}
+	if err := client.seedBuiltInBoardViews(ctx, db, projectID); err != nil {
+		t.Fatalf("seedBuiltInBoardViews error: %v", err)
+	}
+	if _, err := client.ListBoardViews(ctx, projectID); err != nil {
+		t.Fatalf("ListBoardViews seed error: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, `
 		UPDATE board_views
@@ -133,6 +137,9 @@ func TestBoardViewsReseedBuiltInDefinitions(t *testing.T) {
 		t.Fatalf("break default view: %v", err)
 	}
 
+	if err := client.seedBuiltInBoardViews(ctx, db, projectID); err != nil {
+		t.Fatalf("seedBuiltInBoardViews repair error: %v", err)
+	}
 	record, err := client.GetBoardView(ctx, projectID, domain.DefaultBoardViewID)
 	if err != nil {
 		t.Fatalf("GetBoardView after reseed error: %v", err)
@@ -150,12 +157,15 @@ func TestBoardViewsMigrateLegacyBuiltInsAndPreserveCustomIDConflict(t *testing.T
 	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
 	t.Cleanup(func() { _ = client.CloseDB() })
 	projectID := "proj-board-upgrade"
-	if _, err := client.ListBoardViews(ctx, projectID); err != nil {
-		t.Fatalf("initial seed: %v", err)
-	}
 	db, err := client.dbHandle()
 	if err != nil {
 		t.Fatalf("dbHandle: %v", err)
+	}
+	if err := client.seedBuiltInBoardViews(ctx, db, projectID); err != nil {
+		t.Fatalf("seedBuiltInBoardViews: %v", err)
+	}
+	if _, err := client.ListBoardViews(ctx, projectID); err != nil {
+		t.Fatalf("initial seed: %v", err)
 	}
 	custom := boardViewTestCustomView(string(domain.BoardViewDefaultID))
 	definition, err := domain.EncodeBoardViewDefinitionJSON(custom)
@@ -179,6 +189,9 @@ func TestBoardViewsMigrateLegacyBuiltInsAndPreserveCustomIDConflict(t *testing.T
 		t.Fatalf("seed upgraded catalog: %v", err)
 	}
 
+	if err := client.seedBuiltInBoardViews(ctx, db, projectID); err != nil {
+		t.Fatalf("seedBuiltInBoardViews upgrade: %v", err)
+	}
 	views, err := client.ListBoardViews(ctx, projectID)
 	if err != nil {
 		t.Fatalf("ListBoardViews upgrade: %v", err)
@@ -203,12 +216,15 @@ func TestBoardViewsCatalogMigrationRollsBackOnCorruptIDConflict(t *testing.T) {
 	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
 	t.Cleanup(func() { _ = client.CloseDB() })
 	projectID := "proj-board-corrupt-upgrade"
-	if _, err := client.ListBoardViews(ctx, projectID); err != nil {
-		t.Fatalf("initial seed: %v", err)
-	}
 	db, err := client.dbHandle()
 	if err != nil {
 		t.Fatalf("dbHandle: %v", err)
+	}
+	if err := client.seedBuiltInBoardViews(ctx, db, projectID); err != nil {
+		t.Fatalf("seedBuiltInBoardViews: %v", err)
+	}
+	if _, err := client.ListBoardViews(ctx, projectID); err != nil {
+		t.Fatalf("initial seed: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, `
 		UPDATE board_views
@@ -224,9 +240,9 @@ func TestBoardViewsCatalogMigrationRollsBackOnCorruptIDConflict(t *testing.T) {
 		t.Fatalf("seed rollback sentinel: %v", err)
 	}
 
-	_, err = client.ListBoardViews(ctx, projectID)
+	err = client.seedBuiltInBoardViews(ctx, db, projectID)
 	if err == nil || !strings.Contains(err.Error(), `conflicting with built-in "orchestration"`) {
-		t.Fatalf("ListBoardViews error = %v, want corrupt conflict", err)
+		t.Fatalf("seedBuiltInBoardViews error = %v, want corrupt conflict", err)
 	}
 	var name string
 	if err := db.QueryRowContext(ctx, `
@@ -236,6 +252,66 @@ func TestBoardViewsCatalogMigrationRollsBackOnCorruptIDConflict(t *testing.T) {
 	}
 	if name != "Sentinel Default" {
 		t.Fatalf("default name = %q, want transaction rollback sentinel", name)
+	}
+}
+
+func TestBoardViewReadsRemainReadOnly(t *testing.T) {
+	ctx := context.Background()
+	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	db, err := client.dbHandle()
+	if err != nil {
+		t.Fatalf("dbHandle: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.ExecContext(ctx, `PRAGMA query_only = ON`); err != nil {
+		t.Fatalf("enable query_only: %v", err)
+	}
+	projectID := "uninitialized-project"
+	views, err := client.ListBoardViews(ctx, projectID)
+	if err != nil {
+		t.Fatalf("ListBoardViews under query_only: %v", err)
+	}
+	if !boardViewTestHasView(views, domain.DefaultBoardViewID) {
+		t.Fatalf("ListBoardViews missing default: %+v", views)
+	}
+	for _, view := range views {
+		if view.ProjectID != projectID {
+			t.Fatalf("fallback view project ID = %q, want %q", view.ProjectID, projectID)
+		}
+	}
+	if _, err := client.GetBoardView(ctx, projectID, domain.DefaultBoardViewID); err != nil {
+		t.Fatalf("GetBoardView under query_only: %v", err)
+	}
+}
+
+func TestBoardViewReadsSucceedWhileAnotherConnectionHoldsWriteTransaction(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/issues.db"
+	client := NewClientAtPath(dbPath, nil)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	if _, err := client.dbHandle(); err != nil {
+		t.Fatalf("dbHandle: %v", err)
+	}
+
+	writer, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(100)&_txlock=immediate")
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	if _, err := writer.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatalf("begin writer transaction: %v", err)
+	}
+	t.Cleanup(func() { _, _ = writer.ExecContext(context.Background(), `ROLLBACK`) })
+	if _, err := writer.ExecContext(ctx, `UPDATE board_views SET updated_at = updated_at WHERE project_id = 'default'`); err != nil {
+		t.Fatalf("hold board_views write: %v", err)
+	}
+
+	if _, err := client.ListBoardViews(ctx, "default"); err != nil {
+		t.Fatalf("ListBoardViews with concurrent writer: %v", err)
+	}
+	if _, err := client.GetBoardView(ctx, "default", domain.DefaultBoardViewID); err != nil {
+		t.Fatalf("GetBoardView with concurrent writer: %v", err)
 	}
 }
 
