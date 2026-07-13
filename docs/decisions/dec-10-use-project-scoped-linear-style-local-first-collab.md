@@ -1,20 +1,21 @@
 # dec-10: Use project-scoped Linear-style local-first collaboration
 
 - Created: 2026-07-12
-- Updated: 2026-07-12
+- Updated: 2026-07-13
 
 ## Rationale
 
-Use a complete local SQLite projection for reads plus a durable pending-command outbox for offline/optimistic mutations. A self-hosted project service backed by PostgreSQL validates commands, assigns canonical project order, appends shared semantic events, and streams cursor-based changes back to clients. Team-mode offline clients create pending commands rather than authoritative facts; only the service emits canonical shared events. Solo mode retains a local authority that emits canonical events so its history can later be imported. This avoids peer co-authority for leases and lifecycle invariants while retaining local-first UX.
+Use a complete local SQLite projection plus a durable pending-command outbox on every client. In team mode, one self-hosted single-active project service backed by SQLite WAL validates commands and assigns canonical order; clients never become peer authorities for guarded operations. Ordinary content commands may be queued offline, while guarded commands require current server validation. Detailed canonical event, cursor, projection, replay, signing, and recovery mechanics are owned by blocking investigation dgv rather than this product-level decision.
 
 ## Context
 
-Azedarach is primarily an AI context and durable history manager. Repository issue, spec, decision, learning, evidence, and orchestration management form the semantic structure around that history. The first collaboration audience is a small team of developers, not a multi-team enterprise organization. Users want Linear-like instantaneous local behavior and offline metadata editing without synchronizing raw agent transcripts.
+Azedarach is primarily an AI context and durable history manager for a small developer team. Users want Linear-like instantaneous local reads and offline content work, but lifecycle, graph, review, integration, and execution invariants need one online ordering and validation authority.
 
 ## Consequences
 
-Self-hosting is the first deployment promise; a managed service can later run the same protocol. PostgreSQL is the shared authority; SQLite remains the local projection/standalone store. Solo-to-team promotion publishes the full semantic history after a privacy preview and identity binding. Stable global entity/event IDs, actor attribution, schema versions, idempotency, cursor bootstrap, and import deduplication are required from the beginning. Ordinary field-level patches use server arrival order; disjoint fields naturally coexist, same-field supersession remains inspectable/restorable in history, and guarded lifecycle/graph/review/integration/execution commands revalidate current invariants and may reject.
+Self-hosting is the first deployment promise and Docker Compose is the first-run path. One serialized SQLite writer is sufficient for the one-project small-team topology; PostgreSQL is reconsidered for multi-instance HA, consolidated multi-project hosting, or sustained write contention. Client-creatable entities need immutable UUIDv7 identities plus server-assigned human display keys. Field patches use server acceptance order, disjoint fields coexist, superseded values remain inspectable, and stale guarded commands may reject. Solo-to-team promotion imports one owner-selected database as genesis; other local stores are not silently merged.
 
 ## Links
 
 - applies-to issue:dda
+- applies-to issue:dgv — Local-first collaboration and single-active SQLite authority are fixed product inputs.
