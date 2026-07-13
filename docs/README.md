@@ -66,6 +66,7 @@ This directory primarily contains **developer/internal documentation**.
 - `task.follow_on_merge_candidates`: `projection` (durable issue graph + worktree projection).
 - `issue_resources.lifecycle`: `projection` (durable issue status + runtime attachment projection).
 - `interaction.waiting_human`: `projection` (durable interaction requests refreshed before decision-waiting and pickup evaluation).
+- `investigation.waiting_human`: `projection` (durable investigation disposition and issue-specific acceptance/review evidence refreshed before human-authority evaluation).
 - `interaction.staleness`: `projection` (durable interaction requests refreshed before age evaluation and revision-safe stale/reminder/disposition/recovery audit writes).
 - `task.list` freshness/session timestamps: `projection` (refresh-then-cache).
 - `cross_project.view_projection`: `projection` (the global daemon refreshes the user database from authoritative project stores, then evaluates typed cross-project views from the refreshed user-level projection; stale and unavailable projects remain explicit).

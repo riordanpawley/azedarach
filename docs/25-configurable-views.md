@@ -19,10 +19,14 @@ definitions rather than hardcoded application modes. In the TUI, Tab advances
 to the next configured view through the daemon selection contract; it does not
 toggle a surface-local Compact or Orchestration Overview mode.
 
-The built-in **Orchestration** board is the focused tmux-selector default: its
-three columns are Human Review, AI Review, and In Progress, and issues outside
-those active-attention states are omitted. The built-in **Tree** view preserves
-issue hierarchy while sorting human-attention work ahead of ordinary work.
+The built-in **Orchestration** board is the focused tmux-selector default. Its
+ordered columns are Waiting Human, Waiting AI, Working, and In Review; issues
+outside those active-attention states are omitted. Waiting Human is a daemon-
+owned authority fact (for example, an unresolved interaction, a live prompt, or
+an unaccepted human-facing investigation), not an alias for review readiness.
+First-match placement keeps genuine human waits ahead of working or review-ready
+placement. The built-in **Tree** view preserves issue hierarchy while sorting
+human-attention work ahead of ordinary work.
 
 Press `V` in normal mode to open **Views**. Create and edit open the **View
 Configurator**, whose guided fields cover title, Grid/Board/Tree layout,

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -15,6 +16,64 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
+
+func TestRealUserDatabaseMigrationClone(t *testing.T) {
+	path := strings.TrimSpace(os.Getenv("AZEDARACH_USER_DB_CLONE"))
+	if path == "" {
+		t.Skip("AZEDARACH_USER_DB_CLONE is not set")
+	}
+	raw, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var beforeProjects, beforeIssues, beforeCustom, beforeSelections int
+	for query, target := range map[string]*int{
+		`SELECT COUNT(*) FROM projects`:                    &beforeProjects,
+		`SELECT COUNT(*) FROM project_issue_projection`:    &beforeIssues,
+		`SELECT COUNT(*) FROM user_views WHERE built_in=0`: &beforeCustom,
+		`SELECT COUNT(*) FROM user_view_selections`:        &beforeSelections,
+	} {
+		if err = raw.QueryRow(query).Scan(target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = raw.Close()
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.ListViews(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Snapshot(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	var afterProjects, afterIssues, afterCustom, afterSelections int
+	for query, target := range map[string]*int{
+		`SELECT COUNT(*) FROM projects`:                    &afterProjects,
+		`SELECT COUNT(*) FROM project_issue_projection`:    &afterIssues,
+		`SELECT COUNT(*) FROM user_views WHERE built_in=0`: &afterCustom,
+		`SELECT COUNT(*) FROM user_view_selections`:        &afterSelections,
+	} {
+		if err = store.db.QueryRow(query).Scan(target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if beforeProjects != afterProjects || beforeIssues != afterIssues || beforeCustom != afterCustom || beforeSelections != afterSelections {
+		t.Fatalf("row preservation projects=%d/%d issues=%d/%d custom=%d/%d selections=%d/%d", beforeProjects, afterProjects, beforeIssues, afterIssues, beforeCustom, afterCustom, beforeSelections, afterSelections)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, err = reopened.ListViewSelections(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestNormalizedProjectionRoundTripsViewAndSearchFields(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "user.db"))
@@ -286,6 +345,131 @@ func TestDeleteGlobalViewResetsConsumerSelections(t *testing.T) {
 	}
 	if got := selections[protocol.GlobalViewConsumerTmuxSelector]; got != string(domain.BoardViewOrchestrationID) {
 		t.Fatalf("selector fallback = %q", got)
+	}
+}
+
+func TestUserViewSeedRepairsBuiltInDriftAndPreservesCustomIDSelection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "user.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	custom := domain.DefaultBoardView()
+	custom.ID, custom.Title = domain.BoardViewOrchestrationID, "Custom orchestration"
+	raw, err := domain.EncodeBoardViewDefinitionJSON(custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, mutation := range []struct {
+		query string
+		args  []any
+	}{
+		{`UPDATE user_view_selections SET view_id=? WHERE consumer=?`, []any{domain.BoardViewDefaultID, protocol.GlobalViewConsumerTmuxSelector}},
+		{`DELETE FROM user_views WHERE view_id=?`, []any{domain.BoardViewOrchestrationID}},
+		{`INSERT INTO user_views(view_id,title,definition_json,built_in,created_at,updated_at) VALUES(?,?,?,0,?,?)`, []any{domain.BoardViewOrchestrationID, custom.Title, raw, now, now}},
+		{`UPDATE user_view_selections SET view_id=? WHERE consumer=?`, []any{domain.BoardViewOrchestrationID, protocol.GlobalViewConsumerTmuxSelector}},
+	} {
+		if _, err = store.db.ExecContext(ctx, mutation.query, mutation.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var customUpdatedAt, selectionUpdatedAt string
+	if err = store.db.QueryRowContext(ctx, `SELECT updated_at FROM user_views WHERE view_id=?`, domain.BoardViewOrchestrationID).Scan(&customUpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.db.QueryRowContext(ctx, `SELECT updated_at FROM user_view_selections WHERE consumer=?`, protocol.GlobalViewConsumerTmuxSelector).Scan(&selectionUpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	builtIn, err := reopened.ResolveView(ctx, string(domain.BoardViewOrchestrationID), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := []domain.BoardColumnID{builtIn.Columns[0].ID, builtIn.Columns[1].ID, builtIn.Columns[2].ID, builtIn.Columns[3].ID}; !reflect.DeepEqual(got, []domain.BoardColumnID{domain.BoardColumnWaitingHuman, domain.BoardColumnWaitingAI, domain.BoardColumnActive, domain.BoardColumnReviewReady}) {
+		t.Fatalf("repaired orchestration columns = %v", got)
+	}
+	preserved, err := reopened.ResolveView(ctx, "orchestration-custom", "")
+	if err != nil || preserved.Title != custom.Title {
+		t.Fatalf("preserved custom = %+v err=%v", preserved, err)
+	}
+	selections, err := reopened.ListViewSelections(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := selections[protocol.GlobalViewConsumerTmuxSelector]; got != "orchestration-custom" {
+		t.Fatalf("selection = %q, want preserved custom", got)
+	}
+	var preservedUpdatedAt, preservedSelectionUpdatedAt string
+	if err = reopened.db.QueryRow(`SELECT updated_at FROM user_views WHERE view_id='orchestration-custom'`).Scan(&preservedUpdatedAt); err != nil || preservedUpdatedAt != customUpdatedAt {
+		t.Fatalf("preserved custom timestamp=%q want=%q err=%v", preservedUpdatedAt, customUpdatedAt, err)
+	}
+	if err = reopened.db.QueryRow(`SELECT updated_at FROM user_view_selections WHERE consumer=?`, protocol.GlobalViewConsumerTmuxSelector).Scan(&preservedSelectionUpdatedAt); err != nil || preservedSelectionUpdatedAt != selectionUpdatedAt {
+		t.Fatalf("preserved selection timestamp=%q want=%q err=%v", preservedSelectionUpdatedAt, selectionUpdatedAt, err)
+	}
+	if err = reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var beforeReopenUpdatedAt string
+	rawDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = rawDB.QueryRow(`SELECT updated_at FROM user_views WHERE view_id='orchestration'`).Scan(&beforeReopenUpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err = rawDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	idempotent, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idempotent.Close()
+	var preservedCount int
+	if err := idempotent.db.QueryRow(`SELECT COUNT(*) FROM user_views WHERE view_id='orchestration-custom' AND built_in=0`).Scan(&preservedCount); err != nil || preservedCount != 1 {
+		t.Fatalf("idempotent preserved count=%d err=%v", preservedCount, err)
+	}
+	var afterReopenUpdatedAt string
+	if err := idempotent.db.QueryRow(`SELECT updated_at FROM user_views WHERE view_id='orchestration'`).Scan(&afterReopenUpdatedAt); err != nil || afterReopenUpdatedAt != beforeReopenUpdatedAt {
+		t.Fatalf("idempotent reopen changed built-in timestamp: before=%q after=%q err=%v", beforeReopenUpdatedAt, afterReopenUpdatedAt, err)
+	}
+}
+
+func TestUserViewSeedFailureRollsBackCatalogRepair(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "user.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.db.Exec(`UPDATE user_views SET title='Drift Sentinel' WHERE view_id='orchestration'`); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected seed interruption")
+	if failed, openErr := Open(path, withSeedBeforeCommit(func() error { return injected })); openErr == nil {
+		_ = failed.Close()
+		t.Fatal("seed unexpectedly succeeded")
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var title string
+	if err = raw.QueryRow(`SELECT title FROM user_views WHERE view_id='orchestration'`).Scan(&title); err != nil || title != "Drift Sentinel" {
+		t.Fatalf("rolled-back title=%q err=%v", title, err)
 	}
 }
 

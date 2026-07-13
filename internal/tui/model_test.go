@@ -303,13 +303,13 @@ func TestBoardViewportSupportsOrchestrationViewColumns(t *testing.T) {
 	if got, want := len(columns), len(view.Columns); got != want {
 		t.Fatalf("columns=%d want=%d", got, want)
 	}
-	if got, want := columns[0].Title, "Human Review"; got != want {
+	if got, want := columns[0].Title, "Waiting Human"; got != want {
 		t.Fatalf("activity column 0 title=%q want=%q", got, want)
 	}
-	if got, want := columns[1].Title, "AI Review"; got != want {
+	if got, want := columns[1].Title, "Waiting AI"; got != want {
 		t.Fatalf("activity column 1 title=%q want=%q", got, want)
 	}
-	if got, want := columns[2].Title, "In Progress"; got != want {
+	if got, want := columns[2].Title, "Working"; got != want {
 		t.Fatalf("activity column 2 title=%q want=%q", got, want)
 	}
 

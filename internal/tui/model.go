@@ -5941,14 +5941,23 @@ func (m *Model) applyOptimisticTaskLifecycle(taskID string, lifecycle domain.Iss
 	}
 	for i := range m.tasks {
 		if m.tasks[i].ID.String() == taskID {
+			previousFacts := m.tasks[i].IssueFacts()
 			m.tasks[i].Status = domain.StatusOpen
 			m.tasks[i].State = state
+			var investigationAcceptance *domain.InvestigationAcceptance
+			if previousFacts.WaitingHuman && previousFacts.WaitingHumanSource == domain.WaitingHumanSourceInvestigationAcceptance {
+				investigationAcceptance = &domain.InvestigationAcceptance{Disposition: domain.InvestigationDispositionHumanFindings, Reason: previousFacts.WaitingHumanReason}
+			}
 			m.tasks[i].Facts = domain.DeriveIssueFacts(domain.IssueFactsInput{
-				Status:         m.tasks[i].Status,
-				Priority:       m.tasks[i].Priority,
-				State:          m.tasks[i].State,
-				Session:        m.tasks[i].Session,
-				HasTmuxSession: m.tasks[i].HasTmuxSession,
+				Status:                  m.tasks[i].Status,
+				Priority:                m.tasks[i].Priority,
+				Type:                    m.tasks[i].Type,
+				State:                   m.tasks[i].State,
+				Session:                 m.tasks[i].Session,
+				HasTmuxSession:          m.tasks[i].HasTmuxSession,
+				DecisionWaiting:         previousFacts.WaitingHuman && previousFacts.WaitingHumanSource == domain.WaitingHumanSourceInteractionRequest,
+				DecisionWaitReason:      previousFacts.WaitingHumanReason,
+				InvestigationAcceptance: investigationAcceptance,
 			})
 			break
 		}

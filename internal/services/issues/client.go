@@ -499,10 +499,11 @@ type Client struct {
 	walMu          sync.Mutex
 	lastWALCheckAt time.Time
 
-	stateModelV2MigrationFailureHook func(stage string) error
-	boardViewsMigrationFailureHook   func(stage string) error
-	interactionMu                    sync.RWMutex
-	interactionCache                 map[string]domain.InteractionRequest
+	stateModelV2MigrationFailureHook   func(stage string) error
+	boardViewsMigrationFailureHook     func(stage string) error
+	humanAuthorityMigrationFailureHook func(stage string) error
+	interactionMu                      sync.RWMutex
+	interactionCache                   map[string]domain.InteractionRequest
 }
 
 type sqlIssueExecer interface {

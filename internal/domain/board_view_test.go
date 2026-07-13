@@ -12,11 +12,11 @@ import (
 func TestWaitingHumanPredicateDistinguishesDecisionFromRuntimePrompt(t *testing.T) {
 	p := BoardColumnPredicate{Kind: BoardPredicateWaitingHuman}
 	decision := Task{Facts: DeriveIssueFacts(IssueFactsInput{Status: StatusOpen, Priority: P2, DecisionWaiting: true, DecisionWaitReason: "choose region"})}
-	if ok, reason := p.MatchTask(decision); !ok || reason != "waiting_human=true source=interaction_request" {
+	if ok, reason := p.MatchTask(decision); !ok || reason != "waiting_human=true source=interaction_request reason=choose region" {
 		t.Fatalf("decision match = %v, %q", ok, reason)
 	}
 	runtime := Task{Status: StatusInProgress, Priority: P2, Session: &Session{Activity: "waiting-for-human"}}
-	if ok, reason := p.MatchTask(runtime); !ok || reason != "waiting_human=true source=runtime_prompt" {
+	if ok, reason := p.MatchTask(runtime); !ok || reason != "waiting_human=true source=runtime_prompt reason=active session is waiting for human input" {
 		t.Fatalf("runtime match = %v, %q", ok, reason)
 	}
 }
@@ -211,7 +211,7 @@ func TestBuiltInBoardViewsUseFocusedWorkflows(t *testing.T) {
 	}{
 		{DefaultBoardView(), []BoardColumnID{BoardColumnOpen, BoardColumnActive, BoardColumnReviewReady, BoardColumnDone}},
 		{PlanningBoardView(), []BoardColumnID{BoardColumnBacklog, BoardColumnOpen, BoardColumnActive, BoardColumnReviewReady}},
-		{OrchestrationBoardView(), []BoardColumnID{BoardColumnReviewReady, BoardColumnWaitingAI, BoardColumnActive}},
+		{OrchestrationBoardView(), []BoardColumnID{BoardColumnWaitingHuman, BoardColumnWaitingAI, BoardColumnActive, BoardColumnReviewReady}},
 		{CloseoutBoardView(), []BoardColumnID{BoardColumnReviewReady, BoardColumnDone, BoardColumnCancelled}},
 	}
 	for _, tt := range tests {
@@ -228,7 +228,7 @@ func TestBuiltInBoardViewsUseFocusedWorkflows(t *testing.T) {
 	}
 }
 
-func TestOrchestrationBoardViewContainsOnlyFocusedActiveAttentionColumns(t *testing.T) {
+func TestOrchestrationBoardViewSeparatesHumanAuthorityFromReviewReadiness(t *testing.T) {
 	view := OrchestrationBoardView()
 	tests := []struct {
 		name       string
@@ -236,7 +236,8 @@ func TestOrchestrationBoardViewContainsOnlyFocusedActiveAttentionColumns(t *test
 		wantColumn BoardColumnID
 		wantMatch  bool
 	}{
-		{name: "human review", task: Task{ID: "human", Status: StatusInReview, Session: &Session{Activity: string(SessionIdle)}, HasTmuxSession: true}, wantColumn: BoardColumnReviewReady, wantMatch: true},
+		{name: "ordinary review", task: Task{ID: "review", Status: StatusInReview, Session: &Session{Activity: string(SessionIdle)}, HasTmuxSession: true}, wantColumn: BoardColumnReviewReady, wantMatch: true},
+		{name: "human authority wins over review", task: Task{ID: "human", Status: StatusInReview, Facts: IssueFacts{LifecycleState: IssueWorkflowActive, DisplayPhase: IssueDisplayReview, ReviewReadyVisible: true, WaitingHuman: true, WaitingHumanSource: WaitingHumanSourceInvestigationAcceptance, WaitingHumanReason: "explicit acceptance required"}}, wantColumn: BoardColumnWaitingHuman, wantMatch: true},
 		{name: "ai review", task: Task{ID: "ai", Status: StatusInProgress, Session: &Session{Activity: "waiting_tool"}, HasTmuxSession: true}, wantColumn: BoardColumnWaitingAI, wantMatch: true},
 		{name: "in progress", task: Task{ID: "active", Status: StatusInProgress, Session: &Session{Activity: string(SessionBusy)}, HasTmuxSession: true}, wantColumn: BoardColumnActive, wantMatch: true},
 		{name: "open omitted", task: Task{ID: "open", Status: StatusOpen}, wantMatch: false},

@@ -63,7 +63,7 @@ func TestOrchestrationColumnBoardRendersConfiguredColumnsAtDefaultAndNarrowWidth
 	}
 	t.Run("default", func(t *testing.T) {
 		model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
-		model.loading, model.width, model.height = false, 120, 20
+		model.loading, model.width, model.height = false, 180, 20
 		model.snapshot = Snapshot{View: view, Entries: entries}
 		rendered := ansi.Strip(model.View())
 		for _, column := range view.Columns {

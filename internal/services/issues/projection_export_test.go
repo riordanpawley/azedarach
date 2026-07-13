@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
 func TestExportProjectionUsesStableSchemaFingerprintAndMonotonicSourceRevision(t *testing.T) {
@@ -97,6 +99,19 @@ func TestExportProjectionUsesStableSchemaFingerprintAndMonotonicSourceRevision(t
 		t.Fatal(err)
 	}
 	assertAdvanced("session observation delete")
+
+	if _, err = db.ExecContext(ctx, `INSERT INTO issue_observation_events(issue_id,event_type,observed_at,source,payload_json) VALUES(?,?,?,?,?)`, "issue-1", domain.IssueEventHumanInputProvided, observedAt, "human", `{"investigation_findings_accepted":true}`); err != nil {
+		t.Fatal(err)
+	}
+	assertAdvanced("human authority evidence insert")
+	if _, err = db.ExecContext(ctx, `INSERT INTO interaction_requests(id,issue_id,decision_key,state,revision,request_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, "interaction-1", "issue-1", "decision", "open", 1, `{}`, observedAt, observedAt); err != nil {
+		t.Fatal(err)
+	}
+	assertAdvanced("interaction request insert")
+	if _, err = db.ExecContext(ctx, `UPDATE interaction_requests SET state='resolved',revision=2,updated_at=? WHERE id='interaction-1'`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	assertAdvanced("interaction request resolution")
 
 	if _, err = db.ExecContext(ctx, `INSERT INTO issue_external_refs(issue_id,provider,provider_scope,remote_key,display_key,url,metadata_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, "issue-1", "github", "", "42", "#42", "https://example.test/42", `{}`, observedAt, observedAt); err != nil {
 		t.Fatal(err)

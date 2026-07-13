@@ -101,6 +101,30 @@ func TestHumanAttentionRank(t *testing.T) {
 	}
 }
 
+func TestIssueFactsProjectOnlyHumanFindingsAsHumanAuthority(t *testing.T) {
+	tests := []struct {
+		name       string
+		acceptance InvestigationAcceptance
+		wantHuman  bool
+	}{
+		{name: "unaccepted human findings", acceptance: InvestigationAcceptance{Disposition: InvestigationDispositionHumanFindings, Reason: "explicit acceptance required"}, wantHuman: true},
+		{name: "accepted human findings", acceptance: InvestigationAcceptance{Disposition: InvestigationDispositionHumanFindings, Accepted: true}},
+		{name: "unaccepted internal review", acceptance: InvestigationAcceptance{Disposition: InvestigationDispositionInternalReview, Reason: "review outcome required"}},
+		{name: "accepted internal review", acceptance: InvestigationAcceptance{Disposition: InvestigationDispositionInternalReview, Accepted: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			facts := DeriveIssueFacts(IssueFactsInput{Status: StatusInReview, Type: TypeInvestigation, InvestigationAcceptance: &tt.acceptance})
+			if facts.WaitingHuman != tt.wantHuman {
+				t.Fatalf("WaitingHuman = %t, want %t: %+v", facts.WaitingHuman, tt.wantHuman, facts)
+			}
+			if tt.wantHuman && (facts.WaitingHumanSource != WaitingHumanSourceInvestigationAcceptance || facts.WaitingHumanReason != tt.acceptance.Reason) {
+				t.Fatalf("human authority facts = %+v", facts)
+			}
+		})
+	}
+}
+
 func TestIssueFactsExposeClosedArchiveTombstoneAndOperationBlockers(t *testing.T) {
 	closed := mustIssueState(t, IssueStateParts{
 		Workflow:     IssueWorkflowClosed,

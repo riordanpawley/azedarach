@@ -35,6 +35,7 @@ const (
 	daemonInvariantTaskFollowOnMerge    daemonInvariantID = "task.follow_on_merge_candidates"
 	daemonInvariantWorkerObservation    daemonInvariantID = "worker.observation_projection"
 	daemonInvariantInteractionWaiting   daemonInvariantID = "interaction.waiting_human"
+	daemonInvariantInvestigationWaiting daemonInvariantID = "investigation.waiting_human"
 	daemonInvariantInteractionStaleness daemonInvariantID = "interaction.staleness"
 
 	daemonInvariantRuntimeKnownProjectIDs  daemonInvariantID = "runtime.known_project_ids"
@@ -79,6 +80,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantOrchestrationCandidates: daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationParentWake: daemonInvariantSourceHybrid,
 	daemonInvariantInteractionWaiting:      daemonInvariantSourceProjection,
+	daemonInvariantInvestigationWaiting:    daemonInvariantSourceProjection,
 	daemonInvariantAdvisorSingleton:        daemonInvariantSourceHybrid,
 	daemonInvariantInteractionStaleness:    daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationReview:     daemonInvariantSourceProjection,

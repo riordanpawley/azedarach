@@ -278,7 +278,7 @@ func TestCanonicalStateRepairRunsAfterRecordedBroken0045(t *testing.T) {
 		THEN RAISE(ABORT,'issue owner fields must form a complete tuple') END; END`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE id='0046_repair_issue_state_runtime_constraints'`); err != nil {
+	if _, err := db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE id IN ('0046_repair_issue_state_runtime_constraints','0047_human_authority_projection_revision')`); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.CloseDB(); err != nil {

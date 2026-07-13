@@ -10466,6 +10466,56 @@ func TestEnrichTasksWithSessionStateKeepsNoAgentActivity(t *testing.T) {
 	}
 }
 
+func TestEnrichTasksWithSessionStateProjectsInvestigationHumanAuthority(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	const projectID = "investigation-authority"
+	client := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	secondClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = secondClient.CloseDB() })
+
+	create := func(title string) string {
+		id, err := client.Create(ctx, issues.CreateTaskParams{Title: title, Type: domain.TypeInvestigation, Status: domain.StatusInReview})
+		if err != nil {
+			t.Fatalf("create %s: %v", title, err)
+		}
+		return id
+	}
+	unacceptedHuman := create("Human findings")
+	acceptedHuman := create("Accepted human findings")
+	acceptedInternal := create("Accepted internal review")
+	// Write through a second store instance to prove enrichment refreshes durable
+	// evidence instead of reusing process-local acceptance state.
+	if _, err := secondClient.AppendIssueObservationEvent(ctx, acceptedHuman, issues.IssueObservationEventParams{Type: domain.IssueEventHumanInputProvided, Source: "human", Payload: map[string]any{"investigation_findings_accepted": true}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, acceptedInternal, issues.IssueObservationEventParams{Type: domain.IssueEventInvestigationDisposition, Source: "daemon-orchestration", Payload: map[string]any{"disposition": "internal_review"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, acceptedInternal, issues.IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"actor_id": "reviewer", "outcome": "accepted"}}); err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := client.ListWithRuntime(ctx, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, issueClientsByProject: map[string]*issues.Client{projectID: client}}
+	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	if facts := byID[unacceptedHuman].IssueFacts(); !facts.WaitingHuman || facts.WaitingHumanSource != domain.WaitingHumanSourceInvestigationAcceptance {
+		t.Fatalf("unaccepted human findings facts = %+v", facts)
+	}
+	for _, id := range []string{acceptedHuman, acceptedInternal} {
+		if facts := byID[id].IssueFacts(); facts.WaitingHuman {
+			t.Fatalf("accepted investigation %s retained human authority: %+v", id, facts)
+		}
+	}
+}
+
 func TestPersistTmuxSessionRuntimeStatePrefersTmuxCreatedAtOverSnapshotStartedAt(t *testing.T) {
 	const (
 		projectID = "proj-created-at-priority"
