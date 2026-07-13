@@ -122,9 +122,11 @@ func projectOrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOpt
 	var previous string
 	cursor := opts.SinceSeq
 	for {
-		ctx, cancel := context.WithTimeout(watchCtx, daemonCommandTimeout)
-		snapshot, err := orchestrationSnapshot(ctx, deps, scope, 0, cursor)
-		cancel()
+		snapshot, err := watchDaemonCommandContext(watchCtx, deps, func(segmentCtx context.Context) (protocol.OrchestrationSnapshot, error) {
+			ctx, cancel := context.WithTimeout(segmentCtx, daemonCommandTimeout)
+			defer cancel()
+			return orchestrationSnapshot(ctx, deps, scope, 0, cursor)
+		})
 		if err != nil {
 			if isWatchContextDone(watchCtx, err) {
 				return nil

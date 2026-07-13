@@ -107,6 +107,12 @@ type taskGraphReadinessLoad struct {
 	err    error
 }
 
+type taskGraphReadinessCacheEntry struct {
+	revision  uint64
+	expiresAt time.Time
+	result    taskGraphReadinessResult
+}
+
 type taskClosePreflightOptions struct {
 	AllowTargetSession  bool `json:"allow_target_session,omitempty"`
 	AllowActiveSession  bool `json:"allow_active_session,omitempty"`
@@ -194,6 +200,8 @@ type taskGraphReadinessResult struct {
 	ContainmentRisks       []taskContainmentRisk           `json:"containment_risks,omitempty"`
 	WorkerObservations     []domain.WorkerObservation      `json:"worker_observations,omitempty"`
 	Blocked                map[string]string               `json:"blocked"`
+	scopeIssueIDs          []string
+	cacheExpiresAt         time.Time
 }
 
 type taskGraphCapacitySummary struct {
@@ -4534,38 +4542,70 @@ func (d *Daemon) taskGraphReadinessForActor(ctx context.Context, projectID, root
 	projectID = d.canonicalProjectID(projectID)
 	rootIssueID = strings.TrimSpace(rootIssueID)
 	actorID = strings.TrimSpace(actorID)
-	loadKey := taskGraphReadinessLoadKey(projectID, rootIssueID, actorID)
+	cacheKey := taskGraphReadinessLoadKey(projectID, rootIssueID, actorID)
 
-	d.taskGraphReadinessMu.Lock()
-	if d.taskGraphReadinessLoads == nil {
-		d.taskGraphReadinessLoads = map[string]*taskGraphReadinessLoad{}
-	}
-	if load := d.taskGraphReadinessLoads[loadKey]; load != nil {
-		d.taskGraphReadinessMu.Unlock()
-		waitStartedAt := time.Now()
-		select {
-		case <-ctx.Done():
-			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.singleflight_wait", waitStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "actor_id", actorID, "shared_load", true, "error", ctx.Err())
-			return taskGraphReadinessResult{}, ctx.Err()
-		case <-load.done:
-			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.singleflight_wait", waitStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "actor_id", actorID, "shared_load", true, "error", load.err)
-			return cloneTaskGraphReadinessResult(load.result), load.err
+	for {
+		revision := d.currentRevision(projectID)
+		loadKey := fmt.Sprintf("%s\x00%d", cacheKey, revision)
+
+		d.taskGraphReadinessMu.Lock()
+		if d.taskGraphReadinessCache == nil {
+			d.taskGraphReadinessCache = map[string]taskGraphReadinessCacheEntry{}
 		}
+		if cached, ok := d.taskGraphReadinessCache[cacheKey]; ok && cached.revision == revision && (cached.expiresAt.IsZero() || time.Now().Before(cached.expiresAt)) {
+			d.taskGraphReadinessMu.Unlock()
+			if err := d.refreshIssueSessionRuntimeState(ctx, projectID, cached.result.scopeIssueIDs); err != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("validate cached graph readiness runtime", "project_id", projectID, "root_issue_id", rootIssueID, "error", err)
+			}
+			if d.currentRevision(projectID) != revision {
+				continue
+			}
+			return cloneTaskGraphReadinessResult(cached.result), nil
+		}
+		if d.taskGraphReadinessLoads == nil {
+			d.taskGraphReadinessLoads = map[string]*taskGraphReadinessLoad{}
+		}
+		if load := d.taskGraphReadinessLoads[loadKey]; load != nil {
+			d.taskGraphReadinessMu.Unlock()
+			waitStartedAt := time.Now()
+			select {
+			case <-ctx.Done():
+				latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.singleflight_wait", waitStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "actor_id", actorID, "shared_load", true, "error", ctx.Err())
+				return taskGraphReadinessResult{}, ctx.Err()
+			case <-load.done:
+				latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.singleflight_wait", waitStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "actor_id", actorID, "shared_load", true, "error", load.err)
+				if load.err != nil {
+					return taskGraphReadinessResult{}, load.err
+				}
+				if d.currentRevision(projectID) != revision {
+					continue
+				}
+				return cloneTaskGraphReadinessResult(load.result), nil
+			}
+		}
+		load := &taskGraphReadinessLoad{done: make(chan struct{})}
+		d.taskGraphReadinessLoads[loadKey] = load
+		d.taskGraphReadinessMu.Unlock()
+
+		result, err := d.buildTaskGraphReadinessForActor(ctx, projectID, rootIssueID, actorID)
+		load.result = cloneTaskGraphReadinessResult(result)
+		load.err = err
+		finishedRevision := d.currentRevision(projectID)
+
+		d.taskGraphReadinessMu.Lock()
+		delete(d.taskGraphReadinessLoads, loadKey)
+		if err == nil && finishedRevision == revision {
+			d.taskGraphReadinessCache[cacheKey] = taskGraphReadinessCacheEntry{
+				revision:  revision,
+				expiresAt: result.cacheExpiresAt,
+				result:    cloneTaskGraphReadinessResult(result),
+			}
+		}
+		close(load.done)
+		d.taskGraphReadinessMu.Unlock()
+
+		return result, err
 	}
-	load := &taskGraphReadinessLoad{done: make(chan struct{})}
-	d.taskGraphReadinessLoads[loadKey] = load
-	d.taskGraphReadinessMu.Unlock()
-
-	result, err := d.buildTaskGraphReadinessForActor(ctx, projectID, rootIssueID, actorID)
-	load.result = cloneTaskGraphReadinessResult(result)
-	load.err = err
-
-	d.taskGraphReadinessMu.Lock()
-	delete(d.taskGraphReadinessLoads, loadKey)
-	close(load.done)
-	d.taskGraphReadinessMu.Unlock()
-
-	return result, err
 }
 
 func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID, rootIssueID, actorID string) (taskGraphReadinessResult, error) {
@@ -4577,10 +4617,13 @@ func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID,
 	if err != nil {
 		return taskGraphReadinessResult{}, err
 	}
-	ready, err := daemonTaskGraphReadinessFromIndexesForActor(rootID, byID, children, actorID, time.Now().UTC())
+	now := time.Now().UTC()
+	ready, err := daemonTaskGraphReadinessFromIndexesForActor(rootID, byID, children, actorID, now)
 	if err != nil {
 		return taskGraphReadinessResult{}, err
 	}
+	ready.scopeIssueIDs = taskIDsFromTasks(tasks)
+	ready.cacheExpiresAt = taskGraphReadinessOwnershipExpiry(tasks, now)
 	waitingIssues, err := d.issueClientForProject(projectID).UnresolvedInteractionIssueIDs(ctx)
 	if err != nil {
 		return taskGraphReadinessResult{}, fmt.Errorf("refresh interaction readiness projection: %w", err)
@@ -4614,6 +4657,19 @@ func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID,
 	ready.WorkerObservations = d.daemonTaskGraphWorkerObservations(ctx, projectID, rootID, byID, children, ready)
 	ready.Capacity = daemonTaskGraphCapacitySummary(ready)
 	return ready, nil
+}
+
+func taskGraphReadinessOwnershipExpiry(tasks []domain.Task, now time.Time) time.Time {
+	var earliest time.Time
+	for _, task := range tasks {
+		if task.Ownership == nil || task.Ownership.ExpiresAt == nil || !task.Ownership.ExpiresAt.After(now) {
+			continue
+		}
+		if earliest.IsZero() || task.Ownership.ExpiresAt.Before(earliest) {
+			earliest = task.Ownership.ExpiresAt.UTC()
+		}
+	}
+	return earliest
 }
 
 func taskGraphReadinessLoadKey(projectID, rootIssueID, actorID string) string {
@@ -5227,10 +5283,27 @@ func cloneTaskGraphReadinessResult(result taskGraphReadinessResult) taskGraphRea
 	result.Runnable = append([]string(nil), result.Runnable...)
 	result.Pending = append([]taskGraphPendingStart(nil), result.Pending...)
 	result.Active = append([]string(nil), result.Active...)
-	result.SessionStartProgress = append([]taskGraphSessionStartProgress(nil), result.SessionStartProgress...)
+	result.SessionStartProgress = cloneTaskGraphSessionStartProgressList(result.SessionStartProgress)
 	result.StaleCloseableChildren = append([]taskStaleCloseableCandidate(nil), result.StaleCloseableChildren...)
+	for i := range result.StaleCloseableChildren {
+		result.StaleCloseableChildren[i].Evidence = append([]string(nil), result.StaleCloseableChildren[i].Evidence...)
+	}
 	result.ContainmentRisks = append([]taskContainmentRisk(nil), result.ContainmentRisks...)
+	for i := range result.ContainmentRisks {
+		result.ContainmentRisks[i].ChangedFiles = append([]string(nil), result.ContainmentRisks[i].ChangedFiles...)
+	}
 	result.WorkerObservations = append([]domain.WorkerObservation(nil), result.WorkerObservations...)
+	for i := range result.WorkerObservations {
+		observation := &result.WorkerObservations[i]
+		if observation.LastEvent != nil {
+			lastEvent := *observation.LastEvent
+			observation.LastEvent = &lastEvent
+		}
+		observation.EvidenceSummary = append([]string(nil), observation.EvidenceSummary...)
+		observation.Risks = append([]string(nil), observation.Risks...)
+		observation.NextActions = append([]string(nil), observation.NextActions...)
+	}
+	result.scopeIssueIDs = append([]string(nil), result.scopeIssueIDs...)
 	if result.Blocked != nil {
 		blocked := make(map[string]string, len(result.Blocked))
 		for key, value := range result.Blocked {
@@ -5253,8 +5326,7 @@ func cloneTaskGraphNestedRoots(in []taskGraphNestedRoot) []taskGraphNestedRoot {
 		if in[i].ActiveSession != nil {
 			active := *in[i].ActiveSession
 			if active.StartProgress != nil {
-				progress := *active.StartProgress
-				active.StartProgress = &progress
+				active.StartProgress = cloneTaskGraphSessionStartProgress(active.StartProgress)
 			}
 			out[i].ActiveSession = &active
 		}
@@ -5274,11 +5346,35 @@ func cloneTaskGraphActiveSessions(in []taskGraphActiveSession) []taskGraphActive
 	for i := range in {
 		out[i] = in[i]
 		if in[i].StartProgress != nil {
-			progress := *in[i].StartProgress
-			out[i].StartProgress = &progress
+			out[i].StartProgress = cloneTaskGraphSessionStartProgress(in[i].StartProgress)
 		}
 	}
 	return out
+}
+
+func cloneTaskGraphSessionStartProgressList(in []taskGraphSessionStartProgress) []taskGraphSessionStartProgress {
+	out := append([]taskGraphSessionStartProgress(nil), in...)
+	for i := range out {
+		cloned := cloneTaskGraphSessionStartProgress(&out[i])
+		out[i] = *cloned
+	}
+	return out
+}
+
+func cloneTaskGraphSessionStartProgress(in *taskGraphSessionStartProgress) *taskGraphSessionStartProgress {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.StartedAt != nil {
+		startedAt := *in.StartedAt
+		out.StartedAt = &startedAt
+	}
+	if in.FinishedAt != nil {
+		finishedAt := *in.FinishedAt
+		out.FinishedAt = &finishedAt
+	}
+	return &out
 }
 
 func hasTaskGraphSessionStartProgress(issueID string, progressByIssue map[string]taskGraphSessionStartProgress) bool {

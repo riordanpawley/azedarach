@@ -88,6 +88,9 @@ func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope)
 	}
 	resp := d.successResponse(req)
 	resp.Body = out
+	// Mailbox evidence participates in graph readiness and orchestration
+	// snapshots, so advance the projection revision after the durable append.
+	resp.Revision = d.nextRevision(d.projectID(req.Meta))
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon mail send completed",
 			"repo_dir", repoDir,

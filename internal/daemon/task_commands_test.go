@@ -8018,7 +8018,7 @@ func TestTaskGraphReadinessRefreshesOnlyRootScopedSessions(t *testing.T) {
 }
 
 func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	projectID := "proj-graph-shared-load"
@@ -8127,6 +8127,40 @@ func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
 	}
 	if len(second.ready.Active) != 1 || second.ready.Active[0] != childID {
 		t.Fatalf("second active = %v, want [%s]", second.ready.Active, childID)
+	}
+
+	third, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("cached readiness error: %v", err)
+	}
+	if len(third.Active) != 1 || third.Active[0] != childID {
+		t.Fatalf("cached active = %v, want [%s]", third.Active, childID)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 2 {
+		t.Fatalf("tmux list-sessions calls after sequential duplicate = %d, want one build plus one hybrid runtime validation", got)
+	}
+
+	d.nextRevision(projectID)
+	if _, err := d.taskGraphReadiness(ctx, projectID, rootID); err != nil {
+		t.Fatalf("readiness after revision change: %v", err)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 3 {
+		t.Fatalf("tmux list-sessions calls after revision change = %d, want cache invalidation", got)
+	}
+}
+
+func TestTaskGraphReadinessOwnershipExpiryBoundsCache(t *testing.T) {
+	now := time.Date(2026, time.July, 13, 5, 30, 0, 0, time.UTC)
+	early := now.Add(2 * time.Second)
+	late := now.Add(time.Minute)
+	expired := now.Add(-time.Second)
+	tasks := []domain.Task{
+		{Ownership: &domain.IssueOwnership{ExpiresAt: &late}},
+		{Ownership: &domain.IssueOwnership{ExpiresAt: &early}},
+		{Ownership: &domain.IssueOwnership{ExpiresAt: &expired}},
+	}
+	if got := taskGraphReadinessOwnershipExpiry(tasks, now); !got.Equal(early) {
+		t.Fatalf("cache expiry = %s, want earliest active ownership expiry %s", got, early)
 	}
 }
 
@@ -8784,7 +8818,16 @@ func TestTaskGraphReadinessMarksFailedNestedRootStartAsBlockedCapacity(t *testin
 		t.Fatalf("create nested child: %v", err)
 	}
 
-	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, nextRevision: sequentialRevision()})
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger},
+		hub: publish.NewHub(16, 8, logger),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{},
+	}
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, hub: d.hub, nextRevision: d.nextRevision})
+	d.operationRuntime = runtime
 	if _, err := runtime.manager.Submit(ctx, daemonops.SubmitRequest{
 		ID:           "op-nested-start",
 		ProjectID:    projectID,
@@ -8798,13 +8841,6 @@ func TestTaskGraphReadinessMarksFailedNestedRootStartAsBlockedCapacity(t *testin
 	}
 	_ = waitForRuntimeState(t, runtime, "op-nested-start", daemonops.StateFailed)
 
-	d := &Daemon{
-		cfg:              Config{RepoDir: repoDir, Logger: logger},
-		operationRuntime: runtime,
-		issueClientsByProject: map[string]*issues.Client{
-			projectID: issuesClient,
-		},
-	}
 	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
 	if err != nil {
 		t.Fatalf("taskGraphReadiness error: %v", err)

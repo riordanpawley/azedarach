@@ -2168,11 +2168,19 @@ func watchDaemonCommand[T any](deps *Dependencies, call func(context.Context) (T
 }
 
 func watchDaemonCommandContext[T any](ctx context.Context, deps *Dependencies, call func(context.Context) (T, error)) (T, error) {
-	value, err := call(ctx)
+	linkCtx := context.Context(nil)
+	if deps != nil {
+		linkCtx = deps.TraceContext
+	}
+	segmentCtx, endSegment := newWatchTraceSegment(ctx, linkCtx, "daemon_command")
+	value, err := call(segmentCtx)
 	if err == nil || !reconnect.IsTransientTransportError(err) {
+		endSegment(err)
 		return value, err
 	}
-	return commandWithDaemonAutostartRetry(ctx, deps, call)
+	value, err = commandWithDaemonAutostartRetry(segmentCtx, deps, call)
+	endSegment(err)
+	return value, err
 }
 
 func shouldContinueOrchestrateWatchAfterError(err error) bool {
