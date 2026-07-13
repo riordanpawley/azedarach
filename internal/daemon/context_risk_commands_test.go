@@ -19,7 +19,7 @@ func TestTaskContextRiskDoesNotTreatBroadRootAsRiskWithoutOverlap(t *testing.T) 
 	ctx := context.Background()
 	projectID := "proj-context-risk-broad"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Large root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -62,7 +62,7 @@ func TestTaskContextRiskReportsRepeatedSiblingFileCluster(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-context-risk-cluster"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -129,7 +129,7 @@ func TestTaskContextRiskMarksRelatedConsumersAuditedFromObservation(t *testing.T
 	ctx := context.Background()
 	projectID := "proj-context-risk-related-consumers"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	targetID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Target", Type: domain.TypeTask, Status: domain.StatusInReview})
@@ -165,7 +165,7 @@ func TestTaskContextRiskCompactResponseBoundsReturnedEvidence(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-context-risk-compact"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -235,7 +235,7 @@ func TestTaskContextRiskReadsTopLevelRelatedMailboxEvidence(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-context-risk-top-level"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	targetID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Target root", Type: domain.TypeTask, Status: domain.StatusInReview})
@@ -274,7 +274,7 @@ func TestTaskUpdateStatusRejectsInReviewForHighContextRiskWithoutCloseoutEvidenc
 	ctx := context.Background()
 	projectID := "proj-context-risk-review-block"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -338,7 +338,7 @@ func TestCloseTaskRejectsHighContextRiskWithoutCloseoutEvidence(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-context-risk-close-block"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})

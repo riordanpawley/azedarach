@@ -14,8 +14,8 @@ import (
 func TestBeginOrchestrationStartIsCrossProcessAtomic(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
-	first := NewClientAtPath(path, slog.Default())
-	second := NewClientAtPath(path, slog.Default())
+	first := newTestClientAtPath(t, path, slog.Default())
+	second := newTestClientAtPath(t, path, slog.Default())
 	t.Cleanup(func() { _ = first.CloseDB(); _ = second.CloseDB() })
 	issueID, err := first.Create(ctx, CreateTaskParams{Title: "worker", Status: domain.StatusOpen, Type: domain.TypeTask})
 	if err != nil {
@@ -61,7 +61,7 @@ func TestBeginOrchestrationStartIsCrossProcessAtomic(t *testing.T) {
 
 func TestCompensateOrchestrationStartDurablyReleasesOnlyAcquiredClaim(t *testing.T) {
 	ctx := context.Background()
-	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	client := newTestClient(t)
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID, err := client.Create(ctx, CreateTaskParams{Title: "worker", Status: domain.StatusOpen, Type: domain.TypeTask})
 	if err != nil {
@@ -116,7 +116,7 @@ func TestCompensateOrchestrationStartDurablyReleasesOnlyAcquiredClaim(t *testing
 
 func TestCompleteOrchestrationStartIsIdempotent(t *testing.T) {
 	ctx := context.Background()
-	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	client := newTestClient(t)
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID, err := client.Create(ctx, CreateTaskParams{Title: "worker", Status: domain.StatusOpen, Type: domain.TypeTask})
 	if err != nil {
@@ -140,7 +140,7 @@ func TestCompleteOrchestrationStartIsIdempotent(t *testing.T) {
 func TestOrchestrationStartResumesSameIntentAfterClientRestart(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
-	first := NewClientAtPath(path, slog.Default())
+	first := newTestClientAtPath(t, path, slog.Default())
 	issueID, err := first.Create(ctx, CreateTaskParams{Title: "worker", Status: domain.StatusOpen, Type: domain.TypeTask})
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +153,7 @@ func TestOrchestrationStartResumesSameIntentAfterClientRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restarted := NewClientAtPath(path, slog.Default())
+	restarted := newTestClientAtPath(t, path, slog.Default())
 	t.Cleanup(func() { _ = restarted.CloseDB() })
 	resumed, err := restarted.BeginOrchestrationStart(ctx, "project", issueID, "stable-intent", "orchestrator", "session.start:"+issueID)
 	if err != nil {

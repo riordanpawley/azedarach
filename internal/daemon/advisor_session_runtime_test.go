@@ -24,7 +24,7 @@ import (
 func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle(t *testing.T) {
 	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
 	repoDir := t.TempDir()
-	client := issues.NewClient(repoDir, slog.Default())
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "implementation remains open", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +141,7 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 func TestRuntimeReconcileRecoversAndCleansAdvisorSessionsFromDurableRequests(t *testing.T) {
 	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
 	repoDir := t.TempDir()
-	client := issues.NewClient(repoDir, slog.Default())
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "advisor recovery", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -207,7 +207,7 @@ func TestRuntimeReconcileRecoversAndCleansAdvisorSessionsFromDurableRequests(t *
 func TestRuntimeReconcileIssuesLeavesUnrelatedAdvisorSessionsUntouched(t *testing.T) {
 	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
 	repoDir := t.TempDir()
-	client := issues.NewClient(repoDir, slog.Default())
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	createRequest := func(title, requestID string) domain.InteractionRequest {
 		t.Helper()
 		issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: title, Type: domain.TypeTask, Status: domain.StatusOpen})
@@ -277,8 +277,8 @@ func TestImplementationSessionReconcileNeverRecreatesAdvisorProjection(t *testin
 func TestAdvisorRecoveryCleansRuntimeWhenTerminalRequestWinsCrossDaemonRace(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	clientA := issues.NewClient(repoDir, slog.Default())
-	clientB := issues.NewClient(repoDir, slog.Default())
+	clientA := newMigratedIssueClient(t, repoDir, slog.Default())
+	clientB := newMigratedIssueClient(t, repoDir, slog.Default())
 	issueID, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "terminal race", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -338,8 +338,8 @@ func TestAdvisorRecoveryCleansRuntimeWhenTerminalRequestWinsCrossDaemonRace(t *t
 func TestAdvisorRecoveryRetriesWhenNonTerminalMutationWinsCrossDaemonRace(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	clientA := issues.NewClient(repoDir, slog.Default())
-	clientB := issues.NewClient(repoDir, slog.Default())
+	clientA := newMigratedIssueClient(t, repoDir, slog.Default())
+	clientB := newMigratedIssueClient(t, repoDir, slog.Default())
 	issueID, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "recovery metadata race", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -653,7 +653,7 @@ func TestAdvisorContextPackShowsBudgetProvenanceAndExclusions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	client := issues.NewClient(repoDir, slog.Default())
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	issueID, err := client.Create(ctx, issues.CreateTaskParams{
 		Title:       "Choose advisor design",
 		Description: "Compare internal/daemon/relevant.go with config/credentials.json",

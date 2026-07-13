@@ -20,7 +20,7 @@ func TestInteractionStalenessReconcilePersistsAndPublishesOnce(t *testing.T) {
 	projectID := protocol.DefaultProjectID
 	repoDir := t.TempDir()
 	dbPath := filepath.Join(repoDir, "issues.db")
-	client := issues.NewClientAtPath(dbPath, nil)
+	client := newMigratedIssueClientAtPath(t, dbPath, nil)
 	if _, err := client.List(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestInteractionStalenessReconcilePersistsAndPublishesOnce(t *testing.T) {
 	if recovered.Request.State != domain.InteractionOpen || recovered.Request.SessionID == "" || recovered.Request.Recovery == nil || recovered.Request.Recovery.SessionID != recovered.Request.SessionID || !recovered.SessionStarted || !recovered.Age.Stale {
 		t.Fatalf("recovery response = %+v", recovered)
 	}
-	durable := issues.NewClientAtPath(dbPath, nil)
+	durable := newMigratedIssueClientAtPath(t, dbPath, nil)
 	got, found, err := durable.GetInteraction(context.Background(), r.ID)
 	if err != nil || !found || got.StaleAt == nil || len(got.Reminders) != 1 || !got.Unresolved() || got.SessionID != recovered.Request.SessionID {
 		t.Fatalf("restart projection = %+v found=%t err=%v", got, found, err)

@@ -93,8 +93,8 @@ func TestRouteOrchestrationCandidateRejectsForeignExecutionOwner(t *testing.T) {
 func TestRouteOrchestrationCandidateInteractionIsIdempotentAcrossClients(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
-	first := NewClientAtPath(path, slog.Default())
-	second := NewClientAtPath(path, slog.Default())
+	first := newTestClientAtPath(t, path, slog.Default())
+	second := newTestClientAtPath(t, path, slog.Default())
 	t.Cleanup(func() { _ = first.CloseDB(); _ = second.CloseDB() })
 	id, err := first.Create(ctx, CreateTaskParams{Title: "Needs decision", Description: "Choose policy", Acceptance: "Policy chosen", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
 	require.NoError(t, err)

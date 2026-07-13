@@ -19,7 +19,7 @@ import (
 func TestProjectReviewQueuePrioritizesReviewAndExcludesForeignOwnedWork(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	client := issues.NewClientAtPath(filepath.Join(repoDir, "issues.db"), slog.Default())
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	first := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
 	foreign := createReviewTask(t, ctx, client, domain.P2, "worker-b")
@@ -53,7 +53,7 @@ func TestProjectReviewQueuePrioritizesReviewAndExcludesForeignOwnedWork(t *testi
 func TestProjectStartIntentCannotBypassActionableReview(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	client := issues.NewClientAtPath(filepath.Join(repoDir, "issues.db"), slog.Default())
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	reviewID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
 	openID, err := client.Create(ctx, issues.CreateTaskParams{Title: "new work", Description: "Executable", Acceptance: "done", Type: domain.TypeTask, Priority: domain.P0, Status: domain.StatusOpen})
@@ -81,7 +81,7 @@ func TestProjectStartIntentCannotBypassActionableReview(t *testing.T) {
 func TestProjectStartIntentRoutesPrematureWorkBeforePrioritizingReview(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	client := issues.NewClientAtPath(filepath.Join(repoDir, "issues.db"), slog.Default())
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	reviewID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
 	openID, err := client.Create(ctx, issues.CreateTaskParams{Title: "new work", Description: "Executable", Acceptance: "done", Type: domain.TypeTask, Priority: domain.P0, Status: domain.StatusOpen})
@@ -139,8 +139,8 @@ func TestProjectReviewQueueRefreshesCrossProcessReviewLease(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	path := filepath.Join(repoDir, "issues.db")
-	reader := issues.NewClientAtPath(path, slog.Default())
-	writer := issues.NewClientAtPath(path, slog.Default())
+	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
+	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
 	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
 	issueID := createReviewTask(t, ctx, reader, domain.P1, "orchestrator")
 	d := newOrchestrationReviewTestDaemon(repoDir, reader)
@@ -168,7 +168,7 @@ func TestProjectReviewQueueRefreshesCrossProcessReviewLease(t *testing.T) {
 func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	client := issues.NewClientAtPath(filepath.Join(repoDir, "issues.db"), slog.Default())
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID := createReviewTask(t, ctx, client, domain.P1, "worker-a")
 	tmuxRunner := newSessionStartTmuxRunner()
@@ -264,7 +264,7 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 func TestReviewIntentLeavesForeignOwnedWorkUntouched(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	client := issues.NewClientAtPath(filepath.Join(repoDir, "issues.db"), slog.Default())
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID := createReviewTask(t, ctx, client, domain.P1, "worker-a")
 	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "foreign", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseOrchestration}); err != nil {
@@ -307,7 +307,7 @@ func TestReviewIntentLeavesForeignOwnedWorkUntouched(t *testing.T) {
 func TestReviewAcceptRequiresCompleteEvidenceAndLeavesIssueReviewReady(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	client := issues.NewClientAtPath(filepath.Join(repoDir, "issues.db"), slog.Default())
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
@@ -331,7 +331,7 @@ func TestReviewAcceptRequiresCompleteEvidenceAndLeavesIssueReviewReady(t *testin
 func TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	client := issues.NewClientAtPath(filepath.Join(repoDir, "issues.db"), slog.Default())
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
 	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
