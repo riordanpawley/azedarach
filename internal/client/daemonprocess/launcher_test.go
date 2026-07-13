@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -27,7 +28,10 @@ type trackingWriteCloser struct {
 type recordingDaemonProcess struct {
 	stopCalls atomic.Int32
 	stopErr   error
+	exitCh    chan error
 }
+
+func (p *recordingDaemonProcess) exited() <-chan error { return p.exitCh }
 
 func (p *recordingDaemonProcess) stopAndWait(context.Context) error {
 	p.stopCalls.Add(1)
@@ -40,7 +44,7 @@ type recordingDaemonStarter struct {
 }
 
 func useRecordingDaemonStarter(launcher *Launcher) *recordingDaemonStarter {
-	starter := &recordingDaemonStarter{process: &recordingDaemonProcess{}}
+	starter := &recordingDaemonStarter{process: &recordingDaemonProcess{exitCh: make(chan error)}}
 	launcher.startProcess = func(spec daemonProcessSpec) (daemonProcess, error) {
 		spec.args = append([]string(nil), spec.args...)
 		starter.specs = append(starter.specs, spec)
@@ -1084,35 +1088,60 @@ func TestLauncherStartReportsSpawnCleanupFailure(t *testing.T) {
 	}
 }
 
+func TestLauncherStartProcessSupervisorPreservesExitPublishedAfterInitialProbe(t *testing.T) {
+	done := make(chan error)
+	process := &execDaemonProcess{
+		cmd:  &exec.Cmd{Process: &os.Process{Pid: 424242}},
+		done: done,
+		signalProcessGroup: func(signal syscall.Signal) error {
+			if signal != syscall.SIGTERM {
+				t.Fatalf("signal = %v, want SIGTERM", signal)
+			}
+			go func() { done <- errors.New("exit status 7") }()
+			return syscall.ESRCH
+		},
+	}
+
+	err := process.stopAndWait(context.Background())
+	if err == nil || !errors.Is(err, errSpawnedDaemonExited) || !strings.Contains(err.Error(), "exit status 7") {
+		t.Fatalf("stopAndWait() error = %v, want observable pre-readiness exit status", err)
+	}
+}
+
+func TestLauncherStartProcessSupervisorPreservesExitAfterSignalPermissionRace(t *testing.T) {
+	done := make(chan error)
+	process := &execDaemonProcess{
+		cmd:  &exec.Cmd{Process: &os.Process{Pid: 424242}},
+		done: done,
+		signalProcessGroup: func(signal syscall.Signal) error {
+			if signal != syscall.SIGTERM {
+				t.Fatalf("signal = %v, want SIGTERM", signal)
+			}
+			go func() { done <- errors.New("exit status 7") }()
+			return syscall.EPERM
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := process.stopAndWait(ctx)
+	if err == nil || !errors.Is(err, errSpawnedDaemonExited) || !strings.Contains(err.Error(), "exit status 7") {
+		t.Fatalf("stopAndWait() error = %v, want observable pre-readiness exit status", err)
+	}
+}
+
 func TestRealProcessProfileLauncherReportsExitBeforeReadiness(t *testing.T) {
 	root := t.TempDir()
 	executable := filepath.Join(root, "azd-test")
-	exited := filepath.Join(root, "exited")
-	script := fmt.Sprintf("#!/bin/sh\n: > %q\nexit 7\n", exited)
+	script := "#!/bin/sh\nexit 7\n"
 	if err := os.WriteFile(executable, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	launcher := NewLauncher(filepath.Join(root, "repo"), filepath.Join(root, "daemon.sock"))
 	launcher.BinPath = executable
-	readyCalls := 0
 	launcher.waitForReady = func(ctx context.Context, _ string) error {
-		readyCalls++
-		if readyCalls < 3 {
-			return context.DeadlineExceeded
-		}
-		for {
-			if _, err := os.Stat(exited); err == nil {
-				// Give the process-reaper goroutine a chance to publish Wait's
-				// result before cleanup inspects it.
-				time.Sleep(10 * time.Millisecond)
-				return context.DeadlineExceeded
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(time.Millisecond):
-			}
-		}
+		<-ctx.Done()
+		return ctx.Err()
 	}
 	launcher.openLogFile = func(string) (io.WriteCloser, error) {
 		return os.OpenFile(filepath.Join(root, "daemon.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
