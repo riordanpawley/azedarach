@@ -29,14 +29,33 @@ func TestLegacyIssueHelpDocumentsDeprecation(t *testing.T) {
 	}
 }
 
-func TestTicketSubcommandHelpUsesExistingCommandSurface(t *testing.T) {
-	output := captureHelpOutput(t, func() {
-		if !maybePrintCommandHelp([]string{"ticket", "get", "--help"}) {
-			t.Fatal("ticket get help was not recognized")
-		}
-	})
-	if !strings.Contains(output, " get ") && !strings.Contains(output, "issue get") {
-		t.Fatalf("ticket get help did not render command usage: %q", output)
+func TestTicketSubcommandHelpIsCanonical(t *testing.T) {
+	tests := []struct {
+		path []string
+		want string
+	}{
+		{path: []string{"ticket", "get", "--help"}, want: "<ticket-id>"},
+		{path: []string{"ticket", "dep", "add", "--help"}, want: "--ticket-id"},
+		{path: []string{"ticket", "image", "add", "--help"}, want: "--ticket-id"},
+		{path: []string{"ticket", "document", "list", "--help"}, want: "--ticket-id"},
+		{path: []string{"ticket", "fanout", "drift", "--help"}, want: "--ticket"},
+	}
+	for _, tt := range tests {
+		t.Run(strings.Join(tt.path[1:len(tt.path)-1], "_"), func(t *testing.T) {
+			output := captureHelpOutput(t, func() {
+				if !maybePrintCommandHelp(tt.path) {
+					t.Fatalf("ticket help path %v was not recognized", tt.path)
+				}
+			})
+			if !strings.Contains(output, "Usage: az ticket ") || !strings.Contains(output, tt.want) {
+				t.Fatalf("canonical ticket help missing %q: %q", tt.want, output)
+			}
+			for _, legacy := range []string{"<issue-id>", "--issue-id", "--issue "} {
+				if strings.Contains(output, legacy) {
+					t.Fatalf("canonical ticket help contains legacy term %q: %q", legacy, output)
+				}
+			}
+		})
 	}
 }
 

@@ -17,22 +17,22 @@ Commands:
   split [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create a child ticket and launch it with az orchestrate start
   update [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update ticket fields and durable lifecycle actions (backlog/open/active/review/closed/cancelled)
   close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [<ticket-id>]  Integrate, clean up, and close a ticket
-  cleanup [--project <project-id>] [--id <ticket-id> ...|--ids a,b] [--status <status> ...] [--query text] [--updated-before date] [--limit N] [--action closed|cancelled] [--dry-run] [--per-issue-timeout duration] [--json]  Safely clean up ticket lifecycles in one daemon operation
+  cleanup [--project <project-id>] [--id <ticket-id> ...|--ids a,b] [--status <status> ...] [--query text] [--updated-before date] [--limit N] [--action closed|cancelled] [--dry-run] [--per-ticket-timeout duration] [--json]  Safely clean up ticket lifecycles in one daemon operation
   delete [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]  Permanently delete a ticket
   unarchive [--project <project-id>] [--id <ticket-id>] [--json] [--with-parents] [--cascade-children] [<ticket-id>]  Restore archived tickets to active reads
-  image add [--project <project-id>] [--issue-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]  Attach an image to a ticket
-  image remove [--project <project-id>] [--issue-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]  Remove an image attachment from a ticket
-  document add [--project <project-id>] [--issue-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]  Attach a report/document to a ticket
-  document list [--project <project-id>] [--issue-id <ticket-id>] [<ticket-id>] [--json]  List report/document attachments for a ticket
-  document remove [--project <project-id>] [--issue-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]  Remove a document attachment from a ticket
-  dep add [--project <project-id>] [--issue-id <ticket-id>] [--depends-on-id <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]  Add a dependency edge
-  dep remove [--project <project-id>] [--issue-id <ticket-id>] [--depends-on-id <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]  Remove a dependency edge
+  image add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]  Attach an image to a ticket
+  image remove [--project <project-id>] [--ticket-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]  Remove an image attachment from a ticket
+  document add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]  Attach a report/document to a ticket
+  document list [--project <project-id>] [--ticket-id <ticket-id>] [<ticket-id>] [--json]  List report/document attachments for a ticket
+  document remove [--project <project-id>] [--ticket-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]  Remove a document attachment from a ticket
+  dep add [--project <project-id>] [--ticket-id <ticket-id>] [--depends-on-id <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]  Add a dependency edge
+  dep remove [--project <project-id>] [--ticket-id <ticket-id>] [--depends-on-id <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]  Remove a dependency edge
   dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]  Apply dependency edge mutations
   bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Create tickets, epics, or nested children trees from JSON
   bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Execute bulk update operations
   fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply a pre-authored nested ticket tree from JSON
   fanout ready [--project <project-id>] --root <ticket-id> [--json]  List runnable leaf tickets under a fanout root
-  fanout drift [--project <project-id>] --issue <ticket-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
+  fanout drift [--project <project-id>] --ticket <ticket-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
 
 Status semantics:
   open         Not yet active
@@ -50,3 +50,5 @@ Graph/root membership:
   `--impl` assigns implementation/spec variant metadata only; it never attaches a ticket to a graph/root.
 
 Argument ordering: place flags/options before positional arguments for deterministic parsing.
+
+Compatibility: `--issue-id` remains a deprecated alias for `--ticket-id` on attachment and dependency commands; fanout drift likewise accepts deprecated `--issue` as an alias for `--ticket`.

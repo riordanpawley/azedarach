@@ -3265,7 +3265,7 @@ func parseIssueListArgs(args []string, allowQueryArgs bool) (IssueListOptions, e
 		opts.Archived = string(archiveMode)
 	}
 	if allowQueryArgs && opts.Query == "" {
-		return IssueListOptions{}, fmt.Errorf("usage: az issue search [--project <project-id>] [--json] [--deps] [--archived exclude|include|only] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)")
+		return IssueListOptions{}, fmt.Errorf("usage: az ticket search [--project <project-id>] [--json] [--deps] [--archived exclude|include|only] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)")
 	}
 	var parseErr error
 	if opts.CreatedAfter, parseErr = parseIssueListDateFilter(createdAfterRaw, false); parseErr != nil {
@@ -3335,7 +3335,7 @@ func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 		return IssueGetOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueGetOptions{}, fmt.Errorf("usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]")
+		return IssueGetOptions{}, fmt.Errorf("usage: az ticket get [--project <project-id>] [--id <ticket-id>] [--json] [--with-notes] [<ticket-id>]")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -3344,7 +3344,7 @@ func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueGetOptions{}, fmt.Errorf("usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [--archived exclude|include|only] [<issue-id>]")
+		return IssueGetOptions{}, fmt.Errorf("usage: az ticket get [--project <project-id>] [--id <ticket-id>] [--json] [--with-notes] [--archived exclude|include|only] [<ticket-id>]")
 	}
 	if strings.TrimSpace(opts.Archived) != "" {
 		archiveMode, archiveErr := protocol.NormalizeArchiveMode(opts.Archived)
@@ -3373,7 +3373,7 @@ func ParseIssueOwnershipArgs(args []string, command string) (IssueOwnershipOptio
 		return IssueOwnershipOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueOwnershipOptions{}, fmt.Errorf("usage: az issue %s [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<issue-id>]", command)
+		return IssueOwnershipOptions{}, fmt.Errorf("usage: az ticket %s [--project <project-id>] [--id <ticket-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<ticket-id>]", command)
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -3382,7 +3382,7 @@ func ParseIssueOwnershipArgs(args []string, command string) (IssueOwnershipOptio
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueOwnershipOptions{}, fmt.Errorf("usage: az issue %s [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<issue-id>]", command)
+		return IssueOwnershipOptions{}, fmt.Errorf("usage: az ticket %s [--project <project-id>] [--id <ticket-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<ticket-id>]", command)
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	opts.OwnerID = strings.TrimSpace(opts.OwnerID)
@@ -3409,7 +3409,7 @@ func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
 		return IssueEventsOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueEventsOptions{}, fmt.Errorf("usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]")
+		return IssueEventsOptions{}, fmt.Errorf("usage: az ticket events [--project <project-id>] [--id <ticket-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<ticket-id>]")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -3418,7 +3418,7 @@ func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" && !opts.JQHelp {
-		return IssueEventsOptions{}, fmt.Errorf("usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]")
+		return IssueEventsOptions{}, fmt.Errorf("usage: az ticket events [--project <project-id>] [--id <ticket-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<ticket-id>]")
 	}
 	if opts.Limit < 0 {
 		return IssueEventsOptions{}, fmt.Errorf("--limit must be non-negative")
@@ -3454,7 +3454,7 @@ func ParseIssueRecordArgs(args []string) (IssueRecordOptions, error) {
 		return IssueRecordOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueRecordOptions{}, fmt.Errorf("usage: az issue record [--project <project-id>] [--id <issue-id>] [--type <event-type>] [--summary <text>] [--body <text>] [--data <json-object>] [--follow-up <issue-id> ...] [--json] [<issue-id>]")
+		return IssueRecordOptions{}, fmt.Errorf("usage: az ticket record [--project <project-id>] [--id <ticket-id>] [--type <event-type>] [--summary <text>] [--body <text>] [--data <json-object>] [--follow-up <ticket-id> ...] [--json] [<ticket-id>]")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -3506,7 +3506,7 @@ func ParseIssueContextRiskArgs(args []string) (IssueContextRiskOptions, error) {
 		return IssueContextRiskOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueContextRiskOptions{}, fmt.Errorf("usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--summary|--full] [--json] [<issue-id>]")
+		return IssueContextRiskOptions{}, fmt.Errorf("usage: az ticket context-risk [--project <project-id>] [--id <ticket-id>] [--since 14d] [--summary|--full] [--json] [<ticket-id>]")
 	}
 	if opts.Summary && opts.Full {
 		return IssueContextRiskOptions{}, fmt.Errorf("--summary and --full are mutually exclusive")
@@ -3518,7 +3518,7 @@ func ParseIssueContextRiskArgs(args []string) (IssueContextRiskOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueContextRiskOptions{}, fmt.Errorf("usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--summary|--full] [--json] [<issue-id>]")
+		return IssueContextRiskOptions{}, fmt.Errorf("usage: az ticket context-risk [--project <project-id>] [--id <ticket-id>] [--since 14d] [--summary|--full] [--json] [<ticket-id>]")
 	}
 	duration, err := parseIssueContextRiskWindow(sinceRaw)
 	if err != nil {
@@ -3591,7 +3591,7 @@ func ParseIssueGetManyArgs(args []string) (IssueGetManyOptions, error) {
 	}
 	ids = dedupeOrderedIDs(ids)
 	if len(ids) == 0 {
-		return IssueGetManyOptions{}, fmt.Errorf("usage: az issue get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]")
+		return IssueGetManyOptions{}, fmt.Errorf("usage: az ticket get-many [--project <project-id>] --id <ticket-id> [--id <ticket-id> ...] [--ids a,b,c] [--json] [--with-notes]")
 	}
 	opts.IssueIDs = ids
 	opts.Project = normalizeIssueProject(opts.Project)
@@ -3635,7 +3635,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	case fs.NArg() == 1 && titleFlag != "":
 		return IssueCreateOptions{}, fmt.Errorf("provide title either as --title or as a positional argument, not both")
 	default:
-		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
+		return IssueCreateOptions{}, fmt.Errorf("usage: az ticket create [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
 	}
 
 	taskType, err := parseTaskType(typeRaw)
@@ -3683,7 +3683,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 func ParseIssueCheckArgs(args []string) (IssueCheckOptions, error) {
 	getOpts, err := ParseIssueGetArgs(args)
 	if err != nil {
-		return IssueCheckOptions{}, fmt.Errorf("usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
+		return IssueCheckOptions{}, fmt.Errorf("usage: az ticket check [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>]")
 	}
 	return IssueCheckOptions{
 		Project: getOpts.Project,
@@ -3706,7 +3706,7 @@ func ParseIssueDoctorArgs(args []string) (IssueDoctorOptions, error) {
 		return IssueDoctorOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueDoctorOptions{}, fmt.Errorf("usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<issue-id>]")
+		return IssueDoctorOptions{}, fmt.Errorf("usage: az ticket doctor [--project <project-id>] [--id <ticket-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<ticket-id>]")
 	}
 	issueID := ""
 	if fs.NArg() == 1 {
@@ -3716,7 +3716,7 @@ func ParseIssueDoctorArgs(args []string) (IssueDoctorOptions, error) {
 		issueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(issueID) == "" {
-		return IssueDoctorOptions{}, fmt.Errorf("usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<issue-id>]")
+		return IssueDoctorOptions{}, fmt.Errorf("usage: az ticket doctor [--project <project-id>] [--id <ticket-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<ticket-id>]")
 	}
 	if opts.CheckpointWAL && opts.TruncateWAL {
 		return IssueDoctorOptions{}, fmt.Errorf("--checkpoint-wal and --truncate-wal are mutually exclusive")
@@ -3743,7 +3743,7 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 		return IssueCloseOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueCloseOptions{}, fmt.Errorf("--impl is not supported for issue close; issue implementations are already assigned")
@@ -3755,7 +3755,7 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -3777,7 +3777,8 @@ func ParseIssueCleanupArgs(args []string) (IssueCleanupOptions, error) {
 	fs.StringVar(&opts.Action, "action", "closed", "lifecycle action: closed or cancelled")
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "preview ordered actions without changing issues")
 	fs.BoolVar(&opts.JSON, "json", false, "output structured per-issue results")
-	fs.DurationVar(&opts.PerIssueTimeout, "per-issue-timeout", issueCloseCleanupTimeout, "maximum time for each issue cleanup")
+	fs.DurationVar(&opts.PerIssueTimeout, "per-ticket-timeout", issueCloseCleanupTimeout, "maximum time for each ticket cleanup")
+	fs.DurationVar(&opts.PerIssueTimeout, "per-issue-timeout", issueCloseCleanupTimeout, "deprecated alias for --per-ticket-timeout")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCleanupOptions{}, err
 	}
@@ -3803,7 +3804,7 @@ func ParseIssueCleanupArgs(args []string) (IssueCleanupOptions, error) {
 		return IssueCleanupOptions{}, fmt.Errorf("limit must be >= 0")
 	}
 	if opts.PerIssueTimeout <= 0 {
-		return IssueCleanupOptions{}, fmt.Errorf("per-issue-timeout must be positive")
+		return IssueCleanupOptions{}, fmt.Errorf("per-ticket-timeout must be positive")
 	}
 	if strings.TrimSpace(opts.Query) != "" && len(domain.ContentQueryTerms(opts.Query)) == 0 {
 		return IssueCleanupOptions{}, fmt.Errorf("query must contain a searchable term")
@@ -3838,7 +3839,7 @@ func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 		return IssueDeleteOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [--cleanup|--stop-session] [--remove-worktree] [--force-worktree] [<issue-id>]")
+		return IssueDeleteOptions{}, fmt.Errorf("usage: az ticket delete [--project <project-id>] --confirm [--id <ticket-id>] [--json] [--cleanup|--stop-session] [--remove-worktree] [--force-worktree] [<ticket-id>]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDeleteOptions{}, fmt.Errorf("--impl is not supported for issue delete; issue implementations are already assigned")
@@ -3860,7 +3861,7 @@ func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [--cleanup|--stop-session] [--remove-worktree] [--force-worktree] [<issue-id>]")
+		return IssueDeleteOptions{}, fmt.Errorf("usage: az ticket delete [--project <project-id>] --confirm [--id <ticket-id>] [--json] [--cleanup|--stop-session] [--remove-worktree] [--force-worktree] [<ticket-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -3880,7 +3881,7 @@ func ParseIssueUnarchiveArgs(args []string) (IssueUnarchiveOptions, error) {
 		return IssueUnarchiveOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUnarchiveOptions{}, fmt.Errorf("usage: az issue unarchive [--project <project-id>] [--id <issue-id>] [--json] [--with-parents] [--cascade-children] [<issue-id>]")
+		return IssueUnarchiveOptions{}, fmt.Errorf("usage: az ticket unarchive [--project <project-id>] [--id <ticket-id>] [--json] [--with-parents] [--cascade-children] [<ticket-id>]")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -3889,7 +3890,7 @@ func ParseIssueUnarchiveArgs(args []string) (IssueUnarchiveOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUnarchiveOptions{}, fmt.Errorf("usage: az issue unarchive [--project <project-id>] [--id <issue-id>] [--json] [--with-parents] [--cascade-children] [<issue-id>]")
+		return IssueUnarchiveOptions{}, fmt.Errorf("usage: az ticket unarchive [--project <project-id>] [--id <ticket-id>] [--json] [--with-parents] [--cascade-children] [<ticket-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -3933,7 +3934,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		return IssueUpdateOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az ticket update [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update (it is create-only); normal field updates do not need --update-impl, and --update-impl is only for changing issue implementations")
@@ -3945,7 +3946,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az ticket update [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if typeRaw != "" {
 		tt, err := parseTaskType(typeRaw)
@@ -4003,7 +4004,8 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
-	fs.StringVar(&issueIDFlag, "issue-id", "", "source issue id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "ticket-id", "", "source ticket id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "deprecated alias for --ticket-id")
 	fs.StringVar(&dependsOnIDFlag, "depends-on-id", "", "dependency target issue id (named alternative to positional)")
 	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from|created-in)")
 	fs.BoolVar(&opts.ForceParentChange, "force-parent-change", false, "replace an existing parent-child edge")
@@ -4012,7 +4014,7 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 		return IssueDependencyAddOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]")
+		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az ticket dep add [--project <project-id>] [--ticket-id <ticket-id>] [--depends-on-id <depends-on-id>] [<ticket-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDependencyAddOptions{}, fmt.Errorf("--impl is not supported for issue dep add; dependencies target existing issues")
@@ -4030,7 +4032,7 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 		opts.DependsOnID = strings.TrimSpace(dependsOnIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.DependsOnID) == "" {
-		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]")
+		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az ticket dep add [--project <project-id>] [--ticket-id <ticket-id>] [--depends-on-id <depends-on-id>] [<ticket-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	issueProject, issueID, err := parseDependencyEndpointProject(opts.IssueID, "issue_id")
@@ -4097,7 +4099,8 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
-	fs.StringVar(&issueIDFlag, "issue-id", "", "source issue id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "ticket-id", "", "source ticket id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "deprecated alias for --ticket-id")
 	fs.StringVar(&dependsOnIDFlag, "depends-on-id", "", "dependency target issue id (named alternative to positional)")
 	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from|created-in)")
 	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm removal for guarded dependency types")
@@ -4107,7 +4110,7 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 		return IssueDependencyRemoveOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]")
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az ticket dep remove [--project <project-id>] [--ticket-id <ticket-id>] [--depends-on-id <depends-on-id>] [<ticket-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDependencyRemoveOptions{}, fmt.Errorf("--impl is not supported for issue dep remove; dependencies target existing issues")
@@ -4125,7 +4128,7 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 		opts.DependsOnID = strings.TrimSpace(dependsOnIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.DependsOnID) == "" {
-		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]")
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az ticket dep remove [--project <project-id>] [--ticket-id <ticket-id>] [--depends-on-id <depends-on-id>] [<ticket-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -4166,14 +4169,15 @@ func ParseIssueImageAddArgs(args []string) (IssueImageAddOptions, error) {
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
-	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "ticket-id", "", "ticket id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "deprecated alias for --ticket-id")
 	fs.StringVar(&pathFlag, "path", "", "source image path (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output image add result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueImageAddOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueImageAddOptions{}, fmt.Errorf("usage: az issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]")
+		return IssueImageAddOptions{}, fmt.Errorf("usage: az ticket image add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueImageAddOptions{}, fmt.Errorf("--impl is not supported for issue image add; issue implementations are already assigned")
@@ -4191,7 +4195,7 @@ func ParseIssueImageAddArgs(args []string) (IssueImageAddOptions, error) {
 		opts.SourcePath = strings.TrimSpace(pathFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.SourcePath) == "" {
-		return IssueImageAddOptions{}, fmt.Errorf("usage: az issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]")
+		return IssueImageAddOptions{}, fmt.Errorf("usage: az ticket image add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -4206,14 +4210,15 @@ func ParseIssueImageRemoveArgs(args []string) (IssueImageRemoveOptions, error) {
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
-	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "ticket-id", "", "ticket id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "deprecated alias for --ticket-id")
 	fs.StringVar(&attachmentIDFlag, "attachment-id", "", "attachment id (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output image remove result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueImageRemoveOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueImageRemoveOptions{}, fmt.Errorf("usage: az issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]")
+		return IssueImageRemoveOptions{}, fmt.Errorf("usage: az ticket image remove [--project <project-id>] [--ticket-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueImageRemoveOptions{}, fmt.Errorf("--impl is not supported for issue image remove; issue implementations are already assigned")
@@ -4231,7 +4236,7 @@ func ParseIssueImageRemoveArgs(args []string) (IssueImageRemoveOptions, error) {
 		opts.AttachmentID = strings.TrimSpace(attachmentIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.AttachmentID) == "" {
-		return IssueImageRemoveOptions{}, fmt.Errorf("usage: az issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]")
+		return IssueImageRemoveOptions{}, fmt.Errorf("usage: az ticket image remove [--project <project-id>] [--ticket-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -4246,14 +4251,15 @@ func ParseIssueDocumentAddArgs(args []string) (IssueDocumentAddOptions, error) {
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
-	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "ticket-id", "", "ticket id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "deprecated alias for --ticket-id")
 	fs.StringVar(&pathFlag, "path", "", "source document path (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output document add result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDocumentAddOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueDocumentAddOptions{}, fmt.Errorf("usage: az issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]")
+		return IssueDocumentAddOptions{}, fmt.Errorf("usage: az ticket document add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDocumentAddOptions{}, fmt.Errorf("--impl is not supported for issue document add; issue implementations are already assigned")
@@ -4271,7 +4277,7 @@ func ParseIssueDocumentAddArgs(args []string) (IssueDocumentAddOptions, error) {
 		opts.SourcePath = strings.TrimSpace(pathFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.SourcePath) == "" {
-		return IssueDocumentAddOptions{}, fmt.Errorf("usage: az issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]")
+		return IssueDocumentAddOptions{}, fmt.Errorf("usage: az ticket document add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -4285,13 +4291,14 @@ func ParseIssueDocumentListArgs(args []string) (IssueDocumentListOptions, error)
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
-	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "ticket-id", "", "ticket id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "deprecated alias for --ticket-id")
 	fs.BoolVar(&opts.JSON, "json", false, "output document list result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDocumentListOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueDocumentListOptions{}, fmt.Errorf("usage: az issue document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]")
+		return IssueDocumentListOptions{}, fmt.Errorf("usage: az ticket document list [--project <project-id>] [--ticket-id <ticket-id>] [<ticket-id>] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDocumentListOptions{}, fmt.Errorf("--impl is not supported for issue document list; issue implementations are already assigned")
@@ -4303,7 +4310,7 @@ func ParseIssueDocumentListArgs(args []string) (IssueDocumentListOptions, error)
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueDocumentListOptions{}, fmt.Errorf("usage: az issue document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]")
+		return IssueDocumentListOptions{}, fmt.Errorf("usage: az ticket document list [--project <project-id>] [--ticket-id <ticket-id>] [<ticket-id>] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -4318,14 +4325,15 @@ func ParseIssueDocumentRemoveArgs(args []string) (IssueDocumentRemoveOptions, er
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
-	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "ticket-id", "", "ticket id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "deprecated alias for --ticket-id")
 	fs.StringVar(&attachmentIDFlag, "attachment-id", "", "attachment id (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output document remove result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDocumentRemoveOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueDocumentRemoveOptions{}, fmt.Errorf("usage: az issue document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]")
+		return IssueDocumentRemoveOptions{}, fmt.Errorf("usage: az ticket document remove [--project <project-id>] [--ticket-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDocumentRemoveOptions{}, fmt.Errorf("--impl is not supported for issue document remove; issue implementations are already assigned")
@@ -4343,7 +4351,7 @@ func ParseIssueDocumentRemoveArgs(args []string) (IssueDocumentRemoveOptions, er
 		opts.AttachmentID = strings.TrimSpace(attachmentIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.AttachmentID) == "" {
-		return IssueDocumentRemoveOptions{}, fmt.Errorf("usage: az issue document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]")
+		return IssueDocumentRemoveOptions{}, fmt.Errorf("usage: az ticket document remove [--project <project-id>] [--ticket-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil

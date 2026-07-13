@@ -607,3 +607,17 @@ func TestEvidenceValidateCommandFixPrintsCanonicalPacket(t *testing.T) {
 		t.Fatalf("artifact_links = %+v, want generated object link", packet.ArtifactLinks)
 	}
 }
+
+func TestParseIssueFanoutDriftTicketFlagAndLegacyAliasMatch(t *testing.T) {
+	canonical, err := ParseIssueFanoutDriftArgs([]string{"--ticket", "az-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := ParseIssueFanoutDriftArgs([]string{"--issue", "az-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonical.IssueID != "az-1" || legacy.IssueID != canonical.IssueID {
+		t.Fatalf("canonical = %+v, legacy = %+v", canonical, legacy)
+	}
+}

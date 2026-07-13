@@ -5299,12 +5299,12 @@ func TestParseIssueGetArgs(t *testing.T) {
 		{
 			name:        "missing issue id",
 			args:        []string{},
-			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [--archived exclude|include|only] [<issue-id>]",
+			errContains: "usage: az ticket get [--project <project-id>] [--id <ticket-id>] [--json] [--with-notes] [--archived exclude|include|only] [<ticket-id>]",
 		},
 		{
 			name:        "too many args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]",
+			errContains: "usage: az ticket get [--project <project-id>] [--id <ticket-id>] [--json] [--with-notes] [<ticket-id>]",
 		},
 		{
 			name:        "deps flag rejected",
@@ -5389,7 +5389,7 @@ func TestParseIssueEventsArgs(t *testing.T) {
 	}
 
 	_, err = ParseIssueEventsArgs([]string{"--json"})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue events") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az ticket events") {
 		t.Fatalf("expected missing id usage error, got %v", err)
 	}
 	_, err = ParseIssueEventsArgs([]string{"az-1", "--limit", "-1"})
@@ -5476,7 +5476,7 @@ func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 		t.Fatalf("ParseIssueCheckArgs() = %+v", check)
 	}
 	_, err = ParseIssueCheckArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az ticket check [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>]") {
 		t.Fatalf("expected check usage error, got %v", err)
 	}
 
@@ -5520,7 +5520,7 @@ func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 		t.Fatalf("expected mutually exclusive wal flag error, got %v", err)
 	}
 	_, err = ParseIssueDoctorArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<issue-id>]") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az ticket doctor [--project <project-id>] [--id <ticket-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<ticket-id>]") {
 		t.Fatalf("expected doctor usage error, got %v", err)
 	}
 }
@@ -5560,7 +5560,7 @@ func TestParseIssueSearchArgs(t *testing.T) {
 		},
 		{
 			name:        "missing query",
-			errContains: "usage: az issue search",
+			errContains: "usage: az ticket search",
 		},
 		{
 			name:        "duplicate query sources",
@@ -5614,7 +5614,7 @@ func TestParseIssueGetManyArgs(t *testing.T) {
 	}
 
 	_, err = ParseIssueGetManyArgs([]string{"--json"})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue get-many [--project <project-id>] --id <issue-id>") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az ticket get-many [--project <project-id>] --id <ticket-id>") {
 		t.Fatalf("expected usage error for missing ids, got %v", err)
 	}
 }
@@ -5722,7 +5722,7 @@ func TestParseIssueCreateArgs(t *testing.T) {
 		{
 			name:        "missing title",
 			args:        []string{},
-			errContains: "usage: az issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred]",
+			errContains: "usage: az ticket create [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--deferred]",
 		},
 		{
 			name:        "title flag and positional are ambiguous",
@@ -5792,12 +5792,12 @@ func TestParseIssueCloseArgs(t *testing.T) {
 		{
 			name:        "missing id",
 			args:        []string{},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]",
+			errContains: "usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]",
 		},
 		{
 			name:        "extra args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]",
+			errContains: "usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]",
 		},
 		{
 			name: "named id",
@@ -5856,12 +5856,19 @@ func TestParseIssueCloseArgs(t *testing.T) {
 }
 
 func TestParseIssueCleanupArgs(t *testing.T) {
-	opts, err := ParseIssueCleanupArgs([]string{"--id", "az-1", "--statuses", "open,in_review", "--action", "cancelled", "--dry-run", "--per-issue-timeout", "2s"})
+	opts, err := ParseIssueCleanupArgs([]string{"--id", "az-1", "--statuses", "open,in_review", "--action", "cancelled", "--dry-run", "--per-ticket-timeout", "2s"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(opts.IDs) != 1 || len(opts.Statuses) != 2 || opts.Action != "cancelled" || !opts.DryRun || opts.PerIssueTimeout != 2*time.Second {
 		t.Fatalf("opts = %+v", opts)
+	}
+	legacy, err := ParseIssueCleanupArgs([]string{"--id", "az-1", "--per-issue-timeout", "2s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.PerIssueTimeout != opts.PerIssueTimeout {
+		t.Fatalf("legacy timeout = %s, canonical timeout = %s", legacy.PerIssueTimeout, opts.PerIssueTimeout)
 	}
 	if _, err := ParseIssueCleanupArgs(nil); err == nil || !strings.Contains(err.Error(), "at least one") {
 		t.Fatalf("missing selector error = %v", err)
@@ -5936,7 +5943,7 @@ func TestParseIssueUnarchiveArgs(t *testing.T) {
 	}
 
 	_, err = ParseIssueUnarchiveArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue unarchive") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az ticket unarchive") {
 		t.Fatalf("expected usage error, got %v", err)
 	}
 }
@@ -6037,7 +6044,7 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 		{
 			name:        "invalid status arg count",
 			args:        []string{},
-			errContains: "usage: az issue update [--project <project-id>] [--id <issue-id>]",
+			errContains: "usage: az ticket update [--project <project-id>] [--id <ticket-id>]",
 		},
 		{
 			name: "named id",
@@ -6248,6 +6255,33 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 	if remove.IssueID != "az-3" || remove.DependsOnID != "az-4" || !remove.Confirm {
 		t.Fatalf("ParseIssueDependencyRemoveArgs() interspersed id+flags = %+v", remove)
 	}
+}
+
+func TestTicketNamedFlagsAndLegacyAliasesMatch(t *testing.T) {
+	assertIssueID := func(t *testing.T, want string, parse func([]string) (string, error), canonical, legacy []string) {
+		t.Helper()
+		for name, args := range map[string][]string{"canonical": canonical, "legacy": legacy} {
+			got, err := parse(args)
+			if err != nil {
+				t.Fatalf("%s args %v: %v", name, args, err)
+			}
+			if got != want {
+				t.Fatalf("%s args resolved %q, want %q", name, got, want)
+			}
+		}
+	}
+	assertIssueID(t, "az-1", func(args []string) (string, error) {
+		opts, err := ParseIssueDependencyAddArgs(args)
+		return opts.IssueID, err
+	}, []string{"--ticket-id", "az-1", "--depends-on-id", "az-2"}, []string{"--issue-id", "az-1", "--depends-on-id", "az-2"})
+	assertIssueID(t, "az-1", func(args []string) (string, error) {
+		opts, err := ParseIssueImageAddArgs(args)
+		return opts.IssueID, err
+	}, []string{"--ticket-id", "az-1", "--path", "image.png"}, []string{"--issue-id", "az-1", "--path", "image.png"})
+	assertIssueID(t, "az-1", func(args []string) (string, error) {
+		opts, err := ParseIssueDocumentListArgs(args)
+		return opts.IssueID, err
+	}, []string{"--ticket-id", "az-1"}, []string{"--issue-id", "az-1"})
 }
 
 func TestParseIssueImageArgs(t *testing.T) {

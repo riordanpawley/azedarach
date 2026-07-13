@@ -207,7 +207,8 @@ func ParseIssueFanoutDriftArgs(args []string) (IssueFanoutDriftOptions, error) {
 	fs := flag.NewFlagSet("issue fanout drift", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
-	fs.StringVar(&opts.IssueID, "issue", "", "issue id")
+	fs.StringVar(&opts.IssueID, "ticket", "", "ticket id")
+	fs.StringVar(&opts.IssueID, "issue", "", "deprecated alias for --ticket")
 	fs.StringVar(&opts.Worktree, "worktree", "", "worktree path (defaults to cwd)")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
 	fs.BoolVar(&opts.FailOnOut, "fail-on-out", false, "return non-zero if out-of-budget files are detected")
@@ -218,7 +219,7 @@ func ParseIssueFanoutDriftArgs(args []string) (IssueFanoutDriftOptions, error) {
 		return IssueFanoutDriftOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueFanoutDriftOptions{}, fmt.Errorf("missing required flag: --issue")
+		return IssueFanoutDriftOptions{}, fmt.Errorf("missing required flag: --ticket")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil

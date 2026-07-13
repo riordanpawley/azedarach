@@ -108,7 +108,7 @@ Examples:
   az ticket doctor --id az-123
   az ticket create "New task"
   az ticket create "Follow-up task"                # child under AZEDARACH_ISSUE_ID; no --impl needed for parentage
-  az ticket dep add --issue-id az-456 --depends-on-id az-123 --type parent-child  # attach an existing ticket to another parent/root
+  az ticket dep add --ticket-id az-456 --depends-on-id az-123 --type parent-child  # attach an existing ticket to another parent/root
   az ticket create --impl go-bubbletea "Implementation-specific task"  # only assigns implementation metadata; still not parentage
   az ticket split "Implement child task"           # auto-parent and launch isolated child worktree; merge explicitly later
   az ticket create --deferred "Investigate later"  # deferred follow-up (defaults priority to P4)
@@ -123,19 +123,19 @@ Examples:
   az ticket delete az-123 --confirm --cleanup
   az ticket delete --id az-123 --confirm
   az ticket unarchive az-123 --with-parents
-  az ticket image add --issue-id az-123 --path ./screenshot.png
-  az ticket image remove --issue-id az-123 --attachment-id 1a2b3c4d
-  az ticket document add --issue-id az-123 --path ./report.md
-  az ticket document list --issue-id az-123
-  az ticket dep add --issue-id az-456 --depends-on-id az-123 --type blocks
-  az ticket dep remove --issue-id az-456 --depends-on-id az-123 --type blocks --confirm
+  az ticket image add --ticket-id az-123 --path ./screenshot.png
+  az ticket image remove --ticket-id az-123 --attachment-id 1a2b3c4d
+  az ticket document add --ticket-id az-123 --path ./report.md
+  az ticket document list --ticket-id az-123
+  az ticket dep add --ticket-id az-456 --depends-on-id az-123 --type blocks
+  az ticket dep remove --ticket-id az-456 --depends-on-id az-123 --type blocks --confirm
   az ticket dep bulk apply --input ./dep-bulk.json --dry-run --json
   az ticket bulk-create --impl go-bubbletea --input ./bulk-create.json  # supports nested children
   az ticket bulk-update --impl go-bubbletea --input ./bulk-update.json --dry-run
   az ticket fanout --input ./fanout.json
   az ticket fanout --input ./fanout.json --apply
   az ticket fanout ready --root az-123 --json
-  az ticket fanout drift --issue az-456 --worktree /tmp/az-456
+  az ticket fanout drift --ticket az-456 --worktree /tmp/az-456
   az mail send --parent az-123 --type dependency-ready --body "contract merged"
   az mail validate-evidence --template
   az mail validate-evidence --fix --body '{"schema":"worker_evidence.v1",...}'

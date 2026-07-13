@@ -630,7 +630,7 @@ func main() {
 		case "get":
 			opts, err := cli.ParseIssueGetArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az ticket get [--project <project-id>] [--id <ticket-id>] [--json] [--with-notes] [<ticket-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -644,7 +644,7 @@ func main() {
 		case "claim", "takeover":
 			opts, err := cli.ParseIssueOwnershipArgs(issueArgs, issueCommand)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket %s [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<issue-id>]\n", issueCommand)
+				fmt.Fprintf(os.Stderr, "Usage: az ticket %s [--project <project-id>] [--id <ticket-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<ticket-id>]\n", issueCommand)
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -661,7 +661,7 @@ func main() {
 		case "release":
 			opts, err := cli.ParseIssueOwnershipArgs(issueArgs, issueCommand)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket release [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--force] [--json] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az ticket release [--project <project-id>] [--id <ticket-id>] [--owner <owner-id>] [--force] [--json] [<ticket-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -675,7 +675,7 @@ func main() {
 		case "events":
 			opts, err := cli.ParseIssueEventsArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket events [--project <project-id>] [--id <issue-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az ticket events [--project <project-id>] [--id <ticket-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<ticket-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -688,7 +688,7 @@ func main() {
 		case "record":
 			opts, err := cli.ParseIssueRecordArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket record [--project <project-id>] [--id <issue-id>] [--type <event-type>] [--summary <text>] [--body <text>] [--data <json-object>] [--follow-up <issue-id> ...] [--json] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az ticket record [--project <project-id>] [--id <ticket-id>] [--type <event-type>] [--summary <text>] [--body <text>] [--data <json-object>] [--follow-up <ticket-id> ...] [--json] [<ticket-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -702,7 +702,7 @@ func main() {
 		case "context-risk":
 			opts, err := cli.ParseIssueContextRiskArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--summary|--full] [--json] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az ticket context-risk [--project <project-id>] [--id <ticket-id>] [--since 14d] [--summary|--full] [--json] [<ticket-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -716,7 +716,7 @@ func main() {
 		case "get-many":
 			opts, err := cli.ParseIssueGetManyArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az ticket get-many [--project <project-id>] --id <ticket-id> [--id <ticket-id> ...] [--ids a,b,c] [--json] [--with-notes]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -730,7 +730,7 @@ func main() {
 		case "check":
 			opts, err := cli.ParseIssueCheckArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az ticket check [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -744,7 +744,7 @@ func main() {
 		case "doctor":
 			opts, err := cli.ParseIssueDoctorArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket doctor [--project <project-id>] [--id <issue-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az ticket doctor [--project <project-id>] [--id <ticket-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<ticket-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -786,7 +786,7 @@ func main() {
 		case "update":
 			opts, err := cli.ParseIssueUpdateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az ticket update [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]\n")
 				fmt.Fprintf(os.Stderr, "Note: --status backlog/open writes durable lifecycle state; --status in_progress marks active work; --status in_review requests review and may still display active until runtime activity is idle/done/no-agent.\n")
 				fmt.Fprintf(os.Stderr, "Note: --status closed integrates the issue branch and closes with completed outcome; --status cancelled closes with cancelled outcome without integration; --force-worktree only applies to terminal close actions.\n")
 				fmt.Fprintf(os.Stderr, "Note: --cascade-children only applies to review requests and moves open/in_progress descendants to in_review first.\n")
@@ -804,7 +804,7 @@ func main() {
 		case "close":
 			opts, err := cli.ParseIssueCloseArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]\n")
 				fmt.Fprintf(os.Stderr, "Note: close integrates the issue branch, cleans session/worktree attachments, then writes closed status.\n")
 				fmt.Fprintf(os.Stderr, "Note: --force-worktree forces worktree removal after integration.\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -820,7 +820,7 @@ func main() {
 		case "cleanup":
 			opts, err := cli.ParseIssueCleanupArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "Usage: az ticket cleanup [--project <project-id>] [--id <issue-id> ...|--ids a,b] [--status <status> ...] [--query text] [--updated-before date] [--limit N] [--action closed|cancelled] [--dry-run] [--per-issue-timeout duration] [--json]")
+				fmt.Fprintln(os.Stderr, "Usage: az ticket cleanup [--project <project-id>] [--id <ticket-id> ...|--ids a,b] [--status <status> ...] [--query text] [--updated-before date] [--limit N] [--action closed|cancelled] [--dry-run] [--per-ticket-timeout duration] [--json]")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -831,7 +831,7 @@ func main() {
 		case "delete":
 			opts, err := cli.ParseIssueDeleteArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az ticket delete [--project <project-id>] --confirm [--id <ticket-id>] [--json] [<ticket-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -845,7 +845,7 @@ func main() {
 		case "unarchive":
 			opts, err := cli.ParseIssueUnarchiveArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket unarchive [--project <project-id>] [--id <issue-id>] [--json] [--with-parents] [--cascade-children] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az ticket unarchive [--project <project-id>] [--id <ticket-id>] [--json] [--with-parents] [--cascade-children] [<ticket-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -867,7 +867,7 @@ func main() {
 			case "add":
 				opts, err := cli.ParseIssueImageAddArgs(imageArgs)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Usage: az ticket image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az ticket image add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]\n")
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
@@ -880,7 +880,7 @@ func main() {
 			case "remove":
 				opts, err := cli.ParseIssueImageRemoveArgs(imageArgs)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Usage: az ticket image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az ticket image remove [--project <project-id>] [--ticket-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]\n")
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
@@ -907,7 +907,7 @@ func main() {
 			case "add":
 				opts, err := cli.ParseIssueDocumentAddArgs(documentArgs)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Usage: az ticket document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az ticket document add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]\n")
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
@@ -920,7 +920,7 @@ func main() {
 			case "list":
 				opts, err := cli.ParseIssueDocumentListArgs(documentArgs)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Usage: az ticket document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az ticket document list [--project <project-id>] [--ticket-id <ticket-id>] [<ticket-id>] [--json]\n")
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
@@ -933,7 +933,7 @@ func main() {
 			case "remove":
 				opts, err := cli.ParseIssueDocumentRemoveArgs(documentArgs)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Usage: az ticket document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az ticket document remove [--project <project-id>] [--ticket-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]\n")
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
@@ -960,7 +960,7 @@ func main() {
 			case "add":
 				opts, err := cli.ParseIssueDependencyAddArgs(depArgs)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Usage: az ticket dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az ticket dep add [--project <project-id>] [--ticket-id <ticket-id>] [--depends-on-id <depends-on-id>] [<ticket-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]\n")
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
@@ -973,7 +973,7 @@ func main() {
 			case "remove":
 				opts, err := cli.ParseIssueDependencyRemoveArgs(depArgs)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Usage: az ticket dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az ticket dep remove [--project <project-id>] [--ticket-id <ticket-id>] [--depends-on-id <depends-on-id>] [<ticket-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]\n")
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
@@ -1054,7 +1054,7 @@ func main() {
 			case "ready":
 				opts, err := cli.ParseIssueFanoutReadyArgs(issueArgs[1:])
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Usage: az ticket fanout ready [--project <project-id>] --root <issue-id> [--json]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az ticket fanout ready [--project <project-id>] --root <ticket-id> [--json]\n")
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
@@ -1067,7 +1067,7 @@ func main() {
 			case "drift":
 				opts, err := cli.ParseIssueFanoutDriftArgs(issueArgs[1:])
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Usage: az ticket fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az ticket fanout drift [--project <project-id>] --ticket <ticket-id> [--worktree <path>] [--json] [--fail-on-out]\n")
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
@@ -1595,13 +1595,13 @@ func printWorktreeUsage() {
 }
 
 func printIssueCreateUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: az ticket create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
+	fmt.Fprintln(w, "Usage: az ticket create [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
 	fmt.Fprintln(w, "Note: `az issue create \"Child task\"` auto-parents to AZEDARACH_ISSUE_ID when set; use `--parent <issue-id>` for another parent/root.")
 	fmt.Fprintln(w, "Note: --impl only assigns implementation/spec variant metadata; it is not parent/root selection.")
 }
 
 func printIssueSplitUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: az ticket split [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
+	fmt.Fprintln(w, "Usage: az ticket split [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
 	fmt.Fprintln(w, "Note: use --parent or AZEDARACH_ISSUE_ID for parentage; --impl only assigns implementation/spec variant metadata.")
 }
 
