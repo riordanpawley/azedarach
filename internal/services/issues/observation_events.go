@@ -76,7 +76,7 @@ func (c *Client) ListProjectIssueObservationEvents(ctx context.Context, afterID 
 
 func (c *Client) AppendIssueObservationEvent(ctx context.Context, issueID string, params IssueObservationEventParams) (domain.IssueObservationEvent, error) {
 	var eventID int64
-	err := retrySQLiteBusy(ctx, func() error {
+	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
 			return sqliteutil.WithWriteLock(c.dbPath, func() error {
 				db, err := c.dbHandle()

@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,21 +12,80 @@ import (
 
 // mockTmuxClient implements TmuxClient for testing
 type mockTmuxClient struct {
-	output string
-	err    error
+	mu             sync.RWMutex
+	output         string
+	err            error
+	captureStarted chan struct{}
+	releaseCapture chan struct{}
 }
 
 func (m *mockTmuxClient) CapturePane(ctx context.Context, sessionName string) (string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.captureStarted != nil {
+		m.captureStarted <- struct{}{}
+	}
+	if m.releaseCapture != nil {
+		<-m.releaseCapture
+	}
 	return m.output, m.err
+}
+
+func (m *mockTmuxClient) setOutput(output string) {
+	m.mu.Lock()
+	m.output = output
+	m.mu.Unlock()
 }
 
 // mockProgram implements a minimal tea.Program for testing
 type mockProgram struct {
+	mu       sync.Mutex
 	messages []tea.Msg
+	sent     chan tea.Msg
 }
 
 func (m *mockProgram) Send(msg tea.Msg) {
+	m.mu.Lock()
 	m.messages = append(m.messages, msg)
+	m.mu.Unlock()
+	if m.sent != nil {
+		m.sent <- msg
+	}
+}
+
+type manualMonitorTicker struct {
+	ticks chan time.Time
+}
+
+func newManualSessionMonitor(t *testing.T, tmux *mockTmuxClient) (*SessionMonitor, *manualMonitorTicker) {
+	t.Helper()
+	ticker := &manualMonitorTicker{ticks: make(chan time.Time, 1)}
+	monitor := NewSessionMonitor(
+		tmux,
+		withSessionMonitorTickerFactory(func(time.Duration) sessionMonitorTicker {
+			return sessionMonitorTicker{ticks: ticker.ticks, stop: func() {}}
+		}),
+	)
+	return monitor, ticker
+}
+
+func (t *manualMonitorTicker) tick() {
+	t.ticks <- time.Now()
+}
+
+func waitForMonitorMessage(t *testing.T, program *mockProgram) SessionStateMsg {
+	t.Helper()
+	select {
+	case msg := <-program.sent:
+		stateMsg, ok := msg.(SessionStateMsg)
+		if !ok {
+			t.Fatalf("monitor message type = %T, want SessionStateMsg", msg)
+		}
+		return stateMsg
+	case <-time.After(time.Second):
+		t.Fatal("monitor did not emit state change")
+		return SessionStateMsg{}
+	}
 }
 
 func TestNewSessionMonitor(t *testing.T) {
@@ -40,6 +100,13 @@ func TestNewSessionMonitor(t *testing.T) {
 	}
 	if monitor.sessions == nil {
 		t.Error("NewSessionMonitor() did not initialize sessions map")
+	}
+	if monitor.pollInterval != 500*time.Millisecond {
+		t.Errorf("poll interval = %v, want production default 500ms", monitor.pollInterval)
+	}
+	configured := NewSessionMonitor(tmux, WithSessionMonitorPollInterval(2*time.Millisecond))
+	if configured.pollInterval != 2*time.Millisecond {
+		t.Errorf("configured poll interval = %v, want 2ms", configured.pollInterval)
 	}
 }
 
@@ -80,9 +147,6 @@ func TestSessionMonitor_GetState(t *testing.T) {
 
 	// Start monitoring
 	monitor.Start(ctx, "test-issue", program)
-
-	// Wait a bit for initial state to be set
-	time.Sleep(100 * time.Millisecond)
 
 	// Get state
 	state := monitor.GetState("test-issue")
@@ -149,8 +213,8 @@ func TestSessionMonitor_StateDetection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tmux := &mockTmuxClient{output: tt.output}
-			monitor := NewSessionMonitor(tmux)
-			program := &mockProgram{}
+			monitor, ticker := newManualSessionMonitor(t, tmux)
+			program := &mockProgram{sent: make(chan tea.Msg, 1)}
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -158,8 +222,8 @@ func TestSessionMonitor_StateDetection(t *testing.T) {
 			// Start monitoring
 			monitor.Start(ctx, "test-issue", program)
 
-			// Wait for polling cycle to detect state
-			time.Sleep(600 * time.Millisecond)
+			ticker.tick()
+			waitForMonitorMessage(t, program)
 
 			// Check state
 			state := monitor.GetState("test-issue")
@@ -174,8 +238,8 @@ func TestSessionMonitor_StateDetection(t *testing.T) {
 
 func TestSessionMonitor_StateChangeMessage(t *testing.T) {
 	tmux := &mockTmuxClient{output: "normal output"}
-	monitor := NewSessionMonitor(tmux)
-	program := &mockProgram{}
+	monitor, ticker := newManualSessionMonitor(t, tmux)
+	program := &mockProgram{sent: make(chan tea.Msg, 2)}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -183,14 +247,14 @@ func TestSessionMonitor_StateChangeMessage(t *testing.T) {
 	// Start monitoring
 	monitor.Start(ctx, "test-issue", program)
 
-	// Wait for initial polling
-	time.Sleep(600 * time.Millisecond)
+	ticker.tick()
+	waitForMonitorMessage(t, program)
 
 	// Change output to trigger state change
-	tmux.output = "Error: something went wrong"
+	tmux.setOutput("Error: something went wrong")
 
-	// Wait for next polling cycle
-	time.Sleep(600 * time.Millisecond)
+	ticker.tick()
+	waitForMonitorMessage(t, program)
 
 	// Check that state change message was sent
 	foundStateChange := false
@@ -220,11 +284,9 @@ func TestSessionMonitor_RestartSession(t *testing.T) {
 
 	// Start monitoring
 	monitor.Start(ctx, "test-issue", program)
-	time.Sleep(100 * time.Millisecond)
 
 	// Start again (should cancel previous)
 	monitor.Start(ctx, "test-issue", program)
-	time.Sleep(100 * time.Millisecond)
 
 	// Should still have only one session
 	monitor.mu.RLock()
@@ -235,6 +297,48 @@ func TestSessionMonitor_RestartSession(t *testing.T) {
 		t.Errorf("Expected 1 session after restart, got %d", count)
 	}
 
+	monitor.Stop("test-issue")
+}
+
+func TestSessionMonitor_RestartIgnoresOldInFlightCapture(t *testing.T) {
+	tmux := &mockTmuxClient{
+		output:         "Error: stale old-session output",
+		captureStarted: make(chan struct{}, 1),
+		releaseCapture: make(chan struct{}),
+	}
+	createdTickers := make(chan chan time.Time, 2)
+	monitor := NewSessionMonitor(tmux, withSessionMonitorTickerFactory(func(time.Duration) sessionMonitorTicker {
+		ticks := make(chan time.Time, 1)
+		createdTickers <- ticks
+		return sessionMonitorTicker{ticks: ticks, stop: func() {}}
+	}))
+	program := &mockProgram{sent: make(chan tea.Msg, 2)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	monitor.Start(ctx, "test-issue", program)
+	oldTicks := <-createdTickers
+	oldTicks <- time.Now()
+	<-tmux.captureStarted
+
+	monitor.Start(ctx, "test-issue", program)
+	newTicks := <-createdTickers
+	close(tmux.releaseCapture)
+
+	select {
+	case msg := <-program.sent:
+		t.Fatalf("old monitor emitted stale message after replacement: %#v", msg)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if state := monitor.GetState("test-issue"); state != domain.SessionIdle {
+		t.Fatalf("replacement state = %v, want idle before its first poll", state)
+	}
+
+	newTicks <- time.Now()
+	msg := waitForMonitorMessage(t, program)
+	if msg.State != domain.SessionError {
+		t.Fatalf("new monitor state = %v, want error", msg.State)
+	}
 	monitor.Stop("test-issue")
 }
 
@@ -252,7 +356,6 @@ func TestSessionMonitor_ConcurrentAccess(t *testing.T) {
 		go func(id int) {
 			issueID := "issue-" + string(rune('0'+id))
 			monitor.Start(ctx, issueID, program)
-			time.Sleep(50 * time.Millisecond)
 			_ = monitor.GetState(issueID)
 			monitor.Stop(issueID)
 			done <- true
@@ -283,11 +386,10 @@ func TestSessionMonitor_ContextCancellation(t *testing.T) {
 
 	// Start monitoring
 	monitor.Start(ctx, "test-issue", program)
-	time.Sleep(100 * time.Millisecond)
 
 	// Cancel context
 	cancel()
-	time.Sleep(100 * time.Millisecond)
+	monitor.wg.Wait()
 
 	// Session should still be in map (Stop() wasn't called)
 	// but the monitoring goroutine should have exited

@@ -73,14 +73,15 @@ var primeLookPath = exec.LookPath
 var primeDaemonReadTimeout = 8 * time.Second
 
 type Dependencies struct {
-	Config         *config.Config
-	DaemonClient   *daemonclient.Client
-	DaemonSocket   string
-	Logger         *slog.Logger
-	ProjectID      string
-	RepoDir        string
-	RuntimeRepoDir string
-	TraceContext   context.Context
+	Config               *config.Config
+	DaemonClient         *daemonclient.Client
+	DaemonSocket         string
+	Logger               *slog.Logger
+	ProjectID            string
+	RepoDir              string
+	RuntimeRepoDir       string
+	TraceContext         context.Context
+	AutostartRetryPolicy *autoclient.AutostartRetryPolicy
 }
 
 type repeatedStringFlag []string
@@ -10006,6 +10007,9 @@ func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) er
 		concreteLauncher.WithLogger(deps.Logger)
 	}
 	orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(deps.DaemonClient), launcher)
+	if deps != nil && deps.AutostartRetryPolicy != nil {
+		orch.WithRetryPolicy(*deps.AutostartRetryPolicy)
+	}
 	ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,
 		ClientName:      clientName,
@@ -10077,6 +10081,12 @@ func startDaemonLauncher(ctx context.Context, deps *Dependencies) error {
 }
 
 func shouldAutostartAfterDaemonReadError(err error) bool {
+	var readWaitTimeout *daemonclient.ReadWaitTimeoutError
+	if errors.As(err, &readWaitTimeout) {
+		// The daemon answered and its projection read exceeded a bounded wait.
+		// This is not evidence that the transport or daemon process is absent.
+		return false
+	}
 	if reconnect.IsTransientTransportError(err) {
 		return true
 	}
