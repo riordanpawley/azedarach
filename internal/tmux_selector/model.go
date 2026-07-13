@@ -2016,21 +2016,42 @@ func activeSessionTreeRows(entries []InventoryEntry) []sessionTreeRow {
 
 func (m Model) activeSessionTreeRows(entries []InventoryEntry) []sessionTreeRow {
 	if m.snapshot.View.ID != "" {
-		return projectedSessionTreeRows(entries)
+		if m.snapshot.View.Normalized().Layout == domain.BoardViewLayoutTreeList {
+			return projectedSessionTreeRows(entries)
+		}
+		return activeSessionTreeRowsWithOptions(entries, nil, selectorTreeSortOrder)
 	}
 	return activeSessionTreeRowsWithOptions(entries, m.treeAncestorTasks(), m.treeSort)
 }
 
 func projectedSessionTreeRows(entries []InventoryEntry) []sessionTreeRow {
-	rows := make([]sessionTreeRow, 0, len(entries))
+	lastByIndex := make([]bool, len(entries))
 	for i, entry := range entries {
 		depth := maxInt(0, entry.ViewDepth)
-		ancestorLast := make([]bool, depth)
-		last := true
-		if i+1 < len(entries) && entries[i+1].ViewDepth >= depth {
-			last = false
+		lastByIndex[i] = true
+		for j := i + 1; j < len(entries); j++ {
+			nextDepth := maxInt(0, entries[j].ViewDepth)
+			if nextDepth < depth {
+				break
+			}
+			if nextDepth == depth {
+				lastByIndex[i] = false
+				break
+			}
 		}
-		rows = append(rows, sessionTreeRow{entryIndex: i, entry: entry, last: last, ancestorLast: ancestorLast})
+	}
+	rows := make([]sessionTreeRow, 0, len(entries))
+	ancestorLast := make([]bool, 0)
+	for i, entry := range entries {
+		depth := maxInt(0, entry.ViewDepth)
+		if depth < len(ancestorLast) {
+			ancestorLast = ancestorLast[:depth]
+		}
+		for len(ancestorLast) < depth {
+			ancestorLast = append(ancestorLast, true)
+		}
+		rows = append(rows, sessionTreeRow{entryIndex: i, entry: entry, last: lastByIndex[i], ancestorLast: append([]bool(nil), ancestorLast...)})
+		ancestorLast = append(ancestorLast, lastByIndex[i])
 	}
 	return rows
 }
@@ -2069,16 +2090,20 @@ func activeSessionTreeRowsWithOptions(entries []InventoryEntry, ancestorTasks ma
 	}
 	for i, entry := range entries {
 		for parentID := entryParentID(entry); parentID != ""; {
-			if _, ok := nodes[parentID]; ok {
+			parentKey := scopedEntryTreeKey(entry, parentID)
+			if _, ok := nodes[parentKey]; ok {
 				break
 			}
 			task, ok := ancestorTasks[parentID]
 			if !ok {
 				break
 			}
-			nodes[parentID] = &treeNode{
-				key:        parentID,
-				entry:      inventoryEntryFromAncestorTask(task),
+			ancestorEntry := inventoryEntryFromAncestorTask(task)
+			ancestorEntry.ProjectID = entry.ProjectID
+			ancestorEntry.ProjectPath = entry.ProjectPath
+			nodes[parentKey] = &treeNode{
+				key:        parentKey,
+				entry:      ancestorEntry,
 				entryIndex: -1,
 				order:      i,
 			}
@@ -2089,15 +2114,16 @@ func activeSessionTreeRowsWithOptions(entries []InventoryEntry, ancestorTasks ma
 	rootsByKey := make(map[string]struct{}, len(nodes))
 	for key, node := range nodes {
 		parentID := entryParentID(node.entry)
-		if parentID == "" || parentID == key {
+		if parentID == "" || parentID == entryIssueID(node.entry) {
 			rootsByKey[key] = struct{}{}
 			continue
 		}
-		if _, ok := nodes[parentID]; !ok {
+		parentKey := scopedEntryTreeKey(node.entry, parentID)
+		if _, ok := nodes[parentKey]; !ok {
 			rootsByKey[key] = struct{}{}
 			continue
 		}
-		children[parentID] = append(children[parentID], key)
+		children[parentKey] = append(children[parentKey], key)
 	}
 	structuralLess := func(leftKey, rightKey string) bool {
 		left, right := nodes[leftKey], nodes[rightKey]
@@ -2155,7 +2181,7 @@ func activeSessionTreeRowsWithOptions(entries []InventoryEntry, ancestorTasks ma
 				return key
 			}
 			seen[key] = struct{}{}
-			parentID := entryParentID(nodes[key].entry)
+			parentID := scopedEntryTreeKey(nodes[key].entry, entryParentID(nodes[key].entry))
 			if parentID == "" {
 				return key
 			}
@@ -2227,13 +2253,27 @@ func taskParentID(task domain.Task) string {
 
 func entryTreeKey(entry InventoryEntry) string {
 	if issueID := entryIssueID(entry); issueID != "" {
-		return issueID
+		return scopedEntryTreeKey(entry, issueID)
 	}
 	sessionID := strings.TrimSpace(entry.SessionID)
 	if sessionID == "" {
 		return ""
 	}
 	return "session:" + sessionID
+}
+
+func scopedEntryTreeKey(entry InventoryEntry, issueID string) string {
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return ""
+	}
+	if projectID := protocol.NormalizeProjectID(entry.ProjectID); projectID != "" {
+		return "project:" + projectID + ":" + issueID
+	}
+	if projectPath := strings.TrimSpace(entry.ProjectPath); projectPath != "" {
+		return "path:" + projectPath + ":" + issueID
+	}
+	return issueID
 }
 
 func inventoryEntryFromAncestorTask(task domain.Task) InventoryEntry {

@@ -887,6 +887,41 @@ func TestApplyGlobalViewOrderingPreservesProjectedColumnMetadata(t *testing.T) {
 	}
 }
 
+func TestApplyGlobalTreeOrderingCollapsesAncestorsWithoutLiveSessions(t *testing.T) {
+	view := domain.TreeBoardView()
+	snapshot := Snapshot{Entries: []InventoryEntry{
+		{ProjectID: "alpha", IssueID: "child", SessionID: "alpha-child"},
+		{ProjectID: "alpha", IssueID: "grandchild", SessionID: "alpha-grandchild"},
+		{ProjectID: "beta", IssueID: "other-child", SessionID: "beta-other-child"},
+	}}
+	projection := protocol.GlobalViewProjection{
+		View: view,
+		KnownTaskIDs: []protocol.ScopedIssueID{
+			{ProjectID: "alpha", IssueID: "root"},
+			{ProjectID: "alpha", IssueID: "child"},
+			{ProjectID: "alpha", IssueID: "grandchild"},
+			{ProjectID: "beta", IssueID: "other-root"},
+			{ProjectID: "beta", IssueID: "other-child"},
+		},
+		Items: []protocol.GlobalViewProjectedItem{
+			{Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "root"}, Depth: 0},
+			{Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "child"}, Depth: 1},
+			{Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "grandchild"}, Depth: 2},
+			{Identity: protocol.ScopedIssueID{ProjectID: "beta", IssueID: "other-root"}, Depth: 0},
+			{Identity: protocol.ScopedIssueID{ProjectID: "beta", IssueID: "other-child"}, Depth: 1},
+		},
+	}
+
+	applyGlobalViewOrdering(&snapshot, projection)
+
+	wantDepths := []int{0, 1, 0}
+	for i, want := range wantDepths {
+		if snapshot.Entries[i].ViewDepth != want {
+			t.Fatalf("entry %s depth = %d, want %d", snapshot.Entries[i].IssueID, snapshot.Entries[i].ViewDepth, want)
+		}
+	}
+}
+
 func TestGlobalOrchestrationProjectionRendersOnlyUnmatchedSessionsInFallback(t *testing.T) {
 	view := domain.OrchestrationBoardView()
 	snapshot := Snapshot{Entries: []InventoryEntry{
