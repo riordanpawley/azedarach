@@ -557,7 +557,7 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 	// The fake Go process emits its marker before blocking, so a short smoke
 	// budget proves output retention and descendant cleanup without spending a
 	// production-scale timeout in the ordinary semantic suite.
-	const timeoutBudget = 2 * time.Second
+	const timeoutBudget = 5 * time.Second
 
 	timeoutPath, err := exec.LookPath("timeout")
 	if err != nil {

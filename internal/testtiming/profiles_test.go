@@ -44,7 +44,7 @@ func TestCanonicalProfilesMakeCacheAndScopeExplicit(t *testing.T) {
 	cold, err := ResolveProfile("cold", nil, "")
 	require.NoError(t, err)
 	assert.Contains(t, cold.GoTestArgs, "-timeout=8m")
-	assert.Contains(t, cold.GoTestArgs, "-p=4")
+	assert.Contains(t, cold.GoTestArgs, "-p=2")
 }
 
 func TestFocusedProfileOverridesAreRecordedInExactCommand(t *testing.T) {
