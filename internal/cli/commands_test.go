@@ -3014,6 +3014,49 @@ func TestBranchMergeToBaseCommandBlocksChildWithoutAncestorWorktreeUnlessOverrid
 	}
 }
 
+func TestBranchMergeToBaseCommandRefusesOriginBaseBeforeGitMutation(t *testing.T) {
+	baseWorktree := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Git.BaseBranch = "preview"
+	cfg.Git.WorkflowMode = "origin"
+	commands := make([]string, 0, 2)
+	deps := &Dependencies{
+		Config: cfg,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{"worktrees": []map[string]any{{
+						"path": baseWorktree, "branch": "riordan/az-root/work", "issue_id": "az-root",
+					}}}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("refusing direct base integration for az-root because git workflow mode is origin; run `az pr create --issue az-root`, `az pr status --issue az-root`, and `az pr merge --issue az-root --confirm`")
+				default:
+					t.Fatalf("origin refusal reached mutating command %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   baseWorktree,
+	}
+
+	err := BranchMergeToBaseCommandWithOptions(deps, BranchMergeToBaseOptions{IssueID: "az-root", Target: "base"})
+	if err == nil {
+		t.Fatal("BranchMergeToBaseCommandWithOptions error = nil, want origin-mode refusal")
+	}
+	for _, want := range []string{"workflow mode is origin", "az pr create", "az pr status", "az pr merge"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
+	}
+	if !reflect.DeepEqual(commands, []string{daemonclient.CommandWorktreeList, daemonclient.CommandTaskMergeBaseTarget}) {
+		t.Fatalf("commands = %v, want target refusal before git mutation", commands)
+	}
+}
+
 func TestBranchMergeToBaseCommandFailsWhenIssueMissingFromTaskSnapshot(t *testing.T) {
 	baseWorktree := t.TempDir()
 	cfg := config.DefaultConfig()
@@ -13582,6 +13625,33 @@ func TestPrimeCommandQuestionFirstAndSpecBlock(t *testing.T) {
 	}
 	if !strings.Contains(output, "Spec Workflow") {
 		t.Fatal("prime output missing dynamic enabled-spec section")
+	}
+}
+
+func TestPrimeCommandExplainsOriginWorkflowAndCrossProjectHandoff(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	cfg := config.DefaultConfig()
+	cfg.Git.WorkflowMode = "origin"
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(&Dependencies{Config: cfg})
+	})
+
+	for _, want := range []string{
+		"Active git workflow mode: `origin`",
+		"Root integration is PR-only",
+		"git push -u origin HEAD",
+		"az pr create --issue <root>",
+		"az pr status --issue <root>",
+		"az pr merge --issue <root> --confirm",
+		"fetch `origin/<base>`",
+		"az ticket close --id <root>",
+		"az session start --project <project> <ticket>",
+		"do not treat `az worktree create` as a worker handoff",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("origin primer missing %q:\n%s", want, output)
+		}
 	}
 }
 

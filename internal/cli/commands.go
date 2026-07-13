@@ -2258,9 +2258,16 @@ func BranchAgentMergeCommand(deps *Dependencies, opts BranchAgentMergeOptions) e
 	agentIssueID := source.IssueID
 	agentWorktree := source.Path
 	if requestedBaseTarget {
-		baseTarget, _, err := resolveMergeToBaseTarget(ctx, deps, source.IssueID, false)
+		defaultBase := resolveCLIBaseBranch(deps.Config)
+		resolved, err := deps.DaemonClient.TaskMergeBaseTarget(ctx, source.IssueID, defaultBase, false, true)
 		if err != nil {
 			return err
+		}
+		baseTarget := mergeBaseTarget{
+			TargetID:       resolved.TargetID,
+			Branch:         resolved.Branch,
+			WorktreePath:   resolved.WorktreePath,
+			BranchAttached: resolved.BranchAttached,
 		}
 		targetID = baseTarget.TargetID
 		targetRef = baseTarget.Branch
@@ -8507,6 +8514,8 @@ func StopDaemonCommand(deps *Dependencies) error {
 
 type primeTemplateData struct {
 	ActiveIssueID            string
+	GitWorkflowMode          string
+	OriginWorkflow           bool
 	SpecEnabled              bool
 	PrimeEvidenceKey         string
 	OrchestrationVia         string
@@ -8550,6 +8559,10 @@ func primeCommandTo(deps *Dependencies, stdout io.Writer, render primeRenderFunc
 	learningSection := ""
 	var learningConfirmation *protocol.LearnActivationConfirmRequestBody
 	specEnabled := deps != nil && deps.Config != nil && deps.Config.Spec.Enabled
+	gitWorkflowMode := "worktree"
+	if deps != nil && deps.Config != nil && strings.TrimSpace(deps.Config.Git.WorkflowMode) != "" {
+		gitWorkflowMode = strings.TrimSpace(deps.Config.Git.WorkflowMode)
+	}
 	orchestrationVia := primeOrchestrationVia(deps)
 	orchestrationViaAz := strings.EqualFold(orchestrationVia, "az")
 	orchestrationViaNative := strings.EqualFold(orchestrationVia, "native")
@@ -8684,6 +8697,8 @@ func primeCommandTo(deps *Dependencies, stdout io.Writer, render primeRenderFunc
 	finishRender := primePhase(deps, "render", "rendering primer output")
 	output, err := render("prime_output", primeTemplateData{
 		ActiveIssueID:            issueID,
+		GitWorkflowMode:          gitWorkflowMode,
+		OriginWorkflow:           strings.EqualFold(gitWorkflowMode, "origin"),
 		SpecEnabled:              specEnabled,
 		PrimeEvidenceKey:         primeEvidenceKey,
 		OrchestrationVia:         orchestrationVia,

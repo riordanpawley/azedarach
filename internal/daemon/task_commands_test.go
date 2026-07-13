@@ -6085,6 +6085,11 @@ func TestTaskCloseIntegrationOriginBaseRefusesLocalMergeWhenRemoteDiffRemains(t 
 	if !strings.Contains(err.Error(), "origin workflow close will not merge") || !strings.Contains(err.Error(), "main.go") {
 		t.Fatalf("integrateTaskBeforeClose error = %v, want origin-mode recovery with changed file", err)
 	}
+	for _, want := range []string{"git push -u origin HEAD", "az pr create --issue " + taskID, "az pr status --issue " + taskID, "az pr merge --issue " + taskID + " --confirm", "fetch origin/preview", "az ticket close --id " + taskID} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("origin close guidance %q missing %q", err, want)
+		}
+	}
 	if !fetchedOrigin {
 		t.Fatal("origin close did not fetch origin before integration evidence")
 	}
@@ -10038,6 +10043,22 @@ func TestTaskMergeBaseTargetHandlerGatesExplicitBaseOnDurableHumanAcceptance(t *
 	}
 	if result.TargetID != "base" || result.Branch != "main" {
 		t.Fatalf("allowed target = %+v, want base/main", result)
+	}
+
+	d.projectConfigMu.Lock()
+	d.workflowModeByProject[projectID] = "origin"
+	d.projectConfigMu.Unlock()
+	originBlocked, err := d.handleTaskMergeBaseTarget(ctx, request)
+	if err != nil {
+		t.Fatalf("origin handler error: %v", err)
+	}
+	if originBlocked.OK || originBlocked.Error == nil || originBlocked.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("origin response = %+v, want direct base refusal", originBlocked)
+	}
+	for _, want := range []string{"workflow mode is origin", "git push -u origin HEAD", "az pr create --issue " + issueID, "az pr status --issue " + issueID, "az pr merge --issue " + issueID + " --confirm", "az ticket close --id " + issueID} {
+		if !strings.Contains(originBlocked.Error.Message, want) {
+			t.Fatalf("origin refusal %q missing %q", originBlocked.Error.Message, want)
+		}
 	}
 }
 
