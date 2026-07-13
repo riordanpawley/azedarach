@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
 
@@ -32,7 +33,6 @@ var mergeHookNames = map[string]struct{}{
 
 const (
 	mergeCleanupTimeout           = 15 * time.Second
-	mergeCommandTimeout           = 5 * time.Minute
 	diffStatFallbackTimeout       = 1500 * time.Millisecond
 	diffStatFailureBackoff        = 5 * time.Minute
 	maxDiffStatBackoffReasonRunes = 180
@@ -278,10 +278,7 @@ func mergeCommandContext(ctx context.Context) (context.Context, context.CancelFu
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if _, ok := ctx.Deadline(); ok {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, mergeCommandTimeout)
+	return context.WithTimeout(ctx, domain.IntegrationMergeTimeout)
 }
 
 func (c *Client) runMergeWithHookDiagnostics(ctx context.Context, worktree, branch string) (string, error, []GitHookDiagnostic) {

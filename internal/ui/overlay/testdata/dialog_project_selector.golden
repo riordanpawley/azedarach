@@ -1,16 +1,16 @@
 ╭──────────────────────────────────────────────────────────────────────────────────────────────╮
-│PROJECT SELECTOR                                                                              │
+│SCOPE SELECTOR                                                                                │
 │──────────────────────────────────────────────────────────────────────────────────────────────│
-││ 1. chefy [default]                                           Actions                        │
-││    /Users/riordan/prog/Chefy                                 ───────────────────────────────│
-││ 2. azedarach (current)                                         1-9       switch             │
-││    /Users/riordan/prog/azedarach                               Enter     switch             │
-││ 3. otel-tui                                                    d         default            │
-││    /Users/riordan/prog/otel-tui                                x         remove             │
-││                                                                a         add                │
+││ 0. Global                                                    Actions                        │
+││    User views · all registered projects                      ───────────────────────────────│
+││ 1. chefy [default]                                             0-9       switch scope       │
+││    /Users/riordan/prog/Chefy                                   Enter     switch             │
+││ 2. azedarach (current)                                         /         search             │
+││    /Users/riordan/prog/azedarach                               d         default            │
+││ 3. otel-tui                                                    x         remove             │
+││    /Users/riordan/prog/otel-tui                                a         add                │
 ││                                                                D         detect             │
 ││                                                                Esc       close              │
-││                                                                                             │
 ││                                                                                             │
 ││                                                                                             │
 ││                                                                                             │

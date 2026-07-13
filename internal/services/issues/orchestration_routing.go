@@ -33,7 +33,7 @@ func (c *Client) RouteOrchestrationCandidate(ctx context.Context, projectID, act
 	}
 	var interaction *domain.InteractionRequest
 	var created bool
-	err := retrySQLiteBusy(ctx, func() error {
+	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
 			return sqliteutil.WithWriteLock(c.dbPath, func() error {
 				var err error

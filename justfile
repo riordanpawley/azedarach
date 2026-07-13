@@ -34,7 +34,37 @@ bench-parallel-cli-latency:
     ./scripts/bench-parallel-cli-latency.sh
 
 test:
-    go test -v ./...
+    just test-timing cold
+
+# Canonical machine-readable timing profiles. Additional flags can be passed
+# after the recipe name, for example: just test-timing focused --package ./internal/cli --run TestName
+test-timing PROFILE="focused" *ARGS:
+    go run ./cmd/test-timing --profile {{PROFILE}} {{ARGS}}
+
+test-fast *ARGS:
+    just test-timing focused {{ARGS}}
+
+test-integration:
+    just test-timing integration
+
+test-migration-clone:
+    just test-timing migration-clone
+
+test-race:
+    just test-timing race
+
+test-boundary:
+    just test-timing boundary
+
+merge-gate:
+    just build
+    just test
+    just check-boundaries
+
+# Aggregate daemon race validation has a larger budget than focused race tests.
+# The timeout remains inside `go test` so genuine hangs emit goroutine stacks.
+test-race-daemon:
+    ./scripts/test-daemon-race-sharded.sh
 
 test-coverage:
     go test -coverprofile=coverage.out ./...
@@ -56,8 +86,7 @@ check-boundaries:
     if command -v golangci-lint >/dev/null 2>&1; then golangci-lint run --config .golangci-boundary.yml ./internal/...; else echo "WARN: golangci-lint not installed; skipping depguard boundary lint gate" >&2; fi
     ./scripts/check-boundaries.sh
     ./scripts/afv-drift-sentinel.sh
-    env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE go test ./internal/tui ./internal/cli
-    env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE go test ./internal/daemon/... ./internal/client/...
+    env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE just test-boundary
 
 boundary-check:
     @just check-boundaries

@@ -55,7 +55,7 @@ func (m Model) View() string {
 		Render(mainView)
 
 	sb := statusbar.New(m.statusBarMode(), m.width, m.styles)
-	sb.SetCurrentProject(m.currentProject)
+	sb.SetCurrentProject(m.scope.Label(m.currentProject))
 	sb.SetSelectionSummary(m.selectionSummary())
 	sb.SetFilterSummary(m.filterSummary())
 	sb.SetSortSummary(m.sortSummary())
@@ -282,10 +282,10 @@ func (m Model) renderModalBackdrop(contentHeight int) string {
 	}
 	header := m.styles.StatusInfo.Render(fmt.Sprintf(
 		" %s  %d tickets ",
-		strings.TrimSpace(m.currentProject),
+		strings.TrimSpace(m.scope.Label(m.currentProject)),
 		len(m.tasks),
 	))
-	if strings.TrimSpace(m.currentProject) == "" {
+	if strings.TrimSpace(m.scope.Label(m.currentProject)) == "" {
 		header = m.styles.StatusInfo.Render(fmt.Sprintf(" %d tickets ", len(m.tasks)))
 	}
 	return lipgloss.NewStyle().

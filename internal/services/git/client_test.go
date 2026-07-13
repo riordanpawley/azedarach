@@ -1,17 +1,23 @@
 package git
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
 // mockRunner is a test implementation of CommandRunner.
@@ -408,7 +414,7 @@ func TestMergeAbortsIncompleteNonConflictMerge(t *testing.T) {
 	})
 }
 
-func TestMergePreservesCommitHooksAndAbortsIncompleteMerge(t *testing.T) {
+func TestRealProcessProfileMergePreservesCommitHooksAndAbortsIncompleteMerge(t *testing.T) {
 	repo := initDivergedRepo(t)
 	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
 	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\necho hook failed >&2\nexit 1\n"), 0o755); err != nil {
@@ -445,7 +451,7 @@ func TestMergePreservesCommitHooksAndAbortsIncompleteMerge(t *testing.T) {
 	}
 }
 
-func TestMergeReportsSlowHookDiagnostics(t *testing.T) {
+func TestRealProcessProfileMergeReportsSlowHookDiagnostics(t *testing.T) {
 	repo := initDivergedRepo(t)
 	hooks := map[string]string{
 		"commit-msg": "#!/bin/sh\nsleep 0.05\nexit 0\n",
@@ -499,20 +505,269 @@ func TestMergeCommandContextAddsDefaultTimeout(t *testing.T) {
 		t.Fatal("merge command context has no deadline")
 	}
 	remaining := time.Until(deadline)
-	if remaining <= mergeCommandTimeout-time.Second || remaining > mergeCommandTimeout {
-		t.Fatalf("merge command timeout remaining = %v, want close to %v", remaining, mergeCommandTimeout)
+	if remaining <= domain.IntegrationMergeTimeout-time.Second || remaining > domain.IntegrationMergeTimeout {
+		t.Fatalf("merge command timeout remaining = %v, want close to %v", remaining, domain.IntegrationMergeTimeout)
 	}
 
 	parent, parentCancel := context.WithTimeout(context.Background(), time.Hour)
 	defer parentCancel()
 	ctx, cancel = mergeCommandContext(parent)
 	defer cancel()
-	if ctx != parent {
-		t.Fatal("merge command context should preserve caller deadline context")
+	deadline, ok = ctx.Deadline()
+	if !ok {
+		t.Fatal("merge command context derived from long parent has no deadline")
+	}
+	remaining = time.Until(deadline)
+	if remaining <= domain.IntegrationMergeTimeout-time.Second || remaining > domain.IntegrationMergeTimeout {
+		t.Fatalf("merge command timeout with long parent = %v, want close to %v", remaining, domain.IntegrationMergeTimeout)
+	}
+
+	shortParent, shortCancel := context.WithTimeout(context.Background(), time.Minute)
+	defer shortCancel()
+	ctx, cancel = mergeCommandContext(shortParent)
+	defer cancel()
+	deadline, ok = ctx.Deadline()
+	if !ok || time.Until(deadline) > time.Minute {
+		t.Fatalf("merge command should preserve shorter parent deadline, deadline=%v ok=%t", deadline, ok)
 	}
 }
 
-func TestMergeCleanlyDiscardsDirtyPostMergeHookAndReportsFailure(t *testing.T) {
+func TestMergeGateBudgetLeavesFinalizationReserve(t *testing.T) {
+	if got := domain.IntegrationMergeTimeout - domain.IntegrationValidationTimeout; got < domain.IntegrationFinalizeReserve {
+		t.Fatalf("merge finalization reserve = %v, want at least %v", got, domain.IntegrationFinalizeReserve)
+	}
+	scriptsDir := filepath.Join("..", "..", "..", "scripts")
+	gate, err := os.ReadFile(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"))
+	if err != nil {
+		t.Fatalf("read merge gate: %v", err)
+	}
+	wantWall := fmt.Sprintf("AZEDARACH_MERGE_GATE_TIMEOUT:-%.0fm", domain.IntegrationValidationTimeout.Minutes())
+	if !strings.Contains(string(gate), wantWall) {
+		t.Fatalf("merge gate does not enforce shared wall validation budget %q", wantWall)
+	}
+	body, err := os.ReadFile(filepath.Join(scriptsDir, "git-merge-rebase-gate-body.sh"))
+	if err != nil {
+		t.Fatalf("read merge gate body: %v", err)
+	}
+	wantTest := fmt.Sprintf("go test -timeout %.0fm ./...", domain.IntegrationTestBinaryTimeout.Minutes())
+	if !strings.Contains(string(body), wantTest) {
+		t.Fatalf("merge gate body does not enforce test binary budget %q", wantTest)
+	}
+}
+
+func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
+	// A direct synthetic body isolates wrapper timeout/output semantics from
+	// task-runner and Go startup scheduling. Use a long safety budget, then
+	// trigger GNU timeout only after the synthetic body confirms that it emitted
+	// its diagnostic. The separate budget test inspects the production body, and
+	// the merge hook executes it end to end.
+	const timeoutBudget = "1h"
+
+	timeoutPath, err := exec.LookPath("timeout")
+	if err != nil {
+		timeoutPath, err = exec.LookPath("gtimeout")
+	}
+	if err != nil {
+		t.Skip("GNU timeout unavailable")
+	}
+	killPath, err := exec.LookPath("kill")
+	if err != nil {
+		t.Skip("POSIX kill unavailable")
+	}
+
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	scriptsDir := filepath.Join(repo, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	sourceScriptsDir := filepath.Join("..", "..", "..", "scripts")
+	for _, name := range []string{"git-merge-rebase-gate.sh"} {
+		content, readErr := os.ReadFile(filepath.Join(sourceScriptsDir, name))
+		if readErr != nil {
+			t.Fatalf("read %s: %v", name, readErr)
+		}
+		if writeErr := os.WriteFile(filepath.Join(scriptsDir, name), content, 0o755); writeErr != nil {
+			t.Fatalf("write %s: %v", name, writeErr)
+		}
+	}
+	fakeBin := filepath.Join(repo, "fake-bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	timeoutPIDFile := filepath.Join(repo, "timeout.pid")
+	timeoutWrapper := "#!/bin/sh\nprintf '%s\\n' \"$$\" >\"$AZEDARACH_TEST_TIMEOUT_PID_FILE\"\nexec \"$AZEDARACH_TEST_TIMEOUT_PATH\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "timeout"), []byte(timeoutWrapper), 0o755); err != nil {
+		t.Fatalf("write timeout wrapper: %v", err)
+	}
+	childPIDFile := filepath.Join(repo, "timeout-child.pid")
+	diagnosticEmittedFile := filepath.Join(repo, "diagnostic-emitted")
+	fakeBody := "#!/bin/sh\nsleep 30 &\nchild_pid=$!\nprintf '%s\\n' \"$child_pid\" >\"$AZEDARACH_TEST_CHILD_PID_FILE\"\necho retained-timeout-marker\nprintf 'emitted\\n' >\"$AZEDARACH_TEST_DIAGNOSTIC_EMITTED_FILE\"\nwait \"$child_pid\"\n"
+	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate-body.sh"), []byte(fakeBody), 0o755); err != nil {
+		t.Fatalf("write fake gate body: %v", err)
+	}
+
+	cmd := exec.Command(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"))
+	cmd.Dir = repo
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Env = append(os.Environ(),
+		"AZEDARACH_MERGE_GATE_TIMEOUT="+timeoutBudget,
+		"AZEDARACH_TEST_CHILD_PID_FILE="+childPIDFile,
+		"AZEDARACH_TEST_DIAGNOSTIC_EMITTED_FILE="+diagnosticEmittedFile,
+		"AZEDARACH_TEST_TIMEOUT_PATH="+timeoutPath,
+		"AZEDARACH_TEST_TIMEOUT_PID_FILE="+timeoutPIDFile,
+		"PATH="+fakeBin+string(os.PathListSeparator)+filepath.Dir(timeoutPath)+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start merge gate: %v", err)
+	}
+	// Keep the entire gate process tree in a dedicated group.  Readiness and
+	// assertion failures must not leave the one-hour timeout (or its children)
+	// running after this test exits.
+	var runErr error
+	done := make(chan struct{})
+	cleanup := func() {
+		if cmd.Process == nil {
+			return
+		}
+		if syscall.Kill(-cmd.Process.Pid, 0) != nil {
+			return
+		}
+		killProcessGroupWithGrace(-cmd.Process.Pid)
+		select {
+		case <-done:
+		default:
+		}
+		<-done
+	}
+	defer cleanup()
+	go func() {
+		runErr = cmd.Wait()
+		close(done)
+	}()
+
+	waitForFile := func(path, description string) []byte {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			content, readErr := os.ReadFile(path)
+			if readErr == nil && len(content) > 0 {
+				return content
+			}
+			select {
+			case <-done:
+				t.Fatalf("merge gate exited before %s: %v\n%s", description, runErr, output.String())
+			default:
+			}
+			if time.Now().After(deadline) {
+				cleanup()
+				<-done
+				t.Fatalf("timed out waiting for %s\n%s", description, output.String())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	timeoutPIDBytes := waitForFile(timeoutPIDFile, "GNU timeout startup")
+	childPIDBytes := waitForFile(childPIDFile, "fake Go child startup")
+	waitForFile(diagnosticEmittedFile, "fake Go diagnostic emission")
+	select {
+	case <-done:
+		t.Fatalf("merge gate exited before timeout was triggered: %v\n%s", runErr, output.String())
+	default:
+	}
+	timeoutPID, err := strconv.Atoi(strings.TrimSpace(string(timeoutPIDBytes)))
+	if err != nil {
+		t.Fatalf("parse GNU timeout PID %q: %v", timeoutPIDBytes, err)
+	}
+	timeoutTriggeredAt := time.Now()
+	if signalOutput, signalErr := exec.Command(killPath, "-ALRM", strconv.Itoa(timeoutPID)).CombinedOutput(); signalErr != nil {
+		t.Fatalf("trigger GNU timeout process %d: %v: %s", timeoutPID, signalErr, signalOutput)
+	}
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		cleanup()
+		<-done
+		t.Fatalf("merge gate did not return within timeout kill-after reserve\n%s", output.String())
+	}
+	elapsedAfterTrigger := time.Since(timeoutTriggeredAt)
+	if runErr == nil {
+		t.Fatal("merge gate timeout error = nil")
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != 124 {
+		t.Fatalf("merge gate timeout error = %v, output=%s", runErr, output.String())
+	}
+	if !strings.Contains(output.String(), "retained-timeout-marker") || !strings.Contains(output.String(), timeoutBudget+" wall-clock budget") {
+		t.Fatalf("merge gate timeout output did not retain child diagnostics:\n%s", output.String())
+	}
+	if elapsedAfterTrigger > 20*time.Second {
+		t.Fatalf("merge gate timeout return after trigger = %v, want within kill-after reserve", elapsedAfterTrigger)
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(childPIDBytes)))
+	if err != nil {
+		t.Fatalf("parse timed-out child PID %q: %v", childPIDBytes, err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		probeOutput, probeErr := exec.Command(killPath, "-0", strconv.Itoa(childPID)).CombinedOutput()
+		if probeErr != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(probeErr, &exitErr) {
+				t.Fatalf("probe timed-out child process %d: %v", childPID, probeErr)
+			}
+			if strings.Contains(strings.ToLower(string(probeOutput)), "not permitted") {
+				t.Fatalf("probe timed-out child process %d: %s", childPID, probeOutput)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed-out child process %d still running after merge gate returned", childPID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func killProcessGroupWithGrace(pgid int) {
+	if syscall.Kill(pgid, 0) != nil {
+		return
+	}
+	_ = syscall.Kill(pgid, syscall.SIGTERM)
+	time.Sleep(500 * time.Millisecond)
+	if syscall.Kill(pgid, 0) == nil {
+		_ = syscall.Kill(pgid, syscall.SIGKILL)
+	}
+}
+
+func TestProcessGroupCleanupKillsTermIgnoringMemberAfterOuterDone(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "trap '' TERM; sleep 30 & exit 0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start process group: %v", err)
+	}
+	defer killProcessGroupWithGrace(-cmd.Process.Pid)
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("outer process: %v", err)
+	}
+	pgid := -cmd.Process.Pid
+	if err := syscall.Kill(pgid, 0); err != nil {
+		t.Fatalf("term-ignoring member did not keep process group alive: %v", err)
+	}
+	killProcessGroupWithGrace(pgid)
+	deadline := time.Now().Add(2 * time.Second)
+	for syscall.Kill(pgid, 0) == nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if syscall.Kill(pgid, 0) == nil {
+		t.Fatal("term-ignoring process-group member survived KILL")
+	}
+}
+
+func TestRealProcessProfileMergeCleanlyDiscardsDirtyPostMergeHookAndReportsFailure(t *testing.T) {
 	repo := initDivergedRepo(t)
 	hookPath := filepath.Join(repo, ".git", "hooks", "post-merge")
 	hook := "#!/bin/sh\nprintf hook-dirty\\n > hook-created.txt\ngit add hook-created.txt\necho post-merge hook dirtied target >&2\nexit 0\n"
@@ -550,7 +805,7 @@ func TestMergeCleanlyDiscardsDirtyPostMergeHookAndReportsFailure(t *testing.T) {
 	}
 }
 
-func TestMergeCleanlyDiscardsDirtyCommitMsgHookAfterAbort(t *testing.T) {
+func TestRealProcessProfileMergeCleanlyDiscardsDirtyCommitMsgHookAfterAbort(t *testing.T) {
 	repo := initDivergedRepo(t)
 	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
 	hook := "#!/bin/sh\nprintf hook-dirty\\n > hook-created.txt\necho commit-msg hook dirtied target >&2\nexit 1\n"
@@ -587,7 +842,7 @@ func TestMergeCleanlyDiscardsDirtyCommitMsgHookAfterAbort(t *testing.T) {
 	}
 }
 
-func TestMergeCleanlyTransactionalAppliesScratchMergeToCleanTarget(t *testing.T) {
+func TestRealProcessProfileMergeCleanlyTransactionalAppliesScratchMergeToCleanTarget(t *testing.T) {
 	repo := initDivergedRepo(t)
 	originalHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
 
@@ -621,7 +876,7 @@ func TestMergeCleanlyTransactionalAppliesScratchMergeToCleanTarget(t *testing.T)
 	}
 }
 
-func TestMergeCleanlyTransactionalRunsScratchHooksAndKeepsTargetCleanWhenHookFails(t *testing.T) {
+func TestRealProcessProfileMergeCleanlyTransactionalRunsScratchHooksAndKeepsTargetCleanWhenHookFails(t *testing.T) {
 	repo := initDivergedRepo(t)
 	originalHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
 	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
@@ -664,7 +919,7 @@ func TestMergeCleanlyTransactionalRunsScratchHooksAndKeepsTargetCleanWhenHookFai
 	}
 }
 
-func TestRecoverIntegrationJournalCompletesInterruptedFinalReset(t *testing.T) {
+func TestRealProcessProfileRecoverIntegrationJournalCompletesInterruptedFinalReset(t *testing.T) {
 	repo := initDivergedRepo(t)
 	client := NewClient(NewExecRunner(repo), slog.Default())
 	ctx := context.Background()
@@ -1865,7 +2120,7 @@ func TestRuntimeStatus(t *testing.T) {
 	}
 }
 
-func TestRuntimeStatusUsesLocalBaseBeforeCurrentRemoteBase(t *testing.T) {
+func TestRealProcessProfileRuntimeStatusUsesLocalBaseBeforeCurrentRemoteBase(t *testing.T) {
 	repo := t.TempDir()
 	runClientTestGit(t, repo, "init", "-q", "-b", "preview")
 	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
@@ -1907,7 +2162,7 @@ func TestRuntimeStatusUsesLocalBaseBeforeCurrentRemoteBase(t *testing.T) {
 	}
 }
 
-func TestRuntimeStatusWithRemoteBasePreferenceUsesCurrentRemoteBase(t *testing.T) {
+func TestRealProcessProfileRuntimeStatusWithRemoteBasePreferenceUsesCurrentRemoteBase(t *testing.T) {
 	repo := t.TempDir()
 	runClientTestGit(t, repo, "init", "-q", "-b", "preview")
 	runClientTestGit(t, repo, "config", "user.email", "test@example.com")

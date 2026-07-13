@@ -1117,7 +1117,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	}
 	if cmd.StartWork && strings.TrimSpace(postLaunchPrompt) != "" {
 		reportSessionStartProgress(ctx, "agent_prompt", "agent launched; delivering initial prompt", 95)
-		if err := waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
+		if err := d.waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 		}
 		if err := d.tmux.PasteTextAndSubmit(ctx, cmd.SessionID, postLaunchPrompt); err != nil {
@@ -1753,7 +1753,7 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 			result.Sessions = append(result.Sessions, item)
 			continue
 		}
-		if err := waitBeforeSessionResume(ctx, 250*time.Millisecond); err != nil {
+		if err := d.waitBeforeSessionResume(ctx, 250*time.Millisecond); err != nil {
 			item.Error = err.Error()
 			result.Failed++
 			result.Sessions = append(result.Sessions, item)
@@ -1767,7 +1767,7 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 			continue
 		}
 		if item.ActiveIntent && d.sessionRestartNeedsPostLaunchPrompt(target.ProjectID) {
-			if err := waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
+			if err := d.waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
 				item.Error = err.Error()
 				result.Failed++
 				result.Sessions = append(result.Sessions, item)
@@ -1941,6 +1941,13 @@ func waitBeforeSessionResume(ctx context.Context, delay time.Duration) error {
 	}
 }
 
+func (d *Daemon) waitBeforeSessionResume(ctx context.Context, delay time.Duration) error {
+	if d != nil && d.sessionResumeWait != nil {
+		return d.sessionResumeWait(ctx, delay)
+	}
+	return waitBeforeSessionResume(ctx, delay)
+}
+
 func (d *Daemon) persistRestartedSessionProjection(ctx context.Context, projectID, sessionID, issueID string) {
 	session := daemonstate.Session{
 		ID:             sessionID,
@@ -2033,7 +2040,7 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("launch conflict resolver window: %v", err)), nil
 	}
 	if strings.TrimSpace(postLaunchPrompt) != "" {
-		if err := waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
+		if err := d.waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 		}
 		if err := d.tmux.PasteTextAndSubmit(ctx, targetPane, postLaunchPrompt); err != nil {
@@ -3706,12 +3713,31 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("refresh interaction projection while enriching tasks failed", "project_id", projectID, "error", err)
 			}
-			return
+			waiting = map[string]struct{}{}
+		}
+		investigationAcceptances, err := issueClient.InvestigationAcceptances(ctx, tasks)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("refresh investigation acceptance projection while enriching tasks failed", "project_id", projectID, "error", err)
+			}
+			// Fail closed for human-facing investigations without discarding
+			// independently refreshed interaction authority.
+			investigationAcceptances = make(map[string]domain.InvestigationAcceptance)
+			for _, task := range tasks {
+				if task.Type == domain.TypeInvestigation {
+					investigationAcceptances[task.ID.String()] = domain.EvaluateInvestigationAcceptance(task, nil)
+				}
+			}
 		}
 		for i := range tasks {
 			_, decisionWaiting := waiting[tasks[i].ID.String()]
 			base := tasks[i].IssueFacts()
-			tasks[i].Facts = domain.DeriveIssueFacts(domain.IssueFactsInput{Status: tasks[i].Status, Priority: tasks[i].Priority, State: tasks[i].State, Session: tasks[i].Session, HasTmuxSession: tasks[i].HasTmuxSession, OperationBlockers: base.OperationBlockers, DecisionWaiting: decisionWaiting, DecisionWaitReason: "unresolved interaction request requires human decision"})
+			acceptance, hasAcceptance := investigationAcceptances[tasks[i].ID.String()]
+			var acceptancePtr *domain.InvestigationAcceptance
+			if hasAcceptance {
+				acceptancePtr = &acceptance
+			}
+			tasks[i].Facts = domain.DeriveIssueFacts(domain.IssueFactsInput{Status: tasks[i].Status, Priority: tasks[i].Priority, Type: tasks[i].Type, State: tasks[i].State, Session: tasks[i].Session, HasTmuxSession: tasks[i].HasTmuxSession, OperationBlockers: base.OperationBlockers, DecisionWaiting: decisionWaiting, DecisionWaitReason: "unresolved interaction request requires human decision", InvestigationAcceptance: acceptancePtr})
 		}
 	}()
 	if d.sessionStore == nil {
@@ -4995,10 +5021,7 @@ func (d *Daemon) runIssueResourceCommandsWithDir(ctx context.Context, projectID 
 			"project_id", projectID,
 			"arg_count", 2,
 		)
-		cmd := exec.CommandContext(commandCtx, shell, "-lc", trimmed)
-		cmd.Dir = commandDir
-		cmd.Env = append(os.Environ(), env...)
-		output, err := cmd.CombinedOutput()
+		output, err := d.runSessionShell(commandCtx, shell, commandDir, trimmed, append(os.Environ(), env...))
 		endSpan(err)
 		result.Ran = append(result.Ran, trimmed)
 		if err != nil {
@@ -5255,10 +5278,7 @@ func (d *Daemon) runWorktreeInitCommandList(ctx context.Context, initCtx worktre
 			"project_id", projectID,
 			"arg_count", 2,
 		)
-		cmd := exec.CommandContext(commandCtx, shell, "-lc", trimmed)
-		cmd.Dir = initCtx.WorktreePath
-		cmd.Env = worktreeInitCommandEnv(initCtx, phase)
-		output, err := cmd.CombinedOutput()
+		output, err := d.runSessionShell(commandCtx, shell, initCtx.WorktreePath, trimmed, worktreeInitCommandEnv(initCtx, phase))
 		endSpan(err)
 		if err != nil {
 			return fmt.Errorf("%s: %w (%s)", trimmed, err, strings.TrimSpace(string(output)))
@@ -5266,6 +5286,16 @@ func (d *Daemon) runWorktreeInitCommandList(ctx context.Context, initCtx worktre
 	}
 
 	return nil
+}
+
+func (d *Daemon) runSessionShell(ctx context.Context, shell, workdir, command string, env []string) ([]byte, error) {
+	if d != nil && d.sessionShellRun != nil {
+		return d.sessionShellRun(ctx, shell, workdir, command, env)
+	}
+	cmd := exec.CommandContext(ctx, shell, "-lc", command)
+	cmd.Dir = workdir
+	cmd.Env = env
+	return cmd.CombinedOutput()
 }
 
 func worktreeInitCommandEnv(initCtx worktreeInitContext, phase string) []string {

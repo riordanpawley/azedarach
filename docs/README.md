@@ -33,9 +33,12 @@ This directory primarily contains **developer/internal documentation**.
 - [22-event-sourcing-detailed-map-and-risk-register.md](22-event-sourcing-detailed-map-and-risk-register.md)
 - [23-sqlite-wal-policy.md](23-sqlite-wal-policy.md)
 - [24-issue-state-model-v2-rollout.md](24-issue-state-model-v2-rollout.md)
+- [25-migration-artifacts.md](25-migration-artifacts.md) — immutable migration artifact and checksum convention
 - [25-configurable-views.md](25-configurable-views.md)
 - [25-cross-project-user-database.md](25-cross-project-user-database.md)
 - [25-rootless-orchestrator-contracts.md](25-rootless-orchestrator-contracts.md)
+- [26-test-wait-audit.md](26-test-wait-audit.md) — inventory and policy for test waits over 500 ms
+- [26-test-timing-profiles.md](26-test-timing-profiles.md)
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 - [adr/2-daemon-owned-async-notices.md](adr/2-daemon-owned-async-notices.md)
 
@@ -66,6 +69,7 @@ This directory primarily contains **developer/internal documentation**.
 - `task.follow_on_merge_candidates`: `projection` (durable issue graph + worktree projection).
 - `issue_resources.lifecycle`: `projection` (durable issue status + runtime attachment projection).
 - `interaction.waiting_human`: `projection` (durable interaction requests refreshed before decision-waiting and pickup evaluation).
+- `investigation.waiting_human`: `projection` (durable investigation disposition and issue-specific acceptance/review evidence refreshed before human-authority evaluation).
 - `interaction.staleness`: `projection` (durable interaction requests refreshed before age evaluation and revision-safe stale/reminder/disposition/recovery audit writes).
 - `task.list` freshness/session timestamps: `projection` (refresh-then-cache).
 - `cross_project.view_projection`: `projection` (the global daemon refreshes the user database from authoritative project stores, then evaluates typed cross-project views from the refreshed user-level projection; stale and unavailable projects remain explicit).

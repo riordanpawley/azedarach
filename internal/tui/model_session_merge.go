@@ -478,7 +478,7 @@ func (m Model) resolveMergeBaseTarget(ctx context.Context, sourceID string) (mer
 	if m.daemonClient == nil {
 		return mergeBaseTarget{}, fmt.Errorf("daemon client unavailable")
 	}
-	target, err := m.daemonClient.TaskMergeBaseTarget(ctx, sourceID, defaultTarget.targetBranch, true)
+	target, err := m.daemonClient.TaskMergeBaseTarget(ctx, sourceID, defaultTarget.targetBranch, true, true)
 	if err != nil {
 		return mergeBaseTarget{}, err
 	}

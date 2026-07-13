@@ -11,6 +11,7 @@ import (
 )
 
 func TestLearningActivationDeliveryFeedbackAndPrivacy(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	public, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "public", Evidence: "safe"})
@@ -57,6 +58,7 @@ func TestLearningActivationDeliveryFeedbackAndPrivacy(t *testing.T) {
 }
 
 func TestLearningActivationProposalDoesNotSuppressUntilConfirmed(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	learning, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "confirmed delivery only", Evidence: "safe"})
@@ -86,6 +88,7 @@ func TestLearningActivationProposalDoesNotSuppressUntilConfirmed(t *testing.T) {
 }
 
 func TestLearningActivationOutcomeResolvesOncePerActivationByReporterPriority(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	learning, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "feedback", Evidence: "safe"})
@@ -109,6 +112,7 @@ func TestLearningActivationOutcomeResolvesOncePerActivationByReporterPriority(t 
 }
 
 func TestLearningActivationFailedConfirmationDoesNotSuppress(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	learning, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "lifecycle", Evidence: "safe"})
@@ -127,6 +131,7 @@ func TestLearningActivationFailedConfirmationDoesNotSuppress(t *testing.T) {
 }
 
 func TestLearningActivationProposalExpiresLostResponses(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	learning, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "expiry", Evidence: "safe"})
@@ -147,6 +152,7 @@ func TestLearningActivationProposalExpiresLostResponses(t *testing.T) {
 }
 
 func TestLearningActivationKnownFailureAbandonsImmediately(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	learning, err := client.CreateLearning(ctx, CreateLearningParams{ProjectID: "proj", Summary: "safe", Evidence: "safe"})

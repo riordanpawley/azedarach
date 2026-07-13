@@ -250,7 +250,7 @@ func TestStoreRoutersReuseBaseRepoHandlesForLinkedWorktreeRoutes(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	issueClient := issues.NewClient(baseRepo, logger)
+	issueClient := newMigratedIssueClient(t, baseRepo, logger)
 	t.Cleanup(func() { _ = issueClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStore(baseRepo, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })

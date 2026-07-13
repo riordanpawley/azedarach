@@ -12,6 +12,7 @@ import (
 )
 
 func TestStateProductMigrationRejectsDirectSQLContradictions(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	ctx := context.Background()
@@ -60,6 +61,7 @@ func TestStateProductMigrationRejectsDirectSQLContradictions(t *testing.T) {
 }
 
 func TestArchivedResourceGuardsRejectUpdatesAndStoppedRows(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	ctx := context.Background()
@@ -106,6 +108,7 @@ func TestArchivedResourceGuardsRejectUpdatesAndStoppedRows(t *testing.T) {
 }
 
 func TestLeasePurposeEligibilityAcrossIssueStateProduct(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	ctx := context.Background()
@@ -151,6 +154,7 @@ func TestLeasePurposeEligibilityAcrossIssueStateProduct(t *testing.T) {
 }
 
 func TestCanonicalClaimMigrationPreflight(t *testing.T) {
+	parallelIssueStoreTest(t)
 	tests := []struct {
 		name       string
 		ownerID    string
@@ -220,6 +224,7 @@ func TestCanonicalClaimMigrationPreflight(t *testing.T) {
 }
 
 func TestCanonicalStateRepairRunsAfterRecordedBroken0045(t *testing.T) {
+	parallelIssueStoreTest(t)
 	dir := t.TempDir()
 	client := NewClient(dir, slog.Default())
 	ctx := context.Background()
@@ -278,7 +283,7 @@ func TestCanonicalStateRepairRunsAfterRecordedBroken0045(t *testing.T) {
 		THEN RAISE(ABORT,'issue owner fields must form a complete tuple') END; END`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE id='0046_repair_issue_state_runtime_constraints'`); err != nil {
+	if _, err := db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE id IN ('0046_repair_issue_state_runtime_constraints','0047_human_authority_projection_revision')`); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.CloseDB(); err != nil {
@@ -317,6 +322,7 @@ func TestCanonicalStateRepairRunsAfterRecordedBroken0045(t *testing.T) {
 }
 
 func TestCanonicalStateRepairRecordsNoOpOnCanonicalSchema(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	db, err := client.dbHandle()
@@ -330,6 +336,7 @@ func TestCanonicalStateRepairRecordsNoOpOnCanonicalSchema(t *testing.T) {
 }
 
 func TestCanonicalMigrationRejectsHistoricalReviewLeaseWithoutReviewRequest(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	ctx := context.Background()
@@ -351,6 +358,7 @@ func TestCanonicalMigrationRejectsHistoricalReviewLeaseWithoutReviewRequest(t *t
 }
 
 func TestCanonicalMigrationRejectsOrphanAuthorityRows(t *testing.T) {
+	parallelIssueStoreTest(t)
 	for _, kind := range []string{"lease", "session", "worktree"} {
 		t.Run(kind, func(t *testing.T) {
 			client := NewClient(t.TempDir(), slog.Default())
@@ -386,6 +394,7 @@ func TestCanonicalMigrationRejectsOrphanAuthorityRows(t *testing.T) {
 }
 
 func TestReviewLeaseDirectSQLCartesian(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	ctx := context.Background()
@@ -416,6 +425,7 @@ func TestReviewLeaseDirectSQLCartesian(t *testing.T) {
 }
 
 func TestWorkerSessionScopeDirectSQLRejectsEmptyAndMismatch(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	ctx := context.Background()
@@ -469,6 +479,7 @@ func TestWorkerSessionScopeDirectSQLRejectsEmptyAndMismatch(t *testing.T) {
 }
 
 func TestCanonicalMigrationBackfillsPreColumnWorkerScope(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	ctx := context.Background()
@@ -494,6 +505,7 @@ func TestCanonicalMigrationBackfillsPreColumnWorkerScope(t *testing.T) {
 }
 
 func TestCanonicalMigrationConvergesDuplicateLogicalSessions(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	ctx := context.Background()
@@ -570,6 +582,7 @@ func TestCanonicalMigrationConvergesDuplicateLogicalSessions(t *testing.T) {
 }
 
 func TestCanonicalStateMigrationUpgradesLegacyProjectionDeterministically(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	ctx := context.Background()
@@ -598,6 +611,7 @@ func TestCanonicalStateMigrationUpgradesLegacyProjectionDeterministically(t *tes
 }
 
 func TestCanonicalStateMigrationRollsBackAmbiguousArchiveProduct(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	ctx := context.Background()
@@ -649,6 +663,7 @@ func dropCanonicalStateMigrationGuards(t *testing.T, db interface {
 }
 
 func TestRepairReadyIdleEngagementIsAtomicAndTerminalSafe(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	ctx := context.Background()
@@ -686,6 +701,7 @@ func TestRepairReadyIdleEngagementIsAtomicAndTerminalSafe(t *testing.T) {
 }
 
 func TestArchiveAggregateIsIdleUnclaimedAndResourceFree(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	ctx := context.Background()
@@ -725,6 +741,7 @@ func TestArchiveAggregateIsIdleUnclaimedAndResourceFree(t *testing.T) {
 }
 
 func TestRuntimeDivergenceQuarantinesSelectorProjectionUntilRecovery(t *testing.T) {
+	parallelIssueStoreTest(t)
 	client := NewClient(t.TempDir(), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	ctx := context.Background()

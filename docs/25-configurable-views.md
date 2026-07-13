@@ -19,10 +19,14 @@ definitions rather than hardcoded application modes. In the TUI, Tab advances
 to the next configured view through the daemon selection contract; it does not
 toggle a surface-local Compact or Orchestration Overview mode.
 
-The built-in **Orchestration** board is the focused tmux-selector default: its
-three columns are Human Review, AI Review, and In Progress, and issues outside
-those active-attention states are omitted. The built-in **Tree** view preserves
-issue hierarchy while sorting human-attention work ahead of ordinary work.
+The built-in **Orchestration** board is the focused tmux-selector default. Its
+ordered columns are Waiting Human, Waiting AI, Working, and In Review; issues
+outside those active-attention states are omitted. Waiting Human is a daemon-
+owned authority fact (for example, an unresolved interaction, a live prompt, or
+an unaccepted human-facing investigation), not an alias for review readiness.
+First-match placement keeps genuine human waits ahead of working or review-ready
+placement. The built-in **Tree** view preserves issue hierarchy while sorting
+human-attention work ahead of ordinary work.
 
 Press `V` in normal mode to open **Views**. Create and edit open the **View
 Configurator**, whose guided fields cover title, Grid/Board/Tree layout,
@@ -37,6 +41,12 @@ The tmux selector uses the same `V` workflow for global views selected by the
 set of canonical project IDs, or one current project ID. Selection and edits are
 applied only after Enter or explicit save; Escape leaves the persisted view and
 selection unchanged.
+
+On startup, the selector resolves that lightweight selected-view definition in
+parallel with live tmux discovery, so its first interactive content frame already
+uses the configured Grid, Board, or Tree layout. Full issue projection remains
+asynchronous: until it arrives, raw sessions use the final **Live tmux** fallback
+placement rather than client-side guesses about durable grouping or ordering.
 
 The project-local daemon board snapshot schema v5 carries one typed `projection`: ordered
 groups reference a single ordered item collection, items carry tree depth, and
@@ -79,6 +89,15 @@ az view create --project global --file view.json --scope selected_projects --sco
 az view select --project global --consumer tmux_selector orchestration
 az view get --project global --json orchestration
 ```
+
+In the TUI, `g` then `p` opens the scope selector. `0` selects **Global** and
+loads the root cross-project projection; numbered project entries select a
+single project's projection. Use `/` to filter larger project registries and
+arrow keys to navigate the filtered results. The status bar always identifies
+the active scope. Opening `V` manages views in that scope: Global uses
+user-level definitions and the `global_board` selection, while Project uses
+definitions and selection persisted by that project. Switching back restores
+that scope's selected view.
 
 The tmux selector status line identifies its selected saved view and prints the
 `az view select --project global --consumer tmux_selector VIEW` command used to

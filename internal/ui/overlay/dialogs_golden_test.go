@@ -392,7 +392,7 @@ func goldenProjectSelectorView(t *testing.T) string {
 			{Name: "otel-tui", Path: "/Users/riordan/prog/otel-tui"},
 		},
 	}
-	selector := NewProjectSelectorWithOptions(registry, WithCurrentProjectName("azedarach"), WithInitialCursor(1))
+	selector := NewProjectSelectorWithOptions(registry, WithCurrentProjectName("azedarach"), WithInitialCursor(2))
 	model, _ := selector.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
 	return model.(*ProjectSelector).View()
 }
@@ -687,7 +687,7 @@ func goldenProjectSelectorSmallView(t *testing.T) string {
 			{Name: "azedarach", Path: "/Users/riordan/prog/azedarach"},
 		},
 	}
-	selector := NewProjectSelectorWithOptions(registry, WithCurrentProjectName("azedarach"), WithInitialCursor(1))
+	selector := NewProjectSelectorWithOptions(registry, WithCurrentProjectName("azedarach"), WithInitialCursor(2))
 	model, _ := selector.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	return model.(*ProjectSelector).View()
 }

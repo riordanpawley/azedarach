@@ -43,6 +43,12 @@ func TestClient_BoardViewsMigrationSeedsDefaultsOnFreshDBAndRestartsIdempotently
 	var reopenedAt string
 	require.NoError(t, reopenedDB.QueryRowContext(ctx, `SELECT updated_at FROM board_views WHERE project_id = 'default' AND id = ?`, domain.BoardViewDefaultID).Scan(&reopenedAt))
 	assert.Equal(t, seededAt, reopenedAt, "idempotent reopen must not rewrite canonical built-ins")
+	var firstUpdatedAt, secondUpdatedAt string
+	require.NoError(t, reopenedDB.QueryRowContext(ctx, `SELECT updated_at FROM board_views WHERE project_id='default' AND id=?`, domain.BoardViewOrchestrationID).Scan(&firstUpdatedAt))
+	_, err = reopened.ListBoardViews(ctx, "default")
+	require.NoError(t, err)
+	require.NoError(t, reopenedDB.QueryRowContext(ctx, `SELECT updated_at FROM board_views WHERE project_id='default' AND id=?`, domain.BoardViewOrchestrationID).Scan(&secondUpdatedAt))
+	assert.Equal(t, firstUpdatedAt, secondUpdatedAt, "idempotent reseed should not mutate canonical built-in")
 }
 
 func TestClient_BoardViewsMigrationSeedsDefaultsForExistingDBAndKeepsCustomViews(t *testing.T) {
@@ -212,7 +218,7 @@ func seedBoardViewsPreMigrationDB(t *testing.T, dbPath string, includeCustomBoar
 	require.NoError(t, err)
 
 	for _, migration := range orderedMigrations {
-		if migration.id == boardViewsMigrationID || migration.id == "0045_issue_state_runtime_constraints" || migration.id == "0047_projection_delta_authority" {
+		if migration.id == "0019_issue_observation_events" || migration.id == boardViewsMigrationID || migration.id == "0035_interaction_requests" || migration.id == "0045_issue_state_runtime_constraints" || migration.id == humanAuthorityProjectionMigrationID || migration.id == projectionDeltaAuthorityMigrationID {
 			continue
 		}
 		_, err := db.Exec(`INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, migration.id, now)

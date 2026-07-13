@@ -46,7 +46,7 @@ func (c *Client) CommitProjectionDelta(ctx context.Context, params ProjectionDel
 		return domain.ProjectionDelta{}, err
 	}
 	var committed domain.ProjectionDelta
-	err = retrySQLiteBusy(ctx, func() error {
+	err = c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
 			return sqliteutil.WithWriteLock(c.dbPath, func() error {
 				db, err := c.dbHandle()
@@ -273,7 +273,7 @@ func (c *Client) AdvanceProjectionConsumerCursor(ctx context.Context, projectID,
 	if next < expected {
 		return &domain.ProjectionGapError{ProjectID: projectID, Expected: expected, Actual: next}
 	}
-	return retrySQLiteBusy(ctx, func() error {
+	return c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
 			return sqliteutil.WithWriteLock(c.dbPath, func() error {
 				db, err := c.dbHandle()

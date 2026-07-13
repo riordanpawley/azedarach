@@ -35,13 +35,14 @@ type runtimeProjectionEventKey struct {
 }
 
 type pendingRuntimeProjectionEvent struct {
-	key      runtimeProjectionEventKey
-	kind     runtimeProjectionEventKind
-	meta     protocol.Metadata
-	session  daemonstate.Session
-	worktree string
-	status   *git.GitStatus
-	timer    *time.Timer
+	key        runtimeProjectionEventKey
+	kind       runtimeProjectionEventKind
+	generation uint64
+	meta       protocol.Metadata
+	session    daemonstate.Session
+	worktree   string
+	status     *git.GitStatus
+	timer      *time.Timer
 }
 
 func newRuntimeProjectionEventCoalescer(d *Daemon, window time.Duration) *runtimeProjectionEventCoalescer {
@@ -111,19 +112,29 @@ func (c *runtimeProjectionEventCoalescer) schedule(ctx context.Context, next *pe
 		existing.session = next.session
 		existing.worktree = next.worktree
 		existing.status = next.status
+		existing.generation++
+		if existing.timer != nil {
+			existing.timer.Stop()
+		}
+		generation := existing.generation
+		existing.timer = time.AfterFunc(c.window, func() {
+			c.flush(next.key, generation)
+		})
 		return 0
 	}
+	next.generation = 1
+	generation := next.generation
 	next.timer = time.AfterFunc(c.window, func() {
-		c.flush(next.key)
+		c.flush(next.key, generation)
 	})
 	c.pending[next.key] = next
 	return 0
 }
 
-func (c *runtimeProjectionEventCoalescer) flush(key runtimeProjectionEventKey) {
+func (c *runtimeProjectionEventCoalescer) flush(key runtimeProjectionEventKey, generation uint64) {
 	c.mu.Lock()
 	pending := c.pending[key]
-	if pending == nil {
+	if pending == nil || pending.generation != generation {
 		c.mu.Unlock()
 		return
 	}

@@ -53,7 +53,7 @@ func TestDoneTasksInArchiveOrderSortsDescendantsBeforeAncestors(t *testing.T) {
 func TestProjectCleanupAdvisorSessionsStopsRuntimeBeforeProjectRemoval(t *testing.T) {
 	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
 	repoDir := t.TempDir()
-	client := issues.NewClient(repoDir, slog.Default())
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "project removal", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -106,7 +106,7 @@ func TestProjectCleanupArchiveDoneArchivesCompletedSubgraphBottomUp(t *testing.T
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -191,7 +191,7 @@ func TestIssueAutoArchiveArchivesDoneIssuesOlderThanRetention(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	oldDoneID, err := issuesClient.Create(ctx, issues.CreateTaskParams{

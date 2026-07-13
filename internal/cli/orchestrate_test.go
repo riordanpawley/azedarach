@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -2992,6 +2993,9 @@ func TestOrchestrateIntegrateApplyJSONReportsPreflightDeadlineWithRetry(t *testi
 		ProjectID: protocol.DefaultProjectID,
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+				return protocol.HelloAck{Accepted: true}, nil
+			},
 			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
@@ -3015,6 +3019,7 @@ func TestOrchestrateIntegrateApplyJSONReportsPreflightDeadlineWithRetry(t *testi
 			},
 		}),
 	}
+	deps.DaemonClient.WithReconnectPolicy(reconnect.Policy{MaxAttempts: 1})
 
 	output, err := captureStdoutAllowError(t, func() error {
 		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: child.String(), Apply: true, JSON: true})

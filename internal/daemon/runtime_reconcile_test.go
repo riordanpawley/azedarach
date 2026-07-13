@@ -40,7 +40,7 @@ func TestRuntimeReconcileReadsCrossProjectProjectionHealthWithoutRefreshing(t *t
 	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{Projects: []appconfig.Project{{ID: projectID, Name: "Runtime refresh", Path: root}}}); err != nil {
 		t.Fatal(err)
 	}
-	issueClient := issues.NewClientAtPath(filepath.Join(root, ".azedarach", "azedarach.db"), slog.Default())
+	issueClient := newMigratedIssueClientAtPath(t, filepath.Join(root, ".azedarach", "azedarach.db"), slog.Default())
 	_, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "Projected before reconcile", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -574,7 +574,9 @@ func TestRunInvokesStartupRuntimeReconcileWithBoundedTimeout(t *testing.T) {
 }
 
 func TestStartupRuntimeReconcileBeginsSessionRecoveryBeforeInteractionStaleness(t *testing.T) {
-	const waitForSessionRecovery = 5 * time.Second
+	// This test asserts startup ordering, not a five-second performance SLO.
+	// Race instrumentation can delay the second asynchronously scheduled phase.
+	const waitForSessionRecovery = 15 * time.Second
 
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
@@ -600,7 +602,7 @@ func TestStartupRuntimeReconcileBeginsSessionRecoveryBeforeInteractionStaleness(
 			Logger:                  slog.New(slog.NewTextHandler(io.Discard, nil)),
 			RuntimeReconcileTimeout: 20 * time.Second,
 		},
-		issues:       issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default()),
+		issues:       newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default()),
 		tmux:         tmux.NewClient(&signalingTmuxRunner{started: sessionRecoveryStarted}, slog.Default()),
 		sessionStore: daemonstate.NewStore(),
 		lock:         runtimeReconcileTestLock{},
@@ -1544,7 +1546,7 @@ func TestRuntimeReconcileIssuesRepairsLifecycleAcrossSixtyFiveIssueBoundary(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	issueClient := issues.NewClient(repoDir, slog.Default())
+	issueClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issueClient.CloseDB() })
 	issueIDs := make([]string, 0, runtimeReconcileIssueRepairLimit+1)
 	sessions := map[string]bool{}
@@ -1714,7 +1716,7 @@ func TestRefreshRuntimeForIssueMutationAsyncEventuallyUpdatesProjection(t *testi
 func TestSessionStatusDoesNotInvokeRuntimeReconcile(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() {
 		if err := issuesClient.CloseDB(); err != nil {
 			t.Fatalf("close issues db: %v", err)
@@ -1787,7 +1789,7 @@ func TestReconcileIssueResourcesPresentRunsForActiveRuntimeAttachmentsOnly(t *te
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
@@ -1860,7 +1862,7 @@ func TestRuntimeReconcileIssuesSkipsIssueResourceHookForSessionStartFreshness(t 
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })

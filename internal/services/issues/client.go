@@ -481,9 +481,10 @@ func hasParentChildOrphanConfirmation(ctx context.Context) bool {
 }
 
 const (
-	nextAlphaIssueIndexMetaKey = "issue:id_next_alpha_index"
-	sqliteBusyPrimaryCode      = 5
-	sqliteBusyRetryDelay       = 100 * time.Millisecond
+	nextAlphaIssueIndexMetaKey  = "issue:id_next_alpha_index"
+	sqliteBusyPrimaryCode       = 5
+	defaultSQLiteBusyTimeout    = 5 * time.Second
+	defaultSQLiteBusyRetryDelay = 100 * time.Millisecond
 	// Keep at least one foreground reader available while Linear sync owns a write connection.
 	sqliteMaxOpenConns         = 4
 	issueGraphClosureProjectID = "default"
@@ -491,18 +492,58 @@ const (
 
 // Client wraps local SQLite task store operations.
 type Client struct {
-	dbPath string
-	logger *slog.Logger
+	dbPath               string
+	logger               *slog.Logger
+	sqliteBusyTimeout    time.Duration
+	sqliteBusyRetryDelay time.Duration
+	sqliteBusyWait       func(context.Context, time.Duration) error
 
 	mu             sync.Mutex
 	db             *sql.DB
 	walMu          sync.Mutex
 	lastWALCheckAt time.Time
 
-	stateModelV2MigrationFailureHook func(stage string) error
-	boardViewsMigrationFailureHook   func(stage string) error
-	interactionMu                    sync.RWMutex
-	interactionCache                 map[string]domain.InteractionRequest
+	stateModelV2MigrationFailureHook   func(stage string) error
+	boardViewsMigrationFailureHook     func(stage string) error
+	humanAuthorityMigrationFailureHook func(stage string) error
+	interactionMu                      sync.RWMutex
+	interactionCache                   map[string]domain.InteractionRequest
+}
+
+// ClientOption configures optional issue-store behavior while preserving
+// production defaults for ordinary constructors.
+type ClientOption func(*Client)
+
+// WithSQLiteBusyPolicy overrides the SQLite busy timeout and retry backoff.
+// It is primarily useful for bounded callers and deterministic tests.
+func WithSQLiteBusyPolicy(timeout, retryDelay time.Duration) ClientOption {
+	return func(c *Client) {
+		if timeout > 0 {
+			c.sqliteBusyTimeout = timeout
+		}
+		if retryDelay > 0 {
+			c.sqliteBusyRetryDelay = retryDelay
+		}
+	}
+}
+
+func withSQLiteBusyWait(wait func(context.Context, time.Duration) error) ClientOption {
+	return func(c *Client) {
+		if wait != nil {
+			c.sqliteBusyWait = wait
+		}
+	}
+}
+
+func waitSQLiteBusyRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 type sqlIssueExecer interface {
@@ -567,7 +608,7 @@ func issueMutationLockForPath(dbPath string) *sync.Mutex {
 }
 
 // NewClient creates a SQLite-backed issue store client rooted at the repository.
-func NewClient(repoDir string, logger *slog.Logger) *Client {
+func NewClient(repoDir string, logger *slog.Logger, opts ...ClientOption) *Client {
 	dbPath, err := resolveDBPath(repoDir)
 	if err != nil {
 		// Keep daemon bootstrap non-fatal and surface DB errors on first operation.
@@ -583,18 +624,27 @@ func NewClient(repoDir string, logger *slog.Logger) *Client {
 		}
 		dbPath = filepath.Join(fallbackRoot, ".azedarach", "azedarach.db")
 	}
-	return NewClientAtPath(dbPath, logger)
+	return NewClientAtPath(dbPath, logger, opts...)
 }
 
 // NewClientAtPath creates a SQLite-backed issue store client for tests and explicit wiring.
-func NewClientAtPath(dbPath string, logger *slog.Logger) *Client {
+func NewClientAtPath(dbPath string, logger *slog.Logger, opts ...ClientOption) *Client {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Client{
-		dbPath: dbPath,
-		logger: logger,
+	client := &Client{
+		dbPath:               dbPath,
+		logger:               logger,
+		sqliteBusyTimeout:    defaultSQLiteBusyTimeout,
+		sqliteBusyRetryDelay: defaultSQLiteBusyRetryDelay,
+		sqliteBusyWait:       waitSQLiteBusyRetry,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(client)
+		}
+	}
+	return client
 }
 
 func (c *Client) dbHandle() (*sql.DB, error) {
@@ -620,9 +670,11 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		}
 	}
 
+	busyTimeoutMillis := max(c.sqliteBusyTimeout.Milliseconds(), int64(1))
 	dsn := fmt.Sprintf(
-		"file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate",
+		"file:%s?_pragma=busy_timeout(%d)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate",
 		filepath.ToSlash(c.dbPath),
+		busyTimeoutMillis,
 	)
 	db, err := tracesqlite.Open(dsn)
 	if err != nil {
@@ -2321,7 +2373,7 @@ func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 
 // Update changes an issue status.
 func (c *Client) Update(ctx context.Context, id string, status domain.Status) error {
-	return retrySQLiteBusy(ctx, func() error {
+	return c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
 			return sqliteutil.WithWriteLock(c.dbPath, func() error {
 				return c.updateLocked(ctx, id, status)
@@ -2335,7 +2387,7 @@ func (c *Client) Update(ctx context.Context, id string, status domain.Status) er
 // update so a concurrent terminal/backlog/archive transition always wins.
 func (c *Client) RepairReadyIdleEngagement(ctx context.Context, id string) (bool, error) {
 	var repaired bool
-	err := retrySQLiteBusy(ctx, func() error {
+	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
 			return sqliteutil.WithWriteLock(c.dbPath, func() error {
 				db, err := c.dbHandle()
@@ -2776,7 +2828,7 @@ type UpsertExternalIssueRefParams struct {
 // Create inserts a new issue and returns its generated id.
 func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, error) {
 	var issueID string
-	err := retrySQLiteBusy(ctx, func() error {
+	err := c.retrySQLiteBusy(ctx, func() error {
 		var err error
 		issueID, err = c.createOnce(ctx, params)
 		return err
@@ -2970,7 +3022,7 @@ func (c *Client) CreateWithRuntime(ctx context.Context, projectID string, params
 		return domain.Task{}, err
 	}
 	var task domain.Task
-	err = retrySQLiteBusy(ctx, func() error {
+	err = c.retrySQLiteBusy(ctx, func() error {
 		var err error
 		task, err = c.GetWithRuntime(ctx, projectID, id)
 		return err
@@ -2981,7 +3033,7 @@ func (c *Client) CreateWithRuntime(ctx context.Context, projectID string, params
 	return task, nil
 }
 
-func retrySQLiteBusy(ctx context.Context, fn func() error) error {
+func (c *Client) retrySQLiteBusy(ctx context.Context, fn func() error) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -2995,10 +3047,8 @@ func retrySQLiteBusy(ctx context.Context, fn func() error) error {
 			return err
 		}
 		lastErr = err
-		select {
-		case <-ctx.Done():
+		if err := c.sqliteBusyWait(ctx, c.sqliteBusyRetryDelay); err != nil {
 			return lastErr
-		case <-time.After(sqliteBusyRetryDelay):
 		}
 	}
 }

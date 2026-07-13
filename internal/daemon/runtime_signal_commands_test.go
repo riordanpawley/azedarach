@@ -31,6 +31,19 @@ func TestRuntimeSignalIngestGitHookPersistsFastProjectionAndQueuesEnrichment(t *
 		RepoDir: repoDir,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+	t.Cleanup(func() {
+		if d.runtimeProjectionCoalescer != nil {
+			d.runtimeProjectionCoalescer.Close()
+		}
+		if d.runtimeReconcileQueue != nil {
+			_ = d.runtimeReconcileQueue.Close()
+		}
+		if d.gitStatusRefreshQueue != nil {
+			_ = d.gitStatusRefreshQueue.Close()
+		}
+		d.closeIssueClients()
+		d.closeRuntimeStateStores()
+	})
 	projectID := "proj-signals"
 
 	resp, err := d.command(context.Background(), protocol.RequestEnvelope{

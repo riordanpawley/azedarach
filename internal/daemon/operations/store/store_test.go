@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -10,6 +11,47 @@ import (
 	"testing"
 	"time"
 )
+
+func TestSQLiteStoreBackfillsLegacyOperationsAfterOtherAuthorityConversion(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_migrations(id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, artifact_checksum TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range orderedMigrations {
+		sqlText, err := loadMigrationSQL(migration.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(sqlText); err != nil {
+			t.Fatalf("apply legacy fixture %s: %v", migration.id, err)
+		}
+		if _, err := db.Exec(`INSERT INTO schema_migrations(id,applied_at) VALUES(?, 'legacy')`, migration.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := NewAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = repo.Close() })
+	if _, err := repo.List(context.Background(), Query{Limit: 1}); err != nil {
+		t.Fatalf("active operation store open: %v", err)
+	}
+	for _, artifact := range migrationArtifacts {
+		var checksum string
+		if err := repo.db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, artifact.ID).Scan(&checksum); err != nil {
+			t.Fatal(err)
+		}
+		if checksum != artifact.Checksum {
+			t.Fatalf("migration %s checksum = %q, want %q", artifact.ID, checksum, artifact.Checksum)
+		}
+	}
+}
 
 func TestSQLiteStoreCreateGetAndList(t *testing.T) {
 	t.Parallel()

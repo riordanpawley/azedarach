@@ -111,7 +111,7 @@ var registry = []ActionSpec{
 	{ID: ActionOpenOperationQueue, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "Q", Display: "Q"}}, Hint: "ops"},
 	{ID: ActionOpenBoardViews, Mode: types.ModeNormal, Category: "Panes", Keys: []KeySpec{{Input: "V", Display: "V"}}, Hint: "views", Help: "Open View Configurator"},
 	{ID: ActionOpenGitPane, Mode: types.ModeNormal, Category: "Panes", Keys: []KeySpec{{Input: "G", Display: "G"}}, Hint: "git", Help: "Open project root Git pane"},
-	{ID: ActionToggleView, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "tab", Display: "Tab"}}, Hint: "view"},
+	{ID: ActionToggleView, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "tab", Display: "Tab"}, {Input: "shift+tab", Display: "Shift+Tab"}}, Hint: "view", HintKey: "Tab/Shift+Tab"},
 	{ID: ActionPullBase, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "p", Display: "p"}}, Hint: "pull base"},
 	{ID: ActionQuit, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "q", Display: "q"}}, Hint: "quit"},
 
@@ -187,7 +187,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "f", Help: "Open filter menu"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: ",", Help: "Open sort menu"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "/", Help: "Open search"},
-	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "g then p", Help: "Open project selector"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "g then p", Help: "Open Global/project scope selector"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "g then s", Help: "Open spec workspace"},
 
 	{Mode: types.ModeNormal, Category: "Navigation", HelpKey: "h/l", Help: "Move between columns"},
@@ -230,7 +230,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "N", Help: "Open notification action center"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "Q", Help: "Open operation queue"},
 
-	{Mode: types.ModeNormal, Category: "Other", HelpKey: "Tab", Help: "Switch to next configured view"},
+	{Mode: types.ModeNormal, Category: "Other", HelpKey: "Tab/Shift+Tab", Help: "Switch to next/previous configured view"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "esc", Help: "Close overlay / exit mode"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "ctrl+g", Help: "Close all stacked overlays"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "q", Help: "Quit"},

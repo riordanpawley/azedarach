@@ -58,10 +58,11 @@ const (
 	defaultIssueContextRiskDays = 14
 	defaultOperationListLimit   = 50
 	sessionStartCommandTimeout  = 5 * time.Minute
-	branchMergeToBaseTimeout    = 2 * time.Minute
+	branchMergeToBaseTimeout    = domain.IntegrationClientTimeout
 	daemonCommandTimeout        = 15 * time.Second
 	prCommandTimeout            = 2 * time.Minute
-	issueCloseCleanupTimeout    = 10 * time.Minute
+	issueCloseCleanupTimeout    = domain.IntegrationClientTimeout
+	issueBulkCleanupItemTimeout = domain.IntegrationCloseTimeout
 	issueCreateCommandTimeout   = 10 * time.Second
 	issueCreateAutostartTimeout = 12 * time.Second
 	exitCodeHardFailure         = 1
@@ -73,14 +74,15 @@ var primeLookPath = exec.LookPath
 var primeDaemonReadTimeout = 8 * time.Second
 
 type Dependencies struct {
-	Config         *config.Config
-	DaemonClient   *daemonclient.Client
-	DaemonSocket   string
-	Logger         *slog.Logger
-	ProjectID      string
-	RepoDir        string
-	RuntimeRepoDir string
-	TraceContext   context.Context
+	Config               *config.Config
+	DaemonClient         *daemonclient.Client
+	DaemonSocket         string
+	Logger               *slog.Logger
+	ProjectID            string
+	RepoDir              string
+	RuntimeRepoDir       string
+	TraceContext         context.Context
+	AutostartRetryPolicy *autoclient.AutostartRetryPolicy
 }
 
 type repeatedStringFlag []string
@@ -437,6 +439,7 @@ type SessionCaptureOptions struct {
 	IssueID string
 	Lines   int
 	JSON    bool
+	Raw     bool
 }
 
 type WorktreeCreateOptions struct {
@@ -609,6 +612,14 @@ func ParseSessionRestartAllArgs(args []string) (SessionRestartAllOptions, error)
 }
 
 func ParseSessionCaptureArgs(args []string) (SessionCaptureOptions, error) {
+	return parseSessionCaptureArgs(args, false)
+}
+
+func ParseOrchestrateCaptureArgs(args []string) (SessionCaptureOptions, error) {
+	return parseSessionCaptureArgs(args, true)
+}
+
+func parseSessionCaptureArgs(args []string, allowRaw bool) (SessionCaptureOptions, error) {
 	opts := SessionCaptureOptions{Lines: 120}
 	fs := flag.NewFlagSet("session capture", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -617,6 +628,9 @@ func ParseSessionCaptureArgs(args []string) (SessionCaptureOptions, error) {
 	fs.StringVar(&opts.IssueID, "id", "", "issue id")
 	fs.IntVar(&opts.Lines, "lines", opts.Lines, "number of recent pane lines to capture")
 	fs.BoolVar(&opts.JSON, "json", false, "print JSON output")
+	if allowRaw {
+		fs.BoolVar(&opts.Raw, "raw", false, "print the unparsed pane capture")
+	}
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return SessionCaptureOptions{}, err
 	}
@@ -1311,29 +1325,9 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 }
 
 func SessionCaptureCommand(deps *Dependencies, opts SessionCaptureOptions) error {
-	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
-	defer cancel()
-	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
-		return err
-	}
-
-	var target sessionIssueTarget
-	var err error
-	if strings.TrimSpace(opts.Project) != "" {
-		target, err = resolveExplicitSessionStatusTarget(deps, opts.IssueID, opts.Project, opts.IssueID)
-	} else {
-		target, err = resolveSessionStatusTarget(deps, opts.IssueID)
-	}
+	result, err := captureSessionPane(deps, opts, "capturing session pane")
 	if err != nil {
 		return err
-	}
-	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
-	defer restoreProject()
-
-	deps.Logger.Info("capturing session pane", "project_id", target.ProjectID, "issue_id", target.IssueID, "lines", opts.Lines)
-	result, err := deps.DaemonClient.CaptureSession(ctx, target.IssueID, daemonclient.CaptureSessionOptions{Lines: opts.Lines})
-	if err != nil {
-		return fmt.Errorf("failed to capture session pane: %w", err)
 	}
 	if opts.JSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -1347,8 +1341,36 @@ func SessionCaptureCommand(deps *Dependencies, opts SessionCaptureOptions) error
 	return nil
 }
 
+func captureSessionPane(deps *Dependencies, opts SessionCaptureOptions, logMessage string) (protocol.SessionCaptureResponseBody, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return protocol.SessionCaptureResponseBody{}, err
+	}
+
+	var target sessionIssueTarget
+	var err error
+	if strings.TrimSpace(opts.Project) != "" {
+		target, err = resolveExplicitSessionStatusTarget(deps, opts.IssueID, opts.Project, opts.IssueID)
+	} else {
+		target, err = resolveSessionStatusTarget(deps, opts.IssueID)
+	}
+	if err != nil {
+		return protocol.SessionCaptureResponseBody{}, err
+	}
+	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
+	defer restoreProject()
+
+	deps.Logger.Info(logMessage, "project_id", target.ProjectID, "issue_id", target.IssueID, "lines", opts.Lines, "raw", opts.Raw)
+	result, err := deps.DaemonClient.CaptureSession(ctx, target.IssueID, daemonclient.CaptureSessionOptions{Lines: opts.Lines})
+	if err != nil {
+		return protocol.SessionCaptureResponseBody{}, fmt.Errorf("failed to capture session pane: %w", err)
+	}
+	return result, nil
+}
+
 func OrchestrateCaptureCommand(deps *Dependencies, opts SessionCaptureOptions) error {
-	return SessionCaptureCommand(deps, opts)
+	return orchestrateCaptureCommand(deps, opts)
 }
 
 func SessionDiagnoseCommand(deps *Dependencies, issueID string) error {
@@ -2073,7 +2095,7 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 func resolveExplicitBranchMergeTarget(ctx context.Context, deps *Dependencies, source daemonclient.Worktree, opts BranchMergeToBaseOptions) (mergeBaseTarget, mergeTargetDecision, error) {
 	targetID := strings.TrimSpace(opts.Target)
 	if targetID == "" {
-		return resolveMergeToBaseTarget(ctx, deps, source.IssueID, opts.AllowBaseForChild)
+		return resolveProtectedMergeToBaseTarget(ctx, deps, source.IssueID, opts.AllowBaseForChild)
 	}
 	if isBaseMergeTarget(targetID) {
 		defaultBase := resolveCLIBaseBranch(deps.Config)
@@ -2214,9 +2236,12 @@ type mergeTargetDecision struct {
 	AncestorChain []string
 }
 
-func resolveMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID string, allowBaseForChild bool) (mergeBaseTarget, mergeTargetDecision, error) {
+// resolveProtectedMergeToBaseTarget is mutation-only. Requiring human
+// acceptance lets the daemon refuse base integration for origin workflow mode
+// while still resolving child mutations to an active ancestor worktree.
+func resolveProtectedMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID string, allowBaseForChild bool) (mergeBaseTarget, mergeTargetDecision, error) {
 	defaultBase := resolveCLIBaseBranch(deps.Config)
-	target, err := deps.DaemonClient.TaskMergeBaseTarget(ctx, issueID, defaultBase, allowBaseForChild)
+	target, err := deps.DaemonClient.TaskMergeBaseTarget(ctx, issueID, defaultBase, allowBaseForChild, true)
 	if err != nil {
 		return mergeBaseTarget{}, mergeTargetDecision{}, err
 	}
@@ -2258,9 +2283,16 @@ func BranchAgentMergeCommand(deps *Dependencies, opts BranchAgentMergeOptions) e
 	agentIssueID := source.IssueID
 	agentWorktree := source.Path
 	if requestedBaseTarget {
-		baseTarget, _, err := resolveMergeToBaseTarget(ctx, deps, source.IssueID, false)
+		defaultBase := resolveCLIBaseBranch(deps.Config)
+		resolved, err := deps.DaemonClient.TaskMergeBaseTarget(ctx, source.IssueID, defaultBase, false, true)
 		if err != nil {
 			return err
+		}
+		baseTarget := mergeBaseTarget{
+			TargetID:       resolved.TargetID,
+			Branch:         resolved.Branch,
+			WorktreePath:   resolved.WorktreePath,
+			BranchAttached: resolved.BranchAttached,
 		}
 		targetID = baseTarget.TargetID
 		targetRef = baseTarget.Branch
@@ -3762,7 +3794,7 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 }
 
 func ParseIssueCleanupArgs(args []string) (IssueCleanupOptions, error) {
-	opts := IssueCleanupOptions{Action: "closed", PerIssueTimeout: issueCloseCleanupTimeout}
+	opts := IssueCleanupOptions{Action: "closed", PerIssueTimeout: issueBulkCleanupItemTimeout}
 	var idsCSV, statusesCSV, updatedBefore string
 	fs := flag.NewFlagSet("issue cleanup", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -3777,8 +3809,8 @@ func ParseIssueCleanupArgs(args []string) (IssueCleanupOptions, error) {
 	fs.StringVar(&opts.Action, "action", "closed", "lifecycle action: closed or cancelled")
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "preview ordered actions without changing issues")
 	fs.BoolVar(&opts.JSON, "json", false, "output structured per-issue results")
-	fs.DurationVar(&opts.PerIssueTimeout, "per-ticket-timeout", issueCloseCleanupTimeout, "maximum time for each ticket cleanup")
-	fs.DurationVar(&opts.PerIssueTimeout, "per-issue-timeout", issueCloseCleanupTimeout, "deprecated alias for --per-ticket-timeout")
+	fs.DurationVar(&opts.PerIssueTimeout, "per-ticket-timeout", issueBulkCleanupItemTimeout, "maximum time for each ticket cleanup")
+	fs.DurationVar(&opts.PerIssueTimeout, "per-issue-timeout", issueBulkCleanupItemTimeout, "deprecated alias for --per-ticket-timeout")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCleanupOptions{}, err
 	}
@@ -8507,6 +8539,8 @@ func StopDaemonCommand(deps *Dependencies) error {
 
 type primeTemplateData struct {
 	ActiveIssueID            string
+	GitWorkflowMode          string
+	OriginWorkflow           bool
 	SpecEnabled              bool
 	PrimeEvidenceKey         string
 	OrchestrationVia         string
@@ -8550,6 +8584,10 @@ func primeCommandTo(deps *Dependencies, stdout io.Writer, render primeRenderFunc
 	learningSection := ""
 	var learningConfirmation *protocol.LearnActivationConfirmRequestBody
 	specEnabled := deps != nil && deps.Config != nil && deps.Config.Spec.Enabled
+	gitWorkflowMode := "worktree"
+	if deps != nil && deps.Config != nil && strings.TrimSpace(deps.Config.Git.WorkflowMode) != "" {
+		gitWorkflowMode = strings.TrimSpace(deps.Config.Git.WorkflowMode)
+	}
 	orchestrationVia := primeOrchestrationVia(deps)
 	orchestrationViaAz := strings.EqualFold(orchestrationVia, "az")
 	orchestrationViaNative := strings.EqualFold(orchestrationVia, "native")
@@ -8684,6 +8722,8 @@ func primeCommandTo(deps *Dependencies, stdout io.Writer, render primeRenderFunc
 	finishRender := primePhase(deps, "render", "rendering primer output")
 	output, err := render("prime_output", primeTemplateData{
 		ActiveIssueID:            issueID,
+		GitWorkflowMode:          gitWorkflowMode,
+		OriginWorkflow:           strings.EqualFold(gitWorkflowMode, "origin"),
 		SpecEnabled:              specEnabled,
 		PrimeEvidenceKey:         primeEvidenceKey,
 		OrchestrationVia:         orchestrationVia,
@@ -10014,6 +10054,9 @@ func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) er
 		concreteLauncher.WithLogger(deps.Logger)
 	}
 	orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(deps.DaemonClient), launcher)
+	if deps != nil && deps.AutostartRetryPolicy != nil {
+		orch.WithRetryPolicy(*deps.AutostartRetryPolicy)
+	}
 	ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,
 		ClientName:      clientName,
@@ -10085,6 +10128,12 @@ func startDaemonLauncher(ctx context.Context, deps *Dependencies) error {
 }
 
 func shouldAutostartAfterDaemonReadError(err error) bool {
+	var readWaitTimeout *daemonclient.ReadWaitTimeoutError
+	if errors.As(err, &readWaitTimeout) {
+		// The daemon answered and its projection read exceeded a bounded wait.
+		// This is not evidence that the transport or daemon process is absent.
+		return false
+	}
 	if reconnect.IsTransientTransportError(err) {
 		return true
 	}

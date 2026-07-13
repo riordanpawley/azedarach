@@ -23,7 +23,7 @@ import (
 
 func (m Model) Init() tea.Cmd {
 	attach := m.attachDaemonCmd()
-	if m.globalBoard {
+	if m.scope.IsGlobal() {
 		attach = m.loadGlobalBoardCmd(m.globalLoadSeq)
 	}
 	return tea.Batch(
@@ -104,7 +104,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Key == overlay.BoardViewSaveKey {
 			m.overlayStack.Pop()
 			saved, _ := msg.Value.(overlay.BoardViewSaveMsg)
-			return m, m.saveBoardViewCmd(saved.View)
+			return m, m.saveBoardViewCmd(saved.View, saved.Scope)
 		}
 		if msg.Key == overlay.BoardViewDeleteKey {
 			m.overlayStack.Pop()
@@ -269,6 +269,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case issuesLoadedMsg:
+		if m.scope.IsGlobal() {
+			if msg.eventsCancel != nil {
+				msg.eventsCancel()
+			}
+			return m, nil
+		}
 		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
 			if msg.eventsCancel != nil {
 				msg.eventsCancel()
@@ -420,16 +426,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case globalBoardLoadedMsg:
-		if !m.globalBoard || msg.seq < m.globalLoadSeq {
+		if (!m.scope.IsGlobal() && !m.globalScopeSwitchPending) || msg.seq < m.globalLoadSeq {
 			return m, nil
 		}
+		m.projectSwitchInFlight = false
 		if msg.err != nil {
+			m.globalScopeSwitchPending = false
 			m.loading = false
 			m.boardRefreshing = false
 			m.addToast(Toast{Level: ToastError, Message: fmt.Sprintf("Global board load failed: %v", msg.err), Expires: time.Now().Add(6 * time.Second)})
 			return m, nil
 		}
 		m.applyGlobalBoardSnapshot(msg.snapshot)
+		m.globalScopeSwitchPending = false
+		m.issueRefreshInFlight = false
+		m.issueRefreshPending = false
+		m.clearDaemonEventStream()
 		m.loading = false
 		m.boardRefreshing = false
 		m.reconcileCursorAfterIssuesRefresh()
@@ -473,6 +485,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.waitForLogStreamEventCmd()
 
 	case boardViewsLoadedMsg:
+		if msg.scope != m.currentBoardViewCommandScope() {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.addToast(Toast{
 				Level:   ToastError,
@@ -485,9 +500,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(msg.selectedViewID) != "" {
 			m.selectedBoardViewID = domain.NormalizeBoardViewID(msg.selectedViewID)
 		}
+		if msg.scope.global {
+			return m, m.openOverlay(overlay.NewGlobalBoardViewOverlay(msg.globalViews, m.selectedBoardViewID))
+		}
 		return m, m.openOverlay(overlay.NewBoardViewOverlay(m.boardViews, m.selectedBoardViewID))
 
 	case boardViewSelectedMsg:
+		if msg.scope != m.currentBoardViewCommandScope() {
+			return m, nil
+		}
 		m.boardRefreshing = false
 		if msg.err != nil {
 			m.addToast(Toast{
@@ -504,15 +525,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(2 * time.Second),
 		})
 		m.boardRefreshing = true
+		if msg.scope.global {
+			m.globalLoadSeq++
+			return m, m.loadGlobalBoardCmd(m.globalLoadSeq)
+		}
 		return m, m.scheduleIssuesRefreshCmd()
 
 	case boardViewMutatedMsg:
+		if msg.scope != m.currentBoardViewCommandScope() {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.addToast(Toast{Level: ToastError, Message: fmt.Sprintf("Could not %s board view: %v", msg.action, msg.err), Expires: time.Now().Add(6 * time.Second)})
 			return m, m.loadBoardViewsCmd()
 		}
 		m.addToast(Toast{Level: ToastSuccess, Message: fmt.Sprintf("Board view %s: %s", msg.action, msg.viewID), Expires: time.Now().Add(3 * time.Second)})
 		m.boardRefreshing = true
+		if msg.scope.global {
+			m.globalLoadSeq++
+			return m, tea.Batch(m.loadGlobalBoardCmd(m.globalLoadSeq), m.loadBoardViewsCmd())
+		}
 		return m, tea.Batch(m.scheduleIssuesRefreshCmd(), m.loadBoardViewsCmd())
 
 	case projectOrchestratorLoadedMsg:
@@ -568,7 +600,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Expire old toasts and refresh issues
 		m.expireToasts()
 		m.boardRefreshing = true
-		if m.globalBoard {
+		if m.scope.IsGlobal() {
 			m.globalLoadSeq++
 			return m, tea.Batch(m.loadGlobalBoardCmd(m.globalLoadSeq), tickEvery(5*time.Second))
 		}
@@ -1237,17 +1269,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	case overlay.ProjectSelectedMsg:
-		// Close overlay
+	case overlay.ScopeSelectedMsg:
 		m.overlayStack.Pop()
 		m.loading = false
 		m.boardRefreshing = true
+		m.clearDrillDown()
+		if msg.Global {
+			m.beginBoardViewScopeTransition()
+			m.globalScopeSwitchPending = !m.scope.IsGlobal()
+			m.projectSwitchFromGlobal = false
+			m.projectSwitchInFlight = true
+			m.issueRefreshSeq++
+			m.globalLoadSeq++
+			m.beginMutationFeedback("Switching scope: Global")
+			return m, m.loadGlobalBoardCmd(m.globalLoadSeq)
+		}
+		if strings.TrimSpace(msg.Project.Name) == "" || strings.TrimSpace(msg.Project.Path) == "" {
+			m.boardRefreshing = false
+			m.addToast(Toast{Level: ToastError, Message: "Selected project scope is unavailable", Expires: time.Now().Add(4 * time.Second)})
+			return m, nil
+		}
+		m.projectSwitchFromGlobal = m.scope.IsGlobal()
+		m.beginBoardViewScopeTransition()
+		m.scope = projectTUIScope()
 		m.projectSwitchInFlight = true
 		m.issueRefreshSeq++
 		m.projectSwitchSeq++
-		m.beginMutationFeedback(fmt.Sprintf("Switching project: %s", msg.Project.Name))
-
-		// Switch project runtime context and reload issues.
+		m.beginMutationFeedback(fmt.Sprintf("Switching scope: Project: %s", msg.Project.Name))
 		return m, m.switchProjectCmd(msg.Project)
 
 	case projectSwitchResultMsg:
@@ -1259,7 +1307,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if m.projectSwitchFromGlobal {
-				m.globalBoard = true
+				m.scope = globalTUIScope()
 				m.projectSwitchFromGlobal = false
 				m.pendingUIOpenTaskID = ""
 			}
@@ -1298,6 +1346,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
 		m.boardView = msg.boardView
+		m.selectedBoardViewID = string(msg.boardView.ID)
 		m.boardColumns = cloneBoardViewColumnSnapshots(msg.boardColumns)
 		m.boardOrdered = append([]domain.Task(nil), msg.boardOrdered...)
 		m.boardProjection = msg.boardProjection
@@ -2382,6 +2431,7 @@ func (m *Model) applyUICommandEvent(event protocol.EventEnvelope) tea.Cmd {
 		m.loading = false
 		m.boardRefreshing = true
 		m.projectSwitchInFlight = true
+		m.beginBoardViewScopeTransition()
 		m.issueRefreshSeq++
 		m.projectSwitchSeq++
 		m.beginMutationFeedback(fmt.Sprintf("Switching project: %s", project.Name))

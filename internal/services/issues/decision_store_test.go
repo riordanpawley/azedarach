@@ -13,6 +13,7 @@ import (
 )
 
 func TestDecisionStore_RecordAndLinks(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -141,6 +142,7 @@ func TestDecisionStore_RecordAndLinks(t *testing.T) {
 }
 
 func TestDecisionStore_QuerySearchUsesFTSAndCoversDecisionFields(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -236,6 +238,7 @@ func TestDecisionStore_QuerySearchUsesFTSAndCoversDecisionFields(t *testing.T) {
 }
 
 func TestDecisionStore_AuditLogIsolatedFromSpecAudit(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	seedIssue(t, client, "cgn", "issue")
@@ -280,6 +283,7 @@ func TestDecisionStore_AuditLogIsolatedFromSpecAudit(t *testing.T) {
 }
 
 func TestDecisionStore_ConsequencesRoundTrip(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -304,6 +308,7 @@ func TestDecisionStore_ConsequencesRoundTrip(t *testing.T) {
 }
 
 func TestDecisionStore_ValidationErrors(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 

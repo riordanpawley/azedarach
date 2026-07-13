@@ -12,8 +12,9 @@ import (
 )
 
 func TestBoardViewsSeedDefaultsAndIsolateProjects(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
+	client := newTestClient(t)
 	t.Cleanup(func() {
 		if err := client.CloseDB(); err != nil {
 			t.Fatalf("CloseDB error: %v", err)
@@ -52,8 +53,9 @@ func TestBoardViewsSeedDefaultsAndIsolateProjects(t *testing.T) {
 }
 
 func TestBoardViewCorruptDefinitionFailsSafely(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
+	client := newTestClient(t)
 	t.Cleanup(func() {
 		if err := client.CloseDB(); err != nil {
 			t.Fatalf("CloseDB error: %v", err)
@@ -81,8 +83,9 @@ func TestBoardViewCorruptDefinitionFailsSafely(t *testing.T) {
 }
 
 func TestBoardViewInvalidTypedDefinitionFailsSafely(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
+	client := newTestClient(t)
 	t.Cleanup(func() {
 		if err := client.CloseDB(); err != nil {
 			t.Fatalf("CloseDB error: %v", err)
@@ -111,8 +114,9 @@ func TestBoardViewInvalidTypedDefinitionFailsSafely(t *testing.T) {
 }
 
 func TestBoardViewsReseedBuiltInDefinitions(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
+	client := newTestClient(t)
 	t.Cleanup(func() {
 		if err := client.CloseDB(); err != nil {
 			t.Fatalf("CloseDB error: %v", err)
@@ -153,8 +157,9 @@ func TestBoardViewsReseedBuiltInDefinitions(t *testing.T) {
 }
 
 func TestBoardViewsMigrateLegacyBuiltInsAndPreserveCustomIDConflict(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
+	client := newTestClient(t)
 	t.Cleanup(func() { _ = client.CloseDB() })
 	projectID := "proj-board-upgrade"
 	db, err := client.dbHandle()
@@ -209,11 +214,15 @@ func TestBoardViewsMigrateLegacyBuiltInsAndPreserveCustomIDConflict(t *testing.T
 	if preserved.BuiltIn || preserved.View.Title != custom.Title {
 		t.Fatalf("preserved custom = %+v", preserved)
 	}
+	if got := preserved.UpdatedAt.Format(time.RFC3339Nano); got != now {
+		t.Fatalf("preserved custom updated_at = %q, want %q", got, now)
+	}
 }
 
 func TestBoardViewsCatalogMigrationRollsBackOnCorruptIDConflict(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
+	client := newTestClient(t)
 	t.Cleanup(func() { _ = client.CloseDB() })
 	projectID := "proj-board-corrupt-upgrade"
 	db, err := client.dbHandle()

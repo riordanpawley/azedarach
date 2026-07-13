@@ -2,18 +2,22 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
 func TestApplyGlobalBoardSnapshotScopesDuplicateIssueIDs(t *testing.T) {
 	m := New(config.DefaultConfig())
+	m.projectOrchestrator = &projectOrchestratorSnapshot{Name: "stale-project"}
 	view := domain.DefaultBoardView()
 	group := view.Columns[0].ID
 	snapshot := protocol.GlobalSnapshotResponseBody{
@@ -33,6 +37,9 @@ func TestApplyGlobalBoardSnapshotScopesDuplicateIssueIDs(t *testing.T) {
 		},
 	}
 	m.applyGlobalBoardSnapshot(snapshot)
+	if m.projectOrchestrator != nil {
+		t.Fatal("global scope retained project orchestrator chrome")
+	}
 	if len(m.tasks) != 2 || m.tasks[0].ID == m.tasks[1].ID {
 		t.Fatalf("global tasks = %+v, want two scoped identities", m.tasks)
 	}
@@ -48,7 +55,7 @@ func TestApplyGlobalBoardSnapshotScopesDuplicateIssueIDs(t *testing.T) {
 
 func TestGlobalBoardActionHydratesOwningProjectBeforeMutation(t *testing.T) {
 	m := New(config.DefaultConfig())
-	m.globalBoard = true
+	m.scope = globalTUIScope()
 	m.tasks = []domain.Task{{ID: "alpha::ddm", Title: "Issue"}}
 	m.boardView = domain.DefaultBoardView()
 	m.boardColumns = []domain.BoardViewColumnSnapshot{{Definition: m.boardView.Columns[0], Tasks: m.tasks}}
@@ -58,14 +65,14 @@ func TestGlobalBoardActionHydratesOwningProjectBeforeMutation(t *testing.T) {
 
 	next, cmd := m.leaveGlobalBoardForCurrentTask()
 	got := next.(Model)
-	if got.globalBoard || !got.projectSwitchInFlight || cmd == nil || got.pendingUIOpenTaskID != "ddm" {
-		t.Fatalf("route state global=%v switching=%v cmd=%v", got.globalBoard, got.projectSwitchInFlight, cmd != nil)
+	if got.scope.IsGlobal() || !got.projectSwitchInFlight || cmd == nil || got.pendingUIOpenTaskID != "ddm" {
+		t.Fatalf("route state global=%v switching=%v cmd=%v", got.scope.IsGlobal(), got.projectSwitchInFlight, cmd != nil)
 	}
 }
 
 func TestGlobalBoardRefreshSchedulesProjectionReload(t *testing.T) {
 	m := New(config.DefaultConfig())
-	m.globalBoard = true
+	m.scope = globalTUIScope()
 	next, cmd := m.Update(tickMsg{})
 	got := next.(Model)
 	if !got.boardRefreshing || cmd == nil {
@@ -75,7 +82,7 @@ func TestGlobalBoardRefreshSchedulesProjectionReload(t *testing.T) {
 
 func TestGlobalBoardIgnoresStaleReplyAfterLeaving(t *testing.T) {
 	m := New(config.DefaultConfig())
-	m.globalBoard = false
+	m.scope = projectTUIScope()
 	m.loading = true
 	next, _ := m.Update(globalBoardLoadedMsg{seq: 1, err: context.DeadlineExceeded})
 	got := next.(Model)
@@ -86,7 +93,7 @@ func TestGlobalBoardIgnoresStaleReplyAfterLeaving(t *testing.T) {
 
 func TestGlobalBoardGotoSpecRequiresOwningProject(t *testing.T) {
 	m := New(config.DefaultConfig())
-	m.globalBoard = true
+	m.scope = globalTUIScope()
 	m.editor.EnterGoto()
 
 	next, cmd := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
@@ -99,5 +106,204 @@ func TestGlobalBoardGotoSpecRequiresOwningProject(t *testing.T) {
 	}
 	if len(got.toasts) != 1 || got.toasts[0].Expires.Before(time.Now()) {
 		t.Fatalf("global goto-spec toast = %+v", got.toasts)
+	}
+}
+
+func TestGlobalBoardViewKeysStayInGlobalScope(t *testing.T) {
+	for _, tc := range []struct {
+		key     tea.KeyMsg
+		wantCmd bool
+	}{
+		{key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'V'}}, wantCmd: true},
+		{key: tea.KeyMsg{Type: tea.KeyTab}, wantCmd: true},
+		{key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}}},
+	} {
+		m := New(config.DefaultConfig())
+		m.scope = globalTUIScope()
+		m.daemonClient = nil
+		next, cmd := m.handleNormalMode(tc.key)
+		got := next.(Model)
+		if (cmd != nil) != tc.wantCmd || !got.scope.IsGlobal() || got.projectSwitchInFlight {
+			t.Fatalf("key=%q scope=%+v switching=%v cmd=%v", tc.key.String(), got.scope, got.projectSwitchInFlight, cmd != nil)
+		}
+		if !tc.wantCmd {
+			if !got.sessionTreeFilterOnly {
+				t.Fatalf("key=%q did not toggle projection-local filter", tc.key.String())
+			}
+			continue
+		}
+		switch msg := cmd().(type) {
+		case boardViewsLoadedMsg:
+			if !msg.scope.global {
+				t.Fatalf("key=%q loaded project views", tc.key.String())
+			}
+		case boardViewSelectedMsg:
+			if !msg.scope.global {
+				t.Fatalf("key=%q selected project view", tc.key.String())
+			}
+		default:
+			t.Fatalf("key=%q command message=%T", tc.key.String(), msg)
+		}
+	}
+}
+
+func TestGlobalScopeBoardViewCommandsUseRootViewContracts(t *testing.T) {
+	view := domain.DefaultBoardView()
+	view.ID, view.Title = "custom", "Custom"
+	scope := protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeSelectedProjects, ProjectIDs: []naming.ProjectID{"alpha"}}
+	transport := &recordingDaemonTransport{replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		response := protocol.ResponseEnvelope{OK: true, RequestID: req.RequestID, Meta: req.Meta}
+		switch req.Command {
+		case protocol.CommandBoardViewList:
+			var body protocol.BoardViewListRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil || body.ProjectID != "global" {
+				t.Fatalf("list body=%+v err=%v", body, err)
+			}
+			response.Body, _ = json.Marshal(protocol.BoardViewListResponseBody{ProjectID: "global", SelectedViewID: "custom", GlobalViews: []protocol.GlobalViewRecord{{View: view, Scope: scope}}})
+		case protocol.CommandBoardViewSelect:
+			var body protocol.BoardViewSelectRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil || body.ProjectID != "global" || body.Consumer != protocol.GlobalViewConsumerBoard || body.ViewID != "custom" {
+				t.Fatalf("select body=%+v err=%v", body, err)
+			}
+			response.Body, _ = json.Marshal(protocol.BoardViewSelectResponseBody{ProjectID: "global", ViewID: body.ViewID})
+		case protocol.CommandBoardViewSave:
+			var body protocol.BoardViewSaveRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil || body.ProjectID != "global" || body.Scope.Kind != protocol.GlobalViewScopeSelectedProjects {
+				t.Fatalf("save body=%+v err=%v", body, err)
+			}
+			response.Body, _ = json.Marshal(protocol.BoardViewResponseBody{ProjectID: "global", View: domain.BoardViewRecord{ProjectID: "global", View: body.View}})
+		case protocol.CommandBoardViewDelete:
+			var body protocol.BoardViewDeleteRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil || body.ProjectID != "global" || body.ViewID != "custom" {
+				t.Fatalf("delete body=%+v err=%v", body, err)
+			}
+		default:
+			t.Fatalf("unexpected command %q", req.Command)
+		}
+		return response, nil
+	}}
+	m := New(config.DefaultConfig())
+	m.scope = globalTUIScope()
+	m.daemonClient = daemonclient.New(transport).WithProjectID("project-local")
+
+	loaded := m.loadBoardViewsCmd()().(boardViewsLoadedMsg)
+	if loaded.err != nil || !loaded.scope.global || len(loaded.globalViews) != 1 || loaded.globalViews[0].Scope.Kind != scope.Kind {
+		t.Fatalf("loaded = %+v", loaded)
+	}
+	selected := m.selectBoardViewCmd("custom")().(boardViewSelectedMsg)
+	if selected.err != nil || !selected.scope.global || selected.viewID != "custom" {
+		t.Fatalf("selected = %+v", selected)
+	}
+	mutated := m.saveBoardViewCmd(view, scope)().(boardViewMutatedMsg)
+	if mutated.err != nil || !mutated.scope.global || mutated.viewID != "custom" {
+		t.Fatalf("saved = %+v", mutated)
+	}
+	deleted := m.deleteBoardViewCmd("custom")().(boardViewMutatedMsg)
+	if deleted.err != nil || !deleted.scope.global {
+		t.Fatalf("deleted = %+v", deleted)
+	}
+}
+
+func TestBoardViewCallbacksRejectStaleProjectIdentity(t *testing.T) {
+	base := New(config.DefaultConfig())
+	base.scope = projectTUIScope()
+	base.currentProject = "project-a"
+	staleScope := base.currentBoardViewCommandScope()
+	base.currentProject = "project-b"
+	base.selectedBoardViewID = "current"
+	base.boardViews = []domain.BoardViewRecord{{View: domain.DefaultBoardView()}}
+
+	tests := []struct {
+		name string
+		msg  tea.Msg
+	}{
+		{name: "list", msg: boardViewsLoadedMsg{scope: staleScope, selectedViewID: "stale"}},
+		{name: "select", msg: boardViewSelectedMsg{scope: staleScope, viewID: "stale"}},
+		{name: "save", msg: boardViewMutatedMsg{scope: staleScope, action: "save", viewID: "stale"}},
+		{name: "delete", msg: boardViewMutatedMsg{scope: staleScope, action: "delete", viewID: "stale"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := base
+			next, cmd := m.Update(tc.msg)
+			got := next.(Model)
+			if cmd != nil || got.selectedBoardViewID != "current" || len(got.toasts) != 0 || got.overlayStack.Current() != nil {
+				t.Fatalf("stale callback mutated project B: selected=%q toasts=%v overlay=%T cmd=%v", got.selectedBoardViewID, got.toasts, got.overlayStack.Current(), cmd != nil)
+			}
+		})
+	}
+}
+
+func TestBoardViewCallbacksRejectPriorGlobalGeneration(t *testing.T) {
+	m := New(config.DefaultConfig())
+	m.scope = globalTUIScope()
+	m.selectedBoardViewID = "current"
+	staleScope := m.currentBoardViewCommandScope()
+	m.beginBoardViewScopeTransition()
+	m.beginBoardViewScopeTransition()
+
+	next, cmd := m.Update(boardViewSelectedMsg{scope: staleScope, viewID: "stale"})
+	got := next.(Model)
+	if cmd != nil || got.selectedBoardViewID != "current" || len(got.toasts) != 0 {
+		t.Fatalf("prior Global generation was accepted: selected=%q toasts=%v cmd=%v", got.selectedBoardViewID, got.toasts, cmd != nil)
+	}
+}
+
+func TestScopeSelectionGlobalIsAuthoritativeAndStopsProjectEvents(t *testing.T) {
+	m := New(config.DefaultConfig())
+	m.scope = projectTUIScope()
+	cancelled := false
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+	m.daemonEventsCancel = func() { cancelled = true }
+	next, cmd := m.Update(overlay.ScopeSelectedMsg{Global: true})
+	got := next.(Model)
+	if cmd == nil || got.scope.IsGlobal() || !got.globalScopeSwitchPending || !got.projectSwitchInFlight || cancelled || got.daemonEvents == nil {
+		t.Fatalf("scope=%+v pending=%v switching=%v cancelled=%v events=%v cmd=%v", got.scope, got.globalScopeSwitchPending, got.projectSwitchInFlight, cancelled, got.daemonEvents, cmd != nil)
+	}
+	loaded, _ := got.Update(globalBoardLoadedMsg{seq: got.globalLoadSeq, snapshot: protocol.GlobalSnapshotResponseBody{Projection: protocol.GlobalViewProjection{View: domain.DefaultBoardView()}}})
+	loadedModel := loaded.(Model)
+	if loadedModel.projectSwitchInFlight || !loadedModel.scope.IsGlobal() || !cancelled || loadedModel.daemonEvents != nil {
+		t.Fatalf("loaded scope=%+v switching=%v cancelled=%v events=%v", loadedModel.scope, loadedModel.projectSwitchInFlight, cancelled, loadedModel.daemonEvents)
+	}
+}
+
+func TestScopeSelectionGlobalFailureRetainsProjectScopeAndStream(t *testing.T) {
+	m := New(config.DefaultConfig())
+	m.currentProject = "alpha"
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+	next, _ := m.Update(overlay.ScopeSelectedMsg{Global: true})
+	pending := next.(Model)
+	next, _ = pending.Update(globalBoardLoadedMsg{seq: pending.globalLoadSeq, err: context.DeadlineExceeded})
+	got := next.(Model)
+	if got.scope.IsGlobal() || got.globalScopeSwitchPending || got.projectSwitchInFlight || got.daemonEvents == nil {
+		t.Fatalf("scope=%+v pending=%v switching=%v events=%v", got.scope, got.globalScopeSwitchPending, got.projectSwitchInFlight, got.daemonEvents)
+	}
+}
+
+func TestScopeSelectionProjectLeavesGlobalThroughProjectSwitch(t *testing.T) {
+	m := New(config.DefaultConfig())
+	m.scope = globalTUIScope()
+	next, cmd := m.Update(overlay.ScopeSelectedMsg{Project: config.Project{Name: "alpha", Path: "/work/alpha"}})
+	got := next.(Model)
+	if cmd == nil || got.scope.IsGlobal() || !got.projectSwitchFromGlobal || !got.projectSwitchInFlight {
+		t.Fatalf("scope=%+v fromGlobal=%v switching=%v cmd=%v", got.scope, got.projectSwitchFromGlobal, got.projectSwitchInFlight, cmd != nil)
+	}
+}
+
+func TestGlobalScopeRejectsLateProjectSnapshot(t *testing.T) {
+	m := New(config.DefaultConfig())
+	m.scope = globalTUIScope()
+	m.tasks = []domain.Task{{ID: "alpha::dep", Title: "Global item"}}
+	cancelled := false
+	next, cmd := m.Update(issuesLoadedMsg{
+		projectID: "alpha",
+		tasks:     []domain.Task{{ID: "dep", Title: "Late project item"}},
+		eventsCancel: func() {
+			cancelled = true
+		},
+	})
+	got := next.(Model)
+	if cmd != nil || !cancelled || len(got.tasks) != 1 || got.tasks[0].ID != "alpha::dep" {
+		t.Fatalf("cmd=%v cancelled=%v tasks=%+v", cmd != nil, cancelled, got.tasks)
 	}
 }

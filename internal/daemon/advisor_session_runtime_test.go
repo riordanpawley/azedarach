@@ -24,7 +24,7 @@ import (
 func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle(t *testing.T) {
 	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
 	repoDir := t.TempDir()
-	client := issues.NewClient(repoDir, slog.Default())
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "implementation remains open", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +141,7 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 func TestRuntimeReconcileRecoversAndCleansAdvisorSessionsFromDurableRequests(t *testing.T) {
 	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
 	repoDir := t.TempDir()
-	client := issues.NewClient(repoDir, slog.Default())
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "advisor recovery", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -207,7 +207,7 @@ func TestRuntimeReconcileRecoversAndCleansAdvisorSessionsFromDurableRequests(t *
 func TestRuntimeReconcileIssuesLeavesUnrelatedAdvisorSessionsUntouched(t *testing.T) {
 	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
 	repoDir := t.TempDir()
-	client := issues.NewClient(repoDir, slog.Default())
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	createRequest := func(title, requestID string) domain.InteractionRequest {
 		t.Helper()
 		issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: title, Type: domain.TypeTask, Status: domain.StatusOpen})
@@ -277,8 +277,8 @@ func TestImplementationSessionReconcileNeverRecreatesAdvisorProjection(t *testin
 func TestAdvisorRecoveryCleansRuntimeWhenTerminalRequestWinsCrossDaemonRace(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	clientA := issues.NewClient(repoDir, slog.Default())
-	clientB := issues.NewClient(repoDir, slog.Default())
+	clientA := newMigratedIssueClient(t, repoDir, slog.Default())
+	clientB := newMigratedIssueClient(t, repoDir, slog.Default())
 	issueID, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "terminal race", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -338,8 +338,8 @@ func TestAdvisorRecoveryCleansRuntimeWhenTerminalRequestWinsCrossDaemonRace(t *t
 func TestAdvisorRecoveryRetriesWhenNonTerminalMutationWinsCrossDaemonRace(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	clientA := issues.NewClient(repoDir, slog.Default())
-	clientB := issues.NewClient(repoDir, slog.Default())
+	clientA := newMigratedIssueClient(t, repoDir, slog.Default())
+	clientB := newMigratedIssueClient(t, repoDir, slog.Default())
 	issueID, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "recovery metadata race", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -473,7 +473,7 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 	}
 }
 
-func TestAdvisorExactLaunchDoesNotSourceStartupFiles(t *testing.T) {
+func TestRealProcessProfileAdvisorExactLaunchDoesNotSourceStartupFiles(t *testing.T) {
 	tmuxPath, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("tmux is not installed")
@@ -513,11 +513,24 @@ func TestAdvisorExactLaunchDoesNotSourceStartupFiles(t *testing.T) {
 			t.Setenv("ENV", startupFile)
 			t.Setenv("TMUX", "")
 			t.Setenv("AZEDARACH_ALLOW_REAL_TMUX_IN_TESTS", "1")
+			// Keep the exact post-exit hook shape without letting this isolated
+			// process profile contact the developer's daemon through the real az.
+			hookCalled := filepath.Join(t.TempDir(), "az-hook-called")
+			hookChannel := "advisor-hook-" + shellCase.name
+			azWrapper := "#!/bin/sh\nprintf called > " + singleQuoteForShell(hookCalled) + "\n" +
+				singleQuoteForShell(tmuxPath) + " -S " + singleQuoteForShell(tmuxSocket) + " wait-for -S " + singleQuoteForShell(hookChannel) + "\n"
+			if err := os.WriteFile(filepath.Join(binDir, "az"), []byte(azWrapper), 0o755); err != nil {
+				t.Fatal(err)
+			}
 
 			if output, err := tmuxRunner.run(context.Background(), "-f", "/dev/null", "new-session", "-d", "-s", "keeper", "sleep", "30"); err != nil {
 				t.Fatalf("start isolated tmux server: %v\n%s", err, output)
 			}
-			t.Cleanup(func() { _, _ = tmuxRunner.run(context.Background(), "kill-server") })
+			t.Cleanup(func() {
+				if output, err := tmuxRunner.run(context.Background(), "kill-server"); err != nil && !strings.Contains(output, "no server running") {
+					t.Errorf("stop isolated tmux server: %v: %s", err, output)
+				}
+			})
 			for _, args := range [][]string{
 				{"set-option", "-g", "default-shell", shellCase.path},
 				{"set-option", "-g", "remain-on-exit", "on"},
@@ -531,10 +544,15 @@ func TestAdvisorExactLaunchDoesNotSourceStartupFiles(t *testing.T) {
 				}
 			}
 
-			for _, tool := range []string{"codex", "claude", "opencode"} {
+			// One wrapper is sufficient to prove tmux's multi-argument exec and
+			// shell-startup isolation. Per-tool argv contracts stay in the fast
+			// deterministic buildAdvisorLaunchCommand table above.
+			for _, tool := range []string{"codex"} {
 				t.Run(tool, func(t *testing.T) {
 					launched := filepath.Join(t.TempDir(), "trusted-"+tool)
-					wrapper := "#!/bin/sh\nprintf launched > " + singleQuoteForShell(launched) + "\n"
+					launchChannel := "advisor-launch-" + shellCase.name + "-" + tool
+					wrapper := "#!/bin/sh\nprintf launched > " + singleQuoteForShell(launched) + "\n" +
+						singleQuoteForShell(tmuxPath) + " -S " + singleQuoteForShell(tmuxSocket) + " wait-for -S " + singleQuoteForShell(launchChannel) + "\n"
 					if err := os.WriteFile(filepath.Join(binDir, tool), []byte(wrapper), 0o755); err != nil {
 						t.Fatal(err)
 					}
@@ -549,30 +567,20 @@ func TestAdvisorExactLaunchDoesNotSourceStartupFiles(t *testing.T) {
 						t.Fatalf("start exact %s advisor launch: %v", tool, err)
 					}
 					t.Cleanup(func() { _ = client.KillSession(context.Background(), sessionID) })
-					deadline := time.Now().Add(10 * time.Second)
-					for {
-						if _, err := os.Stat(launched); err == nil {
-							break
-						}
-						if time.Now().After(deadline) {
-							output, _ := tmuxRunner.run(context.Background(), "capture-pane", "-p", "-t", sessionID)
-							t.Fatalf("trusted %s executable was not launched; pane output:\n%s", tool, output)
-						}
-						time.Sleep(10 * time.Millisecond)
+					waitCtx, cancelWait := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancelWait()
+					if output, err := tmuxRunner.run(waitCtx, "wait-for", launchChannel); err != nil {
+						paneOutput, _ := tmuxRunner.run(context.Background(), "capture-pane", "-p", "-t", sessionID)
+						t.Fatalf("trusted %s executable was not launched: %v (%s); pane output:\n%s", tool, err, output, paneOutput)
 					}
-					exitDeadline := time.Now().Add(10 * time.Second)
-					for {
-						dead, paneErr := tmuxRunner.run(context.Background(), "display-message", "-p", "-t", sessionID, "#{pane_dead}")
-						if paneErr == nil && strings.TrimSpace(dead) == "1" {
-							break
-						}
-						if time.Now().After(exitDeadline) {
-							t.Fatalf("trusted %s executable did not exit before cleanup: %v (%q)", tool, paneErr, dead)
-						}
-						time.Sleep(10 * time.Millisecond)
+					if output, err := tmuxRunner.run(waitCtx, "wait-for", hookChannel); err != nil {
+						t.Fatalf("trusted %s executable did not exit through the post-exit hook: %v (%s)", tool, err, output)
 					}
 					if _, err := os.Stat(sideEffect); !os.IsNotExist(err) {
 						t.Fatalf("%s startup file side effect occurred for %s: stat err=%v", shellCase.name, tool, err)
+					}
+					if _, err := os.Stat(hookCalled); err != nil {
+						t.Fatalf("isolated post-exit az hook was not called for %s: %v", tool, err)
 					}
 				})
 			}
@@ -590,12 +598,17 @@ func (r *isolatedTmuxTestRunner) Run(ctx context.Context, args ...string) (strin
 }
 
 func (r *isolatedTmuxTestRunner) run(ctx context.Context, args ...string) (string, error) {
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+	}
 	commandArgs := append([]string{"-S", r.socketPath}, args...)
 	output, err := exec.CommandContext(ctx, r.tmuxPath, commandArgs...).CombinedOutput()
 	return string(output), err
 }
 
-func TestOpenCodeAdvisorExactLaunchIgnoresInvalidProjectAndInheritedConfig(t *testing.T) {
+func TestRealProcessProfileOpenCodeAdvisorExactLaunchIgnoresInvalidProjectAndInheritedConfig(t *testing.T) {
 	opencode, err := exec.LookPath("opencode")
 	if err != nil {
 		t.Skip("opencode is not installed")
@@ -610,10 +623,15 @@ func TestOpenCodeAdvisorExactLaunchIgnoresInvalidProjectAndInheritedConfig(t *te
 		t.Fatal(err)
 	}
 	binDir := t.TempDir()
+	hookCalled := filepath.Join(t.TempDir(), "az-hook-called")
 	// Execute the exact generated launch shell while replacing only the final
 	// interactive process with the installed CLI's config/agent parser.
 	wrapper := "#!/bin/sh\nexec " + singleQuoteForShell(opencode) + " --pure agent list\n"
 	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	azWrapper := "#!/bin/sh\nprintf called > " + singleQuoteForShell(hookCalled) + "\n"
+	if err := os.WriteFile(filepath.Join(binDir, "az"), []byte(azWrapper), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -635,6 +653,9 @@ func TestOpenCodeAdvisorExactLaunchIgnoresInvalidProjectAndInheritedConfig(t *te
 	if !strings.Contains(string(output), "advisor (primary)") {
 		t.Fatalf("exact OpenCode advisor launch did not load isolated advisor profile:\n%s", output)
 	}
+	if _, err := os.Stat(hookCalled); err != nil {
+		t.Fatalf("isolated post-exit az hook was not called: %v", err)
+	}
 }
 
 func TestAdvisorContextPackShowsBudgetProvenanceAndExclusions(t *testing.T) {
@@ -653,7 +674,7 @@ func TestAdvisorContextPackShowsBudgetProvenanceAndExclusions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	client := issues.NewClient(repoDir, slog.Default())
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	issueID, err := client.Create(ctx, issues.CreateTaskParams{
 		Title:       "Choose advisor design",
 		Description: "Compare internal/daemon/relevant.go with config/credentials.json",

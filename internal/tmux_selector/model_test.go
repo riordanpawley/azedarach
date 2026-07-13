@@ -55,8 +55,61 @@ func TestTypedColumnBoardRendersProjectedGroups(t *testing.T) {
 	}
 }
 
+func TestOrchestrationColumnBoardRendersConfiguredColumnsAtDefaultAndNarrowWidths(t *testing.T) {
+	view := domain.OrchestrationBoardView()
+	entries := []InventoryEntry{
+		{IssueID: "human", TaskTitle: "Human review", ViewProjected: true, ViewGroupID: view.Columns[0].ID, ViewGroupTitle: view.Columns[0].Title},
+		{IssueID: "active", TaskTitle: "Active work", ViewProjected: true, ViewGroupID: view.Columns[2].ID, ViewGroupTitle: view.Columns[2].Title},
+	}
+	t.Run("default", func(t *testing.T) {
+		model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+		model.loading, model.width, model.height = false, 180, 20
+		model.snapshot = Snapshot{View: view, Entries: entries}
+		rendered := ansi.Strip(model.View())
+		for _, column := range view.Columns {
+			if !strings.Contains(rendered, column.Title+" (") {
+				t.Fatalf("configured column %q missing:\n%s", column.Title, rendered)
+			}
+		}
+	})
+	t.Run("narrow navigation", func(t *testing.T) {
+		model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+		model.loading, model.width, model.height = false, 60, 20
+		model.snapshot = Snapshot{View: view, Entries: entries}
+		if rendered := ansi.Strip(model.View()); !strings.Contains(rendered, view.Columns[0].Title+" (1)") {
+			t.Fatalf("first column missing:\n%s", rendered)
+		}
+		model = updateKey(t, model, "right")
+		if rendered := ansi.Strip(model.View()); model.cursor != 1 || !strings.Contains(rendered, view.Columns[2].Title+" (1)") {
+			t.Fatalf("active column not reachable across empty column: cursor=%d\n%s", model.cursor, rendered)
+		}
+	})
+	t.Run("daemon group visibility", func(t *testing.T) {
+		model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+		model.loading, model.width, model.height = false, 120, 20
+		model.snapshot = Snapshot{View: view, ProjectedGroups: []domain.BoardColumnID{view.Columns[0].ID, view.Columns[2].ID}, Entries: entries}
+		rendered := ansi.Strip(model.View())
+		if strings.Contains(rendered, view.Columns[1].Title+" (") {
+			t.Fatalf("column omitted by daemon projection was rendered:\n%s", rendered)
+		}
+	})
+	t.Run("unknown projected group has stable title", func(t *testing.T) {
+		model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+		model.loading, model.width, model.height = false, 120, 20
+		model.snapshot = Snapshot{View: view, ProjectedGroups: []domain.BoardColumnID{"custom"}, Entries: []InventoryEntry{{IssueID: "custom", ViewGroupID: "custom"}}}
+		if rendered := ansi.Strip(model.View()); !strings.Contains(rendered, "custom (1)") {
+			t.Fatalf("unknown projected group missing stable title:\n%s", rendered)
+		}
+	})
+}
+
 func TestTypedColumnBoardKeepsSelectedGroupVisibleOnNarrowViewport(t *testing.T) {
 	view := domain.DefaultBoardView()
+	view.Columns = []domain.BoardColumn{
+		{ID: "one", Title: "One"},
+		{ID: "two", Title: "Two"},
+		{ID: "three", Title: "Three"},
+	}
 	model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
 	model.loading, model.width, model.height, model.cursor = false, 60, 20, 2
 	model.snapshot = Snapshot{View: view, Entries: []InventoryEntry{
@@ -162,6 +215,11 @@ func TestTypedViewStatusExplainsSelectorConfiguration(t *testing.T) {
 
 func TestTypedColumnBoardHorizontalMovementClampsAcrossUnevenColumns(t *testing.T) {
 	view := domain.DefaultBoardView()
+	view.Columns = []domain.BoardColumn{
+		{ID: "left", Title: "Left"},
+		{ID: "middle", Title: "Middle"},
+		{ID: "right", Title: "Right"},
+	}
 	entries := []InventoryEntry{
 		{IssueID: "left-1", TaskTitle: "Left one", ViewGroupID: "left", ViewGroupTitle: "Left"},
 		{IssueID: "left-2", TaskTitle: "Left two", ViewGroupID: "left", ViewGroupTitle: "Left"},
@@ -208,14 +266,26 @@ type fakeLiveSnapshotLoader struct {
 	enrichCalls int
 	live        Snapshot
 	enriched    Snapshot
+	liveStarted chan<- struct{}
+	waitForView <-chan struct{}
 }
 
 func (f *fakeLiveSnapshotLoader) ListTasksSnapshot(context.Context) (Snapshot, error) {
 	return f.enriched, nil
 }
 
-func (f *fakeLiveSnapshotLoader) ListLiveSnapshot(context.Context) (Snapshot, error) {
+func (f *fakeLiveSnapshotLoader) ListLiveSnapshot(ctx context.Context) (Snapshot, error) {
 	f.liveCalls++
+	if f.liveStarted != nil {
+		close(f.liveStarted)
+	}
+	if f.waitForView != nil {
+		select {
+		case <-f.waitForView:
+		case <-ctx.Done():
+			return Snapshot{}, ctx.Err()
+		}
+	}
 	return f.live, nil
 }
 
@@ -320,14 +390,28 @@ type fakeUIStateStore struct {
 }
 
 type fakeGlobalViewStore struct {
-	list     protocol.BoardViewListResponseBody
-	selected string
-	saved    *protocol.GlobalViewRecord
-	deleted  string
-	err      error
+	list        protocol.BoardViewListResponseBody
+	listCalls   int
+	listStarted chan<- struct{}
+	waitForLive <-chan struct{}
+	selected    string
+	saved       *protocol.GlobalViewRecord
+	deleted     string
+	err         error
 }
 
-func (f *fakeGlobalViewStore) ListGlobalViews(context.Context) (protocol.BoardViewListResponseBody, error) {
+func (f *fakeGlobalViewStore) ListGlobalViews(ctx context.Context) (protocol.BoardViewListResponseBody, error) {
+	f.listCalls++
+	if f.listStarted != nil {
+		close(f.listStarted)
+	}
+	if f.waitForLive != nil {
+		select {
+		case <-f.waitForLive:
+		case <-ctx.Done():
+			return protocol.BoardViewListResponseBody{}, ctx.Err()
+		}
+	}
 	return f.list, f.err
 }
 func (f *fakeGlobalViewStore) SelectGlobalView(_ context.Context, consumer protocol.GlobalViewConsumer, id string) (protocol.BoardViewSelectResponseBody, error) {
@@ -1043,6 +1127,72 @@ func TestModelTabTogglesTreeViewAndPersistsGlobally(t *testing.T) {
 	}
 }
 
+func TestProjectedSessionTreeRowsRenderCoherentConnectors(t *testing.T) {
+	entries := []InventoryEntry{
+		{IssueID: "root-one", ViewDepth: 0},
+		{IssueID: "child-one", ViewDepth: 1},
+		{IssueID: "grandchild", ViewDepth: 2},
+		{IssueID: "child-two", ViewDepth: 1},
+		{IssueID: "root-two", ViewDepth: 0},
+		{IssueID: "only-child", ViewDepth: 1},
+	}
+	rows := projectedSessionTreeRows(entries)
+	want := []string{"", "|- ", "|  `- ", "`- ", "", "`- "}
+	for i, row := range rows {
+		if got := treePrefix(row.ancestorLast, row.last); got != want[i] {
+			t.Fatalf("row %s prefix = %q, want %q", row.entry.IssueID, got, want[i])
+		}
+	}
+}
+
+func TestModelTreeReconstructsHierarchyForConfiguredColumnView(t *testing.T) {
+	parentID := naming.IssueID("parent")
+	entries := []InventoryEntry{
+		{
+			ProjectID: "alpha", SessionID: "alpha-child", IssueID: "child", TaskTitle: "Child", HasTmuxSession: true,
+			Task: domain.Task{ID: "child", Title: "Child", ParentID: &parentID},
+		},
+		{
+			ProjectID: "alpha", SessionID: "alpha-parent", IssueID: "parent", TaskTitle: "Parent", HasTmuxSession: true,
+			Task: domain.Task{ID: parentID, Title: "Parent"},
+		},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	model.snapshot = Snapshot{Entries: entries, View: domain.OrchestrationBoardView()}
+	model.activeTab = selectorTabTree
+	model.loading = false
+
+	view := ansi.Strip(model.View())
+	parentPos, childPos := strings.Index(view, "alpha-parent"), strings.Index(view, "alpha-child")
+	if parentPos < 0 || childPos < 0 || parentPos > childPos {
+		t.Fatalf("configured-view tree did not render parent before child:\n%s", view)
+	}
+	if !strings.Contains(view, "`- alpha-child") {
+		t.Fatalf("configured-view tree did not nest child under parent:\n%s", view)
+	}
+}
+
+func TestConfiguredViewTreeScopesCollidingIssueIDsByProject(t *testing.T) {
+	parentID := naming.IssueID("parent")
+	entries := []InventoryEntry{
+		{ProjectID: "alpha", SessionID: "alpha-child", IssueID: "child", Task: domain.Task{ID: "child", ParentID: &parentID}},
+		{ProjectID: "beta", SessionID: "beta-child", IssueID: "child", Task: domain.Task{ID: "child", ParentID: &parentID}},
+		{ProjectID: "alpha", SessionID: "alpha-parent", IssueID: "parent", Task: domain.Task{ID: parentID}},
+		{ProjectID: "beta", SessionID: "beta-parent", IssueID: "parent", Task: domain.Task{ID: parentID}},
+	}
+	model := Model{snapshot: Snapshot{View: domain.OrchestrationBoardView()}}
+	rows := model.activeSessionTreeRows(entries)
+	if len(rows) != 4 {
+		t.Fatalf("tree rows = %+v, want both scoped parent-child pairs", rows)
+	}
+	want := []string{"alpha-parent", "alpha-child", "beta-parent", "beta-child"}
+	for i, sessionID := range want {
+		if rows[i].entry.SessionID != sessionID {
+			t.Fatalf("tree row sessions = %+v, want %v", rows, want)
+		}
+	}
+}
+
 func TestModelTreeViewShowsNonSelectableAncestorsForActiveLeaves(t *testing.T) {
 	rootID := naming.IssueID("az-root")
 	parentID := naming.IssueID("az-parent")
@@ -1545,6 +1695,146 @@ func TestModelInitialLoadUsesLiveSnapshotBeforeEnrichment(t *testing.T) {
 	}
 	if enrichedMsg.Snapshot.Entries[0].TaskTitle != "Standalone selector performance" {
 		t.Fatalf("enriched title = %q", enrichedMsg.Snapshot.Entries[0].TaskTitle)
+	}
+}
+
+func TestModelInitialLiveSnapshotUsesSelectedViewLayoutBeforeEnrichment(t *testing.T) {
+	entry := InventoryEntry{
+		SessionID:      "az-dfo",
+		IssueID:        "dfo",
+		TaskTitle:      "dfo",
+		HasTmuxSession: true,
+	}
+	tests := []struct {
+		name      string
+		view      domain.BoardView
+		width     int
+		want      []string
+		doNotWant string
+	}{
+		{
+			name:      "column board default viewport",
+			view:      domain.OrchestrationBoardView(),
+			width:     120,
+			want:      []string{"view orchestration", "[ Cards ]", "Live tmux (1)"},
+			doNotWant: "az-dfo  dfo",
+		},
+		{
+			name:      "column board narrow viewport",
+			view:      domain.OrchestrationBoardView(),
+			width:     54,
+			want:      []string{"view orchestration", "[ Cards ]", "Live tmux (1)"},
+			doNotWant: "az-dfo  dfo",
+		},
+		{
+			name:      "tree viewport",
+			view:      domain.TreeBoardView(),
+			width:     80,
+			want:      []string{"view tree", "[ Tree ]", "az-dfo"},
+			doNotWant: "[ Cards ]",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loader := &fakeLiveSnapshotLoader{live: Snapshot{Enriching: true, Entries: []InventoryEntry{entry}}}
+			store := &fakeGlobalViewStore{list: protocol.BoardViewListResponseBody{
+				GlobalViews: []protocol.GlobalViewRecord{{View: tt.view}},
+				Selections: map[protocol.GlobalViewConsumer]string{
+					protocol.GlobalViewConsumerTmuxSelector: string(tt.view.ID),
+				},
+			}}
+			model := New(loader, WithGlobalViewStore(store))
+			model.width, model.height = tt.width, 18
+
+			msg, ok := model.Init()().(LoadedMsg)
+			if !ok {
+				t.Fatalf("init msg = %T, want LoadedMsg", model.Init()())
+			}
+			if msg.ViewErr != nil || msg.Snapshot.View.ID != tt.view.ID {
+				t.Fatalf("initial view = %q err=%v, want %q", msg.Snapshot.View.ID, msg.ViewErr, tt.view.ID)
+			}
+			if store.listCalls != 1 || loader.liveCalls != 1 || loader.enrichCalls != 0 {
+				t.Fatalf("startup calls views=%d live=%d enrich=%d, want 1,1,0", store.listCalls, loader.liveCalls, loader.enrichCalls)
+			}
+			updated, cmd := model.Update(msg)
+			model = updated.(Model)
+			if cmd == nil {
+				t.Fatal("initial snapshot did not schedule asynchronous enrichment")
+			}
+			rendered := ansi.Strip(model.View())
+			for _, want := range tt.want {
+				if !strings.Contains(rendered, want) {
+					t.Fatalf("initial selected-view frame missing %q:\n%s", want, rendered)
+				}
+			}
+			if tt.doNotWant != "" && strings.Contains(rendered, tt.doNotWant) {
+				t.Fatalf("initial selected-view frame contains legacy rendering %q:\n%s", tt.doNotWant, rendered)
+			}
+		})
+	}
+}
+
+func TestModelLoadsLiveInventoryAndSelectedViewConcurrently(t *testing.T) {
+	liveStarted := make(chan struct{})
+	viewStarted := make(chan struct{})
+	view := domain.OrchestrationBoardView()
+	loader := &fakeLiveSnapshotLoader{
+		live:        Snapshot{Enriching: true, Entries: []InventoryEntry{{SessionID: "az-dfo"}}},
+		liveStarted: liveStarted,
+		waitForView: viewStarted,
+	}
+	store := &fakeGlobalViewStore{
+		list: protocol.BoardViewListResponseBody{
+			GlobalViews: []protocol.GlobalViewRecord{{View: view}},
+			Selections:  map[protocol.GlobalViewConsumer]string{protocol.GlobalViewConsumerTmuxSelector: string(view.ID)},
+		},
+		listStarted: viewStarted,
+		waitForLive: liveStarted,
+	}
+	model := New(loader, WithGlobalViewStore(store))
+
+	msg, ok := model.Init()().(LoadedMsg)
+	if !ok {
+		t.Fatalf("init msg = %T, want concurrent LoadedMsg", msg)
+	}
+	if msg.ViewErr != nil || msg.Snapshot.View.ID != view.ID {
+		t.Fatalf("concurrent initial view = %q err=%v, want %q", msg.Snapshot.View.ID, msg.ViewErr, view.ID)
+	}
+}
+
+func TestModelInitialViewLoadFailureKeepsLiveSelectorUsable(t *testing.T) {
+	tests := []struct {
+		name    string
+		store   *fakeGlobalViewStore
+		wantErr string
+	}{
+		{name: "store error", store: &fakeGlobalViewStore{err: errors.New("view store unavailable")}, wantErr: "view store unavailable"},
+		{name: "missing selection", store: &fakeGlobalViewStore{}, wantErr: "view selection is empty"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loader := &fakeLiveSnapshotLoader{live: Snapshot{Enriching: true, Entries: []InventoryEntry{{
+				SessionID: "plain-tmux", TaskTitle: "plain-tmux", HasTmuxSession: true,
+			}}}}
+			model := New(loader, WithGlobalViewStore(tt.store))
+
+			msg, ok := model.Init()().(LoadedMsg)
+			if !ok {
+				t.Fatalf("init msg = %T, want LoadedMsg", model.Init()())
+			}
+			if msg.ViewErr == nil || msg.Snapshot.View.ID != "" {
+				t.Fatalf("view error = %v view=%q, want explicit fallback error and no typed view", msg.ViewErr, msg.Snapshot.View.ID)
+			}
+			updated, cmd := model.Update(msg)
+			model = updated.(Model)
+			if cmd == nil {
+				t.Fatal("view failure prevented asynchronous enrichment")
+			}
+			rendered := ansi.Strip(model.View())
+			if !strings.Contains(rendered, tt.wantErr) || !strings.Contains(rendered, "plain-tmux") {
+				t.Fatalf("fallback selector is not explicit and usable:\n%s", rendered)
+			}
+		})
 	}
 }
 

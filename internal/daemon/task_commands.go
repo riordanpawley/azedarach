@@ -1985,6 +1985,8 @@ func parseTaskOwnershipTTL(raw string) (time.Duration, error) {
 }
 
 func (d *Daemon) handleTaskClose(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	ctx, cancel := context.WithTimeout(ctx, domain.IntegrationCloseTimeout)
+	defer cancel()
 	projectID := d.projectID(req.Meta)
 	var cmd taskCloseRequest
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
@@ -2081,7 +2083,13 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	}
 
 	phaseStartedAt = time.Now()
-	integration, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, cmd.IntegrateBeforeClose)
+	integrationCtx, cancelIntegration, integrationBudgetErr := taskCloseIntegrationContext(ctx)
+	if integrationBudgetErr != nil && cmd.IntegrateBeforeClose {
+		recordPhase("integrate_before_close", phaseStartedAt, false)
+		return result, fmt.Errorf("phase integrate_before_close for issue %s: %w", taskID, integrationBudgetErr)
+	}
+	integration, err := d.integrateTaskBeforeClose(integrationCtx, projectID, taskID, cmd.IntegrateBeforeClose)
+	cancelIntegration()
 	recordPhase("integrate_before_close", phaseStartedAt, !cmd.IntegrateBeforeClose)
 	recordTaskCloseHookPhases(ctx, &result, d.cfg.Logger, req, projectID, taskID, integration.HookDiagnostics)
 	if err != nil {
@@ -2165,6 +2173,21 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	}
 	d.publishTaskEvent(req, protocol.EventTaskUpdated, rev, taskEventBodyFromTask(projectID, task))
 	return result, nil
+}
+
+func taskCloseIntegrationContext(ctx context.Context) (context.Context, context.CancelFunc, error) {
+	budget := domain.IntegrationMergeTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		available := time.Until(deadline) - domain.IntegrationCloseReserve
+		if available <= 0 {
+			return ctx, func() {}, fmt.Errorf("close lifecycle budget exhausted before integration; %s cleanup reserve is required", domain.IntegrationCloseReserve)
+		}
+		if available < budget {
+			budget = available
+		}
+	}
+	integrationCtx, cancel := context.WithTimeout(ctx, budget)
+	return integrationCtx, cancel, nil
 }
 
 func daemonTaskCloseOutcomeStatus(raw string) (domain.IssueCloseOutcome, domain.Status, error) {
@@ -2751,14 +2774,23 @@ func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, source 
 		return result, nil
 	}
 	return result, fmt.Errorf(
-		"origin workflow close will not merge %s into the local %s checkout; %s still differs from %s (%d file(s): %s). Next: integrate through the remote workflow, fetch %s, then retry close",
+		"origin workflow close will not merge %s into the local %s checkout; %s still differs from %s (%d file(s): %s). Next: %s",
 		source.Branch,
 		targetBranch,
 		source.IssueID,
 		remoteBaseRef,
 		len(changedFiles),
 		strings.Join(daemonLimitStrings(changedFiles, 8), ", "),
-		remoteBaseRef,
+		daemonOriginBaseIntegrationGuidance(source.IssueID, targetBranch),
+	)
+}
+
+func daemonOriginBaseIntegrationGuidance(issueID, targetBranch string) string {
+	issueID = strings.TrimSpace(issueID)
+	remoteBaseRef := daemonRemoteTrackingBaseRef(targetBranch)
+	return fmt.Sprintf(
+		"push the issue branch with `git push -u origin HEAD`, run `az pr create --issue %s --draft=false`, inspect it with `az pr status --issue %s`, merge it with `az pr merge --issue %s --confirm`, fetch %s, then retry `az ticket close --id %s`",
+		issueID, issueID, issueID, remoteBaseRef, issueID,
 	)
 }
 
@@ -4188,6 +4220,12 @@ func (d *Daemon) handleTaskMergeBaseTarget(ctx context.Context, req protocol.Req
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	if cmd.RequireHumanAcceptance && result.TargetID == "base" {
+		if strings.EqualFold(strings.TrimSpace(d.workflowModeForProject(projectID)), "origin") {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf(
+				"refusing direct base integration for %s because git workflow mode is origin; %s",
+				cmd.TaskID, daemonOriginBaseIntegrationGuidance(cmd.TaskID, result.Branch),
+			)), nil
+		}
 		accepted, acceptErr := d.hasDurableBaseIntegrationAcceptance(ctx, projectID, cmd.TaskID)
 		if acceptErr != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, acceptErr.Error()), nil

@@ -193,7 +193,7 @@ func (c *Client) seedBuiltInBoardViews(ctx context.Context, db *sql.DB, projectI
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, view := range domain.BuiltInBoardViews() {
 		view = view.Normalized()
-		if err := preserveBoardViewIDConflict(ctx, tx, projectID, view.ID, now); err != nil {
+		if err := preserveBoardViewIDConflict(ctx, tx, projectID, view.ID); err != nil {
 			return err
 		}
 		definitionJSON, err := domain.EncodeBoardViewDefinitionJSON(view)
@@ -209,7 +209,11 @@ func (c *Client) seedBuiltInBoardViews(ctx context.Context, db *sql.DB, projectI
 				built_in = 1,
 				updated_at = excluded.updated_at,
 				deleted_at = NULL
-			WHERE board_views.built_in = 1
+			WHERE board_views.built_in = 1 AND (
+				board_views.name <> excluded.name OR
+				board_views.definition_json <> excluded.definition_json OR
+				board_views.deleted_at IS NOT NULL
+			)
 		`, projectID, view.ID, view.Title, string(definitionJSON), now, now); err != nil {
 			return fmt.Errorf("seed board view %q: %w", view.ID, err)
 		}
@@ -307,7 +311,7 @@ func isBuiltInBoardViewID(id domain.BoardViewID) bool {
 	return false
 }
 
-func preserveBoardViewIDConflict(ctx context.Context, tx *sql.Tx, projectID string, builtInID domain.BoardViewID, now string) error {
+func preserveBoardViewIDConflict(ctx context.Context, tx *sql.Tx, projectID string, builtInID domain.BoardViewID) error {
 	var (
 		definitionJSON string
 		builtIn        int
@@ -346,9 +350,9 @@ func preserveBoardViewIDConflict(ctx context.Context, tx *sql.Tx, projectID stri
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE board_views
-		SET id = ?, definition_json = ?, updated_at = ?
+		SET id = ?, definition_json = ?
 		WHERE project_id = ? AND id = ? AND built_in = 0
-	`, candidate, string(encoded), now, projectID, builtInID); err != nil {
+	`, candidate, string(encoded), projectID, builtInID); err != nil {
 		return fmt.Errorf("preserve custom board view %q as %q: %w", builtInID, candidate, err)
 	}
 	return nil

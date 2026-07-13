@@ -384,24 +384,25 @@ func OrchestrationBoardView() BoardView {
 	view.Title = "Orchestration"
 	view.Columns = []BoardColumn{
 		{
-			ID:    BoardColumnReviewReady,
-			Title: "Human Review",
+			ID:    BoardColumnWaitingHuman,
+			Title: "Waiting Human",
 			Predicates: []BoardColumnPredicate{{
-				Kind: BoardPredicateReviewReady,
+				Kind: BoardPredicateWaitingHuman,
 			}},
 		},
 		{
 			ID:    BoardColumnWaitingAI,
-			Title: "AI Review",
+			Title: "Waiting AI",
 			Predicates: []BoardColumnPredicate{{
 				Kind: BoardPredicateWaitingAIDelegated,
 			}},
 		},
 		{
 			ID:         BoardColumnActive,
-			Title:      "In Progress",
+			Title:      "Working",
 			Predicates: view.Columns[1].Predicates,
 		},
+		view.Columns[2],
 	}
 	return view
 }
@@ -975,7 +976,11 @@ func (p BoardColumnPredicate) MatchTask(task Task) (bool, string) {
 		facts := task.IssueFacts()
 		if facts.WaitingHuman {
 			if facts.WaitingHumanSource != "" {
-				return true, "waiting_human=true source=" + string(facts.WaitingHumanSource)
+				reason := "waiting_human=true source=" + string(facts.WaitingHumanSource)
+				if strings.TrimSpace(facts.WaitingHumanReason) != "" {
+					reason += " reason=" + facts.WaitingHumanReason
+				}
+				return true, reason
 			}
 			return true, "waiting_human=true"
 		}

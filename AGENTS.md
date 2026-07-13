@@ -28,7 +28,7 @@ cd .
 Use these as primary checks after code changes:
 
 ```bash
-# Build and test
+# Build and canonical cold test (machine-readable, uncached)
 just build
 just test
 
@@ -38,8 +38,16 @@ just run
 # Optional focused quality gates
 just check-boundaries
 
-# Full Go test sweep
-go test ./...
+# Fast focused development feedback
+just test-fast --package ./internal/cli --run TestCommand
+
+# Specialized execution-mode profiles (run when relevant)
+just test-integration
+just test-migration-clone
+just test-race
+
+# Aggregate daemon race sweep (four sequential shards; 15m/shard, 45m aggregate)
+just test-race-daemon
 
 # Focused daemon/client boundary checks
 go test ./internal/tui ./internal/cli
@@ -58,6 +66,8 @@ go test ./internal/tui ./internal/cli ./internal/daemon/...
 
 ## Complete Test-Failure Batch Workflow
 
+- Use `just test` (or `just test-timing cold`) for the canonical uncached machine-readable full run. It preserves the complete `go test -json` stream, bounds package concurrency with `-p=4`, emits sorted package/test durations and all failures, and enforces the committed baseline/budgets documented in [docs/26-test-timing-profiles.md](docs/26-test-timing-profiles.md). Use the distinct `cached`, `focused`, `integration`, `migration-clone`, `race`, or `boundary` profiles only for their documented semantics; do not present a focused or cached result as cold full-suite evidence.
+- `just merge-gate` is the required local merge contract: build once, run the cold semantic suite once, then run static and focused executable boundary guards. Integration/subprocess, migration-clone, and race profiles are change-sensitive execution-mode gates; they intentionally rerun only the contracts that need those modes.
 - When a broad validation command fails, do not fix the first visible test and repeatedly rerun in a one-test-at-a-time loop.
 - Run the complete relevant suite once with machine-readable output, such as `go test -json ./... -count=1 -timeout 10m`, and preserve the output outside the repository worktree when it is too large for the terminal.
 - Extract the full set of failed tests and packages from that run, then inspect the associated output and classify failures by shared root cause. Truncated terminal output is not evidence that only the visible failure exists.
@@ -175,6 +185,7 @@ fd "filename" -t f internal cmd
    - `orchestration.project_loop` durable watch cursor, deterministic action replay, and review-first scheduling -> `projection` (durable issue observation stream + orchestration checkpoint refreshed before each loop decision)
    - `issue_resources.lifecycle` issue resource desired-state gate -> `projection` (durable issue status + runtime attachment projection)
    - `interaction.waiting_human` decision-waiting and pickup exclusion gate -> `projection` (durable interaction request projection refreshed before evaluation)
+   - `investigation.waiting_human` human-findings authority gate -> `projection` (durable investigation disposition and issue-specific acceptance/review evidence refreshed before evaluation)
    - `interaction.staleness` stale/reminder/disposition/recovery policy -> `projection` (durable interaction request projection refreshed before age evaluation and revision-safe write-through audit)
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
    - cross-project configurable views and tmux selector ordering -> `projection` (global-daemon-owned user database refreshed from authoritative project stores; scoped issue/session/worktree/dependency keys and explicit stale/unavailable project health)
@@ -208,6 +219,8 @@ fd "filename" -t f internal cmd
 3. Pre-merge review must test the candidate through real startup/store paths against safe temporary clones of the root user database and every registered project database. Never test candidate migrations on the originals.
 4. Require fresh, historical-upgrade, idempotent-reopen, rollback, drift, and real-database-clone evidence. Fresh-database tests alone are insufficient.
 5. Migration changes remain high risk and require three clean review passes after the final migration-affecting edit.
+6. Every migration ID must have exactly one embedded immutable artifact and a pinned SHA-256 checksum. Go-assisted migrations require a SQL/manifest artifact describing schema, data, validation, and ledger effects; callbacks may orchestrate but never replace the artifact.
+7. Registration must fail for duplicate IDs, missing/empty artifacts, checksum drift, or a registry/artifact mismatch. Applied ledger rows must record `artifact_checksum`; legacy rows may be backfilled once from the pinned catalog and must reject later mismatch.
 
 ## Active-Path Placeholder Policy
 

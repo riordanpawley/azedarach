@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestExecRunnerReturnsStdoutOnMergeTreeConflict(t *testing.T) {
+func TestRealProcessProfileExecRunnerReturnsStdoutOnMergeTreeConflict(t *testing.T) {
 	t.Parallel()
 
 	repo := t.TempDir()
