@@ -502,6 +502,46 @@ func TestOrchestrationSnapshotCacheCoalescesDuplicateRevision(t *testing.T) {
 	}
 }
 
+func TestRootedOrchestrationSnapshotCacheHonorsReadinessSemanticExpiry(t *testing.T) {
+	projectID := "project"
+	rootID := "az-root"
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		revision:                map[string]uint64{projectID: 7},
+		taskGraphReadinessCache: map[string]taskGraphReadinessCacheEntry{},
+	}
+	request := protocol.OrchestrationSnapshotRequest{Scope: scope, ActorID: "agent-a"}
+	builds := 0
+	build := func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		expiresAt := time.Now().Add(time.Minute)
+		if builds == 1 {
+			expiresAt = time.Now().Add(-time.Second)
+		}
+		d.taskGraphReadinessCache[taskGraphReadinessLoadKey(projectID, rootID, request.ActorID)] = taskGraphReadinessCacheEntry{
+			revision:  7,
+			expiresAt: expiresAt,
+		}
+		return protocol.OrchestrationSnapshot{Scope: scope, Runnable: []string{"az-child"}, Blocked: map[string]string{}}, nil
+	}
+
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("initial snapshot stable=%v err=%v", stable, err)
+	}
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("snapshot after semantic expiry stable=%v err=%v", stable, err)
+	}
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("cached snapshot after refresh stable=%v err=%v", stable, err)
+	}
+	if builds != 2 {
+		t.Fatalf("snapshot builds = %d, want expired entry rebuilt once", builds)
+	}
+}
+
 func TestOrchestrationSnapshotCacheRecoversFromRevisionChurn(t *testing.T) {
 	projectID := "project"
 	scope, err := domain.RootedOrchestrationScope("az-root")

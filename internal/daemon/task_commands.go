@@ -4739,6 +4739,17 @@ func taskGraphReadinessLoadKey(projectID, rootIssueID, actorID string) string {
 	return strings.TrimSpace(projectID) + "\x00" + strings.TrimSpace(rootIssueID) + "\x00" + strings.TrimSpace(actorID)
 }
 
+func (d *Daemon) taskGraphReadinessCacheExpiry(projectID, rootIssueID, actorID string, revision uint64) time.Time {
+	cacheKey := taskGraphReadinessLoadKey(d.canonicalProjectID(projectID), rootIssueID, actorID)
+	d.taskGraphReadinessMu.Lock()
+	defer d.taskGraphReadinessMu.Unlock()
+	cached, ok := d.taskGraphReadinessCache[cacheKey]
+	if !ok || cached.revision != revision {
+		return time.Time{}
+	}
+	return cached.expiresAt
+}
+
 func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectID, rootIssueID string) ([]domain.Task, error) {
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {

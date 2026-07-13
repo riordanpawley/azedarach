@@ -37,10 +37,11 @@ type daemonOrchestrationAuthority struct{ daemon *Daemon }
 type orchestrationSnapshotBuilder func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error)
 
 type orchestrationSnapshotCacheEntry struct {
-	revision        uint64
-	cachedAt        time.Time
-	snapshot        protocol.OrchestrationSnapshot
-	runtimeIssueIDs []string
+	revision          uint64
+	cachedAt          time.Time
+	semanticExpiresAt time.Time
+	snapshot          protocol.OrchestrationSnapshot
+	runtimeIssueIDs   []string
 }
 
 type orchestrationSnapshotLoad struct {
@@ -144,7 +145,7 @@ func (d *Daemon) loadOrchestrationSnapshot(
 	if d.orchestrationSnapshotCache == nil {
 		d.orchestrationSnapshotCache = map[string]orchestrationSnapshotCacheEntry{}
 	}
-	if cached, ok := d.orchestrationSnapshotCache[cacheKey]; ok && cached.revision == revision && time.Since(cached.cachedAt) <= orchestrationSnapshotCacheTTL {
+	if cached, ok := d.orchestrationSnapshotCache[cacheKey]; ok && cached.revision == revision && time.Since(cached.cachedAt) <= orchestrationSnapshotCacheTTL && (cached.semanticExpiresAt.IsZero() || time.Now().Before(cached.semanticExpiresAt)) {
 		d.orchestrationSnapshotMu.Unlock()
 		if request.Scope.Kind == domain.OrchestrationScopeRooted && d.issueClientForProject(projectID) != nil {
 			if _, err := d.taskGraphReadinessForActor(ctx, projectID, request.Scope.RootIssueID.String(), request.ActorID); err != nil {
@@ -193,14 +194,19 @@ func (d *Daemon) loadOrchestrationSnapshot(
 	load.stable = stable
 	load.err = err
 
+	var semanticExpiresAt time.Time
+	if stable && request.Scope.Kind == domain.OrchestrationScopeRooted {
+		semanticExpiresAt = d.taskGraphReadinessCacheExpiry(projectID, request.Scope.RootIssueID.String(), request.ActorID, revision)
+	}
 	d.orchestrationSnapshotMu.Lock()
 	delete(d.orchestrationSnapshotLoads, loadKey)
 	if stable {
 		d.orchestrationSnapshotCache[cacheKey] = orchestrationSnapshotCacheEntry{
-			revision:        revision,
-			cachedAt:        time.Now(),
-			snapshot:        snapshot,
-			runtimeIssueIDs: orchestrationSnapshotRuntimeIssueIDs(snapshot),
+			revision:          revision,
+			cachedAt:          time.Now(),
+			semanticExpiresAt: semanticExpiresAt,
+			snapshot:          snapshot,
+			runtimeIssueIDs:   orchestrationSnapshotRuntimeIssueIDs(snapshot),
 		}
 	}
 	close(load.done)
