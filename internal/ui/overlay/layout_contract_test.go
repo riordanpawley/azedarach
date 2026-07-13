@@ -15,7 +15,7 @@ import (
 func TestProjectSelector_UsesActionsSectionLayout(t *testing.T) {
 	selector := NewProjectSelector(&config.ProjectsRegistry{})
 	view := selector.View()
-	if !strings.Contains(view, "PROJECT SELECTOR") {
+	if !strings.Contains(view, "SCOPE SELECTOR") {
 		t.Fatalf("expected selector title, got %q", view)
 	}
 	if !strings.Contains(view, "Actions") {

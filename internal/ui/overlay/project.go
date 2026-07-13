@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -12,8 +13,10 @@ import (
 	uistyles "github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
-// ProjectSelectedMsg is sent when a project is selected
-type ProjectSelectedMsg struct {
+// ScopeSelectedMsg is sent when the authoritative board scope changes.
+// A zero Project with Global set selects the root user projection.
+type ScopeSelectedMsg struct {
+	Global  bool
 	Project config.Project
 }
 
@@ -28,7 +31,8 @@ const (
 	ProjectActionDetect
 )
 
-// ProjectSelector is an overlay for selecting and managing projects
+// ProjectSelector is the authoritative Global/project scope selector and
+// project-registry manager.
 type ProjectSelector struct {
 	dialogViewportState
 	registry           *config.ProjectsRegistry
@@ -36,6 +40,15 @@ type ProjectSelector struct {
 	mode               projectSelectorMode
 	styles             *Styles
 	currentProjectName string
+	currentGlobal      bool
+	filtering          bool
+	query              string
+}
+
+type scopeSelectorEntry struct {
+	global       bool
+	project      config.Project
+	projectIndex int
 }
 
 type projectSelectorMode int
@@ -65,6 +78,37 @@ func (m *ProjectSelector) Init() tea.Cmd {
 func (m *ProjectSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.mode == projectModeList && m.filtering {
+			switch msg.String() {
+			case "esc":
+				m.filtering, m.query, m.cursor = false, "", 0
+				return m, nil
+			case "enter":
+				return m, m.selectProject()
+			case "down":
+				m.moveCursorDown()
+				return m, nil
+			case "up":
+				m.moveCursorUp()
+				return m, nil
+			case "backspace":
+				if runes := []rune(m.query); len(runes) > 0 {
+					m.query = string(runes[:len(runes)-1])
+					m.cursor = 0
+				}
+				return m, nil
+			default:
+				if msg.Type == tea.KeyRunes {
+					for _, r := range msg.Runes {
+						if unicode.IsPrint(r) {
+							m.query += string(r)
+						}
+					}
+					m.cursor = 0
+				}
+				return m, nil
+			}
+		}
 		switch msg.String() {
 		case "esc", "q":
 			if m.mode == projectModeActions {
@@ -118,11 +162,23 @@ func (m *ProjectSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.detectAndAdd()
 			}
 
+		case "/":
+			if m.mode == projectModeList {
+				m.filtering = true
+				m.query = ""
+				m.cursor = 0
+				return m, nil
+			}
+
 		default:
 			if m.mode == projectModeList {
+				if msg.String() == "0" {
+					m.cursor = 0
+					return m, m.selectProject()
+				}
 				index, ok := parseOneBasedProjectIndex(msg.String())
 				if ok && index < len(m.registry.Projects) {
-					m.cursor = index
+					m.cursor = m.cursorForProjectIndex(index)
 					return m, m.selectProject()
 				}
 			}
@@ -149,7 +205,7 @@ func (m *ProjectSelector) viewList() string {
 		styles:            m.styles,
 		width:             width,
 		height:            height,
-		title:             "PROJECT SELECTOR",
+		title:             "SCOPE SELECTOR",
 		rightSectionTitle: "Actions",
 		breakpoint:        84,
 		gap:               3,
@@ -157,12 +213,13 @@ func (m *ProjectSelector) viewList() string {
 		minRight:          20,
 		leftFocused:       true,
 		renderLeft: func(mode dialogLayoutMode, width, height int) string {
-			return m.renderProjectListContent()
+			return m.renderProjectListContent(height)
 		},
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
 			return keybinds.RenderKeyTable([]keybinds.Binding{
-				{Key: "1-9", Description: "switch"},
+				{Key: "0-9", Description: "switch scope"},
 				{Key: "Enter", Description: "switch"},
+				{Key: "/", Description: "search"},
 				{Key: "d", Description: "default"},
 				{Key: "x", Description: "remove"},
 				{Key: "a", Description: "add"},
@@ -177,46 +234,56 @@ func (m *ProjectSelector) viewList() string {
 	})
 }
 
-func (m *ProjectSelector) renderProjectListContent() string {
+func (m *ProjectSelector) renderProjectListContent(height int) string {
 	var list strings.Builder
-	if len(m.registry.Projects) == 0 {
-		list.WriteString(m.styles.MenuItem.Render("No projects registered"))
-		return list.String()
+	entries := m.scopeEntries()
+	if m.filtering || strings.TrimSpace(m.query) != "" {
+		list.WriteString(m.styles.Footer.MarginTop(0).Render("Search: " + m.query + "▏"))
+		list.WriteString("\n")
 	}
-
-	for i, project := range m.registry.Projects {
-		number := i + 1
+	start, end := scopeSelectorWindow(m.cursor, len(entries), max(1, (height-3)/2))
+	if start > 0 {
+		list.WriteString(m.styles.Footer.MarginTop(0).Render(fmt.Sprintf("  ↑ %d more", start)))
+		list.WriteString("\n")
+	}
+	for i := start; i < end; i++ {
+		entry := entries[i]
 		style := m.styles.MenuItem
 		if i == m.cursor {
 			style = m.styles.MenuItemActive
 		}
-		isCurrent := project.Name == m.currentProjectName
+		isCurrent := entry.global && m.currentGlobal || !entry.global && !m.currentGlobal && entry.project.Name == m.currentProjectName
 		if isCurrent {
 			style = lipgloss.NewStyle().
 				Foreground(uistyles.Green).
 				Bold(true)
 		}
-		line := fmt.Sprintf("%d. %s", number, project.Name)
+		line := "0. Global"
+		detail := "   User views · all registered projects"
+		if !entry.global {
+			line = fmt.Sprintf("%d. %s", entry.projectIndex+1, entry.project.Name)
+			detail = fmt.Sprintf("   %s", entry.project.Path)
+		}
 		if isCurrent {
 			line += " " + lipgloss.NewStyle().Foreground(uistyles.Green).Render("(current)")
 		}
-		if project.Name == m.registry.DefaultProject {
+		if !entry.global && entry.project.Name == m.registry.DefaultProject {
 			line += " " + m.styles.MenuKey.Render("[default]")
 		}
 
 		list.WriteString(style.Render(line))
 		list.WriteString("\n")
-		list.WriteString(m.styles.Footer.MarginTop(0).Render(fmt.Sprintf("   %s", project.Path)))
+		list.WriteString(m.styles.Footer.MarginTop(0).Render(detail))
 		list.WriteString("\n")
+	}
+	if end < len(entries) {
+		list.WriteString(m.styles.Footer.MarginTop(0).Render(fmt.Sprintf("  ↓ %d more", len(entries)-end)))
 	}
 	return strings.TrimRight(list.String(), "\n")
 }
 
 func (m *ProjectSelector) listModeHeight() int {
-	if len(m.registry.Projects) == 0 {
-		return 12
-	}
-	return max(12, len(m.registry.Projects)*2+8)
+	return max(12, min(26, (len(m.registry.Projects)+1)*2+10))
 }
 
 // viewActions renders the actions menu for adding projects
@@ -305,34 +372,28 @@ func (m *ProjectSelector) getMaxCursor() int {
 	if m.mode == projectModeActions {
 		return 2 // 3 actions (0, 1, 2)
 	}
-	if len(m.registry.Projects) == 0 {
-		return 0
-	}
-	return len(m.registry.Projects) - 1
+	return max(0, len(m.scopeEntries())-1)
 }
 
 // selectProject selects the current project
 func (m *ProjectSelector) selectProject() tea.Cmd {
-	if m.cursor < 0 || m.cursor >= len(m.registry.Projects) {
+	entries := m.scopeEntries()
+	if m.cursor < 0 || m.cursor >= len(entries) {
 		return nil
 	}
-
-	project := m.registry.Projects[m.cursor]
+	entry := entries[m.cursor]
 
 	return func() tea.Msg {
-		return ProjectSelectedMsg{
-			Project: project,
-		}
+		return ScopeSelectedMsg{Global: entry.global, Project: entry.project}
 	}
 }
 
 // setAsDefault sets the current project as default
 func (m *ProjectSelector) setAsDefault() tea.Cmd {
-	if m.cursor < 0 || m.cursor >= len(m.registry.Projects) {
+	project, ok := m.selectedProject()
+	if !ok {
 		return nil
 	}
-
-	project := m.registry.Projects[m.cursor]
 
 	return func() tea.Msg {
 		if err := m.registry.SetDefault(project.Name); err != nil {
@@ -359,11 +420,10 @@ func (m *ProjectSelector) setAsDefault() tea.Cmd {
 
 // removeProject removes the current project
 func (m *ProjectSelector) removeProject() tea.Cmd {
-	if m.cursor < 0 || m.cursor >= len(m.registry.Projects) {
+	project, ok := m.selectedProject()
+	if !ok {
 		return nil
 	}
-
-	project := m.registry.Projects[m.cursor]
 
 	return func() tea.Msg {
 		if err := m.registry.Remove(project.Name); err != nil {
@@ -468,6 +528,13 @@ func WithCurrentProjectName(name string) ProjectSelectorOption {
 	}
 }
 
+// WithGlobalScope marks Global as the currently active scope.
+func WithGlobalScope(global bool) ProjectSelectorOption {
+	return func(p *ProjectSelector) {
+		p.currentGlobal = global
+	}
+}
+
 // NewProjectSelectorWithOptions creates a new project selector with options
 func NewProjectSelectorWithOptions(registry *config.ProjectsRegistry, opts ...ProjectSelectorOption) *ProjectSelector {
 	p := NewProjectSelector(registry)
@@ -486,4 +553,53 @@ func parseOneBasedProjectIndex(key string) (int, bool) {
 		return 0, false
 	}
 	return n - 1, true
+}
+
+func (m *ProjectSelector) scopeEntries() []scopeSelectorEntry {
+	entries := []scopeSelectorEntry{{global: true, projectIndex: -1}}
+	if m.registry == nil {
+		return entries
+	}
+	query := strings.ToLower(strings.TrimSpace(m.query))
+	for i, project := range m.registry.Projects {
+		if query != "" && !strings.Contains(strings.ToLower(project.Name+" "+project.Path), query) {
+			continue
+		}
+		entries = append(entries, scopeSelectorEntry{project: project, projectIndex: i})
+	}
+	return entries
+}
+
+func (m *ProjectSelector) selectedProject() (config.Project, bool) {
+	entries := m.scopeEntries()
+	if m.cursor < 0 || m.cursor >= len(entries) || entries[m.cursor].global {
+		return config.Project{}, false
+	}
+	return entries[m.cursor].project, true
+}
+
+func (m *ProjectSelector) cursorForProjectIndex(index int) int {
+	for i, entry := range m.scopeEntries() {
+		if !entry.global && entry.projectIndex == index {
+			return i
+		}
+	}
+	return 0
+}
+
+func scopeSelectorWindow(cursor, total, capacity int) (int, int) {
+	if total <= 0 || capacity <= 0 {
+		return 0, 0
+	}
+	if capacity >= total {
+		return 0, total
+	}
+	start := cursor - capacity/2
+	if start < 0 {
+		start = 0
+	}
+	if start+capacity > total {
+		start = total - capacity
+	}
+	return start, start + capacity
 }

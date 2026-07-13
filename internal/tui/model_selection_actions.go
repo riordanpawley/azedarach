@@ -308,6 +308,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			m.projectRegistry,
 			overlay.WithInitialCursor(m.projectSelectorCursor()),
 			overlay.WithCurrentProjectName(m.currentProject),
+			overlay.WithGlobalScope(m.scope.IsGlobal()),
 		))
 	case "event-log-stream":
 		switch value := msg.Value.(type) {

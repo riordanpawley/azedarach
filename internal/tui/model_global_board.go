@@ -36,8 +36,8 @@ func globalTaskKey(identity protocol.ScopedIssueID) string {
 }
 
 func (m *Model) applyGlobalBoardSnapshot(snapshot protocol.GlobalSnapshotResponseBody) {
-	m.globalBoard = true
-	m.currentProject = "All projects"
+	m.scope = globalTUIScope()
+	m.projectOrchestrator = nil
 	m.globalTaskScopes = make(map[string]protocol.ScopedIssueID, len(snapshot.Projection.Items))
 	m.globalTaskProjects = make(map[string]config.Project, len(snapshot.Projection.Items))
 	projects := make(map[string]config.Project, len(snapshot.Projects))
@@ -91,7 +91,7 @@ func (m Model) leaveGlobalBoardForCurrentTask() (tea.Model, tea.Cmd) {
 		m.addToast(Toast{Level: ToastError, Message: fmt.Sprintf("Project unavailable for %s", identity.IssueID), Expires: time.Now().Add(4 * time.Second)})
 		return m, nil
 	}
-	m.globalBoard = false
+	m.scope = projectTUIScope()
 	m.projectSwitchFromGlobal = true
 	m.pendingUIOpenTaskID = identity.IssueID.String()
 	m.loading = false

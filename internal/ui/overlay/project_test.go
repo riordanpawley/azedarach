@@ -66,22 +66,23 @@ func TestProjectSelector_MoveCursor(t *testing.T) {
 		t.Errorf("expected cursor at 2, got %d", selector.cursor)
 	}
 
-	// Move down should not go past max
+	// Move down reaches the third project after Global.
 	selector.moveCursorDown()
-	if selector.cursor != 2 {
-		t.Errorf("expected cursor to stay at 2, got %d", selector.cursor)
+	if selector.cursor != 3 {
+		t.Errorf("expected cursor at 3, got %d", selector.cursor)
 	}
 
 	// Move up
 	selector.moveCursorUp()
-	if selector.cursor != 1 {
-		t.Errorf("expected cursor at 1, got %d", selector.cursor)
+	if selector.cursor != 2 {
+		t.Errorf("expected cursor at 2, got %d", selector.cursor)
 	}
 
-	// Move up to 0
+	// Move up through the first project to Global.
+	selector.moveCursorUp()
 	selector.moveCursorUp()
 	if selector.cursor != 0 {
-		t.Errorf("expected cursor at 0, got %d", selector.cursor)
+		t.Errorf("expected Global cursor at 0, got %d", selector.cursor)
 	}
 
 	// Move up should not go below 0
@@ -101,33 +102,32 @@ func TestProjectSelector_SelectProject(t *testing.T) {
 
 	selector := NewProjectSelector(registry)
 
-	// Select first project
+	// Select Global.
 	cmd := selector.selectProject()
 	if cmd == nil {
 		t.Fatal("expected command to be returned")
 	}
 
 	result := cmd()
-	msg, ok := result.(ProjectSelectedMsg)
+	msg, ok := result.(ScopeSelectedMsg)
 	if !ok {
-		t.Fatalf("expected ProjectSelectedMsg, got %T", result)
+		t.Fatalf("expected ScopeSelectedMsg, got %T", result)
+	}
+	if !msg.Global {
+		t.Fatal("expected Global scope")
 	}
 
-	if msg.Project.Name != "test1" {
-		t.Errorf("expected project 'test1', got %s", msg.Project.Name)
-	}
-
-	// Move to second project and select
+	// Move to first project and select.
 	selector.moveCursorDown()
 	cmd = selector.selectProject()
 	result = cmd()
-	msg, ok = result.(ProjectSelectedMsg)
+	msg, ok = result.(ScopeSelectedMsg)
 	if !ok {
-		t.Fatalf("expected ProjectSelectedMsg, got %T", result)
+		t.Fatalf("expected ScopeSelectedMsg, got %T", result)
 	}
 
-	if msg.Project.Name != "test2" {
-		t.Errorf("expected project 'test2', got %s", msg.Project.Name)
+	if msg.Global || msg.Project.Name != "test1" {
+		t.Errorf("expected project 'test1', got %+v", msg)
 	}
 }
 
@@ -259,15 +259,58 @@ func TestProjectSelector_NumberHotkeySelectsProject(t *testing.T) {
 	}
 
 	got := cmd()
-	selected, ok := got.(ProjectSelectedMsg)
+	selected, ok := got.(ScopeSelectedMsg)
 	if !ok {
-		t.Fatalf("expected ProjectSelectedMsg, got %T", got)
+		t.Fatalf("expected ScopeSelectedMsg, got %T", got)
 	}
 	if selected.Project.Name != "test2" {
 		t.Fatalf("expected test2, got %s", selected.Project.Name)
 	}
-	if selector.cursor != 1 {
-		t.Fatalf("expected cursor set to index 1, got %d", selector.cursor)
+	if selector.cursor != 2 {
+		t.Fatalf("expected cursor set to scope index 2, got %d", selector.cursor)
+	}
+}
+
+func TestProjectSelector_ZeroHotkeySelectsGlobal(t *testing.T) {
+	selector := NewProjectSelector(&config.ProjectsRegistry{Projects: []config.Project{{Name: "test1", Path: "/tmp/test1"}}})
+	selector.cursor = 1
+	_, cmd := selector.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'0'}})
+	if cmd == nil {
+		t.Fatal("expected Global selection command")
+	}
+	selected, ok := cmd().(ScopeSelectedMsg)
+	if !ok || !selected.Global || selector.cursor != 0 {
+		t.Fatalf("selection=%#v cursor=%d, want Global at 0", selected, selector.cursor)
+	}
+}
+
+func TestProjectSelector_SearchFiltersLargeRegistryAndKeepsStableShortcut(t *testing.T) {
+	selector := NewProjectSelector(&config.ProjectsRegistry{Projects: []config.Project{
+		{Name: "alpha", Path: "/work/alpha"},
+		{Name: "beta", Path: "/work/beta"},
+		{Name: "gamma", Path: "/work/gamma"},
+	}})
+	selector.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	selector.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("gam")})
+	entries := selector.scopeEntries()
+	if len(entries) != 2 || !entries[0].global || entries[1].project.Name != "gamma" || entries[1].projectIndex != 2 {
+		t.Fatalf("filtered entries = %+v", entries)
+	}
+	selector.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, cmd := selector.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	selected, ok := cmd().(ScopeSelectedMsg)
+	if !ok || selected.Project.Name != "gamma" {
+		t.Fatalf("selection = %#v", selected)
+	}
+	if view := selector.View(); !strings.Contains(view, "3. gamma") || strings.Contains(view, "1. alpha") {
+		t.Fatalf("filtered view = %q", view)
+	}
+}
+
+func TestScopeSelectorWindowKeepsCursorVisible(t *testing.T) {
+	start, end := scopeSelectorWindow(17, 21, 5)
+	if start != 15 || end != 20 {
+		t.Fatalf("window = [%d,%d), want [15,20)", start, end)
 	}
 }
 
@@ -316,8 +359,9 @@ func TestProjectSelector_EnterKey(t *testing.T) {
 	}
 
 	result := cmd()
-	if _, ok := result.(ProjectSelectedMsg); !ok {
-		t.Errorf("expected ProjectSelectedMsg, got %T", result)
+	selected, ok := result.(ScopeSelectedMsg)
+	if !ok || !selected.Global {
+		t.Errorf("expected Global ScopeSelectedMsg, got %#v", result)
 	}
 }
 
@@ -350,9 +394,8 @@ func TestProjectSelector_View_EmptyProjects(t *testing.T) {
 		t.Error("expected non-empty view")
 	}
 
-	// Should contain "No projects registered"
-	if !strings.Contains(view, "No projects registered") {
-		t.Error("expected view to contain 'No projects registered'")
+	if !strings.Contains(view, "0. Global") {
+		t.Error("expected empty registry to retain Global scope")
 	}
 }
 
@@ -445,8 +488,8 @@ func TestProjectSelector_GetMaxCursor(t *testing.T) {
 		expectedMax int
 	}{
 		{"empty list mode", 0, projectModeList, 0},
-		{"one project list mode", 1, projectModeList, 0},
-		{"three projects list mode", 3, projectModeList, 2},
+		{"one project list mode", 1, projectModeList, 1},
+		{"three projects list mode", 3, projectModeList, 3},
 		{"actions mode", 0, projectModeActions, 2},
 	}
 
