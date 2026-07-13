@@ -126,6 +126,33 @@ func recordApplied(ctx context.Context, db LedgerWriter, artifacts []Artifact, i
 }
 
 func EnsureLedgerChecksums(ctx context.Context, db LedgerDB, artifacts []Artifact) error {
+	return ensureLedgerChecksums(ctx, db, artifacts, nil)
+}
+
+// EnsureLedgerChecksumsAtomic upgrades a legacy standalone ledger in one
+// transaction, so an interrupted backfill rolls back both the new column and
+// every earlier row update. Callers already inside a migration transaction
+// should use EnsureLedgerChecksums with that transaction instead.
+func EnsureLedgerChecksumsAtomic(ctx context.Context, db *sql.DB, artifacts []Artifact) error {
+	return ensureLedgerChecksumsAtomic(ctx, db, artifacts, nil)
+}
+
+func ensureLedgerChecksumsAtomic(ctx context.Context, db *sql.DB, artifacts []Artifact, afterLegacyColumnAdded func(LedgerDB) error) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration artifact checksum conversion: %w", err)
+	}
+	defer tx.Rollback()
+	if err := ensureLedgerChecksums(ctx, tx, artifacts, afterLegacyColumnAdded); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration artifact checksum conversion: %w", err)
+	}
+	return nil
+}
+
+func ensureLedgerChecksums(ctx context.Context, db LedgerDB, artifacts []Artifact, afterLegacyColumnAdded func(LedgerDB) error) error {
 	var hasColumn bool
 	rows, err := db.QueryContext(ctx, `PRAGMA table_info(schema_migrations)`)
 	if err != nil {
@@ -147,6 +174,11 @@ func EnsureLedgerChecksums(ctx context.Context, db LedgerDB, artifacts []Artifac
 	if !hasColumn {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE schema_migrations ADD COLUMN artifact_checksum TEXT`); err != nil {
 			return fmt.Errorf("add migration artifact checksum ledger: %w", err)
+		}
+		if afterLegacyColumnAdded != nil {
+			if err := afterLegacyColumnAdded(db); err != nil {
+				return fmt.Errorf("prepare legacy migration artifact checksum backfill: %w", err)
+			}
 		}
 	}
 	allowLegacyBackfill := !hasColumn

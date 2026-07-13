@@ -443,7 +443,7 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := ensureMigrationTable(ctx, db); err != nil {
 		return err
 	}
-	if err := sqlitemigration.EnsureLedgerChecksums(ctx, db, migrationArtifacts); err != nil {
+	if err := sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifacts); err != nil {
 		return err
 	}
 	if err := refusePartialIssueStateModelV2Cutover(ctx, db); err != nil {
@@ -545,7 +545,7 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := c.seedBuiltInBoardViews(ctx, db, "default"); err != nil {
 		return fmt.Errorf("seed built-in board views: %w", err)
 	}
-	return sqlitemigration.EnsureLedgerChecksums(ctx, db, migrationArtifacts)
+	return sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifacts)
 }
 
 func repairIssueIDAllocationSchema(ctx context.Context, db *sql.DB) error {

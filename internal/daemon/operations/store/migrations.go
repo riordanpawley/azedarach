@@ -44,7 +44,7 @@ func runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := ensureMigrationTable(ctx, db); err != nil {
 		return err
 	}
-	if err := sqlitemigration.EnsureLedgerChecksums(ctx, db, migrationArtifacts); err != nil {
+	if err := sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifacts); err != nil {
 		return err
 	}
 	for _, migration := range orderedMigrations {
@@ -63,7 +63,7 @@ func runMigrations(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
-	return sqlitemigration.EnsureLedgerChecksums(ctx, db, migrationArtifacts)
+	return sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifacts)
 }
 
 func ensureMigrationTable(ctx context.Context, db *sql.DB) error {
