@@ -7,12 +7,132 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
+
+func TestMailWatchRecoversReviewReadyResubmissionsExactlyOnce(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	root, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := client.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInProgress, ParentID: &root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, child, issues.IssueObservationEventParams{Type: "worker-integration-ready", Source: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, child, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	req := protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: "project"}}
+
+	first, err := d.readMailboxEventsWithReviewReadyRecovery(ctx, req, repoDir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := d.readMailboxEventsWithReviewReadyRecovery(ctx, req, repoDir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || len(second) != 1 || first[0].Seq != 1 || first[0].Type != "worker-integration-ready" {
+		t.Fatalf("first=%+v second=%+v, want one stable recovered publication", first, second)
+	}
+	if first[0].Payload["source_event_type"] != "worker-integration-ready" {
+		t.Fatalf("payload = %+v, want normalized alias source diagnostics", first[0].Payload)
+	}
+	restarted := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	afterRestart, err := restarted.readMailboxEventsWithReviewReadyRecovery(ctx, req, repoDir, root)
+	if err != nil || len(afterRestart) != 1 {
+		t.Fatalf("restart replay = %+v err=%v, want no duplicate", afterRestart, err)
+	}
+
+	if err := client.Update(ctx, child, domain.StatusInProgress); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, child, issues.IssueObservationEventParams{Type: "worker.integration_ready", Source: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, child, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := d.readMailboxEventsWithReviewReadyRecovery(ctx, req, repoDir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replayed) != 2 || replayed[1].Seq != 2 {
+		t.Fatalf("replayed = %+v, want one publication for each resubmission", replayed)
+	}
+	if afterCursor := filterMailEvents(replayed, 2, 0); len(afterCursor) != 1 || afterCursor[0].Seq != 2 {
+		t.Fatalf("cursor replay = %+v, want only second resubmission", afterCursor)
+	}
+	watchReq := req
+	watchReq.Body = mustMarshal(t, protocol.MailWatchCommandBody{RepoDir: repoDir, ParentIssue: root, SinceSeq: 2})
+	watchResp, err := d.handleMailWatch(ctx, watchReq)
+	if err != nil || !watchResp.OK {
+		t.Fatalf("mail watch resp=%+v err=%v", watchResp, err)
+	}
+	var watched []protocol.MailEvent
+	if err := json.Unmarshal(watchResp.Body, &watched); err != nil {
+		t.Fatal(err)
+	}
+	if len(watched) != 1 || watched[0].Seq != 2 || watched[0].IssueID.String() != child {
+		t.Fatalf("watched = %+v, want watch-only consumer to receive resubmission", watched)
+	}
+}
+
+func TestMailWatchRepairsInterruptedAppendBeforeReviewReadyReplay(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	root, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := client.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInProgress, ParentID: &root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, child, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
+	path := mailboxPath(repoDir, root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"seq":1,"parent_issue":"`+root+`"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	events, err := d.readMailboxEventsWithReviewReadyRecovery(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: "project"}}, repoDir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Seq != 1 || events[0].IssueID != child {
+		t.Fatalf("events = %+v, want durable observation replay after fragment repair", events)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasSuffix(data, []byte("\n")) {
+		t.Fatalf("mailbox = %q, want committed newline", data)
+	}
+}
 
 func TestMailWatchGenericCommandLogsAtDebugOnSuccess(t *testing.T) {
 	repoDir := t.TempDir()
