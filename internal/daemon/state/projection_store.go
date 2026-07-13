@@ -152,8 +152,9 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 
 // ApplyWorkerSessionCompensation atomically aligns worker desired intent and
 // physical runtime observation after a failed start cleanup attempt.
-func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, projectID, sessionID, issueID string, desiredState, observedState SessionState, activity, activitySource string, updatedAt time.Time) ([]Session, error) {
+func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, projectID, sessionID, issueID string, desiredState, observedState SessionState, activity, activitySource string, updatedAt time.Time) ([]Session, SessionState, error) {
 	var changed []Session
+	effectiveState := NormalizeSessionState(desiredState)
 	err := sqliteutil.WithWriteLock(s.dbPath, func() error {
 		db, err := s.dbHandle()
 		if err != nil {
@@ -175,24 +176,42 @@ func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, 
 			return fmt.Errorf("begin session compensation: %w", err)
 		}
 		defer func() { _ = tx.Rollback() }()
-		logicalID := logicalSessionIntentID(Session{Role: SessionRoleWorker, ScopeKind: SessionScopeIssue, ScopeID: strings.TrimSpace(issueID)})
-		result, err := tx.ExecContext(ctx, `UPDATE `+sessionStateTable+` SET state=?,updated_at=? WHERE project_id=? AND logical_id=?`,
-			desiredState, observation.UpdatedAt.Format(time.RFC3339Nano), observation.ProjectID, logicalID)
-		if err != nil {
-			return fmt.Errorf("update compensated desired session: %w", err)
-		}
-		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
-			return fmt.Errorf("update compensated desired session: affected=%d err=%v", affected, err)
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO `+physicalSessionObservationTable+`
+		result, err := tx.ExecContext(ctx, `INSERT INTO `+physicalSessionObservationTable+`
 			(project_id,session_id,observed_state,activity,activity_source,updated_at,observed_version)
 			VALUES(?,?,?,?,?,?,?)
 			ON CONFLICT(project_id,session_id) DO UPDATE SET observed_state=excluded.observed_state,activity=excluded.activity,
 				activity_source=excluded.activity_source,updated_at=excluded.updated_at,observed_version=excluded.observed_version
 			WHERE excluded.observed_version > `+physicalSessionObservationTable+`.observed_version`,
 			observation.ProjectID, observation.SessionID, observation.ObservedState, observation.Activity, observation.ActivitySource,
-			observation.UpdatedAt.Format(time.RFC3339Nano), observation.ObservedVersion); err != nil {
+			observation.UpdatedAt.Format(time.RFC3339Nano), observation.ObservedVersion)
+		if err != nil {
 			return fmt.Errorf("persist compensated physical observation: %w", err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("inspect compensated physical observation: %w", err)
+		}
+		if affected == 0 {
+			var state, updated string
+			if err := tx.QueryRowContext(ctx, `SELECT observed_state,activity,activity_source,updated_at,observed_version FROM `+physicalSessionObservationTable+` WHERE project_id=? AND session_id=?`, observation.ProjectID, observation.SessionID).
+				Scan(&state, &observation.Activity, &observation.ActivitySource, &updated, &observation.ObservedVersion); err != nil {
+				return fmt.Errorf("load winning compensated physical observation: %w", err)
+			}
+			observation.ObservedState = NormalizeSessionState(SessionState(state))
+			observation.UpdatedAt, err = parseRuntimeStateTime(updated)
+			if err != nil {
+				return fmt.Errorf("parse winning compensated physical observation: %w", err)
+			}
+			effectiveState = observation.ObservedState
+		}
+		logicalID := logicalSessionIntentID(Session{Role: SessionRoleWorker, ScopeKind: SessionScopeIssue, ScopeID: strings.TrimSpace(issueID)})
+		result, err = tx.ExecContext(ctx, `UPDATE `+sessionStateTable+` SET state=?,updated_at=? WHERE project_id=? AND logical_id=?`,
+			effectiveState, observation.UpdatedAt.Format(time.RFC3339Nano), observation.ProjectID, logicalID)
+		if err != nil {
+			return fmt.Errorf("update compensated desired session: %w", err)
+		}
+		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+			return fmt.Errorf("update compensated desired session: affected=%d err=%v", affected, err)
 		}
 		linked, err := listSessionIntentsByPhysicalIDTx(ctx, tx, observation.ProjectID, observation.SessionID)
 		if err != nil {
@@ -212,7 +231,7 @@ func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, 
 		}
 		return tx.Commit()
 	})
-	return changed, err
+	return changed, effectiveState, err
 }
 
 func normalizePhysicalSessionObservation(observation PhysicalSessionObservation) (PhysicalSessionObservation, error) {

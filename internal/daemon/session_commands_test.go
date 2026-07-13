@@ -74,11 +74,13 @@ func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
 	for _, tc := range []struct {
 		name, failure string
 		seedPhysical  bool
+		winnerAhead   bool
 		killErr       error
 		want          daemonstate.SessionState
 	}{
 		{name: "physical write failure cleanup succeeds", failure: "physical-write", want: daemonstate.SessionStateStopped},
 		{name: "post-observation lease failure cleanup fails", failure: "lease", seedPhysical: true, killErr: errors.New("kill failed"), want: daemonstate.SessionStateRunning},
+		{name: "newer physical winner defeats stopped compensation", failure: "higher-version-race", seedPhysical: true, winnerAhead: true, want: daemonstate.SessionStateRunning},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -90,7 +92,11 @@ func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.seedPhysical {
-				if _, _, err := runtimeStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "session", UpdatedAt: time.Now().UTC().Add(-500 * time.Millisecond)}); err != nil {
+				physicalAt := time.Now().UTC().Add(-500 * time.Millisecond)
+				if tc.winnerAhead {
+					physicalAt = time.Now().UTC().Add(time.Hour)
+				}
+				if _, _, err := runtimeStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "session", UpdatedAt: physicalAt}); err != nil {
 					t.Fatal(err)
 				}
 			}

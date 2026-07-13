@@ -1249,10 +1249,11 @@ func (d *Daemon) compensateSessionStartFailure(ctx context.Context, req protocol
 	updatedAt := time.Now().UTC()
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	if store != nil {
-		rows, err := store.ApplyWorkerSessionCompensation(ctx, projectID, sessionID, issueID, desired, observed, activity, source, updatedAt)
+		rows, winner, err := store.ApplyWorkerSessionCompensation(ctx, projectID, sessionID, issueID, desired, observed, activity, source, updatedAt)
 		if err != nil {
 			note += fmt.Sprintf("; failed-start durable session compensation also failed: %v", err)
 		} else {
+			desired = winner
 			writer := d.runtimeProjectionStateWriter()
 			for _, row := range rows {
 				writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, row)
