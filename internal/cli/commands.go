@@ -2073,7 +2073,7 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 func resolveExplicitBranchMergeTarget(ctx context.Context, deps *Dependencies, source daemonclient.Worktree, opts BranchMergeToBaseOptions) (mergeBaseTarget, mergeTargetDecision, error) {
 	targetID := strings.TrimSpace(opts.Target)
 	if targetID == "" {
-		return resolveMergeToBaseTarget(ctx, deps, source.IssueID, opts.AllowBaseForChild)
+		return resolveProtectedMergeToBaseTarget(ctx, deps, source.IssueID, opts.AllowBaseForChild)
 	}
 	if isBaseMergeTarget(targetID) {
 		defaultBase := resolveCLIBaseBranch(deps.Config)
@@ -2214,9 +2214,12 @@ type mergeTargetDecision struct {
 	AncestorChain []string
 }
 
-func resolveMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID string, allowBaseForChild bool) (mergeBaseTarget, mergeTargetDecision, error) {
+// resolveProtectedMergeToBaseTarget is mutation-only. Requiring human
+// acceptance lets the daemon refuse base integration for origin workflow mode
+// while still resolving child mutations to an active ancestor worktree.
+func resolveProtectedMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID string, allowBaseForChild bool) (mergeBaseTarget, mergeTargetDecision, error) {
 	defaultBase := resolveCLIBaseBranch(deps.Config)
-	target, err := deps.DaemonClient.TaskMergeBaseTarget(ctx, issueID, defaultBase, allowBaseForChild)
+	target, err := deps.DaemonClient.TaskMergeBaseTarget(ctx, issueID, defaultBase, allowBaseForChild, true)
 	if err != nil {
 		return mergeBaseTarget{}, mergeTargetDecision{}, err
 	}

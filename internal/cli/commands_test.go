@@ -2914,6 +2914,13 @@ func TestBranchMergeToBaseCommandUsesNearestNonClosedAncestorBranch(t *testing.T
 						},
 					}), nil
 				case daemonclient.CommandTaskMergeBaseTarget:
+					var body map[string]any
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal merge target request: %v", err)
+					}
+					if required, _ := body["require_human_acceptance"].(bool); !required {
+						t.Fatalf("merge target request = %#v, want protected mutation authorization", body)
+					}
 					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
 						IssueID:        "az-child",
 						TargetID:       "az-parent",
@@ -3054,6 +3061,76 @@ func TestBranchMergeToBaseCommandRefusesOriginBaseBeforeGitMutation(t *testing.T
 	}
 	if !reflect.DeepEqual(commands, []string{daemonclient.CommandWorktreeList, daemonclient.CommandTaskMergeBaseTarget}) {
 		t.Fatalf("commands = %v, want target refusal before git mutation", commands)
+	}
+}
+
+func TestBranchMergeToBaseCommandDefaultRefusesOriginBaseBeforeGitMutation(t *testing.T) {
+	baseWorktree := t.TempDir()
+	commands := make([]string, 0, 2)
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{"worktrees": []map[string]any{{
+						"path": baseWorktree, "branch": "riordan/az-root/work", "issue_id": "az-root",
+					}}}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					var body map[string]any
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal merge target request: %v", err)
+					}
+					if required, _ := body["require_human_acceptance"].(bool); !required {
+						t.Fatalf("merge target request = %#v, want protected mutation authorization", body)
+					}
+					return protocol.ResponseEnvelope{}, fmt.Errorf("refusing direct base integration for az-root because git workflow mode is origin")
+				default:
+					t.Fatalf("origin refusal reached mutating command %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   baseWorktree,
+	}
+
+	err := BranchMergeToBaseCommand(deps, "az-root")
+	if err == nil || !strings.Contains(err.Error(), "workflow mode is origin") {
+		t.Fatalf("BranchMergeToBaseCommand error = %v, want origin-mode refusal", err)
+	}
+	if !reflect.DeepEqual(commands, []string{daemonclient.CommandWorktreeList, daemonclient.CommandTaskMergeBaseTarget}) {
+		t.Fatalf("commands = %v, want refusal before git mutation", commands)
+	}
+}
+
+func TestResolveParentWorktreeBaseBranchRemainsReadOnly(t *testing.T) {
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskMergeBaseTarget {
+					t.Fatalf("command = %s, want merge target resolution", req.Command)
+				}
+				var body map[string]any
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal merge target request: %v", err)
+				}
+				if required, _ := body["require_human_acceptance"].(bool); required {
+					t.Fatalf("read-only merge target request = %#v, want no integration authorization", body)
+				}
+				return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{TargetID: "az-parent", Branch: "riordan/az-parent/work"}), nil
+			},
+		}).WithProjectID("proj"),
+	}
+
+	branch, err := resolveParentWorktreeBaseBranch(context.Background(), deps, "main", "az-child")
+	if err != nil {
+		t.Fatalf("resolveParentWorktreeBaseBranch error: %v", err)
+	}
+	if branch != "riordan/az-parent/work" {
+		t.Fatalf("branch = %q, want parent worktree branch", branch)
 	}
 }
 
