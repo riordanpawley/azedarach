@@ -633,7 +633,7 @@ func TestRuntimeReconcileIssuesReusesSharedTmuxSessionSnapshotForTargets(t *test
 	for _, issueID := range issueIDs {
 		sessionID := naming.CanonicalSessionID(repoDir, issueID)
 		tmuxRunner.sessions[sessionID] = true
-		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 			ID:        sessionID,
 			IssueID:   issueID,
 			State:     daemonstate.SessionStateAttached,
@@ -685,7 +685,7 @@ func TestRuntimeReconcileIssuesSummarizesSharedTmuxSnapshotFailure(t *testing.T)
 
 	issueIDs := []string{"cpa", "cpb", "cpc", "cpd"}
 	for _, issueID := range issueIDs {
-		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 			ID:        naming.CanonicalSessionID(repoDir, issueID),
 			IssueID:   issueID,
 			State:     daemonstate.SessionStateAttached,
@@ -753,7 +753,7 @@ func TestSessionRestartAllRestartsBusySessionsByDefault(t *testing.T) {
 		{ID: idleSession, IssueID: idleIssue, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: time.Now().UTC()},
 		{ID: busySession, IssueID: busyIssue, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: time.Now().UTC()},
 	} {
-		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, row); err != nil {
+		if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, row); err != nil {
 			t.Fatalf("seed session state: %v", err)
 		}
 	}
@@ -836,7 +836,7 @@ func TestSessionRestartAllForceBusyIncludesBusySessionsAndConfiguredFlags(t *tes
 	for _, issueID := range issueIDs {
 		sessionID := naming.CanonicalSessionID(repoDir, issueID)
 		tmuxRunner.sessions[sessionID] = true
-		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 			ID:             sessionID,
 			IssueID:        issueID,
 			State:          daemonstate.SessionStateRunning,
@@ -939,7 +939,7 @@ func TestSessionRestartAllDiscoversKnownProjectSessionsAndReportsPartialFailures
 		{store: storeA, projectID: projectA, sessionID: sessionA, issueID: "cpl"},
 		{store: storeB, projectID: projectB, sessionID: sessionB, issueID: "cpm"},
 	} {
-		if err := seed.store.UpsertSessionState(ctx, seed.projectID, daemonstate.Session{
+		if err := upsertSessionStateFixture(seed.store, ctx, seed.projectID, daemonstate.Session{
 			ID:             seed.sessionID,
 			IssueID:        seed.issueID,
 			State:          daemonstate.SessionStateRunning,
@@ -1025,7 +1025,7 @@ func TestSessionRestartAllSkipsTmuxSessionWithoutLivePane(t *testing.T) {
 
 	issueID := "cpn"
 	sessionID := naming.CanonicalSessionID(repoDir, issueID)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:             sessionID,
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -1094,7 +1094,7 @@ func TestSessionRestartAllRestartsNoAgentPaneWithoutContinuePrompt(t *testing.T)
 
 	issueID := "cpo"
 	sessionID := naming.CanonicalSessionID(repoDir, issueID)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:             sessionID,
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -1170,7 +1170,7 @@ func TestSessionRestartAllForceBusyAllowsSessionSourcedAgent(t *testing.T) {
 
 	issueID := "cpp"
 	sessionID := naming.CanonicalSessionID(repoDir, issueID)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:             sessionID,
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -4121,7 +4121,7 @@ func TestHandleSessionStopDirectKillsForeignPrefixedIssueSession(t *testing.T) {
 	store := daemonstate.NewStore()
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:            liveName,
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateAttached,
@@ -4243,7 +4243,7 @@ func TestHandleSessionStopDirectRecordsDesiredStateBeforeTmuxKillCompletes(t *te
 	t.Cleanup(func() {
 		_ = runtimeStateStore.Close()
 	})
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -4374,7 +4374,7 @@ func TestPersistTmuxSessionProjectionSnapshotMarksMissingSessionsStopped(t *test
 	liveStartedAt := time.Now().UTC().Add(-1 * time.Hour)
 
 	ctx := context.Background()
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:        staleSessionID,
 		IssueID:   staleIssueID,
 		State:     daemonstate.SessionStateAttached,
@@ -4383,7 +4383,7 @@ func TestPersistTmuxSessionProjectionSnapshotMarksMissingSessionsStopped(t *test
 	}); err != nil {
 		t.Fatalf("seed stale projection session: %v", err)
 	}
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:        liveSessionID,
 		IssueID:   liveIssueID,
 		State:     daemonstate.SessionStateAttached,
@@ -4475,7 +4475,7 @@ func TestHandleSessionStopDirectWritesStoppedProjectionBeforeKillCompletes(t *te
 		},
 	}
 
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -4622,7 +4622,7 @@ func TestListTmuxSessionsCacheFirstSkipsStopPendingCachedSession(t *testing.T) {
 	}()
 
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -5068,7 +5068,7 @@ func TestSessionPauseResumeAgentScopedTargetRefreshesHookActivityWhenLifecycleUn
 			t.Cleanup(func() {
 				_ = runtimeStateStore.Close()
 			})
-			if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+			if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 				ID:             agentSessionID,
 				IssueID:        issueID,
 				State:          tt.state,
@@ -5370,7 +5370,7 @@ func TestHandleSessionStopDirectPostKillRefreshIsIssueScoped(t *testing.T) {
 		{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateAttached, ObservedState: daemonstate.SessionStateAttached, UpdatedAt: time.Now().UTC()},
 		{ID: otherSessionID, IssueID: otherIssueID, State: daemonstate.SessionStateAttached, ObservedState: daemonstate.SessionStateAttached, UpdatedAt: time.Now().UTC()},
 	} {
-		if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, seed); err != nil {
+		if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, seed); err != nil {
 			t.Fatalf("seed runtime state %s: %v", seed.IssueID, err)
 		}
 	}
@@ -5463,7 +5463,7 @@ func TestHandleSessionStopDirectKillsLiveProjectedIssueSessions(t *testing.T) {
 		{ID: paneSessionID, IssueID: issueID, State: daemonstate.SessionStateAttached, ObservedState: daemonstate.SessionStateAttached, UpdatedAt: time.Now().UTC()},
 		{ID: otherSessionID, IssueID: "cix", State: daemonstate.SessionStateAttached, ObservedState: daemonstate.SessionStateAttached, UpdatedAt: time.Now().UTC()},
 	} {
-		if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, seed); err != nil {
+		if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, seed); err != nil {
 			t.Fatalf("seed runtime state %s: %v", seed.ID, err)
 		}
 	}
@@ -5546,7 +5546,7 @@ func TestRefreshStoppedSessionRuntimeStateWritesCanonicalParentForPaneOnlyMatch(
 	t.Cleanup(func() {
 		_ = runtimeStateStore.Close()
 	})
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:            paneSessionID,
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateAttached,
@@ -5670,7 +5670,7 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvent(t *testing.T) {
 	t.Cleanup(func() {
 		_ = runtimeStateStore.Close()
 	})
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateStopped,
@@ -5754,7 +5754,7 @@ func TestApplySessionLifecycleTransitionPreservesTypedIdentity(t *testing.T) {
 			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 			t.Cleanup(func() { _ = runtimeStore.Close() })
 			tc.projection.UpdatedAt = time.Now().UTC()
-			if err := runtimeStore.UpsertSessionState(ctx, "p", tc.projection); err != nil {
+			if err := upsertSessionStateFixture(runtimeStore, ctx, "p", tc.projection); err != nil {
 				t.Fatal(err)
 			}
 			d := &Daemon{cfg: Config{RepoDir: ".", Logger: slog.Default()}, sessionStore: transient, session: daemonhandlers.NewSessionHandler(transient), hub: publish.NewHub(8, 8, slog.Default()), runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": runtimeStore}}
@@ -5793,7 +5793,7 @@ func TestTypedLifecycleTransitionTargetsSharedRuntimeIntent(t *testing.T) {
 			t.Cleanup(func() { _ = runtimeStore.Close() })
 			for _, seed := range []daemonstate.Session{worker, rooted} {
 				seed.UpdatedAt = time.Now().UTC()
-				if err := runtimeStore.UpsertSessionState(ctx, "p", seed); err != nil {
+				if err := upsertSessionStateFixture(runtimeStore, ctx, "p", seed); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -5826,7 +5826,7 @@ func TestTmuxObservationAuthoritySupersedesOldHookAndLaterDesiredWrite(t *testin
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
 	seed := daemonstate.Session{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC().Add(-3 * time.Second)}
-	if err := store.UpsertSessionState(ctx, projectID, seed); err != nil {
+	if err := upsertSessionStateFixture(store, ctx, projectID, seed); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
@@ -5847,7 +5847,7 @@ func TestTmuxObservationAuthoritySupersedesOldHookAndLaterDesiredWrite(t *testin
 	if err != nil || !found || physical.ObservedState != daemonstate.SessionStateStopped {
 		t.Fatalf("tmux stopped observation=%+v found=%v err=%v", physical, found, err)
 	}
-	if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
 		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStatePaused,
 		ObservedState: daemonstate.SessionStateRunning, Activity: "stale", UpdatedAt: time.Now().UTC(),
 	}); err != nil {
@@ -5886,7 +5886,7 @@ func TestApplySessionLifecycleTransitionPreservesObservedRuntimeState(t *testing
 	t.Cleanup(func() {
 		_ = runtimeStateStore.Close()
 	})
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -6246,7 +6246,7 @@ func TestReconcileRecoversRootedOrchestratorThroughOrchestratorAuthority(t *test
 			sessionID := naming.CanonicalSessionID(repoDir, issueID)
 			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 			t.Cleanup(func() { _ = runtimeStore.Close() })
-			if err := runtimeStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{ID: sessionID, IssueID: issueID, Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning}); err != nil {
+			if err := upsertSessionStateFixture(runtimeStore, context.Background(), projectID, daemonstate.Session{ID: sessionID, IssueID: issueID, Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning}); err != nil {
 				t.Fatal(err)
 			}
 			runner := newSessionStartTmuxRunner()
@@ -6388,7 +6388,7 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	t.Cleanup(func() {
 		_ = runtimeStateStore.Close()
 	})
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -6465,7 +6465,7 @@ func TestReconcileRecreatesObservedStoppedDesiredActiveSession(t *testing.T) {
 	t.Cleanup(func() {
 		_ = runtimeStateStore.Close()
 	})
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateAttached,
@@ -6553,7 +6553,7 @@ func TestReconcileDoesNotRecreateFromAgentScopedProjection(t *testing.T) {
 	t.Cleanup(func() {
 		_ = runtimeStateStore.Close()
 	})
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:            paneSessionID,
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateAttached,
@@ -6635,7 +6635,7 @@ func TestReconcileStoppedParentWinsOverAgentScopedProjection(t *testing.T) {
 		{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateStopped, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: time.Now().UTC()},
 		{ID: paneSessionID, IssueID: issueID, State: daemonstate.SessionStateAttached, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: time.Now().UTC().Add(time.Second)},
 	} {
-		if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, seed); err != nil {
+		if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, seed); err != nil {
 			t.Fatalf("seed runtime state %s: %v", seed.ID, err)
 		}
 	}
@@ -6712,7 +6712,7 @@ func TestReconcilePrunesInvalidDesiredSessionAndDoesNotRecreate(t *testing.T) {
 	t.Cleanup(func() {
 		_ = runtimeStateStore.Close()
 	})
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   invalidIssueID,
 		State:     daemonstate.SessionStateAttached,
@@ -6879,7 +6879,7 @@ func TestReconcilePrunesMissingWorktreeSessionProjection(t *testing.T) {
 	sessionID := naming.CanonicalSessionID(repoDir, issueID)
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateAttached,
@@ -6950,7 +6950,7 @@ func TestReconcileDoesNotResurrectStoppedSessionAcrossDaemons(t *testing.T) {
 	t.Cleanup(func() {
 		_ = runtimeStateStore.Close()
 	})
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -7106,7 +7106,7 @@ func TestListTmuxSessionsCacheFirstUsesObservedStateForActiveSet(t *testing.T) {
 	stoppedObservedID := naming.CanonicalSessionID(projectID, "az-1")
 	attachedObservedID := naming.CanonicalSessionID(projectID, "az-2")
 	now := time.Now().UTC()
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:            stoppedObservedID,
 		IssueID:       "az-1",
 		State:         daemonstate.SessionStateAttached,
@@ -7115,7 +7115,7 @@ func TestListTmuxSessionsCacheFirstUsesObservedStateForActiveSet(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed stopped-observed session: %v", err)
 	}
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:            attachedObservedID,
 		IssueID:       "az-2",
 		State:         daemonstate.SessionStateAttached,
@@ -7169,7 +7169,7 @@ func TestSessionStatusIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
 		_ = runtimeStateStore.Close()
 	})
 	sessionID := naming.CanonicalSessionID(repoDir, issueID)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateAttached,
@@ -7265,7 +7265,7 @@ func TestSessionStatusReportsHookBackedActivity(t *testing.T) {
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	now := time.Now().UTC()
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:             busySessionID + ".pane-%1",
 		IssueID:        busyIssueID,
 		State:          daemonstate.SessionStateRunning,
@@ -7276,7 +7276,7 @@ func TestSessionStatusReportsHookBackedActivity(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed busy hook activity: %v", err)
 	}
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:             idleSessionID + ".pane-%2",
 		IssueID:        idleIssueID,
 		State:          daemonstate.SessionStatePaused,
@@ -7447,7 +7447,7 @@ func TestSessionStatusReportsUnknownActivityWithoutHookRows(t *testing.T) {
 	sessionID := naming.CanonicalSessionID(repoDir, issueID)
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateRunning,
@@ -7521,7 +7521,7 @@ func TestSessionStatusReportsNoAgentActivity(t *testing.T) {
 	sessionID := naming.CanonicalSessionID(repoDir, issueID)
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:             sessionID,
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -7599,7 +7599,7 @@ func TestSessionStatusReportsStaleRuntimeForTargetIssue(t *testing.T) {
 	sessionID := naming.CanonicalSessionID(repoDir, issueID)
 	paneSessionID := sessionID + ".pane-190"
 	now := time.Now().UTC()
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateAttached,
@@ -7608,7 +7608,7 @@ func TestSessionStatusReportsStaleRuntimeForTargetIssue(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed stale session projection: %v", err)
 	}
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            paneSessionID,
 		IssueID:       issueID,
 		State:         daemonstate.SessionStatePaused,
@@ -7691,7 +7691,7 @@ func TestSessionStatusDoesNotReportDesiredStoppedRuntimeAsStale(t *testing.T) {
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	sessionID := naming.CanonicalSessionID(repoDir, issueID)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateStopped,
@@ -7790,7 +7790,7 @@ func TestRefreshExistingSessionRuntimeStateStopsDeadPaneRows(t *testing.T) {
 	deadPaneSessionID := parentSessionID + ".pane-1"
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            deadPaneSessionID,
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateRunning,
@@ -7840,7 +7840,7 @@ func TestRefreshExistingSessionRuntimeStateKeepsLivePaneRowsBusy(t *testing.T) {
 	paneSessionID := parentSessionID + ".pane-12"
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:             paneSessionID,
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -7891,7 +7891,7 @@ func TestEnrichTasksWithSessionStateTreatsLegacyPaneRowsWithoutActivityAsIdle(t 
 	parentSessionID := naming.CanonicalSessionID(projectID, issueID)
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:             parentSessionID,
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -7902,7 +7902,7 @@ func TestEnrichTasksWithSessionStateTreatsLegacyPaneRowsWithoutActivityAsIdle(t 
 	}); err != nil {
 		t.Fatalf("seed parent projection: %v", err)
 	}
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            parentSessionID + ".pane-506",
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateRunning,
@@ -7947,7 +7947,7 @@ func TestRefreshExistingSessionRuntimeStateMatchesUnsanitizedPersistedPaneID(t *
 	paneSessionID := parentSessionID + ".pane-%12"
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:             paneSessionID,
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -8000,7 +8000,7 @@ func TestRefreshExistingSessionRuntimeStateCountsMultipleLivePanes(t *testing.T)
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	now := time.Now().UTC()
 	for _, paneSessionID := range []string{parentSessionID + ".pane-1", parentSessionID + ".pane-2"} {
-		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 			ID:             paneSessionID,
 			IssueID:        issueID,
 			State:          daemonstate.SessionStateRunning,
@@ -8045,7 +8045,7 @@ func TestRefreshExistingSessionRuntimeStatePausedLivePaneWithDeadRunningPaneIsId
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	now := time.Now().UTC()
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            oldPaneSessionID,
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateRunning,
@@ -8054,7 +8054,7 @@ func TestRefreshExistingSessionRuntimeStatePausedLivePaneWithDeadRunningPaneIsId
 	}); err != nil {
 		t.Fatalf("seed old running pane projection: %v", err)
 	}
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            currentPaneSessionID,
 		IssueID:       issueID,
 		State:         daemonstate.SessionStatePaused,
@@ -9513,7 +9513,7 @@ func TestEnrichTasksWithSessionStateSeedsStartedAtFromSnapshot(t *testing.T) {
 			".": runtimeStateStore,
 		},
 	}
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -9558,7 +9558,7 @@ func TestEnrichTasksWithSessionStateFallsBackToProjectionCache(t *testing.T) {
 
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
 	cachedStartedAt := time.Date(2026, time.April, 1, 10, 0, 0, 0, time.UTC)
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -9667,7 +9667,7 @@ func TestEnrichTasksWithSessionStateReportsNoAgentActivity(t *testing.T) {
 
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
 	now := time.Date(2026, time.April, 1, 10, 30, 0, 0, time.UTC)
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:             sessionID,
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -9881,7 +9881,7 @@ func TestPersistTmuxSessionRuntimeStatePreservesNoAgentActivity(t *testing.T) {
 
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
 	now := time.Date(2026, time.April, 1, 10, 45, 0, 0, time.UTC)
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:             sessionID,
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -9933,7 +9933,7 @@ func TestEnrichTasksWithSessionStateReportsHookBackedActivity(t *testing.T) {
 	busySessionID := naming.CanonicalSessionID(projectID, busyID) + ".pane-%1"
 	idleSessionID := naming.CanonicalSessionID(projectID, idleID) + ".pane-%2"
 	now := time.Now().UTC()
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:            naming.CanonicalSessionID(projectID, busyID),
 		IssueID:       busyID,
 		State:         daemonstate.SessionStateRunning,
@@ -9942,7 +9942,7 @@ func TestEnrichTasksWithSessionStateReportsHookBackedActivity(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed busy session: %v", err)
 	}
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:            naming.CanonicalSessionID(projectID, idleID),
 		IssueID:       idleID,
 		State:         daemonstate.SessionStatePaused,
@@ -9951,7 +9951,7 @@ func TestEnrichTasksWithSessionStateReportsHookBackedActivity(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed idle session: %v", err)
 	}
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:             busySessionID,
 		IssueID:        busyID,
 		State:          daemonstate.SessionStateRunning,
@@ -9962,7 +9962,7 @@ func TestEnrichTasksWithSessionStateReportsHookBackedActivity(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed busy hook session: %v", err)
 	}
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:             idleSessionID,
 		IssueID:        idleID,
 		State:          daemonstate.SessionStatePaused,
@@ -10029,7 +10029,7 @@ func TestEnrichTasksWithSessionStatePrefersNewerProjectionStateOverSnapshot(t *t
 	store.ReplaceProjectSessions(projectID, []daemonstate.Session{snapshotSession})
 
 	projectionStoppedAt := snapshotStartedAt.Add(1 * time.Minute)
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateStopped,
@@ -10074,7 +10074,7 @@ func TestPersistTmuxSessionProjectionSnapshotPreservesCachedStartedAt(t *testing
 
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
 	cachedStartedAt := time.Date(2026, time.April, 1, 11, 0, 0, 0, time.UTC)
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -10165,7 +10165,7 @@ func TestPersistTmuxSessionRuntimeStateKeepsAgentHookActivityWhenPaneLives(t *te
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
 	agentSessionID := sessionID + ".pane-2021"
 	now := time.Date(2026, time.April, 3, 20, 0, 0, 0, time.UTC)
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateRunning,
@@ -10174,7 +10174,7 @@ func TestPersistTmuxSessionRuntimeStateKeepsAgentHookActivityWhenPaneLives(t *te
 	}); err != nil {
 		t.Fatalf("seed parent session: %v", err)
 	}
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:             agentSessionID,
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -10274,7 +10274,7 @@ func TestEnrichTasksWithSessionStateDoesNotTreatLaunchBusyAsHookActivity(t *test
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:             sessionID,
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -10319,7 +10319,7 @@ func TestEnrichTasksWithSessionStateKeepsNoAgentActivity(t *testing.T) {
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:             sessionID,
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -10433,7 +10433,7 @@ func TestEnrichTasksWithSessionStateKeepsEarlierStartedAtAcrossSnapshotAndProjec
 	})
 
 	startedAt := time.Date(2026, time.April, 1, 10, 0, 0, 0, time.UTC)
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -10489,7 +10489,7 @@ func TestEnrichTasksWithSessionStateIgnoresStoppedAgentScopedRows(t *testing.T) 
 
 	startedAt := time.Date(2026, time.May, 25, 8, 0, 0, 0, time.UTC)
 	secondStartedAt := startedAt.Add(time.Minute)
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:            "ciw.pane-1",
 		IssueID:       issueID,
 		State:         daemonstate.SessionStatePaused,
@@ -10499,7 +10499,7 @@ func TestEnrichTasksWithSessionStateIgnoresStoppedAgentScopedRows(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("seed paused agent session: %v", err)
 	}
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:                "ciw.pane-2",
 		IssueID:           issueID,
 		State:             daemonstate.SessionStateAttached,
@@ -10541,7 +10541,7 @@ func TestEnrichTasksWithSessionStateCountsLivePaneRowsWithoutParentProjection(t 
 
 	parentSessionID := naming.CanonicalSessionID(projectID, issueID)
 	now := time.Date(2026, time.May, 25, 9, 0, 0, 0, time.UTC)
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:             parentSessionID + ".pane-1",
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -10587,7 +10587,7 @@ func TestEnrichTasksWithSessionStateUsesPaneActivityOverParentContainer(t *testi
 
 	startedAt := time.Date(2026, time.May, 28, 8, 0, 0, 0, time.UTC)
 	containerSessionID := naming.CanonicalSessionID(projectID, issueID)
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:            containerSessionID,
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateAttached,
@@ -10597,7 +10597,7 @@ func TestEnrichTasksWithSessionStateUsesPaneActivityOverParentContainer(t *testi
 	}); err != nil {
 		t.Fatalf("seed tmux container session: %v", err)
 	}
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:            containerSessionID + ".pane-190",
 		IssueID:       issueID,
 		State:         daemonstate.SessionStatePaused,

@@ -64,7 +64,8 @@ func TestProjectOrchestratorSessionStartAttachesExactScopeSingleton(t *testing.T
 		t.Fatalf("load stale projection: found=%t err=%v", found, err)
 	}
 	staleProjection.State, staleProjection.ObservedState = daemonstate.SessionStateStopped, daemonstate.SessionStateStopped
-	if err := store.UpsertSessionState(ctx, projectID, staleProjection); err != nil {
+	staleProjection.Activity, staleProjection.ActivitySource = "", ""
+	if err := upsertSessionStateFixture(store, ctx, projectID, staleProjection); err != nil {
 		t.Fatal(err)
 	}
 

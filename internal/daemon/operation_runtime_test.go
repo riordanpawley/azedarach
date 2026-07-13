@@ -748,7 +748,7 @@ func TestDaemonRecoverInterruptedSessionStartUsesActiveProjection(t *testing.T) 
 	projectID := "proj-1"
 	store := daemonstate.NewRuntimeStateStore(t.TempDir(), nil)
 	t.Cleanup(func() { _ = store.Close() })
-	if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
 		ID:            "AZ-2",
 		IssueID:       "AZ-2",
 		State:         daemonstate.SessionStateRunning,
@@ -757,7 +757,7 @@ func TestDaemonRecoverInterruptedSessionStartUsesActiveProjection(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("upsert active session projection: %v", err)
 	}
-	if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
 		ID:            "AZ-3",
 		IssueID:       "AZ-3",
 		State:         daemonstate.SessionStateStarting,
@@ -807,7 +807,7 @@ func TestWorkerLifecyclePathsIgnoreNewerNonWorkerSessions(t *testing.T) {
 		{ID: workerID, IssueID: issueID, Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: now.Add(2 * time.Minute)},
 	}
 	for _, seed := range seeds {
-		if err := store.UpsertSessionState(ctx, projectID, seed); err != nil {
+		if err := upsertSessionStateFixture(store, ctx, projectID, seed); err != nil {
 			t.Fatalf("seed %s: %v", seed.ID, err)
 		}
 	}
@@ -840,7 +840,7 @@ func TestWorkerLifecyclePathsIgnoreNewerNonWorkerSessions(t *testing.T) {
 		t.Fatalf("non-worker intents not preserved: %+v", intents)
 	}
 	worker.State, worker.ObservedState, worker.UpdatedAt = daemonstate.SessionStateRunning, daemonstate.SessionStateRunning, now.Add(4*time.Minute)
-	if err := store.UpsertSessionState(ctx, projectID, worker); err != nil {
+	if err := upsertSessionStateFixture(store, ctx, projectID, worker); err != nil {
 		t.Fatal(err)
 	}
 	recovery, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{ID: "op", ProjectID: projectID, IssueID: issueID, Kind: daemonhandlers.CommandSessionStart})

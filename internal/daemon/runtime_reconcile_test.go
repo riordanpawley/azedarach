@@ -231,7 +231,7 @@ func (r *blockingIssueProjectionReconciler) ReconcileIssues(ctx context.Context,
 		if sessionID == "" {
 			sessionID = naming.CanonicalSessionID(projectID, issueID)
 		}
-		if err := r.store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		if err := upsertSessionStateFixture(r.store, ctx, projectID, daemonstate.Session{
 			ID:            sessionID,
 			IssueID:       issueID,
 			State:         daemonstate.SessionStateAttached,
@@ -1489,7 +1489,7 @@ func TestRuntimeReconcileIssuesChunksLargeIssueSetsThroughHybridReconciler(t *te
 	for i := 0; i <= runtimeReconcileIssueRepairLimit; i++ {
 		issueID := fmt.Sprintf("az-%d", i+1)
 		issueIDs = append(issueIDs, issueID)
-		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 			ID:            naming.CanonicalSessionID(projectID, issueID),
 			IssueID:       issueID,
 			State:         daemonstate.SessionStateRunning,
@@ -1929,7 +1929,7 @@ func TestRuntimeReconcileRefreshesSessionProjectionWithoutWorktreeManager(t *tes
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
 	sessionID := projectID + "-" + issueID
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,

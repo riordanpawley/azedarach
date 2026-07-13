@@ -439,7 +439,7 @@ func TestRuntimeSignalIngestFansPhysicalObservationAcrossSharedLogicalIntents(t 
 		State: daemonstate.SessionStatePaused, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: now,
 	}
 	for _, seed := range []daemonstate.Session{worker, rooted} {
-		if err := store.UpsertSessionState(ctx, projectID, seed); err != nil {
+		if err := upsertSessionStateFixture(store, ctx, projectID, seed); err != nil {
 			t.Fatalf("seed %s intent: %v", seed.Role, err)
 		}
 	}
@@ -570,7 +570,7 @@ func TestRuntimeSignalMaterializesStoredActivityEvidenceToCanonical(t *testing.T
 	issueID := "az-42"
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	store := d.sessionRuntimeStateStore(projectID)
-	if err := store.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(store, context.Background(), projectID, daemonstate.Session{
 		ID:             "pr-az-42",
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -624,7 +624,7 @@ func TestRuntimeSignalMaterializesBusyWhenAnyPaneEvidenceBusy(t *testing.T) {
 	issueID := "az-42"
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	store := d.sessionRuntimeStateStore(projectID)
-	if err := store.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(store, context.Background(), projectID, daemonstate.Session{
 		ID:             "pr-az-42",
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -687,11 +687,11 @@ func TestRuntimeSignalActivityEvidencePreservesStoppedDesiredLiveObservedDiverge
 	issueID := "az-42"
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	store := d.sessionRuntimeStateStore(projectID)
-	if err := store.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(store, context.Background(), projectID, daemonstate.Session{
 		ID:             "pr-az-42",
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateStopped,
-		ObservedState:  daemonstate.SessionStateStopped,
+		ObservedState:  daemonstate.SessionStateRunning,
 		Activity:       "busy",
 		ActivitySource: "session",
 		StartedAt:      &startedAt,
@@ -742,7 +742,7 @@ func TestRuntimeSignalMaterializesActivityEvidenceForRequestedIssuesOnly(t *test
 	store := d.sessionRuntimeStateStore(projectID)
 	for _, issueID := range []string{"az-42", "az-43"} {
 		sessionID := "pr-" + issueID
-		if err := store.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		if err := upsertSessionStateFixture(store, context.Background(), projectID, daemonstate.Session{
 			ID:        sessionID,
 			IssueID:   issueID,
 			State:     daemonstate.SessionStateRunning,
@@ -814,7 +814,7 @@ func TestRuntimeReconcileMaterializesStoredActivityEvidenceToCanonical(t *testin
 	}
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	store := d.sessionRuntimeStateStore(projectID)
-	if err := store.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(store, context.Background(), projectID, daemonstate.Session{
 		ID:             "pr-az-42",
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,

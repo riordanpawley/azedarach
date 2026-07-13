@@ -31,7 +31,7 @@ func TestEnrichTasksWithSessionStateAppliesTerminalFailureProbe(t *testing.T) {
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStore.Close() })
-	if err := runtimeStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, context.Background(), projectID, daemonstate.Session{
 		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning,
 		UpdatedAt: now.Add(-time.Minute),
 	}); err != nil {

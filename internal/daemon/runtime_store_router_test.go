@@ -41,7 +41,7 @@ func TestMigrateLegacyRuntimeStateCopiesRowsToProjectScopedStore(t *testing.T) {
 		t.Fatalf("ProjectIDForRoot(other): %v", err)
 	}
 	now := time.Date(2026, time.April, 3, 7, 10, 0, 0, time.UTC)
-	if err := source.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(source, context.Background(), projectID, daemonstate.Session{
 		ID:        "sess-other",
 		IssueID:   "az-1",
 		State:     daemonstate.SessionStateAttached,
@@ -185,7 +185,7 @@ func TestMigrateLegacyRuntimeStateBootstrapsPrePhysicalSchemaMirror(t *testing.T
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	source := daemonstate.NewRuntimeStateStore(baseRepo, logger)
 	observedAt := time.Date(2026, time.April, 3, 9, 0, 0, 0, time.UTC)
-	if err := source.UpsertSessionState(context.Background(), "legacy", daemonstate.Session{
+	if err := upsertSessionStateFixture(source, context.Background(), "legacy", daemonstate.Session{
 		ID: "legacy-runtime", IssueID: "az-legacy", State: daemonstate.SessionStatePaused, UpdatedAt: observedAt,
 	}); err != nil {
 		t.Fatalf("seed legacy desired session: %v", err)
