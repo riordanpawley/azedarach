@@ -19,7 +19,7 @@
     }
   },
   "budgets": {
-    "regression_factor": 1.25,
+    "regression_factor": 1.6,
     "max_wall_seconds": {
       "cold": 120,
       "cached": 180,

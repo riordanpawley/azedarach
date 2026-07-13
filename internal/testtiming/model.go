@@ -34,6 +34,7 @@ type Measurement struct {
 	Schema           string     `json:"schema"`
 	Profile          string     `json:"profile"`
 	CacheMode        string     `json:"cache_mode"`
+	ResourceMethod   string     `json:"resource_measurement"`
 	StartedAt        time.Time  `json:"started_at"`
 	WallSeconds      float64    `json:"wall_seconds"`
 	UserCPUSeconds   float64    `json:"user_cpu_seconds"`
@@ -55,6 +56,7 @@ type BaselineProfile struct {
 	UserCPUSeconds   float64    `json:"user_cpu_seconds,omitempty"`
 	SystemCPUSeconds float64    `json:"system_cpu_seconds,omitempty"`
 	PeakRSSBytes     int64      `json:"peak_rss_bytes,omitempty"`
+	ResourceMethod   string     `json:"resource_measurement,omitempty"`
 	Packages         []Duration `json:"packages,omitempty"`
 }
 

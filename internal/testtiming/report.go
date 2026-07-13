@@ -14,6 +14,7 @@ func WriteMarkdown(w io.Writer, m Measurement) error {
 	write("- Started: %s\n", m.StartedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	write("- Command: `%s`\n", strings.Join(m.Command, " "))
 	write("- Cache: %s\n", m.CacheMode)
+	write("- Resource measurement: `%s` (direct `go` command process; descendant test-binary resources are not aggregated)\n", m.ResourceMethod)
 	write("- Result: exit %d; %.2fs wall; %.2fs user CPU; %.2fs system CPU; %.1f MiB peak RSS\n", m.ExitCode, m.WallSeconds, m.UserCPUSeconds, m.SystemCPUSeconds, float64(m.PeakRSSBytes)/(1024*1024))
 	write("- Events: %d packages; %d tests; %d failures; %d invalid lines\n", len(m.Packages), len(m.Tests), len(m.Failures), m.InvalidEvents)
 	write("- Raw events: `%s`; stderr: `%s`\n", filepath.ToSlash(m.RawJSONPath), filepath.ToSlash(m.StderrPath))

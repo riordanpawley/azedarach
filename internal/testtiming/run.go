@@ -70,7 +70,7 @@ func Run(ctx context.Context, opts RunOptions) (Measurement, error) {
 			exitCode = exitErr.ExitCode()
 		}
 	}
-	m := Measurement{Schema: ReportSchema, Profile: opts.Profile.Name, CacheMode: opts.Profile.CachePolicy(), StartedAt: startedAt, WallSeconds: wall, ExitCode: exitCode, Packages: packages, Tests: tests, Failures: failures, InvalidEvents: invalid, RawJSONPath: rawPath, StderrPath: stderrPath, Command: command}
+	m := Measurement{Schema: ReportSchema, Profile: opts.Profile.Name, CacheMode: opts.Profile.CachePolicy(), ResourceMethod: "direct-go-command-process-state-v1", StartedAt: startedAt, WallSeconds: wall, ExitCode: exitCode, Packages: packages, Tests: tests, Failures: failures, InvalidEvents: invalid, RawJSONPath: rawPath, StderrPath: stderrPath, Command: command}
 	if cmd.ProcessState != nil {
 		m.UserCPUSeconds = cmd.ProcessState.UserTime().Seconds()
 		m.SystemCPUSeconds = cmd.ProcessState.SystemTime().Seconds()

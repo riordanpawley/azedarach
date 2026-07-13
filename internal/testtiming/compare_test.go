@@ -10,10 +10,10 @@ import (
 func TestCompareUsesStricterRegressionAndPathologyBudgets(t *testing.T) {
 	baseline := Baseline{
 		Schema: BaselineSchema, RecordedAt: "2026-07-13",
-		Profiles: map[string]BaselineProfile{"cold": {WallSeconds: 100, UserCPUSeconds: 50, SystemCPUSeconds: 10, PeakRSSBytes: 1000, Packages: []Duration{{Name: "slow/pkg", Seconds: 40}}}},
+		Profiles: map[string]BaselineProfile{"cold": {WallSeconds: 100, UserCPUSeconds: 50, SystemCPUSeconds: 10, PeakRSSBytes: 1000, ResourceMethod: "direct-go-command-process-state-v1", Packages: []Duration{{Name: "slow/pkg", Seconds: 40}}}},
 		Budgets:  Budgets{RegressionFactor: 1.25, MaxWallSeconds: map[string]float64{"cold": 200}, DefaultPackageSeconds: 60, PackageSeconds: map[string]float64{"special/pkg": 100}, DefaultTestSeconds: 10, TestSeconds: map[string]float64{"slow/pkg::TestAllowed": 25}},
 	}
-	measurement := Measurement{Profile: "cold", WallSeconds: 130, UserCPUSeconds: 40, SystemCPUSeconds: 8, PeakRSSBytes: 800, Packages: []Duration{{Name: "slow/pkg", Seconds: 51}, {Name: "new/pkg", Seconds: 61}, {Name: "special/pkg", Seconds: 90}, {Name: "cached/pkg", Seconds: 999, Cached: true}}, Tests: []Duration{{Name: "slow/pkg::TestPathological", Seconds: 11}, {Name: "slow/pkg::TestAllowed", Seconds: 20}, {Name: "cached/pkg::TestReplay", Seconds: 999, Cached: true}}}
+	measurement := Measurement{Profile: "cold", ResourceMethod: "direct-go-command-process-state-v1", WallSeconds: 130, UserCPUSeconds: 40, SystemCPUSeconds: 8, PeakRSSBytes: 800, Packages: []Duration{{Name: "slow/pkg", Seconds: 51}, {Name: "new/pkg", Seconds: 61}, {Name: "special/pkg", Seconds: 90}, {Name: "cached/pkg", Seconds: 999, Cached: true}}, Tests: []Duration{{Name: "slow/pkg::TestPathological", Seconds: 11}, {Name: "slow/pkg::TestAllowed", Seconds: 20}, {Name: "cached/pkg::TestReplay", Seconds: 999, Cached: true}}}
 
 	comparison := Compare(measurement, baseline)
 	require.NotNil(t, comparison.WallDelta)
@@ -41,6 +41,16 @@ func violationNames(violations []Violation) []string {
 		names = append(names, item.Kind+":"+item.Name)
 	}
 	return names
+}
+
+func TestCompareSuppressesResourceDeltasWithoutMatchingProvenance(t *testing.T) {
+	baseline := Baseline{Profiles: map[string]BaselineProfile{"cold": {WallSeconds: 100, UserCPUSeconds: 50, SystemCPUSeconds: 10, PeakRSSBytes: 1000}}}
+	comparison := Compare(Measurement{Profile: "cold", ResourceMethod: "direct-go-command-process-state-v1", WallSeconds: 80, UserCPUSeconds: 40, SystemCPUSeconds: 8, PeakRSSBytes: 800}, baseline)
+
+	require.NotNil(t, comparison.WallDelta)
+	assert.Nil(t, comparison.UserCPUDelta)
+	assert.Nil(t, comparison.SystemCPUDelta)
+	assert.Nil(t, comparison.PeakRSSDelta)
 }
 
 func TestValidateBaselineRejectsWeakOrUnversionedConfiguration(t *testing.T) {

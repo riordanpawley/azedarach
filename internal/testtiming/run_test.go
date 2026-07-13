@@ -27,6 +27,8 @@ func TestSecond(t *testing.T) { t.Error("second sentinel") }
 	measurement, err := Run(context.Background(), RunOptions{Profile: profile, Baseline: baseline, OutputDir: output, WorkingDir: module, CheckBudgets: true, Now: func() time.Time { return time.Date(2026, 7, 13, 1, 2, 3, 0, time.UTC) }})
 	require.ErrorContains(t, err, "test command exited")
 	assert.Equal(t, 1, measurement.ExitCode)
+	assert.Equal(t, "direct-go-command-process-state-v1", measurement.ResourceMethod)
+	assert.Positive(t, measurement.PeakRSSBytes)
 	assert.Len(t, measurement.Failures, 3, "two failed tests plus their failed package must all be retained")
 	assert.Empty(t, measurement.Comparison.Violations)
 	for _, name := range []string{"events.jsonl", "stderr.txt", "report.json", "report.md"} {

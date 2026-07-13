@@ -3,6 +3,7 @@
 - Started: 2026-07-13T01:02:03Z
 - Command: `go test -json -count=1 ./...`
 - Cache: cleared-and-bypassed
+- Resource measurement: `direct-go-command-process-state-v1` (direct `go` command process; descendant test-binary resources are not aggregated)
 - Result: exit 1; 12.50s wall; 8.20s user CPU; 1.10s system CPU; 64.0 MiB peak RSS
 - Events: 2 packages; 1 tests; 1 failures; 0 invalid lines
 - Raw events: `.tmp/test-timing/cold/events.jsonl`; stderr: `.tmp/test-timing/cold/stderr.txt`

@@ -12,15 +12,16 @@ func Compare(m Measurement, baseline Baseline) Comparison {
 		delta := makeDelta("wall", m.WallSeconds, bp.WallSeconds)
 		comparison.WallDelta = &delta
 	}
-	if hasBaseline && bp.UserCPUSeconds > 0 {
+	resourceComparable := bp.ResourceMethod != "" && bp.ResourceMethod == m.ResourceMethod
+	if hasBaseline && resourceComparable && bp.UserCPUSeconds > 0 {
 		delta := makeDelta("user CPU", m.UserCPUSeconds, bp.UserCPUSeconds)
 		comparison.UserCPUDelta = &delta
 	}
-	if hasBaseline && bp.SystemCPUSeconds > 0 {
+	if hasBaseline && resourceComparable && bp.SystemCPUSeconds > 0 {
 		delta := makeDelta("system CPU", m.SystemCPUSeconds, bp.SystemCPUSeconds)
 		comparison.SystemCPUDelta = &delta
 	}
-	if hasBaseline && bp.PeakRSSBytes > 0 && m.PeakRSSBytes > 0 {
+	if hasBaseline && resourceComparable && bp.PeakRSSBytes > 0 && m.PeakRSSBytes > 0 {
 		delta := ByteDelta{Name: "peak RSS", CurrentBytes: m.PeakRSSBytes, BaselineBytes: bp.PeakRSSBytes, Percent: ((float64(m.PeakRSSBytes) / float64(bp.PeakRSSBytes)) - 1) * 100}
 		comparison.PeakRSSDelta = &delta
 	}

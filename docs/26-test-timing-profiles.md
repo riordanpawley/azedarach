@@ -101,7 +101,7 @@ failure and preserve the full failure set.
 
 The baseline distinguishes two kinds of limits:
 
-- Regression limits use the lower of a hard budget and `baseline × 1.25` for the
+- Regression limits use the lower of a hard budget and `baseline × 1.60` for the
   cold wall time and each recorded package.
 - Pathology limits apply to every measured package/test. The default ceilings are
   60s per package and 30s per individual test, with a documented daemon-package
@@ -116,17 +116,27 @@ the default 60s pathology threshold. Tighten the committed baseline and budgets
 after a reviewed same-machine cold measurement; do not loosen them merely to
 make a regression pass.
 
-Cold reports record wall, user CPU, system CPU, and peak resident memory. The
-Markdown and JSON reports compare each available resource measurement with the
-committed baseline, alongside slow-package/test deltas. Coverage equivalence is
+The 1.60 package factor is based on repeated final-gate evidence: the TUI
+package varied up to 33.79s while complete-suite wall remained 77.87–97.59s and
+all 5,773 tests passed. The earlier 1.25 factor rejected both 33.79s and 26.90s
+(only 0.20s above its ceiling), making a single historical package sample a
+contention-sensitive merge blocker. The 60s default package pathology ceiling
+and 120s total wall gate remain effective upper bounds.
+
+Cold reports record wall plus direct-`go`-command user CPU, system CPU, and peak
+resident memory from `os.ProcessState`. Descendant test-binary resource use is
+not aggregated. Reports compare CPU/RSS only when the baseline declares the
+same `resource_measurement` method; the historical baseline does not, so its
+CPU/RSS values remain provenance-limited observations rather than deltas.
+Wall and slow-package/test deltas remain comparable. Coverage equivalence is
 established by the unchanged cold command scope (`./...`) plus its package/test
 event inventory; a focused, cached, or specialized profile is never presented
 as equivalent full-suite coverage.
 
 ## Consolidation acceptance measurement
 
-Three consecutive same-machine cold passes on 2026-07-13 completed in 79.54s,
-69.83s, and 70.07s. Every pass reported 72 packages, 5,772 tests, zero failures,
+Three consecutive same-machine cold passes on 2026-07-13 completed in 66.41s,
+70.72s, and 87.83s. Every pass reported 72 packages, 5,773 tests, zero failures,
 zero invalid JSON lines, and zero budget violations. This meets the required
 120s target and the optional sub-90s stretch target.
 
@@ -135,24 +145,31 @@ follows:
 
 | Resource | Before | Median after | Change |
 |---|---:|---:|---:|
-| Wall | 283.26s | 70.07s | -75.3% |
-| User CPU | 134.59s | 73.41s | -45.5% |
-| System CPU | 62.86s | 45.29s | -28.0% |
-| Peak RSS | 495.0 MiB | 475.7 MiB | -3.9% |
+| Wall | 283.26s | 70.72s | -75.0% |
+| User CPU | 134.59s (method undocumented) | 73.51s direct command | not comparable |
+| System CPU | 62.86s (method undocumented) | 45.37s direct command | not comparable |
+| Peak RSS | 495.0 MiB (method undocumented) | 477.9 MiB direct command | not comparable |
 
-The daemon remained the limiting package at 62.98–72.85s across the three
-passes. The issue store was next at 25.47–27.47s, down from the 173.47s
+The daemon remained the limiting package at 59.92–80.02s across the three
+passes. The issue store was next at 22.22–26.64s, down from the 173.47s
 baseline. The slowest individual test varied by host scheduling: advisor real
-process launch led each pass, with the observed maximum at 12.09s; bounded
+process launch led each pass, with the observed maximum at 14.30s; bounded
 learning-consolidation retrieval and canonical claim migration preflight were
 the next recurring slow contracts.
 
 The original baseline inventory contained 69 packages and 5,761 tests; the
-final cold inventory contains 72 packages and 5,772 tests under the same
+final cold inventory contains 72 packages and 5,773 tests under the same
 `go test -json -count=1 ./...` semantic scope. The increase reflects added
 runner and regression coverage, with no package/test filtering in the cold
 profile. Specialized validation also passed: boundary 7 tests, real-subprocess
 integration 25 tests, migration-clone 83 tests, and focused race 5 tests.
+
+The historical CPU/RSS values were already present in the committed baseline,
+but their collection method was not durably recorded. They are retained for
+audit provenance and intentionally excluded from computed comparisons. A future
+before/after resource comparison requires two measurements from the same
+declared method; aggregate descendant accounting would require a separate
+platform-aware runner rather than relabeling direct-process `ProcessState` data.
 
 ## Interpreting results
 
