@@ -502,7 +502,7 @@ const (
 	orchestrateObserveUsage       = "Usage: az orchestrate observe --root <issue-id> [--project <project-id>] [--json]"
 	orchestratePromptUsage        = "Usage: az orchestrate prompt --issue <issue-id> [--root <issue-id>] [--coordination native|mailbox] [--project <project-id>] [--json]"
 	orchestrateMessageUsage       = "Usage: az orchestrate message --root <issue-id> --issue <issue-id> --body <text> [--type <event-type>] [--force-self-delivery] [--project <project-id>] [--json]"
-	orchestrateCaptureUsage       = "Usage: az orchestrate capture --issue <issue-id> [--project <project-id>] [--lines N] [--json]"
+	orchestrateCaptureUsage       = "Usage: az orchestrate capture --issue <issue-id> [--project <project-id>] [--lines N] [--raw] [--json]"
 	orchestrateCompleteCheckUsage = "Usage: az orchestrate complete-check [--root <issue-id>] [--project <project-id>] [--json]"
 	orchestratorSessionUsage      = "Usage: az orchestrator-session <start|attach|status> [--root <issue-id>] [--project <project-id>] [--json]"
 	orchestrateIntegrateUsage     = "Usage: az orchestrate integrate --issue <issue-id> [--apply] [--project <project-id>] [--json]"
