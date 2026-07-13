@@ -131,7 +131,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		return fmt.Errorf("begin user database migration: %w", err)
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+	_, err = tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, artifact_checksum TEXT);
 CREATE TABLE IF NOT EXISTS projects (
  project_id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL, db_path TEXT NOT NULL,
  schema_version INTEGER NOT NULL DEFAULT 0, projection_version INTEGER NOT NULL,
@@ -188,12 +188,14 @@ CREATE TABLE IF NOT EXISTS user_views (
 CREATE TABLE IF NOT EXISTS user_view_selections (
  consumer TEXT PRIMARY KEY, view_id TEXT NOT NULL, updated_at TEXT NOT NULL,
  FOREIGN KEY(view_id) REFERENCES user_views(view_id)
-);
-INSERT OR IGNORE INTO schema_migrations(id,applied_at) VALUES('user_0001_cross_project_projection',strftime('%Y-%m-%dT%H:%M:%fZ','now'));`)
+);`)
 	if err != nil {
 		return fmt.Errorf("migrate user cross-project projection: %w", err)
 	}
 	if err := sqlitemigration.EnsureLedgerChecksums(ctx, tx, migrationArtifacts); err != nil {
+		return err
+	}
+	if err := recordAppliedUserMigration(ctx, tx, "user_0001_cross_project_projection"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, tx, "projects", "refresh_generation", "INTEGER NOT NULL DEFAULT 0"); err != nil {
@@ -210,11 +212,14 @@ INSERT OR IGNORE INTO schema_migrations(id,applied_at) VALUES('user_0001_cross_p
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE projects SET freshness='stale',last_error=''
 		WHERE NOT EXISTS(SELECT 1 FROM schema_migrations WHERE id='user_0003_canonical_issue_state_repair');
-		INSERT OR IGNORE INTO schema_migrations(id,applied_at) VALUES('user_0003_canonical_issue_state_repair',strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 		UPDATE projects SET freshness='stale',last_error=''
-		WHERE NOT EXISTS(SELECT 1 FROM schema_migrations WHERE id='user_0004_canonical_archive_state_repair');
-		INSERT OR IGNORE INTO schema_migrations(id,applied_at) VALUES('user_0004_canonical_archive_state_repair',strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		WHERE NOT EXISTS(SELECT 1 FROM schema_migrations WHERE id='user_0004_canonical_archive_state_repair')`); err != nil {
 		return fmt.Errorf("schedule project refresh after canonical issue state repair: %w", err)
+	}
+	for _, id := range []string{"user_0003_canonical_issue_state_repair", "user_0004_canonical_archive_state_repair"} {
+		if err := recordAppliedUserMigration(ctx, tx, id); err != nil {
+			return err
+		}
 	}
 	if s.migrationBeforeCommit != nil {
 		if err := s.migrationBeforeCommit(); err != nil {
@@ -228,6 +233,10 @@ INSERT OR IGNORE INTO schema_migrations(id,applied_at) VALUES('user_0001_cross_p
 		return fmt.Errorf("commit user database migrations: %w", err)
 	}
 	return s.seedViews(ctx)
+}
+
+func recordAppliedUserMigration(ctx context.Context, db sqlitemigration.LedgerWriter, id string) error {
+	return sqlitemigration.RecordAppliedIfMissing(ctx, db, migrationArtifacts, id, time.Now().UTC().Format(time.RFC3339Nano))
 }
 
 func (s *Store) ensureColumn(ctx context.Context, db migrationDB, table, column, declaration string) error {
@@ -280,8 +289,7 @@ func (s *Store) migrateLegacyTaskJSON(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	if !hasTaskJSON {
-		_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(id,applied_at) VALUES('user_0002_normalized_projection',strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
-		return err
+		return recordAppliedUserMigration(ctx, tx, "user_0002_normalized_projection")
 	}
 	legacyRows, err := tx.QueryContext(ctx, `SELECT project_id,task_json FROM project_issue_projection ORDER BY project_id,issue_id`)
 	if err != nil {
@@ -323,7 +331,7 @@ CREATE TABLE project_issue_dependency_projection (project_id TEXT NOT NULL,issue
 			return fmt.Errorf("migrate normalized projected task: %w", err)
 		}
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(id,applied_at) VALUES('user_0002_normalized_projection',strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+	if err = recordAppliedUserMigration(ctx, tx, "user_0002_normalized_projection"); err != nil {
 		return err
 	}
 	return nil

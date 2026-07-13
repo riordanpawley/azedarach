@@ -60,3 +60,43 @@ func TestEnsureLedgerChecksumsBackfillsAndRejectsMutation(t *testing.T) {
 		t.Fatal("mutated artifact accepted")
 	}
 }
+
+func TestEnsureLedgerChecksumsRejectsBlankChecksumInChecksumAwareLedger(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE schema_migrations(id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, artifact_checksum TEXT); INSERT INTO schema_migrations(id,applied_at) VALUES('one','now')`); err != nil {
+		t.Fatal(err)
+	}
+	artifact := Artifact{ID: "one", Path: "one.sql", Checksum: Sum([]byte("SELECT 1;"))}
+	if err := EnsureLedgerChecksums(context.Background(), db, []Artifact{artifact}); err == nil {
+		t.Fatal("blank checksum in checksum-aware ledger was backfilled")
+	}
+}
+
+func TestRecordAppliedRequiresAndPersistsPinnedChecksum(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE schema_migrations(id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, artifact_checksum TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	artifact := Artifact{ID: "one", Path: "one.sql", Checksum: Sum([]byte("SELECT 1;"))}
+	if err := RecordApplied(context.Background(), db, []Artifact{artifact}, "missing", "now"); err == nil {
+		t.Fatal("migration without pinned artifact checksum was recorded")
+	}
+	if err := RecordApplied(context.Background(), db, []Artifact{artifact}, "one", "now"); err != nil {
+		t.Fatal(err)
+	}
+	var checksum string
+	if err := db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id='one'`).Scan(&checksum); err != nil {
+		t.Fatal(err)
+	}
+	if checksum != artifact.Checksum {
+		t.Fatalf("checksum = %q, want %q", checksum, artifact.Checksum)
+	}
+}

@@ -155,7 +155,7 @@ func applyIssueStateRuntimeConstraintsRepairMigration(ctx context.Context, db *s
 			return applyIssueStateRuntimeConstraintsMigration(ctx, db, id)
 		}
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(id,applied_at) VALUES(?,?)`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := recordAppliedMigration(ctx, db, id); err != nil {
 		return fmt.Errorf("record canonical issue state repair migration: %w", err)
 	}
 	return nil
@@ -364,7 +364,7 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 			}
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(id,applied_at) VALUES(?,?)`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -767,7 +767,8 @@ func ensureMigrationTable(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			id TEXT PRIMARY KEY,
-			applied_at TEXT NOT NULL
+			applied_at TEXT NOT NULL,
+			artifact_checksum TEXT
 		)
 	`)
 	if err != nil {
@@ -789,12 +790,12 @@ func isMigrationApplied(ctx context.Context, db *sql.DB, id string) (bool, error
 	return exists, nil
 }
 
-func recordAppliedMigration(ctx context.Context, db *sql.DB, id string) error {
-	_, err := db.ExecContext(ctx, `
-		INSERT INTO schema_migrations (id, applied_at)
-		VALUES (?, ?)
-	`, id, time.Now().UTC().Format(time.RFC3339Nano))
-	return err
+func recordAppliedMigration(ctx context.Context, db sqlitemigration.LedgerWriter, id string) error {
+	return recordAppliedMigrationAt(ctx, db, id, time.Now().UTC().Format(time.RFC3339Nano))
+}
+
+func recordAppliedMigrationAt(ctx context.Context, db sqlitemigration.LedgerWriter, id, appliedAt string) error {
+	return sqlitemigration.RecordApplied(ctx, db, migrationArtifacts, id, appliedAt)
 }
 
 func loadMigrationSQL(path string) (string, error) {
@@ -829,10 +830,7 @@ func (c *Client) applyMigration(ctx context.Context, db *sql.DB, id, sqlText str
 		return fmt.Errorf("apply migration %s: %w", id, err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO schema_migrations (id, applied_at)
-		VALUES (?, ?)
-	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 
@@ -878,7 +876,7 @@ func applyOrchestratorLifecycleClockMigration(ctx context.Context, db *sql.DB, i
 			return fmt.Errorf("apply migration %s column %s: %w", id, column.name, err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -915,9 +913,7 @@ func applyContextualLearningActivationMigration(ctx context.Context, db *sql.DB,
 		}
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)
-	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -986,10 +982,7 @@ func (c *Client) applyBoardViewsMigration(ctx context.Context, db *sql.DB, id, s
 	if err := c.runBoardViewsMigrationFailureHook("after_schema"); err != nil {
 		return fmt.Errorf("migration %s rolled back: %w", id, err)
 	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO schema_migrations (id, applied_at)
-		VALUES (?, ?)
-	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 
@@ -1174,10 +1167,7 @@ func applyIssueClosedRuntimeV2TriggersMigration(ctx context.Context, db *sql.DB,
 	if _, err := tx.ExecContext(ctx, issueClosedRuntimeV2TriggersSQL); err != nil {
 		return fmt.Errorf("apply migration %s triggers: %w", id, err)
 	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO schema_migrations (id, applied_at)
-		VALUES (?, ?)
-	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -1677,10 +1667,7 @@ func (c *Client) runIssueStateModelV2CutoverTransaction(ctx context.Context, db 
 	`, issueStateModelVersionMetaKey, issueStateModelV2Version); err != nil {
 		return fmt.Errorf("record migration %s state model version: %w", id, err)
 	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO schema_migrations (id, applied_at)
-		VALUES (?, ?)
-	`, id, completedAt); err != nil {
+	if err := recordAppliedMigrationAt(ctx, tx, id, completedAt); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 
@@ -2180,10 +2167,7 @@ func applyAgentLearningPrivacyMigration(ctx context.Context, db *sql.DB, id stri
 		return fmt.Errorf("apply migration %s: create privacy index: %w", id, err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO schema_migrations (id, applied_at)
-		VALUES (?, ?)
-	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 
@@ -2234,10 +2218,7 @@ func applyIssueOwnershipMigration(ctx context.Context, db *sql.DB, id string) er
 		return fmt.Errorf("apply migration %s: create ownership index: %w", id, err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO schema_migrations (id, applied_at)
-		VALUES (?, ?)
-	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 

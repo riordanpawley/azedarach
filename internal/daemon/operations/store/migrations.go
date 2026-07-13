@@ -70,7 +70,8 @@ func ensureMigrationTable(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `
         CREATE TABLE IF NOT EXISTS schema_migrations (
             id TEXT PRIMARY KEY,
-            applied_at TEXT NOT NULL
+            applied_at TEXT NOT NULL,
+            artifact_checksum TEXT
         )
     `)
 	if err != nil {
@@ -117,10 +118,7 @@ func applyMigration(ctx context.Context, db *sql.DB, id, sqlText string) error {
 	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
 		return fmt.Errorf("apply migration %s: %w", id, err)
 	}
-	if _, err := tx.ExecContext(ctx, `
-        INSERT INTO schema_migrations (id, applied_at)
-        VALUES (?, ?)
-    `, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := sqlitemigration.RecordApplied(ctx, tx, migrationArtifacts, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 	if err := tx.Commit(); err != nil {

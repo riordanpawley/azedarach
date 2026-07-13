@@ -87,6 +87,44 @@ type LedgerDB interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
+type LedgerWriter interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+// RecordApplied writes a new migration's complete ledger identity atomically.
+// Callers running a transactional migration must pass that transaction so the
+// schema/data changes and checksum-bearing marker commit together.
+func RecordApplied(ctx context.Context, db LedgerWriter, artifacts []Artifact, id, appliedAt string) error {
+	return recordApplied(ctx, db, artifacts, id, appliedAt, false)
+}
+
+// RecordAppliedIfMissing is the idempotent form used by migration authorities
+// whose schema ensure and migration execution share one transaction.
+func RecordAppliedIfMissing(ctx context.Context, db LedgerWriter, artifacts []Artifact, id, appliedAt string) error {
+	return recordApplied(ctx, db, artifacts, id, appliedAt, true)
+}
+
+func recordApplied(ctx context.Context, db LedgerWriter, artifacts []Artifact, id, appliedAt string, ifMissing bool) error {
+	var checksum string
+	for _, artifact := range artifacts {
+		if artifact.ID == id {
+			checksum = artifact.Checksum
+			break
+		}
+	}
+	if strings.TrimSpace(checksum) == "" {
+		return fmt.Errorf("migration %s has no pinned artifact checksum", id)
+	}
+	insert := "INSERT INTO schema_migrations (id, applied_at, artifact_checksum) VALUES (?, ?, ?)"
+	if ifMissing {
+		insert = "INSERT OR IGNORE INTO schema_migrations (id, applied_at, artifact_checksum) VALUES (?, ?, ?)"
+	}
+	if _, err := db.ExecContext(ctx, insert, id, appliedAt, checksum); err != nil {
+		return fmt.Errorf("record migration %s with artifact checksum: %w", id, err)
+	}
+	return nil
+}
+
 func EnsureLedgerChecksums(ctx context.Context, db LedgerDB, artifacts []Artifact) error {
 	var hasColumn bool
 	rows, err := db.QueryContext(ctx, `PRAGMA table_info(schema_migrations)`)
@@ -111,6 +149,7 @@ func EnsureLedgerChecksums(ctx context.Context, db LedgerDB, artifacts []Artifac
 			return fmt.Errorf("add migration artifact checksum ledger: %w", err)
 		}
 	}
+	allowLegacyBackfill := !hasColumn
 	for _, artifact := range artifacts {
 		var recorded sql.NullString
 		err := db.QueryRowContext(ctx, `SELECT artifact_checksum FROM schema_migrations WHERE id=?`, artifact.ID).Scan(&recorded)
@@ -121,6 +160,9 @@ func EnsureLedgerChecksums(ctx context.Context, db LedgerDB, artifacts []Artifac
 			return fmt.Errorf("read migration %s artifact checksum: %w", artifact.ID, err)
 		}
 		if !recorded.Valid || strings.TrimSpace(recorded.String) == "" {
+			if !allowLegacyBackfill {
+				return fmt.Errorf("migration %s has empty artifact checksum in checksum-aware ledger", artifact.ID)
+			}
 			if _, err := db.ExecContext(ctx, `UPDATE schema_migrations SET artifact_checksum=? WHERE id=? AND (artifact_checksum IS NULL OR trim(artifact_checksum)='')`, artifact.Checksum, artifact.ID); err != nil {
 				return fmt.Errorf("backfill migration %s artifact checksum: %w", artifact.ID, err)
 			}

@@ -1,6 +1,9 @@
 package issues
 
 import (
+	"database/sql"
+	"errors"
+	"log/slog"
 	"path/filepath"
 	"testing"
 )
@@ -46,6 +49,39 @@ func TestMigrationRunRecordsArtifactChecksums(t *testing.T) {
 		}
 		if recorded != artifact.Checksum {
 			t.Fatalf("migration %s checksum = %q, want %q", artifact.ID, recorded, artifact.Checksum)
+		}
+	}
+}
+
+func TestMigrationFailureLeavesEarlierCommittedRowsChecksummed(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	client := NewClientAtPath(dbPath, slog.Default())
+	client.boardViewsMigrationFailureHook = func(stage string) error {
+		if stage == "after_schema" {
+			return errors.New("injected later migration failure")
+		}
+		return nil
+	}
+	if _, err := client.dbHandle(); err == nil {
+		t.Fatal("migration run unexpectedly succeeded")
+	}
+	_ = client.CloseDB()
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, artifact := range migrationArtifacts {
+		if artifact.ID == boardViewsMigrationID {
+			break
+		}
+		var recorded string
+		if err := db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, artifact.ID).Scan(&recorded); err != nil {
+			t.Fatalf("read earlier migration %s checksum after later failure: %v", artifact.ID, err)
+		}
+		if recorded != artifact.Checksum {
+			t.Fatalf("earlier migration %s checksum = %q, want %q", artifact.ID, recorded, artifact.Checksum)
 		}
 	}
 }
