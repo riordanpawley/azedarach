@@ -554,10 +554,10 @@ func TestMergeGateBudgetLeavesFinalizationReserve(t *testing.T) {
 }
 
 func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
-	// The fake Go process emits its marker before blocking, so a short smoke
-	// budget proves output retention and descendant cleanup without spending a
-	// production-scale timeout in the ordinary semantic suite.
-	const timeoutBudget = 5 * time.Second
+	// A direct synthetic body isolates wrapper timeout/output semantics from
+	// task-runner and Go startup scheduling. The separate budget test inspects
+	// the production body, and the merge hook executes it end to end.
+	const timeoutBudget = 2 * time.Second
 
 	timeoutPath, err := exec.LookPath("timeout")
 	if err != nil {
@@ -578,7 +578,7 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 		t.Fatalf("mkdir scripts: %v", err)
 	}
 	sourceScriptsDir := filepath.Join("..", "..", "..", "scripts")
-	for _, name := range []string{"git-merge-rebase-gate.sh", "git-merge-rebase-gate-body.sh"} {
+	for _, name := range []string{"git-merge-rebase-gate.sh"} {
 		content, readErr := os.ReadFile(filepath.Join(sourceScriptsDir, name))
 		if readErr != nil {
 			t.Fatalf("read %s: %v", name, readErr)
@@ -587,14 +587,10 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 			t.Fatalf("write %s: %v", name, writeErr)
 		}
 	}
-	fakeBin := filepath.Join(repo, "fake-bin")
-	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
-		t.Fatalf("mkdir fake bin: %v", err)
-	}
 	childPIDFile := filepath.Join(repo, "timeout-child.pid")
-	fakeGo := "#!/bin/sh\nif [ \"$1\" = build ]; then exit 0; fi\nsleep 30 &\nchild_pid=$!\nprintf '%s\\n' \"$child_pid\" >\"$AZEDARACH_TEST_CHILD_PID_FILE\"\necho retained-timeout-marker\nwait \"$child_pid\"\n"
-	if err := os.WriteFile(filepath.Join(fakeBin, "go"), []byte(fakeGo), 0o755); err != nil {
-		t.Fatalf("write fake go: %v", err)
+	fakeBody := "#!/bin/sh\nsleep 30 &\nchild_pid=$!\nprintf '%s\\n' \"$child_pid\" >\"$AZEDARACH_TEST_CHILD_PID_FILE\"\necho retained-timeout-marker\nwait \"$child_pid\"\n"
+	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate-body.sh"), []byte(fakeBody), 0o755); err != nil {
+		t.Fatalf("write fake gate body: %v", err)
 	}
 
 	cmd := exec.Command(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"))
@@ -602,7 +598,7 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"AZEDARACH_MERGE_GATE_TIMEOUT="+timeoutBudget.String(),
 		"AZEDARACH_TEST_CHILD_PID_FILE="+childPIDFile,
-		"PATH="+fakeBin+string(os.PathListSeparator)+filepath.Dir(timeoutPath)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"PATH="+filepath.Dir(timeoutPath)+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
 	startedAt := time.Now()
 	output, runErr := cmd.CombinedOutput()
