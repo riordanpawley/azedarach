@@ -36,6 +36,11 @@ bench-parallel-cli-latency:
 test:
     go test -v ./...
 
+# Canonical machine-readable timing profiles. Additional flags can be passed
+# after the recipe name, for example: just test-timing focused --package ./internal/cli --run TestName
+test-timing PROFILE="focused" *ARGS:
+    go run ./cmd/test-timing --profile {{PROFILE}} {{ARGS}}
+
 test-coverage:
     go test -coverprofile=coverage.out ./...
     go tool cover -html=coverage.out -o coverage.html

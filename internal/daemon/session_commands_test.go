@@ -852,7 +852,7 @@ func TestSessionRestartAllRestartsBusySessionsByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
@@ -938,7 +938,7 @@ func TestSessionRestartAllForceBusyIncludesBusySessionsAndConfiguredFlags(t *tes
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
@@ -1072,7 +1072,7 @@ func TestSessionRestartAllDiscoversKnownProjectSessionsAndReportsPartialFailures
 	daemon := &Daemon{
 		cfg:          Config{RepoDir: repoA, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
-		issues:       issues.NewClient(repoA, slog.Default()),
+		issues:       newMigratedIssueClient(t, repoA, slog.Default()),
 		session:      daemonhandlers.NewSessionHandler(stateStore),
 		sessionStore: stateStore,
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
@@ -1080,8 +1080,8 @@ func TestSessionRestartAllDiscoversKnownProjectSessionsAndReportsPartialFailures
 			projectB: storeB,
 		},
 		issueClientsByProject: map[string]*issues.Client{
-			projectA: issues.NewClient(repoA, slog.Default()),
-			projectB: issues.NewClient(repoB, slog.Default()),
+			projectA: newMigratedIssueClient(t, repoA, slog.Default()),
+			projectB: newMigratedIssueClient(t, repoB, slog.Default()),
 		},
 	}
 
@@ -1560,7 +1560,7 @@ func TestSessionStartRollsBackWorktreeWhenCreateFailsAfterMaterializing(t *testi
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -1685,7 +1685,7 @@ func TestSessionStartDoesNotInspectDirtyWorktreeAfterCreateFailure(t *testing.T)
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -1789,7 +1789,7 @@ func TestSessionStartReusesPreexistingDirtyWorktreeWithoutInit(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -1895,7 +1895,7 @@ func TestSessionStartAllowsNewWorktreeWithPreInitStatusOutput(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -1980,7 +1980,7 @@ func TestSessionStartWithoutAgentExportsContextToLiveShell(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -2083,7 +2083,7 @@ func TestSessionStartIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -2166,7 +2166,7 @@ func TestSessionStartReactivatesClosedIssueBeforeRuntimeProjection(t *testing.T)
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Closed task should reactivate",
@@ -2259,7 +2259,7 @@ func TestSessionStartFailsAndRollsBackWhenSessionProjectionPersistFails(t *testi
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Projection failure should fail",
@@ -2349,7 +2349,7 @@ func TestSessionStartFailsBeforeTmuxWhenWorktreeProjectionPersistFails(t *testin
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Worktree projection failure should fail",
@@ -2511,7 +2511,7 @@ func TestSessionStartReportsFailedStartCleanupFailures(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 				t.Fatalf("mkdir .azedarach: %v", err)
 			}
-			issuesClient := issues.NewClient(repoDir, slog.Default())
+			issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 			t.Cleanup(func() {
 				_ = issuesClient.CloseDB()
 			})
@@ -2594,7 +2594,7 @@ func TestSessionStartContinuesWhenFreshnessTimesOut(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -2711,7 +2711,7 @@ func TestSessionStartWaitsForInitReadyMarkerBeforeCompleting(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -2822,7 +2822,7 @@ func TestSessionStartWithStartWorkFalseSkipsLaunchCommand(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -2939,7 +2939,7 @@ func TestSessionStartDefaultsAgentActivityToBusy(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Start AI worker",
@@ -3051,7 +3051,7 @@ func TestSessionStartInjectsIssueImageAttachments(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Use screenshot",
@@ -3150,7 +3150,7 @@ func TestSessionStartLargeCodexPromptUsesPostLaunchPaste(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Start AI worker with large prompt",
@@ -3235,7 +3235,7 @@ func TestSessionStartCodexPromptWithLargeEncodedLaunchUsesPostLaunchPaste(t *tes
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Start AI worker with encoded prompt near tmux limit",
@@ -3333,7 +3333,7 @@ func TestSessionStartUsesClosestAncestorWorktreeBranchAsBase(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -3419,7 +3419,7 @@ func TestSessionStartMaterializesMissingParentWorktreeBranchAsBase(t *testing.T)
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -3561,7 +3561,7 @@ func TestSessionStartDoesNotPersistTransitionWhenTmuxCreateFails(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -3641,7 +3641,7 @@ func TestSessionStartTmuxCreateFailureIncludesDiagnostics(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Diagnose tmux create failure",
@@ -3732,7 +3732,7 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -6161,7 +6161,7 @@ func TestReconcileRepairsReadyIdleIssueWithLiveManagedRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	issueClient := issues.NewClient(repoDir, slog.Default())
+	issueClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issueClient.CloseDB() })
 	issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "live ready issue", Type: domain.TypeBug, Status: domain.StatusOpen})
 	if err != nil {
@@ -6198,7 +6198,7 @@ func TestReconcileRejectsBacklogLiveRuntimeWithoutDestroyingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	issueClient := issues.NewClient(repoDir, slog.Default())
+	issueClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issueClient.CloseDB() })
 	issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "live backlog issue", Type: domain.TypeBug, Status: domain.StatusOpen, Priority: domain.P4})
 	if err != nil {
@@ -6235,7 +6235,7 @@ func TestReconcileResolvesLifecycleDivergenceAfterStoppedRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	issueClient := issues.NewClient(repoDir, slog.Default())
+	issueClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issueClient.CloseDB() })
 	issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "stopped divergence", Type: domain.TypeBug, Status: domain.StatusOpen})
 	if err != nil {
@@ -6276,7 +6276,7 @@ func TestUntargetedReconcileResolvesDivergenceWithoutRuntimeProjection(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	issueClient := issues.NewClient(repoDir, slog.Default())
+	issueClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issueClient.CloseDB() })
 	issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "removed divergence", Type: domain.TypeBug, Status: domain.StatusOpen})
 	if err != nil {
@@ -6320,7 +6320,7 @@ func TestUntargetedReconcilePreservesProjectOrchestratorRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	issueClient := issues.NewClient(repoDir, slog.Default())
+	issueClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issueClient.CloseDB() })
 	sessionID := naming.CanonicalSessionID(repoDir, "orchestrator-project")
 	store := daemonstate.NewStore()
@@ -6350,7 +6350,7 @@ func TestReconcileRecoversRootedOrchestratorThroughOrchestratorAuthority(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			issueClient := issues.NewClient(repoDir, slog.Default())
+			issueClient := newMigratedIssueClient(t, repoDir, slog.Default())
 			t.Cleanup(func() { _ = issueClient.CloseDB() })
 			issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic})
 			if err != nil {
@@ -6409,8 +6409,8 @@ func TestReconcileRefreshesLifecycleBeforeRepairAcrossDaemons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientA := issues.NewClient(repoDir, slog.Default())
-	clientB := issues.NewClient(repoDir, slog.Default())
+	clientA := newMigratedIssueClient(t, repoDir, slog.Default())
+	clientB := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = clientA.CloseDB(); _ = clientB.CloseDB() })
 	issueID, err := clientA.Create(context.Background(), issues.CreateTaskParams{Title: "cross daemon", Type: domain.TypeBug, Status: domain.StatusInProgress})
 	if err != nil {
@@ -6451,7 +6451,7 @@ func TestReconcileIssueProjectionFailureFailsClosedForConfiguredProject(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := issues.NewClient(repoDir, slog.Default())
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	if _, err := client.Create(context.Background(), issues.CreateTaskParams{Title: "configured", Type: domain.TypeTask}); err != nil {
 		t.Fatal(err)
 	}
@@ -6485,7 +6485,7 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -6562,7 +6562,7 @@ func TestReconcileRecreatesObservedStoppedDesiredActiveSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -6649,7 +6649,7 @@ func TestReconcileDoesNotRecreateFromAgentScopedProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -6727,7 +6727,7 @@ func TestReconcileStoppedParentWinsOverAgentScopedProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -6809,7 +6809,7 @@ func TestReconcilePrunesInvalidDesiredSessionAndDoesNotRecreate(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -6908,7 +6908,7 @@ func TestReconcileDoesNotAlignUnknownTmuxSessionWithoutIssueRecord(t *testing.T)
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -6978,7 +6978,7 @@ func TestReconcilePrunesMissingWorktreeSessionProjection(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:  "Stale projected session",
@@ -7265,7 +7265,7 @@ func TestSessionStatusIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -7354,7 +7354,7 @@ func TestSessionStatusReportsHookBackedActivity(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	busyIssueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:  "Busy worker",
@@ -7456,7 +7456,7 @@ func TestSessionStatusReportsPendingSessionStartProgress(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:  "Launching worker",
@@ -7546,7 +7546,7 @@ func TestSessionStatusReportsUnknownActivityWithoutHookRows(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:  "Worker without hooks",
@@ -7620,7 +7620,7 @@ func TestSessionStatusReportsNoAgentActivity(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:  "Shell only session",
@@ -7696,7 +7696,7 @@ func TestSessionStatusReportsStaleRuntimeForTargetIssue(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:  "Target stale projected session",
@@ -7790,7 +7790,7 @@ func TestSessionStatusDoesNotReportDesiredStoppedRuntimeAsStale(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:  "Stopped projected session",
@@ -9245,7 +9245,7 @@ func TestSessionStartWaitsForWorktreeSyncInitBeforeCreatingTmuxSession(t *testin
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Wait for worktree sync init",
@@ -9370,7 +9370,7 @@ func TestSessionStartInitFailureCleansUpNewWorktree(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Init failure should cleanup worktree",

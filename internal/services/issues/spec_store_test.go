@@ -19,7 +19,7 @@ import (
 
 func TestClient_SpecMigrationsFreshDBAndIdempotency(t *testing.T) {
 	ctx := context.Background()
-	client := newTestClient(t)
+	client := newMigratingTestClient(t)
 
 	requirement, err := client.CreateRequirement(ctx, CreateRequirementParams{
 		LocalID:      "REQ-1",

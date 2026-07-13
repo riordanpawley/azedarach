@@ -17,7 +17,7 @@ import (
 func TestProjectOrchestratorLoopPrioritizesReviewAndPersistsCursor(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	client := issues.NewClient(repoDir, slog.Default())
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
 	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
@@ -99,8 +99,8 @@ func TestProjectOrchestratorUnhealthySnapshotIsObserveOnly(t *testing.T) {
 func TestProjectOrchestratorLoopMultiDaemonReplayDoesNotDuplicateCheckpointAction(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	clientA := issues.NewClient(repoDir, slog.Default())
-	clientB := issues.NewClient(repoDir, slog.Default())
+	clientA := newMigratedIssueClient(t, repoDir, slog.Default())
+	clientB := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = clientA.CloseDB(); _ = clientB.CloseDB() })
 	issueID := createReviewTask(t, ctx, clientA, domain.P1, "worker")
 	if _, err := clientA.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
@@ -135,7 +135,7 @@ func TestProjectOrchestratorLoopMultiDaemonReplayDoesNotDuplicateCheckpointActio
 func TestProjectOrchestratorLoopRecoversApplyingCheckpointWithSameActionKey(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	client := issues.NewClient(repoDir, slog.Default())
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
 	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {

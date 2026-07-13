@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/testutil/sqlitetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -2424,7 +2426,7 @@ func TestClient_IssueOwnershipClaimConflictReleaseAndExpiredTakeover(t *testing.
 
 func TestClient_CoordinationLeasesArePurposeScopedAndPreserveExecutionOwner(t *testing.T) {
 	ctx := context.Background()
-	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	client := newTestClient(t)
 	t.Cleanup(func() { require.NoError(t, client.CloseDB()) })
 	taskID, err := client.Create(ctx, CreateTaskParams{Title: "scoped leases", Type: domain.TypeTask, Priority: domain.P1})
 	require.NoError(t, err)
@@ -5117,7 +5119,127 @@ func newTestClient(t *testing.T, opts ...ClientOption) *Client {
 	return newTestClientWithLogger(t, slog.Default(), opts...)
 }
 
+var (
+	issueTestTemplateOnce sync.Once
+	issueTestTemplate     *sqlitetest.Template
+	issueTestTemplateErr  error
+)
+
 func newTestClientWithLogger(t *testing.T, logger *slog.Logger, opts ...ClientOption) *Client {
+	t.Helper()
+	return newTestClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger, opts...)
+}
+
+func newTestClientAtPath(t *testing.T, dbPath string, logger *slog.Logger, opts ...ClientOption) *Client {
+	t.Helper()
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		template := migratedIssueTestTemplate(t)
+		_, err = template.Clone(dbPath)
+		require.NoError(t, err)
+	} else {
+		require.NoError(t, err)
+	}
+	client := NewClientAtPath(dbPath, logger, opts...)
+	_, err := client.ProjectionSourceVersion(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, client.CloseDB())
+	})
+	return client
+}
+
+func migratedIssueTestTemplate(tb testing.TB) *sqlitetest.Template {
+	tb.Helper()
+	issueTestTemplateOnce.Do(func() {
+		issueTestTemplate, issueTestTemplateErr = sqlitetest.NewTemplate(func(path string) error {
+			client := NewClientAtPath(path, slog.New(slog.DiscardHandler))
+			if _, err := client.ProjectionSourceVersion(tb.Context()); err != nil {
+				_ = client.CloseDB()
+				return err
+			}
+			return client.CloseDB()
+		})
+	})
+	require.NoError(tb, issueTestTemplateErr)
+	return issueTestTemplate
+}
+
+func TestMigratedIssueTestTemplateClonesAreIsolatedAndComplete(t *testing.T) {
+	first := newTestClient(t)
+	second := newTestClient(t)
+	firstDB, err := first.dbHandle()
+	require.NoError(t, err)
+	secondDB, err := second.dbHandle()
+	require.NoError(t, err)
+
+	var migrationCount int
+	require.NoError(t, firstDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount))
+	assert.Equal(t, len(orderedMigrations), migrationCount)
+	for _, object := range []struct{ kind, name string }{
+		{"index", "idx_issues_status_deleted_priority_updated"},
+		{"trigger", "projection_source_revision_issues_insert"},
+	} {
+		var count int
+		require.NoError(t, firstDB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?`, object.kind, object.name).Scan(&count))
+		assert.Equalf(t, 1, count, "%s %s", object.kind, object.name)
+	}
+	var journalMode string
+	require.NoError(t, firstDB.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode))
+	assert.Equal(t, "wal", strings.ToLower(journalMode))
+
+	_, err = firstDB.Exec(`INSERT INTO meta(key, value) VALUES('fixture-isolation', 'first')`)
+	require.NoError(t, err)
+	var secondCount int
+	require.NoError(t, secondDB.QueryRow(`SELECT COUNT(*) FROM meta WHERE key='fixture-isolation'`).Scan(&secondCount))
+	assert.Zero(t, secondCount)
+}
+
+func BenchmarkIssueStoreFixtureCosts(b *testing.B) {
+	b.Run("template_creation", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			template, err := sqlitetest.NewTemplate(func(path string) error {
+				client := NewClientAtPath(path, slog.New(slog.DiscardHandler))
+				if _, err := client.ProjectionSourceVersion(b.Context()); err != nil {
+					_ = client.CloseDB()
+					return err
+				}
+				return client.CloseDB()
+			})
+			require.NoError(b, err)
+			require.NoError(b, template.Close())
+		}
+	})
+
+	template := migratedIssueTestTemplate(b)
+	b.Run("clone", func(b *testing.B) {
+		root := b.TempDir()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, err := template.Clone(filepath.Join(root, strconv.Itoa(i)+".db"))
+			require.NoError(b, err)
+		}
+	})
+	b.Run("open_migrated_clone", func(b *testing.B) {
+		root := b.TempDir()
+		paths := make([]string, b.N)
+		for i := range paths {
+			paths[i] = filepath.Join(root, strconv.Itoa(i)+".db")
+			_, err := template.Clone(paths[i])
+			require.NoError(b, err)
+		}
+		b.ResetTimer()
+		for _, path := range paths {
+			client := NewClientAtPath(path, slog.New(slog.DiscardHandler))
+			_, err := client.ProjectionSourceVersion(b.Context())
+			require.NoError(b, err)
+			require.NoError(b, client.CloseDB())
+		}
+	})
+}
+
+// newMigratingTestClient retains the genuine legacy-to-current schema path for
+// tests whose subject is migration behavior rather than ordinary store use.
+func newMigratingTestClient(t *testing.T) *Client {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	db, err := sql.Open("sqlite", "file:"+dbPath)
@@ -5161,7 +5283,7 @@ func newTestClientWithLogger(t *testing.T, logger *slog.Logger, opts ...ClientOp
 		require.NoError(t, err)
 	}
 
-	client := NewClientAtPath(dbPath, logger, opts...)
+	client := NewClientAtPath(dbPath, slog.Default())
 	t.Cleanup(func() {
 		require.NoError(t, client.CloseDB())
 	})
