@@ -623,6 +623,10 @@ func applyProjectViewOrdering(snapshot *Snapshot, projects []ProjectInventorySna
 		if snapshot.View.ID == "" && project.View.ID != "" {
 			snapshot.View = project.View
 			snapshot.Projection = project.Projection
+			snapshot.ProjectedGroups = make([]domain.BoardColumnID, 0, len(project.Projection.Groups))
+			for _, group := range project.Projection.Groups {
+				snapshot.ProjectedGroups = append(snapshot.ProjectedGroups, group.GroupID)
+			}
 		}
 		for _, taskID := range project.Projection.KnownTaskIDs {
 			for _, scope := range taskScopeKeys(project.ProjectID, project.ProjectPath) {
@@ -693,19 +697,38 @@ func applyGlobalViewOrdering(snapshot *Snapshot, projection protocol.GlobalViewP
 		return
 	}
 	ranks := map[string]int{}
+	items := map[string]protocol.GlobalViewProjectedItem{}
 	known := map[string]struct{}{}
 	for i, item := range projection.Items {
-		ranks[protocol.NormalizeProjectID(item.Identity.ProjectID.String())+":"+item.Identity.IssueID.String()] = i
+		key := protocol.NormalizeProjectID(item.Identity.ProjectID.String()) + ":" + item.Identity.IssueID.String()
+		ranks[key] = i
+		items[key] = item
 	}
 	for _, identity := range projection.KnownTaskIDs {
 		known[protocol.NormalizeProjectID(identity.ProjectID.String())+":"+identity.IssueID.String()] = struct{}{}
 	}
 	filtered := snapshot.Entries[:0]
+	columnBoard := projection.View.ID != "" && projection.View.Normalized().Layout == domain.BoardViewLayoutColumnBoard
 	for _, entry := range snapshot.Entries {
 		key := protocol.NormalizeProjectID(entry.ProjectID) + ":" + entry.IssueID
+		item, projected := items[key]
+		if columnBoard && !projected {
+			continue
+		}
 		if _, tracked := known[key]; tracked {
 			if _, visible := ranks[key]; !visible {
 				continue
+			}
+		}
+		if projected {
+			entry.ViewProjected = true
+			entry.ViewDepth = item.Depth
+			entry.ViewGroupID = item.GroupID
+			for _, column := range projection.View.Columns {
+				if column.ID == item.GroupID {
+					entry.ViewGroupTitle = column.Title
+					break
+				}
 			}
 		}
 		filtered = append(filtered, entry)
@@ -727,6 +750,10 @@ func applyGlobalViewOrdering(snapshot *Snapshot, projection protocol.GlobalViewP
 		snapshot.Tasks = append(snapshot.Tasks, taskFromInventoryEntry(entry))
 	}
 	snapshot.View = projection.View
+	snapshot.ProjectedGroups = make([]domain.BoardColumnID, 0, len(projection.Groups))
+	for _, group := range projection.Groups {
+		snapshot.ProjectedGroups = append(snapshot.ProjectedGroups, group.GroupID)
+	}
 }
 
 func projectedEntryScopeKey(entry InventoryEntry, values map[string]struct{}) (string, bool) {

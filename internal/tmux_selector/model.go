@@ -72,6 +72,7 @@ type Snapshot struct {
 	TreeTasks        []domain.Task
 	View             domain.BoardView
 	Projection       domain.BoardViewProjection
+	ProjectedGroups  []domain.BoardColumnID
 	Revision         uint64
 	LastCheckedAt    time.Time
 	Freshness        string
@@ -786,7 +787,7 @@ func (m Model) View() string {
 }
 
 func (m Model) renderProjectedColumnBoard(entries []InventoryEntry) string {
-	columns, positions := selectorBoardColumns(entries)
+	columns, positions := selectorBoardColumns(m.snapshot.View, m.snapshot.ProjectedGroups, entries)
 	cursor := board.Cursor{Column: -1, Task: -1}
 	if position, ok := positions[m.cursor]; ok {
 		cursor = position
@@ -852,10 +853,28 @@ func selectorColumnViewportStart(taskCount, cursorTask, columnWidth, height int,
 	return clampInt(start, 0, taskCount-1)
 }
 
-func selectorBoardColumns(entries []InventoryEntry) ([]board.Column, map[int]board.Cursor) {
+func selectorBoardColumns(view domain.BoardView, projectedGroups []domain.BoardColumnID, entries []InventoryEntry) ([]board.Column, map[int]board.Cursor) {
 	columns := []board.Column{}
 	columnByID := map[string]int{}
 	positions := make(map[int]board.Cursor, len(entries))
+	definitions := make(map[domain.BoardColumnID]domain.BoardColumn, len(view.Columns))
+	for _, definition := range view.Normalized().Columns {
+		definitions[definition.ID] = definition
+	}
+	if projectedGroups == nil {
+		for _, definition := range view.Normalized().Columns {
+			projectedGroups = append(projectedGroups, definition.ID)
+		}
+	}
+	for _, groupID := range projectedGroups {
+		definition := definitions[groupID]
+		title := strings.TrimSpace(definition.Title)
+		if title == "" {
+			title = string(groupID)
+		}
+		columnByID[string(groupID)] = len(columns)
+		columns = append(columns, board.Column{Title: title})
+	}
 	for index, entry := range entries {
 		groupID := string(entry.ViewGroupID)
 		title := entry.ViewGroupTitle
@@ -864,6 +883,9 @@ func selectorBoardColumns(entries []InventoryEntry) ([]board.Column, map[int]boa
 		}
 		columnIndex, ok := columnByID[groupID]
 		if !ok {
+			if len(view.Columns) > 0 {
+				continue
+			}
 			columnIndex = len(columns)
 			columnByID[groupID] = columnIndex
 			columns = append(columns, board.Column{Title: title})
@@ -1357,7 +1379,7 @@ func (m *Model) movePage(direction int) {
 	if m.activeTab == selectorTabTree {
 		pageSize = maxInt(1, m.treeAvailableHeight())
 	} else if m.snapshot.View.ID != "" && m.snapshot.View.Normalized().Layout == domain.BoardViewLayoutColumnBoard {
-		columns, positions := selectorBoardColumns(entries)
+		columns, positions := selectorBoardColumns(m.snapshot.View, m.snapshot.ProjectedGroups, entries)
 		position, ok := positions[m.cursor]
 		if !ok || position.Column < 0 || position.Column >= len(columns) {
 			return
@@ -1378,7 +1400,7 @@ func (m *Model) movePage(direction int) {
 }
 
 func (m *Model) moveColumnBoardCursor(entries []InventoryEntry, dx, dy int) {
-	columns, positions := selectorBoardColumns(entries)
+	columns, positions := selectorBoardColumns(m.snapshot.View, m.snapshot.ProjectedGroups, entries)
 	current, ok := positions[m.cursor]
 	if !ok {
 		m.cursor = 0
@@ -1386,7 +1408,10 @@ func (m *Model) moveColumnBoardCursor(entries []InventoryEntry, dx, dy int) {
 	}
 	targetColumn, targetTask := current.Column+dx, current.Task+dy
 	if dx != 0 {
-		if targetColumn < 0 || targetColumn >= len(columns) || len(columns[targetColumn].Tasks) == 0 {
+		for targetColumn >= 0 && targetColumn < len(columns) && len(columns[targetColumn].Tasks) == 0 {
+			targetColumn += dx
+		}
+		if targetColumn < 0 || targetColumn >= len(columns) {
 			return
 		}
 		targetTask = min(current.Task, len(columns[targetColumn].Tasks)-1)

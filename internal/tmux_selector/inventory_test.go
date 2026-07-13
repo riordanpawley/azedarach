@@ -836,6 +836,46 @@ func TestApplyGlobalViewOrderingFiltersOnlyTrackedExcludedSessions(t *testing.T)
 	}
 }
 
+func TestApplyGlobalViewOrderingPreservesProjectedColumnMetadata(t *testing.T) {
+	view := domain.OrchestrationBoardView()
+	snapshot := Snapshot{Entries: []InventoryEntry{
+		{ProjectID: "alpha", IssueID: "human", SessionID: "alpha-human"},
+		{ProjectID: "alpha", IssueID: "active", SessionID: "alpha-active"},
+		{ProjectID: "external", IssueID: "plain", SessionID: "plain"},
+	}}
+	projection := protocol.GlobalViewProjection{
+		View: view,
+		KnownTaskIDs: []protocol.ScopedIssueID{
+			{ProjectID: "alpha", IssueID: "human"},
+			{ProjectID: "alpha", IssueID: "active"},
+		},
+		Items: []protocol.GlobalViewProjectedItem{
+			{Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "human"}, GroupID: view.Columns[0].ID, Depth: 2},
+			{Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "active"}, GroupID: view.Columns[2].ID},
+		},
+		Groups: []protocol.GlobalViewProjectedGroup{
+			{GroupID: view.Columns[0].ID},
+			{GroupID: view.Columns[1].ID},
+			{GroupID: view.Columns[2].ID},
+		},
+	}
+
+	applyGlobalViewOrdering(&snapshot, projection)
+
+	if len(snapshot.Entries) != 2 {
+		t.Fatalf("column-board entries = %#v, want only daemon-projected items", snapshot.Entries)
+	}
+	if !slices.Equal(snapshot.ProjectedGroups, []domain.BoardColumnID{view.Columns[0].ID, view.Columns[1].ID, view.Columns[2].ID}) {
+		t.Fatalf("projected groups = %v", snapshot.ProjectedGroups)
+	}
+	if got := snapshot.Entries[0]; !got.ViewProjected || got.ViewGroupID != view.Columns[0].ID || got.ViewGroupTitle != view.Columns[0].Title || got.ViewDepth != 2 {
+		t.Fatalf("human projection metadata = %#v", got)
+	}
+	if got := snapshot.Entries[1]; !got.ViewProjected || got.ViewGroupID != view.Columns[2].ID || got.ViewGroupTitle != view.Columns[2].Title {
+		t.Fatalf("active projection metadata = %#v", got)
+	}
+}
+
 func TestProjectionEnrichmentDoesNotGuessDuplicateBareIssueID(t *testing.T) {
 	source := &fakeProjectSnapshotSource{snapshots: []ProjectInventorySnapshot{
 		{ProjectID: "alpha", ProjectPath: "/projects/alpha", Tasks: []domain.Task{{ID: "ddm", Title: "Alpha"}}},

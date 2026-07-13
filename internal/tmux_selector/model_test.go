@@ -55,8 +55,61 @@ func TestTypedColumnBoardRendersProjectedGroups(t *testing.T) {
 	}
 }
 
+func TestOrchestrationColumnBoardRendersConfiguredColumnsAtDefaultAndNarrowWidths(t *testing.T) {
+	view := domain.OrchestrationBoardView()
+	entries := []InventoryEntry{
+		{IssueID: "human", TaskTitle: "Human review", ViewProjected: true, ViewGroupID: view.Columns[0].ID, ViewGroupTitle: view.Columns[0].Title},
+		{IssueID: "active", TaskTitle: "Active work", ViewProjected: true, ViewGroupID: view.Columns[2].ID, ViewGroupTitle: view.Columns[2].Title},
+	}
+	t.Run("default", func(t *testing.T) {
+		model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+		model.loading, model.width, model.height = false, 120, 20
+		model.snapshot = Snapshot{View: view, Entries: entries}
+		rendered := ansi.Strip(model.View())
+		for _, column := range view.Columns {
+			if !strings.Contains(rendered, column.Title+" (") {
+				t.Fatalf("configured column %q missing:\n%s", column.Title, rendered)
+			}
+		}
+	})
+	t.Run("narrow navigation", func(t *testing.T) {
+		model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+		model.loading, model.width, model.height = false, 60, 20
+		model.snapshot = Snapshot{View: view, Entries: entries}
+		if rendered := ansi.Strip(model.View()); !strings.Contains(rendered, view.Columns[0].Title+" (1)") {
+			t.Fatalf("first column missing:\n%s", rendered)
+		}
+		model = updateKey(t, model, "right")
+		if rendered := ansi.Strip(model.View()); model.cursor != 1 || !strings.Contains(rendered, view.Columns[2].Title+" (1)") {
+			t.Fatalf("active column not reachable across empty column: cursor=%d\n%s", model.cursor, rendered)
+		}
+	})
+	t.Run("daemon group visibility", func(t *testing.T) {
+		model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+		model.loading, model.width, model.height = false, 120, 20
+		model.snapshot = Snapshot{View: view, ProjectedGroups: []domain.BoardColumnID{view.Columns[0].ID, view.Columns[2].ID}, Entries: entries}
+		rendered := ansi.Strip(model.View())
+		if strings.Contains(rendered, view.Columns[1].Title+" (") {
+			t.Fatalf("column omitted by daemon projection was rendered:\n%s", rendered)
+		}
+	})
+	t.Run("unknown projected group has stable title", func(t *testing.T) {
+		model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+		model.loading, model.width, model.height = false, 120, 20
+		model.snapshot = Snapshot{View: view, ProjectedGroups: []domain.BoardColumnID{"custom"}, Entries: []InventoryEntry{{IssueID: "custom", ViewGroupID: "custom"}}}
+		if rendered := ansi.Strip(model.View()); !strings.Contains(rendered, "custom (1)") {
+			t.Fatalf("unknown projected group missing stable title:\n%s", rendered)
+		}
+	})
+}
+
 func TestTypedColumnBoardKeepsSelectedGroupVisibleOnNarrowViewport(t *testing.T) {
 	view := domain.DefaultBoardView()
+	view.Columns = []domain.BoardColumn{
+		{ID: "one", Title: "One"},
+		{ID: "two", Title: "Two"},
+		{ID: "three", Title: "Three"},
+	}
 	model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
 	model.loading, model.width, model.height, model.cursor = false, 60, 20, 2
 	model.snapshot = Snapshot{View: view, Entries: []InventoryEntry{
@@ -162,6 +215,11 @@ func TestTypedViewStatusExplainsSelectorConfiguration(t *testing.T) {
 
 func TestTypedColumnBoardHorizontalMovementClampsAcrossUnevenColumns(t *testing.T) {
 	view := domain.DefaultBoardView()
+	view.Columns = []domain.BoardColumn{
+		{ID: "left", Title: "Left"},
+		{ID: "middle", Title: "Middle"},
+		{ID: "right", Title: "Right"},
+	}
 	entries := []InventoryEntry{
 		{IssueID: "left-1", TaskTitle: "Left one", ViewGroupID: "left", ViewGroupTitle: "Left"},
 		{IssueID: "left-2", TaskTitle: "Left two", ViewGroupID: "left", ViewGroupTitle: "Left"},
