@@ -44,6 +44,85 @@ type testTmuxRunner struct {
 	killRelease         chan struct{}
 }
 
+type sessionStartCompensationTmuxRunner struct {
+	live    bool
+	killErr error
+}
+
+func (r *sessionStartCompensationTmuxRunner) Run(_ context.Context, args ...string) (string, error) {
+	if len(args) == 0 {
+		return "", errors.New("missing tmux args")
+	}
+	switch args[0] {
+	case "kill-session":
+		if r.killErr != nil {
+			return "", r.killErr
+		}
+		r.live = false
+		return "", nil
+	case "has-session":
+		if r.live {
+			return "", nil
+		}
+		return "", errors.New("missing session")
+	default:
+		return "", nil
+	}
+}
+
+func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name, failure string
+		seedPhysical  bool
+		killErr       error
+		want          daemonstate.SessionState
+	}{
+		{name: "physical write failure cleanup succeeds", failure: "physical-write", want: daemonstate.SessionStateStopped},
+		{name: "post-observation lease failure cleanup fails", failure: "lease", seedPhysical: true, killErr: errors.New("kill failed"), want: daemonstate.SessionStateRunning},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			const projectID, issueID, sessionID = "p", "root", "az-root"
+			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+			t.Cleanup(func() { _ = runtimeStore.Close() })
+			seed := daemonstate.Session{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateStarting, UpdatedAt: time.Now().UTC().Add(-time.Second)}
+			if err := runtimeStore.UpsertSessionState(ctx, projectID, seed); err != nil {
+				t.Fatal(err)
+			}
+			if tc.seedPhysical {
+				if _, _, err := runtimeStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "session", UpdatedAt: time.Now().UTC().Add(-500 * time.Millisecond)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			transient := daemonstate.NewStore()
+			_, _ = transient.ForceUpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStarting)
+			runner := &sessionStartCompensationTmuxRunner{live: true, killErr: tc.killErr}
+			d := &Daemon{cfg: Config{RepoDir: ".", Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: transient,
+				runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore}, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": runtimeStore}, hub: publish.NewHub(8, 8, slog.Default())}
+			ch, cancel := d.hub.Subscribe(projectID, 0)
+			defer cancel()
+			d.compensateSessionStartFailure(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: projectID}}, projectID, sessionID, issueID, issueResourceLifecycleContext{}, "busy", "session")
+			intent, found, err := runtimeStore.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, issueID)
+			if err != nil || !found || intent.State != tc.want || intent.ObservedState != tc.want {
+				t.Fatalf("%s durable intent=%+v found=%v err=%v", tc.failure, intent, found, err)
+			}
+			physical, found, err := runtimeStore.GetPhysicalSessionObservation(ctx, projectID, sessionID)
+			if err != nil || !found || physical.ObservedState != tc.want {
+				t.Fatalf("%s physical=%+v found=%v err=%v", tc.failure, physical, found, err)
+			}
+			got, err := transient.Session(projectID, sessionID)
+			if err != nil || got.State != tc.want {
+				t.Fatalf("%s transient=%+v err=%v", tc.failure, got, err)
+			}
+			events := collectSessionProjectionEvents(t, ch, 1)
+			var body protocol.SessionProjectionEventBody
+			if len(events) != 1 || json.Unmarshal(events[0].Body, &body) != nil || daemonstate.SessionState(body.Session.State) != tc.want {
+				t.Fatalf("%s final events=%+v", tc.failure, events)
+			}
+		})
+	}
+}
+
 func TestCodexAppServerLaunchUsesNativeDaemonAndSupervisedRemoteResume(t *testing.T) {
 	d := &Daemon{cfg: Config{
 		CLITool:                    "codex",

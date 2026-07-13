@@ -1090,8 +1090,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		initialActivity,
 		initialActivitySource,
 	); err != nil {
-		d.rollbackSessionStartLifecycle(cmd.ProjectID, cmd.SessionID, cmd.IssueID)
-		cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+		cleanupNote := d.compensateSessionStartFailure(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v%s", err, cleanupNote)), nil
 	}
 	// The tmux session exists at this point. Record that physical fact through
@@ -1101,15 +1100,12 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		ID: cmd.SessionID, ObservedState: daemonstate.SessionStateRunning,
 		Activity: initialActivity, ActivitySource: initialActivitySource, UpdatedAt: time.Now().UTC(),
 	}); err != nil {
-		d.rollbackSessionStartLifecycle(cmd.ProjectID, cmd.SessionID, cmd.IssueID)
-		cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+		cleanupNote := d.compensateSessionStartFailure(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session runtime observation: %v%s", err, cleanupNote)), nil
 	}
 	if task.Type == domain.TypeEpic {
 		if err := d.acquireRootedOrchestratorLease(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
-			d.rollbackSessionStartLifecycle(cmd.ProjectID, cmd.SessionID, cmd.IssueID)
-			_ = d.tmux.KillSession(ctx, cmd.SessionID)
-			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			cleanupNote := d.compensateSessionStartFailure(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource)
 			return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("acquire rooted orchestrator lease: %v%s", err, cleanupNote)), nil
 		}
 	}
@@ -1227,6 +1223,48 @@ func (d *Daemon) rollbackSessionStartLifecycle(projectID, sessionID, issueID str
 			"error", err,
 		)
 	}
+}
+
+func (d *Daemon) compensateSessionStartFailure(ctx context.Context, req protocol.RequestEnvelope, projectID, sessionID, issueID string, resourceCtx issueResourceLifecycleContext, liveActivity, liveActivitySource string) string {
+	note := d.issueResourceFailedStartCleanupNote(ctx, projectID, resourceCtx)
+	live := true
+	if d != nil && d.tmux != nil {
+		if err := d.tmux.KillSession(ctx, sessionID); err == nil {
+			live = false
+		} else {
+			note += fmt.Sprintf("; failed-start tmux cleanup also failed: %v", err)
+			if present, probeErr := d.tmux.HasSession(ctx, sessionID); probeErr == nil {
+				live = present
+			} else {
+				note += fmt.Sprintf("; failed-start tmux reconciliation also failed: %v", probeErr)
+			}
+		}
+	}
+	desired, observed := daemonstate.SessionStateStopped, daemonstate.SessionStateStopped
+	activity, source := "", ""
+	if live {
+		desired, observed = daemonstate.SessionStateRunning, daemonstate.SessionStateRunning
+		activity, source = liveActivity, liveActivitySource
+	}
+	updatedAt := time.Now().UTC()
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store != nil {
+		rows, err := store.ApplyWorkerSessionCompensation(ctx, projectID, sessionID, issueID, desired, observed, activity, source, updatedAt)
+		if err != nil {
+			note += fmt.Sprintf("; failed-start durable session compensation also failed: %v", err)
+		} else {
+			writer := d.runtimeProjectionStateWriter()
+			for _, row := range rows {
+				writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, row)
+			}
+		}
+	}
+	if d != nil && d.sessionStore != nil {
+		if _, err := d.sessionStore.ForceUpsertSession(projectID, sessionID, issueID, desired); err != nil {
+			note += fmt.Sprintf("; failed-start transient session compensation also failed: %v", err)
+		}
+	}
+	return note
 }
 
 func resolveSessionIssue(tasks []domain.Task, requestedIssueID string) (domain.Task, bool) {
