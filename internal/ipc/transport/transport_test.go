@@ -729,6 +729,35 @@ func TestSocketDialStaleClassification(t *testing.T) {
 	}
 }
 
+func TestSocketReadinessRequiresDialableListener(t *testing.T) {
+	socket := tempSocketPath(t)
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	if unixListener, ok := listener.(*net.UnixListener); ok {
+		unixListener.SetUnlinkOnClose(false)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close unix socket: %v", err)
+	}
+	if socketDialReady(socket) {
+		t.Fatal("stale socket path reported ready without a listener")
+	}
+
+	if err := os.Remove(socket); err != nil {
+		t.Fatalf("remove stale socket: %v", err)
+	}
+	listener, err = net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen replacement unix socket: %v", err)
+	}
+	defer listener.Close()
+	if !socketDialReady(socket) {
+		t.Fatal("live unix listener did not report ready")
+	}
+}
+
 func waitForSocket(t *testing.T, socket string, errCh <-chan error) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -744,12 +773,21 @@ func waitForSocket(t *testing.T, socket string, errCh <-chan error) {
 			t.Fatalf("server exited before socket became ready")
 		default:
 		}
-		if _, err := os.Stat(socket); err == nil {
+		if socketDialReady(socket) {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("socket did not become ready: %s", socket)
+}
+
+func socketDialReady(socket string) bool {
+	conn, err := net.DialTimeout("unix", socket, 50*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func isSocketPermissionError(err error) bool {

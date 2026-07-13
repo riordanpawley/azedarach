@@ -135,8 +135,8 @@ as equivalent full-suite coverage.
 
 ## Consolidation acceptance measurement
 
-Three consecutive same-machine cold passes on 2026-07-13 completed in 66.41s,
-70.72s, and 87.83s. Every pass reported 72 packages, 5,773 tests, zero failures,
+Three consecutive same-machine cold passes on 2026-07-13 completed in 77.52s,
+65.13s, and 69.49s. Every pass reported 72 packages, 5,774 tests, zero failures,
 zero invalid JSON lines, and zero budget violations. This meets the required
 120s target and the optional sub-90s stretch target.
 
@@ -145,20 +145,20 @@ follows:
 
 | Resource | Before | Median after | Change |
 |---|---:|---:|---:|
-| Wall | 283.26s | 70.72s | -75.0% |
-| User CPU | 134.59s (method undocumented) | 73.51s direct command | not comparable |
-| System CPU | 62.86s (method undocumented) | 45.37s direct command | not comparable |
-| Peak RSS | 495.0 MiB (method undocumented) | 477.9 MiB direct command | not comparable |
+| Wall | 283.26s | 69.49s | -75.5% |
+| User CPU | 134.59s (method undocumented) | 72.03s direct command | not comparable |
+| System CPU | 62.86s (method undocumented) | 44.56s direct command | not comparable |
+| Peak RSS | 495.0 MiB (method undocumented) | 471.9 MiB direct command | not comparable |
 
-The daemon remained the limiting package at 59.92–80.02s across the three
-passes. The issue store was next at 22.22–26.64s, down from the 173.47s
+The daemon remained the limiting package at 59.25–70.38s across the three
+passes. The issue store was next at 22.08–24.24s, down from the 173.47s
 baseline. The slowest individual test varied by host scheduling: advisor real
-process launch led each pass, with the observed maximum at 14.30s; bounded
+process launch led two passes, with the observed maximum at 14.03s; bounded
 learning-consolidation retrieval and canonical claim migration preflight were
 the next recurring slow contracts.
 
 The original baseline inventory contained 69 packages and 5,761 tests; the
-final cold inventory contains 72 packages and 5,773 tests under the same
+final cold inventory contains 72 packages and 5,774 tests under the same
 `go test -json -count=1 ./...` semantic scope. The increase reflects added
 runner and regression coverage, with no package/test filtering in the cold
 profile. Specialized validation also passed: boundary 7 tests, real-subprocess
