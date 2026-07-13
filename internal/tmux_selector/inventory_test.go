@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -862,8 +863,8 @@ func TestApplyGlobalViewOrderingPreservesProjectedColumnMetadata(t *testing.T) {
 
 	applyGlobalViewOrdering(&snapshot, projection)
 
-	if len(snapshot.Entries) != 2 {
-		t.Fatalf("column-board entries = %#v, want only daemon-projected items", snapshot.Entries)
+	if len(snapshot.Entries) != 3 {
+		t.Fatalf("column-board entries = %#v, want projected items plus unmatched live session", snapshot.Entries)
 	}
 	if !slices.Equal(snapshot.ProjectedGroups, []domain.BoardColumnID{view.Columns[0].ID, view.Columns[1].ID, view.Columns[2].ID}) {
 		t.Fatalf("projected groups = %v", snapshot.ProjectedGroups)
@@ -873,6 +874,63 @@ func TestApplyGlobalViewOrderingPreservesProjectedColumnMetadata(t *testing.T) {
 	}
 	if got := snapshot.Entries[1]; !got.ViewProjected || got.ViewGroupID != view.Columns[2].ID || got.ViewGroupTitle != view.Columns[2].Title {
 		t.Fatalf("active projection metadata = %#v", got)
+	}
+	if got := snapshot.Entries[2]; got.ViewProjected || got.SessionID != "plain" {
+		t.Fatalf("unmatched live session metadata = %#v", got)
+	}
+}
+
+func TestGlobalOrchestrationProjectionRendersOnlyUnmatchedSessionsInFallback(t *testing.T) {
+	view := domain.OrchestrationBoardView()
+	snapshot := Snapshot{Entries: []InventoryEntry{
+		{ProjectID: "alpha", IssueID: "human", SessionID: "alpha-human", HasTmuxSession: true},
+		{ProjectID: "alpha", IssueID: "filtered", SessionID: "alpha-filtered", HasTmuxSession: true},
+		{ProjectID: "external", IssueID: "plain", SessionID: "plain", TaskTitle: "Plain session", HasTmuxSession: true, ViewProjected: true, ViewDepth: 3, ViewGroupID: view.Columns[0].ID, ViewGroupTitle: view.Columns[0].Title},
+	}}
+	projection := protocol.GlobalViewProjection{
+		View: view,
+		KnownTaskIDs: []protocol.ScopedIssueID{
+			{ProjectID: "alpha", IssueID: "human"},
+			{ProjectID: "alpha", IssueID: "filtered"},
+		},
+		Groups: []protocol.GlobalViewProjectedGroup{
+			{GroupID: view.Columns[0].ID},
+			{GroupID: view.Columns[1].ID},
+			{GroupID: view.Columns[2].ID},
+		},
+		Items: []protocol.GlobalViewProjectedItem{{
+			Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "human"},
+			GroupID:  view.Columns[0].ID,
+		}},
+	}
+	applyGlobalViewOrdering(&snapshot, projection)
+	if got := []string{snapshot.Entries[0].SessionID, snapshot.Entries[1].SessionID}; !slices.Equal(got, []string{"alpha-human", "plain"}) {
+		t.Fatalf("active-path entries = %v, want projected and unmatched only", got)
+	}
+	if got := snapshot.Entries[1]; got.ViewProjected || got.ViewDepth != 0 || got.ViewGroupID != "" || got.ViewGroupTitle != "" {
+		t.Fatalf("unmatched session retained stale projection metadata: %#v", got)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		width  int
+		cursor int
+	}{
+		{name: "default", width: 160, cursor: 0},
+		{name: "narrow fallback selected", width: 60, cursor: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+			model.loading, model.width, model.height, model.cursor = false, tc.width, 20, tc.cursor
+			model.snapshot = snapshot
+			rendered := ansi.Strip(model.View())
+			if !strings.Contains(rendered, "Live tmux (1)") {
+				t.Fatalf("fallback column missing:\n%s", rendered)
+			}
+			if strings.Contains(rendered, "alpha-filtered") {
+				t.Fatalf("durable filtered issue re-entered fallback:\n%s", rendered)
+			}
+		})
 	}
 }
 

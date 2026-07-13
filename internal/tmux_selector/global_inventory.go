@@ -708,17 +708,20 @@ func applyGlobalViewOrdering(snapshot *Snapshot, projection protocol.GlobalViewP
 		known[protocol.NormalizeProjectID(identity.ProjectID.String())+":"+identity.IssueID.String()] = struct{}{}
 	}
 	filtered := snapshot.Entries[:0]
-	columnBoard := projection.View.ID != "" && projection.View.Normalized().Layout == domain.BoardViewLayoutColumnBoard
 	for _, entry := range snapshot.Entries {
 		key := protocol.NormalizeProjectID(entry.ProjectID) + ":" + entry.IssueID
 		item, projected := items[key]
-		if columnBoard && !projected {
-			continue
-		}
-		if _, tracked := known[key]; tracked {
+		_, tracked := known[key]
+		if tracked {
 			if _, visible := ranks[key]; !visible {
 				continue
 			}
+		}
+		if !projected {
+			entry.ViewProjected = false
+			entry.ViewDepth = 0
+			entry.ViewGroupID = ""
+			entry.ViewGroupTitle = ""
 		}
 		if projected {
 			entry.ViewProjected = true

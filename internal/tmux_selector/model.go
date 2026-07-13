@@ -883,7 +883,7 @@ func selectorBoardColumns(view domain.BoardView, projectedGroups []domain.BoardC
 		}
 		columnIndex, ok := columnByID[groupID]
 		if !ok {
-			if len(view.Columns) > 0 {
+			if entry.ViewProjected && len(view.Columns) > 0 {
 				continue
 			}
 			columnIndex = len(columns)
