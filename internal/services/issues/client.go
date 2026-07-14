@@ -2679,7 +2679,7 @@ func issueLeaseEligibilityForUpdate(ctx context.Context, tx *sql.Tx, issueID str
 	case domain.CoordinationLeaseReview:
 		eligible = eligible && disposition == string(domain.IssueDispositionReady) && engagement == string(domain.IssueEngagementReviewRequested)
 		if eligible {
-			outcome, err := latestTrustedReviewOutcomeForUpdate(ctx, tx, issueID)
+			outcome, err := latestTrustedReviewOutcomeForCurrentEpoch(ctx, tx, issueID)
 			if err != nil {
 				return err
 			}
@@ -2698,13 +2698,13 @@ func issueLeaseEligibilityForUpdate(ctx context.Context, tx *sql.Tx, issueID str
 	return nil
 }
 
-func latestTrustedReviewOutcomeForUpdate(ctx context.Context, tx *sql.Tx, issueID string) (domain.ReviewOutcome, error) {
+func latestTrustedReviewOutcomeForCurrentEpoch(ctx context.Context, tx *sql.Tx, issueID string) (domain.ReviewOutcome, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
 		FROM issue_observation_events
-		WHERE issue_id = ? AND event_type = ? AND source = 'daemon-orchestration'
+		WHERE issue_id = ? AND event_type IN (?, ?)
 		ORDER BY id DESC
-	`, issueID, domain.IssueEventReviewCompleted)
+	`, issueID, domain.IssueEventReviewCompleted, domain.IssueEventIssueStatusChanged)
 	if err != nil {
 		return "", err
 	}
@@ -2713,6 +2713,9 @@ func latestTrustedReviewOutcomeForUpdate(ctx context.Context, tx *sql.Tx, issueI
 		event, err := scanIssueObservationEvent(rows)
 		if err != nil {
 			return "", err
+		}
+		if domain.IsReviewRequestTransition(event) {
+			return "", nil
 		}
 		if outcome, trusted := domain.TrustedReviewOutcome(event); trusted {
 			return outcome, nil

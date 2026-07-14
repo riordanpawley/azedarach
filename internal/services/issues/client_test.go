@@ -2556,7 +2556,7 @@ func TestClient_AppendIssueObservationEventRecordsSourceMetadata(t *testing.T) {
 	assert.Equal(t, event.ID, filtered[0].ID)
 }
 
-func TestClient_ReviewLeaseCannotBeReacquiredAcrossClientsAfterDurableAcceptance(t *testing.T) {
+func TestClient_ReviewLeaseFenceIsScopedToCurrentReviewRequestEpochAcrossClients(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	reviewer := newTestClientAtPath(t, path, slog.Default())
@@ -2585,14 +2585,34 @@ func TestClient_ReviewLeaseCannotBeReacquiredAcrossClientsAfterDurableAcceptance
 	require.ErrorIs(t, err, domain.ErrConflict)
 	assert.Contains(t, err.Error(), "durable accepted review is awaiting authoritative close")
 
+	require.NoError(t, reviewer.Update(ctx, issueID, domain.StatusDone))
+	require.NoError(t, reviewer.Update(ctx, issueID, domain.StatusOpen))
+	require.NoError(t, reviewer.Update(ctx, issueID, domain.StatusInReview))
+	lease, err := competitor.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-b", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview})
+	require.NoError(t, err)
+	require.Len(t, lease.CoordinationLeases, 1)
+	assert.Equal(t, domain.CoordinationLeaseReview, lease.CoordinationLeases[0].Purpose)
+
 	_, err = reviewer.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
 		Type:          domain.IssueEventReviewCompleted,
 		Source:        "daemon-orchestration",
 		SourceCommand: "review-accept",
-		Payload:       map[string]any{"outcome": "integration_failed", "actor_id": "reviewer-a"},
+		Payload:       map[string]any{"outcome": "accepted", "actor_id": "reviewer-b"},
 	})
 	require.NoError(t, err)
-	lease, err := competitor.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-b", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview})
+	_, err = competitor.ReleaseOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-b", Purpose: domain.CoordinationLeaseReview})
+	require.NoError(t, err)
+	_, err = reviewer.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-a", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview})
+	require.ErrorIs(t, err, domain.ErrConflict)
+
+	_, err = reviewer.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
+		Type:          domain.IssueEventReviewCompleted,
+		Source:        "daemon-orchestration",
+		SourceCommand: "review-accept",
+		Payload:       map[string]any{"outcome": "integration_failed", "actor_id": "reviewer-b"},
+	})
+	require.NoError(t, err)
+	lease, err = reviewer.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-a", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview})
 	require.NoError(t, err)
 	require.Len(t, lease.CoordinationLeases, 1)
 	assert.Equal(t, domain.CoordinationLeaseReview, lease.CoordinationLeases[0].Purpose)

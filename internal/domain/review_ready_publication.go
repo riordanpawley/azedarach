@@ -39,11 +39,7 @@ func DeriveReviewReadyPublications(events []IssueObservationEvent) []ReviewReady
 			}
 			continue
 		}
-		if event.Type != IssueEventIssueStatusChanged {
-			continue
-		}
-		toStatus := strings.ToLower(strings.TrimSpace(payloadString(event.Payload, "to_status")))
-		if toStatus == string(StatusInReview) {
+		if IsReviewRequestTransition(event) {
 			if inReview {
 				continue
 			}
@@ -57,6 +53,9 @@ func DeriveReviewReadyPublications(events []IssueObservationEvent) []ReviewReady
 			pendingEvidence = nil
 			continue
 		}
+		if event.Type != IssueEventIssueStatusChanged {
+			continue
+		}
 		if inReview {
 			inReview = false
 			episodePublished = false
@@ -64,6 +63,16 @@ func DeriveReviewReadyPublications(events []IssueObservationEvent) []ReviewReady
 		pendingEvidence = nil
 	}
 	return publications
+}
+
+// IsReviewRequestTransition reports whether an observation starts a durable
+// review-request epoch.
+func IsReviewRequestTransition(event IssueObservationEvent) bool {
+	if event.Type != IssueEventIssueStatusChanged {
+		return false
+	}
+	toStatus := strings.ToLower(strings.TrimSpace(payloadString(event.Payload, "to_status")))
+	return toStatus == string(StatusInReview)
 }
 
 // IsReviewReadyEvidenceEvent accepts the durable event spellings emitted by
