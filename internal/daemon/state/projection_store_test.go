@@ -243,7 +243,7 @@ func TestRuntimeStateStoreTerminalProjectionWritesRestartAfterBusySnapshot(t *te
 			}
 
 			attempts := 0
-			err = store.withWriteOperation(context.Background(), operation, func(context.Context) error {
+			err = store.withRetryingWriteLock(context.Background(), operation, func(context.Context) error {
 				attempts++
 				if attempts > 2 {
 					_, err := writer.Exec(`INSERT INTO projection_conflict_test(source) VALUES('terminal')`)
@@ -389,7 +389,7 @@ func TestRuntimeStateStoreTerminalRetryKeepsWriterSlot(t *testing.T) {
 	terminalDone := make(chan error, 1)
 	attempts := 0
 	go func() {
-		terminalDone <- store.withWriteOperation(context.Background(), "delete_worktree_state", func(context.Context) error {
+		terminalDone <- store.withRetryingWriteLock(context.Background(), "delete_worktree_state", func(context.Context) error {
 			attempts++
 			if attempts == 1 {
 				close(firstAttempt)
@@ -438,7 +438,7 @@ func TestRuntimeStateStoreContentionDiagnosticNamesOperation(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
-	err := store.withWriteOperation(ctx, "delete_worktree_state", func(context.Context) error {
+	err := store.withRetryingWriteLock(ctx, "delete_worktree_state", func(context.Context) error {
 		return codedSQLiteTestError{code: 517}
 	})
 	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "runtime projection write delete_worktree_state failed on attempt 1") {

@@ -83,7 +83,7 @@ type PhysicalSessionObservation struct {
 func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context, observation PhysicalSessionObservation) ([]Session, bool, error) {
 	var changed []Session
 	var applied bool
-	err := s.withWriteOperation(ctx, "apply_physical_session_observation", func(writeCtx context.Context) error {
+	err := s.withRetryingWriteLock(ctx, "apply_physical_session_observation", func(writeCtx context.Context) error {
 		changed = nil
 		applied = false
 		db, err := s.dbHandle()
@@ -163,7 +163,7 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, projectID, sessionID, issueID string, desiredState, observedState SessionState, activity, activitySource string, updatedAt time.Time) ([]Session, SessionState, error) {
 	var changed []Session
 	effectiveState := NormalizeSessionState(desiredState)
-	err := s.withWriteOperation(ctx, "apply_worker_session_compensation", func(writeCtx context.Context) error {
+	err := s.withRetryingWriteLock(ctx, "apply_worker_session_compensation", func(writeCtx context.Context) error {
 		changed = nil
 		effectiveState = NormalizeSessionState(desiredState)
 		db, err := s.dbHandle()
@@ -532,7 +532,7 @@ func (s *RuntimeStateStore) Close() error {
 }
 
 func (s *RuntimeStateStore) UpsertSessionState(ctx context.Context, projectID string, session Session) error {
-	return s.withWriteOperation(ctx, "upsert_session_state", func(writeCtx context.Context) error {
+	return s.withRetryingWriteLock(ctx, "upsert_session_state", func(writeCtx context.Context) error {
 		return s.upsertSessionStateLocked(writeCtx, projectID, session)
 	})
 }
@@ -717,13 +717,13 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 }
 
 func (s *RuntimeStateStore) DeleteSessionState(ctx context.Context, projectID, sessionID string) error {
-	return s.withWriteOperation(ctx, "delete_session_state", func(writeCtx context.Context) error {
+	return s.withRetryingWriteLock(ctx, "delete_session_state", func(writeCtx context.Context) error {
 		return s.deleteSessionStateLocked(writeCtx, projectID, sessionID)
 	})
 }
 
 func (s *RuntimeStateStore) DeleteSessionIntentState(ctx context.Context, projectID string, session Session) error {
-	return s.withWriteOperation(ctx, "delete_session_intent_state", func(writeCtx context.Context) error {
+	return s.withRetryingWriteLock(ctx, "delete_session_intent_state", func(writeCtx context.Context) error {
 		db, err := s.dbHandle()
 		if err != nil {
 			return err
@@ -769,7 +769,7 @@ func (s *RuntimeStateStore) deleteSessionStateLocked(ctx context.Context, projec
 }
 
 func (s *RuntimeStateStore) UpsertSessionActivityEvidence(ctx context.Context, evidence SessionActivityEvidence) error {
-	return s.withWriteOperation(ctx, "upsert_session_activity_evidence", func(writeCtx context.Context) error {
+	return s.withRetryingWriteLock(ctx, "upsert_session_activity_evidence", func(writeCtx context.Context) error {
 		return s.upsertSessionActivityEvidenceLocked(writeCtx, evidence)
 	})
 }
@@ -1065,7 +1065,7 @@ func scanSessionActivityEvidence(scanner sessionActivityEvidenceScanner) (Sessio
 }
 
 func (s *RuntimeStateStore) ReplaceSessionStates(ctx context.Context, projectID string, sessions []Session) error {
-	return s.withWriteOperation(ctx, "replace_session_states", func(writeCtx context.Context) error {
+	return s.withRetryingWriteLock(ctx, "replace_session_states", func(writeCtx context.Context) error {
 		return s.replaceSessionStatesLocked(writeCtx, projectID, sessions)
 	})
 }
@@ -1668,7 +1668,7 @@ func (s *RuntimeStateStore) ListProjectIDs(ctx context.Context) ([]string, error
 }
 
 func (s *RuntimeStateStore) UpsertWorktreeState(ctx context.Context, worktreeState WorktreeState) error {
-	return s.withWriteOperation(ctx, "upsert_worktree_state", func(writeCtx context.Context) error {
+	return s.withRetryingWriteLock(ctx, "upsert_worktree_state", func(writeCtx context.Context) error {
 		return s.upsertWorktreeStateLocked(writeCtx, worktreeState)
 	})
 }
@@ -1711,7 +1711,7 @@ func (s *RuntimeStateStore) upsertWorktreeStateLocked(ctx context.Context, workt
 }
 
 func (s *RuntimeStateStore) DeleteWorktreeState(ctx context.Context, projectID, issueID string) error {
-	return s.withWriteOperation(ctx, "delete_worktree_state", func(writeCtx context.Context) error {
+	return s.withRetryingWriteLock(ctx, "delete_worktree_state", func(writeCtx context.Context) error {
 		return s.deleteWorktreeStateLocked(writeCtx, projectID, issueID)
 	})
 }
@@ -1736,7 +1736,7 @@ func (s *RuntimeStateStore) deleteWorktreeStateLocked(ctx context.Context, proje
 }
 
 func (s *RuntimeStateStore) ReplaceWorktreeStates(ctx context.Context, projectID string, worktreeStates []WorktreeState) error {
-	return s.withWriteOperation(ctx, "replace_worktree_states", func(writeCtx context.Context) error {
+	return s.withRetryingWriteLock(ctx, "replace_worktree_states", func(writeCtx context.Context) error {
 		return s.replaceWorktreeStatesLocked(writeCtx, projectID, worktreeStates)
 	})
 }
@@ -2001,7 +2001,7 @@ func (s *RuntimeStateStore) GetWorktreeStateByIssueID(ctx context.Context, proje
 }
 
 func (s *RuntimeStateStore) UpsertWorktreeStateGitStatus(ctx context.Context, projectID, issueID string, statusRaw json.RawMessage, updatedAt time.Time) error {
-	return s.withWriteOperation(ctx, "upsert_worktree_git_status", func(writeCtx context.Context) error {
+	return s.withRetryingWriteLock(ctx, "upsert_worktree_git_status", func(writeCtx context.Context) error {
 		return s.upsertWorktreeStateGitStatusLocked(writeCtx, projectID, issueID, statusRaw, updatedAt)
 	})
 }
@@ -2129,13 +2129,7 @@ func (s *RuntimeStateStore) withWriteLock(ctx context.Context, fn func() error) 
 	})
 }
 
-func (s *RuntimeStateStore) withRetryingWriteLock(ctx context.Context, fn func() error) error {
-	return s.withWriteLock(ctx, func() error {
-		return retrySQLiteWrite(ctx, runtimeSQLiteRetryBudget, runtimeSQLiteRetryDelay, waitSQLiteWriteRetry, fn)
-	})
-}
-
-func (s *RuntimeStateStore) withWriteOperation(ctx context.Context, operation string, fn func(context.Context) error) error {
+func (s *RuntimeStateStore) withRetryingWriteLock(ctx context.Context, operation string, fn func(context.Context) error) error {
 	if _, err := s.dbHandle(); err != nil {
 		return err
 	}

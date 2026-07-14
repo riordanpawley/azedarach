@@ -295,8 +295,9 @@ func (s *RuntimeStateStore) AcquireOrchestratorScopeLease(ctx context.Context, i
 	if probe == nil {
 		return result, fmt.Errorf("acquire orchestrator scope lease: runtime probe is required")
 	}
-	err = s.withRetryingWriteLock(ctx, func() error {
-		existing, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
+	err = s.withRetryingWriteLock(ctx, "acquire_orchestrator_scope_lease", func(writeCtx context.Context) error {
+		result = OrchestratorLeaseAcquireResult{}
+		existing, found, loadErr := s.GetOrchestratorScopeLease(writeCtx, identity)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -311,7 +312,7 @@ func (s *RuntimeStateStore) AcquireOrchestratorScopeLease(ctx context.Context, i
 			if existing.Lifecycle == domain.OrchestratorPaused {
 				return &OrchestratorLeaseConflictError{Lease: existing}
 			}
-			live, probeErr := probe(ctx, existing.SessionID)
+			live, probeErr := probe(writeCtx, existing.SessionID)
 			if probeErr != nil {
 				return fmt.Errorf("probe orchestrator session %s: %w", existing.SessionID, probeErr)
 			}
@@ -326,7 +327,7 @@ func (s *RuntimeStateStore) AcquireOrchestratorScopeLease(ctx context.Context, i
 		if found {
 			lease.Cursor, lease.LastWakeAt, lease.LastWakeReason = existing.Cursor, existing.LastWakeAt, existing.LastWakeReason
 		}
-		if writeErr := s.upsertOrchestratorLease(ctx, lease); writeErr != nil {
+		if writeErr := s.upsertOrchestratorLease(writeCtx, lease); writeErr != nil {
 			return writeErr
 		}
 		result = OrchestratorLeaseAcquireResult{Lease: lease, Disposition: disposition}
@@ -343,8 +344,9 @@ func (s *RuntimeStateStore) SetOrchestratorScopeLeaseLifecycle(ctx context.Conte
 	if err != nil {
 		return lease, err
 	}
-	err = s.withRetryingWriteLock(ctx, func() error {
-		current, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
+	err = s.withRetryingWriteLock(ctx, "set_orchestrator_scope_lease_lifecycle", func(writeCtx context.Context) error {
+		lease = OrchestratorScopeLease{}
+		current, found, loadErr := s.GetOrchestratorScopeLease(writeCtx, identity)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -355,7 +357,7 @@ func (s *RuntimeStateStore) SetOrchestratorScopeLeaseLifecycle(ctx context.Conte
 			return fmt.Errorf("%w: scope owned by session %s", ErrOrchestratorLeaseConflict, current.SessionID)
 		}
 		current.Lifecycle, current.UpdatedAt = lifecycle, time.Now().UTC()
-		if writeErr := s.upsertOrchestratorLease(ctx, current); writeErr != nil {
+		if writeErr := s.upsertOrchestratorLease(writeCtx, current); writeErr != nil {
 			return writeErr
 		}
 		lease = current
@@ -370,8 +372,9 @@ func (s *RuntimeStateStore) EvaluateOrchestratorScopeLease(ctx context.Context, 
 		return lease, err
 	}
 	now = now.UTC()
-	err = s.withRetryingWriteLock(ctx, func() error {
-		current, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
+	err = s.withRetryingWriteLock(ctx, "evaluate_orchestrator_scope_lease", func(writeCtx context.Context) error {
+		lease = OrchestratorScopeLease{}
+		current, found, loadErr := s.GetOrchestratorScopeLease(writeCtx, identity)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -392,7 +395,7 @@ func (s *RuntimeStateStore) EvaluateOrchestratorScopeLease(ctx context.Context, 
 		facts.CompleteSince = current.CompleteSince
 		current.Lifecycle = domain.EvaluateOrchestratorLifecycle(now, facts, policy)
 		current.UpdatedAt = now
-		if writeErr := s.upsertOrchestratorLease(ctx, current); writeErr != nil {
+		if writeErr := s.upsertOrchestratorLease(writeCtx, current); writeErr != nil {
 			return writeErr
 		}
 		lease = current
@@ -410,8 +413,9 @@ func (s *RuntimeStateStore) WakeOrchestratorScopeLease(ctx context.Context, iden
 		return lease, false, err
 	}
 	now = now.UTC()
-	err = s.withRetryingWriteLock(ctx, func() error {
-		current, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
+	err = s.withRetryingWriteLock(ctx, "wake_orchestrator_scope_lease", func(writeCtx context.Context) error {
+		lease, changed = OrchestratorScopeLease{}, false
+		current, found, loadErr := s.GetOrchestratorScopeLease(writeCtx, identity)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -424,7 +428,7 @@ func (s *RuntimeStateStore) WakeOrchestratorScopeLease(ctx context.Context, iden
 		}
 		current.Lifecycle, current.CompleteSince, current.LastWakeReason = domain.OrchestratorWorking, nil, reason
 		current.LastWakeAt, current.UpdatedAt = &now, now
-		if writeErr := s.upsertOrchestratorLease(ctx, current); writeErr != nil {
+		if writeErr := s.upsertOrchestratorLease(writeCtx, current); writeErr != nil {
 			return writeErr
 		}
 		lease, changed = current, true
@@ -441,8 +445,9 @@ func (s *RuntimeStateStore) AdvanceOrchestratorScopeCursor(ctx context.Context, 
 	if cursor < 0 {
 		return lease, fmt.Errorf("orchestrator cursor cannot be negative")
 	}
-	err = s.withRetryingWriteLock(ctx, func() error {
-		current, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
+	err = s.withRetryingWriteLock(ctx, "advance_orchestrator_scope_cursor", func(writeCtx context.Context) error {
+		lease = OrchestratorScopeLease{}
+		current, found, loadErr := s.GetOrchestratorScopeLease(writeCtx, identity)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -452,7 +457,7 @@ func (s *RuntimeStateStore) AdvanceOrchestratorScopeCursor(ctx context.Context, 
 		if cursor > current.Cursor {
 			current.Cursor = cursor
 			current.UpdatedAt = time.Now().UTC()
-			if writeErr := s.upsertOrchestratorLease(ctx, current); writeErr != nil {
+			if writeErr := s.upsertOrchestratorLease(writeCtx, current); writeErr != nil {
 				return writeErr
 			}
 		}
@@ -467,8 +472,8 @@ func (s *RuntimeStateStore) ReleaseOrchestratorScopeLease(ctx context.Context, i
 	if err != nil {
 		return err
 	}
-	return s.withRetryingWriteLock(ctx, func() error {
-		current, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
+	return s.withRetryingWriteLock(ctx, "release_orchestrator_scope_lease", func(writeCtx context.Context) error {
+		current, found, loadErr := s.GetOrchestratorScopeLease(writeCtx, identity)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -482,7 +487,7 @@ func (s *RuntimeStateStore) ReleaseOrchestratorScopeLease(ctx context.Context, i
 		if dbErr != nil {
 			return dbErr
 		}
-		_, dbErr = db.ExecContext(ctx, `DELETE FROM `+orchestratorLeaseTable+` WHERE project_id = ? AND scope_kind = ? AND root_issue_id = ?`, identity.ProjectID, identity.Scope.Kind, identity.Scope.RootIssueID)
+		_, dbErr = db.ExecContext(writeCtx, `DELETE FROM `+orchestratorLeaseTable+` WHERE project_id = ? AND scope_kind = ? AND root_issue_id = ?`, identity.ProjectID, identity.Scope.Kind, identity.Scope.RootIssueID)
 		return dbErr
 	})
 }
