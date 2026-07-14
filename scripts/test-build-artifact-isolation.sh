@@ -70,7 +70,17 @@ if [[ "${1:-}" == "validation" && "${2:-}" == "acquire" ]]; then
     fi
     shift
   done
-  printf '{"request":{"request_id":"%s","state":"active"}}\n' "$request"
+  token="${AZEDARACH_VALIDATION_LEASE_TOKEN:-}"
+  if [[ -n "$token" && "$request" == *"${token:0:12}"* ]]; then
+    echo "stub az: public request id leaked lease-token material" >&2
+    exit 1
+  fi
+  state=active
+  if [[ -n "${FAKE_AZ_QUEUE_ONCE_FILE:-}" && ! -e "$FAKE_AZ_QUEUE_ONCE_FILE" ]]; then
+    : >"$FAKE_AZ_QUEUE_ONCE_FILE"
+    state=queued
+  fi
+  printf '{"request":{"request_id":"%s","state":"%s"}}\n' "$request" "$state"
   exit 0
 fi
 if [[ "${1:-}" == "validation" && "${2:-}" == "status" ]]; then
@@ -85,6 +95,13 @@ echo "stub az: unsupported arguments: $*" >&2
 exit 1
 EOF
 chmod +x "$fixture/fake-bin/az"
+
+AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_TICKET_ID=fixture \
+  FAKE_AZ_QUEUE_ONCE_FILE="$fixture/queued-once" \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile token-isolation -- \
+  sh -c 'test -z "${AZEDARACH_VALIDATION_LEASE_TOKEN:-}"'
+test -e "$fixture/queued-once"
 
 AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
   AZEDARACH_VALIDATION_REQUEST_ID=outer-shared \

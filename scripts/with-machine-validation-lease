@@ -52,15 +52,21 @@ chomp $revision;
 die "resolve validation source revision\n" unless $revision;
 $profile ||= $class;
 my $lease_token = random_token();
-my $request_id = sprintf('%s-%d-%d-%s', $issue, $$, int(time() * 1_000_000), substr($lease_token, 0, 12));
+my $request_nonce = random_token();
+my $request_id = sprintf('%s-%d-%d-%s', $issue, $$, int(time() * 1_000_000), substr($request_nonce, 0, 12));
 $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN} = $lease_token;
 my $command_text = join(' ', @ARGV);
 my @acquire = ($az, 'validation', 'acquire', '--request', $request_id, '--issue', $issue,
     '--class', $class, '--profile', $profile, '--command', $command_text,
-    '--revision', $revision, '--ttl', '30', '--wait', '--json');
-my $response = capture(@acquire);
-my $decoded = eval { decode_json($response) };
-die "validation acquire returned invalid JSON\n" unless $decoded && $decoded->{request}{state} eq 'active';
+    '--revision', $revision, '--ttl', '30', '--json');
+while (1) {
+    my $response = capture(@acquire);
+    my $decoded = eval { decode_json($response) };
+    die "validation acquire returned invalid JSON\n" unless $decoded && $decoded->{request}{state};
+    last if $decoded->{request}{state} eq 'active';
+    die "validation request became $decoded->{request}{state} while waiting\n" unless $decoded->{request}{state} eq 'queued';
+    sleep 0.5;
+}
 $ENV{AZEDARACH_VALIDATION_REQUEST_ID} = $request_id;
 $ENV{AZEDARACH_VALIDATION_CLASS} = $class;
 $ENV{AZEDARACH_VALIDATION_PROFILE} = $profile;
@@ -85,6 +91,7 @@ my $child = fork();
 die "fork validation command: $!\n" unless defined $child;
 if ($child == 0) {
     setpgid(0, 0);
+    delete $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN};
     exec @ARGV or die "exec validation command $ARGV[0]: $!\n";
 }
 eval { setpgid($child, $child) };
