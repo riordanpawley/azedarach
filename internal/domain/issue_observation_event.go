@@ -31,6 +31,7 @@ const (
 	IssueEventValidationFailed         IssueObservationEventType = "validation.failed"
 	IssueEventEvidenceSubmitted        IssueObservationEventType = "evidence.submitted"
 	IssueEventReviewCompleted          IssueObservationEventType = "review.completed"
+	IssueEventReviewCloseFailed        IssueObservationEventType = "review.close_failed"
 	IssueEventRiskRecorded             IssueObservationEventType = "risk.recorded"
 	IssueEventBlockerReported          IssueObservationEventType = "blocker.reported"
 	IssueEventHumanInputRequested      IssueObservationEventType = "human.input_requested"

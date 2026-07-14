@@ -125,6 +125,13 @@ decision records trusted acceptance and delegates merge, stopped-session state,
 tmux cleanup, worktree removal, and terminal close to the authoritative close
 flow before reporting success.
 
+If authoritative close fails after acceptance, repair the reported close
+precondition and retry with the same intent key. The accepted reviewer decision
+remains authoritative while the operational failure is recorded separately;
+the retry resumes close without duplicating acceptance. A ticket reopened after
+a successful close is not considered complete from historical evidence: retrying
+the same intent closes its current state again.
+
 When evaluating `az orchestrate integrate --issue <issue-id>`, treat it as an
 inspection and repair command, not the normal merge authority. Merge/close
 guidance is unsafe unless completion evidence exists. The CLI now blocks

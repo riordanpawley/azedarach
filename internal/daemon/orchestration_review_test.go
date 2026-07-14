@@ -394,6 +394,111 @@ func TestReviewAcceptTrustsDecisionOverInternalReviewArtifactWithoutTreatingArti
 	if !domain.EvaluateInvestigationAcceptance(task, after).Accepted || task.Status != domain.StatusDone {
 		t.Fatalf("closed investigation = %+v acceptance=%+v", task, domain.EvaluateInvestigationAcceptance(task, after))
 	}
+	if err := client.Update(ctx, issueID, domain.StatusOpen); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-internal-review", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reopened.Failed) != 0 || len(reopened.Closed) != 1 || reopened.Closed[0] != issueID {
+		t.Fatalf("reopened retry = %+v, want current-state authoritative close", reopened)
+	}
+	task, err = client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != domain.StatusDone {
+		t.Fatalf("reopened review status = %s, want done after same-key recovery", task.Status)
+	}
+}
+
+func TestReviewAcceptSameIntentRecoversAfterCloseFailure(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "owned read-only review", Description: "review findings", Acceptance: "consumed by parent", Type: domain.TypeInvestigation, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []issues.IssueObservationEventParams{
+		{Type: domain.IssueEventInvestigationDisposition, Source: "agent", Payload: map[string]any{"disposition": "internal_review"}},
+		{Type: domain.IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "accepted", "summary": "parent consumed findings"}},
+	} {
+		if _, err := client.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "worker", OwnerKind: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-owned-review", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	failed, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(failed.Failed[issueID], "authoritative close") {
+		t.Fatalf("first close = %+v, want ownership-backed close failure", failed)
+	}
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !domain.EvaluateInvestigationAcceptance(task, events).Accepted {
+		t.Fatal("operational close failure revoked semantic reviewer acceptance")
+	}
+	if _, err := client.ReleaseOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "worker"}); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retried.Failed) != 0 || len(retried.Closed) != 1 || retried.Closed[0] != issueID {
+		t.Fatalf("same-intent retry = %+v, want successful close", retried)
+	}
+	reviewEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeFailures, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCloseFailed}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewEvents) != 2 || len(closeFailures) != 1 {
+		t.Fatalf("review events=%+v close failures=%+v, want one agent artifact, one semantic acceptance, one close failure", reviewEvents, closeFailures)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusOpen); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type:          domain.IssueEventReviewCompleted,
+		Source:        "daemon-orchestration",
+		SourceCommand: string(protocol.OrchestrationIntentReviewReturn),
+		Payload:       map[string]any{"actor_id": "orchestrator", "intent_key": "newer-return", "outcome": "returned"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	superseded, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if superseded.Skipped[issueID] != "review-intent-superseded" {
+		t.Fatalf("superseded retry = %+v, want stale acceptance skipped", superseded)
+	}
+	task, err = client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != domain.StatusOpen {
+		t.Fatalf("superseded retry status = %s, want current reopened state preserved", task.Status)
+	}
 }
 
 func TestReviewAcceptClosesMultipleInternalReviewsBeforeDependentCompletion(t *testing.T) {
@@ -494,8 +599,8 @@ func TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reviewEvents) != 2 || reviewEvents[0].Payload["outcome"] != "accepted" || reviewEvents[1].Payload["outcome"] != "integration_failed" {
-		t.Fatalf("review events = %+v, want accepted and explicit integration failure", reviewEvents)
+	if len(reviewEvents) != 1 || reviewEvents[0].Payload["outcome"] != "accepted" {
+		t.Fatalf("review events = %+v, want one semantic acceptance", reviewEvents)
 	}
 	retried, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-ready", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir})
 	if err != nil {
@@ -508,8 +613,15 @@ func TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reviewEvents) != 2 {
+	if len(reviewEvents) != 1 {
 		t.Fatalf("retry duplicated durable outcomes: %+v", reviewEvents)
+	}
+	closeFailures, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCloseFailed}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closeFailures) != 1 {
+		t.Fatalf("retry duplicated close failure: %+v", closeFailures)
 	}
 }
 

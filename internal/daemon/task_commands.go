@@ -5656,6 +5656,7 @@ func workerObservationIssueEventMeaningful(evt domain.IssueObservationEvent) boo
 		domain.IssueEventValidationFailed,
 		domain.IssueEventEvidenceSubmitted,
 		domain.IssueEventReviewCompleted,
+		domain.IssueEventReviewCloseFailed,
 		domain.IssueEventRiskRecorded,
 		domain.IssueEventBlockerReported,
 		domain.IssueEventHumanInputRequested,
@@ -5683,7 +5684,7 @@ func issueObservationEventSummary(evt domain.IssueObservationEvent) string {
 	if len(evt.Payload) == 0 {
 		return ""
 	}
-	for _, key := range []string{"summary", "message", "body", "reason", "status"} {
+	for _, key := range []string{"summary", "message", "body", "reason", "status", "failure"} {
 		if value, ok := evt.Payload[key]; ok {
 			text := strings.TrimSpace(fmt.Sprint(value))
 			if text != "" {
@@ -5714,6 +5715,7 @@ func workerObservationEvidenceEvents(events []domain.IssueObservationEvent) []do
 			domain.IssueEventValidationPassed,
 			domain.IssueEventValidationFailed,
 			domain.IssueEventReviewCompleted,
+			domain.IssueEventReviewCloseFailed,
 			domain.IssueEventRiskRecorded,
 			domain.IssueEventBlockerReported,
 			domain.IssueEventHumanInputRequested,
