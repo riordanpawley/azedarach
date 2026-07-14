@@ -1402,6 +1402,9 @@ type sessionStartTmuxRunner struct {
 	newSessionErr        error
 	onNewSession         func(string)
 	maxNewSessionCommand int
+	launchScriptPaths    map[string]string
+	launchScriptContents map[string]string
+	launchScriptModes    map[string]os.FileMode
 	sendKeysErr          error
 	sendKeysErrOnCall    int
 	captureOutput        string
@@ -1415,6 +1418,9 @@ func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
 		panes:                map[string][]string{},
 		windows:              map[string]map[string]bool{},
 		env:                  map[string]map[string]string{},
+		launchScriptPaths:    map[string]string{},
+		launchScriptContents: map[string]string{},
+		launchScriptModes:    map[string]os.FileMode{},
 	}
 }
 
@@ -1440,6 +1446,15 @@ func requireNewSessionLaunchCommand(t *testing.T, runner *sessionStartTmuxRunner
 	}
 	t.Fatalf("new-session launch command for %q not found in commands: %+v", sessionID, runner.commands)
 	return ""
+}
+
+func requireNewSessionLaunchScript(t *testing.T, runner *sessionStartTmuxRunner, sessionID string) string {
+	t.Helper()
+	contents, ok := runner.launchScriptContents[sessionID]
+	if !ok {
+		t.Fatalf("new-session launch script for %q not found; paths: %+v", sessionID, runner.launchScriptPaths)
+	}
+	return contents
 }
 
 func tmuxCommandEnvironmentValue(command []string, key string) (string, bool) {
@@ -1482,8 +1497,25 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 		if r.maxNewSessionCommand > 0 && len(args) > 4 && len(args[len(args)-1]) > r.maxNewSessionCommand {
 			return "", errors.New("command too long")
 		}
+		if len(args) > 4 {
+			const launchPrefix = "exec /bin/sh '"
+			command := args[len(args)-1]
+			if strings.HasPrefix(command, launchPrefix) && strings.HasSuffix(command, "'") {
+				path := strings.TrimSuffix(strings.TrimPrefix(command, launchPrefix), "'")
+				if contents, readErr := os.ReadFile(path); readErr == nil {
+					r.launchScriptPaths[args[3]] = path
+					r.launchScriptContents[args[3]] = string(contents)
+					if info, statErr := os.Stat(path); statErr == nil {
+						r.launchScriptModes[args[3]] = info.Mode()
+					}
+				}
+			}
+		}
 		if r.newSessionErr != nil {
 			return "", r.newSessionErr
+		}
+		if path := r.launchScriptPaths[args[3]]; path != "" {
+			_ = os.Remove(path)
 		}
 		if r.onNewSession != nil {
 			r.onNewSession(args[3])
@@ -2969,9 +3001,9 @@ func TestSessionStartWaitsForInitReadyMarkerBeforeCompleting(t *testing.T) {
 	if !strings.Contains(payload.Output, "Session init commands finished: 1 command(s)") {
 		t.Fatalf("output = %q, want init command completion line", payload.Output)
 	}
-	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, sessionID)
-	if !strings.Contains(launchCommand, filepath.ToSlash(sessionInitReadyMarkerPath(issueID, sessionID))) {
-		t.Fatalf("launch command = %q, want init marker path", launchCommand)
+	launchScript := requireNewSessionLaunchScript(t, tmuxRunner, sessionID)
+	if !strings.Contains(launchScript, filepath.ToSlash(sessionInitReadyMarkerPath(issueID, sessionID))) {
+		t.Fatalf("launch script = %q, want init marker path", launchScript)
 	}
 }
 
@@ -3117,6 +3149,7 @@ func TestSessionStartDefaultsAgentActivityToBusy(t *testing.T) {
 		branchName:   branch,
 	}
 	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.maxNewSessionCommand = 12 * 1024
 	store := daemonstate.NewStore()
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
@@ -3154,8 +3187,9 @@ func TestSessionStartDefaultsAgentActivityToBusy(t *testing.T) {
 			ProjectID: naming.ProjectID(projectID),
 		},
 		Body: marshalJSON(map[string]any{
-			"project_id": projectID,
-			"session_id": issueID,
+			"project_id":     projectID,
+			"session_id":     issueID,
+			"initial_prompt": strings.Repeat("context-rich worker prompt\n", 100),
 		}),
 	})
 	if err != nil {
@@ -3167,29 +3201,30 @@ func TestSessionStartDefaultsAgentActivityToBusy(t *testing.T) {
 	if tmuxRunner.sendKeysCalls != 0 {
 		t.Fatalf("send-keys calls = %d, want no typed launch command for agent startup", tmuxRunner.sendKeysCalls)
 	}
-	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID))
-	if !strings.Contains(launchCommand, `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) {
-		t.Fatalf("launch command = %q, want codex launch", launchCommand)
+	sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
+	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, sessionID)
+	launchScript := requireNewSessionLaunchScript(t, tmuxRunner, sessionID)
+	if len(launchCommand) > tmuxRunner.maxNewSessionCommand {
+		t.Fatalf("launch command length = %d, want <= %d", len(launchCommand), tmuxRunner.maxNewSessionCommand)
 	}
-	if !strings.Contains(launchCommand, initialPromptShellVariable+`=$(printf`) {
-		t.Fatalf("launch command = %q, want encoded initial prompt assignment", launchCommand)
+	if strings.Contains(launchCommand, "context-rich worker prompt") || strings.Contains(launchCommand, initialPromptShellVariable) {
+		t.Fatalf("launch command contains initial prompt payload: %q", launchCommand)
 	}
-	if !strings.Contains(launchCommand, `codex -- "$`+initialPromptShellVariable+`"`) {
-		t.Fatalf("launch command = %q, want codex prompt argv", launchCommand)
+	if !strings.Contains(launchScript, `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) || !strings.Contains(launchScript, `codex -- "$`+initialPromptShellVariable+`"`) {
+		t.Fatalf("launch script = %q, want codex prompt launch", launchScript)
 	}
-	for _, mustNotContain := range []string{
-		"Start AI worker",
-		"Start by running",
-	} {
-		if strings.Contains(launchCommand, mustNotContain) {
-			t.Fatalf("launch command = %q, must not contain prompt fragment %q", launchCommand, mustNotContain)
-		}
+	if path := tmuxRunner.launchScriptPaths[sessionID]; path == "" {
+		t.Fatal("missing transient launch script path")
+	} else if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("transient launch script still exists after start: %v", statErr)
+	}
+	if mode := tmuxRunner.launchScriptModes[sessionID].Perm(); mode != 0o600 {
+		t.Fatalf("transient launch script mode = %o, want 600", mode)
 	}
 	if len(tmuxRunner.inputPayloads) != 0 {
 		t.Fatalf("input payloads = %+v, want no post-launch paste for bounded codex prompt", tmuxRunner.inputPayloads)
 	}
 
-	sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
 	session, found, err := runtimeStateStore.GetSessionState(ctx, projectID, sessionID)
 	if err != nil {
 		t.Fatalf("GetSessionState: %v", err)
@@ -3291,19 +3326,19 @@ func TestSessionStartInjectsIssueImageAttachments(t *testing.T) {
 	if _, err := os.Stat(worktreeImagePath); err != nil {
 		t.Fatalf("expected worktree-local image attachment at %s: %v", worktreeImagePath, err)
 	}
-	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID))
-	if !strings.Contains(launchCommand, `--image "`+worktreeImagePath+`"`) {
-		t.Fatalf("launch command = %q, want worktree-local codex image argument %q", launchCommand, worktreeImagePath)
+	launchScript := requireNewSessionLaunchScript(t, tmuxRunner, naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID))
+	if !strings.Contains(launchScript, `--image "`+worktreeImagePath+`"`) {
+		t.Fatalf("launch script = %q, want worktree-local codex image argument %q", launchScript, worktreeImagePath)
 	}
-	if strings.Contains(launchCommand, attached.Path) {
-		t.Fatalf("launch command = %q, must not use shared attachment store path %q", launchCommand, attached.Path)
+	if strings.Contains(launchScript, attached.Path) {
+		t.Fatalf("launch script = %q, must not use shared attachment store path %q", launchScript, attached.Path)
 	}
-	if !strings.Contains(launchCommand, `codex --image "`) || !strings.Contains(launchCommand, `-- "$`+initialPromptShellVariable+`"`) {
-		t.Fatalf("launch command = %q, want image args before positional prompt", launchCommand)
+	if !strings.Contains(launchScript, `codex --image "`) || !strings.Contains(launchScript, `-- "$`+initialPromptShellVariable+`"`) {
+		t.Fatalf("launch script = %q, want image args before positional prompt", launchScript)
 	}
 }
 
-func TestSessionStartLargeCodexPromptUsesPostLaunchPaste(t *testing.T) {
+func TestSessionStartLargeCodexPromptUsesLaunchScript(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID := "proj-large-codex-prompt"
@@ -3377,18 +3412,16 @@ func TestSessionStartLargeCodexPromptUsesPostLaunchPaste(t *testing.T) {
 	if strings.Contains(launchCommand, "large prompt line") || strings.Contains(launchCommand, initialPromptShellVariable) {
 		t.Fatalf("launch command contains large prompt payload or prompt variable")
 	}
-	if len(tmuxRunner.inputPayloads) != 1 {
-		t.Fatalf("input payloads = %+v, want one post-launch prompt payload", tmuxRunner.inputPayloads)
+	launchScript := requireNewSessionLaunchScript(t, tmuxRunner, naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID))
+	if !strings.Contains(launchScript, shellPrintfPercentBBytes("large prompt line\n")) || !strings.Contains(launchScript, initialPromptShellVariable) {
+		t.Fatal("launch script does not contain the encoded large prompt")
 	}
-	if promptPayload := tmuxRunner.inputPayloads[0]; !strings.Contains(promptPayload, "large prompt line") || len(promptPayload) < codexLaunchPromptArgMaxBytes {
-		t.Fatalf("prompt payload length = %d, want large post-launch prompt content", len(promptPayload))
-	}
-	if got := tmuxRunner.sendKeysPayloads[len(tmuxRunner.sendKeysPayloads)-1]; got != "Enter" {
-		t.Fatalf("prompt submit key = %q, want Enter", got)
+	if len(tmuxRunner.inputPayloads) != 0 {
+		t.Fatalf("input payloads = %+v, want initial prompt delivered by launch script", tmuxRunner.inputPayloads)
 	}
 }
 
-func TestSessionStartCodexPromptWithLargeEncodedLaunchUsesPostLaunchPaste(t *testing.T) {
+func TestSessionStartCodexPromptWithLargeEncodedLaunchUsesLaunchScript(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID := "proj-large-encoded-codex-prompt"
@@ -3478,11 +3511,12 @@ func TestSessionStartCodexPromptWithLargeEncodedLaunchUsesPostLaunchPaste(t *tes
 			t.Fatalf("launch command = %q, must not contain prompt fragment %q", launchCommand, mustNotContain)
 		}
 	}
-	if len(tmuxRunner.inputPayloads) != 1 {
-		t.Fatalf("input payloads = %+v, want one post-launch prompt payload", tmuxRunner.inputPayloads)
+	launchScript := requireNewSessionLaunchScript(t, tmuxRunner, sessionID)
+	if !strings.Contains(launchScript, shellPrintfPercentBBytes(promptLine)) || !strings.Contains(launchScript, initialPromptShellVariable) {
+		t.Fatal("launch script does not contain encoded orchestration prompt")
 	}
-	if got := tmuxRunner.inputPayloads[0]; got != strings.TrimSpace(initialPrompt) {
-		t.Fatalf("post-launch prompt length = %d, want trimmed initial prompt length %d", len(got), len(strings.TrimSpace(initialPrompt)))
+	if len(tmuxRunner.inputPayloads) != 0 {
+		t.Fatalf("input payloads = %+v, want initial prompt delivered by launch script", tmuxRunner.inputPayloads)
 	}
 }
 
@@ -3792,6 +3826,20 @@ func TestSessionStartDoesNotPersistTransitionWhenTmuxCreateFails(t *testing.T) {
 	if len(snapshot.Sessions) != 0 {
 		t.Fatalf("session snapshot = %+v, want empty after failed start", snapshot.Sessions)
 	}
+	sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
+	failedScriptPath := tmuxRunner.launchScriptPaths[sessionID]
+	if failedScriptPath == "" {
+		t.Fatal("failed launch did not create a transient launch script")
+	}
+	if _, statErr := os.Stat(failedScriptPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed launch script still exists: %v", statErr)
+	}
+
+	tmuxRunner.newSessionErr = nil
+	retryResp, retryErr := d.handleSessionStartDirect(ctx, req)
+	if retryErr != nil || !retryResp.OK {
+		t.Fatalf("retry after compensated launch failure: resp=%+v err=%v", retryResp, retryErr)
+	}
 }
 
 func TestSessionStartTmuxCreateFailureIncludesDiagnostics(t *testing.T) {
@@ -3874,7 +3922,7 @@ func TestSessionStartTmuxCreateFailureIncludesDiagnostics(t *testing.T) {
 		"session_id=" + sessionID,
 		"cwd=" + worktreePath,
 		"tmux new-session -d -s " + sessionID + " -c " + worktreePath,
-		"[truncated, bytes=",
+		"azedarach-session-launch-",
 		"server exited unexpectedly",
 		"Worktree exists but tmux session is not active; retry with `az session start " + issueID + "`",
 		"Diagnostics: az session diagnose " + issueID,
@@ -3882,6 +3930,9 @@ func TestSessionStartTmuxCreateFailureIncludesDiagnostics(t *testing.T) {
 		if !strings.Contains(message, want) {
 			t.Fatalf("error message = %q, missing %q", message, want)
 		}
+	}
+	if strings.Contains(message, initialPromptShellVariable) {
+		t.Fatalf("error message leaked initial prompt launch content: %q", message)
 	}
 }
 
@@ -6573,8 +6624,8 @@ func TestReconcileRecoversRootedOrchestratorThroughOrchestratorAuthority(t *test
 			if err != nil || !found || projection.Role != daemonstate.SessionRoleOrchestrator || projection.ScopeKind != daemonstate.SessionScopeOrchestration || projection.ScopeID != issueID {
 				t.Fatalf("projection=%+v found=%v err=%v", projection, found, err)
 			}
-			contract := requireNewSessionLaunchCommand(t, runner, sessionID) + "\n" + strings.Join(runner.inputPayloads, "\n") + "\n" + strings.Join(runner.sendKeysPayloads, "\n")
-			if !strings.Contains(contract, "Role: orchestrator") || strings.Contains(contract, "Role: worker") {
+			contract := requireNewSessionLaunchCommand(t, runner, sessionID) + "\n" + requireNewSessionLaunchScript(t, runner, sessionID) + "\n" + strings.Join(runner.inputPayloads, "\n") + "\n" + strings.Join(runner.sendKeysPayloads, "\n")
+			if !strings.Contains(contract, shellPrintfPercentBBytes("Role: orchestrator")) || strings.Contains(contract, shellPrintfPercentBBytes("Role: worker")) {
 				t.Fatalf("rooted orchestrator launch contract=%q", contract)
 			}
 		})
