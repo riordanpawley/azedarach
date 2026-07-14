@@ -1507,7 +1507,9 @@ func TestWaitForSessionPromptHandoffConsumedRejectsPartialDelivery(t *testing.T)
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitForSessionPromptHandoffConsumed(context.Background(), sessionPromptHandoff{PromptPath: path}); err != nil {
+	consumedCtx, consumedCancel := context.WithCancel(context.Background())
+	consumedCancel()
+	if err := waitForSessionPromptHandoffConsumed(consumedCtx, sessionPromptHandoff{PromptPath: path}); err != nil {
 		t.Fatalf("consumed handoff: %v", err)
 	}
 }

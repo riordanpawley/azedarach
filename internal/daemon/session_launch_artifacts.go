@@ -121,6 +121,13 @@ func waitForSessionPromptHandoffConsumed(ctx context.Context, handoff sessionPro
 	for {
 		select {
 		case <-ctx.Done():
+			done, err := consumed()
+			if err != nil {
+				return fmt.Errorf("inspect prompt handoff %s after cancellation: %w", filepath.Base(path), err)
+			}
+			if done {
+				return nil
+			}
 			return fmt.Errorf("prompt handoff %s was not consumed: %w", filepath.Base(path), ctx.Err())
 		case <-ticker.C:
 			done, err := consumed()
