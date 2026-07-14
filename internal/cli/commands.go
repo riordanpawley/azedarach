@@ -6731,17 +6731,18 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 
 	if opts.JSON {
 		return printJSON(map[string]any{
-			"issue_id":                  opts.IssueID,
-			"status":                    "closed",
-			"updated":                   true,
-			"integration_requested":     result.IntegrationRequested,
-			"integrated":                result.Integrated,
-			"cleanup_performed":         true,
-			"worktree_forced":           opts.ForceWorktree,
-			"auto_closed_children":      result.AutoClosedChildren,
-			"worktree_cleanup_deferred": result.WorktreeCleanupDeferred,
-			"phases":                    taskClosePhaseJSON(result.Phases),
-			"context_risk":              result.ContextRisk,
+			"issue_id":                        opts.IssueID,
+			"status":                          "closed",
+			"updated":                         true,
+			"integration_requested":           result.IntegrationRequested,
+			"integrated":                      result.Integrated,
+			"integration_validation_attempts": result.IntegrationValidationAttempts,
+			"cleanup_performed":               true,
+			"worktree_forced":                 opts.ForceWorktree,
+			"auto_closed_children":            result.AutoClosedChildren,
+			"worktree_cleanup_deferred":       result.WorktreeCleanupDeferred,
+			"phases":                          taskClosePhaseJSON(result.Phases),
+			"context_risk":                    result.ContextRisk,
 		})
 	}
 	fmt.Printf("Closed issue: %s\n", opts.IssueID)
@@ -6752,6 +6753,7 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 	if result.Integrated {
 		fmt.Printf("- Integrated %s into %s\n", result.IntegratedSourceBranch, result.IntegratedTargetBranch)
 	}
+	printIntegrationValidationAttempts(result.IntegrationValidationAttempts)
 	fmt.Println("- Cleanup performed")
 	if opts.ForceWorktree {
 		fmt.Println("- Worktree removal forced")
@@ -6892,6 +6894,12 @@ func printTaskClosePhases(phases []daemonclient.TaskClosePhaseTiming) {
 			suffix += " [" + strings.Join(details, " ") + "]"
 		}
 		fmt.Printf("  - %s: %s%s\n", name, phase.Elapsed().Round(time.Millisecond), suffix)
+	}
+}
+
+func printIntegrationValidationAttempts(attempts []domain.IntegrationCandidateValidationAttempt) {
+	for _, attempt := range attempts {
+		fmt.Printf("- Integration candidate %s: status=%s canonical=%t\n", attempt.CandidateHead, attempt.Status, attempt.Canonical)
 	}
 }
 

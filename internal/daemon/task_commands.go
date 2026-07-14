@@ -2117,6 +2117,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	result.Integrated = integration.Integrated
 	result.IntegratedSourceBranch = integration.SourceBranch
 	result.IntegratedTargetBranch = integration.TargetBranch
+	result.IntegrationValidationAttempts = append([]domain.IntegrationCandidateValidationAttempt(nil), integration.ValidationAttempts...)
 
 	phaseStartedAt = time.Now()
 	if integration.Requested && (integration.Integrated || integration.NoChanges) {
@@ -2725,14 +2726,15 @@ func (d *Daemon) liveTmuxSessionSet(ctx context.Context) (map[string]struct{}, b
 }
 
 type taskCloseIntegrationResult struct {
-	Requested       bool
-	Integrated      bool
-	NoChanges       bool
-	SourceBranch    string
-	TargetBranch    string
-	SourceOID       string
-	TargetOID       string
-	HookDiagnostics []git.GitHookDiagnostic
+	Requested          bool
+	Integrated         bool
+	NoChanges          bool
+	SourceBranch       string
+	TargetBranch       string
+	SourceOID          string
+	TargetOID          string
+	HookDiagnostics    []git.GitHookDiagnostic
+	ValidationAttempts []domain.IntegrationCandidateValidationAttempt
 }
 
 type taskCloseIntegrationReceipt struct {
@@ -3015,13 +3017,14 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve resulting target commit after close integration: %w", targetOIDErr)
 	}
 	integration = taskCloseIntegrationResult{
-		Requested:       true,
-		Integrated:      true,
-		SourceBranch:    source.Branch,
-		TargetBranch:    targetBranch,
-		SourceOID:       sourceOID,
-		TargetOID:       targetOID,
-		HookDiagnostics: append([]git.GitHookDiagnostic(nil), merge.HookDiagnostics...),
+		Requested:          true,
+		Integrated:         true,
+		SourceBranch:       source.Branch,
+		TargetBranch:       targetBranch,
+		SourceOID:          sourceOID,
+		TargetOID:          targetOID,
+		HookDiagnostics:    append([]git.GitHookDiagnostic(nil), merge.HookDiagnostics...),
+		ValidationAttempts: append([]domain.IntegrationCandidateValidationAttempt(nil), merge.ValidationAttempts...),
 	}
 	return integration, nil
 }
@@ -3212,6 +3215,7 @@ func recordTaskCloseHookPhases(ctx context.Context, result *taskCloseResult, log
 }
 
 func (d *Daemon) mergeTaskBranchBeforeClose(ctx context.Context, projectID, taskID, targetWorktree, targetBranch, sourceBranch string) (*git.MergeResult, error) {
+	var validationAttempts []git.CandidateValidationAttempt
 	for attempt := 1; ; attempt++ {
 		result, err := d.git.MergeCleanlyTransactional(ctx, targetWorktree, sourceBranch)
 		if err != nil {
@@ -3220,7 +3224,10 @@ func (d *Daemon) mergeTaskBranchBeforeClose(ctx context.Context, projectID, task
 		if result == nil {
 			return nil, fmt.Errorf("merge %s into %s returned no result", sourceBranch, targetBranch)
 		}
+		currentAttempts := append([]git.CandidateValidationAttempt(nil), result.ValidationAttempts...)
+		validationAttempts = append(validationAttempts, currentAttempts...)
 		if result.Success || !git.IsTransactionalMergeStaleTarget(result) {
+			result.ValidationAttempts = validationAttempts
 			return result, nil
 		}
 		if err := ctx.Err(); err != nil {
