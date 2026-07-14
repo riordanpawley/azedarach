@@ -83,7 +83,7 @@ func EvaluateInvestigationAcceptance(task Task, events []IssueObservationEvent) 
 // HasInternalReviewArtifact reports whether the current internal-review
 // disposition has a durable, structured review result available for a trusted
 // reviewer decision. The artifact is evidence to inspect, not acceptance
-// authority; only trustedInvestigationReviewEvent can satisfy terminal close.
+// authority; only TrustedReviewOutcome can satisfy terminal close.
 func HasInternalReviewArtifact(task Task, events []IssueObservationEvent) bool {
 	if task.Type != TypeInvestigation {
 		return false
