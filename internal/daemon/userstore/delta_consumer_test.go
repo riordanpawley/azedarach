@@ -139,6 +139,83 @@ func TestApplyProjectDeltaFailurePreservesLastGoodRowsAndComponent(t *testing.T)
 	}
 }
 
+func TestApplyProjectDeltaPreservesIndependentMaterializedFactInputs(t *testing.T) {
+	tests := []struct {
+		name  string
+		type_ domain.TaskType
+		facts domain.IssueFacts
+		check func(*testing.T, domain.IssueFacts)
+	}{
+		{
+			name:  "active operation blocker",
+			type_: domain.TypeTask,
+			facts: domain.DeriveIssueFacts(domain.IssueFactsInput{
+				Status: domain.StatusOpen, Type: domain.TypeTask,
+				OperationBlockers: []domain.IssueOperationBlocker{{OperationID: "op-1", Kind: "session.start", State: "running", BlockedResourceKeys: []string{"issue:p:issue"}}},
+			}),
+			check: func(t *testing.T, facts domain.IssueFacts) {
+				t.Helper()
+				if !facts.DelegatedOperation || len(facts.OperationBlockers) != 1 || facts.OperationBlockers[0].OperationID != "op-1" {
+					t.Fatalf("operation facts were not preserved: %+v", facts)
+				}
+			},
+		},
+		{
+			name:  "unresolved interaction",
+			type_: domain.TypeTask,
+			facts: domain.DeriveIssueFacts(domain.IssueFactsInput{Status: domain.StatusOpen, Type: domain.TypeTask, DecisionWaiting: true, DecisionWaitReason: "choose a strategy"}),
+			check: func(t *testing.T, facts domain.IssueFacts) {
+				t.Helper()
+				if !facts.WaitingHuman || facts.WaitingHumanSource != domain.WaitingHumanSourceInteractionRequest || facts.WaitingHumanReason != "choose a strategy" {
+					t.Fatalf("interaction facts were not preserved: %+v", facts)
+				}
+			},
+		},
+		{
+			name:  "unaccepted human findings investigation",
+			type_: domain.TypeInvestigation,
+			facts: domain.DeriveIssueFacts(domain.IssueFactsInput{Status: domain.StatusOpen, Type: domain.TypeInvestigation, InvestigationAcceptance: &domain.InvestigationAcceptance{Disposition: domain.InvestigationDispositionHumanFindings, Reason: "findings need acceptance"}}),
+			check: func(t *testing.T, facts domain.IssueFacts) {
+				t.Helper()
+				if !facts.WaitingHuman || facts.WaitingHumanSource != domain.WaitingHumanSourceInvestigationAcceptance || facts.WaitingHumanReason != "findings need acceptance" {
+					t.Fatalf("investigation acceptance facts were not preserved: %+v", facts)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := openTestStore(t)
+			ctx := context.Background()
+			old := projectionTestTask("issue", "before")
+			old.Type = tt.type_
+			old.Facts = tt.facts
+			initial := testDeltaState("p", 1, "one")
+			if err := store.ReplaceProject(ctx, ProjectInput{ProjectID: "p", Name: "P", Path: "/p", DBPath: "/p/db", Tasks: []domain.Task{old}, Delta: &initial}); err != nil {
+				t.Fatal(err)
+			}
+
+			incoming := domain.CanonicalIssueProjectionTask(old)
+			incoming.Title = "covered issue delta"
+			incoming.Status = domain.StatusInProgress
+			incoming.Facts = domain.IssueFacts{}
+			next := testDeltaState("p", 2, "two")
+			if err := store.ApplyProjectDelta(ctx, ProjectDeltaApply{
+				Project:  CatalogProject{ProjectID: "p", Name: "P", Path: "/p", DBPath: "/p/db"},
+				Expected: initial, Next: next,
+				Changes: []ProjectDeltaChange{{IssueID: "issue", Issue: &incoming}},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			got := projectSnapshot(t, store, "p").Tasks[0]
+			if got.Title != "covered issue delta" || got.Status != domain.StatusInProgress || got.Facts.LifecycleState != domain.IssueWorkflowActive {
+				t.Fatalf("incoming issue lifecycle was not re-derived: %+v", got)
+			}
+			tt.check(t, got.Facts)
+		})
+	}
+}
+
 func TestProjectDeltaComponentsConvergeAcrossInterleavingsAndRestart(t *testing.T) {
 	applyOrder := func(t *testing.T, order []string) (protocol.GlobalSnapshotResponseBody, map[string]ProjectDeltaState) {
 		t.Helper()

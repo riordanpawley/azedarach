@@ -187,6 +187,30 @@ func preserveRuntimeProjection(next *domain.Task, current domain.Task) {
 	next.RuntimeUpdatedAt = current.RuntimeUpdatedAt
 	next.Ownership = current.Ownership
 	next.CoordinationLeases = append([]domain.CoordinationLease(nil), current.CoordinationLeases...)
+
+	// Issue deltas carry only issue-authority state. Re-derive lifecycle and
+	// session facts from that new value while retaining the independently
+	// materialized inputs owned by operations, interactions, and investigation
+	// acceptance.
+	var investigationAcceptance *domain.InvestigationAcceptance
+	if current.Facts.WaitingHuman && current.Facts.WaitingHumanSource == domain.WaitingHumanSourceInvestigationAcceptance {
+		investigationAcceptance = &domain.InvestigationAcceptance{
+			Disposition: domain.InvestigationDispositionHumanFindings,
+			Reason:      current.Facts.WaitingHumanReason,
+		}
+	}
+	next.Facts = domain.DeriveIssueFacts(domain.IssueFactsInput{
+		Status:                  next.Status,
+		Priority:                next.Priority,
+		Type:                    next.Type,
+		State:                   next.State,
+		Session:                 next.Session,
+		HasTmuxSession:          next.HasTmuxSession,
+		OperationBlockers:       current.Facts.OperationBlockers,
+		DecisionWaiting:         current.Facts.WaitingHuman && current.Facts.WaitingHumanSource == domain.WaitingHumanSourceInteractionRequest,
+		DecisionWaitReason:      current.Facts.WaitingHumanReason,
+		InvestigationAcceptance: investigationAcceptance,
+	})
 }
 
 func (s *Store) MarkProjectDeltaStale(ctx context.Context, projectID string, cause error) error {
