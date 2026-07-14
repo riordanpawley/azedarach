@@ -46,20 +46,22 @@ func (s issueDecisionService) SyncMD(ctx context.Context, req protocol.DecisionS
 		owners := make(map[string]string, len(decisions))
 		authorized := make(map[string]struct{}, len(decisions))
 		for _, decision := range decisions {
-			links, err := c.ListDecisionLinks(ownerCtx, issues.DecisionLinkFilter{DecisionID: decision.LocalID})
-			if err != nil {
-				return err
-			}
-			provenanceLinks := links
+			var links, provenanceLinks, incoming []issues.DecisionLink
 			if decision.DeletedAt != nil {
 				provenanceLinks, err = c.ListDecisionLinks(ownerCtx, issues.DecisionLinkFilter{DecisionID: decision.LocalID, IncludeDeleted: true})
 				if err != nil {
 					return err
 				}
-			}
-			incoming, err := c.ListDecisionLinks(ownerCtx, issues.DecisionLinkFilter{TargetKind: issues.DecisionTargetDecision, TargetID: decision.LocalID})
-			if err != nil {
-				return err
+			} else {
+				links, err = c.ListDecisionLinks(ownerCtx, issues.DecisionLinkFilter{DecisionID: decision.LocalID})
+				if err != nil {
+					return err
+				}
+				provenanceLinks = links
+				incoming, err = c.ListDecisionLinks(ownerCtx, issues.DecisionLinkFilter{TargetKind: issues.DecisionTargetDecision, TargetID: decision.LocalID})
+				if err != nil {
+					return err
+				}
 			}
 			issueIDs := decisionIssueIDsAtDecisionState(decision, provenanceLinks)
 			provenance[decision.LocalID] = issueIDs
