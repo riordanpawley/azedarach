@@ -58,8 +58,17 @@ func (c *Client) insertDecisionPropagationOutbox(ctx context.Context, tx *sql.Tx
 		{kind: DecisionPropagationWithdrawn, issueIDs: intent.WithdrawnIssueIDs},
 	} {
 		for _, issueID := range normalizeOrderedIDs(batch.issueIDs) {
-			if err := c.requireIssueExists(ctx, tx, issueID, "insert-decision-propagation-outbox"); err != nil {
-				return err
+			// Changed fanout targets an active issue. Withdrawals also close
+			// retained observation history for an issue concurrently hard-
+			// deleted after fanout derivation, so they must survive row removal.
+			if batch.kind == DecisionPropagationWithdrawn {
+				if err := c.requireIssueExistsOrDeleted(ctx, tx, issueID); err != nil {
+					return err
+				}
+			} else {
+				if err := c.requireIssueExists(ctx, tx, issueID, "insert-decision-propagation-outbox"); err != nil {
+					return err
+				}
 			}
 			payload := make(map[string]any, len(intent.Payload)+4)
 			for key, value := range intent.Payload {
@@ -160,8 +169,14 @@ func (c *Client) MaterializeDecisionPropagationOutbox(ctx context.Context, entry
 				eventID = existing.Int64
 				return tx.Commit()
 			}
-			if err := c.requireIssueExists(lockCtx, tx, entry.IssueID, "materialize-decision-propagation"); err != nil {
-				return err
+			if entry.EventKind == DecisionPropagationWithdrawn {
+				if err := c.requireIssueExistsOrDeleted(lockCtx, tx, entry.IssueID); err != nil {
+					return err
+				}
+			} else {
+				if err := c.requireIssueExists(lockCtx, tx, entry.IssueID, "materialize-decision-propagation"); err != nil {
+					return err
+				}
 			}
 			eventID, err = c.insertIssueObservationEvent(lockCtx, tx, entry.IssueID, IssueObservationEventParams{
 				Type: domain.IssueEventDecisionChanged, Source: "daemon-decision",
@@ -185,6 +200,27 @@ func (c *Client) MaterializeDecisionPropagationOutbox(ctx context.Context, entry
 		return domain.IssueObservationEvent{}, c.wrapError("materialize-decision-propagation-outbox", entry.DecisionID, err)
 	}
 	return c.getIssueObservationEventByID(ctx, eventID)
+}
+
+func (c *Client) requireIssueExistsOrDeleted(ctx context.Context, queryer sqlRequirementQueryer, issueID string) error {
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return errors.New("issue id is required")
+	}
+	var known bool
+	if err := queryer.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM issues WHERE id = ?)
+		    OR EXISTS(
+			SELECT 1 FROM issue_observation_events
+			WHERE issue_id = ? AND event_type = ?
+		    )
+	`, issueID, issueID, string(domain.IssueEventIssueDeleted)).Scan(&known); err != nil {
+		return err
+	}
+	if !known {
+		return c.wrapError("decision-propagation-target", issueID, domain.ErrNotFound)
+	}
+	return nil
 }
 
 func (c *Client) RetireDecisionPropagationOutbox(ctx context.Context, entryID int64) error {

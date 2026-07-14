@@ -2,6 +2,7 @@ package issues
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"sync"
@@ -97,5 +98,57 @@ func TestDecisionPropagationOutboxMaterializationIsExactlyOnceAcrossClients(t *t
 	events, err = firstClient.ListIssueDecisionObservationEvents(ctx, issueID)
 	if err != nil || len(events) != 2 {
 		t.Fatalf("events=%+v err=%v, want one change and one authoritative acknowledgement", events, err)
+	}
+}
+
+func TestDecisionPropagationWithdrawalAllowsProvenDeleteButRejectsPhantomIssue(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	issueID, err := client.Create(ctx, CreateTaskParams{Title: "deleted worker", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := client.RecordDecision(ctx, RecordDecisionParams{Title: "contract", Rationale: "material"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Delete(ctx, issueID); err != nil {
+		t.Fatal(err)
+	}
+
+	title := "contract after delete"
+	if _, err := client.UpdateDecisionWithPropagation(ctx, decision.LocalID, UpdateDecisionParams{Title: &title}, DecisionPropagationIntent{
+		WithdrawnIssueIDs: []string{issueID}, SourceCommand: "decision.update",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := client.ListActiveDecisionPropagationOutbox(ctx, 10)
+	if err != nil || len(entries) != 1 || entries[0].EventKind != DecisionPropagationWithdrawn {
+		t.Fatalf("entries=%+v err=%v, want one deleted-issue withdrawal", entries, err)
+	}
+	event, err := client.MaterializeDecisionPropagationOutbox(ctx, entries[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.IssueID.String() != issueID || event.Payload["withdrawn"] != true {
+		t.Fatalf("event=%+v, want deleted issue %s withdrawal", event, issueID)
+	}
+
+	before, err := client.GetDecision(ctx, decision.LocalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	phantomTitle := "must roll back"
+	if _, err := client.UpdateDecisionWithPropagation(ctx, decision.LocalID, UpdateDecisionParams{Title: &phantomTitle}, DecisionPropagationIntent{
+		WithdrawnIssueIDs: []string{"phantom-issue"}, SourceCommand: "decision.update",
+	}); err == nil || !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("phantom withdrawal err=%v, want not found", err)
+	}
+	after, err := client.GetDecision(ctx, decision.LocalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Title != before.Title {
+		t.Fatalf("decision title after rejected phantom = %q, want rollback to %q", after.Title, before.Title)
 	}
 }

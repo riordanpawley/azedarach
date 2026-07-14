@@ -376,6 +376,164 @@ func TestDecisionPropagationRetriesCrossDaemonIssueObservationScopeRaces(t *test
 	}
 }
 
+func TestDecisionPropagationRetriesCrossDaemonIssueObservationLifecycleMatrix(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	dbPath := filepath.Join(repoDir, "issues.db")
+	clientA := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
+	t.Cleanup(func() { _ = clientA.CloseDB() })
+	clientB := issues.NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = clientB.CloseDB() })
+
+	root, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "lifecycle root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "lifecycle anchor", Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := clientA.RecordDecision(ctx, issues.RecordDecisionParams{Title: "lifecycle contract", Rationale: "initial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemonA := newOrchestrationReviewTestDaemon(repoDir, clientA)
+	serviceA := issueDecisionService{daemon: daemonA}
+	serviceCtx := withDaemonProjectIDContext(ctx, "project")
+	governsAnchor := protocol.DecisionLinkAddRequestBody{
+		DecisionID: decision.LocalID, TargetKind: protocol.DecisionTargetIssue,
+		TargetID: anchor, Relation: protocol.DecisionRelationGoverns,
+	}
+	if _, err := serviceA.AddDecisionLink(serviceCtx, governsAnchor); err != nil {
+		t.Fatal(err)
+	}
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, root, decision.LocalID)
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, anchor, decision.LocalID)
+
+	// Create adds a new graph member and observation while update fanout is
+	// paused. The new child must receive the exact shared update revision.
+	var child string
+	runPausedDecisionMutation(t, &serviceA, protocol.CommandDecisionUpdate, func() error {
+		rationale := "update after child create"
+		_, err := serviceA.UpdateDecision(serviceCtx, protocol.DecisionUpdateRequestBody{ID: decision.LocalID, Rationale: &rationale})
+		return err
+	}, func() {
+		var createErr error
+		child, createErr = clientB.Create(ctx, issues.CreateTaskParams{Title: "lifecycle child", Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &root})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+	})
+	childRevision := assertPendingDecisionFromCommand(t, ctx, clientB, child, decision.LocalID, protocol.CommandDecisionUpdate)
+	if rootRevision := pendingDecisionRevision(t, ctx, clientA, root, decision.LocalID); rootRevision != childRevision {
+		t.Fatalf("root revision = %d, created child revision = %d, want exact shared update revision", rootRevision, childRevision)
+	}
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, root, decision.LocalID)
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, anchor, decision.LocalID)
+	ackPendingDecision(t, ctx, serviceA, clientB, serviceCtx, child, decision.LocalID)
+
+	// Terminal status removes the child from active fanout during a material
+	// link update. The stale captured scope must become a withdrawal.
+	runPausedDecisionMutation(t, &serviceA, protocol.CommandDecisionLinkAdd, func() error {
+		request := governsAnchor
+		request.Note = "link update after child completion"
+		_, err := serviceA.AddDecisionLink(serviceCtx, request)
+		return err
+	}, func() {
+		if err := clientB.Update(ctx, child, domain.StatusDone); err != nil {
+			t.Fatal(err)
+		}
+	})
+	assertDecisionWithdrawnByCommand(t, ctx, clientB, child, decision.LocalID, protocol.CommandDecisionLinkAdd)
+	assertPendingDecisionCount(t, ctx, clientB, child, 0)
+	if err := daemonA.validateTaskDecisionAcknowledgementsForReview(ctx, "project", child); err != nil {
+		t.Fatalf("child readiness after terminal status: %v", err)
+	}
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, root, decision.LocalID)
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, anchor, decision.LocalID)
+
+	// Reopen outside the pause to seed the captured scope, then archive during
+	// an update. Archive must withdraw the child and leave readiness clear.
+	if err := clientB.Update(ctx, child, domain.StatusInProgress); err != nil {
+		t.Fatal(err)
+	}
+	runPausedDecisionMutation(t, &serviceA, protocol.CommandDecisionUpdate, func() error {
+		rationale := "update after child archive"
+		_, err := serviceA.UpdateDecision(serviceCtx, protocol.DecisionUpdateRequestBody{ID: decision.LocalID, Rationale: &rationale})
+		return err
+	}, func() {
+		if err := clientB.Archive(ctx, child); err != nil {
+			t.Fatal(err)
+		}
+	})
+	assertDecisionWithdrawnByCommand(t, ctx, clientB, child, decision.LocalID, protocol.CommandDecisionUpdate)
+	assertPendingDecisionCount(t, ctx, clientB, child, 0)
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, root, decision.LocalID)
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, anchor, decision.LocalID)
+
+	// Unarchive adds the child back while update fanout is paused. It must get
+	// the same exact revision as the retained root and anchor.
+	runPausedDecisionMutation(t, &serviceA, protocol.CommandDecisionUpdate, func() error {
+		rationale := "update after child unarchive"
+		_, err := serviceA.UpdateDecision(serviceCtx, protocol.DecisionUpdateRequestBody{ID: decision.LocalID, Rationale: &rationale})
+		return err
+	}, func() {
+		if err := clientB.Unarchive(ctx, child); err != nil {
+			t.Fatal(err)
+		}
+	})
+	childRevision = assertPendingDecisionFromCommand(t, ctx, clientB, child, decision.LocalID, protocol.CommandDecisionUpdate)
+	if rootRevision := pendingDecisionRevision(t, ctx, clientA, root, decision.LocalID); rootRevision != childRevision {
+		t.Fatalf("root revision = %d, unarchived child revision = %d, want exact shared update revision", rootRevision, childRevision)
+	}
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, root, decision.LocalID)
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, anchor, decision.LocalID)
+	ackPendingDecision(t, ctx, serviceA, clientB, serviceCtx, child, decision.LocalID)
+
+	// Hard delete removes the issue row but retains its observation stream. A
+	// link update must still persist/materialize the stale-scope withdrawal so
+	// historical readiness does not retain a pending decision.
+	runPausedDecisionMutation(t, &serviceA, protocol.CommandDecisionLinkAdd, func() error {
+		request := governsAnchor
+		request.Note = "link update after child delete"
+		_, err := serviceA.AddDecisionLink(serviceCtx, request)
+		return err
+	}, func() {
+		if err := clientB.Delete(ctx, child); err != nil {
+			t.Fatal(err)
+		}
+	})
+	assertDecisionWithdrawnByCommand(t, ctx, clientB, child, decision.LocalID, protocol.CommandDecisionLinkAdd)
+	assertPendingDecisionCount(t, ctx, clientB, child, 0)
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, root, decision.LocalID)
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, anchor, decision.LocalID)
+
+	// Root completion races with link removal. Complete its remaining child
+	// first, as required by lifecycle policy, then complete the root within the
+	// same paused callback. The final removal must withdraw the entire stale
+	// captured root and leave final readiness clear.
+	runPausedDecisionMutation(t, &serviceA, protocol.CommandDecisionLinkRemove, func() error {
+		_, err := serviceA.RemoveDecisionLink(serviceCtx, protocol.DecisionLinkRemoveRequestBody{
+			DecisionID: decision.LocalID, TargetKind: protocol.DecisionTargetIssue, TargetID: anchor,
+		})
+		return err
+	}, func() {
+		if err := clientB.Update(ctx, anchor, domain.StatusDone); err != nil {
+			t.Fatal(err)
+		}
+		if err := clientB.Update(ctx, root, domain.StatusDone); err != nil {
+			t.Fatal(err)
+		}
+	})
+	assertDecisionWithdrawnByCommand(t, ctx, clientA, root, decision.LocalID, protocol.CommandDecisionLinkRemove)
+	assertDecisionWithdrawnByCommand(t, ctx, clientA, anchor, decision.LocalID, protocol.CommandDecisionLinkRemove)
+	assertPendingDecisionCount(t, ctx, clientA, root, 0)
+	assertPendingDecisionCount(t, ctx, clientA, anchor, 0)
+	if err := daemonA.validateTaskDecisionAcknowledgementsForReview(ctx, "project", anchor); err != nil {
+		t.Fatalf("anchor readiness after root lifecycle and link removal: %v", err)
+	}
+}
+
 func TestDecisionPropagationRetriesCrossDaemonSpecLinkAddRemoveRaces(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
