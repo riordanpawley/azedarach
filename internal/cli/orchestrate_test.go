@@ -1914,6 +1914,54 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	}
 }
 
+func TestOrchestrateStartNormalizesNilMapsForMalformedLaunch(t *testing.T) {
+	root := naming.IssueID("az-1")
+	child := naming.IssueID("az-2")
+	deps := &Dependencies{
+		ProjectID:      protocol.DefaultProjectID,
+		RepoDir:        "/repo",
+		RuntimeRepoDir: "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{passOrchestrationIntent: true, commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandTaskGraphReadiness:
+				return responseWithJSON(req, daemonclient.TaskGraphReadiness{RootIssueID: root.String(), Runnable: []string{child.String()}, Blocked: map[string]string{}}), nil
+			case protocol.CommandOrchestrationIntent:
+				return responseWithJSON(req, protocol.OrchestrationIntentResult{Requested: []string{child.String()}, Launched: []protocol.OrchestrationLaunch{{IssueID: child.String(), SessionID: "az-2"}}}), nil
+			case daemonclient.CommandWorktreeList:
+				return responseWithJSON(req, map[string]any{"project_id": protocol.DefaultProjectID, "worktrees": []map[string]string{}}), nil
+			case daemonclient.CommandGitStatus:
+				return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{}}), nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		}}),
+	}
+
+	result, err := orchestrateStart(deps, OrchestrateStartOptions{RootIssueID: root.String(), Limit: 1})
+	if err != nil {
+		t.Fatalf("orchestrateStart error = %v", err)
+	}
+	if result.Failed == nil || result.Skipped == nil {
+		t.Fatalf("result maps were not initialized: failed=%v skipped=%v", result.Failed, result.Skipped)
+	}
+	if got := result.Failed[child.String()]; !strings.Contains(got, "missing operation_id") {
+		t.Fatalf("failed launch detail = %q, want typed invalid-launch message", got)
+	}
+	if len(result.Started) != 0 || len(result.Launched) != 0 || len(result.Pending) != 0 {
+		t.Fatalf("malformed launch treated as active: %+v", result)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "no dedicated worktree") {
+		t.Fatalf("root worktree warning = %+v", result.Warnings)
+	}
+
+	_, _, err = waitForOrchestrateStartLaunch(deps, OrchestrateStartOptions{}, orchestrateStartLaunch{IssueID: child.String()})
+	var invalid *orchestrateStartLaunchError
+	if !errors.As(err, &invalid) || invalid.Field != "operation_id" {
+		t.Fatalf("wait error = %v, want typed missing operation_id", err)
+	}
+}
+
 func TestOrchestrateStartSkipsForeignOwnedIssue(t *testing.T) {
 	root := naming.IssueID("az-1")
 	child := naming.IssueID("az-2")
