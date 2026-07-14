@@ -534,6 +534,112 @@ func TestDecisionPropagationRetriesCrossDaemonIssueObservationLifecycleMatrix(t 
 	}
 }
 
+func TestDecisionPropagationRetriesCrossDaemonNonterminalStatusObservationMatrix(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	dbPath := filepath.Join(repoDir, "issues.db")
+	clientA := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
+	t.Cleanup(func() { _ = clientA.CloseDB() })
+	clientB := issues.NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = clientB.CloseDB() })
+
+	root, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "nonterminal root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "nonterminal anchor", Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "nonterminal worker", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := clientA.RecordDecision(ctx, issues.RecordDecisionParams{Title: "nonterminal contract", Rationale: "initial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemonA := newOrchestrationReviewTestDaemon(repoDir, clientA)
+	serviceA := issueDecisionService{daemon: daemonA}
+	serviceCtx := withDaemonProjectIDContext(ctx, "project")
+	governsAnchor := protocol.DecisionLinkAddRequestBody{
+		DecisionID: decision.LocalID, TargetKind: protocol.DecisionTargetIssue,
+		TargetID: anchor, Relation: protocol.DecisionRelationGoverns,
+	}
+	if _, err := serviceA.AddDecisionLink(serviceCtx, governsAnchor); err != nil {
+		t.Fatal(err)
+	}
+	ackAll := func() {
+		t.Helper()
+		for _, issueID := range []string{root, anchor, worker} {
+			ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, issueID, decision.LocalID)
+		}
+	}
+	ackAll()
+
+	// Nonterminal status leaves graph membership unchanged, so exact fanout
+	// alone cannot prove the observation watermark was honored. Require two
+	// mutation attempts: the first transaction rejects the stale watermark and
+	// the second commits one exact shared update revision.
+	attempts := runPausedDecisionMutationAttempts(t, &serviceA, protocol.CommandDecisionUpdate, func() error {
+		rationale := "update after worker starts"
+		_, err := serviceA.UpdateDecision(serviceCtx, protocol.DecisionUpdateRequestBody{ID: decision.LocalID, Rationale: &rationale})
+		return err
+	}, func() {
+		if err := clientB.Update(ctx, worker, domain.StatusInProgress); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if attempts < 2 {
+		t.Fatalf("decision update attempts = %d, want retry after nonterminal status observation", attempts)
+	}
+	workerRevision := assertPendingDecisionFromCommand(t, ctx, clientB, worker, decision.LocalID, protocol.CommandDecisionUpdate)
+	if rootRevision := pendingDecisionRevision(t, ctx, clientA, root, decision.LocalID); rootRevision != workerRevision {
+		t.Fatalf("root revision = %d, worker revision = %d, want exact shared update revision", rootRevision, workerRevision)
+	}
+	ackAll()
+
+	attempts = runPausedDecisionMutationAttempts(t, &serviceA, protocol.CommandDecisionLinkAdd, func() error {
+		request := governsAnchor
+		request.Note = "link update after worker review"
+		_, err := serviceA.AddDecisionLink(serviceCtx, request)
+		return err
+	}, func() {
+		if err := clientB.Update(ctx, worker, domain.StatusInReview); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if attempts < 2 {
+		t.Fatalf("decision link add attempts = %d, want retry after nonterminal status observation", attempts)
+	}
+	workerRevision = assertPendingDecisionFromCommand(t, ctx, clientB, worker, decision.LocalID, protocol.CommandDecisionLinkAdd)
+	if anchorRevision := pendingDecisionRevision(t, ctx, clientA, anchor, decision.LocalID); anchorRevision != workerRevision {
+		t.Fatalf("anchor revision = %d, worker revision = %d, want exact shared link revision", anchorRevision, workerRevision)
+	}
+	ackAll()
+
+	attempts = runPausedDecisionMutationAttempts(t, &serviceA, protocol.CommandDecisionLinkRemove, func() error {
+		_, err := serviceA.RemoveDecisionLink(serviceCtx, protocol.DecisionLinkRemoveRequestBody{
+			DecisionID: decision.LocalID, TargetKind: protocol.DecisionTargetIssue, TargetID: anchor,
+		})
+		return err
+	}, func() {
+		if err := clientB.Update(ctx, worker, domain.StatusInProgress); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if attempts < 2 {
+		t.Fatalf("decision link remove attempts = %d, want retry after nonterminal status observation", attempts)
+	}
+	for _, issueID := range []string{root, anchor, worker} {
+		assertDecisionWithdrawnByCommand(t, ctx, clientA, issueID, decision.LocalID, protocol.CommandDecisionLinkRemove)
+		assertPendingDecisionCount(t, ctx, clientA, issueID, 0)
+	}
+	if err := daemonA.validateTaskDecisionAcknowledgementsForReview(ctx, "project", worker); err != nil {
+		t.Fatalf("worker readiness after nonterminal status and link removal: %v", err)
+	}
+}
+
 func TestDecisionPropagationRetriesCrossDaemonSpecLinkAddRemoveRaces(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -695,13 +801,20 @@ func TestReconcileRetriedDecisionPropagationIntentPreservesFinalChangedScope(t *
 
 func runPausedDecisionMutation(t *testing.T, service *issueDecisionService, command string, mutation func() error, concurrent func()) {
 	t.Helper()
+	runPausedDecisionMutationAttempts(t, service, command, mutation, concurrent)
+}
+
+func runPausedDecisionMutationAttempts(t *testing.T, service *issueDecisionService, command string, mutation func() error, concurrent func()) int {
+	t.Helper()
 	captured := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
+	attempts := 0
 	service.beforeDecisionPropagationMutation = func(got string) {
 		if got != command {
 			return
 		}
+		attempts++
 		once.Do(func() {
 			close(captured)
 			<-release
@@ -717,6 +830,7 @@ func runPausedDecisionMutation(t *testing.T, service *issueDecisionService, comm
 		t.Fatal(err)
 	}
 	service.beforeDecisionPropagationMutation = nil
+	return attempts
 }
 
 func ackPendingDecision(t *testing.T, ctx context.Context, service issueDecisionService, client *issues.Client, serviceCtx context.Context, issueID, decisionID string) {
