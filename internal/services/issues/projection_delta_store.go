@@ -7,16 +7,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 const (
 	defaultProjectionDeltaLimit = 500
-	projectionWatchPollInterval = 25 * time.Millisecond
 )
 
 type ProjectionDeltaParams struct {
@@ -76,27 +77,14 @@ func (c *Client) CommitProjectionDelta(ctx context.Context, params ProjectionDel
 						return fmt.Errorf("apply authoritative mutation: %w", err)
 					}
 				}
-				now := params.CommittedAt.UTC()
-				if _, err := tx.ExecContext(ctx, `INSERT INTO projection_streams(project_id,head_cursor,updated_at) VALUES(?,0,?) ON CONFLICT(project_id) DO NOTHING`, params.ProjectID, now.Format(time.RFC3339Nano)); err != nil {
-					return fmt.Errorf("ensure projection stream: %w", err)
-				}
-				var head uint64
-				if err := tx.QueryRowContext(ctx, `SELECT head_cursor FROM projection_streams WHERE project_id=?`, params.ProjectID).Scan(&head); err != nil {
-					return fmt.Errorf("read projection head: %w", err)
-				}
-				cursor := head + 1
-				if _, err := tx.ExecContext(ctx, `UPDATE projection_streams SET head_cursor=?,updated_at=? WHERE project_id=? AND head_cursor=?`, cursor, now.Format(time.RFC3339Nano), params.ProjectID, head); err != nil {
-					return fmt.Errorf("advance projection head: %w", err)
-				}
-				payload := normalizedProjectionPayload(params.Payload)
-				if _, err := tx.ExecContext(ctx, `INSERT INTO projection_deltas(project_id,cursor,kind,key,operation,idempotency_key,payload_json,committed_at) VALUES(?,?,?,?,?,?,?,?)`,
-					params.ProjectID, cursor, params.Kind, params.Key, params.Operation, params.IdempotencyKey, string(payload), now.Format(time.RFC3339Nano)); err != nil {
-					return fmt.Errorf("append projection delta: %w", err)
+				appended, err := appendProjectionDelta(ctx, tx, params)
+				if err != nil {
+					return err
 				}
 				if err := tx.Commit(); err != nil {
 					return fmt.Errorf("commit projection delta: %w", err)
 				}
-				committed = domain.ProjectionDelta{ProjectID: params.ProjectID, Cursor: cursor, Kind: params.Kind, Key: params.Key, Operation: params.Operation, IdempotencyKey: params.IdempotencyKey, Payload: payload, CommittedAt: now}
+				committed = appended
 				return nil
 			})
 		})
@@ -104,8 +92,51 @@ func (c *Client) CommitProjectionDelta(ctx context.Context, params ProjectionDel
 	return committed, err
 }
 
+func appendProjectionDelta(ctx context.Context, tx sqlIssueDBTX, params ProjectionDeltaParams) (domain.ProjectionDelta, error) {
+	params, err := normalizeProjectionDeltaParams(params)
+	if err != nil {
+		return domain.ProjectionDelta{}, err
+	}
+	existing, found, err := findProjectionDeltaByIdempotencyKey(ctx, tx, params.ProjectID, params.IdempotencyKey)
+	if err != nil {
+		return domain.ProjectionDelta{}, err
+	}
+	if found {
+		if !projectionDeltaMatches(existing, params) {
+			return domain.ProjectionDelta{}, fmt.Errorf("projection idempotency key %q reused with different semantics: %w", params.IdempotencyKey, domain.ErrConflict)
+		}
+		return existing, nil
+	}
+	now := params.CommittedAt.UTC()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO projection_streams(project_id,head_cursor,updated_at) VALUES(?,0,?) ON CONFLICT(project_id) DO NOTHING`, params.ProjectID, now.Format(time.RFC3339Nano)); err != nil {
+		return domain.ProjectionDelta{}, fmt.Errorf("ensure projection stream: %w", err)
+	}
+	var head uint64
+	if err := tx.QueryRowContext(ctx, `SELECT head_cursor FROM projection_streams WHERE project_id=?`, params.ProjectID).Scan(&head); err != nil {
+		return domain.ProjectionDelta{}, fmt.Errorf("read projection head: %w", err)
+	}
+	cursor := head + 1
+	result, err := tx.ExecContext(ctx, `UPDATE projection_streams SET head_cursor=?,updated_at=? WHERE project_id=? AND head_cursor=?`, cursor, now.Format(time.RFC3339Nano), params.ProjectID, head)
+	if err != nil {
+		return domain.ProjectionDelta{}, fmt.Errorf("advance projection head: %w", err)
+	}
+	advanced, err := result.RowsAffected()
+	if err != nil || advanced != 1 {
+		return domain.ProjectionDelta{}, fmt.Errorf("advance projection head changed %d rows (count error %v), want 1", advanced, err)
+	}
+	payload := normalizedProjectionPayload(params.Payload)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO projection_deltas(project_id,cursor,kind,key,operation,idempotency_key,payload_json,committed_at) VALUES(?,?,?,?,?,?,?,?)`,
+		params.ProjectID, cursor, params.Kind, params.Key, params.Operation, params.IdempotencyKey, string(payload), now.Format(time.RFC3339Nano)); err != nil {
+		return domain.ProjectionDelta{}, fmt.Errorf("append projection delta: %w", err)
+	}
+	return domain.ProjectionDelta{ProjectID: params.ProjectID, Cursor: cursor, Kind: params.Kind, Key: params.Key, Operation: params.Operation, IdempotencyKey: params.IdempotencyKey, Payload: payload, CommittedAt: now}, nil
+}
+
 func (c *Client) ListProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
-	db, err := c.dbHandle()
+	if c.projectionDeltaReadHook != nil {
+		c.projectionDeltaReadHook()
+	}
+	db, err := c.projectionReadDBHandle()
 	if err != nil {
 		return nil, 0, err
 	}
@@ -168,31 +199,65 @@ func (c *Client) ListProjectionDeltas(ctx context.Context, projectID string, aft
 // WatchProjectionDeltas blocks until at least one delta follows after. It only
 // performs read queries; context termination is returned as a typed error.
 func (c *Client) WatchProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
+	deltas, head, err := c.ListProjectionDeltas(ctx, projectID, after, limit)
+	if err != nil || len(deltas) > 0 {
+		return deltas, head, projectionWatchError(err)
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, head, fmt.Errorf("create projection cursor watcher: %w: %w", err, domain.ErrProjectionRetryable)
+	}
+	defer watcher.Close()
+	if err := watcher.Add(filepath.Dir(c.dbPath)); err != nil {
+		return nil, head, fmt.Errorf("watch projection cursor directory: %w: %w", err, domain.ErrProjectionRetryable)
+	}
+	// Re-read after registration to close the commit-before-watch race. From
+	// here onward SQLite WAL/main-file notifications wake the reader without a
+	// periodic query loop, including commits from another daemon process.
+	deltas, head, err = c.ListProjectionDeltas(ctx, projectID, after, limit)
+	if err != nil || len(deltas) > 0 {
+		return deltas, head, projectionWatchError(err)
+	}
 	for {
-		deltas, head, err := c.ListProjectionDeltas(ctx, projectID, after, limit)
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return nil, head, &domain.ProjectionCanceledError{Cause: err}
-			}
-			return nil, head, err
-		}
-		if len(deltas) > 0 {
-			return deltas, head, nil
-		}
-		timer := time.NewTimer(projectionWatchPollInterval)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return nil, head, &domain.ProjectionCanceledError{Cause: ctx.Err()}
-		case <-timer.C:
+		case watchErr, ok := <-watcher.Errors:
+			if !ok {
+				return nil, head, fmt.Errorf("projection cursor watcher closed: %w", domain.ErrProjectionRetryable)
+			}
+			return nil, head, fmt.Errorf("projection cursor watcher failed: %w: %w", watchErr, domain.ErrProjectionRetryable)
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return nil, head, fmt.Errorf("projection cursor watcher closed: %w", domain.ErrProjectionRetryable)
+			}
+			if !projectionDBEvent(c.dbPath, event.Name) {
+				continue
+			}
+			deltas, head, err = c.ListProjectionDeltas(ctx, projectID, after, limit)
+			if err != nil || len(deltas) > 0 {
+				return deltas, head, projectionWatchError(err)
+			}
 		}
 	}
+}
+
+func projectionDBEvent(dbPath, eventPath string) bool {
+	dbPath, eventPath = filepath.Clean(dbPath), filepath.Clean(eventPath)
+	return eventPath == dbPath || eventPath == dbPath+"-wal" || eventPath == dbPath+"-shm"
+}
+
+func projectionWatchError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return &domain.ProjectionCanceledError{Cause: err}
+	}
+	return err
 }
 
 // ProjectionSnapshotAt returns the keyed materialization exactly as of cursor.
 // It is a pure read transaction and never advances authority or consumer state.
 func (c *Client) ProjectionSnapshotAt(ctx context.Context, projectID string, cursor uint64) (domain.ProjectionSnapshot, error) {
-	db, err := c.dbHandle()
+	db, err := c.projectionReadDBHandle()
 	if err != nil {
 		return domain.ProjectionSnapshot{}, err
 	}
@@ -244,7 +309,7 @@ func (c *Client) ProjectionSnapshotAt(ctx context.Context, projectID string, cur
 }
 
 func (c *Client) ProjectionConsumerCursor(ctx context.Context, projectID, consumer string) (uint64, error) {
-	db, err := c.dbHandle()
+	db, err := c.projectionReadDBHandle()
 	if err != nil {
 		return 0, err
 	}
@@ -261,6 +326,23 @@ func (c *Client) ProjectionConsumerCursor(ctx context.Context, projectID, consum
 		return 0, projectionReadError("read projection consumer cursor", err)
 	}
 	return cursor, nil
+}
+
+// OpenProjectionDeltaStore is the explicit initialization boundary for delta
+// readers. Read methods never call migrations, normalization, repair, or seed
+// paths; callers must open the project store during startup or through a write.
+func (c *Client) OpenProjectionDeltaStore() error {
+	_, err := c.dbHandle()
+	return err
+}
+
+func (c *Client) projectionReadDBHandle() (*sql.DB, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.db == nil {
+		return nil, fmt.Errorf("projection delta store is not open: %w", domain.ErrProjectionRetryable)
+	}
+	return c.db, nil
 }
 
 // AdvanceProjectionConsumerCursor records exactly-once consumption after

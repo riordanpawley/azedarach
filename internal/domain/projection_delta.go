@@ -14,6 +14,7 @@ type ProjectionKind string
 const (
 	ProjectionDeltaUpsert ProjectionDeltaOperation = "upsert"
 	ProjectionDeltaDelete ProjectionDeltaOperation = "delete"
+	ProjectionKindIssue   ProjectionKind           = "issue"
 )
 
 func (o ProjectionDeltaOperation) Valid() bool {

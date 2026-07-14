@@ -7,7 +7,12 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
-const ProjectionDeltaSchemaVersion = 1
+const (
+	ProjectionDeltaSchemaVersion = 1
+	CommandProjectionDeltaList   = "projection.delta.list"
+	CommandProjectionDeltaWatch  = "projection.delta.watch"
+	CommandProjectionSnapshot    = "projection.snapshot"
+)
 
 type ProjectionDeltaReadRequest struct {
 	ProjectID   naming.ProjectID `json:"project_id" msgpack:"project_id"`

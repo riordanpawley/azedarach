@@ -69,9 +69,15 @@ const (
 	commandSessionRecover        = "session.recover"
 	commandRuntimeReconcile      = "runtime.reconcile"
 	commandRuntimeReconcileIssue = "runtime.reconcile_issue"
+	commandProjectionDeltaList   = protocol.CommandProjectionDeltaList
+	commandProjectionDeltaWatch  = protocol.CommandProjectionDeltaWatch
+	commandProjectionSnapshot    = protocol.CommandProjectionSnapshot
 )
 
 var commandSpecRegistry = map[string]CommandSpec{
+	commandProjectionDeltaList:              {Command: commandProjectionDeltaList, RequiresProjectID: true},
+	commandProjectionDeltaWatch:             {Command: commandProjectionDeltaWatch, RequiresProjectID: true},
+	commandProjectionSnapshot:               {Command: commandProjectionSnapshot, RequiresProjectID: true},
 	commandOrchestrationSnapshot:            {Command: commandOrchestrationSnapshot, RequiresProjectID: true},
 	commandOrchestrationIntent:              {Command: commandOrchestrationIntent, RequiresProjectID: true},
 	commandTaskBulkCleanup:                  {Command: commandTaskBulkCleanup, RequiresProjectID: true},

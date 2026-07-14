@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -16,6 +18,120 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/stretchr/testify/require"
 )
+
+func TestProjectionDeltaActiveIssueMutationEmits(t *testing.T) {
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	id, err := client.Create(context.Background(), CreateTaskParams{Title: "active delta", Type: domain.TypeTask})
+	require.NoError(t, err)
+	deltas, head, err := client.ListProjectionDeltas(context.Background(), "default", 0, 10)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), head)
+	require.Len(t, deltas, 1)
+	require.Equal(t, id, deltas[0].Key)
+	require.Equal(t, domain.ProjectionKindIssue, deltas[0].Kind)
+	require.Equal(t, "issue-observation:1", deltas[0].IdempotencyKey)
+}
+
+func TestProjectionDeltaFirstReadIsPureAndRequiresExplicitOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.db")
+	client := NewClientAtPath(path, nil)
+	_, _, err := client.ListProjectionDeltas(context.Background(), "default", 0, 1)
+	require.ErrorIs(t, err, domain.ErrProjectionRetryable)
+	_, statErr := os.Stat(path)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestProjectionDeltaWatchHasNoIdlePolling(t *testing.T) {
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	require.NoError(t, client.OpenProjectionDeltaStore())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	var reads atomic.Int32
+	client.projectionDeltaReadHook = func() { reads.Add(1) }
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, _, err := client.WatchProjectionDeltas(ctx, "default", 0, 1)
+	require.ErrorIs(t, err, domain.ErrProjectionCanceled)
+	require.Equal(t, int32(2), reads.Load(), "idle watch must only read before and after event registration")
+}
+
+func TestProjectionDeltaCrossProcessWritersAreGapFreeAndIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.db")
+	seed := NewClientAtPath(path, nil)
+	require.NoError(t, seed.OpenProjectionDeltaStore())
+	require.NoError(t, seed.CloseDB())
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	commands := make([]*exec.Cmd, 2)
+	for worker := range commands {
+		commands[worker] = exec.Command(executable, "-test.run=TestProjectionDeltaSubprocessWriter$")
+		commands[worker].Env = append(os.Environ(), "AZEDARACH_PROJECTION_SUBPROCESS=1", "AZEDARACH_PROJECTION_DB="+path, fmt.Sprintf("AZEDARACH_PROJECTION_WORKER=%d", worker))
+		require.NoError(t, commands[worker].Start())
+	}
+	for _, command := range commands {
+		require.NoError(t, command.Wait())
+	}
+	reader := NewClientAtPath(path, nil)
+	require.NoError(t, reader.OpenProjectionDeltaStore())
+	t.Cleanup(func() { _ = reader.CloseDB() })
+	deltas, head, err := reader.ListProjectionDeltas(context.Background(), "p", 0, 100)
+	require.NoError(t, err)
+	require.Equal(t, uint64(41), head)
+	require.Len(t, deltas, 41)
+	for index, delta := range deltas {
+		require.Equal(t, uint64(index+1), delta.Cursor)
+	}
+}
+
+func TestProjectionDeltaWatchWakesForCrossProcessCommit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.db")
+	client := NewClientAtPath(path, nil)
+	require.NoError(t, client.OpenProjectionDeltaStore())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	ready := make(chan struct{})
+	var reads atomic.Int32
+	client.projectionDeltaReadHook = func() {
+		if reads.Add(1) == 2 {
+			close(ready)
+		}
+	}
+	type result struct {
+		deltas []domain.ProjectionDelta
+		err    error
+	}
+	resultCh := make(chan result, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() {
+		deltas, _, err := client.WatchProjectionDeltas(ctx, "p", 0, 100)
+		resultCh <- result{deltas: deltas, err: err}
+	}()
+	<-ready
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	command := exec.Command(executable, "-test.run=TestProjectionDeltaSubprocessWriter$")
+	command.Env = append(os.Environ(), "AZEDARACH_PROJECTION_SUBPROCESS=1", "AZEDARACH_PROJECTION_DB="+path, "AZEDARACH_PROJECTION_WORKER=watch")
+	require.NoError(t, command.Run())
+	got := <-resultCh
+	require.NoError(t, got.err)
+	require.NotEmpty(t, got.deltas)
+	require.Equal(t, uint64(1), got.deltas[0].Cursor)
+}
+
+func TestProjectionDeltaSubprocessWriter(t *testing.T) {
+	if os.Getenv("AZEDARACH_PROJECTION_SUBPROCESS") != "1" {
+		t.Skip("subprocess helper")
+	}
+	path, worker := os.Getenv("AZEDARACH_PROJECTION_DB"), os.Getenv("AZEDARACH_PROJECTION_WORKER")
+	client := NewClientAtPath(path, nil)
+	defer client.CloseDB()
+	for index := 0; index < 20; index++ {
+		_, err := client.CommitProjectionDelta(context.Background(), ProjectionDeltaParams{ProjectID: "p", Kind: domain.ProjectionKindIssue, Key: worker + "-" + fmt.Sprint(index), Operation: domain.ProjectionDeltaUpsert, IdempotencyKey: worker + "-" + fmt.Sprint(index), Payload: json.RawMessage(`{}`)}, nil)
+		require.NoError(t, err)
+	}
+	_, err := client.CommitProjectionDelta(context.Background(), ProjectionDeltaParams{ProjectID: "p", Kind: domain.ProjectionKindIssue, Key: "shared", Operation: domain.ProjectionDeltaUpsert, IdempotencyKey: "shared", Payload: json.RawMessage(`{"shared":true}`)}, nil)
+	require.NoError(t, err)
+}
 
 func TestProjectionDeltaCommitIsAtomicIdempotentAndSnapshotHistorical(t *testing.T) {
 	ctx := context.Background()
@@ -112,6 +228,7 @@ func TestProjectionDeltaMultiClientWritersAreMonotonicAndRestartSafe(t *testing.
 	for _, client := range clients {
 		defer client.CloseDB()
 	}
+	require.NoError(t, clients[0].OpenProjectionDeltaStore())
 	_, err := clients[0].ProjectionSnapshotAt(ctx, "p", 0)
 	require.NoError(t, err)
 
@@ -184,6 +301,7 @@ func TestProjectionDeltaMultiClientWritersAreMonotonicAndRestartSafe(t *testing.
 	}
 	restarted := NewClientAtPath(path, nil)
 	defer restarted.CloseDB()
+	require.NoError(t, restarted.OpenProjectionDeltaStore())
 	deltas, head, err := restarted.ListProjectionDeltas(ctx, "p", 0, writes+1)
 	require.NoError(t, err)
 	require.Equal(t, uint64(writes), head)
@@ -197,6 +315,7 @@ func TestProjectionDeltaWatchCancellationGapAndConsumerCursorAreTyped(t *testing
 	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
 	defer client.CloseDB()
 	ctx := context.Background()
+	require.NoError(t, client.OpenProjectionDeltaStore())
 	_, err := client.ProjectionSnapshotAt(ctx, "p", 1)
 	var gap *domain.ProjectionGapError
 	require.ErrorAs(t, err, &gap)
@@ -233,6 +352,7 @@ func TestProjectionDeltaMigrationFreshHistoricalReopenRollbackAndDrift(t *testin
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	client := NewClientAtPath(path, nil)
+	require.NoError(t, client.OpenProjectionDeltaStore())
 	_, err := client.ProjectionSnapshotAt(ctx, "p", 0)
 	require.NoError(t, err)
 	require.NoError(t, client.CloseDB())
@@ -245,12 +365,14 @@ func TestProjectionDeltaMigrationFreshHistoricalReopenRollbackAndDrift(t *testin
 	require.NoError(t, db.Close())
 
 	reopened := NewClientAtPath(path, nil)
+	require.NoError(t, reopened.OpenProjectionDeltaStore())
 	_, err = reopened.ProjectionSnapshotAt(ctx, "p", 0)
 	require.NoError(t, err)
 	require.NoError(t, reopened.CloseDB())
 
 	historicalPath := filepath.Join(t.TempDir(), "historical.db")
 	historical := NewClientAtPath(historicalPath, nil)
+	require.NoError(t, historical.OpenProjectionDeltaStore())
 	_, err = historical.ProjectionSnapshotAt(ctx, "p", 0)
 	require.NoError(t, err)
 	require.NoError(t, historical.CloseDB())
@@ -260,6 +382,7 @@ func TestProjectionDeltaMigrationFreshHistoricalReopenRollbackAndDrift(t *testin
 	require.NoError(t, err)
 	require.NoError(t, historicalDB.Close())
 	upgraded := NewClientAtPath(historicalPath, nil)
+	require.NoError(t, upgraded.OpenProjectionDeltaStore())
 	_, err = upgraded.ProjectionSnapshotAt(ctx, "p", 0)
 	require.NoError(t, err)
 	require.NoError(t, upgraded.CloseDB())
@@ -285,7 +408,7 @@ func TestProjectionDeltaMigrationFreshHistoricalReopenRollbackAndDrift(t *testin
 	require.NoError(t, err)
 	require.NoError(t, driftDB.Close())
 	drifted := NewClientAtPath(path, nil)
-	_, err = drifted.ProjectionSnapshotAt(ctx, "p", 0)
+	err = drifted.OpenProjectionDeltaStore()
 	require.ErrorContains(t, err, "missing index idx_projection_deltas_key_history")
 	_ = drifted.CloseDB()
 }

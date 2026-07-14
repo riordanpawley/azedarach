@@ -248,7 +248,7 @@ func (c *Client) InvestigationAcceptances(ctx context.Context, tasks []domain.Ta
 	return out, nil
 }
 
-func (c *Client) appendIssueObservationEvent(ctx context.Context, execer sqlIssueExecer, issueID string, eventType domain.IssueObservationEventType, payload map[string]any) error {
+func (c *Client) appendIssueObservationEvent(ctx context.Context, execer sqlIssueDBTX, issueID string, eventType domain.IssueObservationEventType, payload map[string]any) error {
 	_, err := c.insertIssueObservationEvent(ctx, execer, issueID, IssueObservationEventParams{
 		Type:    eventType,
 		Source:  "issue-store",
@@ -257,7 +257,7 @@ func (c *Client) appendIssueObservationEvent(ctx context.Context, execer sqlIssu
 	return err
 }
 
-func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssueExecer, issueID string, params IssueObservationEventParams) (int64, error) {
+func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssueDBTX, issueID string, params IssueObservationEventParams) (int64, error) {
 	issueID = strings.TrimSpace(issueID)
 	if issueID == "" {
 		return 0, errors.New("issue id is required")
@@ -294,6 +294,29 @@ func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssu
 	id, err := result.LastInsertId()
 	if err != nil {
 		return 0, fmt.Errorf("read observation event id: %w", err)
+	}
+	deltaPayload, err := json.Marshal(map[string]any{
+		"event_id":   id,
+		"event_type": eventType,
+		"payload":    params.Payload,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("marshal issue projection delta: %w", err)
+	}
+	operation := domain.ProjectionDeltaUpsert
+	if params.Type == domain.IssueEventIssueDeleted {
+		operation = domain.ProjectionDeltaDelete
+	}
+	if _, err := appendProjectionDelta(ctx, execer, ProjectionDeltaParams{
+		ProjectID:      "default",
+		Kind:           domain.ProjectionKindIssue,
+		Key:            issueID,
+		Operation:      operation,
+		IdempotencyKey: fmt.Sprintf("issue-observation:%d", id),
+		Payload:        deltaPayload,
+		CommittedAt:    observedAt,
+	}); err != nil {
+		return 0, fmt.Errorf("append issue observation projection delta: %w", err)
 	}
 	return id, nil
 }

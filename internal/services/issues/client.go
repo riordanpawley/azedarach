@@ -506,6 +506,8 @@ type Client struct {
 	stateModelV2MigrationFailureHook   func(stage string) error
 	boardViewsMigrationFailureHook     func(stage string) error
 	humanAuthorityMigrationFailureHook func(stage string) error
+	projectionDeltaChecksumRepairHook  func(stage string) error
+	projectionDeltaReadHook            func()
 	interactionMu                      sync.RWMutex
 	interactionCache                   map[string]domain.InteractionRequest
 }

@@ -840,6 +840,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleGlobalSnapshot(ctx, req)
 	case protocol.CommandGlobalProjectionRebuild:
 		return d.handleGlobalProjectionRebuild(ctx, req)
+	case protocol.CommandProjectionDeltaList, protocol.CommandProjectionDeltaWatch:
+		return d.handleProjectionDeltaRead(ctx, req)
+	case protocol.CommandProjectionSnapshot:
+		return d.handleProjectionSnapshot(ctx, req)
 	case "task.list":
 		return d.handleTaskList(ctx, req)
 	case "task.get":
