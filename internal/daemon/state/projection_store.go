@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/dbpathguard"
 	"github.com/riordanpawley/azedarach/internal/observability/tracesqlite"
 	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
@@ -476,9 +477,6 @@ func NewRuntimeStateStoreAtPath(dbPath string, logger *slog.Logger) *RuntimeStat
 }
 
 func resolveRuntimeStateDBPath(repoDir string) (string, error) {
-	if override := strings.TrimSpace(os.Getenv("AZEDARACH_DB_PATH")); override != "" {
-		return override, nil
-	}
 	baseRoot, err := config.ResolveProjectRoot(repoDir)
 	if err != nil {
 		return "", err
@@ -486,7 +484,17 @@ func resolveRuntimeStateDBPath(repoDir string) (string, error) {
 	if strings.TrimSpace(baseRoot) == "" {
 		baseRoot = "."
 	}
-	return filepath.Join(baseRoot, ".azedarach", "azedarach.db"), nil
+	candidate := filepath.Join(baseRoot, ".azedarach", "azedarach.db")
+	if override := strings.TrimSpace(os.Getenv("AZEDARACH_DB_PATH")); override != "" {
+		useOverride, useErr := dbpathguard.UseProjectOverride(candidate, override)
+		if useErr != nil {
+			return "", fmt.Errorf("resolve test database override: %w", useErr)
+		}
+		if useOverride {
+			return override, nil
+		}
+	}
+	return candidate, nil
 }
 
 func (s *RuntimeStateStore) Close() error {
@@ -2091,6 +2099,9 @@ func (s *RuntimeStateStore) dbHandle() (*sql.DB, error) {
 	defer s.mu.Unlock()
 	if s.db != nil {
 		return s.db, nil
+	}
+	if err := dbpathguard.Check(s.dbPath); err != nil {
+		return nil, fmt.Errorf("refuse runtime state database: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(s.dbPath), 0o755); err != nil {
 		return nil, fmt.Errorf("ensure db directory: %w", err)

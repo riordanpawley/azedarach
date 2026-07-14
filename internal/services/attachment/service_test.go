@@ -9,7 +9,27 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/riordanpawley/azedarach/internal/dbpathguard"
 )
+
+func TestServicePropagatesProjectOverrideResolutionErrorBeforeFilesystemTouch(t *testing.T) {
+	root := t.TempDir()
+	issuesPath := filepath.Join(root, "untouched", ".azedarach")
+	isolatedDB := filepath.Join(root, "isolated", ".azedarach", "azedarach.db")
+	t.Setenv(dbpathguard.TestIsolationRootEnv, root)
+	t.Setenv(dbpathguard.TestIsolatedProjectDBEnv, isolatedDB)
+	t.Setenv(dbpathguard.TestCurrentProjectDBEnv, "")
+	t.Setenv("AZEDARACH_DB_PATH", isolatedDB)
+
+	service := NewService(issuesPath, slog.Default())
+	if _, err := service.List(context.Background(), "issue"); err == nil || !strings.Contains(err.Error(), dbpathguard.TestCurrentProjectDBEnv) {
+		t.Fatalf("List() error = %v, want missing isolation metadata error", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "untouched")); !os.IsNotExist(err) {
+		t.Fatalf("resolution failure touched attachment root: %v", err)
+	}
+}
 
 func TestAttach(t *testing.T) {
 	// Create temporary directory

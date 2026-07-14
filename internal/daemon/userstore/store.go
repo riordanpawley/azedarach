@@ -16,6 +16,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/dbpathguard"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/sqlitemigration"
@@ -90,6 +91,9 @@ func Open(path string, options ...Option) (*Store, error) {
 	}
 	if resolved, resolveErr := filepath.EvalSymlinks(filepath.Dir(path)); resolveErr == nil {
 		path = filepath.Join(resolved, filepath.Base(path))
+	}
+	if err := dbpathguard.Check(path); err != nil {
+		return nil, fmt.Errorf("refuse user database: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create user database directory: %w", err)
