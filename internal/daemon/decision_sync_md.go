@@ -40,14 +40,7 @@ func (s issueDecisionService) SyncMD(ctx context.Context, req protocol.DecisionS
 		return protocol.DecisionSyncMDResponseBody{}, err
 	}
 
-	targetDir := filepath.Join(repoDir, decisionMDSubdir)
-	if !req.Check {
-		if err := os.MkdirAll(targetDir, 0o755); err != nil {
-			return protocol.DecisionSyncMDResponseBody{}, fmt.Errorf("create %s: %w", targetDir, err)
-		}
-	}
-
-	changedFiles := make([]string, 0, len(decisions))
+	exports := make([]decisionMDExport, 0, len(decisions))
 	for _, decision := range decisions {
 		links, err := c.ListDecisionLinks(ctx, issues.DecisionLinkFilter{DecisionID: decision.LocalID})
 		if err != nil {
@@ -61,32 +54,123 @@ func (s issueDecisionService) SyncMD(ctx context.Context, req protocol.DecisionS
 			return protocol.DecisionSyncMDResponseBody{}, err
 		}
 		body := renderDecisionMarkdown(decision, links, incoming)
-		path := filepath.Join(targetDir, decisionMDFilename(decision))
-
-		existing, readErr := os.ReadFile(path)
-		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-			return protocol.DecisionSyncMDResponseBody{}, fmt.Errorf("read %s: %w", path, readErr)
-		}
-		if errors.Is(readErr, os.ErrNotExist) || !bytes.Equal(existing, body) {
-			rel, _ := filepath.Rel(repoDir, path)
-			if rel == "" {
-				rel = path
-			}
-			changedFiles = append(changedFiles, rel)
-			if !req.Check {
-				if err := os.WriteFile(path, body, 0o644); err != nil {
-					return protocol.DecisionSyncMDResponseBody{}, fmt.Errorf("write %s: %w", path, err)
-				}
-			}
-		}
+		exports = append(exports, decisionMDExport{Decision: decision, Body: body})
 	}
-	sort.Strings(changedFiles)
+
+	changedFiles, err := reconcileDecisionMarkdown(repoDir, exports, req.Check)
+	if err != nil {
+		return protocol.DecisionSyncMDResponseBody{}, err
+	}
 
 	return protocol.DecisionSyncMDResponseBody{
 		Check:   req.Check,
 		Changed: len(changedFiles) > 0,
 		Files:   changedFiles,
 	}, nil
+}
+
+type decisionMDExport struct {
+	Decision issues.Decision
+	Body     []byte
+}
+
+// reconcileDecisionMarkdown makes docs/decisions an exact export of the live
+// decision store. Canonical files are written before obsolete artifacts are
+// removed so a failed rename reconciliation never destroys the only copy of a
+// live decision. Reserved decision filenames and parseable decision exports are
+// reconciled; unrelated Markdown is left alone.
+func reconcileDecisionMarkdown(repoDir string, exports []decisionMDExport, check bool) ([]string, error) {
+	targetDir := filepath.Join(repoDir, decisionMDSubdir)
+	if !check {
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
+			return nil, fmt.Errorf("create %s: %w", targetDir, err)
+		}
+	}
+
+	desiredPaths := make(map[string]struct{}, len(exports))
+	changedPaths := make(map[string]struct{}, len(exports))
+	for _, export := range exports {
+		path := filepath.Join(targetDir, decisionMDFilename(export.Decision))
+		desiredPaths[path] = struct{}{}
+		existing, readErr := os.ReadFile(path)
+		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("read %s: %w", path, readErr)
+		}
+		if errors.Is(readErr, os.ErrNotExist) || !bytes.Equal(existing, export.Body) {
+			changedPaths[path] = struct{}{}
+			if !check {
+				if err := os.WriteFile(path, export.Body, 0o644); err != nil {
+					return nil, fmt.Errorf("write %s: %w", path, err)
+				}
+			}
+		}
+	}
+
+	entries, err := os.ReadDir(targetDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return sortedDecisionMDChanges(repoDir, changedPaths), nil
+		}
+		return nil, fmt.Errorf("read %s: %w", targetDir, err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		path := filepath.Join(targetDir, entry.Name())
+		if _, desired := desiredPaths[path]; desired {
+			continue
+		}
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil, fmt.Errorf("read %s: %w", path, readErr)
+		}
+		if !isDecisionMDFilename(entry.Name()) {
+			if _, parseErr := parseDecisionMarkdown(content); parseErr != nil {
+				continue
+			}
+		}
+		changedPaths[path] = struct{}{}
+		if !check {
+			if err := os.Remove(path); err != nil {
+				return nil, fmt.Errorf("remove obsolete decision markdown %s: %w", path, err)
+			}
+		}
+	}
+	return sortedDecisionMDChanges(repoDir, changedPaths), nil
+}
+
+func isDecisionMDFilename(name string) bool {
+	stem := strings.TrimSuffix(name, ".md")
+	if stem == name || !strings.HasPrefix(stem, "dec-") {
+		return false
+	}
+	numeric := strings.TrimPrefix(stem, "dec-")
+	if i := strings.IndexByte(numeric, '-'); i >= 0 {
+		numeric = numeric[:i]
+	}
+	if numeric == "" {
+		return false
+	}
+	for _, r := range numeric {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func sortedDecisionMDChanges(repoDir string, paths map[string]struct{}) []string {
+	changed := make([]string, 0, len(paths))
+	for path := range paths {
+		rel, err := filepath.Rel(repoDir, path)
+		if err != nil || rel == "" {
+			rel = path
+		}
+		changed = append(changed, rel)
+	}
+	sort.Strings(changed)
+	return changed
 }
 
 func decisionMDRepoDir(fallbackRepoDir, requestRepoDir string) (string, error) {
