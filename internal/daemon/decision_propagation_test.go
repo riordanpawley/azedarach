@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
@@ -154,6 +155,113 @@ func TestParallelWorkerMaterialDecisionPropagationAndAcknowledgement(t *testing.
 	})
 	if err != nil || !strings.Contains(result.Failed[second], "stale material decisions") {
 		t.Fatalf("review accept result=%+v err=%v, want stale decision rejection", result, err)
+	}
+}
+
+func TestDecisionPropagationRetriesCrossDaemonScopeChangesBeforeUpdateReadiness(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	dbPath := filepath.Join(repoDir, "issues.db")
+	clientA := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
+	t.Cleanup(func() { _ = clientA.CloseDB() })
+	clientB := issues.NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = clientB.CloseDB() })
+	issueA, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "scope a", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueB, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "scope b", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := clientA.RecordDecision(ctx, issues.RecordDecisionParams{Title: "shared protocol", Rationale: "initial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	daemonA := newOrchestrationReviewTestDaemon(repoDir, clientA)
+	daemonB := newOrchestrationReviewTestDaemon(repoDir, clientB)
+	serviceA := issueDecisionService{daemon: daemonA}
+	serviceB := issueDecisionService{daemon: daemonB}
+	serviceCtx := withDaemonProjectIDContext(ctx, "project")
+	governs := func(issueID string) protocol.DecisionLinkAddRequestBody {
+		return protocol.DecisionLinkAddRequestBody{DecisionID: decision.LocalID, TargetKind: protocol.DecisionTargetIssue, TargetID: issueID, Relation: protocol.DecisionRelationGoverns}
+	}
+	if _, err := serviceA.AddDecisionLink(serviceCtx, governs(issueA)); err != nil {
+		t.Fatal(err)
+	}
+
+	ackPending := func(service issueDecisionService, client *issues.Client, issueID string) int64 {
+		t.Helper()
+		events, err := client.ListIssueDecisionObservationEvents(ctx, issueID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pending := domain.ReducePendingDecisionChanges(events)
+		if len(pending) != 1 {
+			t.Fatalf("pending %s=%+v, want one decision", issueID, pending)
+		}
+		if _, err := service.AcknowledgeDecision(serviceCtx, protocol.DecisionAcknowledgeRequestBody{
+			IssueID: naming.IssueID(issueID), DecisionID: decision.LocalID, Revision: pending[0].Revision,
+			Disposition: domain.DecisionAcknowledgementReconciled,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return pending[0].Revision
+	}
+	ackPending(serviceA, clientA, issueA)
+
+	runPausedUpdate := func(rationale string, concurrent func()) error {
+		t.Helper()
+		captured := make(chan struct{})
+		release := make(chan struct{})
+		var once sync.Once
+		serviceA.beforeDecisionPropagationMutation = func(command string) {
+			if command != protocol.CommandDecisionUpdate {
+				return
+			}
+			once.Do(func() {
+				close(captured)
+				<-release
+			})
+		}
+		result := make(chan error, 1)
+		go func() {
+			_, err := serviceA.UpdateDecision(serviceCtx, protocol.DecisionUpdateRequestBody{ID: decision.LocalID, Rationale: &rationale})
+			result <- err
+		}()
+		<-captured
+		concurrent()
+		close(release)
+		return <-result
+	}
+
+	if err := runPausedUpdate("update after adding b", func() {
+		if _, err := serviceB.AddDecisionLink(serviceCtx, governs(issueB)); err != nil {
+			t.Fatal(err)
+		}
+		ackPending(serviceB, clientB, issueB)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := daemonB.validateTaskDecisionAcknowledgementsForReview(ctx, "project", issueB); err == nil || !strings.Contains(err.Error(), "stale material decision") {
+		t.Fatalf("issue b review readiness err=%v, want retried update revision pending", err)
+	}
+	ackPending(serviceA, clientA, issueA)
+	ackPending(serviceB, clientB, issueB)
+
+	if err := runPausedUpdate("update after removing b", func() {
+		if _, err := serviceB.RemoveDecisionLink(serviceCtx, protocol.DecisionLinkRemoveRequestBody{DecisionID: decision.LocalID, TargetKind: protocol.DecisionTargetIssue, TargetID: issueB}); err != nil {
+			t.Fatal(err)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := daemonB.validateTaskDecisionAcknowledgementsForReview(ctx, "project", issueB); err != nil {
+		t.Fatalf("removed issue b remained blocked after retried update: %v", err)
+	}
+	if err := daemonA.validateTaskDecisionAcknowledgementsForReview(ctx, "project", issueA); err == nil || !strings.Contains(err.Error(), "stale material decision") {
+		t.Fatalf("issue a review readiness err=%v, want latest update pending", err)
 	}
 }
 

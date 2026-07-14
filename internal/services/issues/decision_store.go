@@ -633,6 +633,12 @@ func (c *Client) deleteDecisionLocked(ctx context.Context, selector string, inte
 	if err != nil {
 		return c.wrapError("delete-decision", selector, err)
 	}
+	if err := c.validateDecisionPropagationRevision(ctx, tx, decision.LocalID, intent.ExpectedRevision); err != nil {
+		return c.wrapError("delete-decision", decision.LocalID, err)
+	}
+	if err := c.validateDecisionPropagationObservationRevision(ctx, tx, decision.LocalID, intent); err != nil {
+		return c.wrapError("delete-decision", decision.LocalID, err)
+	}
 	links, err := c.listDecisionLinksForDecisionRow(ctx, tx, decision.rowID, false)
 	if err != nil {
 		return c.wrapError("delete-decision", decision.LocalID, err)
@@ -716,6 +722,12 @@ func (c *Client) addDecisionLinkLocked(ctx context.Context, params AddDecisionLi
 	decision, err := c.lookupDecisionByLocalID(ctx, tx, normalized.DecisionID, false)
 	if err != nil {
 		return DecisionLink{}, c.wrapError("add-decision-link", normalized.DecisionID, err)
+	}
+	if err := c.validateDecisionPropagationRevision(ctx, tx, decision.LocalID, intent.ExpectedRevision); err != nil {
+		return DecisionLink{}, c.wrapError("add-decision-link", decision.LocalID, err)
+	}
+	if err := c.validateDecisionPropagationObservationRevision(ctx, tx, decision.LocalID, intent); err != nil {
+		return DecisionLink{}, c.wrapError("add-decision-link", decision.LocalID, err)
 	}
 	if err := ensureDecisionLinkTargetExists(ctx, tx, normalized.TargetKind, normalized.TargetID); err != nil {
 		return DecisionLink{}, c.wrapError("add-decision-link", normalized.DecisionID, err)
@@ -824,6 +836,12 @@ func (c *Client) removeDecisionLinkLocked(ctx context.Context, decisionSelector 
 	if err != nil {
 		return c.wrapError("remove-decision-link", decisionSelector, err)
 	}
+	if err := c.validateDecisionPropagationRevision(ctx, tx, decision.LocalID, intent.ExpectedRevision); err != nil {
+		return c.wrapError("remove-decision-link", decision.LocalID, err)
+	}
+	if err := c.validateDecisionPropagationObservationRevision(ctx, tx, decision.LocalID, intent); err != nil {
+		return c.wrapError("remove-decision-link", decision.LocalID, err)
+	}
 	link, err := c.lookupDecisionLink(ctx, tx, decision.rowID, targetKind, targetID, false)
 	if err != nil {
 		return c.wrapError("remove-decision-link", decisionSelector, err)
@@ -919,12 +937,43 @@ func (c *Client) DecisionRevision(ctx context.Context, decisionID string) (int64
 	if err != nil {
 		return 0, err
 	}
+	revision, err := decisionRevision(ctx, db, decisionID)
+	if err != nil {
+		return 0, c.wrapError("decision-revision", strings.TrimSpace(decisionID), err)
+	}
+	return revision, nil
+}
+
+// IssueObservationRevision is the durable project-scope watermark used while
+// deriving decision fanout. Issue hierarchy and lifecycle changes append to
+// this stream, so a changed watermark invalidates a scope captured by another
+// daemon before the decision mutation commits.
+func (c *Client) IssueObservationRevision(ctx context.Context) (int64, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return 0, err
+	}
+	return issueObservationRevision(ctx, db)
+}
+
+func issueObservationRevision(ctx context.Context, queryer sqlRequirementQueryer) (int64, error) {
+	var revision sql.NullInt64
+	if err := queryer.QueryRowContext(ctx, `SELECT MAX(id) FROM issue_observation_events`).Scan(&revision); err != nil {
+		return 0, err
+	}
+	if !revision.Valid {
+		return 0, nil
+	}
+	return revision.Int64, nil
+}
+
+func decisionRevision(ctx context.Context, queryer sqlRequirementQueryer, decisionID string) (int64, error) {
 	decisionID = strings.TrimSpace(decisionID)
 	if decisionID == "" {
-		return 0, c.wrapError("decision-revision", "", errors.New("decision id is required"))
+		return 0, errors.New("decision id is required")
 	}
 	var revision sql.NullInt64
-	err = db.QueryRowContext(ctx, `
+	err := queryer.QueryRowContext(ctx, `
 		SELECT MAX(id)
 		FROM decision_audit_log
 		WHERE (entity_type = ? AND entity_id = ?)
@@ -938,12 +987,40 @@ func (c *Client) DecisionRevision(ctx context.Context, decisionID string) (int64
 	`, decisionEntityKind, decisionID, decisionLinkEntityKind, decisionID, decisionID+":%",
 		string(DecisionRelationGoverns), string(DecisionRelationRevises), string(DecisionRelationGoverns), string(DecisionRelationRevises)).Scan(&revision)
 	if err != nil {
-		return 0, c.wrapError("decision-revision", decisionID, err)
+		return 0, err
 	}
 	if !revision.Valid || revision.Int64 <= 0 {
-		return 0, c.wrapError("decision-revision", decisionID, domain.ErrNotFound)
+		return 0, domain.ErrNotFound
 	}
 	return revision.Int64, nil
+}
+
+func (c *Client) validateDecisionPropagationRevision(ctx context.Context, queryer sqlRequirementQueryer, decisionID string, expected int64) error {
+	if expected <= 0 {
+		return nil
+	}
+	current, err := decisionRevision(ctx, queryer, decisionID)
+	if err != nil {
+		return err
+	}
+	if current != expected {
+		return fmt.Errorf("%w: decision %s expected revision %d, current revision %d", ErrDecisionPropagationRevisionChanged, decisionID, expected, current)
+	}
+	return nil
+}
+
+func (c *Client) validateDecisionPropagationObservationRevision(ctx context.Context, queryer sqlRequirementQueryer, decisionID string, intent DecisionPropagationIntent) error {
+	if intent.ExpectedRevision <= 0 {
+		return nil
+	}
+	current, err := issueObservationRevision(ctx, queryer)
+	if err != nil {
+		return err
+	}
+	if current != intent.ExpectedObservationRevision {
+		return fmt.Errorf("%w: decision %s expected issue observation revision %d, current revision %d", ErrDecisionPropagationRevisionChanged, decisionID, intent.ExpectedObservationRevision, current)
+	}
+	return nil
 }
 
 func (c *Client) lookupDecisionByLocalID(ctx context.Context, queryer sqlRequirementQueryer, selector string, includeDeleted bool) (decisionRecord, error) {

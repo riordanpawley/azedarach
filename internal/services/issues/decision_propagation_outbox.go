@@ -17,14 +17,18 @@ const (
 	DecisionPropagationWithdrawn = "withdrawn"
 )
 
+var ErrDecisionPropagationRevisionChanged = errors.New("decision propagation revision changed")
+
 // DecisionPropagationIntent is captured in the same transaction as the
 // decision audit revision. The daemon may crash at any later point without
 // losing the exact issue fanout it must reconcile.
 type DecisionPropagationIntent struct {
-	ChangedIssueIDs   []string
-	WithdrawnIssueIDs []string
-	SourceCommand     string
-	Payload           map[string]any
+	ChangedIssueIDs             []string
+	WithdrawnIssueIDs           []string
+	SourceCommand               string
+	Payload                     map[string]any
+	ExpectedRevision            int64
+	ExpectedObservationRevision int64
 }
 
 type DecisionPropagationOutboxEntry struct {

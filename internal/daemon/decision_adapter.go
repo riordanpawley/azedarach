@@ -12,7 +12,50 @@ import (
 )
 
 type issueDecisionService struct {
-	daemon *Daemon
+	daemon                            *Daemon
+	beforeDecisionPropagationMutation func(command string)
+}
+
+const decisionPropagationMutationMaxAttempts = 8
+
+func retryDecisionPropagationMutation[T any](ctx context.Context, service issueDecisionService, client *issues.Client, decisionID, command string, derive func() (issues.DecisionPropagationIntent, error), mutate func(issues.DecisionPropagationIntent) (T, error)) (T, error) {
+	var zero T
+	for attempt := 1; attempt <= decisionPropagationMutationMaxAttempts; attempt++ {
+		before, err := client.DecisionRevision(ctx, decisionID)
+		if err != nil {
+			return zero, err
+		}
+		beforeObservation, err := client.IssueObservationRevision(ctx)
+		if err != nil {
+			return zero, err
+		}
+		intent, err := derive()
+		if err != nil {
+			return zero, err
+		}
+		after, err := client.DecisionRevision(ctx, decisionID)
+		if err != nil {
+			return zero, err
+		}
+		afterObservation, err := client.IssueObservationRevision(ctx)
+		if err != nil {
+			return zero, err
+		}
+		if before != after || beforeObservation != afterObservation {
+			continue
+		}
+		intent.ExpectedRevision = after
+		intent.ExpectedObservationRevision = afterObservation
+		if service.beforeDecisionPropagationMutation != nil {
+			service.beforeDecisionPropagationMutation(command)
+		}
+		result, err := mutate(intent)
+		if errors.Is(err, issues.ErrDecisionPropagationRevisionChanged) {
+			continue
+		}
+		return result, err
+	}
+	return zero, fmt.Errorf("%w after %d attempts for decision %s", issues.ErrDecisionPropagationRevisionChanged, decisionPropagationMutationMaxAttempts, decisionID)
 }
 
 func (s issueDecisionService) client(ctx context.Context) (*issues.Client, error) {
@@ -103,18 +146,19 @@ func (s issueDecisionService) UpdateDecision(ctx context.Context, req protocol.D
 		Consequences: req.Consequences,
 	}
 	projectID := daemonProjectIDFromContext(ctx)
-	affected, err := s.daemon.decisionAffectedIssues(ctx, projectID, req.ID)
-	if err != nil {
-		return protocol.DecisionUpdateResponseBody{}, err
-	}
-	intent, err := s.daemon.newDecisionPropagationIntent(ctx, projectID, req.ID, affected, nil, protocol.CommandDecisionUpdate)
-	if err != nil {
-		return protocol.DecisionUpdateResponseBody{}, err
-	}
-	if req.Title != nil {
-		intent.Payload["title"] = strings.TrimSpace(*req.Title)
-	}
-	decision, err := c.UpdateDecisionWithPropagation(ctx, req.ID, params, intent)
+	decision, err := retryDecisionPropagationMutation(ctx, s, c, req.ID, protocol.CommandDecisionUpdate, func() (issues.DecisionPropagationIntent, error) {
+		affected, err := s.daemon.decisionAffectedIssues(ctx, projectID, req.ID)
+		if err != nil {
+			return issues.DecisionPropagationIntent{}, err
+		}
+		intent, err := s.daemon.newDecisionPropagationIntent(ctx, projectID, req.ID, affected, nil, protocol.CommandDecisionUpdate)
+		if err == nil && req.Title != nil {
+			intent.Payload["title"] = strings.TrimSpace(*req.Title)
+		}
+		return intent, err
+	}, func(intent issues.DecisionPropagationIntent) (issues.Decision, error) {
+		return c.UpdateDecisionWithPropagation(ctx, req.ID, params, intent)
+	})
 	if err != nil {
 		return protocol.DecisionUpdateResponseBody{}, err
 	}
@@ -128,15 +172,16 @@ func (s issueDecisionService) DeleteDecision(ctx context.Context, req protocol.D
 		return protocol.DecisionDeleteResponseBody{}, err
 	}
 	projectID := daemonProjectIDFromContext(ctx)
-	affected, err := s.daemon.decisionAffectedIssues(ctx, projectID, req.ID)
+	_, err = retryDecisionPropagationMutation(ctx, s, c, req.ID, protocol.CommandDecisionDelete, func() (issues.DecisionPropagationIntent, error) {
+		affected, err := s.daemon.decisionAffectedIssues(ctx, projectID, req.ID)
+		if err != nil {
+			return issues.DecisionPropagationIntent{}, err
+		}
+		return s.daemon.newDecisionPropagationIntent(ctx, projectID, req.ID, nil, affected, protocol.CommandDecisionDelete)
+	}, func(intent issues.DecisionPropagationIntent) (struct{}, error) {
+		return struct{}{}, c.DeleteDecisionWithPropagation(ctx, req.ID, intent)
+	})
 	if err != nil {
-		return protocol.DecisionDeleteResponseBody{}, err
-	}
-	intent, err := s.daemon.newDecisionPropagationIntent(ctx, projectID, req.ID, nil, affected, protocol.CommandDecisionDelete)
-	if err != nil {
-		return protocol.DecisionDeleteResponseBody{}, err
-	}
-	if err := c.DeleteDecisionWithPropagation(ctx, req.ID, intent); err != nil {
 		return protocol.DecisionDeleteResponseBody{}, err
 	}
 	s.daemon.reconcileDecisionPropagationBestEffort(ctx, projectID)
@@ -202,24 +247,26 @@ func (s issueDecisionService) AddDecisionLink(ctx context.Context, req protocol.
 		params.Note = &req.Note
 	}
 	projectID := daemonProjectIDFromContext(ctx)
-	priorRelation, found, err := decisionLinkRelation(ctx, c, req.DecisionID, issues.DecisionTargetKind(req.TargetKind), req.TargetID)
-	if err != nil {
-		return protocol.DecisionLinkAddResponseBody{}, err
-	}
-	intent := issues.DecisionPropagationIntent{}
-	if (found && materialDecisionRelation(priorRelation)) || materialDecisionRelation(issues.DecisionRelation(req.Relation)) {
+	link, err := retryDecisionPropagationMutation(ctx, s, c, req.DecisionID, protocol.CommandDecisionLinkAdd, func() (issues.DecisionPropagationIntent, error) {
+		priorRelation, found, err := decisionLinkRelation(ctx, c, req.DecisionID, issues.DecisionTargetKind(req.TargetKind), req.TargetID)
+		if err != nil {
+			return issues.DecisionPropagationIntent{}, err
+		}
+		if !((found && materialDecisionRelation(priorRelation)) || materialDecisionRelation(issues.DecisionRelation(req.Relation))) {
+			return issues.DecisionPropagationIntent{}, nil
+		}
 		before, err := s.daemon.decisionAffectedIssues(ctx, projectID, req.DecisionID)
 		if err != nil {
-			return protocol.DecisionLinkAddResponseBody{}, err
+			return issues.DecisionPropagationIntent{}, err
 		}
 		override := &decisionLinkOverride{DecisionID: req.DecisionID, TargetKind: issues.DecisionTargetKind(req.TargetKind), TargetID: req.TargetID, Relation: issues.DecisionRelation(req.Relation)}
 		after, err := s.daemon.decisionAffectedIssuesWithLinkOverride(ctx, projectID, req.DecisionID, override)
 		if err != nil {
-			return protocol.DecisionLinkAddResponseBody{}, err
+			return issues.DecisionPropagationIntent{}, err
 		}
-		intent, err = s.daemon.newDecisionPropagationIntent(ctx, projectID, req.DecisionID, after, decisionIssueDifference(before, after), protocol.CommandDecisionLinkAdd)
+		intent, err := s.daemon.newDecisionPropagationIntent(ctx, projectID, req.DecisionID, after, decisionIssueDifference(before, after), protocol.CommandDecisionLinkAdd)
 		if err != nil {
-			return protocol.DecisionLinkAddResponseBody{}, err
+			return issues.DecisionPropagationIntent{}, err
 		}
 		if issues.DecisionRelation(req.Relation) == issues.DecisionRelationRevises && issues.DecisionTargetKind(req.TargetKind) == issues.DecisionTargetDecision {
 			intent.Payload["supersedes_decision_id"] = strings.TrimSpace(req.TargetID)
@@ -227,8 +274,10 @@ func (s issueDecisionService) AddDecisionLink(ctx context.Context, req protocol.
 		if issues.DecisionRelation(req.Relation) == issues.DecisionRelationGoverns && issues.DecisionTargetKind(req.TargetKind) == issues.DecisionTargetIssue {
 			intent.Payload["source_issue_id"] = strings.TrimSpace(req.TargetID)
 		}
-	}
-	link, err := c.AddDecisionLinkWithPropagation(ctx, params, intent)
+		return intent, nil
+	}, func(intent issues.DecisionPropagationIntent) (issues.DecisionLink, error) {
+		return c.AddDecisionLinkWithPropagation(ctx, params, intent)
+	})
 	if err != nil {
 		return protocol.DecisionLinkAddResponseBody{}, err
 	}
@@ -303,27 +352,28 @@ func (s issueDecisionService) RemoveDecisionLink(ctx context.Context, req protoc
 		return protocol.DecisionLinkRemoveResponseBody{}, err
 	}
 	projectID := daemonProjectIDFromContext(ctx)
-	priorRelation, found, err := decisionLinkRelation(ctx, c, req.DecisionID, issues.DecisionTargetKind(req.TargetKind), req.TargetID)
-	if err != nil {
-		return protocol.DecisionLinkRemoveResponseBody{}, err
-	}
-	intent := issues.DecisionPropagationIntent{}
-	if found && materialDecisionRelation(priorRelation) {
+	_, err = retryDecisionPropagationMutation(ctx, s, c, req.DecisionID, protocol.CommandDecisionLinkRemove, func() (issues.DecisionPropagationIntent, error) {
+		priorRelation, found, err := decisionLinkRelation(ctx, c, req.DecisionID, issues.DecisionTargetKind(req.TargetKind), req.TargetID)
+		if err != nil {
+			return issues.DecisionPropagationIntent{}, err
+		}
+		if !found || !materialDecisionRelation(priorRelation) {
+			return issues.DecisionPropagationIntent{}, nil
+		}
 		before, err := s.daemon.decisionAffectedIssues(ctx, projectID, req.DecisionID)
 		if err != nil {
-			return protocol.DecisionLinkRemoveResponseBody{}, err
+			return issues.DecisionPropagationIntent{}, err
 		}
 		override := &decisionLinkOverride{DecisionID: req.DecisionID, TargetKind: issues.DecisionTargetKind(req.TargetKind), TargetID: req.TargetID, Remove: true}
 		after, err := s.daemon.decisionAffectedIssuesWithLinkOverride(ctx, projectID, req.DecisionID, override)
 		if err != nil {
-			return protocol.DecisionLinkRemoveResponseBody{}, err
+			return issues.DecisionPropagationIntent{}, err
 		}
-		intent, err = s.daemon.newDecisionPropagationIntent(ctx, projectID, req.DecisionID, after, decisionIssueDifference(before, after), protocol.CommandDecisionLinkRemove)
-		if err != nil {
-			return protocol.DecisionLinkRemoveResponseBody{}, err
-		}
-	}
-	if err := c.RemoveDecisionLinkWithPropagation(ctx, req.DecisionID, issues.DecisionTargetKind(req.TargetKind), req.TargetID, intent); err != nil {
+		return s.daemon.newDecisionPropagationIntent(ctx, projectID, req.DecisionID, after, decisionIssueDifference(before, after), protocol.CommandDecisionLinkRemove)
+	}, func(intent issues.DecisionPropagationIntent) (struct{}, error) {
+		return struct{}{}, c.RemoveDecisionLinkWithPropagation(ctx, req.DecisionID, issues.DecisionTargetKind(req.TargetKind), req.TargetID, intent)
+	})
+	if err != nil {
 		return protocol.DecisionLinkRemoveResponseBody{}, err
 	}
 	s.daemon.reconcileDecisionPropagationBestEffort(ctx, projectID)
