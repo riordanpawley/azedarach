@@ -1,3 +1,12 @@
+-- Authority: project.daemon_operations.
+-- Schema: add durable validation request/state tables, queue/expiry indexes,
+-- one-active-aggregate enforcement, and monotonic revision triggers.
+-- Data: no existing rows are rewritten or removed.
+-- Validation: startup verifies every declared table, constraint, index, and
+-- trigger definition and fails closed on applied-ledger schema drift.
+-- Ledger: the shared migration runner records this artifact ID and pinned
+-- SHA-256 exactly once in schema_migrations within the schema transaction.
+
 CREATE TABLE daemon_validation_requests (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     request_id TEXT NOT NULL UNIQUE,

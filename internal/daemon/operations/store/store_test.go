@@ -8,9 +8,96 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/testisolation"
 )
+
+func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
+	rawPaths := strings.TrimSpace(os.Getenv("AZEDARACH_PROJECT_DB_CLONES"))
+	if rawPaths == "" {
+		t.Skip("AZEDARACH_PROJECT_DB_CLONES is not set")
+	}
+	for _, path := range filepath.SplitList(rawPaths) {
+		path := path
+		t.Run(filepath.Base(filepath.Dir(filepath.Dir(path))), func(t *testing.T) {
+			if err := testisolation.CheckDatabaseClone(path, "."); err != nil {
+				t.Fatalf("refuse unsafe project database clone before SQLite open: %v", err)
+			}
+			beforeDB, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var beforeOperations, hasOperations int
+			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='daemon_operations'`).Scan(&hasOperations); err != nil {
+				_ = beforeDB.Close()
+				t.Fatal(err)
+			}
+			if hasOperations == 1 {
+				if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM daemon_operations`).Scan(&beforeOperations); err != nil {
+					_ = beforeDB.Close()
+					t.Fatal(err)
+				}
+			}
+			if err = beforeDB.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			ctx := context.Background()
+			store := NewAtPath(path, slog.Default())
+			if _, err = store.ValidationSnapshot(ctx, "migration-review", time.Now().UTC(), time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = store.List(ctx, Query{Limit: 1}); err != nil {
+				t.Fatal(err)
+			}
+			var checksum string
+			if err = store.db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, "daemon_operations_0003_validation_leases").Scan(&checksum); err != nil {
+				t.Fatal(err)
+			}
+			if checksum != "317c9ea680d378637b417005ccfcf0d989e4c025cbbacabdd581f00dafac19df" {
+				t.Fatalf("validation migration checksum = %q", checksum)
+			}
+			var objects, afterOperations int
+			if err = store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN (
+				'daemon_validation_requests','daemon_validation_state',
+				'idx_daemon_validation_one_active_aggregate','idx_daemon_validation_project_queue','idx_daemon_validation_expiry',
+				'daemon_validation_requests_insert_revision','daemon_validation_requests_update_revision'
+			)`).Scan(&objects); err != nil {
+				t.Fatal(err)
+			}
+			if objects != 7 {
+				t.Fatalf("validation migration objects = %d, want 7", objects)
+			}
+			if err = store.db.QueryRow(`SELECT COUNT(*) FROM daemon_operations`).Scan(&afterOperations); err != nil {
+				t.Fatal(err)
+			}
+			if afterOperations != beforeOperations {
+				t.Fatalf("operation row preservation = %d/%d", beforeOperations, afterOperations)
+			}
+			if err = store.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			reopened := NewAtPath(path, slog.Default())
+			if _, err = reopened.ValidationSnapshot(ctx, "migration-review", time.Now().UTC(), time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			var ledgerRows int
+			if err = reopened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, "daemon_operations_0003_validation_leases", checksum).Scan(&ledgerRows); err != nil {
+				t.Fatal(err)
+			}
+			if ledgerRows != 1 {
+				t.Fatalf("validation migration ledger rows after reopen = %d, want 1", ledgerRows)
+			}
+			if err = reopened.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
 
 func TestSQLiteStoreMigrationBackfillsLegacyOperationsAfterOtherAuthorityConversion(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
@@ -106,6 +193,93 @@ func TestValidationLeaseMigrationUpgradesHistoricalOperationsStoreAndReopens(t *
 			t.Fatal(err)
 		}
 	}
+}
+
+func TestValidationLeaseMigrationRollsBackWhenLedgerWriteFails(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE schema_migrations(id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, artifact_checksum TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range orderedMigrations[:2] {
+		sqlText, loadErr := loadMigrationSQL(migration.path)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if _, err = db.Exec(sqlText); err != nil {
+			t.Fatal(err)
+		}
+		var checksum string
+		for _, artifact := range migrationArtifacts {
+			if artifact.ID == migration.id {
+				checksum = artifact.Checksum
+			}
+		}
+		if _, err = db.Exec(`INSERT INTO schema_migrations(id,applied_at,artifact_checksum) VALUES(?, 'historical', ?)`, migration.id, checksum); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = db.Exec(`CREATE TRIGGER reject_validation_ledger BEFORE INSERT ON schema_migrations WHEN NEW.id='daemon_operations_0003_validation_leases' BEGIN SELECT RAISE(ABORT, 'injected validation ledger failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	failed := NewAtPath(dbPath, slog.Default())
+	if _, err = failed.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || !strings.Contains(err.Error(), "injected validation ledger failure") {
+		t.Fatalf("migration error = %v, want injected ledger failure", err)
+	}
+	_ = failed.Close()
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var objects, ledgerRows int
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'daemon_validation_%' OR name LIKE 'idx_daemon_validation_%'`).Scan(&objects); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='daemon_operations_0003_validation_leases'`).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if objects != 0 || ledgerRows != 0 {
+		t.Fatalf("failed migration residue objects=%d ledger=%d", objects, ledgerRows)
+	}
+	if _, err = raw.Exec(`DROP TRIGGER reject_validation_ledger`); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	retried := NewAtPath(dbPath, slog.Default())
+	defer retried.Close()
+	if _, err = retried.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err != nil {
+		t.Fatalf("retry validation migration: %v", err)
+	}
+}
+
+func TestValidationLeaseMigrationRejectsAppliedSchemaDrift(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seed := NewAtPath(dbPath, slog.Default())
+	if _, err := seed.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.db.Exec(`DROP TRIGGER daemon_validation_requests_update_revision`); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := NewAtPath(dbPath, slog.Default())
+	if _, err := reopened.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || !strings.Contains(err.Error(), "missing trigger daemon_validation_requests_update_revision") {
+		t.Fatalf("schema drift error = %v", err)
+	}
+	_ = reopened.Close()
 }
 
 func TestSQLiteStoreCreateGetAndList(t *testing.T) {
