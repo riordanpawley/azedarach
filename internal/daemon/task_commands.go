@@ -1493,7 +1493,7 @@ func runtimeWorktreeIssueEligible(issueID string, taskByIssue map[string]domain.
 	if !ok {
 		return true
 	}
-	if task.IssueClosed() {
+	if task.IssueClosed() || task.State.IsArchived() {
 		return false
 	}
 	seen := map[string]struct{}{strings.ToLower(issueID): {}}
@@ -1507,7 +1507,7 @@ func runtimeWorktreeIssueEligible(issueID string, taskByIssue map[string]domain.
 		if !ok {
 			return true
 		}
-		if parent.IssueClosed() {
+		if parent.IssueClosed() || parent.State.IsArchived() {
 			return false
 		}
 		parentID = domain.TaskParentIssueID(parent)

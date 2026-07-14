@@ -4885,7 +4885,7 @@ func taskMetadataRuntimeProjectionQuery(projectID string, issueIDs ...string) (s
 			ON parent.issue_id = i.id
 			AND parent.tombstoned_at IS NULL
 			AND parent.dependency_type IN (?, ?)
-		WHERE i.visibility = 'live' AND i.id IN (%s)
+		WHERE i.id IN (%s)
 		ORDER BY i.updated_at DESC
 	`, runtimeSessionProjectionUnionSQL, placeholders, placeholders)
 	args := make([]any, 0, len(ids)*2+4)

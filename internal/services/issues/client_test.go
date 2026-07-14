@@ -2178,6 +2178,26 @@ func TestClient_GetRuntimeWorktreeIssueContextScopesToRequestedIssuesAndAncestor
 	assert.Equal(t, rootIssueID, *byID[parentIssueID].ParentID)
 }
 
+func TestClient_GetRuntimeWorktreeIssueContextIncludesArchivedRequestedIssue(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:  "Archived worktree owner",
+		Type:   domain.TypeTask,
+		Status: domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Archive(ctx, issueID))
+
+	tasks, err := client.GetRuntimeWorktreeIssueContext(ctx, "proj-runtime-context", []string{issueID})
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, naming.IssueID(issueID), tasks[0].ID)
+	assert.True(t, tasks[0].State.IsArchived())
+}
+
 func TestSQLiteHotQueryPlansUseExpectedIndexes(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()
