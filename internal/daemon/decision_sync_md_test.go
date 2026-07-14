@@ -151,6 +151,70 @@ func TestDecisionSyncRejectsCheckoutBeforeFinalRevalidation(t *testing.T) {
 	}
 }
 
+func TestDecisionSyncHoldsOwnerAuthorityThroughReconciliation(t *testing.T) {
+	ctx, client, service, _, worktree, issueID, decision := newDecisionTransferBarrierFixture(t)
+	foreignIssue, err := client.Create(ctx, issues.CreateTaskParams{Title: "Transferred owner", Type: domain.TypeTask, Priority: domain.P2, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transferStarted := make(chan struct{})
+	transferEntered := make(chan struct{})
+	transferDone := make(chan error, 1)
+	service.daemon.decisionTransferBeforeRevalidation = func(operation string, _ decisionMDTransferTarget) {
+		if operation != "sync_md" {
+			return
+		}
+		go func() {
+			close(transferStarted)
+			transferDone <- client.WithMutationLock(ctx, func(transferCtx context.Context) error {
+				close(transferEntered)
+				if err := client.RemoveDecisionLink(transferCtx, decision.LocalID, issues.DecisionTargetIssue, issueID); err != nil {
+					return err
+				}
+				_, err := client.AddDecisionLink(transferCtx, issues.AddDecisionLinkParams{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue, TargetID: foreignIssue, Relation: issues.DecisionRelationAppliesTo})
+				return err
+			})
+		}()
+		<-transferStarted
+		select {
+		case <-transferEntered:
+			t.Fatal("decision owner transfer entered before SyncMD reconciliation released authority")
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
+
+	result, err := service.SyncMD(ctx, protocol.DecisionSyncMDRequestBody{RepoDir: worktree})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Changed {
+		t.Fatalf("sync result = %+v, want authorized export", result)
+	}
+	select {
+	case <-transferEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("owner transfer did not enter after SyncMD reconciliation")
+	}
+	select {
+	case err := <-transferDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("owner transfer did not complete after SyncMD reconciliation")
+	}
+	links, err := client.ListDecisionLinks(ctx, issues.DecisionLinkFilter{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 || links[0].TargetID != foreignIssue {
+		t.Fatalf("decision owner after transfer = %+v", links)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, decisionMDSubdir, decisionMDFilename(decision))); err != nil {
+		t.Fatalf("authorized reconciliation did not finish before owner transfer: %v", err)
+	}
+}
+
 func TestDecisionImportRejectsWorktreeRelinkBeforeFinalRevalidation(t *testing.T) {
 	ctx, client, service, _, worktree, issueID, decision := newDecisionTransferBarrierFixture(t)
 	foreignIssue, err := client.Create(ctx, issues.CreateTaskParams{Title: "Relinked issue", Type: domain.TypeTask, Priority: domain.P2, Status: domain.StatusOpen})

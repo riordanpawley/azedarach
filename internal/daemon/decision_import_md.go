@@ -31,7 +31,7 @@ func (s issueDecisionService) ImportMD(ctx context.Context, req protocol.Decisio
 		return protocol.DecisionImportMDResponseBody{}, errors.New("decision import_md unavailable: daemon nil")
 	}
 	var resp protocol.DecisionImportMDResponseBody
-	_, err = s.withDecisionMDTransferTarget(ctx, req.RepoDir, req.FullProject, func(lockCtx context.Context, target decisionMDTransferTarget) error {
+	_, err = s.withDecisionMDTransferAuthority(ctx, c, req.RepoDir, req.FullProject, func(lockCtx context.Context, target decisionMDTransferTarget) error {
 		s.beforeDecisionMDTransferRevalidation("import_md", target)
 		if err := s.revalidateDecisionMDTransferTarget(lockCtx, target); err != nil {
 			return fmt.Errorf("revalidate decision import_md target: %w", err)

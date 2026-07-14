@@ -31,8 +31,12 @@ func (s issueDecisionService) SyncMD(ctx context.Context, req protocol.DecisionS
 		return protocol.DecisionSyncMDResponseBody{}, errors.New("decision sync_md unavailable: daemon nil")
 	}
 	var resp protocol.DecisionSyncMDResponseBody
-	_, err = s.withDecisionMDTransferTarget(ctx, req.RepoDir, req.FullProject, func(lockCtx context.Context, target decisionMDTransferTarget) error {
-		decisions, err := c.ListDecisions(lockCtx, issues.DecisionFilter{IncludeDeleted: true})
+	_, err = s.withDecisionMDTransferAuthority(ctx, c, req.RepoDir, req.FullProject, func(ownerCtx context.Context, target decisionMDTransferTarget) error {
+		// Decision ownership and filesystem reconciliation form one authority
+		// operation. Holding the canonical issue-store mutation lock prevents a
+		// link transfer from invalidating the owner snapshot before files are
+		// written or removed.
+		decisions, err := c.ListDecisions(ownerCtx, issues.DecisionFilter{IncludeDeleted: true})
 		if err != nil {
 			return err
 		}
@@ -42,18 +46,18 @@ func (s issueDecisionService) SyncMD(ctx context.Context, req protocol.DecisionS
 		owners := make(map[string]string, len(decisions))
 		authorized := make(map[string]struct{}, len(decisions))
 		for _, decision := range decisions {
-			links, err := c.ListDecisionLinks(lockCtx, issues.DecisionLinkFilter{DecisionID: decision.LocalID})
+			links, err := c.ListDecisionLinks(ownerCtx, issues.DecisionLinkFilter{DecisionID: decision.LocalID})
 			if err != nil {
 				return err
 			}
 			provenanceLinks := links
 			if decision.DeletedAt != nil {
-				provenanceLinks, err = c.ListDecisionLinks(lockCtx, issues.DecisionLinkFilter{DecisionID: decision.LocalID, IncludeDeleted: true})
+				provenanceLinks, err = c.ListDecisionLinks(ownerCtx, issues.DecisionLinkFilter{DecisionID: decision.LocalID, IncludeDeleted: true})
 				if err != nil {
 					return err
 				}
 			}
-			incoming, err := c.ListDecisionLinks(lockCtx, issues.DecisionLinkFilter{TargetKind: issues.DecisionTargetDecision, TargetID: decision.LocalID})
+			incoming, err := c.ListDecisionLinks(ownerCtx, issues.DecisionLinkFilter{TargetKind: issues.DecisionTargetDecision, TargetID: decision.LocalID})
 			if err != nil {
 				return err
 			}
@@ -72,7 +76,7 @@ func (s issueDecisionService) SyncMD(ctx context.Context, req protocol.DecisionS
 		// worktree ownership under the canonical target lock immediately before
 		// any filesystem reconciliation.
 		s.beforeDecisionMDTransferRevalidation("sync_md", target)
-		if err := s.revalidateDecisionMDTransferTarget(lockCtx, target); err != nil {
+		if err := s.revalidateDecisionMDTransferTarget(ownerCtx, target); err != nil {
 			return fmt.Errorf("revalidate decision sync_md target: %w", err)
 		}
 		results, err := reconcileDecisionMarkdownScoped(target.RepoDir, exports, authorized, provenance, owners, target.FullProject, req.Check)

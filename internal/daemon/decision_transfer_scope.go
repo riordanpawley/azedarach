@@ -2,9 +2,12 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 type decisionMDTransferTarget struct {
@@ -12,6 +15,23 @@ type decisionMDTransferTarget struct {
 	Revision    string
 	IssueID     string
 	FullProject bool
+}
+
+// withDecisionMDTransferAuthority holds durable decision/link authority before
+// acquiring the canonical worktree lock. This order matches other daemon
+// operations that combine issue-store state with Git/filesystem side effects
+// and prevents both stale-owner reconciliation and lock inversion.
+func (s issueDecisionService) withDecisionMDTransferAuthority(ctx context.Context, c *issues.Client, requestRepoDir string, fullProject bool, fn func(context.Context, decisionMDTransferTarget) error) (decisionMDTransferTarget, error) {
+	if c == nil {
+		return decisionMDTransferTarget{}, errors.New("decision transfer authority unavailable: issue store nil")
+	}
+	var target decisionMDTransferTarget
+	err := c.WithMutationLock(ctx, func(ownerCtx context.Context) error {
+		var err error
+		target, err = s.withDecisionMDTransferTarget(ownerCtx, requestRepoDir, fullProject, fn)
+		return err
+	})
+	return target, err
 }
 
 func (s issueDecisionService) withDecisionMDTransferTarget(ctx context.Context, requestRepoDir string, fullProject bool, fn func(context.Context, decisionMDTransferTarget) error) (decisionMDTransferTarget, error) {
