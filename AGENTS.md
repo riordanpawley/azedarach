@@ -196,6 +196,7 @@ fd "filename" -t f internal cmd
    - orchestration scope singleton -> `hybrid` (refreshed durable scope lease + live tmux runtime)
    - rooted parent orchestration continuation -> `hybrid` (durable rooted lease/cursor + refreshed direct nested-root, interaction, completion, and session projections + live tmux wake delivery)
    - project orchestration completion -> `hybrid` (refreshed issue/review/interaction/session projections + live tmux runtime)
+   - repository-family validation capacity -> `projection` (durable daemon validation request/lease queue refreshed transactionally before aggregate/shared/safe admission; heartbeat expiry is recovery authority)
 
 ### Adding New Invariants (Required Checklist)
 
@@ -288,7 +289,8 @@ If any are missing, keep issue state `in_progress` or `open`.
 
 - `.envrc` stores one shared direnv/nix-direnv layout per repository under `${XDG_CACHE_HOME:-$HOME/.cache}/direnv/layouts`, keyed by the canonical Git common directory, so linked worktrees reuse the warm profile without gaining checkout-local `.direnv` state. Run `nix-direnv-reload` after changing `flake.nix` or `flake.lock`.
 - `.envrc` keeps `GOPATH` and module downloads shared under the primary repo's `.azedarach/go/path`, but assigns build output to `.azedarach/go/caches/v1/<normal|race|coverage>/<main|issue-ID>`. It exports `-trimpath` through `GOFLAGS`; `AZEDARACH_GO_CACHE_ROOT` and `AZEDARACH_GOCACHE` may only restate their derived daemon-authoritative locations and are rejected when they redirect outside the project layout. `AZEDARACH_GOPATH` remains an explicit local module-download override.
-- Managed validation serializes on the repository-family Go cache lock and defaults to a 10 GiB soft warning plus a 28 GiB hard refusal. Override bytes with `AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES` and `AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES`; opt into selected-namespace maintenance with `AZEDARACH_GO_CACHE_AUTO_MAINTAIN=1`.
+- Managed validators hold the repository-family Go cache lock shared while supported cache maintenance holds it exclusively. Cache accounting defaults to a 10 GiB soft warning plus a 28 GiB hard refusal. Override bytes with `AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES` and `AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES`; opt into selected-namespace maintenance with `AZEDARACH_GO_CACHE_AUTO_MAINTAIN=1`.
+- Canonical `just merge-gate` holds the daemon-owned repository-family aggregate validation lease across its complete build/test/boundary sequence. Start builds and named test profiles through `just` so they queue before invoking Go; inspect live ownership and waiters without compiling Go via `just validation-status` or `just validation-watch`.
 - Use `just go-cache-inventory` before legacy cleanup. `just go-cache-clean-legacy --confirm` uses supported Go cleanup for legacy build caches; add `--include-gopath-modcache` only to remove the legacy module download cache. It never removes legacy GOPATH binaries or other user files.
 - After `direnv allow`, use normal `go ...` commands from repo root without per-command env prefixes.
 

@@ -228,6 +228,17 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 			RoleGuardrails: []string{"remain in the active orchestration loop", "do not implement worker issue scope", "delegate non-trivial review inspection to fresh read-only ephemeral subagents", "retain orchestrator-only durable review and integration authority", "preserve sessions during review handoff"},
 		},
 	}
+	if a.daemon.operationRuntime != nil {
+		validationStore, err := a.daemon.validationProjectionStore()
+		if err != nil {
+			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load validation capacity projection: %w", err)
+		}
+		validation, err := validationStore.ValidationSnapshot(ctx, projectID, snapshot.GeneratedAt, defaultValidationLeaseTTL)
+		if err != nil {
+			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load validation capacity projection: %w", err)
+		}
+		snapshot.ValidationCapacity = &validation
+	}
 	if identity.Scope.Kind == domain.OrchestrationScopeRooted {
 		root := identity.Scope.RootIssueID.String()
 		ready, err := a.daemon.taskGraphReadinessForActor(ctx, projectID, root, request.ActorID)

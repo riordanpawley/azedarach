@@ -1,0 +1,133 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use JSON::PP qw(decode_json);
+use File::Temp qw(tempfile);
+use POSIX qw(setpgid);
+use Time::HiRes qw(time sleep);
+
+my $mode = 'run';
+my $class = 'shared';
+my $profile = '';
+my $interval = 1;
+while (@ARGV && $ARGV[0] ne '--') {
+    my $flag = shift @ARGV;
+    if ($flag eq '--status') { $mode = 'status'; next; }
+    if ($flag eq '--watch') { $mode = 'watch'; next; }
+    if ($flag eq '--interval') { $interval = shift(@ARGV) // die "--interval requires seconds\n"; next; }
+    if ($flag eq '--class') { $class = shift(@ARGV) // die "--class requires a value\n"; next; }
+    if ($flag eq '--label' || $flag eq '--profile') { $profile = shift(@ARGV) // die "$flag requires a value\n"; next; }
+    die "unknown option $flag\n";
+}
+shift @ARGV if @ARGV && $ARGV[0] eq '--';
+die "unsupported validation class $class\n" unless $class eq 'aggregate' || $class eq 'shared' || $class eq 'safe';
+my $az = $ENV{AZEDARACH_VALIDATION_AZ_BIN} || 'az';
+
+if ($mode eq 'status') {
+    exec $az, 'validation', 'status', '--json' or die "exec validation status: $!\n";
+}
+if ($mode eq 'watch') {
+    exec $az, 'validation', 'watch', '--json', '--interval', $interval . 's' or die "exec validation watch: $!\n";
+}
+die "usage: with-machine-validation-lease [--status|--watch] | --class aggregate|shared|safe --profile name -- command [args]\n" unless @ARGV;
+
+# Nested build/test commands remain under the outer canonical request. The
+# daemon record, heartbeat process, and expiry remain owned by the outer wrapper.
+if ($ENV{AZEDARACH_VALIDATION_REQUEST_ID}) {
+    my $status = eval { decode_json(capture($az, 'validation', 'status', '--json')) };
+    die "verify nested validation request with daemon\n" unless $status && ref($status->{active}) eq 'ARRAY';
+    my ($owner) = grep { ($_->{request_id} || '') eq $ENV{AZEDARACH_VALIDATION_REQUEST_ID} } @{$status->{active}};
+    die "nested validation request is not active\n" unless $owner;
+    my $outer_class = $owner->{class} || '';
+    my $compatible = $outer_class eq 'aggregate' || $outer_class eq $class;
+    die "nested $class validation cannot join active $outer_class request\n" unless $compatible;
+    $ENV{AZEDARACH_VALIDATION_CLASS} = $outer_class;
+    $ENV{AZEDARACH_VALIDATION_PROFILE} = $owner->{profile} || $ENV{AZEDARACH_VALIDATION_PROFILE} || '';
+    exec @ARGV or die "exec nested validation command $ARGV[0]: $!\n";
+}
+
+my $issue = $ENV{AZEDARACH_TICKET_ID} || $ENV{AZEDARACH_ISSUE_ID} || 'manual-' . $$;
+my $revision = `git rev-parse HEAD 2>/dev/null`;
+chomp $revision;
+die "resolve validation source revision\n" unless $revision;
+$profile ||= $class;
+my $lease_token = random_token();
+my $request_id = sprintf('%s-%d-%d-%s', $issue, $$, int(time() * 1_000_000), substr($lease_token, 0, 12));
+$ENV{AZEDARACH_VALIDATION_LEASE_TOKEN} = $lease_token;
+my $command_text = join(' ', @ARGV);
+my @acquire = ($az, 'validation', 'acquire', '--request', $request_id, '--issue', $issue,
+    '--class', $class, '--profile', $profile, '--command', $command_text,
+    '--revision', $revision, '--ttl', '30', '--wait', '--json');
+my $response = capture(@acquire);
+my $decoded = eval { decode_json($response) };
+die "validation acquire returned invalid JSON\n" unless $decoded && $decoded->{request}{state} eq 'active';
+$ENV{AZEDARACH_VALIDATION_REQUEST_ID} = $request_id;
+$ENV{AZEDARACH_VALIDATION_CLASS} = $class;
+$ENV{AZEDARACH_VALIDATION_PROFILE} = $profile;
+my ($evidence_fh, $evidence_file) = tempfile('azedarach-validation-evidence-XXXXXX', TMPDIR => 1, UNLINK => 0);
+close $evidence_fh;
+$ENV{AZEDARACH_VALIDATION_EVIDENCE_FILE} = $evidence_file;
+
+my $heartbeat = fork();
+die "fork validation heartbeat: $!\n" unless defined $heartbeat;
+if ($heartbeat == 0) {
+    while (1) {
+        sleep 10;
+        system($az, 'validation', 'heartbeat', '--request', $request_id, '--ttl', '30');
+        if ($? != 0) {
+            kill 'TERM', getppid();
+            exit 1;
+        }
+    }
+}
+
+my $child = fork();
+die "fork validation command: $!\n" unless defined $child;
+if ($child == 0) {
+    setpgid(0, 0);
+    exec @ARGV or die "exec validation command $ARGV[0]: $!\n";
+}
+eval { setpgid($child, $child) };
+my $interrupted = 0;
+my $forward = sub { my ($signal) = @_; $interrupted = 1; kill $signal, -$child if $child; };
+local $SIG{TERM} = sub { $forward->('TERM') };
+local $SIG{INT} = sub { $forward->('INT') };
+local $SIG{HUP} = sub { $forward->('HUP') };
+my $waited;
+do { $waited = waitpid($child, 0) } while $waited < 0 && $!{EINTR};
+my $status = $?;
+kill 'TERM', $heartbeat;
+waitpid($heartbeat, 0);
+my $exit_code = ($status & 127) ? 128 + ($status & 127) : ($status >> 8);
+my $terminal = $interrupted ? 'cancelled' : ($exit_code == 0 ? 'completed' : 'failed');
+my @finish = ($az, 'validation', 'finish', '--request', $request_id, '--state', $terminal, '--outcome', "exit $exit_code");
+if (-s $evidence_file) {
+    open my $evidence_fh, '<', $evidence_file or die "open validation evidence: $!\n";
+    local $/;
+    my $evidence_json = <$evidence_fh> // '';
+    close $evidence_fh;
+    push @finish, '--evidence-json', $evidence_json;
+}
+my $finish_failed = !eval { capture(@finish); 1 };
+warn "validation finish failed for $request_id\n" if $finish_failed;
+unlink $evidence_file if -e $evidence_file;
+exit(($finish_failed && $exit_code == 0) ? 70 : $exit_code);
+
+sub capture {
+    my (@command) = @_;
+    open my $fh, '-|', @command or die "start validation acquire: $!\n";
+    local $/;
+    my $output = <$fh> // '';
+    close $fh;
+    die "validation acquire failed\n" if $? != 0;
+    return $output;
+}
+
+sub random_token {
+    open my $random, '<:raw', '/dev/urandom' or die "open random source: $!\n";
+    my $bytes = '';
+    my $read = read($random, $bytes, 32);
+    close $random;
+    die "read random source\n" unless defined($read) && $read == 32;
+    return unpack('H*', $bytes);
+}

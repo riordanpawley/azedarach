@@ -1,0 +1,224 @@
+package store
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/riordanpawley/azedarach/internal/domain"
+)
+
+const testValidationToken = "test-validation-secret"
+
+func TestValidationLeaseSerializesAggregateAndPreservesSharedConcurrency(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "project.db")
+	storeA := NewAtPath(path, nil)
+	storeB := NewAtPath(path, nil)
+	t.Cleanup(func() { _ = storeA.Close(); _ = storeB.Close() })
+	now := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
+	ttl := time.Minute
+	acquire := func(store *SQLiteStore, id string, class domain.ValidationClass) domain.ValidationRequest {
+		t.Helper()
+		profile, command := id, "go test"
+		if class == domain.ValidationClassSafe {
+			profile, command = "safe-git-diff", "git diff --check"
+		}
+		request, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: id, LeaseToken: testValidationToken, ProjectID: "project", IssueID: id, Class: class, Profile: profile, Command: command, SourceRevision: "abc123", TTL: ttl}, now)
+		require.NoError(t, err)
+		return request
+	}
+
+	assert.Equal(t, domain.ValidationRequestActive, acquire(storeA, "shared-a", domain.ValidationClassShared).State)
+	assert.Equal(t, domain.ValidationRequestActive, acquire(storeB, "shared-b", domain.ValidationClassShared).State)
+	assert.Equal(t, domain.ValidationRequestQueued, acquire(storeA, "aggregate", domain.ValidationClassAggregate).State)
+	assert.Equal(t, domain.ValidationRequestQueued, acquire(storeB, "shared-late", domain.ValidationClassShared).State, "later shared work must not starve queued aggregate")
+	assert.Equal(t, domain.ValidationRequestActive, acquire(storeB, "safe", domain.ValidationClassSafe).State)
+
+	_, err := storeA.FinishValidation(ctx, "shared-a", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{}, now.Add(time.Second), ttl)
+	require.NoError(t, err)
+	_, err = storeB.FinishValidation(ctx, "shared-b", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{}, now.Add(2*time.Second), ttl)
+	require.NoError(t, err)
+	snapshot, err := storeA.ValidationSnapshot(ctx, "project", now.Add(2*time.Second), ttl)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"aggregate", "safe"}, validationRequestIDs(snapshot.Active))
+	assert.Equal(t, []string{"shared-late"}, validationRequestIDs(snapshot.Queued))
+
+	_, err = storeA.FinishValidation(ctx, "aggregate", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{}, now.Add(3*time.Second), ttl)
+	require.NoError(t, err)
+	snapshot, err = storeB.ValidationSnapshot(ctx, "project", now.Add(3*time.Second), ttl)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"shared-late", "safe"}, validationRequestIDs(snapshot.Active))
+}
+
+func TestValidationLeaseConcurrentDaemonsActivateExactlyOneAggregate(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "project.db")
+	stores := []*SQLiteStore{NewAtPath(path, nil), NewAtPath(path, nil)}
+	t.Cleanup(func() {
+		for _, store := range stores {
+			_ = store.Close()
+		}
+	})
+	now := time.Now().UTC()
+	for _, store := range stores {
+		_, err := store.ValidationSnapshot(ctx, "project", now, time.Minute)
+		require.NoError(t, err)
+	}
+	start := make(chan struct{})
+	results := make(chan domain.ValidationRequest, len(stores))
+	errs := make(chan error, len(stores))
+	var ready sync.WaitGroup
+	ready.Add(len(stores))
+	for i, store := range stores {
+		go func(i int, store *SQLiteStore) {
+			ready.Done()
+			<-start
+			request, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: fmt.Sprintf("aggregate-%d", i), LeaseToken: testValidationToken, ProjectID: "project", IssueID: fmt.Sprintf("issue-%d", i), Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: time.Minute}, now)
+			results <- request
+			errs <- err
+		}(i, store)
+	}
+	ready.Wait()
+	close(start)
+	for range stores {
+		require.NoError(t, <-errs)
+	}
+	states := map[domain.ValidationRequestState]int{}
+	for range stores {
+		states[(<-results).State]++
+	}
+	assert.Equal(t, 1, states[domain.ValidationRequestActive])
+	assert.Equal(t, 1, states[domain.ValidationRequestQueued])
+}
+
+func TestValidationLeaseRejectsUnboundedSafeCommand(t *testing.T) {
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	_, err := store.AcquireValidation(context.Background(), domain.ValidationAcquire{RequestID: "unsafe", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassSafe, Profile: "cold", Command: "go test ./...", SourceRevision: "abc123", TTL: time.Minute}, time.Now().UTC())
+	require.ErrorContains(t, err, "bounded non-compiling")
+}
+
+func TestValidationSnapshotRevisionAdvancesOnHeartbeatAndCompletion(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	_, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "shared", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassShared, Profile: "focused", Command: "go test ./internal/domain", SourceRevision: "abc123", TTL: time.Minute}, now)
+	require.NoError(t, err)
+	first, err := store.ValidationSnapshot(ctx, "project", now, time.Minute)
+	require.NoError(t, err)
+	_, err = store.HeartbeatValidation(ctx, "shared", testValidationToken, now.Add(time.Second), time.Minute)
+	require.NoError(t, err)
+	second, err := store.ValidationSnapshot(ctx, "project", now.Add(time.Second), time.Minute)
+	require.NoError(t, err)
+	_, err = store.FinishValidation(ctx, "shared", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{}, now.Add(2*time.Second), time.Minute)
+	require.NoError(t, err)
+	third, err := store.ValidationSnapshot(ctx, "project", now.Add(2*time.Second), time.Minute)
+	require.NoError(t, err)
+	assert.Greater(t, second.Revision, first.Revision)
+	assert.Greater(t, third.Revision, second.Revision)
+}
+
+func TestValidationLeaseRestartExpiresStaleOwnerAndWakesQueue(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "project.db")
+	first := NewAtPath(path, nil)
+	now := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
+	ttl := 10 * time.Second
+	request := func(id string) domain.ValidationAcquire {
+		return domain.ValidationAcquire{RequestID: id, LeaseToken: testValidationToken, ProjectID: "project", IssueID: id, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: ttl}
+	}
+	active, err := first.AcquireValidation(ctx, request("owner"), now)
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationRequestActive, active.State)
+	queued, err := first.AcquireValidation(ctx, request("waiter"), now.Add(time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationRequestQueued, queued.State)
+	require.NoError(t, first.Close())
+
+	restarted := NewAtPath(path, nil)
+	t.Cleanup(func() { _ = restarted.Close() })
+	snapshot, err := restarted.ValidationSnapshot(ctx, "project", now.Add(ttl+500*time.Millisecond), ttl)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"waiter"}, validationRequestIDs(snapshot.Active))
+	require.Len(t, snapshot.Recent, 1)
+	assert.Equal(t, domain.ValidationRequestExpired, snapshot.Recent[0].State)
+}
+
+func TestValidationLeaseExpiresAbandonedQueuedRequest(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	ttl := 10 * time.Second
+	request := func(id string) domain.ValidationAcquire {
+		return domain.ValidationAcquire{RequestID: id, LeaseToken: testValidationToken, ProjectID: "project", IssueID: id, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: ttl}
+	}
+	_, err := store.AcquireValidation(ctx, request("owner"), now)
+	require.NoError(t, err)
+	_, err = store.AcquireValidation(ctx, request("abandoned"), now.Add(time.Second))
+	require.NoError(t, err)
+	_, err = store.HeartbeatValidation(ctx, "owner", testValidationToken, now.Add(9*time.Second), ttl)
+	require.NoError(t, err)
+	snapshot, err := store.ValidationSnapshot(ctx, "project", now.Add(12*time.Second), ttl)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"owner"}, validationRequestIDs(snapshot.Active))
+	require.Len(t, snapshot.Recent, 1)
+	assert.Equal(t, "abandoned", snapshot.Recent[0].RequestID)
+	assert.Equal(t, domain.ValidationRequestExpired, snapshot.Recent[0].State)
+}
+
+func TestLatestAggregateValidationRetainsMachineEvidence(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
+	_, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "aggregate", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: time.Minute}, now)
+	require.NoError(t, err)
+	want := domain.ValidationEvidence{Held: true, RequestID: "aggregate", Class: domain.ValidationClassAggregate, Profile: "cold", Present: true, ReportPath: ".tmp/report.json", OverlapDetected: true, ExternalGoProcesses: 3}
+	_, err = store.FinishValidation(ctx, "aggregate", testValidationToken, domain.ValidationRequestCompleted, "passed", want, now.Add(time.Second), time.Minute)
+	require.NoError(t, err)
+	got, err := store.LatestAggregateValidation(ctx, "project", "dkg", now.Add(time.Second), time.Minute)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, want, got.Evidence)
+}
+
+func TestValidationLeaseRejectsSpoofedMachineEvidenceIdentity(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	_, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "aggregate", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: time.Minute}, now)
+	require.NoError(t, err)
+	_, err = store.FinishValidation(ctx, "aggregate", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{Held: true, RequestID: "different", Class: domain.ValidationClassAggregate, Profile: "cold", Present: true}, now.Add(time.Second), time.Minute)
+	require.ErrorContains(t, err, "evidence identity does not match")
+}
+
+func TestValidationLeaseRejectsHeartbeatAndFinishWithWrongFencingToken(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	_, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "aggregate", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: time.Minute}, now)
+	require.NoError(t, err)
+	_, err = store.HeartbeatValidation(ctx, "aggregate", "wrong", now.Add(time.Second), time.Minute)
+	require.ErrorContains(t, err, "lease token rejected")
+	_, err = store.FinishValidation(ctx, "aggregate", "wrong", domain.ValidationRequestCancelled, "stolen", domain.ValidationEvidence{}, now.Add(time.Second), time.Minute)
+	require.ErrorContains(t, err, "lease token rejected")
+}
+
+func validationRequestIDs(requests []domain.ValidationRequest) []string {
+	ids := make([]string, 0, len(requests))
+	for _, request := range requests {
+		ids = append(ids, request.RequestID)
+	}
+	return ids
+}

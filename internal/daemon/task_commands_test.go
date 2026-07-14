@@ -10589,6 +10589,72 @@ func TestTaskIntegrationReadinessRequiresCompleteWorkerEvidencePacket(t *testing
 	}
 }
 
+func TestTaskIntegrationReadinessRejectsOverlappedAggregateEvidence(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-overlapped-aggregate"
+	repoDir := t.TempDir()
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = issuesClient.AppendIssueObservationEvent(ctx, childID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: map[string]any{
+		"schema": domain.WorkerEvidenceSchemaV1, "summary": "ready", "commands_run": []string{"just test"}, "key_assertions": []string{"tests pass"}, "files_changed": []string{"justfile"}, "review": map[string]any{"status": "clean", "findings": []string{}}, "risks": []string{"none"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	now := time.Now().UTC()
+	_, err = runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "aggregate-overlap", LeaseToken: "test-secret", ProjectID: projectID, IssueID: childID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: time.Minute}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runtime.store.FinishValidation(ctx, "aggregate-overlap", "test-secret", domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{Held: true, RequestID: "aggregate-overlap", Class: domain.ValidationClassAggregate, Profile: "cold", Present: true, OverlapDetected: true, ExternalGoProcesses: 2}, now.Add(time.Second), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, operationRuntime: runtime, revision: map[string]uint64{projectID: 1}}
+	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Ready || result.AggregateValidation == nil || !strings.Contains(strings.Join(result.Reasons, "\n"), "overlapped 2 external Go processes") {
+		t.Fatalf("result = %+v, want rejected overlapped aggregate evidence", result)
+	}
+}
+
+func TestTaskIntegrationReadinessRejectsUnleasedAggregateEvidencePacket(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-unleased-aggregate"
+	repoDir := t.TempDir()
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = issuesClient.AppendIssueObservationEvent(ctx, childID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: map[string]any{
+		"schema": domain.WorkerEvidenceSchemaV1, "summary": "ready", "commands_run": []string{"just test"}, "key_assertions": []string{"tests pass"}, "files_changed": []string{"justfile"}, "review": map[string]any{"status": "clean", "findings": []string{}}, "risks": []string{"none"},
+		"aggregate_validation": map[string]any{"held": true, "request_id": "fabricated", "class": "aggregate", "profile": "cold", "present": true, "overlap_detected": false},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, operationRuntime: runtime, revision: map[string]uint64{projectID: 1}}
+	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Ready || !strings.Contains(strings.Join(result.Reasons, "\n"), "not present in the daemon validation projection") {
+		t.Fatalf("result = %+v, want rejected unleased aggregate evidence", result)
+	}
+}
+
 func TestTaskIntegrationReadinessSkipsReviewReadyReplayNotification(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-worker-evidence-replay"

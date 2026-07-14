@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func TestSQLiteStoreBackfillsLegacyOperationsAfterOtherAuthorityConversion(t *testing.T) {
+func TestSQLiteStoreMigrationBackfillsLegacyOperationsAfterOtherAuthorityConversion(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -49,6 +49,61 @@ func TestSQLiteStoreBackfillsLegacyOperationsAfterOtherAuthorityConversion(t *te
 		}
 		if checksum != artifact.Checksum {
 			t.Fatalf("migration %s checksum = %q, want %q", artifact.ID, checksum, artifact.Checksum)
+		}
+	}
+}
+
+func TestValidationLeaseMigrationUpgradesHistoricalOperationsStoreAndReopens(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_migrations(id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, artifact_checksum TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range orderedMigrations[:2] {
+		sqlText, err := loadMigrationSQL(migration.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(sqlText); err != nil {
+			t.Fatalf("apply historical fixture %s: %v", migration.id, err)
+		}
+		checksum := ""
+		for _, artifact := range migrationArtifacts {
+			if artifact.ID == migration.id {
+				checksum = artifact.Checksum
+				break
+			}
+		}
+		if checksum == "" {
+			t.Fatalf("missing artifact %s", migration.id)
+		}
+		if _, err := db.Exec(`INSERT INTO schema_migrations(id,applied_at,artifact_checksum) VALUES(?, 'historical', ?)`, migration.id, checksum); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 2; i++ {
+		store := NewAtPath(dbPath, slog.Default())
+		if _, err := store.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err != nil {
+			t.Fatalf("open %d validation projection: %v", i+1, err)
+		}
+		if i == 0 {
+			var objects int
+			if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN ('daemon_validation_requests','daemon_validation_state','daemon_validation_requests_insert_revision','daemon_validation_requests_update_revision')`).Scan(&objects); err != nil {
+				t.Fatal(err)
+			}
+			if objects != 4 {
+				t.Fatalf("validation migration objects = %d, want 4", objects)
+			}
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
 		}
 	}
 }
