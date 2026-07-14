@@ -58,6 +58,10 @@ container, or an unrelated volume. When querying Jaeger, start with a 15-minute
 window and at most 10 traces, filter by service and operation, and widen one
 dimension at a time. A result limit bounds trace count, not spans per trace;
 export an important trace by ID before experimenting with broader searches.
+Maintainers with a healthy local container engine can exercise the configured
+memory budget with `just test-jaeger-workload`; it ingests and queries a
+15,000-span trace in an isolated ephemeral collector and fails if the collector
+exits or is OOM-killed.
 
 Build and link without starting interactive TUI:
 

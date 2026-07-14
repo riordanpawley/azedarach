@@ -71,6 +71,10 @@ test-build-contract:
 test-jaeger-contract:
     ./scripts/test-jaeger-local.sh
 
+# Requires a healthy local Docker/Podman engine and the pinned Jaeger image.
+test-jaeger-workload:
+    ./scripts/test-jaeger-workload.sh
+
 merge-gate:
     just build
     just test
