@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -1191,6 +1192,32 @@ func TestPendingDecisionEnrichmentComposesAndDeduplicatesExistingBlockers(t *tes
 		if strings.Count(got, want) != 1 {
 			t.Fatalf("composed blocker duplicated %q: %q", want, got)
 		}
+	}
+}
+
+func TestProjectOrchestrationSnapshotEnrichesPendingDecisionsInsideProjectionFence(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	worker, err := client.Create(ctx, issues.CreateTaskParams{Title: "fenced decision worker", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, worker, issues.IssueObservationEventParams{
+		Type: domain.IssueEventDecisionChanged, Source: "daemon-decision", SourceCommand: protocol.CommandDecisionUpdate,
+		Payload: map[string]any{"decision_id": "dec-fenced", "revision": int64(49), "material": true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PendingDecisions[worker]) != 1 || !strings.Contains(snapshot.Blocked[worker], "stale material decision dec-fenced revision 49") {
+		t.Fatalf("snapshot pending=%+v blocked=%+v, want fenced pending decision enrichment", snapshot.PendingDecisions, snapshot.Blocked)
 	}
 }
 
