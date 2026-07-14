@@ -265,6 +265,117 @@ func TestDecisionPropagationRetriesCrossDaemonScopeChangesBeforeUpdateReadiness(
 	}
 }
 
+func TestDecisionPropagationRetriesCrossDaemonIssueObservationScopeRaces(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	dbPath := filepath.Join(repoDir, "issues.db")
+	clientA := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
+	t.Cleanup(func() { _ = clientA.CloseDB() })
+	clientB := issues.NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = clientB.CloseDB() })
+
+	rootA, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "scope root a", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "governed anchor", Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &rootA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootB, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "scope root b", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "moving worker", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := clientA.RecordDecision(ctx, issues.RecordDecisionParams{Title: "graph-scoped contract", Rationale: "initial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	daemonA := newOrchestrationReviewTestDaemon(repoDir, clientA)
+	serviceA := issueDecisionService{daemon: daemonA}
+	serviceCtx := withDaemonProjectIDContext(ctx, "project")
+	governsAnchor := protocol.DecisionLinkAddRequestBody{
+		DecisionID: decision.LocalID, TargetKind: protocol.DecisionTargetIssue,
+		TargetID: anchor, Relation: protocol.DecisionRelationGoverns,
+	}
+	if _, err := serviceA.AddDecisionLink(serviceCtx, governsAnchor); err != nil {
+		t.Fatal(err)
+	}
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, rootA, decision.LocalID)
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, anchor, decision.LocalID)
+
+	// A parent-child observation moves the worker into the governed root after
+	// the first daemon has derived its update fanout. The retry must deliver the
+	// exact new decision revision to the newly overlapping worker.
+	runPausedDecisionMutation(t, &serviceA, protocol.CommandDecisionUpdate, func() error {
+		rationale := "update after graph scope add"
+		_, err := serviceA.UpdateDecision(serviceCtx, protocol.DecisionUpdateRequestBody{ID: decision.LocalID, Rationale: &rationale})
+		return err
+	}, func() {
+		if err := clientB.AddDependency(ctx, worker, rootA, string(domain.DependencyParentChild)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	workerRevision := assertPendingDecisionFromCommand(t, ctx, clientB, worker, decision.LocalID, protocol.CommandDecisionUpdate)
+	if rootRevision := pendingDecisionRevision(t, ctx, clientA, rootA, decision.LocalID); rootRevision != workerRevision {
+		t.Fatalf("root revision = %d, worker revision = %d, want exact shared update revision", rootRevision, workerRevision)
+	}
+	if anchorRevision := pendingDecisionRevision(t, ctx, clientA, anchor, decision.LocalID); anchorRevision != workerRevision {
+		t.Fatalf("anchor revision = %d, worker revision = %d, want exact shared update revision", anchorRevision, workerRevision)
+	}
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, rootA, decision.LocalID)
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, anchor, decision.LocalID)
+	ackPendingDecision(t, ctx, serviceA, clientB, serviceCtx, worker, decision.LocalID)
+
+	// Removing the parent observation while a material link update is paused
+	// must carry the stale captured worker scope forward as a withdrawal.
+	runPausedDecisionMutation(t, &serviceA, protocol.CommandDecisionLinkAdd, func() error {
+		request := governsAnchor
+		request.Note = "link update after graph scope removal"
+		_, err := serviceA.AddDecisionLink(serviceCtx, request)
+		return err
+	}, func() {
+		confirmed := issues.WithParentChildOrphanConfirmation(issues.WithDependencyRemovalConfirmation(ctx))
+		if err := clientB.RemoveDependency(confirmed, worker, rootA, string(domain.DependencyParentChild)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	assertDecisionWithdrawnByCommand(t, ctx, clientB, worker, decision.LocalID, protocol.CommandDecisionLinkAdd)
+	if err := daemonA.validateTaskDecisionAcknowledgementsForReview(ctx, "project", worker); err != nil {
+		t.Fatalf("worker readiness after graph scope removal: %v", err)
+	}
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, rootA, decision.LocalID)
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, anchor, decision.LocalID)
+
+	// Reattach the worker, then reassign it to another root while link removal
+	// is paused. The final mutation must withdraw both the retained root and the
+	// worker captured before reassignment, leaving final readiness unblocked.
+	if err := clientB.AddDependency(ctx, worker, rootA, string(domain.DependencyParentChild)); err != nil {
+		t.Fatal(err)
+	}
+	runPausedDecisionMutation(t, &serviceA, protocol.CommandDecisionLinkRemove, func() error {
+		_, err := serviceA.RemoveDecisionLink(serviceCtx, protocol.DecisionLinkRemoveRequestBody{
+			DecisionID: decision.LocalID, TargetKind: protocol.DecisionTargetIssue, TargetID: anchor,
+		})
+		return err
+	}, func() {
+		if err := clientB.AddDependencyWithParentChange(ctx, worker, rootB, string(domain.DependencyParentChild), true); err != nil {
+			t.Fatal(err)
+		}
+	})
+	assertDecisionWithdrawnByCommand(t, ctx, clientB, worker, decision.LocalID, protocol.CommandDecisionLinkRemove)
+	assertPendingDecisionCount(t, ctx, clientA, rootA, 0)
+	assertPendingDecisionCount(t, ctx, clientA, anchor, 0)
+	assertPendingDecisionCount(t, ctx, clientB, worker, 0)
+	if err := daemonA.validateTaskDecisionAcknowledgementsForReview(ctx, "project", worker); err != nil {
+		t.Fatalf("worker readiness after graph scope reassignment and link removal: %v", err)
+	}
+}
+
 func TestDecisionPropagationRetriesCrossDaemonSpecLinkAddRemoveRaces(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -466,6 +577,38 @@ func ackPendingDecision(t *testing.T, ctx context.Context, service issueDecision
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func pendingDecisionRevision(t *testing.T, ctx context.Context, client *issues.Client, issueID, decisionID string) int64 {
+	t.Helper()
+	events, err := client.ListIssueDecisionObservationEvents(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := domain.ReducePendingDecisionChanges(events)
+	if len(pending) != 1 || pending[0].DecisionID != decisionID {
+		t.Fatalf("pending for %s = %+v, want decision %s", issueID, pending, decisionID)
+	}
+	return pending[0].Revision
+}
+
+func assertPendingDecisionFromCommand(t *testing.T, ctx context.Context, client *issues.Client, issueID, decisionID, command string) int64 {
+	t.Helper()
+	revision := pendingDecisionRevision(t, ctx, client, issueID, decisionID)
+	events, err := client.ListIssueDecisionObservationEvents(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches := 0
+	for _, event := range events {
+		if event.Type == domain.IssueEventDecisionChanged && event.SourceCommand == command && strings.TrimSpace(fmt.Sprint(event.Payload["decision_id"])) == decisionID && observationPayloadInt64(event.Payload["revision"]) == revision && event.Payload["withdrawn"] != true {
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("events for %s = %+v, want one exact %s delivery for %s revision %d", issueID, events, command, decisionID, revision)
+	}
+	return revision
 }
 
 func assertDecisionWithdrawnByCommand(t *testing.T, ctx context.Context, client *issues.Client, issueID, decisionID, command string) {
