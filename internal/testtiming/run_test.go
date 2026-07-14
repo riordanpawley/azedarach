@@ -16,8 +16,8 @@ import (
 )
 
 func TestRunWritesCompleteArtifactsBeforeReturningTestFailure(t *testing.T) {
-	configureTestCacheFamily(t)
 	module := t.TempDir()
+	configureTestCacheFamily(t, module)
 	require.NoError(t, os.WriteFile(filepath.Join(module, "go.mod"), []byte("module example.test/failures\n\ngo 1.24.2\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(module, "failure_test.go"), []byte(`package failures
 import "testing"
@@ -49,7 +49,6 @@ func TestSecond(t *testing.T) { t.Error("second sentinel") }
 }
 
 func TestRunForcesIsolatedHomeConfigAndDatabaseRoots(t *testing.T) {
-	configureTestCacheFamily(t)
 	originalHome := t.TempDir()
 	registered := filepath.Join(t.TempDir(), "registered")
 	require.NoError(t, os.MkdirAll(filepath.Join(originalHome, ".config", "azedarach"), 0o755))
@@ -63,6 +62,7 @@ func TestRunForcesIsolatedHomeConfigAndDatabaseRoots(t *testing.T) {
 	t.Setenv("AZEDARACH_REFUSE_DB_PATH", "")
 
 	module := t.TempDir()
+	configureTestCacheFamily(t, module)
 	require.NoError(t, os.WriteFile(filepath.Join(module, "go.mod"), []byte("module example.test/isolation\n\ngo 1.24.2\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(module, "isolation_test.go"), []byte(`package isolation
 import (
@@ -102,8 +102,10 @@ func TestEnvironment(t *testing.T) {
 	assert.Zero(t, measurement.ExitCode)
 }
 
-func configureTestCacheFamily(t *testing.T) {
+func configureTestCacheFamily(t *testing.T, workingDir string) {
 	t.Helper()
+	t.Setenv("AZEDARACH_GO_CACHE_ROOT", filepath.Join(workingDir, ".azedarach", "go"))
+	t.Setenv("AZEDARACH_GOCACHE", "")
 	t.Setenv("AZEDARACH_GO_CACHE_OWNER", "issue-test")
 	t.Setenv("AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES", "104857600")
 	t.Setenv("AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES", "209715200")
@@ -115,6 +117,7 @@ func TestRunWritesMachineReadableArtifactsWhenBuildCacheHardLimitRefuses(t *test
 	require.NoError(t, os.WriteFile(filepath.Join(module, "refusal_test.go"), []byte("package refusal\nimport \"testing\"\nfunc TestMustNotRun(t *testing.T) { t.Fatal(\"command ran\") }\n"), 0o644))
 	cacheRoot := filepath.Join(module, ".azedarach", "go")
 	t.Setenv("AZEDARACH_GO_CACHE_ROOT", cacheRoot)
+	t.Setenv("AZEDARACH_GOCACHE", "")
 	t.Setenv("AZEDARACH_GO_CACHE_OWNER", "issue-dhc")
 	t.Setenv("AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES", "4")
 	t.Setenv("AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES", "8")
