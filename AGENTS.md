@@ -262,7 +262,7 @@ If any are missing, keep issue state `in_progress` or `open`.
 11. Ordinary validation and orchestration may run `just build`; it must remain
     isolated to `.tmp/az-test` and must not create, replace, or delete
     `bin/az`/`bin/azd`. Automated agents and project orchestration must not run
-    `just build-link-run` unless the user explicitly requests a production
+    `just build-install-run` unless the user explicitly requests a production
     rebuild/relink from the primary worktree, because that recipe intentionally
     installs a serialized, atomically switched `az`/`azd` generation and rejects
     linked worktrees. Installed command links must resolve only inside the stable

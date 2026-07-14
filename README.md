@@ -25,7 +25,7 @@ This repository ships the Go implementation as the canonical runtime:
 Build, link, and run:
 
 ```bash
-just build-link-run
+just build-install-run
 ```
 
 This also starts or reuses a local Jaeger container named `azedarach-jaeger`
@@ -43,14 +43,14 @@ different volume, `AZEDARACH_JAEGER_MEMORY=none` to disable the container memory
 limit, or `AZEDARACH_JAEGER_STORAGE=memory` with
 `AZEDARACH_JAEGER_MAX_TRACES=20000` for throwaway in-memory traces. If the
 existing `azedarach-jaeger` container was OOM-killed or was created with older
-storage settings, `just build-link-run` recreates it with the current defaults.
+storage settings, `just build-install-run` recreates it with the current defaults.
 Badger retains traces by TTL; it does not guarantee keeping all error traces
 after expiry.
 
 Build and link without starting interactive TUI:
 
 ```bash
-just build-link-run -- --no-run
+just build-install-run -- --no-run
 ```
 
 Then verify:
@@ -303,7 +303,7 @@ just git-config-status
 ```
 
 Ordinary `build` and `clean` recipes preserve `bin/az` and `bin/azd`. The
-explicit `just build-link-run` workflow builds a private paired generation,
+explicit `just build-install-run` workflow builds a private paired generation,
 serializes installers, and commits both commands through one atomic generation
 switch in the selected stable user bin directory (an existing global command
 directory, Homebrew's bin, or `~/.local/bin`). The public command links resolve

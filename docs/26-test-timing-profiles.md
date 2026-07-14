@@ -101,7 +101,7 @@ packages on high-core hosts while retaining package-level parallel execution.
    complete JSON failure stream.
 3. `just test-build-contract` executes the real `build` and `clean` recipes in
    an isolated fixture and verifies they preserve existing `bin/az` and
-   `bin/azd` link targets. It also verifies `build-link-run` rejects linked
+   `bin/azd` link targets. It also verifies `build-install-run` rejects linked
    worktrees before mutation, rolls back a failed link migration, serializes
    concurrent installers, and commits `az` plus `azd` through one atomic
    generation switch. The stable public links never target the repository.

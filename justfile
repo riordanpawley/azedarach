@@ -2,8 +2,8 @@
 default:
     @just --list
 
-build-link-run:
-    ./scripts/build-link-run.sh
+build-install-run:
+    ./scripts/build-install-run.sh
 
 build:
     mkdir -p .tmp/az-test
@@ -92,7 +92,7 @@ clean:
     rm -rf .tmp/az-test/ .tmp/cli-smoke/ coverage.out coverage.html
 
 install:
-    @echo "Refusing unpaired install: run 'just build-link-run -- --no-run' from the primary worktree" >&2
+    @echo "Refusing unpaired install: run 'just build-install-run -- --no-run' from the primary worktree" >&2
     @exit 1
 
 lint:
