@@ -4585,8 +4585,10 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 	if issueClient == nil {
 		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue integration readiness: issue store unavailable")
 	}
-	if err := d.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
-		return taskIntegrationReadinessResult{}, fmt.Errorf("reconcile issue decision propagation: %w", err)
+	if !orchestrationProjectionSnapshotFenceHeld(ctx) {
+		if err := d.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
+			return taskIntegrationReadinessResult{}, fmt.Errorf("reconcile issue decision propagation: %w", err)
+		}
 	}
 	decisionEvents, err := issueClient.ListIssueDecisionObservationEvents(ctx, task.ID.String())
 	if err != nil {
