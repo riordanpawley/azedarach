@@ -13,7 +13,7 @@ cd "$repo_root"
 git_dir="$(git rev-parse --git-dir)"
 git_common_dir="$(git rev-parse --git-common-dir)"
 if [[ "$git_dir" != "$git_common_dir" ]]; then
-  echo "Refusing build-link-run from a linked worktree: $repo_root" >&2
+  echo "Refusing build-install-run from a linked worktree: $repo_root" >&2
   echo "Run it from the primary Azedarach worktree because it mutates user-global runtime assets." >&2
   exit 1
 fi
