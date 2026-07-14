@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -21,13 +22,21 @@ const (
 )
 
 type integrationJournal struct {
-	Version         int                        `json:"version"`
-	TargetWorktree  string                     `json:"target_worktree"`
-	TargetHead      string                     `json:"target_head"`
-	DesiredHead     string                     `json:"desired_head"`
-	ScratchWorktree string                     `json:"scratch_worktree,omitempty"`
-	Validation      CandidateValidationAttempt `json:"validation"`
-	StartedAt       time.Time                  `json:"started_at"`
+	Version         int                         `json:"version"`
+	TargetWorktree  string                      `json:"target_worktree"`
+	TargetHead      string                      `json:"target_head"`
+	DesiredHead     string                      `json:"desired_head"`
+	ScratchWorktree string                      `json:"scratch_worktree,omitempty"`
+	ScratchOwner    integrationScratchOwnership `json:"scratch_owner"`
+	Validation      CandidateValidationAttempt  `json:"validation"`
+	StartedAt       time.Time                   `json:"started_at"`
+}
+
+type integrationScratchOwnership struct {
+	AttemptID       string `json:"attempt_id"`
+	TargetWorktree  string `json:"target_worktree"`
+	GitCommonDir    string `json:"git_common_dir"`
+	ScratchWorktree string `json:"scratch_worktree"`
 }
 
 type integrationValidationReceipt struct {
@@ -126,6 +135,10 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 		return nil, fmt.Errorf("create scratch integration worktree: %w", err)
 	}
 	scratchAdded = true
+	scratchOwner, err := c.createIntegrationScratchOwnership(ctx, worktree, scratchPath)
+	if err != nil {
+		return nil, fmt.Errorf("persist scratch integration ownership: %w", err)
+	}
 
 	result, err := c.mergeCleanlyWithEnv(ctx, scratchPath, branch, []string{"AZEDARACH_SKIP_MERGE_REBASE_GATE=1"})
 	if err != nil {
@@ -167,7 +180,7 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 		return result, nil
 	}
 
-	return c.applyValidatedScratchMerge(ctx, worktree, scratchPath, targetHead, desiredHead, result)
+	return c.applyValidatedScratchMerge(ctx, worktree, scratchPath, targetHead, desiredHead, scratchOwner, result)
 }
 
 func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scratchPath, candidateHead string) (CandidateValidationAttempt, bool, error) {
@@ -301,7 +314,7 @@ func setCandidateValidationDisposition(ctx context.Context, result *MergeResult,
 	}
 }
 
-func (c *Client) applyValidatedScratchMerge(ctx context.Context, worktree, scratchPath, targetHead, desiredHead string, result *MergeResult) (*MergeResult, error) {
+func (c *Client) applyValidatedScratchMerge(ctx context.Context, worktree, scratchPath, targetHead, desiredHead string, scratchOwner integrationScratchOwnership, result *MergeResult) (*MergeResult, error) {
 	var out *MergeResult
 	if err := c.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
 		if err := c.RecoverIntegrationJournal(ctx, worktree); err != nil {
@@ -343,6 +356,7 @@ func (c *Client) applyValidatedScratchMerge(ctx context.Context, worktree, scrat
 			TargetHead:      targetHead,
 			DesiredHead:     desiredHead,
 			ScratchWorktree: scratchPath,
+			ScratchOwner:    scratchOwner,
 			StartedAt:       time.Now().UTC(),
 		}
 		for i := len(result.ValidationAttempts) - 1; i >= 0; i-- {
@@ -443,13 +457,13 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 	if targetHead == "" || desiredHead == "" {
 		return fmt.Errorf("integration journal missing target or desired head")
 	}
-	if journal.Version == integrationJournalVersion && normalizeWorktreeLockKey(journal.TargetWorktree) != normalizeWorktreeLockKey(worktree) {
+	if normalizeWorktreeLockKey(journal.TargetWorktree) != normalizeWorktreeLockKey(worktree) {
 		return fmt.Errorf("integration journal target %s does not match recovery target %s", journal.TargetWorktree, worktree)
 	}
 	if strings.TrimSpace(journal.ScratchWorktree) == "" {
 		return fmt.Errorf("integration journal missing scratch worktree identity; journal retained")
 	}
-	provenScratch, err := c.proveIntegrationScratchWorktree(ctx, worktree, journal.ScratchWorktree, desiredHead)
+	provenScratch, err := c.proveIntegrationScratchWorktree(ctx, worktree, journal.ScratchWorktree, desiredHead, journal.ScratchOwner)
 	if err != nil {
 		return fmt.Errorf("prove integration scratch identity before recovery; journal and scratch retained: %w", err)
 	}
@@ -457,8 +471,8 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 	if err != nil {
 		return fmt.Errorf("inspect target before integration recovery: %w", err)
 	}
-	if gitStatusHasTrackedChanges(targetStatus) {
-		return fmt.Errorf("target has tracked edits before integration recovery; journal and scratch retained: %s", gitStatusSummary(targetStatus))
+	if gitStatusDirty(targetStatus) {
+		return fmt.Errorf("target is dirty before integration recovery; journal and scratch retained: %s", gitStatusSummary(targetStatus))
 	}
 
 	currentHead, err := c.revParseVerify(ctx, worktree, "HEAD")
@@ -483,10 +497,7 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 			return fmt.Errorf("inspect recovered candidate before canonical publication: %w", err)
 		}
 		if gitStatusDirty(status) {
-			recoverHead = targetHead
-			if err := c.resetHard(ctx, worktree, targetHead); err != nil {
-				return fmt.Errorf("rollback dirty recovered candidate: %w", err)
-			}
+			return fmt.Errorf("recovered candidate is dirty before rollback; journal and scratch retained without destructive reset: %s", gitStatusSummary(status))
 		} else if err := c.writeCanonicalIntegrationReceipt(ctx, worktree, journal); err != nil {
 			return fmt.Errorf("persist recovered canonical candidate validation receipt: %w", err)
 		}
@@ -510,7 +521,7 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 	return nil
 }
 
-func (c *Client) proveIntegrationScratchWorktree(ctx context.Context, worktree, scratchPath, desiredHead string) (string, error) {
+func (c *Client) proveIntegrationScratchWorktree(ctx context.Context, worktree, scratchPath, desiredHead string, owner integrationScratchOwnership) (string, error) {
 	scratchPath = normalizeWorktreeLockKey(scratchPath)
 	tempRoot := normalizeWorktreeLockKey(os.TempDir())
 	if filepath.Dir(scratchPath) != tempRoot || !strings.HasPrefix(filepath.Base(scratchPath), "azedarach-integration-") {
@@ -533,9 +544,100 @@ func (c *Client) proveIntegrationScratchWorktree(ctx context.Context, worktree, 
 		if !entry.Detached || entry.Branch != "" || entry.Locked || entry.Prunable {
 			return "", fmt.Errorf("registered scratch does not have disposable detached identity")
 		}
+		if err := c.validateIntegrationScratchOwnership(ctx, worktree, scratchPath, owner); err != nil {
+			return "", err
+		}
 		return scratchPath, nil
 	}
 	return "", fmt.Errorf("scratch path %s is not a registered worktree", scratchPath)
+}
+
+func (c *Client) createIntegrationScratchOwnership(ctx context.Context, worktree, scratchPath string) (integrationScratchOwnership, error) {
+	commonDir, err := c.gitCommonDir(ctx, worktree)
+	if err != nil {
+		return integrationScratchOwnership{}, fmt.Errorf("resolve Git common directory: %w", err)
+	}
+	token := make([]byte, 32)
+	if _, err := rand.Read(token); err != nil {
+		return integrationScratchOwnership{}, fmt.Errorf("generate ownership attempt ID: %w", err)
+	}
+	owner := integrationScratchOwnership{
+		AttemptID:       hex.EncodeToString(token),
+		TargetWorktree:  normalizeWorktreeLockKey(worktree),
+		GitCommonDir:    normalizeWorktreeLockKey(commonDir),
+		ScratchWorktree: normalizeWorktreeLockKey(scratchPath),
+	}
+	path, err := c.integrationScratchOwnershipPath(ctx, scratchPath, commonDir)
+	if err != nil {
+		return integrationScratchOwnership{}, err
+	}
+	payload, err := json.MarshalIndent(owner, "", "  ")
+	if err != nil {
+		return integrationScratchOwnership{}, err
+	}
+	if err := writeFileAtomic(path, append(payload, '\n'), 0o600); err != nil {
+		return integrationScratchOwnership{}, err
+	}
+	return owner, nil
+}
+
+func (c *Client) validateIntegrationScratchOwnership(ctx context.Context, worktree, scratchPath string, owner integrationScratchOwnership) error {
+	commonDir, err := c.gitCommonDir(ctx, worktree)
+	if err != nil {
+		return fmt.Errorf("resolve recovery Git common directory: %w", err)
+	}
+	if strings.TrimSpace(owner.AttemptID) == "" ||
+		normalizeWorktreeLockKey(owner.TargetWorktree) != normalizeWorktreeLockKey(worktree) ||
+		normalizeWorktreeLockKey(owner.GitCommonDir) != normalizeWorktreeLockKey(commonDir) ||
+		normalizeWorktreeLockKey(owner.ScratchWorktree) != normalizeWorktreeLockKey(scratchPath) {
+		return fmt.Errorf("journal scratch ownership is missing or does not match target/common-dir/scratch identity")
+	}
+	path, err := c.integrationScratchOwnershipPath(ctx, scratchPath, commonDir)
+	if err != nil {
+		return err
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read registered scratch ownership marker: %w", err)
+	}
+	var marker integrationScratchOwnership
+	if err := json.Unmarshal(payload, &marker); err != nil {
+		return fmt.Errorf("decode registered scratch ownership marker: %w", err)
+	}
+	if marker != owner {
+		return fmt.Errorf("registered scratch ownership marker does not match journal attempt")
+	}
+	return nil
+}
+
+func (c *Client) integrationScratchOwnershipPath(ctx context.Context, scratchPath, commonDir string) (string, error) {
+	gitDir, err := c.runInWorktree(ctx, scratchPath, "rev-parse", "--git-dir")
+	if err != nil {
+		return "", fmt.Errorf("resolve scratch Git directory: %w", err)
+	}
+	gitDir = strings.TrimSpace(gitDir)
+	if gitDir == "" {
+		return "", fmt.Errorf("empty scratch Git directory")
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(scratchPath, gitDir)
+	}
+	gitDir = filepath.Clean(gitDir)
+	worktreeAdminRoot := filepath.Join(normalizeWorktreeLockKey(commonDir), "worktrees")
+	canonicalGitDir := normalizeWorktreeLockKey(gitDir)
+	adminName := ""
+	if filepath.Dir(canonicalGitDir) == worktreeAdminRoot {
+		adminName = filepath.Base(canonicalGitDir)
+	} else {
+		lexicalAdminRoot := filepath.Join(filepath.Clean(commonDir), "worktrees")
+		relativeName, relativeErr := filepath.Rel(lexicalAdminRoot, gitDir)
+		if relativeErr != nil || relativeName == "." || filepath.Dir(relativeName) != "." {
+			return "", fmt.Errorf("scratch Git directory %s is not a direct child of common-directory worktree administration %s", gitDir, worktreeAdminRoot)
+		}
+		adminName = relativeName
+	}
+	gitDir = filepath.Join(worktreeAdminRoot, adminName)
+	return filepath.Join(gitDir, "azedarach-integration-owner.json"), nil
 }
 
 // CanonicalIntegrationValidation returns durable proof only when the exact

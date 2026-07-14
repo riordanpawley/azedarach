@@ -100,6 +100,29 @@ func installPassingIntegrationGate(t *testing.T, repo string) {
 	runClientTestGit(t, repo, "commit", "-q", "-m", "add integration gate")
 }
 
+func addOwnedIntegrationScratch(t *testing.T, client *Client, repo, head string) (string, integrationScratchOwnership) {
+	t.Helper()
+	scratch, err := os.MkdirTemp("", "azedarach-integration-")
+	if err != nil {
+		t.Fatalf("create scratch path: %v", err)
+	}
+	if err := os.Remove(scratch); err != nil {
+		t.Fatalf("prepare scratch worktree: %v", err)
+	}
+	runClientTestGit(t, repo, "worktree", "add", "--detach", scratch, head)
+	t.Cleanup(func() {
+		cmd := exec.Command("git", "worktree", "remove", "--force", scratch)
+		cmd.Dir = repo
+		_ = cmd.Run()
+		_ = os.RemoveAll(scratch)
+	})
+	owner, err := client.createIntegrationScratchOwnership(context.Background(), repo, scratch)
+	if err != nil {
+		t.Fatalf("createIntegrationScratchOwnership() error = %v", err)
+	}
+	return scratch, owner
+}
+
 func runClientTestGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
@@ -1110,20 +1133,7 @@ func TestRealProcessProfileRecoverIntegrationJournalCompletesInterruptedFinalRes
 	targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
 	tree := runClientTestGitOutput(t, repo, "merge-tree", "--write-tree", targetHead, "feature")
 	desiredHead := runClientTestGitOutput(t, repo, "commit-tree", tree, "-p", targetHead, "-p", "feature", "-m", "scratch merge")
-	scratch, err := os.MkdirTemp("", "azedarach-integration-")
-	if err != nil {
-		t.Fatalf("create scratch path: %v", err)
-	}
-	if err := os.Remove(scratch); err != nil {
-		t.Fatalf("prepare scratch worktree: %v", err)
-	}
-	runClientTestGit(t, repo, "worktree", "add", "--detach", scratch, desiredHead)
-	t.Cleanup(func() {
-		cmd := exec.Command("git", "worktree", "remove", "--force", scratch)
-		cmd.Dir = repo
-		_ = cmd.Run()
-		_ = os.RemoveAll(scratch)
-	})
+	scratch, scratchOwner := addOwnedIntegrationScratch(t, client, repo, desiredHead)
 
 	if err := client.writeIntegrationJournal(ctx, repo, integrationJournal{
 		Version:         integrationJournalVersion,
@@ -1131,6 +1141,7 @@ func TestRealProcessProfileRecoverIntegrationJournalCompletesInterruptedFinalRes
 		TargetHead:      targetHead,
 		DesiredHead:     desiredHead,
 		ScratchWorktree: scratch,
+		ScratchOwner:    scratchOwner,
 		Validation: CandidateValidationAttempt{
 			CandidateHead: desiredHead,
 			Status:        CandidateValidationPassed,
@@ -1262,23 +1273,11 @@ func TestRealProcessProfileRecoverIntegrationJournalRetriesDeleteBeforeScratchCl
 	targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
 	tree := runClientTestGitOutput(t, repo, "merge-tree", "--write-tree", targetHead, "feature")
 	desiredHead := runClientTestGitOutput(t, repo, "commit-tree", tree, "-p", targetHead, "-p", "feature", "-m", "scratch merge")
-	scratch, err := os.MkdirTemp("", "azedarach-integration-")
-	if err != nil {
-		t.Fatalf("create scratch path: %v", err)
-	}
-	if err := os.Remove(scratch); err != nil {
-		t.Fatalf("prepare scratch worktree: %v", err)
-	}
-	runClientTestGit(t, repo, "worktree", "add", "--detach", scratch, desiredHead)
-	t.Cleanup(func() {
-		cmd := exec.Command("git", "worktree", "remove", "--force", scratch)
-		cmd.Dir = repo
-		_ = cmd.Run()
-		_ = os.RemoveAll(scratch)
-	})
+	scratch, scratchOwner := addOwnedIntegrationScratch(t, client, repo, desiredHead)
 	journal := integrationJournal{
 		Version: integrationJournalVersion, TargetWorktree: repo, TargetHead: targetHead, DesiredHead: desiredHead,
 		ScratchWorktree: scratch,
+		ScratchOwner:    scratchOwner,
 		Validation:      CandidateValidationAttempt{CandidateHead: desiredHead, Status: CandidateValidationPassed},
 		StartedAt:       time.Now().UTC(),
 	}
@@ -1355,23 +1354,10 @@ func TestRealProcessProfileRecoverIntegrationJournalRollsBackDesiredHeadWithoutV
 			targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
 			tree := runClientTestGitOutput(t, repo, "merge-tree", "--write-tree", targetHead, "feature")
 			desiredHead := runClientTestGitOutput(t, repo, "commit-tree", tree, "-p", targetHead, "-p", "feature", "-m", "unproved merge")
-			scratch, err := os.MkdirTemp("", "azedarach-integration-")
-			if err != nil {
-				t.Fatalf("create scratch path: %v", err)
-			}
-			if err := os.Remove(scratch); err != nil {
-				t.Fatalf("prepare scratch worktree: %v", err)
-			}
-			runClientTestGit(t, repo, "worktree", "add", "--detach", scratch, desiredHead)
-			t.Cleanup(func() {
-				cmd := exec.Command("git", "worktree", "remove", "--force", scratch)
-				cmd.Dir = repo
-				_ = cmd.Run()
-				_ = os.RemoveAll(scratch)
-			})
+			scratch, scratchOwner := addOwnedIntegrationScratch(t, client, repo, desiredHead)
 			if err := client.writeIntegrationJournal(ctx, repo, integrationJournal{
 				Version: version, TargetWorktree: repo, TargetHead: targetHead, DesiredHead: desiredHead,
-				ScratchWorktree: scratch, StartedAt: time.Now().UTC(),
+				ScratchWorktree: scratch, ScratchOwner: scratchOwner, StartedAt: time.Now().UTC(),
 			}); err != nil {
 				t.Fatalf("writeIntegrationJournal() error = %v", err)
 			}
@@ -1458,20 +1444,7 @@ func TestRealProcessProfileRecoverIntegrationJournalRetainsTrackedEditsForV1AndV
 			targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
 			tree := runClientTestGitOutput(t, repo, "merge-tree", "--write-tree", targetHead, "feature")
 			desiredHead := runClientTestGitOutput(t, repo, "commit-tree", tree, "-p", targetHead, "-p", "feature", "-m", "unapplied merge")
-			scratch, err := os.MkdirTemp("", "azedarach-integration-")
-			if err != nil {
-				t.Fatalf("create scratch path: %v", err)
-			}
-			if err := os.Remove(scratch); err != nil {
-				t.Fatalf("prepare scratch worktree: %v", err)
-			}
-			runClientTestGit(t, repo, "worktree", "add", "--detach", scratch, desiredHead)
-			t.Cleanup(func() {
-				cmd := exec.Command("git", "worktree", "remove", "--force", scratch)
-				cmd.Dir = repo
-				_ = cmd.Run()
-				_ = os.RemoveAll(scratch)
-			})
+			scratch, scratchOwner := addOwnedIntegrationScratch(t, client, repo, desiredHead)
 			scratchMarker := filepath.Join(scratch, "marker")
 			if err := os.WriteFile(scratchMarker, []byte("retain scratch\n"), 0o644); err != nil {
 				t.Fatalf("write scratch marker: %v", err)
@@ -1482,6 +1455,7 @@ func TestRealProcessProfileRecoverIntegrationJournalRetainsTrackedEditsForV1AndV
 				TargetHead:      targetHead,
 				DesiredHead:     desiredHead,
 				ScratchWorktree: scratch,
+				ScratchOwner:    scratchOwner,
 				StartedAt:       time.Now().UTC(),
 			}); err != nil {
 				t.Fatalf("writeIntegrationJournal() error = %v", err)
@@ -1501,7 +1475,7 @@ func TestRealProcessProfileRecoverIntegrationJournalRetainsTrackedEditsForV1AndV
 			}
 
 			err = client.RecoverIntegrationJournal(ctx, repo)
-			if err == nil || !strings.Contains(err.Error(), "target has tracked edits before integration recovery") {
+			if err == nil || !strings.Contains(err.Error(), "target is dirty before integration recovery") {
 				t.Fatalf("RecoverIntegrationJournal() error = %v, want tracked-edit refusal", err)
 			}
 			if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != targetHead {
@@ -1515,6 +1489,154 @@ func TestRealProcessProfileRecoverIntegrationJournalRetainsTrackedEditsForV1AndV
 			}
 			if got, err := os.ReadFile(scratchMarker); err != nil || string(got) != "retain scratch\n" {
 				t.Fatalf("scratch marker = %q, %v; want retained", got, err)
+			}
+		})
+	}
+}
+
+func TestRealProcessProfileRecoverIntegrationJournalRetainsUntrackedResetCollisionsForV1AndV2(t *testing.T) {
+	for _, version := range []int{integrationJournalVersionV1, integrationJournalVersionV2} {
+		for _, collision := range []string{"file", "directory"} {
+			t.Run(fmt.Sprintf("v%d/%s", version, collision), func(t *testing.T) {
+				repo := initDivergedRepo(t)
+				client := NewClient(NewExecRunner(repo), slog.Default())
+				ctx := context.Background()
+				collisionPath := filepath.Join(repo, "collision")
+				if err := os.WriteFile(collisionPath, []byte("tracked target bytes\n"), 0o644); err != nil {
+					t.Fatalf("write tracked collision source: %v", err)
+				}
+				runClientTestGit(t, repo, "add", "collision")
+				runClientTestGit(t, repo, "commit", "-q", "-m", "track collision at rollback head")
+				targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+				runClientTestGit(t, repo, "rm", "-q", "collision")
+				runClientTestGit(t, repo, "commit", "-q", "-m", "remove collision at interrupted head")
+				desiredHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+				scratch, scratchOwner := addOwnedIntegrationScratch(t, client, repo, desiredHead)
+
+				var preservedPath string
+				preservedBytes := []byte("user collision bytes\n")
+				switch collision {
+				case "file":
+					preservedPath = collisionPath
+					if err := os.WriteFile(preservedPath, preservedBytes, 0o644); err != nil {
+						t.Fatalf("write untracked file collision: %v", err)
+					}
+				case "directory":
+					preservedPath = filepath.Join(collisionPath, "nested")
+					if err := os.Mkdir(collisionPath, 0o755); err != nil {
+						t.Fatalf("mkdir untracked directory collision: %v", err)
+					}
+					if err := os.WriteFile(preservedPath, preservedBytes, 0o644); err != nil {
+						t.Fatalf("write untracked directory bytes: %v", err)
+					}
+				}
+				if err := client.writeIntegrationJournal(ctx, repo, integrationJournal{
+					Version: version, TargetWorktree: repo, TargetHead: targetHead, DesiredHead: desiredHead,
+					ScratchWorktree: scratch, ScratchOwner: scratchOwner, StartedAt: time.Now().UTC(),
+				}); err != nil {
+					t.Fatalf("writeIntegrationJournal() error = %v", err)
+				}
+				journalPath, err := client.integrationJournalPath(ctx, repo)
+				if err != nil {
+					t.Fatalf("integrationJournalPath() error = %v", err)
+				}
+				journalBefore, err := os.ReadFile(journalPath)
+				if err != nil {
+					t.Fatalf("read journal before recovery: %v", err)
+				}
+
+				err = client.RecoverIntegrationJournal(ctx, repo)
+				if err == nil || !strings.Contains(err.Error(), "target is dirty before integration recovery") {
+					t.Fatalf("RecoverIntegrationJournal() error = %v, want untracked collision refusal", err)
+				}
+				if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != desiredHead {
+					t.Fatalf("HEAD = %s, want unchanged interrupted head %s", head, desiredHead)
+				}
+				if got, readErr := os.ReadFile(preservedPath); readErr != nil || !bytes.Equal(got, preservedBytes) {
+					t.Fatalf("collision bytes = %q, %v; want preserved %q", got, readErr, preservedBytes)
+				}
+				if got, readErr := os.ReadFile(journalPath); readErr != nil || !bytes.Equal(got, journalBefore) {
+					t.Fatalf("journal changed after collision refusal: %v", readErr)
+				}
+				if _, statErr := os.Stat(scratch); statErr != nil {
+					t.Fatalf("scratch after collision refusal: %v", statErr)
+				}
+			})
+		}
+	}
+}
+
+func TestRealProcessProfileRecoverIntegrationJournalRejectsOtherOwnedScratchForV1AndV2(t *testing.T) {
+	for _, version := range []int{integrationJournalVersionV1, integrationJournalVersionV2} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			repo := initDivergedRepo(t)
+			client := NewClient(NewExecRunner(repo), slog.Default())
+			ctx := context.Background()
+			targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+			tree := runClientTestGitOutput(t, repo, "merge-tree", "--write-tree", targetHead, "feature")
+			desiredHead := runClientTestGitOutput(t, repo, "commit-tree", tree, "-p", targetHead, "-p", "feature", "-m", "shared desired oid")
+			intended, intendedOwner := addOwnedIntegrationScratch(t, client, repo, desiredHead)
+			victim, _ := addOwnedIntegrationScratch(t, client, repo, desiredHead)
+			victimMarker := filepath.Join(victim, "must-survive")
+			victimBytes := []byte("valid unrelated scratch\n")
+			if err := os.WriteFile(victimMarker, victimBytes, 0o644); err != nil {
+				t.Fatalf("write victim marker: %v", err)
+			}
+			if err := client.writeIntegrationJournal(ctx, repo, integrationJournal{
+				Version: version, TargetWorktree: repo, TargetHead: targetHead, DesiredHead: desiredHead,
+				ScratchWorktree: victim, ScratchOwner: intendedOwner, StartedAt: time.Now().UTC(),
+			}); err != nil {
+				t.Fatalf("writeIntegrationJournal() error = %v", err)
+			}
+			journalPath, err := client.integrationJournalPath(ctx, repo)
+			if err != nil {
+				t.Fatalf("integrationJournalPath() error = %v", err)
+			}
+			journalBefore, err := os.ReadFile(journalPath)
+			if err != nil {
+				t.Fatalf("read journal before recovery: %v", err)
+			}
+
+			err = client.RecoverIntegrationJournal(ctx, repo)
+			if err == nil || !strings.Contains(err.Error(), "journal scratch ownership") {
+				t.Fatalf("RecoverIntegrationJournal() error = %v, want attempt ownership refusal", err)
+			}
+			if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != targetHead {
+				t.Fatalf("HEAD = %s, want unchanged %s", head, targetHead)
+			}
+			if got, readErr := os.ReadFile(victimMarker); readErr != nil || !bytes.Equal(got, victimBytes) {
+				t.Fatalf("victim bytes = %q, %v; want preserved %q", got, readErr, victimBytes)
+			}
+			if got, readErr := os.ReadFile(journalPath); readErr != nil || !bytes.Equal(got, journalBefore) {
+				t.Fatalf("journal changed after victim refusal: %v", readErr)
+			}
+			if _, statErr := os.Stat(intended); statErr != nil {
+				t.Fatalf("intended scratch changed: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestRealProcessProfileRecoverIntegrationJournalValidatesTargetForV1AndV2(t *testing.T) {
+	for _, version := range []int{integrationJournalVersionV1, integrationJournalVersionV2} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			repo := initDivergedRepo(t)
+			client := NewClient(NewExecRunner(repo), slog.Default())
+			ctx := context.Background()
+			targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+			scratch, scratchOwner := addOwnedIntegrationScratch(t, client, repo, targetHead)
+			if err := client.writeIntegrationJournal(ctx, repo, integrationJournal{
+				Version: version, TargetWorktree: repo + "-other", TargetHead: targetHead, DesiredHead: targetHead,
+				ScratchWorktree: scratch, ScratchOwner: scratchOwner, StartedAt: time.Now().UTC(),
+			}); err != nil {
+				t.Fatalf("writeIntegrationJournal() error = %v", err)
+			}
+			err := client.RecoverIntegrationJournal(ctx, repo)
+			if err == nil || !strings.Contains(err.Error(), "does not match recovery target") {
+				t.Fatalf("RecoverIntegrationJournal() error = %v, want target identity refusal", err)
+			}
+			if _, statErr := os.Stat(scratch); statErr != nil {
+				t.Fatalf("scratch after target refusal: %v", statErr)
 			}
 		})
 	}
@@ -1575,7 +1697,7 @@ func TestRealProcessProfileRecoverIntegrationJournalRejectsUnprovenScratchWithou
 	}
 }
 
-func TestMergeCleanlyTransactionalRecoversDirtyFinalApplyAndRemovesJournal(t *testing.T) {
+func TestMergeCleanlyTransactionalRetainsJournalAndScratchWhenFinalApplyIsDirty(t *testing.T) {
 	repo := t.TempDir()
 	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o755); err != nil {
 		t.Fatalf("mkdir .git: %v", err)
@@ -1591,6 +1713,7 @@ func TestMergeCleanlyTransactionalRecoversDirtyFinalApplyAndRemovesJournal(t *te
 	var scratchWorktree string
 	targetStatusReads := 0
 	scratchStatusReads := 0
+	targetRollbackResets := 0
 	runner := &rawMockRunner{runFunc: func(ctx context.Context, args ...string) (string, error) {
 		switch {
 		case clientTestArgsForWorktree(args, repo, "status", "--porcelain"):
@@ -1627,9 +1750,14 @@ func TestMergeCleanlyTransactionalRecoversDirtyFinalApplyAndRemovesJournal(t *te
 			return "Merge made by the 'ort' strategy.", nil
 		case scratchWorktree != "" && clientTestArgsForWorktree(args, scratchWorktree, "rev-parse", "--verify", "HEAD"):
 			return "desired-sha", nil
+		case scratchWorktree != "" && len(args) == 4 && args[0] == "-C" &&
+			normalizeWorktreeLockKey(args[1]) == normalizeWorktreeLockKey(scratchWorktree) &&
+			args[2] == "rev-parse" && args[3] == "--git-dir":
+			return filepath.Join(repo, ".git", "worktrees", "integration-scratch"), nil
 		case clientTestArgsForWorktree(args, repo, "reset", "--hard", "desired-sha"):
 			return "", nil
 		case clientTestArgsForWorktree(args, repo, "reset", "--hard", "target-sha"):
+			targetRollbackResets++
 			return "", nil
 		case scratchWorktree != "" && clientTestArgsForWorktree(args, repo, "worktree", "list", "--porcelain"):
 			return fmt.Sprintf("worktree %s\nHEAD desired-sha\ndetached\n\nworktree %s\nHEAD desired-sha\ndetached\n", repo, scratchWorktree), nil
@@ -1644,35 +1772,21 @@ func TestMergeCleanlyTransactionalRecoversDirtyFinalApplyAndRemovesJournal(t *te
 
 	client := NewClient(runner, slog.Default())
 	result, err := client.MergeCleanlyTransactional(context.Background(), repo, "feature")
-	if err != nil {
-		t.Fatalf("MergeCleanlyTransactional() error = %v", err)
-	}
-	if result == nil {
-		t.Fatal("MergeCleanlyTransactional() result = nil")
-	}
-	if result.Success {
-		t.Fatalf("MergeCleanlyTransactional() result = %+v, want dirty final apply failure", result)
-	}
-	if !strings.Contains(result.Message, "left target dirty after recovery") ||
-		!strings.Contains(result.Message, "user-created.txt") {
-		t.Fatalf("MergeCleanlyTransactional() message = %q, want recovery dirty detail", result.Message)
-	}
-	if scratchStatusReads != 5 {
-		t.Fatalf("scratch status reads = %d, want 5", scratchStatusReads)
-	}
-	if len(result.ValidationAttempts) != 1 {
-		t.Fatalf("validation attempts = %+v, want dirty-apply attempt", result.ValidationAttempts)
-	}
-	attempt := result.ValidationAttempts[0]
-	if attempt.CandidateHead != "desired-sha" || attempt.Status != CandidateValidationFailed || attempt.Canonical {
-		t.Fatalf("validation attempt = %+v, want failed noncanonical desired-sha", attempt)
+	if err == nil || !strings.Contains(err.Error(), "target is dirty before integration recovery") {
+		t.Fatalf("MergeCleanlyTransactional() = (%+v, %v), want fail-closed dirty recovery", result, err)
 	}
 	journalPath, err := client.integrationJournalPath(context.Background(), repo)
 	if err != nil {
 		t.Fatalf("integrationJournalPath() error = %v", err)
 	}
-	if _, err := os.Stat(journalPath); !os.IsNotExist(err) {
-		t.Fatalf("journal stat err = %v, want removed", err)
+	if _, err := os.Stat(journalPath); err != nil {
+		t.Fatalf("journal stat err = %v, want retained", err)
+	}
+	if _, err := os.Stat(scratchWorktree); err != nil {
+		t.Fatalf("scratch stat err = %v, want retained", err)
+	}
+	if targetRollbackResets != 0 {
+		t.Fatalf("target rollback resets = %d, want none while porcelain is dirty", targetRollbackResets)
 	}
 }
 
@@ -1716,6 +1830,8 @@ func TestMergeCleanlyTransactionalAllowsConcurrentScratchValidationAndRejectsSta
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && strings.HasPrefix(args[1], os.TempDir()) && args[2] == "status" && args[3] == "--porcelain":
 			return "", nil
+		case len(args) == 4 && args[0] == "-C" && strings.HasPrefix(args[1], os.TempDir()) && args[2] == "rev-parse" && args[3] == "--git-dir":
+			return filepath.Join(gitDir, "worktrees", filepath.Base(args[1])), nil
 		case len(args) >= 5 && args[0] == "-C" && strings.HasPrefix(args[1], os.TempDir()) && args[2] == "merge" && args[3] == "--no-edit":
 			scratch := args[1]
 			branch := args[4]

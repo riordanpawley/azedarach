@@ -154,6 +154,8 @@ func TestGitServiceAdapterMergeForcesStatusUpdatePublish(t *testing.T) {
 				return "Already up to date.", nil
 			case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 				return "target-sha", nil
+			case len(args) == 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--git-dir":
+				return filepath.Join(worktree, ".git", "worktrees", "adapter-scratch"), nil
 			case len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain":
 				return "", nil
 			case len(args) >= 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "status" && args[3] == "--porcelain":
