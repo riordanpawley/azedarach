@@ -208,7 +208,6 @@ func (d *Daemon) readCrossProjectProjectionHealth(ctx context.Context, projectID
 	if err != nil {
 		return
 	}
-	d.overlayScheduledUserProjectionFreshness(&snapshot)
 	for _, project := range snapshot.Projects {
 		if project.ProjectID == projectID {
 			project.Tasks = nil

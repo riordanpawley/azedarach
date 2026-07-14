@@ -30,9 +30,10 @@ type ProjectDeltaState struct {
 }
 
 type ProjectDeltaChange struct {
-	IssueID string
-	Delete  bool
-	Issue   *domain.Task
+	IssueID           string
+	Delete            bool
+	Issue             *domain.Task
+	MaterializedIssue *domain.Task
 }
 
 type ProjectDeltaApply struct {
@@ -40,6 +41,63 @@ type ProjectDeltaApply struct {
 	Expected ProjectDeltaState
 	Next     ProjectDeltaState
 	Changes  []ProjectDeltaChange
+}
+
+// ApplyProjectMaterializedIssues updates independently sourced current-state
+// fields for a bounded set of issues without advancing the project's delivery
+// cursor. The cursor belongs only to the transitional issue delta stream; it
+// must never order runtime, ownership, interaction, or worktree observations.
+func (s *Store) ApplyProjectMaterializedIssues(ctx context.Context, projectID string, changes []ProjectDeltaChange) error {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" || len(changes) == 0 {
+		return nil
+	}
+	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin project materialized issue apply: %w", err)
+		}
+		defer tx.Rollback()
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE project_id=?`, projectID).Scan(&exists); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return fmt.Errorf("read materialized project catalog: %w", err)
+		}
+		for _, change := range changes {
+			issueID := strings.TrimSpace(change.IssueID)
+			if issueID == "" {
+				return errors.New("project materialized issue ID is empty")
+			}
+			if change.Delete {
+				if err := deleteProjectedIssue(ctx, tx, projectID, issueID); err != nil {
+					return err
+				}
+				continue
+			}
+			if change.Issue == nil || change.Issue.ID.String() != issueID {
+				return fmt.Errorf("project materialized issue payload key mismatch for %q", issueID)
+			}
+			issue := *change.Issue
+			current, err := s.tasks(ctx, tx, projectID, "", nil, nil, []string{issueID})
+			if err != nil {
+				return fmt.Errorf("read canonical projected issue %s: %w", issueID, err)
+			}
+			if len(current) > 0 {
+				canonical := current[0]
+				preserveRuntimeProjection(&canonical, issue)
+				issue = canonical
+			}
+			if err := deleteProjectedIssue(ctx, tx, projectID, issueID); err != nil {
+				return err
+			}
+			if err := insertTask(ctx, tx, projectID, issue); err != nil {
+				return fmt.Errorf("apply materialized issue %s: %w", issueID, err)
+			}
+		}
+		return tx.Commit()
+	})
 }
 
 func (s *Store) ProjectDeltaState(ctx context.Context, projectID string) (ProjectDeltaState, error) {
@@ -136,16 +194,29 @@ func (s *Store) applyProjectIssueChange(ctx context.Context, tx *sql.Tx, project
 	if change.Delete {
 		return deleteProjectedIssue(ctx, tx, projectID, issueID)
 	}
-	if change.Issue == nil || change.Issue.ID.String() != issueID {
-		return fmt.Errorf("project delta issue payload key mismatch for %q", issueID)
-	}
-	issue := *change.Issue
 	current, err := s.tasks(ctx, tx, projectID, "", nil, nil, []string{issueID})
 	if err != nil {
 		return fmt.Errorf("read existing projected issue %s: %w", issueID, err)
 	}
-	if len(current) > 0 {
-		preserveRuntimeProjection(&issue, current[0])
+	var issue domain.Task
+	if change.Issue != nil {
+		if change.Issue.ID.String() != issueID {
+			return fmt.Errorf("project delta issue payload key mismatch for %q", issueID)
+		}
+		issue = *change.Issue
+		if len(current) > 0 {
+			preserveRuntimeProjection(&issue, current[0])
+		}
+	} else if len(current) > 0 {
+		issue = current[0]
+	} else {
+		return fmt.Errorf("project delta issue %q has no canonical value", issueID)
+	}
+	if change.MaterializedIssue != nil {
+		if change.MaterializedIssue.ID.String() != issueID {
+			return fmt.Errorf("project delta materialized issue payload key mismatch for %q", issueID)
+		}
+		preserveRuntimeProjection(&issue, *change.MaterializedIssue)
 	}
 	if err := deleteProjectedIssue(ctx, tx, projectID, issueID); err != nil {
 		return err

@@ -105,11 +105,6 @@ type Daemon struct {
 	issues                               *issues.Client
 	userStore                            *userstore.Store
 	userStoreRefreshMu                   sync.Mutex
-	userStoreRefreshPending              map[string]bool
-	userStoreRefreshDirty                map[string]bool
-	userStoreRefreshActive               map[string]bool
-	userStoreRefreshInterval             time.Duration
-	userStoreRefreshProjectFn            func(context.Context, string) error
 	userStoreProjectLockHook             func(string, bool)
 	userStoreProjectRefreshLocks         sync.Map
 	userStoreRefreshWG                   sync.WaitGroup
@@ -382,9 +377,6 @@ func New(cfg Config) *Daemon {
 		orchestrationSnapshotLoads:         map[string]*orchestrationSnapshotLoad{},
 		materializers:                      map[string]*projectReadMaterializer{},
 		revision:                           map[string]uint64{},
-		userStoreRefreshPending:            map[string]bool{},
-		userStoreRefreshDirty:              map[string]bool{},
-		userStoreRefreshActive:             map[string]bool{},
 		userProjectionConsumers:            map[string]*userProjectionConsumerHandle{},
 		shutdownReqCh:                      make(chan struct{}),
 	}
@@ -464,7 +456,6 @@ func New(cfg Config) *Daemon {
 		sessionResolveConflict:  d.handleSessionResolveConflictDirect,
 		taskBulkCleanup:         d.handleTaskBulkCleanup,
 		globalProjectionRebuild: d.handleGlobalProjectionRebuild,
-		onMutationSuccess:       d.enqueueUserProjectionRefresh,
 		onTerminal:              d.reconcileOrchestrationStartOperation,
 		recoverInterrupted:      d.recoverInterruptedOperation,
 		noticeService:           noticeService,
@@ -812,14 +803,6 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	}
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "command.begin", beginStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	defer d.endCommand()
-	if commandMutatesProjectProjection(req.Command) {
-		defer func() {
-			if err == nil && resp.OK && (!commandCoveredByIssueProjectionDelta(req.Command) || !d.hasUserProjectionConsumer(projectID)) {
-				d.enqueueUserProjectionRefresh(projectID)
-			}
-		}()
-	}
-
 	if daemonhandlers.DaemonRoutesThroughDispatcher(req.Command) {
 		if d.router == nil {
 			return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil

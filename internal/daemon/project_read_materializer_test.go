@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
@@ -258,6 +259,57 @@ func TestProjectReadSnapshotIsPureAtDeclaredChecksum(t *testing.T) {
 	}
 	if before != after || checksumJSON(tasksA) != checksumJSON(tasksB) || sourceA.SemanticChecksum != sourceB.SemanticChecksum {
 		t.Fatalf("pure read changed source: data_version %d->%d source %s/%s", before, after, sourceA.SemanticChecksum, sourceB.SemanticChecksum)
+	}
+}
+
+func TestSyncUserProjectionMaterializedIssuesPropagatesBoundedCurrentState(t *testing.T) {
+	ctx := context.Background()
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	canonical := domain.Task{ID: "issue", Title: "canonical", Status: domain.StatusInProgress, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}
+	state := userstore.ProjectDeltaState{ProjectID: "p", Cursor: 4, Hash: "four", Initialized: true, Projector: issueProjectionProjector()}
+	if err := store.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: "p", Name: "P", Path: "/p", DBPath: "/p/db", Tasks: []domain.Task{canonical}, Delta: &state}); err != nil {
+		t.Fatal(err)
+	}
+	materialized := canonical
+	materialized.Session = &domain.Session{IssueID: "issue", State: domain.SessionBusy, Activity: "working", UpdatedAt: now.Add(time.Second)}
+	materialized.HasTmuxSession = true
+	reader := newProjectReadMaterializer("p", nil, nil)
+	reader.tasks[canonical.ID.String()] = materialized
+	reader.metadata = protocol.MaterializedSnapshotMetadata{Health: "healthy"}
+	d := &Daemon{cfg: Config{}, userStore: store, materializers: map[string]*projectReadMaterializer{"p": reader}}
+	if err := d.syncUserProjectionMaterializedIssues(ctx, "p", []string{"issue"}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 1 || snapshot.Projects[0].DeltaCursor != 4 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].Session == nil || !snapshot.Projects[0].Tasks[0].HasTmuxSession {
+		t.Fatalf("bounded current-state propagation = %+v", snapshot.Projects)
+	}
+}
+
+func TestStopAllProjectReadMaterializersCancelsAndJoinsConsumers(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		close(done)
+	}()
+	d := &Daemon{materializers: map[string]*projectReadMaterializer{"p": {projectID: "p", cancel: cancel, done: done}}}
+	d.stopAllProjectReadMaterializers(context.Background())
+	select {
+	case <-done:
+	default:
+		t.Fatal("materializer shutdown did not join canceled consumer")
+	}
+	if d.activeProjectReadMaterializer("p") != nil {
+		t.Fatal("materializer survived shutdown")
 	}
 }
 

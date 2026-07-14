@@ -189,7 +189,7 @@ fd "filename" -t f internal cmd
    - `investigation.waiting_human` human-findings authority gate -> `projection` (durable investigation disposition and issue-specific acceptance/review evidence refreshed before evaluation)
    - `interaction.staleness` stale/reminder/disposition/recovery policy -> `projection` (durable interaction request projection refreshed before age evaluation and revision-safe write-through audit)
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
-   - cross-project configurable views and tmux selector ordering -> `projection` (global-daemon-owned user database refreshed from authoritative project stores; scoped issue/session/worktree/dependency keys and explicit stale/unavailable project health)
+   - cross-project configurable views and tmux selector ordering -> `projection` (global-daemon-owned user database incrementally consumes verified per-project issue deltas plus independently keyed runtime/fact materializations; full export is bootstrap/explicit rebuild/isolated recovery only; scoped issue/session/worktree/dependency keys and explicit vector/stale/unavailable project health)
    - orchestration scope identity -> `projection` (durable project + typed rooted/project scope)
    - orchestration scope singleton -> `hybrid` (refreshed durable scope lease + live tmux runtime)
    - rooted parent orchestration continuation -> `hybrid` (durable rooted lease/cursor + refreshed direct nested-root, interaction, completion, and session projections + live tmux wake delivery)

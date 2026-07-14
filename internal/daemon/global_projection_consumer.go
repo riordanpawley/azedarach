@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,6 +52,7 @@ func (d *Daemon) ensureUserProjectionConsumers(ctx context.Context, projects []a
 	}
 	d.userProjectionConsumerMu.Lock()
 	var stopped []*userProjectionConsumerHandle
+	var stoppedProjectIDs []string
 	for projectID, handle := range d.userProjectionConsumers {
 		project, exists := desired[projectID]
 		if exists && filepath.Clean(project.Path) == handle.path {
@@ -59,6 +61,7 @@ func (d *Daemon) ensureUserProjectionConsumers(ctx context.Context, projects []a
 		handle.cancel()
 		delete(d.userProjectionConsumers, projectID)
 		stopped = append(stopped, handle)
+		stoppedProjectIDs = append(stoppedProjectIDs, projectID)
 	}
 	d.userProjectionConsumerMu.Unlock()
 	for _, handle := range stopped {
@@ -70,6 +73,9 @@ func (d *Daemon) ensureUserProjectionConsumers(ctx context.Context, projects []a
 		case <-ctx.Done():
 			return
 		}
+	}
+	for _, projectID := range stoppedProjectIDs {
+		d.stopProjectReadMaterializer(ctx, projectID)
 	}
 	for _, project := range projects {
 		projectID := protocol.NormalizeProjectID(appconfig.RegisteredProjectID(project))
@@ -138,6 +144,15 @@ func (d *Daemon) runUserProjectionConsumer(ctx context.Context, project appconfi
 			}
 			continue
 		}
+		if d.activeProjectReadMaterializer(projectID) == nil {
+			if _, err := d.ensureProjectReadMaterializer(ctx, projectID, client); err != nil {
+				d.logUserProjectionConsumerError(projectID, fmt.Errorf("start keyed current-state materializer: %w", err))
+				if !waitProjectionConsumerRetry(ctx) {
+					return
+				}
+				continue
+			}
+		}
 		batch, err := NewProjectionDeltaAuthority(client).Watch(ctx, "default", state.Cursor, rootProjectionDeltaBatchLimit)
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, domain.ErrProjectionCanceled) {
@@ -178,6 +193,16 @@ func (d *Daemon) runUserProjectionConsumer(ctx context.Context, project appconfi
 			}
 			continue
 		}
+		changes, err = d.hydrateUserProjectionChanges(ctx, projectID, client, batch, changes)
+		if err != nil {
+			if recoverErr := d.recoverUserProjectionConsumer(ctx, project, err); recoverErr != nil {
+				d.logUserProjectionConsumerError(projectID, recoverErr)
+				if !waitProjectionConsumerRetry(ctx) {
+					return
+				}
+			}
+			continue
+		}
 		next := userstore.ProjectDeltaState{
 			ProjectID: projectID, Cursor: batch.DeliveryToCursor,
 			SourceVector: mergeRootProjectionSources(state.SourceVector, batch.SourceVector),
@@ -204,6 +229,90 @@ func (d *Daemon) runUserProjectionConsumer(ctx context.Context, project appconfi
 			}
 		}
 	}
+}
+
+func (d *Daemon) hydrateUserProjectionChanges(ctx context.Context, projectID string, client *issues.Client, batch protocol.ProjectionDeltaBatch, changes []userstore.ProjectDeltaChange) ([]userstore.ProjectDeltaChange, error) {
+	wanted := make(map[string]struct{}, len(changes)+len(batch.EmptyAdvances))
+	byID := make(map[string]userstore.ProjectDeltaChange, len(changes)+len(batch.EmptyAdvances))
+	observationPositions := make(map[int64]struct{}, len(batch.EmptyAdvances))
+	var firstObservation, lastObservation int64
+	for _, change := range changes {
+		byID[change.IssueID] = change
+		if !change.Delete {
+			wanted[change.IssueID] = struct{}{}
+		}
+	}
+	for _, advance := range batch.EmptyAdvances {
+		if advance.Source.Authority != "legacy_issue_observation" {
+			continue
+		}
+		position, err := strconv.ParseInt(strings.TrimSpace(advance.Source.SourceTo), 10, 64)
+		if err != nil || position <= 0 {
+			return nil, fmt.Errorf("decode issue observation source position %q", advance.Source.SourceTo)
+		}
+		observationPositions[position] = struct{}{}
+		if firstObservation == 0 || position < firstObservation {
+			firstObservation = position
+		}
+		if position > lastObservation {
+			lastObservation = position
+		}
+	}
+	if len(observationPositions) > 0 {
+		span := lastObservation - firstObservation + 1
+		if span > 5000 {
+			return nil, fmt.Errorf("issue observation source span %d exceeds bounded lookup", span)
+		}
+		events, err := client.ListProjectIssueObservationEvents(ctx, firstObservation-1, int(span))
+		if err != nil {
+			return nil, fmt.Errorf("resolve issue observation sources %d..%d: %w", firstObservation, lastObservation, err)
+		}
+		for _, event := range events {
+			if _, ok := observationPositions[event.ID]; !ok {
+				continue
+			}
+			delete(observationPositions, event.ID)
+			if issueID := event.IssueID.String(); issueID != "" {
+				wanted[issueID] = struct{}{}
+			}
+		}
+		if len(observationPositions) > 0 {
+			return nil, fmt.Errorf("%d issue observation source positions unavailable", len(observationPositions))
+		}
+	}
+	if len(wanted) == 0 {
+		return changes, nil
+	}
+	ids := make([]string, 0, len(wanted))
+	for issueID := range wanted {
+		ids = append(ids, issueID)
+	}
+	sort.Strings(ids)
+	tasks, err := client.GetManyWithRuntime(ctx, protocol.DefaultProjectID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("hydrate keyed user projection changes: %w", err)
+	}
+	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
+	for i := range tasks {
+		task := tasks[i]
+		change := byID[task.ID.String()]
+		change.IssueID = task.ID.String()
+		change.MaterializedIssue = &task
+		byID[task.ID.String()] = change
+		delete(wanted, task.ID.String())
+	}
+	for issueID := range wanted {
+		if existing, ok := byID[issueID]; ok && existing.Delete {
+			continue
+		}
+		return nil, fmt.Errorf("hydrate keyed user projection issue %s: %w", issueID, domain.ErrNotFound)
+	}
+	result := make([]userstore.ProjectDeltaChange, 0, len(byID))
+	for _, change := range byID {
+		result = append(result, change)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].IssueID < result[j].IssueID })
+	return result, nil
 }
 
 func decodeUserProjectionChanges(batch protocol.ProjectionDeltaBatch) ([]userstore.ProjectDeltaChange, error) {

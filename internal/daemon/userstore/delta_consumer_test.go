@@ -112,6 +112,67 @@ func TestApplyProjectDeltaIsAtomicIdempotentAndPreservesRuntimeProjection(t *tes
 	}
 }
 
+func TestApplyProjectMaterializedIssuesUpdatesCurrentStateWithoutOrderingItByDeliveryCursor(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	initial := testDeltaState("p", 7, "issue-stream-seven")
+	issue := domain.Task{ID: "issue", Title: "bounded", Status: domain.StatusInProgress, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}
+	if err := store.ReplaceProject(ctx, ProjectInput{ProjectID: "p", Name: "P", Path: "/p", DBPath: "/p/db", Tasks: []domain.Task{issue}, Delta: &initial}); err != nil {
+		t.Fatal(err)
+	}
+	materialized := issue
+	materialized.Title = "stale materializer title"
+	materialized.Status = domain.StatusOpen
+	materialized.Session = &domain.Session{IssueID: issue.ID, State: domain.SessionBusy, Activity: "working", UpdatedAt: now.Add(time.Second)}
+	materialized.HasTmuxSession = true
+	materialized.Ownership = &domain.IssueOwnership{OwnerID: "agent", OwnerKind: "agent", ClaimedAt: now}
+	if err := store.ApplyProjectMaterializedIssues(ctx, "p", []ProjectDeltaChange{{IssueID: issue.ID.String(), Issue: &materialized}}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.ProjectDeltaState(ctx, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := projectSnapshot(t, store, "p")
+	if state.Cursor != initial.Cursor || state.Hash != initial.Hash || !reflect.DeepEqual(state.SourceVector, initial.SourceVector) {
+		t.Fatalf("current-state apply changed issue delivery component: before=%+v after=%+v", initial, state)
+	}
+	if len(project.Tasks) != 1 || project.Tasks[0].Title != issue.Title || project.Tasks[0].Status != issue.Status || project.Tasks[0].Session == nil || !project.Tasks[0].HasTmuxSession || project.Tasks[0].Ownership == nil {
+		t.Fatalf("current-state materialization was not applied: %+v", project.Tasks)
+	}
+}
+
+func TestApplyProjectDeltaAtomicallyAdvancesEmptySourceAndAffectedCurrentIssue(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	initial := testDeltaState("p", 1, "one")
+	issue := domain.Task{ID: "issue", Title: "canonical", Status: domain.StatusInReview, Type: domain.TypeInvestigation, CreatedAt: now, UpdatedAt: now}
+	if err := store.ReplaceProject(ctx, ProjectInput{ProjectID: "p", Name: "P", Path: "/p", DBPath: "/p/db", Tasks: []domain.Task{issue}, Delta: &initial}); err != nil {
+		t.Fatal(err)
+	}
+	materialized := issue
+	materialized.Facts = domain.DeriveIssueFacts(domain.IssueFactsInput{Status: issue.Status, Type: issue.Type})
+	next := testDeltaState("p", 2, "two")
+	next.SourceVector[0].SourceTo = "2"
+	err := store.ApplyProjectDelta(ctx, ProjectDeltaApply{
+		Project: CatalogProject{ProjectID: "p", Name: "P", Path: "/p", DBPath: "/p/db"}, Expected: initial, Next: next,
+		Changes: []ProjectDeltaChange{{IssueID: issue.ID.String(), MaterializedIssue: &materialized}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.ProjectDeltaState(ctx, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := projectSnapshot(t, store, "p")
+	if state.Cursor != 2 || len(project.Tasks) != 1 || project.Tasks[0].Title != issue.Title || project.Tasks[0].IssueFacts().WaitingHuman {
+		t.Fatalf("empty source advance did not atomically materialize affected current issue: state=%+v tasks=%+v", state, project.Tasks)
+	}
+}
+
 func TestApplyProjectDeltaFailurePreservesLastGoodRowsAndComponent(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

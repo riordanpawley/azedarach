@@ -18,46 +18,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
-func TestStopUserProjectionWorkersWaitsAndRejectsNewWork(t *testing.T) {
-	d := &Daemon{
-		userStoreRefreshPending: map[string]bool{},
-		userStoreRefreshDirty:   map[string]bool{},
-	}
-	workerStarted := make(chan struct{})
-	releaseWorker := make(chan struct{})
-	d.userStoreRefreshMu.Lock()
-	d.userStoreRefreshWG.Add(1)
-	d.userStoreRefreshMu.Unlock()
-	go func() {
-		defer d.userStoreRefreshWG.Done()
-		close(workerStarted)
-		<-releaseWorker
-	}()
-	<-workerStarted
-	stopped := make(chan struct{})
-	go func() {
-		d.stopUserProjectionWorkers()
-		close(stopped)
-	}()
-	select {
-	case <-stopped:
-		t.Fatal("projection shutdown returned before active worker completed")
-	case <-time.After(20 * time.Millisecond):
-	}
-	d.userStoreRefreshMu.Lock()
-	if !d.userStoreRefreshStopping {
-		d.userStoreRefreshMu.Unlock()
-		t.Fatal("projection shutdown did not reject new workers")
-	}
-	d.userStoreRefreshMu.Unlock()
-	close(releaseWorker)
-	select {
-	case <-stopped:
-	case <-time.After(time.Second):
-		t.Fatal("projection shutdown did not finish after active worker completed")
-	}
-}
-
 func TestGlobalSnapshotScopeExcludesUnavailableProjectFromPartialHealth(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	p1, p2 := t.TempDir(), t.TempDir()

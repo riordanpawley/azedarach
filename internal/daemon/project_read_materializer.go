@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -33,6 +34,8 @@ type projectReadMaterializer struct {
 	tasks     map[string]domain.Task
 	worktrees map[string]git.Worktree
 	metadata  protocol.MaterializedSnapshotMetadata
+	cancel    context.CancelFunc
+	done      chan struct{}
 }
 
 func newProjectReadMaterializer(projectID string, authority *ProjectionDeltaAuthority, hydrate func(context.Context, []domain.Task) ([]domain.Task, error)) *projectReadMaterializer {
@@ -362,6 +365,11 @@ func (d *Daemon) ensureProjectReadMaterializer(ctx context.Context, projectID st
 	projectID = d.canonicalProjectID(projectID)
 	d.materializersInitMu.Lock()
 	defer d.materializersInitMu.Unlock()
+	d.materializersMu.Lock()
+	if d.materializers == nil {
+		d.materializers = map[string]*projectReadMaterializer{}
+	}
+	d.materializersMu.Unlock()
 	d.materializersMu.RLock()
 	materializer := d.materializers[projectID]
 	runCtx := d.materializersContext
@@ -399,24 +407,82 @@ func (d *Daemon) ensureProjectReadMaterializer(ctx context.Context, projectID st
 	if err := d.refreshProjectReadWorktrees(ctx, projectID, materializer); err != nil {
 		return nil, fmt.Errorf("hydrate project %s worktree materialization: %w", projectID, err)
 	}
+	var materializerRunCtx context.Context
+	if runCtx != nil {
+		materializerRunCtx, materializer.cancel = context.WithCancel(runCtx)
+		materializer.done = make(chan struct{})
+	}
 	d.materializersMu.Lock()
 	if existing := d.materializers[projectID]; existing != nil {
 		d.materializersMu.Unlock()
+		if materializer.cancel != nil {
+			materializer.cancel()
+		}
 		return existing, nil
 	}
 	d.materializers[projectID] = materializer
 	d.materializersMu.Unlock()
 	if runCtx != nil {
-		go materializer.run(runCtx, func(metadata protocol.MaterializedSnapshotMetadata) {
-			revision := d.nextRevision(projectID)
-			body, _ := json.Marshal(struct {
-				ProjectID naming.ProjectID                      `json:"project_id"`
-				Source    protocol.MaterializedSnapshotMetadata `json:"source"`
-			}{naming.ProjectID(projectID), metadata})
-			d.hub.Publish(protocol.EventEnvelope{ProtocolVersion: protocol.CurrentVersion, ProjectID: naming.ProjectID(projectID), Revision: revision, Event: "projection.materialized", Kind: protocol.EnvelopeKindEvent, EmittedAt: time.Now().UTC(), Body: body})
-		})
+		go func() {
+			defer close(materializer.done)
+			materializer.run(materializerRunCtx, func(metadata protocol.MaterializedSnapshotMetadata) {
+				revision := d.nextRevision(projectID)
+				body, _ := json.Marshal(struct {
+					ProjectID naming.ProjectID                      `json:"project_id"`
+					Source    protocol.MaterializedSnapshotMetadata `json:"source"`
+				}{naming.ProjectID(projectID), metadata})
+				d.hub.Publish(protocol.EventEnvelope{ProtocolVersion: protocol.CurrentVersion, ProjectID: naming.ProjectID(projectID), Revision: revision, Event: "projection.materialized", Kind: protocol.EnvelopeKindEvent, EmittedAt: time.Now().UTC(), Body: body})
+			})
+		}()
 	}
 	return materializer, nil
+}
+
+func (d *Daemon) stopProjectReadMaterializer(ctx context.Context, projectID string) {
+	projectID = d.canonicalProjectID(projectID)
+	d.materializersMu.Lock()
+	materializer := d.materializers[projectID]
+	delete(d.materializers, projectID)
+	d.materializersMu.Unlock()
+	if materializer == nil || materializer.cancel == nil {
+		return
+	}
+	materializer.cancel()
+	if materializer.done == nil {
+		return
+	}
+	select {
+	case <-materializer.done:
+	case <-ctx.Done():
+	}
+}
+
+func (d *Daemon) stopAllProjectReadMaterializers(ctx context.Context) {
+	if d == nil {
+		return
+	}
+	d.materializersMu.Lock()
+	materializers := make([]*projectReadMaterializer, 0, len(d.materializers))
+	for projectID, materializer := range d.materializers {
+		delete(d.materializers, projectID)
+		materializers = append(materializers, materializer)
+	}
+	d.materializersMu.Unlock()
+	for _, materializer := range materializers {
+		if materializer != nil && materializer.cancel != nil {
+			materializer.cancel()
+		}
+	}
+	for _, materializer := range materializers {
+		if materializer == nil || materializer.done == nil {
+			continue
+		}
+		select {
+		case <-materializer.done:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (d *Daemon) projectReadSnapshot(projectID string) ([]domain.Task, protocol.MaterializedSnapshotMetadata, error) {
@@ -467,7 +533,7 @@ func (d *Daemon) projectReadSnapshot(projectID string) ([]domain.Task, protocol.
 	return tasks, metadata, nil
 }
 
-func (d *Daemon) refreshProjectReadRuntime(ctx context.Context, projectID string) {
+func (d *Daemon) refreshProjectReadRuntime(ctx context.Context, projectID string, issueIDs ...string) {
 	projectID = d.canonicalProjectID(projectID)
 	d.materializersMu.RLock()
 	materializer := d.materializers[projectID]
@@ -481,6 +547,39 @@ func (d *Daemon) refreshProjectReadRuntime(ctx context.Context, projectID string
 	if err := d.refreshProjectReadWorktrees(ctx, projectID, materializer); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("refresh project read worktree materialization", "project_id", projectID, "error", err)
 	}
+	if err := d.syncUserProjectionMaterializedIssues(ctx, projectID, issueIDs); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("apply keyed user projection materialization", "project_id", projectID, "issue_ids", issueIDs, "error", err)
+	}
+}
+
+func (d *Daemon) syncUserProjectionMaterializedIssues(ctx context.Context, projectID string, issueIDs []string) error {
+	if d == nil || d.userStore == nil || d.cfg.ScopedRuntime || len(issueIDs) == 0 {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(issueIDs))
+	for _, issueID := range issueIDs {
+		if issueID = strings.TrimSpace(issueID); issueID != "" {
+			wanted[issueID] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	tasks, _, err := d.projectReadSnapshot(projectID)
+	if err != nil {
+		return err
+	}
+	changes := make([]userstore.ProjectDeltaChange, 0, len(wanted))
+	for i := range tasks {
+		issueID := tasks[i].ID.String()
+		if _, ok := wanted[issueID]; !ok {
+			continue
+		}
+		task := tasks[i]
+		changes = append(changes, userstore.ProjectDeltaChange{IssueID: issueID, Issue: &task})
+		delete(wanted, issueID)
+	}
+	return d.userStore.ApplyProjectMaterializedIssues(ctx, d.canonicalProjectID(projectID), changes)
 }
 
 func (d *Daemon) refreshProjectReadWorktrees(ctx context.Context, projectID string, materializer *projectReadMaterializer) error {

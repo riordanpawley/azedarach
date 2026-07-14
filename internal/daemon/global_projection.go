@@ -12,173 +12,13 @@ import (
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
-	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
-func commandMutatesProjectProjection(command string) bool {
-	switch command {
-	case "task.event.append", "task.create", "task.close", protocol.CommandTaskBulkCleanup,
-		"task.ownership.claim", "task.ownership.release", "task.update_status", "task.update_details",
-		"task.append_notes", "task.delete", "task.archive", "task.unarchive",
-		"task.dependency.add", "task.dependency.remove", protocol.CommandTaskBulkApply,
-		"session.start", "session.attach", "session.pause", "session.resume", "session.stop",
-		daemonhandlers.CommandSessionMessage, protocol.CommandSessionResolveConflict,
-		protocol.CommandSessionRestartAll, "session.recover", protocol.CommandRuntimeReconcile,
-		protocol.CommandRuntimeReconcileIssue, commandSyncRun,
-		protocol.CommandInteractionCreate, protocol.CommandInteractionDiscuss,
-		protocol.CommandInteractionPropose, protocol.CommandInteractionAnswer,
-		protocol.CommandInteractionResolve, protocol.CommandInteractionWithdraw,
-		protocol.CommandInteractionSupersede, protocol.CommandInteractionRecover,
-		protocol.CommandOrchestrationIntent, protocol.CommandOrchestratorSessionStart,
-		protocol.CommandOrchestratorSessionAttach, protocol.CommandOrchestratorSessionStop,
-		daemonhandlers.CommandWorktreeCreate, daemonhandlers.CommandWorktreeRemove,
-		daemonhandlers.CommandWorktreeCleanupOrphaned,
-		daemonhandlers.CommandGitFetch, daemonhandlers.CommandGitPullBase,
-		daemonhandlers.CommandGitPush, daemonhandlers.CommandGitMerge,
-		daemonhandlers.CommandGitCheckout, daemonhandlers.CommandGitAbortMerge,
-		daemonhandlers.CommandGitDiscardChanges, daemonhandlers.CommandGitCheckpoint:
-		return true
-	default:
-		return false
-	}
-}
-
-func (d *Daemon) enqueueUserProjectionRefresh(projectID string) {
-	if d == nil || d.userStore == nil || d.cfg.ScopedRuntime {
-		return
-	}
-	projectID = d.canonicalProjectID(projectID)
-	d.enqueueLegacyUserProjectionRefresh(projectID)
-}
-
-func (d *Daemon) enqueueLegacyUserProjectionRefresh(projectID string) {
-	if d == nil || d.userStore == nil || d.cfg.ScopedRuntime {
-		return
-	}
-	projectID = d.canonicalProjectID(projectID)
-	d.userStoreRefreshMu.Lock()
-	if d.userStoreRefreshPending == nil {
-		d.userStoreRefreshPending = map[string]bool{}
-	}
-	if d.userStoreRefreshDirty == nil {
-		d.userStoreRefreshDirty = map[string]bool{}
-	}
-	if d.userStoreRefreshActive == nil {
-		d.userStoreRefreshActive = map[string]bool{}
-	}
-	if d.userStoreRefreshStopping {
-		d.userStoreRefreshMu.Unlock()
-		return
-	}
-	if d.userStoreRefreshPending[projectID] {
-		d.userStoreRefreshDirty[projectID] = true
-		d.userStoreRefreshMu.Unlock()
-		return
-	}
-	d.userStoreRefreshPending[projectID] = true
-	d.userStoreRefreshDirty[projectID] = true
-	d.userStoreRefreshWG.Add(1)
-	workerCtx := d.userStoreRefreshCtx
-	if workerCtx == nil {
-		d.userStoreRefreshCtx, d.userStoreRefreshCancel = context.WithCancel(context.Background())
-		workerCtx = d.userStoreRefreshCtx
-	}
-	interval := d.userStoreRefreshInterval
-	if interval <= 0 {
-		interval = userProjectionMutationRefreshInterval
-	}
-	refreshProject := d.userStoreRefreshProjectFn
-	if refreshProject == nil {
-		refreshProject = d.refreshUserProject
-	}
-	d.userStoreRefreshMu.Unlock()
-	go func() {
-		defer d.userStoreRefreshWG.Done()
-		for {
-			d.userStoreRefreshMu.Lock()
-			d.userStoreRefreshDirty[projectID] = false
-			d.userStoreRefreshActive[projectID] = true
-			d.userStoreRefreshMu.Unlock()
-			ctx, cancel := context.WithTimeout(workerCtx, 30*time.Second)
-			err := refreshProject(ctx, projectID)
-			cancel()
-			if err != nil && d.cfg.Logger != nil {
-				d.cfg.Logger.Warn("refresh user cross-project projection after mutation", "project_id", projectID, "error", err)
-			}
-			d.userStoreRefreshMu.Lock()
-			d.userStoreRefreshActive[projectID] = false
-			stopping := d.userStoreRefreshStopping
-			d.userStoreRefreshMu.Unlock()
-			if stopping {
-				d.finishUserProjectionRefreshWorker(projectID)
-				return
-			}
-
-			// Retain the project's single worker throughout the cooldown. This
-			// prevents a mutation arriving just after a clean refresh from creating
-			// a fresh worker that bypasses the per-project rate bound.
-			timer := time.NewTimer(interval)
-			select {
-			case <-workerCtx.Done():
-				timer.Stop()
-				d.finishUserProjectionRefreshWorker(projectID)
-				return
-			case <-timer.C:
-			}
-			d.userStoreRefreshMu.Lock()
-			dirty := d.userStoreRefreshDirty[projectID]
-			stopping = d.userStoreRefreshStopping
-			if !dirty || stopping {
-				delete(d.userStoreRefreshPending, projectID)
-				delete(d.userStoreRefreshDirty, projectID)
-				delete(d.userStoreRefreshActive, projectID)
-			}
-			d.userStoreRefreshMu.Unlock()
-			if !dirty || stopping {
-				return
-			}
-		}
-	}()
-}
-
-func (d *Daemon) hasUserProjectionConsumer(projectID string) bool {
-	projectID = d.canonicalProjectID(projectID)
-	d.userProjectionConsumerMu.Lock()
-	defer d.userProjectionConsumerMu.Unlock()
-	_, ok := d.userProjectionConsumers[projectID]
-	return ok
-}
-
-// commandCoveredByIssueProjectionDelta is deliberately narrower than the
-// mutation registry. Runtime, ownership, interaction, Git, and worktree facts
-// retain the bounded legacy refresh until their typed sibling delta producers
-// land and the final cutover removes that adapter.
-func commandCoveredByIssueProjectionDelta(command string) bool {
-	switch command {
-	case "task.create", "task.update_details", "task.append_notes",
-		"task.delete", "task.archive", "task.unarchive",
-		"task.dependency.add", "task.dependency.remove",
-		commandSyncRun:
-		return true
-	default:
-		return false
-	}
-}
-
-func (d *Daemon) finishUserProjectionRefreshWorker(projectID string) {
-	d.userStoreRefreshMu.Lock()
-	delete(d.userStoreRefreshPending, projectID)
-	delete(d.userStoreRefreshDirty, projectID)
-	delete(d.userStoreRefreshActive, projectID)
-	d.userStoreRefreshMu.Unlock()
-}
-
 const (
-	userProjectionMutationRefreshInterval = 10 * time.Second
-	globalProjectionRepairInterval        = 2 * time.Minute
+	globalProjectionRepairInterval = 2 * time.Minute
 )
 
 func (d *Daemon) startGlobalProjectionRepairWorker(ctx context.Context) {
@@ -268,6 +108,7 @@ func (d *Daemon) stopUserProjectionWorkers() {
 	}
 	d.userStoreRefreshMu.Unlock()
 	d.userStoreRefreshWG.Wait()
+	d.stopAllProjectReadMaterializers(context.Background())
 }
 
 func (d *Daemon) refreshUserProject(ctx context.Context, wantedProjectID string) error {
@@ -445,7 +286,6 @@ func (d *Daemon) handleGlobalSnapshot(ctx context.Context, req protocol.RequestE
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	d.overlayScheduledUserProjectionFreshness(&snapshot)
 	projection, err := projectGlobalView(view, filterGlobalProjects(snapshot.Projects, scope))
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -482,34 +322,6 @@ func augmentGlobalProjectionKnownTasks(known []protocol.ScopedIssueID, projects 
 		}
 	}
 	return known
-}
-
-func (d *Daemon) overlayScheduledUserProjectionFreshness(snapshot *protocol.GlobalSnapshotResponseBody) {
-	if d == nil || snapshot == nil {
-		return
-	}
-	d.userStoreRefreshMu.Lock()
-	stale := make(map[string]struct{}, len(d.userStoreRefreshDirty)+len(d.userStoreRefreshActive))
-	for projectID, dirty := range d.userStoreRefreshDirty {
-		if dirty {
-			stale[projectID] = struct{}{}
-		}
-	}
-	for projectID, active := range d.userStoreRefreshActive {
-		if active {
-			stale[projectID] = struct{}{}
-		}
-	}
-	d.userStoreRefreshMu.Unlock()
-	for i := range snapshot.Projects {
-		if _, ok := stale[protocol.NormalizeProjectID(snapshot.Projects[i].ProjectID)]; !ok {
-			continue
-		}
-		if snapshot.Projects[i].Freshness == protocol.GlobalProjectionFreshnessFresh {
-			snapshot.Projects[i].Freshness = protocol.GlobalProjectionFreshnessStale
-		}
-		snapshot.Partial = true
-	}
 }
 
 func filterGlobalProjects(projects []protocol.GlobalProjectSnapshot, scope protocol.GlobalViewScope) []protocol.GlobalProjectSnapshot {
@@ -575,7 +387,6 @@ func (d *Daemon) handleGlobalProjectionRebuild(ctx context.Context, req protocol
 	if rebuildErr != nil {
 		snapshot.Partial = true
 	}
-	d.overlayScheduledUserProjectionFreshness(&snapshot)
 	raw, err := json.Marshal(snapshot)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil

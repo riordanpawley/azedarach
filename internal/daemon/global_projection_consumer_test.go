@@ -4,7 +4,9 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -44,9 +46,6 @@ func TestUserProjectionConsumerReplaysAndWatchesWithoutMutationFullExport(t *tes
 		issueClientsByProject:   map[string]*issues.Client{projectID: client},
 		issueClientsByRoot:      map[string]*issues.Client{daemonStoreRootKey(root): client},
 		userStore:               store,
-		userStoreRefreshPending: map[string]bool{},
-		userStoreRefreshDirty:   map[string]bool{},
-		userStoreRefreshActive:  map[string]bool{},
 		userProjectionConsumers: map[string]*userProjectionConsumerHandle{},
 	}
 	if err := d.refreshRegisteredUserProject(context.Background(), project); err != nil {
@@ -96,6 +95,36 @@ func TestUserProjectionConsumerReplaysAndWatchesWithoutMutationFullExport(t *tes
 	restartCtx, restartCancel := context.WithCancel(context.Background())
 	d2.ensureUserProjectionConsumers(restartCtx, []appconfig.Project{project})
 	waitForGlobalProjectedTask(t, store, projectID, issueID, domain.StatusInReview, 3)
+	legacy, err := client.ExportProjection(context.Background(), projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.Tasks = d2.enrichTasksWithSessionState(context.Background(), projectID, legacy.Tasks)
+	incremental, err := store.Snapshot(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(incremental.Projects) != 1 || checksumJSON(incremental.Projects[0].Tasks) != checksumJSON(legacy.Tasks) {
+		t.Fatalf("shadow materializations diverged: legacy=%s incremental=%s", checksumJSON(legacy.Tasks), checksumJSON(incremental.Projects[0].Tasks))
+	}
+	legacyView, err := projectGlobalView(domain.DefaultBoardView(), []protocol.GlobalProjectSnapshot{{ProjectID: projectID, Tasks: legacy.Tasks}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	incrementalView, err := projectGlobalView(domain.DefaultBoardView(), incremental.Projects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checksumJSON(legacyView) != checksumJSON(incrementalView) {
+		t.Fatalf("shadow user-visible views diverged: legacy=%s incremental=%s", checksumJSON(legacyView), checksumJSON(incrementalView))
+	}
+	component, err := store.ProjectDeltaState(context.Background(), projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if component.Cursor != 3 || component.Hash == "" || len(component.SourceVector) == 0 || component.Projector != issueProjectionProjector() {
+		t.Fatalf("incremental vector health = %+v", component)
+	}
 	restartCancel()
 	d2.stopUserProjectionWorkers()
 }
@@ -158,16 +187,38 @@ func TestUserProjectionConsumerGapRecoversOnlyAffectedProjectFromVerifiedSnapsho
 	d.stopUserProjectionWorkers()
 }
 
-func TestIssueDeltaCoverageKeepsRuntimeAndOwnershipMutationsOnLegacyRepair(t *testing.T) {
-	for _, command := range []string{"task.ownership.claim", "task.update_status", "task.close", "session.start", "interaction.answer", "git.merge"} {
-		if commandCoveredByIssueProjectionDelta(command) {
-			t.Fatalf("runtime/ownership command %q bypasses transitional repair", command)
-		}
+func TestUserProjectionConsumerHydratesAffectedIssueForEmptyObservationAdvance(t *testing.T) {
+	ctx := context.Background()
+	client := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	if err := client.OpenProjectionDeltaStore(); err != nil {
+		t.Fatal(err)
 	}
-	for _, command := range []string{"task.create", "task.update_details", "task.append_notes", "task.dependency.add", commandSyncRun} {
-		if !commandCoveredByIssueProjectionDelta(command) {
-			t.Fatalf("complete-value issue command %q did not use delta materialization", command)
-		}
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "findings", Type: domain.TypeInvestigation, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := NewProjectionDeltaAuthority(client).List(ctx, protocol.DefaultProjectID, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventHumanInputProvided, Source: "human", Payload: map[string]any{"investigation_findings_accepted": true}}); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := NewProjectionDeltaAuthority(client).List(ctx, protocol.DefaultProjectID, before.DeliveryToCursor, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.Deltas) != 0 || len(batch.EmptyAdvances) != 1 {
+		t.Fatalf("acceptance batch = %+v, want one non-semantic source advance", batch)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issues: client, issueClientsByProject: map[string]*issues.Client{"p": client}}
+	changes, err := d.hydrateUserProjectionChanges(ctx, "p", client, batch, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 1 || changes[0].MaterializedIssue == nil || changes[0].MaterializedIssue.ID.String() != issueID || changes[0].MaterializedIssue.IssueFacts().WaitingHuman {
+		t.Fatalf("hydrated empty advance changes = %+v", changes)
 	}
 }
 
@@ -180,17 +231,38 @@ func TestMergeRootProjectionSourcesRetainsLastKnownTerminalHash(t *testing.T) {
 	}
 }
 
+func TestRoutineProjectionPathsDoNotReintroduceLegacyFullRefreshScheduling(t *testing.T) {
+	for _, path := range []string{"daemon.go", "operation_runtime.go", "global_projection.go"} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{"enqueueUserProjectionRefresh", "enqueueLegacyUserProjectionRefresh", "commandMutatesProjectProjection", "userStoreRefreshDirty", "userStoreRefreshPending"} {
+			if strings.Contains(string(raw), forbidden) {
+				t.Fatalf("%s reintroduced retired routine projection adapter %q", path, forbidden)
+			}
+		}
+	}
+}
+
 func TestEnsureUserProjectionConsumersCancelsRemovedProject(t *testing.T) {
 	consumerCtx, consumerCancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	drained := make(chan struct{})
+	materializerCtx, materializerCancel := context.WithCancel(context.Background())
+	materializerDone := make(chan struct{})
+	go func() {
+		<-materializerCtx.Done()
+		close(materializerDone)
+	}()
 	go func() {
 		<-consumerCtx.Done()
 		close(drained)
 		close(done)
 	}()
 	d := &Daemon{
-		userStore: &userstore.Store{},
+		userStore:     &userstore.Store{},
+		materializers: map[string]*projectReadMaterializer{"removed": {projectID: "removed", cancel: materializerCancel, done: materializerDone}},
 		userProjectionConsumers: map[string]*userProjectionConsumerHandle{
 			"removed": {path: "/removed", cancel: consumerCancel, done: done},
 		},
@@ -205,6 +277,9 @@ func TestEnsureUserProjectionConsumersCancelsRemovedProject(t *testing.T) {
 	defer d.userProjectionConsumerMu.Unlock()
 	if len(d.userProjectionConsumers) != 0 {
 		t.Fatalf("removed project consumer survived: %+v", d.userProjectionConsumers)
+	}
+	if d.activeProjectReadMaterializer("removed") != nil {
+		t.Fatal("removed project current-state materializer survived")
 	}
 }
 
