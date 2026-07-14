@@ -265,6 +265,10 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 		}
 		switch terminal {
 		case "returned":
+			if err := a.ensureReviewReturnedStatus(ctx, projectID, issueID); err != nil {
+				result.Failed[issueID] = "converge returned review status: " + err.Error()
+				continue
+			}
 			result.Returned = append(result.Returned, issueID)
 			continue
 		case "closed":
@@ -315,6 +319,20 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 				} else {
 					actionErr = fmt.Errorf("%v; release review lease: %w", actionErr, releaseErr)
 				}
+			}
+		}
+		restartPending := false
+		for _, pending := range result.Pending {
+			if pending.IssueID == issueID {
+				restartPending = true
+				break
+			}
+		}
+		if actionErr == nil && request.Kind == protocol.OrchestrationIntentReviewReturn && !restartPending {
+			if err := a.ensureReviewReturnedStatus(ctx, projectID, issueID); err != nil {
+				actionErr = fmt.Errorf("converge returned review status: %w", err)
+			} else {
+				result.Returned = append(result.Returned, issueID)
 			}
 		}
 		if actionErr != nil {
@@ -370,12 +388,24 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 			return fmt.Errorf("review findings recorded but delivery failed: %v; restart failed: %w", deliveryErr, restartErr)
 		}
 		result.Launched = append(result.Launched, launch)
-		if launch.OperationState != string(protocol.OperationStateDone) {
+		switch protocol.OperationState(launch.OperationState) {
+		case protocol.OperationStateQueued, protocol.OperationStateRunning:
 			result.Pending = append(result.Pending, protocol.OrchestrationPending{IssueID: inspection.IssueID, OperationID: launch.OperationID, OperationState: launch.OperationState})
-			_ = a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "restart_submitted", "")
+			if err := a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "restart_submitted", ""); err != nil {
+				return err
+			}
 			return nil
+		case protocol.OperationStateDone:
+			delivered = true
+		case protocol.OperationStateFailed, protocol.OperationStateCancelled:
+			failure := fmt.Sprintf("restart operation %s reached terminal %s", launch.OperationID, launch.OperationState)
+			if err := a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "delivery_failed", failure); err != nil {
+				return fmt.Errorf("review findings recorded but delivery failed: %v; %s; record failure: %w", deliveryErr, failure, err)
+			}
+			return fmt.Errorf("review findings recorded but delivery failed: %v; %s", deliveryErr, failure)
+		default:
+			return fmt.Errorf("review findings recorded but delivery failed: %v; restart operation %s returned unknown state %q", deliveryErr, launch.OperationID, launch.OperationState)
 		}
-		delivered = true
 	}
 	if !delivered {
 		_ = a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "delivery_failed", deliveryErr.Error())
@@ -384,8 +414,24 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 	if err := a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "returned", ""); err != nil {
 		return err
 	}
-	result.Returned = append(result.Returned, inspection.IssueID)
 	return nil
+}
+
+func (a daemonOrchestrationAuthority) ensureReviewReturnedStatus(ctx context.Context, projectID, issueID string) error {
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return fmt.Errorf("issue store unavailable")
+	}
+	task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
+	if err != nil {
+		return err
+	}
+	switch task.Status {
+	case domain.StatusInReview, domain.StatusOpen:
+		return issueClient.Update(ctx, issueID, domain.StatusInProgress)
+	default:
+		return nil
+	}
 }
 
 func reviewFindingMailExists(repoDir, parentIssueID, issueID string, request protocol.OrchestrationIntentRequest) (bool, error) {
@@ -624,7 +670,11 @@ func reviewRequestFingerprint(request protocol.OrchestrationIntentRequest) strin
 }
 
 func (a daemonOrchestrationAuthority) deliverReviewMessage(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID, message string) (bool, error) {
-	body, err := json.Marshal(sessionCommandBody{ProjectID: projectID, SessionID: issueID, IssueID: issueID, Message: message})
+	// Leave IssueID empty so decodeSessionRequest resolves the bare issue-shaped
+	// session input through the project naming scope. Supplying both fields makes
+	// the decoder treat SessionID as an explicit tmux name, which misses the
+	// canonical project-scoped session used by session.start.
+	body, err := json.Marshal(sessionCommandBody{ProjectID: projectID, SessionID: issueID, Message: message})
 	if err != nil {
 		return false, err
 	}

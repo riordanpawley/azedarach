@@ -205,17 +205,19 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID := createReviewTask(t, ctx, client, domain.P1, "worker-a")
 	tmuxRunner := newSessionStartTmuxRunner()
-	tmuxRunner.sessions[issueID] = true
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
 	d.tmux = tmux.NewClient(tmuxRunner, slog.Default())
+	canonicalSessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()
+	tmuxRunner.sessions[canonicalSessionID] = true
 
 	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{
-		Scope:     domain.ProjectOrchestrationScope(),
-		Kind:      protocol.OrchestrationIntentReviewReturn,
-		IntentKey: "review-return-1",
-		ActorID:   "orchestrator",
-		IssueIDs:  []string{issueID},
-		RepoDir:   repoDir,
+		Scope:         domain.ProjectOrchestrationScope(),
+		Kind:          protocol.OrchestrationIntentReviewReturn,
+		IntentKey:     "review-return-1",
+		ActorID:       "orchestrator",
+		IssueIDs:      []string{issueID},
+		RepoDir:       repoDir,
+		RestartWorker: true,
 		Findings: []protocol.OrchestrationReviewFinding{{
 			Severity:     "high",
 			File:         "internal/daemon/orchestration.go",
@@ -227,7 +229,7 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Returned) != 1 || result.Returned[0] != issueID || len(result.Failed) != 0 {
+	if len(result.Returned) != 1 || result.Returned[0] != issueID || len(result.Launched) != 0 || len(result.Pending) != 0 || len(result.Failed) != 0 {
 		t.Fatalf("return result = %+v", result)
 	}
 	task, err := client.GetWithRuntime(ctx, "project", issueID)
@@ -236,6 +238,9 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	}
 	if task.Ownership == nil || task.Ownership.OwnerID != "worker-a" {
 		t.Fatalf("execution ownership = %+v, want preserved", task.Ownership)
+	}
+	if task.Status != domain.StatusInProgress {
+		t.Fatalf("status = %q, want %q after review handback", task.Status, domain.StatusInProgress)
 	}
 	if lease := coordinationLease(task, domain.CoordinationLeaseReview); lease != nil {
 		t.Fatalf("review lease = %+v, want released after handback", lease)
@@ -258,12 +263,13 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 		t.Fatalf("review events = %+v", reviewEvents)
 	}
 	replayed, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{
-		Scope:     domain.ProjectOrchestrationScope(),
-		Kind:      protocol.OrchestrationIntentReviewReturn,
-		IntentKey: "review-return-1",
-		ActorID:   "orchestrator",
-		IssueIDs:  []string{issueID},
-		RepoDir:   repoDir,
+		Scope:         domain.ProjectOrchestrationScope(),
+		Kind:          protocol.OrchestrationIntentReviewReturn,
+		IntentKey:     "review-return-1",
+		ActorID:       "orchestrator",
+		IssueIDs:      []string{issueID},
+		RepoDir:       repoDir,
+		RestartWorker: true,
 		Findings: []protocol.OrchestrationReviewFinding{{
 			Severity:     "high",
 			File:         "internal/daemon/orchestration.go",
@@ -291,6 +297,140 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	}
 	if !strings.Contains(conflict.Failed[issueID], "different review request") {
 		t.Fatalf("conflicting replay = %+v, want explicit idempotency conflict", conflict)
+	}
+}
+
+func TestReviewReturnRestartConvergesWhenAbsentSessionAppears(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	tmuxRunner := newSessionStartTmuxRunner()
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.tmux = tmux.NewClient(tmuxRunner, slog.Default())
+	authority := daemonOrchestrationAuthority{daemon: d}
+	authority.submitStart = func(_ context.Context, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+		body, err := json.Marshal(protocol.OperationSubmitResponseBody{Operation: protocol.OperationRecord{
+			OperationID: naming.OperationID("op-review-restart"),
+			ProjectID:   naming.ProjectID("project"),
+			Kind:        "session.start",
+			IssueID:     naming.IssueID(issueID),
+			State:       protocol.OperationStateQueued,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return protocol.ResponseEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: req.RequestID, OK: true, Body: body}
+	}
+	request := protocol.OrchestrationIntentRequest{
+		Scope:         domain.ProjectOrchestrationScope(),
+		Kind:          protocol.OrchestrationIntentReviewReturn,
+		IntentKey:     "review-return-restart",
+		ActorID:       "orchestrator",
+		IssueIDs:      []string{issueID},
+		RepoDir:       repoDir,
+		RestartWorker: true,
+		Findings:      []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "resume with durable finding"}},
+	}
+
+	first, err := authority.Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Pending) != 1 || first.Pending[0].OperationState != string(protocol.OperationStateQueued) || len(first.Failed) != 0 {
+		t.Fatalf("first return = %+v, want queued restart", first)
+	}
+	reviewEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewEvents) != 1 || reviewEvents[0].Payload["outcome"] != "restart_submitted" {
+		t.Fatalf("review events = %+v, want durable queued restart outcome", reviewEvents)
+	}
+	canonicalSessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()
+	tmuxRunner.sessions[canonicalSessionID] = true
+
+	replayed, err := authority.Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replayed.Returned) != 1 || replayed.Returned[0] != issueID || len(replayed.Pending) != 0 || len(replayed.Failed) != 0 {
+		t.Fatalf("replayed return = %+v, want converged handback", replayed)
+	}
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != domain.StatusInProgress {
+		t.Fatalf("status = %q, want %q", task.Status, domain.StatusInProgress)
+	}
+	events, err := readMailboxEvents(repoDir, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || len(tmuxRunner.inputPayloads) != 1 {
+		t.Fatalf("side effects mail=%d prompts=%d, want one durable finding and one wake", len(events), len(tmuxRunner.inputPayloads))
+	}
+	reviewEvents, err = client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewEvents) != 2 || reviewEvents[0].Payload["outcome"] != "restart_submitted" || reviewEvents[1].Payload["outcome"] != "returned" {
+		t.Fatalf("review events = %+v, want returned after restart_submitted", reviewEvents)
+	}
+}
+
+func TestReviewReturnDoesNotReportTerminalFailedRestartAsSubmitted(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.tmux = tmux.NewClient(newSessionStartTmuxRunner(), slog.Default())
+	authority := daemonOrchestrationAuthority{daemon: d}
+	authority.submitStart = func(_ context.Context, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+		body, err := json.Marshal(protocol.OperationSubmitResponseBody{Operation: protocol.OperationRecord{
+			OperationID: naming.OperationID("op-review-failed"),
+			ProjectID:   naming.ProjectID("project"),
+			Kind:        "session.start",
+			IssueID:     naming.IssueID(issueID),
+			State:       protocol.OperationStateFailed,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return protocol.ResponseEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: req.RequestID, OK: true, Body: body}
+	}
+	request := protocol.OrchestrationIntentRequest{
+		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn,
+		IntentKey: "review-return-failed", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
+		RestartWorker: true, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "retry safely"}},
+	}
+
+	result, err := authority.Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Pending) != 0 || !strings.Contains(result.Failed[issueID], "terminal failed") {
+		t.Fatalf("result = %+v, want terminal restart failure without pending", result)
+	}
+	reviewEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundDeliveryFailed := false
+	for _, event := range reviewEvents {
+		if event.Payload["outcome"] == "restart_submitted" {
+			t.Fatalf("review events = %+v, terminal failed restart must not be submitted", reviewEvents)
+		}
+		if event.Payload["outcome"] == "delivery_failed" && strings.Contains(fmt.Sprint(event.Payload["failure"]), "terminal failed") {
+			foundDeliveryFailed = true
+		}
+	}
+	if !foundDeliveryFailed {
+		t.Fatalf("review events = %+v, want durable terminal delivery failure", reviewEvents)
 	}
 }
 
