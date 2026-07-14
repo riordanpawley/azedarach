@@ -687,6 +687,36 @@ func (c *Client) repairKnownProjectionDeltaBlankChecksum(ctx context.Context, db
 }
 
 func validateProjectionDeltaAuthoritySchema(ctx context.Context, db projectionDeltaSchemaReader) error {
+	expectedDDL := map[string]string{
+		"projection_streams": `CREATE TABLE projection_streams (
+    project_id TEXT PRIMARY KEY,
+    head_cursor INTEGER NOT NULL DEFAULT 0 CHECK (head_cursor >= 0),
+    updated_at TEXT NOT NULL
+)`,
+		"projection_deltas": `CREATE TABLE projection_deltas (
+    project_id TEXT NOT NULL,
+    cursor INTEGER NOT NULL CHECK (cursor > 0),
+    kind TEXT NOT NULL CHECK (trim(kind) != ''),
+    key TEXT NOT NULL CHECK (trim(key) != ''),
+    operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+    idempotency_key TEXT NOT NULL CHECK (trim(idempotency_key) != ''),
+    payload_json TEXT NOT NULL,
+    committed_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, cursor),
+    UNIQUE (project_id, idempotency_key),
+    FOREIGN KEY (project_id) REFERENCES projection_streams(project_id) ON DELETE CASCADE
+)`,
+		"projection_consumer_cursors": `CREATE TABLE projection_consumer_cursors (
+    project_id TEXT NOT NULL,
+    consumer TEXT NOT NULL CHECK (trim(consumer) != ''),
+    cursor INTEGER NOT NULL DEFAULT 0 CHECK (cursor >= 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, consumer),
+    FOREIGN KEY (project_id) REFERENCES projection_streams(project_id) ON DELETE CASCADE
+)`,
+		"idx_projection_deltas_key_history": `CREATE INDEX idx_projection_deltas_key_history
+    ON projection_deltas(project_id, kind, key, cursor DESC)`,
+	}
 	required := []struct{ kind, name string }{
 		{"table", "projection_streams"},
 		{"table", "projection_deltas"},
@@ -700,6 +730,13 @@ func validateProjectionDeltaAuthoritySchema(ctx context.Context, db projectionDe
 		}
 		if !exists {
 			return fmt.Errorf("applied migration 0047_projection_delta_authority is missing %s %s", object.kind, object.name)
+		}
+		var ddl string
+		if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type=? AND name=?`, object.kind, object.name).Scan(&ddl); err != nil {
+			return err
+		}
+		if normalizeProjectionDDL(ddl) != normalizeProjectionDDL(expectedDDL[object.name]) {
+			return fmt.Errorf("applied migration %s %s %s definition drift", projectionDeltaAuthorityMigrationID, object.kind, object.name)
 		}
 	}
 	type columnContract struct {
@@ -842,6 +879,10 @@ func validateProjectionDeltaAuthoritySchema(ctx context.Context, db projectionDe
 		}
 	}
 	return nil
+}
+
+func normalizeProjectionDDL(ddl string) string {
+	return strings.ToLower(strings.Join(strings.Fields(ddl), " "))
 }
 
 func repairIssueIDAllocationSchema(ctx context.Context, db *sql.DB) error {
