@@ -8886,6 +8886,48 @@ func TestTaskGraphReadinessSurfacesPendingSessionStartProgress(t *testing.T) {
 	}
 }
 
+func TestSessionStartStatusKeepsHistoricalFailureDistinctFromCurrentRetry(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-retry-status"
+	issueID := "az-retry"
+	runtime := newOperationRuntime(operationRuntimeConfig{
+		repoDir: t.TempDir(),
+		logger:  slog.Default(),
+		hub:     publish.NewHub(16, 8, slog.Default()),
+	})
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	failedAt := time.Date(2026, time.July, 14, 1, 0, 0, 0, time.UTC)
+	if _, err := runtime.store.Create(ctx, opstore.CreateParams{
+		OperationID: "op-historical", ProjectID: projectID, IssueID: issueID,
+		Kind: daemonhandlers.CommandSessionStart, DedupeKey: "session.start:az-retry:old",
+		ResourceKeys: []string{"issue:" + projectID + ":" + issueID}, State: opstore.StateFailed,
+		SubmittedAt: failedAt.Add(-time.Second), FinishedAt: &failedAt,
+		ErrorJSON: json.RawMessage(`{"message":"obsolete generation failed"}`),
+	}); err != nil {
+		t.Fatalf("seed historical failure: %v", err)
+	}
+	if _, err := runtime.store.Create(ctx, opstore.CreateParams{
+		OperationID: "op-current", ProjectID: projectID, IssueID: issueID,
+		Kind: daemonhandlers.CommandSessionStart, DedupeKey: "session.start:az-retry:new",
+		ResourceKeys: []string{"issue:" + projectID + ":" + issueID}, State: opstore.StateQueued,
+		SubmittedAt: failedAt.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("seed current retry: %v", err)
+	}
+
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, operationRuntime: runtime}
+	progress := d.sessionStartProgressByIssue(ctx, projectID)
+	current, ok := progress[sessionKey(issueID)]
+	if !ok || current.OperationID != "op-current" || current.OperationState != string(daemonops.StateQueued) {
+		t.Fatalf("current start progress = %+v, want op-current queued", progress)
+	}
+	history := d.failedSessionStartByIssue(ctx, projectID)
+	if got := history[issueID]; got.OperationID != "op-historical" || got.OperationState != string(daemonops.StateFailed) {
+		t.Fatalf("historical start failure = %+v, want distinct op-historical failed", got)
+	}
+}
+
 func TestTaskGraphReadinessPendingStartOverridesStaleCloseableProjection(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
