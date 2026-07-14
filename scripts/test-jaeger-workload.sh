@@ -21,6 +21,7 @@ command -v ruby >/dev/null 2>&1 || {
 name="azedarach-jaeger-workload-$$"
 expiry_name="${name}-expiry"
 tmp="$(mktemp -d)"
+export AZEDARACH_JAEGER_LIFECYCLE_LOCK_FILE="$tmp/lifecycle-lock"
 cleanup() {
   "$engine" rm -f "$name" >/dev/null 2>&1 || true
   "$engine" rm -f "$expiry_name" >/dev/null 2>&1 || true

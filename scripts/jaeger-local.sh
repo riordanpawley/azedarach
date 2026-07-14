@@ -87,21 +87,28 @@ jaeger_endpoint_file() {
   fi
 }
 
-jaeger_endpoint_lock_acquire() {
-  local target lock control ready release helper attempt perl_bin="${AZEDARACH_JAEGER_PERL:-perl}"
-  target="$(jaeger_endpoint_file)" || return 1
-  mkdir -p "$(dirname "$target")" || return 1
-  lock="${target}.state-lock"
+jaeger_lifecycle_lock_file() {
+  if [[ -n "${AZEDARACH_JAEGER_LIFECYCLE_LOCK_FILE:-}" ]]; then
+    echo "$AZEDARACH_JAEGER_LIFECYCLE_LOCK_FILE"
+  else
+    [[ -n "${XDG_STATE_HOME:-${HOME:-}}" ]] || return 1
+    echo "${XDG_STATE_HOME:-$HOME/.local/state}/azedarach/jaeger-lifecycle-lock"
+  fi
+}
+
+jaeger_advisory_lock_acquire() {
+  local lock="$1" purpose="$2" control ready release helper attempt perl_bin="${AZEDARACH_JAEGER_PERL:-perl}"
+  mkdir -p "$(dirname "$lock")" || return 1
   control="$(mktemp -d "${lock}.control.XXXXXX")" || return 1
   ready="${control}/ready"
   release="${control}/release"
   if ! perl_bin="$(command -v "$perl_bin" 2>/dev/null)" || [[ -z "$perl_bin" ]]; then
-    echo "Warning: Perl with Fcntl flock support is required for managed Jaeger endpoint locking" >&2
+    echo "Warning: Perl with Fcntl flock support is required for managed Jaeger $purpose locking" >&2
     rmdir "$control" 2>/dev/null || true
     return 1
   fi
   if ! "$perl_bin" -MFcntl=:flock -e 'exit 0' >/dev/null 2>&1; then
-    echo "Warning: Perl Fcntl flock support is unavailable; refusing managed Jaeger endpoint mutation" >&2
+    echo "Warning: Perl Fcntl flock support is unavailable; refusing managed Jaeger $purpose mutation" >&2
     rmdir "$control" 2>/dev/null || true
     return 1
   fi
@@ -128,9 +135,8 @@ jaeger_endpoint_lock_acquire() {
   helper=$!
   for attempt in {1..200}; do
     if [[ -e "$ready" ]] && kill -0 "$helper" 2>/dev/null; then
-      JAEGER_ENDPOINT_LOCK="$lock"
-      JAEGER_ENDPOINT_LOCK_CONTROL="$control"
-      JAEGER_ENDPOINT_LOCK_HELPER="$helper"
+      JAEGER_ADVISORY_LOCK_CONTROL="$control"
+      JAEGER_ADVISORY_LOCK_HELPER="$helper"
       return 0
     fi
     kill -0 "$helper" 2>/dev/null || break
@@ -143,8 +149,8 @@ jaeger_endpoint_lock_acquire() {
   return 1
 }
 
-jaeger_endpoint_lock_release() {
-  local control="${JAEGER_ENDPOINT_LOCK_CONTROL:-}" helper="${JAEGER_ENDPOINT_LOCK_HELPER:-}"
+jaeger_advisory_lock_release() {
+  local control="$1" helper="$2"
   local status=0
   [[ -n "$control" && -n "$helper" ]] || return 0
   if kill -0 "$helper" 2>/dev/null; then
@@ -158,7 +164,24 @@ jaeger_endpoint_lock_release() {
   wait "$helper" 2>/dev/null || status=1
   rm -f "$control/ready" "$control/release" || status=1
   rmdir "$control" 2>/dev/null || status=1
-  JAEGER_ENDPOINT_LOCK=""
+  return "$status"
+}
+
+jaeger_endpoint_lock_acquire() {
+  local target lock
+  target="$(jaeger_endpoint_file)" || return 1
+  lock="${target}.state-lock"
+  jaeger_advisory_lock_acquire "$lock" endpoint || return 1
+  JAEGER_ENDPOINT_LOCK_CONTROL="$JAEGER_ADVISORY_LOCK_CONTROL"
+  JAEGER_ENDPOINT_LOCK_HELPER="$JAEGER_ADVISORY_LOCK_HELPER"
+  JAEGER_ADVISORY_LOCK_CONTROL=""
+  JAEGER_ADVISORY_LOCK_HELPER=""
+}
+
+jaeger_endpoint_lock_release() {
+  local control="${JAEGER_ENDPOINT_LOCK_CONTROL:-}" helper="${JAEGER_ENDPOINT_LOCK_HELPER:-}"
+  local status=0
+  jaeger_advisory_lock_release "$control" "$helper" || status=1
   JAEGER_ENDPOINT_LOCK_CONTROL=""
   JAEGER_ENDPOINT_LOCK_HELPER=""
   if (( status == 0 )) && [[ -n "${AZEDARACH_JAEGER_TEST_FAIL_LOCK_RELEASE_FILE:-}" ]] &&
@@ -166,6 +189,49 @@ jaeger_endpoint_lock_release() {
     rm -f "$AZEDARACH_JAEGER_TEST_FAIL_LOCK_RELEASE_FILE"
     status=1
   fi
+  return "$status"
+}
+
+jaeger_lifecycle_lock_acquire() {
+  local lock attempt
+  lock="$(jaeger_lifecycle_lock_file)" || return 1
+  jaeger_advisory_lock_acquire "$lock" lifecycle || return 1
+  JAEGER_LIFECYCLE_LOCK_CONTROL="$JAEGER_ADVISORY_LOCK_CONTROL"
+  JAEGER_LIFECYCLE_LOCK_HELPER="$JAEGER_ADVISORY_LOCK_HELPER"
+  JAEGER_ADVISORY_LOCK_CONTROL=""
+  JAEGER_ADVISORY_LOCK_HELPER=""
+  if [[ -n "${AZEDARACH_JAEGER_TEST_LIFECYCLE_ACQUIRED_FILE:-}" &&
+    ! -e "$AZEDARACH_JAEGER_TEST_LIFECYCLE_ACQUIRED_FILE" ]]; then
+    : >"$AZEDARACH_JAEGER_TEST_LIFECYCLE_ACQUIRED_FILE"
+    for attempt in {1..200}; do
+      [[ -e "${AZEDARACH_JAEGER_TEST_LIFECYCLE_CONTINUE_FILE:-}" ]] && break
+      sleep 0.05
+    done
+    if [[ ! -e "${AZEDARACH_JAEGER_TEST_LIFECYCLE_CONTINUE_FILE:-}" ]]; then
+      jaeger_lifecycle_lock_release || true
+      return 1
+    fi
+  fi
+}
+
+jaeger_lifecycle_lock_release() {
+  local status=0
+  jaeger_advisory_lock_release "${JAEGER_LIFECYCLE_LOCK_CONTROL:-}" \
+    "${JAEGER_LIFECYCLE_LOCK_HELPER:-}" || status=1
+  JAEGER_LIFECYCLE_LOCK_CONTROL=""
+  JAEGER_LIFECYCLE_LOCK_HELPER=""
+  return "$status"
+}
+
+jaeger_with_lifecycle_lock() {
+  local status=0
+  jaeger_lifecycle_lock_acquire || return 1
+  if "$@"; then
+    status=0
+  else
+    status=$?
+  fi
+  jaeger_lifecycle_lock_release || status=1
   return "$status"
 }
 
@@ -248,13 +314,19 @@ jaeger_clear_endpoint_record_locked() {
 }
 
 jaeger_schedule_published_expiry() {
+  jaeger_with_lifecycle_lock jaeger_schedule_published_expiry_locked "$@"
+}
+
+jaeger_schedule_published_expiry_locked() {
   local engine="$1" name="$2" expires="${JAEGER_PUBLISHED_EXPIRES_AT:-0}"
   local record="${JAEGER_PUBLISHED_ENDPOINT_RECORD:-}" target worker_dir worker_key slot pid worker_shell nonce
   [[ "$expires" =~ ^[0-9]+$ ]] && (( expires > 0 )) || return 0
   [[ "${AZEDARACH_JAEGER_DISABLE_EXPIRY_WORKER:-0}" != "1" ]] || return 0
   target="$(jaeger_endpoint_file)" || return 1
   worker_dir="${target}.workers"
-  mkdir -p "$worker_dir" || return 1
+  if ! mkdir -p "$worker_dir" 2>/dev/null && [[ ! -d "$worker_dir" ]]; then
+    return 1
+  fi
   chmod 0700 "$worker_dir" 2>/dev/null || true
   worker_key="$(printf '%s' "${engine}:${name}:${expires}" | cksum | awk '{print $1}')" || return 1
   slot="${worker_dir}/${worker_key}"
@@ -263,11 +335,11 @@ jaeger_schedule_published_expiry() {
       return 0
     fi
     if ! jaeger_discard_worker_slot "$slot" "$name" "$expires"; then
-      jaeger_abort_fallback_expiry "$engine" "$name" "$expires" "$record" "$slot"
+      jaeger_abort_fallback_expiry_locked "$engine" "$name" "$expires" "$record" "$slot"
       return 1
     fi
     if ! jaeger_endpoint_record_valid "$record" || ! jaeger_running "$engine" "$name"; then
-      jaeger_abort_fallback_expiry "$engine" "$name" "$expires" "$record" "$slot"
+      jaeger_abort_fallback_expiry_locked "$engine" "$name" "$expires" "$record" "$slot"
       return 1
     fi
   fi
@@ -276,7 +348,7 @@ jaeger_schedule_published_expiry() {
     if jaeger_wait_expiry_ready "$slot" "$engine" "$name" "$expires" "$record"; then
       return 0
     fi
-    jaeger_abort_fallback_expiry "$engine" "$name" "$expires" "$record" "$slot"
+    jaeger_abort_fallback_expiry_locked "$engine" "$name" "$expires" "$record" "$slot"
     return 1
   fi
   worker_shell="${AZEDARACH_JAEGER_EXPIRY_SHELL:-bash}"
@@ -287,16 +359,20 @@ jaeger_schedule_published_expiry() {
     return 0
   fi
   kill "$pid" 2>/dev/null || true
-  jaeger_abort_fallback_expiry "$engine" "$name" "$expires" "$record" "$slot"
+  jaeger_abort_fallback_expiry_locked "$engine" "$name" "$expires" "$record" "$slot"
   return 1
 }
 
 jaeger_require_published_expiry() {
+  jaeger_with_lifecycle_lock jaeger_require_published_expiry_locked "$@"
+}
+
+jaeger_require_published_expiry_locked() {
   local engine="$1" name="$2" record="${JAEGER_PUBLISHED_ENDPOINT_RECORD:-}"
-  if jaeger_schedule_published_expiry "$engine" "$name"; then
+  if jaeger_schedule_published_expiry_locked "$engine" "$name"; then
     return 0
   fi
-  jaeger_remove_matching_fallback "$engine" "$name" "${JAEGER_PUBLISHED_EXPIRES_AT:-0}"
+  jaeger_remove_matching_fallback_locked "$engine" "$name" "${JAEGER_PUBLISHED_EXPIRES_AT:-0}"
   jaeger_clear_endpoint_record "$record" || true
   return 1
 }
@@ -442,13 +518,21 @@ jaeger_worker_slot_valid() {
 }
 
 jaeger_abort_fallback_expiry() {
+  jaeger_with_lifecycle_lock jaeger_abort_fallback_expiry_locked "$@"
+}
+
+jaeger_abort_fallback_expiry_locked() {
   local engine="$1" name="$2" expires="$3" record="$4" slot="$5"
-  jaeger_remove_matching_fallback "$engine" "$name" "$expires"
+  jaeger_remove_matching_fallback_locked "$engine" "$name" "$expires"
   jaeger_clear_endpoint_record "$record" || true
   jaeger_clear_worker_slot "$slot" || true
 }
 
 jaeger_remove_matching_fallback() {
+  jaeger_with_lifecycle_lock jaeger_remove_matching_fallback_locked "$@"
+}
+
+jaeger_remove_matching_fallback_locked() {
   local engine="$1" name="$2" expires="$3"
   [[ "$("$engine" inspect -f '{{index .Config.Labels "azedarach.jaeger.fallback"}}' "$name" 2>/dev/null || true)" == "true" ]] || return 0
   [[ "$("$engine" inspect -f '{{index .Config.Labels "azedarach.jaeger.expires_at"}}' "$name" 2>/dev/null || true)" == "$expires" ]] || return 0
@@ -462,9 +546,14 @@ jaeger_expire_fallback() {
   if (( delay > 0 )); then
     sleep "$delay"
   fi
+  jaeger_with_lifecycle_lock jaeger_expire_fallback_locked "$engine" "$name" "$expires" "$record" "$slot"
+}
+
+jaeger_expire_fallback_locked() {
+  local engine="$1" name="$2" expires="$3" record="$4" slot="${5:-}"
   if [[ "$("$engine" inspect -f '{{index .Config.Labels "azedarach.jaeger.fallback"}}' "$name" 2>/dev/null || true)" == "true" ]] &&
     [[ "$("$engine" inspect -f '{{index .Config.Labels "azedarach.jaeger.expires_at"}}' "$name" 2>/dev/null || true)" == "$expires" ]]; then
-    jaeger_remove_matching_fallback "$engine" "$name" "$expires"
+    jaeger_remove_matching_fallback_locked "$engine" "$name" "$expires"
   fi
   jaeger_clear_endpoint_record "$record" || true
   jaeger_clear_worker_slot "$slot" || true
@@ -494,6 +583,10 @@ jaeger_storage_type() {
 }
 
 jaeger_start() {
+  jaeger_with_lifecycle_lock jaeger_start_locked "$@"
+}
+
+jaeger_start_locked() {
   local engine="$1" name="$2" fixed_ports="$3" storage="$4"
   local image="${AZEDARACH_JAEGER_IMAGE:-cr.jaegertracing.io/jaegertracing/jaeger:2.19.0}"
   local memory="${AZEDARACH_JAEGER_MEMORY:-1g}"
@@ -568,6 +661,10 @@ jaeger_legacy_fallbacks() {
 }
 
 jaeger_reclaim_fallbacks() {
+  jaeger_with_lifecycle_lock jaeger_reclaim_fallbacks_locked "$@"
+}
+
+jaeger_reclaim_fallbacks_locked() {
   local engine="$1" primary="$2" keep_running="${3:-1}" id expires now
   now="$(date +%s)"
   while IFS= read -r id; do
@@ -586,6 +683,10 @@ jaeger_reclaim_fallbacks() {
 }
 
 jaeger_reuse_fallback() {
+  jaeger_with_lifecycle_lock jaeger_reuse_fallback_locked "$@"
+}
+
+jaeger_reuse_fallback_locked() {
   local engine="$1" primary="$2" id expires now publish_status
   now="$(date +%s)"
   while IFS= read -r id; do
@@ -598,7 +699,7 @@ jaeger_reuse_fallback() {
         publish_status=$?
         return "$publish_status"
       fi
-      if ! jaeger_require_published_expiry "$engine" "$id"; then
+      if ! jaeger_require_published_expiry_locked "$engine" "$id"; then
         return 1
       fi
       return 0
@@ -608,10 +709,14 @@ jaeger_reuse_fallback() {
 }
 
 jaeger_start_fallback() {
+  jaeger_with_lifecycle_lock jaeger_start_fallback_locked "$@"
+}
+
+jaeger_start_fallback_locked() {
   local engine="$1" primary="$2" fallback reuse_status
   fallback="${primary}-fallback"
-  jaeger_reclaim_fallbacks "$engine" "$primary" 1
-  if jaeger_reuse_fallback "$engine" "$primary"; then
+  jaeger_reclaim_fallbacks_locked "$engine" "$primary" 1
+  if jaeger_reuse_fallback_locked "$engine" "$primary"; then
     echo "Reusing ephemeral Jaeger fallback: $fallback" >&2
     return 0
   else
@@ -623,7 +728,7 @@ jaeger_start_fallback() {
   fi
   "$engine" rm -f "$fallback" >/dev/null 2>&1 || true
   echo "Warning: starting ephemeral Jaeger fallback with dynamic ports; traces are not persisted" >&2
-  if ! jaeger_start "$engine" "$fallback" 0 memory; then
+  if ! jaeger_start_locked "$engine" "$fallback" 0 memory; then
     "$engine" rm -f "$fallback" >/dev/null 2>&1 || true
     return 1
   fi
@@ -631,15 +736,19 @@ jaeger_start_fallback() {
     "$engine" rm -f "$fallback" >/dev/null 2>&1 || true
     return 1
   }
-  if ! jaeger_require_published_expiry "$engine" "$fallback"; then
+  if ! jaeger_require_published_expiry_locked "$engine" "$fallback"; then
     return 1
   fi
 }
 
 jaeger_activate_primary() {
+  jaeger_with_lifecycle_lock jaeger_activate_primary_locked "$@"
+}
+
+jaeger_activate_primary_locked() {
   local engine="$1" primary="$2"
   jaeger_publish_env "$engine" "$primary" || return 1
-  jaeger_reclaim_fallbacks "$engine" "$primary" 0
+  jaeger_reclaim_fallbacks_locked "$engine" "$primary" 0
 }
 
 jaeger_labels_match() {
@@ -656,6 +765,10 @@ jaeger_labels_match() {
 }
 
 jaeger_ensure() {
+  jaeger_with_lifecycle_lock jaeger_ensure_locked "$@"
+}
+
+jaeger_ensure_locked() {
   if [[ "${AZEDARACH_SKIP_JAEGER:-0}" == "1" ]]; then
     echo "Skipping Jaeger (AZEDARACH_SKIP_JAEGER=1)"
     return 0
@@ -664,12 +777,12 @@ jaeger_ensure() {
   engine="$(jaeger_choose_engine)" || { echo "Warning: docker/podman not found; skipping Jaeger startup" >&2; return 0; }
   name="${AZEDARACH_JAEGER_CONTAINER:-azedarach-jaeger}"
   storage="$(jaeger_storage_type)"
-  jaeger_reclaim_fallbacks "$engine" "$name" 1
+  jaeger_reclaim_fallbacks_locked "$engine" "$name" 1
 
   if "$engine" inspect "$name" >/dev/null 2>&1; then
     if jaeger_oom_killed "$engine" "$name"; then
       echo "Warning: $name was OOM-killed; preserving its store and using an ephemeral fallback" >&2
-      jaeger_start_fallback "$engine" "$name" || echo "Warning: failed to start Jaeger fallback" >&2
+      jaeger_start_fallback_locked "$engine" "$name" || echo "Warning: failed to start Jaeger fallback" >&2
       return 0
     fi
     if ! jaeger_labels_match "$engine" "$name" "$storage"; then
@@ -677,29 +790,29 @@ jaeger_ensure() {
       "$engine" rm -f "$name" >/dev/null 2>&1 || true
     elif jaeger_running "$engine" "$name"; then
       echo "Jaeger already running: $name"
-      jaeger_activate_primary "$engine" "$name" || true
+      jaeger_activate_primary_locked "$engine" "$name" || true
       return 0
     elif "$engine" start "$name" >/dev/null 2>&1; then
       if jaeger_wait_ready "$engine" "$name"; then
-        jaeger_activate_primary "$engine" "$name" || true
+        jaeger_activate_primary_locked "$engine" "$name" || true
         return 0
       fi
       "$engine" stop "$name" >/dev/null 2>&1 || true
-      jaeger_start_fallback "$engine" "$name" || echo "Warning: failed to start Jaeger fallback" >&2
+      jaeger_start_fallback_locked "$engine" "$name" || echo "Warning: failed to start Jaeger fallback" >&2
       return 0
     else
-      jaeger_start_fallback "$engine" "$name" || echo "Warning: failed to start Jaeger fallback" >&2
+      jaeger_start_fallback_locked "$engine" "$name" || echo "Warning: failed to start Jaeger fallback" >&2
       return 0
     fi
   fi
 
   echo "Starting Jaeger container: $name"
-  if ! jaeger_start "$engine" "$name" 1 "$storage"; then
+  if ! jaeger_start_locked "$engine" "$name" 1 "$storage"; then
     "$engine" rm -f "$name" >/dev/null 2>&1 || true
-    jaeger_start_fallback "$engine" "$name" || echo "Warning: failed to start Jaeger fallback" >&2
+    jaeger_start_fallback_locked "$engine" "$name" || echo "Warning: failed to start Jaeger fallback" >&2
     return 0
   fi
-  jaeger_activate_primary "$engine" "$name" || true
+  jaeger_activate_primary_locked "$engine" "$name" || true
 }
 
 jaeger_inventory() {
@@ -721,11 +834,15 @@ jaeger_inventory() {
 }
 
 jaeger_cleanup() {
+  jaeger_with_lifecycle_lock jaeger_cleanup_locked "$@"
+}
+
+jaeger_cleanup_locked() {
   local engine="$1" primary="${AZEDARACH_JAEGER_CONTAINER:-azedarach-jaeger}" selected volume remainder
   selected="${AZEDARACH_JAEGER_VOLUME:-${primary}-data}"
   # Cleanup is intentionally conservative: even an expired running fallback
   # may still be serving a user, so only an ensure operation may replace it.
-  jaeger_reclaim_fallbacks "$engine" "$primary" 2
+  jaeger_reclaim_fallbacks_locked "$engine" "$primary" 2
   while IFS= read -r legacy; do
     [[ -n "$legacy" ]] || continue
     jaeger_running "$engine" "$legacy" && continue

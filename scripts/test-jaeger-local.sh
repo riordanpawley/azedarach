@@ -63,8 +63,97 @@ fake_engine_executable="$tmp/fake-engine"
 printf '%s\n' '#!/usr/bin/env bash' 'fake_engine "$@"' >"$fake_engine_executable"
 chmod +x "$fake_engine_executable"
 
+# This fake persists container state across real Bash processes so concurrent
+# lifecycle callers exercise the advisory lock rather than isolated shell data.
+stateful_engine() {
+  local name="" arg
+  printf '%q ' "$@" >>"$stateful_calls"
+  printf '\n' >>"$stateful_calls"
+  case "$1" in
+    inspect)
+      name="${@: -1}"
+      if [[ "${2:-}" != "-f" ]]; then
+        [[ "$name" == "azedarach-jaeger" && -e "$stateful_primary" ]] ||
+          [[ "$name" == "azedarach-jaeger-fallback" && -e "$stateful_fallback" ]]
+        return
+      fi
+      case "$3" in
+        *OOMKilled*) echo false ;;
+        *State.Running*)
+          if [[ "$name" == "azedarach-jaeger" && -e "$stateful_primary" ]] ||
+            [[ "$name" == "azedarach-jaeger-fallback" && -e "$stateful_fallback" ]]; then
+            echo true
+          else
+            echo false
+          fi
+          ;;
+        *expires_at*) echo "$stateful_expires" ;;
+        *azedarach.jaeger.fallback*)
+          [[ "$name" == "azedarach-jaeger-fallback" ]] && echo true
+          ;;
+        *Config.Labels*)
+          echo "azedarach.jaeger.managed = true"
+          echo "azedarach.jaeger.image = cr.jaegertracing.io/jaegertracing/jaeger:2.19.0"
+          echo "azedarach.jaeger.storage = memory"
+          echo "azedarach.jaeger.volume = azedarach-jaeger-data"
+          echo "azedarach.jaeger.max_traces = 2000"
+          echo "azedarach.jaeger.badger_ttl = 24h"
+          ;;
+      esac
+      ;;
+    port)
+      case "$3" in 16686/tcp) echo "127.0.0.1:31686" ;; 4318/tcp) echo "127.0.0.1:34318" ;; esac
+      ;;
+    ps)
+      if [[ "$*" == *"label=azedarach.jaeger.fallback=true"* ]] && [[ -e "$stateful_fallback" ]]; then
+        echo azedarach-jaeger-fallback
+      fi
+      ;;
+    run)
+      for ((arg = 2; arg <= $#; arg++)); do
+        if [[ "${!arg}" == "--name" ]]; then
+          arg=$((arg + 1))
+          name="${!arg}"
+          break
+        fi
+      done
+      case "$name" in
+        azedarach-jaeger)
+          [[ ! -e "$stateful_primary" ]] || return 1
+          : >"$stateful_primary"
+          ;;
+        azedarach-jaeger-fallback)
+          [[ ! -e "$stateful_fallback" ]] || return 1
+          : >"$stateful_fallback"
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+    rm)
+      name="${@: -1}"
+      case "$name" in
+        azedarach-jaeger) rm -f "$stateful_primary" ;;
+        azedarach-jaeger-fallback) rm -f "$stateful_fallback" ;;
+      esac
+      ;;
+    start) : >"$stateful_primary" ;;
+    stop) rm -f "$stateful_primary" ;;
+  esac
+}
+
+export -f stateful_engine
+stateful_calls="$tmp/stateful calls"
+stateful_primary="$tmp/stateful primary"
+stateful_fallback="$tmp/stateful fallback"
+stateful_expires="$((now + 3600))"
+export stateful_calls stateful_primary stateful_fallback stateful_expires
+stateful_engine_executable="$tmp/stateful-engine"
+printf '%s\n' '#!/usr/bin/env bash' 'stateful_engine "$@"' >"$stateful_engine_executable"
+chmod +x "$stateful_engine_executable"
+
 export AZEDARACH_CONTAINER_ENGINE=fake_engine
 export AZEDARACH_JAEGER_ENDPOINT_FILE="$tmp/endpoint"
+export AZEDARACH_JAEGER_LIFECYCLE_LOCK_FILE="$tmp/jaeger lifecycle lock"
 export AZEDARACH_JAEGER_STARTUP_GRACE_SECONDS=0
 export AZEDARACH_JAEGER_DISABLE_EXPIRY_WORKER=1
 export AZEDARACH_JAEGER_EXPIRY_READY_ATTEMPTS=5
@@ -128,6 +217,96 @@ if [[ -d "${rollback_endpoint}.d" ]] &&
   exit 1
 fi
 [[ ! -e "${rollback_endpoint}.workers" ]]
+
+# Concurrent fixed-name fallback starts serialize the whole inspect/reuse/run/
+# publish transaction. The loser must reuse the winner and cannot remove it.
+concurrent_fallback_endpoint="$tmp/concurrent fallback endpoint"
+concurrent_fallback_second_endpoint="$tmp/concurrent fallback second endpoint"
+fallback_lock_acquired="$tmp/fallback lifecycle acquired"
+fallback_lock_continue="$tmp/fallback lifecycle continue"
+fallback_first_result="$tmp/fallback first result"
+fallback_second_result="$tmp/fallback second result"
+: >"$stateful_calls"
+rm -f "$stateful_fallback" "$fallback_lock_acquired" "$fallback_lock_continue"
+(
+  set +e
+  AZEDARACH_JAEGER_ENDPOINT_FILE="$concurrent_fallback_second_endpoint" \
+    AZEDARACH_JAEGER_TEST_LIFECYCLE_ACQUIRED_FILE="$fallback_lock_acquired" \
+    AZEDARACH_JAEGER_TEST_LIFECYCLE_CONTINUE_FILE="$fallback_lock_continue" \
+    jaeger_start_fallback "$stateful_engine_executable" azedarach-jaeger
+  printf '%s\n' "$?" >"$fallback_first_result"
+) &
+fallback_first_pid=$!
+for attempt in {1..200}; do
+  [[ -e "$fallback_lock_acquired" ]] && break
+  sleep 0.05
+done
+[[ -e "$fallback_lock_acquired" ]]
+(
+  set +e
+  AZEDARACH_JAEGER_ENDPOINT_FILE="$concurrent_fallback_endpoint" \
+    jaeger_start_fallback "$stateful_engine_executable" azedarach-jaeger
+  printf '%s\n' "$?" >"$fallback_second_result"
+) &
+fallback_second_pid=$!
+sleep 0.2
+[[ ! -e "$fallback_second_result" ]]
+: >"$fallback_lock_continue"
+wait "$fallback_first_pid"
+wait "$fallback_second_pid"
+[[ "$(<"$fallback_first_result")" == "0" && "$(<"$fallback_second_result")" == "0" ]]
+[[ "$(grep -c '^run ' "$stateful_calls")" == "1" ]]
+awk '
+  $1 == "run" { ran = 1 }
+  ran && $1 == "rm" && $2 == "-f" && $3 == "azedarach-jaeger-fallback" { exit 1 }
+' "$stateful_calls"
+[[ -e "$stateful_fallback" && -e "$concurrent_fallback_endpoint" && -e "$concurrent_fallback_second_endpoint" ]]
+
+# Concurrent primary ensures use the same lifecycle lock and ordering. Once the
+# first caller creates and activates the primary, the second observes/reuses it.
+concurrent_primary_endpoint="$tmp/concurrent primary endpoint"
+concurrent_primary_second_endpoint="$tmp/concurrent primary second endpoint"
+primary_lock_acquired="$tmp/primary lifecycle acquired"
+primary_lock_continue="$tmp/primary lifecycle continue"
+primary_first_result="$tmp/primary first result"
+primary_second_result="$tmp/primary second result"
+: >"$stateful_calls"
+rm -f "$stateful_primary" "$stateful_fallback" "$primary_lock_acquired" "$primary_lock_continue"
+(
+  set +e
+  AZEDARACH_CONTAINER_ENGINE="$stateful_engine_executable" \
+    AZEDARACH_JAEGER_ENDPOINT_FILE="$concurrent_primary_second_endpoint" \
+    AZEDARACH_JAEGER_TEST_LIFECYCLE_ACQUIRED_FILE="$primary_lock_acquired" \
+    AZEDARACH_JAEGER_TEST_LIFECYCLE_CONTINUE_FILE="$primary_lock_continue" \
+    jaeger_ensure
+  printf '%s\n' "$?" >"$primary_first_result"
+) &
+primary_first_pid=$!
+for attempt in {1..200}; do
+  [[ -e "$primary_lock_acquired" ]] && break
+  sleep 0.05
+done
+[[ -e "$primary_lock_acquired" ]]
+(
+  set +e
+  AZEDARACH_CONTAINER_ENGINE="$stateful_engine_executable" \
+    AZEDARACH_JAEGER_ENDPOINT_FILE="$concurrent_primary_endpoint" \
+    jaeger_ensure
+  printf '%s\n' "$?" >"$primary_second_result"
+) &
+primary_second_pid=$!
+sleep 0.2
+[[ ! -e "$primary_second_result" ]]
+: >"$primary_lock_continue"
+wait "$primary_first_pid"
+wait "$primary_second_pid"
+[[ "$(<"$primary_first_result")" == "0" && "$(<"$primary_second_result")" == "0" ]]
+[[ "$(grep -c '^run ' "$stateful_calls")" == "1" ]]
+awk '
+  $1 == "run" { ran = 1 }
+  ran && $1 == "rm" && $2 == "-f" && $3 == "azedarach-jaeger" { exit 1 }
+' "$stateful_calls"
+[[ -e "$stateful_primary" && -e "$concurrent_primary_endpoint" && -e "$concurrent_primary_second_endpoint" ]]
 
 : >"$calls"
 FAKE_FALLBACK=1 jaeger_start_fallback fake_engine azedarach-jaeger
