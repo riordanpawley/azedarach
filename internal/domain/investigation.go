@@ -45,6 +45,10 @@ func EvaluateInvestigationAcceptance(task Task, events []IssueObservationEvent) 
 		return ordered[i].ObservedAt.Before(ordered[j].ObservedAt)
 	})
 	for _, event := range ordered {
+		if IsReviewRequestTransition(event) {
+			accepted = false
+			continue
+		}
 		if event.Type == IssueEventInvestigationDisposition {
 			value := InvestigationDisposition(strings.TrimSpace(stringValue(event.Payload["disposition"])))
 			if value == InvestigationDispositionHumanFindings || value == InvestigationDispositionInternalReview {
@@ -98,6 +102,10 @@ func HasInternalReviewArtifact(task Task, events []IssueObservationEvent) bool {
 		return ordered[i].ObservedAt.Before(ordered[j].ObservedAt)
 	})
 	for _, event := range ordered {
+		if IsReviewRequestTransition(event) {
+			hasArtifact = false
+			continue
+		}
 		if event.Type == IssueEventInvestigationDisposition {
 			value := InvestigationDisposition(strings.TrimSpace(stringValue(event.Payload["disposition"])))
 			if value == InvestigationDispositionHumanFindings || value == InvestigationDispositionInternalReview {

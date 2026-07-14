@@ -3025,6 +3025,7 @@ func TestTaskClosePreflightEnforcesInvestigationDispositionAcceptance(t *testing
 	tests := []struct {
 		name       string
 		events     []issues.IssueObservationEventParams
+		newEpoch   bool
 		wantReason string
 	}{
 		{name: "human facing remains gated", wantReason: "human-facing investigation lacks explicit issue-specific findings acceptance"},
@@ -3037,6 +3038,13 @@ func TestTaskClosePreflightEnforcesInvestigationDispositionAcceptance(t *testing
 			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
 			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"outcome": "returned", "actor_id": "reviewer"}},
 		}, wantReason: "unresolved returned findings"},
+		{name: "new review epoch rejects stale human acceptance", events: []issues.IssueObservationEventParams{
+			{Type: domain.IssueEventHumanInputProvided, Source: "human", Payload: map[string]any{"investigation_findings_accepted": true}},
+		}, newEpoch: true, wantReason: "human-facing investigation lacks explicit issue-specific findings acceptance"},
+		{name: "new review epoch rejects stale internal acceptance", events: []issues.IssueObservationEventParams{
+			{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+		}, newEpoch: true, wantReason: "internal review lacks durable accepted reviewer outcome"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3047,6 +3055,14 @@ func TestTaskClosePreflightEnforcesInvestigationDispositionAcceptance(t *testing
 			for _, event := range tt.events {
 				if _, err := issuesClient.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
 					t.Fatalf("append event: %v", err)
+				}
+			}
+			if tt.newEpoch {
+				if err := issuesClient.Update(ctx, issueID, domain.StatusOpen); err != nil {
+					t.Fatalf("reopen investigation: %v", err)
+				}
+				if err := issuesClient.Update(ctx, issueID, domain.StatusInReview); err != nil {
+					t.Fatalf("start new review epoch: %v", err)
 				}
 			}
 			_, err = d.validateTaskClosePreflight(ctx, projectID, issueID, taskClosePreflightOptions{}, protocol.RequestEnvelope{})

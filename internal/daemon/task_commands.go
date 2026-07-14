@@ -3469,9 +3469,10 @@ func (d *Daemon) investigationAcceptance(ctx context.Context, projectID string, 
 			domain.IssueEventInvestigationDisposition,
 			domain.IssueEventReviewCompleted,
 			domain.IssueEventHumanInputProvided,
+			domain.IssueEventIssueStatusChanged,
 		},
-		Limit:       5000,
-		NewestFirst: true,
+		Limit:         5000,
+		NewestIDFirst: true,
 	})
 	if err != nil {
 		return domain.InvestigationAcceptance{}, fmt.Errorf("read investigation acceptance for %s: %w", task.ID, err)

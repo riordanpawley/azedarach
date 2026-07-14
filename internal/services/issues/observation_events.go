@@ -351,7 +351,7 @@ func (c *Client) InvestigationAcceptances(ctx context.Context, tasks []domain.Ta
 	if len(ids) == 0 {
 		return map[string]domain.InvestigationAcceptance{}, nil
 	}
-	args := make([]any, 0, len(ids)+3)
+	args := make([]any, 0, len(ids)+4)
 	for _, id := range ids {
 		args = append(args, id)
 	}
@@ -359,12 +359,13 @@ func (c *Client) InvestigationAcceptances(ctx context.Context, tasks []domain.Ta
 		string(domain.IssueEventInvestigationDisposition),
 		string(domain.IssueEventReviewCompleted),
 		string(domain.IssueEventHumanInputProvided),
+		string(domain.IssueEventIssueStatusChanged),
 	)
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
 		FROM issue_observation_events
 		WHERE issue_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")+`)
-		  AND event_type IN (?,?,?)
+		  AND event_type IN (?,?,?,?)
 		ORDER BY id ASC
 	`, args...)
 	if err != nil {

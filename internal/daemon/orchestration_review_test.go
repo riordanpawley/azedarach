@@ -445,6 +445,49 @@ func TestReviewAcceptTrustsDecisionOverInternalReviewArtifactWithoutTreatingArti
 	}
 }
 
+func TestReviewAcceptRejectsInternalReviewArtifactFromPriorEpoch(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "stale internal artifact", Description: "review findings", Acceptance: "consumed by parent", Type: domain.TypeInvestigation, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []issues.IssueObservationEventParams{
+		{Type: domain.IssueEventInvestigationDisposition, Source: "agent", Payload: map[string]any{"disposition": "internal_review"}},
+		{Type: domain.IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "ratified", "summary": "parent consumed findings"}},
+	} {
+		if _, err := client.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := client.Update(ctx, issueID, domain.StatusOpen); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "reject-stale-artifact", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Failed[issueID]; !strings.Contains(got, "durable accepted/ratified review artifact") {
+		t.Fatalf("result = %+v, want stale-artifact rejection", result)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "ratified", "summary": "current findings consumed"}}); err != nil {
+		t.Fatal(err)
+	}
+	result, err = d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-current-artifact", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Closed) != 1 || result.Closed[0] != issueID || len(result.Failed) != 0 {
+		t.Fatalf("result = %+v, want same-epoch artifact acceptance", result)
+	}
+}
+
 func TestReviewAcceptSameIntentRecoversAfterCloseFailure(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
