@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -29,6 +30,10 @@ const (
 	orchestratorLeaseTable          = "daemon_orchestrator_scope_leases"
 	advisorSessionTable             = "daemon_advisor_sessions"
 	orchestratorLoopTable           = "daemon_orchestrator_loop_checkpoints"
+	runtimeSQLiteBusyPrimaryCode    = 5
+	runtimeSQLiteLockedPrimaryCode  = 6
+	runtimeSQLiteRetryBudget        = 5 * time.Second
+	runtimeSQLiteRetryDelay         = 100 * time.Millisecond
 )
 
 // WorktreeState captures durable daemon worktree state stored in sqlite.
@@ -511,7 +516,9 @@ func (s *RuntimeStateStore) Close() error {
 
 func (s *RuntimeStateStore) UpsertSessionState(ctx context.Context, projectID string, session Session) error {
 	return s.withWriteLock(ctx, func() error {
-		return s.upsertSessionStateLocked(ctx, projectID, session)
+		return retrySQLiteWrite(ctx, runtimeSQLiteRetryBudget, runtimeSQLiteRetryDelay, waitSQLiteWriteRetry, func() error {
+			return s.upsertSessionStateLocked(ctx, projectID, session)
+		})
 	})
 }
 
@@ -1647,7 +1654,9 @@ func (s *RuntimeStateStore) ListProjectIDs(ctx context.Context) ([]string, error
 
 func (s *RuntimeStateStore) UpsertWorktreeState(ctx context.Context, worktreeState WorktreeState) error {
 	return s.withWriteLock(ctx, func() error {
-		return s.upsertWorktreeStateLocked(ctx, worktreeState)
+		return retrySQLiteWrite(ctx, runtimeSQLiteRetryBudget, runtimeSQLiteRetryDelay, waitSQLiteWriteRetry, func() error {
+			return s.upsertWorktreeStateLocked(ctx, worktreeState)
+		})
 	})
 }
 
@@ -2105,6 +2114,68 @@ func (s *RuntimeStateStore) withWriteLock(ctx context.Context, fn func() error) 
 	return sqliteutil.WithWriteLockContext(ctx, s.dbPath, func(context.Context) error {
 		return fn()
 	})
+}
+
+func retrySQLiteWrite(
+	ctx context.Context,
+	budget time.Duration,
+	delay time.Duration,
+	wait func(context.Context, time.Duration) error,
+	fn func() error,
+) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	retryCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	var lastErr error
+	for {
+		if retryCtx.Err() != nil {
+			if lastErr != nil {
+				return lastErr
+			}
+			return retryCtx.Err()
+		}
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		if !isSQLiteWriteContention(err) {
+			return err
+		}
+		lastErr = err
+		if err := wait(retryCtx, delay); err != nil {
+			return lastErr
+		}
+	}
+}
+
+func waitSQLiteWriteRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func isSQLiteWriteContention(err error) bool {
+	type sqliteErrorCoder interface {
+		Code() int
+	}
+	for err != nil {
+		var coded sqliteErrorCoder
+		if errors.As(err, &coded) {
+			switch coded.Code() & 0xff {
+			case runtimeSQLiteBusyPrimaryCode, runtimeSQLiteLockedPrimaryCode:
+				return true
+			}
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
 }
 
 func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
