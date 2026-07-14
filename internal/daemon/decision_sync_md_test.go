@@ -131,6 +131,183 @@ func TestDecisionSyncIssueWorktreeDoesNotExportForeignDecisionAcrossRestart(t *t
 	assertDecisionWorktreeClean(t, worktreeB)
 }
 
+func TestDecisionSyncRejectsCheckoutBeforeFinalRevalidation(t *testing.T) {
+	ctx, client, service, _, worktree, issueID, decision := newDecisionTransferBarrierFixture(t)
+	service.daemon.decisionTransferBeforeRevalidation = func(operation string, _ decisionMDTransferTarget) {
+		if operation == "sync_md" {
+			runDecisionGit(t, worktree, "checkout", "--detach", "HEAD~1")
+		}
+	}
+
+	if _, err := service.SyncMD(ctx, protocol.DecisionSyncMDRequestBody{RepoDir: worktree}); err == nil || !strings.Contains(err.Error(), "revalidate decision sync_md target") {
+		t.Fatalf("sync after checkout error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, decisionMDSubdir, decisionMDFilename(decision))); !os.IsNotExist(err) {
+		t.Fatalf("sync wrote after checkout: %v", err)
+	}
+	ownerLinks, err := client.ListDecisionLinks(ctx, issues.DecisionLinkFilter{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue})
+	if err != nil || len(ownerLinks) != 1 || ownerLinks[0].TargetID != issueID {
+		t.Fatalf("decision ownership changed: links=%+v err=%v", ownerLinks, err)
+	}
+}
+
+func TestDecisionImportRejectsWorktreeRelinkBeforeFinalRevalidation(t *testing.T) {
+	ctx, client, service, _, worktree, issueID, decision := newDecisionTransferBarrierFixture(t)
+	foreignIssue, err := client.Create(ctx, issues.CreateTaskParams{Title: "Relinked issue", Type: domain.TypeTask, Priority: domain.P2, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(worktree, decisionMDSubdir, decisionMDFilename(decision))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	markdown := decision
+	markdown.Rationale = "must not cross relink"
+	if err := os.WriteFile(path, renderDecisionMarkdown(markdown, []issues.DecisionLink{{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue, TargetID: issueID, Relation: issues.DecisionRelationAppliesTo}}, nil), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	service.daemon.decisionTransferBeforeRevalidation = func(operation string, _ decisionMDTransferTarget) {
+		if operation == "import_md" {
+			runDecisionGit(t, worktree, "branch", "-m", "tester/"+foreignIssue+"/relinked")
+		}
+	}
+
+	if _, err := service.ImportMD(ctx, protocol.DecisionImportMDRequestBody{RepoDir: worktree, Force: true}); err == nil || !strings.Contains(err.Error(), "revalidate decision import_md target") {
+		t.Fatalf("import after relink error = %v", err)
+	}
+	after, err := client.GetDecision(ctx, decision.LocalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Rationale != decision.Rationale {
+		t.Fatalf("import crossed relink: before=%q after=%q", decision.Rationale, after.Rationale)
+	}
+}
+
+func TestDecisionImportRejectsCheckoutBeforeLinkOnlyMutation(t *testing.T) {
+	ctx, client, service, repoDir, _, issueID, decision := newDecisionTransferBarrierFixture(t)
+	secondIssue, err := client.Create(ctx, issues.CreateTaskParams{Title: "Second provenance", Type: domain.TypeTask, Priority: domain.P2, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	links := []issues.DecisionLink{
+		{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue, TargetID: issueID, Relation: issues.DecisionRelationAppliesTo},
+		{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue, TargetID: secondIssue, Relation: issues.DecisionRelationAppliesTo},
+	}
+	path := filepath.Join(repoDir, decisionMDSubdir, decisionMDFilename(decision))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, renderDecisionMarkdown(decision, links, nil), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	service.daemon.decisionTransferBeforeRevalidation = func(operation string, _ decisionMDTransferTarget) {
+		if operation == "import_md_apply" {
+			runDecisionGit(t, repoDir, "checkout", "--detach", "HEAD~1")
+		}
+	}
+
+	result, err := service.ImportMD(ctx, protocol.DecisionImportMDRequestBody{RepoDir: repoDir, FullProject: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Files) != 1 || !strings.Contains(result.Files[0].ApplyError, "revalidate decision import target") {
+		t.Fatalf("link-only import result = %+v", result)
+	}
+	afterLinks, err := client.ListDecisionLinks(ctx, issues.DecisionLinkFilter{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterLinks) != 1 || afterLinks[0].TargetID != issueID {
+		t.Fatalf("link-only import crossed checkout: %+v", afterLinks)
+	}
+}
+
+func TestDecisionSyncAndImportSerializeOnCanonicalTarget(t *testing.T) {
+	ctx, _, service, _, worktree, _, _ := newDecisionTransferBarrierFixture(t)
+	worktreeAlias := filepath.Join(t.TempDir(), "worktree-alias")
+	if err := os.Symlink(worktree, worktreeAlias); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan string, 2)
+	releaseSync := make(chan struct{})
+	service.daemon.decisionTransferBeforeRevalidation = func(operation string, _ decisionMDTransferTarget) {
+		entered <- operation
+		if operation == "sync_md" {
+			<-releaseSync
+		}
+	}
+
+	syncDone := make(chan error, 1)
+	go func() {
+		_, err := service.SyncMD(ctx, protocol.DecisionSyncMDRequestBody{RepoDir: worktree})
+		syncDone <- err
+	}()
+	if operation := <-entered; operation != "sync_md" {
+		t.Fatalf("first transfer = %q, want sync_md", operation)
+	}
+
+	importDone := make(chan error, 1)
+	go func() {
+		_, err := service.ImportMD(ctx, protocol.DecisionImportMDRequestBody{RepoDir: worktreeAlias, Check: true})
+		importDone <- err
+	}()
+	select {
+	case operation := <-entered:
+		t.Fatalf("concurrent transfer entered canonical barrier early: %s", operation)
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(releaseSync)
+	if err := <-syncDone; err != nil {
+		t.Fatalf("serialized sync: %v", err)
+	}
+	if operation := <-entered; operation != "import_md" {
+		t.Fatalf("second transfer = %q, want import_md", operation)
+	}
+	if err := <-importDone; err != nil {
+		t.Fatalf("serialized import: %v", err)
+	}
+}
+
+func newDecisionTransferBarrierFixture(t *testing.T) (context.Context, *issues.Client, issueDecisionService, string, string, string, issues.Decision) {
+	t.Helper()
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	runDecisionGit(t, repoDir, "init")
+	runDecisionGit(t, repoDir, "config", "user.name", "Decision Test")
+	runDecisionGit(t, repoDir, "config", "user.email", "decision@example.com")
+	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte(".azedarach/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDecisionGit(t, repoDir, "add", ".gitignore", "README.md")
+	runDecisionGit(t, repoDir, "commit", "-m", "seed")
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("second revision\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDecisionGit(t, repoDir, "add", "README.md")
+	runDecisionGit(t, repoDir, "commit", "-m", "second")
+
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Transfer owner", Type: domain.TypeTask, Priority: domain.P2, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := client.RecordDecision(ctx, issues.RecordDecisionParams{Title: "Barrier decision", Rationale: "durable rationale"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AddDecisionLink(ctx, issues.AddDecisionLinkParams{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue, TargetID: issueID, Relation: issues.DecisionRelationAppliesTo}); err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(t.TempDir(), "issue-worktree")
+	runDecisionGit(t, repoDir, "worktree", "add", "-b", "tester/"+issueID+"/transfer", worktree)
+	service := newTestIssueDecisionService(client, repoDir)
+	service.daemon.git = gitservice.NewClient(gitservice.NewExecRunner(repoDir), nil)
+	return ctx, client, service, repoDir, worktree, issueID, decision
+}
+
 func TestDecisionOwnerRequiresExactlyOneIssue(t *testing.T) {
 	if got := decisionOwnerIssueID(nil); got != "" {
 		t.Fatalf("unowned owner = %q", got)
@@ -248,6 +425,150 @@ func TestDecisionImportPreservesForeignIssueArtifact(t *testing.T) {
 	if _, err := client.GetDecision(ctx, decision.LocalID); err == nil {
 		t.Fatal("foreign decision was imported")
 	}
+}
+
+func TestDecisionImportExistingForeignDurableOwnerNeverMutates(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		force bool
+		edit  func(*issues.Decision)
+	}{
+		{name: "no-op"},
+		{name: "clean change", edit: func(d *issues.Decision) { d.Consequences = "markdown-only consequence" }},
+		{name: "forced conflict", force: true, edit: func(d *issues.Decision) { d.Rationale = "foreign markdown rationale" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			client, repoDir := newTestIssueClient(t)
+			localIssue, err := client.Create(ctx, issues.CreateTaskParams{Title: "Local", Type: domain.TypeTask, Priority: domain.P2, Status: domain.StatusOpen})
+			if err != nil {
+				t.Fatal(err)
+			}
+			foreignIssue, err := client.Create(ctx, issues.CreateTaskParams{Title: "Foreign", Type: domain.TypeTask, Priority: domain.P2, Status: domain.StatusOpen})
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision, err := client.RecordDecision(ctx, issues.RecordDecisionParams{Title: "Durably foreign", Rationale: "durable rationale"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.AddDecisionLink(ctx, issues.AddDecisionLinkParams{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue, TargetID: foreignIssue, Relation: issues.DecisionRelationAppliesTo}); err != nil {
+				t.Fatal(err)
+			}
+
+			markdownDecision := decision
+			if tc.edit != nil {
+				tc.edit(&markdownDecision)
+			}
+			claimedLocal := []issues.DecisionLink{{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue, TargetID: localIssue, Relation: issues.DecisionRelationAppliesTo}}
+			path := filepath.Join(repoDir, decisionMDSubdir, decisionMDFilename(markdownDecision))
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, renderDecisionMarkdown(markdownDecision, claimedLocal, nil), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			service := newTestIssueDecisionService(client, repoDir)
+			result := service.importOneDecisionFile(ctx, client, decisionMDTransferTarget{RepoDir: repoDir, IssueID: localIssue}, path, protocol.DecisionImportMDRequestBody{Force: tc.force})
+			if !result.Skipped || !strings.Contains(result.SkipReason, "durable decision owner") || result.Imported || result.ApplyError != "" {
+				t.Fatalf("foreign-owner import result = %+v", result)
+			}
+			after, err := client.GetDecision(ctx, decision.LocalID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Title != decision.Title || after.Rationale != decision.Rationale || after.Context != decision.Context || after.Consequences != decision.Consequences {
+				t.Fatalf("foreign decision mutated: before=%+v after=%+v", decision, after)
+			}
+			links, err := client.ListDecisionLinks(ctx, issues.DecisionLinkFilter{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(links) != 1 || links[0].TargetID != foreignIssue {
+				t.Fatalf("foreign ownership mutated: %+v", links)
+			}
+		})
+	}
+}
+
+func TestDecisionImportFullProjectUpdatesExistingAndImportsProvenance(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	firstIssue, err := client.Create(ctx, issues.CreateTaskParams{Title: "First owner", Type: domain.TypeTask, Priority: domain.P2, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondIssue, err := client.Create(ctx, issues.CreateTaskParams{Title: "Second owner", Type: domain.TypeTask, Priority: domain.P2, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := newTestIssueDecisionService(client, repoDir)
+
+	writeImport := func(t *testing.T, decision issues.Decision, rationale string) string {
+		t.Helper()
+		markdown := decision
+		markdown.Rationale = rationale
+		links := []issues.DecisionLink{
+			{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue, TargetID: firstIssue, Relation: issues.DecisionRelationAppliesTo},
+			{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue, TargetID: secondIssue, Relation: issues.DecisionRelationAppliesTo},
+		}
+		path := filepath.Join(repoDir, decisionMDSubdir, decisionMDFilename(markdown))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, renderDecisionMarkdown(markdown, links, nil), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("field update", func(t *testing.T) {
+		decision, err := client.RecordDecision(ctx, issues.RecordDecisionParams{Title: "Existing full-project decision", Rationale: "durable rationale"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.AddDecisionLink(ctx, issues.AddDecisionLinkParams{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue, TargetID: firstIssue, Relation: issues.DecisionRelationAppliesTo}); err != nil {
+			t.Fatal(err)
+		}
+		path := writeImport(t, decision, "markdown rationale")
+
+		result := service.importOneDecisionFile(ctx, client, decisionMDTransferTarget{RepoDir: repoDir, FullProject: true}, path, protocol.DecisionImportMDRequestBody{Force: true, FullProject: true})
+		if !result.Imported || result.ApplyError != "" {
+			t.Fatalf("full-project update result = %+v", result)
+		}
+		updated, err := client.GetDecision(ctx, decision.LocalID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.Rationale != "markdown rationale" {
+			t.Fatalf("updated rationale = %q", updated.Rationale)
+		}
+		links, err := client.ListDecisionLinks(ctx, issues.DecisionLinkFilter{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue})
+		if err != nil || len(links) != 2 {
+			t.Fatalf("full-project update links = %+v err=%v", links, err)
+		}
+	})
+
+	t.Run("link only", func(t *testing.T) {
+		decision, err := client.RecordDecision(ctx, issues.RecordDecisionParams{Title: "Existing link-only decision", Rationale: "unchanged rationale"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.AddDecisionLink(ctx, issues.AddDecisionLinkParams{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue, TargetID: firstIssue, Relation: issues.DecisionRelationAppliesTo}); err != nil {
+			t.Fatal(err)
+		}
+		path := writeImport(t, decision, decision.Rationale)
+
+		result := service.importOneDecisionFile(ctx, client, decisionMDTransferTarget{RepoDir: repoDir, FullProject: true}, path, protocol.DecisionImportMDRequestBody{FullProject: true})
+		if !result.Imported || result.ApplyError != "" || len(result.Changes) != 0 {
+			t.Fatalf("full-project link-only result = %+v", result)
+		}
+		links, err := client.ListDecisionLinks(ctx, issues.DecisionLinkFilter{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue})
+		if err != nil || len(links) != 2 {
+			t.Fatalf("full-project link-only links = %+v err=%v", links, err)
+		}
+	})
 }
 
 func TestDecisionImportPersistsIssueProvenance(t *testing.T) {

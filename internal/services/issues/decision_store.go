@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -114,6 +115,19 @@ type UpdateDecisionParams struct {
 	Context      *string
 	Consequences *string
 }
+
+// DecisionOwnerSnapshot describes the active issue-link ownership of a
+// decision at one durable read point. Exactly one active issue link establishes
+// an owner; zero or multiple active issue links leave OwnerIssueID empty.
+type DecisionOwnerSnapshot struct {
+	IssueIDs     []string
+	OwnerIssueID string
+}
+
+// ErrDecisionOwnerMismatch indicates that a conditional decision mutation was
+// rejected because the decision's exact durable active owner differed from the
+// caller's expected owner.
+var ErrDecisionOwnerMismatch = errors.New("decision owner mismatch")
 
 type DecisionFilter struct {
 	LocalIDs       []string
@@ -422,6 +436,95 @@ func (c *Client) UpdateDecision(ctx context.Context, selector string, params Upd
 	return out, err
 }
 
+// UpdateDecisionForOwner verifies the decision's exact active issue-link owner
+// and applies params in the same transaction. Empty params perform an atomic
+// ownership verification without writing or auditing an update.
+func (c *Client) UpdateDecisionForOwner(ctx context.Context, selector, expectedOwner string, params UpdateDecisionParams) (Decision, DecisionOwnerSnapshot, error) {
+	var out Decision
+	var owner DecisionOwnerSnapshot
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		out, owner, err = c.updateDecisionForOwnerLocked(lockCtx, selector, expectedOwner, params)
+		return err
+	})
+	return out, owner, err
+}
+
+func (c *Client) updateDecisionForOwnerLocked(ctx context.Context, selector, expectedOwner string, params UpdateDecisionParams) (Decision, DecisionOwnerSnapshot, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return Decision{}, DecisionOwnerSnapshot{}, err
+	}
+	selector = strings.TrimSpace(selector)
+	expectedOwner = strings.TrimSpace(expectedOwner)
+	if selector == "" {
+		return Decision{}, DecisionOwnerSnapshot{}, c.wrapError("update-decision-for-owner", selector, errors.New("decision id is required"))
+	}
+	if expectedOwner == "" {
+		return Decision{}, DecisionOwnerSnapshot{}, c.wrapError("update-decision-for-owner", selector, errors.New("expected decision owner is required"))
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return Decision{}, DecisionOwnerSnapshot{}, c.wrapError("update-decision-for-owner", selector, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	before, err := c.lookupDecisionByLocalID(ctx, tx, selector, false)
+	if err != nil {
+		return Decision{}, DecisionOwnerSnapshot{}, c.wrapError("update-decision-for-owner", selector, err)
+	}
+	links, err := c.listDecisionLinksForDecisionRow(ctx, tx, before.rowID, false)
+	if err != nil {
+		return Decision{}, DecisionOwnerSnapshot{}, c.wrapError("update-decision-for-owner", before.LocalID, err)
+	}
+	owner := decisionOwnerSnapshot(links)
+	if owner.OwnerIssueID != expectedOwner {
+		return Decision{}, owner, c.wrapError("update-decision-for-owner", before.LocalID, fmt.Errorf("%w: expected %q, active issue links %v", ErrDecisionOwnerMismatch, expectedOwner, owner.IssueIDs))
+	}
+
+	if decisionUpdateParamsEmpty(params) {
+		if err := tx.Commit(); err != nil {
+			return Decision{}, owner, c.wrapError("update-decision-for-owner", before.LocalID, err)
+		}
+		return before.Decision, owner, nil
+	}
+
+	after, err := c.applyDecisionUpdateTx(ctx, tx, before, params)
+	if err != nil {
+		return Decision{}, owner, c.wrapError("update-decision-for-owner", before.LocalID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Decision{}, owner, c.wrapError("update-decision-for-owner", before.LocalID, err)
+	}
+	return after, owner, nil
+}
+
+func decisionOwnerSnapshot(links []decisionLinkRecord) DecisionOwnerSnapshot {
+	seen := make(map[string]struct{})
+	for _, link := range links {
+		if link.TargetKind != DecisionTargetIssue {
+			continue
+		}
+		if issueID := strings.TrimSpace(link.TargetID); issueID != "" {
+			seen[issueID] = struct{}{}
+		}
+	}
+	owner := DecisionOwnerSnapshot{IssueIDs: make([]string, 0, len(seen))}
+	for issueID := range seen {
+		owner.IssueIDs = append(owner.IssueIDs, issueID)
+	}
+	sort.Strings(owner.IssueIDs)
+	if len(owner.IssueIDs) == 1 {
+		owner.OwnerIssueID = owner.IssueIDs[0]
+	}
+	return owner
+}
+
+func decisionUpdateParamsEmpty(params UpdateDecisionParams) bool {
+	return params.Title == nil && params.Rationale == nil && params.Context == nil && params.Consequences == nil
+}
+
 func (c *Client) updateDecisionLocked(ctx context.Context, selector string, params UpdateDecisionParams) (Decision, error) {
 	db, err := c.dbHandle()
 	if err != nil {
@@ -446,33 +549,33 @@ func (c *Client) updateDecisionLocked(ctx context.Context, selector string, para
 	if err != nil {
 		return Decision{}, c.wrapError("update-decision", selector, err)
 	}
-	after, err := applyDecisionUpdate(before.Decision, params)
+	after, err := c.applyDecisionUpdateTx(ctx, tx, before, params)
 	if err != nil {
-		return Decision{}, c.wrapError("update-decision", before.LocalID, err)
-	}
-
-	after.UpdatedAt = time.Now().UTC()
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE decisions
-		SET title = ?, rationale = ?, context = ?, consequences = ?, updated_at = ?
-		WHERE id = ?
-	`,
-		after.Title,
-		nullableString(after.Rationale),
-		nullableString(after.Context),
-		nullableString(after.Consequences),
-		formatTimestamp(after.UpdatedAt),
-		before.rowID,
-	); err != nil {
-		return Decision{}, c.wrapError("update-decision", before.LocalID, classifySQLiteConstraint(err))
-	}
-	if err := c.insertDecisionAuditRow(ctx, tx, decisionEntityKind, before.LocalID, decisionOpUpdate, before.Decision, after); err != nil {
 		return Decision{}, c.wrapError("update-decision", before.LocalID, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return Decision{}, c.wrapError("update-decision", before.LocalID, err)
 	}
 	tx = nil
+	return after, nil
+}
+
+func (c *Client) applyDecisionUpdateTx(ctx context.Context, tx *sql.Tx, before decisionRecord, params UpdateDecisionParams) (Decision, error) {
+	after, err := applyDecisionUpdate(before.Decision, params)
+	if err != nil {
+		return Decision{}, err
+	}
+	after.UpdatedAt = time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE decisions
+		SET title = ?, rationale = ?, context = ?, consequences = ?, updated_at = ?
+		WHERE id = ?
+	`, after.Title, nullableString(after.Rationale), nullableString(after.Context), nullableString(after.Consequences), formatTimestamp(after.UpdatedAt), before.rowID); err != nil {
+		return Decision{}, classifySQLiteConstraint(err)
+	}
+	if err := c.insertDecisionAuditRow(ctx, tx, decisionEntityKind, before.LocalID, decisionOpUpdate, before.Decision, after); err != nil {
+		return Decision{}, err
+	}
 	return after, nil
 }
 

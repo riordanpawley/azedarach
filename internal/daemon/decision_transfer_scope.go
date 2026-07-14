@@ -14,6 +14,42 @@ type decisionMDTransferTarget struct {
 	FullProject bool
 }
 
+func (s issueDecisionService) withDecisionMDTransferTarget(ctx context.Context, requestRepoDir string, fullProject bool, fn func(context.Context, decisionMDTransferTarget) error) (decisionMDTransferTarget, error) {
+	target, err := s.resolveDecisionMDTransferTarget(ctx, requestRepoDir, fullProject)
+	if err != nil {
+		return decisionMDTransferTarget{}, err
+	}
+	if s.daemon == nil || s.daemon.git == nil {
+		if err := fn(ctx, target); err != nil {
+			return target, err
+		}
+		return target, nil
+	}
+	err = s.daemon.git.WithWorktreeLock(ctx, target.RepoDir, func(lockCtx context.Context) error {
+		return fn(lockCtx, target)
+	})
+	return target, err
+}
+
+func (s issueDecisionService) revalidateDecisionMDTransferTarget(ctx context.Context, expected decisionMDTransferTarget) error {
+	actual, err := s.resolveDecisionMDTransferTarget(ctx, expected.RepoDir, expected.FullProject)
+	if err != nil {
+		return err
+	}
+	if actual.RepoDir != expected.RepoDir || actual.Revision != expected.Revision || actual.IssueID != expected.IssueID || actual.FullProject != expected.FullProject {
+		return fmt.Errorf("decision transfer target changed: expected repo=%s revision=%s issue=%s full_project=%t; got repo=%s revision=%s issue=%s full_project=%t",
+			expected.RepoDir, expected.Revision, expected.IssueID, expected.FullProject,
+			actual.RepoDir, actual.Revision, actual.IssueID, actual.FullProject)
+	}
+	return nil
+}
+
+func (s issueDecisionService) beforeDecisionMDTransferRevalidation(operation string, target decisionMDTransferTarget) {
+	if s.daemon != nil && s.daemon.decisionTransferBeforeRevalidation != nil {
+		s.daemon.decisionTransferBeforeRevalidation(operation, target)
+	}
+}
+
 func (s issueDecisionService) resolveDecisionMDTransferTarget(ctx context.Context, requestRepoDir string, fullProject bool) (decisionMDTransferTarget, error) {
 	projectID := daemonProjectIDFromContext(ctx)
 	repoDir, err := decisionMDRepoDir(s.daemon.resolveRepoDirForProject(projectID), requestRepoDir)

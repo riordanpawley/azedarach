@@ -30,67 +30,68 @@ func (s issueDecisionService) SyncMD(ctx context.Context, req protocol.DecisionS
 	if s.daemon == nil {
 		return protocol.DecisionSyncMDResponseBody{}, errors.New("decision sync_md unavailable: daemon nil")
 	}
-	target, err := s.resolveDecisionMDTransferTarget(ctx, req.RepoDir, req.FullProject)
+	var resp protocol.DecisionSyncMDResponseBody
+	_, err = s.withDecisionMDTransferTarget(ctx, req.RepoDir, req.FullProject, func(lockCtx context.Context, target decisionMDTransferTarget) error {
+		decisions, err := c.ListDecisions(lockCtx, issues.DecisionFilter{IncludeDeleted: true})
+		if err != nil {
+			return err
+		}
+
+		exports := make([]decisionMDExport, 0, len(decisions))
+		provenance := make(map[string][]string, len(decisions))
+		owners := make(map[string]string, len(decisions))
+		authorized := make(map[string]struct{}, len(decisions))
+		for _, decision := range decisions {
+			links, err := c.ListDecisionLinks(lockCtx, issues.DecisionLinkFilter{DecisionID: decision.LocalID})
+			if err != nil {
+				return err
+			}
+			provenanceLinks := links
+			if decision.DeletedAt != nil {
+				provenanceLinks, err = c.ListDecisionLinks(lockCtx, issues.DecisionLinkFilter{DecisionID: decision.LocalID, IncludeDeleted: true})
+				if err != nil {
+					return err
+				}
+			}
+			incoming, err := c.ListDecisionLinks(lockCtx, issues.DecisionLinkFilter{TargetKind: issues.DecisionTargetDecision, TargetID: decision.LocalID})
+			if err != nil {
+				return err
+			}
+			issueIDs := decisionIssueIDsAtDecisionState(decision, provenanceLinks)
+			provenance[decision.LocalID] = issueIDs
+			owners[decision.LocalID] = decisionOwnerIssueID(issueIDs)
+			if target.FullProject || owners[decision.LocalID] == target.IssueID {
+				authorized[decision.LocalID] = struct{}{}
+				if decision.DeletedAt == nil {
+					exports = append(exports, decisionMDExport{Decision: decision, Body: renderDecisionMarkdown(decision, links, incoming)})
+				}
+			}
+		}
+
+		// Planning may take time. Re-read live HEAD and both live/durable
+		// worktree ownership under the canonical target lock immediately before
+		// any filesystem reconciliation.
+		s.beforeDecisionMDTransferRevalidation("sync_md", target)
+		if err := s.revalidateDecisionMDTransferTarget(lockCtx, target); err != nil {
+			return fmt.Errorf("revalidate decision sync_md target: %w", err)
+		}
+		results, err := reconcileDecisionMarkdownScoped(target.RepoDir, exports, authorized, provenance, owners, target.FullProject, req.Check)
+		if err != nil {
+			return err
+		}
+		changedFiles := make([]string, 0, len(results))
+		for _, result := range results {
+			if !result.Skipped {
+				changedFiles = append(changedFiles, result.Path)
+			}
+		}
+		resp = protocol.DecisionSyncMDResponseBody{Check: req.Check, Changed: len(changedFiles) > 0, Files: changedFiles, TargetRepoDir: target.RepoDir, TargetRevision: target.Revision, TargetIssueID: target.IssueID, FullProject: target.FullProject, Results: results}
+		return nil
+	})
 	if err != nil {
 		return protocol.DecisionSyncMDResponseBody{}, fmt.Errorf("decision sync_md target: %w", err)
 	}
-
-	decisions, err := c.ListDecisions(ctx, issues.DecisionFilter{IncludeDeleted: true})
-	if err != nil {
-		return protocol.DecisionSyncMDResponseBody{}, err
-	}
-
-	exports := make([]decisionMDExport, 0, len(decisions))
-	provenance := make(map[string][]string, len(decisions))
-	owners := make(map[string]string, len(decisions))
-	authorized := make(map[string]struct{}, len(decisions))
-	for _, decision := range decisions {
-		links, err := c.ListDecisionLinks(ctx, issues.DecisionLinkFilter{DecisionID: decision.LocalID})
-		if err != nil {
-			return protocol.DecisionSyncMDResponseBody{}, err
-		}
-		provenanceLinks := links
-		if decision.DeletedAt != nil {
-			provenanceLinks, err = c.ListDecisionLinks(ctx, issues.DecisionLinkFilter{DecisionID: decision.LocalID, IncludeDeleted: true})
-			if err != nil {
-				return protocol.DecisionSyncMDResponseBody{}, err
-			}
-		}
-		incoming, err := c.ListDecisionLinks(ctx, issues.DecisionLinkFilter{
-			TargetKind: issues.DecisionTargetDecision,
-			TargetID:   decision.LocalID,
-		})
-		if err != nil {
-			return protocol.DecisionSyncMDResponseBody{}, err
-		}
-		issueIDs := decisionIssueIDsAtDecisionState(decision, provenanceLinks)
-		provenance[decision.LocalID] = issueIDs
-		owners[decision.LocalID] = decisionOwnerIssueID(issueIDs)
-		if target.FullProject || owners[decision.LocalID] == target.IssueID {
-			authorized[decision.LocalID] = struct{}{}
-			if decision.DeletedAt == nil {
-				body := renderDecisionMarkdown(decision, links, incoming)
-				exports = append(exports, decisionMDExport{Decision: decision, Body: body})
-			}
-		}
-	}
-
-	results, err := reconcileDecisionMarkdownScoped(target.RepoDir, exports, authorized, provenance, owners, target.FullProject, req.Check)
-	if err != nil {
-		return protocol.DecisionSyncMDResponseBody{}, err
-	}
-	changedFiles := make([]string, 0, len(results))
-	for _, result := range results {
-		if !result.Skipped {
-			changedFiles = append(changedFiles, result.Path)
-		}
-	}
-
-	return protocol.DecisionSyncMDResponseBody{
-		Check: req.Check, Changed: len(changedFiles) > 0, Files: changedFiles,
-		TargetRepoDir: target.RepoDir, TargetRevision: target.Revision,
-		TargetIssueID: target.IssueID, FullProject: target.FullProject, Results: results,
-	}, nil
+	return resp, nil
 }
 
 type decisionMDExport struct {
