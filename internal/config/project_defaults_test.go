@@ -42,6 +42,8 @@ func TestEnvrcSharesExternalDirenvLayoutAcrossWorktrees(t *testing.T) {
 	require.NoError(t, err)
 	envrc, err := os.ReadFile(filepath.Join(repoRoot, ".envrc"))
 	require.NoError(t, err)
+	cacheEnv, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "go-cache-env.sh"))
+	require.NoError(t, err)
 
 	testRoot := t.TempDir()
 	mainCheckout := filepath.Join(testRoot, "main checkout")
@@ -49,9 +51,11 @@ func TestEnvrcSharesExternalDirenvLayoutAcrossWorktrees(t *testing.T) {
 	cacheRoot := filepath.Join(testRoot, "cache")
 	goCacheRoot := filepath.Join(testRoot, "go-cache")
 	require.NoError(t, os.Mkdir(mainCheckout, 0o755))
+	require.NoError(t, os.Mkdir(filepath.Join(mainCheckout, "scripts"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(mainCheckout, ".envrc"), envrc, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(mainCheckout, "scripts", "go-cache-env.sh"), cacheEnv, 0o755))
 	runGit(t, mainCheckout, "init")
-	runGit(t, mainCheckout, "add", ".envrc")
+	runGit(t, mainCheckout, "add", ".envrc", "scripts/go-cache-env.sh")
 	runGit(t, mainCheckout, "-c", "user.name=Azedarach Test", "-c", "user.email=test@example.invalid", "commit", "-m", "test fixture")
 	runGit(t, mainCheckout, "worktree", "add", "--detach", linkedCheckout, "HEAD")
 

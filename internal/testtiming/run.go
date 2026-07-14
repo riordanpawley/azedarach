@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/gocache"
 	"github.com/riordanpawley/azedarach/internal/testisolation"
 )
 
@@ -29,6 +31,60 @@ func Run(ctx context.Context, opts RunOptions) (Measurement, error) {
 	if opts.OutputDir == "" {
 		return Measurement{}, fmt.Errorf("output directory is required")
 	}
+	cacheConfig, err := gocache.FromEnvironment(gocache.KindForProfile(opts.Profile.Name))
+	if err != nil {
+		return Measurement{}, fmt.Errorf("resolve Go build-cache protocol: %w", err)
+	}
+	var measurement Measurement
+	var runErr error
+	lockErr := gocache.WithExclusiveLock(ctx, cacheConfig, func() error {
+		telemetry, err := gocache.Prepare(ctx, cacheConfig, os.Getenv("AZEDARACH_GO_CACHE_AUTO_MAINTAIN") == "1")
+		if err != nil {
+			measurement, runErr = writeRefusalArtifacts(opts, telemetry, err)
+			return nil
+		}
+		measurement, runErr = runLocked(ctx, opts, cacheConfig, telemetry)
+		return nil
+	})
+	if lockErr != nil {
+		return measurement, lockErr
+	}
+	return measurement, runErr
+}
+
+func writeRefusalArtifacts(opts RunOptions, telemetry gocache.Telemetry, refusal error) (Measurement, error) {
+	if err := os.MkdirAll(opts.OutputDir, 0o755); err != nil {
+		return Measurement{}, errors.Join(refusal, fmt.Errorf("create refusal artifact directory: %w", err))
+	}
+	rawPath := filepath.Join(opts.OutputDir, "events.jsonl")
+	stderrPath := filepath.Join(opts.OutputDir, "stderr.txt")
+	if err := os.WriteFile(rawPath, nil, 0o644); err != nil {
+		return Measurement{}, errors.Join(refusal, err)
+	}
+	if err := os.WriteFile(stderrPath, []byte(refusal.Error()+"\n"), 0o644); err != nil {
+		return Measurement{}, errors.Join(refusal, err)
+	}
+	measurement := Measurement{
+		Schema:              ReportSchema,
+		Profile:             opts.Profile.Name,
+		CacheMode:           opts.Profile.CachePolicy(),
+		TestResultCacheMode: opts.Profile.CachePolicy(),
+		BuildCache:          telemetry,
+		ResourceMethod:      "direct-go-command-process-state-v1",
+		StartedAt:           opts.Now().UTC(),
+		ExitCode:            1,
+		RawJSONPath:         rawPath,
+		StderrPath:          stderrPath,
+		Command:             opts.Profile.Command(),
+		Comparison:          Comparison{BaselineRecordedAt: opts.Baseline.RecordedAt, PackageDeltas: []Delta{}, Violations: []Violation{}},
+	}
+	if err := writeArtifacts(opts.OutputDir, measurement); err != nil {
+		return measurement, errors.Join(refusal, err)
+	}
+	return measurement, refusal
+}
+
+func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config, cacheTelemetry gocache.Telemetry) (Measurement, error) {
 	if err := os.MkdirAll(opts.OutputDir, 0o755); err != nil {
 		return Measurement{}, fmt.Errorf("create output directory: %w", err)
 	}
@@ -40,6 +96,7 @@ func Run(ctx context.Context, opts RunOptions) (Measurement, error) {
 	if opts.Profile.CleanCache {
 		cmd := exec.CommandContext(ctx, "go", "clean", "-testcache")
 		cmd.Dir = opts.WorkingDir
+		cmd.Env = withEnv(os.Environ(), "GOCACHE", cacheConfig.CachePath())
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return Measurement{}, fmt.Errorf("clean Go test cache: %w: %s", err, output)
 		}
@@ -61,7 +118,7 @@ func Run(ctx context.Context, opts RunOptions) (Measurement, error) {
 	command := opts.Profile.Command()
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	cmd.Dir = opts.WorkingDir
-	cmd.Env = isolation.Environ(os.Environ())
+	cmd.Env = isolation.Environ(withEnv(os.Environ(), "GOCACHE", cacheConfig.CachePath()))
 	collector := NewEventCollector(raw)
 	cmd.Stdout = collector
 	cmd.Stderr = stderr
@@ -78,7 +135,8 @@ func Run(ctx context.Context, opts RunOptions) (Measurement, error) {
 			exitCode = exitErr.ExitCode()
 		}
 	}
-	m := Measurement{Schema: ReportSchema, Profile: opts.Profile.Name, CacheMode: opts.Profile.CachePolicy(), ResourceMethod: "direct-go-command-process-state-v1", StartedAt: startedAt, WallSeconds: wall, ExitCode: exitCode, Packages: packages, Tests: tests, Failures: failures, InvalidEvents: invalid, RawJSONPath: rawPath, StderrPath: stderrPath, Command: command}
+	cacheTelemetry, cacheErr := gocache.Finish(cacheConfig, cacheTelemetry)
+	m := Measurement{Schema: ReportSchema, Profile: opts.Profile.Name, CacheMode: opts.Profile.CachePolicy(), TestResultCacheMode: opts.Profile.CachePolicy(), BuildCache: cacheTelemetry, ResourceMethod: "direct-go-command-process-state-v1", StartedAt: startedAt, WallSeconds: wall, ExitCode: exitCode, Packages: packages, Tests: tests, Failures: failures, InvalidEvents: invalid, RawJSONPath: rawPath, StderrPath: stderrPath, Command: command}
 	if cmd.ProcessState != nil {
 		m.UserCPUSeconds = cmd.ProcessState.UserTime().Seconds()
 		m.SystemCPUSeconds = cmd.ProcessState.SystemTime().Seconds()
@@ -89,6 +147,11 @@ func Run(ctx context.Context, opts RunOptions) (Measurement, error) {
 		return m, err
 	}
 	var outcomes []error
+	if cacheErr != nil {
+		outcomes = append(outcomes, fmt.Errorf("measure Go build cache after validation: %w", cacheErr))
+	} else if cacheTelemetry.FamilyBytes > cacheConfig.HardLimitBytes {
+		outcomes = append(outcomes, fmt.Errorf("Go build-cache family grew to %d bytes, above hard limit %d", cacheTelemetry.FamilyBytes, cacheConfig.HardLimitBytes))
+	}
 	if runErr != nil {
 		outcomes = append(outcomes, fmt.Errorf("test command exited %d: %w", exitCode, runErr))
 	}
@@ -99,6 +162,17 @@ func Run(ctx context.Context, opts RunOptions) (Measurement, error) {
 		outcomes = append(outcomes, fmt.Errorf("%d timing budget violation(s)", len(m.Comparison.Violations)))
 	}
 	return m, errors.Join(outcomes...)
+}
+
+func withEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	for _, item := range env {
+		if !strings.HasPrefix(item, prefix) {
+			out = append(out, item)
+		}
+	}
+	return append(out, prefix+value)
 }
 
 func writeArtifacts(dir string, m Measurement) error {

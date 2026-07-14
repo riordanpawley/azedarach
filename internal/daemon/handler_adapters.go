@@ -21,6 +21,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/gocache"
 	"github.com/riordanpawley/azedarach/internal/naming"
 
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -1592,15 +1593,22 @@ func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, i
 	if hasProjectedWorktree {
 		opts.FallbackBranch = projectedWorktree.Branch
 	}
+	cacheRoot := gocache.RootForRepository(ctx, manager.RepoDir())
 	removedWorktree, err := manager.DeleteWithOptions(ctx, issueID, opts)
 	if err != nil {
 		if errors.Is(err, git.ErrWorktreeNotFound) {
+			if cacheErr := gocache.CleanupOwner(ctx, cacheRoot, manager.RepoDir(), issueID); cacheErr != nil {
+				return nil, false, fmt.Errorf("cleanup inactive Go cache owner %s: %w", issueID, cacheErr)
+			}
 			if a.runtimeProjectionWriter != nil {
 				a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
 			}
 			return nil, false, nil
 		}
 		return nil, false, err
+	}
+	if cacheErr := gocache.CleanupOwner(ctx, cacheRoot, manager.RepoDir(), issueID); cacheErr != nil {
+		return nil, false, fmt.Errorf("cleanup inactive Go cache owner %s: %w", issueID, cacheErr)
 	}
 	if removedWorktree != nil && strings.TrimSpace(removedWorktree.Path) != "" {
 		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(removedWorktree.Path))
@@ -1642,8 +1650,16 @@ func (a *worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID 
 	result := &daemonhandlers.CleanupOrphanedResult{
 		ProjectID: projectID,
 	}
+	cacheRoot := gocache.RootForRepository(ctx, manager.RepoDir())
 	for _, wt := range worktrees {
 		if err := manager.Delete(ctx, wt.IssueID); err != nil {
+			result.Skipped = append(result.Skipped, wt)
+			continue
+		}
+		if err := gocache.CleanupOwner(ctx, cacheRoot, manager.RepoDir(), wt.IssueID); err != nil {
+			if a.logger != nil {
+				a.logger.Warn("preserved Go cache after orphaned worktree cleanup", "project_id", projectID, "issue_id", wt.IssueID, "error", err)
+			}
 			result.Skipped = append(result.Skipped, wt)
 			continue
 		}

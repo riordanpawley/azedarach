@@ -262,7 +262,9 @@ If any are missing, keep issue state `in_progress` or `open`.
 ## Environment Rules
 
 - `.envrc` stores one shared direnv/nix-direnv layout per repository under `${XDG_CACHE_HOME:-$HOME/.cache}/direnv/layouts`, keyed by the canonical Git common directory, so linked worktrees reuse the warm profile without gaining checkout-local `.direnv` state. Run `nix-direnv-reload` after changing `flake.nix` or `flake.lock`.
-- `.envrc` exports shared repo-family `GOCACHE`/`GOPATH` under the primary repo's `.azedarach/go/` so linked worktrees do not duplicate multi-GB Go caches. If Git common-dir detection fails, it falls back to the current checkout's `.azedarach/go/`. Use `AZEDARACH_GO_CACHE_ROOT`, `AZEDARACH_GOCACHE`, or `AZEDARACH_GOPATH` for explicit local overrides.
+- `.envrc` keeps `GOPATH` and module downloads shared under the primary repo's `.azedarach/go/path`, but assigns build output to `.azedarach/go/caches/v1/<normal|race|coverage>/<main|issue-ID>`. It exports `-trimpath` through `GOFLAGS`; use `AZEDARACH_GO_CACHE_ROOT`, `AZEDARACH_GOCACHE`, or `AZEDARACH_GOPATH` only for explicit local overrides.
+- Managed validation serializes on the repository-family Go cache lock and defaults to a 10 GiB soft warning plus a 28 GiB hard refusal. Override bytes with `AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES` and `AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES`; opt into selected-namespace maintenance with `AZEDARACH_GO_CACHE_AUTO_MAINTAIN=1`.
+- Use `just go-cache-inventory` before legacy cleanup. `just go-cache-clean-legacy --confirm` uses supported Go cleanup for legacy build caches; add `--include-gopath-modcache` only to remove the legacy module download cache. It never removes legacy GOPATH binaries or other user files.
 - After `direnv allow`, use normal `go ...` commands from repo root without per-command env prefixes.
 
 ## Git Safety Rules
