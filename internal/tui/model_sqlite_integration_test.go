@@ -43,7 +43,10 @@ func TestLoadIssuesCmd_UsesDaemonSQLiteSnapshot(t *testing.T) {
 
 	loaded, ok := msg.(issuesLoadedMsg)
 	if !ok {
-		t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+		if failed, isFailure := msg.(issuesErrorMsg); isFailure {
+			t.Fatalf("load issues: %v", failed.err)
+		}
+		t.Fatalf("message = %#v (type %T), want issuesLoadedMsg", msg, msg)
 	}
 	if got, want := len(loaded.tasks), 2; got != want {
 		t.Fatalf("loaded tasks = %d, want %d", got, want)
@@ -105,7 +108,7 @@ func TestLoadIssuesCmd_HidesParentChildTasksFromBoardByDefault(t *testing.T) {
 	msg := model.loadIssuesCmd()()
 	loaded, ok := msg.(issuesLoadedMsg)
 	if !ok {
-		t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+		t.Fatalf("message = %#v (type %T), want issuesLoadedMsg", msg, msg)
 	}
 
 	model.tasks = loaded.tasks

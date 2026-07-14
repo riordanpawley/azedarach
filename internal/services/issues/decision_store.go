@@ -152,6 +152,16 @@ type decisionLinkRecord struct {
 // RecordDecision creates a new decision with an auto-allocated dec-N id.
 // Title and rationale are required; context is optional.
 func (c *Client) RecordDecision(ctx context.Context, params RecordDecisionParams) (Decision, error) {
+	var out Decision
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		out, err = c.recordDecisionLocked(lockCtx, params)
+		return err
+	})
+	return out, err
+}
+
+func (c *Client) recordDecisionLocked(ctx context.Context, params RecordDecisionParams) (Decision, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return Decision{}, err
@@ -222,6 +232,16 @@ func (c *Client) RecordDecision(ctx context.Context, params RecordDecisionParams
 // exists; callers should check via GetDecision first and fall back to
 // UpdateDecision for existing rows.
 func (c *Client) ImportDecision(ctx context.Context, params ImportDecisionParams) (Decision, error) {
+	var out Decision
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		out, err = c.importDecisionLocked(lockCtx, params)
+		return err
+	})
+	return out, err
+}
+
+func (c *Client) importDecisionLocked(ctx context.Context, params ImportDecisionParams) (Decision, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return Decision{}, err
@@ -393,6 +413,16 @@ func decisionListQuery(filter DecisionFilter) (string, []any, bool) {
 }
 
 func (c *Client) UpdateDecision(ctx context.Context, selector string, params UpdateDecisionParams) (Decision, error) {
+	var out Decision
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		out, err = c.updateDecisionLocked(lockCtx, selector, params)
+		return err
+	})
+	return out, err
+}
+
+func (c *Client) updateDecisionLocked(ctx context.Context, selector string, params UpdateDecisionParams) (Decision, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return Decision{}, err
@@ -447,6 +477,12 @@ func (c *Client) UpdateDecision(ctx context.Context, selector string, params Upd
 }
 
 func (c *Client) DeleteDecision(ctx context.Context, selector string) error {
+	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		return c.deleteDecisionLocked(lockCtx, selector)
+	})
+}
+
+func (c *Client) deleteDecisionLocked(ctx context.Context, selector string) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
@@ -513,6 +549,16 @@ func (c *Client) DeleteDecision(ctx context.Context, selector string) error {
 }
 
 func (c *Client) AddDecisionLink(ctx context.Context, params AddDecisionLinkParams) (DecisionLink, error) {
+	var out DecisionLink
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		out, err = c.addDecisionLinkLocked(lockCtx, params)
+		return err
+	})
+	return out, err
+}
+
+func (c *Client) addDecisionLinkLocked(ctx context.Context, params AddDecisionLinkParams) (DecisionLink, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return DecisionLink{}, err
@@ -602,6 +648,12 @@ func (c *Client) AddDecisionLink(ctx context.Context, params AddDecisionLinkPara
 }
 
 func (c *Client) RemoveDecisionLink(ctx context.Context, decisionSelector string, targetKind DecisionTargetKind, targetID string) error {
+	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		return c.removeDecisionLinkLocked(lockCtx, decisionSelector, targetKind, targetID)
+	})
+}
+
+func (c *Client) removeDecisionLinkLocked(ctx context.Context, decisionSelector string, targetKind DecisionTargetKind, targetID string) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err

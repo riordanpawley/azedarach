@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 type AdvisorSession struct {
@@ -33,7 +31,7 @@ func (s *RuntimeStateStore) AcquireAdvisorSession(ctx context.Context, projectID
 	if requestID == "" || issueID == "" || candidateSessionID == "" {
 		return session, false, fmt.Errorf("acquire advisor session: project, request, issue, and session ids are required")
 	}
-	err = sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err = s.withWriteLock(ctx, func() error {
 		db, openErr := s.dbHandle()
 		if openErr != nil {
 			return openErr
@@ -83,7 +81,7 @@ func (s *RuntimeStateStore) EnsureAdvisorSession(ctx context.Context, projectID,
 	if requestID == "" || issueID == "" || candidateSessionID == "" {
 		return session, false, fmt.Errorf("ensure advisor session: project, request, issue, and session ids are required")
 	}
-	err = sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err = s.withWriteLock(ctx, func() error {
 		db, openErr := s.dbHandle()
 		if openErr != nil {
 			return openErr
@@ -174,7 +172,7 @@ func (s *RuntimeStateStore) ListAdvisorSessions(ctx context.Context, projectID s
 
 func (s *RuntimeStateStore) DeleteAdvisorSession(ctx context.Context, projectID, requestID string) error {
 	projectID, requestID = normalizedProjectID(projectID), strings.TrimSpace(requestID)
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+	return s.withWriteLock(ctx, func() error {
 		db, err := s.dbHandle()
 		if err != nil {
 			return err

@@ -11,7 +11,6 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
-	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 var (
@@ -247,7 +246,7 @@ func (s *RuntimeStateStore) AcquireOrchestratorScopeLease(ctx context.Context, i
 	if probe == nil {
 		return result, fmt.Errorf("acquire orchestrator scope lease: runtime probe is required")
 	}
-	err = sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err = s.withWriteLock(ctx, func() error {
 		existing, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
 		if loadErr != nil {
 			return loadErr
@@ -295,7 +294,7 @@ func (s *RuntimeStateStore) SetOrchestratorScopeLeaseLifecycle(ctx context.Conte
 	if err != nil {
 		return lease, err
 	}
-	err = sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err = s.withWriteLock(ctx, func() error {
 		current, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
 		if loadErr != nil {
 			return loadErr
@@ -322,7 +321,7 @@ func (s *RuntimeStateStore) EvaluateOrchestratorScopeLease(ctx context.Context, 
 		return lease, err
 	}
 	now = now.UTC()
-	err = sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err = s.withWriteLock(ctx, func() error {
 		current, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
 		if loadErr != nil {
 			return loadErr
@@ -362,7 +361,7 @@ func (s *RuntimeStateStore) WakeOrchestratorScopeLease(ctx context.Context, iden
 		return lease, false, err
 	}
 	now = now.UTC()
-	err = sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err = s.withWriteLock(ctx, func() error {
 		current, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
 		if loadErr != nil {
 			return loadErr
@@ -393,7 +392,7 @@ func (s *RuntimeStateStore) AdvanceOrchestratorScopeCursor(ctx context.Context, 
 	if cursor < 0 {
 		return lease, fmt.Errorf("orchestrator cursor cannot be negative")
 	}
-	err = sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err = s.withWriteLock(ctx, func() error {
 		current, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
 		if loadErr != nil {
 			return loadErr
@@ -419,7 +418,7 @@ func (s *RuntimeStateStore) ReleaseOrchestratorScopeLease(ctx context.Context, i
 	if err != nil {
 		return err
 	}
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+	return s.withWriteLock(ctx, func() error {
 		current, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
 		if loadErr != nil {
 			return loadErr

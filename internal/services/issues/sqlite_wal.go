@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 var (
@@ -74,6 +76,16 @@ func (c *Client) CheckpointSQLiteWAL(ctx context.Context, mode SQLiteWALCheckpoi
 	if err != nil {
 		return SQLiteWALCheckpointStats{}, err
 	}
+	var stats SQLiteWALCheckpointStats
+	err = sqliteutil.WithWriteLockContext(ctx, c.dbPath, func(lockCtx context.Context) error {
+		var checkpointErr error
+		stats, checkpointErr = c.checkpointSQLiteWALLocked(lockCtx, db, mode)
+		return checkpointErr
+	})
+	return stats, err
+}
+
+func (c *Client) checkpointSQLiteWALLocked(ctx context.Context, db *sql.DB, mode SQLiteWALCheckpointMode) (SQLiteWALCheckpointStats, error) {
 	mode = normalizeSQLiteWALCheckpointMode(mode)
 	before, err := sqliteWALSize(c.dbPath)
 	if err != nil {
