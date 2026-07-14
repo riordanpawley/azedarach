@@ -202,6 +202,7 @@ type Daemon struct {
 	reviewReadyRecoveryMu                sync.Mutex
 	reviewReadyRecoveryCursor            map[string]int64
 	reviewReadyRecoveryBeforeLoad        func()
+	deferredCleanupOperationManager      deferredCleanupOperationManager
 
 	revMu    sync.Mutex
 	revision map[string]uint64

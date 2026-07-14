@@ -17,6 +17,28 @@ type memoryStore struct {
 	records map[string]daemonops.Record
 }
 
+type toggleUpdateErrorStore struct {
+	*memoryStore
+	mu        sync.Mutex
+	updateErr error
+}
+
+func (s *toggleUpdateErrorStore) setUpdateError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.updateErr = err
+}
+
+func (s *toggleUpdateErrorStore) Update(ctx context.Context, params daemonops.UpdateParams) (daemonops.Record, error) {
+	s.mu.Lock()
+	err := s.updateErr
+	s.mu.Unlock()
+	if err != nil {
+		return daemonops.Record{}, err
+	}
+	return s.memoryStore.Update(ctx, params)
+}
+
 func newMemoryStore() *memoryStore {
 	return &memoryStore{records: make(map[string]daemonops.Record)}
 }
@@ -527,6 +549,48 @@ func TestCancelQueuedMarksCancelled(t *testing.T) {
 	close(runningRelease)
 	if err := mgr.Drain(context.Background()); err != nil {
 		t.Fatalf("drain error: %v", err)
+	}
+}
+
+func TestCancelQueuedKeepsOperationPendingWhenStoreUpdateFails(t *testing.T) {
+	store := &toggleUpdateErrorStore{memoryStore: newMemoryStore()}
+	mgr := New(store, Config{})
+
+	runningStarted := make(chan struct{})
+	runningRelease := make(chan struct{})
+	if _, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{ID: "op-running", ProjectID: "p1", Kind: "blocker", ResourceKeys: []string{"issue:a"}}, func(context.Context) ([]byte, error) {
+		close(runningStarted)
+		<-runningRelease
+		return nil, nil
+	}); err != nil {
+		t.Fatalf("submit blocker: %v", err)
+	}
+	<-runningStarted
+
+	queued, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{ID: "op-queued", ProjectID: "p1", Kind: "worktree.cleanup", ResourceKeys: []string{"issue:a"}}, func(context.Context) ([]byte, error) {
+		t.Fatal("queued cleanup must remain blocked")
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("submit queued cleanup: %v", err)
+	}
+	injectedErr := errors.New("injected cancel persistence failure")
+	store.setUpdateError(injectedErr)
+	if _, err := mgr.Cancel(context.Background(), queued.Record.ID, "reopen"); !errors.Is(err, injectedErr) {
+		t.Fatalf("cancel error = %v, want injected persistence failure", err)
+	}
+	queue := mgr.Queue(daemonops.Query{ProjectID: "p1", IssueID: "", Kind: "worktree.cleanup"})
+	if len(queue.Queued) != 1 || queue.Queued[0].Record.ID != queued.Record.ID {
+		t.Fatalf("queued cleanup after failed cancel = %+v, want %s", queue.Queued, queued.Record.ID)
+	}
+
+	store.setUpdateError(nil)
+	if _, err := mgr.Cancel(context.Background(), queued.Record.ID, "retry reopen"); err != nil {
+		t.Fatalf("cancel retry: %v", err)
+	}
+	close(runningRelease)
+	if err := mgr.Drain(context.Background()); err != nil {
+		t.Fatalf("drain: %v", err)
 	}
 }
 

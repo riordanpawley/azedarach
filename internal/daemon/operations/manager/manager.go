@@ -193,7 +193,6 @@ func (m *Manager) Cancel(ctx context.Context, operationID, reason string) (daemo
 
 	if idx := m.indexPendingLocked(operationID); idx >= 0 {
 		op := m.pending[idx]
-		m.pending = append(m.pending[:idx], m.pending[idx+1:]...)
 		finished := m.now().UTC()
 		msg := reason
 		if msg == "" {
@@ -208,6 +207,7 @@ func (m *Manager) Cancel(ctx context.Context, operationID, reason string) (daemo
 		if err != nil {
 			return daemonops.Record{}, err
 		}
+		m.pending = append(m.pending[:idx], m.pending[idx+1:]...)
 		op.record = updated
 		m.clearDedupeLocked(op)
 		return updated, nil
