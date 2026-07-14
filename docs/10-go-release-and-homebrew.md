@@ -25,8 +25,9 @@ This repository now ships the Go implementation as the canonical `az` CLI.
      resolve inside the same active immutable `.azedarach-generations/generation.*`
      directory rather than the repository's preserved `bin/`, a scratch pair,
      or an older generation. Environment activation identifies the installer-owned
-     `.azedarach-current` control links and strips other `az`/`azd` directories
-     from that repository shell's `PATH`.
+     `.azedarach-current` control links and prepends their immutable generation.
+     It preserves inherited package-manager, repository, and scratch directories
+     so unrelated tools in those directories remain available.
      Global daemon pairing trusts only a client whose resolved executable is
      inside `.azedarach-generations/generation.*`; primary-repo `bin/` binaries
      remain development artifacts.
