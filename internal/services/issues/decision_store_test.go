@@ -13,6 +13,7 @@ import (
 )
 
 func TestDecisionStore_RecordAndLinks(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -141,6 +142,7 @@ func TestDecisionStore_RecordAndLinks(t *testing.T) {
 }
 
 func TestDecisionStore_QuerySearchUsesFTSAndCoversDecisionFields(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -236,6 +238,7 @@ func TestDecisionStore_QuerySearchUsesFTSAndCoversDecisionFields(t *testing.T) {
 }
 
 func TestDecisionStore_AuditLogIsolatedFromSpecAudit(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	seedIssue(t, client, "cgn", "issue")
@@ -280,6 +283,7 @@ func TestDecisionStore_AuditLogIsolatedFromSpecAudit(t *testing.T) {
 }
 
 func TestDecisionStore_ConsequencesRoundTrip(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -304,6 +308,7 @@ func TestDecisionStore_ConsequencesRoundTrip(t *testing.T) {
 }
 
 func TestDecisionStore_ValidationErrors(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -328,8 +333,8 @@ func seedIssue(t *testing.T, c *Client, id, title string) {
 	require.NoError(t, err)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = db.Exec(`
-		INSERT INTO issues (id, title, description, status, priority, issue_type, created_at, updated_at)
-		VALUES (?, ?, ?, 'open', 2, 'task', ?, ?)
+		INSERT INTO issues (id, title, description, status, disposition, engagement, visibility, lifecycle_state, closed_outcome, review_state, priority, issue_type, created_at, updated_at)
+		VALUES (?, ?, ?, 'open', 'ready', 'idle', 'live', 'open', 'none', 'none', 2, 'task', ?, ?)
 	`, id, title, "", now, now)
 	require.NoError(t, err)
 }

@@ -54,6 +54,10 @@ type InventoryEntry struct {
 	GitAdditions          int
 	GitDeletions          int
 	GraphAncestors        []string
+	ViewGroupID           domain.BoardColumnID
+	ViewGroupTitle        string
+	ViewDepth             int
+	ViewProjected         bool
 	Task                  domain.Task
 }
 
@@ -66,6 +70,9 @@ type Snapshot struct {
 	Entries          []InventoryEntry
 	Tasks            []domain.Task
 	TreeTasks        []domain.Task
+	View             domain.BoardView
+	Projection       domain.BoardViewProjection
+	ProjectedGroups  []domain.BoardColumnID
 	Revision         uint64
 	LastCheckedAt    time.Time
 	Freshness        string
@@ -129,6 +136,13 @@ type UIStateStore interface {
 	SetUIStateForProject(context.Context, string, string, string) (protocol.UIStateResponseBody, error)
 }
 
+type GlobalViewStore interface {
+	ListGlobalViews(context.Context) (protocol.BoardViewListResponseBody, error)
+	SelectGlobalView(context.Context, protocol.GlobalViewConsumer, string) (protocol.BoardViewSelectResponseBody, error)
+	SaveGlobalView(context.Context, protocol.GlobalViewRecord) (protocol.BoardViewResponseBody, error)
+	DeleteGlobalView(context.Context, string) error
+}
+
 type PopupCloser interface {
 	ClosePopup(context.Context) error
 }
@@ -173,6 +187,10 @@ func WithUIStateStore(store UIStateStore) Option {
 	}
 }
 
+func WithGlobalViewStore(store GlobalViewStore) Option {
+	return func(m *Model) { m.globalViewStore = store }
+}
+
 type selectorTab int
 
 const (
@@ -188,13 +206,14 @@ const (
 )
 
 type Model struct {
-	loader       SnapshotLoader
-	switcher     Switcher
-	popupCloser  PopupCloser
-	killer       Killer
-	detailOpener DetailOpener
-	uiStateStore UIStateStore
-	styles       *styles.Styles
+	loader          SnapshotLoader
+	switcher        Switcher
+	popupCloser     PopupCloser
+	killer          Killer
+	detailOpener    DetailOpener
+	uiStateStore    UIStateStore
+	globalViewStore GlobalViewStore
+	styles          *styles.Styles
 
 	snapshot           Snapshot
 	cursor             int
@@ -211,15 +230,18 @@ type Model struct {
 	startedAt          time.Time
 	readyLogged        bool
 
-	searchMode  bool
-	searchQuery string
-	gotoArmed   bool
-	jumpMode    *overlay.JumpMode
-	jumpTargets []int
+	searchMode   bool
+	searchQuery  string
+	gotoArmed    bool
+	jumpMode     *overlay.JumpMode
+	jumpTargets  []int
+	viewOverlay  *overlay.BoardViewOverlay
+	viewsLoading bool
 }
 
 type LoadedMsg struct {
 	Snapshot Snapshot
+	ViewErr  error
 }
 
 type LoadFailedMsg struct {
@@ -258,6 +280,18 @@ type selectorTabLoadedMsg struct {
 type selectorTabSavedMsg struct {
 	tab selectorTab
 	err error
+}
+
+type globalViewsLoadedMsg struct {
+	views    []protocol.GlobalViewRecord
+	selected string
+	err      error
+}
+
+type globalViewMutationMsg struct {
+	action string
+	viewID string
+	err    error
 }
 
 func New(loader SnapshotLoader, opts ...Option) Model {
@@ -315,16 +349,78 @@ func (m *Model) logReadyToRender(trigger string) {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width, m.height = size.Width, size.Height
+		if m.viewOverlay != nil {
+			_, _ = m.viewOverlay.Update(size)
+		}
 		return m, nil
+	}
+	if m.viewOverlay != nil {
+		if mouse, ok := msg.(tea.MouseMsg); ok {
+			next, cmd := m.viewOverlay.Update(mouse)
+			if updated, ok := next.(*overlay.BoardViewOverlay); ok {
+				m.viewOverlay = updated
+			}
+			return m, cmd
+		}
+	}
+	switch msg := msg.(type) {
+	case overlay.CloseOverlayMsg:
+		m.viewOverlay = nil
+		m.viewsLoading = false
+		m.clearJumpMode()
+		return m, nil
+	case overlay.SelectionMsg:
+		if m.viewOverlay == nil || m.globalViewStore == nil {
+			return m, nil
+		}
+		switch msg.Key {
+		case overlay.BoardViewSelectKey:
+			selected, _ := msg.Value.(overlay.BoardViewSelectMsg)
+			m.viewOverlay, m.viewsLoading = nil, true
+			return m, m.selectGlobalViewCmd(selected.ViewID)
+		case overlay.BoardViewSaveKey:
+			saved, _ := msg.Value.(overlay.BoardViewSaveMsg)
+			m.viewOverlay, m.viewsLoading = nil, true
+			return m, m.saveGlobalViewCmd(saved.View, saved.Scope)
+		case overlay.BoardViewDeleteKey:
+			deleted, _ := msg.Value.(overlay.BoardViewDeleteMsg)
+			m.viewOverlay, m.viewsLoading = nil, true
+			return m, m.deleteGlobalViewCmd(deleted.ViewID)
+		}
+	case globalViewsLoadedMsg:
+		if !m.viewsLoading {
+			return m, nil
+		}
+		m.viewsLoading = false
+		if msg.err != nil {
+			m.err = msg.err
+			m.status = "could not load views"
+			return m, nil
+		}
+		m.err = nil
+		m.viewOverlay = overlay.NewGlobalBoardViewOverlay(msg.views, msg.selected)
+		_, _ = m.viewOverlay.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
+		return m, nil
+	case globalViewMutationMsg:
+		m.viewsLoading = false
+		if msg.err != nil {
+			m.err = msg.err
+			m.status = fmt.Sprintf("view %s failed", msg.action)
+			return m, nil
+		}
+		m.err = nil
+		m.status = fmt.Sprintf("view %s: %s", msg.action, msg.viewID)
+		m.loading = true
+		m.defaultedToCurrent = false
+		return m, m.loadCmd()
 	case LoadedMsg:
 		m.loading = false
-		m.err = nil
+		m.err = msg.ViewErr
 		m.snapshot = msg.Snapshot
 		m.normalizeSnapshot()
+		m.applySnapshotViewLayout()
 		m.status = formatSnapshotStatus(m.snapshot, len(m.snapshot.Entries))
 		slog.Default().Info("tmux selector snapshot applied",
 			"elapsed_ms", m.elapsedSinceStart().Milliseconds(),
@@ -336,7 +432,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 		m.logReadyToRender("snapshot")
 		cmds := []tea.Cmd{}
-		if !m.selectorTabLoaded {
+		if !m.selectorTabLoaded && m.snapshot.View.ID == "" {
 			cmds = append(cmds, m.loadSelectorTabCmd())
 		}
 		if liveLoader, ok := m.loader.(LiveSnapshotLoader); ok && m.snapshot.Enriching {
@@ -362,7 +458,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			selectedSessionID = strings.TrimSpace(selected.SessionID)
 		}
 		m.snapshot = msg.Snapshot
+		m.err = nil
 		m.normalizeSnapshot()
+		m.applySnapshotViewLayout()
 		if selectedSessionID != "" {
 			m.selectSessionID(selectedSessionID)
 		}
@@ -409,10 +507,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.clearJumpMode()
 		return m, nil
-	case overlay.CloseOverlayMsg:
-		m.clearJumpMode()
+	case tea.MouseMsg:
+		if m.loading || m.jumpMode != nil || m.searchMode || m.gotoArmed {
+			return m, nil
+		}
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			m.moveCursor(0, -1)
+		case tea.MouseButtonWheelDown:
+			m.moveCursor(0, 1)
+		case tea.MouseButtonWheelLeft:
+			m.moveCursor(-1, 0)
+		case tea.MouseButtonWheelRight:
+			m.moveCursor(1, 0)
+		}
 		return m, nil
 	case tea.KeyMsg:
+		if m.viewOverlay != nil {
+			next, cmd := m.viewOverlay.Update(msg)
+			if updated, ok := next.(*overlay.BoardViewOverlay); ok {
+				m.viewOverlay = updated
+			}
+			return m, cmd
+		}
+		if m.viewsLoading {
+			switch msg.String() {
+			case "esc", "q", "ctrl+c":
+				m.viewsLoading = false
+				return m, nil
+			default:
+				return m, nil
+			}
+		}
 		if m.loading {
 			switch msg.String() {
 			case "ctrl+c", "q", "esc":
@@ -458,7 +584,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectorTabLoaded = true
 			m.selectorTabUserSet = true
 			m.loading = false
-			return m, m.persistSelectorTabCmd(m.activeTab)
+			if m.snapshot.View.ID == "" {
+				return m, m.persistSelectorTabCmd(m.activeTab)
+			}
+			return m, nil
 		case "u":
 			if m.activeTab == selectorTabTree {
 				m.toggleTreeSort()
@@ -482,6 +611,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			m.moveCursor(0, -1)
 			return m, nil
+		case "pgdown":
+			m.movePage(1)
+			return m, nil
+		case "pgup":
+			m.movePage(-1)
+			return m, nil
 		case "h", "left":
 			m.moveCursor(-1, 0)
 			return m, nil
@@ -494,6 +629,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "refreshing"
 			m.defaultedToCurrent = false
 			return m, m.loadCmd()
+		case "V", "v":
+			if m.globalViewStore == nil {
+				m.err = fmt.Errorf("view management is unavailable")
+				return m, nil
+			}
+			m.viewsLoading = true
+			m.err = nil
+			m.status = "loading views"
+			return m, m.loadGlobalViewsCmd()
 		case "enter":
 			entry, ok := m.selectedEntry()
 			if !ok {
@@ -524,6 +668,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *Model) applySnapshotViewLayout() {
+	if m == nil || m.selectorTabUserSet || m.snapshot.View.ID == "" {
+		return
+	}
+	switch m.snapshot.View.Normalized().Layout {
+	case domain.BoardViewLayoutTreeList:
+		m.activeTab = selectorTabTree
+	case domain.BoardViewLayoutColumnBoard, domain.BoardViewLayoutHorizontalGrid:
+		m.activeTab = selectorTabGrid
+	}
+	m.selectorTabLoaded = true
 }
 
 func nilFromLoadFailed(m *Model, err error) tea.Cmd {
@@ -583,6 +740,12 @@ func (m *Model) selectAttachedSnapshotSession() bool {
 }
 
 func (m Model) View() string {
+	if m.viewOverlay != nil {
+		return m.viewOverlay.View()
+	}
+	if m.viewsLoading {
+		return "Loading saved views...  Esc cancel\n"
+	}
 	if m.loading {
 		return "Loading tmux sessions...\n"
 	}
@@ -606,27 +769,133 @@ func (m Model) View() string {
 		if m.activeTab == selectorTabTree {
 			b.WriteString(m.renderTree(entries))
 		} else {
-			availableHeight := m.gridAvailableHeight()
-			columns := m.gridColumnCount(availableHeight)
-			cardWidth := gridCardWidth(m.width, columns)
-			rows := RenderVisibleGridWithLabels(
-				entries,
-				m.cursor,
-				columns,
-				cardWidth,
-				availableHeight,
-				m.styles,
-				m.labelsByEntry(),
-			)
-			for _, row := range rows {
-				b.WriteString(row)
-				b.WriteString("\n")
+			if m.snapshot.View.ID != "" && m.snapshot.View.Normalized().Layout == domain.BoardViewLayoutColumnBoard {
+				b.WriteString(m.renderProjectedColumnBoard(entries))
+			} else {
+				availableHeight := m.gridAvailableHeight()
+				columns := m.gridColumnCount(availableHeight)
+				cardWidth := gridCardWidth(m.width, columns)
+				rows := RenderVisibleGridWithLabels(entries, m.cursor, columns, cardWidth, availableHeight, m.styles, m.labelsByEntry())
+				for _, row := range rows {
+					b.WriteString(row)
+					b.WriteString("\n")
+				}
 			}
 		}
 	}
 	contentLines := linesForHeight(b.String(), maxInt(0, m.height-1))
 	footer := m.renderFooter()
 	return strings.Join(append(contentLines, footer), "\n")
+}
+
+func (m Model) renderProjectedColumnBoard(entries []InventoryEntry) string {
+	columns, positions := selectorBoardColumns(m.snapshot.View, m.snapshot.ProjectedGroups, entries)
+	cursor := board.Cursor{Column: -1, Task: -1}
+	if position, ok := positions[m.cursor]; ok {
+		cursor = position
+	}
+	layout := board.NewColumnLayout(len(columns), m.width, 0)
+	if cursor.Column >= 0 {
+		layout = layout.WithColumnVisible(cursor.Column)
+	}
+	start, end := layout.Range()
+	if start < end {
+		columns = columns[start:end]
+		cursor.Column -= start
+	}
+	activeViewportStart := 0
+	if cursor.Column >= 0 && cursor.Column < len(columns) {
+		activeViewportStart = selectorColumnViewportStart(
+			len(columns[cursor.Column].Tasks),
+			cursor.Task,
+			board.NewVisibleColumnLayout(len(columns), m.width).WidthForLocalColumn(cursor.Column),
+			m.gridAvailableHeight(),
+			m.styles,
+		)
+	}
+	signals := make(map[string]board.RuntimeSignals, len(entries))
+	jumpLabels := make(map[string]string)
+	labelsByEntry := m.labelsByEntry()
+	for index, entry := range entries {
+		task := taskFromInventoryEntry(entry)
+		if label := labelsByEntry[index]; label != "" {
+			jumpLabels[task.ID.String()] = label
+		}
+		signals[task.ID.String()] = board.RuntimeSignals{
+			HasTmuxSession: entry.HasTmuxSession, TmuxAttached: entry.TmuxAttached,
+			TmuxAttachedCount: entry.TmuxAttachedCount, HasWorktree: entry.HasWorktree,
+			GitAheadCount: entry.GitAheadCount, GitBehindCount: entry.GitBehindCount,
+			HasUncommittedChanges: entry.HasUncommittedChanges, HasConflicts: entry.HasConflicts,
+			GitAdditions: entry.GitAdditions, GitDeletions: entry.GitDeletions,
+		}
+	}
+	return board.Render(columns, cursor, nil, signals, nil, nil, false, jumpLabels, activeViewportStart, m.styles, m.width, m.gridAvailableHeight()) + "\n"
+}
+
+func selectorColumnViewportStart(taskCount, cursorTask, columnWidth, height int, s *styles.Styles) int {
+	if taskCount <= 0 || cursorTask <= 0 {
+		return 0
+	}
+	bodyHeight := board.ColumnBodyHeight(height)
+	linesPerCard := board.CardLineFootprint(s, board.CardContentWidth(columnWidth))
+	start := 0
+	for i := 0; i < 8; i++ {
+		windowStart, windowEnd := board.VisibleTaskWindow(taskCount, start, bodyHeight, linesPerCard)
+		if cursorTask < windowStart {
+			start = cursorTask
+			continue
+		}
+		if cursorTask >= windowEnd {
+			windowSize := maxInt(1, windowEnd-windowStart)
+			start = maxInt(0, cursorTask-windowSize+1)
+			continue
+		}
+		return windowStart
+	}
+	return clampInt(start, 0, taskCount-1)
+}
+
+func selectorBoardColumns(view domain.BoardView, projectedGroups []domain.BoardColumnID, entries []InventoryEntry) ([]board.Column, map[int]board.Cursor) {
+	columns := []board.Column{}
+	columnByID := map[string]int{}
+	positions := make(map[int]board.Cursor, len(entries))
+	definitions := make(map[domain.BoardColumnID]domain.BoardColumn, len(view.Columns))
+	for _, definition := range view.Normalized().Columns {
+		definitions[definition.ID] = definition
+	}
+	if projectedGroups == nil {
+		for _, definition := range view.Normalized().Columns {
+			projectedGroups = append(projectedGroups, definition.ID)
+		}
+	}
+	for _, groupID := range projectedGroups {
+		definition := definitions[groupID]
+		title := strings.TrimSpace(definition.Title)
+		if title == "" {
+			title = string(groupID)
+		}
+		columnByID[string(groupID)] = len(columns)
+		columns = append(columns, board.Column{Title: title})
+	}
+	for index, entry := range entries {
+		groupID := string(entry.ViewGroupID)
+		title := entry.ViewGroupTitle
+		if groupID == "" {
+			groupID, title = "live_tmux", "Live tmux"
+		}
+		columnIndex, ok := columnByID[groupID]
+		if !ok {
+			if entry.ViewProjected && len(view.Columns) > 0 {
+				continue
+			}
+			columnIndex = len(columns)
+			columnByID[groupID] = columnIndex
+			columns = append(columns, board.Column{Title: title})
+		}
+		positions[index] = board.Cursor{Column: columnIndex, Task: len(columns[columnIndex].Tasks)}
+		columns[columnIndex].Tasks = append(columns[columnIndex].Tasks, taskFromInventoryEntry(entry))
+	}
+	return columns, positions
 }
 
 func (m Model) jumpLabelsByEntry() map[int]string {
@@ -670,13 +939,15 @@ func (m Model) renderFooter() string {
 	bindings := []keybinds.Binding{
 		{Key: "Tab", Description: "tab"},
 		{Key: "h/j/k/l", Description: "move"},
+		{Key: "Pg", Description: "page"},
 		{Key: "q/Esc", Description: "close"},
+		{Key: "x", Description: "kill"},
 		{Key: "/", Description: "search"},
 		{Key: "gw", Description: "labels"},
 		{Key: "Enter", Description: "drill"},
 		{Key: "a", Description: "switch"},
-		{Key: "x", Description: "kill"},
 		{Key: "o/Sp", Description: "open"},
+		{Key: "V", Description: "views"},
 	}
 	if m.activeTab == selectorTabTree {
 		bindings = append([]keybinds.Binding{{Key: "u", Description: "sort"}}, bindings...)
@@ -894,6 +1165,9 @@ func (m Model) filteredEntries() []InventoryEntry {
 			}
 		}
 	}
+	if m.snapshot.View.ID != "" {
+		return m.withGraphAncestors(entries)
+	}
 	return m.graphOrderedEntries(entries)
 }
 
@@ -1057,6 +1331,10 @@ func (m *Model) moveCursor(dx int, dy int) {
 		m.moveTreeCursor(entries, dx, dy)
 		return
 	}
+	if m.snapshot.View.ID != "" && m.snapshot.View.Normalized().Layout == domain.BoardViewLayoutColumnBoard {
+		m.moveColumnBoardCursor(entries, dx, dy)
+		return
+	}
 	count := len(entries)
 	if count == 0 {
 		m.cursor = 0
@@ -1091,6 +1369,60 @@ func (m *Model) moveCursor(dx int, dy int) {
 	next := nextRow*columns + nextCol
 	if next >= 0 && next < count {
 		m.cursor = next
+	}
+}
+
+func (m *Model) movePage(direction int) {
+	entries := m.filteredEntries()
+	if len(entries) == 0 || direction == 0 {
+		return
+	}
+	pageSize := maxInt(1, len(m.visibleEntryIndices()))
+	if m.activeTab == selectorTabTree {
+		pageSize = maxInt(1, m.treeAvailableHeight())
+	} else if m.snapshot.View.ID != "" && m.snapshot.View.Normalized().Layout == domain.BoardViewLayoutColumnBoard {
+		columns, positions := selectorBoardColumns(m.snapshot.View, m.snapshot.ProjectedGroups, entries)
+		position, ok := positions[m.cursor]
+		if !ok || position.Column < 0 || position.Column >= len(columns) {
+			return
+		}
+		layout := board.NewColumnLayout(len(columns), m.width, 0).WithColumnVisible(position.Column)
+		columnWidth := layout.WidthForColumn(position.Column)
+		linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
+		start, end := board.VisibleTaskWindow(len(columns[position.Column].Tasks), 0, board.ColumnBodyHeight(m.gridAvailableHeight()), linesPerCard)
+		pageSize = maxInt(1, end-start)
+	}
+	for range pageSize {
+		before := m.cursor
+		m.moveCursor(0, direction)
+		if m.cursor == before {
+			break
+		}
+	}
+}
+
+func (m *Model) moveColumnBoardCursor(entries []InventoryEntry, dx, dy int) {
+	columns, positions := selectorBoardColumns(m.snapshot.View, m.snapshot.ProjectedGroups, entries)
+	current, ok := positions[m.cursor]
+	if !ok {
+		m.cursor = 0
+		return
+	}
+	targetColumn, targetTask := current.Column+dx, current.Task+dy
+	if dx != 0 {
+		for targetColumn >= 0 && targetColumn < len(columns) && len(columns[targetColumn].Tasks) == 0 {
+			targetColumn += dx
+		}
+		if targetColumn < 0 || targetColumn >= len(columns) {
+			return
+		}
+		targetTask = min(current.Task, len(columns[targetColumn].Tasks)-1)
+	}
+	for entryIndex, position := range positions {
+		if position.Column == targetColumn && position.Task == targetTask {
+			m.cursor = entryIndex
+			return
+		}
 	}
 }
 
@@ -1177,6 +1509,12 @@ func prioritizeAzSessionFirst(entries []InventoryEntry) []InventoryEntry {
 	if azIndex <= 0 {
 		return entries
 	}
+	azAttention := inventoryHumanAttentionRank(entries[azIndex])
+	for _, entry := range entries[:azIndex] {
+		if inventoryHumanAttentionRank(entry) > azAttention {
+			return entries
+		}
+	}
 	reordered := make([]InventoryEntry, len(entries))
 	reordered[0] = entries[azIndex]
 	copy(reordered[1:], entries[:azIndex])
@@ -1253,6 +1591,24 @@ func (m Model) loadCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if liveLoader, ok := m.loader.(LiveSnapshotLoader); ok {
+			type selectedViewResult struct {
+				view domain.BoardView
+				err  error
+			}
+			var selectedView <-chan selectedViewResult
+			if m.globalViewStore != nil {
+				results := make(chan selectedViewResult, 1)
+				selectedView = results
+				go func() {
+					resp, err := m.globalViewStore.ListGlobalViews(ctx)
+					if err != nil {
+						results <- selectedViewResult{err: fmt.Errorf("load selected tmux selector view: %w", err)}
+						return
+					}
+					view, err := selectedGlobalView(resp)
+					results <- selectedViewResult{view: view, err: err}
+				}()
+			}
 			snapshot, err := liveLoader.ListLiveSnapshot(ctx)
 			if err != nil {
 				slog.Default().Warn("tmux selector live load command failed",
@@ -1266,7 +1622,21 @@ func (m Model) loadCmd() tea.Cmd {
 				"session_count", len(snapshot.Entries),
 				"enriching", snapshot.Enriching,
 			)
-			return LoadedMsg{Snapshot: snapshot}
+			var viewErr error
+			if selectedView != nil {
+				result := <-selectedView
+				viewErr = result.err
+				if result.err == nil {
+					snapshot.View = result.view
+				}
+				if result.err != nil {
+					slog.Default().Warn("tmux selector initial view load failed",
+						"elapsed_ms", time.Since(start).Milliseconds(),
+						"error", result.err,
+					)
+				}
+			}
+			return LoadedMsg{Snapshot: snapshot, ViewErr: viewErr}
 		}
 		snapshot, err := m.loader.ListTasksSnapshot(ctx)
 		if err != nil {
@@ -1283,6 +1653,19 @@ func (m Model) loadCmd() tea.Cmd {
 		)
 		return LoadedMsg{Snapshot: snapshot}
 	}
+}
+
+func selectedGlobalView(resp protocol.BoardViewListResponseBody) (domain.BoardView, error) {
+	selected := strings.TrimSpace(resp.Selections[protocol.GlobalViewConsumerTmuxSelector])
+	if selected == "" {
+		return domain.BoardView{}, fmt.Errorf("tmux selector view selection is empty")
+	}
+	for _, record := range resp.GlobalViews {
+		if strings.TrimSpace(string(record.View.ID)) == selected {
+			return record.View, nil
+		}
+	}
+	return domain.BoardView{}, fmt.Errorf("selected tmux selector view %q is unavailable", selected)
 }
 
 func (m Model) loadSelectorTabCmd() tea.Cmd {
@@ -1346,6 +1729,46 @@ func (m Model) persistSelectorTabCmd(tab selectorTab) tea.Cmd {
 			)
 		}
 		return selectorTabSavedMsg{tab: tab, err: err}
+	}
+}
+
+func (m Model) loadGlobalViewsCmd() tea.Cmd {
+	store := m.globalViewStore
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		resp, err := store.ListGlobalViews(ctx)
+		return globalViewsLoadedMsg{views: resp.GlobalViews, selected: resp.Selections[protocol.GlobalViewConsumerTmuxSelector], err: err}
+	}
+}
+
+func (m Model) selectGlobalViewCmd(viewID string) tea.Cmd {
+	store := m.globalViewStore
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := store.SelectGlobalView(ctx, protocol.GlobalViewConsumerTmuxSelector, viewID)
+		return globalViewMutationMsg{action: "selected", viewID: viewID, err: err}
+	}
+}
+
+func (m Model) saveGlobalViewCmd(view domain.BoardView, scope protocol.GlobalViewScope) tea.Cmd {
+	store := m.globalViewStore
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := store.SaveGlobalView(ctx, protocol.GlobalViewRecord{View: view, Scope: scope})
+		return globalViewMutationMsg{action: "saved", viewID: string(view.ID), err: err}
+	}
+}
+
+func (m Model) deleteGlobalViewCmd(viewID string) tea.Cmd {
+	store := m.globalViewStore
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err := store.DeleteGlobalView(ctx, viewID)
+		return globalViewMutationMsg{action: "deleted", viewID: viewID, err: err}
 	}
 }
 
@@ -1639,7 +2062,45 @@ func activeSessionTreeRows(entries []InventoryEntry) []sessionTreeRow {
 }
 
 func (m Model) activeSessionTreeRows(entries []InventoryEntry) []sessionTreeRow {
+	if m.snapshot.View.ID != "" {
+		if m.snapshot.View.Normalized().Layout == domain.BoardViewLayoutTreeList {
+			return projectedSessionTreeRows(entries)
+		}
+		return activeSessionTreeRowsWithOptions(entries, nil, selectorTreeSortOrder)
+	}
 	return activeSessionTreeRowsWithOptions(entries, m.treeAncestorTasks(), m.treeSort)
+}
+
+func projectedSessionTreeRows(entries []InventoryEntry) []sessionTreeRow {
+	lastByIndex := make([]bool, len(entries))
+	for i, entry := range entries {
+		depth := maxInt(0, entry.ViewDepth)
+		lastByIndex[i] = true
+		for j := i + 1; j < len(entries); j++ {
+			nextDepth := maxInt(0, entries[j].ViewDepth)
+			if nextDepth < depth {
+				break
+			}
+			if nextDepth == depth {
+				lastByIndex[i] = false
+				break
+			}
+		}
+	}
+	rows := make([]sessionTreeRow, 0, len(entries))
+	ancestorLast := make([]bool, 0)
+	for i, entry := range entries {
+		depth := maxInt(0, entry.ViewDepth)
+		if depth < len(ancestorLast) {
+			ancestorLast = ancestorLast[:depth]
+		}
+		for len(ancestorLast) < depth {
+			ancestorLast = append(ancestorLast, true)
+		}
+		rows = append(rows, sessionTreeRow{entryIndex: i, entry: entry, last: lastByIndex[i], ancestorLast: append([]bool(nil), ancestorLast...)})
+		ancestorLast = append(ancestorLast, lastByIndex[i])
+	}
+	return rows
 }
 
 func (m Model) treeAncestorTasks() map[string]domain.Task {
@@ -1676,16 +2137,20 @@ func activeSessionTreeRowsWithOptions(entries []InventoryEntry, ancestorTasks ma
 	}
 	for i, entry := range entries {
 		for parentID := entryParentID(entry); parentID != ""; {
-			if _, ok := nodes[parentID]; ok {
+			parentKey := scopedEntryTreeKey(entry, parentID)
+			if _, ok := nodes[parentKey]; ok {
 				break
 			}
 			task, ok := ancestorTasks[parentID]
 			if !ok {
 				break
 			}
-			nodes[parentID] = &treeNode{
-				key:        parentID,
-				entry:      inventoryEntryFromAncestorTask(task),
+			ancestorEntry := inventoryEntryFromAncestorTask(task)
+			ancestorEntry.ProjectID = entry.ProjectID
+			ancestorEntry.ProjectPath = entry.ProjectPath
+			nodes[parentKey] = &treeNode{
+				key:        parentKey,
+				entry:      ancestorEntry,
 				entryIndex: -1,
 				order:      i,
 			}
@@ -1696,15 +2161,16 @@ func activeSessionTreeRowsWithOptions(entries []InventoryEntry, ancestorTasks ma
 	rootsByKey := make(map[string]struct{}, len(nodes))
 	for key, node := range nodes {
 		parentID := entryParentID(node.entry)
-		if parentID == "" || parentID == key {
+		if parentID == "" || parentID == entryIssueID(node.entry) {
 			rootsByKey[key] = struct{}{}
 			continue
 		}
-		if _, ok := nodes[parentID]; !ok {
+		parentKey := scopedEntryTreeKey(node.entry, parentID)
+		if _, ok := nodes[parentKey]; !ok {
 			rootsByKey[key] = struct{}{}
 			continue
 		}
-		children[parentID] = append(children[parentID], key)
+		children[parentKey] = append(children[parentKey], key)
 	}
 	structuralLess := func(leftKey, rightKey string) bool {
 		left, right := nodes[leftKey], nodes[rightKey]
@@ -1762,7 +2228,7 @@ func activeSessionTreeRowsWithOptions(entries []InventoryEntry, ancestorTasks ma
 				return key
 			}
 			seen[key] = struct{}{}
-			parentID := entryParentID(nodes[key].entry)
+			parentID := scopedEntryTreeKey(nodes[key].entry, entryParentID(nodes[key].entry))
 			if parentID == "" {
 				return key
 			}
@@ -1834,13 +2300,27 @@ func taskParentID(task domain.Task) string {
 
 func entryTreeKey(entry InventoryEntry) string {
 	if issueID := entryIssueID(entry); issueID != "" {
-		return issueID
+		return scopedEntryTreeKey(entry, issueID)
 	}
 	sessionID := strings.TrimSpace(entry.SessionID)
 	if sessionID == "" {
 		return ""
 	}
 	return "session:" + sessionID
+}
+
+func scopedEntryTreeKey(entry InventoryEntry, issueID string) string {
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return ""
+	}
+	if projectID := protocol.NormalizeProjectID(entry.ProjectID); projectID != "" {
+		return "project:" + projectID + ":" + issueID
+	}
+	if projectPath := strings.TrimSpace(entry.ProjectPath); projectPath != "" {
+		return "path:" + projectPath + ":" + issueID
+	}
+	return issueID
 }
 
 func inventoryEntryFromAncestorTask(task domain.Task) InventoryEntry {
@@ -1996,8 +2476,38 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 	if len(metaParts) == 0 {
 		return card
 	}
-	meta := strings.Join(metaParts, "  ")
-	return insertCardMetaLine(card, meta, origin, s)
+	return insertCardMetaLines(card, metaParts, origin, s)
+}
+
+func insertCardMetaLines(card string, parts []string, origin string, s *styles.Styles) string {
+	cardWidth := 0
+	if lines := strings.Split(card, "\n"); len(lines) > 0 {
+		cardWidth = ansi.StringWidth(lines[0])
+	}
+	innerWidth := maxInt(1, cardWidth-4)
+	lines := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if len(lines) > 0 {
+			joined := lines[len(lines)-1] + "  " + part
+			if ansi.StringWidth(joined) <= innerWidth {
+				lines[len(lines)-1] = joined
+				continue
+			}
+		}
+		lines = append(lines, part)
+	}
+	for i, line := range lines {
+		badge := ""
+		if i == len(lines)-1 {
+			badge = origin
+		}
+		card = insertCardMetaLine(card, line, badge, s)
+	}
+	return card
 }
 
 func entryDisplayLabel(entry InventoryEntry) string {
@@ -2561,7 +3071,7 @@ func gridCardWidth(width int, columns int) int {
 	const gapWidth = 2
 	available := maxInt(1, width-4)
 	cardWidth := (available-gapWidth*(columns-1))/columns - 2
-	return clampInt(cardWidth, 36, 96)
+	return clampInt(cardWidth, 12, 96)
 }
 
 func formatSnapshotStatus(snapshot Snapshot, rows int) string {
@@ -2571,6 +3081,9 @@ func formatSnapshotStatus(snapshot Snapshot, rows int) string {
 	}
 	if snapshot.Freshness != "" {
 		parts = append(parts, snapshot.Freshness)
+	}
+	if snapshot.View.ID != "" {
+		parts = append(parts, fmt.Sprintf("view %s", snapshot.View.ID), "configure: az view select --project global --consumer tmux_selector VIEW")
 	}
 	return strings.Join(parts, "  ")
 }

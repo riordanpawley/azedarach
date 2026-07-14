@@ -58,10 +58,11 @@ const (
 	defaultIssueContextRiskDays = 14
 	defaultOperationListLimit   = 50
 	sessionStartCommandTimeout  = 5 * time.Minute
-	branchMergeToBaseTimeout    = 2 * time.Minute
+	branchMergeToBaseTimeout    = domain.IntegrationClientTimeout
 	daemonCommandTimeout        = 15 * time.Second
 	prCommandTimeout            = 2 * time.Minute
-	issueCloseCleanupTimeout    = 10 * time.Minute
+	issueCloseCleanupTimeout    = domain.IntegrationClientTimeout
+	issueBulkCleanupItemTimeout = domain.IntegrationCloseTimeout
 	issueCreateCommandTimeout   = 10 * time.Second
 	issueCreateAutostartTimeout = 12 * time.Second
 	exitCodeHardFailure         = 1
@@ -73,14 +74,15 @@ var primeLookPath = exec.LookPath
 var primeDaemonReadTimeout = 8 * time.Second
 
 type Dependencies struct {
-	Config         *config.Config
-	DaemonClient   *daemonclient.Client
-	DaemonSocket   string
-	Logger         *slog.Logger
-	ProjectID      string
-	RepoDir        string
-	RuntimeRepoDir string
-	TraceContext   context.Context
+	Config               *config.Config
+	DaemonClient         *daemonclient.Client
+	DaemonSocket         string
+	Logger               *slog.Logger
+	ProjectID            string
+	RepoDir              string
+	RuntimeRepoDir       string
+	TraceContext         context.Context
+	AutostartRetryPolicy *autoclient.AutostartRetryPolicy
 }
 
 type repeatedStringFlag []string
@@ -437,6 +439,7 @@ type SessionCaptureOptions struct {
 	IssueID string
 	Lines   int
 	JSON    bool
+	Raw     bool
 }
 
 type WorktreeCreateOptions struct {
@@ -609,6 +612,14 @@ func ParseSessionRestartAllArgs(args []string) (SessionRestartAllOptions, error)
 }
 
 func ParseSessionCaptureArgs(args []string) (SessionCaptureOptions, error) {
+	return parseSessionCaptureArgs(args, false)
+}
+
+func ParseOrchestrateCaptureArgs(args []string) (SessionCaptureOptions, error) {
+	return parseSessionCaptureArgs(args, true)
+}
+
+func parseSessionCaptureArgs(args []string, allowRaw bool) (SessionCaptureOptions, error) {
 	opts := SessionCaptureOptions{Lines: 120}
 	fs := flag.NewFlagSet("session capture", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -617,6 +628,9 @@ func ParseSessionCaptureArgs(args []string) (SessionCaptureOptions, error) {
 	fs.StringVar(&opts.IssueID, "id", "", "issue id")
 	fs.IntVar(&opts.Lines, "lines", opts.Lines, "number of recent pane lines to capture")
 	fs.BoolVar(&opts.JSON, "json", false, "print JSON output")
+	if allowRaw {
+		fs.BoolVar(&opts.Raw, "raw", false, "print the unparsed pane capture")
+	}
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return SessionCaptureOptions{}, err
 	}
@@ -672,6 +686,7 @@ type BranchAgentMergeOptions struct {
 type BranchMergeToBaseOptions struct {
 	IssueID           string
 	Project           string
+	Target            string
 	AllowBaseForChild bool
 }
 
@@ -1310,29 +1325,9 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 }
 
 func SessionCaptureCommand(deps *Dependencies, opts SessionCaptureOptions) error {
-	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
-	defer cancel()
-	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
-		return err
-	}
-
-	var target sessionIssueTarget
-	var err error
-	if strings.TrimSpace(opts.Project) != "" {
-		target, err = resolveExplicitSessionStatusTarget(deps, opts.IssueID, opts.Project, opts.IssueID)
-	} else {
-		target, err = resolveSessionStatusTarget(deps, opts.IssueID)
-	}
+	result, err := captureSessionPane(deps, opts, "capturing session pane")
 	if err != nil {
 		return err
-	}
-	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
-	defer restoreProject()
-
-	deps.Logger.Info("capturing session pane", "project_id", target.ProjectID, "issue_id", target.IssueID, "lines", opts.Lines)
-	result, err := deps.DaemonClient.CaptureSession(ctx, target.IssueID, daemonclient.CaptureSessionOptions{Lines: opts.Lines})
-	if err != nil {
-		return fmt.Errorf("failed to capture session pane: %w", err)
 	}
 	if opts.JSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -1346,8 +1341,36 @@ func SessionCaptureCommand(deps *Dependencies, opts SessionCaptureOptions) error
 	return nil
 }
 
+func captureSessionPane(deps *Dependencies, opts SessionCaptureOptions, logMessage string) (protocol.SessionCaptureResponseBody, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return protocol.SessionCaptureResponseBody{}, err
+	}
+
+	var target sessionIssueTarget
+	var err error
+	if strings.TrimSpace(opts.Project) != "" {
+		target, err = resolveExplicitSessionStatusTarget(deps, opts.IssueID, opts.Project, opts.IssueID)
+	} else {
+		target, err = resolveSessionStatusTarget(deps, opts.IssueID)
+	}
+	if err != nil {
+		return protocol.SessionCaptureResponseBody{}, err
+	}
+	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
+	defer restoreProject()
+
+	deps.Logger.Info(logMessage, "project_id", target.ProjectID, "issue_id", target.IssueID, "lines", opts.Lines, "raw", opts.Raw)
+	result, err := deps.DaemonClient.CaptureSession(ctx, target.IssueID, daemonclient.CaptureSessionOptions{Lines: opts.Lines})
+	if err != nil {
+		return protocol.SessionCaptureResponseBody{}, fmt.Errorf("failed to capture session pane: %w", err)
+	}
+	return result, nil
+}
+
 func OrchestrateCaptureCommand(deps *Dependencies, opts SessionCaptureOptions) error {
-	return SessionCaptureCommand(deps, opts)
+	return orchestrateCaptureCommand(deps, opts)
 }
 
 func SessionDiagnoseCommand(deps *Dependencies, issueID string) error {
@@ -1967,7 +1990,7 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 	recordPhase("resolve_source", phaseStartedAt)
 
 	phaseStartedAt = time.Now()
-	target, decision, err := resolveMergeToBaseTarget(ctx, deps, source.IssueID, opts.AllowBaseForChild)
+	target, decision, err := resolveExplicitBranchMergeTarget(ctx, deps, source, opts)
 	if err != nil {
 		recordPhase("resolve_target", phaseStartedAt)
 		return branchMergeToBaseCommandResult{}, wrapPhaseErr("resolve_target", err)
@@ -1999,6 +2022,7 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 		"ancestor_chain", strings.Join(decision.AncestorChain, " -> "),
 		"allow_base_for_child", opts.AllowBaseForChild,
 	)
+	fmt.Printf("Merge plan: source %s (%s) -> target %s (%s)\n", source.IssueID, source.Branch, target.TargetID, baseBranch)
 
 	phaseStartedAt = time.Now()
 	if err := checkMergeToBasePreflight(ctx, deps, source, baseWorktree); err != nil {
@@ -2066,6 +2090,42 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 		Message:      result.Result.Message,
 		Phases:       phases,
 	}, nil
+}
+
+func resolveExplicitBranchMergeTarget(ctx context.Context, deps *Dependencies, source daemonclient.Worktree, opts BranchMergeToBaseOptions) (mergeBaseTarget, mergeTargetDecision, error) {
+	targetID := strings.TrimSpace(opts.Target)
+	if targetID == "" {
+		return resolveProtectedMergeToBaseTarget(ctx, deps, source.IssueID, opts.AllowBaseForChild)
+	}
+	if isBaseMergeTarget(targetID) {
+		defaultBase := resolveCLIBaseBranch(deps.Config)
+		targetResult, err := deps.DaemonClient.TaskMergeBaseTarget(ctx, source.IssueID, defaultBase, opts.AllowBaseForChild, true)
+		if err != nil {
+			return mergeBaseTarget{}, mergeTargetDecision{}, err
+		}
+		target := mergeBaseTarget{TargetID: targetResult.TargetID, Branch: targetResult.Branch, WorktreePath: targetResult.WorktreePath, BranchAttached: targetResult.BranchAttached}
+		decision := mergeTargetDecision{Reason: targetResult.Reason, AncestorChain: append([]string(nil), targetResult.AncestorChain...)}
+		if target.TargetID != "base" {
+			return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("refusing target base for %s: daemon selected active ancestor %s; use --target %s", source.IssueID, target.TargetID, target.TargetID)
+		}
+		return target, decision, nil
+	}
+	targetWorktree, err := resolveWorktreeForIssue(ctx, deps, targetID)
+	if err != nil {
+		return mergeBaseTarget{}, mergeTargetDecision{}, err
+	}
+	if naming.IssueIDsEqual(source.IssueID, targetWorktree.IssueID) {
+		return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("source and target issue must be different: %s", source.IssueID)
+	}
+	if strings.TrimSpace(targetWorktree.Branch) == "" {
+		return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("target issue %s has no branch", targetWorktree.IssueID)
+	}
+	return mergeBaseTarget{
+		TargetID:       targetWorktree.IssueID,
+		Branch:         targetWorktree.Branch,
+		WorktreePath:   targetWorktree.Path,
+		BranchAttached: true,
+	}, mergeTargetDecision{Reason: "selected explicit issue target"}, nil
 }
 
 func printBranchMergeToBaseResult(result branchMergeToBaseCommandResult) {
@@ -2176,9 +2236,12 @@ type mergeTargetDecision struct {
 	AncestorChain []string
 }
 
-func resolveMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID string, allowBaseForChild bool) (mergeBaseTarget, mergeTargetDecision, error) {
+// resolveProtectedMergeToBaseTarget is mutation-only. Requiring human
+// acceptance lets the daemon refuse base integration for origin workflow mode
+// while still resolving child mutations to an active ancestor worktree.
+func resolveProtectedMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID string, allowBaseForChild bool) (mergeBaseTarget, mergeTargetDecision, error) {
 	defaultBase := resolveCLIBaseBranch(deps.Config)
-	target, err := deps.DaemonClient.TaskMergeBaseTarget(ctx, issueID, defaultBase, allowBaseForChild)
+	target, err := deps.DaemonClient.TaskMergeBaseTarget(ctx, issueID, defaultBase, allowBaseForChild, true)
 	if err != nil {
 		return mergeBaseTarget{}, mergeTargetDecision{}, err
 	}
@@ -2220,9 +2283,16 @@ func BranchAgentMergeCommand(deps *Dependencies, opts BranchAgentMergeOptions) e
 	agentIssueID := source.IssueID
 	agentWorktree := source.Path
 	if requestedBaseTarget {
-		baseTarget, _, err := resolveMergeToBaseTarget(ctx, deps, source.IssueID, false)
+		defaultBase := resolveCLIBaseBranch(deps.Config)
+		resolved, err := deps.DaemonClient.TaskMergeBaseTarget(ctx, source.IssueID, defaultBase, false, true)
 		if err != nil {
 			return err
+		}
+		baseTarget := mergeBaseTarget{
+			TargetID:       resolved.TargetID,
+			Branch:         resolved.Branch,
+			WorktreePath:   resolved.WorktreePath,
+			BranchAttached: resolved.BranchAttached,
 		}
 		targetID = baseTarget.TargetID
 		targetRef = baseTarget.Branch
@@ -2253,7 +2323,7 @@ func BranchAgentMergeCommand(deps *Dependencies, opts BranchAgentMergeOptions) e
 	if preflight.Clean {
 		fmt.Printf("Merge preflight clean for %s -> %s; no agent needed.\n", source.IssueID, displayTargetID)
 		if requestedBaseTarget {
-			fmt.Printf("Run: az branch merge %s\n", source.IssueID)
+			fmt.Printf("Run: az branch merge --source %s --target %s\n", source.IssueID, targetID)
 		}
 		return nil
 	}
@@ -2320,7 +2390,7 @@ func buildBranchAgentMergePrompt(source daemonclient.Worktree, targetID, targetW
 	fmt.Fprintf(&b, "Auto-merge the blocked preflight for %s -> %s.\n\n", source.IssueID, targetID)
 	b.WriteString("Start by running `az prime`. Inspect the predicted conflict files, perform the merge in the appropriate worktree, resolve conflicts, commit the resolution, and run focused validation.\n\n")
 	if isBaseMergeTarget(targetID) {
-		fmt.Fprintf(&b, "This preflight blocked merging source branch %s into base ref %s. Work in source issue %s at %s: merge %s into %s, resolve conflicts there, and leave the source branch clean so `az branch merge %s` can be retried.\n", source.Branch, targetRef, source.IssueID, source.Path, targetRef, source.Branch, source.IssueID)
+		fmt.Fprintf(&b, "This preflight blocked merging source branch %s into base ref %s. Work in source issue %s at %s: merge %s into %s, resolve conflicts there, and leave the source branch clean so `az branch merge --source %s --target base` can be retried after durable human acceptance.\n", source.Branch, targetRef, source.IssueID, source.Path, targetRef, source.Branch, source.IssueID)
 	} else {
 		fmt.Fprintf(&b, "This preflight blocked merging source branch %s from %s into target issue %s at %s. Work in the target worktree, merge %s, resolve conflicts there, and leave the target branch clean.\n", source.Branch, source.Path, targetID, targetWorktree, source.Branch)
 	}
@@ -2370,7 +2440,7 @@ func resolveMergeToBaseSourceWorktree(ctx context.Context, deps *Dependencies, i
 			return wt, nil
 		}
 	}
-	return daemonclient.Worktree{}, fmt.Errorf("could not infer issue from current worktree %q; pass issue ID: az branch merge <issue-id>", absCWD)
+	return daemonclient.Worktree{}, fmt.Errorf("could not infer issue from current worktree %q; pass an explicit source: az branch merge --source <issue-id> --target <issue-id|base>", absCWD)
 }
 
 func samePath(left, right string) bool {
@@ -3227,7 +3297,7 @@ func parseIssueListArgs(args []string, allowQueryArgs bool) (IssueListOptions, e
 		opts.Archived = string(archiveMode)
 	}
 	if allowQueryArgs && opts.Query == "" {
-		return IssueListOptions{}, fmt.Errorf("usage: az issue search [--project <project-id>] [--json] [--deps] [--archived exclude|include|only] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)")
+		return IssueListOptions{}, fmt.Errorf("usage: az ticket search [--project <project-id>] [--json] [--deps] [--archived exclude|include|only] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)")
 	}
 	var parseErr error
 	if opts.CreatedAfter, parseErr = parseIssueListDateFilter(createdAfterRaw, false); parseErr != nil {
@@ -3297,7 +3367,7 @@ func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 		return IssueGetOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueGetOptions{}, fmt.Errorf("usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]")
+		return IssueGetOptions{}, fmt.Errorf("usage: az ticket get [--project <project-id>] [--id <ticket-id>] [--json] [--with-notes] [<ticket-id>]")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -3306,7 +3376,7 @@ func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueGetOptions{}, fmt.Errorf("usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [--archived exclude|include|only] [<issue-id>]")
+		return IssueGetOptions{}, fmt.Errorf("usage: az ticket get [--project <project-id>] [--id <ticket-id>] [--json] [--with-notes] [--archived exclude|include|only] [<ticket-id>]")
 	}
 	if strings.TrimSpace(opts.Archived) != "" {
 		archiveMode, archiveErr := protocol.NormalizeArchiveMode(opts.Archived)
@@ -3335,7 +3405,7 @@ func ParseIssueOwnershipArgs(args []string, command string) (IssueOwnershipOptio
 		return IssueOwnershipOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueOwnershipOptions{}, fmt.Errorf("usage: az issue %s [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<issue-id>]", command)
+		return IssueOwnershipOptions{}, fmt.Errorf("usage: az ticket %s [--project <project-id>] [--id <ticket-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<ticket-id>]", command)
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -3344,7 +3414,7 @@ func ParseIssueOwnershipArgs(args []string, command string) (IssueOwnershipOptio
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueOwnershipOptions{}, fmt.Errorf("usage: az issue %s [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<issue-id>]", command)
+		return IssueOwnershipOptions{}, fmt.Errorf("usage: az ticket %s [--project <project-id>] [--id <ticket-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<ticket-id>]", command)
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	opts.OwnerID = strings.TrimSpace(opts.OwnerID)
@@ -3371,7 +3441,7 @@ func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
 		return IssueEventsOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueEventsOptions{}, fmt.Errorf("usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]")
+		return IssueEventsOptions{}, fmt.Errorf("usage: az ticket events [--project <project-id>] [--id <ticket-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<ticket-id>]")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -3380,7 +3450,7 @@ func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" && !opts.JQHelp {
-		return IssueEventsOptions{}, fmt.Errorf("usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]")
+		return IssueEventsOptions{}, fmt.Errorf("usage: az ticket events [--project <project-id>] [--id <ticket-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<ticket-id>]")
 	}
 	if opts.Limit < 0 {
 		return IssueEventsOptions{}, fmt.Errorf("--limit must be non-negative")
@@ -3416,7 +3486,7 @@ func ParseIssueRecordArgs(args []string) (IssueRecordOptions, error) {
 		return IssueRecordOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueRecordOptions{}, fmt.Errorf("usage: az issue record [--project <project-id>] [--id <issue-id>] [--type <event-type>] [--summary <text>] [--body <text>] [--data <json-object>] [--follow-up <issue-id> ...] [--json] [<issue-id>]")
+		return IssueRecordOptions{}, fmt.Errorf("usage: az ticket record [--project <project-id>] [--id <ticket-id>] [--type <event-type>] [--summary <text>] [--body <text>] [--data <json-object>] [--follow-up <ticket-id> ...] [--json] [<ticket-id>]")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -3468,7 +3538,7 @@ func ParseIssueContextRiskArgs(args []string) (IssueContextRiskOptions, error) {
 		return IssueContextRiskOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueContextRiskOptions{}, fmt.Errorf("usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--summary|--full] [--json] [<issue-id>]")
+		return IssueContextRiskOptions{}, fmt.Errorf("usage: az ticket context-risk [--project <project-id>] [--id <ticket-id>] [--since 14d] [--summary|--full] [--json] [<ticket-id>]")
 	}
 	if opts.Summary && opts.Full {
 		return IssueContextRiskOptions{}, fmt.Errorf("--summary and --full are mutually exclusive")
@@ -3480,7 +3550,7 @@ func ParseIssueContextRiskArgs(args []string) (IssueContextRiskOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueContextRiskOptions{}, fmt.Errorf("usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--summary|--full] [--json] [<issue-id>]")
+		return IssueContextRiskOptions{}, fmt.Errorf("usage: az ticket context-risk [--project <project-id>] [--id <ticket-id>] [--since 14d] [--summary|--full] [--json] [<ticket-id>]")
 	}
 	duration, err := parseIssueContextRiskWindow(sinceRaw)
 	if err != nil {
@@ -3553,7 +3623,7 @@ func ParseIssueGetManyArgs(args []string) (IssueGetManyOptions, error) {
 	}
 	ids = dedupeOrderedIDs(ids)
 	if len(ids) == 0 {
-		return IssueGetManyOptions{}, fmt.Errorf("usage: az issue get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]")
+		return IssueGetManyOptions{}, fmt.Errorf("usage: az ticket get-many [--project <project-id>] --id <ticket-id> [--id <ticket-id> ...] [--ids a,b,c] [--json] [--with-notes]")
 	}
 	opts.IssueIDs = ids
 	opts.Project = normalizeIssueProject(opts.Project)
@@ -3597,7 +3667,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	case fs.NArg() == 1 && titleFlag != "":
 		return IssueCreateOptions{}, fmt.Errorf("provide title either as --title or as a positional argument, not both")
 	default:
-		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
+		return IssueCreateOptions{}, fmt.Errorf("usage: az ticket create [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
 	}
 
 	taskType, err := parseTaskType(typeRaw)
@@ -3645,7 +3715,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 func ParseIssueCheckArgs(args []string) (IssueCheckOptions, error) {
 	getOpts, err := ParseIssueGetArgs(args)
 	if err != nil {
-		return IssueCheckOptions{}, fmt.Errorf("usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
+		return IssueCheckOptions{}, fmt.Errorf("usage: az ticket check [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>]")
 	}
 	return IssueCheckOptions{
 		Project: getOpts.Project,
@@ -3668,7 +3738,7 @@ func ParseIssueDoctorArgs(args []string) (IssueDoctorOptions, error) {
 		return IssueDoctorOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueDoctorOptions{}, fmt.Errorf("usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<issue-id>]")
+		return IssueDoctorOptions{}, fmt.Errorf("usage: az ticket doctor [--project <project-id>] [--id <ticket-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<ticket-id>]")
 	}
 	issueID := ""
 	if fs.NArg() == 1 {
@@ -3678,7 +3748,7 @@ func ParseIssueDoctorArgs(args []string) (IssueDoctorOptions, error) {
 		issueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(issueID) == "" {
-		return IssueDoctorOptions{}, fmt.Errorf("usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<issue-id>]")
+		return IssueDoctorOptions{}, fmt.Errorf("usage: az ticket doctor [--project <project-id>] [--id <ticket-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<ticket-id>]")
 	}
 	if opts.CheckpointWAL && opts.TruncateWAL {
 		return IssueDoctorOptions{}, fmt.Errorf("--checkpoint-wal and --truncate-wal are mutually exclusive")
@@ -3705,7 +3775,7 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 		return IssueCloseOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueCloseOptions{}, fmt.Errorf("--impl is not supported for issue close; issue implementations are already assigned")
@@ -3717,14 +3787,14 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
 }
 
 func ParseIssueCleanupArgs(args []string) (IssueCleanupOptions, error) {
-	opts := IssueCleanupOptions{Action: "closed", PerIssueTimeout: issueCloseCleanupTimeout}
+	opts := IssueCleanupOptions{Action: "closed", PerIssueTimeout: issueBulkCleanupItemTimeout}
 	var idsCSV, statusesCSV, updatedBefore string
 	fs := flag.NewFlagSet("issue cleanup", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -3739,7 +3809,8 @@ func ParseIssueCleanupArgs(args []string) (IssueCleanupOptions, error) {
 	fs.StringVar(&opts.Action, "action", "closed", "lifecycle action: closed or cancelled")
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "preview ordered actions without changing issues")
 	fs.BoolVar(&opts.JSON, "json", false, "output structured per-issue results")
-	fs.DurationVar(&opts.PerIssueTimeout, "per-issue-timeout", issueCloseCleanupTimeout, "maximum time for each issue cleanup")
+	fs.DurationVar(&opts.PerIssueTimeout, "per-ticket-timeout", issueBulkCleanupItemTimeout, "maximum time for each ticket cleanup")
+	fs.DurationVar(&opts.PerIssueTimeout, "per-issue-timeout", issueBulkCleanupItemTimeout, "deprecated alias for --per-ticket-timeout")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCleanupOptions{}, err
 	}
@@ -3765,7 +3836,7 @@ func ParseIssueCleanupArgs(args []string) (IssueCleanupOptions, error) {
 		return IssueCleanupOptions{}, fmt.Errorf("limit must be >= 0")
 	}
 	if opts.PerIssueTimeout <= 0 {
-		return IssueCleanupOptions{}, fmt.Errorf("per-issue-timeout must be positive")
+		return IssueCleanupOptions{}, fmt.Errorf("per-ticket-timeout must be positive")
 	}
 	if strings.TrimSpace(opts.Query) != "" && len(domain.ContentQueryTerms(opts.Query)) == 0 {
 		return IssueCleanupOptions{}, fmt.Errorf("query must contain a searchable term")
@@ -3800,7 +3871,7 @@ func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 		return IssueDeleteOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [--cleanup|--stop-session] [--remove-worktree] [--force-worktree] [<issue-id>]")
+		return IssueDeleteOptions{}, fmt.Errorf("usage: az ticket delete [--project <project-id>] --confirm [--id <ticket-id>] [--json] [--cleanup|--stop-session] [--remove-worktree] [--force-worktree] [<ticket-id>]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDeleteOptions{}, fmt.Errorf("--impl is not supported for issue delete; issue implementations are already assigned")
@@ -3822,7 +3893,7 @@ func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [--cleanup|--stop-session] [--remove-worktree] [--force-worktree] [<issue-id>]")
+		return IssueDeleteOptions{}, fmt.Errorf("usage: az ticket delete [--project <project-id>] --confirm [--id <ticket-id>] [--json] [--cleanup|--stop-session] [--remove-worktree] [--force-worktree] [<ticket-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -3842,7 +3913,7 @@ func ParseIssueUnarchiveArgs(args []string) (IssueUnarchiveOptions, error) {
 		return IssueUnarchiveOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUnarchiveOptions{}, fmt.Errorf("usage: az issue unarchive [--project <project-id>] [--id <issue-id>] [--json] [--with-parents] [--cascade-children] [<issue-id>]")
+		return IssueUnarchiveOptions{}, fmt.Errorf("usage: az ticket unarchive [--project <project-id>] [--id <ticket-id>] [--json] [--with-parents] [--cascade-children] [<ticket-id>]")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -3851,7 +3922,7 @@ func ParseIssueUnarchiveArgs(args []string) (IssueUnarchiveOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUnarchiveOptions{}, fmt.Errorf("usage: az issue unarchive [--project <project-id>] [--id <issue-id>] [--json] [--with-parents] [--cascade-children] [<issue-id>]")
+		return IssueUnarchiveOptions{}, fmt.Errorf("usage: az ticket unarchive [--project <project-id>] [--id <ticket-id>] [--json] [--with-parents] [--cascade-children] [<ticket-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -3895,7 +3966,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		return IssueUpdateOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az ticket update [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update (it is create-only); normal field updates do not need --update-impl, and --update-impl is only for changing issue implementations")
@@ -3907,7 +3978,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az ticket update [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if typeRaw != "" {
 		tt, err := parseTaskType(typeRaw)
@@ -3965,7 +4036,8 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
-	fs.StringVar(&issueIDFlag, "issue-id", "", "source issue id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "ticket-id", "", "source ticket id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "deprecated alias for --ticket-id")
 	fs.StringVar(&dependsOnIDFlag, "depends-on-id", "", "dependency target issue id (named alternative to positional)")
 	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from|created-in)")
 	fs.BoolVar(&opts.ForceParentChange, "force-parent-change", false, "replace an existing parent-child edge")
@@ -3974,7 +4046,7 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 		return IssueDependencyAddOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]")
+		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az ticket dep add [--project <project-id>] [--ticket-id <ticket-id>] [--depends-on-id <depends-on-id>] [<ticket-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDependencyAddOptions{}, fmt.Errorf("--impl is not supported for issue dep add; dependencies target existing issues")
@@ -3992,7 +4064,7 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 		opts.DependsOnID = strings.TrimSpace(dependsOnIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.DependsOnID) == "" {
-		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]")
+		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az ticket dep add [--project <project-id>] [--ticket-id <ticket-id>] [--depends-on-id <depends-on-id>] [<ticket-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	issueProject, issueID, err := parseDependencyEndpointProject(opts.IssueID, "issue_id")
@@ -4059,7 +4131,8 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
-	fs.StringVar(&issueIDFlag, "issue-id", "", "source issue id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "ticket-id", "", "source ticket id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "deprecated alias for --ticket-id")
 	fs.StringVar(&dependsOnIDFlag, "depends-on-id", "", "dependency target issue id (named alternative to positional)")
 	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from|created-in)")
 	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm removal for guarded dependency types")
@@ -4069,7 +4142,7 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 		return IssueDependencyRemoveOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]")
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az ticket dep remove [--project <project-id>] [--ticket-id <ticket-id>] [--depends-on-id <depends-on-id>] [<ticket-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDependencyRemoveOptions{}, fmt.Errorf("--impl is not supported for issue dep remove; dependencies target existing issues")
@@ -4087,7 +4160,7 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 		opts.DependsOnID = strings.TrimSpace(dependsOnIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.DependsOnID) == "" {
-		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]")
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az ticket dep remove [--project <project-id>] [--ticket-id <ticket-id>] [--depends-on-id <depends-on-id>] [<ticket-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -4128,14 +4201,15 @@ func ParseIssueImageAddArgs(args []string) (IssueImageAddOptions, error) {
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
-	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "ticket-id", "", "ticket id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "deprecated alias for --ticket-id")
 	fs.StringVar(&pathFlag, "path", "", "source image path (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output image add result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueImageAddOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueImageAddOptions{}, fmt.Errorf("usage: az issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]")
+		return IssueImageAddOptions{}, fmt.Errorf("usage: az ticket image add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueImageAddOptions{}, fmt.Errorf("--impl is not supported for issue image add; issue implementations are already assigned")
@@ -4153,7 +4227,7 @@ func ParseIssueImageAddArgs(args []string) (IssueImageAddOptions, error) {
 		opts.SourcePath = strings.TrimSpace(pathFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.SourcePath) == "" {
-		return IssueImageAddOptions{}, fmt.Errorf("usage: az issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]")
+		return IssueImageAddOptions{}, fmt.Errorf("usage: az ticket image add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -4168,14 +4242,15 @@ func ParseIssueImageRemoveArgs(args []string) (IssueImageRemoveOptions, error) {
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
-	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "ticket-id", "", "ticket id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "deprecated alias for --ticket-id")
 	fs.StringVar(&attachmentIDFlag, "attachment-id", "", "attachment id (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output image remove result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueImageRemoveOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueImageRemoveOptions{}, fmt.Errorf("usage: az issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]")
+		return IssueImageRemoveOptions{}, fmt.Errorf("usage: az ticket image remove [--project <project-id>] [--ticket-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueImageRemoveOptions{}, fmt.Errorf("--impl is not supported for issue image remove; issue implementations are already assigned")
@@ -4193,7 +4268,7 @@ func ParseIssueImageRemoveArgs(args []string) (IssueImageRemoveOptions, error) {
 		opts.AttachmentID = strings.TrimSpace(attachmentIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.AttachmentID) == "" {
-		return IssueImageRemoveOptions{}, fmt.Errorf("usage: az issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]")
+		return IssueImageRemoveOptions{}, fmt.Errorf("usage: az ticket image remove [--project <project-id>] [--ticket-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -4208,14 +4283,15 @@ func ParseIssueDocumentAddArgs(args []string) (IssueDocumentAddOptions, error) {
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
-	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "ticket-id", "", "ticket id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "deprecated alias for --ticket-id")
 	fs.StringVar(&pathFlag, "path", "", "source document path (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output document add result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDocumentAddOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueDocumentAddOptions{}, fmt.Errorf("usage: az issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]")
+		return IssueDocumentAddOptions{}, fmt.Errorf("usage: az ticket document add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDocumentAddOptions{}, fmt.Errorf("--impl is not supported for issue document add; issue implementations are already assigned")
@@ -4233,7 +4309,7 @@ func ParseIssueDocumentAddArgs(args []string) (IssueDocumentAddOptions, error) {
 		opts.SourcePath = strings.TrimSpace(pathFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.SourcePath) == "" {
-		return IssueDocumentAddOptions{}, fmt.Errorf("usage: az issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]")
+		return IssueDocumentAddOptions{}, fmt.Errorf("usage: az ticket document add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -4247,13 +4323,14 @@ func ParseIssueDocumentListArgs(args []string) (IssueDocumentListOptions, error)
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
-	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "ticket-id", "", "ticket id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "deprecated alias for --ticket-id")
 	fs.BoolVar(&opts.JSON, "json", false, "output document list result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDocumentListOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueDocumentListOptions{}, fmt.Errorf("usage: az issue document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]")
+		return IssueDocumentListOptions{}, fmt.Errorf("usage: az ticket document list [--project <project-id>] [--ticket-id <ticket-id>] [<ticket-id>] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDocumentListOptions{}, fmt.Errorf("--impl is not supported for issue document list; issue implementations are already assigned")
@@ -4265,7 +4342,7 @@ func ParseIssueDocumentListArgs(args []string) (IssueDocumentListOptions, error)
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueDocumentListOptions{}, fmt.Errorf("usage: az issue document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]")
+		return IssueDocumentListOptions{}, fmt.Errorf("usage: az ticket document list [--project <project-id>] [--ticket-id <ticket-id>] [<ticket-id>] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -4280,14 +4357,15 @@ func ParseIssueDocumentRemoveArgs(args []string) (IssueDocumentRemoveOptions, er
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
-	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "ticket-id", "", "ticket id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "deprecated alias for --ticket-id")
 	fs.StringVar(&attachmentIDFlag, "attachment-id", "", "attachment id (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output document remove result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDocumentRemoveOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueDocumentRemoveOptions{}, fmt.Errorf("usage: az issue document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]")
+		return IssueDocumentRemoveOptions{}, fmt.Errorf("usage: az ticket document remove [--project <project-id>] [--ticket-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDocumentRemoveOptions{}, fmt.Errorf("--impl is not supported for issue document remove; issue implementations are already assigned")
@@ -4305,7 +4383,7 @@ func ParseIssueDocumentRemoveArgs(args []string) (IssueDocumentRemoveOptions, er
 		opts.AttachmentID = strings.TrimSpace(attachmentIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.AttachmentID) == "" {
-		return IssueDocumentRemoveOptions{}, fmt.Errorf("usage: az issue document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]")
+		return IssueDocumentRemoveOptions{}, fmt.Errorf("usage: az ticket document remove [--project <project-id>] [--ticket-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -4881,6 +4959,9 @@ func ImplMigrateCommand(deps *Dependencies, opts ImplMigrateOptions) error {
 }
 
 func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
+	if protocol.NormalizeProjectID(opts.Project) == "global" {
+		return globalIssueListCommand(deps, opts)
+	}
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
@@ -5027,6 +5108,77 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		fmt.Println("Window note: additional matching issues may exist beyond current limit.")
 	} else {
 		fmt.Println("Window note: all matching issues are shown.")
+	}
+	return nil
+}
+
+func globalIssueListCommand(deps *Dependencies, opts IssueListOptions) error {
+	if deps == nil || deps.DaemonClient == nil {
+		return fmt.Errorf("daemon client unavailable")
+	}
+	archiveMode, err := protocol.NormalizeArchiveMode(opts.Archived)
+	if err != nil {
+		return err
+	}
+	if opts.Deps || len(opts.DependsOnIDs) > 0 {
+		return fmt.Errorf("global issue queries do not support --deps or --depends-on; query a specific project")
+	}
+	if archiveMode != protocol.ArchiveModeExclude {
+		return fmt.Errorf("global issue queries support only --archived exclude")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	consumer := protocol.GlobalViewConsumerSearch
+	for _, state := range opts.States {
+		if state == domain.IssueDisplayReview {
+			consumer = protocol.GlobalViewConsumerReview
+			break
+		}
+	}
+	snapshot, err := deps.DaemonClient.GlobalViewSnapshot(ctx, protocol.GlobalSnapshotRequestBody{Query: strings.TrimSpace(opts.Query), Consumer: consumer})
+	if err != nil {
+		return fmt.Errorf("failed to query global issues: %w", err)
+	}
+	items := append([]protocol.GlobalViewProjectedItem(nil), snapshot.Projection.Items...)
+	filtered := items[:0]
+	for _, item := range items {
+		task := item.Task
+		if len(opts.IDs) > 0 && len(filterTasksByIDs([]domain.Task{task}, opts.IDs)) == 0 {
+			continue
+		}
+		if len(opts.States) > 0 && len(filterTasksByIssueDisplayPhase([]domain.Task{task}, opts.States)) == 0 {
+			continue
+		}
+		if len(opts.ParentIDs) > 0 && len(filterTasksByParentIDs([]domain.Task{task}, opts.ParentIDs)) == 0 {
+			continue
+		}
+		if len(filterTasksByTimeRange([]domain.Task{task}, opts.CreatedAfter, opts.CreatedBefore, opts.UpdatedAfter, opts.UpdatedBefore)) == 0 {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	limit := opts.Limit
+	if limit < 1 {
+		limit = defaultIssueListLimit
+	}
+	truncated := len(filtered) > limit
+	if truncated {
+		filtered = filtered[:limit]
+	}
+	if opts.JSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(filtered)
+	}
+	if len(filtered) == 0 {
+		fmt.Println("No issues found.")
+		return nil
+	}
+	for _, item := range filtered {
+		fmt.Printf("%-24s %-12s %s\n", formatProjectIssueRef(item.Identity.ProjectID.String(), item.Identity.IssueID.String()), item.Task.Status, item.Task.Title)
+	}
+	if truncated {
+		fmt.Printf("Showing %d of %d issues; use --limit to expand.\n", len(filtered), len(items))
 	}
 	return nil
 }
@@ -8387,6 +8539,8 @@ func StopDaemonCommand(deps *Dependencies) error {
 
 type primeTemplateData struct {
 	ActiveIssueID            string
+	GitWorkflowMode          string
+	OriginWorkflow           bool
 	SpecEnabled              bool
 	PrimeEvidenceKey         string
 	OrchestrationVia         string
@@ -8394,6 +8548,7 @@ type primeTemplateData struct {
 	OrchestrationViaNative   bool
 	TmuxAvailable            bool
 	OrchestratorExitContract string
+	OrchestrationSection     string
 	IssueSection             string
 	ActiveIssueClosedWarning string
 	ContextGuardrail         string
@@ -8405,6 +8560,12 @@ type primeTemplateData struct {
 }
 
 func PrimeCommand(deps *Dependencies) error {
+	return primeCommandTo(deps, os.Stdout, clitext.Render)
+}
+
+type primeRenderFunc func(string, any) (string, error)
+
+func primeCommandTo(deps *Dependencies, stdout io.Writer, render primeRenderFunc) error {
 	commandStartedAt := time.Now()
 	issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID"))
 	issueIDSource := ""
@@ -8412,20 +8573,53 @@ func PrimeCommand(deps *Dependencies) error {
 		issueIDSource = "env"
 	}
 	primeMode := strings.TrimSpace(os.Getenv("AZEDARACH_PRIME_MODE"))
-	guardrail := "- No active issue is preselected. When work starts, set `AZEDARACH_ISSUE_ID` or run `az issue get <issue-id>`."
+	guardrail := "- No active ticket is preselected. When work starts, set `AZEDARACH_TICKET_ID` (or legacy `AZEDARACH_ISSUE_ID`) or run `az ticket get <ticket-id>`."
 	issueSection := ""
 	activeIssueClosedWarning := ""
 	specGuardrails := ""
 	questionFirstGuardrails := ""
 	orchestratorExitContract := ""
 	implementationSection := ""
-	implementationGuardrails := "- `--impl` selects implementation/spec variants; it never establishes parentage or graph membership. Use the active issue context or an explicit parent-child edge for hierarchy."
+	implementationGuardrails := "- `--impl` selects implementation/spec variants; it never establishes parentage or graph membership. Use the active ticket context or an explicit parent-child edge for hierarchy."
 	learningSection := ""
+	var learningConfirmation *protocol.LearnActivationConfirmRequestBody
 	specEnabled := deps != nil && deps.Config != nil && deps.Config.Spec.Enabled
+	gitWorkflowMode := "worktree"
+	if deps != nil && deps.Config != nil && strings.TrimSpace(deps.Config.Git.WorkflowMode) != "" {
+		gitWorkflowMode = strings.TrimSpace(deps.Config.Git.WorkflowMode)
+	}
 	orchestrationVia := primeOrchestrationVia(deps)
 	orchestrationViaAz := strings.EqualFold(orchestrationVia, "az")
 	orchestrationViaNative := strings.EqualFold(orchestrationVia, "native")
 	tmuxAvailable := primeTmuxAvailable()
+	primeOrchestrator := false
+	orchestrationSection := ""
+	if tmuxAvailable && deps != nil && deps.DaemonClient != nil {
+		if sessionID, err := tmuxPaneSessionName(context.Background()); err == nil && strings.TrimSpace(sessionID) != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), primeDaemonReadTimeout)
+			finish := primePhase(deps, "orchestration_snapshot", "loading daemon orchestration scope snapshot")
+			orchestrationSnapshot, snapshotErr := deps.DaemonClient.OrchestrationSnapshot(ctx, protocol.OrchestrationSnapshotRequest{
+				SessionID: strings.TrimSpace(sessionID), ActorID: defaultIssueOwnerID(),
+			})
+			cancel()
+			finish(snapshotErr)
+			if snapshotErr == nil && orchestrationSnapshot.Role == "orchestrator" {
+				primeOrchestrator = true
+				issueID = orchestrationSnapshot.Scope.RootIssueID.String()
+				if issueID != "" {
+					issueIDSource = "daemon"
+					guardrail = fmt.Sprintf("- The daemon identifies this session as the rooted orchestrator for `%s`; its persisted scope is authority over environment-derived startup context.", issueID)
+				} else {
+					issueIDSource = ""
+					guardrail = "- The daemon identifies this session as the project orchestrator; remain project-scoped and do not invent an active worker issue from environment context."
+				}
+				orchestrationSection = renderPrimeOrchestrationSection(orchestrationSnapshot)
+				if issueID != "" {
+					orchestratorExitContract = renderPrimeOrchestratorExitContract(issueID)
+				}
+			}
+		}
+	}
 
 	if primeMode == "question-first" {
 		questionFirstGuardrails = `- Question-first execution rules (Space+Q mode):
@@ -8443,7 +8637,7 @@ func PrimeCommand(deps *Dependencies) error {
 
 	var snapshot daemonclient.TaskSnapshot
 	snapshotLoaded := false
-	if deps != nil && deps.DaemonClient != nil {
+	if !primeOrchestrator && deps != nil && deps.DaemonClient != nil {
 		if issueID != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), primeDaemonReadTimeout)
 			finish := primePhase(deps, "issue_snapshot", fmt.Sprintf("loading active issue snapshot for %s", issueID))
@@ -8474,15 +8668,15 @@ func PrimeCommand(deps *Dependencies) error {
 		}
 	}
 
-	if issueID != "" {
+	if !primeOrchestrator && issueID != "" {
 		if issueIDSource == "tmux" {
-			guardrail = fmt.Sprintf("- `AZEDARACH_ISSUE_ID` is absent, but the current tmux session resolves to issue `%s`; use it as the default issue scope and refresh stale context with `az issue get %s`.", issueID, issueID)
+			guardrail = fmt.Sprintf("- `AZEDARACH_TICKET_ID` is absent, but the current tmux session resolves to ticket `%s`; use it as the default ticket scope and refresh stale context with `az ticket get %s`.", issueID, issueID)
 		} else {
-			guardrail = fmt.Sprintf("- `AZEDARACH_ISSUE_ID` is set to `%s`; use it as the default issue scope and refresh stale context with `az issue get %s`.", issueID, issueID)
+			guardrail = fmt.Sprintf("- The active ticket scope is `%s`; refresh stale context with `az ticket get %s`. `AZEDARACH_ISSUE_ID` remains a legacy compatibility variable.", issueID, issueID)
 		}
 		ownerID := defaultIssueOwnerID()
 		if !snapshotLoaded {
-			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nCould not load issue details automatically; run `az issue get %s`.\n", issueID, issueID)
+			issueSection = fmt.Sprintf("Active ticket context (ticket=%s):\nCould not load ticket details automatically; run `az ticket get %s`.\n", issueID, issueID)
 		} else if task, ok := findTaskByID(snapshot.Tasks, issueID); ok {
 			if err := snapshot.RequireFullDetails("prime active issue snapshot"); err != nil {
 				if detailTask, err := loadPrimeIssueDetailTask(context.Background(), deps, issueID); err == nil {
@@ -8510,23 +8704,26 @@ func PrimeCommand(deps *Dependencies) error {
 			}
 			issueSection = renderPrimeIssueSection(issueID, task, snapshot.Tasks, observations, containmentRisks, tmuxAvailable)
 			if task.IssueClosed() {
-				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `%s`; start by picking/opening actionable work (for example `az issue list --limit 20` or `az issue create \"Next task\"`). Use `--deferred` only for standalone backlog work.", task.ID, task.IssueDisplayStatusText())
+				activeIssueClosedWarning = fmt.Sprintf("- Active ticket `%s` is currently `%s`; start by picking/opening actionable work (for example `az ticket list --limit 20` or `az ticket create \"Next task\"`). Use `--deferred` only for standalone backlog work.", task.ID, task.IssueDisplayStatusText())
 			}
 		} else {
 			readiness, hasReadiness := loadPrimeTaskGraphReadiness(context.Background(), deps, issueID, ownerID)
 			if orchestrationViaAz && hasReadiness && primeTaskGraphReadinessHasGraphState(issueID, readiness) {
 				orchestratorExitContract = renderPrimeOrchestratorExitContract(issueID)
 			}
-			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nIssue not found in current project snapshot; run `az issue get %s`.\n", issueID, issueID)
+			issueSection = fmt.Sprintf("Active ticket context (ticket=%s):\nTicket not found in current project snapshot; run `az ticket get %s`.\n", issueID, issueID)
 		}
 	}
-	if issueID != "" {
-		learningSection = renderPrimeLearningSection(context.Background(), deps, issueID)
+	if !primeOrchestrator && issueID != "" {
+		learning := renderPrimeLearningSection(context.Background(), deps, issueID)
+		learningSection, learningConfirmation = learning.Text, learning.Confirmation
 	}
 
 	finishRender := primePhase(deps, "render", "rendering primer output")
-	output, err := clitext.Render("prime_output", primeTemplateData{
+	output, err := render("prime_output", primeTemplateData{
 		ActiveIssueID:            issueID,
+		GitWorkflowMode:          gitWorkflowMode,
+		OriginWorkflow:           strings.EqualFold(gitWorkflowMode, "origin"),
 		SpecEnabled:              specEnabled,
 		PrimeEvidenceKey:         primeEvidenceKey,
 		OrchestrationVia:         orchestrationVia,
@@ -8534,6 +8731,7 @@ func PrimeCommand(deps *Dependencies) error {
 		OrchestrationViaNative:   orchestrationViaNative,
 		TmuxAvailable:            tmuxAvailable,
 		OrchestratorExitContract: orchestratorExitContract,
+		OrchestrationSection:     orchestrationSection,
 		IssueSection:             issueSection,
 		ActiveIssueClosedWarning: activeIssueClosedWarning,
 		ContextGuardrail:         guardrail,
@@ -8545,11 +8743,30 @@ func PrimeCommand(deps *Dependencies) error {
 	})
 	finishRender(err)
 	if err != nil {
-		return fmt.Errorf("render prime output: %w", err)
+		return errors.Join(fmt.Errorf("render prime output: %w", err), abandonPrimeLearningActivation(deps, learningConfirmation, "render_failed"))
 	}
-	fmt.Print(output)
+	if _, err := io.WriteString(stdout, output); err != nil {
+		return errors.Join(fmt.Errorf("write prime output: %w", err), abandonPrimeLearningActivation(deps, learningConfirmation, "write_failed"))
+	}
+	if learningConfirmation != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if _, err := deps.DaemonClient.ConfirmLearningActivation(ctx, *learningConfirmation); err != nil {
+			return fmt.Errorf("confirm prime learning delivery: %w", err)
+		}
+	}
 	latencytrace.LogPhaseContext(primeTraceContext(deps), primeLogger(deps), "cli", "prime.total", commandStartedAt, "issue_id", issueID)
 	return nil
+}
+
+func abandonPrimeLearningActivation(deps *Dependencies, confirmation *protocol.LearnActivationConfirmRequestBody, reason string) error {
+	if deps == nil || deps.DaemonClient == nil || confirmation == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := deps.DaemonClient.AbandonLearningActivation(ctx, protocol.LearnActivationAbandonRequestBody{ActivationID: confirmation.ActivationID, Reason: reason})
+	return err
 }
 
 func primePhase(deps *Dependencies, phase, message string) func(error) {
@@ -8577,10 +8794,15 @@ func primeTraceContext(deps *Dependencies) context.Context {
 	return deps.TraceContext
 }
 
-func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID string) string {
+type primeLearningSection struct {
+	Text         string
+	Confirmation *protocol.LearnActivationConfirmRequestBody
+}
+
+func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID string) primeLearningSection {
 	issueID = strings.TrimSpace(issueID)
 	if issueID == "" {
-		return ""
+		return primeLearningSection{}
 	}
 	lines := []string{
 		"Learning capture:",
@@ -8588,46 +8810,34 @@ func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID
 		"- Use `--private` for sensitive local details; promote durable guidance later with `az learn review` and `az learn promote`.",
 	}
 	if deps == nil || deps.DaemonClient == nil {
-		return strings.Join(lines, "\n")
+		return primeLearningSection{Text: strings.Join(lines, "\n")}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	payload, err := json.Marshal(protocol.LearnRecallRequestBody{
-		ContextIssueID: naming.IssueID(issueID),
-		Statuses:       []protocol.LearningStatus{protocol.LearningStatusAccepted, protocol.LearningStatusPromoted},
-		Limit:          3,
-	})
-	if err != nil {
-		return strings.Join(lines, "\n")
+	projectID := strings.TrimSpace(deps.ProjectID)
+	if projectID == "" {
+		projectID = protocol.DefaultProjectID
 	}
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
 	finish := primePhase(deps, "learning_recall", fmt.Sprintf("loading learning recall for %s", issueID))
-	resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       naming.RequestID(fmt.Sprintf("prime-learn-%d", time.Now().UnixNano())),
-		Kind:            protocol.EnvelopeKindCommand,
-		Command:         protocol.CommandLearnRecall,
-		SentAt:          time.Now().UTC(),
-		Body:            payload,
-		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(deps.ProjectID)},
-	})
+	resp, err := deps.DaemonClient.ActivateContextualLearnings(ctx, protocol.LearnContextualActivateRequestBody{Purpose: string(domain.LearningPurposeSessionStart), Surface: "prime", SessionID: naming.SessionID(sessionID), ContextIssueID: naming.IssueID(issueID), TokenBudget: 256})
 	finish(err)
-	if err != nil || !resp.OK || len(resp.Body) == 0 {
-		return strings.Join(lines, "\n")
+	if err != nil || resp.Proposal == nil || len(resp.Learnings) == 0 {
+		return primeLearningSection{Text: strings.Join(lines, "\n")}
 	}
-	var out protocol.LearnRecallResponseBody
-	if err := json.Unmarshal(resp.Body, &out); err != nil || len(out.Learnings) == 0 {
-		return strings.Join(lines, "\n")
-	}
-	lines = append(lines, "", "Relevant accepted/promoted learnings:")
-	for _, learning := range out.Learnings {
+	section := []string{"", fmt.Sprintf("Relevant accepted/promoted learnings [activation: %s]:", resp.Proposal.ActivationID)}
+	for _, learning := range resp.Learnings {
 		reason := strings.TrimSpace(learning.RecallReason)
 		if reason != "" {
 			reason = " (why: " + reason + ")"
 		}
-		lines = append(lines, fmt.Sprintf("- %s [%s]: %s%s", learning.ID, learning.Status, learning.Summary, reason))
+		section = append(section, fmt.Sprintf("- %s [%s]: %s%s", learning.ID, learning.Status, learning.Summary, reason))
 	}
-	lines = append(lines, "Use `az learn show <learning-id>` for evidence; long evidence is not injected by default.")
-	return strings.Join(lines, "\n")
+	section = append(section, "Use `az learn show <learning-id>` for evidence; long evidence is not injected by default.")
+	section = append(section, fmt.Sprintf("Record the activation outcome with `az learn feedback --idempotency-key <key> --outcome helpful|followed|contradicted|unknown %s`.", resp.Proposal.ActivationID))
+	rendered := strings.Join(section, "\n")
+	lines = append(lines, section...)
+	return primeLearningSection{Text: strings.Join(lines, "\n"), Confirmation: &protocol.LearnActivationConfirmRequestBody{ActivationID: resp.Proposal.ActivationID, TokenCost: domain.RenderedLearningTokenCost(rendered)}}
 }
 
 func activeIssueIDFromTmuxPane(ctx context.Context, deps *Dependencies) (string, bool) {
@@ -8821,7 +9031,7 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 	observationSection := renderPrimeWorkerObservationSection(observations)
 	containmentSection := renderPrimeContainmentRiskSection(issueID, containmentRisks)
 	return fmt.Sprintf(
-		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s impl=%s]%s%s\nDependencies:\n%s\n```\n%s%s%s%s",
+		"Active ticket context (ticket=%s):\nRefresh with `az ticket get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s impl=%s]%s%s\nDependencies:\n%s\n```\n%s%s%s%s",
 		issueID,
 		issueID,
 		task.ID,
@@ -8842,10 +9052,76 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 
 func renderPrimeOrchestratorExitContract(rootIssueID string) string {
 	return fmt.Sprintf(`Orchestrator Exit Contract (root %s):
-- Integrate accepted children until `+"`az orchestrate complete-check --root %s`"+` passes, then run root validation.
+- Remain in the active orchestration turn/loop after starting workers, nested orchestrators, or a background watch; startup is not a completed handoff to the human.
+- Continuously consume the root watch and react to worker/nested-orchestrator progress, blocked, and integration-ready evidence while graph work remains.
+- Supervise nested epic/root orchestrators as direct children while they own their descendant workers; do not flatten or take over those descendants unless explicitly requested.
+- Review and integrate accepted children/epics, advance newly unblocked work, and repeat status/start/watch/review until `+"`az orchestrate complete-check --root %s`"+` passes; then run root validation.
 - Set the root `+"`in_review`"+` and report to the human without stopping its session or cleaning its worktree.
 - Close/integrate the root only after explicit human acceptance.
 `, rootIssueID, rootIssueID)
+}
+
+func renderPrimeOrchestrationSection(snapshot protocol.OrchestrationSnapshot) string {
+	var b strings.Builder
+	scope := "project"
+	if snapshot.Scope.Kind == domain.OrchestrationScopeRooted {
+		scope = "rooted:" + snapshot.Scope.RootIssueID.String()
+	}
+	fmt.Fprintf(&b, "Daemon orchestration context (role=orchestrator scope=%s lifecycle=%s revision=%d cursor=%d):\n", scope, snapshot.Lifecycle, snapshot.Revision, snapshot.Cursor)
+	if snapshot.ContinuationRequired {
+		fmt.Fprintf(&b, "- Runtime persistence guard: wake-required (%s). Durable continuation: %s\n", snapshot.ContinuationReason, snapshot.ContinuationContract)
+	} else if snapshot.Scope.Kind == domain.OrchestrationScopeRooted {
+		b.WriteString("- Runtime persistence guard: daemon-enforced; idle/turn completion wakes this parent while direct nested roots remain, except after complete-check passes or while explicit human acceptance is pending.\n")
+	}
+	fmt.Fprintf(&b, "- Capacity: active=%d runnable=%d total=%d/%d; wave limit=%d.\n", snapshot.Capacity.DirectActiveCount, snapshot.Capacity.DirectRunnableCount, snapshot.Capacity.TotalCountingCapacityCount, snapshot.Constraints.AgentCapacity, snapshot.Constraints.StartLimit)
+	renderCandidates := func(label string, candidates []protocol.OrchestrationCandidate) {
+		if len(candidates) == 0 {
+			return
+		}
+		fmt.Fprintf(&b, "- %s:\n", label)
+		for _, candidate := range candidates {
+			fmt.Fprintf(&b, "  - %s: %s (%s)\n", candidate.IssueID, candidate.Classification, candidate.Reason)
+		}
+	}
+	generalCandidates := make([]protocol.OrchestrationCandidate, 0, len(snapshot.Candidates))
+	for _, candidate := range snapshot.Candidates {
+		if candidate.Classification != string(domain.OrchestrationCandidateReviewReady) && candidate.Classification != string(domain.OrchestrationCandidateOwnedElsewhere) {
+			generalCandidates = append(generalCandidates, candidate)
+		}
+	}
+	renderCandidates("Candidates", generalCandidates)
+	renderCandidates("Reviews", snapshot.Reviews)
+	renderCandidates("Ownership conflicts", snapshot.OwnershipConflicts)
+	if len(snapshot.Blocked) > 0 {
+		ids := make([]string, 0, len(snapshot.Blocked))
+		for id := range snapshot.Blocked {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		b.WriteString("- Blockers:\n")
+		for _, id := range ids {
+			fmt.Fprintf(&b, "  - %s: %s\n", id, snapshot.Blocked[id])
+		}
+	}
+	if len(snapshot.Interactions) > 0 {
+		b.WriteString("- Waiting-human interactions:\n")
+		for _, interaction := range snapshot.Interactions {
+			fmt.Fprintf(&b, "  - %s (%s): %s\n", interaction.ID, interaction.IssueID, interaction.Question)
+		}
+	}
+	if len(snapshot.RecentEvents) > 0 {
+		b.WriteString("- Recent coordination events:\n")
+		for _, event := range snapshot.RecentEvents {
+			fmt.Fprintf(&b, "  - #%d %s %s: %s\n", event.Seq, event.Type, event.IssueID, summarizePrimeDescription(event.IssueID.String(), event.Body))
+		}
+	}
+	if len(snapshot.Constraints.Commands) > 0 {
+		fmt.Fprintf(&b, "- Commands: %s.\n", strings.Join(snapshot.Constraints.Commands, ", "))
+	}
+	for _, guardrail := range snapshot.Constraints.RoleGuardrails {
+		fmt.Fprintf(&b, "- Constraint: %s.\n", guardrail)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func primeIssueIsAzOrchestrationRoot(task domain.Task, tasks []domain.Task, orchestrationViaAz bool) bool {
@@ -9040,11 +9316,11 @@ func renderPrimeChildWorkRecommendation(task domain.Task, tasks []domain.Task, t
 	if task.Type != domain.TypeEpic && !issueHasChildren(task.ID, tasks) {
 		return ""
 	}
-	commands := "`az issue create \"Child task\"` for tracking-only work"
+	commands := "`az ticket create \"Child task\"` for tracking-only work"
 	if tmuxAvailable {
-		commands += " or `az issue split \"Child task\"` for an immediate isolated worker"
+		commands += " or `az ticket split \"Child task\"` for an immediate isolated worker"
 	}
-	return fmt.Sprintf("- Parent context: `%s` is an epic or has children. Keep implementation-sized scope in child issues using %s; execute each child from its own worktree/session and account for every child before root handoff.\n", task.ID, commands)
+	return fmt.Sprintf("- Parent context: `%s` is an epic or has children. Keep implementation-sized scope in child tickets using %s; execute each child from its own worktree/session and account for every child before root handoff.\n", task.ID, commands)
 }
 
 func issueHasChildren(issueID naming.IssueID, tasks []domain.Task) bool {
@@ -9087,7 +9363,7 @@ func summarizePrimeDescription(issueID, description string) string {
 	if !truncated {
 		return snippet
 	}
-	return fmt.Sprintf("%s\n… (truncated; run `az issue get %s` for full context)", snippet, issueID)
+	return fmt.Sprintf("%s\n… (truncated; run `az ticket get %s` for full context)", snippet, issueID)
 }
 
 func formatPrimeImplementations(implementations []string) string {
@@ -9778,6 +10054,9 @@ func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) er
 		concreteLauncher.WithLogger(deps.Logger)
 	}
 	orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(deps.DaemonClient), launcher)
+	if deps != nil && deps.AutostartRetryPolicy != nil {
+		orch.WithRetryPolicy(*deps.AutostartRetryPolicy)
+	}
 	ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,
 		ClientName:      clientName,
@@ -9849,6 +10128,12 @@ func startDaemonLauncher(ctx context.Context, deps *Dependencies) error {
 }
 
 func shouldAutostartAfterDaemonReadError(err error) bool {
+	var readWaitTimeout *daemonclient.ReadWaitTimeoutError
+	if errors.As(err, &readWaitTimeout) {
+		// The daemon answered and its projection read exceeded a bounded wait.
+		// This is not evidence that the transport or daemon process is absent.
+		return false
+	}
 	if reconnect.IsTransientTransportError(err) {
 		return true
 	}

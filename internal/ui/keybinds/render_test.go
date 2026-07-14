@@ -90,6 +90,26 @@ func TestNormalModeAttachShortcutLookup(t *testing.T) {
 	}
 }
 
+func TestNormalModeViewCycleShortcutsLookup(t *testing.T) {
+	tests := []string{"tab", "shift+tab"}
+	for _, input := range tests {
+		t.Run(input, func(t *testing.T) {
+			action, ok := LookupAction(types.ModeNormal, input)
+			if !ok {
+				t.Fatalf("expected normal mode %s key to resolve", input)
+			}
+			if action != ActionToggleView {
+				t.Fatalf("action = %q, want %q", action, ActionToggleView)
+			}
+		})
+	}
+
+	help := RenderCategories(HelpCategories(), KeyColumnWidth(HelpCategories(), 8), Theme{})
+	if !strings.Contains(help, "Tab/Shift+Tab") || !strings.Contains(help, "Switch to next/previous configured view") {
+		t.Fatalf("help = %q, want bidirectional configured-view navigation guidance", help)
+	}
+}
+
 func TestBoardViewRegistryDrivesActionsHintsAndHelp(t *testing.T) {
 	tests := []struct {
 		key  string
@@ -120,17 +140,17 @@ func TestBoardViewRegistryDrivesActionsHintsAndHelp(t *testing.T) {
 	categories := HelpCategories()
 	var boardViews Category
 	for _, category := range categories {
-		if category.Name == "Board Views" {
+		if category.Name == "Views" {
 			boardViews = category
 			break
 		}
 	}
 	boardHelp := RenderPlain(boardViews.Bindings, "  ")
 	for _, want := range []string{
-		"B: Open board view selector",
-		"CLI create: az board view create --file PATH",
-		"CLI edit: az board view update --file PATH",
-		"CLI delete: az board view delete --confirm VIEW",
+		"V: Open View Configurator",
+		"CLI create: az view create --file PATH",
+		"CLI edit: az view update --file PATH",
+		"CLI delete: az view delete --confirm VIEW",
 	} {
 		if !strings.Contains(boardHelp, want) {
 			t.Fatalf("Board Views category = %q, missing %q", boardHelp, want)
@@ -139,12 +159,12 @@ func TestBoardViewRegistryDrivesActionsHintsAndHelp(t *testing.T) {
 
 	help := RenderCategories(categories, KeyColumnWidth(categories, 8), Theme{})
 	for _, want := range []string{
-		"Board Views:",
-		"B",
-		"Open board view selector",
-		"az board view create --file PATH",
-		"az board view update --file PATH",
-		"az board view delete --confirm VIEW",
+		"Views:",
+		"V",
+		"Open View Configurator",
+		"az view create --file PATH",
+		"az view update --file PATH",
+		"az view delete --confirm VIEW",
 	} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("help = %q, missing %q", help, want)

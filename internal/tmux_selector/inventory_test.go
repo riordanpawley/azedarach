@@ -6,11 +6,16 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
@@ -20,6 +25,22 @@ type fakeSessionInventory struct {
 	infos   []tmux.SessionInfo
 	err     error
 	current string
+}
+
+func TestSnapshotFromEntriesPrioritizesDurableHumanAttention(t *testing.T) {
+	loader := NewGlobalInventoryLoader(fakeSessionInventory{}, nil)
+	entries := []InventoryEntry{
+		{SessionID: "attached", TmuxAttached: true, Task: domain.Task{ID: "attached", Status: domain.StatusInProgress}},
+		{SessionID: "review", Task: domain.Task{ID: "review", Status: domain.StatusInReview}},
+		{SessionID: "waiting", Task: domain.Task{ID: "waiting", Status: domain.StatusInProgress, Session: &domain.Session{Activity: "waiting-for-human"}}},
+	}
+
+	snapshot := loader.snapshotFromEntries(entries, false)
+	got := []string{snapshot.Entries[0].SessionID, snapshot.Entries[1].SessionID, snapshot.Entries[2].SessionID}
+	want := []string{"waiting", "review", "attached"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("session order = %v, want %v", got, want)
+	}
 }
 
 func (f fakeSessionInventory) ListSessionInfos(context.Context) ([]tmux.SessionInfo, error) {
@@ -144,6 +165,66 @@ func TestGlobalInventoryLoaderUsesTmuxFirstAcrossProjects(t *testing.T) {
 	}
 	if len(snapshot.Tasks) != len(snapshot.Entries) {
 		t.Fatalf("tasks = %d, entries = %d", len(snapshot.Tasks), len(snapshot.Entries))
+	}
+}
+
+func TestGlobalInventoryLoaderHydratesEveryProjectWithScopedIdentity(t *testing.T) {
+	root := t.TempDir()
+	alphaDir := filepath.Join(root, "alpha-app")
+	archiveDir := filepath.Join(root, "alpine-app")
+	alphaID := projectIDForPath(alphaDir)
+	archiveID := projectIDForPath(archiveDir)
+	sharedIssueID := "shared"
+	alphaSession := naming.CanonicalSessionID(alphaDir, sharedIssueID)
+	archiveSession := naming.CanonicalSessionID(archiveDir, sharedIssueID)
+	if alphaSession != archiveSession {
+		t.Fatalf("fixture requires colliding session prefixes: %q != %q", alphaSession, archiveSession)
+	}
+
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{infos: []tmux.SessionInfo{
+			{Name: alphaSession, Path: filepath.Join(alphaDir, "worktrees", sharedIssueID)},
+			{Name: archiveSession + "-other", Path: filepath.Join(archiveDir, "worktrees", sharedIssueID)},
+			{Name: "plain-tmux", Path: filepath.Join(root, "scratch")},
+		}},
+		nil,
+		WithProjectDirs(alphaDir, archiveDir),
+		WithProjectSnapshotSource(fakeProjectSnapshotSource{snapshots: []ProjectInventorySnapshot{
+			{
+				ProjectID: alphaID, ProjectPath: alphaDir,
+				Tasks: []domain.Task{{ID: naming.IssueID(sharedIssueID), Title: "Alpha issue", Priority: domain.P1, Status: domain.StatusInProgress}},
+			},
+			{
+				ProjectID: archiveID, ProjectPath: archiveDir,
+				Tasks: []domain.Task{{ID: naming.IssueID(sharedIssueID + "-other"), Title: "Archive issue", Priority: domain.P2, Status: domain.StatusInReview}},
+			},
+		}}),
+	)
+
+	snapshot, err := loader.ListTasksSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ListTasksSnapshot: %v", err)
+	}
+	if len(snapshot.Entries) != 3 {
+		t.Fatalf("entries = %#v, want two hydrated and one tmux-only", snapshot.Entries)
+	}
+	bySession := make(map[string]InventoryEntry, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		bySession[entry.SessionID] = entry
+	}
+	for _, want := range []struct {
+		session, projectID, projectPath, title string
+	}{
+		{alphaSession, alphaID, alphaDir, "Alpha issue"},
+		{archiveSession + "-other", archiveID, archiveDir, "Archive issue"},
+	} {
+		entry := bySession[want.session]
+		if entry.ProjectID != want.projectID || entry.ProjectPath != want.projectPath || entry.TaskTitle != want.title {
+			t.Errorf("entry %q = project %q path %q title %q, want %q %q %q", want.session, entry.ProjectID, entry.ProjectPath, entry.TaskTitle, want.projectID, want.projectPath, want.title)
+		}
+	}
+	if entry := bySession["plain-tmux"]; !entry.HasTmuxSession || entry.Task.ID.String() != "" {
+		t.Fatalf("plain tmux discovery = %#v, want retained sparse entry", entry)
 	}
 }
 
@@ -304,6 +385,38 @@ func TestGlobalInventoryLoaderCarriesTreeTasksForAncestorRendering(t *testing.T)
 	}
 	if snapshot.TreeTasks[0].ID != rootID {
 		t.Fatalf("tree tasks = %#v, want root ancestor task", snapshot.TreeTasks)
+	}
+}
+
+func TestApplyProjectViewOrderingUsesSharedProjectionWithoutDroppingLiveSessions(t *testing.T) {
+	snapshot := Snapshot{Entries: []InventoryEntry{
+		{IssueID: "low", ProjectID: "project", HasTmuxSession: true},
+		{IssueID: "high", ProjectID: "project", HasTmuxSession: true},
+		{IssueID: "filtered", ProjectID: "project", HasTmuxSession: true},
+		{SessionID: "untracked", HasTmuxSession: true},
+	}}
+	projects := []ProjectInventorySnapshot{{
+		ProjectID: "project",
+		View:      domain.DefaultBoardView(),
+		Projection: domain.BoardViewProjection{View: func() domain.BoardView {
+			v := domain.DefaultBoardView()
+			v.Layout = domain.BoardViewLayoutHorizontalGrid
+			return v
+		}(),
+			KnownTaskIDs: []naming.IssueID{"high", "low", "filtered"},
+			Items:        []domain.BoardViewProjectedItem{{Task: domain.Task{ID: "high"}}, {Task: domain.Task{ID: "low"}}}},
+	}}
+	applyProjectViewOrdering(&snapshot, projects)
+	if got := []string{snapshot.Entries[0].IssueID, snapshot.Entries[1].IssueID, snapshot.Entries[2].SessionID}; !slices.Equal(got, []string{"high", "low", "untracked"}) {
+		t.Fatalf("entry order = %v", got)
+	}
+	if !snapshot.Entries[2].HasTmuxSession {
+		t.Fatal("untracked live tmux session was dropped")
+	}
+	for _, entry := range snapshot.Entries {
+		if entry.IssueID == "filtered" {
+			t.Fatal("view-filtered tracked session remained visible")
+		}
 	}
 }
 
@@ -649,6 +762,235 @@ func TestTaskIDsByProjectDirDeduplicatesByProject(t *testing.T) {
 	key := cleanProjectDirKey(root)
 	if len(got[key]) != 1 || got[key][0] != "az-1" {
 		t.Fatalf("deduplicated task ids = %#v, want one az-1", got)
+	}
+}
+
+func TestTaskIDsByProjectDirUsesWorktreeWhenProjectPrefixesCollide(t *testing.T) {
+	root := t.TempDir()
+	alphaDir := filepath.Join(root, "alpha-app")
+	alpineDir := filepath.Join(root, "alpine-app")
+	entries := []InventoryEntry{
+		{SessionID: "al-alpha", IssueID: "alpha", ProjectID: "al", Worktree: filepath.Join(alphaDir, "worktrees", "alpha")},
+		{SessionID: "al-alpine", IssueID: "alpine", ProjectID: "al", Worktree: filepath.Join(alpineDir, "worktrees", "alpine")},
+	}
+
+	got := taskIDsByProjectDir(entries, []string{alphaDir, alpineDir})
+	if ids := got[cleanProjectDirKey(alphaDir)]; !slices.Equal(ids, []string{"alpha"}) {
+		t.Fatalf("alpha task ids = %v, want [alpha]", ids)
+	}
+	if ids := got[cleanProjectDirKey(alpineDir)]; !slices.Equal(ids, []string{"alpine"}) {
+		t.Fatalf("alpine task ids = %v, want [alpine]", ids)
+	}
+}
+
+func TestScopedTaskIDsByProjectDirPreservesDuplicateIssueProjectIdentity(t *testing.T) {
+	root := t.TempDir()
+	alpha := filepath.Join(root, "alpha")
+	beta := filepath.Join(root, "beta")
+	got := scopedTaskIDsByProjectDir(map[string][]string{alpha: {"same"}, beta: {"same"}})
+	want := []protocol.ScopedIssueID{
+		{ProjectID: naming.ProjectID(projectIDForPath(alpha)), IssueID: "same"},
+		{ProjectID: naming.ProjectID(projectIDForPath(beta)), IssueID: "same"},
+	}
+	sort.Slice(want, func(i, j int) bool { return want[i].ProjectID < want[j].ProjectID })
+	if !slices.Equal(got, want) {
+		t.Fatalf("scoped hydration IDs = %+v, want %+v", got, want)
+	}
+}
+
+func TestScopedTaskIDsByProjectDirUsesStableRegisteredProjectIdentity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	projectDir := t.TempDir()
+	if err := config.SaveProjectsRegistry(&config.ProjectsRegistry{Projects: []config.Project{{ID: "stable-id", Name: "Renamed", Path: projectDir}}}); err != nil {
+		t.Fatal(err)
+	}
+	got := scopedTaskIDsByProjectDir(map[string][]string{projectDir: {"issue"}})
+	want := []protocol.ScopedIssueID{{ProjectID: "stable-id", IssueID: "issue"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("scoped hydration IDs = %+v, want %+v", got, want)
+	}
+}
+
+func TestApplyGlobalViewOrderingFiltersOnlyTrackedExcludedSessions(t *testing.T) {
+	snapshot := Snapshot{Entries: []InventoryEntry{
+		{ProjectID: "alpha", IssueID: "one", SessionID: "alpha-one"},
+		{ProjectID: "alpha", IssueID: "two", SessionID: "alpha-two"},
+		{ProjectID: "beta", IssueID: "one", SessionID: "beta-one"},
+		{ProjectID: "", IssueID: "external", SessionID: "external"},
+	}}
+	projection := protocol.GlobalViewProjection{
+		KnownTaskIDs: []protocol.ScopedIssueID{
+			{ProjectID: "alpha", IssueID: "one"}, {ProjectID: "alpha", IssueID: "two"}, {ProjectID: "beta", IssueID: "one"},
+		},
+		Items: []protocol.GlobalViewProjectedItem{
+			{Identity: protocol.ScopedIssueID{ProjectID: "beta", IssueID: "one"}, Depth: 0},
+			{Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "one"}, GroupID: "active", Depth: 1},
+		},
+	}
+	applyGlobalViewOrdering(&snapshot, projection)
+	got := make([]string, 0, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		got = append(got, entry.SessionID)
+	}
+	if !slices.Equal(got, []string{"beta-one", "alpha-one", "external"}) {
+		t.Fatalf("ordered sessions = %v", got)
+	}
+	if got := snapshot.Entries[1]; !got.ViewProjected || got.ViewDepth != 1 || got.ViewGroupID != "active" {
+		t.Fatalf("projected tree metadata = %+v, want projected depth 1 in active group", got)
+	}
+	rows := projectedSessionTreeRows(snapshot.Entries[:2])
+	if len(rows) != 2 || len(rows[1].ancestorLast) != 1 {
+		t.Fatalf("projected tree rows = %+v, want second row nested one level", rows)
+	}
+}
+
+func TestApplyGlobalViewOrderingPreservesProjectedColumnMetadata(t *testing.T) {
+	view := domain.OrchestrationBoardView()
+	snapshot := Snapshot{Entries: []InventoryEntry{
+		{ProjectID: "alpha", IssueID: "human", SessionID: "alpha-human"},
+		{ProjectID: "alpha", IssueID: "active", SessionID: "alpha-active"},
+		{ProjectID: "external", IssueID: "plain", SessionID: "plain"},
+	}}
+	projection := protocol.GlobalViewProjection{
+		View: view,
+		KnownTaskIDs: []protocol.ScopedIssueID{
+			{ProjectID: "alpha", IssueID: "human"},
+			{ProjectID: "alpha", IssueID: "active"},
+		},
+		Items: []protocol.GlobalViewProjectedItem{
+			{Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "human"}, GroupID: view.Columns[0].ID, Depth: 2},
+			{Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "active"}, GroupID: view.Columns[2].ID},
+		},
+		Groups: []protocol.GlobalViewProjectedGroup{
+			{GroupID: view.Columns[0].ID},
+			{GroupID: view.Columns[1].ID},
+			{GroupID: view.Columns[2].ID},
+		},
+	}
+
+	applyGlobalViewOrdering(&snapshot, projection)
+
+	if len(snapshot.Entries) != 3 {
+		t.Fatalf("column-board entries = %#v, want projected items plus unmatched live session", snapshot.Entries)
+	}
+	if !slices.Equal(snapshot.ProjectedGroups, []domain.BoardColumnID{view.Columns[0].ID, view.Columns[1].ID, view.Columns[2].ID}) {
+		t.Fatalf("projected groups = %v", snapshot.ProjectedGroups)
+	}
+	if got := snapshot.Entries[0]; !got.ViewProjected || got.ViewGroupID != view.Columns[0].ID || got.ViewGroupTitle != view.Columns[0].Title || got.ViewDepth != 2 {
+		t.Fatalf("human projection metadata = %#v", got)
+	}
+	if got := snapshot.Entries[1]; !got.ViewProjected || got.ViewGroupID != view.Columns[2].ID || got.ViewGroupTitle != view.Columns[2].Title {
+		t.Fatalf("active projection metadata = %#v", got)
+	}
+	if got := snapshot.Entries[2]; got.ViewProjected || got.SessionID != "plain" {
+		t.Fatalf("unmatched live session metadata = %#v", got)
+	}
+}
+
+func TestApplyGlobalTreeOrderingCollapsesAncestorsWithoutLiveSessions(t *testing.T) {
+	view := domain.TreeBoardView()
+	snapshot := Snapshot{Entries: []InventoryEntry{
+		{ProjectID: "alpha", IssueID: "child", SessionID: "alpha-child"},
+		{ProjectID: "alpha", IssueID: "grandchild", SessionID: "alpha-grandchild"},
+		{ProjectID: "beta", IssueID: "other-child", SessionID: "beta-other-child"},
+	}}
+	projection := protocol.GlobalViewProjection{
+		View: view,
+		KnownTaskIDs: []protocol.ScopedIssueID{
+			{ProjectID: "alpha", IssueID: "root"},
+			{ProjectID: "alpha", IssueID: "child"},
+			{ProjectID: "alpha", IssueID: "grandchild"},
+			{ProjectID: "beta", IssueID: "other-root"},
+			{ProjectID: "beta", IssueID: "other-child"},
+		},
+		Items: []protocol.GlobalViewProjectedItem{
+			{Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "root"}, Depth: 0},
+			{Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "child"}, Depth: 1},
+			{Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "grandchild"}, Depth: 2},
+			{Identity: protocol.ScopedIssueID{ProjectID: "beta", IssueID: "other-root"}, Depth: 0},
+			{Identity: protocol.ScopedIssueID{ProjectID: "beta", IssueID: "other-child"}, Depth: 1},
+		},
+	}
+
+	applyGlobalViewOrdering(&snapshot, projection)
+
+	wantDepths := []int{0, 1, 0}
+	for i, want := range wantDepths {
+		if snapshot.Entries[i].ViewDepth != want {
+			t.Fatalf("entry %s depth = %d, want %d", snapshot.Entries[i].IssueID, snapshot.Entries[i].ViewDepth, want)
+		}
+	}
+}
+
+func TestGlobalOrchestrationProjectionRendersOnlyUnmatchedSessionsInFallback(t *testing.T) {
+	view := domain.OrchestrationBoardView()
+	snapshot := Snapshot{Entries: []InventoryEntry{
+		{ProjectID: "alpha", IssueID: "human", SessionID: "alpha-human", HasTmuxSession: true},
+		{ProjectID: "beta", IssueID: "outside-scope", SessionID: "beta-outside-scope", HasTmuxSession: true},
+		{ProjectID: "external", IssueID: "plain", SessionID: "plain", TaskTitle: "Plain session", HasTmuxSession: true, ViewProjected: true, ViewDepth: 3, ViewGroupID: view.Columns[0].ID, ViewGroupTitle: view.Columns[0].Title},
+	}}
+	projection := protocol.GlobalViewProjection{
+		View: view,
+		KnownTaskIDs: []protocol.ScopedIssueID{
+			{ProjectID: "alpha", IssueID: "human"},
+			{ProjectID: "beta", IssueID: "outside-scope"},
+		},
+		Groups: []protocol.GlobalViewProjectedGroup{
+			{GroupID: view.Columns[0].ID},
+			{GroupID: view.Columns[1].ID},
+			{GroupID: view.Columns[2].ID},
+		},
+		Items: []protocol.GlobalViewProjectedItem{{
+			Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "human"},
+			GroupID:  view.Columns[0].ID,
+		}},
+	}
+	applyGlobalViewOrdering(&snapshot, projection)
+	if got := []string{snapshot.Entries[0].SessionID, snapshot.Entries[1].SessionID}; !slices.Equal(got, []string{"alpha-human", "plain"}) {
+		t.Fatalf("active-path entries = %v, want projected and unmatched only", got)
+	}
+	if got := snapshot.Entries[1]; got.ViewProjected || got.ViewDepth != 0 || got.ViewGroupID != "" || got.ViewGroupTitle != "" {
+		t.Fatalf("unmatched session retained stale projection metadata: %#v", got)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		width  int
+		cursor int
+	}{
+		{name: "default", width: 160, cursor: 0},
+		{name: "narrow fallback selected", width: 60, cursor: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := New(SnapshotLoaderFunc(func(context.Context) (Snapshot, error) { return Snapshot{}, nil }))
+			model.loading, model.width, model.height, model.cursor = false, tc.width, 20, tc.cursor
+			model.snapshot = snapshot
+			rendered := ansi.Strip(model.View())
+			if !strings.Contains(rendered, "Live tmux (1)") {
+				t.Fatalf("fallback column missing:\n%s", rendered)
+			}
+			if strings.Contains(rendered, "beta-outside-scope") {
+				t.Fatalf("durable filtered issue re-entered fallback:\n%s", rendered)
+			}
+		})
+	}
+}
+
+func TestProjectionEnrichmentDoesNotGuessDuplicateBareIssueID(t *testing.T) {
+	source := &fakeProjectSnapshotSource{snapshots: []ProjectInventorySnapshot{
+		{ProjectID: "alpha", ProjectPath: "/projects/alpha", Tasks: []domain.Task{{ID: "ddm", Title: "Alpha"}}},
+		{ProjectID: "beta", ProjectPath: "/projects/beta", Tasks: []domain.Task{{ID: "ddm", Title: "Beta"}}},
+	}}
+	loader := &GlobalInventoryLoader{source: source}
+	projections, _, _ := loader.loadProjectionsForEntries(context.Background(), nil, nil)
+	if projection, ok := projections["ddm"]; ok {
+		t.Fatalf("duplicate bare issue ID was attributed to project %q", projection.projectID)
+	}
+	if _, ok := projections[naming.CanonicalSessionID("alpha", "ddm")]; !ok {
+		t.Fatal("missing alpha scoped session projection")
+	}
+	if _, ok := projections[naming.CanonicalSessionID("beta", "ddm")]; !ok {
+		t.Fatal("missing beta scoped session projection")
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 )
 
 type InteractionService interface {
+	AuthorizeInteractionCommand(context.Context, protocol.Metadata, string) error
 	CreateInteraction(context.Context, protocol.InteractionCreateRequestBody) (protocol.InteractionResponseBody, error)
 	ListInteractions(context.Context, protocol.InteractionListRequestBody) (protocol.InteractionListResponseBody, error)
 	GetInteraction(context.Context, protocol.InteractionGetRequestBody) (protocol.InteractionResponseBody, error)
@@ -24,6 +25,11 @@ func (h *InteractionHandler) Handle(ctx context.Context, req protocol.RequestEnv
 	if h.service == nil {
 		resp.Error = &protocol.ErrorEnvelope{Code: protocol.ErrorCodeUnavailable, Message: "interaction service unavailable", Retryable: true}
 		return resp
+	}
+	if req.Command != protocol.CommandInteractionList && req.Command != protocol.CommandInteractionGet {
+		if err := h.service.AuthorizeInteractionCommand(ctx, req.Meta, req.Command); err != nil {
+			return specInvalidRequest(resp, err.Error())
+		}
 	}
 	switch req.Command {
 	case protocol.CommandInteractionCreate:
@@ -61,7 +67,7 @@ func (h *InteractionHandler) Handle(ctx context.Context, req protocol.RequestEnv
 			return specInvalidRequest(resp, "only the human respondent may resolve interaction requests")
 		}
 		return specJSONResponse(ctx, resp, h.service.ResolveInteraction, cmd)
-	case protocol.CommandInteractionDiscuss, protocol.CommandInteractionPropose, protocol.CommandInteractionAnswer, protocol.CommandInteractionWithdraw:
+	case protocol.CommandInteractionDiscuss, protocol.CommandInteractionPropose, protocol.CommandInteractionAnswer, protocol.CommandInteractionWithdraw, protocol.CommandInteractionSupersede, protocol.CommandInteractionRecover:
 		var cmd protocol.InteractionMutationRequestBody
 		if !decodeSpecRequest(req.Body, &cmd, &resp) {
 			return resp
@@ -69,8 +75,11 @@ func (h *InteractionHandler) Handle(ctx context.Context, req protocol.RequestEnv
 		if err := validateInteractionMutation(cmd, req.Command == protocol.CommandInteractionPropose || req.Command == protocol.CommandInteractionAnswer); err != "" {
 			return specInvalidRequest(resp, err)
 		}
-		if req.Command == protocol.CommandInteractionDiscuss && strings.TrimSpace(cmd.SessionID) == "" {
-			return specInvalidRequest(resp, "missing required field: session_id")
+		if (req.Command == protocol.CommandInteractionWithdraw || req.Command == protocol.CommandInteractionSupersede) && strings.TrimSpace(cmd.Reason) == "" {
+			return specInvalidRequest(resp, "missing required field: reason")
+		}
+		if req.Command == protocol.CommandInteractionSupersede && strings.TrimSpace(cmd.ReplacementID) == "" {
+			return specInvalidRequest(resp, "missing required field: replacement_id")
 		}
 		if req.Command == protocol.CommandInteractionAnswer && !interactionHumanActor(cmd.Actor) {
 			return specInvalidRequest(resp, "only the human respondent may answer interaction requests")
@@ -93,7 +102,7 @@ func validateInteractionMutation(cmd protocol.InteractionMutationRequestBody, an
 	if cmd.ID == "" || cmd.ExpectedRevision < 1 || strings.TrimSpace(cmd.Actor) == "" {
 		return "missing required fields: id/expected_revision/actor"
 	}
-	if answer && strings.TrimSpace(cmd.Answer) == "" {
+	if answer && (strings.TrimSpace(cmd.Answer.SelectedOption) == "" || strings.TrimSpace(cmd.Answer.Rationale) == "" || cmd.Answer.Revision < 1) {
 		return "missing required field: answer"
 	}
 	return ""

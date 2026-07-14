@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/sqlitemigration"
+	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 //go:embed migrations/*.sql
@@ -58,21 +60,377 @@ var orderedMigrations = []migration{
 	{id: "0026_decision_search_fts", path: "migrations/0026_decision_search_fts.sql", apply: applyDecisionSearchFTSMigration},
 	{id: "0027_issue_id_allocations", path: "migrations/0027_issue_id_allocations.sql"},
 	{id: "0028_runtime_projection_order_indexes", path: "migrations/0028_runtime_projection_order_indexes.sql"},
-	{id: "0029_issue_state_model_v2"},
-	{id: "0030_issue_closed_runtime_v2_triggers", apply: applyIssueClosedRuntimeV2TriggersMigration},
+	{id: "0029_issue_state_model_v2", path: "migrations/0029_issue_state_model_v2.sql"},
+	{id: "0030_issue_closed_runtime_v2_triggers", path: "migrations/0030_issue_closed_runtime_v2_triggers.sql", apply: applyIssueClosedRuntimeV2TriggersMigration},
 	{id: "0031_board_views", path: "migrations/0031_board_views.sql"},
-	{id: "0032_interaction_requests", path: "migrations/0032_interaction_requests.sql"},
 	{id: "0032_coordination_leases", path: "migrations/0032_coordination_leases.sql"},
 	{id: "0033_orchestrator_scope_leases", path: "migrations/0033_orchestrator_scope_leases.sql"},
-	{id: "0034_orchestrator_lifecycle_clock", apply: applyOrchestratorLifecycleClockMigration},
+	{id: "0034_orchestration_start_attempts", path: "migrations/0034_orchestration_start_attempts.sql"},
+	{id: "0034_orchestrator_lifecycle_clock", path: "migrations/0034_orchestrator_lifecycle_clock.sql", apply: applyOrchestratorLifecycleClockMigration},
+	{id: "0035_interaction_requests", path: "migrations/0035_interaction_requests.sql"},
+	{id: "0036_advisor_sessions", path: "migrations/0036_advisor_sessions.sql"},
+	{id: "0037_projection_source_revision", path: "migrations/0037_projection_source_revision.sql"},
+	{id: "0037_learning_activation_feedback", path: "migrations/0037_learning_activation_feedback.sql"},
+	{id: "0038_learning_consolidation", path: "migrations/0038_learning_consolidation.sql"},
+	{id: contextualLearningMigrationID, path: "migrations/0039_contextual_learning_activation.sql", apply: applyContextualLearningActivationMigration},
+	{id: "0040_typed_learning_observations", path: "migrations/0040_typed_learning_observations.sql"},
+	{id: "0041_learning_activation_confirmation", path: "migrations/0041_learning_activation_confirmation.sql"},
+	{id: "0042_learning_consolidation_scan_cursor", path: "migrations/0042_learning_consolidation_scan_cursor.sql"},
+	{id: "0043_learning_activation_telemetry", path: "migrations/0043_learning_activation_telemetry.sql"},
+	{id: "0044_learning_activation_abandonment", path: "migrations/0044_learning_activation_abandonment.sql"},
+	{id: "0045_issue_state_runtime_constraints", path: "migrations/0045_issue_state_runtime_constraints.sql", apply: applyIssueStateRuntimeConstraintsMigration},
+	{id: "0046_repair_issue_state_runtime_constraints", path: "migrations/0046_repair_issue_state_runtime_constraints.manifest.sql", apply: applyIssueStateRuntimeConstraintsRepairMigration},
+	{id: humanAuthorityProjectionMigrationID, path: "migrations/0047_human_authority_projection_revision.sql"},
+}
+
+var migrationArtifacts = []sqlitemigration.Artifact{
+	{ID: "0001_bootstrap_tables", Path: "migrations/0001_bootstrap_tables.sql", Checksum: "0bf3ae46504d70064277484bf9e2145a26be64b985989500b1c84e83020007d0"},
+	{ID: "0002_dependency_foreign_keys", Path: "migrations/0002_dependency_foreign_keys.sql", Checksum: "f63f418c52c26730976c6c8115ec7c3b17856051cdb4926487e9b1294deb8faa"},
+	{ID: "0003_issue_indexes", Path: "migrations/0003_issue_indexes.sql", Checksum: "0471d2d0c7e99d5634bf91c5b2647351a3216f15190a6a89d75c63d45ac33f3d"},
+	{ID: "0004_spec_tables", Path: "migrations/0004_spec_tables.sql", Checksum: "65f997c26f9baff2d27c335d8a4721cbf0b87c7d447f04ca383652ffddc3524c"},
+	{ID: "0005_spec_audit_log", Path: "migrations/0005_spec_audit_log.sql", Checksum: "d58cbb0ea6e2d2aaa6a6f3a323fccabc788419cad394283fe93c9581cdd782a9"},
+	{ID: "0006_external_issue_sync", Path: "migrations/0006_external_issue_sync.sql", Checksum: "b69f1e807dd2002d6a3698a2a0f1635244cfabdc9af90e9bae75db15baec0cab"},
+	{ID: "0006_issue_external_refs", Path: "migrations/0006_issue_external_refs.sql", Checksum: "3c0156e286d82b94462749495abae9e64dcc89b4c200e717ad78e6fbe83747dd"},
+	{ID: "0007_external_issue_sync_payload", Path: "migrations/0007_external_issue_sync_payload.sql", Checksum: "e59b21ce4bc6ecead279770f70d09f6f06f63dc9ef9862a5cfdd4453537ca6f1"},
+	{ID: "0008_decision_tables", Path: "migrations/0008_decision_tables.sql", Checksum: "d2a1678febb10e1036d8135f004738b053ea1c39b7663ab903c52e7c9a69ac94"},
+	{ID: "0009_decision_audit_log", Path: "migrations/0009_decision_audit_log.sql", Checksum: "9c4c26e8b49eef6404fa2b08ad7f8d38c2cea4be1beccb5f7032e4c41783791c"},
+	{ID: "0010_decisions_refresh", Path: "migrations/0010_decisions_refresh.sql", Checksum: "09df612b84cb9b660ef50c2f42e0df93dd17b9c4eb6f2755ebdb72163d27fde7"},
+	{ID: "0011_decisions_consequences", Path: "migrations/0011_decisions_consequences.sql", Checksum: "68e30438aed5aa883772107459e43114f7bd743cd525cb30b597cdbd0c777474"},
+	{ID: "0012_blocked_status_to_open", Path: "migrations/0012_blocked_status_to_open.sql", Checksum: "5a770520b605af1c4c0aa57c471b8dbb81c888b403cd1a93e3e00ed920f50ad1"},
+	{ID: "0013_closed_runtime_invariants", Path: "migrations/0013_closed_runtime_invariants.sql", Checksum: "4ddfa055a9561c6a95601898774058559ae77122fb6fa6f194d57861ef726143"},
+	{ID: "0014_linear_sync_external_refs_backfill", Path: "migrations/0014_linear_sync_external_refs_backfill.sql", Checksum: "8a71492754fe53e7b5bb784941c730522ab3dfa1a786785c896d5a7e454b3a24"},
+	{ID: "0015_issue_attachments", Path: "migrations/0015_issue_attachments.sql", Checksum: "dd5f93a99ed0c84401796ec46044f48f8471fa23f22abb79279d4be3030b6400"},
+	{ID: "0016_issue_search_fts", Path: "migrations/0016_issue_search_fts.sql", Checksum: "ccaae29ac521b2c487ada8966373803c9ae918fba7799bb6f0f663d9d65a0b64"},
+	{ID: "0017_spec_requirement_search_fts", Path: "migrations/0017_spec_requirement_search_fts.sql", Checksum: "7cd22a727a9f2da7934d1f454f392104766da106b6d4ef86446c8e51d360b330"},
+	{ID: "0018_issue_graph_closure", Path: "migrations/0018_issue_graph_closure.sql", Checksum: "ee360245b281908d8f7e4a14db31533788d9b3804ffc07c41656c7d009420f77"},
+	{ID: "0019_agent_learnings", Path: "migrations/0019_agent_learnings.sql", Checksum: "90e4c418659b81bc38591759713d9eff9cacd47910b87d26433c8d326003e463"},
+	{ID: "0019_issue_observation_events", Path: "migrations/0019_issue_observation_events.sql", Checksum: "7862370ddf094f860b6ae97f92c96bb3a1c937ce8c6402075619228624f55daa"},
+	{ID: "0020_agent_learning_lifecycle", Path: "migrations/0020_agent_learning_lifecycle.sql", Checksum: "27fd546057a312954c3f44960c55ed56934fc4280c5cf672442d57f78e7d1587"},
+	{ID: "0021_agent_learning_metadata", Path: "migrations/0021_agent_learning_metadata.sql", Checksum: "efdb0a78edf46f056c52b203f7a20cb12ac3365d18a314fba3a058f50e2cd2d8"},
+	{ID: "0021_agent_learning_relations", Path: "migrations/0021_agent_learning_relations.sql", Checksum: "1be17d65f2bed296c4d70719adbb44375267b9a201390b7a744b067ef73c68c4"},
+	{ID: "0021_agent_learning_target_state", Path: "migrations/0021_agent_learning_target_state.sql", Checksum: "0bc218f33abed5ccfd705ee02f2b2b54927361e2bf9013acdea369fd693e90f6"},
+	{ID: "0025_agent_learning_privacy", Path: "migrations/0025_agent_learning_privacy.sql", Checksum: "a4454d74dc05fa6bb9117230a626e892de15fe9fd80db526e58b7fd10dab433e"},
+	{ID: "0026_decision_search_fts", Path: "migrations/0026_decision_search_fts.sql", Checksum: "88f9c2e2810ff084699a88999fc3771ed917d0a946c211457a89407efb59aeda"},
+	{ID: "0026_issue_ownership", Path: "migrations/0026_issue_ownership.sql", Checksum: "7d4d80fd698eafa9d7d85b84718138fa408668b3b6d1f9226837bd1989478664"},
+	{ID: "0027_issue_id_allocations", Path: "migrations/0027_issue_id_allocations.sql", Checksum: "d7e05669a900b0c3c40fb188a3edc76fce0582be5ba8230979ac999d7438cd48"},
+	{ID: "0028_runtime_projection_order_indexes", Path: "migrations/0028_runtime_projection_order_indexes.sql", Checksum: "ef8b0cffb8a3ea879d6e5cf44f36b69a6f3ba76154effedf2f36cd9acb0a5a8f"},
+	{ID: "0029_issue_state_model_v2", Path: "migrations/0029_issue_state_model_v2.sql", Checksum: "ca0030ade7b737ae91e6ac81f37cfedceb581beb5384d3302406166d3756ce0f"},
+	{ID: "0030_issue_closed_runtime_v2_triggers", Path: "migrations/0030_issue_closed_runtime_v2_triggers.sql", Checksum: "3019b99cb750044a48230af4dcd7ffba03e87345e5ee5c1cbc7f5650028a3ce4"},
+	{ID: "0031_board_views", Path: "migrations/0031_board_views.sql", Checksum: "cd1c7d9222499d4a35f156eb62a810eb021e0c5aa91634b98c2759560757d931"},
+	{ID: "0032_coordination_leases", Path: "migrations/0032_coordination_leases.sql", Checksum: "0cd1f81ea34f483635269e8235b822eb845a10b950c41702c8c3068b839837f3"},
+	{ID: "0033_orchestrator_scope_leases", Path: "migrations/0033_orchestrator_scope_leases.sql", Checksum: "e00edd244f0ae6dd8ab005ae66a0abd173fd7becae2ce68d809df2c7a85fd7fb"},
+	{ID: "0034_orchestration_start_attempts", Path: "migrations/0034_orchestration_start_attempts.sql", Checksum: "571141c87792a69e6da0b053e4a2604881b4f0741436148a6ac1284b1bbcc8fb"},
+	{ID: "0034_orchestrator_lifecycle_clock", Path: "migrations/0034_orchestrator_lifecycle_clock.sql", Checksum: "4f1be08c0c843afe7cd59cdd57d32a8b709afec037db10babf7b652fd6b3d50f"},
+	{ID: "0035_interaction_requests", Path: "migrations/0035_interaction_requests.sql", Checksum: "e04f344237c144670ae1f013536f2c5200908caa313d97ceaf2e47f5b1a9c529"},
+	{ID: "0036_advisor_sessions", Path: "migrations/0036_advisor_sessions.sql", Checksum: "a492b56a0e64fcf7a305f6a894e855f7f7f9c67c5e9fc1c6d0c9fdbabe83359d"},
+	{ID: "0037_learning_activation_feedback", Path: "migrations/0037_learning_activation_feedback.sql", Checksum: "16524bb983b9d4a6d5aac9a9ef3eee719405e55f4451a0c1c13044c22e7fcc69"},
+	{ID: "0037_projection_source_revision", Path: "migrations/0037_projection_source_revision.sql", Checksum: "62b6aabb965fb823d23951e50ab8dc70a45f52b454c82053153ca8f3467c9f51"},
+	{ID: "0038_learning_consolidation", Path: "migrations/0038_learning_consolidation.sql", Checksum: "268ff879069de8eddb66fcfc7ed4daa7e3d749d7dd8eb09fec8a54afef3a6d7f"},
+	{ID: "0039_contextual_learning_activation", Path: "migrations/0039_contextual_learning_activation.sql", Checksum: "fd5871a322c1e7961c94e3feba1c68667458f71fa3b01b49e93fd96c60489c1e"},
+	{ID: "0040_typed_learning_observations", Path: "migrations/0040_typed_learning_observations.sql", Checksum: "18a03aee58698cee1fd46081ea99fed3f1a33592d27474c8031c7233d4c8f0fa"},
+	{ID: "0041_learning_activation_confirmation", Path: "migrations/0041_learning_activation_confirmation.sql", Checksum: "966ecb2589dac579a0efd894665b00ec0dfff823bae3931fde8d36c53e595677"},
+	{ID: "0042_learning_consolidation_scan_cursor", Path: "migrations/0042_learning_consolidation_scan_cursor.sql", Checksum: "5d83042f5f7e7e53e38b9d92228a4d2f0fc66435b29a1632e55914620297c731"},
+	{ID: "0043_learning_activation_telemetry", Path: "migrations/0043_learning_activation_telemetry.sql", Checksum: "fc665da364e9cafe07864cfeca8884929cf8c65982c4f61bcd12a4a20b526642"},
+	{ID: "0044_learning_activation_abandonment", Path: "migrations/0044_learning_activation_abandonment.sql", Checksum: "56276dedf6d63e8db3e0a58e49cd29d7d862bc83ec7fdf1eb9615127004f607c"},
+	{ID: "0045_issue_state_runtime_constraints", Path: "migrations/0045_issue_state_runtime_constraints.sql", Checksum: "67a11506f5d49059280d6406cbf1e66155549e4e573978f78f3e43b5ea944f23"},
+	{ID: "0046_repair_issue_state_runtime_constraints", Path: "migrations/0046_repair_issue_state_runtime_constraints.manifest.sql", Checksum: "6420b559de666287450e274b283b2e481c1472e3b02914f3023019975216e20d"},
+	{ID: humanAuthorityProjectionMigrationID, Path: "migrations/0047_human_authority_projection_revision.sql", Checksum: "ac3a48512b2e6e9c018d58a68db24a2465e9d172139d22f8378f69677073a0ab"},
+}
+
+func validateMigrationRegistry() error {
+	if err := sqlitemigration.Validate(migrationFiles, migrationArtifacts); err != nil {
+		return err
+	}
+	registered := make([]sqlitemigration.Artifact, 0, len(orderedMigrations))
+	for _, migration := range orderedMigrations {
+		registered = append(registered, sqlitemigration.Artifact{ID: migration.id, Path: migration.path})
+	}
+	return sqlitemigration.ValidateRegistrations(migrationArtifacts, registered)
+}
+
+func applyIssueStateRuntimeConstraintsRepairMigration(ctx context.Context, db *sql.DB, id string) error {
+	for _, column := range []string{"disposition", "engagement", "visibility"} {
+		exists, err := columnExistsDB(ctx, db, "issues", column)
+		if err != nil {
+			return fmt.Errorf("inspect canonical issue state column %s: %w", column, err)
+		}
+		if !exists {
+			return applyIssueStateRuntimeConstraintsMigration(ctx, db, id)
+		}
+	}
+	if err := recordAppliedMigration(ctx, db, id); err != nil {
+		return fmt.Errorf("record canonical issue state repair migration: %w", err)
+	}
+	return nil
+}
+
+func columnExistsDB(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, typ string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB, id string) error {
+	var client Client
+	if err := client.ensureRuntimeProjectionSchema(db); err != nil {
+		return fmt.Errorf("repair runtime projection schema before migration %s: %w", id, err)
+	}
+	sqlText, err := loadMigrationSQL("migrations/0045_issue_state_runtime_constraints.sql")
+	if err != nil {
+		return fmt.Errorf("load migration %s: %w", id, err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS interaction_requests (id TEXT PRIMARY KEY,issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,decision_key TEXT NOT NULL,state TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),request_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`); err != nil {
+		return fmt.Errorf("ensure interaction request authority before migration %s: %w", id, err)
+	}
+	for _, name := range []string{"issue_state_product_guard_insert", "issue_state_product_guard_update", "issue_archive_aggregate_guard", "issue_lease_archived_guard", "issue_lease_state_guard_update", "issue_worktree_archived_guard", "issue_worktree_archived_guard_update", "issue_session_archived_guard", "issue_session_archived_guard_update", "daemon_session_state_product_guard_insert", "daemon_session_state_product_guard_update", "daemon_session_observation_product_guard_insert", "daemon_session_observation_product_guard_update", "daemon_worktree_state_product_guard_insert", "daemon_worktree_state_product_guard_update", "issue_closed_runtime_guard_insert", "issue_closed_runtime_guard_update", "daemon_session_closed_issue_guard_insert", "daemon_session_closed_issue_guard_update", "issue_dependency_closed_runtime_guard_insert", "issue_dependency_closed_runtime_guard_update", "issue_descendant_closed_ancestor_guard_update"} {
+		if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+name); err != nil {
+			return err
+		}
+	}
+	addedCanonicalStateColumn := false
+	for _, column := range []struct{ name, ddl string }{{"disposition", "TEXT"}, {"engagement", "TEXT"}, {"visibility", "TEXT"}} {
+		exists, err := txColumnExists(ctx, tx, "issues", column.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE issues ADD COLUMN `+column.name+` `+column.ddl); err != nil {
+			return fmt.Errorf("add canonical issue state column %s: %w", column.name, err)
+		}
+		addedCanonicalStateColumn = true
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE issues SET
+		disposition = CASE
+			WHEN lifecycle_state='backlog' THEN 'backlog'
+			WHEN lifecycle_state IN ('open','active') THEN 'ready'
+			WHEN lifecycle_state='closed' AND closed_outcome='completed' THEN 'completed'
+			WHEN lifecycle_state='closed' AND closed_outcome='cancelled' THEN 'cancelled'
+		END,
+		engagement = CASE
+			WHEN lifecycle_state='active' AND review_state='requested' THEN 'review_requested'
+			WHEN lifecycle_state='active' THEN 'working'
+			ELSE 'idle'
+		END,
+		visibility = CASE WHEN archived_at IS NULL THEN 'live' ELSE 'archived' END
+		WHERE disposition IS NULL OR engagement IS NULL OR visibility IS NULL`); err != nil {
+		return fmt.Errorf("backfill canonical issue state: %w", err)
+	}
+	if addedCanonicalStateColumn {
+		// The pre-canonical archive adapter represented archive intent by copying
+		// deleted_at to archived_at without stopping active lifecycle state. Archive
+		// is orthogonal to disposition in the canonical product, but an archived
+		// issue cannot remain engaged. Normalize the canonical tuple, then regenerate
+		// all legacy mirrors from it before installing the product guards.
+		if _, err := tx.ExecContext(ctx, `UPDATE issues SET engagement='idle' WHERE visibility='archived';
+			UPDATE issues SET
+				lifecycle_state = CASE WHEN disposition='backlog' THEN 'backlog' WHEN disposition='ready' AND engagement='idle' THEN 'open' WHEN disposition='ready' THEN 'active' ELSE 'closed' END,
+				review_state = CASE WHEN engagement='review_requested' THEN 'requested' ELSE 'none' END,
+				closed_outcome = CASE WHEN disposition='completed' THEN 'completed' WHEN disposition='cancelled' THEN 'cancelled' ELSE 'none' END,
+				status = CASE WHEN disposition='completed' THEN 'closed' WHEN disposition='cancelled' THEN 'cancelled' WHEN engagement='review_requested' THEN 'in_review' WHEN engagement='working' THEN 'in_progress' ELSE 'open' END`); err != nil {
+			return fmt.Errorf("normalize legacy issue state mirrors: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM daemon_session_observations WHERE NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_session_observations.issue_id);
+			DELETE FROM daemon_session_projections WHERE NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_session_projections.issue_id);
+			DELETE FROM daemon_worktree_projections WHERE NOT EXISTS(SELECT 1 FROM issues i WHERE i.id=daemon_worktree_projections.issue_id)`); err != nil {
+			return fmt.Errorf("prune impossible legacy issue authority: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE daemon_session_projections SET scope_id=issue_id
+		WHERE role='worker' AND scope_kind='issue' AND COALESCE(trim(scope_id),'')=''`); err != nil {
+		return fmt.Errorf("backfill legacy worker session scope identity: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE daemon_session_observations SET scope_id=issue_id WHERE role='worker' AND scope_kind='issue' AND COALESCE(trim(scope_id),'')=''; UPDATE daemon_session_observations SET state='running' WHERE state='attached'; UPDATE daemon_session_observations SET observed_state='running' WHERE observed_state='attached'`); err != nil {
+		return fmt.Errorf("normalize legacy session observations: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE daemon_session_projections SET state='running' WHERE state='attached'; UPDATE daemon_session_projections SET observed_state='running' WHERE observed_state='attached'`); err != nil {
+		return fmt.Errorf("normalize legacy attached session state: %w", err)
+	}
+	if err := migrateIssueSessionLogicalIdentity(ctx, tx); err != nil {
+		return fmt.Errorf("migrate logical session identity: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS issue_coordination_leases (
+		issue_id TEXT NOT NULL, purpose TEXT NOT NULL CHECK (purpose IN ('execution','orchestration','review')),
+		owner_id TEXT NOT NULL, owner_kind TEXT NOT NULL, claimed_at TEXT NOT NULL, expires_at TEXT,
+		PRIMARY KEY(issue_id,purpose), FOREIGN KEY(issue_id) REFERENCES issues(id) ON DELETE CASCADE)`); err != nil {
+		return fmt.Errorf("ensure canonical claim authority: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS idx_issues_owner_active`); err != nil {
+		return err
+	}
+	hasOwnerColumns, err := txColumnExists(ctx, tx, "issues", "owner_id")
+	if err != nil {
+		return err
+	}
+	if hasOwnerColumns {
+		var invalidOwnerRows int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE
+			(COALESCE(trim(owner_id),'')='' AND (COALESCE(trim(owner_kind),'')!='' OR COALESCE(trim(owner_claimed_at),'')!='' OR COALESCE(trim(owner_expires_at),'')!='')) OR
+			(COALESCE(trim(owner_id),'')!='' AND (COALESCE(trim(owner_kind),'')='' OR COALESCE(trim(owner_claimed_at),'')=''))`).Scan(&invalidOwnerRows); err != nil {
+			return fmt.Errorf("validate legacy issue claim tuples: %w", err)
+		}
+		if invalidOwnerRows != 0 {
+			return fmt.Errorf("legacy issue claim authority contains %d partial tuples", invalidOwnerRows)
+		}
+		var conflictingOwnerRows int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues i JOIN issue_coordination_leases l ON l.issue_id=i.id AND l.purpose='execution'
+			WHERE COALESCE(trim(i.owner_id),'')!='' AND (l.owner_id!=i.owner_id OR l.owner_kind!=i.owner_kind OR l.claimed_at!=i.owner_claimed_at OR COALESCE(l.expires_at,'')!=COALESCE(i.owner_expires_at,''))`).Scan(&conflictingOwnerRows); err != nil {
+			return fmt.Errorf("compare legacy and canonical issue claims: %w", err)
+		}
+		if conflictingOwnerRows != 0 {
+			return fmt.Errorf("legacy and canonical issue claim authority conflict on %d rows", conflictingOwnerRows)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_coordination_leases(issue_id,purpose,owner_id,owner_kind,claimed_at,expires_at)
+			SELECT i.id,'execution',i.owner_id,i.owner_kind,i.owner_claimed_at,i.owner_expires_at FROM issues i
+			WHERE COALESCE(trim(i.owner_id),'')!='' AND NOT EXISTS(SELECT 1 FROM issue_coordination_leases l WHERE l.issue_id=i.id AND l.purpose='execution')`); err != nil {
+			return fmt.Errorf("migrate unambiguous legacy issue claims: %w", err)
+		}
+	}
+	for _, name := range []string{"owner_expires_at", "owner_claimed_at", "owner_kind", "owner_id"} {
+		exists, err := txColumnExists(ctx, tx, "issues", name)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE issues DROP COLUMN `+name); err != nil {
+			return fmt.Errorf("drop legacy issue claim mirror %s: %w", name, err)
+		}
+	}
+	if addedCanonicalStateColumn {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases WHERE NOT EXISTS(
+			SELECT 1 FROM issues i WHERE i.id=issue_coordination_leases.issue_id
+			AND i.visibility='live' AND i.disposition NOT IN ('completed','cancelled')
+			AND ((issue_coordination_leases.purpose='execution' AND i.disposition='ready')
+				OR (issue_coordination_leases.purpose='review' AND i.disposition='ready' AND i.engagement='review_requested')
+				OR (issue_coordination_leases.purpose='orchestration' AND i.disposition IN ('backlog','ready')))
+		)`); err != nil {
+			return fmt.Errorf("prune impossible legacy issue claims: %w", err)
+		}
+	}
+	for _, name := range []string{"issue_closed_runtime_guard_insert", "issue_closed_runtime_guard_update", "daemon_worktree_closed_issue_guard_insert", "daemon_worktree_closed_issue_guard_update", "daemon_session_closed_issue_guard_insert", "daemon_session_closed_issue_guard_update", "issue_dependency_closed_runtime_guard_insert", "issue_dependency_closed_runtime_guard_update", "issue_descendant_closed_ancestor_guard_update"} {
+		if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+name); err != nil {
+			return fmt.Errorf("drop legacy lifecycle authority trigger %s: %w", name, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+		return fmt.Errorf("apply migration %s: %w", id, err)
+	}
+	canonicalRuntimeGuards := issueClosedRuntimeV2TriggersSQL
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "BEFORE UPDATE OF lifecycle_state", "BEFORE UPDATE OF disposition")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "NEW.lifecycle_state = 'closed'", "NEW.disposition IN ('completed','cancelled')")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "NEW.lifecycle_state <> 'closed'", "NEW.disposition NOT IN ('completed','cancelled')")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "child.lifecycle_state <> 'closed'", "child.disposition NOT IN ('completed','cancelled')")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "i.lifecycle_state = 'closed'", "i.disposition IN ('completed','cancelled')")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "NEW.archived_at IS NULL", "NEW.visibility = 'live'")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "child.archived_at IS NULL", "child.visibility = 'live'")
+	canonicalRuntimeGuards = strings.ReplaceAll(canonicalRuntimeGuards, "i.archived_at IS NULL", "i.visibility = 'live'")
+	if _, err := tx.ExecContext(ctx, canonicalRuntimeGuards); err != nil {
+		return fmt.Errorf("install canonical runtime aggregate guards: %w", err)
+	}
+	var revisionTables int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projection_source_revision'`).Scan(&revisionTables); err != nil {
+		return err
+	}
+	if revisionTables > 0 {
+		for _, table := range []struct{ prefix, name string }{{"sessions", "daemon_session_projections"}, {"session_observations", "daemon_session_observations"}} {
+			for _, action := range []string{"insert", "update", "delete"} {
+				trigger := "projection_source_revision_" + table.prefix + "_" + action
+				if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+trigger+`; CREATE TRIGGER `+trigger+` AFTER `+strings.ToUpper(action)+` ON `+table.name+` BEGIN UPDATE projection_source_revision SET revision=revision+1 WHERE singleton=1; END`); err != nil {
+					return fmt.Errorf("restore projection revision trigger %s: %w", trigger, err)
+				}
+			}
+		}
+	}
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	tx = nil
+	return nil
+}
+
+func migrateIssueSessionLogicalIdentity(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE logical_runtime_winners AS
+		SELECT DISTINCT project_id,role,scope_kind,scope_id,
+		FIRST_VALUE(session_id) OVER (PARTITION BY project_id,role,scope_kind,scope_id ORDER BY
+		CASE WHEN length(session_id)>3 AND substr(session_id,3,1)='-' AND substr(session_id,4)=CASE WHEN role='orchestrator' AND scope_id='project' THEN 'orchestrator-project' ELSE scope_id END THEN 0 ELSE 1 END,
+		updated_at DESC,session_id ASC) winner_id
+		FROM (SELECT project_id,session_id,role,scope_kind,scope_id,updated_at FROM daemon_session_projections WHERE instr(session_id,'.pane-')=0
+		UNION ALL SELECT project_id,session_id,role,scope_kind,scope_id,updated_at FROM daemon_session_observations WHERE instr(session_id,'.pane-')=0)`); err != nil {
+		return err
+	}
+	for _, table := range []string{"daemon_session_projections", "daemon_session_observations"} {
+		merged := "merged_" + table
+		if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE `+merged+` AS SELECT DISTINCT t.project_id,w.winner_id session_id,
+		FIRST_VALUE(t.issue_id) OVER newest issue_id,t.role,t.scope_kind,t.scope_id,FIRST_VALUE(t.state) OVER newest state,
+		FIRST_VALUE(t.observed_state) OVER newest observed_state,FIRST_VALUE(t.activity) OVER newest activity,
+		FIRST_VALUE(t.activity_source) OVER newest activity_source,FIRST_VALUE(t.tmux_attached_count) OVER newest tmux_attached_count,
+		MIN(NULLIF(t.started_at,'')) OVER logical_scope started_at,MAX(t.updated_at) OVER logical_scope updated_at
+		FROM `+table+` t JOIN logical_runtime_winners w USING(project_id,role,scope_kind,scope_id) WHERE instr(t.session_id,'.pane-')=0
+		WINDOW logical_scope AS (PARTITION BY t.project_id,t.role,t.scope_kind,t.scope_id),newest AS (PARTITION BY t.project_id,t.role,t.scope_kind,t.scope_id ORDER BY t.updated_at DESC,t.session_id ASC);
+		DELETE FROM `+table+` WHERE instr(session_id,'.pane-')=0;
+		INSERT INTO `+table+`(project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at)
+		SELECT project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at FROM `+merged+`; DROP TABLE `+merged+`;`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE logical_runtime_winners`); err != nil {
+		return err
+	}
+	for _, table := range []string{"daemon_session_projections", "daemon_session_observations"} {
+		newTable := table + "_logical_identity_v3"
+		if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS `+newTable+`; CREATE TABLE `+newTable+`(
+		project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'worker',scope_kind TEXT NOT NULL DEFAULT 'issue',scope_id TEXT NOT NULL DEFAULT '',
+		state TEXT NOT NULL,observed_state TEXT,activity TEXT,activity_source TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,started_at TEXT,updated_at TEXT NOT NULL,
+		logical_id TEXT GENERATED ALWAYS AS (role||':'||scope_kind||':'||scope_id||CASE WHEN instr(session_id,'.pane-')>0 THEN ':pane:'||session_id ELSE '' END) STORED,
+		UNIQUE(project_id,logical_id));
+		INSERT INTO `+newTable+`(project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at)
+		SELECT project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at FROM `+table+`;
+		DROP TABLE `+table+`; ALTER TABLE `+newTable+` RENAME TO `+table+`;`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 const (
-	issueStateModelV2MigrationID      = "0029_issue_state_model_v2"
-	issueStateModelVersionMetaKey     = "issue:state_model_version"
-	issueStateModelV2CutoverMarkerKey = "issue:state_model_v2_cutover"
-	issueStateModelV2Version          = "2"
-	boardViewsMigrationID             = "0031_board_views"
+	migrationArtifactAuthority          sqlitemigration.Authority = "project.issues"
+	issueStateModelV2MigrationID                                  = "0029_issue_state_model_v2"
+	issueStateModelVersionMetaKey                                 = "issue:state_model_version"
+	issueStateModelV2CutoverMarkerKey                             = "issue:state_model_v2_cutover"
+	issueStateModelV2Version                                      = "2"
+	boardViewsMigrationID                                         = "0031_board_views"
+	humanAuthorityProjectionMigrationID                           = "0047_human_authority_projection_revision"
+	contextualLearningMigrationID                                 = "0039_contextual_learning_activation"
+	legacyContextualLearningMigration                             = "0038_contextual_learning_activation"
 )
 
 type issueStateModelV2CutoverMarker struct {
@@ -84,7 +442,13 @@ type issueStateModelV2CutoverMarker struct {
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
+	if err := validateMigrationRegistry(); err != nil {
+		return fmt.Errorf("validate migration registry: %w", err)
+	}
 	if err := ensureMigrationTable(ctx, db); err != nil {
+		return err
+	}
+	if err := sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts); err != nil {
 		return err
 	}
 	if err := refusePartialIssueStateModelV2Cutover(ctx, db); err != nil {
@@ -146,6 +510,12 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 				}
 				continue
 			}
+			if m.id == humanAuthorityProjectionMigrationID {
+				if err := c.applyHumanAuthorityProjectionMigration(ctx, db, m.id); err != nil {
+					return err
+				}
+				continue
+			}
 			if m.apply != nil {
 				if err := m.apply(ctx, db, m.id); err != nil {
 					return err
@@ -166,9 +536,18 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("record skipped migration %s: %w", m.id, err)
 		}
 	}
-
-	if err := c.reconcileIssueStateModelV2Drift(ctx, db); err != nil {
+	if err := validateHumanAuthorityProjectionRevisionTriggers(ctx, db); err != nil {
 		return err
+	}
+
+	canonicalApplied, err := isMigrationApplied(ctx, db, "0045_issue_state_runtime_constraints")
+	if err != nil {
+		return fmt.Errorf("check canonical issue state migration: %w", err)
+	}
+	if !canonicalApplied {
+		if err := c.reconcileIssueStateModelV2Drift(ctx, db); err != nil {
+			return err
+		}
 	}
 
 	if err := repairAgentLearningBaseSchema(ctx, db); err != nil {
@@ -177,11 +556,14 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := repairIssueIDAllocationSchema(ctx, db); err != nil {
 		return fmt.Errorf("repair issue id allocation schema: %w", err)
 	}
-	if err := c.seedBuiltInBoardViews(ctx, db, "default"); err != nil {
+	if err := c.retrySQLiteBusy(ctx, func() error {
+		return sqliteutil.WithWriteLock(c.dbPath, func() error {
+			return c.seedBuiltInBoardViews(ctx, db, "default")
+		})
+	}); err != nil {
 		return fmt.Errorf("seed built-in board views: %w", err)
 	}
-
-	return nil
+	return sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts)
 }
 
 func repairIssueIDAllocationSchema(ctx context.Context, db *sql.DB) error {
@@ -403,7 +785,8 @@ func ensureMigrationTable(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			id TEXT PRIMARY KEY,
-			applied_at TEXT NOT NULL
+			applied_at TEXT NOT NULL,
+			artifact_checksum TEXT
 		)
 	`)
 	if err != nil {
@@ -425,12 +808,12 @@ func isMigrationApplied(ctx context.Context, db *sql.DB, id string) (bool, error
 	return exists, nil
 }
 
-func recordAppliedMigration(ctx context.Context, db *sql.DB, id string) error {
-	_, err := db.ExecContext(ctx, `
-		INSERT INTO schema_migrations (id, applied_at)
-		VALUES (?, ?)
-	`, id, time.Now().UTC().Format(time.RFC3339Nano))
-	return err
+func recordAppliedMigration(ctx context.Context, db sqlitemigration.LedgerWriter, id string) error {
+	return recordAppliedMigrationAt(ctx, db, id, time.Now().UTC().Format(time.RFC3339Nano))
+}
+
+func recordAppliedMigrationAt(ctx context.Context, db sqlitemigration.LedgerWriter, id, appliedAt string) error {
+	return sqlitemigration.RecordApplied(ctx, db, migrationArtifacts, id, appliedAt)
 }
 
 func loadMigrationSQL(path string) (string, error) {
@@ -465,10 +848,7 @@ func (c *Client) applyMigration(ctx context.Context, db *sql.DB, id, sqlText str
 		return fmt.Errorf("apply migration %s: %w", id, err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO schema_migrations (id, applied_at)
-		VALUES (?, ?)
-	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 
@@ -514,11 +894,84 @@ func applyOrchestratorLifecycleClockMigration(ctx context.Context, db *sql.DB, i
 			return fmt.Errorf("apply migration %s column %s: %w", id, column.name, err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	return nil
+}
+
+func applyContextualLearningActivationMigration(ctx context.Context, db *sql.DB, id string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var legacyApplied bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id = ?)
+	`, legacyContextualLearningMigration).Scan(&legacyApplied); err != nil {
+		return fmt.Errorf("inspect legacy migration %s: %w", legacyContextualLearningMigration, err)
+	}
+
+	if legacyApplied {
+		if err := completeHistoricalContextualLearningSchema(ctx, tx); err != nil {
+			return fmt.Errorf("complete legacy migration %s before aliasing to %s: %w", legacyContextualLearningMigration, id, err)
+		}
+	} else {
+		sqlText, err := loadMigrationSQL("migrations/0039_contextual_learning_activation.sql")
+		if err != nil {
+			return fmt.Errorf("load migration %s: %w", id, err)
+		}
+		if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+			return fmt.Errorf("apply migration %s: %w", id, err)
+		}
+	}
+
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	return nil
+}
+
+func completeHistoricalContextualLearningSchema(ctx context.Context, tx *sql.Tx) error {
+	for _, column := range []struct {
+		name string
+		ddl  string
+	}{
+		{name: "purpose", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "session_id", ddl: "TEXT NOT NULL DEFAULT ''"},
+	} {
+		exists, err := txColumnExists(ctx, tx, "learning_activations", column.name)
+		if err != nil {
+			return fmt.Errorf("inspect learning_activations.%s: %w", column.name, err)
+		}
+		if !exists {
+			if _, err := tx.ExecContext(ctx, "ALTER TABLE learning_activations ADD COLUMN "+column.name+" "+column.ddl); err != nil {
+				return fmt.Errorf("add learning_activations.%s: %w", column.name, err)
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_learning_activations_session
+			ON learning_activations(project_id, session_id, delivered_at DESC);
+		CREATE TABLE IF NOT EXISTS learning_activation_deliveries (
+			activation_id TEXT NOT NULL REFERENCES learning_activations(activation_id) ON DELETE CASCADE,
+			project_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			learning_id TEXT NOT NULL,
+			PRIMARY KEY (project_id, session_id, learning_id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_learning_activation_deliveries_activation
+			ON learning_activation_deliveries(activation_id);
+	`); err != nil {
+		return fmt.Errorf("complete contextual learning tables and indexes: %w", err)
 	}
 	return nil
 }
@@ -547,10 +1000,7 @@ func (c *Client) applyBoardViewsMigration(ctx context.Context, db *sql.DB, id, s
 	if err := c.runBoardViewsMigrationFailureHook("after_schema"); err != nil {
 		return fmt.Errorf("migration %s rolled back: %w", id, err)
 	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO schema_migrations (id, applied_at)
-		VALUES (?, ?)
-	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 
@@ -575,6 +1025,66 @@ func (c *Client) runBoardViewsMigrationFailureHook(stage string) error {
 	}
 	if err := c.boardViewsMigrationFailureHook(stage); err != nil {
 		return fmt.Errorf("injected board views migration failure at %s: %w", stage, err)
+	}
+	return nil
+}
+
+var humanAuthorityProjectionRevisionTriggers = []string{
+	"projection_source_revision_issue_observations_insert",
+	"projection_source_revision_issue_observations_update",
+	"projection_source_revision_issue_observations_delete",
+	"projection_source_revision_interactions_insert",
+	"projection_source_revision_interactions_update",
+	"projection_source_revision_interactions_delete",
+}
+
+func (c *Client) applyHumanAuthorityProjectionMigration(ctx context.Context, db *sql.DB, id string) error {
+	sqlText, err := loadMigrationSQL("migrations/0047_human_authority_projection_revision.sql")
+	if err != nil {
+		return fmt.Errorf("load migration %s: %w", id, err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+		return fmt.Errorf("apply migration %s: %w", id, err)
+	}
+	if err := c.runHumanAuthorityMigrationFailureHook("after_schema"); err != nil {
+		return fmt.Errorf("migration %s rolled back: %w", id, err)
+	}
+	if err := validateHumanAuthorityProjectionRevisionTriggers(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s: %w", id, err)
+	}
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	return nil
+}
+
+func (c *Client) runHumanAuthorityMigrationFailureHook(stage string) error {
+	if c.humanAuthorityMigrationFailureHook == nil {
+		return nil
+	}
+	if err := c.humanAuthorityMigrationFailureHook(stage); err != nil {
+		return fmt.Errorf("injected human authority migration failure at %s: %w", stage, err)
+	}
+	return nil
+}
+
+func validateHumanAuthorityProjectionRevisionTriggers(ctx context.Context, q sqlIssueQueryer) error {
+	for _, name := range humanAuthorityProjectionRevisionTriggers {
+		var exists bool
+		if err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?)`, name).Scan(&exists); err != nil {
+			return fmt.Errorf("inspect human authority projection revision trigger %s: %w", name, err)
+		}
+		if !exists {
+			return fmt.Errorf("applied migration %s is missing required trigger %s", humanAuthorityProjectionMigrationID, name)
+		}
 	}
 	return nil
 }
@@ -735,10 +1245,7 @@ func applyIssueClosedRuntimeV2TriggersMigration(ctx context.Context, db *sql.DB,
 	if _, err := tx.ExecContext(ctx, issueClosedRuntimeV2TriggersSQL); err != nil {
 		return fmt.Errorf("apply migration %s triggers: %w", id, err)
 	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO schema_migrations (id, applied_at)
-		VALUES (?, ?)
-	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -1238,10 +1745,7 @@ func (c *Client) runIssueStateModelV2CutoverTransaction(ctx context.Context, db 
 	`, issueStateModelVersionMetaKey, issueStateModelV2Version); err != nil {
 		return fmt.Errorf("record migration %s state model version: %w", id, err)
 	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO schema_migrations (id, applied_at)
-		VALUES (?, ?)
-	`, id, completedAt); err != nil {
+	if err := recordAppliedMigrationAt(ctx, tx, id, completedAt); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 
@@ -1408,7 +1912,6 @@ func issueStateModelV2Reconciliations(ctx context.Context, db sqlIssueQueryer) (
 				Review:       domain.IssueReviewState(reviewState),
 				CloseOutcome: domain.IssueCloseOutcome(closedOutcome),
 				Archive:      issueArchiveStateFromTimestamp(archivedAt),
-				Deletion:     domain.IssueDeletionPresent,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("issue %s v2 state: %w", id, err)
@@ -1431,7 +1934,6 @@ func issueStateModelV2Reconciliations(ctx context.Context, db sqlIssueQueryer) (
 			Review:       authoritativeState.Review(),
 			CloseOutcome: authoritativeState.CloseOutcome(),
 			Archive:      issueArchiveStateFromTimestamp(deletedAt),
-			Deletion:     authoritativeState.Deletion(),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("issue %s reconciled state: %w", id, err)
@@ -1743,10 +2245,7 @@ func applyAgentLearningPrivacyMigration(ctx context.Context, db *sql.DB, id stri
 		return fmt.Errorf("apply migration %s: create privacy index: %w", id, err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO schema_migrations (id, applied_at)
-		VALUES (?, ?)
-	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 
@@ -1797,10 +2296,7 @@ func applyIssueOwnershipMigration(ctx context.Context, db *sql.DB, id string) er
 		return fmt.Errorf("apply migration %s: create ownership index: %w", id, err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO schema_migrations (id, applied_at)
-		VALUES (?, ?)
-	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 

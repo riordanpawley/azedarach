@@ -10,7 +10,6 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
-	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 const defaultIssueObservationEventLimit = 500
@@ -32,38 +31,78 @@ type IssueObservationEventListOptions struct {
 	NewestFirst bool
 }
 
+// ListProjectIssueObservationEvents returns the durable project event stream
+// after a cursor. Each issues.Client is already scoped to one project database,
+// so the global event id is a stable project watch cursor across daemon restarts.
+func (c *Client) ListProjectIssueObservationEvents(ctx context.Context, afterID int64, limit int) ([]domain.IssueObservationEvent, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	if afterID < 0 {
+		afterID = 0
+	}
+	if limit <= 0 {
+		limit = defaultIssueObservationEventLimit
+	}
+	if limit > 5000 {
+		limit = 5000
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM issue_observation_events
+		WHERE id > ?
+		ORDER BY id ASC
+		LIMIT ?
+	`, afterID, limit)
+	if err != nil {
+		return nil, c.wrapError("list-project-observation-events", "", err)
+	}
+	defer rows.Close()
+	events := make([]domain.IssueObservationEvent, 0, min(limit, 64))
+	for rows.Next() {
+		event, scanErr := scanIssueObservationEvent(rows)
+		if scanErr != nil {
+			return nil, c.wrapError("list-project-observation-events", "", scanErr)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-project-observation-events", "", err)
+	}
+	return events, nil
+}
+
 func (c *Client) AppendIssueObservationEvent(ctx context.Context, issueID string, params IssueObservationEventParams) (domain.IssueObservationEvent, error) {
 	var eventID int64
-	err := retrySQLiteBusy(ctx, func() error {
+	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
-			return sqliteutil.WithWriteLock(c.dbPath, func() error {
-				db, err := c.dbHandle()
-				if err != nil {
-					return err
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return c.wrapError("append-observation-event", issueID, err)
+			}
+			defer func() {
+				if tx != nil {
+					_ = tx.Rollback()
 				}
-				tx, err := db.BeginTx(ctx, nil)
-				if err != nil {
-					return c.wrapError("append-observation-event", issueID, err)
-				}
-				defer func() {
-					if tx != nil {
-						_ = tx.Rollback()
-					}
-				}()
-				if err := c.requireIssueExists(ctx, tx, issueID, "append-observation-event"); err != nil {
-					return err
-				}
-				id, err := c.insertIssueObservationEvent(ctx, tx, issueID, params)
-				if err != nil {
-					return c.wrapError("append-observation-event", issueID, err)
-				}
-				if err := tx.Commit(); err != nil {
-					return c.wrapError("append-observation-event", issueID, err)
-				}
-				tx = nil
-				eventID = id
-				return nil
-			})
+			}()
+			if err := c.requireIssueExists(ctx, tx, issueID, "append-observation-event"); err != nil {
+				return err
+			}
+			id, err := c.insertIssueObservationEvent(ctx, tx, issueID, params)
+			if err != nil {
+				return c.wrapError("append-observation-event", issueID, err)
+			}
+			if err := tx.Commit(); err != nil {
+				return c.wrapError("append-observation-event", issueID, err)
+			}
+			tx = nil
+			eventID = id
+			return nil
 		})
 	})
 	if err != nil {
@@ -141,6 +180,69 @@ func (c *Client) ListIssueObservationEvents(ctx context.Context, issueID string,
 		return nil, c.wrapError("list-observation-events", issueID, err)
 	}
 	return events, nil
+}
+
+// InvestigationAcceptances reads the durable evidence needed to decide who
+// has authority over each investigation's findings. The store selects the
+// evidence; the domain owns its meaning.
+func (c *Client) InvestigationAcceptances(ctx context.Context, tasks []domain.Task) (map[string]domain.InvestigationAcceptance, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(tasks))
+	tasksByID := make(map[string]domain.Task)
+	for _, task := range tasks {
+		if task.Type != domain.TypeInvestigation {
+			continue
+		}
+		id := strings.TrimSpace(task.ID.String())
+		if id == "" {
+			continue
+		}
+		ids = append(ids, id)
+		tasksByID[id] = task
+	}
+	if len(ids) == 0 {
+		return map[string]domain.InvestigationAcceptance{}, nil
+	}
+	args := make([]any, 0, len(ids)+3)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args,
+		string(domain.IssueEventInvestigationDisposition),
+		string(domain.IssueEventReviewCompleted),
+		string(domain.IssueEventHumanInputProvided),
+	)
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM issue_observation_events
+		WHERE issue_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")+`)
+		  AND event_type IN (?,?,?)
+		ORDER BY id ASC
+	`, args...)
+	if err != nil {
+		return nil, c.wrapError("list-investigation-acceptances", "", err)
+	}
+	defer rows.Close()
+	eventsByID := make(map[string][]domain.IssueObservationEvent, len(ids))
+	for rows.Next() {
+		event, scanErr := scanIssueObservationEvent(rows)
+		if scanErr != nil {
+			return nil, c.wrapError("list-investigation-acceptances", event.IssueID.String(), scanErr)
+		}
+		id := event.IssueID.String()
+		eventsByID[id] = append(eventsByID[id], event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-investigation-acceptances", "", err)
+	}
+	out := make(map[string]domain.InvestigationAcceptance, len(ids))
+	for _, id := range ids {
+		out[id] = domain.EvaluateInvestigationAcceptance(tasksByID[id], eventsByID[id])
+	}
+	return out, nil
 }
 
 func (c *Client) appendIssueObservationEvent(ctx context.Context, execer sqlIssueExecer, issueID string, eventType domain.IssueObservationEventType, payload map[string]any) error {

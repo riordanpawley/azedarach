@@ -24,6 +24,9 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 		projection.Session = protocol.RuntimeSessionProjection{
 			HasSession:        hasSession,
 			SessionID:         parseSessionIDOrZero(session.ID),
+			Role:              protocol.SessionRole(session.Role),
+			ScopeKind:         protocol.SessionScopeKind(session.ScopeKind),
+			ScopeID:           strings.TrimSpace(session.ScopeID),
 			State:             protocol.SessionLifecycleState(daemonstate.NormalizeSessionState(observedState)),
 			TmuxAttached:      session.TmuxAttachedCount > 0,
 			TmuxAttachedCount: session.TmuxAttachedCount,
@@ -98,6 +101,9 @@ func applyRuntimeSessionCounts(projection *protocol.RuntimeProjection, counts se
 	projection.Session.TmuxAttached = counts.TmuxAttachedCount > 0
 	projection.Session.TmuxAttachedCount = counts.TmuxAttachedCount
 	if counts.PaneScoped == 0 {
+		return
+	}
+	if !isAgentScopedSessionID(string(projection.Session.SessionID)) {
 		return
 	}
 	if counts.Active > 0 {

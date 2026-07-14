@@ -61,7 +61,7 @@ const (
 	eventLogCapacity                 = 256
 	notificationHistoryCapacity      = 100
 	eventSummaryMaxRunes             = 140
-	taskCloseMutationTimeout         = 10 * time.Minute
+	taskCloseMutationTimeout         = domain.IntegrationClientTimeout
 	worktreeCleanupMutationTimeout   = 2 * time.Minute
 	orphanedWorktreeCleanupTimeout   = 2 * time.Minute
 	issueScopedRuntimeReconcileLimit = 64
@@ -96,29 +96,22 @@ const (
 // Re-export navigation types for compatibility
 type Position = navigation.Position
 
-// ViewMode represents the current view mode
-type ViewMode int
-
-const (
-	ViewModeBoard ViewMode = iota
-	ViewModeCompact
-	ViewModeOverview
-)
-
-type orchestrationProjectOverview struct {
-	Name            string
-	Path            string
-	ProjectID       string
-	Tasks           []domain.Task
-	Observations    []domain.WorkerObservation
-	ObservationErrs []string
-	MailByTask      map[string]protocol.MailEvent
-	Err             error
-	Fallback        string
-	Revision        uint64
-	LastCheckedAt   time.Time
-	Freshness       protocol.TaskListFreshness
+type projectOrchestratorSnapshot struct {
+	Name             string
+	Path             string
+	ProjectID        string
+	Snapshot         *protocol.OrchestrationSnapshot
+	Session          *protocol.OrchestratorSessionResult
+	OrchestrationErr error
 }
+
+type projectOrchestratorTarget struct {
+	ProjectID   string
+	ProjectPath string
+	SocketPath  string
+}
+
+type projectOrchestratorActionRunner func(context.Context, projectOrchestratorTarget, string, protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error)
 
 type drillDownContext struct {
 	parentID   string
@@ -209,21 +202,29 @@ type notificationHistoryEntry struct {
 // Model is the main application state
 type Model struct {
 	// Core data
-	tasks                []domain.Task
-	boardView            domain.BoardView
-	boardColumns         []domain.BoardViewColumnSnapshot
-	sessions             map[string]*domain.Session
-	suppressedTasks      map[string]struct{}
-	pendingStatuses      map[string]pendingTaskStatus
-	pendingDetails       map[string]pendingTaskDetails
-	operationTaskID      map[string]string
-	pendingOpsByTask     map[string]pendingOperationProgress
-	pendingFailures      map[string]taskMutationFailure
-	pendingCleanupOps    map[string]pendingWorktreeCleanupConfirmation
-	pendingCleanup       *pendingWorktreeCleanupConfirmation
-	pendingBulkCleanup   *pendingBulkCleanupConfirmation
-	pendingClose         *pendingCloseCleanupConfirmation
-	pendingReviewCascade *pendingReviewCascadeConfirmation
+	tasks                    []domain.Task
+	boardView                domain.BoardView
+	boardColumns             []domain.BoardViewColumnSnapshot
+	boardOrdered             []domain.Task
+	boardProjection          domain.BoardViewProjection
+	scope                    tuiScope
+	globalTaskScopes         map[string]protocol.ScopedIssueID
+	globalTaskProjects       map[string]config.Project
+	globalScopeSwitchPending bool
+	projectSwitchFromGlobal  bool
+	globalLoadSeq            uint64
+	sessions                 map[string]*domain.Session
+	suppressedTasks          map[string]struct{}
+	pendingStatuses          map[string]pendingTaskStatus
+	pendingDetails           map[string]pendingTaskDetails
+	operationTaskID          map[string]string
+	pendingOpsByTask         map[string]pendingOperationProgress
+	pendingFailures          map[string]taskMutationFailure
+	pendingCleanupOps        map[string]pendingWorktreeCleanupConfirmation
+	pendingCleanup           *pendingWorktreeCleanupConfirmation
+	pendingBulkCleanup       *pendingBulkCleanupConfirmation
+	pendingClose             *pendingCloseCleanupConfirmation
+	pendingReviewCascade     *pendingReviewCascadeConfirmation
 
 	// Navigation (using NavigationService)
 	nav *navigation.Service
@@ -232,38 +233,33 @@ type Model struct {
 	editor *editor.Service
 
 	// UI state
-	overlayStack                        *overlay.Stack
-	createTaskOverlay                   *overlay.CreateTaskOverlay
-	viewMode                            ViewMode
-	boardViews                          []domain.BoardViewRecord
-	selectedBoardViewID                 string
-	orchestrationOverview               []orchestrationProjectOverview
-	orchestrationOverviewLoadedAt       time.Time
-	orchestrationOverviewHiddenProjects int
-	orchestrationOverviewHiddenTasks    int
-	orchestrationOverviewBackendErrors  int
-	orchestrationOverviewHiddenLabels   []string
-	orchestrationOverviewCursor         int
-	jumpMode                            *overlay.JumpMode
-	jumpTargets                         []string
-	mergePickMode                       *mergePickState
-	mouseDrag                           mouseDragState
-	mouseTap                            mouseTapState
-	viewportStarts                      [maxBoardViewColumns]int
-	columnViewportStart                 int
-	drillDownParentID                   string
-	drillDownParentName                 string
-	drillDownTrail                      []drillDownContext
-	pendingCreatedTaskID                string
-	pendingCreatedWorkspaceTaskID       string
-	pendingUIOpenTaskID                 string
-	pendingUIDrillDownTaskID            string
-	openCreatedTaskInWorkspace          bool
-	openSessionSelectorOnLoad           bool
-	sessionTreeFilterOnly               bool
-	runtimeSignalsByTask                map[string]board.RuntimeSignals
-	runtimeSignalWorktreeByTask         map[string]string
-	runtimeSignalBranchByTask           map[string]string
+	overlayStack                    *overlay.Stack
+	createTaskOverlay               *overlay.CreateTaskOverlay
+	boardViews                      []domain.BoardViewRecord
+	selectedBoardViewID             string
+	boardViewScopeGeneration        uint64
+	projectOrchestrator             *projectOrchestratorSnapshot
+	projectOrchestratorActionRunner projectOrchestratorActionRunner
+	jumpMode                        *overlay.JumpMode
+	jumpTargets                     []string
+	mergePickMode                   *mergePickState
+	mouseDrag                       mouseDragState
+	mouseTap                        mouseTapState
+	viewportStarts                  [maxBoardViewColumns]int
+	columnViewportStart             int
+	drillDownParentID               string
+	drillDownParentName             string
+	drillDownTrail                  []drillDownContext
+	pendingCreatedTaskID            string
+	pendingCreatedWorkspaceTaskID   string
+	pendingUIOpenTaskID             string
+	pendingUIDrillDownTaskID        string
+	openCreatedTaskInWorkspace      bool
+	openSessionSelectorOnLoad       bool
+	sessionTreeFilterOnly           bool
+	runtimeSignalsByTask            map[string]board.RuntimeSignals
+	runtimeSignalWorktreeByTask     map[string]string
+	runtimeSignalBranchByTask       map[string]string
 
 	// Project
 	currentProject       string
@@ -356,6 +352,13 @@ func WithSessionSelectorOnLoad() Option {
 	}
 }
 
+// WithGlobalBoardOnLoad starts the TUI in the user-level cross-project view.
+// Actions leave the global projection and hydrate the selected authoritative
+// project before any mutation is offered.
+func WithGlobalBoardOnLoad() Option {
+	return func(m *Model) { m.scope, m.globalLoadSeq = globalTUIScope(), 1 }
+}
+
 // New creates a new application model with the given config
 func New(cfg *config.Config) Model {
 	return NewWithOptions(cfg)
@@ -393,6 +396,7 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 	deps := appdeps.Build(cfg, repoDir, logger)
 
 	m := Model{
+		scope:                       projectTUIScope(),
 		tasks:                       []domain.Task{},
 		sessions:                    make(map[string]*domain.Session),
 		pendingStatuses:             make(map[string]pendingTaskStatus),
@@ -404,11 +408,12 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 		nav:                         navigation.NewService(),
 		editor:                      editor.NewService(),
 		overlayStack:                overlay.NewStack(),
-		viewMode:                    ViewModeBoard, // Start with board view
 		selectedBoardViewID:         domain.DefaultBoardViewID,
 		runtimeSignalsByTask:        make(map[string]board.RuntimeSignals),
 		runtimeSignalWorktreeByTask: make(map[string]string),
 		runtimeSignalBranchByTask:   make(map[string]string),
+		globalTaskScopes:            make(map[string]protocol.ScopedIssueID),
+		globalTaskProjects:          make(map[string]config.Project),
 		toasts:                      []Toast{},
 		activeToastHistoryIDs:       []string{},
 		notificationHistory:         []notificationHistoryEntry{},
@@ -515,6 +520,9 @@ func (m Model) openCurrentTaskWorkspace() (tea.Model, tea.Cmd) {
 	}
 	if task == nil {
 		return m, nil
+	}
+	if m.taskWaitingHuman(task) {
+		return m.openWaitingHumanRequest(task.ID.String())
 	}
 	return m.openTaskWorkspaceByID(task.ID.String())
 }
@@ -657,6 +665,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		if m.editor.GetMode() != ModeAction {
 			m.boardRefreshing = true
+			if m.scope.IsGlobal() {
+				m.globalLoadSeq++
+				return m, m.loadGlobalBoardCmd(m.globalLoadSeq)
+			}
 			return m, tea.Batch(m.scheduleIssuesRefreshAfterRuntimeReconcileCmd(), m.gitSyncService.FetchAndCheck())
 		}
 	}
@@ -718,9 +730,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // handleNormalMode processes keyboard input in normal mode
 func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
-	if m.viewMode == ViewModeOverview {
-		if next, cmd, handled := m.handleOverviewModeKey(msg); handled {
-			return next, cmd
+	if m.scope.IsGlobal() {
+		switch msg.String() {
+		case overlay.EventLogHotkey, overlay.OperationQueueHotkey, "O", "X":
+			m.addToast(Toast{Level: ToastInfo, Message: "Open a ticket's project before using project operations", Expires: time.Now().Add(4 * time.Second)})
+			return m, nil
 		}
 	}
 	switch msg.String() {
@@ -736,7 +750,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case overlay.OperationQueueHotkey:
 		return m.openOperationQueueOverlay()
 	case "O": // Orchestration overlay
-		return m, m.openOrchestrationOverlay()
+		return m, m.openProjectOrchestratorOverlay()
 	case "X": // Bulk cleanup (Shift+X)
 		taskCount := len(m.tasks)
 		worktreeCount := len(m.sessions)
@@ -752,6 +766,16 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.applyBoardNavigationAction(action, columns) {
 		return m, nil
+	}
+	if m.scope.IsGlobal() {
+		switch action {
+		case keybinds.ActionQuit, keybinds.ActionEnterGoto, keybinds.ActionEnterSearch,
+			keybinds.ActionOpenFilter, keybinds.ActionToggleSessionTreeFilter, keybinds.ActionOpenSort, keybinds.ActionOpenHelp,
+			keybinds.ActionOpenBoardViews, keybinds.ActionToggleView:
+			// These actions are projection-local and cannot mutate a project.
+		default:
+			return m.leaveGlobalBoardForCurrentTask()
+		}
 	}
 
 	switch action {
@@ -782,7 +806,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.sessionTreeFilterOnly {
 			m.addToast(Toast{
 				Level:   ToastInfo,
-				Message: "Showing issues with sessions in their tree",
+				Message: "Showing tickets with sessions in their tree",
 				Expires: time.Now().Add(2 * time.Second),
 			})
 		} else {
@@ -869,33 +893,13 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		pane := overlay.NewGitPaneOverlay(m.resolveBaseBranch())
 		return m, tea.Batch(m.openOverlay(pane), m.gitPaneStatusCmd(true))
 
-	case keybinds.ActionToggleView: // Toggle view mode
-		switch m.viewMode {
-		case ViewModeBoard:
-			m.viewMode = ViewModeCompact
-			m.addToast(Toast{
-				Level:   ToastInfo,
-				Message: "Switched to compact view",
-				Expires: time.Now().Add(2 * time.Second),
-			})
-			return m, m.persistUIViewModeCmd(m.viewMode)
-		case ViewModeCompact:
-			m.viewMode = ViewModeOverview
-			m.addToast(Toast{
-				Level:   ToastInfo,
-				Message: "Switched to orchestration overview",
-				Expires: time.Now().Add(2 * time.Second),
-			})
-			return m, tea.Batch(m.persistUIViewModeCmd(m.viewMode), m.loadOrchestrationOverviewCmd())
-		default:
-			m.viewMode = ViewModeBoard
-			m.addToast(Toast{
-				Level:   ToastInfo,
-				Message: "Switched to board view",
-				Expires: time.Now().Add(2 * time.Second),
-			})
-			return m, m.persistUIViewModeCmd(m.viewMode)
+	case keybinds.ActionToggleView:
+		m.boardRefreshing = true
+		direction := 1
+		if msg.String() == "shift+tab" {
+			direction = -1
 		}
+		return m, m.cycleBoardViewCmd(direction)
 	}
 
 	return m, nil
@@ -909,6 +913,14 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	action, ok := keybinds.LookupAction(types.ModeGoto, msg.String())
 	if !ok {
+		return m, nil
+	}
+	if m.scope.IsGlobal() && action == keybinds.ActionGotoSpec {
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: "Open a ticket's project before viewing its spec",
+			Expires: time.Now().Add(4 * time.Second),
+		})
 		return m, nil
 	}
 
@@ -938,6 +950,7 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.projectRegistry,
 			overlay.WithInitialCursor(m.projectSelectorCursor()),
 			overlay.WithCurrentProjectName(m.currentProject),
+			overlay.WithGlobalScope(m.scope.IsGlobal()),
 		))
 	case keybinds.ActionGotoSpec:
 		// Dedicated Spec workspace
@@ -1019,7 +1032,7 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task == nil {
 			m.addToast(Toast{
 				Level:   ToastWarning,
-				Message: "No focused issue to update",
+				Message: "No focused ticket to update",
 				Expires: time.Now().Add(3 * time.Second),
 			})
 			return m, nil
@@ -1161,22 +1174,24 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Message types for async operations
 
 type issuesLoadedMsg struct {
-	refreshSeq     uint64
-	projectID      string
-	scopedParentID string
-	tasks          []domain.Task
-	boardView      domain.BoardView
-	boardColumns   []domain.BoardViewColumnSnapshot
-	revision       uint64
-	lastCheckedAt  time.Time
-	freshness      protocol.TaskListFreshness
-	events         <-chan protocol.EventEnvelope
-	eventsCancel   context.CancelFunc
-	daemonClient   *daemonclient.Client
-	daemonSocket   string
-	stale          bool
-	freshnessHint  string
-	reconcileWarn  error
+	refreshSeq      uint64
+	projectID       string
+	scopedParentID  string
+	tasks           []domain.Task
+	boardView       domain.BoardView
+	boardColumns    []domain.BoardViewColumnSnapshot
+	boardOrdered    []domain.Task
+	boardProjection domain.BoardViewProjection
+	revision        uint64
+	lastCheckedAt   time.Time
+	freshness       protocol.TaskListFreshness
+	events          <-chan protocol.EventEnvelope
+	eventsCancel    context.CancelFunc
+	daemonClient    *daemonclient.Client
+	daemonSocket    string
+	stale           bool
+	freshnessHint   string
+	reconcileWarn   error
 }
 
 type issuesErrorMsg struct {
@@ -1186,20 +1201,22 @@ type issuesErrorMsg struct {
 }
 
 type projectSwitchResultMsg struct {
-	switchSeq     uint64
-	project       config.Project
-	projectConfig *config.Config
-	tasks         []domain.Task
-	boardView     domain.BoardView
-	boardColumns  []domain.BoardViewColumnSnapshot
-	revision      uint64
-	lastCheckedAt time.Time
-	freshness     protocol.TaskListFreshness
-	events        <-chan protocol.EventEnvelope
-	eventsCancel  context.CancelFunc
-	daemonClient  *daemonclient.Client
-	daemonSocket  string
-	err           error
+	switchSeq       uint64
+	project         config.Project
+	projectConfig   *config.Config
+	tasks           []domain.Task
+	boardView       domain.BoardView
+	boardColumns    []domain.BoardViewColumnSnapshot
+	boardOrdered    []domain.Task
+	boardProjection domain.BoardViewProjection
+	revision        uint64
+	lastCheckedAt   time.Time
+	freshness       protocol.TaskListFreshness
+	events          <-chan protocol.EventEnvelope
+	eventsCancel    context.CancelFunc
+	daemonClient    *daemonclient.Client
+	daemonSocket    string
+	err             error
 }
 
 const (
@@ -1271,40 +1288,37 @@ type notificationCopyDetailsResultMsg struct {
 	err error
 }
 
-type uiViewModeLoadedMsg struct {
-	viewMode ViewMode
-	found    bool
-	err      error
-}
-
-type uiViewModeSavedMsg struct {
-	viewMode ViewMode
-	err      error
-}
-
 type boardViewsLoadedMsg struct {
 	views          []domain.BoardViewRecord
+	globalViews    []protocol.GlobalViewRecord
 	selectedViewID string
+	scope          boardViewCommandScope
 	err            error
 }
 
 type boardViewSelectedMsg struct {
 	viewID string
+	scope  boardViewCommandScope
 	err    error
 }
 
 type boardViewMutatedMsg struct {
 	action string
 	viewID string
+	scope  boardViewCommandScope
 	err    error
 }
 
-type orchestrationOverviewLoadedMsg struct {
-	projects       []orchestrationProjectOverview
-	hiddenProjects int
-	hiddenTasks    int
-	backendErrors  int
-	hiddenLabels   []string
+type projectOrchestratorLoadedMsg struct {
+	project projectOrchestratorSnapshot
+	err     error
+}
+
+type projectOrchestratorActionMsg struct {
+	projectID string
+	action    string
+	result    protocol.OrchestratorSessionResult
+	err       error
 }
 
 type hookLogLoadedMsg struct {
@@ -1737,15 +1751,17 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: err}
 		}
 		return issuesLoadedMsg{
-			refreshSeq:     refreshSeq,
-			projectID:      projectID,
-			scopedParentID: scopedParentID,
-			tasks:          snapshot.Tasks,
-			boardView:      snapshot.View,
-			boardColumns:   snapshot.Columns,
-			revision:       snapshot.Revision,
-			lastCheckedAt:  snapshot.LastCheckedAt,
-			freshness:      snapshot.Freshness,
+			refreshSeq:      refreshSeq,
+			projectID:       projectID,
+			scopedParentID:  scopedParentID,
+			tasks:           snapshot.Tasks,
+			boardView:       snapshot.View,
+			boardColumns:    snapshot.Columns,
+			boardOrdered:    snapshot.Projection.OrderedTasks(),
+			boardProjection: snapshot.Projection,
+			revision:        snapshot.Revision,
+			lastCheckedAt:   snapshot.LastCheckedAt,
+			freshness:       snapshot.Freshness,
 		}
 	}
 }
@@ -1791,128 +1807,161 @@ func (m *Model) finishIssuesRefreshCmd(refreshSeq uint64) tea.Cmd {
 	return m.scheduleIssuesRefreshCmd()
 }
 
-func (m Model) loadUIViewModeCmd() tea.Cmd {
-	client := m.daemonClient
-	if client == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		resp, err := client.GetUIStateForProject(ctx, protocol.DefaultProjectID, protocol.UIStateKeyUIViewMode)
-		if err != nil {
-			return uiViewModeLoadedMsg{err: err}
-		}
-		mode, ok := viewModeFromPersistedValue(resp.Value)
-		if !resp.Found || !ok {
-			return uiViewModeLoadedMsg{found: false}
-		}
-		return uiViewModeLoadedMsg{viewMode: mode, found: true}
-	}
-}
-
-func (m Model) persistUIViewModeCmd(mode ViewMode) tea.Cmd {
-	client := m.daemonClient
-	if client == nil {
-		return nil
-	}
-	value, ok := persistedValueForViewMode(mode)
-	if !ok {
-		return nil
-	}
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_, err := client.SetUIStateForProject(ctx, protocol.DefaultProjectID, protocol.UIStateKeyUIViewMode, value)
-		return uiViewModeSavedMsg{viewMode: mode, err: err}
-	}
-}
-
 func (m Model) loadBoardViewsCmd() tea.Cmd {
 	client := m.daemonClient
+	scope := m.currentBoardViewCommandScope()
 	if client == nil {
-		return func() tea.Msg { return boardViewsLoadedMsg{err: fmt.Errorf("daemon client unavailable")} }
+		return func() tea.Msg {
+			return boardViewsLoadedMsg{scope: scope, err: fmt.Errorf("daemon client unavailable")}
+		}
 	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		resp, err := client.ListBoardViews(ctx)
+		var resp protocol.BoardViewListResponseBody
+		var err error
+		if scope.global {
+			resp, err = client.ListGlobalViews(ctx)
+		} else {
+			resp, err = client.ListBoardViews(ctx)
+		}
 		if err != nil {
-			return boardViewsLoadedMsg{err: err}
+			return boardViewsLoadedMsg{scope: scope, err: err}
 		}
 		return boardViewsLoadedMsg{
 			views:          resp.Views,
+			globalViews:    resp.GlobalViews,
 			selectedViewID: resp.SelectedViewID,
+			scope:          scope,
 		}
+	}
+}
+
+func boardViewCycleIndex(viewIDs []string, current string, direction int) int {
+	if len(viewIDs) == 0 {
+		return -1
+	}
+	for i, viewID := range viewIDs {
+		if viewID == current {
+			return (i + direction%len(viewIDs) + len(viewIDs)) % len(viewIDs)
+		}
+	}
+	return 0
+}
+
+func (m Model) cycleBoardViewCmd(direction int) tea.Cmd {
+	client := m.daemonClient
+	scope := m.currentBoardViewCommandScope()
+	selected := domain.NormalizeBoardViewID(m.selectedBoardViewID)
+	if client == nil {
+		return func() tea.Msg {
+			return boardViewSelectedMsg{viewID: selected, scope: scope, err: fmt.Errorf("daemon client unavailable")}
+		}
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var resp protocol.BoardViewListResponseBody
+		var err error
+		if scope.global {
+			resp, err = client.ListGlobalViews(ctx)
+		} else {
+			resp, err = client.ListBoardViews(ctx)
+		}
+		if err != nil {
+			return boardViewSelectedMsg{viewID: selected, scope: scope, err: err}
+		}
+		viewIDs := make([]string, 0, len(resp.Views)+len(resp.GlobalViews))
+		for _, record := range resp.Views {
+			viewIDs = append(viewIDs, string(record.View.ID))
+		}
+		if scope.global {
+			viewIDs = viewIDs[:0]
+			for _, record := range resp.GlobalViews {
+				viewIDs = append(viewIDs, string(record.View.ID))
+			}
+		}
+		if len(viewIDs) == 0 {
+			return boardViewSelectedMsg{viewID: selected, scope: scope, err: fmt.Errorf("no configured views available")}
+		}
+		current := selected
+		if current == "" {
+			current = domain.NormalizeBoardViewID(resp.SelectedViewID)
+		}
+		next := boardViewCycleIndex(viewIDs, current, direction)
+		var result protocol.BoardViewSelectResponseBody
+		if scope.global {
+			result, err = client.SelectGlobalView(ctx, protocol.GlobalViewConsumerBoard, viewIDs[next])
+		} else {
+			result, err = client.SelectBoardView(ctx, viewIDs[next])
+		}
+		if err != nil {
+			return boardViewSelectedMsg{viewID: current, scope: scope, err: err}
+		}
+		return boardViewSelectedMsg{viewID: result.ViewID, scope: scope}
 	}
 }
 
 func (m Model) selectBoardViewCmd(viewID string) tea.Cmd {
 	client := m.daemonClient
+	scope := m.currentBoardViewCommandScope()
 	viewID = strings.TrimSpace(viewID)
 	if client == nil {
 		return func() tea.Msg {
-			return boardViewSelectedMsg{viewID: viewID, err: fmt.Errorf("daemon client unavailable")}
+			return boardViewSelectedMsg{viewID: viewID, scope: scope, err: fmt.Errorf("daemon client unavailable")}
 		}
 	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		resp, err := client.SelectBoardView(ctx, viewID)
-		if err != nil {
-			return boardViewSelectedMsg{viewID: viewID, err: err}
+		var resp protocol.BoardViewSelectResponseBody
+		var err error
+		if scope.global {
+			resp, err = client.SelectGlobalView(ctx, protocol.GlobalViewConsumerBoard, viewID)
+		} else {
+			resp, err = client.SelectBoardView(ctx, viewID)
 		}
-		return boardViewSelectedMsg{viewID: resp.ViewID}
+		if err != nil {
+			return boardViewSelectedMsg{viewID: viewID, scope: scope, err: err}
+		}
+		return boardViewSelectedMsg{viewID: resp.ViewID, scope: scope}
 	}
 }
 
-func (m Model) saveBoardViewCmd(view domain.BoardView) tea.Cmd {
+func (m Model) saveBoardViewCmd(view domain.BoardView, scope protocol.GlobalViewScope) tea.Cmd {
+	commandScope := m.currentBoardViewCommandScope()
 	return func() tea.Msg {
 		if m.daemonClient == nil {
-			return boardViewMutatedMsg{action: "save", viewID: string(view.ID), err: fmt.Errorf("daemon client unavailable")}
+			return boardViewMutatedMsg{action: "save", viewID: string(view.ID), scope: commandScope, err: fmt.Errorf("daemon client unavailable")}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		resp, err := m.daemonClient.SaveBoardView(ctx, view)
-		return boardViewMutatedMsg{action: "save", viewID: string(resp.View.View.ID), err: err}
+		var resp protocol.BoardViewResponseBody
+		var err error
+		if commandScope.global {
+			resp, err = m.daemonClient.SaveGlobalView(ctx, protocol.GlobalViewRecord{View: view, Scope: scope})
+		} else {
+			resp, err = m.daemonClient.SaveBoardView(ctx, view)
+		}
+		return boardViewMutatedMsg{action: "save", viewID: string(resp.View.View.ID), scope: commandScope, err: err}
 	}
 }
 
 func (m Model) deleteBoardViewCmd(viewID string) tea.Cmd {
+	commandScope := m.currentBoardViewCommandScope()
 	return func() tea.Msg {
 		if m.daemonClient == nil {
-			return boardViewMutatedMsg{action: "delete", viewID: viewID, err: fmt.Errorf("daemon client unavailable")}
+			return boardViewMutatedMsg{action: "delete", viewID: viewID, scope: commandScope, err: fmt.Errorf("daemon client unavailable")}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		err := m.daemonClient.DeleteBoardView(ctx, viewID)
-		return boardViewMutatedMsg{action: "delete", viewID: viewID, err: err}
-	}
-}
-
-func persistedValueForViewMode(mode ViewMode) (string, bool) {
-	switch mode {
-	case ViewModeBoard:
-		return "board", true
-	case ViewModeCompact:
-		return "compact", true
-	case ViewModeOverview:
-		return "overview", true
-	default:
-		return "", false
-	}
-}
-
-func viewModeFromPersistedValue(value string) (ViewMode, bool) {
-	switch strings.TrimSpace(strings.ToLower(value)) {
-	case "board":
-		return ViewModeBoard, true
-	case "compact":
-		return ViewModeCompact, true
-	case "overview", "orchestration":
-		return ViewModeOverview, true
-	default:
-		return ViewModeBoard, false
+		var err error
+		if commandScope.global {
+			err = m.daemonClient.DeleteGlobalView(ctx, viewID)
+		} else {
+			err = m.daemonClient.DeleteBoardView(ctx, viewID)
+		}
+		return boardViewMutatedMsg{action: "delete", viewID: viewID, scope: commandScope, err: err}
 	}
 }
 
@@ -1951,16 +2000,18 @@ func (m Model) loadIssuesAfterRuntimeReconcileCmd() tea.Cmd {
 		}
 
 		return issuesLoadedMsg{
-			refreshSeq:     refreshSeq,
-			projectID:      projectID,
-			scopedParentID: scopedParentID,
-			tasks:          snapshot.Tasks,
-			boardView:      snapshot.View,
-			boardColumns:   snapshot.Columns,
-			revision:       snapshot.Revision,
-			lastCheckedAt:  snapshot.LastCheckedAt,
-			freshness:      snapshot.Freshness,
-			reconcileWarn:  reconcileWarn,
+			refreshSeq:      refreshSeq,
+			projectID:       projectID,
+			scopedParentID:  scopedParentID,
+			tasks:           snapshot.Tasks,
+			boardView:       snapshot.View,
+			boardColumns:    snapshot.Columns,
+			boardOrdered:    snapshot.Projection.OrderedTasks(),
+			boardProjection: snapshot.Projection,
+			revision:        snapshot.Revision,
+			lastCheckedAt:   snapshot.LastCheckedAt,
+			freshness:       snapshot.Freshness,
+			reconcileWarn:   reconcileWarn,
 		}
 	}
 }
@@ -2018,16 +2069,18 @@ func (m Model) loadIssuesAfterIssueReconcileCmd(issueIDs []string) tea.Cmd {
 		}
 
 		return issuesLoadedMsg{
-			refreshSeq:     refreshSeq,
-			projectID:      projectID,
-			scopedParentID: scopedParentID,
-			tasks:          snapshot.Tasks,
-			boardView:      snapshot.View,
-			boardColumns:   snapshot.Columns,
-			revision:       snapshot.Revision,
-			lastCheckedAt:  snapshot.LastCheckedAt,
-			freshness:      snapshot.Freshness,
-			reconcileWarn:  reconcileWarn,
+			refreshSeq:      refreshSeq,
+			projectID:       projectID,
+			scopedParentID:  scopedParentID,
+			tasks:           snapshot.Tasks,
+			boardView:       snapshot.View,
+			boardColumns:    snapshot.Columns,
+			boardOrdered:    snapshot.Projection.OrderedTasks(),
+			boardProjection: snapshot.Projection,
+			revision:        snapshot.Revision,
+			lastCheckedAt:   snapshot.LastCheckedAt,
+			freshness:       snapshot.Freshness,
+			reconcileWarn:   reconcileWarn,
 		}
 	}
 }
@@ -2345,19 +2398,21 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		}
 
 		return projectSwitchResultMsg{
-			switchSeq:     switchSeq,
-			project:       project,
-			projectConfig: projectConfig,
-			tasks:         snapshot.Tasks,
-			boardView:     snapshot.View,
-			boardColumns:  snapshot.Columns,
-			revision:      snapshot.Revision,
-			lastCheckedAt: snapshot.LastCheckedAt,
-			freshness:     snapshot.Freshness,
-			events:        events,
-			eventsCancel:  streamCancel,
-			daemonClient:  daemonClient,
-			daemonSocket:  socketPath,
+			switchSeq:       switchSeq,
+			project:         project,
+			projectConfig:   projectConfig,
+			tasks:           snapshot.Tasks,
+			boardView:       snapshot.View,
+			boardColumns:    snapshot.Columns,
+			boardOrdered:    snapshot.Projection.OrderedTasks(),
+			boardProjection: snapshot.Projection,
+			revision:        snapshot.Revision,
+			lastCheckedAt:   snapshot.LastCheckedAt,
+			freshness:       snapshot.Freshness,
+			events:          events,
+			eventsCancel:    streamCancel,
+			daemonClient:    daemonClient,
+			daemonSocket:    socketPath,
 		}
 	}
 }
@@ -2425,17 +2480,19 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		}
 
 		return issuesLoadedMsg{
-			projectID:     projectID,
-			tasks:         snapshot.Tasks,
-			boardView:     snapshot.View,
-			boardColumns:  snapshot.Columns,
-			revision:      snapshot.Revision,
-			lastCheckedAt: snapshot.LastCheckedAt,
-			freshness:     snapshot.Freshness,
-			events:        events,
-			eventsCancel:  streamCancel,
-			daemonClient:  daemonClient,
-			daemonSocket:  socketPath,
+			projectID:       projectID,
+			tasks:           snapshot.Tasks,
+			boardView:       snapshot.View,
+			boardColumns:    snapshot.Columns,
+			boardOrdered:    snapshot.Projection.OrderedTasks(),
+			boardProjection: snapshot.Projection,
+			revision:        snapshot.Revision,
+			lastCheckedAt:   snapshot.LastCheckedAt,
+			freshness:       snapshot.Freshness,
+			events:          events,
+			eventsCancel:    streamCancel,
+			daemonClient:    daemonClient,
+			daemonSocket:    socketPath,
 		}
 	}
 }
@@ -2856,6 +2913,9 @@ func findProjectByCwdBasenamePrefix(registry *config.ProjectsRegistry, cwd strin
 }
 
 func (m Model) projectSelectorCursor() int {
+	if m.scope.IsGlobal() {
+		return 0
+	}
 	if m.projectRegistry == nil || len(m.projectRegistry.Projects) == 0 {
 		return 0
 	}
@@ -2867,7 +2927,7 @@ func (m Model) projectSelectorCursor() int {
 
 	for i, project := range m.projectRegistry.Projects {
 		if project.Name == target {
-			return i
+			return i + 1
 		}
 	}
 
@@ -4194,6 +4254,9 @@ func (m Model) sortSummary() string {
 	if sortState.Order == domain.SortDesc {
 		order = "desc"
 	}
+	if m.boardView.Options.SortPolicy == domain.BoardViewSortHumanAttention && !m.editor.IsSortExplicit() {
+		field = "attention+" + field
+	}
 	return fmt.Sprintf("S:%s/%s", field, order)
 }
 
@@ -4202,7 +4265,7 @@ func (m Model) renderLoading() string {
 	content := lipgloss.JoinVertical(
 		lipgloss.Center,
 		m.spinner.View(),
-		"Loading issues...",
+		"Loading tickets...",
 	)
 
 	return lipgloss.Place(
@@ -4952,6 +5015,11 @@ type taskStatusResultMsg struct {
 	err            error
 }
 
+type ancestorWorktreeCloseRetryResultMsg struct {
+	action overlay.CloseFailureActionMsg
+	err    error
+}
+
 type taskLifecycleResultMsg struct {
 	taskID        string
 	previousTask  domain.Task
@@ -5401,8 +5469,37 @@ func (m Model) closeFailureDialogCmd(msg taskStatusResultMsg) tea.Cmd {
 		AllowForceWorktree:      closeFailureSupportsForceWorktree(msg.err),
 		AllowActiveSessionRetry: closeFailureSupportsActiveSessionRetry(msg.err),
 		AllowCloseCleanChildren: closeFailureSupportsCloseCleanChildren(msg.err),
+		AllowCreateAncestor:     closeFailureSupportsCreateAncestor(msg.err, closeContext.parentID),
 	}
 	return m.openOverlay(overlay.NewCloseFailureDialog(msg.taskID, msg.err.Error(), options))
+}
+
+func closeFailureSupportsCreateAncestor(err error, parentID string) bool {
+	if err == nil || strings.TrimSpace(parentID) == "" {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "no active ancestor worktree branch was found") &&
+		strings.Contains(message, "az worktree create "+strings.ToLower(strings.TrimSpace(parentID)))
+}
+
+func (m Model) createAncestorWorktreeAndRetryCloseCmd(action overlay.CloseFailureActionMsg) tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return ancestorWorktreeCloseRetryResultMsg{action: action, err: fmt.Errorf("daemon client unavailable")}
+		}
+		parentID := strings.TrimSpace(action.ParentID)
+		if parentID == "" {
+			return ancestorWorktreeCloseRetryResultMsg{action: action, err: fmt.Errorf("parent issue id is unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
+		defer cancel()
+		_, err := m.daemonClient.CreateWorktreeResult(ctx, parentID, strings.TrimSpace(action.BaseBranch))
+		if err != nil {
+			err = fmt.Errorf("create ancestor worktree %s: %w", parentID, err)
+		}
+		return ancestorWorktreeCloseRetryResultMsg{action: action, err: err}
+	}
 }
 
 func closeFailureSupportsForceWorktree(err error) bool {
@@ -5854,14 +5951,23 @@ func (m *Model) applyOptimisticTaskLifecycle(taskID string, lifecycle domain.Iss
 	}
 	for i := range m.tasks {
 		if m.tasks[i].ID.String() == taskID {
+			previousFacts := m.tasks[i].IssueFacts()
 			m.tasks[i].Status = domain.StatusOpen
 			m.tasks[i].State = state
+			var investigationAcceptance *domain.InvestigationAcceptance
+			if previousFacts.WaitingHuman && previousFacts.WaitingHumanSource == domain.WaitingHumanSourceInvestigationAcceptance {
+				investigationAcceptance = &domain.InvestigationAcceptance{Disposition: domain.InvestigationDispositionHumanFindings, Reason: previousFacts.WaitingHumanReason}
+			}
 			m.tasks[i].Facts = domain.DeriveIssueFacts(domain.IssueFactsInput{
-				Status:         m.tasks[i].Status,
-				Priority:       m.tasks[i].Priority,
-				State:          m.tasks[i].State,
-				Session:        m.tasks[i].Session,
-				HasTmuxSession: m.tasks[i].HasTmuxSession,
+				Status:                  m.tasks[i].Status,
+				Priority:                m.tasks[i].Priority,
+				Type:                    m.tasks[i].Type,
+				State:                   m.tasks[i].State,
+				Session:                 m.tasks[i].Session,
+				HasTmuxSession:          m.tasks[i].HasTmuxSession,
+				DecisionWaiting:         previousFacts.WaitingHuman && previousFacts.WaitingHumanSource == domain.WaitingHumanSourceInteractionRequest,
+				DecisionWaitReason:      previousFacts.WaitingHumanReason,
+				InvestigationAcceptance: investigationAcceptance,
 			})
 			break
 		}

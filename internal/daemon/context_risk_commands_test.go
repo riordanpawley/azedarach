@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,13 +14,14 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
+	"github.com/riordanpawley/azedarach/internal/testutil/issuefixture"
 )
 
 func TestTaskContextRiskDoesNotTreatBroadRootAsRiskWithoutOverlap(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-context-risk-broad"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Large root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -32,24 +34,29 @@ func TestTaskContextRiskDoesNotTreatBroadRootAsRiskWithoutOverlap(t *testing.T) 
 	}
 	now := time.Now().UTC()
 	appendContextRiskEvidence(t, repoDir, parentID, targetID, 1, now, []string{"internal/daemon/context_risk_commands.go"}, "none")
+	fixture := issuefixture.Fixture{
+		Issues:       make([]issuefixture.Issue, 100),
+		Dependencies: make([]issuefixture.Dependency, 100),
+	}
 	for i := 0; i < 100; i++ {
-		childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-			Title:    fmt.Sprintf("Broad sibling %03d", i),
-			Type:     domain.TypeTask,
-			Status:   domain.StatusDone,
-			ParentID: &parentID,
-		})
-		if err != nil {
-			t.Fatalf("create broad sibling %d: %v", i, err)
-		}
+		childID := fmt.Sprintf("fixture-broad-sibling-%03d", i)
+		fixture.Issues[i] = issuefixture.Issue{ID: childID, Title: fmt.Sprintf("Broad sibling %03d", i), Type: domain.TypeTask, Status: domain.StatusDone, Priority: domain.P2}
+		fixture.Dependencies[i] = issuefixture.Dependency{IssueID: childID, DependsOnID: parentID, Type: domain.DependencyParentChild}
 		appendContextRiskEvidence(t, repoDir, parentID, childID, int64(i+2), now, []string{fmt.Sprintf("internal/other/file_%03d.go", i)}, "none")
+	}
+	setup, err := issuefixture.SeedPath(ctx, filepath.Join(repoDir, ".azedarach", "azedarach.db"), fixture)
+	if err != nil {
+		t.Fatalf("seed broad siblings: %v", err)
 	}
 
 	d := newContextRiskTestDaemon(projectID, repoDir, issuesClient)
+	queryStarted := time.Now()
 	packet, err := d.taskContextRisk(ctx, projectID, targetID, repoDir, now.Add(-14*24*time.Hour))
+	queryDuration := time.Since(queryStarted)
 	if err != nil {
 		t.Fatalf("taskContextRisk error: %v", err)
 	}
+	t.Logf("context risk scale timing: setup=%s query=%s rows=%d", setup.Duration, queryDuration, setup.Rows)
 	if packet.Level != domain.IssueContextRiskNone {
 		t.Fatalf("Level = %s, want %s; packet=%+v", packet.Level, domain.IssueContextRiskNone, packet)
 	}
@@ -62,7 +69,7 @@ func TestTaskContextRiskReportsRepeatedSiblingFileCluster(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-context-risk-cluster"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -129,7 +136,7 @@ func TestTaskContextRiskMarksRelatedConsumersAuditedFromObservation(t *testing.T
 	ctx := context.Background()
 	projectID := "proj-context-risk-related-consumers"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	targetID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Target", Type: domain.TypeTask, Status: domain.StatusInReview})
@@ -165,7 +172,7 @@ func TestTaskContextRiskCompactResponseBoundsReturnedEvidence(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-context-risk-compact"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -235,7 +242,7 @@ func TestTaskContextRiskReadsTopLevelRelatedMailboxEvidence(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-context-risk-top-level"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	targetID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Target root", Type: domain.TypeTask, Status: domain.StatusInReview})
@@ -274,7 +281,7 @@ func TestTaskUpdateStatusRejectsInReviewForHighContextRiskWithoutCloseoutEvidenc
 	ctx := context.Background()
 	projectID := "proj-context-risk-review-block"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -338,7 +345,7 @@ func TestCloseTaskRejectsHighContextRiskWithoutCloseoutEvidence(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-context-risk-close-block"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})

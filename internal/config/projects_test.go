@@ -7,6 +7,13 @@ import (
 	"testing"
 )
 
+func TestRegisteredProjectIDSurvivesPathChange(t *testing.T) {
+	project := Project{ID: "stable-project-id", Name: "renamed", Path: filepath.Join(t.TempDir(), "moved")}
+	if got := RegisteredProjectID(project); got != "stable-project-id" {
+		t.Fatalf("RegisteredProjectID()=%q want stable-project-id", got)
+	}
+}
+
 func TestProjectsRegistry_Add(t *testing.T) {
 	tests := []struct {
 		name    string

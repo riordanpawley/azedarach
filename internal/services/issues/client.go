@@ -2,6 +2,7 @@ package issues
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	sqlite "modernc.org/sqlite"
 
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/dbpathguard"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -26,9 +28,215 @@ import (
 	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
+// ProjectionExport is a transactionally consistent, fully hydrated snapshot
+// consumed by the user-level cross-project projection.
+type ProjectionExport struct {
+	Tasks             []domain.Task
+	Checkpoint        uint64
+	SchemaVersion     int
+	SchemaFingerprint string
+}
+
+// ExportProjection reads the source contract, composite issue/runtime
+// checkpoint, issues, dependencies, and runtime projections in one SQLite
+// read transaction. A successful export therefore never acknowledges state
+// newer than the rows it contains.
+func (c *Client) ExportProjection(ctx context.Context, projectID string) (ProjectionExport, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return ProjectionExport{}, err
+	}
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return ProjectionExport{}, fmt.Errorf("begin projection export: %w", err)
+	}
+	defer tx.Rollback()
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	version, fingerprint, err := projectionSchemaContract(ctx, tx)
+	if err != nil {
+		return ProjectionExport{}, err
+	}
+	checkpoint, err := projectionCompositeCheckpoint(ctx, tx, projectID)
+	if err != nil {
+		return ProjectionExport{}, err
+	}
+	tasks, err := c.queryTasksWithRuntimeArchiveMode(ctx, tx, projectID, ArchiveInclude)
+	if err != nil {
+		return ProjectionExport{}, c.wrapError("export-projection", projectID, err)
+	}
+	divergent, err := runtimeDivergentIssueIDs(ctx, tx)
+	if err != nil {
+		return ProjectionExport{}, err
+	}
+	for i := range tasks {
+		if _, quarantined := divergent[tasks[i].ID.String()]; quarantined {
+			tasks[i].Session, tasks[i].HasTmuxSession = nil, false
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return ProjectionExport{}, fmt.Errorf("commit projection export read: %w", err)
+	}
+	return ProjectionExport{Tasks: tasks, Checkpoint: checkpoint, SchemaVersion: version, SchemaFingerprint: fingerprint}, nil
+}
+
+func runtimeDivergentIssueIDs(ctx context.Context, q sqlIssueQueryer) (map[string]struct{}, error) {
+	rows, err := q.QueryContext(ctx, `SELECT issue_id FROM issue_runtime_divergences WHERE resolved_at IS NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) RecordRuntimeDivergence(ctx context.Context, issueID, reason string) error {
+	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		return c.recordRuntimeDivergenceLocked(lockCtx, issueID, reason)
+	})
+}
+
+func (c *Client) recordRuntimeDivergenceLocked(ctx context.Context, issueID, reason string) error {
+	db, err := c.dbHandle()
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO issue_runtime_divergences(issue_id,kind,reason,detected_at,resolved_at) VALUES(?,'lifecycle_runtime',?,?,NULL)
+		ON CONFLICT(issue_id,kind) DO UPDATE SET reason=excluded.reason,detected_at=excluded.detected_at,resolved_at=NULL`, strings.TrimSpace(issueID), strings.TrimSpace(reason), time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (c *Client) ClearRuntimeDivergence(ctx context.Context, issueID string) error {
+	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		return c.clearRuntimeDivergenceLocked(lockCtx, issueID)
+	})
+}
+
+func (c *Client) clearRuntimeDivergenceLocked(ctx context.Context, issueID string) error {
+	db, err := c.dbHandle()
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `UPDATE issue_runtime_divergences SET resolved_at=? WHERE issue_id=? AND kind='lifecycle_runtime' AND resolved_at IS NULL`, time.Now().UTC().Format(time.RFC3339Nano), strings.TrimSpace(issueID))
+	return err
+}
+
+func (c *Client) ListActiveRuntimeDivergenceIssueIDs(ctx context.Context) ([]string, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT issue_id FROM issue_runtime_divergences WHERE kind='lifecycle_runtime' AND resolved_at IS NULL ORDER BY issue_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func projectionSchemaContract(ctx context.Context, q sqlIssueDBTX) (int, string, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id FROM schema_migrations ORDER BY id`)
+	if err != nil {
+		return 0, "", fmt.Errorf("read projection schema migrations: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, "", err
+		}
+		ids = append(ids, id)
+	}
+	if err = rows.Close(); err != nil {
+		return 0, "", err
+	}
+	rows, err = q.QueryContext(ctx, `SELECT type,name,COALESCE(sql,'') FROM sqlite_master WHERE type IN ('table','index','trigger','view') AND name NOT LIKE 'sqlite_%' ORDER BY type,name`)
+	if err != nil {
+		return 0, "", fmt.Errorf("read projection schema contract: %w", err)
+	}
+	h := sha256.New()
+	for _, id := range ids {
+		fmt.Fprintf(h, "migration\x00%s\n", id)
+	}
+	for rows.Next() {
+		var typ, name, ddl string
+		if err = rows.Scan(&typ, &name, &ddl); err != nil {
+			rows.Close()
+			return 0, "", err
+		}
+		fmt.Fprintf(h, "%s\x00%s\x00%s\n", typ, name, strings.Join(strings.Fields(ddl), " "))
+	}
+	if err = rows.Close(); err != nil {
+		return 0, "", err
+	}
+	return len(ids), fmt.Sprintf("sha256:%x", h.Sum(nil)), nil
+}
+
+func projectionCompositeCheckpoint(ctx context.Context, q sqlIssueDBTX, projectID string) (uint64, error) {
+	_ = projectID // The project database has one revision domain; project ID scopes runtime rows within it.
+	var revision int64
+	if err := q.QueryRowContext(ctx, `SELECT revision FROM projection_source_revision WHERE singleton=1`).Scan(&revision); err != nil {
+		return 0, fmt.Errorf("read projection source revision: %w", err)
+	}
+	if revision < 0 {
+		return 0, fmt.Errorf("invalid negative projection source revision %d", revision)
+	}
+	return uint64(revision), nil
+}
+
 type dependencyRemovalConfirmationKey struct{}
 type parentChildOrphanConfirmationKey struct{}
 type issueMutationLockKey struct{}
+
+var issueOperationLocks sync.Map
+
+// ProjectionSourceVersion reports the applied project-schema migration count.
+func (c *Client) ProjectionSourceVersion(ctx context.Context) (int, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return 0, err
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("read projection source schema version: %w", err)
+	}
+	return count, nil
+}
+
+// ProjectionSourceCheckpoint returns the same durable revision used by
+// ExportProjection. It is retained for callers that only need freshness.
+func (c *Client) ProjectionSourceCheckpoint(ctx context.Context) (uint64, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return 0, err
+	}
+	var value int64
+	if err := db.QueryRowContext(ctx, `SELECT revision FROM projection_source_revision WHERE singleton=1`).Scan(&value); err != nil {
+		return 0, fmt.Errorf("read projection source checkpoint: %w", err)
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("invalid negative projection source revision %d", value)
+	}
+	return uint64(value), nil
+}
 
 type ArchiveMode string
 
@@ -36,7 +244,7 @@ const (
 	ArchiveExclude  ArchiveMode = "exclude"
 	ArchiveInclude  ArchiveMode = "include"
 	ArchiveOnly     ArchiveMode = "only"
-	refuseDBPathEnv             = "AZEDARACH_REFUSE_DB_PATH"
+	refuseDBPathEnv             = dbpathguard.LegacyRefusePathEnv
 )
 
 func NormalizeArchiveMode(value string) ArchiveMode {
@@ -59,22 +267,24 @@ func archiveWhere(alias string, mode ArchiveMode) string {
 	case ArchiveInclude:
 		return "1=1"
 	case ArchiveOnly:
-		return prefix + "archived_at IS NOT NULL"
+		return prefix + "visibility = 'archived'"
 	default:
-		return prefix + "archived_at IS NULL"
+		return prefix + "visibility = 'live'"
 	}
 }
 
 type issueStateColumns struct {
-	LegacyStatus  string
-	Lifecycle     string
-	ClosedOutcome string
-	Review        string
-	ArchivedAt    sql.NullString
-	DeletedAt     sql.NullString
+	Disposition  string
+	Engagement   string
+	Visibility   string
+	LegacyStatus string
+	ArchivedAt   sql.NullString
 }
 
 type issueStateWriteValues struct {
+	Disposition   string
+	Engagement    string
+	Visibility    string
 	LegacyStatus  string
 	Lifecycle     string
 	ClosedOutcome string
@@ -83,27 +293,17 @@ type issueStateWriteValues struct {
 }
 
 func issueStateFromColumns(issueID string, priority domain.Priority, cols issueStateColumns) (domain.IssueState, error) {
-	lifecycle := strings.TrimSpace(cols.Lifecycle)
-	if lifecycle == "" {
-		state, err := domain.IssueStateFromLegacy(domain.LegacyIssueStateInput{
-			Status:   domain.Status(cols.LegacyStatus),
-			Priority: priority,
-			Archived: nonEmptyNullString(cols.ArchivedAt) || nonEmptyNullString(cols.DeletedAt),
-		})
-		if err != nil {
-			return domain.IssueState{}, fmt.Errorf("issue %s legacy state: %w", issueID, err)
-		}
-		return state, nil
+	disposition := strings.TrimSpace(cols.Disposition)
+	if disposition == "" {
+		return domain.IssueState{}, fmt.Errorf("issue %s missing canonical disposition", issueID)
 	}
-	state, err := domain.NewIssueState(domain.IssueStateParts{
-		Workflow:     domain.IssueWorkflow(lifecycle),
-		Review:       domain.IssueReviewState(strings.TrimSpace(cols.Review)),
-		CloseOutcome: domain.IssueCloseOutcome(strings.TrimSpace(cols.ClosedOutcome)),
-		Archive:      issueArchiveStateFromTimestamp(cols.ArchivedAt),
-		Deletion:     domain.IssueDeletionPresent,
+	state, err := domain.NewCanonicalIssueState(domain.CanonicalIssueStateParts{
+		Disposition: domain.IssueDisposition(disposition),
+		Engagement:  domain.IssueEngagement(strings.TrimSpace(cols.Engagement)),
+		Visibility:  domain.IssueVisibility(strings.TrimSpace(cols.Visibility)),
 	})
 	if err != nil {
-		return domain.IssueState{}, fmt.Errorf("issue %s v2 state: %w", issueID, err)
+		return domain.IssueState{}, fmt.Errorf("issue %s canonical state: %w", issueID, err)
 	}
 	return state, nil
 }
@@ -125,12 +325,14 @@ func issueStateWithLifecycle(state domain.IssueState, lifecycle domain.IssueWork
 		Review:       domain.IssueReviewNone,
 		CloseOutcome: domain.IssueCloseNone,
 		Archive:      state.Archive(),
-		Deletion:     state.Deletion(),
 	})
 }
 
 func issueStateWriteValuesFromState(state domain.IssueState, archivedAt any) issueStateWriteValues {
 	return issueStateWriteValues{
+		Disposition:   string(state.Disposition),
+		Engagement:    string(state.Engagement),
+		Visibility:    string(state.Visibility),
 		LegacyStatus:  string(legacyStatusFromIssueState(state)),
 		Lifecycle:     string(state.Workflow()),
 		ClosedOutcome: string(state.CloseOutcome()),
@@ -294,9 +496,10 @@ func hasParentChildOrphanConfirmation(ctx context.Context) bool {
 }
 
 const (
-	nextAlphaIssueIndexMetaKey = "issue:id_next_alpha_index"
-	sqliteBusyPrimaryCode      = 5
-	sqliteBusyRetryDelay       = 100 * time.Millisecond
+	nextAlphaIssueIndexMetaKey  = "issue:id_next_alpha_index"
+	sqliteBusyPrimaryCode       = 5
+	defaultSQLiteBusyTimeout    = 5 * time.Second
+	defaultSQLiteBusyRetryDelay = 100 * time.Millisecond
 	// Keep at least one foreground reader available while Linear sync owns a write connection.
 	sqliteMaxOpenConns         = 4
 	issueGraphClosureProjectID = "default"
@@ -304,18 +507,68 @@ const (
 
 // Client wraps local SQLite task store operations.
 type Client struct {
-	dbPath string
-	logger *slog.Logger
+	dbPath                string
+	logger                *slog.Logger
+	sqliteBusyTimeout     time.Duration
+	sqliteBusyRetryBudget time.Duration
+	sqliteBusyRetryDelay  time.Duration
+	sqliteBusyWait        func(context.Context, time.Duration) error
 
 	mu             sync.Mutex
 	db             *sql.DB
 	walMu          sync.Mutex
 	lastWALCheckAt time.Time
 
-	stateModelV2MigrationFailureHook func(stage string) error
-	boardViewsMigrationFailureHook   func(stage string) error
-	interactionMu                    sync.RWMutex
-	interactionCache                 map[string]domain.InteractionRequest
+	stateModelV2MigrationFailureHook   func(stage string) error
+	boardViewsMigrationFailureHook     func(stage string) error
+	humanAuthorityMigrationFailureHook func(stage string) error
+	interactionMu                      sync.RWMutex
+	interactionCache                   map[string]domain.InteractionRequest
+}
+
+// ClientOption configures optional issue-store behavior while preserving
+// production defaults for ordinary constructors.
+type ClientOption func(*Client)
+
+// WithSQLiteBusyPolicy overrides the SQLite busy timeout and retry backoff.
+// It is primarily useful for bounded callers and deterministic tests.
+func WithSQLiteBusyPolicy(timeout, retryDelay time.Duration) ClientOption {
+	return func(c *Client) {
+		if timeout > 0 {
+			c.sqliteBusyTimeout = timeout
+			c.sqliteBusyRetryBudget = timeout
+		}
+		if retryDelay > 0 {
+			c.sqliteBusyRetryDelay = retryDelay
+		}
+	}
+}
+
+func withSQLiteBusyRetryBudget(budget time.Duration) ClientOption {
+	return func(c *Client) {
+		if budget > 0 {
+			c.sqliteBusyRetryBudget = budget
+		}
+	}
+}
+
+func withSQLiteBusyWait(wait func(context.Context, time.Duration) error) ClientOption {
+	return func(c *Client) {
+		if wait != nil {
+			c.sqliteBusyWait = wait
+		}
+	}
+}
+
+func waitSQLiteBusyRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 type sqlIssueExecer interface {
@@ -333,17 +586,30 @@ type sqlIssueDBTX interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-var issueMutationLocks sync.Map
-
 // WithMutationLock serializes issue-store writes that must not interleave with
 // multi-step daemon side effects for the same SQLite database.
 func (c *Client) WithMutationLock(ctx context.Context, fn func(context.Context) error) error {
-	return c.withMutationLock(ctx, fn)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if locked, _ := ctx.Value(issueMutationLockKey{}).(bool); locked {
+		return fn(ctx)
+	}
+	lock := issueOperationLockForPath(c.dbPath)
+	lock.Lock()
+	defer lock.Unlock()
+	return fn(context.WithValue(ctx, issueMutationLockKey{}, true))
 }
 
 func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) error) error {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	// Initialization performs coordinated startup repairs of its own. Complete
+	// it before taking the steady-state write lock so a first mutation cannot
+	// recursively acquire the same canonical database lock.
+	if _, err := c.dbHandle(); err != nil {
+		return err
 	}
 	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "issue_store.mutation_lock",
 		"dependency.name", "sqlite",
@@ -351,36 +617,31 @@ func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) 
 	)
 	var spanErr error
 	defer func() { endSpan(spanErr) }()
-	if locked, _ := ctx.Value(issueMutationLockKey{}).(bool); locked {
-		spanErr = fn(ctx)
-		return spanErr
+	runWrite := func(lockCtx context.Context) error {
+		return sqliteutil.WithWriteLockContext(lockCtx, c.dbPath, fn)
 	}
-	lock := issueMutationLockForPath(c.dbPath)
-	spanErr = func() error {
-		lock.Lock()
-		defer lock.Unlock()
-		return fn(context.WithValue(ctx, issueMutationLockKey{}, true))
-	}()
+	if locked, _ := ctx.Value(issueMutationLockKey{}).(bool); locked {
+		spanErr = runWrite(ctx)
+	} else {
+		spanErr = c.WithMutationLock(ctx, runWrite)
+	}
 	if spanErr == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
 	}
 	return spanErr
 }
 
-func issueMutationLockForPath(dbPath string) *sync.Mutex {
-	key := strings.TrimSpace(dbPath)
-	if abs, err := filepath.Abs(key); err == nil {
-		key = filepath.Clean(abs)
-	}
+func issueOperationLockForPath(dbPath string) *sync.Mutex {
+	key := sqliteutil.CanonicalPath(dbPath)
 	if key == "" {
 		key = "."
 	}
-	value, _ := issueMutationLocks.LoadOrStore(key, &sync.Mutex{})
+	value, _ := issueOperationLocks.LoadOrStore(key, &sync.Mutex{})
 	return value.(*sync.Mutex)
 }
 
 // NewClient creates a SQLite-backed issue store client rooted at the repository.
-func NewClient(repoDir string, logger *slog.Logger) *Client {
+func NewClient(repoDir string, logger *slog.Logger, opts ...ClientOption) *Client {
 	dbPath, err := resolveDBPath(repoDir)
 	if err != nil {
 		// Keep daemon bootstrap non-fatal and surface DB errors on first operation.
@@ -396,18 +657,28 @@ func NewClient(repoDir string, logger *slog.Logger) *Client {
 		}
 		dbPath = filepath.Join(fallbackRoot, ".azedarach", "azedarach.db")
 	}
-	return NewClientAtPath(dbPath, logger)
+	return NewClientAtPath(dbPath, logger, opts...)
 }
 
 // NewClientAtPath creates a SQLite-backed issue store client for tests and explicit wiring.
-func NewClientAtPath(dbPath string, logger *slog.Logger) *Client {
+func NewClientAtPath(dbPath string, logger *slog.Logger, opts ...ClientOption) *Client {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Client{
-		dbPath: dbPath,
-		logger: logger,
+	client := &Client{
+		dbPath:                dbPath,
+		logger:                logger,
+		sqliteBusyTimeout:     defaultSQLiteBusyTimeout,
+		sqliteBusyRetryBudget: defaultSQLiteBusyTimeout,
+		sqliteBusyRetryDelay:  defaultSQLiteBusyRetryDelay,
+		sqliteBusyWait:        waitSQLiteBusyRetry,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(client)
+		}
+	}
+	return client
 }
 
 func (c *Client) dbHandle() (*sql.DB, error) {
@@ -418,12 +689,8 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 	if c.db != nil {
 		return c.db, nil
 	}
-	if refusedPath := strings.TrimSpace(os.Getenv(refuseDBPathEnv)); refusedPath != "" {
-		dbPath, dbPathErr := canonicalDBPath(c.dbPath)
-		refusedDBPath, refusedPathErr := canonicalDBPath(refusedPath)
-		if dbPathErr == nil && refusedPathErr == nil && dbPath == refusedDBPath {
-			return nil, c.wrapError("open-db", "", fmt.Errorf("refusing configured issue database path: %s", dbPath))
-		}
+	if err := dbpathguard.Check(c.dbPath); err != nil {
+		return nil, c.wrapError("open-db", "", fmt.Errorf("refuse issue database: %w", err))
 	}
 
 	dbDir := filepath.Dir(c.dbPath)
@@ -433,9 +700,11 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		}
 	}
 
+	busyTimeoutMillis := max(min(c.sqliteBusyTimeout, c.sqliteBusyRetryDelay).Milliseconds(), int64(1))
 	dsn := fmt.Sprintf(
-		"file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate",
+		"file:%s?_pragma=busy_timeout(%d)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate",
 		filepath.ToSlash(c.dbPath),
+		busyTimeoutMillis,
 	)
 	db, err := tracesqlite.Open(dsn)
 	if err != nil {
@@ -462,10 +731,6 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		return nil, c.wrapError("open-db", "", err)
 	}
 	migrationsDoneAt := time.Now()
-	if err := c.ensureIssueOwnershipSchema(db); err != nil {
-		_ = db.Close()
-		return nil, c.wrapError("open-db", "", err)
-	}
 	if err := c.normalizeDependencyEnumRows(db); err != nil {
 		_ = db.Close()
 		return nil, c.wrapError("open-db", "", err)
@@ -517,42 +782,6 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		)
 	}
 	return c.db, nil
-}
-
-func canonicalDBPath(path string) (string, error) {
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	if resolvedPath, err := filepath.EvalSymlinks(absPath); err == nil {
-		absPath = resolvedPath
-	}
-	return filepath.Clean(absPath), nil
-}
-
-func (c *Client) ensureIssueOwnershipSchema(db *sql.DB) error {
-	for _, column := range []struct {
-		name string
-		ddl  string
-	}{
-		{"owner_id", "TEXT"},
-		{"owner_kind", "TEXT"},
-		{"owner_claimed_at", "TEXT"},
-		{"owner_expires_at", "TEXT"},
-	} {
-		if err := ensureSQLiteColumn(db, "issues", column.name, column.ddl); err != nil {
-			return fmt.Errorf("ensure issue ownership schema: %w", err)
-		}
-	}
-	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_issues_owner_active`); err != nil {
-		return fmt.Errorf("ensure issue ownership schema: %w", err)
-	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_issues_owner_active
-		ON issues (owner_id, owner_expires_at)
-		WHERE archived_at IS NULL AND owner_id IS NOT NULL`); err != nil {
-		return fmt.Errorf("ensure issue ownership schema: %w", err)
-	}
-	return nil
 }
 
 func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
@@ -619,6 +848,11 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 	if err := ensureSQLiteColumn(db, "daemon_session_projections", "activity_source", "TEXT"); err != nil {
 		return fmt.Errorf("ensure runtime projection schema: %w", err)
 	}
+	for _, column := range []struct{ name, ddl string }{{"role", "TEXT NOT NULL DEFAULT 'worker'"}, {"scope_kind", "TEXT NOT NULL DEFAULT 'issue'"}, {"scope_id", "TEXT NOT NULL DEFAULT ''"}} {
+		if err := ensureSQLiteColumn(db, "daemon_session_projections", column.name, column.ddl); err != nil {
+			return fmt.Errorf("ensure runtime projection schema: %w", err)
+		}
+	}
 	for _, column := range []struct {
 		name string
 		ddl  string
@@ -628,6 +862,9 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 		{"activity", "TEXT"},
 		{"activity_source", "TEXT"},
 		{"tmux_attached_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"role", "TEXT NOT NULL DEFAULT 'worker'"},
+		{"scope_kind", "TEXT NOT NULL DEFAULT 'issue'"},
+		{"scope_id", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := ensureSQLiteColumn(db, "daemon_session_observations", column.name, column.ddl); err != nil {
 			return fmt.Errorf("ensure runtime projection schema: %w", err)
@@ -640,6 +877,22 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 }
 
 func migrateRuntimeSessionObservations(db *sql.DB) error {
+	logicalIdentity := false
+	var logicalColumns int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_xinfo('daemon_session_observations') WHERE name='logical_id'`).Scan(&logicalColumns); err == nil {
+		logicalIdentity = logicalColumns > 0
+	}
+	if logicalIdentity {
+		if _, err := db.Exec(`DELETE FROM daemon_session_observations WHERE EXISTS(SELECT 1 FROM daemon_session_projections p WHERE p.project_id=daemon_session_observations.project_id AND p.session_id=daemon_session_observations.session_id AND instr(p.session_id,'.pane-')>0);
+			INSERT INTO daemon_session_observations(project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,tmux_attached_count,started_at,updated_at)
+			SELECT project_id,session_id,issue_id,role,scope_kind,scope_id,state,observed_state,activity,activity_source,COALESCE(tmux_attached_count,0),started_at,updated_at
+			FROM daemon_session_projections WHERE instr(session_id,'.pane-')>0
+			ON CONFLICT DO UPDATE SET session_id=excluded.session_id,issue_id=excluded.issue_id,role=excluded.role,scope_kind=excluded.scope_kind,scope_id=excluded.scope_id,state=excluded.state,observed_state=excluded.observed_state,activity=excluded.activity,activity_source=excluded.activity_source,tmux_attached_count=excluded.tmux_attached_count,started_at=excluded.started_at,updated_at=excluded.updated_at;
+			DELETE FROM daemon_session_projections WHERE instr(session_id,'.pane-')>0`); err != nil {
+			return err
+		}
+		return nil
+	}
 	if _, err := db.Exec(`
 		INSERT INTO daemon_session_observations (
 			project_id,
@@ -795,7 +1048,7 @@ func (c *Client) normalizeProviderDisplayKeyIssueIDs(ctx context.Context, db *sq
 	rows, err := db.QueryContext(ctx, `
 		SELECT id
 		FROM issues
-		WHERE archived_at IS NULL
+		WHERE visibility = 'live'
 		ORDER BY id
 	`)
 	if err != nil {
@@ -903,6 +1156,9 @@ func (c *Client) migrateProviderDisplayKeyIssueID(ctx context.Context, tx *sql.T
 			title,
 			description,
 			status,
+			disposition,
+			engagement,
+			visibility,
 			priority,
 			issue_type,
 			created_at,
@@ -926,6 +1182,9 @@ func (c *Client) migrateProviderDisplayKeyIssueID(ctx context.Context, tx *sql.T
 			title,
 			description,
 			status,
+			disposition,
+			engagement,
+			visibility,
 			priority,
 			issue_type,
 			created_at,
@@ -958,8 +1217,8 @@ func (c *Client) migrateProviderDisplayKeyIssueID(ctx context.Context, tx *sql.T
 		{`UPDATE spec_requirements SET issue_id = ? WHERE issue_id = ?`, []any{migration.NewID, migration.OldID}},
 		{`UPDATE spec_links SET issue_id = ? WHERE issue_id = ?`, []any{migration.NewID, migration.OldID}},
 		{`UPDATE issue_external_refs SET issue_id = ?, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, now, migration.OldID}},
-		{`UPDATE daemon_session_projections SET issue_id = ?, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, now, migration.OldID}},
-		{`UPDATE daemon_session_observations SET issue_id = ?, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, now, migration.OldID}},
+		{`UPDATE daemon_session_projections SET issue_id = ?, scope_id = CASE WHEN scope_id = ? THEN ? ELSE scope_id END, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, migration.OldID, migration.NewID, now, migration.OldID}},
+		{`UPDATE daemon_session_observations SET issue_id = ?, scope_id = CASE WHEN scope_id = ? THEN ? ELSE scope_id END, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, migration.OldID, migration.NewID, now, migration.OldID}},
 		{`UPDATE daemon_worktree_projections SET issue_id = ?, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, now, migration.OldID}},
 	}
 	for _, stmt := range statements {
@@ -1043,18 +1302,17 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 			COALESCE(labels_json, '[]'),
 			estimate,
 			status,
-			COALESCE(lifecycle_state, ''),
-			COALESCE(closed_outcome, ''),
-			COALESCE(review_state, ''),
+			COALESCE(disposition, ''),
+			COALESCE(engagement, ''),
+			COALESCE(visibility, ''),
 			archived_at,
-			deleted_at,
 			priority,
 			issue_type,
 			COALESCE(implementations_json, '[]'),
 			created_at,
 			updated_at
 		FROM issues
-		WHERE archived_at IS NULL
+		WHERE visibility = 'live'
 		ORDER BY updated_at DESC
 	`)
 	if err != nil {
@@ -1065,6 +1323,12 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 
 // ListWithRuntime fetches active issues and runtime projection fields using a single joined SQLite query.
 func (c *Client) ListWithRuntime(ctx context.Context, projectID string) ([]domain.Task, error) {
+	return c.ListWithRuntimeArchiveMode(ctx, projectID, ArchiveExclude)
+}
+
+// ListWithRuntimeArchiveMode fetches full issue bodies, all dependency edges,
+// and joined runtime projections for user-level cross-project projection.
+func (c *Client) ListWithRuntimeArchiveMode(ctx context.Context, projectID string, archiveMode ArchiveMode) ([]domain.Task, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return nil, err
@@ -1073,7 +1337,7 @@ func (c *Client) ListWithRuntime(ctx context.Context, projectID string) ([]domai
 	if projectID == "" {
 		projectID = "default"
 	}
-	tasks, err := c.queryTasksWithRuntime(ctx, db, projectID)
+	tasks, err := c.queryTasksWithRuntimeArchiveMode(ctx, db, projectID, archiveMode)
 	if err != nil {
 		return nil, c.wrapError("list-with-runtime", projectID, err)
 	}
@@ -1259,10 +1523,11 @@ func (c *Client) HydrateRuntime(ctx context.Context, projectID string, tasks []d
 	return out, nil
 }
 
-// ListGraphReadinessWithRuntime fetches the root graph plus direct dependency
-// context needed by daemon graph-readiness checks. The read scales with the
-// requested root graph instead of all active issues in the project.
-func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, rootID string) ([]domain.Task, error) {
+// ListGraphReadinessWithRuntime is the single indexed candidate read for rooted
+// and project orchestration. A root selects its graph closure; an empty root
+// selects a bounded project candidate window. Final semantics are always
+// applied by domain.AssessOrchestrationCandidate after hydration.
+func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, rootID string, projectLimit ...int) ([]domain.Task, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return nil, err
@@ -1273,7 +1538,24 @@ func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, r
 	}
 	rootID = strings.TrimSpace(rootID)
 	if rootID == "" {
-		return []domain.Task{}, nil
+		limit := 50
+		if len(projectLimit) > 0 && projectLimit[0] > 0 {
+			limit = projectLimit[0]
+		}
+		issueIDs, err := c.projectGraphReadinessContextIDs(ctx, db, limit)
+		if err != nil {
+			return nil, c.wrapError("list-graph-readiness-with-runtime", projectID, err)
+		}
+		if len(issueIDs) == 0 {
+			return []domain.Task{}, nil
+		}
+		// Project stewardship is bounded and needs contract fields for
+		// executability assessment. Rooted graph reads remain summary-only.
+		tasks, err := c.queryTasksWithRuntimeProjection(ctx, db, projectID, true, taskDependencyLoadAll, ArchiveExclude, issueIDs...)
+		if err != nil {
+			return nil, c.wrapError("list-graph-readiness-with-runtime", projectID, err)
+		}
+		return tasks, nil
 	}
 	issueIDs, err := c.graphReadinessContextIDs(ctx, db, rootID)
 	if err != nil {
@@ -1287,6 +1569,63 @@ func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, r
 		return nil, c.wrapError("list-graph-readiness-with-runtime", rootID, err)
 	}
 	return tasks, nil
+}
+
+// CountOpenOrchestrationIssues returns the project-wide durable lifecycle count
+// used by the rootless safety threshold. It deliberately does not hydrate
+// candidates or duplicate candidate-selection semantics.
+func (c *Client) CountOpenOrchestrationIssues(ctx context.Context) (int, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return 0, err
+	}
+	var count int
+	err = db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM issues INDEXED BY idx_issues_status_deleted_priority_updated
+		WHERE visibility = 'live'
+		  AND status IN ('open', 'in_progress', 'in_review')
+	`).Scan(&count)
+	if err != nil {
+		return 0, c.wrapError("count-open-orchestration-issues", "", err)
+	}
+	return count, nil
+}
+
+func (c *Client) projectGraphReadinessContextIDs(ctx context.Context, db *sql.DB, limit int) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		WITH candidates(id) AS (
+			SELECT id FROM issues INDEXED BY idx_issues_status_deleted_priority_updated
+			WHERE visibility = 'live'
+			  AND disposition IN ('backlog','ready')
+			ORDER BY priority ASC, updated_at ASC, id ASC
+			LIMIT ?
+		), context(id) AS (
+			SELECT id FROM candidates
+			UNION SELECT closure.ancestor_id FROM candidates c
+			JOIN issue_graph_closure closure INDEXED BY idx_issue_graph_closure_descendant
+			  ON closure.descendant_id = c.id
+			WHERE closure.project_id = ? AND closure.dependency_type = ?
+			UNION SELECT dep.depends_on_id FROM candidates c
+			JOIN issue_dependencies dep INDEXED BY idx_dependencies_issue_active_type
+			  ON dep.issue_id = c.id AND dep.tombstoned_at IS NULL
+		)
+		SELECT id FROM context ORDER BY id
+	`, limit, issueGraphClosureProjectID, string(domain.DependencyParentChild))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0, limit*2)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if id = strings.TrimSpace(id); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, rows.Err()
 }
 
 // ListParentChildSubtreeWithRuntime fetches the requested issue and active
@@ -1570,7 +1909,7 @@ func dependencyContextIDsQuery(ids []string, opts dependencyContextOptions) (str
 		FROM (
 			SELECT id
 			FROM issues
-			WHERE archived_at IS NULL AND id IN (%s)
+			WHERE visibility = 'live' AND id IN (%s)
 			UNION ALL
 			SELECT depends_on_id AS id
 			FROM issue_dependencies
@@ -1654,7 +1993,7 @@ func graphReadinessContextIDsQuery(rootID string) (string, []any) {
 		WITH graph(id) AS (
 			SELECT id
 			FROM issues
-			WHERE id = ? AND archived_at IS NULL
+			WHERE id = ? AND visibility = 'live'
 
 			UNION
 
@@ -1662,7 +2001,7 @@ func graphReadinessContextIDsQuery(rootID string) (string, []any) {
 			FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_ancestor
 			INNER JOIN issues child
 				ON child.id = closure.descendant_id
-				AND child.archived_at IS NULL
+				AND child.visibility = 'live'
 			WHERE closure.project_id = ?
 				AND closure.dependency_type = ?
 				AND closure.ancestor_id = ?
@@ -1678,7 +2017,7 @@ func graphReadinessContextIDsQuery(rootID string) (string, []any) {
 			CROSS JOIN issues dep_issue
 			WHERE dep.issue_id = graph_issue.id
 				AND dep_issue.id = dep.depends_on_id
-				AND dep_issue.archived_at IS NULL
+				AND dep_issue.visibility = 'live'
 				AND dep.tombstoned_at IS NULL
 		)
 		SELECT id
@@ -1696,7 +2035,7 @@ func parentChildSubtreeIDsQuery(rootID string) (string, []any) {
 	query := `
 		SELECT id
 		FROM issues
-		WHERE id = ? AND archived_at IS NULL
+		WHERE id = ? AND visibility = 'live'
 
 		UNION
 
@@ -1704,7 +2043,7 @@ func parentChildSubtreeIDsQuery(rootID string) (string, []any) {
 		FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_ancestor
 		INNER JOIN issues child
 			ON child.id = closure.descendant_id
-			AND child.archived_at IS NULL
+			AND child.visibility = 'live'
 		WHERE closure.project_id = ?
 			AND closure.dependency_type = ?
 			AND closure.ancestor_id = ?
@@ -1816,7 +2155,7 @@ func parentAncestorIDsQuery(issueIDs []string) (string, []any) {
 		SELECT DISTINCT closure.ancestor_id
 		FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_descendant
 		JOIN issues i ON i.id = closure.ancestor_id
-		WHERE i.archived_at IS NULL
+		WHERE i.visibility = 'live'
 			AND closure.project_id = ?
 			AND closure.dependency_type = ?
 			AND closure.descendant_id IN (%s)
@@ -1885,7 +2224,7 @@ func (c *Client) listGraphDescendantIDs(ctx context.Context, queryer sqlIssueDBT
 		FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_ancestor
 		INNER JOIN issues descendant
 			ON descendant.id = closure.descendant_id
-			AND descendant.archived_at IS NULL
+			AND descendant.visibility = 'live'
 		WHERE closure.project_id = ?
 			AND closure.dependency_type = ?
 			AND closure.ancestor_id = ?
@@ -1907,7 +2246,7 @@ func (c *Client) listGraphAncestorIDs(ctx context.Context, queryer sqlIssueDBTX,
 		FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_descendant
 		INNER JOIN issues ancestor
 			ON ancestor.id = closure.ancestor_id
-			AND ancestor.archived_at IS NULL
+			AND ancestor.visibility = 'live'
 		WHERE closure.project_id = ?
 			AND closure.dependency_type = ?
 			AND closure.descendant_id = ?
@@ -1978,11 +2317,10 @@ func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error
 			COALESCE(labels_json, '[]'),
 			estimate,
 			status,
-			COALESCE(lifecycle_state, ''),
-			COALESCE(closed_outcome, ''),
-			COALESCE(review_state, ''),
+			COALESCE(disposition, ''),
+			COALESCE(engagement, ''),
+			COALESCE(visibility, ''),
 			archived_at,
-			deleted_at,
 			priority,
 			issue_type,
 			COALESCE(implementations_json, '[]'),
@@ -1990,7 +2328,7 @@ func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error
 			updated_at
 		FROM issues
 		WHERE
-			archived_at IS NULL
+			visibility = 'live'
 			AND (id LIKE ? OR title LIKE ? OR description LIKE ?)
 		ORDER BY updated_at DESC
 		LIMIT 200
@@ -2019,11 +2357,10 @@ func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 			COALESCE(i.labels_json, '[]'),
 			i.estimate,
 			i.status,
-			COALESCE(i.lifecycle_state, ''),
-			COALESCE(i.closed_outcome, ''),
-			COALESCE(i.review_state, ''),
+			COALESCE(i.disposition, ''),
+			COALESCE(i.engagement, ''),
+			COALESCE(i.visibility, ''),
 			i.archived_at,
-			i.deleted_at,
 			i.priority,
 			i.issue_type,
 			COALESCE(i.implementations_json, '[]'),
@@ -2031,8 +2368,9 @@ func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 			i.updated_at
 		FROM issues i
 		WHERE
-			i.archived_at IS NULL
-			AND i.lifecycle_state = 'open'
+			i.visibility = 'live'
+			AND i.disposition = 'ready'
+			AND i.engagement = 'idle'
 			AND NOT EXISTS (
 				SELECT 1
 				FROM issue_dependencies d
@@ -2041,8 +2379,8 @@ func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 					d.issue_id = i.id
 					AND d.tombstoned_at IS NULL
 					AND d.dependency_type = 'blocks'
-					AND dep.archived_at IS NULL
-					AND dep.lifecycle_state != 'closed'
+					AND dep.visibility = 'live'
+					AND dep.disposition NOT IN ('completed','cancelled')
 			)
 		ORDER BY i.priority ASC, i.updated_at DESC
 	`)
@@ -2054,13 +2392,58 @@ func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 
 // Update changes an issue status.
 func (c *Client) Update(ctx context.Context, id string, status domain.Status) error {
-	return retrySQLiteBusy(ctx, func() error {
+	return c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
-			return sqliteutil.WithWriteLock(c.dbPath, func() error {
-				return c.updateLocked(ctx, id, status)
-			})
+			return c.updateLocked(ctx, id, status)
 		})
 	})
+}
+
+// RepairReadyIdleEngagement atomically promotes the compatibility store shape
+// for canonical ready+idle to ready+working. It deliberately uses a guarded
+// update so a concurrent terminal/backlog/archive transition always wins.
+func (c *Client) RepairReadyIdleEngagement(ctx context.Context, id string) (bool, error) {
+	var repaired bool
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return c.wrapError("repair-ready-idle", id, err)
+			}
+			defer func() {
+				if tx != nil {
+					_ = tx.Rollback()
+				}
+			}()
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			res, err := tx.ExecContext(ctx, `UPDATE issues
+					SET engagement='working', status=?, lifecycle_state='active', review_state='none', closed_outcome='none', updated_at=?
+					WHERE id=? AND disposition='ready' AND engagement='idle' AND visibility='live'`, domain.StatusInProgress, now, strings.TrimSpace(id))
+			if err != nil {
+				return c.wrapError("repair-ready-idle", id, err)
+			}
+			affected, err := res.RowsAffected()
+			if err != nil {
+				return c.wrapError("repair-ready-idle", id, err)
+			}
+			if affected == 1 {
+				if err := c.appendIssueObservationEvent(ctx, tx, strings.TrimSpace(id), domain.IssueEventIssueStatusChanged, map[string]any{"from_status": string(domain.StatusOpen), "to_status": string(domain.StatusInProgress), "reason": "live_managed_runtime"}); err != nil {
+					return c.wrapError("repair-ready-idle", id, err)
+				}
+				repaired = true
+			}
+			if err := tx.Commit(); err != nil {
+				return c.wrapError("repair-ready-idle", id, err)
+			}
+			tx = nil
+			return nil
+		})
+	})
+	return repaired, err
 }
 
 func (c *Client) updateLocked(ctx context.Context, id string, status domain.Status) error {
@@ -2083,21 +2466,19 @@ func (c *Client) updateLocked(ctx context.Context, id string, status domain.Stat
 	if err := tx.QueryRowContext(ctx, `
 		SELECT
 			status,
-			COALESCE(lifecycle_state, ''),
-			COALESCE(closed_outcome, ''),
-			COALESCE(review_state, ''),
+			COALESCE(disposition, ''),
+			COALESCE(engagement, ''),
+			COALESCE(visibility, ''),
 			archived_at,
-			deleted_at,
 			priority
 		FROM issues
-		WHERE id = ? AND archived_at IS NULL
+		WHERE id = ? AND visibility = 'live'
 	`, id).Scan(
 		&oldStateCols.LegacyStatus,
-		&oldStateCols.Lifecycle,
-		&oldStateCols.ClosedOutcome,
-		&oldStateCols.Review,
+		&oldStateCols.Disposition,
+		&oldStateCols.Engagement,
+		&oldStateCols.Visibility,
 		&oldStateCols.ArchivedAt,
-		&oldStateCols.DeletedAt,
 		&oldPriorityRaw,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -2134,6 +2515,9 @@ func (c *Client) updateLocked(ctx context.Context, id string, status domain.Stat
 	res, err := tx.ExecContext(ctx, `
 		UPDATE issues
 		SET
+			disposition = ?,
+			engagement = ?,
+			visibility = ?,
 			status = ?,
 			lifecycle_state = ?,
 			closed_outcome = ?,
@@ -2142,8 +2526,8 @@ func (c *Client) updateLocked(ctx context.Context, id string, status domain.Stat
 			deleted_at = ?,
 			updated_at = ?,
 			closed_at = ?
-		WHERE id = ? AND archived_at IS NULL
-	`, writeState.LegacyStatus, writeState.Lifecycle, writeState.ClosedOutcome, writeState.Review, writeState.ArchivedAt, writeState.ArchivedAt, now, closedAt, id)
+		WHERE id = ? AND visibility = 'live'
+	`, writeState.Disposition, writeState.Engagement, writeState.Visibility, writeState.LegacyStatus, writeState.Lifecycle, writeState.ClosedOutcome, writeState.Review, writeState.ArchivedAt, writeState.ArchivedAt, now, closedAt, id)
 	if err != nil {
 		return c.wrapError("update", id, err)
 	}
@@ -2216,80 +2600,93 @@ func (c *Client) claimOwnership(ctx context.Context, issueID string, params Owne
 		return c.wrapError("claim-ownership", issueID, fmt.Errorf("invalid ownership purpose %q", purpose))
 	}
 	return c.withMutationLock(ctx, func(ctx context.Context) error {
-		return sqliteutil.WithWriteLock(c.dbPath, func() error {
-			db, err := c.dbHandle()
-			if err != nil {
-				return err
+		db, err := c.dbHandle()
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return c.wrapError("claim-ownership", issueID, err)
+		}
+		defer func() {
+			if tx != nil {
+				_ = tx.Rollback()
 			}
-			tx, err := db.BeginTx(ctx, nil)
-			if err != nil {
-				return c.wrapError("claim-ownership", issueID, err)
-			}
-			defer func() {
-				if tx != nil {
-					_ = tx.Rollback()
-				}
-			}()
+		}()
 
-			task, err := c.issueOwnershipForUpdate(ctx, tx, issueID)
-			if err != nil {
-				return c.wrapError("claim-ownership", issueID, err)
-			}
-			now := time.Now().UTC()
-			var lease *domain.CoordinationLease
-			if purpose == domain.CoordinationLeaseExecution && task.Ownership != nil {
-				lease = &domain.CoordinationLease{Purpose: purpose, OwnerID: task.Ownership.OwnerID, OwnerKind: task.Ownership.OwnerKind, ClaimedAt: task.Ownership.ClaimedAt, ExpiresAt: task.Ownership.ExpiresAt}
-			} else {
-				lease, err = coordinationLeaseForUpdate(ctx, tx, issueID, purpose)
-				if err != nil {
-					return c.wrapError("claim-ownership", issueID, err)
-				}
-			}
-			if lease != nil && !lease.IsExpired(now) && !strings.EqualFold(lease.OwnerID, ownerID) && !params.Force {
-				return c.wrapError("claim-ownership", issueID, fmt.Errorf("%w: %s lease owned by %s", domain.ErrConflict, purpose, lease.OwnerID))
-			}
-			var expiresAt any
-			var expiresPayload any
-			if params.TTL > 0 {
-				expires := now.Add(params.TTL).UTC()
-				expiresAt = expires.Format(time.RFC3339Nano)
-				expiresPayload = expiresAt
-			}
-			nowRaw := now.Format(time.RFC3339Nano)
-			if _, err := tx.ExecContext(ctx, `INSERT INTO issue_coordination_leases
+		_, err = c.issueOwnershipForUpdate(ctx, tx, issueID)
+		if err != nil {
+			return c.wrapError("claim-ownership", issueID, err)
+		}
+		if err := issueLeaseEligibilityForUpdate(ctx, tx, issueID, purpose); err != nil {
+			return c.wrapError("claim-ownership", issueID, err)
+		}
+		now := time.Now().UTC()
+		var lease *domain.CoordinationLease
+		lease, err = coordinationLeaseForUpdate(ctx, tx, issueID, purpose)
+		if err != nil {
+			return c.wrapError("claim-ownership", issueID, err)
+		}
+		if lease != nil && !lease.IsExpired(now) && !strings.EqualFold(lease.OwnerID, ownerID) && !params.Force {
+			return c.wrapError("claim-ownership", issueID, fmt.Errorf("%w: %s lease owned by %s", domain.ErrConflict, purpose, lease.OwnerID))
+		}
+		var expiresAt any
+		var expiresPayload any
+		if params.TTL > 0 {
+			expires := now.Add(params.TTL).UTC()
+			expiresAt = expires.Format(time.RFC3339Nano)
+			expiresPayload = expiresAt
+		}
+		nowRaw := now.Format(time.RFC3339Nano)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_coordination_leases
 				(issue_id, purpose, owner_id, owner_kind, claimed_at, expires_at)
 				VALUES (?, ?, ?, ?, ?, ?)
 				ON CONFLICT(issue_id, purpose) DO UPDATE SET owner_id=excluded.owner_id,
 				owner_kind=excluded.owner_kind, claimed_at=excluded.claimed_at, expires_at=excluded.expires_at`,
-				issueID, purpose, ownerID, ownerKind, nowRaw, expiresAt); err != nil {
-				return c.wrapError("claim-ownership", issueID, err)
-			}
-			if purpose == domain.CoordinationLeaseExecution {
-				if _, err := tx.ExecContext(ctx, `
-				UPDATE issues
-				SET owner_id = ?, owner_kind = ?, owner_claimed_at = ?, owner_expires_at = ?, updated_at = ?
-				WHERE id = ? AND archived_at IS NULL
-			`, ownerID, ownerKind, nowRaw, expiresAt, nowRaw, issueID); err != nil {
-					return c.wrapError("claim-ownership", issueID, err)
-				}
-			}
-			if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, map[string]any{
-				"action":           "claimed",
-				"owner_id":         ownerID,
-				"owner_kind":       ownerKind,
-				"owner_expires_at": expiresPayload,
-				"forced":           params.Force,
-				"purpose":          purpose,
-			}); err != nil {
-				return c.wrapError("claim-ownership", issueID, err)
-			}
-			if err := tx.Commit(); err != nil {
-				return c.wrapError("claim-ownership", issueID, err)
-			}
-			tx = nil
-			return nil
-		})
+			issueID, purpose, ownerID, ownerKind, nowRaw, expiresAt); err != nil {
+			return c.wrapError("claim-ownership", issueID, err)
+		}
+		if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, map[string]any{
+			"action":           "claimed",
+			"owner_id":         ownerID,
+			"owner_kind":       ownerKind,
+			"owner_expires_at": expiresPayload,
+			"forced":           params.Force,
+			"purpose":          purpose,
+		}); err != nil {
+			return c.wrapError("claim-ownership", issueID, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return c.wrapError("claim-ownership", issueID, err)
+		}
+		tx = nil
+		return nil
 	})
+}
+
+func issueLeaseEligibilityForUpdate(ctx context.Context, tx *sql.Tx, issueID string, purpose domain.CoordinationLeasePurpose) error {
+	var disposition, engagement, visibility string
+	if err := tx.QueryRowContext(ctx, `SELECT disposition,engagement,visibility FROM issues WHERE id=?`, issueID).Scan(&disposition, &engagement, &visibility); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.ErrNotFound
+		}
+		return err
+	}
+	eligible := visibility == string(domain.IssueVisibilityLive)
+	switch purpose {
+	case domain.CoordinationLeaseExecution:
+		eligible = eligible && disposition == string(domain.IssueDispositionReady)
+	case domain.CoordinationLeaseReview:
+		eligible = eligible && disposition == string(domain.IssueDispositionReady) && engagement == string(domain.IssueEngagementReviewRequested)
+	case domain.CoordinationLeaseOrchestration:
+		eligible = eligible && (disposition == string(domain.IssueDispositionBacklog) || disposition == string(domain.IssueDispositionReady))
+	default:
+		eligible = false
+	}
+	if !eligible {
+		return fmt.Errorf("%w: issue state is ineligible for %s lease", domain.ErrConflict, purpose)
+	}
+	return nil
 }
 
 func (c *Client) releaseOwnership(ctx context.Context, issueID string, params OwnershipClaimParams) error {
@@ -2306,88 +2703,72 @@ func (c *Client) releaseOwnership(ctx context.Context, issueID string, params Ow
 		return c.wrapError("release-ownership", issueID, fmt.Errorf("invalid ownership purpose %q", purpose))
 	}
 	return c.withMutationLock(ctx, func(ctx context.Context) error {
-		return sqliteutil.WithWriteLock(c.dbPath, func() error {
-			db, err := c.dbHandle()
-			if err != nil {
-				return err
+		db, err := c.dbHandle()
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return c.wrapError("release-ownership", issueID, err)
+		}
+		defer func() {
+			if tx != nil {
+				_ = tx.Rollback()
 			}
-			tx, err := db.BeginTx(ctx, nil)
-			if err != nil {
-				return c.wrapError("release-ownership", issueID, err)
-			}
-			defer func() {
-				if tx != nil {
-					_ = tx.Rollback()
-				}
-			}()
+		}()
 
-			task, err := c.issueOwnershipForUpdate(ctx, tx, issueID)
-			if err != nil {
-				return c.wrapError("release-ownership", issueID, err)
-			}
-			now := time.Now().UTC()
-			var lease *domain.CoordinationLease
-			if purpose == domain.CoordinationLeaseExecution && task.Ownership != nil {
-				lease = &domain.CoordinationLease{Purpose: purpose, OwnerID: task.Ownership.OwnerID, OwnerKind: task.Ownership.OwnerKind, ClaimedAt: task.Ownership.ClaimedAt, ExpiresAt: task.Ownership.ExpiresAt}
-			} else {
-				lease, err = coordinationLeaseForUpdate(ctx, tx, issueID, purpose)
-				if err != nil {
-					return c.wrapError("release-ownership", issueID, err)
-				}
-			}
-			if lease != nil && !lease.IsExpired(now) && !strings.EqualFold(lease.OwnerID, actorID) && !params.Force {
-				return c.wrapError("release-ownership", issueID, fmt.Errorf("%w: %s lease owned by %s", domain.ErrConflict, purpose, lease.OwnerID))
-			}
-			nowRaw := now.Format(time.RFC3339Nano)
-			if _, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases WHERE issue_id = ? AND purpose = ?`, issueID, purpose); err != nil {
-				return c.wrapError("release-ownership", issueID, err)
-			}
-			if purpose == domain.CoordinationLeaseExecution {
-				if _, err := tx.ExecContext(ctx, `
-				UPDATE issues
-				SET owner_id = NULL, owner_kind = NULL, owner_claimed_at = NULL, owner_expires_at = NULL, updated_at = ?
-				WHERE id = ? AND archived_at IS NULL
-			`, nowRaw, issueID); err != nil {
-					return c.wrapError("release-ownership", issueID, err)
-				}
-			}
-			if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, map[string]any{
-				"action":      "released",
-				"released_by": actorID,
-				"forced":      params.Force,
-				"purpose":     purpose,
-			}); err != nil {
-				return c.wrapError("release-ownership", issueID, err)
-			}
-			if err := tx.Commit(); err != nil {
-				return c.wrapError("release-ownership", issueID, err)
-			}
-			tx = nil
-			return nil
-		})
+		_, err = c.issueOwnershipForUpdate(ctx, tx, issueID)
+		if err != nil {
+			return c.wrapError("release-ownership", issueID, err)
+		}
+		now := time.Now().UTC()
+		var lease *domain.CoordinationLease
+		lease, err = coordinationLeaseForUpdate(ctx, tx, issueID, purpose)
+		if err != nil {
+			return c.wrapError("release-ownership", issueID, err)
+		}
+		if lease != nil && !lease.IsExpired(now) && !strings.EqualFold(lease.OwnerID, actorID) && !params.Force {
+			return c.wrapError("release-ownership", issueID, fmt.Errorf("%w: %s lease owned by %s", domain.ErrConflict, purpose, lease.OwnerID))
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases WHERE issue_id = ? AND purpose = ?`, issueID, purpose); err != nil {
+			return c.wrapError("release-ownership", issueID, err)
+		}
+		if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, map[string]any{
+			"action":      "released",
+			"released_by": actorID,
+			"forced":      params.Force,
+			"purpose":     purpose,
+		}); err != nil {
+			return c.wrapError("release-ownership", issueID, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return c.wrapError("release-ownership", issueID, err)
+		}
+		tx = nil
+		return nil
 	})
 }
 
 func (c *Client) issueOwnershipForUpdate(ctx context.Context, tx *sql.Tx, issueID string) (domain.Task, error) {
-	var (
-		task            domain.Task
-		ownerIDRaw      string
-		ownerKindRaw    string
-		ownerClaimedRaw string
-		ownerExpiresRaw string
-	)
+	var task domain.Task
 	err := tx.QueryRowContext(ctx, `
-		SELECT id, COALESCE(owner_id, ''), COALESCE(owner_kind, ''), COALESCE(owner_claimed_at, ''), COALESCE(owner_expires_at, '')
+		SELECT id
 		FROM issues
-		WHERE id = ? AND archived_at IS NULL
-	`, issueID).Scan(&task.ID, &ownerIDRaw, &ownerKindRaw, &ownerClaimedRaw, &ownerExpiresRaw)
+		WHERE id = ? AND visibility = 'live'
+	`, issueID).Scan(&task.ID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Task{}, domain.ErrNotFound
 		}
 		return domain.Task{}, err
 	}
-	task.Ownership = parseIssueOwnership(ownerIDRaw, ownerKindRaw, ownerClaimedRaw, ownerExpiresRaw)
+	lease, err := coordinationLeaseForUpdate(ctx, tx, issueID, domain.CoordinationLeaseExecution)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if lease != nil {
+		task.Ownership = &domain.IssueOwnership{OwnerID: lease.OwnerID, OwnerKind: lease.OwnerKind, ClaimedAt: lease.ClaimedAt, ExpiresAt: lease.ExpiresAt}
+	}
 	return task, nil
 }
 
@@ -2418,8 +2799,8 @@ func (c *Client) countOpenChildren(ctx context.Context, db sqlIssueQueryer, pare
 			d.depends_on_id = ?
 			AND d.tombstoned_at IS NULL
 			AND d.dependency_type IN ('parent-child', 'parent_child')
-			AND child.archived_at IS NULL
-			AND child.lifecycle_state != 'closed'
+			AND child.visibility = 'live'
+			AND child.disposition NOT IN ('completed','cancelled')
 	`, parentID).Scan(&count)
 	if err != nil {
 		return 0, err
@@ -2458,7 +2839,7 @@ type UpsertExternalIssueRefParams struct {
 // Create inserts a new issue and returns its generated id.
 func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, error) {
 	var issueID string
-	err := retrySQLiteBusy(ctx, func() error {
+	err := c.retrySQLiteBusy(ctx, func() error {
 		var err error
 		issueID, err = c.createOnce(ctx, params)
 		return err
@@ -2472,11 +2853,9 @@ func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, e
 func (c *Client) createOnce(ctx context.Context, params CreateTaskParams) (string, error) {
 	var issueID string
 	err := c.withMutationLock(ctx, func(ctx context.Context) error {
-		return sqliteutil.WithWriteLock(c.dbPath, func() error {
-			var err error
-			issueID, err = c.createOnceLocked(ctx, params)
-			return err
-		})
+		var err error
+		issueID, err = c.createOnceLocked(ctx, params)
+		return err
 	})
 	return issueID, err
 }
@@ -2562,6 +2941,9 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 			title,
 			description,
 			status,
+			disposition,
+			engagement,
+			visibility,
 			priority,
 			issue_type,
 			created_at,
@@ -2580,8 +2962,8 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 			review_state,
 			archived_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, issueID, params.Title, nullableString(params.Description), writeState.LegacyStatus, int(params.Priority), string(issueType), now, now, closedAt, nullableString(params.Assignee), labelsJSON, implementationsJSON, nullableString(params.Design), nullableString(params.Notes), nullableString(params.Acceptance), estimate, writeState.ArchivedAt, writeState.Lifecycle, writeState.ClosedOutcome, writeState.Review, writeState.ArchivedAt); err != nil {
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, issueID, params.Title, nullableString(params.Description), writeState.LegacyStatus, writeState.Disposition, writeState.Engagement, writeState.Visibility, int(params.Priority), string(issueType), now, now, closedAt, nullableString(params.Assignee), labelsJSON, implementationsJSON, nullableString(params.Design), nullableString(params.Notes), nullableString(params.Acceptance), estimate, writeState.ArchivedAt, writeState.Lifecycle, writeState.ClosedOutcome, writeState.Review, writeState.ArchivedAt); err != nil {
 		return "", c.wrapError("create", issueID, err)
 	}
 	createPayload := map[string]any{
@@ -2649,7 +3031,7 @@ func (c *Client) CreateWithRuntime(ctx context.Context, projectID string, params
 		return domain.Task{}, err
 	}
 	var task domain.Task
-	err = retrySQLiteBusy(ctx, func() error {
+	err = c.retrySQLiteBusy(ctx, func() error {
 		var err error
 		task, err = c.GetWithRuntime(ctx, projectID, id)
 		return err
@@ -2660,12 +3042,20 @@ func (c *Client) CreateWithRuntime(ctx context.Context, projectID string, params
 	return task, nil
 }
 
-func retrySQLiteBusy(ctx context.Context, fn func() error) error {
+func (c *Client) retrySQLiteBusy(ctx context.Context, fn func() error) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	retryCtx, cancel := context.WithTimeout(ctx, c.sqliteBusyRetryBudget)
+	defer cancel()
 	var lastErr error
 	for {
+		if retryCtx.Err() != nil {
+			if lastErr != nil {
+				return lastErr
+			}
+			return retryCtx.Err()
+		}
 		err := fn()
 		if err == nil {
 			return nil
@@ -2674,10 +3064,11 @@ func retrySQLiteBusy(ctx context.Context, fn func() error) error {
 			return err
 		}
 		lastErr = err
-		select {
-		case <-ctx.Done():
+		if retryCtx.Err() != nil {
 			return lastErr
-		case <-time.After(sqliteBusyRetryDelay):
+		}
+		if err := c.sqliteBusyWait(retryCtx, c.sqliteBusyRetryDelay); err != nil {
+			return lastErr
 		}
 	}
 }
@@ -2695,6 +3086,16 @@ func IsSQLiteBusy(err error) bool {
 }
 
 func (c *Client) UpsertExternalIssueRef(ctx context.Context, params UpsertExternalIssueRefParams) (domain.ExternalIssueRef, error) {
+	var out domain.ExternalIssueRef
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		out, err = c.upsertExternalIssueRefLocked(lockCtx, params)
+		return err
+	})
+	return out, err
+}
+
+func (c *Client) upsertExternalIssueRefLocked(ctx context.Context, params UpsertExternalIssueRefParams) (domain.ExternalIssueRef, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return domain.ExternalIssueRef{}, err
@@ -3058,6 +3459,9 @@ func (c *Client) reopenClosedParentForActiveChild(ctx context.Context, execer sq
 	if _, err := execer.ExecContext(ctx, `
 		UPDATE issues
 		SET
+			disposition = ?,
+			engagement = ?,
+			visibility = ?,
 			status = ?,
 			lifecycle_state = ?,
 			closed_outcome = ?,
@@ -3068,17 +3472,17 @@ func (c *Client) reopenClosedParentForActiveChild(ctx context.Context, execer sq
 			closed_at = NULL
 		WHERE
 			id = ?
-			AND archived_at IS NULL
-			AND lifecycle_state = 'closed'
+			AND visibility = 'live'
+			AND disposition IN ('completed','cancelled')
 			AND EXISTS (
 				SELECT 1
 				FROM issues child
 				WHERE
 					child.id = ?
-					AND child.archived_at IS NULL
-					AND child.lifecycle_state != 'closed'
+					AND child.visibility = 'live'
+					AND child.disposition NOT IN ('completed','cancelled')
 			)
-	`, writeState.LegacyStatus, writeState.Lifecycle, writeState.ClosedOutcome, writeState.Review, writeState.ArchivedAt, writeState.ArchivedAt, now, parentID, childID); err != nil {
+	`, writeState.Disposition, writeState.Engagement, writeState.Visibility, writeState.LegacyStatus, writeState.Lifecycle, writeState.ClosedOutcome, writeState.Review, writeState.ArchivedAt, writeState.ArchivedAt, now, parentID, childID); err != nil {
 		return err
 	}
 	return nil
@@ -3090,7 +3494,7 @@ func (c *Client) issueExists(ctx context.Context, queryer sqlIssueQueryer, id st
 		SELECT EXISTS(
 			SELECT 1
 			FROM issues
-			WHERE id = ? AND archived_at IS NULL
+			WHERE id = ? AND visibility = 'live'
 		)
 	`, id).Scan(&exists); err != nil {
 		return false, err
@@ -3117,10 +3521,10 @@ func (c *Client) rebuildIssueGraphClosure(ctx context.Context, execer sqlIssueEx
 			FROM issue_dependencies d
 			INNER JOIN issues ancestor
 				ON ancestor.id = d.depends_on_id
-				AND ancestor.archived_at IS NULL
+				AND ancestor.visibility = 'live'
 			INNER JOIN issues descendant
 				ON descendant.id = d.issue_id
-				AND descendant.archived_at IS NULL
+				AND descendant.visibility = 'live'
 			WHERE d.tombstoned_at IS NULL
 				AND d.dependency_type IN (?, 'parent_child')
 		),
@@ -3278,23 +3682,23 @@ func (c *Client) dependencyEdgeExists(ctx context.Context, issueID, dependsOnID,
 }
 
 func (c *Client) parentChildRemovalWouldOrphanActiveChild(ctx context.Context, db *sql.DB, issueID, dependsOnID string) (bool, error) {
-	var lifecycle string
+	var disposition string
 	if err := db.QueryRowContext(ctx, `
-		SELECT COALESCE(i.lifecycle_state, '')
+		SELECT COALESCE(i.disposition, '')
 		FROM issues i
 		INNER JOIN issue_dependencies d
 			ON d.issue_id = i.id
 			AND d.depends_on_id = ?
 			AND d.dependency_type = ?
 			AND d.tombstoned_at IS NULL
-		WHERE i.id = ? AND i.archived_at IS NULL
-	`, dependsOnID, string(domain.DependencyParentChild), issueID).Scan(&lifecycle); err != nil {
+		WHERE i.id = ? AND i.visibility = 'live'
+	`, dependsOnID, string(domain.DependencyParentChild), issueID).Scan(&disposition); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
 		return false, err
 	}
-	return strings.TrimSpace(lifecycle) != string(domain.IssueWorkflowClosed), nil
+	return strings.TrimSpace(disposition) != string(domain.IssueDispositionCompleted) && strings.TrimSpace(disposition) != string(domain.IssueDispositionCancelled), nil
 }
 
 func parentChildRemovalWouldOrphanRuntimeChild(task domain.Task) bool {
@@ -3426,15 +3830,29 @@ func (c *Client) archiveLocked(ctx context.Context, id string) error {
 	if err := c.guardNoUndeletedParentChildDescendants(ctx, tx, "archive", id); err != nil {
 		return c.wrapError("archive", id, err)
 	}
+	var blockers int
+	if err := tx.QueryRowContext(ctx, `SELECT
+		(SELECT COUNT(*) FROM issue_coordination_leases WHERE issue_id=?) +
+		(SELECT COUNT(*) FROM daemon_worktree_projections WHERE issue_id=? AND trim(path)!='') +
+		(SELECT COUNT(*) FROM (`+runtimeSessionProjectionUnionSQL+`) WHERE issue_id=?)`, id, id, id).Scan(&blockers); err != nil {
+		return c.wrapError("archive", id, err)
+	}
+	if blockers != 0 {
+		return c.wrapError("archive", id, fmt.Errorf("%w: archived issue must be unclaimed and resource-free", domain.ErrConflict))
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE issues
 		SET
+			visibility = 'archived',
+			engagement = 'idle',
+			status = CASE WHEN disposition='ready' THEN 'open' ELSE status END,
+			lifecycle_state = CASE WHEN disposition='ready' THEN 'open' ELSE lifecycle_state END,
+			review_state = 'none',
 			archived_at = ?,
-			deleted_at = ?,
 			updated_at = ?
-		WHERE id = ? AND archived_at IS NULL
-	`, now, now, now, id)
+		WHERE id = ? AND visibility = 'live'
+	`, now, now, id)
 	if err != nil {
 		return c.wrapError("archive", id, err)
 	}
@@ -3490,12 +3908,12 @@ func (c *Client) unarchiveLocked(ctx context.Context, id string, opts UnarchiveO
 		}
 	}()
 
-	var targetArchivedAt sql.NullString
+	var targetVisibility string
 	if err := tx.QueryRowContext(ctx, `
-		SELECT archived_at
+		SELECT visibility
 		FROM issues
 		WHERE id = ?
-	`, id).Scan(&targetArchivedAt); err != nil {
+	`, id).Scan(&targetVisibility); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return result, c.wrapError("unarchive", id, domain.ErrNotFound)
 		}
@@ -3518,7 +3936,7 @@ func (c *Client) unarchiveLocked(ctx context.Context, id string, opts UnarchiveO
 	if opts.WithParents {
 		restoreIDs = append(restoreIDs, archivedParents...)
 	}
-	if targetArchivedAt.Valid && strings.TrimSpace(targetArchivedAt.String) != "" {
+	if targetVisibility == string(domain.IssueVisibilityArchived) {
 		restoreIDs = append(restoreIDs, id)
 	}
 	if opts.CascadeChildren {
@@ -3543,10 +3961,10 @@ func (c *Client) unarchiveLocked(ctx context.Context, id string, opts UnarchiveO
 	res, err := tx.ExecContext(ctx, `
 		UPDATE issues
 		SET
+			visibility = 'live',
 			archived_at = NULL,
-			deleted_at = NULL,
 			updated_at = ?
-		WHERE archived_at IS NOT NULL
+		WHERE visibility = 'archived'
 			AND id IN (`+placeholders+`)
 	`, args...)
 	if err != nil {
@@ -3596,7 +4014,7 @@ func (c *Client) archivedParentChildAncestorIDs(ctx context.Context, queryer sql
 		SELECT ancestors.id
 		FROM ancestors
 		INNER JOIN issues parent ON parent.id = ancestors.id
-		WHERE parent.archived_at IS NOT NULL
+		WHERE parent.visibility = 'archived'
 		ORDER BY ancestors.depth DESC, ancestors.id
 	`, issueID, string(domain.DependencyParentChild), string(domain.DependencyParentChild))
 	if err != nil {
@@ -3630,7 +4048,7 @@ func (c *Client) archivedParentChildDescendantIDs(ctx context.Context, queryer s
 		SELECT descendants.id
 		FROM descendants
 		INNER JOIN issues child ON child.id = descendants.id
-		WHERE child.archived_at IS NOT NULL
+		WHERE child.visibility = 'archived'
 		ORDER BY descendants.depth ASC, descendants.id
 	`, issueID, string(domain.DependencyParentChild), string(domain.DependencyParentChild))
 	if err != nil {
@@ -3709,7 +4127,7 @@ func (c *Client) countUndeletedParentChildDescendants(ctx context.Context, query
 		FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_ancestor
 		INNER JOIN issues descendant
 			ON descendant.id = closure.descendant_id
-			AND descendant.archived_at IS NULL
+			AND descendant.visibility = 'live'
 		WHERE closure.project_id = ?
 			AND closure.dependency_type = ?
 			AND closure.ancestor_id = ?
@@ -3736,9 +4154,7 @@ type UpdateTaskParams struct {
 // AppendNotes appends a single line to task notes.
 func (c *Client) AppendNotes(ctx context.Context, id, line string) error {
 	return c.withMutationLock(ctx, func(ctx context.Context) error {
-		return sqliteutil.WithWriteLock(c.dbPath, func() error {
-			return c.appendNotesLocked(ctx, id, line)
-		})
+		return c.appendNotesLocked(ctx, id, line)
 	})
 }
 
@@ -3770,7 +4186,7 @@ func (c *Client) appendNotesLocked(ctx context.Context, id, line string) error {
 				ELSE notes || CHAR(10) || ?
 			END,
 			updated_at = ?
-		WHERE id = ? AND archived_at IS NULL
+		WHERE id = ? AND visibility = 'live'
 	`, noteLine, noteLine, now, id)
 	if err != nil {
 		return c.wrapError("append-notes", id, err)
@@ -3802,9 +4218,7 @@ func (c *Client) AppendNotesWithRuntime(ctx context.Context, projectID, id, line
 // UpdateDetails updates non-status issue metadata.
 func (c *Client) UpdateDetails(ctx context.Context, id string, params UpdateTaskParams) error {
 	return c.withMutationLock(ctx, func(ctx context.Context) error {
-		return sqliteutil.WithWriteLock(c.dbPath, func() error {
-			return c.updateDetailsLocked(ctx, id, params)
-		})
+		return c.updateDetailsLocked(ctx, id, params)
 	})
 }
 
@@ -3840,13 +4254,12 @@ func (c *Client) updateDetailsLocked(ctx context.Context, id string, params Upda
 			priority,
 			COALESCE(implementations_json, '[]'),
 			status,
-			COALESCE(lifecycle_state, ''),
-			COALESCE(closed_outcome, ''),
-			COALESCE(review_state, ''),
-			archived_at,
-			deleted_at
+			COALESCE(disposition, ''),
+			COALESCE(engagement, ''),
+			COALESCE(visibility, ''),
+			archived_at
 		FROM issues
-		WHERE id = ? AND archived_at IS NULL
+		WHERE id = ? AND visibility = 'live'
 	`, id).Scan(
 		&oldTitle,
 		&oldDescription,
@@ -3858,11 +4271,10 @@ func (c *Client) updateDetailsLocked(ctx context.Context, id string, params Upda
 		&oldPriority,
 		&oldImplementations,
 		&oldStateCols.LegacyStatus,
-		&oldStateCols.Lifecycle,
-		&oldStateCols.ClosedOutcome,
-		&oldStateCols.Review,
+		&oldStateCols.Disposition,
+		&oldStateCols.Engagement,
+		&oldStateCols.Visibility,
 		&oldStateCols.ArchivedAt,
-		&oldStateCols.DeletedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.wrapError("update-details", id, domain.ErrNotFound)
@@ -3931,14 +4343,17 @@ func (c *Client) updateDetailsLocked(ctx context.Context, id string, params Upda
 			estimate = CASE WHEN ? = 1 THEN ? ELSE estimate END,
 			issue_type = ?,
 			priority = ?,
+			disposition = ?,
+			engagement = ?,
+			visibility = ?,
 			status = ?,
 			lifecycle_state = ?,
 			closed_outcome = ?,
 			review_state = ?,
 			implementations_json = CASE WHEN ? = 1 THEN ? ELSE implementations_json END,
 			updated_at = ?
-		WHERE id = ? AND archived_at IS NULL
-	`, params.Title, nullableString(params.Description), designSet, nullableString(designValue), noteSet, nullableString(noteValue), acceptanceSet, nullableString(acceptanceValue), estimateSet, estimateValue, string(params.Type), int(params.Priority), writeState.LegacyStatus, writeState.Lifecycle, writeState.ClosedOutcome, writeState.Review, implSet, implementationsJSON, now, id)
+		WHERE id = ? AND visibility = 'live'
+	`, params.Title, nullableString(params.Description), designSet, nullableString(designValue), noteSet, nullableString(noteValue), acceptanceSet, nullableString(acceptanceValue), estimateSet, estimateValue, string(params.Type), int(params.Priority), writeState.Disposition, writeState.Engagement, writeState.Visibility, writeState.LegacyStatus, writeState.Lifecycle, writeState.ClosedOutcome, writeState.Review, implSet, implementationsJSON, now, id)
 	if err != nil {
 		return c.wrapError("update-details", id, err)
 	}
@@ -4036,11 +4451,10 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 			&labelsRaw,
 			&estimateRaw,
 			&stateCols.LegacyStatus,
-			&stateCols.Lifecycle,
-			&stateCols.ClosedOutcome,
-			&stateCols.Review,
+			&stateCols.Disposition,
+			&stateCols.Engagement,
+			&stateCols.Visibility,
 			&stateCols.ArchivedAt,
-			&stateCols.DeletedAt,
 			&priorityRaw,
 			&typeRaw,
 			&implementationsRaw,
@@ -4101,7 +4515,7 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 	return c.queryTasksWithRuntimeArchiveMode(ctx, db, projectID, ArchiveExclude, issueIDs...)
 }
 
-func (c *Client) queryTasksWithRuntimeArchiveMode(ctx context.Context, db *sql.DB, projectID string, archiveMode ArchiveMode, issueIDs ...string) ([]domain.Task, error) {
+func (c *Client) queryTasksWithRuntimeArchiveMode(ctx context.Context, db sqlIssueDBTX, projectID string, archiveMode ArchiveMode, issueIDs ...string) ([]domain.Task, error) {
 	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, true, taskDependencyLoadAll, archiveMode, issueIDs...)
 }
 
@@ -4150,11 +4564,10 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 			&task.ID,
 			&task.Title,
 			&stateCols.LegacyStatus,
-			&stateCols.Lifecycle,
-			&stateCols.ClosedOutcome,
-			&stateCols.Review,
+			&stateCols.Disposition,
+			&stateCols.Engagement,
+			&stateCols.Visibility,
 			&stateCols.ArchivedAt,
-			&stateCols.DeletedAt,
 			&priorityRaw,
 			&typeRaw,
 			&createdRaw,
@@ -4246,7 +4659,7 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 	return tasks, nil
 }
 
-func (c *Client) loadCoordinationLeasesForTasks(ctx context.Context, db *sql.DB, tasks []domain.Task) error {
+func (c *Client) loadCoordinationLeasesForTasks(ctx context.Context, db sqlIssueDBTX, tasks []domain.Task) error {
 	if len(tasks) == 0 {
 		return nil
 	}
@@ -4274,6 +4687,9 @@ func (c *Client) loadCoordinationLeasesForTasks(ctx context.Context, db *sql.DB,
 		lease.ExpiresAt = parseOptionalTimestamp(expiresRaw)
 		if i, ok := indexes[issueID]; ok {
 			tasks[i].CoordinationLeases = append(tasks[i].CoordinationLeases, lease)
+			if lease.Purpose == domain.CoordinationLeaseExecution {
+				tasks[i].Ownership = &domain.IssueOwnership{OwnerID: lease.OwnerID, OwnerKind: lease.OwnerKind, ClaimedAt: lease.ClaimedAt, ExpiresAt: lease.ExpiresAt}
+			}
 		}
 	}
 	return rows.Err()
@@ -4322,11 +4738,10 @@ func taskMetadataRuntimeProjectionQuery(projectID string, issueIDs ...string) (s
 			i.id,
 			i.title,
 			i.status,
-			COALESCE(i.lifecycle_state, ''),
-			COALESCE(i.closed_outcome, ''),
-			COALESCE(i.review_state, ''),
+			COALESCE(i.disposition, ''),
+			COALESCE(i.engagement, ''),
+			COALESCE(i.visibility, ''),
 			i.archived_at,
-			i.deleted_at,
 			i.priority,
 			i.issue_type,
 			i.created_at,
@@ -4341,10 +4756,10 @@ func taskMetadataRuntimeProjectionQuery(projectID string, issueIDs ...string) (s
 			COALESCE(w.git_status_json, ''),
 			COALESCE(w.updated_at, ''),
 			COALESCE(w.git_status_updated_at, ''),
-			COALESCE(i.owner_id, ''),
-			COALESCE(i.owner_kind, ''),
-			COALESCE(i.owner_claimed_at, ''),
-			COALESCE(i.owner_expires_at, ''),
+			COALESCE((SELECT owner_id FROM issue_coordination_leases l WHERE l.issue_id=i.id AND l.purpose='execution'), ''),
+			COALESCE((SELECT owner_kind FROM issue_coordination_leases l WHERE l.issue_id=i.id AND l.purpose='execution'), ''),
+			COALESCE((SELECT claimed_at FROM issue_coordination_leases l WHERE l.issue_id=i.id AND l.purpose='execution'), ''),
+			COALESCE((SELECT expires_at FROM issue_coordination_leases l WHERE l.issue_id=i.id AND l.purpose='execution'), ''),
 			COALESCE(parent.depends_on_id, '')
 		FROM issues i
 		LEFT JOIN session_pick sp ON sp.issue_id = i.id
@@ -4354,7 +4769,7 @@ func taskMetadataRuntimeProjectionQuery(projectID string, issueIDs ...string) (s
 			ON parent.issue_id = i.id
 			AND parent.tombstoned_at IS NULL
 			AND parent.dependency_type IN (?, ?)
-		WHERE i.archived_at IS NULL AND i.id IN (%s)
+		WHERE i.visibility = 'live' AND i.id IN (%s)
 		ORDER BY i.updated_at DESC
 	`, runtimeSessionProjectionUnionSQL, placeholders, placeholders)
 	args := make([]any, 0, len(ids)*2+4)
@@ -4376,7 +4791,7 @@ const (
 	taskDependencyLoadParentOnly
 )
 
-func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB, projectID string, includeDetails bool, dependencyMode taskDependencyLoadMode, archiveMode ArchiveMode, issueIDs ...string) ([]domain.Task, error) {
+func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db sqlIssueDBTX, projectID string, includeDetails bool, dependencyMode taskDependencyLoadMode, archiveMode ArchiveMode, issueIDs ...string) ([]domain.Task, error) {
 	startedAt := time.Now()
 	issueCount := len(uniqueIssueIDStrings(issueIDs))
 	query, args := taskRuntimeProjectionQuery(projectID, includeDetails, archiveMode, issueIDs...)
@@ -4430,11 +4845,10 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 			&labelsRaw,
 			&estimateRaw,
 			&stateCols.LegacyStatus,
-			&stateCols.Lifecycle,
-			&stateCols.ClosedOutcome,
-			&stateCols.Review,
+			&stateCols.Disposition,
+			&stateCols.Engagement,
+			&stateCols.Visibility,
 			&stateCols.ArchivedAt,
-			&stateCols.DeletedAt,
 			&priorityRaw,
 			&typeRaw,
 			&implementationsRaw,
@@ -4540,7 +4954,7 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 	return tasks, nil
 }
 
-func (c *Client) loadPullRequestsForTasks(ctx context.Context, db *sql.DB, tasks []domain.Task) error {
+func (c *Client) loadPullRequestsForTasks(ctx context.Context, db sqlIssueDBTX, tasks []domain.Task) error {
 	if len(tasks) == 0 {
 		return nil
 	}
@@ -4865,11 +5279,10 @@ func taskRuntimeProjectionQuery(projectID string, includeDetails bool, archiveMo
 			COALESCE(i.labels_json, '[]'),
 			i.estimate,
 			i.status,
-			COALESCE(i.lifecycle_state, ''),
-			COALESCE(i.closed_outcome, ''),
-			COALESCE(i.review_state, ''),
+			COALESCE(i.disposition, ''),
+			COALESCE(i.engagement, ''),
+			COALESCE(i.visibility, ''),
 			i.archived_at,
-			i.deleted_at,
 			i.priority,
 			i.issue_type,
 			COALESCE(i.implementations_json, '[]'),
@@ -4886,10 +5299,10 @@ func taskRuntimeProjectionQuery(projectID string, includeDetails bool, archiveMo
 			COALESCE(w.updated_at, ''),
 			COALESCE(w.git_status_updated_at, ''),
 			COALESCE(o.provider, ''),
-			COALESCE(i.owner_id, ''),
-			COALESCE(i.owner_kind, ''),
-			COALESCE(i.owner_claimed_at, ''),
-			COALESCE(i.owner_expires_at, '')
+			COALESCE((SELECT owner_id FROM issue_coordination_leases l WHERE l.issue_id=i.id AND l.purpose='execution'), ''),
+			COALESCE((SELECT owner_kind FROM issue_coordination_leases l WHERE l.issue_id=i.id AND l.purpose='execution'), ''),
+			COALESCE((SELECT claimed_at FROM issue_coordination_leases l WHERE l.issue_id=i.id AND l.purpose='execution'), ''),
+			COALESCE((SELECT expires_at FROM issue_coordination_leases l WHERE l.issue_id=i.id AND l.purpose='execution'), '')
 		FROM issues i
 		LEFT JOIN session_pick sp ON sp.issue_id = i.id
 		LEFT JOIN daemon_worktree_projections w
@@ -4981,7 +5394,7 @@ func mapRuntimeSessionState(value string) domain.SessionState {
 
 func (c *Client) loadDependenciesForTasks(
 	ctx context.Context,
-	db *sql.DB,
+	db sqlIssueDBTX,
 	taskIDs []naming.IssueID,
 	taskIndexByID map[naming.IssueID]int,
 	tasks []domain.Task,
@@ -5345,10 +5758,6 @@ func encodeAlphaIssueIndex(index int) string {
 }
 
 func resolveDBPath(repoDir string) (string, error) {
-	if fromEnv := strings.TrimSpace(os.Getenv("AZEDARACH_DB_PATH")); fromEnv != "" {
-		return fromEnv, nil
-	}
-
 	startDir := repoDir
 	if strings.TrimSpace(startDir) == "" {
 		cwd, err := os.Getwd()
@@ -5364,7 +5773,17 @@ func resolveDBPath(repoDir string) (string, error) {
 
 	baseRoot, err := config.ResolveProjectRoot(absStart)
 	if err == nil {
-		return filepath.Join(baseRoot, ".azedarach", "azedarach.db"), nil
+		candidate := filepath.Join(baseRoot, ".azedarach", "azedarach.db")
+		if fromEnv := strings.TrimSpace(os.Getenv("AZEDARACH_DB_PATH")); fromEnv != "" {
+			useOverride, useErr := dbpathguard.UseProjectOverride(candidate, fromEnv)
+			if useErr != nil {
+				return "", fmt.Errorf("resolve test database override: %w", useErr)
+			}
+			if useOverride {
+				return fromEnv, nil
+			}
+		}
+		return candidate, nil
 	}
 	return "", fmt.Errorf("resolve project root: %w", err)
 }

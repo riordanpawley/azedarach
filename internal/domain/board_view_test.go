@@ -1,27 +1,151 @@
 package domain
 
 import (
+	"bytes"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWaitingHumanPredicateDistinguishesDecisionFromRuntimePrompt(t *testing.T) {
 	p := BoardColumnPredicate{Kind: BoardPredicateWaitingHuman}
 	decision := Task{Facts: DeriveIssueFacts(IssueFactsInput{Status: StatusOpen, Priority: P2, DecisionWaiting: true, DecisionWaitReason: "choose region"})}
-	if ok, reason := p.MatchTask(decision); !ok || reason != "waiting_human=true source=interaction_request" {
+	if ok, reason := p.MatchTask(decision); !ok || reason != "waiting_human=true source=interaction_request reason=choose region" {
 		t.Fatalf("decision match = %v, %q", ok, reason)
 	}
 	runtime := Task{Status: StatusInProgress, Priority: P2, Session: &Session{Activity: "waiting-for-human"}}
-	if ok, reason := p.MatchTask(runtime); !ok || reason != "waiting_human=true source=runtime_prompt" {
+	if ok, reason := p.MatchTask(runtime); !ok || reason != "waiting_human=true source=runtime_prompt reason=active session is waiting for human input" {
 		t.Fatalf("runtime match = %v, %q", ok, reason)
 	}
 }
 
 func TestBuiltInBoardViewsValidate(t *testing.T) {
-	if err := BuiltInBoardViewSet().Validate(); err != nil {
+	set := BuiltInBoardViewSet()
+	if err := set.Validate(); err != nil {
 		t.Fatalf("BuiltInBoardViewSet().Validate() error = %v", err)
 	}
+	for _, view := range set.Views {
+		if view.Options.SortPolicy != BoardViewSortHumanAttention {
+			t.Fatalf("built-in view %q sort policy = %q, want %q", view.ID, view.Options.SortPolicy, BoardViewSortHumanAttention)
+		}
+	}
+}
+
+func TestBoardViewValidationRejectsUnknownSortPolicy(t *testing.T) {
+	view := DefaultBoardView()
+	view.Options.SortPolicy = "future_policy"
+	if err := view.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported sort policy") {
+		t.Fatalf("Validate() error = %v, want unsupported sort policy", err)
+	}
+}
+
+func TestBoardViewSortPolicyJSONRoundTrip(t *testing.T) {
+	view := DefaultBoardView()
+	encoded, err := EncodeBoardViewDefinitionJSON(view)
+	if err != nil {
+		t.Fatalf("EncodeBoardViewDefinitionJSON: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"sort_policy":"human_attention"`) {
+		t.Fatalf("encoded definition missing sort policy: %s", encoded)
+	}
+	decoded, err := DecodeBoardViewDefinitionJSON(encoded)
+	if err != nil {
+		t.Fatalf("DecodeBoardViewDefinitionJSON: %v", err)
+	}
+	if decoded.Options.SortPolicy != BoardViewSortHumanAttention {
+		t.Fatalf("decoded sort policy = %q", decoded.Options.SortPolicy)
+	}
+}
+
+func TestBoardViewSchemaV1MigratesToColumnLayoutAndAttentionSort(t *testing.T) {
+	legacy := []byte(`{"schema_version":1,"id":"legacy","title":"Legacy","columns":[{"id":"active","title":"Active","predicates":[{"kind":"lifecycle","lifecycle":["active"]}]}],"options":{"sort_policy":"human_attention"}}`)
+	view, err := DecodeBoardViewDefinitionJSON(legacy)
+	if err != nil {
+		t.Fatalf("DecodeBoardViewDefinitionJSON(v1): %v", err)
+	}
+	if view.Layout != BoardViewLayoutColumnBoard {
+		t.Fatalf("layout = %q, want %q", view.Layout, BoardViewLayoutColumnBoard)
+	}
+	if len(view.Sort) != 1 || view.Sort[0].Key != BoardViewSortKeyHumanAttention {
+		t.Fatalf("sort = %#v, want migrated human-attention rule", view.Sort)
+	}
+	encoded, err := EncodeBoardViewDefinitionJSON(view)
+	if err != nil {
+		t.Fatalf("EncodeBoardViewDefinitionJSON: %v", err)
+	}
+	if !bytes.Contains(encoded, []byte(`"schema_version":2`)) {
+		t.Fatalf("encoded definition = %s, want schema v2", encoded)
+	}
+}
+
+func TestProjectTasksByBoardViewAppliesFiltersOrderedRulesAndTreeLayout(t *testing.T) {
+	now := time.Now().UTC()
+	parentID := Task{ID: "parent"}.ID
+	view := DefaultBoardView()
+	view.Layout = BoardViewLayoutTreeList
+	view.Filters = []BoardColumnPredicate{{Kind: BoardPredicateLifecycle, Lifecycle: []IssueWorkflow{IssueWorkflowActive}}}
+	view.Sort = []BoardViewSortRule{
+		{Key: BoardViewSortKeyPriority, Direction: BoardViewSortAscending},
+		{Key: BoardViewSortKeyUpdated, Direction: BoardViewSortDescending},
+	}
+	tasks := []Task{
+		{ID: "child", ParentID: &parentID, Status: StatusInProgress, Priority: P0, UpdatedAt: now},
+		{ID: parentID, Status: StatusInProgress, Priority: P2, UpdatedAt: now.Add(-time.Hour)},
+		{ID: "filtered", Status: StatusOpen, Priority: P0, UpdatedAt: now.Add(time.Hour)},
+	}
+	projection, err := ProjectTasksByBoardView(view, tasks)
+	if err != nil {
+		t.Fatalf("ProjectTasksByBoardView: %v", err)
+	}
+	if projection.View.Layout != BoardViewLayoutTreeList {
+		t.Fatalf("layout = %q", projection.View.Layout)
+	}
+	if got := taskIDs(projection.OrderedTasks()); !slices.Equal(got, []string{"parent", "child"}) {
+		t.Fatalf("ordered = %v, want parent-before-child and filtered task omitted", got)
+	}
+}
+
+func TestTreeProjectionPromotesChildWhenParentIsFiltered(t *testing.T) {
+	parentID := Task{ID: "parent"}.ID
+	view := DefaultBoardView()
+	view.Layout = BoardViewLayoutTreeList
+	view.Filters = []BoardColumnPredicate{{Kind: BoardPredicateLifecycle, Lifecycle: []IssueWorkflow{IssueWorkflowActive}}}
+	projection, err := ProjectTasksByBoardView(view, []Task{
+		{ID: parentID, Status: StatusOpen},
+		{ID: "child", ParentID: &parentID, Status: StatusInProgress},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Items) != 1 || projection.Items[0].Task.ID != "child" || projection.Items[0].Depth != 0 {
+		t.Fatalf("projection items = %+v, want child promoted to root", projection.Items)
+	}
+}
+
+func TestBoardViewAllowsCustomGroupIDs(t *testing.T) {
+	view := DefaultBoardView()
+	view.Columns[0].ID = "needs_attention"
+	if err := view.Validate(); err != nil {
+		t.Fatalf("custom group id rejected: %v", err)
+	}
+}
+
+func TestCustomGroupIDDoesNotUseLegacyViewAliases(t *testing.T) {
+	column := DefaultBoardView().Columns[0]
+	column.ID = "current"
+	if got := column.Normalized().ID; got != "current" {
+		t.Fatalf("group id = %q, want current", got)
+	}
+}
+
+func taskIDs(tasks []Task) []string {
+	out := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		out = append(out, task.ID.String())
+	}
+	return out
 }
 
 func TestBuiltInBoardViewCatalogAndLegacyAliases(t *testing.T) {
@@ -29,7 +153,7 @@ func TestBuiltInBoardViewCatalogAndLegacyAliases(t *testing.T) {
 	if set.DefaultViewID != BoardViewDefaultID {
 		t.Fatalf("default view id = %q, want %q", set.DefaultViewID, BoardViewDefaultID)
 	}
-	want := []BoardViewID{BoardViewDefaultID, BoardViewPlanningID, BoardViewOrchestrationID, BoardViewCloseoutID}
+	want := []BoardViewID{BoardViewDefaultID, BoardViewPlanningID, BoardViewOrchestrationID, BoardViewCloseoutID, BoardViewGridID, BoardViewTreeID}
 	if len(set.Views) != len(want) {
 		t.Fatalf("built-in views = %d, want %d", len(set.Views), len(want))
 	}
@@ -46,7 +170,41 @@ func TestBuiltInBoardViewCatalogAndLegacyAliases(t *testing.T) {
 	}
 }
 
-func TestBuiltInBoardViewsUseFocusedFourColumnWorkflows(t *testing.T) {
+func TestBuiltInViewsExposeAllSupportedLayouts(t *testing.T) {
+	want := map[BoardViewLayout]bool{
+		BoardViewLayoutColumnBoard:    true,
+		BoardViewLayoutHorizontalGrid: true,
+		BoardViewLayoutTreeList:       true,
+	}
+	for _, view := range BuiltInBoardViewSet().Views {
+		delete(want, view.Normalized().Layout)
+	}
+	if len(want) != 0 {
+		t.Fatalf("built-in catalog missing layouts: %v", want)
+	}
+}
+
+func TestLegacyUIViewModesMigrateToConfiguredViews(t *testing.T) {
+	tests := map[string]string{"board": string(BoardViewDefaultID), "compact": string(BoardViewTreeID), "overview": string(BoardViewOrchestrationID)}
+	for legacy, want := range tests {
+		if got, ok := BoardViewIDFromLegacyUIMode(legacy); !ok || got != want {
+			t.Fatalf("BoardViewIDFromLegacyUIMode(%q) = %q, %t; want %q, true", legacy, got, ok, want)
+		}
+	}
+}
+
+func TestProjectionExposesOrchestrationViewState(t *testing.T) {
+	task := Task{ID: "waiting", Title: "Waiting", Status: StatusInProgress, Session: &Session{Activity: "waiting-for-human"}}
+	projection, err := ProjectTasksByBoardView(DefaultBoardView(), []Task{task})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Items) != 1 || projection.Items[0].OrchestrationState != OrchestrationViewWaitingHuman {
+		t.Fatalf("projection items = %#v", projection.Items)
+	}
+}
+
+func TestBuiltInBoardViewsUseFocusedWorkflows(t *testing.T) {
 	tests := []struct {
 		view BoardView
 		want []BoardColumnID
@@ -70,14 +228,45 @@ func TestBuiltInBoardViewsUseFocusedFourColumnWorkflows(t *testing.T) {
 	}
 }
 
-func TestOrchestrationBoardViewPlacesWaitingBeforeWorking(t *testing.T) {
-	task := Task{ID: "az-waiting", Status: StatusInProgress, Session: &Session{Activity: "waiting-for-human"}, HasTmuxSession: true}
-	placement, err := OrchestrationBoardView().PlaceTask(task)
-	if err != nil {
-		t.Fatalf("PlaceTask error: %v", err)
+func TestOrchestrationBoardViewSeparatesHumanAuthorityFromReviewReadiness(t *testing.T) {
+	view := OrchestrationBoardView()
+	tests := []struct {
+		name       string
+		task       Task
+		wantColumn BoardColumnID
+		wantMatch  bool
+	}{
+		{name: "ordinary review", task: Task{ID: "review", Status: StatusInReview, Session: &Session{Activity: string(SessionIdle)}, HasTmuxSession: true}, wantColumn: BoardColumnReviewReady, wantMatch: true},
+		{name: "human authority wins over review", task: Task{ID: "human", Status: StatusInReview, Facts: IssueFacts{LifecycleState: IssueWorkflowActive, DisplayPhase: IssueDisplayReview, ReviewReadyVisible: true, WaitingHuman: true, WaitingHumanSource: WaitingHumanSourceInvestigationAcceptance, WaitingHumanReason: "explicit acceptance required"}}, wantColumn: BoardColumnWaitingHuman, wantMatch: true},
+		{name: "ai review", task: Task{ID: "ai", Status: StatusInProgress, Session: &Session{Activity: "waiting_tool"}, HasTmuxSession: true}, wantColumn: BoardColumnWaitingAI, wantMatch: true},
+		{name: "in progress", task: Task{ID: "active", Status: StatusInProgress, Session: &Session{Activity: string(SessionBusy)}, HasTmuxSession: true}, wantColumn: BoardColumnActive, wantMatch: true},
+		{name: "open omitted", task: Task{ID: "open", Status: StatusOpen}, wantMatch: false},
+		{name: "done omitted", task: Task{ID: "done", Status: StatusDone}, wantMatch: false},
 	}
-	if placement.ColumnID != BoardColumnWaitingHuman {
-		t.Fatalf("column = %q, want %q", placement.ColumnID, BoardColumnWaitingHuman)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			placement, err := view.PlaceTask(tt.task)
+			if err != nil {
+				t.Fatalf("PlaceTask error: %v", err)
+			}
+			if placement.Matched != tt.wantMatch || placement.ColumnID != tt.wantColumn {
+				t.Fatalf("placement = %+v, want matched=%t column=%q", placement, tt.wantMatch, tt.wantColumn)
+			}
+		})
+	}
+}
+
+func TestTreeBoardViewSortsHumanAttentionRootsFirst(t *testing.T) {
+	projection, err := ProjectTasksByBoardView(TreeBoardView(), []Task{
+		{ID: "ordinary", Status: StatusInProgress, Priority: P0, UpdatedAt: time.Now().UTC()},
+		{ID: "review", Status: StatusInReview, Priority: P4, Session: &Session{Activity: string(SessionIdle)}, HasTmuxSession: true},
+		{ID: "waiting", Status: StatusInProgress, Priority: P4, Session: &Session{Activity: "waiting-for-human"}, HasTmuxSession: true},
+	})
+	if err != nil {
+		t.Fatalf("ProjectTasksByBoardView: %v", err)
+	}
+	if got := taskIDs(projection.OrderedTasks()); !slices.Equal(got, []string{"waiting", "review", "ordinary"}) {
+		t.Fatalf("tree order = %v, want waiting-human then review then ordinary", got)
 	}
 }
 
@@ -136,7 +325,6 @@ func TestGroupTasksByBoardViewUsesTypedPlacementAndFirstMatch(t *testing.T) {
 		Review:       IssueReviewRequested,
 		CloseOutcome: IssueCloseNone,
 		Archive:      IssueArchiveLive,
-		Deletion:     IssueDeletionPresent,
 	})
 	if err != nil {
 		t.Fatalf("new review state: %v", err)
@@ -146,7 +334,6 @@ func TestGroupTasksByBoardViewUsesTypedPlacementAndFirstMatch(t *testing.T) {
 		Review:       IssueReviewNone,
 		CloseOutcome: IssueCloseCompleted,
 		Archive:      IssueArchiveLive,
-		Deletion:     IssueDeletionPresent,
 	})
 	if err != nil {
 		t.Fatalf("new done state: %v", err)
@@ -171,6 +358,23 @@ func TestGroupTasksByBoardViewUsesTypedPlacementAndFirstMatch(t *testing.T) {
 	done := findBoardViewTestColumn(columns, BoardColumnDone)
 	if len(done.Tasks) != 1 || done.Tasks[0].ID != "az-done" {
 		t.Fatalf("done column tasks = %+v, want done task", done.Tasks)
+	}
+}
+
+func TestGroupTasksByBuiltInBoardViewAppliesStableAttentionPolicy(t *testing.T) {
+	tasks := []Task{
+		{ID: "ordinary-newer", Status: StatusInProgress},
+		{ID: "ordinary-older", Status: StatusInProgress},
+		{ID: "review", Status: StatusInReview},
+		{ID: "waiting", Status: StatusInProgress, Session: &Session{Activity: "waiting-for-human"}},
+	}
+	columns, err := GroupTasksByBoardView(DefaultBoardView(), tasks)
+	if err != nil {
+		t.Fatalf("GroupTasksByBoardView: %v", err)
+	}
+	active := findBoardViewTestColumn(columns, BoardColumnActive).Tasks
+	if len(active) != 3 || active[0].ID != "waiting" || active[1].ID != "ordinary-newer" || active[2].ID != "ordinary-older" {
+		t.Fatalf("active order = %+v, want attention first with stable ordinary order", active)
 	}
 }
 
@@ -433,7 +637,7 @@ func TestBoardViewValidationRejectsInvalidDefinitions(t *testing.T) {
 					Kind: BoardColumnPredicateKind("sql"),
 				}},
 			}}},
-			want: "unknown board column id",
+			want: "unsupported board column predicate kind",
 		},
 		{
 			name: "unsupported predicate kind",

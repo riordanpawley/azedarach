@@ -167,6 +167,16 @@ func WithSpecAuditActorSource(ctx context.Context, source string) context.Contex
 }
 
 func (c *Client) CreateRequirement(ctx context.Context, params CreateRequirementParams) (Requirement, error) {
+	var out Requirement
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		out, err = c.createRequirementLocked(lockCtx, params)
+		return err
+	})
+	return out, err
+}
+
+func (c *Client) createRequirementLocked(ctx context.Context, params CreateRequirementParams) (Requirement, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return Requirement{}, err
@@ -222,6 +232,15 @@ func (c *Client) CreateRequirement(ctx context.Context, params CreateRequirement
 
 	if err := c.insertSpecAuditRow(ctx, tx, specAuditEntityRequirement, requirement.LocalID, specAuditOpCreate, nil, requirement); err != nil {
 		return Requirement{}, c.wrapError("create-requirement", normalized.LocalID, err)
+	}
+	if requirement.IssueID != nil {
+		link := SpecLink{ID: specLinkID(*requirement.IssueID, requirement.LocalID), IssueID: *requirement.IssueID, RequirementID: requirement.LocalID, Role: LinkRoleRelates, CreatedAt: now, UpdatedAt: now}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO spec_links(issue_id,requirement_id,role,note,implementations_json,fulfillment_status,fulfilled_at,created_at,updated_at,deleted_at) SELECT ?,id,?,NULL,'[]',NULL,NULL,?,?,NULL FROM spec_requirements WHERE local_id=? AND deleted_at IS NULL`, link.IssueID, string(link.Role), formatTimestamp(now), formatTimestamp(now), requirement.LocalID); err != nil {
+			return Requirement{}, c.wrapError("create-requirement-owner-link", normalized.LocalID, classifySQLiteConstraint(err))
+		}
+		if err := c.insertSpecAuditRow(ctx, tx, specAuditEntityLink, link.ID, specAuditOpCreate, nil, link); err != nil {
+			return Requirement{}, c.wrapError("create-requirement-owner-link", normalized.LocalID, err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -338,6 +357,16 @@ func (c *Client) ListRequirements(ctx context.Context, filter RequirementFilter)
 }
 
 func (c *Client) UpdateRequirement(ctx context.Context, selector string, params UpdateRequirementParams) (Requirement, error) {
+	var out Requirement
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		out, err = c.updateRequirementLocked(lockCtx, selector, params)
+		return err
+	})
+	return out, err
+}
+
+func (c *Client) updateRequirementLocked(ctx context.Context, selector string, params UpdateRequirementParams) (Requirement, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return Requirement{}, err
@@ -399,6 +428,12 @@ func (c *Client) UpdateRequirement(ctx context.Context, selector string, params 
 }
 
 func (c *Client) DeleteRequirement(ctx context.Context, selector string) error {
+	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		return c.deleteRequirementLocked(lockCtx, selector)
+	})
+}
+
+func (c *Client) deleteRequirementLocked(ctx context.Context, selector string) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
@@ -468,6 +503,16 @@ func (c *Client) DeleteRequirement(ctx context.Context, selector string) error {
 }
 
 func (c *Client) AddSpecLink(ctx context.Context, params AddSpecLinkParams) (SpecLink, error) {
+	var out SpecLink
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		out, err = c.addSpecLinkLocked(lockCtx, params)
+		return err
+	})
+	return out, err
+}
+
+func (c *Client) addSpecLinkLocked(ctx context.Context, params AddSpecLinkParams) (SpecLink, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return SpecLink{}, err
@@ -713,6 +758,12 @@ func (c *Client) ListSpecLinksByRequirementLocalID(ctx context.Context, localID 
 }
 
 func (c *Client) RemoveSpecLink(ctx context.Context, issueID, requirementSelector string) error {
+	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		return c.removeSpecLinkLocked(lockCtx, issueID, requirementSelector)
+	})
+}
+
+func (c *Client) removeSpecLinkLocked(ctx context.Context, issueID, requirementSelector string) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err

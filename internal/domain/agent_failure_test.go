@@ -31,6 +31,27 @@ func TestClassifyAgentTerminalOutput(t *testing.T) {
 	}
 }
 
+func TestClassifyAgentTerminalIdle(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{name: "codex prompt", output: "Tests passed.\n› Continue", want: true},
+		{name: "claude prompt", output: "Done.\n❯", want: true},
+		{name: "quoted prompt outside tail", output: "› example\nline 1\nline 2\nline 3\nline 4\nline 5"},
+		{name: "prompt remains visible while working", output: "• Working (49s • esc to interrupt)\n› Continue"},
+		{name: "shell prompt", output: "tests passed\n$ "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ClassifyAgentTerminalIdle(tt.output); got != tt.want {
+				t.Fatalf("ClassifyAgentTerminalIdle() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestClassifyAgentTerminalFailurePreservesOrdinaryIdleNotifications(t *testing.T) {
 	tests := []struct {
 		name    string

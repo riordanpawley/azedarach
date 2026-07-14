@@ -54,6 +54,26 @@ func TestCloseFailureDialogActions(t *testing.T) {
 	}
 }
 
+func TestCloseFailureDialogOffersCreateAncestorAndRetry(t *testing.T) {
+	dialog := NewCloseFailureDialog("gav", "no active ancestor worktree branch was found", CloseFailureDialogOptions{
+		ParentID: "gat", PreviousStatus: "in_review", TargetStatus: "closed", AllowCreateAncestor: true,
+	})
+
+	_, cmd := dialog.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	if cmd == nil {
+		t.Fatal("expected create ancestor action command")
+	}
+	selection := cmd().(SelectionMsg)
+	action := selection.Value.(CloseFailureActionMsg)
+	if action.Action != CloseFailureActionCreateAncestor || action.ParentID != "gat" {
+		t.Fatalf("action = %+v, want create_ancestor for gat", action)
+	}
+	view := dialog.View()
+	if !strings.Contains(view, "Create ancestor & retry") || !strings.Contains(view, "child-to-parent") {
+		t.Fatalf("view missing ancestor recovery guidance: %q", view)
+	}
+}
+
 func TestCloseFailureDialogDoesNotOfferAIMergeForDirtyState(t *testing.T) {
 	dialog := NewCloseFailureDialog("az-1", "base worktree has local changes: README.md", CloseFailureDialogOptions{
 		PreviousStatus: "in_review",

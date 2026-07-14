@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,7 +43,10 @@ func TestLoadIssuesCmd_UsesDaemonSQLiteSnapshot(t *testing.T) {
 
 	loaded, ok := msg.(issuesLoadedMsg)
 	if !ok {
-		t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+		if failed, isFailure := msg.(issuesErrorMsg); isFailure {
+			t.Fatalf("load issues: %v", failed.err)
+		}
+		t.Fatalf("message = %#v (type %T), want issuesLoadedMsg", msg, msg)
 	}
 	if got, want := len(loaded.tasks), 2; got != want {
 		t.Fatalf("loaded tasks = %d, want %d", got, want)
@@ -104,7 +108,7 @@ func TestLoadIssuesCmd_HidesParentChildTasksFromBoardByDefault(t *testing.T) {
 	msg := model.loadIssuesCmd()()
 	loaded, ok := msg.(issuesLoadedMsg)
 	if !ok {
-		t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+		t.Fatalf("message = %#v (type %T), want issuesLoadedMsg", msg, msg)
 	}
 
 	model.tasks = loaded.tasks
@@ -339,9 +343,13 @@ func seedModelIssueStore(t *testing.T, repoDir, id, title, status string, priori
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var closedAt any
+	if status == "closed" || status == "cancelled" {
+		closedAt = now
+	}
 	if _, err := db.Exec(
-		`INSERT INTO issues (id, title, description, status, priority, issue_type, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-		id, title, "", status, priority, issueType, now, now,
+		`INSERT INTO issues (id, title, description, status, priority, issue_type, created_at, updated_at, closed_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+		id, title, "", status, priority, issueType, now, now, closedAt,
 	); err != nil {
 		t.Fatalf("insert issue: %v", err)
 	}
@@ -368,10 +376,11 @@ func startModelTestDaemon(t *testing.T, repoDir, socketPath, lockPath string) fu
 	t.Helper()
 
 	d := daemon.New(daemon.Config{
-		RepoDir:    repoDir,
-		SocketPath: socketPath,
-		LockPath:   lockPath,
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RepoDir:       repoDir,
+		SocketPath:    socketPath,
+		LockPath:      lockPath,
+		ScopedRuntime: true,
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -392,7 +401,7 @@ func startModelTestDaemon(t *testing.T, repoDir, socketPath, lockPath string) fu
 			t.Fatalf("daemon exited before socket became ready")
 		default:
 		}
-		if _, err := os.Stat(socketPath); err == nil {
+		if modelDaemonSocketReady(socketPath) {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -418,6 +427,15 @@ func startModelTestDaemon(t *testing.T, repoDir, socketPath, lockPath string) fu
 			t.Fatalf("daemon shutdown timed out")
 		}
 	}
+}
+
+func modelDaemonSocketReady(socketPath string) bool {
+	conn, err := net.DialTimeout("unix", socketPath, 50*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func captureStdoutForParity(t *testing.T, fn func() error) string {
@@ -452,9 +470,9 @@ func captureStdoutForParity(t *testing.T, fn func() error) string {
 func newModelTestRuntimePaths(t *testing.T) (string, string) {
 	t.Helper()
 
-	runtimeDir, err := os.MkdirTemp(".", "azd-")
+	runtimeDir, err := os.MkdirTemp("", "azd-")
 	if err != nil {
-		t.Fatalf("MkdirTemp(.): %v", err)
+		t.Fatalf("MkdirTemp: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
 	return filepath.Join(runtimeDir, "s.sock"), filepath.Join(runtimeDir, "l.lock")

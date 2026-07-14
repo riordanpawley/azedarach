@@ -18,8 +18,9 @@ import (
 )
 
 func TestClient_SpecMigrationsFreshDBAndIdempotency(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	client := newTestClient(t)
+	client := newMigratingTestClient(t)
 
 	requirement, err := client.CreateRequirement(ctx, CreateRequirementParams{
 		LocalID:      "REQ-1",
@@ -75,6 +76,7 @@ func TestClient_SpecMigrationsFreshDBAndIdempotency(t *testing.T) {
 }
 
 func TestClient_MigratesLegacySpecSchemaWithoutDataLoss(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "legacy-spec.db")
 	db := openSQLiteDB(t, dbPath)
@@ -153,6 +155,7 @@ func TestClient_MigratesLegacySpecSchemaWithoutDataLoss(t *testing.T) {
 }
 
 func TestClient_ListRequirements_WithTextPrimaryKeyIDs_AutoMigratesSchema(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "text-id-spec.db")
 	db := openSQLiteDB(t, dbPath)
@@ -243,6 +246,7 @@ func TestClient_ListRequirements_WithTextPrimaryKeyIDs_AutoMigratesSchema(t *tes
 }
 
 func TestClient_CreateRequirement_WithLegacySpecTableShape(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "legacy-shape-create.db")
 	db := openSQLiteDB(t, dbPath)
@@ -320,6 +324,7 @@ func TestClient_CreateRequirement_WithLegacySpecTableShape(t *testing.T) {
 }
 
 func TestClient_RequirementCRUDAndSelectorResolution(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -339,6 +344,11 @@ func TestClient_RequirementCRUDAndSelectorResolution(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, issueID, derefString(requirement.IssueID))
+	ownerLinks, err := client.ListSpecLinksByRequirementLocalID(ctx, requirement.LocalID)
+	require.NoError(t, err)
+	require.Len(t, ownerLinks, 1)
+	assert.Equal(t, issueID, ownerLinks[0].IssueID)
+	assert.Equal(t, LinkRoleRelates, ownerLinks[0].Role)
 
 	resolved, err := client.GetRequirement(ctx, "PAYLOAD-100")
 	require.NoError(t, err)
@@ -370,6 +380,7 @@ func TestClient_RequirementCRUDAndSelectorResolution(t *testing.T) {
 }
 
 func TestClient_ListRequirements_QueryAndLimit(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -448,6 +459,7 @@ func TestClient_ListRequirements_QueryAndLimit(t *testing.T) {
 }
 
 func TestClient_ListRequirements_QueryAnyRanksBroadDiscoveryMatches(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -488,6 +500,7 @@ func TestClient_ListRequirements_QueryAnyRanksBroadDiscoveryMatches(t *testing.T
 }
 
 func TestClient_SpecLinksCRUDAndAuditOrdering(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := WithSpecAuditActorSource(context.Background(), "spec-store-test")
 	client := newTestClient(t)
 
@@ -574,6 +587,7 @@ func TestClient_SpecLinksCRUDAndAuditOrdering(t *testing.T) {
 }
 
 func TestClient_AuditInsertFailureRollsBackRequirementMutation(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	db, err := client.dbHandle()
@@ -601,6 +615,7 @@ func TestClient_AuditInsertFailureRollsBackRequirementMutation(t *testing.T) {
 }
 
 func TestClient_AuditInsertFailureRollsBackLinkMutation(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -642,6 +657,7 @@ func TestClient_AuditInsertFailureRollsBackLinkMutation(t *testing.T) {
 }
 
 func TestClient_ListSpecAuditEntriesSupportsTimeWindow(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 
@@ -668,6 +684,7 @@ func TestClient_ListSpecAuditEntriesSupportsTimeWindow(t *testing.T) {
 }
 
 func TestClient_ListSpecAuditEntriesFilteredQueriesUseAuditIndexes(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 	db, err := client.dbHandle()
@@ -723,6 +740,7 @@ func TestClient_ListSpecAuditEntriesFilteredQueriesUseAuditIndexes(t *testing.T)
 }
 
 func TestClient_ListSpecLinksRequirementSelectorRejectsAmbiguousLocalIDAndExternalCode(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
 

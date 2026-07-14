@@ -11,6 +11,29 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
 
+func TestParseLearnActivationFeedbackArgs(t *testing.T) {
+	activation, err := parseLearnActivateArgs([]string{"--surface", "primer", "--token-cost", "42", "--issue", "ddh", "--tag", "go", "learn-1", "learn-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activation.Surface != "primer" || activation.TokenCost != 42 || activation.Issue != "ddh" || len(activation.LearningIDs) != 2 {
+		t.Fatalf("activation opts = %+v", activation)
+	}
+	feedback, err := parseLearnFeedbackArgs([]string{"--idempotency-key", "turn-1", "--outcome", "followed", "--source", "inferred", "act-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if feedback.ActivationID != "act-1" || feedback.Source != "inferred" {
+		t.Fatalf("feedback opts = %+v", feedback)
+	}
+	if _, err := parseLearnActivateArgs([]string{"--surface", "primer", "--token-cost", "32769", "learn-1"}); err == nil {
+		t.Fatal("expected token bound error")
+	}
+	if _, err := parseLearnFeedbackArgs([]string{"--idempotency-key", "turn-1", "--outcome", "maybe", "act-1"}); err == nil {
+		t.Fatal("expected outcome validation error")
+	}
+}
+
 func TestRunLearnCommandHelpArgsReturnUsage(t *testing.T) {
 	for _, args := range [][]string{
 		{"--help"},
@@ -58,6 +81,16 @@ func TestParseLearnAddArgs(t *testing.T) {
 			_, err := parseLearnAddArgs(tc.args)
 			assertParseOutcome(t, err, tc.ok, tc.errFrag)
 		})
+	}
+}
+
+func TestParseLearnCaptureArgs(t *testing.T) {
+	o, err := parseLearnCaptureArgs([]string{"--observed", "loop retried", "--preferred", "bound retries", "--source", "agent-hook", "--context", "surface=cli", "--sensitivity", "private"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Observed != "loop retried" || o.Preferred != "bound retries" || o.Source != "agent-hook" || o.Context["surface"] != "cli" || o.Sensitivity != "private" {
+		t.Fatalf("unexpected opts: %+v", o)
 	}
 }
 
@@ -358,5 +391,24 @@ func assertParseOutcome(t *testing.T, err error, ok bool, errFrag string) {
 	}
 	if errFrag != "" && !strings.Contains(err.Error(), errFrag) {
 		t.Fatalf("error %q does not contain %q", err.Error(), errFrag)
+	}
+}
+
+func TestParseLearnConsolidationArgs(t *testing.T) {
+	if _, err := parseLearnSuggestArgs([]string{"--refresh", "--status", "pending"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := parseLearnConsolidateArgs([]string{"--canonical", "learn-1", "--note", "human confirmed", "learn-sug-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CanonicalID != "learn-1" || got.SuggestionID != "learn-sug-1" {
+		t.Fatalf("opts=%+v", got)
+	}
+	if _, err := parseLearnConsolidateArgs([]string{"learn-sug-1"}); err == nil {
+		t.Fatal("expected missing confirmation fields to fail")
+	}
+	if _, err := parseLearnSuggestionRejectArgs([]string{"--note", "not a duplicate", "learn-sug-1"}); err != nil {
+		t.Fatal(err)
 	}
 }

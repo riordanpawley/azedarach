@@ -1,13 +1,37 @@
 package overlay
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
+
+func TestGlobalBoardViewOverlayGuidesAndValidatesProjectScope(t *testing.T) {
+	o := NewGlobalBoardViewOverlay([]protocol.GlobalViewRecord{{View: domain.DefaultBoardView(), Scope: protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeAllProjects}}}, "default")
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRight})
+	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	if cmd != nil || !strings.Contains(o.errorText, "requires project_ids") {
+		t.Fatalf("empty selected-project scope cmd=%v error=%q", cmd, o.errorText)
+	}
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("alpha,beta")})
+	_, cmd = o.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	saved := cmd().(SelectionMsg).Value.(BoardViewSaveMsg)
+	if len(saved.Scope.ProjectIDs) != 2 || saved.Scope.ProjectIDs[0] != "alpha" {
+		t.Fatalf("saved scope = %+v", saved.Scope)
+	}
+	_, _ = o.Update(tea.WindowSizeMsg{Width: 54, Height: 18})
+	width, height := o.Size()
+	if width > 52 || height > 16 {
+		t.Fatalf("global configurator %dx%d exceeds narrow viewport", width, height)
+	}
+}
 
 func TestBoardViewOverlaySelectsCurrentView(t *testing.T) {
 	records := []domain.BoardViewRecord{
@@ -74,8 +98,8 @@ func TestBoardViewOverlayDuplicateValidatesAndSaves(t *testing.T) {
 	existing.Title = "Existing"
 	o := NewBoardViewOverlay([]domain.BoardViewRecord{{View: defaultView, BuiltIn: true}, {View: existing}}, domain.DefaultBoardViewID)
 	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	if o.mode != boardViewEdit || !strings.Contains(o.editor.Value(), fmt.Sprintf(`"id": %q`, uniqueCopyID)) {
-		t.Fatalf("duplicate did not open populated editor: mode=%v value=%s", o.mode, o.editor.Value())
+	if o.mode != boardViewEdit || string(o.configurator.view.ID) != uniqueCopyID {
+		t.Fatalf("duplicate did not open populated configurator: mode=%v view=%+v", o.mode, o.configurator.view)
 	}
 	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	if cmd == nil {
@@ -83,6 +107,9 @@ func TestBoardViewOverlayDuplicateValidatesAndSaves(t *testing.T) {
 	}
 	msg := cmd().(SelectionMsg)
 	saved := msg.Value.(BoardViewSaveMsg)
+	if saved.View.Options.SortPolicy != domain.BoardViewSortDefault {
+		t.Fatalf("duplicated custom view sort policy = %q, want explicit custom default", saved.View.Options.SortPolicy)
+	}
 	if string(saved.View.ID) != uniqueCopyID || len(saved.View.Columns) == 0 {
 		t.Fatalf("saved view = %+v", saved.View)
 	}
@@ -91,15 +118,17 @@ func TestBoardViewOverlayDuplicateValidatesAndSaves(t *testing.T) {
 func TestBoardViewOverlayInvalidEditStaysOpenAndCancelIsSafe(t *testing.T) {
 	o := NewBoardViewOverlay(nil, "")
 	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
 	o.editor.SetValue(`{"id":"bad","title":"Bad","columns":[]}`)
 	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
-	if cmd != nil || o.errorText == "" || o.mode != boardViewEdit {
+	if cmd != nil || o.errorText == "" || o.mode != boardViewAdvancedEdit {
 		t.Fatalf("invalid save cmd=%v error=%q mode=%v", cmd, o.errorText, o.mode)
 	}
 	_, cmd = o.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if cmd != nil || o.mode != boardViewBrowse {
-		t.Fatal("escape should cancel without mutation")
+	if cmd != nil || o.mode != boardViewEdit {
+		t.Fatal("escape should return to guided editing without mutation")
 	}
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyEsc})
 }
 
 func TestBoardViewOverlayEditLocksRecordIDButAllowsTitleRename(t *testing.T) {
@@ -108,6 +137,7 @@ func TestBoardViewOverlayEditLocksRecordIDButAllowsTitleRename(t *testing.T) {
 	custom.Title = "Custom"
 	o := NewBoardViewOverlay([]domain.BoardViewRecord{{View: custom}}, "custom")
 	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
 	o.editor.SetValue(strings.Replace(o.editor.Value(), `"id": "custom"`, `"id": "renamed-id"`, 1))
 	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	if cmd != nil || !strings.Contains(o.errorText, "id is fixed") {
@@ -118,6 +148,40 @@ func TestBoardViewOverlayEditLocksRecordIDButAllowsTitleRename(t *testing.T) {
 	_, cmd = o.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	if got := cmd().(SelectionMsg).Value.(BoardViewSaveMsg).View.Title; got != "Renamed" {
 		t.Fatalf("title=%q", got)
+	}
+}
+
+func TestBoardViewOverlayGuidedConfiguratorCoversLayoutsAndOptions(t *testing.T) {
+	o := NewBoardViewOverlay(nil, "")
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	for i := 0; i < 5; i++ {
+		_, _ = o.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRight})
+	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	saved := cmd().(SelectionMsg).Value.(BoardViewSaveMsg).View
+	if saved.Layout != domain.BoardViewLayoutColumnBoard || !saved.Options.HideEmptyColumns || len(saved.Sort) == 0 {
+		t.Fatalf("guided view = %+v", saved)
+	}
+	view := o.View()
+	for _, want := range []string{"View Configurator", "Layout", "Filters", "Grouping", "Ordered sorting", "advanced JSON"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("configurator missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestBoardViewOverlayGuidedSavePreservesUnchangedCustomRules(t *testing.T) {
+	custom := domain.DefaultBoardView()
+	custom.ID, custom.Title = "custom", "Custom"
+	custom.Filters = []domain.BoardColumnPredicate{{Kind: domain.BoardPredicateWaitingHuman}}
+	custom.Sort = []domain.BoardViewSortRule{{Key: domain.BoardViewSortKeySession, Direction: domain.BoardViewSortAscending}}
+	o := NewBoardViewOverlay([]domain.BoardViewRecord{{View: custom}}, "custom")
+	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	saved := cmd().(SelectionMsg).Value.(BoardViewSaveMsg).View
+	if saved.Filters[0].Kind != domain.BoardPredicateWaitingHuman || saved.Sort[0].Key != domain.BoardViewSortKeySession {
+		t.Fatalf("unchanged custom rules were rewritten: %+v", saved)
 	}
 }
 

@@ -1,0 +1,16 @@
+╭──────────────────────────────────────────────────╮
+│View Configurator                                 │
+│──────────────────────────────────────────────────│
+│Configure the View with guided fields; no JSON r… │
+│                                                  │
+│▸ Title            > Orchestration Copy           │
+│  Layout           Board                          │
+│  Project scope    All projects                   │
+│  Scope projects   >                              │
+│  Filters          All issues                     │
+│  Grouping         Workflow columns               │
+│  Ordered sorting  Attention ↓, priority ↑, upda… │
+│  Hide empty       false                          │
+│ Tab field                                        │
+│ ←/→ choice                                       │
+╰──────────────────────────────────────────────────╯

@@ -29,7 +29,7 @@ func TestClient_BoardViewsMigrationSeedsDefaultsOnFreshDBAndRestartsIdempotently
 	require.NoError(t, err)
 	assertPromisedBuiltInBoardViews(t, views)
 	assertBoardViewsMigrationApplied(t, ctx, db)
-	assertBoardViewsDefaultCount(t, ctx, db, 4)
+	assertBoardViewsDefaultCount(t, ctx, db, 6)
 	require.NoError(t, client.CloseDB())
 
 	reopened := NewClientAtPath(dbPath, slog.Default())
@@ -37,7 +37,13 @@ func TestClient_BoardViewsMigrationSeedsDefaultsOnFreshDBAndRestartsIdempotently
 	reopenedDB, err := reopened.dbHandle()
 	require.NoError(t, err)
 	assertBoardViewsMigrationApplied(t, ctx, reopenedDB)
-	assertBoardViewsDefaultCount(t, ctx, reopenedDB, 4)
+	assertBoardViewsDefaultCount(t, ctx, reopenedDB, 6)
+	var firstUpdatedAt, secondUpdatedAt string
+	require.NoError(t, reopenedDB.QueryRowContext(ctx, `SELECT updated_at FROM board_views WHERE project_id='default' AND id=?`, domain.BoardViewOrchestrationID).Scan(&firstUpdatedAt))
+	_, err = reopened.ListBoardViews(ctx, "default")
+	require.NoError(t, err)
+	require.NoError(t, reopenedDB.QueryRowContext(ctx, `SELECT updated_at FROM board_views WHERE project_id='default' AND id=?`, domain.BoardViewOrchestrationID).Scan(&secondUpdatedAt))
+	assert.Equal(t, firstUpdatedAt, secondUpdatedAt, "idempotent reseed should not mutate canonical built-in")
 }
 
 func TestClient_BoardViewsMigrationSeedsDefaultsForExistingDBAndKeepsCustomViews(t *testing.T) {
@@ -55,7 +61,7 @@ func TestClient_BoardViewsMigrationSeedsDefaultsForExistingDBAndKeepsCustomViews
 	assertPromisedBuiltInBoardViews(t, views)
 	assert.True(t, boardViewTestHasView(views, "custom-active"))
 	assertBoardViewsMigrationApplied(t, ctx, db)
-	assertBoardViewsDefaultCount(t, ctx, db, 5)
+	assertBoardViewsDefaultCount(t, ctx, db, 7)
 }
 
 func TestClient_RefusesPartialBoardViewsSchema(t *testing.T) {
@@ -177,7 +183,7 @@ func seedBoardViewsPreMigrationDB(t *testing.T, dbPath string, includeCustomBoar
 	require.NoError(t, err)
 
 	for _, migration := range orderedMigrations {
-		if migration.id == boardViewsMigrationID {
+		if migration.id == "0019_issue_observation_events" || migration.id == boardViewsMigrationID || migration.id == "0035_interaction_requests" || migration.id == "0045_issue_state_runtime_constraints" || migration.id == humanAuthorityProjectionMigrationID {
 			continue
 		}
 		_, err := db.Exec(`INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, migration.id, now)
@@ -217,7 +223,7 @@ func assertBoardViewsDefaultCount(t *testing.T, ctx context.Context, db *sql.DB,
 
 func assertPromisedBuiltInBoardViews(t *testing.T, views []domain.BoardViewRecord) {
 	t.Helper()
-	for _, id := range []domain.BoardViewID{domain.BoardViewDefaultID, domain.BoardViewPlanningID, domain.BoardViewOrchestrationID, domain.BoardViewCloseoutID} {
+	for _, id := range []domain.BoardViewID{domain.BoardViewDefaultID, domain.BoardViewPlanningID, domain.BoardViewOrchestrationID, domain.BoardViewCloseoutID, domain.BoardViewGridID, domain.BoardViewTreeID} {
 		assert.True(t, boardViewTestHasView(views, string(id)), "missing built-in view %s", id)
 	}
 	assert.False(t, boardViewTestHasView(views, string(domain.BoardViewCurrentID)))

@@ -91,6 +91,11 @@ func (d *Daemon) bootstrapSyncOrchestrator(ctx context.Context) error {
 		d.syncBootstrapState.markFailed(err)
 		return fmt.Errorf("wake orchestrators after recovery: %w", err)
 	}
+	if err := d.reconcileOrchestratorLifecycles(ctx, protocol.DefaultProjectID, timeNow().UTC()); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("resume rooted orchestrator continuations after recovery failed; periodic reconcile will retry", "error", err)
+		}
+	}
 	d.syncBootstrapState.markReady()
 	return nil
 }
@@ -110,16 +115,23 @@ func (d *Daemon) defaultSyncBootstrap(ctx context.Context) error {
 			d.cfg.Logger.Warn("migrate runtime state store failed during bootstrap", "error", err)
 		}
 	}
+	if err := d.refreshUserProjection(ctx); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("refresh user cross-project projection during bootstrap completed partially", "error", err)
+	}
 	return nil
 }
 
 func (d *Daemon) bootstrapProjectStores(ctx context.Context, projectID string) error {
+	projectID = d.canonicalProjectID(projectID)
 	client := d.issueClientForProject(projectID)
 	if client == nil {
 		return errors.New("issue store unavailable")
 	}
 	if _, err := client.DBStats(); err != nil {
 		return fmt.Errorf("open issue store %s: %w", protocol.NormalizeProjectID(projectID), err)
+	}
+	if err := client.EnsureBoardViews(ctx, projectID); err != nil {
+		return fmt.Errorf("initialize board views %s: %w", protocol.NormalizeProjectID(projectID), err)
 	}
 	runtimeStore := d.runtimeStateStoreForProject(projectID)
 	if runtimeStore == nil {

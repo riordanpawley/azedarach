@@ -48,6 +48,9 @@ func TestDialogs_View_Golden(t *testing.T) {
 		{name: "orchestration", view: goldenOrchestrationView},
 		{name: "orchestration_empty", view: goldenOrchestrationEmptyView},
 		{name: "board_view", view: goldenBoardView},
+		{name: "view_configurator", view: goldenViewConfigurator},
+		{name: "global_view_configurator", view: goldenGlobalViewConfigurator},
+		{name: "interaction", view: goldenInteractionView},
 	}
 
 	for _, tc := range cases {
@@ -89,6 +92,9 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 		{name: "create_task_attachments_small", view: goldenCreateTaskAttachmentsSmallView},
 		{name: "orchestration_small", view: goldenOrchestrationSmallView},
 		{name: "board_view_small", view: goldenBoardViewSmall},
+		{name: "view_configurator_small", view: goldenViewConfiguratorSmall},
+		{name: "global_view_configurator_small", view: goldenGlobalViewConfiguratorSmall},
+		{name: "interaction_small", view: goldenInteractionSmallView},
 	}
 
 	for _, tc := range cases {
@@ -99,6 +105,25 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 			assertGolden(t, filepath.Join("testdata", "dialog_"+tc.name+".golden"), got)
 		})
 	}
+}
+
+func goldenInteractionRequest() (domain.InteractionRequest, domain.InteractionAgeView) {
+	now := time.Date(2026, time.July, 11, 2, 0, 0, 0, time.UTC)
+	return domain.InteractionRequest{ID: "int-7", IssueID: "dcj", DecisionKey: "rollout", OrchestrationScope: "project", Question: "Which rollout path should we use?", Why: "The choice changes migration risk and user-visible availability.", Options: []domain.InteractionOption{{Key: "gradual", Label: "Gradual", Description: "Canary the change and expand after validation"}, {Key: "direct", Label: "Direct", Description: "Ship to everyone in one release"}}, Context: "docs/24-issue-state-model-v2-rollout.md", Significance: domain.InteractionSignificanceMaterial, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose rollout", Recommendation: "Use the gradual rollout."}, State: domain.InteractionOpen, Revision: 3, CreatedAt: now, UpdatedAt: now}, domain.InteractionAgeView{AgeSeconds: 3720, Stale: true}
+}
+
+func goldenInteractionView(t *testing.T) string {
+	r, age := goldenInteractionRequest()
+	o := NewInteractionOverlay(r, age)
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*InteractionOverlay).View()
+}
+
+func goldenInteractionSmallView(t *testing.T) string {
+	r, age := goldenInteractionRequest()
+	o := NewInteractionOverlay(r, age)
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	return model.(*InteractionOverlay).View()
 }
 
 func goldenBoardView(t *testing.T) string {
@@ -124,6 +149,38 @@ func goldenGitPaneSmallView(t *testing.T) string {
 func goldenBoardViewSmall(t *testing.T) string {
 	o := NewBoardViewOverlay(goldenBuiltInBoardViews(), domain.DefaultBoardViewID)
 	model, _ := o.Update(tea.WindowSizeMsg{Width: 54, Height: 18})
+	return model.(*BoardViewOverlay).View()
+}
+
+func goldenViewConfigurator(t *testing.T) string {
+	o := NewBoardViewOverlay(goldenBuiltInBoardViews(), domain.DefaultBoardViewID)
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	o = model.(*BoardViewOverlay)
+	model, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	return model.(*BoardViewOverlay).View()
+}
+
+func goldenViewConfiguratorSmall(t *testing.T) string {
+	o := NewBoardViewOverlay(goldenBuiltInBoardViews(), domain.DefaultBoardViewID)
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 54, Height: 18})
+	o = model.(*BoardViewOverlay)
+	model, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	return model.(*BoardViewOverlay).View()
+}
+
+func goldenGlobalViewConfigurator(t *testing.T) string {
+	o := NewGlobalBoardViewOverlay([]protocol.GlobalViewRecord{{View: domain.OrchestrationBoardView(), Scope: protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeAllProjects}}}, "orchestration")
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	o = model.(*BoardViewOverlay)
+	model, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	return model.(*BoardViewOverlay).View()
+}
+
+func goldenGlobalViewConfiguratorSmall(t *testing.T) string {
+	o := NewGlobalBoardViewOverlay([]protocol.GlobalViewRecord{{View: domain.OrchestrationBoardView(), Scope: protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeAllProjects}}}, "orchestration")
+	model, _ := o.Update(tea.WindowSizeMsg{Width: 54, Height: 18})
+	o = model.(*BoardViewOverlay)
+	model, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	return model.(*BoardViewOverlay).View()
 }
 
@@ -231,14 +288,14 @@ func goldenCleanupSmallView(t *testing.T) string {
 func goldenCloseFailureView(t *testing.T) string {
 	t.Helper()
 	dialog := NewCloseFailureDialog(
-		"az-321",
-		"cannot close issue az-321: unresolved child issues remain: az-400 (open). Next: close or clean up the listed child issues first, then retry",
+		"gav",
+		"refusing to merge child issue gav directly into base: no active ancestor worktree branch was found; run `az worktree create gat`, then close the child into that target",
 		CloseFailureDialogOptions{
-			PreviousStatus:          "in_review",
-			TargetStatus:            "closed",
-			AllowAIMerge:            true,
-			AllowForceWorktree:      true,
-			AllowCloseCleanChildren: true,
+			ParentID:            "gat",
+			PreviousStatus:      "in_review",
+			TargetStatus:        "closed",
+			AllowAIMerge:        true,
+			AllowCreateAncestor: true,
 		},
 	)
 	model, _ := dialog.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
@@ -248,13 +305,14 @@ func goldenCloseFailureView(t *testing.T) string {
 func goldenCloseFailureSmallView(t *testing.T) string {
 	t.Helper()
 	dialog := NewCloseFailureDialog(
-		"az-321",
-		"cannot close issue az-321: worktree has local changes: main.go. Next: commit, discard, or merge the worktree changes first, then retry",
+		"gav",
+		"refusing to merge child issue gav directly into base: no active ancestor worktree branch was found; run `az worktree create gat`, then close the child into that target",
 		CloseFailureDialogOptions{
-			PreviousStatus:     "in_review",
-			TargetStatus:       "closed",
-			AllowAIMerge:       true,
-			AllowForceWorktree: true,
+			ParentID:            "gat",
+			PreviousStatus:      "in_review",
+			TargetStatus:        "closed",
+			AllowAIMerge:        true,
+			AllowCreateAncestor: true,
 		},
 	)
 	model, _ := dialog.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
@@ -334,7 +392,7 @@ func goldenProjectSelectorView(t *testing.T) string {
 			{Name: "otel-tui", Path: "/Users/riordan/prog/otel-tui"},
 		},
 	}
-	selector := NewProjectSelectorWithOptions(registry, WithCurrentProjectName("azedarach"), WithInitialCursor(1))
+	selector := NewProjectSelectorWithOptions(registry, WithCurrentProjectName("azedarach"), WithInitialCursor(2))
 	model, _ := selector.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
 	return model.(*ProjectSelector).View()
 }
@@ -629,7 +687,7 @@ func goldenProjectSelectorSmallView(t *testing.T) string {
 			{Name: "azedarach", Path: "/Users/riordan/prog/azedarach"},
 		},
 	}
-	selector := NewProjectSelectorWithOptions(registry, WithCurrentProjectName("azedarach"), WithInitialCursor(1))
+	selector := NewProjectSelectorWithOptions(registry, WithCurrentProjectName("azedarach"), WithInitialCursor(2))
 	model, _ := selector.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	return model.(*ProjectSelector).View()
 }

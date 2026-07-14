@@ -323,9 +323,10 @@ type TaskMergeBaseTarget struct {
 }
 
 type taskMergeBaseTargetRequest struct {
-	TaskID            naming.IssueID `json:"task_id"`
-	BaseBranch        string         `json:"base_branch,omitempty"`
-	AllowBaseForChild bool           `json:"allow_base_for_child,omitempty"`
+	TaskID                 naming.IssueID `json:"task_id"`
+	BaseBranch             string         `json:"base_branch,omitempty"`
+	AllowBaseForChild      bool           `json:"allow_base_for_child,omitempty"`
+	RequireHumanAcceptance bool           `json:"require_human_acceptance,omitempty"`
 }
 
 // TaskFollowOnMergeCandidate is a daemon-owned follow-on merge source decision.
@@ -416,6 +417,7 @@ type TaskIDResponse struct {
 type TaskSnapshot struct {
 	Tasks         []domain.Task
 	View          domain.BoardView
+	Projection    domain.BoardViewProjection
 	Columns       []domain.BoardViewColumnSnapshot
 	Revision      uint64
 	LastCheckedAt time.Time
@@ -932,10 +934,12 @@ func (c *Client) decodeBoardSnapshotResponse(resp protocol.ResponseEnvelope) (Ta
 	if revision == 0 {
 		revision = resp.Revision
 	}
+	projection := boardSnapshotProjectionToDomain(payload)
 	return TaskSnapshot{
-		Tasks:         protocol.DomainTasksFromBoardSummaries(payload.Tasks),
-		View:          payload.View,
-		Columns:       boardSnapshotColumnsToDomain(payload.Columns),
+		Tasks:         projection.OrderedTasks(),
+		View:          projection.View,
+		Projection:    projection,
+		Columns:       projection.ColumnSnapshots(),
 		Revision:      revision,
 		LastCheckedAt: payload.LastCheckedAt,
 		Freshness:     payload.Freshness,
@@ -943,18 +947,23 @@ func (c *Client) decodeBoardSnapshotResponse(resp protocol.ResponseEnvelope) (Ta
 	}, nil
 }
 
-func boardSnapshotColumnsToDomain(columns []protocol.BoardSnapshotColumn) []domain.BoardViewColumnSnapshot {
-	if len(columns) == 0 {
-		return nil
+func boardSnapshotProjectionToDomain(payload protocol.BoardSnapshotPayload) domain.BoardViewProjection {
+	projection := domain.BoardViewProjection{
+		View:         payload.Projection.View,
+		KnownTaskIDs: append([]naming.IssueID(nil), payload.Projection.KnownTaskIDs...),
 	}
-	out := make([]domain.BoardViewColumnSnapshot, 0, len(columns))
-	for _, column := range columns {
-		out = append(out, domain.BoardViewColumnSnapshot{
-			Definition: column.Definition,
-			Tasks:      protocol.DomainTasksFromBoardSummaries(column.Tasks),
+	for _, group := range payload.Projection.Groups {
+		projection.Groups = append(projection.Groups, domain.BoardViewProjectedGroup{GroupID: group.GroupID, TaskIDs: append([]naming.IssueID(nil), group.TaskIDs...)})
+	}
+	for _, item := range payload.Projection.Items {
+		projection.Items = append(projection.Items, domain.BoardViewProjectedItem{
+			Task:               item.Task.ToDomainTask(),
+			GroupID:            item.GroupID,
+			Depth:              item.Depth,
+			OrchestrationState: item.OrchestrationState,
 		})
 	}
-	return out
+	return projection
 }
 
 // CreateTask creates a task through the daemon client boundary.
@@ -1206,6 +1215,26 @@ func (c *Client) ApplyOrchestrationIntent(ctx context.Context, request protocol.
 	return out, nil
 }
 
+func (c *Client) StartOrchestratorSession(ctx context.Context, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+	return c.orchestratorSession(ctx, protocol.CommandOrchestratorSessionStart, request)
+}
+
+func (c *Client) AttachOrchestratorSession(ctx context.Context, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+	return c.orchestratorSession(ctx, protocol.CommandOrchestratorSessionAttach, request)
+}
+
+func (c *Client) OrchestratorSessionStatus(ctx context.Context, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+	return c.orchestratorSession(ctx, protocol.CommandOrchestratorSessionStatus, request)
+}
+
+func (c *Client) orchestratorSession(ctx context.Context, command string, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+	var out protocol.OrchestratorSessionResult
+	if err := c.commandJSON(ctx, command, request, &out); err != nil {
+		return protocol.OrchestratorSessionResult{}, err
+	}
+	return out, nil
+}
+
 // TaskCompleteCheck returns the daemon-owned completion gate for a root issue.
 func (c *Client) TaskCompleteCheck(ctx context.Context, rootIssueID string) (TaskCompleteCheckResult, error) {
 	parsedRootID, err := naming.ParseIssueID(rootIssueID)
@@ -1258,16 +1287,18 @@ func (c *Client) TaskContextRisk(ctx context.Context, issueID, repoDir string, s
 }
 
 // TaskMergeBaseTarget resolves the daemon-owned merge target for an issue branch.
-func (c *Client) TaskMergeBaseTarget(ctx context.Context, issueID, baseBranch string, allowBaseForChild bool) (TaskMergeBaseTarget, error) {
+func (c *Client) TaskMergeBaseTarget(ctx context.Context, issueID, baseBranch string, allowBaseForChild bool, requireHumanAcceptance ...bool) (TaskMergeBaseTarget, error) {
 	parsedIssueID, err := naming.ParseIssueID(issueID)
 	if err != nil {
 		return TaskMergeBaseTarget{}, fmt.Errorf("invalid issue id: %w", err)
 	}
 	var out TaskMergeBaseTarget
+	requireAcceptance := len(requireHumanAcceptance) > 0 && requireHumanAcceptance[0]
 	if err := c.commandJSON(ctx, CommandTaskMergeBaseTarget, taskMergeBaseTargetRequest{
-		TaskID:            parsedIssueID,
-		BaseBranch:        strings.TrimSpace(baseBranch),
-		AllowBaseForChild: allowBaseForChild,
+		TaskID:                 parsedIssueID,
+		BaseBranch:             strings.TrimSpace(baseBranch),
+		AllowBaseForChild:      allowBaseForChild,
+		RequireHumanAcceptance: requireAcceptance,
 	}, &out); err != nil {
 		return TaskMergeBaseTarget{}, err
 	}

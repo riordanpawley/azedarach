@@ -17,9 +17,11 @@ import (
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	activationmodule "github.com/riordanpawley/azedarach/internal/daemon/learningactivation"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/gocache"
 	"github.com/riordanpawley/azedarach/internal/naming"
 
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -32,6 +34,19 @@ type issueSpecService struct {
 
 type issueLearnService struct {
 	daemon *Daemon
+}
+
+func (s issueLearnService) Health(ctx context.Context, req protocol.LearnHealthRequestBody) (protocol.LearnHealthResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnHealthResponseBody{}, err
+	}
+	projectID := firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx))
+	health, err := client.LearningPortfolioHealth(ctx, projectID, time.Now().UTC())
+	if err != nil {
+		return protocol.LearnHealthResponseBody{}, err
+	}
+	return protocol.LearnHealthResponseBody{Health: health}, nil
 }
 
 func (s issueSpecService) issueClient(ctx context.Context) (*issues.Client, error) {
@@ -57,35 +72,49 @@ func (s issueLearnService) issueClient(ctx context.Context) (*issues.Client, err
 }
 
 func (s issueLearnService) Add(ctx context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
+	legacy := domain.LegacyLearningCapture(firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)), req.Summary, req.Evidence, req.Private, req.Tags, req.Files)
+	captured, err := s.Capture(ctx, protocol.LearnCaptureRequestBody{ProjectID: legacy.ProjectID, IssueID: req.IssueID, ReqID: req.ReqID, SessionID: req.SessionID, ObservedBehavior: legacy.ObservedBehavior, PreferredBehavior: legacy.PreferredBehavior, Provenance: protocol.LearningObservationProvenance{Source: legacy.Provenance.Source}, Sensitivity: string(legacy.Sensitivity), Tags: legacy.Tags, Files: legacy.Files})
+	if err != nil {
+		return protocol.LearnAddResponseBody{}, err
+	}
+	learning := captured.Observation.Learning
+	return protocol.LearnAddResponseBody{Learning: learning}, nil
+}
+
+func (s issueLearnService) Capture(ctx context.Context, req protocol.LearnCaptureRequestBody) (protocol.LearnCaptureResponseBody, error) {
 	client, err := s.issueClient(ctx)
 	if err != nil {
-		return protocol.LearnAddResponseBody{}, err
+		return protocol.LearnCaptureResponseBody{}, err
 	}
-	params := issues.CreateLearningParams{
-		ProjectID:       firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)),
-		Summary:         req.Summary,
-		Evidence:        req.Evidence,
-		EvidencePrivate: req.Private,
-		Tags:            req.Tags,
-		Files:           req.Files,
-	}
+	p := issues.CaptureLearningObservationParams{ProjectID: firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)), ObservedBehavior: req.ObservedBehavior, PreferredBehavior: req.PreferredBehavior, Outcome: req.Outcome, Impact: req.Impact, Context: req.Context, Provenance: issues.LearningObservationProvenance{Source: req.Provenance.Source, Actor: req.Provenance.Actor, Ref: req.Provenance.Ref}, Sensitivity: domain.LearningSensitivity(req.Sensitivity), Tags: req.Tags, Files: req.Files}
 	if req.IssueID != "" {
-		issueID := req.IssueID.String()
-		params.IssueID = &issueID
+		v := req.IssueID.String()
+		p.IssueID = &v
 	}
 	if req.ReqID != "" {
-		reqID := req.ReqID.String()
-		params.RequirementID = &reqID
+		v := req.ReqID.String()
+		p.RequirementID = &v
 	}
 	if req.SessionID != "" {
-		sessionID := req.SessionID.String()
-		params.SessionID = &sessionID
+		v := req.SessionID.String()
+		p.SessionID = &v
 	}
-	learning, err := client.CreateLearning(ctx, params)
+	obs, err := client.CaptureLearningObservation(ctx, p)
 	if err != nil {
-		return protocol.LearnAddResponseBody{}, err
+		return protocol.LearnCaptureResponseBody{}, err
 	}
-	return protocol.LearnAddResponseBody{Learning: mapLearningToProtocol(learning, true)}, nil
+	out := protocol.LearningObservation{ID: obs.LocalID, Learning: mapLearningToProtocol(obs.Learning, obs.Sensitivity == domain.LearningSensitivityPublic), ObservedBehavior: obs.ObservedBehavior, PreferredBehavior: obs.PreferredBehavior, Outcome: obs.Outcome, Impact: obs.Impact, Context: obs.Context, Provenance: protocol.LearningObservationProvenance{Source: obs.Provenance.Source, Actor: obs.Provenance.Actor, Ref: obs.Provenance.Ref}, Sensitivity: string(obs.Sensitivity), SafeFingerprint: obs.SafeFingerprint, DuplicateLearningIDs: obs.DuplicateLearningIDs, CreatedAt: obs.CreatedAt.Format(time.RFC3339Nano)}
+	if obs.Sensitivity == domain.LearningSensitivityPrivate {
+		out.ObservedBehavior = ""
+		out.PreferredBehavior = ""
+		out.Outcome = ""
+		out.Impact = ""
+		out.Context = nil
+		out.Provenance = protocol.LearningObservationProvenance{}
+		out.SafeFingerprint = ""
+		out.DuplicateLearningIDs = nil
+	}
+	return protocol.LearnCaptureResponseBody{Observation: out}, nil
 }
 
 func (s issueLearnService) Recall(ctx context.Context, req protocol.LearnRecallRequestBody) (protocol.LearnRecallResponseBody, error) {
@@ -129,6 +158,77 @@ func (s issueLearnService) Recall(ctx context.Context, req protocol.LearnRecallR
 		out = append(out, mapLearningToProtocol(row, req.IncludeEvidence))
 	}
 	return protocol.LearnRecallResponseBody{Learnings: out}, nil
+}
+
+func (s issueLearnService) ContextualActivate(ctx context.Context, req protocol.LearnContextualActivateRequestBody) (protocol.LearnContextualActivateResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnContextualActivateResponseBody{}, err
+	}
+	projectID := firstNonEmptyDaemon(daemonProjectIDFromContext(ctx), req.ProjectID, protocol.DefaultProjectID)
+	result, err := activationmodule.New(client).Propose(ctx, activationmodule.Request{ProjectID: projectID, Purpose: req.Purpose, Surface: req.Surface, SessionID: req.SessionID.String(), IssueID: req.ContextIssueID.String(), RequirementID: req.ContextReqID.String(), Query: req.Query, Tags: req.ContextTags, Files: req.ContextFiles, TokenBudget: req.TokenBudget})
+	if err != nil {
+		return protocol.LearnContextualActivateResponseBody{}, err
+	}
+	if result.Activation.ActivationID == "" {
+		return protocol.LearnContextualActivateResponseBody{Explanation: result.Explanation}, nil
+	}
+	learnings := make([]protocol.Learning, 0, len(result.Learnings))
+	for _, row := range result.Learnings {
+		learnings = append(learnings, mapLearningToProtocol(row, false))
+	}
+	a := result.Activation
+	proposal := protocol.LearningActivationProposal{ActivationID: a.ActivationID, Surface: a.Surface, ContextFingerprint: a.ContextFingerprint, LearningIDs: a.LearningIDs, Explanation: a.Explanation}
+	return protocol.LearnContextualActivateResponseBody{Proposal: &proposal, Learnings: learnings, Explanation: result.Explanation}, nil
+}
+
+func (s issueLearnService) ConfirmActivation(ctx context.Context, req protocol.LearnActivationConfirmRequestBody) (protocol.LearnActivationConfirmResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnActivationConfirmResponseBody{}, err
+	}
+	a, err := activationmodule.New(client).Confirm(ctx, firstNonEmptyDaemon(daemonProjectIDFromContext(ctx), protocol.DefaultProjectID), req.ActivationID, req.TokenCost)
+	if err != nil {
+		return protocol.LearnActivationConfirmResponseBody{}, err
+	}
+	return protocol.LearnActivationConfirmResponseBody{Activation: protocol.LearningActivation{ActivationID: a.ActivationID, Surface: a.Surface, ContextFingerprint: a.ContextFingerprint, LearningIDs: a.LearningIDs, TokenCost: a.TokenCost, Explanation: a.Explanation, DeliveredAt: formatProtocolTime(a.DeliveredAt)}}, nil
+}
+
+func (s issueLearnService) AbandonActivation(ctx context.Context, req protocol.LearnActivationAbandonRequestBody) (protocol.LearnActivationAbandonResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnActivationAbandonResponseBody{}, err
+	}
+	abandoned, err := activationmodule.New(client).Abandon(ctx, firstNonEmptyDaemon(daemonProjectIDFromContext(ctx), protocol.DefaultProjectID), req.ActivationID, req.Reason)
+	return protocol.LearnActivationAbandonResponseBody{Abandoned: abandoned}, err
+}
+
+func (s issueLearnService) Activate(ctx context.Context, req protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnActivateResponseBody{}, err
+	}
+	fingerprint, err := domain.LearningContextFingerprint(req.ContextIssueID.String(), req.ContextReqID.String(), req.ContextTags, req.ContextFiles)
+	if err != nil {
+		return protocol.LearnActivateResponseBody{}, err
+	}
+	a, err := client.RecordLearningActivation(ctx, issues.RecordLearningActivationParams{ProjectID: firstNonEmptyDaemon(daemonProjectIDFromContext(ctx), req.ProjectID, protocol.DefaultProjectID), Surface: req.Surface, ContextFingerprint: fingerprint, LearningIDs: req.LearningIDs, TokenCost: req.TokenCost, Explanation: req.Explanation})
+	if err != nil {
+		return protocol.LearnActivateResponseBody{}, err
+	}
+	return protocol.LearnActivateResponseBody{Activation: protocol.LearningActivation{ActivationID: a.ActivationID, Surface: a.Surface, ContextFingerprint: a.ContextFingerprint, LearningIDs: a.LearningIDs, TokenCost: a.TokenCost, Explanation: a.Explanation, DeliveredAt: formatProtocolTime(a.DeliveredAt)}}, nil
+}
+
+func (s issueLearnService) Feedback(ctx context.Context, req protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnFeedbackResponseBody{}, err
+	}
+	out, created, err := activationmodule.New(client).Feedback(ctx, issues.LearningActivationOutcome{ProjectID: firstNonEmptyDaemon(daemonProjectIDFromContext(ctx), protocol.DefaultProjectID), ActivationID: req.ActivationID, IdempotencyKey: req.IdempotencyKey, Outcome: domain.LearningActivationOutcome(req.Outcome), Source: domain.LearningOutcomeSource(req.Source), Explanation: req.Explanation})
+	if err != nil {
+		return protocol.LearnFeedbackResponseBody{}, err
+	}
+	return protocol.LearnFeedbackResponseBody{Created: created, Feedback: protocol.LearningActivationFeedback{ActivationID: out.ActivationID, IdempotencyKey: out.IdempotencyKey, Outcome: string(out.Outcome), Source: string(out.Source), Explanation: out.Explanation, RecordedAt: formatProtocolTime(out.RecordedAt), ResolvedOutcome: string(out.ResolvedOutcome), ResolvedSource: string(out.ResolvedSource)}}, nil
 }
 
 func (s issueLearnService) Show(ctx context.Context, req protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error) {
@@ -201,6 +301,63 @@ func (s issueLearnService) Review(ctx context.Context, req protocol.LearnReviewR
 		return protocol.LearnReviewResponseBody{}, err
 	}
 	return protocol.LearnReviewResponseBody{Learnings: mapLearningsToProtocol(rows, false)}, nil
+}
+
+func (s issueLearnService) Suggest(ctx context.Context, req protocol.LearnSuggestRequestBody) (protocol.LearnSuggestResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnSuggestResponseBody{}, err
+	}
+	projectID := firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx))
+	var rows []issues.LearningSuggestion
+	if req.Refresh {
+		rows, err = client.SuggestLearningConsolidations(ctx, projectID)
+	} else {
+		rows, err = client.ListLearningSuggestions(ctx, issues.LearningSuggestionFilter{ProjectID: projectID, Status: issues.LearningSuggestionStatus(req.Status), Limit: req.Limit})
+	}
+	if err != nil {
+		return protocol.LearnSuggestResponseBody{}, err
+	}
+	return protocol.LearnSuggestResponseBody{Suggestions: mapLearningSuggestionsToProtocol(rows)}, nil
+}
+
+func (s issueLearnService) Consolidate(ctx context.Context, req protocol.LearnConsolidateRequestBody) (protocol.LearnConsolidateResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnConsolidateResponseBody{}, err
+	}
+	row, err := client.ConfirmLearningConsolidation(ctx, issues.ConfirmLearningConsolidationParams{SuggestionID: req.SuggestionID, CanonicalLearningID: req.CanonicalLearningID, Summary: req.Summary, Note: req.Note})
+	if err != nil {
+		return protocol.LearnConsolidateResponseBody{}, err
+	}
+	learning, err := client.GetLearning(ctx, req.CanonicalLearningID)
+	if err != nil {
+		return protocol.LearnConsolidateResponseBody{}, err
+	}
+	return protocol.LearnConsolidateResponseBody{Suggestion: mapLearningSuggestionToProtocol(row), Learning: mapLearningToProtocol(learning, false), SourceLearningIDs: []string{row.LeftLearningID, row.RightLearningID}}, nil
+}
+
+func (s issueLearnService) RejectSuggestion(ctx context.Context, req protocol.LearnSuggestionRejectRequestBody) (protocol.LearnSuggestionRejectResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnSuggestionRejectResponseBody{}, err
+	}
+	row, err := client.RejectLearningSuggestion(ctx, req.SuggestionID, req.Note)
+	if err != nil {
+		return protocol.LearnSuggestionRejectResponseBody{}, err
+	}
+	return protocol.LearnSuggestionRejectResponseBody{Suggestion: mapLearningSuggestionToProtocol(row)}, nil
+}
+
+func mapLearningSuggestionsToProtocol(rows []issues.LearningSuggestion) []protocol.LearningSuggestion {
+	out := make([]protocol.LearningSuggestion, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, mapLearningSuggestionToProtocol(row))
+	}
+	return out
+}
+func mapLearningSuggestionToProtocol(row issues.LearningSuggestion) protocol.LearningSuggestion {
+	return protocol.LearningSuggestion{ID: row.LocalID, ProjectID: row.ProjectID, Kind: string(row.Kind), LeftLearningID: row.LeftLearningID, RightLearningID: row.RightLearningID, Score: row.Score, Reason: row.Reason, Status: string(row.Status), ReviewNote: row.ReviewNote, CanonicalLearningID: row.CanonicalLearningID, CreatedAt: row.CreatedAt.Format(time.RFC3339Nano), UpdatedAt: row.UpdatedAt.Format(time.RFC3339Nano)}
 }
 
 func (s issueLearnService) Stale(ctx context.Context, req protocol.LearnStaleRequestBody) (protocol.LearnStaleResponseBody, error) {
@@ -1345,7 +1502,7 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 		ensured, err := ensureAncestorWorktrees(ctx, projectID, task, baseBranch, manager, taskLookupFromMap(taskByIssue), a.runtimeProjectionWriter, func(ctx context.Context, initCtx worktreeInitContext) error {
 			if a.runWorktreeSyncInit != nil {
 				if err := a.runWorktreeSyncInit(ctx, initCtx); err != nil {
-					cleanupNote := cleanupWorktreeAfterInitFailure(ctx, manager, initCtx.IssueID, initCtx.WorktreePath, a.logger)
+					cleanupNote := cleanupWorktreeAfterInitFailure(ctx, initCtx.ProjectID, manager, initCtx.IssueID, initCtx.WorktreePath, a.runtimeProjectionWriter, a.logger)
 					return fmt.Errorf("%w%s", err, cleanupNote)
 				}
 			}
@@ -1375,7 +1532,7 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 		}
 		if a.runWorktreeSyncInit != nil {
 			if err := a.runWorktreeSyncInit(ctx, initCtx); err != nil {
-				cleanupNote := cleanupWorktreeAfterInitFailure(ctx, manager, initCtx.IssueID, initCtx.WorktreePath, a.logger)
+				cleanupNote := cleanupWorktreeAfterInitFailure(ctx, initCtx.ProjectID, manager, initCtx.IssueID, initCtx.WorktreePath, a.runtimeProjectionWriter, a.logger)
 				return nil, "", fmt.Errorf("%w%s", err, cleanupNote)
 			}
 		}
@@ -1395,14 +1552,15 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 	return worktree, baseBranch, nil
 }
 
-func cleanupWorktreeAfterInitFailure(ctx context.Context, manager *git.WorktreeManager, issueID, worktreePath string, logger *slog.Logger) string {
+func cleanupWorktreeAfterInitFailure(ctx context.Context, projectID string, manager *git.WorktreeManager, issueID, worktreePath string, writer runtimeProjectionWriter, logger *slog.Logger) string {
 	if manager == nil {
 		return ""
 	}
-	if _, err := manager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
+	removedWorktree, err := manager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
 		Force:         true,
 		BranchCleanup: git.WorktreeBranchCleanupRequired,
-	}); err != nil {
+	})
+	if err != nil {
 		if logger != nil {
 			logger.Warn("failed to cleanup worktree after init failure",
 				"issue_id", issueID,
@@ -1411,6 +1569,16 @@ func cleanupWorktreeAfterInitFailure(ctx context.Context, manager *git.WorktreeM
 			)
 		}
 		return fmt.Sprintf(" (cleanup failed for worktree %s: %v)", worktreePath, err)
+	}
+	if err := finalizeDeletedWorktree(ctx, projectID, issueID, manager, removedWorktree, writer); err != nil {
+		if logger != nil {
+			logger.Warn("Go cache cleanup pending after init rollback",
+				"issue_id", issueID,
+				"worktree", worktreePath,
+				"error", err,
+			)
+		}
+		return fmt.Sprintf(" (removed failed worktree %s; %v)", worktreePath, err)
 	}
 	return fmt.Sprintf(" (removed failed worktree %s)", worktreePath)
 }
@@ -1439,21 +1607,35 @@ func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, i
 	removedWorktree, err := manager.DeleteWithOptions(ctx, issueID, opts)
 	if err != nil {
 		if errors.Is(err, git.ErrWorktreeNotFound) {
-			if a.runtimeProjectionWriter != nil {
-				a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
-			}
-			return nil, false, nil
+			return nil, false, finalizeDeletedWorktree(ctx, projectID, issueID, manager, nil, a.runtimeProjectionWriter)
 		}
 		return nil, false, err
 	}
+	branchDeleted := removeOpts.DeleteBranch && removedWorktree != nil && strings.TrimSpace(removedWorktree.Branch) != ""
+	if err := finalizeDeletedWorktree(ctx, projectID, issueID, manager, removedWorktree, a.runtimeProjectionWriter); err != nil {
+		return removedWorktree, branchDeleted, err
+	}
+	return removedWorktree, branchDeleted, nil
+}
+
+// finalizeDeletedWorktree is the single post-delete lifecycle path. Runtime
+// state is finalized before cache maintenance so a resumable cache failure can
+// never make an already-deleted checkout appear retained.
+func finalizeDeletedWorktree(ctx context.Context, projectID, issueID string, manager *git.WorktreeManager, removedWorktree *git.Worktree, writer runtimeProjectionWriter) error {
 	if removedWorktree != nil && strings.TrimSpace(removedWorktree.Path) != "" {
 		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(removedWorktree.Path))
 	}
-	if a.runtimeProjectionWriter != nil {
-		a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
+	if writer != nil {
+		writer.DeleteWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), issueID)
 	}
-	branchDeleted := removeOpts.DeleteBranch && removedWorktree != nil && strings.TrimSpace(removedWorktree.Branch) != ""
-	return removedWorktree, branchDeleted, nil
+	if manager == nil {
+		return errors.New("worktree manager unavailable for post-delete cache cleanup")
+	}
+	cacheRoot := gocache.RootForRepository(ctx, manager.RepoDir())
+	if err := gocache.CleanupInactiveOwner(ctx, cacheRoot, issueID); err != nil {
+		return fmt.Errorf("worktree deleted; Go cache cleanup remains pending for owner %s: %w", issueID, err)
+	}
+	return nil
 }
 
 func (a *worktreeServiceAdapter) projectedWorktreeForIssue(ctx context.Context, projectID, issueID string) (daemonstate.WorktreeState, bool, error) {
@@ -1486,19 +1668,23 @@ func (a *worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID 
 	result := &daemonhandlers.CleanupOrphanedResult{
 		ProjectID: projectID,
 	}
+	var cleanupErrors []error
 	for _, wt := range worktrees {
 		if err := manager.Delete(ctx, wt.IssueID); err != nil {
 			result.Skipped = append(result.Skipped, wt)
 			continue
 		}
-		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(wt.Path))
 		result.Removed = append(result.Removed, wt)
-		if a.runtimeProjectionWriter != nil {
-			a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), wt.IssueID)
+		if err := finalizeDeletedWorktree(ctx, projectID, wt.IssueID, manager, &wt, a.runtimeProjectionWriter); err != nil {
+			if a.logger != nil {
+				a.logger.Warn("Go cache cleanup pending after orphaned worktree deletion", "project_id", projectID, "issue_id", wt.IssueID, "error", err)
+			}
+			cleanupErrors = append(cleanupErrors, err)
+			continue
 		}
 	}
 
-	return result, nil
+	return result, errors.Join(cleanupErrors...)
 }
 
 func (a *worktreeServiceAdapter) ensureBackgroundPoller(projectID string) {

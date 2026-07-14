@@ -11,18 +11,82 @@ import (
 )
 
 type fakeLearnService struct {
-	addFn       func(context.Context, protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error)
-	recallFn    func(context.Context, protocol.LearnRecallRequestBody) (protocol.LearnRecallResponseBody, error)
-	showFn      func(context.Context, protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error)
-	reviewFn    func(context.Context, protocol.LearnReviewRequestBody) (protocol.LearnReviewResponseBody, error)
-	staleFn     func(context.Context, protocol.LearnStaleRequestBody) (protocol.LearnStaleResponseBody, error)
-	demoteFn    func(context.Context, protocol.LearnDemoteRequestBody) (protocol.LearnDemoteResponseBody, error)
-	promoteFn   func(context.Context, protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error)
-	retireFn    func(context.Context, protocol.LearnRetireRequestBody) (protocol.LearnRetireResponseBody, error)
-	relateFn    func(context.Context, protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error)
-	supersedeFn func(context.Context, protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error)
-	doctorFn    func(context.Context, protocol.LearnDoctorRequestBody) (protocol.LearnDoctorResponseBody, error)
-	gcFn        func(context.Context, protocol.LearnGCRequestBody) (protocol.LearnGCResponseBody, error)
+	healthFn             func(context.Context, protocol.LearnHealthRequestBody) (protocol.LearnHealthResponseBody, error)
+	contextualActivateFn func(context.Context, protocol.LearnContextualActivateRequestBody) (protocol.LearnContextualActivateResponseBody, error)
+	activateFn           func(context.Context, protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error)
+	feedbackFn           func(context.Context, protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error)
+	addFn                func(context.Context, protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error)
+	recallFn             func(context.Context, protocol.LearnRecallRequestBody) (protocol.LearnRecallResponseBody, error)
+	showFn               func(context.Context, protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error)
+	reviewFn             func(context.Context, protocol.LearnReviewRequestBody) (protocol.LearnReviewResponseBody, error)
+	staleFn              func(context.Context, protocol.LearnStaleRequestBody) (protocol.LearnStaleResponseBody, error)
+	demoteFn             func(context.Context, protocol.LearnDemoteRequestBody) (protocol.LearnDemoteResponseBody, error)
+	promoteFn            func(context.Context, protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error)
+	retireFn             func(context.Context, protocol.LearnRetireRequestBody) (protocol.LearnRetireResponseBody, error)
+	relateFn             func(context.Context, protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error)
+	supersedeFn          func(context.Context, protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error)
+	doctorFn             func(context.Context, protocol.LearnDoctorRequestBody) (protocol.LearnDoctorResponseBody, error)
+	gcFn                 func(context.Context, protocol.LearnGCRequestBody) (protocol.LearnGCResponseBody, error)
+}
+
+func (f *fakeLearnService) Health(ctx context.Context, req protocol.LearnHealthRequestBody) (protocol.LearnHealthResponseBody, error) {
+	if f.healthFn != nil {
+		return f.healthFn(ctx, req)
+	}
+	return protocol.LearnHealthResponseBody{}, nil
+}
+func (f *fakeLearnService) AbandonActivation(context.Context, protocol.LearnActivationAbandonRequestBody) (protocol.LearnActivationAbandonResponseBody, error) {
+	return protocol.LearnActivationAbandonResponseBody{Abandoned: true}, nil
+}
+
+func TestLearnHandlerHealthDispatch(t *testing.T) {
+	called := false
+	h := NewLearnHandler(&fakeLearnService{healthFn: func(context.Context, protocol.LearnHealthRequestBody) (protocol.LearnHealthResponseBody, error) {
+		called = true
+		return protocol.LearnHealthResponseBody{}, nil
+	}})
+	resp := h.Handle(context.Background(), specRequest(t, protocol.CommandLearnHealth, protocol.LearnHealthRequestBody{}))
+	if resp.Error != nil || !called {
+		t.Fatalf("health dispatch failed: error=%v called=%v", resp.Error, called)
+	}
+}
+
+func (f *fakeLearnService) ContextualActivate(ctx context.Context, req protocol.LearnContextualActivateRequestBody) (protocol.LearnContextualActivateResponseBody, error) {
+	if f.contextualActivateFn != nil {
+		return f.contextualActivateFn(ctx, req)
+	}
+	return protocol.LearnContextualActivateResponseBody{}, nil
+}
+
+func (f *fakeLearnService) ConfirmActivation(context.Context, protocol.LearnActivationConfirmRequestBody) (protocol.LearnActivationConfirmResponseBody, error) {
+	return protocol.LearnActivationConfirmResponseBody{}, nil
+}
+
+func (f *fakeLearnService) Capture(context.Context, protocol.LearnCaptureRequestBody) (protocol.LearnCaptureResponseBody, error) {
+	return protocol.LearnCaptureResponseBody{Observation: protocol.LearningObservation{ID: "learn-obs-1", Learning: protocol.Learning{ID: "learn-1"}}}, nil
+}
+
+func (f *fakeLearnService) Activate(ctx context.Context, req protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error) {
+	if f.activateFn != nil {
+		return f.activateFn(ctx, req)
+	}
+	return protocol.LearnActivateResponseBody{}, nil
+}
+func (f *fakeLearnService) Feedback(ctx context.Context, req protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error) {
+	if f.feedbackFn != nil {
+		return f.feedbackFn(ctx, req)
+	}
+	return protocol.LearnFeedbackResponseBody{}, nil
+}
+
+func (f *fakeLearnService) Suggest(context.Context, protocol.LearnSuggestRequestBody) (protocol.LearnSuggestResponseBody, error) {
+	return protocol.LearnSuggestResponseBody{}, nil
+}
+func (f *fakeLearnService) Consolidate(context.Context, protocol.LearnConsolidateRequestBody) (protocol.LearnConsolidateResponseBody, error) {
+	return protocol.LearnConsolidateResponseBody{}, nil
+}
+func (f *fakeLearnService) RejectSuggestion(context.Context, protocol.LearnSuggestionRejectRequestBody) (protocol.LearnSuggestionRejectResponseBody, error) {
+	return protocol.LearnSuggestionRejectResponseBody{}, nil
 }
 
 func (f *fakeLearnService) Add(ctx context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
@@ -121,7 +185,17 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	var gotSupersede protocol.LearnSupersedeRequestBody
 	var gotDoctor protocol.LearnDoctorRequestBody
 	var gotGC protocol.LearnGCRequestBody
+	var gotActivate protocol.LearnActivateRequestBody
+	var gotFeedback protocol.LearnFeedbackRequestBody
 	handler := NewLearnHandler(&fakeLearnService{
+		activateFn: func(_ context.Context, req protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error) {
+			gotActivate = req
+			return protocol.LearnActivateResponseBody{Activation: protocol.LearningActivation{ActivationID: "act-1"}}, nil
+		},
+		feedbackFn: func(_ context.Context, req protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error) {
+			gotFeedback = req
+			return protocol.LearnFeedbackResponseBody{Created: true}, nil
+		},
 		addFn: func(_ context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
 			gotAdd = req
 			return protocol.LearnAddResponseBody{Learning: protocol.Learning{ID: "learn-1"}}, nil
@@ -168,6 +242,14 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 			return protocol.LearnGCResponseBody{DryRun: !req.Confirm, Deleted: []protocol.LearnMaintenanceFinding{{LearningID: "learn-1", Type: "old_candidate"}}}, nil
 		},
 	})
+	activateResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnActivate, protocol.LearnActivateRequestBody{Surface: " primer ", LearningIDs: []string{" learn-1 ", "learn-1"}, TokenCost: 12}))
+	if !activateResp.OK || gotActivate.Surface != "primer" || len(gotActivate.LearningIDs) != 1 {
+		t.Fatalf("activate response=%+v got=%+v", activateResp, gotActivate)
+	}
+	feedbackResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnFeedback, protocol.LearnFeedbackRequestBody{ActivationID: " act-1 ", IdempotencyKey: " turn-1 ", Outcome: "helpful", Source: "explicit"}))
+	if !feedbackResp.OK || gotFeedback.ActivationID != "act-1" || gotFeedback.IdempotencyKey != "turn-1" {
+		t.Fatalf("feedback response=%+v got=%+v", feedbackResp, gotFeedback)
+	}
 
 	addResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnAdd, protocol.LearnAddRequestBody{
 		IssueID:  naming.IssueID("csk"),
@@ -401,5 +483,26 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	}))
 	if conflictResp.OK || conflictResp.Error == nil || conflictResp.Error.Code != protocol.ErrorCodeConflict {
 		t.Fatalf("conflict promote response=%+v", conflictResp)
+	}
+}
+
+func TestLearnHandlerConsolidationCommands(t *testing.T) {
+	h := NewLearnHandler(&fakeLearnService{})
+	for _, tc := range []struct {
+		command string
+		body    any
+	}{
+		{protocol.CommandLearnSuggest, protocol.LearnSuggestRequestBody{Refresh: true}},
+		{protocol.CommandLearnConsolidate, protocol.LearnConsolidateRequestBody{SuggestionID: "learn-sug-1", CanonicalLearningID: "learn-1", Note: "confirmed"}},
+		{protocol.CommandLearnSuggestionReject, protocol.LearnSuggestionRejectRequestBody{SuggestionID: "learn-sug-1", Note: "rejected"}},
+	} {
+		resp := h.Handle(context.Background(), specRequest(t, tc.command, tc.body))
+		if !resp.OK {
+			t.Fatalf("%s response=%+v", tc.command, resp)
+		}
+	}
+	bad := h.Handle(context.Background(), specRequest(t, protocol.CommandLearnConsolidate, protocol.LearnConsolidateRequestBody{}))
+	if bad.OK || bad.Error == nil || bad.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("bad response=%+v", bad)
 	}
 }

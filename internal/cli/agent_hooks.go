@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -49,7 +51,8 @@ type AgentHookContext struct {
 type AgentHookOutcome struct {
 	// GuardResponse holds JSON fields agents may act on (systemMessage,
 	// decision, etc.). Always non-nil; empty means "allow / no advice".
-	GuardResponse map[string]any
+	GuardResponse          map[string]any
+	ActivationConfirmation *protocol.LearnActivationConfirmRequestBody
 }
 
 // RunAgentHook is the shared hook-handling port called by every CLI adapter.
@@ -61,6 +64,8 @@ type AgentHookOutcome struct {
 // their agent's hook protocol expects.
 func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookContext) (AgentHookOutcome, error) {
 	outcome := AgentHookOutcome{GuardResponse: map[string]any{}}
+	contextualGuidance := ""
+	contextualActivationID := ""
 
 	agent := hookCtx.Agent
 	if !agent.IsKnown() {
@@ -75,6 +80,26 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 	if deps != nil && deps.DaemonClient != nil && shouldIngestAgentRuntimeSignal(hookCtx, event) {
 		notifyCtx, cancel := context.WithTimeout(ctx, hookBestEffortDaemonTimeout)
 		_ = ingestAgentHookRuntimeSignalBestEffort(notifyCtx, deps, hookCtx, event)
+		cancel()
+	}
+	if agent == AgentCodex && deps != nil && deps.DaemonClient != nil && (event == hookEventSessionStart || event == hookEventUserPromptSubmit) && strings.TrimSpace(hookCtx.IssueID) != "" {
+		activationCtx, cancel := context.WithTimeout(ctx, hookBestEffortDaemonTimeout)
+		purpose := domain.LearningPurposeContextTransition
+		if event == hookEventSessionStart {
+			purpose = domain.LearningPurposeSessionStart
+		}
+		query := agentHookPromptText(hookCtx.Payload)
+		projectID := strings.TrimSpace(deps.ProjectID)
+		if projectID == "" {
+			projectID = protocol.DefaultProjectID
+		}
+		activation, activationErr := deps.DaemonClient.ActivateContextualLearnings(activationCtx, protocol.LearnContextualActivateRequestBody{
+			Purpose: string(purpose), Surface: "agent_hook", SessionID: naming.SessionID(naming.CanonicalSessionID(projectID, hookCtx.IssueID)), ContextIssueID: naming.IssueID(hookCtx.IssueID), Query: query, TokenBudget: 192,
+		})
+		if activationErr == nil && activation.Proposal != nil && len(activation.Learnings) > 0 {
+			contextualGuidance = renderContextualLearningGuidance(activation.Proposal.ActivationID, activation.Learnings)
+			contextualActivationID = activation.Proposal.ActivationID
+		}
 		cancel()
 	}
 
@@ -94,8 +119,36 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 	case AgentClaude:
 		// Claude has no port-layer guard today.
 	}
+	if contextualGuidance != "" {
+		renderedGuidance := contextualGuidance
+		existing, _ := outcome.GuardResponse["systemMessage"].(string)
+		if strings.TrimSpace(existing) != "" {
+			contextualGuidance = strings.TrimSpace(existing) + "\n\n" + contextualGuidance
+		}
+		outcome.GuardResponse["systemMessage"] = contextualGuidance
+		outcome.ActivationConfirmation = &protocol.LearnActivationConfirmRequestBody{ActivationID: contextualActivationID, TokenCost: domain.RenderedLearningTokenCost(renderedGuidance)}
+	}
 
 	return outcome, nil
+}
+
+func agentHookPromptText(payload map[string]any) string {
+	for _, key := range []string{"prompt", "user_prompt", "message"} {
+		if value, ok := payload[key].(string); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func renderContextualLearningGuidance(activationID string, learnings []protocol.Learning) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Relevant project guidance [activation: %s]:\n", activationID)
+	for _, learning := range learnings {
+		fmt.Fprintf(&b, "- %s: %s\n", learning.ID, learning.Summary)
+	}
+	fmt.Fprintf(&b, "Feedback: `az learn feedback --idempotency-key <key> --outcome helpful|followed|contradicted|unknown %s`\n", activationID)
+	return strings.TrimSpace(b.String())
 }
 
 func shouldAppendHookLogEvent(event string) bool {
@@ -289,6 +342,10 @@ func ParseAIHookRunArgs(args []string) (AIHookRunOptions, error) {
 // AIHookRunCommand is the unified CLI entrypoint that delegates to the
 // shared RunAgentHook port. Agent-specific output rendering happens here.
 func AIHookRunCommand(deps *Dependencies, opts AIHookRunOptions) error {
+	return aiHookRunCommandTo(deps, opts, os.Stdout)
+}
+
+func aiHookRunCommandTo(deps *Dependencies, opts AIHookRunOptions, stdout io.Writer) error {
 	projectDir, err := resolveProjectDir("", deps)
 	if err != nil {
 		return err
@@ -311,29 +368,56 @@ func AIHookRunCommand(deps *Dependencies, opts AIHookRunOptions) error {
 	if err != nil {
 		return err
 	}
+	return emitAgentHookOutcome(deps, opts, outcome, stdout)
+}
 
+func emitAgentHookOutcome(deps *Dependencies, opts AIHookRunOptions, outcome AgentHookOutcome, stdout io.Writer) error {
+	fail := func(reason string, deliveryErr error) error {
+		if outcome.ActivationConfirmation == nil || deps == nil || deps.DaemonClient == nil {
+			return deliveryErr
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), hookBestEffortDaemonTimeout)
+		defer cancel()
+		_, abandonErr := deps.DaemonClient.AbandonLearningActivation(ctx, protocol.LearnActivationAbandonRequestBody{ActivationID: outcome.ActivationConfirmation.ActivationID, Reason: reason})
+		return errors.Join(deliveryErr, abandonErr)
+	}
 	switch opts.Agent {
 	case AgentCodex:
 		if opts.JSON {
 			encoded, err := json.Marshal(outcome.GuardResponse)
 			if err != nil {
-				return err
+				return fail("render_failed", err)
 			}
-			fmt.Println(string(encoded))
-			return nil
+			if _, err := fmt.Fprintln(stdout, string(encoded)); err != nil {
+				return fail("write_failed", err)
+			}
+			break
 		}
 		notifyOutput, err := renderNotifyOutput(opts.Event, false, false, "")
 		if err != nil {
-			return err
+			return fail("render_failed", err)
 		}
-		fmt.Println(notifyOutput)
-		printCodexGuardResponse(outcome.GuardResponse)
+		if _, err := fmt.Fprintln(stdout, notifyOutput); err != nil {
+			return fail("write_failed", err)
+		}
+		if err := writeCodexGuardResponse(stdout, outcome.GuardResponse); err != nil {
+			return fail("write_failed", err)
+		}
 	default: // claude
 		notifyOutput, err := renderNotifyOutput(opts.Event, opts.JSON, false, "")
 		if err != nil {
+			return fail("render_failed", err)
+		}
+		if _, err := fmt.Fprintln(stdout, notifyOutput); err != nil {
+			return fail("write_failed", err)
+		}
+	}
+	if outcome.ActivationConfirmation != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), hookBestEffortDaemonTimeout)
+		defer cancel()
+		if _, err := deps.DaemonClient.ConfirmLearningActivation(ctx, *outcome.ActivationConfirmation); err != nil {
 			return err
 		}
-		fmt.Println(notifyOutput)
 	}
 	return nil
 }

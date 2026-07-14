@@ -12,10 +12,8 @@ import (
 	"strings"
 	"time"
 
-	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
-	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -1156,7 +1154,7 @@ func buildBoardSnapshotPayload(projectID string, revision uint64, lastCheckedAt 
 	if view.ID == "" {
 		view = domain.DefaultBoardView()
 	}
-	columns, err := domain.GroupTasksByBoardView(view, tasks)
+	projection, err := domain.ProjectTasksByBoardView(view, tasks)
 	if err != nil {
 		return protocol.BoardSnapshotPayload{}, err
 	}
@@ -1167,9 +1165,7 @@ func buildBoardSnapshotPayload(projectID string, revision uint64, lastCheckedAt 
 		ProjectID:        naming.ProjectID(projectID),
 		LastCheckedAt:    lastCheckedAt.UTC(),
 		Freshness:        freshness,
-		View:             view,
-		Columns:          protocol.BoardSnapshotColumnsFromDomain(columns),
-		Tasks:            protocol.BoardTaskSummariesFromDomain(tasks),
+		Projection:       protocol.BoardViewProjectionFromDomain(projection),
 	}, nil
 }
 
@@ -1969,6 +1965,8 @@ func parseTaskOwnershipTTL(raw string) (time.Duration, error) {
 }
 
 func (d *Daemon) handleTaskClose(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	ctx, cancel := context.WithTimeout(ctx, domain.IntegrationCloseTimeout)
+	defer cancel()
 	projectID := d.projectID(req.Meta)
 	var cmd taskCloseRequest
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
@@ -2065,7 +2063,13 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	}
 
 	phaseStartedAt = time.Now()
-	integration, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, cmd.IntegrateBeforeClose)
+	integrationCtx, cancelIntegration, integrationBudgetErr := taskCloseIntegrationContext(ctx)
+	if integrationBudgetErr != nil && cmd.IntegrateBeforeClose {
+		recordPhase("integrate_before_close", phaseStartedAt, false)
+		return result, fmt.Errorf("phase integrate_before_close for issue %s: %w", taskID, integrationBudgetErr)
+	}
+	integration, err := d.integrateTaskBeforeClose(integrationCtx, projectID, taskID, cmd.IntegrateBeforeClose)
+	cancelIntegration()
 	recordPhase("integrate_before_close", phaseStartedAt, !cmd.IntegrateBeforeClose)
 	recordTaskCloseHookPhases(ctx, &result, d.cfg.Logger, req, projectID, taskID, integration.HookDiagnostics)
 	if err != nil {
@@ -2151,6 +2155,21 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	return result, nil
 }
 
+func taskCloseIntegrationContext(ctx context.Context) (context.Context, context.CancelFunc, error) {
+	budget := domain.IntegrationMergeTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		available := time.Until(deadline) - domain.IntegrationCloseReserve
+		if available <= 0 {
+			return ctx, func() {}, fmt.Errorf("close lifecycle budget exhausted before integration; %s cleanup reserve is required", domain.IntegrationCloseReserve)
+		}
+		if available < budget {
+			budget = available
+		}
+	}
+	integrationCtx, cancel := context.WithTimeout(ctx, budget)
+	return integrationCtx, cancel, nil
+}
+
 func daemonTaskCloseOutcomeStatus(raw string) (domain.IssueCloseOutcome, domain.Status, error) {
 	switch domain.IssueCloseOutcome(strings.ToLower(strings.TrimSpace(raw))) {
 	case "", domain.IssueCloseCompleted, domain.IssueCloseOutcome(domain.StatusDone):
@@ -2192,6 +2211,12 @@ func (d *Daemon) repairStaleSessionRuntimeProjections(ctx context.Context, proje
 			}
 			markSessionProjectionStopped(&session)
 			if err := store.UpsertSessionState(ctx, projectionProjectID, session); err != nil {
+				return err
+			}
+			if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+				ProjectID: projectionProjectID, SessionID: session.ID,
+				ObservedState: daemonstate.SessionStateStopped, UpdatedAt: session.UpdatedAt,
+			}); err != nil {
 				return err
 			}
 		}
@@ -2266,6 +2291,12 @@ func (d *Daemon) repairStaleRuntimeProjections(ctx context.Context, projectID, t
 				if _, live := liveSessions[session.ID]; !live {
 					markSessionProjectionStopped(&session)
 					if err := store.UpsertSessionState(ctx, projectionProjectID, session); err != nil {
+						return err
+					}
+					if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+						ProjectID: projectionProjectID, SessionID: session.ID,
+						ObservedState: daemonstate.SessionStateStopped, UpdatedAt: session.UpdatedAt,
+					}); err != nil {
 						return err
 					}
 					continue
@@ -2378,6 +2409,9 @@ func (d *Daemon) submitDeferredTaskWorktreeCleanup(ctx context.Context, projectI
 		})
 		if err != nil {
 			if errors.Is(err, git.ErrWorktreeNotFound) {
+				if cleanupErr := finalizeDeletedWorktree(runCtx, projectID, taskID, manager, nil, d.runtimeProjectionStateWriter()); cleanupErr != nil {
+					return nil, cleanupErr
+				}
 				return json.Marshal(deferredTaskWorktreeCleanupResult{
 					ProjectID: projectID,
 					TaskID:    taskID,
@@ -2385,8 +2419,8 @@ func (d *Daemon) submitDeferredTaskWorktreeCleanup(ctx context.Context, projectI
 			}
 			return nil, err
 		}
-		if removedWorktree != nil {
-			_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(removedWorktree.Path))
+		if cleanupErr := finalizeDeletedWorktree(runCtx, projectID, taskID, manager, removedWorktree, d.runtimeProjectionStateWriter()); cleanupErr != nil {
+			return nil, cleanupErr
 		}
 		return json.Marshal(deferredTaskWorktreeCleanupResult{
 			ProjectID: projectID,
@@ -2723,14 +2757,23 @@ func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, source 
 		return result, nil
 	}
 	return result, fmt.Errorf(
-		"origin workflow close will not merge %s into the local %s checkout; %s still differs from %s (%d file(s): %s). Next: integrate through the remote workflow, fetch %s, then retry close",
+		"origin workflow close will not merge %s into the local %s checkout; %s still differs from %s (%d file(s): %s). Next: %s",
 		source.Branch,
 		targetBranch,
 		source.IssueID,
 		remoteBaseRef,
 		len(changedFiles),
 		strings.Join(daemonLimitStrings(changedFiles, 8), ", "),
-		remoteBaseRef,
+		daemonOriginBaseIntegrationGuidance(source.IssueID, targetBranch),
+	)
+}
+
+func daemonOriginBaseIntegrationGuidance(issueID, targetBranch string) string {
+	issueID = strings.TrimSpace(issueID)
+	remoteBaseRef := daemonRemoteTrackingBaseRef(targetBranch)
+	return fmt.Sprintf(
+		"push the issue branch with `git push -u origin HEAD`, run `az pr create --issue %s --draft=false`, inspect it with `az pr status --issue %s`, merge it with `az pr merge --issue %s --confirm`, fetch %s, then retry `az ticket close --id %s`",
+		issueID, issueID, issueID, remoteBaseRef, issueID,
 	)
 }
 
@@ -3298,6 +3341,13 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 	}
 
 	reasons := make([]string, 0, 3)
+	acceptance, err := d.investigationAcceptance(ctx, projectID, task)
+	if err != nil {
+		return taskClosePreflightResult{}, err
+	}
+	if !acceptance.Accepted {
+		reasons = append(reasons, acceptance.Reason)
+	}
 	reasons = append(reasons, daemonCloseGuardRuntimeBlockers(task, opts)...)
 	reasons = append(reasons, daemonCloseGuardChildBlockers(task.ID, tasks, opts)...)
 	if len(reasons) > 0 {
@@ -3400,6 +3450,29 @@ func (d *Daemon) loadTaskClosePreflightDomainTasks(ctx context.Context, projectI
 		return nil, err
 	}
 	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
+}
+
+func (d *Daemon) investigationAcceptance(ctx context.Context, projectID string, task domain.Task) (domain.InvestigationAcceptance, error) {
+	if task.Type != domain.TypeInvestigation {
+		return domain.InvestigationAcceptance{Accepted: true}, nil
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return domain.InvestigationAcceptance{}, fmt.Errorf("issue store unavailable")
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, task.ID.String(), issues.IssueObservationEventListOptions{
+		Types: []domain.IssueObservationEventType{
+			domain.IssueEventInvestigationDisposition,
+			domain.IssueEventReviewCompleted,
+			domain.IssueEventHumanInputProvided,
+		},
+		Limit:       5000,
+		NewestFirst: true,
+	})
+	if err != nil {
+		return domain.InvestigationAcceptance{}, fmt.Errorf("read investigation acceptance for %s: %w", task.ID, err)
+	}
+	return domain.EvaluateInvestigationAcceptance(task, events), nil
 }
 
 type daemonCloseGuardStatusRepair struct {
@@ -4062,6 +4135,9 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 	for i := len(events) - 1; i >= 0; i-- {
 		evt := events[i]
 		if naming.IssueIDsEqual(evt.IssueID, task.ID.String()) && daemonWorkerIntegrationReadyMailType(evt.Type) {
+			if evt.Payload != nil && evt.Payload["publication"] == reviewReadyReplayPublication {
+				continue
+			}
 			packet, validation := domain.ParseWorkerEvidencePacketBody(evt.Body)
 			if validation.Complete {
 				return taskIntegrationReadinessResult{
@@ -4117,9 +4193,10 @@ func daemonWorkerIntegrationReadyMailType(eventType string) bool {
 func (d *Daemon) handleTaskMergeBaseTarget(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
 	var cmd struct {
-		TaskID            string `json:"task_id"`
-		BaseBranch        string `json:"base_branch,omitempty"`
-		AllowBaseForChild bool   `json:"allow_base_for_child,omitempty"`
+		TaskID                 string `json:"task_id"`
+		BaseBranch             string `json:"base_branch,omitempty"`
+		AllowBaseForChild      bool   `json:"allow_base_for_child,omitempty"`
+		RequireHumanAcceptance bool   `json:"require_human_acceptance,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -4127,6 +4204,21 @@ func (d *Daemon) handleTaskMergeBaseTarget(ctx context.Context, req protocol.Req
 	result, err := d.taskMergeBaseTarget(ctx, projectID, cmd.TaskID, cmd.BaseBranch, cmd.AllowBaseForChild)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if cmd.RequireHumanAcceptance && result.TargetID == "base" {
+		if strings.EqualFold(strings.TrimSpace(d.workflowModeForProject(projectID)), "origin") {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf(
+				"refusing direct base integration for %s because git workflow mode is origin; %s",
+				cmd.TaskID, daemonOriginBaseIntegrationGuidance(cmd.TaskID, result.Branch),
+			)), nil
+		}
+		accepted, acceptErr := d.hasDurableBaseIntegrationAcceptance(ctx, projectID, cmd.TaskID)
+		if acceptErr != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, acceptErr.Error()), nil
+		}
+		if !accepted {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("refusing root issue %s integration into base without durable human acceptance; record `human.input_provided` with data {\"base_integration_accepted\":true}", cmd.TaskID)), nil
+		}
 	}
 	body, err := json.Marshal(result)
 	if err != nil {
@@ -4136,6 +4228,23 @@ func (d *Daemon) handleTaskMergeBaseTarget(ctx context.Context, req protocol.Req
 	resp.Body = body
 	resp.Revision = d.currentRevision(projectID)
 	return resp, nil
+}
+
+func (d *Daemon) hasDurableBaseIntegrationAcceptance(ctx context.Context, projectID, issueID string) (bool, error) {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return false, fmt.Errorf("issue store unavailable")
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventHumanInputProvided}, Limit: 100})
+	if err != nil {
+		return false, fmt.Errorf("read durable human acceptance for %s: %w", issueID, err)
+	}
+	for _, event := range events {
+		if accepted, ok := event.Payload["base_integration_accepted"].(bool); ok && accepted {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (d *Daemon) handleTaskFollowOnMergeCandidates(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -4375,6 +4484,30 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 
 	desc := daemonTaskGraphDescendants(rootID, children)
 	staleCloseable := daemonTaskGraphStaleCloseableCandidates(rootID, byID, children)
+	acceptanceByIssue := make(map[string]domain.InvestigationAcceptance)
+	for _, id := range desc {
+		task := byID[id]
+		if task.Type != domain.TypeInvestigation || task.IssueClosed() {
+			continue
+		}
+		acceptance, err := d.investigationAcceptance(ctx, projectID, task)
+		if err != nil {
+			return taskCompleteCheckResult{}, err
+		}
+		acceptanceByIssue[id.String()] = acceptance
+	}
+	filteredStale := staleCloseable[:0]
+	for _, candidate := range staleCloseable {
+		acceptance, investigation := acceptanceByIssue[candidate.IssueID]
+		if investigation && !acceptance.Accepted {
+			continue
+		}
+		if investigation {
+			candidate.Evidence = append(candidate.Evidence, "investigation disposition="+string(acceptance.Disposition), "durable acceptance satisfied")
+		}
+		filteredStale = append(filteredStale, candidate)
+	}
+	staleCloseable = filteredStale
 	staleCloseableSet := make(map[string]struct{}, len(staleCloseable))
 	for _, candidate := range staleCloseable {
 		staleCloseableSet[candidate.IssueID] = struct{}{}
@@ -4420,6 +4553,12 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 	if len(activeSessions) > 0 {
 		reasons = append(reasons, fmt.Sprintf("active child sessions remain: %s", strings.Join(activeSessions, ",")))
 	}
+	for issueID, acceptance := range acceptanceByIssue {
+		if !acceptance.Accepted {
+			reasons = append(reasons, fmt.Sprintf("investigation %s acceptance blocked: %s", issueID, acceptance.Reason))
+		}
+	}
+	sort.Strings(reasons)
 	return taskCompleteCheckResult{
 		RootIssueID:            rootID.String(),
 		Pass:                   len(reasons) == 0,
@@ -5011,7 +5150,7 @@ func (d *Daemon) daemonTaskGraphNestedRoots(
 				item.StartFailure = &copyFailure
 				item.Status = "blocked_start_failed"
 				item.FallbackPolicy = "keep_children_blocked_or_create_replacement_direct_work"
-				item.Advice = fmt.Sprintf("nested root session start failed; inspect operation %s, retry `az session start %s`, or create replacement direct work under the parent without flattening %s descendants", failure.OperationID, item.IssueID, item.IssueID)
+				item.Advice = fmt.Sprintf("nested root session start failed; inspect operation %s, retry `az orchestrator-session start --root %s`, or create replacement direct work under the parent without flattening %s descendants", failure.OperationID, item.IssueID, item.IssueID)
 			}
 		}
 		if item.Status == "" || item.Status == "startable" || item.Status == string(domain.StatusOpen) || item.Status == string(domain.StatusInProgress) || item.Status == string(domain.StatusInReview) {
@@ -5025,7 +5164,7 @@ func (d *Daemon) daemonTaskGraphNestedRoots(
 			}
 		}
 		if strings.TrimSpace(item.Advice) == "" {
-			item.Advice = fmt.Sprintf("start nested root orchestrator: az session start %s", item.IssueID)
+			item.Advice = fmt.Sprintf("start nested root orchestrator: az orchestrator-session start --root %s", item.IssueID)
 		}
 		out = append(out, item)
 	}
@@ -5521,7 +5660,8 @@ func workerObservationIssueEventMeaningful(evt domain.IssueObservationEvent) boo
 		domain.IssueEventRiskRecorded,
 		domain.IssueEventBlockerReported,
 		domain.IssueEventHumanInputRequested,
-		domain.IssueEventHumanInputProvided:
+		domain.IssueEventHumanInputProvided,
+		domain.IssueEventInvestigationDisposition:
 		return true
 	case domain.IssueEventIssueDependencyAdded, domain.IssueEventIssueDependencyRemoved:
 		return workerObservationDependencyEventMeaningful(evt)
@@ -5578,7 +5718,8 @@ func workerObservationEvidenceEvents(events []domain.IssueObservationEvent) []do
 			domain.IssueEventRiskRecorded,
 			domain.IssueEventBlockerReported,
 			domain.IssueEventHumanInputRequested,
-			domain.IssueEventHumanInputProvided:
+			domain.IssueEventHumanInputProvided,
+			domain.IssueEventInvestigationDisposition:
 			out = append(out, evt)
 		}
 	}
@@ -5907,7 +6048,7 @@ func daemonTaskGraphNestedRootSummaries(root naming.IssueID, byID map[naming.Iss
 				IssueStatus: string(task.Status),
 				Type:        string(task.Type),
 				ChildCount:  len(daemonTaskGraphDescendants(id, children)),
-				Advice:      fmt.Sprintf("start nested root orchestrator: az session start %s", id.String()),
+				Advice:      fmt.Sprintf("start nested root orchestrator: az orchestrator-session start --root %s", id.String()),
 			})
 			return
 		}
@@ -6143,7 +6284,7 @@ func daemonTaskCompletionAdvice(rootIssueID string, runnable []string, nestedRoo
 		if strings.TrimSpace(nested.Advice) != "" {
 			advice = append(advice, nested.Advice)
 		} else {
-			advice = append(advice, fmt.Sprintf("start nested root orchestrator: az session start %s", nested.IssueID))
+			advice = append(advice, fmt.Sprintf("start nested root orchestrator: az orchestrator-session start --root %s", nested.IssueID))
 		}
 	}
 	if len(staleCloseable) > 0 {

@@ -17,6 +17,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -29,6 +30,19 @@ func TestRuntimeSignalIngestGitHookPersistsFastProjectionAndQueuesEnrichment(t *
 	d := New(Config{
 		RepoDir: repoDir,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	t.Cleanup(func() {
+		if d.runtimeProjectionCoalescer != nil {
+			d.runtimeProjectionCoalescer.Close()
+		}
+		if d.runtimeReconcileQueue != nil {
+			_ = d.runtimeReconcileQueue.Close()
+		}
+		if d.gitStatusRefreshQueue != nil {
+			_ = d.gitStatusRefreshQueue.Close()
+		}
+		d.closeIssueClients()
+		d.closeRuntimeStateStores()
 	})
 	projectID := "proj-signals"
 
@@ -92,11 +106,15 @@ func TestRuntimeSignalIngestAgentHookPersistsActivityAndHookLog(t *testing.T) {
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	projectID := "proj-signals"
-	issueID := "az-42"
-	sessionID := "pr-az-42.pane-12"
+	issueID, err := d.issueClientForProject(projectID).Create(context.Background(), issues.CreateTaskParams{Title: "runtime signal", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentSessionID := naming.CanonicalSessionID(repoDir, issueID)
+	sessionID := parentSessionID + ".pane-12"
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-		ID:             "pr-az-42",
+		ID:             parentSessionID,
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
 		ObservedState:  daemonstate.SessionStateRunning,
@@ -143,20 +161,19 @@ func TestRuntimeSignalIngestAgentHookPersistsActivityAndHookLog(t *testing.T) {
 		t.Fatalf("runtime signal stages = %+v", body.Stages)
 	}
 
-	session, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, sessionID)
+	store := d.sessionRuntimeStateStore(projectID)
+	session, found, err := store.GetSessionState(context.Background(), projectID, sessionID)
 	if err != nil {
 		t.Fatalf("GetSessionState: %v", err)
 	}
-	if !found {
-		t.Fatalf("expected session projection for %s", sessionID)
+	if found {
+		t.Fatalf("agent pane observation invented desired intent: %+v", session)
 	}
-	if session.IssueID != issueID ||
-		session.State != daemonstate.SessionStatePaused ||
-		session.Activity != "waiting" ||
-		session.ActivitySource != "hooks" {
-		t.Fatalf("session projection = %+v", session)
+	paneObservation, found, err := store.GetPhysicalSessionObservation(context.Background(), projectID, sessionID)
+	if err != nil || !found || paneObservation.ObservedState != daemonstate.SessionStatePaused || paneObservation.Activity != "waiting" {
+		t.Fatalf("pane physical observation=%+v found=%v err=%v", paneObservation, found, err)
 	}
-	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, "pr-az-42")
+	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, parentSessionID)
 	if err != nil {
 		t.Fatalf("GetSessionState canonical: %v", err)
 	}
@@ -169,7 +186,7 @@ func TestRuntimeSignalIngestAgentHookPersistsActivityAndHookLog(t *testing.T) {
 		canonical.ActivitySource != "hooks" {
 		t.Fatalf("canonical session projection = %+v", canonical)
 	}
-	evidence, found, err := d.sessionRuntimeStateStore(projectID).GetSessionActivityEvidence(context.Background(), projectID, "pr-az-42")
+	evidence, found, err := d.sessionRuntimeStateStore(projectID).GetSessionActivityEvidence(context.Background(), projectID, parentSessionID)
 	if err != nil {
 		t.Fatalf("GetSessionActivityEvidence: %v", err)
 	}
@@ -223,6 +240,11 @@ func TestRuntimeSignalIngestKeepsCanonicalBusyWhenAnotherPaneWaits(t *testing.T)
 	projectID := "proj-signals"
 	issueID := "az-42"
 	parentSessionID := "pr-az-42"
+	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID: parentSessionID, IssueID: issueID, State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
 		ID:             parentSessionID,
@@ -295,6 +317,11 @@ func TestRuntimeSignalIngestCanonicalStopClearsStalePaneBusyForDisplay(t *testin
 	})
 	projectID := "proj-signals"
 	issueID := "az-42"
+	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID: "pr-az-42", IssueID: issueID, State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	parentSessionID := "pr-az-42"
 
 	signals := []protocol.RuntimeSignalIngestCommandBody{
@@ -352,7 +379,7 @@ func TestRuntimeSignalIngestCanonicalStopClearsStalePaneBusyForDisplay(t *testin
 	}
 }
 
-func TestRuntimeSignalIngestAgentHookCreatesRunningCanonicalProjection(t *testing.T) {
+func TestRuntimeSignalIngestAgentHookStoresObservationWithoutCreatingIntent(t *testing.T) {
 	repoDir := initRuntimeSignalGitRepo(t)
 	d := New(Config{
 		RepoDir: repoDir,
@@ -385,19 +412,110 @@ func TestRuntimeSignalIngestAgentHookCreatesRunningCanonicalProjection(t *testin
 		t.Fatalf("runtime.signal.ingest response not ok: %+v", resp.Error)
 	}
 
-	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, "pr-az-42")
+	store := d.sessionRuntimeStateStore(projectID)
+	canonical, found, err := store.GetSessionState(context.Background(), projectID, "pr-az-42")
 	if err != nil {
 		t.Fatalf("GetSessionState canonical: %v", err)
 	}
-	if !found {
-		t.Fatal("expected canonical session projection")
+	if found {
+		t.Fatalf("hook observation invented desired canonical intent: %+v", canonical)
 	}
-	if canonical.IssueID != issueID ||
-		canonical.State != daemonstate.SessionStateRunning ||
-		canonical.ObservedState != daemonstate.SessionStateRunning ||
-		canonical.Activity != "waiting" ||
-		canonical.ActivitySource != "hooks" {
-		t.Fatalf("canonical session projection = %+v", canonical)
+	observation, found, err := store.GetPhysicalSessionObservation(context.Background(), projectID, "pr-az-42")
+	if err != nil || !found {
+		t.Fatalf("canonical physical observation found=%v err=%v", found, err)
+	}
+	if observation.ObservedState != daemonstate.SessionStateRunning || observation.Activity != "waiting" || observation.ActivitySource != "hooks" {
+		t.Fatalf("canonical physical observation = %+v", observation)
+	}
+}
+
+func TestRuntimeSignalIngestFansPhysicalObservationAcrossSharedLogicalIntents(t *testing.T) {
+	repoDir := initRuntimeSignalGitRepo(t)
+	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	ctx := context.Background()
+	projectID := "proj-shared-runtime-signal"
+	issueID, err := d.issueClientForProject(projectID).Create(ctx, issues.CreateTaskParams{Title: "shared runtime root", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	store := d.sessionRuntimeStateStore(projectID)
+	now := time.Now().UTC()
+	worker := daemonstate.Session{
+		ID: sessionID, IssueID: issueID, Role: daemonstate.SessionRoleWorker,
+		ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID,
+		State: daemonstate.SessionStateStopped, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: now,
+	}
+	rooted := daemonstate.Session{
+		ID: sessionID, IssueID: issueID, Role: daemonstate.SessionRoleOrchestrator,
+		ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: issueID,
+		State: daemonstate.SessionStatePaused, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: now,
+	}
+	for _, seed := range []daemonstate.Session{worker, rooted} {
+		if err := upsertSessionStateFixture(store, ctx, projectID, seed); err != nil {
+			t.Fatalf("seed %s intent: %v", seed.Role, err)
+		}
+	}
+	projectionWriter := &recordingRuntimeProjectionWriter{}
+	d.runtimeProjectionWriter = projectionWriter
+
+	resp, err := d.command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "runtime-signal-shared-physical",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         protocol.CommandRuntimeSignalIngest,
+		Body: mustMarshal(t, protocol.RuntimeSignalIngestCommandBody{
+			Source: protocol.RuntimeSignalSourceAgentHook, Kind: protocol.RuntimeSignalKindAgentActivityChanged,
+			IssueID: issueID, SessionID: sessionID, Agent: "codex", Event: "pre_tool_use",
+		}),
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("runtime signal response=%+v err=%v", resp, err)
+	}
+	var body protocol.RuntimeSignalIngestResponseBody
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if !runtimeSignalStageOK(body.Stages, "agent_activity") {
+		t.Fatalf("runtime signal stages = %+v", body.Stages)
+	}
+
+	observation, found, err := store.GetPhysicalSessionObservation(ctx, projectID, sessionID)
+	if err != nil || !found {
+		t.Fatalf("physical observation found=%v err=%v", found, err)
+	}
+	if observation.ObservedState != daemonstate.SessionStateRunning || observation.Activity != "busy" {
+		t.Fatalf("physical observation = %+v", observation)
+	}
+	for _, want := range []struct {
+		role      daemonstate.SessionRole
+		scopeKind daemonstate.SessionScopeKind
+		state     daemonstate.SessionState
+	}{
+		{daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, daemonstate.SessionStateStopped},
+		{daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, daemonstate.SessionStatePaused},
+	} {
+		got, found, err := store.GetSessionIntent(ctx, projectID, want.role, want.scopeKind, issueID)
+		if err != nil || !found {
+			t.Fatalf("load %s intent found=%v err=%v", want.role, found, err)
+		}
+		if got.State != want.state || got.ObservedState != daemonstate.SessionStateRunning || got.Activity != "busy" || got.ActivitySource != "hooks" {
+			t.Fatalf("%s intent = %+v; desired state must remain %s", want.role, got, want.state)
+		}
+	}
+	published := projectionWriter.sessionSnapshot()
+	if len(published) != 2 {
+		t.Fatalf("published sessions = %+v, want both shared intents", published)
+	}
+	for _, eventSession := range published {
+		persisted, found, err := store.GetSessionIntent(ctx, projectID, eventSession.Role, eventSession.ScopeKind, eventSession.ScopeID)
+		if err != nil || !found {
+			t.Fatalf("load published %s intent found=%v err=%v", eventSession.Role, found, err)
+		}
+		if !eventSession.UpdatedAt.Equal(persisted.UpdatedAt) || !eventSession.UpdatedAt.After(now) {
+			t.Fatalf("published freshness=%v persisted=%v seed=%v", eventSession.UpdatedAt, persisted.UpdatedAt, now)
+		}
 	}
 }
 
@@ -409,6 +527,11 @@ func TestRuntimeSignalIngestAgentIdlePromptPersistsWaitingActivity(t *testing.T)
 	})
 	projectID := "proj-signals"
 	issueID := "az-42"
+	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID: "pr-az-42", IssueID: issueID, State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -460,7 +583,7 @@ func TestRuntimeSignalMaterializesStoredActivityEvidenceToCanonical(t *testing.T
 	issueID := "az-42"
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	store := d.sessionRuntimeStateStore(projectID)
-	if err := store.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(store, context.Background(), projectID, daemonstate.Session{
 		ID:             "pr-az-42",
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -514,7 +637,7 @@ func TestRuntimeSignalMaterializesBusyWhenAnyPaneEvidenceBusy(t *testing.T) {
 	issueID := "az-42"
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	store := d.sessionRuntimeStateStore(projectID)
-	if err := store.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(store, context.Background(), projectID, daemonstate.Session{
 		ID:             "pr-az-42",
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,
@@ -567,7 +690,7 @@ func TestRuntimeSignalMaterializesBusyWhenAnyPaneEvidenceBusy(t *testing.T) {
 	}
 }
 
-func TestRuntimeSignalActivityEvidenceDoesNotReviveStoppedCanonicalSession(t *testing.T) {
+func TestRuntimeSignalActivityEvidencePreservesStoppedDesiredLiveObservedDivergence(t *testing.T) {
 	repoDir := initRuntimeSignalGitRepo(t)
 	d := New(Config{
 		RepoDir: repoDir,
@@ -577,11 +700,11 @@ func TestRuntimeSignalActivityEvidenceDoesNotReviveStoppedCanonicalSession(t *te
 	issueID := "az-42"
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	store := d.sessionRuntimeStateStore(projectID)
-	if err := store.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(store, context.Background(), projectID, daemonstate.Session{
 		ID:             "pr-az-42",
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateStopped,
-		ObservedState:  daemonstate.SessionStateStopped,
+		ObservedState:  daemonstate.SessionStateRunning,
 		Activity:       "busy",
 		ActivitySource: "session",
 		StartedAt:      &startedAt,
@@ -614,10 +737,10 @@ func TestRuntimeSignalActivityEvidenceDoesNotReviveStoppedCanonicalSession(t *te
 		t.Fatal("expected canonical session projection")
 	}
 	if canonical.State != daemonstate.SessionStateStopped ||
-		canonical.ObservedState != daemonstate.SessionStateStopped ||
-		canonical.Activity != "" ||
-		canonical.ActivitySource != "" {
-		t.Fatalf("canonical session projection = %+v, want stopped without activity", canonical)
+		canonical.ObservedState != daemonstate.SessionStateRunning ||
+		canonical.Activity != "idle" ||
+		canonical.ActivitySource != "hooks" {
+		t.Fatalf("canonical session projection = %+v, want stopped desired with live idle observation", canonical)
 	}
 }
 
@@ -632,17 +755,20 @@ func TestRuntimeSignalMaterializesActivityEvidenceForRequestedIssuesOnly(t *test
 	store := d.sessionRuntimeStateStore(projectID)
 	for _, issueID := range []string{"az-42", "az-43"} {
 		sessionID := "pr-" + issueID
-		if err := store.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-			ID:             sessionID,
-			IssueID:        issueID,
-			State:          daemonstate.SessionStateRunning,
-			ObservedState:  daemonstate.SessionStateRunning,
-			Activity:       "busy",
-			ActivitySource: "session",
-			StartedAt:      &startedAt,
-			UpdatedAt:      startedAt,
+		if err := upsertSessionStateFixture(store, context.Background(), projectID, daemonstate.Session{
+			ID:        sessionID,
+			IssueID:   issueID,
+			State:     daemonstate.SessionStateRunning,
+			StartedAt: &startedAt,
+			UpdatedAt: startedAt,
 		}); err != nil {
 			t.Fatalf("seed canonical session projection %s: %v", issueID, err)
+		}
+		if _, _, err := store.ApplyPhysicalSessionObservation(context.Background(), daemonstate.PhysicalSessionObservation{
+			ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning,
+			Activity: "busy", ActivitySource: "session", UpdatedAt: startedAt,
+		}); err != nil {
+			t.Fatalf("seed physical session observation %s: %v", issueID, err)
 		}
 		if err := store.UpsertSessionActivityEvidence(context.Background(), daemonstate.SessionActivityEvidence{
 			ProjectID:       projectID,
@@ -701,7 +827,7 @@ func TestRuntimeReconcileMaterializesStoredActivityEvidenceToCanonical(t *testin
 	}
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	store := d.sessionRuntimeStateStore(projectID)
-	if err := store.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(store, context.Background(), projectID, daemonstate.Session{
 		ID:             "pr-az-42",
 		IssueID:        issueID,
 		State:          daemonstate.SessionStateRunning,

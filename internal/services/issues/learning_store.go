@@ -199,24 +199,25 @@ type LearningGCReport struct {
 }
 
 type LearningFilter struct {
-	ProjectID       string
-	IssueID         string
-	RequirementID   string
-	ContextIssueID  string
-	ContextReqID    string
-	ContextTags     []string
-	ContextFiles    []string
-	Query           string
-	Statuses        []LearningStatus
-	TargetStates    []LearningTargetState
-	Tags            []string
-	Files           []string
-	Limit           int
-	IncludeEvidence bool
-	ExcludePrivate  bool
-	IncludeDeleted  bool
-	ActiveOnly      bool
-	UpdatedBefore   *time.Time
+	ProjectID          string
+	IssueID            string
+	RequirementID      string
+	ContextIssueID     string
+	ContextReqID       string
+	ContextTags        []string
+	ContextFiles       []string
+	Query              string
+	Statuses           []LearningStatus
+	TargetStates       []LearningTargetState
+	Tags               []string
+	Files              []string
+	Limit              int
+	IncludeEvidence    bool
+	ExcludePrivate     bool
+	IncludeDeleted     bool
+	ActiveOnly         bool
+	SkipRecallTracking bool
+	UpdatedBefore      *time.Time
 }
 
 type learningRecord struct {
@@ -262,10 +263,12 @@ func (s LearningTargetState) Valid() bool {
 
 func (c *Client) CreateLearning(ctx context.Context, params CreateLearningParams) (Learning, error) {
 	var learning Learning
-	err := retrySQLiteBusy(ctx, func() error {
-		var err error
-		learning, err = c.createLearningOnce(ctx, params)
-		return err
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			learning, err = c.createLearningOnce(lockCtx, params)
+			return err
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -365,6 +368,7 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 	if err != nil {
 		return nil, err
 	}
+	activeAt := time.Now().UTC()
 	query := strings.Builder{}
 	args := make([]any, 0, 8)
 	query.WriteString(`
@@ -383,7 +387,7 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		query.WriteString(` JOIN agent_learning_search_fts fts ON fts.rowid = l.id AND agent_learning_search_fts MATCH ?`)
 		args = append(args, match)
 	}
-	query.WriteString(` WHERE 1 = 1`)
+	query.WriteString(` WHERE l.consolidated_into_id IS NULL`)
 	if !filter.IncludeDeleted {
 		query.WriteString(` AND l.deleted_at IS NULL`)
 	}
@@ -396,15 +400,9 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		args = append(args, fileKey)
 	}
 	if filter.ActiveOnly {
-		query.WriteString(`
-			AND l.deleted_at IS NULL
-			AND l.status IN (?, ?)
-			AND l.superseded_at IS NULL
-			AND l.target_retired_at IS NULL
-			AND l.target_drifted_at IS NULL
-			AND (l.status != ? OR COALESCE(NULLIF(l.target_state, ''), ?) = ?)
-		`)
-		args = append(args, string(LearningStatusAccepted), string(LearningStatusPromoted), string(LearningStatusPromoted), string(LearningTargetStateActive), string(LearningTargetStateActive))
+		predicate, predicateArgs := learningActiveSQL("l", activeAt)
+		query.WriteString(` AND ` + predicate)
+		args = append(args, predicateArgs...)
 	}
 	if filter.ExcludePrivate {
 		query.WriteString(` AND l.evidence_private = 0`)
@@ -460,7 +458,6 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		return nil, c.wrapError("list-learnings", "", err)
 	}
 	defer rows.Close()
-	activeAt := time.Now().UTC()
 	records := make([]learningRecord, 0, 16)
 	for rows.Next() {
 		record, scanErr := scanLearningRecord(rows)
@@ -487,7 +484,7 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 	if filter.ActiveOnly && filter.Limit > 0 && len(records) > filter.Limit {
 		records = records[:filter.Limit]
 	}
-	if filter.ActiveOnly && len(records) > 0 {
+	if filter.ActiveOnly && !filter.SkipRecallTracking && len(records) > 0 {
 		recalledAt := time.Now().UTC()
 		for i := range records {
 			if _, err := db.ExecContext(ctx, `
@@ -506,6 +503,20 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		out = append(out, record.Learning)
 	}
 	return out, nil
+}
+
+// learningActiveSQL is the store-level form of learningActiveAt. Keep both in
+// lockstep so recall, activation, and aggregate reporting share one population.
+func learningActiveSQL(alias string, now time.Time) (string, []any) {
+	prefix := strings.TrimSpace(alias)
+	if prefix != "" {
+		prefix += "."
+	}
+	p := func(column string) string { return prefix + column }
+	predicate := fmt.Sprintf(`%s IS NULL AND %s IS NULL AND %s IN (?, ?) AND (%s IS NULL OR %s > ?) AND (%s IS NULL OR %s > ?) AND %s IS NULL AND %s IS NULL AND %s IS NULL AND (%s != ? OR COALESCE(NULLIF(%s, ''), ?) = ?)`,
+		p("deleted_at"), p("consolidated_into_id"), p("status"), p("expires_at"), p("expires_at"), p("stale_at"), p("stale_at"), p("superseded_at"), p("target_retired_at"), p("target_drifted_at"), p("status"), p("target_state"))
+	formatted := formatTimestamp(now.UTC())
+	return predicate, []any{string(LearningStatusAccepted), string(LearningStatusPromoted), formatted, formatted, string(LearningStatusPromoted), string(LearningTargetStateActive), string(LearningTargetStateActive)}
 }
 
 func (c *Client) DoctorLearnings(ctx context.Context, params LearningMaintenanceParams) (LearningDoctorReport, error) {
@@ -535,10 +546,12 @@ func (c *Client) DoctorLearnings(ctx context.Context, params LearningMaintenance
 
 func (c *Client) GCLearnings(ctx context.Context, params LearningGCParams) (LearningGCReport, error) {
 	var report LearningGCReport
-	err := retrySQLiteBusy(ctx, func() error {
-		var err error
-		report, err = c.gcLearningsOnce(ctx, params)
-		return err
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			report, err = c.gcLearningsOnce(lockCtx, params)
+			return err
+		})
 	})
 	if err == nil && params.Confirm {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -757,10 +770,12 @@ func learningRecencyScore(updatedAt time.Time) int {
 
 func (c *Client) UpdateLearningStatus(ctx context.Context, selector string, status LearningStatus, note string) (Learning, error) {
 	var learning Learning
-	err := retrySQLiteBusy(ctx, func() error {
-		var err error
-		learning, err = c.updateLearningStatusOnce(ctx, selector, status, note)
-		return err
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			learning, err = c.updateLearningStatusOnce(lockCtx, selector, status, note)
+			return err
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -806,10 +821,12 @@ func (c *Client) updateLearningStatusOnce(ctx context.Context, selector string, 
 
 func (c *Client) BulkReviewLearnings(ctx context.Context, params BulkReviewLearningsParams) ([]Learning, error) {
 	var learnings []Learning
-	err := retrySQLiteBusy(ctx, func() error {
-		var err error
-		learnings, err = c.bulkReviewLearningsOnce(ctx, params)
-		return err
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			learnings, err = c.bulkReviewLearningsOnce(lockCtx, params)
+			return err
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -887,10 +904,12 @@ func (c *Client) bulkReviewLearningsOnce(ctx context.Context, params BulkReviewL
 
 func (c *Client) DemoteLearning(ctx context.Context, selector string, note string) (Learning, error) {
 	var learning Learning
-	err := retrySQLiteBusy(ctx, func() error {
-		var err error
-		learning, err = c.demoteLearningOnce(ctx, selector, note)
-		return err
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			learning, err = c.demoteLearningOnce(lockCtx, selector, note)
+			return err
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -1025,10 +1044,12 @@ func (c *Client) RetireLearningTarget(ctx context.Context, selector string, note
 
 func (c *Client) UpdateLearningTargetState(ctx context.Context, selector string, params UpdateLearningTargetStateParams) (Learning, error) {
 	var learning Learning
-	err := retrySQLiteBusy(ctx, func() error {
-		var err error
-		learning, err = c.updateLearningTargetStateOnce(ctx, selector, params)
-		return err
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			learning, err = c.updateLearningTargetStateOnce(lockCtx, selector, params)
+			return err
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -1100,10 +1121,12 @@ func (c *Client) updateLearningTargetStateOnce(ctx context.Context, selector str
 
 func (c *Client) RelateLearning(ctx context.Context, params RelateLearningParams) (LearningRelation, error) {
 	var relation LearningRelation
-	err := retrySQLiteBusy(ctx, func() error {
-		var err error
-		relation, err = c.relateLearningOnce(ctx, params)
-		return err
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			relation, err = c.relateLearningOnce(lockCtx, params)
+			return err
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)

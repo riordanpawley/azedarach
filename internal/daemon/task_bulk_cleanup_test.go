@@ -47,7 +47,7 @@ func TestTaskBulkCleanupContinuesAfterUnresolvedDescendantFailure(t *testing.T) 
 	ctx := context.Background()
 	projectID := "proj-bulk-cleanup"
 	repoDir := t.TempDir()
-	client := issues.NewClient(repoDir, slog.Default())
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	parent, err := client.Create(ctx, issues.CreateTaskParams{Title: "blocked parent", Type: domain.TypeTask})
 	if err != nil {
@@ -149,11 +149,36 @@ func TestTaskBulkCleanupLaterItemGetsFreshTimeoutBudget(t *testing.T) {
 	}
 }
 
+func TestTaskBulkCleanupDefaultPreservesMergeAndCleanupBudgets(t *testing.T) {
+	if taskBulkCleanupDefaultPerIssueTimeout != domain.IntegrationCloseTimeout {
+		t.Fatalf("bulk cleanup daemon default = %v, want %v", taskBulkCleanupDefaultPerIssueTimeout, domain.IntegrationCloseTimeout)
+	}
+	itemCtx, itemCancel := context.WithTimeout(context.Background(), taskBulkCleanupDefaultPerIssueTimeout)
+	defer itemCancel()
+	mergeCtx, mergeCancel, err := taskCloseIntegrationContext(itemCtx)
+	if err != nil {
+		t.Fatalf("derive bulk cleanup merge context: %v", err)
+	}
+	defer mergeCancel()
+	deadline, ok := mergeCtx.Deadline()
+	if !ok {
+		t.Fatal("bulk cleanup merge context has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining <= domain.IntegrationMergeTimeout-time.Second || remaining > domain.IntegrationMergeTimeout {
+		t.Fatalf("bulk cleanup merge budget = %v, want close to %v", remaining, domain.IntegrationMergeTimeout)
+	}
+	itemDeadline, _ := itemCtx.Deadline()
+	if reserve := itemDeadline.Sub(deadline); reserve < domain.IntegrationCloseReserve-time.Second {
+		t.Fatalf("bulk cleanup reserve = %v, want at least %v", reserve, domain.IntegrationCloseReserve)
+	}
+}
+
 func TestTaskBulkCleanupRejectsOutOfRangePerIssueTimeout(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-bulk-timeout-validation"
 	repoDir := t.TempDir()
-	client := issues.NewClient(repoDir, slog.Default())
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	store := state.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })

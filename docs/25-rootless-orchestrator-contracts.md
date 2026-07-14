@@ -33,13 +33,91 @@ lease, then compare its session identity with live tmux runtime.
 interaction, orchestration, and session projections, then compare runtime
 presence with live tmux. `runtime.reconcile` exposes both mappings.
 
-## Multi-daemon stale-cache test plan
+## Client and authority boundary
 
-The runtime implementation must start two daemon instances over one durable
-projection. Seed daemon A's cache with a complete project, mutate an issue,
-review, interaction, or session projection through daemon B, and evaluate on A.
-Each table case must prove A refreshes before evaluation and does not report
-complete from stale memory. Hybrid cases additionally create or remove live tmux
-state independently of the projection and prove neither source is used as a
-fallback for the other. Repeat for wake-after-pause and grace-reset changes to
-prove idempotent wake and timer reset behavior across processes.
+The daemon owns scope resolution after startup, singleton identity, candidate
+classification, ownership, lifecycle, interaction revisions, review outcomes,
+and wake decisions. CLI and TUI commands parse intent, send typed protocol
+requests, and render the returned snapshot. They must not reproduce those
+policies or call git, tmux, issue-store, or session authority directly when a
+daemon command exists.
+
+The supported operator surfaces are:
+
+- `az orchestrator-session start|attach|status [--root <issue>]`
+- `az orchestrate status|start|watch|complete-check [--root <issue>]`
+- `az interaction list|get|discuss|answer|resolve|withdraw`
+- the TUI project overview for project-level start, attach, status, and health
+- the TUI Waiting Human overlay for direct answers, proposal review, advisor
+  discussion, revision-conflict reload, resolution, and withdrawal
+
+`attach` is declarative: the daemon resumes or recovers the exact-scope session
+and returns its tmux target. The CLI may then exec the user's terminal attach;
+the daemon handler must never perform a blocking terminal attach.
+
+## End-to-end acceptance matrix
+
+The combined acceptance suite deliberately exercises production authority
+paths rather than transitional adapters:
+
+| Contract | Executable evidence |
+| --- | --- |
+| Exact-scope singleton start, attach, stale-runtime recovery | `TestProjectOrchestratorSessionStartAttachesExactScopeSingleton` |
+| Bounded project scheduling and stable ordering | `TestOrchestrationCandidateOrderingIsStable`, `TestProjectOrchestratorLoopPrioritizesReviewAndPersistsCursor` |
+| Foreign ownership exclusion and claim races | `TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership`, `TestProjectStartIntentCannotBypassActionableReview` |
+| Human request, advisor discussion, edited/direct answer, atomic resolution | `TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle`, `TestInteractionStructuredProposalCanBeHumanEditedAndAtomicallyResolved` |
+| Review return and authoritative accepted close | `TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings`, `TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState` |
+| Quiescent, complete-grace, pause, and wake | `TestProjectOrchestrationEndToEndAcceptanceInventory` executes the production lease authority across quiescence, persisted grace, pause, relevant-change wake, debounced duplicate wake, and grace reset; focused state regressions are `TestOrchestratorLifecycleGracePersistsAcrossRestartAndResets` and `TestOrchestratorWakeIsDurablyDebouncedAcrossStores` |
+| Restart and durable cursor/action replay | `TestProjectOrchestratorActionKeyIsRestartStableAndStateSensitive`, `TestOrchestratorLoopCheckpointSurvivesRestartAndUsesCursorCAS` |
+| Multi-daemon stale-cache/race behavior | `TestOrchestratorLeaseAuthorityRefreshesStaleCacheBeforeAcquire`, `TestProjectOrchestratorLoopMultiDaemonReplayDoesNotDuplicateCheckpointAction`, `TestAdvisorRecoveryCleansRuntimeWhenTerminalRequestWinsCrossDaemonRace` |
+
+`TestProjectOrchestrationEndToEndAcceptanceInventory` locks this inventory and
+the required invariant-source mappings in one discoverable gate. The named
+tests retain the detailed state setup and assertions; the inventory prevents a
+partial package run or future refactor from silently dropping a required leg.
+
+Run the focused acceptance gate with:
+
+```bash
+go test ./internal/daemon -run 'TestProject(OrchestrationEndToEndAcceptanceInventory|OrchestratorSessionStartAttachesExactScopeSingleton|OrchestratorLoopPrioritizesReviewAndPersistsCursor|OrchestrationSnapshotRefreshesCrossProcessOwnership)|TestInteraction(DiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle|StructuredProposalCanBeHumanEditedAndAtomicallyResolved)|TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings|TestOrchestrator(LifecycleGracePersistsAcrossRestartAndResets|WakeIsDurablyDebouncedAcrossStores|LeaseAuthorityRefreshesStaleCacheBeforeAcquire)' -count=1
+go test ./internal/daemon/state -run 'TestOrchestrator(LifecycleGracePersistsAcrossRestartAndResets|WakeIsDurablyDebouncedAcrossStores)' -count=1
+```
+
+## Rollout and rollback
+
+1. Back up the project issue database and runtime projection before upgrading.
+2. Start one daemon on the new binary. Runtime reconcile runs on daemon startup.
+3. Confirm the typed reconcile debug contract with
+   `go test ./internal/daemon -run TestCommandRuntimeReconcileRoutesToManualRepair`.
+   Its `invariant_sources` must contain the scope, singleton, completion,
+   candidates, review, claim/start, loop, interaction, advisor, and parent
+   continuation mappings documented in `docs/README.md`.
+4. Run `env -u AZEDARACH_ISSUE_ID az orchestrator-session status`, then start or
+   attach the project scope. (Use `--root <issue>` for rooted scope.)
+   A repeated start must return the same live exact-scope session.
+5. Observe one bounded scheduling/review cycle. Confirm foreign-owned work is
+   excluded, review is prioritized, and Waiting Human work is not started.
+6. Exercise one disposable interaction through discuss and human resolution;
+   confirm the accepted answer wakes evaluation without directly starting work.
+7. Leave the singleton running through quiescence and complete-grace. Confirm it
+   pauses after grace and wakes once for new work.
+
+Do not run old and new binaries concurrently after a protocol/schema contract
+change. Roll back by stopping the upgraded daemon, restoring both backed-up
+databases as a pair, and starting the prior binary. Never restore only the issue
+database or only the runtime projection: their revisions and exact-scope leases
+form one recovery boundary.
+
+## Failure diagnosis
+
+- Duplicate orchestrators: compare the durable exact-scope lease with live tmux;
+  do not delete the lease before `runtime.reconcile` reports both sources.
+- Stuck Waiting Human: fetch the request and use its current positive revision;
+  stale answers must be rejected and reloaded, never force-written.
+- Complete reported too early: inspect open/active issues, review requests,
+  unresolved interactions, projected sessions, and live tmux independently.
+- Replayed scheduling/review: inspect the durable cursor, checkpoint action key,
+  and observation event before retrying. Reuse the same intent key only for an
+  identical retry.
+- Missing advisor: keep the request durable and run reconcile; terminal requests
+  clean advisor resources, while unresolved requests recover the singleton.

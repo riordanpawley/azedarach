@@ -21,11 +21,56 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
+
+func TestRuntimeReconcileRefreshesCrossProjectProjectionAfterSourceChanges(t *testing.T) {
+	home := t.TempDir()
+	root := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const projectID = "runtime-refresh-project"
+	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{Projects: []appconfig.Project{{ID: projectID, Name: "Runtime refresh", Path: root}}}); err != nil {
+		t.Fatal(err)
+	}
+	issueClient := newMigratedIssueClientAtPath(t, filepath.Join(root, ".azedarach", "azedarach.db"), slog.Default())
+	issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "Created before reconcile", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg:                   Config{RepoDir: root, Logger: slog.Default()},
+		userStore:             store,
+		issueClientsByProject: map[string]*issues.Client{projectID: issueClient},
+	}
+
+	result, err := newRuntimeReconcileService(d).Reconcile(context.Background(), projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CrossProjectProjection == nil || result.CrossProjectProjection.Freshness != protocol.GlobalProjectionFreshnessFresh {
+		t.Fatalf("cross-project projection health = %+v", result.CrossProjectProjection)
+	}
+	snapshot, err := store.Snapshot(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].ID.String() != issueID {
+		t.Fatalf("post-reconcile projection = %+v", snapshot.Projects)
+	}
+}
 
 type runtimeReconcileRecorder struct {
 	mu            sync.Mutex
@@ -33,6 +78,7 @@ type runtimeReconcileRecorder struct {
 	projectIDs    []string
 	issueIDs      [][]string
 	started       chan struct{}
+	finished      chan struct{}
 	waitForCancel bool
 	result        protocol.RuntimeReconcileResponseBody
 	err           error
@@ -43,6 +89,7 @@ func (r *runtimeReconcileRecorder) Reconcile(ctx context.Context, projectID stri
 	r.calls++
 	r.projectIDs = append(r.projectIDs, projectID)
 	started := r.started
+	finished := r.finished
 	waitForCancel := r.waitForCancel
 	result := r.result
 	err := r.err
@@ -59,6 +106,12 @@ func (r *runtimeReconcileRecorder) Reconcile(ctx context.Context, projectID stri
 		<-ctx.Done()
 		if err == nil {
 			err = ctx.Err()
+		}
+	}
+	if finished != nil {
+		select {
+		case finished <- struct{}{}:
+		default:
 		}
 	}
 
@@ -178,7 +231,7 @@ func (r *blockingIssueProjectionReconciler) ReconcileIssues(ctx context.Context,
 		if sessionID == "" {
 			sessionID = naming.CanonicalSessionID(projectID, issueID)
 		}
-		if err := r.store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		if err := upsertSessionStateFixture(r.store, ctx, projectID, daemonstate.Session{
 			ID:            sessionID,
 			IssueID:       issueID,
 			State:         daemonstate.SessionStateAttached,
@@ -315,16 +368,28 @@ func (r *dedupedTimeoutRuntimeReconciler) snapshot() int {
 }
 
 type runtimeReconcileTestServer struct {
-	served chan struct{}
+	served        chan struct{}
+	waitForCancel bool
+	release       <-chan struct{}
 }
 
-func (s *runtimeReconcileTestServer) Serve(context.Context) error {
+func (s *runtimeReconcileTestServer) Serve(ctx context.Context) error {
 	if s.served != nil {
 		select {
 		case s.served <- struct{}{}:
 		default:
 		}
 	}
+	if s.waitForCancel {
+		<-ctx.Done()
+	}
+	if s.release != nil {
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+		}
+	}
+	<-ctx.Done()
 	return nil
 }
 
@@ -345,6 +410,22 @@ func (emptyTmuxRunner) Run(_ context.Context, args ...string) (string, error) {
 		return "", errors.New("no tmux sessions")
 	}
 	return "", nil
+}
+
+type emptyGitRunner struct{}
+
+func (emptyGitRunner) Run(context.Context, ...string) (string, error) {
+	return "", nil
+}
+
+type signalingTmuxRunner struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (r *signalingTmuxRunner) Run(ctx context.Context, args ...string) (string, error) {
+	r.once.Do(func() { close(r.started) })
+	return emptyTmuxRunner{}.Run(ctx, args...)
 }
 
 func TestCommandRuntimeReconcileRoutesToManualRepair(t *testing.T) {
@@ -405,6 +486,12 @@ func TestCommandRuntimeReconcileRoutesToManualRepair(t *testing.T) {
 	if got := out.InvariantSources[string(daemonInvariantOrchestrationCompletion)]; got != string(daemonInvariantSourceHybrid) {
 		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantOrchestrationCompletion, got, daemonInvariantSourceHybrid)
 	}
+	if got := out.InvariantSources[string(daemonInvariantOrchestrationCandidates)]; got != string(daemonInvariantSourceProjection) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantOrchestrationCandidates, got, daemonInvariantSourceProjection)
+	}
+	if got := out.InvariantSources[string(daemonInvariantSessionActivityConverge)]; got != string(daemonInvariantSourceHybrid) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantSessionActivityConverge, got, daemonInvariantSourceHybrid)
+	}
 
 	calls, projectIDs := recorder.snapshot()
 	if calls != 1 {
@@ -420,9 +507,12 @@ func TestRunInvokesStartupRuntimeReconcileWithBoundedTimeout(t *testing.T) {
 
 	recorder := &runtimeReconcileRecorder{
 		started:       make(chan struct{}, 1),
+		finished:      make(chan struct{}, 1),
 		waitForCancel: true,
 	}
 	t.Chdir(t.TempDir())
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	t.Cleanup(cancelRun)
 	runDone := make(chan error, 1)
 	serveDone := make(chan struct{}, 1)
 	d := &Daemon{
@@ -437,7 +527,7 @@ func TestRunInvokesStartupRuntimeReconcileWithBoundedTimeout(t *testing.T) {
 	d.runtimeReconciler = recorder
 
 	go func() {
-		runDone <- d.Run(context.Background())
+		runDone <- d.Run(runCtx)
 	}()
 
 	select {
@@ -445,6 +535,12 @@ func TestRunInvokesStartupRuntimeReconcileWithBoundedTimeout(t *testing.T) {
 	case <-time.After(waitForStartupReconcile):
 		t.Fatal("timed out waiting for startup reconcile to begin")
 	}
+	select {
+	case <-recorder.finished:
+	case <-time.After(waitForStartupReconcile):
+		t.Fatal("timed out waiting for bounded startup reconcile to finish")
+	}
+	cancelRun()
 
 	select {
 	case err := <-runDone:
@@ -467,6 +563,101 @@ func TestRunInvokesStartupRuntimeReconcileWithBoundedTimeout(t *testing.T) {
 	}
 	if len(projectIDs) != 1 || projectIDs[0] != protocol.DefaultProjectID {
 		t.Fatalf("startup reconcile project ids = %v, want [%s]", projectIDs, protocol.DefaultProjectID)
+	}
+}
+
+func TestStartupRuntimeReconcileBeginsSessionRecoveryBeforeInteractionStaleness(t *testing.T) {
+	// This test asserts startup ordering, not a five-second performance SLO.
+	// Race instrumentation can delay the second asynchronously scheduled phase.
+	const waitForSessionRecovery = 15 * time.Second
+
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("project id for root: %v", err)
+	}
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	interactionStarted := make(chan struct{})
+	interactionBeforeSessionRecovery := make(chan struct{}, 1)
+	releaseInteraction := make(chan struct{})
+	var releaseInteractionOnce sync.Once
+	release := func() { releaseInteractionOnce.Do(func() { close(releaseInteraction) }) }
+	t.Cleanup(release)
+	sessionRecoveryStarted := make(chan struct{})
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	t.Cleanup(cancelRun)
+	worktreeManager := git.NewWorktreeManager(emptyGitRunner{}, repoDir, slog.Default())
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:                 repoDir,
+			Logger:                  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			RuntimeReconcileTimeout: 20 * time.Second,
+		},
+		issues:       newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default()),
+		tmux:         tmux.NewClient(&signalingTmuxRunner{started: sessionRecoveryStarted}, slog.Default()),
+		sessionStore: daemonstate.NewStore(),
+		lock:         runtimeReconcileTestLock{},
+		serve:        &runtimeReconcileTestServer{served: make(chan struct{}, 1), waitForCancel: true, release: releaseInteraction},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: worktreeManager,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: worktreeManager,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+	}
+	t.Cleanup(func() { _ = d.issues.CloseDB() })
+	d.reconcileInteractionStalenessFn = func(ctx context.Context, _ string) error {
+		select {
+		case <-sessionRecoveryStarted:
+		default:
+			interactionBeforeSessionRecovery <- struct{}{}
+		}
+		close(interactionStarted)
+		select {
+		case <-releaseInteraction:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	d.syncBootstrapFn = func(context.Context) error { return nil }
+	d.runtimeReconciler = newRuntimeReconcileService(d)
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- d.Run(runCtx)
+	}()
+
+	select {
+	case <-sessionRecoveryStarted:
+	case <-time.After(waitForSessionRecovery):
+		t.Fatal("timed out waiting for startup session recovery to begin")
+	}
+	select {
+	case <-interactionStarted:
+	case <-time.After(waitForSessionRecovery):
+		t.Fatal("timed out waiting for interaction reconciliation to begin")
+	}
+	select {
+	case <-interactionBeforeSessionRecovery:
+		t.Fatal("interaction reconciliation began before startup session recovery")
+	default:
+	}
+
+	release()
+	cancelRun()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+	case <-time.After(waitForSessionRecovery):
+		t.Fatal("timed out waiting for Run to finish")
 	}
 }
 
@@ -1293,7 +1484,7 @@ func TestEnsureFreshRuntimeForIssueMutationUsesIssueScopedReconcile(t *testing.T
 	}
 }
 
-func TestRuntimeReconcileIssuesUsesBatchedSessionRefreshForLargeIssueSets(t *testing.T) {
+func TestRuntimeReconcileIssuesChunksLargeIssueSetsThroughHybridReconciler(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-large-issue-reconcile"
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
@@ -1303,7 +1494,7 @@ func TestRuntimeReconcileIssuesUsesBatchedSessionRefreshForLargeIssueSets(t *tes
 	for i := 0; i <= runtimeReconcileIssueRepairLimit; i++ {
 		issueID := fmt.Sprintf("az-%d", i+1)
 		issueIDs = append(issueIDs, issueID)
-		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 			ID:            naming.CanonicalSessionID(projectID, issueID),
 			IssueID:       issueID,
 			State:         daemonstate.SessionStateRunning,
@@ -1333,18 +1524,59 @@ func TestRuntimeReconcileIssuesUsesBatchedSessionRefreshForLargeIssueSets(t *tes
 		t.Fatalf("ReconcileIssues returned error: %v", err)
 	}
 
-	if got := tmuxRunner.listSessionCallCount(); got != 1 {
-		t.Fatalf("tmux list-sessions calls = %d, want one batched liveness refresh", got)
+	if got := tmuxRunner.listSessionCallCount(); got != 2 {
+		t.Fatalf("tmux list-sessions calls = %d, want two bounded hybrid chunks", got)
 	}
-	row, found, err := runtimeStateStore.GetSessionState(ctx, projectID, naming.CanonicalSessionID(projectID, issueIDs[0]))
+	if _, found, err := runtimeStateStore.GetSessionState(ctx, projectID, naming.CanonicalSessionID(projectID, issueIDs[0])); err != nil || !found {
+		t.Fatalf("durable session intent missing after hybrid chunk: found=%t err=%v", found, err)
+	}
+}
+
+func TestRuntimeReconcileIssuesRepairsLifecycleAcrossSixtyFiveIssueBoundary(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
 	if err != nil {
-		t.Fatalf("get refreshed session projection: %v", err)
+		t.Fatal(err)
 	}
-	if !found {
-		t.Fatal("refreshed session projection not found")
+	issueClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	issueIDs := make([]string, 0, runtimeReconcileIssueRepairLimit+1)
+	sessions := map[string]bool{}
+	for i := 0; i <= runtimeReconcileIssueRepairLimit; i++ {
+		id, createErr := issueClient.Create(ctx, issues.CreateTaskParams{Title: fmt.Sprintf("ready-%d", i), Type: domain.TypeTask, Status: domain.StatusOpen})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		issueIDs = append(issueIDs, id)
+		sessions[naming.CanonicalSessionID(repoDir, id)] = true
 	}
-	if row.ObservedState != daemonstate.SessionStateStopped {
-		t.Fatalf("observed state = %s, want %s", row.ObservedState, daemonstate.SessionStateStopped)
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	tmuxRunner := &testTmuxRunner{sessions: sessions, panes: map[string][]string{}, killEntered: make(chan struct{}), killRelease: make(chan struct{})}
+	store := daemonstate.NewStore()
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, tmux: tmux.NewClient(tmuxRunner, slog.Default()), sessionStore: store,
+		worktreeManagersByRoot:    map[string]*git.WorktreeManager{repoDir: git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default())},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default())},
+		runtimeStoresByRoot:       map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore}}
+	result, err := newRuntimeReconcileService(d).ReconcileIssues(ctx, projectID, issueIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IssueLifecycleRepairs != len(issueIDs) {
+		t.Fatalf("repairs=%d want=%d", result.IssueLifecycleRepairs, len(issueIDs))
+	}
+	if tmuxRunner.listSessionCallCount() != 2 {
+		t.Fatalf("tmux calls=%d want=2", tmuxRunner.listSessionCallCount())
+	}
+	for _, id := range issueIDs {
+		task, getErr := issueClient.GetWithRuntime(ctx, projectID, id)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if task.State.Engagement != domain.IssueEngagementWorking {
+			t.Fatalf("%s engagement=%s", id, task.State.Engagement)
+		}
 	}
 }
 
@@ -1477,7 +1709,7 @@ func TestRefreshRuntimeForIssueMutationAsyncEventuallyUpdatesProjection(t *testi
 func TestSessionStatusDoesNotInvokeRuntimeReconcile(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() {
 		if err := issuesClient.CloseDB(); err != nil {
 			t.Fatalf("close issues db: %v", err)
@@ -1550,7 +1782,7 @@ func TestReconcileIssueResourcesPresentRunsForActiveRuntimeAttachmentsOnly(t *te
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
@@ -1623,7 +1855,7 @@ func TestRuntimeReconcileIssuesSkipsIssueResourceHookForSessionStartFreshness(t 
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
@@ -1702,7 +1934,7 @@ func TestRuntimeReconcileRefreshesSessionProjectionWithoutWorktreeManager(t *tes
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
 	sessionID := projectID + "-" + issueID
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,

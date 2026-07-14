@@ -58,10 +58,12 @@ type ExternalSyncState struct {
 // identifier. It is intentionally narrow and used by sync import paths only.
 func (c *Client) UpsertSyncedTask(ctx context.Context, task domain.Task) (bool, error) {
 	var changed bool
-	err := retrySQLiteBusy(ctx, func() error {
-		var err error
-		changed, err = c.upsertSyncedTaskOnce(ctx, task)
-		return err
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			changed, err = c.upsertSyncedTaskOnce(lockCtx, task)
+			return err
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -109,17 +111,29 @@ func (c *Client) upsertSyncedTaskOnce(ctx context.Context, task domain.Task) (bo
 	if task.IssueClosed() {
 		closedAt = task.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
+	state, err := task.IssueState()
+	if err != nil {
+		return false, c.wrapError("sync-upsert", issueID, err)
+	}
+	writeState := issueStateWriteValuesFromState(state, nil)
 	res, err := db.ExecContext(ctx, `
 		INSERT INTO issues (
-			id, title, description, status, priority, issue_type,
+			id, title, description, status, disposition, engagement, visibility, lifecycle_state, closed_outcome, review_state, archived_at, priority, issue_type,
 			created_at, updated_at, closed_at, assignee, labels_json,
 			implementations_json, design, notes, acceptance, estimate, deleted_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
 		ON CONFLICT(id) DO UPDATE SET
 			title = excluded.title,
 			description = excluded.description,
 			status = excluded.status,
+			disposition = excluded.disposition,
+			engagement = excluded.engagement,
+			visibility = excluded.visibility,
+			lifecycle_state = excluded.lifecycle_state,
+			closed_outcome = excluded.closed_outcome,
+			review_state = excluded.review_state,
+			archived_at = excluded.archived_at,
 			priority = excluded.priority,
 			issue_type = excluded.issue_type,
 			updated_at = excluded.updated_at,
@@ -128,7 +142,7 @@ func (c *Client) upsertSyncedTaskOnce(ctx context.Context, task domain.Task) (bo
 			labels_json = excluded.labels_json,
 			implementations_json = excluded.implementations_json,
 			deleted_at = NULL
-	`, issueID, task.Title, nullableString(task.Description), string(task.Status), int(task.Priority), string(task.Type), task.CreatedAt.UTC().Format(time.RFC3339Nano), task.UpdatedAt.UTC().Format(time.RFC3339Nano), closedAt, nullableString(task.Assignee), labelsJSON, implsJSON, nullableString(task.Design), nullableString(task.Notes), nullableString(task.Acceptance), estimate)
+	`, issueID, task.Title, nullableString(task.Description), writeState.LegacyStatus, writeState.Disposition, writeState.Engagement, writeState.Visibility, writeState.Lifecycle, writeState.ClosedOutcome, writeState.Review, writeState.ArchivedAt, int(task.Priority), string(task.Type), task.CreatedAt.UTC().Format(time.RFC3339Nano), task.UpdatedAt.UTC().Format(time.RFC3339Nano), closedAt, nullableString(task.Assignee), labelsJSON, implsJSON, nullableString(task.Design), nullableString(task.Notes), nullableString(task.Acceptance), estimate)
 	if err != nil {
 		return false, c.wrapError("sync-upsert", issueID, err)
 	}
@@ -137,8 +151,10 @@ func (c *Client) upsertSyncedTaskOnce(ctx context.Context, task domain.Task) (bo
 }
 
 func (c *Client) UpsertExternalRef(ctx context.Context, ref ExternalRef) error {
-	err := retrySQLiteBusy(ctx, func() error {
-		return c.upsertExternalRefOnce(ctx, ref)
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			return c.upsertExternalRefOnce(lockCtx, ref)
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -218,7 +234,7 @@ func (c *Client) ListExternalRefs(ctx context.Context, provider string) ([]Exter
 			COALESCE(i.assignee, ''),
 			COALESCE(i.labels_json, '[]')
 		FROM issue_external_refs r
-		INNER JOIN issues i ON i.id = r.issue_id AND i.deleted_at IS NULL
+		INNER JOIN issues i ON i.id = r.issue_id AND i.visibility = 'live'
 		LEFT JOIN azedarach_external_issue_refs a
 			ON a.provider = r.provider AND a.issue_id = r.issue_id
 		WHERE r.provider = ? AND r.deleted_at IS NULL
@@ -387,8 +403,10 @@ func (c *Client) GetExternalSyncState(ctx context.Context, provider, projectID s
 }
 
 func (c *Client) UpsertExternalSyncState(ctx context.Context, state ExternalSyncState) error {
-	err := retrySQLiteBusy(ctx, func() error {
-		return c.upsertExternalSyncStateOnce(ctx, state)
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			return c.upsertExternalSyncStateOnce(lockCtx, state)
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -427,8 +445,10 @@ func (c *Client) upsertExternalSyncStateOnce(ctx context.Context, state External
 }
 
 func (c *Client) RecordSyncConflict(ctx context.Context, conflict SyncConflict) error {
-	err := retrySQLiteBusy(ctx, func() error {
-		return c.recordSyncConflictOnce(ctx, conflict)
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			return c.recordSyncConflictOnce(lockCtx, conflict)
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)

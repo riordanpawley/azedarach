@@ -18,6 +18,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 	"github.com/riordanpawley/azedarach/internal/ui/statusbar"
+	"github.com/riordanpawley/azedarach/internal/ui/styles"
 	"github.com/riordanpawley/azedarach/internal/ui/toast"
 )
 
@@ -34,10 +35,10 @@ func (m Model) View() string {
 	contentHeight := board.BoardContentHeight(m.height)
 	mainView := ""
 	if currentOverlay == nil || overlayUsesFullScreen(currentOverlay) {
-		if m.viewMode == ViewModeCompact {
-			mainView = m.renderCompactView()
-		} else if m.viewMode == ViewModeOverview {
-			mainView = m.renderOrchestrationOverview()
+		if m.boardView.Normalized().Layout == domain.BoardViewLayoutTreeList {
+			mainView = m.renderConfiguredListView()
+		} else if m.boardView.Normalized().Layout == domain.BoardViewLayoutHorizontalGrid {
+			mainView = m.renderConfiguredHorizontalGrid()
 		} else {
 			mainView = m.renderBoardView()
 		}
@@ -45,7 +46,7 @@ func (m Model) View() string {
 		mainView = m.renderModalBackdrop(contentHeight)
 	}
 
-	// Clamp board/compact content to the space above the footer to keep
+	// Clamp board/tree content to the space above the footer to keep
 	// column headers and card rows stable even when internal render paths
 	// overproduce lines (for example via wrapped content or spacing styles).
 	mainView = lipgloss.NewStyle().
@@ -54,16 +55,17 @@ func (m Model) View() string {
 		Render(mainView)
 
 	sb := statusbar.New(m.statusBarMode(), m.width, m.styles)
-	sb.SetCurrentProject(m.currentProject)
+	sb.SetCurrentProject(m.scope.Label(m.currentProject))
 	sb.SetSelectionSummary(m.selectionSummary())
 	sb.SetFilterSummary(m.filterSummary())
 	sb.SetSortSummary(m.sortSummary())
 	sb.SetAlertIndicator(m.alertIndicator())
+	suffix := m.orchestratorChromeStatus()
 	if m.boardRefreshing {
-		sb.SetModeSuffix(m.spinner.View())
+		suffix = strings.TrimSpace(suffix + " " + m.spinner.View())
 	}
-	if currentOverlay == nil && m.viewMode == ViewModeOverview {
-		sb.SetHintBindings(orchestrationOverviewStatusBindings())
+	if suffix != "" {
+		sb.SetModeSuffix(suffix)
 	}
 	if current := currentOverlay; current != nil {
 		bindings := []keybinds.Binding(nil)
@@ -138,16 +140,63 @@ func (m Model) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, contentView, statusBarView)
 }
 
-func orchestrationOverviewStatusBindings() []keybinds.Binding {
-	return []keybinds.Binding{
-		{Key: "↑/↓ j/k", Description: "row"},
-		{Key: "←/→ h/l", Description: "project"},
-		{Key: "Home/End g/G", Description: "top/end"},
-		{Key: "Enter", Description: "open"},
-		{Key: "Tab", Description: "switch view"},
-		{Key: "/", Description: "search"},
-		{Key: "f", Description: "filter"},
+func (m Model) renderConfiguredHorizontalGrid() string {
+	visible := m.boardVisibleTasks(m.tasks)
+	visibleByID := make(map[string]domain.Task, len(visible))
+	for _, task := range visible {
+		visibleByID[task.ID.String()] = task
 	}
+	ordered := make([]domain.Task, 0, len(visible))
+	for _, projected := range m.boardOrdered {
+		if task, ok := visibleByID[projected.ID.String()]; ok {
+			ordered = append(ordered, task)
+		}
+	}
+	if len(m.boardOrdered) == 0 {
+		projection, err := domain.ProjectTasksByBoardView(m.boardView, visible)
+		if err == nil {
+			ordered = projection.OrderedTasks()
+		}
+	}
+	if sortState := m.editor.GetSort(); sortState != nil && m.editor.IsSortExplicit() {
+		ordered = sortState.ApplyInPlace(ordered)
+	}
+	if len(ordered) == 0 {
+		return ""
+	}
+	cardWidth, columns := horizontalGridGeometry(m.width)
+	selectedID := ""
+	if m.nav != nil && m.nav.GetCursor() != nil {
+		selectedID = m.nav.GetCursor().TaskID
+	}
+	cards := make([]string, 0, len(ordered))
+	for _, task := range ordered {
+		style := lipgloss.NewStyle().Width(max(1, cardWidth-4)).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(styles.Surface0)
+		if task.ID.String() == selectedID {
+			style = style.BorderForeground(styles.Blue).Bold(true)
+		}
+		bodyWidth := max(1, cardWidth-4)
+		body := ansi.Truncate(task.ID.String()+" "+task.Title, bodyWidth, "…") + "\n" + ansi.Truncate(task.Status.String(), bodyWidth, "…")
+		cards = append(cards, style.Render(body))
+	}
+	rows := make([]string, 0, (len(cards)+columns-1)/columns)
+	for start := 0; start < len(cards); start += columns {
+		end := min(len(cards), start+columns)
+		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, cards[start:end]...))
+	}
+	return m.overlayFreshnessIndicator(strings.Join(rows, "\n"), board.BoardContentHeight(m.height))
+}
+
+func horizontalGridGeometry(width int) (cardWidth, columns int) {
+	if width < 1 {
+		width = 1
+	}
+	cardWidth = min(32, max(4, width/3))
+	if cardWidth > width {
+		cardWidth = width
+	}
+	columns = max(1, width/cardWidth)
+	return cardWidth, columns
 }
 
 func (m Model) layerNotificationStack(contentView string, width, height int) string {
@@ -232,12 +281,12 @@ func (m Model) renderModalBackdrop(contentHeight int) string {
 		return ""
 	}
 	header := m.styles.StatusInfo.Render(fmt.Sprintf(
-		" %s  %d issues ",
-		strings.TrimSpace(m.currentProject),
+		" %s  %d tickets ",
+		strings.TrimSpace(m.scope.Label(m.currentProject)),
 		len(m.tasks),
 	))
-	if strings.TrimSpace(m.currentProject) == "" {
-		header = m.styles.StatusInfo.Render(fmt.Sprintf(" %d issues ", len(m.tasks)))
+	if strings.TrimSpace(m.scope.Label(m.currentProject)) == "" {
+		header = m.styles.StatusInfo.Render(fmt.Sprintf(" %d tickets ", len(m.tasks)))
 	}
 	return lipgloss.NewStyle().
 		Width(m.width).
@@ -457,6 +506,13 @@ func renderedBlockSize(view string) (width, height int) {
 func (m Model) buildColumns() []board.Column {
 	// Apply filter to tasks and enforce board-level child hiding semantics.
 	filteredTasks := m.boardVisibleTasks(m.tasks)
+	if m.boardView.Normalized().Layout == domain.BoardViewLayoutHorizontalGrid {
+		return m.horizontalGridNavigationColumns(filteredTasks)
+	}
+	if m.boardView.Normalized().Layout == domain.BoardViewLayoutTreeList {
+		ordered, _ := m.configuredListTasks()
+		return []board.Column{{Title: m.boardView.Title, Tasks: ordered}}
+	}
 	if columns, ok := m.configuredBoardColumns(filteredTasks); ok {
 		return m.applyBoardColumnSort(columns)
 	}
@@ -478,6 +534,30 @@ func (m Model) buildColumns() []board.Column {
 	}
 
 	return m.applyBoardColumnSort(columns)
+}
+
+func (m Model) horizontalGridNavigationColumns(visible []domain.Task) []board.Column {
+	visibleByID := make(map[string]domain.Task, len(visible))
+	for _, task := range visible {
+		visibleByID[task.ID.String()] = task
+	}
+	ordered := make([]domain.Task, 0, len(visible))
+	for _, projected := range m.boardOrdered {
+		if task, ok := visibleByID[projected.ID.String()]; ok {
+			ordered = append(ordered, task)
+		}
+	}
+	if len(m.boardOrdered) == 0 {
+		if projection, err := domain.ProjectTasksByBoardView(m.boardView, visible); err == nil {
+			ordered = projection.OrderedTasks()
+		}
+	}
+	_, columnCount := horizontalGridGeometry(m.width)
+	columns := make([]board.Column, min(columnCount, len(ordered)))
+	for i, task := range ordered {
+		columns[i%len(columns)].Tasks = append(columns[i%len(columns)].Tasks, task)
+	}
+	return columns
 }
 
 func (m Model) configuredBoardColumns(filteredTasks []domain.Task) ([]board.Column, bool) {
@@ -546,7 +626,7 @@ func (m Model) applyBoardColumnSort(columns []board.Column) []board.Column {
 	}
 	var activeDescendantSessionByTask map[string]bool
 	sortState := m.editor.GetSort()
-	if sortState != nil && sortState.Field == domain.SortBySession {
+	if m.editor.IsSortExplicit() && sortState != nil && sortState.Field == domain.SortBySession {
 		activeDescendantSessionByTask = buildActiveDescendantSessionByTask(m.tasks)
 	}
 	for i := range columns {
@@ -557,7 +637,7 @@ func (m Model) applyBoardColumnSort(columns []board.Column) []board.Column {
 				}
 			}
 		}
-		if sortState != nil {
+		if m.editor.IsSortExplicit() && sortState != nil {
 			columns[i].Tasks = sortState.ApplyInPlace(columns[i].Tasks)
 		}
 	}
@@ -578,6 +658,11 @@ func (m Model) boardVisibleTasks(tasks []domain.Task) []domain.Task {
 			}
 		}
 		return result
+	}
+	if m.boardProjection.View.ID != "" {
+		filter := *m.editor.GetFilter()
+		filter.HideEpicChildren = false
+		return m.applySessionTreeFilter(filter.Apply(tasks))
 	}
 
 	if m.sessionTreeFilterOnly {
@@ -651,8 +736,8 @@ func taskIDsWithSessionInTree(tasks []domain.Task) map[string]bool {
 }
 
 func (m Model) runtimeSignalRefreshTasks() []domain.Task {
-	if m.viewMode == ViewModeCompact {
-		return m.compactRenderedTasks()
+	if m.boardView.Normalized().Layout == domain.BoardViewLayoutTreeList {
+		return m.treeRenderedTasks()
 	}
 	return m.boardRenderedTasks()
 }
@@ -715,24 +800,12 @@ func (m Model) jumpLabelsByTask() map[string]string {
 	return labels
 }
 
-func (m Model) compactRenderedTasks() []domain.Task {
-	filtered := m.boardVisibleTasks(m.tasks)
-	if sortState := m.editor.GetSort(); sortState != nil {
-		filtered = sortState.ApplyInPlace(filtered)
-	}
-	if len(filtered) == 0 {
+func (m Model) treeRenderedTasks() []domain.Task {
+	ordered, _ := m.configuredListTasks()
+	if len(ordered) == 0 {
 		return nil
 	}
-
-	columns := m.buildColumns()
-	pos := m.nav.GetPosition(columns)
-	cursor := m.getFlatIndexFromPosition(pos, columns)
-	if cursor < 0 {
-		cursor = 0
-	}
-	if cursor >= len(filtered) {
-		cursor = len(filtered) - 1
-	}
+	cursor := m.treeCursorIndex(ordered)
 
 	visibleRows := board.BoardContentHeight(m.height) - 2
 	if visibleRows < 1 {
@@ -743,7 +816,7 @@ func (m Model) compactRenderedTasks() []domain.Task {
 	if cursor >= visibleRows {
 		scrollOffset = cursor - visibleRows + 1
 	}
-	maxOffset := len(filtered) - visibleRows
+	maxOffset := len(ordered) - visibleRows
 	if maxOffset < 0 {
 		maxOffset = 0
 	}
@@ -752,10 +825,10 @@ func (m Model) compactRenderedTasks() []domain.Task {
 	}
 
 	end := scrollOffset + visibleRows
-	if end > len(filtered) {
-		end = len(filtered)
+	if end > len(ordered) {
+		end = len(ordered)
 	}
-	return filtered[scrollOffset:end]
+	return ordered[scrollOffset:end]
 }
 
 func isChildOfParent(task domain.Task, parentID string) bool {
@@ -1052,28 +1125,58 @@ func buildActiveDescendantSessionByTask(tasks []domain.Task) map[string]bool {
 	return activeAncestorSessionByTask
 }
 
-// renderCompactView renders the compact list view
-func (m Model) renderCompactView() string {
-	// Get all filtered and sorted tasks
-	filteredTasks := m.boardVisibleTasks(m.tasks)
-	sortedTasks := filteredTasks
-	if sortState := m.editor.GetSort(); sortState != nil {
-		sortedTasks = sortState.ApplyInPlace(sortedTasks)
-	}
-
-	// Create compact view
-	compactView := compact.NewCompactView(sortedTasks, m.width, board.BoardContentHeight(m.height))
-
-	compactView.SetCursor(m.compactCursorIndex(sortedTasks))
-
-	// Set selected tasks
+func (m Model) renderConfiguredListView() string {
+	ordered, projectedItems := m.configuredListTasks()
+	ordered = decorateConfiguredTreeTasks(ordered, projectedItems)
+	compactView := compact.NewCompactView(ordered, m.width, board.BoardContentHeight(m.height))
+	compactView.SetCursor(m.treeCursorIndex(ordered))
 	compactView.SetSelected(m.editor.GetSelectedTasks())
-
-	rendered := compactView.Render()
-	return m.overlayFreshnessIndicator(rendered, board.BoardContentHeight(m.height))
+	return m.overlayFreshnessIndicator(compactView.Render(), board.BoardContentHeight(m.height))
 }
 
-func (m Model) compactCursorIndex(tasks []domain.Task) int {
+func (m Model) configuredListTasks() ([]domain.Task, []domain.BoardViewProjectedItem) {
+	visible := m.boardVisibleTasks(m.tasks)
+	visibleByID := make(map[string]domain.Task, len(visible))
+	for _, task := range visible {
+		visibleByID[task.ID.String()] = task
+	}
+	ordered := make([]domain.Task, 0, len(visible))
+	projectedItems := m.boardProjection.Items
+	for _, projected := range m.boardOrdered {
+		if task, ok := visibleByID[projected.ID.String()]; ok {
+			ordered = append(ordered, task)
+			delete(visibleByID, projected.ID.String())
+		}
+	}
+	if len(m.boardOrdered) == 0 {
+		projection, err := domain.ProjectTasksByBoardView(m.boardView, visible)
+		if err == nil {
+			ordered = projection.OrderedTasks()
+			projectedItems = projection.Items
+		}
+	}
+	if sortState := m.editor.GetSort(); sortState != nil && m.editor.IsSortExplicit() {
+		ordered = sortState.ApplyInPlace(ordered)
+	}
+	return ordered, projectedItems
+}
+
+func decorateConfiguredTreeTasks(tasks []domain.Task, items []domain.BoardViewProjectedItem) []domain.Task {
+	depths := make(map[string]int, len(items))
+	for _, item := range items {
+		depths[item.Task.ID.String()] = item.Depth
+	}
+	result := append([]domain.Task(nil), tasks...)
+	for i := range result {
+		depth := depths[result[i].ID.String()]
+		if depth > 0 {
+			result[i].Title = strings.Repeat("  ", depth-1) + "└ " + result[i].Title
+		}
+	}
+	return result
+}
+
+func (m Model) treeCursorIndex(tasks []domain.Task) int {
 	if len(tasks) == 0 || m.nav == nil || m.nav.GetCursor() == nil {
 		return 0
 	}

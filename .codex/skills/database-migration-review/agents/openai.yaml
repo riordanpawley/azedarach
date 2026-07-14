@@ -1,0 +1,4 @@
+interface:
+  display_name: "Database Migration Review"
+  short_description: "Safely consolidate and validate migrations"
+  default_prompt: "Use $database-migration-review to review and validate this migration before merge."

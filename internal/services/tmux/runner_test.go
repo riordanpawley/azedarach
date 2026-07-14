@@ -22,7 +22,7 @@ func TestExecRunnerRefusesMutatingTmuxCommandsInGoTests(t *testing.T) {
 	}
 }
 
-func TestExecRunnerPreservesCombinedOutputOnFailure(t *testing.T) {
+func TestRealProcessProfileExecRunnerPreservesCombinedOutputOnFailure(t *testing.T) {
 	dir := t.TempDir()
 	tmuxPath := filepath.Join(dir, "tmux")
 	if err := os.WriteFile(tmuxPath, []byte("#!/bin/sh\nprintf 'stdout detail\\n'\nprintf 'stderr detail\\n' >&2\nexit 1\n"), 0o755); err != nil {

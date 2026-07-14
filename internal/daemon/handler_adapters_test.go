@@ -412,8 +412,8 @@ func TestIssueLearnServiceOmitEvidenceFromReviewAndPromoteResponses(t *testing.T
 	if err != nil {
 		t.Fatalf("add learning: %v", err)
 	}
-	if added.Learning.Evidence == "" || !added.Learning.EvidencePrivate {
-		t.Fatalf("add response should echo explicit capture evidence and private flag: %+v", added.Learning)
+	if added.Learning.Evidence != "" || !added.Learning.EvidencePrivate {
+		t.Fatalf("add response must redact private capture evidence and retain private flag: %+v", added.Learning)
 	}
 
 	reviewed, err := service.Review(ctx, protocol.LearnReviewRequestBody{
@@ -448,6 +448,72 @@ func TestIssueLearnServiceOmitEvidenceFromReviewAndPromoteResponses(t *testing.T
 	}
 	if promoted.Learning.Evidence != "" || !promoted.Learning.EvidencePrivate {
 		t.Fatalf("promote response evidence/private = %q/%v, want no evidence and private marker", promoted.Learning.Evidence, promoted.Learning.EvidencePrivate)
+	}
+}
+
+func TestIssueLearnServiceCapturePrivateResponseHasNoSensitiveProjection(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	service := newTestIssueLearnService(client, repoDir)
+	out, err := service.Capture(ctx, protocol.LearnCaptureRequestBody{ObservedBehavior: "token=PRIVATE123", PreferredBehavior: "do not expose PRIVATE123", Outcome: "PRIVATE outcome", Impact: "PRIVATE impact", Context: map[string]string{"secret": "PRIVATE123"}, Provenance: protocol.LearningObservationProvenance{Source: "hook", Actor: "private actor", Ref: "private ref"}, Sensitivity: "private", Tags: []string{"private-tag"}, Files: []string{"private.go"}})
+	if err != nil {
+		t.Fatalf("capture private observation: %v", err)
+	}
+	obs := out.Observation
+	if obs.ObservedBehavior != "" || obs.PreferredBehavior != "" || obs.Outcome != "" || obs.Impact != "" || obs.Context != nil || obs.Provenance != (protocol.LearningObservationProvenance{}) || obs.SafeFingerprint != "" || len(obs.DuplicateLearningIDs) != 0 {
+		t.Fatalf("private capture response leaked sensitive projection: %+v", obs)
+	}
+	if obs.Learning.Evidence != "" || obs.Learning.Summary != "Private learning observation" || len(obs.Learning.Tags) != 0 || len(obs.Learning.Files) != 0 || !obs.Learning.EvidencePrivate {
+		t.Fatalf("private learning response leaked indexed fields: %+v", obs.Learning)
+	}
+}
+
+func TestIssueLearnServiceContextualActivationIsPrivateSafeBudgetedAndSessionDeduplicated(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	service := newTestIssueLearnService(client, repoDir)
+	public, err := client.CreateLearning(ctx, issues.CreateLearningParams{ProjectID: protocol.DefaultProjectID, Summary: "Use the daemon boundary.", Evidence: "public"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err = client.UpdateLearningStatus(ctx, public.LocalID, issues.LearningStatusAccepted, "reviewed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	private, err := client.CreateLearning(ctx, issues.CreateLearningParams{ProjectID: protocol.DefaultProjectID, Summary: "Never expose this.", Evidence: "secret", EvidencePrivate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.UpdateLearningStatus(ctx, private.LocalID, issues.LearningStatusAccepted, "reviewed privately")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := protocol.LearnContextualActivateRequestBody{Purpose: string(domain.LearningPurposeSessionStart), Surface: "prime", SessionID: "session-1", TokenBudget: 64}
+	first, err := service.ContextualActivate(ctx, req)
+	if err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	if first.Proposal == nil || len(first.Learnings) != 1 || first.Learnings[0].ID != public.LocalID || first.Learnings[0].EvidencePrivate {
+		t.Fatalf("first activation = %+v", first)
+	}
+	lostResponseRetry, err := service.ContextualActivate(ctx, req)
+	if err != nil || lostResponseRetry.Proposal == nil || lostResponseRetry.Proposal.ActivationID == first.Proposal.ActivationID {
+		t.Fatalf("unconfirmed proposal should not suppress retry: %+v err=%v", lostResponseRetry, err)
+	}
+	if _, err := service.ConfirmActivation(ctx, protocol.LearnActivationConfirmRequestBody{ActivationID: lostResponseRetry.Proposal.ActivationID, TokenCost: 10}); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	second, err := service.ContextualActivate(ctx, req)
+	if err != nil {
+		t.Fatalf("repeat activate: %v", err)
+	}
+	if second.Proposal != nil || len(second.Learnings) != 0 {
+		t.Fatalf("repeat activation = %+v, want suppressed", second)
+	}
+	req.SessionID = "session-2"
+	third, err := service.ContextualActivate(ctx, req)
+	if err != nil || third.Proposal == nil {
+		t.Fatalf("new session activation = %+v, err=%v", third, err)
 	}
 }
 
@@ -843,7 +909,7 @@ func newTestIssueClient(t *testing.T) (*issues.Client, string) {
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	client := issues.NewClient(repoDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	client := newMigratedIssueClient(t, repoDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { _ = client.CloseDB() })
 	return client, repoDir
 }
@@ -1048,6 +1114,46 @@ func TestWorktreeServiceAdapterCreateMaterializesMissingAncestorChain(t *testing
 	}
 }
 
+func TestWorktreeServiceAdapterCreateInitRollbackCleansCache(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	runner := &recordingWorktreeCreateRunner{repoDir: repoDir}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	issueID := "az-cache-rollback"
+	cacheRoot := filepath.Join(repoDir, ".azedarach", "go")
+	adapter := &worktreeServiceAdapter{
+		manager: manager,
+		logger:  logger,
+		runWorktreeSyncInit: func(_ context.Context, initCtx worktreeInitContext) error {
+			for _, kind := range []string{"normal", "race", "coverage"} {
+				entry := filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+initCtx.IssueID, "entry")
+				if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+					return err
+				}
+				if err := os.WriteFile(entry, []byte("cache"), 0o644); err != nil {
+					return err
+				}
+			}
+			return errors.New("init sentinel")
+		},
+	}
+
+	_, _, err := adapter.Create(ctx, "proj", issueID, "main")
+	if err == nil || !strings.Contains(err.Error(), "init sentinel") {
+		t.Fatalf("Create error = %v, want primary init sentinel", err)
+	}
+	if !strings.Contains(err.Error(), "removed failed worktree") {
+		t.Fatalf("Create error = %v, want rollback evidence", err)
+	}
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		_, statErr := os.Stat(filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+issueID))
+		if !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("%s cache remains after init rollback: %v", kind, statErr)
+		}
+	}
+}
+
 func ptrIssueID(id string) *naming.IssueID {
 	issueID := naming.IssueID(id)
 	return &issueID
@@ -1124,6 +1230,85 @@ branch refs/heads/` + branchName + `
 	}
 	if strings.Join(runner.commands, "\n") != strings.Join(wantCommands, "\n") {
 		t.Fatalf("commands = %v, want %v", runner.commands, wantCommands)
+	}
+}
+
+func TestWorktreeServiceAdapterDeleteFinalizesProjectionWhenCacheCleanupFails(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	repoDir := t.TempDir()
+	worktreePath := filepath.Join(t.TempDir(), "repo-bvx")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach", "go"), 0o755); err != nil {
+		t.Fatalf("mkdir cache root: %v", err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(repoDir, ".azedarach", "go", "caches")); err != nil {
+		t.Fatalf("symlink cache layout: %v", err)
+	}
+	runner := &staticWorktreeListRunner{
+		output: `worktree ` + repoDir + `
+HEAD abc123
+branch refs/heads/main
+
+worktree ` + worktreePath + `
+HEAD def456
+branch refs/heads/riordan/bvx/worktree-delete
+`,
+	}
+	writer := &recordingRuntimeProjectionWriter{}
+	adapter := &worktreeServiceAdapter{
+		manager:                 git.NewWorktreeManager(runner, repoDir, logger),
+		runtimeProjectionWriter: writer,
+		logger:                  logger,
+	}
+
+	removed, _, err := adapter.Delete(ctx, "proj", "bvx", daemonhandlers.WorktreeRemoveOptions{})
+	if removed == nil {
+		t.Fatal("Delete removed worktree = nil")
+	}
+	if err == nil || !strings.Contains(err.Error(), "worktree deleted; Go cache cleanup remains pending") {
+		t.Fatalf("Delete error = %v, want pending cache cleanup", err)
+	}
+	if got := writer.snapshot(); strings.Join(got, "\n") != "worktree.delete+publish" {
+		t.Fatalf("projection writer calls = %v, want worktree.delete+publish", got)
+	}
+}
+
+func TestFinalizeDeletedWorktreeCleanupUsesAuthoritativeRootDespiteOverride(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	canonicalRepo, err := filepath.EvalSymlinks(repoDir)
+	if err != nil {
+		t.Fatalf("canonicalize repo: %v", err)
+	}
+	issueID := "az-root"
+	authoritativeRoot := filepath.Join(canonicalRepo, ".azedarach", "go")
+	authoritativeEntry := filepath.Join(authoritativeRoot, "caches", "v1", "normal", "issue-"+issueID, "entry")
+	if err := os.MkdirAll(filepath.Dir(authoritativeEntry), 0o755); err != nil {
+		t.Fatalf("seed authoritative cache: %v", err)
+	}
+	if err := os.WriteFile(authoritativeEntry, []byte("cache"), 0o644); err != nil {
+		t.Fatalf("write authoritative cache: %v", err)
+	}
+	customRoot := t.TempDir()
+	customEntry := filepath.Join(customRoot, "caches", "v1", "normal", "issue-"+issueID, "keep")
+	if err := os.MkdirAll(filepath.Dir(customEntry), 0o755); err != nil {
+		t.Fatalf("seed rejected custom cache: %v", err)
+	}
+	if err := os.WriteFile(customEntry, []byte("outside"), 0o644); err != nil {
+		t.Fatalf("write rejected custom cache: %v", err)
+	}
+	t.Setenv("AZEDARACH_GO_CACHE_ROOT", customRoot)
+	manager := git.NewWorktreeManager(&staticWorktreeListRunner{}, canonicalRepo, slog.Default())
+
+	if err := finalizeDeletedWorktree(ctx, "proj", issueID, manager, nil, nil); err != nil {
+		t.Fatalf("finalizeDeletedWorktree error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(authoritativeEntry)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("authoritative cache remains: %v", err)
+	}
+	data, err := os.ReadFile(customEntry)
+	if err != nil || string(data) != "outside" {
+		t.Fatalf("rejected custom cache changed: data=%q err=%v", data, err)
 	}
 }
 

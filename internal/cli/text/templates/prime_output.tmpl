@@ -1,78 +1,82 @@
 Azedarach Session Primer
 
 Primer evidence key: `{{ .PrimeEvidenceKey }}`
-{{ if .ActiveIssueID }}Active issue ID: `{{ .ActiveIssueID }}`
+{{ if .ActiveIssueID }}Active ticket ID: `{{ .ActiveIssueID }}`
 {{ end }}
 {{ if .OrchestratorExitContract }}{{ .OrchestratorExitContract }}
 {{ end }}
 Start here:
-1. {{ if .ActiveIssueID }}Run `az issue get {{ .ActiveIssueID }}`.{{ else }}Identify the issue with `az issue get <issue-id>` or create a fully described issue.{{ end }}
-2. {{ if .SpecEnabled }}{{ if .ActiveIssueID }}Run `az spec read --issue {{ .ActiveIssueID }}`{{ else }}Run `az spec read --issue <issue-id>`{{ end }} before behavior changes.{{ else }}Spec workflows are disabled for this project.{{ end }}
-3. When the user approves an implementation plan, your first action must always be to encode the approved plan into Azedarach before editing code: update the active issue's executable context and create any child issues, dependency edges, or requirement links the plan calls for. Do not create needless decomposition for a single-scope plan.
-4. Continue the requested work. Do not stop after restating the issue or proposing a plan unless the user asked for planning only.
+1. {{ if .OrchestrationSection }}Use the daemon orchestration context below and continue the active stewardship loop.{{ else if .ActiveIssueID }}Run `az ticket get {{ .ActiveIssueID }}`.{{ else }}Identify the ticket with `az ticket get <ticket-id>` or create a fully described ticket.{{ end }}
+2. {{ if .SpecEnabled }}{{ if .ActiveIssueID }}Run `az spec read --issue {{ .ActiveIssueID }}`{{ else }}Run `az spec read --issue <ticket-id>`{{ end }} before behavior changes.{{ else }}Spec workflows are disabled for this project.{{ end }}
+3. When the user approves an implementation plan, your first action must always be to encode the approved plan into Azedarach before editing code: update the active ticket's executable context and create any child tickets, dependency edges, or requirement links the plan calls for. Do not create needless decomposition for a single-scope plan.
+4. Continue the requested work. Do not stop after restating the ticket or proposing a plan unless the user asked for planning only.
 
 {{ if .ActiveIssueClosedWarning }}{{ .ActiveIssueClosedWarning }}
 
 {{ end }}{{ if .ImplementationSection }}{{ .ImplementationSection }}
+{{ end }}{{ if .OrchestrationSection }}{{ .OrchestrationSection }}
 {{ end }}{{ if .IssueSection }}{{ .IssueSection }}
 {{ end }}{{ if .QuestionFirstGuardrails }}{{ .QuestionFirstGuardrails }}
 
 {{ end }}Session Contract
 
-- `AZEDARACH_ISSUE_ID` selects the default issue scope. Refresh stale context with `az issue get <issue-id>`; do not silently switch issues.
-- Use `az issue` as the task authority. Record non-trivial work in issues and perform implementation in the issue worktree/session.
-- When the user asks to start an issue, start or attach its session; changing lifecycle state alone does not start execution. Agents start sessions only on explicit user or orchestrator direction.
-- Create issues with enough description and acceptance context to execute; a title alone is not a usable handoff.
-- Plan approval is the transition from discussion to durable execution state. Encode the approved plan in `az issue` and the relevant graph/spec records before implementation begins.
-- Keep the issue state aligned with what is happening now. Resume active work before editing; do not leave an issue review-ready while making follow-up changes.
-- Record progress, validation, review facts, risks, blockers, and closeout with `az issue record`. Notes are terse human scratchpad, not the automation source of truth.
+- Active git workflow mode: `{{ .GitWorkflowMode }}`.{{ if .OriginWorkflow }} Root integration is PR-only: push the issue branch with `git push -u origin HEAD`, run `az pr create --issue <root> --draft=false`, inspect it with `az pr status --issue <root>`, merge it with `az pr merge --issue <root> --confirm`, fetch `origin/<base>`, then retry `az ticket close --id <root>`. Do not merge or push the configured base branch directly.{{ end }}
+- `AZEDARACH_TICKET_ID` selects the default ticket scope. `AZEDARACH_ISSUE_ID` remains a legacy compatibility alias. Refresh stale context with `az ticket get <ticket-id>`; do not silently switch tickets.
+- Use `az ticket` as the task authority. Record non-trivial work in tickets and perform implementation in the ticket worktree/session.
+- When the user asks to start a ticket, start or attach its session; changing lifecycle state alone does not start execution. Agents start sessions only on explicit user or orchestrator direction.
+- Create tickets with enough description and acceptance context to execute; a title alone is not a usable handoff.
+- Plan approval is the transition from discussion to durable execution state. Encode the approved plan in `az ticket` and the relevant graph/spec records before implementation begins.
+- Keep the ticket state aligned with what is happening now. Resume active work before editing; do not leave a ticket review-ready while making follow-up changes.
+- Record progress, validation, review facts, risks, blockers, and closeout with `az ticket record`. Notes are terse human scratchpad, not the automation source of truth.
 
-Issue State
+Ticket State
 
-- Durable state is a discriminated model: lifecycle is `backlog`, `open`, `active`, or `closed`; a closed issue has outcome `completed` or `cancelled`. Review readiness, archive, and tombstone/delete are separate dimensions.
+- Durable state is a discriminated model: lifecycle is `backlog`, `open`, `active`, or `closed`; a closed ticket has outcome `completed` or `cancelled`. Review readiness, archive, and tombstone/delete are separate dimensions.
 - `backlog` means not ready to start. `open` means ready but inactive. `in_progress` enters or resumes active work. `in_review` requests review without leaving the active lifecycle.
-- Board columns are configurable projections over issue facts. In Review, Waiting Human, and Waiting AI are derived columns, not stored statuses. A review-ready issue with active runtime work may still display In Progress.
+- Board columns are configurable projections over ticket facts. In Review, Waiting Human, and Waiting AI are derived columns, not stored statuses. A review-ready ticket with active runtime work may still display In Progress.
 - Blocked is graph state, not a status. Add a `blocks` dependency and record blocker evidence; do not use `in_review` to mean blocked.
 - `cancelled` is a terminal closed outcome without integration. Archive and tombstone/delete do not substitute for cancellation.
 
-Issue Types
+Ticket Types
 
 - Use `task` for bounded implementation work, `bug` for defects, `feature` for new user-facing capability, `epic` for orchestration roots, `chore` for maintenance, and `investigation` for research, discovery, spikes, analysis, experiments, audits, findings, options, or recommendations.
-- Check that an issue's durable type matches its actual intent whenever you read or materially reshape it. Correct discrepancies with `az issue update --type <type> <issue-id>` and record why; do not preserve a misleading type merely because it already exists.
-- Investigation issues may intentionally have no code diff. Their Agent Band/session discussion, findings, and attached evidence are deliverables for human inspection. Keep them in review/waiting-human state until explicit, issue-specific human acceptance is durably recorded; agent review, an integration sweep, or lack of repository changes is insufficient for terminal close, cancellation, session stop, worktree cleanup, or integration.
+- Check that a ticket's durable type matches its actual intent whenever you read or materially reshape it. Correct discrepancies with `az ticket update --type <type> <ticket-id>` and record why; do not preserve a misleading type merely because it already exists.
+- Investigation tickets may intentionally have no code diff. Their Agent Band/session discussion, findings, and attached evidence are deliverables for human inspection. Keep them in review/waiting-human state until explicit, ticket-specific human acceptance is durably recorded; agent review, an integration sweep, or lack of repository changes is insufficient for terminal close, cancellation, session stop, worktree cleanup, or integration.
 
 Execution Loop
 
-1. Read the issue, linked requirements, dependencies, recent evidence, and relevant existing code paths.
-2. Move the issue to `in_progress` when starting or resuming implementation, review, re-review, or fixes.
-3. Keep changes scoped, create child issues for newly discovered required work, and maintain dependency edges.
+1. Read the ticket, linked requirements, dependencies, recent evidence, and relevant existing code paths.
+2. Move the ticket to `in_progress` when starting or resuming implementation, review, re-review, or fixes.
+3. Keep changes scoped, create child tickets for newly discovered required work, and maintain dependency edges.
 4. Run risk-appropriate tests and the repository review gate. Fix actionable findings and repeat until clean.
-5. Commit intended changes with the issue ID in the commit message; verify the worktree is clean.
-6. Record commands, assertions, files, acceptance results, risks, and follow-ups with `az issue record`.
-7. Request review with `az issue update --status in_review <issue-id>`.
+5. Commit intended changes with the ticket ID in the commit message; verify the worktree is clean.
+6. Record commands, assertions, files, acceptance results, risks, and follow-ups with `az ticket record`.
+7. Request review with `az ticket update --status in_review <ticket-id>`.
 
 Review And Terminal Close
 
-- Review handoff is non-terminal. Setting `in_review` must preserve the tmux session and worktree for human/orchestrator feedback. Do not stop the session, clean the worktree, or close the issue merely because review was requested.
+- Review handoff is non-terminal. Setting `in_review` must preserve the tmux session and worktree for human/orchestrator feedback. Do not stop the session, clean the worktree, or close the ticket merely because review was requested.
 - A worker leaves integration and terminal close to its orchestrator. A root/contributor waits for explicit human acceptance before integration and cleanup.
-- `az issue close --id <issue-id>` is the accepted-completion transaction: preflight, integrate, stop session, clean worktree, and close. Use it only after acceptance criteria, validation, and required integration are complete.
-- `az issue update --status cancelled <issue-id>` is the terminal non-integrated path. It performs close cleanup without integration.
-- If work is incomplete, keep it `in_progress`; record remaining scope and create required child/blocker issues.
+- `az ticket close --id <ticket-id>` is the accepted-completion transaction: preflight, integrate, stop session, clean worktree, and close. Use it only after acceptance criteria, validation, and required integration are complete.
+- `az ticket update --status cancelled <ticket-id>` is the terminal non-integrated path. It performs close cleanup without integration.
+- If work is incomplete, keep it `in_progress`; record remaining scope and create required child/blocker tickets.
 
 Parent And Child Scope
 
-- Parent/epic issues hold the overarching goal and acceptance contract. Put implementation-sized scope and detailed decisions on child issues.
-- `az issue create "Child task"` creates tracking-only child work and auto-parents under `AZEDARACH_ISSUE_ID`; pass `--parent <issue-id>` when targeting another root. Use `az issue split` only when the child should launch in an isolated session.
+- Parent/epic tickets hold the overarching goal and acceptance contract. Put implementation-sized scope and detailed decisions on child tickets.
+- `az ticket create "Child task"` creates tracking-only child work and auto-parents under `AZEDARACH_ISSUE_ID`; pass `--parent <ticket-id>` when targeting another root. Use `az ticket split` only when the child should launch in an isolated session.
 - After launching a child session, the parent observes, coordinates, and integrates it; do not also implement that child's scope in the parent session.
 - Graph membership comes from parent-child edges, never `--impl`. Verify returned `parent_id` before launching a worker.
 - If work starts under the wrong parent, stop that worker and create a fresh correctly parented child; session and worktree identity make an active worker unsafe to reparent in place.
 - Parent-child edges express hierarchy, not readiness. Pause/supersede work by changing lifecycle intent and adding a blocker; do not orphan active work by removing its parent edge.
 - Before using `--deferred`, ask whether the parent can land correctly without the work. Required work belongs in the parent's merge unit; only independently landable later work is deferred.
-- Child integration targets the closest active ancestor worktree. Materialize a missing ancestor with `az worktree create <ancestor-issue>`; do not route normal child completion directly to the base branch.
+- Child integration targets the closest active ancestor worktree. Materialize a missing ancestor with `az worktree create <ancestor-ticket>`; do not route normal child completion directly to the base branch. Low-level repair merges require both endpoints: `az branch merge --source <child> --target <ancestor>`.
+- Ancestor-to-descendant materialization is a distinct explicit flow: `az branch merge --source <ancestor> --target <descendant>`. In non-origin workflow modes, root-to-base uses `--target base` and is refused until the root has durable, ticket-specific human acceptance. Origin mode never permits this local base integration path; use the PR-only workflow named above.
+- Cross-project follow-up work must be handed to a separate managed session with `az session start --project <project> <ticket>`. Do not switch projects in-band, and do not treat `az worktree create` as a worker handoff; it only materializes a worktree.
 
 Orchestration
 
-{{ if .OrchestrationViaNative }}- Mode is `native`: use harness-native subagents for execution while keeping durable issue state and dependencies in `az`.
+{{ if .OrchestrationViaNative }}- Mode is `native`: use harness-native subagents for execution while keeping durable ticket state and dependencies in `az`.
 - Use `az orchestrate prompt --issue <child> --root <parent>` for a self-contained handoff. Add `--coordination mailbox` only when an active parent watch needs durable coordination.
 {{ if .TmuxAvailable }}- Use CLI-managed `az orchestrate` only when its recoverable sessions, worktrees, or mailbox loop are specifically needed.
 {{ else }}- CLI-managed worker fanout requires `tmux`; it is unavailable. Native delegation remains available.
@@ -81,21 +85,21 @@ Orchestration
 - Keep `az orchestrate watch --root <root> --since <seq> --jsonl` running while workers are active. Use `az orchestrate capture --issue <worker>` only when status/watch is stale or contradictory; do not poll panes continuously.
 - Trust hook-backed activity. If activity is `unknown`, inspect `az ai status --target=auto` and repair missing or outdated hooks before treating the worker as idle.
 - Workers report `worker-progress`, `worker-blocked`, or `worker-integration-ready`. The orchestrator uses `az orchestrate message` only for evidence-backed intervention.
-- Review worker evidence and context risk, return non-trivial findings to live worker sessions, and close accepted children with `az issue close --id <child>`.
+- Review worker evidence and context risk, return non-trivial findings to live worker sessions, and close accepted children with `az ticket close --id <child>`.
 - Start nested epic/root sessions as their own orchestrators; do not flatten their descendants unless explicitly requested.
 - Repeat status, start, watch, review, and accepted child close until `az orchestrate complete-check --root <root>` passes. Then validate and request human review of the root without stopping its session.
-{{ else if .OrchestrationViaAz }}- Mode is `az`, but CLI-managed worker fanout requires `tmux`; it is unavailable. Keep work in this session or use native delegation for disposable exploration while tracking durable state in `az issue`.
+{{ else if .OrchestrationViaAz }}- Mode is `az`, but CLI-managed worker fanout requires `tmux`; it is unavailable. Keep work in this session or use native delegation for disposable exploration while tracking durable state in `az ticket`.
 {{ else }}- Unsupported `orchestration.via` value: `{{ .OrchestrationVia }}`. Set it to `az` or `native` before fanning out.
 {{ end }}
 Evidence And Coordination
 
-- Use `az issue record --type <event-type> --summary "..." --data '<json>' <issue-id>` for durable facts that do not require live delivery. Inspect with `az issue events` or `az observe`.
+- Use `az ticket record --type <event-type> --summary "..." --data '<json>' <ticket-id>` for durable facts that do not require live delivery. Inspect with `az ticket events` or `az observe`.
 - Use mailbox events only when an active parent orchestrator/watch needs coordination delivery. Bare `az mail send` is durable but may not be observed immediately.
 - Worker handoff evidence uses `worker_evidence.v1`: summary, commands run, key assertions, files changed, review status/findings, and risks. Validate it with `az evidence validate` before recording or sending.
-- Before accepting repeated-locality work, inspect `az issue context-risk --since 14d <issue-id>`; treat low risk as advisory and require structured diagnosis/invariant/consumer/test evidence for high risk.
-- Capture reusable discoveries with `az learn add`; use `az decision` for durable architecture/product choices and link them to issues or requirements.
-- When the implementation design changes, update the issue's durable design field and keep child-level detail on the relevant child issue.
-- Pre-commit hooks may sync decision markdown. Run `az decision sync --check` before scoped commits when unrelated decision drift would be harmful.
+- Before accepting repeated-locality work, inspect `az ticket context-risk --since 14d <ticket-id>`; treat low risk as advisory and require structured diagnosis/invariant/consumer/test evidence for high risk.
+- Capture reusable discoveries with `az learn add`; use `az decision` for durable architecture/product choices and link them to tickets or requirements.
+- When the implementation design changes, update the ticket's durable design field and keep child-level detail on the relevant child ticket.
+- Pre-commit hooks never export or stage decision markdown. Use `az decision import --check` before exporting teammates' Git changes, then run explicit `az decision sync --check` / `az decision sync` and stage `docs/decisions` intentionally.
 
 {{ if .LearningSection }}{{ .LearningSection }}
 
@@ -107,24 +111,24 @@ Evidence And Coordination
 
 {{ .ContextGuardrail }}
 {{ if .ImplementationGuardrails }}{{ .ImplementationGuardrails }}
-{{ end }}- Missing optional issue fields are valid; do not invent content to fill them.
+{{ end }}- Missing optional ticket fields are valid; do not invent content to fill them.
 - For overlay behavior changes, align linked requirements first, keep `View()`/`Size()` geometry consistent, validate default and narrow viewports, and update affected goldens.
 
 Workflow Playbook
 
-- Intake and selection: use `az issue list`, `az issue search`, `az issue get`, `az issue get-many`, `az issue check`, and `az issue doctor` to find and inspect work before changing it. Search/list filters can narrow by status, dates, IDs, parent, and dependencies; request `--deps`, `--with-notes`, or `--json` only when that detail is needed.
-- Creation and decomposition: `az issue create` records tracking work; `--deferred` creates standalone backlog work; `az issue split` creates a child and isolated execution context; `az issue bulk-create` and `az issue fanout` shape larger graphs. Every created issue needs executable context, scope, and acceptance evidence.
-- Ownership: `az issue claim`, `takeover`, and `release` manage durable human/agent/orchestrator leases. Do not bypass a conflicting live owner; inspect or coordinate before takeover.
-- Lifecycle: `az issue update --status backlog|open|in_progress|in_review|closed|cancelled` applies lifecycle/review actions. Prefer `az issue close` for accepted completion because it owns integration and cleanup. Use `az issue delete --confirm` only for permanent deletion, and `az issue unarchive` to restore archived work.
-- Graphs: `az issue dep add` and `az issue dep remove` own `blocks`, `parent-child`, `related`, `discovered-from`, and `created-in` edges. `az issue dep bulk apply`, `az issue fanout ready`, and `az issue fanout drift` support larger plans. Parent-child defines containment; `blocks` defines readiness.
-- Evidence and resources: `az issue record`, `az issue events`, `az issue context-risk`, `az observe`, and `az evidence validate` carry durable execution and closeout facts. `az issue image` and `az issue document` attach inspectable artifacts. Mail is for active coordination, not routine notes.
+- Intake and selection: use `az ticket list`, `az ticket search`, `az ticket get`, `az ticket get-many`, `az ticket check`, and `az ticket doctor` to find and inspect work before changing it. Search/list filters can narrow by status, dates, IDs, parent, and dependencies; request `--deps`, `--with-notes`, or `--json` only when that detail is needed.
+- Creation and decomposition: `az ticket create` records tracking work; `--deferred` creates standalone backlog work; `az ticket split` creates a child and isolated execution context; `az ticket bulk-create` and `az ticket fanout` shape larger graphs. Every created ticket needs executable context, scope, and acceptance evidence.
+- Ownership: `az ticket claim`, `takeover`, and `release` manage durable human/agent/orchestrator leases. Do not bypass a conflicting live owner; inspect or coordinate before takeover.
+- Lifecycle: `az ticket update --status backlog|open|in_progress|in_review|closed|cancelled` applies lifecycle/review actions. Prefer `az ticket close` for accepted completion because it owns integration and cleanup. Use `az ticket delete --confirm` only for permanent deletion, and `az ticket unarchive` to restore archived work.
+- Graphs: `az ticket dep add` and `az ticket dep remove` own `blocks`, `parent-child`, `related`, `discovered-from`, and `created-in` edges. `az ticket dep bulk apply`, `az ticket fanout ready`, and `az ticket fanout drift` support larger plans. Parent-child defines containment; `blocks` defines readiness.
+- Evidence and resources: `az ticket record`, `az ticket events`, `az ticket context-risk`, `az observe`, and `az evidence validate` carry durable execution and closeout facts. `az ticket image` and `az ticket document` attach inspectable artifacts. Mail is for active coordination, not routine notes.
 - Execution: `az session start|attach|status|diagnose|stop|restart-all|resolve-conflict` controls managed tmux sessions. `az worktree create` materializes an integration target without starting an agent. The short aliases `az start`, `az attach`, `az status`, and `az stop` map to session operations.
-- Integration: accepted child work normally closes through `az issue close`. `az branch merge` and `az branch agent-merge` are low-level conflict/repair tools. `az pr list|status|checks|open|create|merge` covers remote pull-request workflows when configured.
+- Integration: accepted child work normally closes through `az ticket close`. `az branch merge --source <ticket> --target <ticket|base>` and `az branch agent-merge` are low-level conflict/repair tools; merge never infers its target from the caller's worktree, and origin workflow mode refuses their direct base path. `az pr list|status|checks|open|create|merge` owns origin-mode base integration.
 - Orchestration: `az orchestrate status|start|group|watch|observe|capture|prompt|message|complete-check|integrate|close-session` runs tracked graphs. `az mail send|list|watch|validate-evidence` carries worker events, and `az evidence validate` checks `worker_evidence.v1` before delivery.
 - Board views: `az board view list|get|select|create|update|delete|explain` manages persistent typed projections. Use `explain` to understand first-match placement rather than inferring durable state from a column title.
 - Requirements and decisions: `az spec req|link|read|pack|lint|parity` owns behavioral traceability. `az decision list|get|record|update|delete|revisit|sync|import|link` owns durable rationale and relationships.
 - Learning: `az learn add|recall|show|review|promote|relate` captures evidence-backed discoveries, controls their review lifecycle, and promotes accepted guidance into rules, skills, specs, or decisions.
-- Validation and development: `az gate` and `az dev gate` run configured checks. `az dev start|stop|restart|status|list` manages issue-scoped development servers. `az githooks install|update|run|notify|hook` manages repository hook integration.
+- Validation and development: `az gate` and `az dev gate` run configured checks. `az dev start|stop|restart|status|list` manages ticket-scoped development servers. `az githooks install|update|run|notify|hook` manages repository hook integration.
 - Projects and implementations: `az project list|add|remove` manages registered repositories, and `az project scripts status` inspects project scripts. `az impl list|delete|migrate` manages implementation assignments; implementation identity never implies hierarchy.
 - Runtime and diagnostics: `az daemon start|stop|restart|watch-clients`, `az operation get|list|logs|cancel`, and `az log` inspect or control daemon work. `az sync` refreshes tracker/worktree state; `az export` writes a project snapshot.
 - Agent integration: `az ai install|status|uninstall|migrate|hook run` manages harness hooks and agent event reporting. `az tmux selector|install-selector|uninstall-selector` manages the tmux chooser integration.
@@ -134,12 +138,12 @@ Operational Rules Across Commands
 
 - Put flags before positional arguments. Prefer typed `--json` output for automation and text output for direct human inspection.
 - Use the daemon-backed command path rather than editing SQLite, killing tmux panes, moving worktrees, or invoking backend trackers directly. Repair commands are exceptional paths, not substitutes for normal lifecycle operations.
-- Start with read commands, make one authoritative mutation, then read back the resulting issue/session/graph projection. For destructive or terminal operations, inspect preflight output and preserve rollback evidence.
+- Start with read commands, make one authoritative mutation, then read back the resulting ticket/session/graph projection. For destructive or terminal operations, inspect preflight output and preserve rollback evidence.
 - Keep project scope explicit when operating outside the current worktree. Check command help and returned project IDs before assuming an operation is current-project or cross-project.
 - Discover exact syntax at the point of use. The primer explains command ownership and workflow; `az <group> --help` remains authoritative for optional flags and rarely used variants.
 
 Useful Discovery Commands
 
-- `az issue --help`, `az spec --help`, `az orchestrate --help`, `az board view --help`, `az decision --help`, `az learn --help`
-- `az session status [issue-id]`, `az board view list`, `az board view explain <issue-id>`
+- `az ticket --help`, `az spec --help`, `az orchestrate --help`, `az board view --help`, `az decision --help`, `az learn --help`
+- `az session status [ticket-id]`, `az board view list`, `az board view explain <ticket-id>`
 - Use flags before positional arguments in documented commands.

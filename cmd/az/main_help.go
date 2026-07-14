@@ -37,6 +37,13 @@ func helpPath(args []string) ([]string, bool) {
 }
 
 func printHelpForPath(path []string) bool {
+	legacyIssuePath := len(path) > 0 && path[0] == "issue"
+	// Ticket is the canonical command family. Internally the mature command
+	// implementation still uses its legacy issue path while the compatibility
+	// window remains open, so normalize ticket subcommand help through it.
+	if len(path) > 1 && path[0] == "ticket" {
+		path = append([]string{"issue"}, path[1:]...)
+	}
 	key := strings.Join(path, " ")
 	switch key {
 	case "":
@@ -66,7 +73,7 @@ func printHelpForPath(path []string) bool {
 	case "branch":
 		fmt.Println("Usage: az branch <merge|agent-merge> [arguments]")
 	case "branch merge", "branch merge-to-base":
-		fmt.Println("usage: az branch merge [--project <project-id>] [issue-id]")
+		fmt.Println("usage: az branch merge [--project <project-id>] --source <issue-id> --target base|<issue-id>")
 	case "branch agent-merge":
 		fmt.Println("usage: az branch agent-merge [--project <project-id>] <issue-id> [--target base|<issue-id>]")
 	case "board":
@@ -87,6 +94,10 @@ func printHelpForPath(path []string) bool {
 		printBoardViewCommandUsage("delete")
 	case "board view explain":
 		printBoardViewCommandUsage("explain")
+	case "view":
+		printBoardViewUsage()
+	case "view list", "view get", "view select", "view create", "view update", "view delete", "view explain":
+		printBoardViewCommandUsage(path[1])
 	case "worktree":
 		printWorktreeUsage()
 	case "worktree create":
@@ -163,8 +174,10 @@ func printHelpForPath(path []string) bool {
 		fmt.Println("Usage: az decision revisit --id <old-id> (--new <existing-id> | --title <text> --rationale <text>) [--context <text>] [--note <text>] [--json]")
 	case "decision sync":
 		fmt.Println("Usage: az decision sync [--check] [--project-dir <dir>] [--json]")
+		fmt.Println("Explicitly reconcile the target worktree's docs/decisions with the shared store, removing obsolete rename/delete artifacts.")
 	case "decision import":
 		fmt.Println("Usage: az decision import [--check] [--force] [--project-dir <dir>] [--json]")
+		fmt.Println("Import clean Markdown changes; conflicting non-empty fields are reported and skipped unless --force is explicit.")
 	case "decision link":
 		printDecisionLinkUsage()
 	case "decision link list":
@@ -175,6 +188,8 @@ func printHelpForPath(path []string) bool {
 		fmt.Println("Usage: az decision link remove --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--json]")
 	case "learn":
 		printLearnUsage()
+	case "interaction", "interaction list", "interaction get", "interaction discuss", "interaction answer", "interaction resolve", "interaction withdraw":
+		cli.PrintInteractionUsage()
 	case "learn add":
 		fmt.Println("Usage: az learn add --evidence <text> [--summary <text>] [--private] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--json]")
 	case "learn recall":
@@ -280,7 +295,7 @@ func printHelpForPath(path []string) bool {
 		fmt.Println("Usage: az tmux uninstall-selector [--config <path>] [--verbose]")
 	case "prime":
 		fmt.Println("Usage: az prime")
-	case "issue":
+	case "ticket", "issue":
 		printIssueHelp()
 	case "issue list":
 		fmt.Println(issueListUsage)
@@ -315,19 +330,19 @@ func printHelpForPath(path []string) bool {
 	case "issue close":
 		printIssueCloseUsage(os.Stdout)
 	case "issue cleanup":
-		fmt.Println("Usage: az issue cleanup [--project <project-id>] [--id <issue-id> ...|--ids a,b] [--status <status> ...] [--query text] [--updated-before date] [--limit N] [--action closed|cancelled] [--dry-run] [--per-issue-timeout duration] [--json]")
+		fmt.Println("Usage: az ticket cleanup [--project <project-id>] [--id <ticket-id> ...|--ids a,b] [--status <status> ...] [--query text] [--updated-before date] [--limit N] [--action closed|cancelled] [--dry-run] [--per-ticket-timeout duration] [--json]")
 	case "issue delete":
 		fmt.Println(issueDeleteUsage)
 	case "issue unarchive":
 		fmt.Println(issueUnarchiveUsage)
 	case "issue image":
-		fmt.Println("Usage: az issue image <add|remove> [arguments]")
+		fmt.Println("Usage: az ticket image <add|remove> [arguments]")
 	case "issue image add":
 		fmt.Println(issueImageAddUsage)
 	case "issue image remove":
 		fmt.Println(issueImageRemoveUsage)
 	case "issue document":
-		fmt.Println("Usage: az issue document <add|list|remove> [arguments]")
+		fmt.Println("Usage: az ticket document <add|list|remove> [arguments]")
 	case "issue document add":
 		fmt.Println(issueDocumentAddUsage)
 	case "issue document list":
@@ -335,13 +350,13 @@ func printHelpForPath(path []string) bool {
 	case "issue document remove":
 		fmt.Println(issueDocumentRemoveUsage)
 	case "issue dep":
-		fmt.Println("Usage: az issue dep <add|remove|bulk> [arguments]")
+		fmt.Println("Usage: az ticket dep <add|remove|bulk> [arguments]")
 	case "issue dep add":
 		fmt.Println(issueDepAddUsage)
 	case "issue dep remove":
 		fmt.Println(issueDepRemoveUsage)
 	case "issue dep bulk":
-		fmt.Println("Usage: az issue dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]")
+		fmt.Println("Usage: az ticket dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]")
 	case "issue dep bulk apply":
 		fmt.Println(issueDepBulkApplyUsage)
 	case "issue bulk-create":
@@ -372,6 +387,10 @@ func printHelpForPath(path []string) bool {
 		fmt.Println(observeUsage)
 	case "orchestrate":
 		fmt.Println("Usage: az orchestrate <status|start|group|watch|observe|prompt|message|capture|complete-check|integrate|close-session> [arguments]")
+	case "orchestrator-session":
+		fmt.Println(orchestratorSessionUsage)
+	case "orchestrator-session start", "orchestrator-session attach", "orchestrator-session status":
+		fmt.Println(orchestratorSessionUsage)
 	case "orchestrate status":
 		fmt.Println(orchestrateStatusUsage)
 	case "orchestrate start":
@@ -407,13 +426,16 @@ func printHelpForPath(path []string) bool {
 	default:
 		return false
 	}
+	if legacyIssuePath {
+		fmt.Println("Compatibility: `az issue` is deprecated; use `az ticket`.")
+	}
 	return true
 }
 
 func printIssueHelp() {
 	helpText, err := clitext.Render("issue_help", nil)
 	if err != nil {
-		fmt.Println("Usage: az issue <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|cleanup|delete|unarchive|image|document|dep|bulk-create|bulk-update|fanout> [arguments]")
+		fmt.Println("Usage: az ticket <list|search|get|claim|takeover|release|events|record|context-risk|get-many|check|doctor|create|split|update|close|cleanup|delete|unarchive|image|document|dep|bulk-create|bulk-update|fanout> [arguments]")
 		return
 	}
 	fmt.Print(helpText)
@@ -440,50 +462,51 @@ func printIssueCloseUsage(w *os.File) {
 }
 
 const (
-	issueListUsage                = "Usage: az issue list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c]"
-	issueSearchUsage              = "Usage: az issue search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)"
-	issueGetUsage                 = "Usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]"
-	issueClaimUsage               = "Usage: az issue claim [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<issue-id>]"
-	issueTakeoverUsage            = "Usage: az issue takeover [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--json] [<issue-id>]"
-	issueReleaseUsage             = "Usage: az issue release [--project <project-id>] [--id <issue-id>] [--owner <owner-id>] [--force] [--json] [<issue-id>]"
-	issueEventsUsage              = "Usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]"
-	issueRecordUsage              = "Usage: az issue record [--project <project-id>] [--id <issue-id>] [--type <event-type>] [--summary <text>] [--body <text>] [--data <json-object>] [--follow-up <issue-id> ...] [--json] [<issue-id>]"
-	issueContextRiskUsage         = "Usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--summary|--full] [--json] [<issue-id>]"
-	issueGetManyUsage             = "Usage: az issue get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]"
-	issueCheckUsage               = "Usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]"
-	issueDoctorUsage              = "Usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<issue-id>]"
-	issueUpdateUsage              = "Usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]"
-	issueCloseUsage               = "Usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]"
-	issueDeleteUsage              = "Usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [<issue-id>]"
-	issueUnarchiveUsage           = "Usage: az issue unarchive [--project <project-id>] [--id <issue-id>] [--json] [--with-parents] [--cascade-children] [<issue-id>]"
-	issueImageAddUsage            = "Usage: az issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]"
-	issueImageRemoveUsage         = "Usage: az issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]"
-	issueDocumentAddUsage         = "Usage: az issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]"
-	issueDocumentListUsage        = "Usage: az issue document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]"
-	issueDocumentRemoveUsage      = "Usage: az issue document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]"
-	issueDepAddUsage              = "Usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]"
-	issueDepRemoveUsage           = "Usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]"
-	issueDepBulkApplyUsage        = "Usage: az issue dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]"
-	issueBulkCreateUsage          = "Usage: az issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]"
-	issueBulkUpdateUsage          = "Usage: az issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]"
-	issueFanoutUsage              = "Usage: az issue fanout [--project <project-id>] --input <path> [--apply] [--json]"
-	issueFanoutReadyUsage         = "Usage: az issue fanout ready [--project <project-id>] --root <issue-id> [--json]"
-	issueFanoutDriftUsage         = "Usage: az issue fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]"
+	issueListUsage                = "Usage: az ticket list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c]"
+	issueSearchUsage              = "Usage: az ticket search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)"
+	issueGetUsage                 = "Usage: az ticket get [--project <project-id>] [--id <ticket-id>] [--json] [--with-notes] [<ticket-id>]"
+	issueClaimUsage               = "Usage: az ticket claim [--project <project-id>] [--id <ticket-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<ticket-id>]"
+	issueTakeoverUsage            = "Usage: az ticket takeover [--project <project-id>] [--id <ticket-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--json] [<ticket-id>]"
+	issueReleaseUsage             = "Usage: az ticket release [--project <project-id>] [--id <ticket-id>] [--owner <owner-id>] [--force] [--json] [<ticket-id>]"
+	issueEventsUsage              = "Usage: az ticket events [--project <project-id>] [--id <ticket-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<ticket-id>]"
+	issueRecordUsage              = "Usage: az ticket record [--project <project-id>] [--id <ticket-id>] [--type <event-type>] [--summary <text>] [--body <text>] [--data <json-object>] [--follow-up <ticket-id> ...] [--json] [<ticket-id>]"
+	issueContextRiskUsage         = "Usage: az ticket context-risk [--project <project-id>] [--id <ticket-id>] [--since 14d] [--summary|--full] [--json] [<ticket-id>]"
+	issueGetManyUsage             = "Usage: az ticket get-many [--project <project-id>] --id <ticket-id> [--id <ticket-id> ...] [--ids a,b,c] [--json] [--with-notes]"
+	issueCheckUsage               = "Usage: az ticket check [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>]"
+	issueDoctorUsage              = "Usage: az ticket doctor [--project <project-id>] [--id <ticket-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<ticket-id>]"
+	issueUpdateUsage              = "Usage: az ticket update [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]"
+	issueCloseUsage               = "Usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]"
+	issueDeleteUsage              = "Usage: az ticket delete [--project <project-id>] --confirm [--id <ticket-id>] [--json] [<ticket-id>]"
+	issueUnarchiveUsage           = "Usage: az ticket unarchive [--project <project-id>] [--id <ticket-id>] [--json] [--with-parents] [--cascade-children] [<ticket-id>]"
+	issueImageAddUsage            = "Usage: az ticket image add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]"
+	issueImageRemoveUsage         = "Usage: az ticket image remove [--project <project-id>] [--ticket-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]"
+	issueDocumentAddUsage         = "Usage: az ticket document add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]"
+	issueDocumentListUsage        = "Usage: az ticket document list [--project <project-id>] [--ticket-id <ticket-id>] [<ticket-id>] [--json]"
+	issueDocumentRemoveUsage      = "Usage: az ticket document remove [--project <project-id>] [--ticket-id <ticket-id>] [--attachment-id <attachment-id>] [<ticket-id> <attachment-id>] [--json]"
+	issueDepAddUsage              = "Usage: az ticket dep add [--project <project-id>] [--ticket-id <ticket-id>] [--depends-on-id <depends-on-id>] [<ticket-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]"
+	issueDepRemoveUsage           = "Usage: az ticket dep remove [--project <project-id>] [--ticket-id <ticket-id>] [--depends-on-id <depends-on-id>] [<ticket-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]"
+	issueDepBulkApplyUsage        = "Usage: az ticket dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]"
+	issueBulkCreateUsage          = "Usage: az ticket bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]"
+	issueBulkUpdateUsage          = "Usage: az ticket bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]"
+	issueFanoutUsage              = "Usage: az ticket fanout [--project <project-id>] --input <path> [--apply] [--json]"
+	issueFanoutReadyUsage         = "Usage: az ticket fanout ready [--project <project-id>] --root <ticket-id> [--json]"
+	issueFanoutDriftUsage         = "Usage: az ticket fanout drift [--project <project-id>] --ticket <ticket-id> [--worktree <path>] [--json] [--fail-on-out]"
 	mailSendUsage                 = "Usage: az mail send --parent <issue-id> --type <event-type> --body <text> [--issue <issue-id>] [--from <actor>] [--to <actor>] [--json]"
 	mailListUsage                 = "Usage: az mail list --parent <issue-id> [--since <seq>] [--limit <n>] [--json]"
 	mailWatchUsage                = "Usage: az mail watch --parent <issue-id> [--since <seq>] [--jsonl] [--once]"
 	mailValidateEvidenceUsage     = "Usage: az mail validate-evidence [--body <json>|--file <path>] [--fix] [--template] [--json]"
 	evidenceValidateUsage         = "Usage: az evidence validate [--body <json>|--file <path>] [--fix] [--template] [--json]"
 	observeUsage                  = "Usage: az observe [--root <issue-id>] [--project <project-id>] [--json]"
-	orchestrateStatusUsage        = "Usage: az orchestrate status --root <issue-id> [--project <project-id>] [--since <seq>] [--limit <n>] [--json] [--summary|--full]"
-	orchestrateStartUsage         = "Usage: az orchestrate start --root <issue-id> [--project <project-id>] [--limit <n>] [--issue <issue-id> ...] [--json]"
+	orchestrateStatusUsage        = "Usage: az orchestrate status [--root <issue-id>] [--project <project-id>] [--since <seq>] [--limit <n>] [--json] [--summary|--full]"
+	orchestrateStartUsage         = "Usage: az orchestrate start [--root <issue-id>] [--project <project-id>] [--limit <n>] [--issue <issue-id> ...] [--override-board-health] [--json]"
 	orchestrateGroupUsage         = "Usage: az orchestrate group --root <issue-id> --nested <issue-id> --issue <issue-id> ... [--project <project-id>] [--json]"
-	orchestrateWatchUsage         = "Usage: az orchestrate watch --root <issue-id> [--project <project-id>] [--since <seq>] [--jsonl] [--once] [--verbose|--full]"
+	orchestrateWatchUsage         = "Usage: az orchestrate watch [--root <issue-id>] [--project <project-id>] [--since <seq>] [--jsonl] [--once] [--verbose|--full]"
 	orchestrateObserveUsage       = "Usage: az orchestrate observe --root <issue-id> [--project <project-id>] [--json]"
 	orchestratePromptUsage        = "Usage: az orchestrate prompt --issue <issue-id> [--root <issue-id>] [--coordination native|mailbox] [--project <project-id>] [--json]"
 	orchestrateMessageUsage       = "Usage: az orchestrate message --root <issue-id> --issue <issue-id> --body <text> [--type <event-type>] [--force-self-delivery] [--project <project-id>] [--json]"
-	orchestrateCaptureUsage       = "Usage: az orchestrate capture --issue <issue-id> [--project <project-id>] [--lines N] [--json]"
-	orchestrateCompleteCheckUsage = "Usage: az orchestrate complete-check --root <issue-id> [--project <project-id>] [--json]"
+	orchestrateCaptureUsage       = "Usage: az orchestrate capture --issue <issue-id> [--project <project-id>] [--lines N] [--raw] [--json]"
+	orchestrateCompleteCheckUsage = "Usage: az orchestrate complete-check [--root <issue-id>] [--project <project-id>] [--json]"
+	orchestratorSessionUsage      = "Usage: az orchestrator-session <start|attach|status> [--root <issue-id>] [--project <project-id>] [--json]"
 	orchestrateIntegrateUsage     = "Usage: az orchestrate integrate --issue <issue-id> [--apply] [--project <project-id>] [--json]"
 	orchestrateCloseSessionUsage  = "Usage: az orchestrate close-session --issue <issue-id> [--project <project-id>] [--json]"
 )

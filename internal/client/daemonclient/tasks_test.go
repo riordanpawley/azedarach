@@ -110,12 +110,29 @@ func mustMarshalBoardSnapshotPayload(t *testing.T, protocolVersion protocol.Vers
 		ProjectID:        naming.ProjectID(projectID),
 		LastCheckedAt:    mustTaskSnapshotCheckedAt(),
 		Freshness:        protocol.TaskListFreshnessFresh,
-		Tasks:            protocol.BoardTaskSummariesFromDomain(tasks),
+		Projection:       protocol.BoardViewProjectionFromDomain(testBoardProjection(tasks)),
 	})
 	if err != nil {
 		t.Fatalf("marshal board snapshot payload: %v", err)
 	}
 	return body
+}
+
+func testBoardProjection(tasks []domain.Task) domain.BoardViewProjection {
+	groupID := domain.BoardColumnID("test")
+	view := domain.DefaultBoardView()
+	view.ID = "test"
+	view.Layout = domain.BoardViewLayoutHorizontalGrid
+	view.Columns = []domain.BoardColumn{{ID: groupID, Title: "Test", Predicates: view.Columns[0].Predicates}}
+	projection := domain.BoardViewProjection{View: view}
+	group := domain.BoardViewProjectedGroup{GroupID: groupID}
+	for _, task := range tasks {
+		projection.KnownTaskIDs = append(projection.KnownTaskIDs, task.ID)
+		projection.Items = append(projection.Items, domain.BoardViewProjectedItem{Task: task, GroupID: groupID, OrchestrationState: domain.TaskOrchestrationViewState(task)})
+		group.TaskIDs = append(group.TaskIDs, task.ID)
+	}
+	projection.Groups = []domain.BoardViewProjectedGroup{group}
+	return projection
 }
 
 func mustTaskSnapshotCheckedAt() time.Time {
@@ -138,6 +155,38 @@ func mustMarshalRawTaskListSnapshotBody(t *testing.T, body any) []byte {
 		t.Fatalf("marshal snapshot body: %v", err)
 	}
 	return data
+}
+
+func TestOrchestrationReviewIntentTypedRoundTrip(t *testing.T) {
+	const wantProjectID = "proj-review"
+	transport := &taskRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			assertTaskProjectID(t, req, wantProjectID)
+			if req.Command != CommandOrchestrationIntent {
+				t.Fatalf("command = %q, want %q", req.Command, CommandOrchestrationIntent)
+			}
+			var body protocol.OrchestrationIntentRequest
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Kind != protocol.OrchestrationIntentReviewReturn || body.IntentKey != "review-1" || !body.RestartWorker || len(body.Findings) != 1 || body.Findings[0].Finding != "fix the race" {
+				t.Fatalf("request body = %+v", body)
+			}
+			return responseWithJSON(t, req, protocol.OrchestrationIntentResult{Scope: body.Scope, Kind: body.Kind, IntentKey: body.IntentKey, Requested: []string{"az-1"}, Returned: []string{"az-1"}}), nil
+		},
+	}
+	client := New(transport).WithProjectID(wantProjectID)
+	scope, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.ApplyOrchestrationIntent(context.Background(), protocol.OrchestrationIntentRequest{Scope: scope, Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "review-1", ActorID: "reviewer", IssueIDs: []string{"az-1"}, RestartWorker: true, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "fix the race"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Returned) != 1 || result.Returned[0] != "az-1" {
+		t.Fatalf("result = %+v", result)
+	}
 }
 
 func TestTaskSnapshotRequireFullDetails(t *testing.T) {
@@ -234,7 +283,7 @@ func TestTaskGraphReadinessDecodesWorkerObservations(t *testing.T) {
 					Status:     string(domain.StatusOpen),
 					Type:       string(domain.TypeTask),
 					ChildCount: 1,
-					Advice:     "start its orchestrator session with `az session start az-nested`",
+					Advice:     "start its orchestrator session with `az orchestrator-session start --root az-nested`",
 				}},
 				Blocked: map[string]string{},
 				WorkerObservations: []domain.WorkerObservation{{
@@ -400,6 +449,9 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 		if got, want := task.State.Review(), domain.IssueReviewRequested; got != want {
 			t.Fatalf("task issue review state = %s, want %s", got, want)
+		}
+		if got := snapshot.Projection.Items[0].OrchestrationState; got != domain.OrchestrationViewReview {
+			t.Fatalf("orchestration state = %q, want %q", got, domain.OrchestrationViewReview)
 		}
 		if task.Description != "" || task.Notes != "" || task.Design != "" || task.Acceptance != "" {
 			t.Fatalf("board snapshot decoded detail fields: description=%q notes=%q design=%q acceptance=%q", task.Description, task.Notes, task.Design, task.Acceptance)

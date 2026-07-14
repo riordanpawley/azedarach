@@ -50,6 +50,24 @@ type AutostartOrchestrator struct {
 	replaceKey      string
 }
 
+// AutostartRetryPolicy controls bounded handshake retries around daemon start.
+type AutostartRetryPolicy struct {
+	PreStartRetries   int
+	PreStartBackoff   time.Duration
+	MaxAttachRetries  int
+	AttachBackoffStep time.Duration
+}
+
+// DefaultAutostartRetryPolicy preserves production attach behavior.
+func DefaultAutostartRetryPolicy() AutostartRetryPolicy {
+	return AutostartRetryPolicy{
+		PreStartRetries:   3,
+		PreStartBackoff:   100 * time.Millisecond,
+		MaxAttachRetries:  20,
+		AttachBackoffStep: 100 * time.Millisecond,
+	}
+}
+
 // NewAutostartOrchestrator returns a default autostart orchestrator.
 func NewAutostartOrchestrator(handshaker Handshaker, starter Starter) *AutostartOrchestrator {
 	var replacer Replacer
@@ -57,21 +75,36 @@ func NewAutostartOrchestrator(handshaker Handshaker, starter Starter) *Autostart
 		replacer = r
 	}
 
+	policy := DefaultAutostartRetryPolicy()
 	return &AutostartOrchestrator{
 		handshaker: handshaker,
 		starter:    starter,
 		replacer:   replacer,
 		// Avoid unnecessary daemon spawn when handshake has a short transient blip.
-		preStartRetries: 3,
-		preStartBackoff: func(_ int) time.Duration { return 100 * time.Millisecond },
+		preStartRetries: policy.PreStartRetries,
+		preStartBackoff: func(_ int) time.Duration { return policy.PreStartBackoff },
 		// Daemon boot can take >300ms on cold starts; allow a wider attach window.
-		maxRetries: 20,
+		maxRetries: policy.MaxAttachRetries,
 		backoffFn: func(attempt int) time.Duration {
-			return time.Duration(attempt+1) * 100 * time.Millisecond
+			return time.Duration(attempt+1) * policy.AttachBackoffStep
 		},
 		startKey:   "daemon-autostart",
 		replaceKey: "daemon-replace",
 	}
+}
+
+// WithRetryPolicy overrides bounded autostart retry counts and backoffs.
+func (o *AutostartOrchestrator) WithRetryPolicy(policy AutostartRetryPolicy) *AutostartOrchestrator {
+	if o == nil {
+		return nil
+	}
+	o.preStartRetries = max(policy.PreStartRetries, 0)
+	o.preStartBackoff = func(_ int) time.Duration { return max(policy.PreStartBackoff, 0) }
+	o.maxRetries = max(policy.MaxAttachRetries, 0)
+	o.backoffFn = func(attempt int) time.Duration {
+		return time.Duration(attempt+1) * max(policy.AttachBackoffStep, 0)
+	}
+	return o
 }
 
 // EnsureAttached performs handshake and autostarts daemon if needed.

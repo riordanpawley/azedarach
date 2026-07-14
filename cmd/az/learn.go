@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/cli"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -28,6 +30,12 @@ type learnAddOpts struct {
 	Tags     []string
 	Files    []string
 }
+type learnCaptureOpts struct {
+	JSON                                                                                       bool
+	Issue, Req, Session, Observed, Preferred, Outcome, Impact, Source, Actor, Ref, Sensitivity string
+	Context                                                                                    map[string]string
+	Tags, Files                                                                                []string
+}
 
 type learnRecallOpts struct {
 	JSON            bool
@@ -40,6 +48,16 @@ type learnRecallOpts struct {
 	Limit           int
 	IncludeEvidence bool
 	IncludePrivate  bool
+}
+type learnActivateOpts struct {
+	JSON                             bool
+	Surface, Issue, Req, Explanation string
+	Tags, Files, LearningIDs         []string
+	TokenCost                        int
+}
+type learnFeedbackOpts struct {
+	JSON                                                       bool
+	ActivationID, IdempotencyKey, Outcome, Source, Explanation string
 }
 
 type learnShowOpts struct {
@@ -140,6 +158,20 @@ type learnGCOpts struct {
 	Confirm                bool
 }
 
+type learnSuggestOpts struct {
+	JSON, Refresh bool
+	Status        string
+	Limit         int
+}
+type learnConsolidateOpts struct {
+	JSON                                     bool
+	SuggestionID, CanonicalID, Summary, Note string
+}
+type learnSuggestionRejectOpts struct {
+	JSON               bool
+	SuggestionID, Note string
+}
+
 func runLearnCommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		printLearnUsage()
@@ -150,6 +182,29 @@ func runLearnCommand(cfg *config.Config, args []string) error {
 		return nil
 	}
 	switch args[0] {
+	case "health":
+		return runLearnHealthRPC(cfg, args[1:])
+	case "capture":
+		opts, err := parseLearnCaptureArgs(args[1:])
+		if err != nil {
+			printLearnUsage()
+			return err
+		}
+		return runLearnCaptureRPC(cfg, opts)
+	case "activate":
+		opts, err := parseLearnActivateArgs(args[1:])
+		if err != nil {
+			printLearnUsage()
+			return err
+		}
+		return runLearnActivateRPC(cfg, opts)
+	case "feedback":
+		opts, err := parseLearnFeedbackArgs(args[1:])
+		if err != nil {
+			printLearnUsage()
+			return err
+		}
+		return runLearnFeedbackRPC(cfg, opts)
 	case "add":
 		opts, err := parseLearnAddArgs(args[1:])
 		if err != nil {
@@ -234,9 +289,211 @@ func runLearnCommand(cfg *config.Config, args []string) error {
 			return err
 		}
 		return runLearnGCRPC(cfg, opts)
+	case "suggest":
+		opts, err := parseLearnSuggestArgs(args[1:])
+		if err != nil {
+			return err
+		}
+		return runLearnSuggestRPC(cfg, opts)
+	case "consolidate":
+		opts, err := parseLearnConsolidateArgs(args[1:])
+		if err != nil {
+			return err
+		}
+		return runLearnConsolidateRPC(cfg, opts)
+	case "suggestion-reject":
+		opts, err := parseLearnSuggestionRejectArgs(args[1:])
+		if err != nil {
+			return err
+		}
+		return runLearnSuggestionRejectRPC(cfg, opts)
 	default:
 		return fmt.Errorf("unknown learn command: %s", args[0])
 	}
+}
+
+func runLearnHealthRPC(cfg *config.Config, args []string) error {
+	fs := flag.NewFlagSet("learn health", flag.ContinueOnError)
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("learn health takes no positional arguments")
+	}
+	var out protocol.LearnHealthResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnHealth, protocol.LearnHealthRequestBody{}, &out); err != nil {
+		return err
+	}
+	if *jsonOut {
+		return printJSON(out)
+	}
+	h := out.Health
+	fmt.Printf("Learning portfolio health (%s; %d-day window %s to %s)\nCandidates: %d (average %.1fh, maximum %.1fh)\nDuplicate density: %d/%d (%.2f%%)\nUsefulness: %d/%d (%.2f%%); contradictions: %d/%d (%.2f%%)\nPromotions: %d (%.3f/day); lifetime reviewed-to-promoted conversion: %d/%d (%.2f%%)\nContextual coverage (current eligible population): %d/%d (%.2f%%)\nProposals: %d (%d abandoned, %d pending); confirmed deliveries: %d\nExclusions: %d suppressed, %d budget; delivered tokens: %d; tokens/useful activation: %d/%d (%.2f)\n", h.ProjectID, h.WindowDays, h.WindowStart, h.WindowEnd, h.CandidateCount, h.CandidateAgeAverageHours, h.CandidateAgeMaximumHours, h.DuplicateDensity.Numerator, h.DuplicateDensity.Denominator, h.DuplicateDensity.Value*100, h.UsefulnessRate.Numerator, h.UsefulnessRate.Denominator, h.UsefulnessRate.Value*100, h.ContradictionRate.Numerator, h.ContradictionRate.Denominator, h.ContradictionRate.Value*100, h.PromotionEventCount, h.PromotionsPerDay, h.PromotionConversion.Numerator, h.PromotionConversion.Denominator, h.PromotionConversion.Value*100, h.ContextualCoverage.Numerator, h.ContextualCoverage.Denominator, h.ContextualCoverage.Value*100, h.ProposalCount, h.AbandonedProposalCount, h.PendingProposalCount, h.DeliveryCount, h.SuppressionExclusionCount, h.BudgetExclusionCount, h.DeliveredTokenCost, h.TokensPerUsefulActivation.Numerator, h.TokensPerUsefulActivation.Denominator, h.TokensPerUsefulActivation.Value)
+	return nil
+}
+
+func runLearnSuggestRPC(cfg *config.Config, opts learnSuggestOpts) error {
+	var out protocol.LearnSuggestResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnSuggest, protocol.LearnSuggestRequestBody{Refresh: opts.Refresh, Status: opts.Status, Limit: opts.Limit}, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	if len(out.Suggestions) == 0 {
+		fmt.Println("No learning consolidation suggestions.")
+		return nil
+	}
+	for _, s := range out.Suggestions {
+		fmt.Printf("%s [%s/%s] %s + %s score=%d: %s\n", s.ID, s.Kind, s.Status, s.LeftLearningID, s.RightLearningID, s.Score, s.Reason)
+	}
+	return nil
+}
+func runLearnConsolidateRPC(cfg *config.Config, opts learnConsolidateOpts) error {
+	var out protocol.LearnConsolidateResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnConsolidate, protocol.LearnConsolidateRequestBody{SuggestionID: opts.SuggestionID, CanonicalLearningID: opts.CanonicalID, Summary: opts.Summary, Note: opts.Note}, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Consolidated %s into %s\n", out.Suggestion.ID, out.Learning.ID)
+	return nil
+}
+func runLearnSuggestionRejectRPC(cfg *config.Config, opts learnSuggestionRejectOpts) error {
+	var out protocol.LearnSuggestionRejectResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnSuggestionReject, protocol.LearnSuggestionRejectRequestBody{SuggestionID: opts.SuggestionID, Note: opts.Note}, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Rejected learning suggestion: %s\n", out.Suggestion.ID)
+	return nil
+}
+func parseLearnSuggestArgs(args []string) (learnSuggestOpts, error) {
+	opts := learnSuggestOpts{Status: "pending", Limit: 100}
+	fs := flag.NewFlagSet("learn suggest", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json")
+	fs.BoolVar(&opts.Refresh, "refresh", false, "refresh suggestions")
+	fs.StringVar(&opts.Status, "status", opts.Status, "status")
+	fs.IntVar(&opts.Limit, "limit", opts.Limit, "limit")
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	if fs.NArg() != 0 {
+		return opts, fmt.Errorf("usage: az learn suggest [--refresh] [--status pending|rejected|confirmed] [--limit N] [--json]")
+	}
+	if opts.Limit < 0 {
+		return opts, errors.New("limit must be non-negative")
+	}
+	return opts, nil
+}
+func parseLearnConsolidateArgs(args []string) (learnConsolidateOpts, error) {
+	var opts learnConsolidateOpts
+	fs := flag.NewFlagSet("learn consolidate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json")
+	fs.StringVar(&opts.CanonicalID, "canonical", "", "canonical learning id")
+	fs.StringVar(&opts.Summary, "summary", "", "merged summary")
+	fs.StringVar(&opts.Note, "note", "", "audit note")
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	if fs.NArg() != 1 || strings.TrimSpace(opts.CanonicalID) == "" || strings.TrimSpace(opts.Note) == "" {
+		return opts, fmt.Errorf("usage: az learn consolidate --canonical <learning-id> --note <text> [--summary <text>] <suggestion-id> [--json]")
+	}
+	opts.SuggestionID = strings.TrimSpace(fs.Arg(0))
+	return opts, nil
+}
+func parseLearnSuggestionRejectArgs(args []string) (learnSuggestionRejectOpts, error) {
+	var opts learnSuggestionRejectOpts
+	fs := flag.NewFlagSet("learn suggestion-reject", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json")
+	fs.StringVar(&opts.Note, "note", "", "audit note")
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	if fs.NArg() != 1 || strings.TrimSpace(opts.Note) == "" {
+		return opts, fmt.Errorf("usage: az learn suggestion-reject --note <text> <suggestion-id> [--json]")
+	}
+	opts.SuggestionID = strings.TrimSpace(fs.Arg(0))
+	return opts, nil
+}
+func runLearnActivateRPC(cfg *config.Config, o learnActivateOpts) error {
+	var out protocol.LearnActivateResponseBody
+	err := runLearnRPC(cfg, protocol.CommandLearnActivate, protocol.LearnActivateRequestBody{Surface: o.Surface, ContextIssueID: naming.IssueID(o.Issue), ContextReqID: naming.RequirementID(o.Req), ContextTags: o.Tags, ContextFiles: o.Files, LearningIDs: o.LearningIDs, TokenCost: o.TokenCost, Explanation: o.Explanation}, &out)
+	if err != nil {
+		return err
+	}
+	if o.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Delivered learning activation: %s\n", out.Activation.ActivationID)
+	return nil
+}
+func runLearnFeedbackRPC(cfg *config.Config, o learnFeedbackOpts) error {
+	var out protocol.LearnFeedbackResponseBody
+	err := runLearnRPC(cfg, protocol.CommandLearnFeedback, protocol.LearnFeedbackRequestBody{ActivationID: o.ActivationID, IdempotencyKey: o.IdempotencyKey, Outcome: o.Outcome, Source: o.Source, Explanation: o.Explanation}, &out)
+	if err != nil {
+		return err
+	}
+	if o.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Recorded activation feedback: %s created=%t\n", out.Feedback.Outcome, out.Created)
+	return nil
+}
+func parseLearnActivateArgs(args []string) (learnActivateOpts, error) {
+	var o learnActivateOpts
+	fs := flag.NewFlagSet("learn activate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&o.JSON, "json", false, "json output")
+	fs.StringVar(&o.Surface, "surface", "", "delivery surface")
+	fs.StringVar(&o.Issue, "issue", "", "context issue")
+	fs.StringVar(&o.Req, "req", "", "context requirement")
+	fs.StringVar(&o.Explanation, "explanation", "", "ranking explanation")
+	fs.IntVar(&o.TokenCost, "token-cost", 0, "delivered token cost")
+	addRepeatedStringFlag(fs, "learning", &o.LearningIDs)
+	addRepeatedStringFlag(fs, "tag", &o.Tags)
+	addRepeatedStringFlag(fs, "file", &o.Files)
+	if err := fs.Parse(args); err != nil {
+		return o, err
+	}
+	o.LearningIDs = append(o.LearningIDs, fs.Args()...)
+	o.LearningIDs = compactCLIStrings(o.LearningIDs)
+	o.Surface = strings.TrimSpace(o.Surface)
+	if o.Surface == "" || len(o.LearningIDs) == 0 {
+		return o, fmt.Errorf("--surface and at least one learning id are required")
+	}
+	if o.TokenCost < 0 || o.TokenCost > 32768 {
+		return o, fmt.Errorf("--token-cost must be between 0 and 32768")
+	}
+	return o, nil
+}
+func parseLearnFeedbackArgs(args []string) (learnFeedbackOpts, error) {
+	var o learnFeedbackOpts
+	fs := flag.NewFlagSet("learn feedback", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&o.JSON, "json", false, "json output")
+	fs.StringVar(&o.IdempotencyKey, "idempotency-key", "", "deduplication key")
+	fs.StringVar(&o.Outcome, "outcome", "", "helpful|followed|contradicted|unknown")
+	fs.StringVar(&o.Source, "source", "human", "human|agent|inferred")
+	fs.StringVar(&o.Explanation, "explanation", "", "outcome explanation")
+	if err := fs.Parse(args); err != nil {
+		return o, err
+	}
+	if fs.NArg() != 1 {
+		return o, fmt.Errorf("activation id is required")
+	}
+	o.ActivationID = strings.TrimSpace(fs.Arg(0))
+	if o.IdempotencyKey == "" || !domain.LearningActivationOutcome(o.Outcome).Valid() || !domain.LearningOutcomeSource(o.Source).Valid() {
+		return o, fmt.Errorf("valid --idempotency-key, --outcome, and --source are required")
+	}
+	return o, nil
 }
 
 func runLearnAddRPC(cfg *config.Config, opts learnAddOpts) error {
@@ -258,6 +515,19 @@ func runLearnAddRPC(cfg *config.Config, opts learnAddOpts) error {
 		return printJSON(out)
 	}
 	fmt.Printf("Recorded learning: %s\n", out.Learning.ID)
+	return nil
+}
+
+func runLearnCaptureRPC(cfg *config.Config, o learnCaptureOpts) error {
+	req := protocol.LearnCaptureRequestBody{IssueID: naming.IssueID(o.Issue), ReqID: naming.RequirementID(o.Req), SessionID: naming.SessionID(o.Session), ObservedBehavior: o.Observed, PreferredBehavior: o.Preferred, Outcome: o.Outcome, Impact: o.Impact, Context: o.Context, Provenance: protocol.LearningObservationProvenance{Source: o.Source, Actor: o.Actor, Ref: o.Ref}, Sensitivity: o.Sensitivity, Tags: o.Tags, Files: o.Files}
+	var out protocol.LearnCaptureResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnCapture, req, &out); err != nil {
+		return err
+	}
+	if o.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Recorded learning observation: %s (%s)\n", out.Observation.ID, out.Observation.Learning.ID)
 	return nil
 }
 
@@ -685,6 +955,34 @@ func parseLearnAddArgs(args []string) (learnAddOpts, error) {
 		return learnAddOpts{}, fmt.Errorf("missing required flag: --evidence")
 	}
 	return opts, nil
+}
+
+func parseLearnCaptureArgs(args []string) (learnCaptureOpts, error) {
+	o := learnCaptureOpts{Issue: strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID")), Sensitivity: "public", Context: map[string]string{}}
+	fs := flag.NewFlagSet("learn capture", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&o.JSON, "json", false, "json output")
+	fs.StringVar(&o.Issue, "issue", o.Issue, "issue id")
+	fs.StringVar(&o.Req, "req", "", "requirement id")
+	fs.StringVar(&o.Session, "session", "", "session id")
+	fs.StringVar(&o.Observed, "observed", "", "observed behavior")
+	fs.StringVar(&o.Preferred, "preferred", "", "preferred behavior")
+	fs.StringVar(&o.Outcome, "outcome", "", "outcome")
+	fs.StringVar(&o.Impact, "impact", "", "impact")
+	fs.StringVar(&o.Source, "source", "", "provenance source")
+	fs.StringVar(&o.Actor, "actor", "", "provenance actor")
+	fs.StringVar(&o.Ref, "ref", "", "provenance reference")
+	fs.StringVar(&o.Sensitivity, "sensitivity", o.Sensitivity, "public or private")
+	addRepeatedKeyValueFlag(fs, "context", &o.Context)
+	addRepeatedStringFlag(fs, "tag", &o.Tags)
+	addRepeatedStringFlag(fs, "file", &o.Files)
+	if err := fs.Parse(args); err != nil {
+		return o, err
+	}
+	if fs.NArg() != 0 || strings.TrimSpace(o.Observed) == "" || strings.TrimSpace(o.Preferred) == "" || strings.TrimSpace(o.Source) == "" || !domain.LearningSensitivity(o.Sensitivity).Valid() {
+		return o, fmt.Errorf("usage: az learn capture --observed <text> --preferred <text> --source <source> [--outcome <text>] [--impact <text>] [--context key=value ...] [--sensitivity public|private] [--json]")
+	}
+	return o, nil
 }
 
 func parseLearnRecallArgs(args []string) (learnRecallOpts, error) {
@@ -1128,9 +1426,13 @@ func parseLearningAgeDuration(raw string) (time.Duration, error) {
 }
 
 func printLearnUsage() {
-	fmt.Println("Usage: az learn <add|recall|show|review|stale|demote|promote|retire|relate|supersede|doctor|gc> [arguments]")
+	fmt.Println("Usage: az learn <capture|add|recall|activate|feedback|health|show|review|stale|demote|promote|retire|relate|supersede|suggest|consolidate|suggestion-reject|doctor|gc> [arguments]")
+	fmt.Println("  capture  Capture a typed learning correction or observation")
 	fmt.Println("  add      Capture an evidence-backed candidate learning")
 	fmt.Println("  recall   Search accepted/promoted learning summaries")
+	fmt.Println("  activate Record actual delivery of selected public learnings")
+	fmt.Println("  feedback Record an idempotent explicit or inferred activation outcome")
+	fmt.Println("  health   Report deterministic privacy-safe portfolio metrics")
 	fmt.Println("  show     Show a learning with full evidence")
 	fmt.Println("  review   List review queues or bulk update selected learnings")
 	fmt.Println("  stale    Mark a learning stale with an audit note")
@@ -1139,12 +1441,19 @@ func printLearnUsage() {
 	fmt.Println("  retire   Retire an Az-managed promoted guidance block")
 	fmt.Println("  relate   Record supersession or conflict between learnings")
 	fmt.Println("  supersede Record that a newer learning supersedes an older one")
+	fmt.Println("  suggest  Review or refresh deterministic duplicate/conflict suggestions")
+	fmt.Println("  consolidate Human-confirm a suggestion into a canonical learning")
+	fmt.Println("  suggestion-reject Reject a suggestion with an audit note")
 	fmt.Println("  doctor   Report learning lifecycle maintenance problems without mutation")
 	fmt.Println("  gc       Dry-run or confirm bounded cleanup of inactive learnings")
 	fmt.Println("")
 	fmt.Println("Commands:")
+	fmt.Println("  az learn capture --observed <text> --preferred <text> --source <source> [--outcome <text>] [--impact <text>] [--context key=value ...] [--sensitivity public|private] [--json]")
 	fmt.Println("  az learn add --evidence <text> [--summary <text>] [--private] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--json]")
 	fmt.Println("  az learn recall [--query <text>] [--issue <id>] [--req <id>] [--status <status> ...] [--tag <tag> ...] [--file <path> ...] [--limit N] [--include-evidence] [--include-private] [--json]")
+	fmt.Println("  az learn activate --surface <name> [--token-cost N] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--explanation <text>] <learning-id> ... [--json]")
+	fmt.Println("  az learn feedback --idempotency-key <key> --outcome helpful|followed|contradicted|unknown [--source explicit|inferred] [--explanation <text>] <activation-id> [--json]")
+	fmt.Println("  az learn health [--json]")
 	fmt.Println("  az learn show <learning-id> [--json]")
 	fmt.Println("  az learn review [--queue-status <status> ...] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--target-state active|retired|drifted|missing ...] [--older-than 30d] [--limit N] [--json]")
 	fmt.Println("  az learn review --id <learning-id> [--id <learning-id> ...] --status accepted|rejected|stale --note <text> [--json]")
@@ -1155,6 +1464,9 @@ func printLearnUsage() {
 	fmt.Println("  az learn retire --note <text> <learning-id> [--json]")
 	fmt.Println("  az learn relate --type supersedes|conflicts --note <text> [--scope-issue <id>] [--scope-req <id>] [--scope-session <id>] [--scope-tag <tag> ...] [--scope-file <path> ...] <source-learning-id> <target-learning-id> [--json]")
 	fmt.Println("  az learn supersede --note <text> [--scope-issue <id>] [--scope-req <id>] [--scope-session <id>] [--scope-tag <tag> ...] [--scope-file <path> ...] <new-learning-id> <old-learning-id> [--json]")
+	fmt.Println("  az learn suggest [--refresh] [--status pending|rejected|confirmed] [--limit N] [--json]")
+	fmt.Println("  az learn consolidate --canonical <learning-id> --note <text> [--summary <text>] <suggestion-id> [--json]")
+	fmt.Println("  az learn suggestion-reject --note <text> <suggestion-id> [--json]")
 	fmt.Println("  az learn doctor [--candidate-older-than-days N] [--inactive-older-than-days N] [--limit N] [--json]")
 	fmt.Println("  az learn gc [--confirm] [--candidate-older-than-days N] [--inactive-older-than-days N] [--limit N] [--json]")
 }

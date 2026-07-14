@@ -16,7 +16,10 @@ import (
 	"testing"
 	"time"
 
+	clitext "github.com/riordanpawley/azedarach/internal/cli/text"
+	autoclient "github.com/riordanpawley/azedarach/internal/client"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -39,6 +42,23 @@ type fakeDaemonTransport struct {
 	commandFn               func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	passOrchestrationIntent bool
 	lastGraphReadiness      daemonclient.TaskGraphReadiness
+}
+
+func TestRenderPrimeOrchestrationSectionExplainsRuntimeContinuationGuard(t *testing.T) {
+	scope, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	section := renderPrimeOrchestrationSection(protocol.OrchestrationSnapshot{
+		Scope: scope, Cursor: 17, ContinuationRequired: true,
+		ContinuationReason:   "direct nested root active",
+		ContinuationContract: "consume the durable cursor and continue",
+	})
+	for _, want := range []string{"Runtime persistence guard: wake-required", "direct nested root active", "consume the durable cursor and continue", "cursor=17"} {
+		if !strings.Contains(section, want) {
+			t.Fatalf("prime orchestration section missing %q:\n%s", want, section)
+		}
+	}
 }
 
 func openSQLiteDB(t *testing.T, dbPath string) *sql.DB {
@@ -591,7 +611,7 @@ func (f *fakeDaemonTransport) emulateOrchestrationIntent(ctx context.Context, re
 	for _, issueID := range requested {
 		if _, ok := runnable[issueID]; !ok {
 			if _, ok := nestedRoots[issueID]; ok {
-				result.Skipped[issueID] = fmt.Sprintf("nested-root-start-orchestrator-session: az session start %s", issueID)
+				result.Skipped[issueID] = fmt.Sprintf("nested-root-start-orchestrator-session: az orchestrator-session start --root %s", issueID)
 			} else if _, ok := active[issueID]; ok {
 				result.Skipped[issueID] = "session-already-running"
 			} else if reason := f.lastGraphReadiness.Blocked[issueID]; reason != "" {
@@ -2567,6 +2587,82 @@ func TestBranchMergeToBaseCommandUsesAttachedTargetBranchWorktree(t *testing.T) 
 	}
 }
 
+func TestBranchMergeCommandExplicitDescendantTargetIgnoresCallerWorktree(t *testing.T) {
+	sourceWorktree := t.TempDir()
+	descendantWorktree := t.TempDir()
+	t.Chdir(sourceWorktree)
+	var mergeBody daemonclient.GitCommandRequest
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				return responseWithJSON(req, map[string]any{"worktrees": []map[string]any{
+					{"path": sourceWorktree, "branch": "riordan/ancestor/work", "issue_id": "ancestor"},
+					{"path": descendantWorktree, "branch": "riordan/descendant/work", "issue_id": "descendant"},
+				}}), nil
+			case daemonclient.CommandTaskMergeBaseTarget:
+				t.Fatal("explicit issue target must not invoke inferred merge-base resolution")
+			case daemonclient.CommandGitStatus:
+				return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{HasChanges: false}}), nil
+			case daemonclient.CommandGitMerge:
+				if err := json.Unmarshal(req.Body, &mergeBody); err != nil {
+					t.Fatalf("unmarshal merge body: %v", err)
+				}
+				return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
+					Worktree: descendantWorktree,
+					Branch:   "riordan/ancestor/work",
+					Result:   gitservice.MergeResult{Success: true, Message: "merged"},
+				}), nil
+			default:
+				return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		}}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	if err := BranchMergeToBaseCommandWithOptions(deps, BranchMergeToBaseOptions{IssueID: "ancestor", Target: "descendant"}); err != nil {
+		t.Fatalf("explicit descendant merge: %v", err)
+	}
+	if mergeBody.Worktree != descendantWorktree || mergeBody.Branch != "riordan/ancestor/work" {
+		t.Fatalf("merge body = %+v, want source branch merged in named descendant worktree %q", mergeBody, descendantWorktree)
+	}
+}
+
+func TestBranchMergeCommandExplicitBaseRequiresDaemonHumanAcceptance(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				return responseWithJSON(req, map[string]any{"worktrees": []map[string]any{{
+					"path": t.TempDir(), "branch": "riordan/root/work", "issue_id": "root",
+				}}}), nil
+			case daemonclient.CommandTaskMergeBaseTarget:
+				var body map[string]any
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal merge target body: %v", err)
+				}
+				if required, _ := body["require_human_acceptance"].(bool); !required {
+					t.Fatalf("merge target request = %#v, want require_human_acceptance=true", body)
+				}
+				return protocol.ResponseEnvelope{}, fmt.Errorf("refusing root issue root integration into base without durable human acceptance")
+			default:
+				t.Fatalf("command %s must not run after acceptance refusal", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		}}).WithProjectID("proj"),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), ProjectID: "proj", RepoDir: t.TempDir(),
+	}
+	err := BranchMergeToBaseCommandWithOptions(deps, BranchMergeToBaseOptions{IssueID: "root", Target: "base"})
+	if err == nil || !strings.Contains(err.Error(), "without durable human acceptance") {
+		t.Fatalf("error = %v, want daemon acceptance refusal", err)
+	}
+}
+
 func TestBranchMergeToBaseCommandFailsOnDirtyPreflight(t *testing.T) {
 	commands := make([]string, 0, 8)
 	deps := &Dependencies{
@@ -2820,6 +2916,13 @@ func TestBranchMergeToBaseCommandUsesNearestNonClosedAncestorBranch(t *testing.T
 						},
 					}), nil
 				case daemonclient.CommandTaskMergeBaseTarget:
+					var body map[string]any
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal merge target request: %v", err)
+					}
+					if required, _ := body["require_human_acceptance"].(bool); !required {
+						t.Fatalf("merge target request = %#v, want protected mutation authorization", body)
+					}
 					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
 						IssueID:        "az-child",
 						TargetID:       "az-parent",
@@ -2917,6 +3020,119 @@ func TestBranchMergeToBaseCommandBlocksChildWithoutAncestorWorktreeUnlessOverrid
 	err := BranchMergeToBaseCommand(deps, "az-child")
 	if err == nil || !strings.Contains(err.Error(), "no active ancestor worktree branch was found") || strings.Contains(err.Error(), "--allow-base-for-child") {
 		t.Fatalf("err = %v, want child base merge refusal without override suggestion", err)
+	}
+}
+
+func TestBranchMergeToBaseCommandRefusesOriginBaseBeforeGitMutation(t *testing.T) {
+	baseWorktree := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Git.BaseBranch = "preview"
+	cfg.Git.WorkflowMode = "origin"
+	commands := make([]string, 0, 2)
+	deps := &Dependencies{
+		Config: cfg,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{"worktrees": []map[string]any{{
+						"path": baseWorktree, "branch": "riordan/az-root/work", "issue_id": "az-root",
+					}}}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("refusing direct base integration for az-root because git workflow mode is origin; run `az pr create --issue az-root`, `az pr status --issue az-root`, and `az pr merge --issue az-root --confirm`")
+				default:
+					t.Fatalf("origin refusal reached mutating command %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   baseWorktree,
+	}
+
+	err := BranchMergeToBaseCommandWithOptions(deps, BranchMergeToBaseOptions{IssueID: "az-root", Target: "base"})
+	if err == nil {
+		t.Fatal("BranchMergeToBaseCommandWithOptions error = nil, want origin-mode refusal")
+	}
+	for _, want := range []string{"workflow mode is origin", "az pr create", "az pr status", "az pr merge"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
+	}
+	if !reflect.DeepEqual(commands, []string{daemonclient.CommandWorktreeList, daemonclient.CommandTaskMergeBaseTarget}) {
+		t.Fatalf("commands = %v, want target refusal before git mutation", commands)
+	}
+}
+
+func TestBranchMergeToBaseCommandDefaultRefusesOriginBaseBeforeGitMutation(t *testing.T) {
+	baseWorktree := t.TempDir()
+	commands := make([]string, 0, 2)
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{"worktrees": []map[string]any{{
+						"path": baseWorktree, "branch": "riordan/az-root/work", "issue_id": "az-root",
+					}}}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					var body map[string]any
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal merge target request: %v", err)
+					}
+					if required, _ := body["require_human_acceptance"].(bool); !required {
+						t.Fatalf("merge target request = %#v, want protected mutation authorization", body)
+					}
+					return protocol.ResponseEnvelope{}, fmt.Errorf("refusing direct base integration for az-root because git workflow mode is origin")
+				default:
+					t.Fatalf("origin refusal reached mutating command %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   baseWorktree,
+	}
+
+	err := BranchMergeToBaseCommand(deps, "az-root")
+	if err == nil || !strings.Contains(err.Error(), "workflow mode is origin") {
+		t.Fatalf("BranchMergeToBaseCommand error = %v, want origin-mode refusal", err)
+	}
+	if !reflect.DeepEqual(commands, []string{daemonclient.CommandWorktreeList, daemonclient.CommandTaskMergeBaseTarget}) {
+		t.Fatalf("commands = %v, want refusal before git mutation", commands)
+	}
+}
+
+func TestResolveParentWorktreeBaseBranchRemainsReadOnly(t *testing.T) {
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskMergeBaseTarget {
+					t.Fatalf("command = %s, want merge target resolution", req.Command)
+				}
+				var body map[string]any
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal merge target request: %v", err)
+				}
+				if required, _ := body["require_human_acceptance"].(bool); required {
+					t.Fatalf("read-only merge target request = %#v, want no integration authorization", body)
+				}
+				return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{TargetID: "az-parent", Branch: "riordan/az-parent/work"}), nil
+			},
+		}).WithProjectID("proj"),
+	}
+
+	branch, err := resolveParentWorktreeBaseBranch(context.Background(), deps, "main", "az-child")
+	if err != nil {
+		t.Fatalf("resolveParentWorktreeBaseBranch error: %v", err)
+	}
+	if branch != "riordan/az-parent/work" {
+		t.Fatalf("branch = %q, want parent worktree branch", branch)
 	}
 }
 
@@ -5205,12 +5421,12 @@ func TestParseIssueGetArgs(t *testing.T) {
 		{
 			name:        "missing issue id",
 			args:        []string{},
-			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [--archived exclude|include|only] [<issue-id>]",
+			errContains: "usage: az ticket get [--project <project-id>] [--id <ticket-id>] [--json] [--with-notes] [--archived exclude|include|only] [<ticket-id>]",
 		},
 		{
 			name:        "too many args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]",
+			errContains: "usage: az ticket get [--project <project-id>] [--id <ticket-id>] [--json] [--with-notes] [<ticket-id>]",
 		},
 		{
 			name:        "deps flag rejected",
@@ -5295,7 +5511,7 @@ func TestParseIssueEventsArgs(t *testing.T) {
 	}
 
 	_, err = ParseIssueEventsArgs([]string{"--json"})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue events") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az ticket events") {
 		t.Fatalf("expected missing id usage error, got %v", err)
 	}
 	_, err = ParseIssueEventsArgs([]string{"az-1", "--limit", "-1"})
@@ -5382,7 +5598,7 @@ func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 		t.Fatalf("ParseIssueCheckArgs() = %+v", check)
 	}
 	_, err = ParseIssueCheckArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az ticket check [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>]") {
 		t.Fatalf("expected check usage error, got %v", err)
 	}
 
@@ -5426,7 +5642,7 @@ func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 		t.Fatalf("expected mutually exclusive wal flag error, got %v", err)
 	}
 	_, err = ParseIssueDoctorArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<issue-id>]") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az ticket doctor [--project <project-id>] [--id <ticket-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<ticket-id>]") {
 		t.Fatalf("expected doctor usage error, got %v", err)
 	}
 }
@@ -5466,7 +5682,7 @@ func TestParseIssueSearchArgs(t *testing.T) {
 		},
 		{
 			name:        "missing query",
-			errContains: "usage: az issue search",
+			errContains: "usage: az ticket search",
 		},
 		{
 			name:        "duplicate query sources",
@@ -5520,7 +5736,7 @@ func TestParseIssueGetManyArgs(t *testing.T) {
 	}
 
 	_, err = ParseIssueGetManyArgs([]string{"--json"})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue get-many [--project <project-id>] --id <issue-id>") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az ticket get-many [--project <project-id>] --id <ticket-id>") {
 		t.Fatalf("expected usage error for missing ids, got %v", err)
 	}
 }
@@ -5628,7 +5844,7 @@ func TestParseIssueCreateArgs(t *testing.T) {
 		{
 			name:        "missing title",
 			args:        []string{},
-			errContains: "usage: az issue create [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--deferred]",
+			errContains: "usage: az ticket create [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--deferred]",
 		},
 		{
 			name:        "title flag and positional are ambiguous",
@@ -5698,12 +5914,12 @@ func TestParseIssueCloseArgs(t *testing.T) {
 		{
 			name:        "missing id",
 			args:        []string{},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]",
+			errContains: "usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]",
 		},
 		{
 			name:        "extra args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]",
+			errContains: "usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]",
 		},
 		{
 			name: "named id",
@@ -5762,12 +5978,19 @@ func TestParseIssueCloseArgs(t *testing.T) {
 }
 
 func TestParseIssueCleanupArgs(t *testing.T) {
-	opts, err := ParseIssueCleanupArgs([]string{"--id", "az-1", "--statuses", "open,in_review", "--action", "cancelled", "--dry-run", "--per-issue-timeout", "2s"})
+	opts, err := ParseIssueCleanupArgs([]string{"--id", "az-1", "--statuses", "open,in_review", "--action", "cancelled", "--dry-run", "--per-ticket-timeout", "2s"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(opts.IDs) != 1 || len(opts.Statuses) != 2 || opts.Action != "cancelled" || !opts.DryRun || opts.PerIssueTimeout != 2*time.Second {
 		t.Fatalf("opts = %+v", opts)
+	}
+	legacy, err := ParseIssueCleanupArgs([]string{"--id", "az-1", "--per-issue-timeout", "2s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.PerIssueTimeout != opts.PerIssueTimeout {
+		t.Fatalf("legacy timeout = %s, canonical timeout = %s", legacy.PerIssueTimeout, opts.PerIssueTimeout)
 	}
 	if _, err := ParseIssueCleanupArgs(nil); err == nil || !strings.Contains(err.Error(), "at least one") {
 		t.Fatalf("missing selector error = %v", err)
@@ -5842,7 +6065,7 @@ func TestParseIssueUnarchiveArgs(t *testing.T) {
 	}
 
 	_, err = ParseIssueUnarchiveArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue unarchive") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az ticket unarchive") {
 		t.Fatalf("expected usage error, got %v", err)
 	}
 }
@@ -5943,7 +6166,7 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 		{
 			name:        "invalid status arg count",
 			args:        []string{},
-			errContains: "usage: az issue update [--project <project-id>] [--id <issue-id>]",
+			errContains: "usage: az ticket update [--project <project-id>] [--id <ticket-id>]",
 		},
 		{
 			name: "named id",
@@ -6154,6 +6377,33 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 	if remove.IssueID != "az-3" || remove.DependsOnID != "az-4" || !remove.Confirm {
 		t.Fatalf("ParseIssueDependencyRemoveArgs() interspersed id+flags = %+v", remove)
 	}
+}
+
+func TestTicketNamedFlagsAndLegacyAliasesMatch(t *testing.T) {
+	assertIssueID := func(t *testing.T, want string, parse func([]string) (string, error), canonical, legacy []string) {
+		t.Helper()
+		for name, args := range map[string][]string{"canonical": canonical, "legacy": legacy} {
+			got, err := parse(args)
+			if err != nil {
+				t.Fatalf("%s args %v: %v", name, args, err)
+			}
+			if got != want {
+				t.Fatalf("%s args resolved %q, want %q", name, got, want)
+			}
+		}
+	}
+	assertIssueID(t, "az-1", func(args []string) (string, error) {
+		opts, err := ParseIssueDependencyAddArgs(args)
+		return opts.IssueID, err
+	}, []string{"--ticket-id", "az-1", "--depends-on-id", "az-2"}, []string{"--issue-id", "az-1", "--depends-on-id", "az-2"})
+	assertIssueID(t, "az-1", func(args []string) (string, error) {
+		opts, err := ParseIssueImageAddArgs(args)
+		return opts.IssueID, err
+	}, []string{"--ticket-id", "az-1", "--path", "image.png"}, []string{"--issue-id", "az-1", "--path", "image.png"})
+	assertIssueID(t, "az-1", func(args []string) (string, error) {
+		opts, err := ParseIssueDocumentListArgs(args)
+		return opts.IssueID, err
+	}, []string{"--ticket-id", "az-1"}, []string{"--issue-id", "az-1"})
 }
 
 func TestParseIssueImageArgs(t *testing.T) {
@@ -6791,6 +7041,56 @@ func TestIssueListCommand_ContentQueryDelegatesToTaskList(t *testing.T) {
 	}
 	if !strings.Contains(output, "az-1") || strings.Contains(output, "az-2") {
 		t.Fatalf("content query output = %q, want only az-1", output)
+	}
+}
+
+func TestIssueSearchGlobalUsesScopedProjectionConsumer(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandGlobalSnapshot {
+				t.Fatalf("command = %q, want global.snapshot", req.Command)
+			}
+			var request protocol.GlobalSnapshotRequestBody
+			if err := json.Unmarshal(req.Body, &request); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			if request.Consumer != protocol.GlobalViewConsumerSearch || request.Query != "runtime cache" {
+				t.Fatalf("request = %+v", request)
+			}
+			body, err := json.Marshal(protocol.GlobalSnapshotResponseBody{
+				SchemaVersion: protocol.GlobalProjectionSchemaVersion,
+				Projection: protocol.GlobalViewProjection{Items: []protocol.GlobalViewProjectedItem{{
+					Identity: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "ddm"},
+					Task:     domain.Task{ID: "ddm", Title: "Runtime cache", Status: domain.StatusOpen},
+				}}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return responseWithBody(req, body), nil
+		}}),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueListCommand(deps, IssueListOptions{Project: "global", Query: "runtime cache"})
+	})
+	if !strings.Contains(output, "alpha:ddm") || !strings.Contains(output, "Runtime cache") {
+		t.Fatalf("global search output = %q", output)
+	}
+}
+
+func TestIssueSearchGlobalRejectsUnsupportedDependencyAndArchiveFlags(t *testing.T) {
+	deps := &Dependencies{DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		t.Fatalf("unexpected daemon command %s", req.Command)
+		return protocol.ResponseEnvelope{}, nil
+	}})}
+	if err := IssueListCommand(deps, IssueListOptions{Project: "global", Deps: true}); err == nil || !strings.Contains(err.Error(), "--deps") {
+		t.Fatalf("deps error = %v", err)
+	}
+	if err := IssueListCommand(deps, IssueListOptions{Project: "global", Archived: "include"}); err == nil || !strings.Contains(err.Error(), "--archived exclude") {
+		t.Fatalf("archive error = %v", err)
 	}
 }
 
@@ -8635,6 +8935,7 @@ func TestIssueCreateCommandUsesInheritedImplsWhenTaskSnapshotTimesOut(t *testing
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
 	}
+	deps.DaemonClient.WithReconnectPolicy(reconnect.Policy{MaxAttempts: 1})
 
 	parentID := "az-parent"
 	_ = captureStdout(t, func() error {
@@ -8709,6 +9010,7 @@ func TestIssueCreateCommandOmitsImplWhenTaskSnapshotTimesOutWithoutInferenceSign
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
 	}
+	deps.DaemonClient.WithReconnectPolicy(reconnect.Policy{MaxAttempts: 1})
 
 	parentID := "az-parent"
 	err := IssueCreateCommand(deps, IssueCreateOptions{
@@ -9373,6 +9675,21 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	commands := commandNames(requests)
 	if !containsString(commands, protocol.CommandOrchestrationIntent) || containsString(commands, protocol.CommandOperationSubmit) || containsString(commands, protocol.CommandMailSend) {
 		t.Fatalf("commands = %+v, want daemon orchestration intent without client-side operation submit or immediate mail send", commands)
+	}
+
+	textOutput := captureStdout(t, func() error {
+		return IssueSplitCommand(deps, IssueSplitOptions{
+			ParentIssueID: root.String(),
+			Title:         "Child work",
+			Type:          domain.TypeTask,
+			Priority:      domain.P2,
+		})
+	})
+	if !strings.Contains(textOutput, "`az ticket close` owns") || !strings.Contains(textOutput, "az ticket close --id "+child.String()) {
+		t.Fatalf("split output missing canonical ticket close guidance: %s", textOutput)
+	}
+	if strings.Contains(textOutput, "az issue close") {
+		t.Fatalf("split output contains legacy issue close guidance: %s", textOutput)
 	}
 }
 
@@ -10772,6 +11089,9 @@ func TestIssueContextRiskCommandTimeoutReturnsDegradedSummary(t *testing.T) {
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+				return protocol.HelloAck{Accepted: true}, nil
+			},
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				return protocol.ResponseEnvelope{}, context.DeadlineExceeded
 			},
@@ -10779,6 +11099,7 @@ func TestIssueContextRiskCommandTimeoutReturnsDegradedSummary(t *testing.T) {
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
 	}
+	deps.DaemonClient.WithReconnectPolicy(reconnect.Policy{MaxAttempts: 1})
 
 	output := captureStdout(t, func() error {
 		return IssueContextRiskCommand(deps, IssueContextRiskOptions{IssueID: "az-1", JSON: true})
@@ -10789,6 +11110,20 @@ func TestIssueContextRiskCommandTimeoutReturnsDegradedSummary(t *testing.T) {
 	}
 	if !summary.Degraded || !summary.Timeout || summary.IssueID != "az-1" {
 		t.Fatalf("summary = %+v, want degraded timeout summary for az-1", summary)
+	}
+}
+
+func TestShouldAutostartAfterDaemonReadErrorSeparatesReadWaitFromTransportFailure(t *testing.T) {
+	readWait := &daemonclient.ReadWaitTimeoutError{
+		Mode:   daemonclient.ReadWaitModeDefault,
+		Budget: 2 * time.Second,
+		Err:    context.DeadlineExceeded,
+	}
+	if shouldAutostartAfterDaemonReadError(readWait) {
+		t.Fatal("typed snapshot read timeout triggered daemon autostart")
+	}
+	if !shouldAutostartAfterDaemonReadError(errors.New("dial unix /tmp/azedarach.sock: connection refused")) {
+		t.Fatal("transport connection failure did not trigger daemon autostart")
 	}
 }
 
@@ -12213,13 +12548,92 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Do not create needless decomposition for a single-scope plan") {
 		t.Fatalf("prime output missing single-scope plan guidance: %q", output)
 	}
-	if strings.Contains(output, "Active issue ID:") || strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=") {
+	if strings.Contains(output, "Active ticket ID:") || strings.Contains(output, "Active ticket context (ticket=") {
 		t.Fatalf("prime without issue rendered active issue context: %q", output)
 	}
-	for _, want := range []string{"Issue Types", "`investigation` for research", "az issue update --type <type>", "explicit, issue-specific human acceptance"} {
+	for _, want := range []string{"Ticket Types", "`investigation` for research", "az ticket update --type <type>", "explicit, ticket-specific human acceptance"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("prime output missing investigation guidance %q: %q", want, output)
 		}
+	}
+}
+
+func TestPrimeCommandRendersPersistedProjectOrchestratorSnapshotOnly(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "stale-worker-scope")
+	setPrimeTmuxAvailable(t, true)
+	previous := tmuxPaneSessionName
+	tmuxPaneSessionName = func(context.Context) (string, error) { return "az-project-orchestrator", nil }
+	t.Cleanup(func() { tmuxPaneSessionName = previous })
+	commands := []string{}
+	deps := &Dependencies{
+		ProjectID: "proj",
+		Config:    config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			commands = append(commands, req.Command)
+			if req.Command != daemonclient.CommandOrchestrationSnapshot {
+				t.Fatalf("unexpected daemon command %q", req.Command)
+			}
+			return responseWithJSON(req, protocol.OrchestrationSnapshot{
+				Role: "orchestrator", SessionID: "az-project-orchestrator", Lifecycle: domain.OrchestratorWorking,
+				Scope: domain.ProjectOrchestrationScope(), Revision: 41, Cursor: 9,
+				Capacity:           protocol.OrchestrationCapacity{DirectRunnableCount: 2, DirectActiveCount: 1, TotalCountingCapacityCount: 3},
+				Candidates:         []protocol.OrchestrationCandidate{{IssueID: "az-ready", Classification: "runnable", Reason: "included: ready for worker start"}},
+				Reviews:            []protocol.OrchestrationCandidate{{IssueID: "az-review", Classification: "review-ready", Reason: "excluded: review requested"}},
+				OwnershipConflicts: []protocol.OrchestrationCandidate{{IssueID: "az-owned", Classification: "owned-elsewhere", Reason: "excluded: owned by another actor"}},
+				Blocked:            map[string]string{"az-blocked": "dependency open"},
+				Interactions:       []domain.InteractionRequest{{ID: "int-1", IssueID: "az-wait", Question: "Choose rollout?"}},
+				RecentEvents:       []protocol.MailEvent{{Seq: 9, IssueID: "az-ready", Type: "worker-progress", Body: "tests running"}},
+				Constraints:        protocol.OrchestrationConstraints{StartLimit: 4, AgentCapacity: 12, Commands: []string{"az orchestrate status"}, RoleGuardrails: []string{"remain in the active orchestration loop"}},
+			}), nil
+		}}),
+	}
+	output := captureStdout(t, func() error { return PrimeCommand(deps) })
+	if !reflect.DeepEqual(commands, []string{daemonclient.CommandOrchestrationSnapshot}) {
+		t.Fatalf("commands = %v, want one coherent orchestration snapshot", commands)
+	}
+	for _, want := range []string{
+		"role=orchestrator scope=project lifecycle=working revision=41 cursor=9",
+		"daemon identifies this session as the project orchestrator",
+		"az-ready: runnable", "az-review: review-ready", "az-owned: owned-elsewhere",
+		"az-blocked: dependency open", "int-1 (az-wait): Choose rollout?", "#9 worker-progress az-ready: tests running",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("prime output missing %q: %s", want, output)
+		}
+	}
+	if strings.Contains(output, "stale-worker-scope") {
+		t.Fatalf("project orchestrator output leaked environment worker scope: %s", output)
+	}
+}
+
+func TestPrimeCommandRendersPersistedRootedOrchestratorScope(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "stale-root")
+	setPrimeTmuxAvailable(t, true)
+	previous := tmuxPaneSessionName
+	tmuxPaneSessionName = func(context.Context) (string, error) { return "az-root-orchestrator", nil }
+	t.Cleanup(func() { tmuxPaneSessionName = previous })
+	rooted, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := &Dependencies{ProjectID: "proj", Config: config.DefaultConfig(), DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		if req.Command != daemonclient.CommandOrchestrationSnapshot {
+			t.Fatalf("unexpected daemon command %q", req.Command)
+		}
+		return responseWithJSON(req, protocol.OrchestrationSnapshot{
+			Role: "orchestrator", Scope: rooted, Lifecycle: domain.OrchestratorWorking, Revision: 7,
+			Roots: []string{"az-root"}, Blocked: map[string]string{},
+			Constraints: protocol.OrchestrationConstraints{Commands: []string{"az orchestrate status --root az-root"}},
+		}), nil
+	}})}
+	output := captureStdout(t, func() error { return PrimeCommand(deps) })
+	for _, want := range []string{"Active ticket ID: `az-root`", "scope=rooted:az-root", "rooted orchestrator for `az-root`", "az orchestrate status --root az-root", "Orchestrator Exit Contract (root az-root)"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("rooted prime output missing %q: %s", want, output)
+		}
+	}
+	if strings.Contains(output, "stale-root") {
+		t.Fatalf("rooted prime leaked environment scope: %s", output)
 	}
 }
 
@@ -12312,8 +12726,8 @@ func TestPrimeCommandWithActiveIssueUsesTargetedSnapshot(t *testing.T) {
 						RootIssueID: "az-1",
 						Blocked:     map[string]string{},
 					}), nil
-				case protocol.CommandLearnRecall:
-					return responseWithJSON(req, protocol.LearnRecallResponseBody{}), nil
+				case protocol.CommandLearnContextualActivate:
+					return responseWithJSON(req, protocol.LearnContextualActivateResponseBody{}), nil
 				default:
 					t.Fatalf("unexpected daemon command: %q", req.Command)
 				}
@@ -12386,8 +12800,8 @@ func TestPrimeCommandStopsOnActiveIssueOwnershipConflict(t *testing.T) {
 					}, nil
 				case daemonclient.CommandTaskGraphReadiness:
 					t.Fatal("prime must not continue to readiness after ownership conflict")
-				case protocol.CommandLearnRecall:
-					t.Fatal("prime must not continue to learning recall after ownership conflict")
+				case protocol.CommandLearnContextualActivate:
+					t.Fatal("prime must not continue to contextual learning activation after ownership conflict")
 				default:
 					t.Fatalf("unexpected daemon command: %q", req.Command)
 				}
@@ -12505,13 +12919,13 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
-	if !strings.Contains(output, "Active issue ID: `az-1`") {
+	if !strings.Contains(output, "Active ticket ID: `az-1`") {
 		t.Fatalf("prime output missing explicit active issue id: %q", output)
 	}
 	if !strings.Contains(output, "Run `az spec read --issue az-1` before behavior changes") {
 		t.Fatalf("prime output missing active-issue spec read command: %q", output)
 	}
-	if !strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=az-1)") {
+	if !strings.Contains(output, "Active ticket context (ticket=az-1)") {
 		t.Fatalf("prime output missing active issue section: %q", output)
 	}
 	if !strings.Contains(output, "az-1: Prime issue [status=open priority=P2 type=task impl=go-bubbletea]") {
@@ -12665,6 +13079,16 @@ func TestPrimeCommandShowsRootExitContractForAzOrchestrationRoot(t *testing.T) {
 	if contractIndex < 0 {
 		t.Fatalf("prime output missing root exit contract: %q", output)
 	}
+	for _, guidance := range []string{
+		"Remain in the active orchestration turn/loop after starting workers, nested orchestrators, or a background watch; startup is not a completed handoff to the human.",
+		"Continuously consume the root watch and react to worker/nested-orchestrator progress, blocked, and integration-ready evidence while graph work remains.",
+		"Supervise nested epic/root orchestrators as direct children while they own their descendant workers; do not flatten or take over those descendants unless explicitly requested.",
+		"repeat status/start/watch/review until `az orchestrate complete-check --root az-root` passes",
+	} {
+		if !strings.Contains(output, guidance) {
+			t.Fatalf("prime output missing persistent parent-orchestrator guidance %q: %q", guidance, output)
+		}
+	}
 	if !strings.Contains(output, "az-child: review_ready - worker reported integration-ready evidence") {
 		t.Fatalf("prime output missing dynamic child observation: %q", output)
 	}
@@ -12741,7 +13165,10 @@ func TestPrimeCommandShowsRootExitContractForTaskRootWithActiveReadiness(t *test
 func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
 	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
-	var learnReq protocol.LearnRecallRequestBody
+	var learnReq protocol.LearnContextualActivateRequestBody
+	var confirmReq protocol.LearnActivationConfirmRequestBody
+	var confirmCalls int
+	var abandonCalls int
 
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -12761,7 +13188,7 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 						t.Fatalf("marshal task list: %v", err)
 					}
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt, Body: body}, nil
-				case protocol.CommandLearnRecall:
+				case protocol.CommandLearnContextualActivate:
 					if err := json.Unmarshal(req.Body, &learnReq); err != nil {
 						t.Fatalf("decode learn recall request: %v", err)
 					}
@@ -12773,21 +13200,20 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 						Status:       protocol.LearningStatusAccepted,
 						RecallReason: "issue=az-1; query",
 					}}
-					if learnReq.IncludePrivate {
-						learnings = append(learnings, protocol.Learning{
-							ID:              "learn-private",
-							IssueID:         naming.IssueID("az-1"),
-							Summary:         "Private local handling detail",
-							Evidence:        "private raw evidence should not be injected",
-							EvidencePrivate: true,
-							Status:          protocol.LearningStatusAccepted,
-						})
-					}
-					body, err := json.Marshal(protocol.LearnRecallResponseBody{Learnings: learnings})
+					body, err := json.Marshal(protocol.LearnContextualActivateResponseBody{Proposal: &protocol.LearningActivationProposal{ActivationID: "act-prime", LearningIDs: []string{"learn-1"}}, Learnings: learnings})
 					if err != nil {
 						t.Fatalf("marshal learn recall response: %v", err)
 					}
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt, Body: body}, nil
+				case protocol.CommandLearnActivationConfirm:
+					confirmCalls++
+					if err := json.Unmarshal(req.Body, &confirmReq); err != nil {
+						t.Fatal(err)
+					}
+					return responseWithJSON(req, protocol.LearnActivationConfirmResponseBody{Activation: protocol.LearningActivation{ActivationID: "act-prime"}}), nil
+				case protocol.CommandLearnActivationAbandon:
+					abandonCalls++
+					return responseWithJSON(req, protocol.LearnActivationAbandonResponseBody{Abandoned: true}), nil
 				default:
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt}, nil
 				}
@@ -12801,25 +13227,13 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
-	if learnReq.IssueID != "" {
-		t.Fatalf("prime should not hard-filter learn recall issue, got %q", learnReq.IssueID)
-	}
 	if learnReq.ContextIssueID != naming.IssueID("az-1") {
 		t.Fatalf("learn recall context issue = %q, want az-1", learnReq.ContextIssueID)
 	}
-	if learnReq.Limit != 3 {
-		t.Fatalf("learn recall limit = %d, want 3", learnReq.Limit)
+	if learnReq.Purpose != string(domain.LearningPurposeSessionStart) || learnReq.Surface != "prime" || learnReq.TokenBudget != 256 {
+		t.Fatalf("contextual activation request = %+v", learnReq)
 	}
-	if learnReq.IncludeEvidence {
-		t.Fatal("prime learn recall should not request evidence")
-	}
-	if learnReq.IncludePrivate {
-		t.Fatal("prime learn recall should not request private rows")
-	}
-	if !reflect.DeepEqual(learnReq.Statuses, []protocol.LearningStatus{protocol.LearningStatusAccepted, protocol.LearningStatusPromoted}) {
-		t.Fatalf("learn recall statuses = %#v", learnReq.Statuses)
-	}
-	if !strings.Contains(output, "Relevant accepted/promoted learnings:") ||
+	if !strings.Contains(output, "Relevant accepted/promoted learnings [activation: act-prime]:") ||
 		!strings.Contains(output, "- learn-1 [accepted]: Keep durable choices in decisions (why: issue=az-1; query)") {
 		t.Fatalf("prime output missing learning section: %q", output)
 	}
@@ -12828,6 +13242,26 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 	}
 	if strings.Contains(output, "Private local handling detail") || strings.Contains(output, "private raw evidence should not be injected") {
 		t.Fatalf("prime output injected private learning: %q", output)
+	}
+	wantSection := "\nRelevant accepted/promoted learnings [activation: act-prime]:\n- learn-1 [accepted]: Keep durable choices in decisions (why: issue=az-1; query)\nUse `az learn show <learning-id>` for evidence; long evidence is not injected by default.\nRecord the activation outcome with `az learn feedback --idempotency-key <key> --outcome helpful|followed|contradicted|unknown act-prime`."
+	if confirmCalls != 1 || confirmReq.ActivationID != "act-prime" || confirmReq.TokenCost != domain.RenderedLearningTokenCost(wantSection) {
+		t.Fatalf("prime confirmation=%+v calls=%d want token cost=%d", confirmReq, confirmCalls, domain.RenderedLearningTokenCost(wantSection))
+	}
+	if err := primeCommandTo(deps, failingHookWriter{}, clitext.Render); err == nil {
+		t.Fatal("expected output write failure")
+	}
+	if confirmCalls != 1 {
+		t.Fatalf("write failure confirmed activation: calls=%d", confirmCalls)
+	}
+	var rendered bytes.Buffer
+	if err := primeCommandTo(deps, &rendered, func(string, any) (string, error) { return "", errors.New("render failed") }); err == nil {
+		t.Fatal("expected render failure")
+	}
+	if confirmCalls != 1 {
+		t.Fatalf("render failure confirmed activation: calls=%d", confirmCalls)
+	}
+	if abandonCalls != 2 {
+		t.Fatalf("known prime delivery failures must abandon immediately: calls=%d", abandonCalls)
 	}
 }
 
@@ -12853,8 +13287,8 @@ func TestPrimeCommandShowsLearningCaptureGuidanceWithoutRecallRows(t *testing.T)
 						t.Fatalf("marshal task list: %v", err)
 					}
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt, Body: body}, nil
-				case protocol.CommandLearnRecall:
-					body, err := json.Marshal(protocol.LearnRecallResponseBody{})
+				case protocol.CommandLearnContextualActivate:
+					body, err := json.Marshal(protocol.LearnContextualActivateResponseBody{})
 					if err != nil {
 						t.Fatalf("marshal learn recall response: %v", err)
 					}
@@ -12931,7 +13365,7 @@ func TestPrimeCommandRecommendsChildIssuesForEpicContext(t *testing.T) {
 	if !strings.Contains(output, "Parent context: `az-1` is an epic or has children") {
 		t.Fatalf("prime output missing epic child-work recommendation: %q", output)
 	}
-	if !strings.Contains(output, "az issue split \"Child task\"") {
+	if !strings.Contains(output, "az ticket split \"Child task\"") {
 		t.Fatalf("tmux-capable parent context omitted split option: %q", output)
 	}
 }
@@ -13003,7 +13437,7 @@ func TestPrimeCommandRecommendsChildIssuesWhenActiveIssueHasChildren(t *testing.
 	if !strings.Contains(output, "Parent context: `az-1` is an epic or has children") {
 		t.Fatalf("prime output missing child-work recommendation for parent task: %q", output)
 	}
-	if strings.Contains(output, "Parent context: `az-1` is an epic or has children. Keep implementation-sized scope in child issues using `az issue create \"Child task\"` for tracking-only work or `az issue split") {
+	if strings.Contains(output, "Parent context: `az-1` is an epic or has children. Keep implementation-sized scope in child tickets using `az ticket create \"Child task\"` for tracking-only work or `az ticket split") {
 		t.Fatalf("prime output should not mention split command when tmux is unavailable: %q", output)
 	}
 }
@@ -13068,13 +13502,13 @@ func TestPrimeCommandUsesTmuxSessionContextWhenEnvMissing(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
-	if !strings.Contains(output, "Active issue ID: `az-1`") {
+	if !strings.Contains(output, "Active ticket ID: `az-1`") {
 		t.Fatalf("prime output missing tmux-derived active issue id: %q", output)
 	}
-	if !strings.Contains(output, "`AZEDARACH_ISSUE_ID` is absent, but the current tmux session resolves to issue `az-1`") {
+	if !strings.Contains(output, "`AZEDARACH_TICKET_ID` is absent, but the current tmux session resolves to ticket `az-1`") {
 		t.Fatalf("prime output missing missing-env tmux warning: %q", output)
 	}
-	if !strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=az-1)") {
+	if !strings.Contains(output, "Active ticket context (ticket=az-1)") {
 		t.Fatalf("prime output missing tmux-derived active issue section: %q", output)
 	}
 }
@@ -13200,7 +13634,7 @@ func TestPrimeCommandTruncatesLargeIssueDescription(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
-	if !strings.Contains(output, "… (truncated; run `az issue get az-1` for full context)") {
+	if !strings.Contains(output, "… (truncated; run `az ticket get az-1` for full context)") {
 		t.Fatalf("prime output should include truncated description sentinel: %q", output)
 	}
 	if strings.Count(output, "line content for noisy transcript output") >= 12 {
@@ -13217,8 +13651,8 @@ func TestPrimeCommandWarnsWhenActiveIssueClosed(t *testing.T) {
 		status domain.Status
 		want   string
 	}{
-		{name: "completed", id: "az-closed", status: domain.StatusDone, want: "Active issue `az-closed` is currently `closed`"},
-		{name: "cancelled", id: "az-cancelled", status: domain.StatusCancelled, want: "Active issue `az-cancelled` is currently `cancelled`"},
+		{name: "completed", id: "az-closed", status: domain.StatusDone, want: "Active ticket `az-closed` is currently `closed`"},
+		{name: "cancelled", id: "az-cancelled", status: domain.StatusCancelled, want: "Active ticket `az-cancelled` is currently `cancelled`"},
 	}
 
 	for _, tt := range tests {
@@ -13290,6 +13724,33 @@ func TestPrimeCommandQuestionFirstAndSpecBlock(t *testing.T) {
 	}
 	if !strings.Contains(output, "Spec Workflow") {
 		t.Fatal("prime output missing dynamic enabled-spec section")
+	}
+}
+
+func TestPrimeCommandExplainsOriginWorkflowAndCrossProjectHandoff(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	cfg := config.DefaultConfig()
+	cfg.Git.WorkflowMode = "origin"
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(&Dependencies{Config: cfg})
+	})
+
+	for _, want := range []string{
+		"Active git workflow mode: `origin`",
+		"Root integration is PR-only",
+		"git push -u origin HEAD",
+		"az pr create --issue <root>",
+		"az pr status --issue <root>",
+		"az pr merge --issue <root> --confirm",
+		"fetch `origin/<base>`",
+		"az ticket close --id <root>",
+		"az session start --project <project> <ticket>",
+		"do not treat `az worktree create` as a worker handoff",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("origin primer missing %q:\n%s", want, output)
+		}
 	}
 }
 
@@ -13460,6 +13921,8 @@ func TestIssueCreateCommandUsesExtendedDaemonAttachTimeout(t *testing.T) {
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
 	}
+	deps.AutostartRetryPolicy = &autoclient.AutostartRetryPolicy{}
+	deps.DaemonClient.WithReconnectPolicy(reconnect.Policy{MaxAttempts: 1})
 
 	err := IssueCreateCommand(deps, IssueCreateOptions{
 		Title:           "timeout budget",

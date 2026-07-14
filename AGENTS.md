@@ -28,7 +28,7 @@ cd .
 Use these as primary checks after code changes:
 
 ```bash
-# Build and test
+# Build and canonical cold test (machine-readable, uncached)
 just build
 just test
 
@@ -38,8 +38,16 @@ just run
 # Optional focused quality gates
 just check-boundaries
 
-# Full Go test sweep
-go test ./...
+# Fast focused development feedback
+just test-fast --package ./internal/cli --run TestCommand
+
+# Specialized execution-mode profiles (run when relevant)
+just test-integration
+just test-migration-clone
+just test-race
+
+# Aggregate daemon race sweep (four sequential shards; 15m/shard, 45m aggregate)
+just test-race-daemon
 
 # Focused daemon/client boundary checks
 go test ./internal/tui ./internal/cli
@@ -55,6 +63,17 @@ go test ./internal/tui ./internal/cli ./internal/daemon/...
   - recovery tests should seed a live tmux runtime with empty daemon cache when validating event publication
   - stop tests should seed desired-stopped intent before runtime cleanup
   - do not seed a desired-stopped row when the assertion is about runtime recovery or reattachment
+
+## Complete Test-Failure Batch Workflow
+
+- Use `just test` (or `just test-timing cold`) for the canonical uncached machine-readable full run. It preserves the complete `go test -json` stream, bounds package concurrency with `-p=4`, emits sorted package/test durations and all failures, and enforces the committed baseline/budgets documented in [docs/26-test-timing-profiles.md](docs/26-test-timing-profiles.md). Use the distinct `cached`, `focused`, `integration`, `migration-clone`, `race`, or `boundary` profiles only for their documented semantics; do not present a focused or cached result as cold full-suite evidence.
+- `just merge-gate` is the required local merge contract: build once, run the cold semantic suite once, then run static and focused executable boundary guards. Integration/subprocess, migration-clone, and race profiles are change-sensitive execution-mode gates; they intentionally rerun only the contracts that need those modes.
+- When a broad validation command fails, do not fix the first visible test and repeatedly rerun in a one-test-at-a-time loop.
+- Run the complete relevant suite once with machine-readable output, such as `go test -json ./... -count=1 -timeout 10m`, and preserve the output outside the repository worktree when it is too large for the terminal.
+- Extract the full set of failed tests and packages from that run, then inspect the associated output and classify failures by shared root cause. Truncated terminal output is not evidence that only the visible failure exists.
+- Repair each coherent failure class as a batch. Prefer one shared fixture or production-boundary correction when many tests violate the same contract; do not bulk-relax expectations until the intended production semantics are established.
+- After the batch repair, rerun the complete suite and collect the next complete failure set. Use focused tests for diagnosis and regression development, but never substitute isolated green tests for the complete rerun.
+- If a complete rerun exposes unrelated or flaky failures, reproduce and classify them explicitly. Fix them in scope when appropriate; otherwise create durable follow-up issues with the failing commands and evidence before accepting the scoped change.
 
 ## Fast Search Commands
 
@@ -152,17 +171,28 @@ fd "filename" -t f internal cmd
 6. Mutations remain write-through: update in-memory authority and durable projection, then publish events.
 7. Example matrix:
    - `session.start`/`session.attach`/`session.pause`/`session.resume`/`session.stop` runtime-presence checks -> `tmux`
+   - advisor-session singleton/recovery/cleanup per interaction request -> `hybrid` (refreshed durable request/session-role projection + live tmux runtime; terminal requests and project removal clean advisor resources)
    - session recovery/reconcile -> `hybrid`
-   - `task.close`/`task.close_preflight`/`task.delete`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle and orchestration checks -> `hybrid` (read v2 issue lifecycle projection first, then compare with live runtime)
+   - `session.issue_lifecycle_runtime` live managed-session lifecycle gate -> `hybrid` (refresh durable factored issue disposition/engagement/visibility projection, then compare with live tmux; repair ready+idle to working, reject backlog/terminal/archived divergence without destroying runtime)
+   - `session.activity_convergence` stale busy/hooks recovery -> `hybrid` (refresh durable session activity and runtime projections, then compare with a bounded live tmux pane probe; newer durable hook evidence wins races)
+   - `task.close`/`task.close_preflight`/`task.delete`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle, investigation disposition/acceptance, and orchestration checks -> `hybrid` (read v2 issue lifecycle and evidence projection first, then compare with live runtime)
    - `task.review_handoff` external busy-equivalent session activity gate before moving to `in_review` -> `projection` (durable issue v2 lifecycle/review projection + session activity projection; active issue self-handoff remains allowed)
    - `task.integration_readiness` worker evidence gate and `task.context_risk_closeout` repeated-local-failure gate -> `projection` (durable issue projection + mailbox/observation evidence)
-   - `task.merge_base_target` branch integration target gate -> `projection` (durable issue graph + worktree projection)
+   - `task.merge_base_target` branch integration target gate -> `projection` (durable issue graph + worktree projection; explicit root-to-base requests also require issue-scoped `human.input_provided` acceptance evidence)
    - `task.follow_on_merge_candidates` follow-on merge source gate -> `projection` (durable issue graph + worktree projection)
+   - `orchestration.project_candidates` bounded project candidate classification -> `projection` (durable issue graph/lifecycle, ownership, session activity, and interaction projections)
+   - `orchestration.project_review` review queue, reviewer lease, structured evidence, and outcome gate -> `projection` (durable issue/review/ownership, mailbox/observation evidence, and worktree projections; accepted close delegates to the existing hybrid `task.close` invariant)
+   - `orchestration.claim_start` bounded worker-wave claim/start and compensation -> `hybrid` (durable ownership/start-attempt projection + daemon session-start operation/runtime)
+   - `orchestration.project_loop` durable watch cursor, deterministic action replay, and review-first scheduling -> `projection` (durable issue observation stream + orchestration checkpoint refreshed before each loop decision)
    - `issue_resources.lifecycle` issue resource desired-state gate -> `projection` (durable issue status + runtime attachment projection)
    - `interaction.waiting_human` decision-waiting and pickup exclusion gate -> `projection` (durable interaction request projection refreshed before evaluation)
+   - `investigation.waiting_human` human-findings authority gate -> `projection` (durable investigation disposition and issue-specific acceptance/review evidence refreshed before evaluation)
+   - `interaction.staleness` stale/reminder/disposition/recovery policy -> `projection` (durable interaction request projection refreshed before age evaluation and revision-safe write-through audit)
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
+   - cross-project configurable views and tmux selector ordering -> `projection` (global-daemon-owned user database refreshed from authoritative project stores; scoped issue/session/worktree/dependency keys and explicit stale/unavailable project health)
    - orchestration scope identity -> `projection` (durable project + typed rooted/project scope)
    - orchestration scope singleton -> `hybrid` (refreshed durable scope lease + live tmux runtime)
+   - rooted parent orchestration continuation -> `hybrid` (durable rooted lease/cursor + refreshed direct nested-root, interaction, completion, and session projections + live tmux wake delivery)
    - project orchestration completion -> `hybrid` (refreshed issue/review/interaction/session projections + live tmux runtime)
 
 ### Adding New Invariants (Required Checklist)
@@ -181,6 +211,16 @@ fd "filename" -t f internal cmd
 1. Do not mark migrations complete while active entrypoints still depend on transitional adapters or legacy execution paths.
 2. Runtime acceptance criteria must prove the intended production path is wired on active entrypoints, not only isolated package/tests.
 3. Cross-process boundaries must use typed protocol/domain payloads, not UI-framework message types.
+
+## Database Migration Safety Gate (Critical)
+
+1. For any migration, schema ensure/repair logic, trigger/index change, persistence-authority change, migration failure, or pre-merge review containing database changes, use `$database-migration-review` at [.codex/skills/database-migration-review/SKILL.md](.codex/skills/database-migration-review/SKILL.md).
+2. Default to exactly one new migration per merge to main, or one per independently versioned database authority when a merge genuinely changes more than one. Consolidate branch-local steps before clone testing; never squash or mutate migrations already merged or executed against any real database.
+3. Pre-merge review must test the candidate through real startup/store paths against safe temporary clones of the root user database and every registered project database. Never test candidate migrations on the originals.
+4. Require fresh, historical-upgrade, idempotent-reopen, rollback, drift, and real-database-clone evidence. Fresh-database tests alone are insufficient.
+5. Migration changes remain high risk and require three clean review passes after the final migration-affecting edit.
+6. Every migration ID must have exactly one embedded immutable artifact and a pinned SHA-256 checksum. Go-assisted migrations require a SQL/manifest artifact describing schema, data, validation, and ledger effects; callbacks may orchestrate but never replace the artifact.
+7. Registration must fail for duplicate IDs, missing/empty artifacts, checksum drift, or a registry/artifact mismatch. Applied ledger rows must record `artifact_checksum`; legacy rows may be backfilled once from the pinned catalog and must reject later mismatch.
 
 ## Active-Path Placeholder Policy
 
@@ -202,9 +242,10 @@ If any are missing, keep issue state `in_progress` or `open`.
 
 1. Use the durable `investigation` issue type for research, discovery, spikes, analysis, experiments, audits, and issues whose primary deliverable is findings, options, recommendations, or an AI Agent Band/session discussion, even when they have no code diff or repository artifact.
 2. Whenever issue intent and type disagree, correct the type with `az issue update --type <type>` and record why. Until corrected, apply this gate based on actual intent so legacy or misclassified work is not closed accidentally.
-3. Investigation-like issues require explicit, issue-specific human acceptance before integration, terminal close, cancellation, session stop, or worktree cleanup. An integration-sweep request, `in_review` state, agent/reviewer approval, or lack of a diff does not satisfy this gate.
-4. Before asking for human review, surface the findings and identify all artifacts plus the relevant Agent Band/session location. Preserve the issue, session, and worktree in review/waiting-human state and record durable evidence that human review is pending.
-5. Immediately before any terminal action, re-check the issue's type, intent, and durable evidence. Proceed only when explicit human acceptance of the investigation findings and disposition is recorded for that issue.
+3. Investigations default to the `human_findings` disposition for migration safety. Human-facing investigations require explicit, issue-specific `human.input_provided` evidence with `investigation_findings_accepted=true` before integration, terminal close, cancellation, session stop, or worktree cleanup. An integration sweep, `in_review`, reviewer approval, or lack of a diff is insufficient.
+4. AI-initiated read-only review/audit children may instead declare `internal_review` with an `investigation.disposition_declared` issue record when their findings are intermediate verification inputs consumed by implementation. They may close only after a durable orchestration `review.completed` outcome of `accepted`; a later `returned` or `integration_failed` outcome revokes readiness until a new acceptance.
+5. Before asking for human review of `human_findings`, surface the findings and identify all artifacts plus the relevant Agent Band/session location. Preserve the issue, session, and worktree in review/waiting-human state and record durable evidence that human review is pending.
+6. Immediately before any terminal action, re-check the issue's type, disposition, and durable evidence. Never infer `internal_review` from title, parentage, read-only work, or agent authorship; missing/invalid declarations remain human-facing.
 
 ## CLI/Binary Rules
 
@@ -222,7 +263,9 @@ If any are missing, keep issue state `in_progress` or `open`.
 ## Environment Rules
 
 - `.envrc` stores one shared direnv/nix-direnv layout per repository under `${XDG_CACHE_HOME:-$HOME/.cache}/direnv/layouts`, keyed by the canonical Git common directory, so linked worktrees reuse the warm profile without gaining checkout-local `.direnv` state. Run `nix-direnv-reload` after changing `flake.nix` or `flake.lock`.
-- `.envrc` exports shared repo-family `GOCACHE`/`GOPATH` under the primary repo's `.azedarach/go/` so linked worktrees do not duplicate multi-GB Go caches. If Git common-dir detection fails, it falls back to the current checkout's `.azedarach/go/`. Use `AZEDARACH_GO_CACHE_ROOT`, `AZEDARACH_GOCACHE`, or `AZEDARACH_GOPATH` for explicit local overrides.
+- `.envrc` keeps `GOPATH` and module downloads shared under the primary repo's `.azedarach/go/path`, but assigns build output to `.azedarach/go/caches/v1/<normal|race|coverage>/<main|issue-ID>`. It exports `-trimpath` through `GOFLAGS`; `AZEDARACH_GO_CACHE_ROOT` and `AZEDARACH_GOCACHE` may only restate their derived daemon-authoritative locations and are rejected when they redirect outside the project layout. `AZEDARACH_GOPATH` remains an explicit local module-download override.
+- Managed validation serializes on the repository-family Go cache lock and defaults to a 10 GiB soft warning plus a 28 GiB hard refusal. Override bytes with `AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES` and `AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES`; opt into selected-namespace maintenance with `AZEDARACH_GO_CACHE_AUTO_MAINTAIN=1`.
+- Use `just go-cache-inventory` before legacy cleanup. `just go-cache-clean-legacy --confirm` uses supported Go cleanup for legacy build caches; add `--include-gopath-modcache` only to remove the legacy module download cache. It never removes legacy GOPATH binaries or other user files.
 - After `direnv allow`, use normal `go ...` commands from repo root without per-command env prefixes.
 
 ## Git Safety Rules

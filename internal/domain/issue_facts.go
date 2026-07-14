@@ -8,8 +8,9 @@ import (
 type WaitingHumanSource string
 
 const (
-	WaitingHumanSourceInteractionRequest WaitingHumanSource = "interaction_request"
-	WaitingHumanSourceRuntimePrompt      WaitingHumanSource = "runtime_prompt"
+	WaitingHumanSourceInteractionRequest      WaitingHumanSource = "interaction_request"
+	WaitingHumanSourceRuntimePrompt           WaitingHumanSource = "runtime_prompt"
+	WaitingHumanSourceInvestigationAcceptance WaitingHumanSource = "investigation_acceptance"
 )
 
 type IssueFactReason struct {
@@ -27,14 +28,16 @@ type IssueOperationBlocker struct {
 }
 
 type IssueFactsInput struct {
-	Status             Status
-	Priority           Priority
-	State              IssueState
-	Session            *Session
-	HasTmuxSession     bool
-	OperationBlockers  []IssueOperationBlocker
-	DecisionWaiting    bool
-	DecisionWaitReason string
+	Status                  Status
+	Priority                Priority
+	Type                    TaskType
+	State                   IssueState
+	Session                 *Session
+	HasTmuxSession          bool
+	OperationBlockers       []IssueOperationBlocker
+	DecisionWaiting         bool
+	DecisionWaitReason      string
+	InvestigationAcceptance *InvestigationAcceptance
 }
 
 type IssueFacts struct {
@@ -43,7 +46,6 @@ type IssueFacts struct {
 	ReviewReadyVisible bool                    `json:"review_ready_visible" msgpack:"review_ready_visible"`
 	ClosedOutcome      IssueCloseOutcome       `json:"closed_outcome" msgpack:"closed_outcome"`
 	ArchiveState       IssueArchiveState       `json:"archive_state" msgpack:"archive_state"`
-	DeletionState      IssueDeletionState      `json:"deletion_state" msgpack:"deletion_state"`
 	BoardPhase         IssueBoardPhase         `json:"board_phase" msgpack:"board_phase"`
 	DisplayPhase       IssueDisplayPhase       `json:"display_phase" msgpack:"display_phase"`
 	DisplayStatus      Status                  `json:"display_status,omitempty" msgpack:"display_status,omitempty"`
@@ -61,13 +63,33 @@ type IssueFacts struct {
 	Reasons            []IssueFactReason       `json:"reasons,omitempty" msgpack:"reasons,omitempty"`
 }
 
+type HumanAttentionTier int
+
+const (
+	HumanAttentionNone HumanAttentionTier = iota
+	HumanAttentionReviewReady
+	HumanAttentionWaitingHuman
+)
+
+// HumanAttentionRank implements the product ordering contract: waiting-human
+// work first, visibly review-ready work second, then unattended work.
+func HumanAttentionRank(task Task) HumanAttentionTier {
+	facts := task.IssueFacts()
+	if facts.WaitingHuman {
+		return HumanAttentionWaitingHuman
+	}
+	if facts.ReviewReadyVisible {
+		return HumanAttentionReviewReady
+	}
+	return HumanAttentionNone
+}
+
 func (f IssueFacts) IsZero() bool {
 	return f.LifecycleState == "" &&
 		f.ReviewState == "" &&
 		!f.ReviewReadyVisible &&
 		f.ClosedOutcome == "" &&
 		f.ArchiveState == "" &&
-		f.DeletionState == "" &&
 		f.BoardPhase == "" &&
 		f.DisplayPhase == "" &&
 		f.DisplayStatus == "" &&
@@ -131,7 +153,6 @@ func DeriveIssueFacts(input IssueFactsInput) IssueFacts {
 		ReviewState:        state.Review(),
 		ClosedOutcome:      state.CloseOutcome(),
 		ArchiveState:       state.Archive(),
-		DeletionState:      state.Deletion(),
 		BoardPhase:         state.BoardPhase(),
 		DisplayPhase:       state.DisplayPhase(),
 		DisplayStatus:      state.DisplayPhase().FilterStatus(),
@@ -160,12 +181,6 @@ func DeriveIssueFacts(input IssueFactsInput) IssueFacts {
 			Message: "issue is archived",
 		})
 	}
-	if state.IsTombstoned() {
-		facts.Reasons = append(facts.Reasons, IssueFactReason{
-			Code:    "tombstoned",
-			Message: "issue is tombstoned",
-		})
-	}
 
 	applySessionFacts(&facts, input.Session, input.HasTmuxSession)
 	if input.DecisionWaiting {
@@ -173,6 +188,14 @@ func DeriveIssueFacts(input IssueFactsInput) IssueFacts {
 		facts.WaitingHumanSource = WaitingHumanSourceInteractionRequest
 		facts.WaitingHumanReason = strings.TrimSpace(input.DecisionWaitReason)
 		facts.Reasons = append(facts.Reasons, IssueFactReason{Code: "interaction_request", Message: facts.WaitingHumanReason})
+	}
+	if input.Type == TypeInvestigation && input.InvestigationAcceptance != nil &&
+		input.InvestigationAcceptance.Disposition == InvestigationDispositionHumanFindings &&
+		!input.InvestigationAcceptance.Accepted {
+		facts.WaitingHuman = true
+		facts.WaitingHumanSource = WaitingHumanSourceInvestigationAcceptance
+		facts.WaitingHumanReason = strings.TrimSpace(input.InvestigationAcceptance.Reason)
+		facts.Reasons = append(facts.Reasons, IssueFactReason{Code: "investigation_acceptance", Message: facts.WaitingHumanReason})
 	}
 	applyReviewReadyFacts(&facts, state, input.Session, input.HasTmuxSession)
 	facts.Reasons = append(facts.Reasons, IssueFactReason{
@@ -189,6 +212,7 @@ func (t Task) IssueFacts() IssueFacts {
 	return DeriveIssueFacts(IssueFactsInput{
 		Status:         t.Status,
 		Priority:       t.Priority,
+		Type:           t.Type,
 		State:          t.State,
 		Session:        t.Session,
 		HasTmuxSession: t.HasTmuxSession,

@@ -25,6 +25,16 @@ type LearnService interface {
 	Supersede(context.Context, protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error)
 	Doctor(context.Context, protocol.LearnDoctorRequestBody) (protocol.LearnDoctorResponseBody, error)
 	GC(context.Context, protocol.LearnGCRequestBody) (protocol.LearnGCResponseBody, error)
+	Suggest(context.Context, protocol.LearnSuggestRequestBody) (protocol.LearnSuggestResponseBody, error)
+	Consolidate(context.Context, protocol.LearnConsolidateRequestBody) (protocol.LearnConsolidateResponseBody, error)
+	RejectSuggestion(context.Context, protocol.LearnSuggestionRejectRequestBody) (protocol.LearnSuggestionRejectResponseBody, error)
+	Activate(context.Context, protocol.LearnActivateRequestBody) (protocol.LearnActivateResponseBody, error)
+	Feedback(context.Context, protocol.LearnFeedbackRequestBody) (protocol.LearnFeedbackResponseBody, error)
+	Capture(context.Context, protocol.LearnCaptureRequestBody) (protocol.LearnCaptureResponseBody, error)
+	ContextualActivate(context.Context, protocol.LearnContextualActivateRequestBody) (protocol.LearnContextualActivateResponseBody, error)
+	ConfirmActivation(context.Context, protocol.LearnActivationConfirmRequestBody) (protocol.LearnActivationConfirmResponseBody, error)
+	AbandonActivation(context.Context, protocol.LearnActivationAbandonRequestBody) (protocol.LearnActivationAbandonResponseBody, error)
+	Health(context.Context, protocol.LearnHealthRequestBody) (protocol.LearnHealthResponseBody, error)
 }
 
 type LearnHandler struct {
@@ -52,6 +62,88 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 		return resp
 	}
 	switch req.Command {
+	case protocol.CommandLearnActivationAbandon:
+		var cmd protocol.LearnActivationAbandonRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.ActivationID, cmd.Reason = strings.TrimSpace(cmd.ActivationID), strings.TrimSpace(cmd.Reason)
+		if cmd.ActivationID == "" || cmd.Reason == "" {
+			return learnInvalidRequest(resp, "activation_id and reason are required")
+		}
+		return learnJSONResponse(ctx, resp, h.service.AbandonActivation, cmd)
+	case protocol.CommandLearnActivationConfirm:
+		var cmd protocol.LearnActivationConfirmRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.ActivationID = strings.TrimSpace(cmd.ActivationID)
+		if cmd.ActivationID == "" || cmd.TokenCost < 0 || cmd.TokenCost > 32768 {
+			return learnInvalidRequest(resp, "valid activation_id and token_cost are required")
+		}
+		return learnJSONResponse(ctx, resp, h.service.ConfirmActivation, cmd)
+	case protocol.CommandLearnHealth:
+		var cmd protocol.LearnHealthRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		return learnJSONResponse(ctx, resp, h.service.Health, cmd)
+	case protocol.CommandLearnCapture:
+		var cmd protocol.LearnCaptureRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.ObservedBehavior, cmd.PreferredBehavior, cmd.Provenance.Source = strings.TrimSpace(cmd.ObservedBehavior), strings.TrimSpace(cmd.PreferredBehavior), strings.TrimSpace(cmd.Provenance.Source)
+		if cmd.ObservedBehavior == "" || cmd.PreferredBehavior == "" || cmd.Provenance.Source == "" {
+			return learnInvalidRequest(resp, "observed_behavior, preferred_behavior, and provenance.source are required")
+		}
+		if !domain.LearningSensitivity(cmd.Sensitivity).Valid() {
+			return learnInvalidRequest(resp, "sensitivity must be public|private")
+		}
+		return learnJSONResponse(ctx, resp, h.service.Capture, cmd)
+	case protocol.CommandLearnContextualActivate:
+		var cmd protocol.LearnContextualActivateRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.Purpose, cmd.Surface, cmd.Query = strings.TrimSpace(cmd.Purpose), strings.TrimSpace(cmd.Surface), strings.TrimSpace(cmd.Query)
+		if !domain.LearningActivationPurpose(cmd.Purpose).Valid() || cmd.Surface == "" || strings.TrimSpace(cmd.SessionID.String()) == "" {
+			return learnInvalidRequest(resp, "valid purpose, surface, and session_id are required")
+		}
+		if cmd.TokenBudget <= 0 || cmd.TokenBudget > 32768 {
+			return learnInvalidRequest(resp, "token_budget must be between 1 and 32768")
+		}
+		return learnJSONResponse(ctx, resp, h.service.ContextualActivate, cmd)
+	case protocol.CommandLearnActivate:
+		var cmd protocol.LearnActivateRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.Surface, cmd.Explanation = strings.TrimSpace(cmd.Surface), strings.TrimSpace(cmd.Explanation)
+		cmd.LearningIDs = compactStrings(cmd.LearningIDs)
+		if cmd.Surface == "" || len(cmd.LearningIDs) == 0 {
+			return learnInvalidRequest(resp, "surface and learning_ids are required")
+		}
+		if cmd.TokenCost < 0 || cmd.TokenCost > 32768 {
+			return learnInvalidRequest(resp, "token_cost must be between 0 and 32768")
+		}
+		return learnJSONResponse(ctx, resp, h.service.Activate, cmd)
+	case protocol.CommandLearnFeedback:
+		var cmd protocol.LearnFeedbackRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.ActivationID, cmd.IdempotencyKey, cmd.Outcome, cmd.Source, cmd.Explanation = strings.TrimSpace(cmd.ActivationID), strings.TrimSpace(cmd.IdempotencyKey), strings.TrimSpace(cmd.Outcome), strings.TrimSpace(cmd.Source), strings.TrimSpace(cmd.Explanation)
+		if cmd.ActivationID == "" || cmd.IdempotencyKey == "" {
+			return learnInvalidRequest(resp, "activation_id and idempotency_key are required")
+		}
+		if !domain.LearningActivationOutcome(cmd.Outcome).Valid() {
+			return learnInvalidRequest(resp, "outcome must be helpful|followed|contradicted|unknown")
+		}
+		if !domain.LearningOutcomeSource(cmd.Source).Valid() {
+			return learnInvalidRequest(resp, "source must be human|agent|inferred (explicit is retained for compatibility)")
+		}
+		return learnJSONResponse(ctx, resp, h.service.Feedback, cmd)
 	case protocol.CommandLearnAdd:
 		var cmd protocol.LearnAddRequestBody
 		if !decodeLearnRequest(req.Body, &cmd, &resp) {
@@ -274,6 +366,44 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 			return learnInvalidRequest(resp, "limit must be non-negative")
 		}
 		return learnJSONResponse(ctx, resp, h.service.GC, cmd)
+	case protocol.CommandLearnSuggest:
+		var cmd protocol.LearnSuggestRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.ProjectID = strings.TrimSpace(cmd.ProjectID)
+		cmd.Status = strings.TrimSpace(cmd.Status)
+		if cmd.Limit < 0 {
+			return learnInvalidRequest(resp, "limit must be non-negative")
+		}
+		if cmd.Status != "" && cmd.Status != "pending" && cmd.Status != "rejected" && cmd.Status != "confirmed" {
+			return learnInvalidRequest(resp, "invalid suggestion status")
+		}
+		return learnJSONResponse(ctx, resp, h.service.Suggest, cmd)
+	case protocol.CommandLearnConsolidate:
+		var cmd protocol.LearnConsolidateRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.SuggestionID = strings.TrimSpace(cmd.SuggestionID)
+		cmd.CanonicalLearningID = strings.TrimSpace(cmd.CanonicalLearningID)
+		cmd.Summary = strings.TrimSpace(cmd.Summary)
+		cmd.Note = strings.TrimSpace(cmd.Note)
+		if cmd.SuggestionID == "" || cmd.CanonicalLearningID == "" || cmd.Note == "" {
+			return learnInvalidRequest(resp, "suggestion_id, canonical_learning_id, and note are required")
+		}
+		return learnJSONResponse(ctx, resp, h.service.Consolidate, cmd)
+	case protocol.CommandLearnSuggestionReject:
+		var cmd protocol.LearnSuggestionRejectRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.SuggestionID = strings.TrimSpace(cmd.SuggestionID)
+		cmd.Note = strings.TrimSpace(cmd.Note)
+		if cmd.SuggestionID == "" || cmd.Note == "" {
+			return learnInvalidRequest(resp, "suggestion_id and note are required")
+		}
+		return learnJSONResponse(ctx, resp, h.service.RejectSuggestion, cmd)
 	default:
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeUnsupportedCommand,

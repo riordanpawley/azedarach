@@ -2,7 +2,9 @@ package issues
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -10,9 +12,42 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-func TestBoardViewsSeedDefaultsAndIsolateProjects(t *testing.T) {
+func TestBoardViewReadsRemainPureWhileAnotherWriterIsActive(t *testing.T) {
 	ctx := context.Background()
-	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
+	client := newTestClient(t, WithSQLiteBusyPolicy(10*time.Millisecond, time.Millisecond))
+	t.Cleanup(func() { _ = client.CloseDB() })
+	projectID := "proj-pure-board-read"
+
+	if err := client.EnsureBoardViews(ctx, projectID); err != nil {
+		t.Fatalf("initialize board views: %v", err)
+	}
+
+	lockDB, err := sql.Open("sqlite", "file:"+filepath.ToSlash(client.dbPath)+"?_txlock=immediate")
+	if err != nil {
+		t.Fatalf("open lock database: %v", err)
+	}
+	t.Cleanup(func() { _ = lockDB.Close() })
+	if _, err := lockDB.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatalf("begin active writer: %v", err)
+	}
+	defer func() { _, _ = lockDB.ExecContext(context.Background(), `ROLLBACK`) }()
+
+	views, err := client.ListBoardViews(ctx, projectID)
+	if err != nil {
+		t.Fatalf("ListBoardViews while writer active: %v", err)
+	}
+	if !boardViewTestHasView(views, domain.DefaultBoardViewID) {
+		t.Fatalf("ListBoardViews omitted default built-in: %+v", views)
+	}
+	if _, err := client.GetBoardView(ctx, projectID, domain.DefaultBoardViewID); err != nil {
+		t.Fatalf("GetBoardView while writer active: %v", err)
+	}
+}
+
+func TestBoardViewsSeedDefaultsAndIsolateProjects(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
 	t.Cleanup(func() {
 		if err := client.CloseDB(); err != nil {
 			t.Fatalf("CloseDB error: %v", err)
@@ -27,6 +62,9 @@ func TestBoardViewsSeedDefaultsAndIsolateProjects(t *testing.T) {
 	viewsA, err := client.ListBoardViews(ctx, projectA)
 	if err != nil {
 		t.Fatalf("ListBoardViews projectA error: %v", err)
+	}
+	if err := client.EnsureBoardViews(ctx, projectB); err != nil {
+		t.Fatalf("EnsureBoardViews projectB error: %v", err)
 	}
 	viewsB, err := client.ListBoardViews(ctx, projectB)
 	if err != nil {
@@ -51,8 +89,9 @@ func TestBoardViewsSeedDefaultsAndIsolateProjects(t *testing.T) {
 }
 
 func TestBoardViewCorruptDefinitionFailsSafely(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
+	client := newTestClient(t)
 	t.Cleanup(func() {
 		if err := client.CloseDB(); err != nil {
 			t.Fatalf("CloseDB error: %v", err)
@@ -80,8 +119,9 @@ func TestBoardViewCorruptDefinitionFailsSafely(t *testing.T) {
 }
 
 func TestBoardViewInvalidTypedDefinitionFailsSafely(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
+	client := newTestClient(t)
 	t.Cleanup(func() {
 		if err := client.CloseDB(); err != nil {
 			t.Fatalf("CloseDB error: %v", err)
@@ -110,15 +150,16 @@ func TestBoardViewInvalidTypedDefinitionFailsSafely(t *testing.T) {
 }
 
 func TestBoardViewsReseedBuiltInDefinitions(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
+	client := newTestClient(t)
 	t.Cleanup(func() {
 		if err := client.CloseDB(); err != nil {
 			t.Fatalf("CloseDB error: %v", err)
 		}
 	})
 	projectID := "proj-reseed-board"
-	if _, err := client.ListBoardViews(ctx, projectID); err != nil {
+	if err := client.EnsureBoardViews(ctx, projectID); err != nil {
 		t.Fatalf("ListBoardViews seed error: %v", err)
 	}
 	db, err := client.dbHandle()
@@ -133,6 +174,9 @@ func TestBoardViewsReseedBuiltInDefinitions(t *testing.T) {
 		t.Fatalf("break default view: %v", err)
 	}
 
+	if err := client.EnsureBoardViews(ctx, projectID); err != nil {
+		t.Fatalf("EnsureBoardViews repair error: %v", err)
+	}
 	record, err := client.GetBoardView(ctx, projectID, domain.DefaultBoardViewID)
 	if err != nil {
 		t.Fatalf("GetBoardView after reseed error: %v", err)
@@ -146,11 +190,12 @@ func TestBoardViewsReseedBuiltInDefinitions(t *testing.T) {
 }
 
 func TestBoardViewsMigrateLegacyBuiltInsAndPreserveCustomIDConflict(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
+	client := newTestClient(t)
 	t.Cleanup(func() { _ = client.CloseDB() })
 	projectID := "proj-board-upgrade"
-	if _, err := client.ListBoardViews(ctx, projectID); err != nil {
+	if err := client.EnsureBoardViews(ctx, projectID); err != nil {
 		t.Fatalf("initial seed: %v", err)
 	}
 	db, err := client.dbHandle()
@@ -179,6 +224,9 @@ func TestBoardViewsMigrateLegacyBuiltInsAndPreserveCustomIDConflict(t *testing.T
 		t.Fatalf("seed upgraded catalog: %v", err)
 	}
 
+	if err := client.EnsureBoardViews(ctx, projectID); err != nil {
+		t.Fatalf("EnsureBoardViews upgrade: %v", err)
+	}
 	views, err := client.ListBoardViews(ctx, projectID)
 	if err != nil {
 		t.Fatalf("ListBoardViews upgrade: %v", err)
@@ -196,14 +244,18 @@ func TestBoardViewsMigrateLegacyBuiltInsAndPreserveCustomIDConflict(t *testing.T
 	if preserved.BuiltIn || preserved.View.Title != custom.Title {
 		t.Fatalf("preserved custom = %+v", preserved)
 	}
+	if got := preserved.UpdatedAt.Format(time.RFC3339Nano); got != now {
+		t.Fatalf("preserved custom updated_at = %q, want %q", got, now)
+	}
 }
 
 func TestBoardViewsCatalogMigrationRollsBackOnCorruptIDConflict(t *testing.T) {
+	parallelIssueStoreTest(t)
 	ctx := context.Background()
-	client := NewClientAtPath(t.TempDir()+"/issues.db", nil)
+	client := newTestClient(t)
 	t.Cleanup(func() { _ = client.CloseDB() })
 	projectID := "proj-board-corrupt-upgrade"
-	if _, err := client.ListBoardViews(ctx, projectID); err != nil {
+	if err := client.EnsureBoardViews(ctx, projectID); err != nil {
 		t.Fatalf("initial seed: %v", err)
 	}
 	db, err := client.dbHandle()
@@ -224,7 +276,7 @@ func TestBoardViewsCatalogMigrationRollsBackOnCorruptIDConflict(t *testing.T) {
 		t.Fatalf("seed rollback sentinel: %v", err)
 	}
 
-	_, err = client.ListBoardViews(ctx, projectID)
+	err = client.EnsureBoardViews(ctx, projectID)
 	if err == nil || !strings.Contains(err.Error(), `conflicting with built-in "orchestration"`) {
 		t.Fatalf("ListBoardViews error = %v, want corrupt conflict", err)
 	}

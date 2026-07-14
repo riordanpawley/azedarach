@@ -82,12 +82,54 @@ func TestIssueFactsDeriveReviewReadyVisibilityAndReasons(t *testing.T) {
 	}
 }
 
+func TestHumanAttentionRank(t *testing.T) {
+	tests := []struct {
+		name string
+		task Task
+		want HumanAttentionTier
+	}{
+		{name: "ordinary work", task: Task{Status: StatusInProgress}, want: HumanAttentionNone},
+		{name: "review ready", task: Task{Status: StatusInReview}, want: HumanAttentionReviewReady},
+		{name: "waiting human", task: Task{Status: StatusInProgress, Session: &Session{Activity: "waiting-for-human"}}, want: HumanAttentionWaitingHuman},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HumanAttentionRank(tt.task); got != tt.want {
+				t.Fatalf("HumanAttentionRank() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIssueFactsProjectOnlyHumanFindingsAsHumanAuthority(t *testing.T) {
+	tests := []struct {
+		name       string
+		acceptance InvestigationAcceptance
+		wantHuman  bool
+	}{
+		{name: "unaccepted human findings", acceptance: InvestigationAcceptance{Disposition: InvestigationDispositionHumanFindings, Reason: "explicit acceptance required"}, wantHuman: true},
+		{name: "accepted human findings", acceptance: InvestigationAcceptance{Disposition: InvestigationDispositionHumanFindings, Accepted: true}},
+		{name: "unaccepted internal review", acceptance: InvestigationAcceptance{Disposition: InvestigationDispositionInternalReview, Reason: "review outcome required"}},
+		{name: "accepted internal review", acceptance: InvestigationAcceptance{Disposition: InvestigationDispositionInternalReview, Accepted: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			facts := DeriveIssueFacts(IssueFactsInput{Status: StatusInReview, Type: TypeInvestigation, InvestigationAcceptance: &tt.acceptance})
+			if facts.WaitingHuman != tt.wantHuman {
+				t.Fatalf("WaitingHuman = %t, want %t: %+v", facts.WaitingHuman, tt.wantHuman, facts)
+			}
+			if tt.wantHuman && (facts.WaitingHumanSource != WaitingHumanSourceInvestigationAcceptance || facts.WaitingHumanReason != tt.acceptance.Reason) {
+				t.Fatalf("human authority facts = %+v", facts)
+			}
+		})
+	}
+}
+
 func TestIssueFactsExposeClosedArchiveTombstoneAndOperationBlockers(t *testing.T) {
 	closed := mustIssueState(t, IssueStateParts{
 		Workflow:     IssueWorkflowClosed,
 		CloseOutcome: IssueCloseCancelled,
 		Archive:      IssueArchiveArchived,
-		Deletion:     IssueDeletionTombstoned,
 	})
 	facts := DeriveIssueFacts(IssueFactsInput{
 		Status: StatusDone,
@@ -104,8 +146,8 @@ func TestIssueFactsExposeClosedArchiveTombstoneAndOperationBlockers(t *testing.T
 	if facts.DisplayPhase != IssueDisplayCancelled || facts.ClosedOutcome != IssueCloseCancelled {
 		t.Fatalf("facts = %+v, want cancelled display with cancelled outcome", facts)
 	}
-	if facts.ArchiveState != IssueArchiveArchived || facts.DeletionState != IssueDeletionTombstoned {
-		t.Fatalf("archive/deletion = %s/%s, want archived/tombstoned", facts.ArchiveState, facts.DeletionState)
+	if facts.ArchiveState != IssueArchiveArchived {
+		t.Fatalf("archive = %s, want archived", facts.ArchiveState)
 	}
 	if !facts.DelegatedOperation || len(facts.OperationBlockers) != 1 {
 		t.Fatalf("operation blockers = %+v, delegated=%t", facts.OperationBlockers, facts.DelegatedOperation)
@@ -120,7 +162,7 @@ func TestIssueFactsExposeClosedArchiveTombstoneAndOperationBlockers(t *testing.T
 	}).OperationBlockers[0].BlockedResourceKeys[0]; got != "issue:az-1" {
 		t.Fatalf("operation blocker resources were not cloned, got %q", got)
 	}
-	for _, want := range []string{"closed outcome is cancelled", "issue is archived", "issue is tombstoned"} {
+	for _, want := range []string{"closed outcome is cancelled", "issue is archived"} {
 		if !issueFactReasonsContain(facts, want) {
 			t.Fatalf("reasons = %#v, want %q", facts.ReasonMessages(), want)
 		}

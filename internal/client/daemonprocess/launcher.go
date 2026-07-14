@@ -39,12 +39,137 @@ type Launcher struct {
 	replaceReason      string
 	sleepFn            func(time.Duration)
 	terminateLockOwner func(lockPath string) error
+	startProcess       daemonProcessStarter
 }
 
 type daemonCommand struct {
 	executable string
 	args       []string
 	dir        string
+}
+
+type daemonProcessSpec struct {
+	command daemonCommand
+	args    []string
+	stdout  io.Writer
+	stderr  io.Writer
+}
+
+type daemonProcess interface {
+	exited() <-chan error
+	stopAndWait(context.Context) error
+}
+
+type daemonProcessStarter func(daemonProcessSpec) (daemonProcess, error)
+
+type execDaemonProcess struct {
+	cmd                *exec.Cmd
+	done               chan error
+	signalProcessGroup func(syscall.Signal) error
+}
+
+var errSpawnedDaemonExited = errors.New("spawned daemon process exited before readiness")
+
+func startExecDaemonProcess(spec daemonProcessSpec) (daemonProcess, error) {
+	cmd := exec.Command(spec.command.executable, spec.args...)
+	if strings.TrimSpace(spec.command.dir) != "" {
+		cmd.Dir = spec.command.dir
+	}
+	cmd.Stdout = spec.stdout
+	cmd.Stderr = spec.stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	process := &execDaemonProcess{
+		cmd:  cmd,
+		done: make(chan error, 1),
+		signalProcessGroup: func(signal syscall.Signal) error {
+			return syscall.Kill(-cmd.Process.Pid, signal)
+		},
+	}
+	go func() { process.done <- cmd.Wait() }()
+	return process, nil
+}
+
+func spawnedDaemonExitError(waitErr error) error {
+	if waitErr == nil {
+		return errSpawnedDaemonExited
+	}
+	return fmt.Errorf("%w: %v", errSpawnedDaemonExited, waitErr)
+}
+
+func stoppedByCleanupSignal(waitErr error, signalDelivered bool) bool {
+	if !signalDelivered {
+		return false
+	}
+	if waitErr == nil {
+		// The daemon may trap SIGTERM and exit cleanly.
+		return true
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(waitErr, &exitErr) {
+		return false
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled() && status.Signal() == syscall.SIGTERM
+}
+
+func (p *execDaemonProcess) signal(signal syscall.Signal) error {
+	if p.signalProcessGroup != nil {
+		return p.signalProcessGroup(signal)
+	}
+	return syscall.Kill(-p.cmd.Process.Pid, signal)
+}
+
+func (p *execDaemonProcess) exited() <-chan error {
+	return p.done
+}
+
+func (p *execDaemonProcess) stopAndWait(ctx context.Context) error {
+	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+		return nil
+	}
+	select {
+	case waitErr := <-p.done:
+		return spawnedDaemonExitError(waitErr)
+	default:
+	}
+	pid := p.cmd.Process.Pid
+	termErr := p.signal(syscall.SIGTERM)
+	if termErr != nil && !errors.Is(termErr, syscall.ESRCH) {
+		// A short-lived child can exit between the initial done probe and the
+		// process-group signal. On some platforms that race is reported as EPERM
+		// rather than ESRCH, while cmd.Wait is still publishing the exit status.
+		// Prefer that authoritative status when the caller supplied the bounded
+		// cleanup context used by Launcher.Start.
+		if _, bounded := ctx.Deadline(); bounded {
+			select {
+			case waitErr := <-p.done:
+				return spawnedDaemonExitError(waitErr)
+			case <-ctx.Done():
+				return fmt.Errorf("terminate spawned daemon process group %d: %w", pid, termErr)
+			}
+		}
+		return fmt.Errorf("terminate spawned daemon process group %d: %w", pid, termErr)
+	}
+	select {
+	case waitErr := <-p.done:
+		if stoppedByCleanupSignal(waitErr, termErr == nil) {
+			return nil
+		}
+		return spawnedDaemonExitError(waitErr)
+	case <-ctx.Done():
+		if err := p.signal(syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return fmt.Errorf("force-kill spawned daemon process group %d after cleanup timeout: %w", pid, err)
+		}
+		select {
+		case <-p.done:
+			return fmt.Errorf("wait for spawned daemon process cleanup: %w", ctx.Err())
+		case <-time.After(time.Second):
+			return fmt.Errorf("spawned daemon process group %d did not reap after force-kill: %w", pid, ctx.Err())
+		}
+	}
 }
 
 func (c daemonCommand) displayName() string {
@@ -188,24 +313,48 @@ func (l *Launcher) Start(ctx context.Context) error {
 	)
 	var spanErr error
 	defer func() { endSpan(spanErr) }()
-	cmd := exec.Command(daemonCmd.executable, args...)
-	if strings.TrimSpace(daemonCmd.dir) != "" {
-		cmd.Dir = daemonCmd.dir
+	startProcess := l.startProcess
+	if startProcess == nil {
+		startProcess = startExecDaemonProcess
 	}
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
+	process, err := startProcess(daemonProcessSpec{
+		command: daemonCmd,
+		args:    args,
+		stdout:  logFile,
+		stderr:  logFile,
+	})
+	if err != nil {
 		spanErr = err
 		return fmt.Errorf("start daemon %s: %w", daemonCmd.displayName(), err)
 	}
+	if process == nil {
+		spanErr = errors.New("daemon process starter returned nil process")
+		return fmt.Errorf("start daemon %s: %w", daemonCmd.displayName(), spanErr)
+	}
 	if l.waitForReady != nil {
 		readyCtx, cancel := context.WithTimeout(launchCtx, 15*time.Second)
-		err := l.waitForReady(readyCtx, l.SocketPath)
-		cancel()
+		readyResult := make(chan error, 1)
+		go func() {
+			readyResult <- l.waitForReady(readyCtx, l.SocketPath)
+		}()
+		select {
+		case waitErr := <-process.exited():
+			cancel()
+			spanErr = spawnedDaemonExitError(waitErr)
+			return fmt.Errorf("wait for daemon socket readiness: %w", spanErr)
+		case err = <-readyResult:
+			cancel()
+		}
 		if err != nil {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			cleanupErr := process.stopAndWait(cleanupCtx)
+			cleanupCancel()
+			if cleanupErr != nil {
+				spanErr = errors.Join(err, cleanupErr)
+				return fmt.Errorf("wait for daemon socket readiness and cleanup spawned daemon: %w", spanErr)
+			}
 			spanErr = err
-			return fmt.Errorf("wait for daemon socket readiness: %w", err)
+			return fmt.Errorf("wait for daemon socket readiness: %w (spawned daemon cleaned up)", err)
 		}
 	}
 	return nil

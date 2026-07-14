@@ -1,4 +1,4 @@
-# Issue State Model V2 Rollout
+# Factored Issue State and Managed Runtime Rollout
 
 ## Scope
 
@@ -7,28 +7,40 @@ CLI/TUI phases derived from that authority. The rollout is implemented through
 the issue domain model, SQLite startup migration, issue-store read/write paths,
 daemon readiness policy, and CLI/TUI display filters.
 
-The linked spec requirement is `cyp-v2-issue-state-domain`.
+The current corrective requirement is `dec-lifecycle-runtime-state-product`.
 
 ## Durable State
 
-The durable issue-store authority is:
+The canonical domain authority is the product of three small enums:
+
+- disposition: `backlog`, `ready`, `completed`, or `cancelled`;
+- engagement: `idle`, `working`, or `review_requested`, and non-ready
+  dispositions are constrained to idle;
+- visibility: `live` or `archived`.
+
+`open` is derived from `ready + idle`; it is not durable lifecycle authority.
+Issue deletion is not part of this state product. Dependency-edge tombstones
+remain separate relationship authority.
+
+SQLite persists the canonical disposition/engagement/visibility product above.
+The following columns are one-way, trigger-checked compatibility projections:
 
 - `lifecycle_state`: `backlog`, `open`, `active`, or `closed`.
 - `review_state`: `none` or `requested`; review is valid only for active
   workflow.
 - `closed_outcome`: `none`, `completed`, or `cancelled`; closed workflow must
   have a non-`none` outcome.
-- `archived_at`: soft-archive visibility authority.
+- `archived_at`: archive transition timestamp; `visibility` is authority.
 - dependency `tombstoned_at`: dependency-edge deletion authority.
 
-Legacy `status` and `deleted_at` remain compatibility mirrors for callers,
-search indexes, and existing external integrations. New lifecycle decisions must
-not infer authority directly from raw `status` or `deleted_at` when v2 fields are
-available.
+Legacy `status`, `lifecycle_state`, `review_state`, and `closed_outcome` remain
+compatibility projections for callers and existing integrations. Issue
+`deleted_at` is constrained null; issue deletion is physical and dependency-edge
+tombstones remain separate. Active decisions read only canonical fields.
 
 Archive and tombstone semantics are intentionally separate:
 
-- Archive hides/restores an issue through `archived_at`.
+- Archive hides/restores an issue through `visibility`; `archived_at` records time.
 - Tombstone/delete removes or deactivates records and relationships through the
   relevant tombstone/delete path.
 - Workflow transitions must not use archive or tombstone state as a substitute
@@ -42,12 +54,12 @@ session activity:
 
 | Derived phase | Source |
 | --- | --- |
-| `backlog` | `lifecycle_state=backlog` |
-| `open` | `lifecycle_state=open` |
-| `active` | `lifecycle_state=active` and no review-ready presentation |
-| `review` | `lifecycle_state=active`, `review_state=requested`, and session activity is idle/done/no-agent or equivalent |
-| `done` | `lifecycle_state=closed` and `closed_outcome=completed` |
-| `cancelled` | `lifecycle_state=closed` and `closed_outcome=cancelled` |
+| `backlog` | disposition `backlog`, engagement `idle` |
+| `open` | disposition `ready`, engagement `idle` |
+| `active` | disposition `ready`, engagement `working` |
+| `review` | disposition `ready`, engagement `review_requested`, and review-ready runtime activity |
+| `done` | disposition `completed` |
+| `cancelled` | disposition `cancelled` |
 
 Review handoff is a derived readiness phase, not a durable workflow. An issue
 with `review_state=requested` remains operationally active while its session
@@ -74,11 +86,17 @@ known-good database. Do not delete the marker to force startup; that bypasses th
 rollback contract and can let later migrations run against a partially upgraded
 schema.
 
-Migration `0030` reapplies closed-runtime invariant triggers against v2
-authority. Closed-runtime guards now read `lifecycle_state` and `archived_at`
-instead of legacy `status` and `deleted_at`.
+Migration `0045` installs canonical state-product and resource guards, migrates
+unambiguous ownership into typed coordination leases, and rewrites runtime
+aggregate guards to read disposition and visibility. Legacy v2 columns are no
+longer decision authority.
 
 ## Invariant Sources
+
+- `session.issue_lifecycle_runtime` is `hybrid`: refresh factored issue state,
+  then compare it with live tmux. A live runtime repairs `ready + idle` to
+  `ready + working`. Backlog, terminal, or archived divergence returns an
+  explicit invariant error and preserves the runtime for safe reconciliation.
 
 State-model v2 does not change the daemon invariant source categories, but it
 changes the durable projection fields those invariants must read:

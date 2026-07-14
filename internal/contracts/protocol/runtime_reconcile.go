@@ -22,9 +22,19 @@ type RuntimeReconcileIssueRequestBody struct {
 
 // RuntimeReconcileResponseBody is the deterministic response payload for runtime reconciliation.
 type RuntimeReconcileResponseBody struct {
-	ProjectID             naming.ProjectID  `json:"project_id" msgpack:"project_id"`
-	WorktreesRefreshed    int               `json:"worktrees_refreshed" msgpack:"worktrees_refreshed"`
-	RecreatedTmuxSessions int               `json:"recreated_tmux_sessions" msgpack:"recreated_tmux_sessions"`
-	AlignedDaemonSessions int               `json:"aligned_daemon_sessions" msgpack:"aligned_daemon_sessions"`
-	InvariantSources      map[string]string `json:"invariant_sources,omitempty" msgpack:"invariant_sources,omitempty"`
+	ProjectID                 naming.ProjectID             `json:"project_id" msgpack:"project_id"`
+	WorktreesRefreshed        int                          `json:"worktrees_refreshed" msgpack:"worktrees_refreshed"`
+	RecreatedTmuxSessions     int                          `json:"recreated_tmux_sessions" msgpack:"recreated_tmux_sessions"`
+	AlignedDaemonSessions     int                          `json:"aligned_daemon_sessions" msgpack:"aligned_daemon_sessions"`
+	IssueLifecycleRepairs     int                          `json:"issue_lifecycle_repairs" msgpack:"issue_lifecycle_repairs"`
+	IssueLifecycleDivergences []RuntimeLifecycleDivergence `json:"issue_lifecycle_divergences,omitempty" msgpack:"issue_lifecycle_divergences,omitempty"`
+	AdvisorSessionsRecovered  int                          `json:"advisor_sessions_recovered" msgpack:"advisor_sessions_recovered"`
+	AdvisorSessionsCleaned    int                          `json:"advisor_sessions_cleaned" msgpack:"advisor_sessions_cleaned"`
+	InvariantSources          map[string]string            `json:"invariant_sources,omitempty" msgpack:"invariant_sources,omitempty"`
+	CrossProjectProjection    *GlobalProjectSnapshot       `json:"cross_project_projection,omitempty" msgpack:"cross_project_projection,omitempty"`
+}
+
+type RuntimeLifecycleDivergence struct {
+	IssueID string `json:"issue_id" msgpack:"issue_id"`
+	Reason  string `json:"reason" msgpack:"reason"`
 }

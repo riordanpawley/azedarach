@@ -22,6 +22,7 @@ import (
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
@@ -97,6 +98,14 @@ type Daemon struct {
 	apply  *daemonhandlers.ApplyHandler
 
 	issues                             *issues.Client
+	userStore                          *userstore.Store
+	userStoreRefreshMu                 sync.Mutex
+	userStoreRefreshPending            map[string]bool
+	userStoreRefreshDirty              map[string]bool
+	userStoreRefreshWG                 sync.WaitGroup
+	userStoreRefreshStopping           bool
+	userStoreRefreshCtx                context.Context
+	userStoreRefreshCancel             context.CancelFunc
 	issueClientsMu                     sync.Mutex
 	issueClientsByProject              map[string]*issues.Client
 	issueClientsByRoot                 map[string]*issues.Client
@@ -149,6 +158,8 @@ type Daemon struct {
 	sessionStore                       *daemonstate.Store
 	runtimeProjectionWriter            runtimeProjectionWriter
 	sessionLongRunning                 SessionLongRunningExecutor
+	sessionResumeWait                  func(context.Context, time.Duration) error
+	sessionShellRun                    func(context.Context, string, string, string, []string) ([]byte, error)
 	runtimeReconciler                  runtimeReconciler
 	runtimeReconcileQueue              *reconcileQueue[protocol.RuntimeReconcileResponseBody]
 	gitStatusRefreshQueue              *reconcileQueue[*git.GitStatus]
@@ -183,6 +194,9 @@ type Daemon struct {
 	watchClients                       map[string]watchClientObservation
 	terminalFailureProbeMu             sync.Mutex
 	terminalFailureProbes              map[string]terminalFailureProbeState
+	reviewReadyRecoveryMu              sync.Mutex
+	reviewReadyRecoveryCursor          map[string]int64
+	reviewReadyRecoveryBeforeLoad      func()
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -193,8 +207,9 @@ type Daemon struct {
 	shutdownReqOnce  sync.Once
 	inFlightCommands sync.WaitGroup
 
-	syncBootstrapState syncBootstrapState
-	syncBootstrapFn    func(context.Context) error
+	syncBootstrapState              syncBootstrapState
+	syncBootstrapFn                 func(context.Context) error
+	reconcileInteractionStalenessFn func(context.Context, string) error
 }
 
 // New constructs a runnable daemon runtime.
@@ -325,7 +340,16 @@ func New(cfg Config) *Daemon {
 		issueAutoArchiveLastRun:            map[string]time.Time{},
 		taskGraphReadinessLoads:            map[string]*taskGraphReadinessLoad{},
 		revision:                           map[string]uint64{},
+		userStoreRefreshPending:            map[string]bool{},
+		userStoreRefreshDirty:              map[string]bool{},
 		shutdownReqCh:                      make(chan struct{}),
+	}
+	if !cfg.ScopedRuntime && strings.TrimSpace(os.Getenv("AZEDARACH_DISABLE_USER_DB")) != "1" {
+		if store, err := userstore.Open(userstore.DefaultPath()); err != nil {
+			cfg.Logger.Warn("initialize user cross-project projection", "error", err)
+		} else {
+			d.userStore = store
+		}
 	}
 	canonicalProjectID := protocol.DefaultProjectID
 	if hashProjectID, err := appconfig.ProjectIDForRoot(strings.TrimSpace(cfg.RepoDir)); err == nil {
@@ -387,16 +411,18 @@ func New(cfg Config) *Daemon {
 		Logger:       cfg.Logger,
 	})
 	runtime := newOperationRuntime(operationRuntimeConfig{
-		repoDir:                cfg.RepoDir,
-		logger:                 cfg.Logger,
-		hub:                    d.hub,
-		nextRevision:           d.nextRevision,
-		sessionStart:           d.handleSessionStartDirect,
-		sessionStop:            d.handleSessionStopDirect,
-		sessionResolveConflict: d.handleSessionResolveConflictDirect,
-		taskBulkCleanup:        d.handleTaskBulkCleanup,
-		recoverInterrupted:     d.recoverInterruptedOperation,
-		noticeService:          noticeService,
+		repoDir:                 cfg.RepoDir,
+		logger:                  cfg.Logger,
+		hub:                     d.hub,
+		nextRevision:            d.nextRevision,
+		sessionStart:            d.handleSessionStartDirect,
+		sessionStop:             d.handleSessionStopDirect,
+		sessionResolveConflict:  d.handleSessionResolveConflictDirect,
+		taskBulkCleanup:         d.handleTaskBulkCleanup,
+		globalProjectionRebuild: d.handleGlobalProjectionRebuild,
+		onMutationSuccess:       d.enqueueUserProjectionRefresh,
+		recoverInterrupted:      d.recoverInterruptedOperation,
+		noticeService:           noticeService,
 	})
 	commandExecutor := operationCommandExecutor{runtime: runtime}
 	sessionExecutor := sessionOperationExecutor{runtime: runtime}
@@ -536,7 +562,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if d.issueAutoArchive != nil {
 			d.issueAutoArchive.Close()
 		}
-		d.closeIssueClients()
 		if d.runtimeReconcileQueue != nil {
 			if closeErr := d.runtimeReconcileQueue.Close(); closeErr != nil && d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("failed to close runtime reconcile queue", "error", closeErr)
@@ -545,6 +570,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if d.gitStatusRefreshQueue != nil {
 			if closeErr := d.gitStatusRefreshQueue.Close(); closeErr != nil && d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("failed to close git status refresh queue", "error", closeErr)
+			}
+		}
+		d.stopUserProjectionWorkers()
+		d.closeIssueClients()
+		if d.userStore != nil {
+			if closeErr := d.userStore.Close(); closeErr != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("failed to close user database", "error", closeErr)
 			}
 		}
 		d.closeRuntimeStateStores()
@@ -614,6 +646,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.startLinearSyncWorker(serveCtx)
 	d.startScheduledScriptWorker(serveCtx)
 	d.startIssueAutoArchiveWorker(serveCtx)
+	d.startGlobalProjectionRepairWorker(serveCtx)
 	d.cfg.Logger.Info("daemon startup phase", "phase", "startup_ready", "duration_ms", time.Since(startedAt).Milliseconds())
 	err = <-serveErrCh
 	if ctx.Err() != nil {
@@ -718,6 +751,13 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	}
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "command.begin", beginStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	defer d.endCommand()
+	if commandMutatesProjectProjection(req.Command) {
+		defer func() {
+			if err == nil && resp.OK {
+				d.enqueueUserProjectionRefresh(projectID)
+			}
+		}()
+	}
 
 	if daemonhandlers.DaemonRoutesThroughDispatcher(req.Command) {
 		if d.router == nil {
@@ -780,6 +820,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleBoardFetch(ctx, req)
 	case protocol.CommandScheduledScriptsStatus:
 		return d.handleScheduledScriptsStatus(ctx, req)
+	case protocol.CommandGlobalSnapshot:
+		return d.handleGlobalSnapshot(ctx, req)
+	case protocol.CommandGlobalProjectionRebuild:
+		return d.handleGlobalProjectionRebuild(ctx, req)
 	case "task.list":
 		return d.handleTaskList(ctx, req)
 	case "task.get":
@@ -806,6 +850,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleOrchestrationSnapshot(ctx, req)
 	case protocol.CommandOrchestrationIntent:
 		return d.handleOrchestrationIntent(ctx, req)
+	case protocol.CommandOrchestratorSessionStart, protocol.CommandOrchestratorSessionAttach, protocol.CommandOrchestratorSessionStatus:
+		return d.handleOrchestratorSession(ctx, req)
 	case "task.complete_check":
 		return d.handleTaskCompleteCheck(ctx, req)
 	case "task.integration_readiness":
@@ -1001,6 +1047,12 @@ func (d *Daemon) applySessionLifecycleTransition(
 	return d.applySessionLifecycleTransitionWithActivity(ctx, req, projectID, sessionID, issueID, command, "", "")
 }
 
+type sessionIntentSelector struct {
+	Role      daemonstate.SessionRole
+	ScopeKind daemonstate.SessionScopeKind
+	ScopeID   string
+}
+
 func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 	ctx context.Context,
 	req protocol.RequestEnvelope,
@@ -1011,6 +1063,10 @@ func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 	activity string,
 	activitySource string,
 ) error {
+	return d.applyTypedSessionLifecycleTransition(ctx, req, projectID, sessionID, issueID, command, activity, activitySource, sessionIntentSelector{Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID})
+}
+
+func (d *Daemon) applyTypedSessionLifecycleTransition(ctx context.Context, req protocol.RequestEnvelope, projectID, sessionID, issueID, command, activity, activitySource string, selector sessionIntentSelector) error {
 	if d.sessionStore == nil {
 		return errors.New("session store unavailable")
 	}
@@ -1034,8 +1090,17 @@ func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 	if err != nil {
 		return err
 	}
+	runtimeObservedFound := false
 	if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil && strings.TrimSpace(sessionID) != "" {
-		if observed, found, loadErr := runtimeStore.GetSessionState(ctx, projectID, sessionID); loadErr == nil && found {
+		if observed, found, loadErr := runtimeStore.GetSessionIntent(ctx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID); loadErr == nil && found {
+			runtimeObservedFound = strings.TrimSpace(string(observed.ObservedState)) != ""
+			// Durable projection identity is authoritative. The transient lifecycle
+			// store carries only physical session/issue strings and must not erase a
+			// typed advisor or orchestrator product during a state transition.
+			session.IssueID = observed.IssueID
+			session.Role = observed.Role
+			session.ScopeKind = observed.ScopeKind
+			session.ScopeID = observed.ScopeID
 			if strings.TrimSpace(string(observed.ObservedState)) != "" {
 				session.ObservedState = observed.ObservedState
 			}
@@ -1053,6 +1118,9 @@ func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 		} else if loadErr != nil && d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("load runtime session projection for transition failed", "project_id", projectID, "session_id", sessionID, "error", loadErr)
 		}
+	}
+	if !runtimeObservedFound {
+		session.ObservedState = ""
 	}
 	if state == daemonstate.SessionStateStopped {
 		session.Activity = ""
@@ -1076,6 +1144,15 @@ func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 	writer := d.runtimeProjectionStateWriter()
 	if err := writer.PersistSessionProjection(ctx, projectID, session); err != nil {
 		return err
+	}
+	if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil {
+		persisted, found, err := runtimeStore.GetSessionIntent(ctx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID)
+		if err != nil {
+			return fmt.Errorf("reload persisted session intent for publication: %w", err)
+		}
+		if found {
+			session = persisted
+		}
 	}
 	writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, session)
 	return nil
@@ -1207,28 +1284,18 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 	if store == nil {
 		return interruptedOperationRecovery{}, false
 	}
-	session, found, err := store.GetSessionState(ctx, projectID, record.IssueID)
-	if err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Warn("failed to inspect interrupted session.start projection",
-			"operation_id", record.ID,
-			"project_id", projectID,
-			"issue_id", record.IssueID,
-			"error", err,
-		)
-	}
-	if err != nil || !found {
-		session, found, err = store.GetSessionStateByIssueID(ctx, projectID, record.IssueID)
-		if err != nil {
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Warn("failed to inspect interrupted session.start projection by issue",
-					"operation_id", record.ID,
-					"project_id", projectID,
-					"issue_id", record.IssueID,
-					"error", err,
-				)
-			}
-			return interruptedOperationRecovery{}, false
+	canonicalID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), record.IssueID)
+	session, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, record.IssueID, canonicalID)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("failed to inspect interrupted worker session.start projection",
+				"operation_id", record.ID,
+				"project_id", projectID,
+				"issue_id", record.IssueID,
+				"error", err,
+			)
 		}
+		return interruptedOperationRecovery{}, false
 	}
 	if !found || strings.TrimSpace(session.IssueID) != strings.TrimSpace(record.IssueID) {
 		return interruptedOperationRecovery{}, false
@@ -1301,8 +1368,11 @@ func (d *Daemon) recoverInterruptedDeferredWorktreeCleanup(ctx context.Context, 
 			ErrorMessage: err.Error(),
 		}, true
 	}
-	if removedWorktree != nil {
-		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(removedWorktree.Path))
+	if cleanupErr := finalizeDeletedWorktree(cleanupCtx, projectID, taskID, manager, removedWorktree, d.runtimeProjectionStateWriter()); cleanupErr != nil {
+		return interruptedOperationRecovery{
+			State:        daemonops.StateFailed,
+			ErrorMessage: cleanupErr.Error(),
+		}, true
 	}
 	payload, _ := json.Marshal(deferredTaskWorktreeCleanupResult{
 		ProjectID: projectID,
@@ -1404,12 +1474,25 @@ func (d *Daemon) closeRuntimeStateStores() {
 }
 
 func (d *Daemon) persistSessionState(projectID string, session daemonstate.Session) error {
-	if d.sessionRuntimeStateStore(projectID) == nil {
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(ctx, projectID, session); err != nil {
+	if (session.Role == "" || session.Role == daemonstate.SessionRoleWorker) && !isAgentScopedSessionID(session.ID) {
+		canonicalID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), session.IssueID)
+		if existing, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, session.IssueID, canonicalID); err != nil {
+			return fmt.Errorf("load logical worker session before persist: %w", err)
+		} else if found && !isAgentScopedSessionID(existing.ID) {
+			session.ID = existing.ID
+			session.IssueID = existing.IssueID
+			session.Role = existing.Role
+			session.ScopeKind = existing.ScopeKind
+			session.ScopeID = existing.ScopeID
+		}
+	}
+	if err := store.UpsertSessionState(ctx, projectID, session); err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn(
 				"persist session runtime state failed",
@@ -1697,6 +1780,9 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 		Session: protocol.SessionProjection{
 			SessionID: parseSessionIDOrZero(session.ID),
 			IssueID:   parseIssueIDOrZero(session.IssueID),
+			Role:      protocol.SessionRole(session.Role),
+			ScopeKind: protocol.SessionScopeKind(session.ScopeKind),
+			ScopeID:   strings.TrimSpace(session.ScopeID),
 			State:     protocol.SessionLifecycleState(session.State),
 			UpdatedAt: session.UpdatedAt,
 		},
@@ -1794,7 +1880,7 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 
 	var session *daemonstate.Session
 	if issueID != "" {
-		if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil {
+		if runtimeStore := d.sessionRuntimeStateStoreIfConfigured(projectID); runtimeStore != nil {
 			if loaded, err := runtimeStore.ListSessionStates(ctx, projectID); err == nil {
 				aggregated := sessionProjectionAggregateByIssueKey(loaded, d.sessionNamingScope(projectID))
 				if merged, found := aggregated[sessionKey(issueID)]; found {

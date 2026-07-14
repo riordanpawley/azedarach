@@ -30,6 +30,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
+	"github.com/riordanpawley/azedarach/internal/testutil/issuefixture"
 )
 
 func TestBuildTaskSnapshotExportBodyIsDeterministic(t *testing.T) {
@@ -397,7 +398,7 @@ func TestValidateDependencyEndpointProjectsRejectsCrossProjectRefs(t *testing.T)
 
 func TestHandleTaskDependencyAddRejectsCrossProjectEndpointMetadata(t *testing.T) {
 	logger := slog.Default()
-	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger)
 	t.Cleanup(func() {
 		if err := issuesClient.CloseDB(); err != nil {
 			t.Fatalf("close issues db: %v", err)
@@ -506,24 +507,53 @@ func TestBuildBoardSnapshotPayloadOmitsDetailFields(t *testing.T) {
 	if got, want := decoded.SchemaVersion, uint16(protocol.BoardSnapshotSchemaVersion); got != want {
 		t.Fatalf("schema version = %d, want %d", got, want)
 	}
-	if got, want := len(decoded.Tasks), 1; got != want {
+	tasks := decoded.Projection.TaskSummaries()
+	columns := decoded.Projection.ColumnSnapshots()
+	if got, want := len(tasks), 1; got != want {
 		t.Fatalf("task count = %d, want %d", got, want)
 	}
-	if got, want := string(decoded.View.ID), domain.DefaultBoardViewID; got != want {
+	if got, want := string(decoded.Projection.View.ID), domain.DefaultBoardViewID; got != want {
 		t.Fatalf("view id = %q, want %q", got, want)
 	}
-	if got := len(decoded.Columns); got == 0 {
+	if got := len(columns); got == 0 {
 		t.Fatal("expected grouped board columns")
 	}
-	if got, want := decoded.Tasks[0].Title, "Board task"; got != want {
+	if got, want := tasks[0].Title, "Board task"; got != want {
 		t.Fatalf("title = %q, want %q", got, want)
 	}
+}
+
+func TestBuildBoardSnapshotPayloadAppliesViewSortPolicy(t *testing.T) {
+	payload, err := buildBoardSnapshotPayload(
+		"proj-board",
+		13,
+		time.Now().UTC(),
+		protocol.TaskListFreshnessFresh,
+		[]domain.Task{
+			{ID: "ordinary", Status: domain.StatusInProgress, Priority: domain.P0},
+			{ID: "waiting", Status: domain.StatusInProgress, Priority: domain.P4, Session: &domain.Session{Activity: "waiting-for-human"}},
+		},
+		domain.DefaultBoardView(),
+	)
+	if err != nil {
+		t.Fatalf("build board payload: %v", err)
+	}
+	for _, column := range payload.Projection.ColumnSnapshots() {
+		if column.Definition.ID != domain.BoardColumnActive {
+			continue
+		}
+		if len(column.Tasks) != 2 || column.Tasks[0].ID != "waiting" || column.Tasks[1].ID != "ordinary" {
+			t.Fatalf("active snapshot order = %+v, want waiting then ordinary", column.Tasks)
+		}
+		return
+	}
+	t.Fatal("active board column not found")
 }
 
 func TestHandleBoardFetchGroupsBySelectedView(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
-	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger)
 	t.Cleanup(func() {
 		if err := issuesClient.CloseDB(); err != nil {
 			t.Fatalf("CloseDB error: %v", err)
@@ -604,30 +634,32 @@ func TestHandleBoardFetchGroupsBySelectedView(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeBoardSnapshotPayload error: %v", err)
 	}
-	if got, want := string(payload.View.ID), "active-only"; got != want {
+	if got, want := string(payload.Projection.View.ID), "active-only"; got != want {
 		t.Fatalf("payload view id = %q, want %q", got, want)
 	}
-	if got, want := len(payload.Columns), 1; got != want {
+	columns := payload.Projection.ColumnSnapshots()
+	tasks := payload.Projection.TaskSummaries()
+	if got, want := len(columns), 1; got != want {
 		t.Fatalf("len(columns) = %d, want %d", got, want)
 	}
-	if got, want := len(payload.Columns[0].Tasks), 1; got != want {
+	if got, want := len(columns[0].Tasks), 1; got != want {
 		t.Fatalf("len(active tasks) = %d, want %d", got, want)
 	}
-	if got, want := payload.Columns[0].Tasks[0].Title, "Active issue"; got != want {
+	if got, want := columns[0].Tasks[0].Title, "Active issue"; got != want {
 		t.Fatalf("active task title = %q, want %q", got, want)
 	}
-	if payload.Tasks[0].Facts.DisplayPhase != domain.IssueDisplayActive {
-		t.Fatalf("issue facts display phase = %s, want %s", payload.Tasks[0].Facts.DisplayPhase, domain.IssueDisplayActive)
+	if tasks[0].Facts.DisplayPhase != domain.IssueDisplayActive {
+		t.Fatalf("issue facts display phase = %s, want %s", tasks[0].Facts.DisplayPhase, domain.IssueDisplayActive)
 	}
-	if !slices.Contains(payload.Tasks[0].Facts.ReasonMessages(), "lifecycle is active") {
-		t.Fatalf("issue facts reasons = %#v, want lifecycle reason", payload.Tasks[0].Facts.ReasonMessages())
+	if !slices.Contains(tasks[0].Facts.ReasonMessages(), "lifecycle is active") {
+		t.Fatalf("issue facts reasons = %#v, want lifecycle reason", tasks[0].Facts.ReasonMessages())
 	}
 }
 
 func TestHandleBoardFetchFallsBackToDefaultWhenSelectedViewPreferenceIsCorrupt(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
-	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger)
 	t.Cleanup(func() {
 		if err := issuesClient.CloseDB(); err != nil {
 			t.Fatalf("CloseDB error: %v", err)
@@ -679,10 +711,10 @@ func TestHandleBoardFetchFallsBackToDefaultWhenSelectedViewPreferenceIsCorrupt(t
 	if err != nil {
 		t.Fatalf("DecodeBoardSnapshotPayload error: %v", err)
 	}
-	if got, want := string(payload.View.ID), domain.DefaultBoardViewID; got != want {
+	if got, want := string(payload.Projection.View.ID), domain.DefaultBoardViewID; got != want {
 		t.Fatalf("payload view id = %q, want %q", got, want)
 	}
-	if got, want := len(payload.Columns), len(domain.DefaultBoardView().Columns); got != want {
+	if got, want := len(payload.Projection.Groups), len(domain.DefaultBoardView().Columns); got != want {
 		t.Fatalf("len(columns) = %d, want default view column count %d", got, want)
 	}
 }
@@ -699,7 +731,7 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	}
 
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() {
 		if err := issuesClient.CloseDB(); err != nil {
 			t.Fatalf("close issues db: %v", err)
@@ -727,7 +759,7 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 
 	sessionStartedAt := time.Date(2026, time.April, 2, 10, 59, 0, 0, time.UTC)
 	sessionUpdatedAt := time.Date(2026, time.April, 2, 11, 0, 0, 0, time.UTC)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   taskID,
 		State:     daemonstate.SessionStateAttached,
@@ -946,7 +978,7 @@ func TestHandleTaskListAndGetSupportArchivedOnly(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() {
 		if err := issuesClient.CloseDB(); err != nil {
 			t.Fatalf("close issues db: %v", err)
@@ -1051,7 +1083,7 @@ func TestHandleTaskUnarchiveRestoresArchivedIssue(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() {
 		if err := issuesClient.CloseDB(); err != nil {
 			t.Fatalf("close issues db: %v", err)
@@ -1139,7 +1171,7 @@ func TestHandleTaskUnarchiveRejectsArchivedParentWithoutFlag(t *testing.T) {
 	logger := slog.Default()
 	repoDir := t.TempDir()
 	projectID := "proj-unarchive-parent-guard"
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -1208,7 +1240,7 @@ func TestHandleTaskListRefreshesMissingTmuxSessionBeforeReportingActive(t *testi
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:    "Task list stale session",
@@ -1223,7 +1255,7 @@ func TestHandleTaskListRefreshesMissingTmuxSessionBeforeReportingActive(t *testi
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	sessionID := naming.CanonicalSessionID(projectID, taskID)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       taskID,
 		State:         daemonstate.SessionStateAttached,
@@ -1302,7 +1334,7 @@ func TestHandleTaskListThrottlesSessionRuntimeRefresh(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:    "Task list refresh throttle",
@@ -1317,7 +1349,7 @@ func TestHandleTaskListThrottlesSessionRuntimeRefresh(t *testing.T) {
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	sessionID := naming.CanonicalSessionID(projectID, taskID)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       taskID,
 		State:         daemonstate.SessionStateAttached,
@@ -1400,7 +1432,7 @@ func TestTaskListSessionRuntimeRefreshSharesInFlightRefresh(t *testing.T) {
 	)
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            naming.CanonicalSessionID(projectID, issueID),
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateAttached,
@@ -1526,8 +1558,13 @@ func TestRefreshExistingSessionRuntimeStateSkipsUnchangedProjectionWrites(t *tes
 			UpdatedAt:     seededAt,
 		},
 	} {
-		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, session); err != nil {
+		if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, session); err != nil {
 			t.Fatalf("seed session %s: %v", session.ID, err)
+		}
+		if _, _, err := runtimeStateStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+			ProjectID: projectID, SessionID: session.ID, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: seededAt,
+		}); err != nil {
+			t.Fatalf("seed physical observation %s: %v", session.ID, err)
 		}
 	}
 
@@ -1555,8 +1592,8 @@ func TestRefreshExistingSessionRuntimeStateSkipsUnchangedProjectionWrites(t *tes
 	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil {
 		t.Fatalf("refreshExistingSessionRuntimeState: %v", err)
 	}
-	if got := writer.sessionPersistCount(); got != 1 {
-		t.Fatalf("session projection persists = %d, want only stale row persisted", got)
+	if got := writer.sessionPersistCount(); got != 0 {
+		t.Fatalf("logical session persists = %d, runtime observations must use physical authority", got)
 	}
 
 	live, found, err := runtimeStateStore.GetSessionState(ctx, projectID, liveSessionID)
@@ -1595,7 +1632,7 @@ func TestHandleTaskListKeepsFreshResponseWhenRuntimeRefreshSkipsUnchangedRows(t 
 	logger := slog.Default()
 	repoDir := t.TempDir()
 	projectID := "proj-session-refresh-fresh"
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:    "unchanged live session stays fresh",
@@ -1611,7 +1648,7 @@ func TestHandleTaskListKeepsFreshResponseWhenRuntimeRefreshSkipsUnchangedRows(t 
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	sessionID := naming.CanonicalSessionID(projectID, taskID)
 	seededAt := now.Add(-time.Minute)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       taskID,
 		State:         daemonstate.SessionStateRunning,
@@ -1684,7 +1721,7 @@ func TestHandleTaskListIgnoresAgentPaneStatusForTaskLifecycle(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	projectID := "proj-agent-task-list"
@@ -1702,7 +1739,7 @@ func TestHandleTaskListIgnoresAgentPaneStatusForTaskLifecycle(t *testing.T) {
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	startedAt := time.Date(2026, time.May, 29, 8, 0, 0, 0, time.UTC)
 	containerID := naming.CanonicalSessionID(projectID, taskID)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:                containerID,
 		IssueID:           taskID,
 		State:             daemonstate.SessionStateAttached,
@@ -1713,7 +1750,7 @@ func TestHandleTaskListIgnoresAgentPaneStatusForTaskLifecycle(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed container session: %v", err)
 	}
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            containerID + ".pane-190",
 		IssueID:       taskID,
 		State:         daemonstate.SessionStatePaused,
@@ -1777,7 +1814,7 @@ func TestHandleTaskGetUsesFreshTaskListSnapshotCache(t *testing.T) {
 	logger := slog.Default()
 	projectID := "proj-cache-get"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:    "cached issue",
@@ -1849,7 +1886,7 @@ func TestHandleTaskGetComposesRuntimeProjectionOverCachedTaskSnapshot(t *testing
 	logger := slog.Default()
 	projectID := "proj-task-get-worktree-refresh"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -1988,7 +2025,7 @@ func TestHandleTaskListIgnoresFreshCacheAndReadsSQLiteProjection(t *testing.T) {
 	logger := slog.Default()
 	projectID := "proj-cache-list"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -2067,7 +2104,7 @@ func TestHandleBoardFetchComposesRuntimeProjectionOverCachedTaskSnapshot(t *test
 	logger := slog.Default()
 	projectID := "proj-cache-board-runtime-overlay"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -2144,10 +2181,11 @@ func TestHandleBoardFetchComposesRuntimeProjectionOverCachedTaskSnapshot(t *test
 	if err != nil {
 		t.Fatalf("decode board.fetch body: %v", err)
 	}
-	if got, want := len(payload.Tasks), 1; got != want {
+	tasks := payload.Projection.TaskSummaries()
+	if got, want := len(tasks), 1; got != want {
 		t.Fatalf("payload.Tasks len = %d, want %d", got, want)
 	}
-	task := payload.Tasks[0]
+	task := tasks[0]
 	if got, want := task.Title, "cached durable title"; got != want {
 		t.Fatalf("task.Title = %q, want cached durable title %q", got, want)
 	}
@@ -2161,7 +2199,7 @@ func TestHandleBoardFetchDerivesInReviewPhaseFromSessionActivity(t *testing.T) {
 	logger := slog.Default()
 	projectID := "proj-board-derived-review"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -2191,7 +2229,7 @@ func TestHandleBoardFetchDerivesInReviewPhaseFromSessionActivity(t *testing.T) {
 		{issueID: busyID, activity: "busy"},
 		{issueID: idleID, activity: "idle"},
 	} {
-		if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 			ID:             naming.CanonicalSessionID(projectID, seed.issueID),
 			IssueID:        seed.issueID,
 			State:          daemonstate.SessionStateRunning,
@@ -2235,7 +2273,7 @@ func TestHandleBoardFetchDerivesInReviewPhaseFromSessionActivity(t *testing.T) {
 	}
 	statusByID := map[string]domain.Status{}
 	factsByID := map[string]domain.IssueFacts{}
-	for _, task := range payload.Tasks {
+	for _, task := range payload.Projection.TaskSummaries() {
 		statusByID[task.ID.String()] = task.Status
 		factsByID[task.ID.String()] = task.Facts
 	}
@@ -2254,16 +2292,13 @@ func TestHandleBoardFetchDerivesInReviewPhaseFromSessionActivity(t *testing.T) {
 }
 
 func TestHandleTaskListReadsSQLiteProjection(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
 	logger := slog.Default()
 	projectID := "proj-local-first-list"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
-	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+	taskID, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
 		Title:    "foreground reads local projection",
 		Type:     domain.TypeTask,
 		Priority: domain.P2,
@@ -2272,6 +2307,10 @@ func TestHandleTaskListReadsSQLiteProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
+	// The deadline covers the list operation under test, not lazy,
+	// race-instrumented schema setup performed by the fixture create.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 
 	d := &Daemon{
 		cfg: Config{Logger: logger},
@@ -2377,7 +2416,7 @@ func TestLoadTaskListSnapshotUsesDetachedBuildContext(t *testing.T) {
 	logger := slog.Default()
 	projectID := "proj-canceled-owner-list"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	taskID, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
@@ -2425,7 +2464,7 @@ func TestHandleTaskListAppliesContentQueryInDaemon(t *testing.T) {
 	logger := slog.Default()
 	projectID := "proj-query-list"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	matchID, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
@@ -2495,7 +2534,7 @@ func TestHandleTaskListQuerySkipsLiveRuntimeRefresh(t *testing.T) {
 	repoDir := t.TempDir()
 	projectID := "proj-query-skip-refresh"
 	issuesDBPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	matchID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -2511,7 +2550,7 @@ func TestHandleTaskListQuerySkipsLiveRuntimeRefresh(t *testing.T) {
 
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            naming.CanonicalSessionID(projectID, matchID),
 		IssueID:       matchID,
 		State:         daemonstate.SessionStateAttached,
@@ -2575,7 +2614,7 @@ func TestHandleTaskListIncludesDependenciesOnlyWhenRequested(t *testing.T) {
 	logger := slog.Default()
 	projectID := "proj-list-deps"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -2698,7 +2737,8 @@ func TestHandleTaskListIncludesDependenciesOnlyWhenRequested(t *testing.T) {
 		t.Fatalf("decode board body: %v", err)
 	}
 	foundChild := false
-	for _, task := range boardPayload.Tasks {
+	boardTasks := boardPayload.Projection.TaskSummaries()
+	for _, task := range boardTasks {
 		if task.ID.String() != childID {
 			continue
 		}
@@ -2708,7 +2748,7 @@ func TestHandleTaskListIncludesDependenciesOnlyWhenRequested(t *testing.T) {
 		}
 	}
 	if !foundChild {
-		t.Fatalf("board payload missing child %s: %+v", childID, boardPayload.Tasks)
+		t.Fatalf("board payload missing child %s: %+v", childID, boardTasks)
 	}
 }
 
@@ -2717,7 +2757,7 @@ func TestHandleTaskGetInvalidatesTaskListSnapshotCacheAfterIssueUpdate(t *testin
 	logger := slog.Default()
 	projectID := "proj-cache-invalidation"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:    "cache invalidates",
@@ -2812,7 +2852,7 @@ func TestTaskUpdateStatusRejectsRawCloseRuntimeAttachments(t *testing.T) {
 	logger := slog.Default()
 	projectID := "proj-close-guard-runtime"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -2885,7 +2925,7 @@ func TestTaskClosePreflightBlocksDirtyWorktreeInDaemonPolicy(t *testing.T) {
 	projectID := "proj-close-guard-dirty"
 	repoDir := filepath.Join(t.TempDir(), "repo")
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -2973,6 +3013,53 @@ func TestTaskClosePreflightBlocksDirtyWorktreeInDaemonPolicy(t *testing.T) {
 	}
 }
 
+func TestTaskClosePreflightEnforcesInvestigationDispositionAcceptance(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	projectID := "proj-investigation-acceptance"
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: logger}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}}
+
+	tests := []struct {
+		name       string
+		events     []issues.IssueObservationEventParams
+		wantReason string
+	}{
+		{name: "human facing remains gated", wantReason: "human-facing investigation lacks explicit issue-specific findings acceptance"},
+		{name: "internal accepted", events: []issues.IssueObservationEventParams{
+			{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+		}},
+		{name: "internal returned findings remain blocked", events: []issues.IssueObservationEventParams{
+			{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"outcome": "returned", "actor_id": "reviewer"}},
+		}, wantReason: "unresolved returned findings"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: tt.name, Type: domain.TypeInvestigation, Status: domain.StatusInReview})
+			if err != nil {
+				t.Fatalf("create investigation: %v", err)
+			}
+			for _, event := range tt.events {
+				if _, err := issuesClient.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
+					t.Fatalf("append event: %v", err)
+				}
+			}
+			_, err = d.validateTaskClosePreflight(ctx, projectID, issueID, taskClosePreflightOptions{}, protocol.RequestEnvelope{})
+			if tt.wantReason == "" && err != nil {
+				t.Fatalf("accepted internal review blocked: %v", err)
+			}
+			if tt.wantReason != "" && (err == nil || !strings.Contains(err.Error(), tt.wantReason)) {
+				t.Fatalf("error = %v, want reason %q", err, tt.wantReason)
+			}
+		})
+	}
+}
+
 func TestTaskCloseBlocksActiveSessionActivity(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -2994,7 +3081,7 @@ func TestTaskCloseBlocksActiveSessionActivity(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			projectID := "proj-close-active-" + strings.ReplaceAll(tt.name, " ", "-")
 			issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-			issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+			issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 			t.Cleanup(func() { _ = issuesClient.CloseDB() })
 			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 			t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -3009,7 +3096,7 @@ func TestTaskCloseBlocksActiveSessionActivity(t *testing.T) {
 				t.Fatalf("create issue: %v", err)
 			}
 			sessionID := naming.CanonicalSessionID(projectID, taskID)
-			if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 				ID:             sessionID,
 				IssueID:        taskID,
 				State:          daemonstate.SessionStateRunning,
@@ -3083,7 +3170,7 @@ func TestTaskCloseAllowsExplicitActiveSessionOverride(t *testing.T) {
 	logger := slog.Default()
 	projectID := "proj-close-active-override"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -3098,7 +3185,7 @@ func TestTaskCloseAllowsExplicitActiveSessionOverride(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 	sessionID := naming.CanonicalSessionID(projectID, taskID)
-	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 		ID:             sessionID,
 		IssueID:        taskID,
 		State:          daemonstate.SessionStateRunning,
@@ -3177,7 +3264,7 @@ func TestTaskCloseAllowsTerminalOrIdleSessionActivity(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			projectID := "proj-close-inactive-" + tt.name
 			issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-			issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+			issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 			t.Cleanup(func() { _ = issuesClient.CloseDB() })
 			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 			t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -3192,7 +3279,7 @@ func TestTaskCloseAllowsTerminalOrIdleSessionActivity(t *testing.T) {
 				t.Fatalf("create issue: %v", err)
 			}
 			sessionID := naming.CanonicalSessionID(projectID, taskID)
-			if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 				ID:             sessionID,
 				IssueID:        taskID,
 				State:          daemonstate.SessionStateRunning,
@@ -3261,7 +3348,7 @@ func TestTaskCloseCommandUpdatesStatusThroughDaemon(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Close me",
@@ -3341,7 +3428,7 @@ func TestTaskCloseCommandCancelledSkipsIntegrationAndWritesOutcome(t *testing.T)
 	projectID := "proj-task-close-cancelled"
 	repoDir := t.TempDir()
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:    "Cancel me",
@@ -3422,7 +3509,7 @@ func TestTaskCloseBlocksUnresolvedChildrenByDefault(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask, Status: domain.StatusInReview})
 	if err != nil {
@@ -3480,7 +3567,7 @@ func TestTaskClosePreflightBlocksFiveOpenDescendantsBeforeIntegration(t *testing
 	logger := slog.Default()
 	projectID := "proj-task-close-atomic-preflight"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -3623,7 +3710,7 @@ func TestTaskCloseCanAutoCloseCleanUnresolvedChildren(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask, Status: domain.StatusInReview})
 	if err != nil {
@@ -3690,7 +3777,7 @@ func TestTaskCloseCleanChildrenDoesNotForceDirtyChildWorktree(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask, Status: domain.StatusInReview})
 	if err != nil {
@@ -3784,6 +3871,36 @@ func taskClosePhaseNames(phases []taskClosePhaseTiming) []string {
 	return names
 }
 
+func TestTaskCloseIntegrationContextReservesCleanupBudget(t *testing.T) {
+	parent, parentCancel := context.WithTimeout(context.Background(), domain.IntegrationCloseReserve+2*time.Second)
+	defer parentCancel()
+
+	ctx, cancel, err := taskCloseIntegrationContext(parent)
+	if err != nil {
+		t.Fatalf("taskCloseIntegrationContext() error = %v", err)
+	}
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("integration context has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining < time.Second || remaining > 2*time.Second {
+		t.Fatalf("integration budget = %v, want close to 2s after cleanup reserve", remaining)
+	}
+}
+
+func TestTaskCloseIntegrationContextRejectsExhaustedCleanupReserve(t *testing.T) {
+	parent, parentCancel := context.WithTimeout(context.Background(), domain.IntegrationCloseReserve-time.Second)
+	defer parentCancel()
+
+	_, cancel, err := taskCloseIntegrationContext(parent)
+	cancel()
+	if err == nil || !strings.Contains(err.Error(), "cleanup reserve is required") {
+		t.Fatalf("taskCloseIntegrationContext() error = %v, want exhausted cleanup reserve", err)
+	}
+}
+
 func taskClosePhaseByName(phases []taskClosePhaseTiming, name string) (taskClosePhaseTiming, bool) {
 	for _, phase := range phases {
 		if phase.Name == name {
@@ -3846,7 +3963,7 @@ func TestTaskCloseRepairsLegacyProjectRuntimeProjectionBeforeFinalStatusUpdate(t
 	projectID := "proj-close-current"
 	legacyProjectID := "proj-close-legacy"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -3920,7 +4037,7 @@ func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.
 	projectID := "proj-close-current"
 	legacyProjectID := "proj-close-legacy-session-stale"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -3935,7 +4052,7 @@ func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.
 		t.Fatalf("create issue: %v", err)
 	}
 	sessionID := "legacy-" + taskID
-	if err := runtimeStore.UpsertSessionState(ctx, legacyProjectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, ctx, legacyProjectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   taskID,
 		State:     daemonstate.SessionStateRunning,
@@ -3992,7 +4109,7 @@ func TestTaskCloseRepairsStaleBusyHookProjectionBeforePreflight(t *testing.T) {
 	logger := slog.Default()
 	projectID := "proj-close-stale-hook-preflight"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -4007,7 +4124,7 @@ func TestTaskCloseRepairsStaleBusyHookProjectionBeforePreflight(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 	sessionID := "ch-" + taskID
-	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 		ID:             sessionID,
 		IssueID:        taskID,
 		State:          daemonstate.SessionStateRunning,
@@ -4078,7 +4195,7 @@ func TestTaskCloseBlocksLiveLegacyProjectRuntimeProjection(t *testing.T) {
 	projectID := "proj-close-current"
 	legacyProjectID := "proj-close-legacy-live"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -4156,7 +4273,7 @@ func TestTaskCloseBlocksUnverifiedLegacyProjectSessionProjection(t *testing.T) {
 	projectID := "proj-close-current"
 	legacyProjectID := "proj-close-legacy-session"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -4170,7 +4287,7 @@ func TestTaskCloseBlocksUnverifiedLegacyProjectSessionProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
-	if err := runtimeStore.UpsertSessionState(ctx, legacyProjectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, ctx, legacyProjectID, daemonstate.Session{
 		ID:        "legacy-" + taskID,
 		IssueID:   taskID,
 		State:     daemonstate.SessionStateRunning,
@@ -4226,7 +4343,7 @@ func TestTaskCloseRunsIssueResourceCleanupWithoutSessionBeforeWorktreeRemoval(t 
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -4362,7 +4479,7 @@ func TestTaskCloseRunsIssueResourceCleanupWithSessionBeforeWorktreeRemoval(t *te
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -4390,7 +4507,7 @@ func TestTaskCloseRunsIssueResourceCleanupWithSessionBeforeWorktreeRemoval(t *te
 		t.Fatalf("seed worktree projection: %v", err)
 	}
 	sessionID := naming.CanonicalSessionID(projectID, taskID)
-	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 		ID:             sessionID,
 		IssueID:        taskID,
 		State:          daemonstate.SessionStateAttached,
@@ -4577,7 +4694,7 @@ func TestTaskUpdateStatusRejectsRawCloseActiveRuntime(t *testing.T) {
 	logger := slog.Default()
 	projectID := "proj-close-guard-reopen-target"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -4591,7 +4708,7 @@ func TestTaskUpdateStatusRejectsRawCloseActiveRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
-	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 		ID:            "sess-" + taskID,
 		IssueID:       taskID,
 		State:         daemonstate.SessionStateAttached,
@@ -4672,7 +4789,7 @@ func TestTaskUpdateStatusRejectsRawCloseUnresolvedChildrenAndApplyPath(t *testin
 	logger := slog.Default()
 	projectID := "proj-close-guard-children"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -4759,7 +4876,7 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	projectID := "proj-close-integrate"
 	repoDir := t.TempDir()
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -4787,6 +4904,7 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
 	commands := make([]string, 0, 12)
 	var scratchWorktree string
+	var mergeBudget time.Duration
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		switch {
@@ -4846,6 +4964,11 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			}
 		}
 		startedAt := time.Now().UTC()
+		if len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge" {
+			if deadline, ok := runCtx.Deadline(); ok {
+				mergeBudget = time.Until(deadline)
+			}
+		}
 		output, err := runner.Run(runCtx, args...)
 		endedAt := time.Now().UTC()
 		if tracePath != "" && len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge" {
@@ -4917,6 +5040,9 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("handleTaskClose response = %+v", resp)
 	}
+	if mergeBudget < domain.IntegrationMergeTimeout-time.Second || mergeBudget > domain.IntegrationMergeTimeout {
+		t.Fatalf("daemon close merge budget = %v, want close to %v with cleanup reserve retained", mergeBudget, domain.IntegrationMergeTimeout)
+	}
 	var result taskCloseResult
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		t.Fatalf("unmarshal close result: %v", err)
@@ -4969,7 +5095,7 @@ func TestTaskCloseCommandIntegrationIgnoresDuplicateIssueTargetWorktreeFromOther
 		t.Fatalf("mkdir other repo: %v", err)
 	}
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -5123,7 +5249,7 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 	projectID := "proj-close-integrate-cleanup-fail-retry"
 	repoDir := t.TempDir()
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -5382,7 +5508,7 @@ func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchVal
 	projectID := "proj-close-integrate-retry-stale-target"
 	repoDir := t.TempDir()
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -5541,7 +5667,7 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 		t.Fatalf("ProjectIDForRoot(project): %v", err)
 	}
 
-	issuesClient := issues.NewClient(projectRepo, logger)
+	issuesClient := newMigratedIssueClient(t, projectRepo, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -5668,7 +5794,7 @@ func TestTaskCloseIntegrationOriginBaseSkipsLocalMergeWhenRemoteTreeMatches(t *t
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -5784,7 +5910,7 @@ func TestTaskCloseIntegrationOriginBaseAllowsRemoteAheadWhenSourceContained(t *t
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -5904,7 +6030,7 @@ func TestTaskCloseIntegrationOriginBaseRefusesLocalMergeWhenRemoteDiffRemains(t 
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -6000,6 +6126,11 @@ func TestTaskCloseIntegrationOriginBaseRefusesLocalMergeWhenRemoteDiffRemains(t 
 	if !strings.Contains(err.Error(), "origin workflow close will not merge") || !strings.Contains(err.Error(), "main.go") {
 		t.Fatalf("integrateTaskBeforeClose error = %v, want origin-mode recovery with changed file", err)
 	}
+	for _, want := range []string{"git push -u origin HEAD", "az pr create --issue " + taskID, "az pr status --issue " + taskID, "az pr merge --issue " + taskID + " --confirm", "fetch origin/preview", "az ticket close --id " + taskID} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("origin close guidance %q missing %q", err, want)
+		}
+	}
 	if !fetchedOrigin {
 		t.Fatal("origin close did not fetch origin before integration evidence")
 	}
@@ -6038,7 +6169,7 @@ func TestTaskCloseCommandKeepsTargetCleanWhenScratchMergeDirties(t *testing.T) {
 	projectID := "proj-close-integrate-post-merge-dirty"
 	repoDir := t.TempDir()
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -6208,7 +6339,7 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -6402,7 +6533,7 @@ func TestTaskCloseCommandDirtyChildTargetNamesPathsAndRecovery(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -6588,7 +6719,7 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -6766,7 +6897,7 @@ func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -6793,6 +6924,16 @@ func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T
 		UpdatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seed worktree projection: %v", err)
+	}
+	cacheRoot := filepath.Join(repoDir, ".azedarach", "go")
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		entry := filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+taskID, "entry")
+		if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+			t.Fatalf("seed %s cache: %v", kind, err)
+		}
+		if err := os.WriteFile(entry, []byte("cache"), 0o644); err != nil {
+			t.Fatalf("write %s cache: %v", kind, err)
+		}
 	}
 
 	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
@@ -6945,6 +7086,12 @@ func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T
 	if record.Kind != taskDeferredWorktreeCleanupOperationKind {
 		t.Fatalf("cleanup operation kind = %s, want %s", record.Kind, taskDeferredWorktreeCleanupOperationKind)
 	}
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		_, err := os.Stat(filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+taskID))
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s cache remains after deferred close cleanup: %v", kind, err)
+		}
+	}
 }
 
 func TestTaskCloseDeferredWorktreeCleanupCancelledWhenIssueReopens(t *testing.T) {
@@ -6955,7 +7102,7 @@ func TestTaskCloseDeferredWorktreeCleanupCancelledWhenIssueReopens(t *testing.T)
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -7155,7 +7302,7 @@ func TestRecoverInterruptedDeferredWorktreeCleanupRemovesClosedIssueWorktree(t *
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -7172,6 +7319,16 @@ func TestRecoverInterruptedDeferredWorktreeCleanupRemovesClosedIssueWorktree(t *
 		t.Fatalf("mkdir source worktree: %v", err)
 	}
 	sourceBranch := "riordan/" + taskID + "/recover-deferred-cleanup"
+	cacheRoot := filepath.Join(repoDir, ".azedarach", "go")
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		entry := filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+taskID, "entry")
+		if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+			t.Fatalf("seed %s cache: %v", kind, err)
+		}
+		if err := os.WriteFile(entry, []byte("cache"), 0o644); err != nil {
+			t.Fatalf("write %s cache: %v", kind, err)
+		}
+	}
 	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
 	commands := make([]string, 0, 8)
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
@@ -7223,6 +7380,12 @@ func TestRecoverInterruptedDeferredWorktreeCleanupRemovesClosedIssueWorktree(t *
 	if !strings.Contains(joined, "branch -D "+sourceBranch) {
 		t.Fatalf("commands missing branch cleanup:\n%s", joined)
 	}
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		_, err := os.Stat(filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+taskID))
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s cache remains after interrupted recovery cleanup: %v", kind, err)
+		}
+	}
 }
 
 func TestTaskCloseCommandRefusesChildIntegrationToBaseWithoutAncestorTarget(t *testing.T) {
@@ -7233,7 +7396,7 @@ func TestTaskCloseCommandRefusesChildIntegrationToBaseWithoutAncestorTarget(t *t
 	sourceWorktree := filepath.Join(repoDir, "wt-child")
 	sourceBranch := "riordan/az-2/child-base"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -7372,7 +7535,7 @@ func TestTaskUpdateStatusRejectsRawCloseActiveChildRuntime(t *testing.T) {
 	logger := slog.Default()
 	projectID := "proj-close-guard-reopen-child"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -7559,7 +7722,7 @@ func TestTaskGraphReadinessSkipsForeignOwnedRunnableIssues(t *testing.T) {
 func TestTaskOwnershipClaimConflictReturnsProtocolConflict(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-task-ownership-conflict"
-	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:  "Owned worker",
@@ -7607,7 +7770,7 @@ func TestTaskOwnershipClaimConflictReturnsProtocolConflict(t *testing.T) {
 func TestTaskOwnershipClaimCommandKeepsReviewSeparateFromExecution(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-scoped-ownership"
-	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "worker under review", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
@@ -7615,6 +7778,9 @@ func TestTaskOwnershipClaimCommandKeepsReviewSeparateFromExecution(t *testing.T)
 	}
 	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{OwnerID: "worker-a"}); err != nil {
 		t.Fatalf("seed execution ownership: %v", err)
+	}
+	if err := issuesClient.Update(ctx, taskID, domain.StatusInReview); err != nil {
+		t.Fatalf("request review: %v", err)
 	}
 	d := &Daemon{cfg: Config{Logger: slog.Default()}, hub: publish.NewHub(16, 8, slog.Default()), issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{}}
 	body, err := json.Marshal(taskOwnershipRequest{TaskID: taskID, OwnerID: "reviewer-a", Purpose: domain.CoordinationLeaseReview})
@@ -7735,7 +7901,8 @@ func TestTaskGraphReadinessStopsAtNestedRoots(t *testing.T) {
 func TestTaskGraphReadinessLoadsRootScopedTasksWithLargeUnrelatedProject(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-root-scoped-readiness"
-	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -7769,19 +7936,13 @@ func TestTaskGraphReadinessLoadsRootScopedTasksWithLargeUnrelatedProject(t *test
 	if err := issuesClient.AddDependency(ctx, childID, blockerID, string(domain.DependencyBlocks)); err != nil {
 		t.Fatalf("add blocker dependency: %v", err)
 	}
-	for i := 0; i < 250; i++ {
-		unrelatedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-			Title:    fmt.Sprintf("Unrelated %03d", i),
-			Type:     domain.TypeTask,
-			Priority: domain.P3,
-			Status:   domain.StatusOpen,
-		})
-		if err != nil {
-			t.Fatalf("create unrelated %d: %v", i, err)
-		}
-		if unrelatedID == rootID || unrelatedID == childID || unrelatedID == blockerID {
-			t.Fatalf("unexpected duplicate unrelated id %s", unrelatedID)
-		}
+	unrelated := make([]issuefixture.Issue, 250)
+	for i := range unrelated {
+		unrelated[i] = issuefixture.Issue{ID: fmt.Sprintf("fixture-readiness-unrelated-%03d", i), Title: fmt.Sprintf("Unrelated %03d", i), Type: domain.TypeTask, Priority: domain.P3, Status: domain.StatusOpen}
+	}
+	setup, err := issuefixture.SeedPath(ctx, dbPath, issuefixture.Fixture{Issues: unrelated})
+	if err != nil {
+		t.Fatalf("seed unrelated issues: %v", err)
 	}
 
 	d := &Daemon{
@@ -7790,10 +7951,13 @@ func TestTaskGraphReadinessLoadsRootScopedTasksWithLargeUnrelatedProject(t *test
 			projectID: issuesClient,
 		},
 	}
+	queryStarted := time.Now()
 	tasks, err := d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootID)
+	queryDuration := time.Since(queryStarted)
 	if err != nil {
 		t.Fatalf("loadTaskGraphReadinessDomainTasks error: %v", err)
 	}
+	t.Logf("graph readiness scale timing: setup=%s query=%s rows=%d", setup.Duration, queryDuration, setup.Rows)
 	byID := map[string]domain.Task{}
 	for _, task := range tasks {
 		byID[task.ID.String()] = task
@@ -7823,7 +7987,7 @@ func TestTaskGraphReadinessRefreshesOnlyRootScopedSessions(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-root-scoped-session-refresh"
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(dbPath, slog.Default())
+	issuesClient := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
@@ -7873,7 +8037,7 @@ func TestTaskGraphReadinessRefreshesOnlyRootScopedSessions(t *testing.T) {
 			UpdatedAt:     seededAt,
 		},
 	} {
-		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, session); err != nil {
+		if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, session); err != nil {
 			t.Fatalf("seed session %s: %v", session.ID, err)
 		}
 	}
@@ -7930,17 +8094,14 @@ func TestTaskGraphReadinessRefreshesOnlyRootScopedSessions(t *testing.T) {
 }
 
 func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
 	projectID := "proj-graph-shared-load"
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(dbPath, slog.Default())
+	issuesClient := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-
-	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+	setupCtx := context.Background()
+	rootID, err := issuesClient.Create(setupCtx, issues.CreateTaskParams{
 		Title:  "Shared readiness root",
 		Type:   domain.TypeEpic,
 		Status: domain.StatusInProgress,
@@ -7948,7 +8109,7 @@ func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create root: %v", err)
 	}
-	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+	childID, err := issuesClient.Create(setupCtx, issues.CreateTaskParams{
 		Title:    "Shared readiness child",
 		Type:     domain.TypeTask,
 		Status:   domain.StatusInProgress,
@@ -7958,7 +8119,7 @@ func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
 		t.Fatalf("create child: %v", err)
 	}
 	sessionID := naming.CanonicalSessionID(projectID, childID)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, setupCtx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       childID,
 		State:         daemonstate.SessionStateRunning,
@@ -7991,6 +8152,10 @@ func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
 		revision: map[string]uint64{projectID: 1},
 	}
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+	// Keep fixture initialization outside the operation deadline. Under -race,
+	// lazy migrations can exceed the intended three-second readiness assertion.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 
 	type readinessResult struct {
 		ready taskGraphReadinessResult
@@ -8045,7 +8210,8 @@ func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
 func TestTaskClosePreflightLoadsRootScopedSubtreeWithLargeUnrelatedProject(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-close-scoped-subtree"
-	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -8077,19 +8243,13 @@ func TestTaskClosePreflightLoadsRootScopedSubtreeWithLargeUnrelatedProject(t *te
 	if err != nil {
 		t.Fatalf("create grandchild: %v", err)
 	}
-	for i := 0; i < 250; i++ {
-		unrelatedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-			Title:    fmt.Sprintf("Unrelated %03d", i),
-			Type:     domain.TypeTask,
-			Priority: domain.P3,
-			Status:   domain.StatusOpen,
-		})
-		if err != nil {
-			t.Fatalf("create unrelated %d: %v", i, err)
-		}
-		if unrelatedID == rootID || unrelatedID == childID || unrelatedID == grandchildID {
-			t.Fatalf("unexpected duplicate unrelated id %s", unrelatedID)
-		}
+	unrelated := make([]issuefixture.Issue, 250)
+	for i := range unrelated {
+		unrelated[i] = issuefixture.Issue{ID: fmt.Sprintf("fixture-close-unrelated-%03d", i), Title: fmt.Sprintf("Unrelated %03d", i), Type: domain.TypeTask, Priority: domain.P3, Status: domain.StatusOpen}
+	}
+	setup, err := issuefixture.SeedPath(ctx, dbPath, issuefixture.Fixture{Issues: unrelated})
+	if err != nil {
+		t.Fatalf("seed unrelated issues: %v", err)
 	}
 
 	d := &Daemon{
@@ -8098,10 +8258,13 @@ func TestTaskClosePreflightLoadsRootScopedSubtreeWithLargeUnrelatedProject(t *te
 			projectID: issuesClient,
 		},
 	}
+	queryStarted := time.Now()
 	tasks, err := d.loadTaskClosePreflightDomainTasks(ctx, projectID, rootID)
+	queryDuration := time.Since(queryStarted)
 	if err != nil {
 		t.Fatalf("loadTaskClosePreflightDomainTasks error: %v", err)
 	}
+	t.Logf("close preflight scale timing: setup=%s query=%s rows=%d", setup.Duration, queryDuration, setup.Rows)
 	byID := map[string]domain.Task{}
 	for _, task := range tasks {
 		byID[task.ID.String()] = task
@@ -8128,7 +8291,7 @@ func TestTaskGraphReadinessSurfacesPendingSessionStartProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot: %v", err)
 	}
-	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:    "Root",
@@ -8206,7 +8369,7 @@ func TestTaskGraphReadinessPendingStartOverridesStaleCloseableProjection(t *test
 	logger := slog.Default()
 	projectID := "proj-pending-start-overrides-stale"
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(dbPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, dbPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
@@ -8288,7 +8451,7 @@ func TestTaskGraphReadinessStoppedProjectionSuppressesNewerSnapshotAfterClose(t 
 	logger := slog.Default()
 	projectID := "proj-close-stopped-projection-wins"
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(dbPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, dbPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
@@ -8313,7 +8476,7 @@ func TestTaskGraphReadinessStoppedProjectionSuppressesNewerSnapshotAfterClose(t 
 
 	sessionID := naming.CanonicalSessionID(projectID, childID)
 	stoppedAt := time.Date(2026, time.July, 7, 9, 0, 0, 0, time.UTC)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       childID,
 		State:         daemonstate.SessionStateStopped,
@@ -8363,7 +8526,7 @@ func TestTaskCompletionAdviceIncludesDomainNextSteps(t *testing.T) {
 	joined := strings.Join(advice, "\n")
 	for _, want := range []string{
 		"az orchestrate close-session --issue az-4",
-		"az session start az-5",
+		"az orchestrator-session start --root az-5",
 		"az issue close --id az-3",
 		"az orchestrate start --root az-1 --issue az-2 --json",
 	} {
@@ -8435,7 +8598,7 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 	logger := slog.Default()
 	projectID := "proj-containment-risk"
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(dbPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, dbPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
@@ -8479,10 +8642,12 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 	}
 	runDaemonTestGit(t, repoDir, "commit", "-am", closedID.String()+": generate typed materializer rpc")
 	evidenceCommit := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
+	activeWorktree := filepath.Join(t.TempDir(), "active-worktree")
+	runDaemonTestGit(t, repoDir, "worktree", "add", "-q", activeWorktree, activeBranch)
 
 	for _, state := range []daemonstate.WorktreeState{
 		{ProjectID: projectID, IssueID: rootID.String(), Path: repoDir, Branch: rootBranch, UpdatedAt: time.Now().UTC()},
-		{ProjectID: projectID, IssueID: activeID.String(), Path: repoDir, Branch: activeBranch, UpdatedAt: time.Now().UTC()},
+		{ProjectID: projectID, IssueID: activeID.String(), Path: activeWorktree, Branch: activeBranch, UpdatedAt: time.Now().UTC()},
 	} {
 		if err := runtimeStateStore.UpsertWorktreeState(ctx, state); err != nil {
 			t.Fatalf("seed worktree state: %v", err)
@@ -8584,7 +8749,7 @@ func TestTaskGraphReadinessReportsNestedTrackerRootInsteadOfFlatteningDescendant
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 	projectID := "proj-nested-tracker-readiness"
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -8650,7 +8815,7 @@ func TestTaskGraphReadinessReportsNestedTrackerRootInsteadOfFlatteningDescendant
 	if ready.Capacity.DirectRunnableCount != 1 || ready.Capacity.NestedStartableCount != 1 || ready.Capacity.TotalCountingCapacityCount != 0 {
 		t.Fatalf("capacity = %+v, want direct runnable and nested startable outside active capacity", ready.Capacity)
 	}
-	if !strings.Contains(nested.Advice, "az session start "+trackerID) {
+	if !strings.Contains(nested.Advice, "az orchestrator-session start --root "+trackerID) {
 		t.Fatalf("nested advice = %q, want session start guidance", nested.Advice)
 	}
 	for _, observation := range ready.WorkerObservations {
@@ -8665,7 +8830,7 @@ func TestTaskGraphReadinessMarksFailedNestedRootStartAsBlockedCapacity(t *testin
 	logger := slog.Default()
 	repoDir := t.TempDir()
 	projectID := "proj-nested-start-failed"
-	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -8729,7 +8894,7 @@ func TestTaskGraphReadinessMarksFailedNestedRootStartAsBlockedCapacity(t *testin
 	if nested.FallbackPolicy != "keep_children_blocked_or_create_replacement_direct_work" {
 		t.Fatalf("fallback policy = %q", nested.FallbackPolicy)
 	}
-	if !strings.Contains(nested.Advice, "retry `az session start "+nestedID+"`") || !strings.Contains(nested.Advice, "replacement direct work") {
+	if !strings.Contains(nested.Advice, "retry `az orchestrator-session start --root "+nestedID+"`") || !strings.Contains(nested.Advice, "replacement direct work") {
 		t.Fatalf("advice = %q, want retry and replacement guidance", nested.Advice)
 	}
 	if ready.Capacity.BlockedNestedRootsCount != 1 || ready.Capacity.NestedStartableCount != 0 {
@@ -8766,7 +8931,7 @@ func TestTaskCompleteCheckIgnoresClosedNestedRootWithClosedDescendants(t *testin
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 	projectID := "proj-complete-closed-nested-root"
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -9021,7 +9186,7 @@ func TestTaskGraphReadinessWorkerObservationsIncludeEvidenceAndMissingProjection
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 	projectID := "proj-worker-observation"
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -9153,7 +9318,7 @@ func TestTaskGraphReadinessWorkerObservationsIncludeNonEpicRootLeaf(t *testing.T
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 	projectID := "proj-root-leaf-observation"
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -9196,7 +9361,7 @@ func TestTaskCompleteCheckReportsMixedStaleCloseableAndIncompleteChildren(t *tes
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -9264,6 +9429,51 @@ func TestTaskCompleteCheckReportsMixedStaleCloseableAndIncompleteChildren(t *tes
 	}
 }
 
+func TestTaskCompleteCheckClassifiesInvestigationChildrenByAcceptance(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-complete-check-investigations"
+	repoDir := t.TempDir()
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	humanID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Human findings", Type: domain.TypeInvestigation, Status: domain.StatusInReview, ParentID: &rootID})
+	if err != nil {
+		t.Fatalf("create human investigation: %v", err)
+	}
+	internalID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Internal review", Type: domain.TypeInvestigation, Status: domain.StatusInReview, ParentID: &rootID})
+	if err != nil {
+		t.Fatalf("create internal investigation: %v", err)
+	}
+	for _, event := range []issues.IssueObservationEventParams{
+		{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
+		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+	} {
+		if _, err := issuesClient.AppendIssueObservationEvent(ctx, internalID, event); err != nil {
+			t.Fatalf("append internal review event: %v", err)
+		}
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: logger}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
+	result, err := d.taskCompleteCheck(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskCompleteCheck: %v", err)
+	}
+	if len(result.StaleCloseableChildren) != 1 || result.StaleCloseableChildren[0].IssueID != internalID {
+		t.Fatalf("stale closeable = %+v, want accepted internal review %s only", result.StaleCloseableChildren, internalID)
+	}
+	evidence := strings.Join(result.StaleCloseableChildren[0].Evidence, "\n")
+	if !strings.Contains(evidence, "investigation disposition=internal_review") || !strings.Contains(evidence, "durable acceptance satisfied") {
+		t.Fatalf("internal review evidence = %q", evidence)
+	}
+	reasons := strings.Join(result.Reasons, "\n")
+	if !strings.Contains(reasons, "investigation "+humanID+" acceptance blocked") || strings.Contains(reasons, "investigation "+internalID+" acceptance blocked") {
+		t.Fatalf("reasons = %q", reasons)
+	}
+}
+
 func TestTaskIntegrationReadinessAcceptsLegacyMailboxAliases(t *testing.T) {
 	tests := map[string]bool{
 		"worker-integration-ready":       true,
@@ -9293,7 +9503,7 @@ func TestTaskIntegrationReadinessRequiresCompleteWorkerEvidencePacket(t *testing
 	ctx := context.Background()
 	projectID := "proj-worker-evidence-ready"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
 	if err != nil {
@@ -9341,11 +9551,50 @@ func TestTaskIntegrationReadinessRequiresCompleteWorkerEvidencePacket(t *testing
 	}
 }
 
+func TestTaskIntegrationReadinessSkipsReviewReadyReplayNotification(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-worker-evidence-replay"
+	repoDir := t.TempDir()
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusInReview, ParentID: &parentID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []daemonMailEvent{
+		{
+			Seq: 1, ParentIssue: parentID, IssueID: childID, Type: "worker-integration-ready", CreatedAt: time.Now().UTC(),
+			Body: `{"schema":"worker_evidence.v1","summary":"Ready","commands_run":["go test ./internal/daemon"],"key_assertions":["replay notification cannot mask evidence"],"files_changed":["internal/daemon/task_commands.go"],"review":{"status":"clean","findings":[]},"risks":["none"]}`,
+		},
+		{
+			Seq: 2, ParentIssue: parentID, IssueID: childID, Type: "worker-integration-ready", From: "daemon-observation-replay", Body: `{"summary":"issue is review-ready"}`, CreatedAt: time.Now().UTC(),
+			Payload: map[string]interface{}{"publication": reviewReadyReplayPublication, "publication_key": "project:42"},
+		},
+	}
+	for _, event := range events {
+		if err := appendMailboxEvent(repoDir, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
+	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Ready || result.EvidenceEventSeq != 1 || result.EvidencePacket == nil {
+		t.Fatalf("result = %+v, want earlier structured evidence selected", result)
+	}
+}
+
 func TestTaskIntegrationReadinessAcceptsIssueRecordWorkerEvidence(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-worker-issue-evidence-ready"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
 	if err != nil {
@@ -9396,7 +9645,7 @@ func TestHandleTaskEventAppendPublishesTaskUpdate(t *testing.T) {
 	projectID := "proj-task-event-append"
 	repoDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "append event", Type: domain.TypeTask, Status: domain.StatusInProgress})
 	if err != nil {
@@ -9465,7 +9714,7 @@ func TestTaskIntegrationReadinessLatestIssueEvidenceEventWins(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-worker-issue-evidence-latest"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
 	if err != nil {
@@ -9531,7 +9780,7 @@ func TestTaskIntegrationReadinessReportsIncompleteWorkerEvidencePacket(t *testin
 	ctx := context.Background()
 	projectID := "proj-worker-evidence-incomplete"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
 	if err != nil {
@@ -9578,7 +9827,7 @@ func TestTaskIntegrationReadinessLatestWorkerEvidenceEventWins(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-worker-evidence-latest"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
 	if err != nil {
@@ -9640,7 +9889,7 @@ func TestTaskIntegrationReadinessAcceptsLegacyAliasOnlyWithStructuredEvidence(t 
 	ctx := context.Background()
 	projectID := "proj-worker-evidence-legacy-alias"
 	repoDir := t.TempDir()
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
 	if err != nil {
@@ -9693,7 +9942,7 @@ func TestTaskMergeBaseTargetSelectsNearestAncestorWorktree(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "parent",
@@ -9809,6 +10058,119 @@ func TestTaskMergeBaseTargetDefaultUsesProjectBaseBranch(t *testing.T) {
 	}
 }
 
+func TestDurableBaseIntegrationAcceptanceRequiresIssueScopedHumanInput(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj-base-acceptance"
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}}
+	accepted, err := d.hasDurableBaseIntegrationAcceptance(ctx, projectID, issueID)
+	if err != nil || accepted {
+		t.Fatalf("acceptance before event = %v, %v; want false, nil", accepted, err)
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type:    domain.IssueEventHumanInputProvided,
+		Payload: map[string]any{"base_integration_accepted": true},
+	}); err != nil {
+		t.Fatalf("append acceptance: %v", err)
+	}
+	accepted, err = d.hasDurableBaseIntegrationAcceptance(ctx, projectID, issueID)
+	if err != nil || !accepted {
+		t.Fatalf("acceptance after event = %v, %v; want true, nil", accepted, err)
+	}
+}
+
+func TestTaskMergeBaseTargetHandlerGatesExplicitBaseOnDurableHumanAcceptance(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-handler-base-acceptance"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
+			return "worktree " + repoDir + "\nbranch refs/heads/main\n", nil
+		}
+		return "", fmt.Errorf("unexpected git args: %v", args)
+	}}
+	d := &Daemon{
+		cfg:                       Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		issueClientsByProject:     map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject:    map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(runner, repoDir, slog.Default())},
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return d.worktreeManagerForProject(projectID) },
+		runtimeStateStore: store,
+		logger:            slog.Default(),
+		pollers:           map[string]context.CancelFunc{normalizedProjectID(projectID): func() {}},
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	request := testRequest("task.merge_base_target", map[string]any{
+		"task_id": issueID, "base_branch": "main", "require_human_acceptance": true,
+	})
+	request.Meta.ProjectID = naming.ProjectID(projectID)
+	blocked, err := d.handleTaskMergeBaseTarget(ctx, request)
+	if err != nil {
+		t.Fatalf("blocked handler error: %v", err)
+	}
+	if blocked.OK || blocked.Error == nil || blocked.Error.Code != protocol.ErrorCodeInvalidRequest || !strings.Contains(blocked.Error.Message, "without durable human acceptance") {
+		t.Fatalf("blocked response = %+v, want acceptance refusal", blocked)
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventHumanInputProvided, Payload: map[string]any{"base_integration_accepted": true},
+	}); err != nil {
+		t.Fatalf("append acceptance: %v", err)
+	}
+	allowed, err := d.handleTaskMergeBaseTarget(ctx, request)
+	if err != nil || !allowed.OK {
+		t.Fatalf("allowed response = %+v, err = %v", allowed, err)
+	}
+	var result taskMergeBaseTargetResult
+	if err := json.Unmarshal(allowed.Body, &result); err != nil {
+		t.Fatalf("decode allowed response: %v", err)
+	}
+	if result.TargetID != "base" || result.Branch != "main" {
+		t.Fatalf("allowed target = %+v, want base/main", result)
+	}
+
+	d.projectConfigMu.Lock()
+	d.workflowModeByProject[projectID] = "origin"
+	d.projectConfigMu.Unlock()
+	originBlocked, err := d.handleTaskMergeBaseTarget(ctx, request)
+	if err != nil {
+		t.Fatalf("origin handler error: %v", err)
+	}
+	if originBlocked.OK || originBlocked.Error == nil || originBlocked.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("origin response = %+v, want direct base refusal", originBlocked)
+	}
+	for _, want := range []string{"workflow mode is origin", "git push -u origin HEAD", "az pr create --issue " + issueID, "az pr status --issue " + issueID, "az pr merge --issue " + issueID + " --confirm", "az ticket close --id " + issueID} {
+		if !strings.Contains(originBlocked.Error.Message, want) {
+			t.Fatalf("origin refusal %q missing %q", originBlocked.Error.Message, want)
+		}
+	}
+}
+
 func TestTaskGraphReadinessReportsPendingStartupAndCleanupTranscriptStates(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -9818,7 +10180,7 @@ func TestTaskGraphReadinessReportsPendingStartupAndCleanupTranscriptStates(t *te
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -9975,7 +10337,7 @@ func TestTaskFollowOnMergeCandidatesAreDaemonOwned(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent epic", Type: domain.TypeEpic})
 	if err != nil {
@@ -10064,7 +10426,7 @@ func TestTaskFollowOnMergeCandidatesAllowsTopLevelBaseFallback(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	topID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Top task", Type: domain.TypeTask})
 	if err != nil {
@@ -10113,7 +10475,7 @@ func TestTaskDeleteCommandDeletesThroughDaemon(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Delete me",
@@ -10178,7 +10540,7 @@ func TestTaskDeleteCommandRejectsParentWithUndeletedChildren(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Parent",
@@ -10250,7 +10612,7 @@ func TestTaskArchiveCommandRejectsParentWithUndeletedChildren(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Parent",
@@ -10320,7 +10682,7 @@ func TestTaskDeleteCommandRejectsParentWithChildrenBeforeRuntimeCleanup(t *testi
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -10446,7 +10808,7 @@ func TestTaskDeleteRunsIssueResourceCleanupWithoutSessionBeforeWorktreeRemoval(t
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -10577,7 +10939,7 @@ func TestTaskDeleteCleanupRepairsStaleMissingWorktreeProjection(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -10593,7 +10955,7 @@ func TestTaskDeleteCleanupRepairsStaleMissingWorktreeProjection(t *testing.T) {
 		t.Fatalf("mark task in progress: %v", err)
 	}
 	sessionID := naming.CanonicalSessionID(projectID, taskID)
-	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   taskID,
 		State:     daemonstate.SessionStateAttached,
@@ -10712,7 +11074,7 @@ func TestTaskDeleteCleanupRepairsStaleLegacyProjectWorktreeProjection(t *testing
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -10824,7 +11186,7 @@ func TestTaskDeleteCleanupRepairsLegacyProjectWorktreeProjectionMissingFromGitLi
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -10939,7 +11301,7 @@ func TestTaskDeleteCleanupBlocksLiveLegacyProjectWorktreeProjectionFromGitList(t
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -11043,7 +11405,7 @@ func TestTaskDeleteRunsIssueResourceCleanupWithoutRuntimeAttachments(t *testing.
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	issuesClient := issues.NewClient(repoDir, logger)
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -11508,7 +11870,7 @@ func newTaskStatusReviewGuardDaemon(t *testing.T, projectID string) (*Daemon, *i
 	t.Helper()
 	repoDir := t.TempDir()
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, slog.Default())
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, slog.Default())
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -11543,7 +11905,7 @@ func seedReviewGuardSessionProjection(t *testing.T, d *Daemon, projectID, taskID
 	if store == nil {
 		t.Fatal("missing runtime store")
 	}
-	if err := store.UpsertSessionState(context.Background(), projectID, session); err != nil {
+	if err := upsertSessionStateFixture(store, context.Background(), projectID, session); err != nil {
 		t.Fatalf("seed session projection: %v", err)
 	}
 }
@@ -11649,7 +12011,7 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 	}
 
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	projectID := "proj-get-many"
@@ -11688,14 +12050,18 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 		{name: "requested", sessionID: secondSessionID, issueID: secondID},
 		{name: "context", sessionID: firstSessionID, issueID: firstID},
 	} {
-		if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
-			ID:            row.sessionID,
-			IssueID:       row.issueID,
-			State:         daemonstate.SessionStateRunning,
-			ObservedState: daemonstate.SessionStateStopped,
-			UpdatedAt:     staleUpdatedAt,
+		if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
+			ID:        row.sessionID,
+			IssueID:   row.issueID,
+			State:     daemonstate.SessionStateRunning,
+			UpdatedAt: staleUpdatedAt,
 		}); err != nil {
 			t.Fatalf("seed %s session state: %v", row.name, err)
+		}
+		if _, _, err := runtimeStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+			ProjectID: projectID, SessionID: row.sessionID, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: staleUpdatedAt,
+		}); err != nil {
+			t.Fatalf("seed %s stale physical observation: %v", row.name, err)
 		}
 	}
 	tmuxRunner := &testTmuxRunner{
@@ -11707,6 +12073,7 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 		killRelease: make(chan struct{}),
 	}
 
+	const initialRevision uint64 = 9
 	d := &Daemon{
 		cfg:  Config{RepoDir: ".", Logger: logger},
 		tmux: tmux.NewClient(tmuxRunner, logger),
@@ -11716,7 +12083,7 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 		sessionStore:           daemonstate.NewStore(),
 		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{},
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
-		revision:               map[string]uint64{projectID: 9},
+		revision:               map[string]uint64{projectID: initialRevision},
 	}
 
 	body, err := json.Marshal(map[string][]string{
@@ -11744,7 +12111,7 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 	if err != nil {
 		t.Fatalf("decode task.get_many body: %v", err)
 	}
-	if got, want := payload.SnapshotRevision, uint64(9); got != want {
+	if got, want := payload.SnapshotRevision, initialRevision+2; got != want {
 		t.Fatalf("snapshot revision = %d, want %d", got, want)
 	}
 	taskByID := map[string]domain.Task{}
@@ -11885,7 +12252,7 @@ func TestTaskListSnapshotFreshnessRefreshesSessionCacheBeforeEvaluation(t *testi
 	)
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
 	durableUpdatedAt := time.Date(2026, time.April, 2, 11, 4, 45, 0, time.UTC)
-	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -11926,7 +12293,7 @@ func TestHandleTaskListDoesNotPersistSessionProjectionSnapshot(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -11987,7 +12354,7 @@ func TestHandleTaskListDoesNotPersistSessionProjectionSnapshot(t *testing.T) {
 func TestHandleTaskGetManyIncludesAncestorContextWhenRequested(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
-	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	projectID := "proj-get-many-ancestors"
@@ -12068,7 +12435,7 @@ func TestHandleTaskGetManyIncludesAncestorContextWhenRequested(t *testing.T) {
 func TestHandleTaskGetManyCanExcludeDependents(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
-	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	projectID := "proj-get-many-no-dependents"
@@ -12140,7 +12507,7 @@ func TestHandleTaskGetManyCanExcludeDependents(t *testing.T) {
 func TestHandleTaskGetManyDirectDependentsOnlyUsesParentChildEdges(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
-	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	projectID := "proj-get-many-direct-dependents"
@@ -12228,7 +12595,7 @@ func TestHandleTaskGetManyDirectDependentsOnlyUsesParentChildEdges(t *testing.T)
 func TestHandleTaskGetManyMetadataOnlyPreservesContextShape(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
-	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	projectID := "proj-get-many-metadata-only"
@@ -12328,7 +12695,7 @@ func TestHandleTaskSnapshotExportUsesProjectionSessions(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() {
 		_ = issuesClient.CloseDB()
 	})
@@ -12345,7 +12712,7 @@ func TestHandleTaskSnapshotExportUsesProjectionSessions(t *testing.T) {
 
 	projectID := "proj-snapshot-export"
 	sessionID := naming.CanonicalSessionID(projectID, taskID)
-	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   taskID,
 		State:     daemonstate.SessionStateAttached,
@@ -12414,7 +12781,7 @@ func TestHandleTaskGetEnqueuesOnlyRequestedIssueWorktreeRefreshAsync(t *testing.
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	targetID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "target issue",
@@ -12549,7 +12916,7 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	_, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "schema seed",
@@ -12577,11 +12944,11 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 	} {
 		if _, err := db.ExecContext(ctx, `
 			INSERT INTO issues (
-				id, title, description, status, priority, issue_type,
+				id, title, description, status, disposition, engagement, visibility, lifecycle_state, closed_outcome, review_state, priority, issue_type,
 				created_at, updated_at, closed_at, assignee, labels_json,
 				implementations_json, design, notes, acceptance, estimate, deleted_at
 			)
-			VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+			VALUES (?, ?, NULL, ?, 'ready', 'idle', 'live', 'open', 'none', 'none', ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
 		`, row.id, row.title, string(domain.StatusOpen), int(domain.P3), string(domain.TypeTask), now, now); err != nil {
 			t.Fatalf("insert issue %s: %v", row.id, err)
 		}
@@ -12604,10 +12971,10 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 		sessionID string
 		issueID   string
 	}{
-		{name: "target", sessionID: targetSessionID, issueID: targetSessionID},
+		{name: "target", sessionID: targetSessionID, issueID: targetID},
 		{name: "context", sessionID: contextSessionID, issueID: contextID},
 	} {
-		if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
 			ID:            row.sessionID,
 			IssueID:       row.issueID,
 			State:         daemonstate.SessionStateRunning,
@@ -12621,7 +12988,10 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 	otherUpdatedAt := time.Date(2026, time.April, 2, 9, 0, 0, 0, time.UTC)
 	for i := 0; i < 25; i++ {
 		issueID := fmt.Sprintf("other-%02d", i)
-		if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		if _, err := db.ExecContext(ctx, `INSERT INTO issues(id,title,status,disposition,engagement,visibility,lifecycle_state,closed_outcome,review_state,priority,issue_type,created_at,updated_at) VALUES(?,?,?,'ready','idle','live','open','none','none',?,?,?,?)`, issueID, issueID, string(domain.StatusOpen), int(domain.P3), string(domain.TypeTask), now, now); err != nil {
+			t.Fatalf("seed unrelated issue %s: %v", issueID, err)
+		}
+		if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
 			ID:            naming.CanonicalSessionID(projectID, issueID),
 			IssueID:       issueID,
 			State:         daemonstate.SessionStateStopped,
@@ -12786,7 +13156,7 @@ func TestRefreshWorktreeRuntimeStateSkipsClosedIssueWorktrees(t *testing.T) {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	closedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:  "closed with stale live worktree",
@@ -12875,7 +13245,19 @@ func TestRefreshWorktreeRuntimeStateSuppressesMissingWorktreeFromGitList(t *test
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE issues(id TEXT PRIMARY KEY); INSERT INTO issues(id) VALUES(?)`, missingID); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed durable issue authority: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
 	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
 		ProjectID: projectID,
@@ -12936,7 +13318,7 @@ func TestRefreshWorktreeRuntimeStateForIssuesDeletesClosedIssueWorktreeProjectio
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	closedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:  "closed targeted worktree",
@@ -13037,7 +13419,7 @@ func TestRefreshWorktreeRuntimeStateUsesClosestNonDoneAncestorBranch(t *testing.
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -13215,7 +13597,7 @@ func TestRuntimeDiffBaseBranchForWorktreeUsesClosestAncestorWorktree(t *testing.
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "parent",
@@ -13291,7 +13673,7 @@ func TestRefreshWorktreeRuntimeStateFallsBackToAncestorWorktreeBranchWhenAncesto
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	issuesClient := issues.NewClient(repoDir, slog.Default())
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{

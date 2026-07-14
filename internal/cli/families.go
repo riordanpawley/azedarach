@@ -374,31 +374,14 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 		return finishGitHookCommand(reconcileDir, deps, hookName, hookCommand, startedAt, runErr, opts.Verbose)
 	}
 
-	preCommitMergeInProgress := false
-	skipPreCommitDecisionSync := hookName == "pre-commit" && gitHookEnvFlagEnabled("AZEDARACH_SKIP_DECISION_SYNC")
-	if hookName == "pre-commit" {
-		mergeInProgress, mergeErr := gitMergeInProgress(projectDir)
-		if mergeErr != nil && opts.Verbose {
-			fmt.Fprintf(os.Stderr, "githooks pre-commit: merge state inspection failed: %v\n", mergeErr)
-		}
-		preCommitMergeInProgress = mergeInProgress
-		if preCommitMergeInProgress && opts.Verbose {
-			fmt.Fprintln(os.Stderr, "githooks pre-commit: merge in progress; skipping built-in decision sync")
-		}
-		if skipPreCommitDecisionSync && opts.Verbose {
-			fmt.Fprintln(os.Stderr, "githooks pre-commit: skipping built-in decision sync (AZEDARACH_SKIP_DECISION_SYNC=1)")
-		}
-	}
-
-	// Built-in decision sync commands fire before user-configured commands so
-	// that the markdown reflects SQLite by the time other pre-commit checks
-	// (lint, formatter, etc.) inspect the tree. Built-ins are best-effort and
-	// silent unless --verbose: the daemon may not be running on a fresh clone,
-	// and a missing decision feature must not block a commit.
+	// Built-in decision imports fire before user-configured commands. They are
+	// best-effort and silent unless --verbose: the daemon may not be running on
+	// a fresh clone, and a missing decision feature must not block Git updates.
+	// Export is deliberately explicit because the SQLite store is shared by
+	// linked worktrees; exporting from pre-commit can stage another worktree's
+	// decisions in the commit currently being created.
 	allCommands := []string{}
-	if !skipPreCommitDecisionSync {
-		allCommands = append(allCommands, builtInDecisionCommandsForHook(hookName, projectDir, preCommitMergeInProgress)...)
-	}
+	allCommands = append(allCommands, builtInDecisionCommandsForHook(hookName, projectDir)...)
 	allCommands = append(allCommands, configuredCommandsForHook(cfg, hookName)...)
 
 	for _, command := range allCommands {
@@ -415,17 +398,8 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 		}
 	}
 
-	// On ordinary pre-commit, restage docs/decisions/ in addition to any
-	// user-configured restage paths, so newly synced markdown lands in the
-	// same commit as the SQLite mutation that produced it. During merges, skip
-	// that built-in generation/restage path; dirty post-merge trees break the
-	// transactional merge path.
 	restageEnabled := cfg.GitHooks.Restage.Enabled
 	restagePaths := append([]string{}, cfg.GitHooks.Restage.Paths...)
-	if hookName == "pre-commit" && !preCommitMergeInProgress && !skipPreCommitDecisionSync {
-		restageEnabled = true
-		restagePaths = append(restagePaths, "docs/decisions")
-	}
 	if restageEnabled {
 		if err := restageHookChanges(projectDir, restagePaths); err != nil {
 			if !cfg.GitHooks.BestEffort {
@@ -481,15 +455,6 @@ type gitHookRuntimeDiagnostic struct {
 	Message    string
 }
 
-func gitHookEnvFlagEnabled(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
-
 func loadConfigForHook(projectDir string, deps *Dependencies) (*config.Config, error) {
 	if deps != nil && deps.Config != nil {
 		return deps.Config, nil
@@ -501,50 +466,25 @@ func loadConfigForHook(projectDir string, deps *Dependencies) (*config.Config, e
 	return cfg, nil
 }
 
-// builtInDecisionCommandsForHook returns the auto-injected decision sync
-// commands for a given hook. These normally fire regardless of whether the user
-// has populated cfg.GitHooks.Commands, so a freshly installed hook setup
-// automatically keeps SQLite and markdown in sync. The pre-commit sync is
-// suppressed during merges because generating markdown in that path can leave
-// the post-merge worktree dirty.
-//
-// ordinary pre-commit: write SQLite to docs/decisions/*.md so the markdown that
-// lands in the commit reflects the current store state.
+// builtInDecisionCommandsForHook returns the auto-injected decision import
+// commands for Git update hooks. Export remains an explicit user action so a
+// shared SQLite store cannot leak one linked worktree's changes into another
+// worktree's commit.
 //
 // post-merge / post-checkout / post-rewrite: read docs/decisions/*.md back
 // into SQLite so a freshly pulled branch sees teammates' decisions without a
 // manual import. The import is clean-changes-only; conflicts are reported
 // but neither side is overwritten (use az decision import --force for that).
-func builtInDecisionCommandsForHook(hookName, projectDir string, preCommitMergeInProgress bool) []string {
+func builtInDecisionCommandsForHook(hookName, projectDir string) []string {
 	projectDirFlag := ""
 	if strings.TrimSpace(projectDir) != "" {
 		projectDirFlag = " --project-dir " + shellSingleQuote(projectDir)
 	}
 	switch hookName {
-	case "pre-commit":
-		if preCommitMergeInProgress {
-			return nil
-		}
-		return []string{"az decision sync" + projectDirFlag}
 	case "post-merge", "post-checkout", "post-rewrite":
 		return []string{"az decision import" + projectDirFlag}
 	}
 	return nil
-}
-
-func gitMergeInProgress(projectDir string) (bool, error) {
-	gitDir, err := resolveGitDirPath(projectDir)
-	if err != nil {
-		return false, err
-	}
-	data, err := os.ReadFile(filepath.Join(gitDir, "MERGE_HEAD"))
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("read MERGE_HEAD: %w", err)
-	}
-	return strings.TrimSpace(string(data)) != "", nil
 }
 
 func configuredCommandsForHook(cfg *config.Config, hookName string) []string {
@@ -1234,16 +1174,25 @@ func codexGuardResponse(projectDir, event string, payloadMap map[string]any) (ma
 }
 
 func printCodexGuardResponse(response map[string]any) {
+	_ = writeCodexGuardResponse(os.Stdout, response)
+}
+
+func writeCodexGuardResponse(w io.Writer, response map[string]any) error {
 	if len(response) == 0 {
-		fmt.Println("codex guard: allow")
-		return
+		_, err := fmt.Fprintln(w, "codex guard: allow")
+		return err
 	}
 	if message, ok := response["systemMessage"].(string); ok {
-		fmt.Println(message)
+		if _, err := fmt.Fprintln(w, message); err != nil {
+			return err
+		}
 	}
 	if reason, ok := response["reason"].(string); ok {
-		fmt.Println(reason)
+		if _, err := fmt.Fprintln(w, reason); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func PrintGitHooksUsage() {

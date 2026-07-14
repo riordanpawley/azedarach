@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"strings"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/sqlitemigration"
 )
 
 //go:embed migrations/*.sql
@@ -22,8 +24,27 @@ var orderedMigrations = []migration{
 	{id: "daemon_notices_0001", path: "migrations/0001_daemon_notices.sql"},
 }
 
+var migrationArtifacts = []sqlitemigration.Artifact{
+	{ID: "daemon_notices_0001", Path: "migrations/0001_daemon_notices.sql", Checksum: "05a47c2b8c1e16e79062f0d19762bce056c7fd56c05bc33d06ccf5b2ea7e008a"},
+}
+
+const migrationArtifactAuthority sqlitemigration.Authority = "project.daemon_notices"
+
 func runMigrations(ctx context.Context, db *sql.DB) error {
+	if err := sqlitemigration.Validate(migrationFiles, migrationArtifacts); err != nil {
+		return fmt.Errorf("validate migration registry: %w", err)
+	}
+	registrations := make([]sqlitemigration.Artifact, 0, len(orderedMigrations))
+	for _, migration := range orderedMigrations {
+		registrations = append(registrations, sqlitemigration.Artifact{ID: migration.id, Path: migration.path})
+	}
+	if err := sqlitemigration.ValidateRegistrations(migrationArtifacts, registrations); err != nil {
+		return fmt.Errorf("validate migration artifact coverage: %w", err)
+	}
 	if err := ensureMigrationTable(ctx, db); err != nil {
+		return err
+	}
+	if err := sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts); err != nil {
 		return err
 	}
 	for _, migration := range orderedMigrations {
@@ -42,14 +63,15 @@ func runMigrations(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
-	return nil
+	return sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts)
 }
 
 func ensureMigrationTable(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `
         CREATE TABLE IF NOT EXISTS schema_migrations (
             id TEXT PRIMARY KEY,
-            applied_at TEXT NOT NULL
+            applied_at TEXT NOT NULL,
+            artifact_checksum TEXT
         )
     `)
 	if err != nil {
@@ -96,10 +118,7 @@ func applyMigration(ctx context.Context, db *sql.DB, id, sqlText string) error {
 	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
 		return fmt.Errorf("apply migration %s: %w", id, err)
 	}
-	if _, err := tx.ExecContext(ctx, `
-        INSERT INTO schema_migrations (id, applied_at)
-        VALUES (?, ?)
-    `, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := sqlitemigration.RecordApplied(ctx, tx, migrationArtifacts, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)
 	}
 	if err := tx.Commit(); err != nil {

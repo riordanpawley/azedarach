@@ -1,0 +1,27 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────╮
+│View Configurator                                                                             │
+│──────────────────────────────────────────────────────────────────────────────────────────────│
+│Configure the View with guided fields; no JSON required.                                      │
+│                                                                                              │
+│▸ Title            > Custom                                                                   │
+│  Layout           Board                                                                      │
+│  Filters          All issues                                                                 │
+│  Grouping         Workflow columns                                                           │
+│  Ordered sorting  Attention ↓, priority ↑, updated ↓                                         │
+│  Hide empty       false                                                                      │
+│ Tab field                                                                                    │
+│ ←/→ choice                                                                                   │
+│ Ctrl+S save                                                                                  │
+│ Ctrl+J advanced JSON                                                                         │
+│ Esc cancel                                                                                   │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯

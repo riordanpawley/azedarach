@@ -65,7 +65,7 @@ func ParseIssueSplitArgs(args []string) (IssueSplitOptions, error) {
 		return IssueSplitOptions{}, err
 	}
 	if fs.NArg() != 1 {
-		return IssueSplitOptions{}, fmt.Errorf("usage: az issue split [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
+		return IssueSplitOptions{}, fmt.Errorf("usage: az ticket split [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
 	}
 	opts.Title = fs.Arg(0)
 	taskType, err := parseTaskType(typeRaw)
@@ -137,7 +137,7 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 			StatusCommand:    fmt.Sprintf("az orchestrate status --root %s", parentIssueID),
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", parentIssueID),
 			IntegrateCommand: issueCloseCommand(createResult.IssueID),
-			MergeCommand:     fmt.Sprintf("az branch merge %s", createResult.IssueID),
+			MergeCommand:     fmt.Sprintf("az branch merge --source %s --target %s", createResult.IssueID, parentIssueID),
 			CloseCommand:     issueCloseCommand(createResult.IssueID),
 			Summary:          "Child work runs in an isolated session/worktree. Keep the parent/orchestrator watching with az orchestrate watch in another pane/session while workers are active; do not use --once for orchestration monitoring. It is not merged at creation; the parent/orchestrator should review, then close the child issue to integrate, record stopped session state, clean up, and mark it closed. Use merge_command only for manual repair.",
 		},
@@ -156,7 +156,7 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 	fmt.Println("Integration model:")
 	fmt.Println("- Child work runs in its own az/tmux session/worktree.")
 	fmt.Println("- It is not merged at creation; review it from the parent/orchestrator session, then close it to integrate and clean up.")
-	fmt.Println("- `az issue close` owns merge, stopped session cleanup, worktree cleanup, and issue closure.")
+	fmt.Println("- `az ticket close` owns merge, stopped session cleanup, worktree cleanup, and ticket closure.")
 	printOrchestrateStartResult(startResult)
 	fmt.Println("When the child is ready:")
 	fmt.Printf("- %s\n", result.Advice.CloseCommand)

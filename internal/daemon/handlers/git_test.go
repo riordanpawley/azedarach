@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -744,5 +745,15 @@ func TestGitHandlerUsesLongRunningExecutorForMutatingCommands(t *testing.T) {
 	}
 	if executor.commands[1] != CommandGitDiscardChanges || executor.commands[2] != CommandGitCheckpoint {
 		t.Fatalf("commands = %v", executor.commands)
+	}
+}
+
+func TestGitHandlerRejectsUnsuccessfulMergeResult(t *testing.T) {
+	handler := NewGitHandler(&fakeGitService{mergeFn: func(context.Context, string, string, string) (*git.MergeResult, error) {
+		return &git.MergeResult{Success: false, Message: "hook rejected merge"}, nil
+	}})
+	resp := handler.Handle(context.Background(), gitRequest(t, CommandGitMerge, gitCommandBody{Worktree: "/tmp/az-1", Branch: "source"}))
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "hook rejected merge") {
+		t.Fatalf("response = %+v, want unsuccessful result surfaced as command failure", resp)
 	}
 }

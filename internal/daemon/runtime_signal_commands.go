@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -228,19 +229,21 @@ func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.Req
 		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: true, Message: "lifecycle neutral"})
 		return
 	}
-	before := d.currentRevision(projectID)
-	if err := d.applySessionLifecycleTransitionWithActivity(ctx, req, projectID, sessionID, cmd.IssueID, command, activity, "hooks"); err != nil {
+	observedState, stateOK := lifecycleCommandState(command)
+	if !stateOK {
+		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: false, Message: fmt.Sprintf("unsupported observed lifecycle command %q", command)})
+		return
+	}
+	revisions, err := d.recordPhysicalSessionObservation(ctx, req.Meta, projectID, sessionID, cmd.IssueID, observedState, activity, "hooks")
+	if err != nil {
 		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: false, Message: err.Error()})
 		return
 	}
-	after := d.currentRevision(projectID)
-	rev := after
-	if rev == before {
-		rev = 0
+	for _, rev := range revisions {
+		out.ProjectionRevisions = appendRevision(out.ProjectionRevisions, rev)
 	}
-	out.ProjectionRevisions = appendRevision(out.ProjectionRevisions, rev)
+	rev := lastRevision(revisions)
 	out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: true, Revision: rev})
-
 	if parentSessionID, _, ok := agentScopedSessionParentAndPane(sessionID); ok {
 		canonicalRev, err := d.recordAgentHookActivityEvidenceAndMaterialize(ctx, req.Meta, projectID, parentSessionID, sessionID, cmd.IssueID, activity, cmd)
 		if err != nil {
@@ -251,6 +254,46 @@ func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.Req
 		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity_evidence", OK: true})
 		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity_canonical", OK: true, Revision: canonicalRev})
 	}
+	if orchestratorActivityWakeRequired(activity) {
+		if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC()); err != nil {
+			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "orchestrator_continuation", OK: false, Message: err.Error()})
+		} else {
+			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "orchestrator_continuation", OK: true})
+		}
+	}
+}
+
+// recordPhysicalSessionObservation persists one fact about the physical tmux
+// runtime, then fans its observed state and activity into every logical intent
+// associated with that runtime. Desired logical state and typed identity are
+// deliberately preserved.
+func (d *Daemon) recordPhysicalSessionObservation(ctx context.Context, meta protocol.Metadata, projectID, sessionID, _ string, observedState daemonstate.SessionState, activity, activitySource string) ([]uint64, error) {
+	store := d.sessionRuntimeStateStore(projectID)
+	if store == nil {
+		return nil, errors.New("session runtime store unavailable")
+	}
+	now := time.Now().UTC()
+	activity = normalizeSessionActivity(activity)
+	activitySource = normalizeSessionActivitySource(activitySource, "hooks")
+	if observedState == daemonstate.SessionStateStopped {
+		activity, activitySource = "", ""
+	}
+	changed, applied, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+		ProjectID: projectID, SessionID: sessionID, ObservedState: observedState,
+		Activity: activity, ActivitySource: activitySource, UpdatedAt: now,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !applied {
+		return nil, nil
+	}
+	revisions := make([]uint64, 0, len(changed))
+	writer := d.runtimeProjectionStateWriter()
+	for _, row := range changed {
+		revisions = appendRevision(revisions, writer.PublishSessionProjectionEvent(ctx, projectID, meta, row))
+	}
+	return revisions, nil
 }
 
 func (d *Daemon) recordAgentHookActivityEvidenceAndMaterialize(ctx context.Context, meta protocol.Metadata, projectID, sessionID, sourceSessionID, issueID, activity string, cmd protocol.RuntimeSignalIngestCommandBody) (uint64, error) {
@@ -305,69 +348,8 @@ func (d *Daemon) applySessionActivityEvidenceToCanonicalSession(ctx context.Cont
 		return 0, nil
 	}
 
-	now := time.Now().UTC()
-	if !evidence.UpdatedAt.IsZero() {
-		now = evidence.UpdatedAt.UTC()
-	}
-	state := daemonstate.SessionStateRunning
-	session := daemonstate.Session{
-		ID:             sessionID,
-		IssueID:        issueID,
-		State:          state,
-		ObservedState:  state,
-		Activity:       activity,
-		ActivitySource: activitySource,
-		UpdatedAt:      now,
-	}
-
-	seededFromSessionStore := false
-	if d.sessionStore != nil {
-		if existing, err := d.sessionStore.Session(projectID, sessionID); err == nil {
-			if daemonstate.NormalizeSessionState(existing.State) == daemonstate.SessionStateStopped ||
-				daemonstate.NormalizeSessionState(existing.ObservedState) == daemonstate.SessionStateStopped {
-				return 0, nil
-			}
-			session = existing
-			seededFromSessionStore = true
-		}
-	}
-
-	if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil {
-		existing, found, err := runtimeStore.GetSessionState(ctx, projectID, sessionID)
-		if err != nil {
-			return 0, fmt.Errorf("load canonical session projection: %w", err)
-		}
-		if found {
-			if !seededFromSessionStore &&
-				(daemonstate.NormalizeSessionState(existing.State) == daemonstate.SessionStateStopped ||
-					daemonstate.NormalizeSessionState(existing.ObservedState) == daemonstate.SessionStateStopped) {
-				return 0, nil
-			}
-			if !seededFromSessionStore {
-				session = existing
-			} else if strings.TrimSpace(string(session.State)) == "" {
-				session.State = existing.State
-			}
-			if seededFromSessionStore && strings.TrimSpace(string(session.ObservedState)) == "" {
-				session.ObservedState = existing.ObservedState
-			}
-			if existing.StartedAt != nil && !existing.StartedAt.IsZero() {
-				started := existing.StartedAt.UTC()
-				session.StartedAt = &started
-			}
-			if existing.TmuxAttachedCount > 0 {
-				session.TmuxAttachedCount = existing.TmuxAttachedCount
-			}
-		}
-	}
-
-	session.ID = sessionID
-	issueID = strings.TrimSpace(issueID)
-	session.IssueID = issueID
-	session.Activity = activity
-	session.ActivitySource = activitySource
-	session.UpdatedAt = now
-	return d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, meta, session), nil
+	revisions, err := d.recordPhysicalSessionObservation(ctx, meta, projectID, sessionID, issueID, daemonstate.SessionStateRunning, activity, activitySource)
+	return lastRevision(revisions), err
 }
 
 func (d *Daemon) materializeSessionActivityEvidence(ctx context.Context, meta protocol.Metadata, projectID string, issueIDs []string) error {
@@ -423,4 +405,11 @@ func appendRevision(revisions []uint64, rev uint64) []uint64 {
 		return revisions
 	}
 	return append(revisions, rev)
+}
+
+func lastRevision(revisions []uint64) uint64 {
+	if len(revisions) == 0 {
+		return 0
+	}
+	return revisions[len(revisions)-1]
 }

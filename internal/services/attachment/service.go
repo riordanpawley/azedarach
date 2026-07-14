@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/dbpathguard"
 	"github.com/riordanpawley/azedarach/internal/observability/tracesqlite"
 	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
@@ -31,6 +32,7 @@ var errAttachmentNotFound = errors.New("attachment not found")
 type Service struct {
 	issuesPath string
 	dbPath     string
+	dbPathErr  error
 	logger     *slog.Logger
 }
 
@@ -84,15 +86,20 @@ func newService(issuesPath string, logger *slog.Logger) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	dbPath, dbPathErr := resolveDBPath(issuesPath)
 	return &Service{
 		issuesPath: issuesPath,
-		dbPath:     resolveDBPath(issuesPath),
+		dbPath:     dbPath,
+		dbPathErr:  dbPathErr,
 		logger:     logger,
 	}
 }
 
 // Attach copies a file from sourcePath to shared attachment storage.
 func (s *Service) Attach(ctx context.Context, issueID string, sourcePath string) (*Attachment, error) {
+	if err := s.checkReady(); err != nil {
+		return nil, err
+	}
 	s.logger.Debug("attaching file", "issue_id", issueID, "source", sourcePath)
 
 	// Verify source file exists
@@ -123,6 +130,9 @@ func (s *Service) Attach(ctx context.Context, issueID string, sourcePath string)
 
 // AttachFromClipboard reads an image from the clipboard and attaches it
 func (s *Service) AttachFromClipboard(ctx context.Context, issueID string) (*Attachment, error) {
+	if err := s.checkReady(); err != nil {
+		return nil, err
+	}
 	s.logger.Info("attaching image from clipboard", "issue_id", issueID)
 	readCtx, cancel := context.WithTimeout(ctx, clipboardReadTimeout)
 	defer cancel()
@@ -157,6 +167,9 @@ func (s *Service) AttachFromClipboard(ctx context.Context, issueID string) (*Att
 
 // List returns all attachments for a given issue
 func (s *Service) List(ctx context.Context, issueID string) ([]Attachment, error) {
+	if err := s.checkReady(); err != nil {
+		return nil, err
+	}
 	s.logger.Debug("listing attachments", "issue_id", issueID)
 
 	if err := s.migrateLegacyImages(ctx, issueID); err != nil {
@@ -242,6 +255,9 @@ func (s *Service) listAttachmentReferences(ctx context.Context, issueID string) 
 
 // Delete removes an attachment by ID
 func (s *Service) Delete(ctx context.Context, issueID, attachmentID string) error {
+	if err := s.checkReady(); err != nil {
+		return err
+	}
 	s.logger.Debug("deleting attachment", "issue_id", issueID, "attachment_id", attachmentID)
 
 	if err := s.migrateLegacyImages(ctx, issueID); err != nil {
@@ -476,8 +492,14 @@ func parseLegacyAttachmentFilename(filename string) (attachmentID, originalFilen
 }
 
 func (s *Service) openDB() (*sql.DB, error) {
+	if err := s.checkReady(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(s.dbPath) == "" {
 		return nil, fmt.Errorf("attachment database path is empty")
+	}
+	if err := dbpathguard.Check(s.dbPath); err != nil {
+		return nil, fmt.Errorf("refuse attachment database: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(s.dbPath), 0755); err != nil {
 		return nil, fmt.Errorf("create attachment database directory: %w", err)
@@ -495,6 +517,16 @@ func (s *Service) openDB() (*sql.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+func (s *Service) checkReady() error {
+	if s == nil {
+		return fmt.Errorf("attachment service is nil")
+	}
+	if s.dbPathErr != nil {
+		return fmt.Errorf("resolve attachment database path: %w", s.dbPathErr)
+	}
+	return nil
 }
 
 func (s *Service) ensureIssueAttachmentSchema(db *sql.DB) error {
@@ -534,11 +566,18 @@ func (s *Service) ensureIssueAttachmentSchema(db *sql.DB) error {
 	return nil
 }
 
-func resolveDBPath(issuesPath string) string {
+func resolveDBPath(issuesPath string) (string, error) {
+	candidate := filepath.Join(issuesPath, "azedarach.db")
 	if fromEnv := strings.TrimSpace(os.Getenv("AZEDARACH_DB_PATH")); fromEnv != "" {
-		return fromEnv
+		useOverride, err := dbpathguard.UseProjectOverride(candidate, fromEnv)
+		if err != nil {
+			return "", fmt.Errorf("resolve test database override: %w", err)
+		}
+		if useOverride {
+			return fromEnv, nil
+		}
 	}
-	return filepath.Join(issuesPath, "azedarach.db")
+	return candidate, nil
 }
 
 func (s *Service) pathFromRelative(relative string) string {

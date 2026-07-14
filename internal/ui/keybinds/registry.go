@@ -50,6 +50,7 @@ const (
 	ActionOpenNotificationHistory ActionID = "open_notification_history"
 	ActionOpenOperationQueue      ActionID = "open_operation_queue"
 	ActionOpenBoardViews          ActionID = "open_board_views"
+	ActionOpenProjectOrchestrator ActionID = "open_project_orchestrator"
 	ActionToggleView              ActionID = "toggle_view"
 	ActionRefresh                 ActionID = "refresh"
 	ActionPullBase                ActionID = "pull_base"
@@ -91,6 +92,7 @@ var registry = []ActionSpec{
 	{ID: ActionHalfPageUp, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "ctrl+u", Display: "ctrl+u"}}},
 	{ID: ActionHalfPageDown, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "ctrl+d", Display: "ctrl+d"}}},
 	{ID: ActionOpenHelp, Mode: types.ModeNormal, Category: "Panes", Keys: []KeySpec{{Input: "?", Display: "?"}}, Hint: "help", Help: "Open this help reference"},
+	{ID: ActionOpenProjectOrchestrator, Mode: types.ModeNormal, Category: "Panes", Keys: []KeySpec{{Input: "O", Display: "O"}}, Hint: "orchestrator", Help: "Open project orchestrator details"},
 	{ID: ActionOpenWorkspace, Mode: types.ModeNormal, Keys: []KeySpec{{Input: " ", Display: "Space"}}, Hint: "task workspace"},
 	{ID: ActionEnterGoto, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "g", Display: "g"}}, Hint: "goto"},
 	{ID: ActionEnterSearch, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "/", Display: "/"}}, Hint: "search"},
@@ -107,9 +109,9 @@ var registry = []ActionSpec{
 	{ID: ActionOpenRecovery, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "n", Display: "n"}}, Hint: "recover"},
 	{ID: ActionOpenNotificationHistory, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "N", Display: "N"}}},
 	{ID: ActionOpenOperationQueue, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "Q", Display: "Q"}}, Hint: "ops"},
-	{ID: ActionOpenBoardViews, Mode: types.ModeNormal, Category: "Panes", Keys: []KeySpec{{Input: "B", Display: "B"}}, Hint: "board view", Help: "Open board view selector"},
+	{ID: ActionOpenBoardViews, Mode: types.ModeNormal, Category: "Panes", Keys: []KeySpec{{Input: "V", Display: "V"}}, Hint: "views", Help: "Open View Configurator"},
 	{ID: ActionOpenGitPane, Mode: types.ModeNormal, Category: "Panes", Keys: []KeySpec{{Input: "G", Display: "G"}}, Hint: "git", Help: "Open project root Git pane"},
-	{ID: ActionToggleView, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "tab", Display: "Tab"}}, Hint: "view"},
+	{ID: ActionToggleView, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "tab", Display: "Tab"}, {Input: "shift+tab", Display: "Shift+Tab"}}, Hint: "view", HintKey: "Tab/Shift+Tab"},
 	{ID: ActionPullBase, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "p", Display: "p"}}, Hint: "pull base"},
 	{ID: ActionQuit, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "q", Display: "q"}}, Hint: "quit"},
 
@@ -176,7 +178,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "Q", Help: "Open operation queue"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "L", Help: "Open event log"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "N", Help: "Open notification action center"},
-	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "O", Help: "Open tmux sessions"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "O", Help: "Open project orchestrator details"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "D", Help: "Open system diagnostics"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "n", Help: "Open async failure recovery"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "s", Help: "Open settings"},
@@ -185,7 +187,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "f", Help: "Open filter menu"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: ",", Help: "Open sort menu"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "/", Help: "Open search"},
-	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "g then p", Help: "Open project selector"},
+	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "g then p", Help: "Open Global/project scope selector"},
 	{Mode: types.ModeNormal, Category: "Panes", HelpKey: "g then s", Help: "Open spec workspace"},
 
 	{Mode: types.ModeNormal, Category: "Navigation", HelpKey: "h/l", Help: "Move between columns"},
@@ -228,7 +230,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "N", Help: "Open notification action center"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "Q", Help: "Open operation queue"},
 
-	{Mode: types.ModeNormal, Category: "Other", HelpKey: "Tab", Help: "Toggle compact/kanban view"},
+	{Mode: types.ModeNormal, Category: "Other", HelpKey: "Tab/Shift+Tab", Help: "Switch to next/previous configured view"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "esc", Help: "Close overlay / exit mode"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "ctrl+g", Help: "Close all stacked overlays"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "q", Help: "Quit"},
@@ -236,17 +238,17 @@ var registry = []ActionSpec{
 
 var boardViewRegistry = []ActionSpec{
 	{ID: ActionBoardViewMoveUp, Keys: []KeySpec{{Input: "k", Display: "k"}, {Input: "up", Display: "up"}}},
-	{ID: ActionBoardViewMoveDown, Keys: []KeySpec{{Input: "j", Display: "j"}, {Input: "down", Display: "down"}}, Hint: "view", HintKey: "j/k", Category: "Board Views", Help: "Move through saved board views", HelpKey: "j/k"},
-	{ID: ActionBoardViewSelect, Keys: []KeySpec{{Input: "enter", Display: "Enter"}}, Hint: "select", Category: "Board Views", Help: "Select highlighted board view"},
-	{ID: ActionBoardViewCreate, Keys: []KeySpec{{Input: "c", Display: "c"}}, Hint: "create", Category: "Board Views", Help: "Create a board view"},
-	{ID: ActionBoardViewDuplicate, Keys: []KeySpec{{Input: "d", Display: "d"}}, Hint: "duplicate", Category: "Board Views", Help: "Duplicate highlighted board view"},
-	{ID: ActionBoardViewEdit, Keys: []KeySpec{{Input: "e", Display: "e"}}, Hint: "edit", Category: "Board Views", Help: "Edit highlighted custom board view"},
-	{ID: ActionBoardViewDelete, Keys: []KeySpec{{Input: "x", Display: "x"}}, Hint: "delete", Category: "Board Views", Help: "Delete highlighted custom board view"},
-	{ID: ActionBoardViewToggleEmpty, Keys: []KeySpec{{Input: "h", Display: "h"}}, Hint: "hide empty", Category: "Board Views", Help: "Toggle empty columns for highlighted custom view"},
-	{ID: ActionBoardViewClose, Keys: []KeySpec{{Input: "esc", Display: "Esc"}, {Input: "q", Display: "q"}}, Hint: "close", HintKey: "Esc", Category: "Board Views", Help: "Close board view selector", HelpKey: "Esc/q"},
-	{Category: "Board Views", HelpKey: "CLI create", Help: "az board view create --file PATH"},
-	{Category: "Board Views", HelpKey: "CLI edit", Help: "az board view update --file PATH"},
-	{Category: "Board Views", HelpKey: "CLI delete", Help: "az board view delete --confirm VIEW"},
+	{ID: ActionBoardViewMoveDown, Keys: []KeySpec{{Input: "j", Display: "j"}, {Input: "down", Display: "down"}}, Hint: "view", HintKey: "j/k", Category: "Views", Help: "Move through saved Views", HelpKey: "j/k"},
+	{ID: ActionBoardViewSelect, Keys: []KeySpec{{Input: "enter", Display: "Enter"}}, Hint: "select", Category: "Views", Help: "Select highlighted View"},
+	{ID: ActionBoardViewCreate, Keys: []KeySpec{{Input: "c", Display: "c"}}, Hint: "create", Category: "Views", Help: "Create a View with the guided configurator"},
+	{ID: ActionBoardViewDuplicate, Keys: []KeySpec{{Input: "d", Display: "d"}}, Hint: "duplicate", Category: "Views", Help: "Duplicate highlighted View"},
+	{ID: ActionBoardViewEdit, Keys: []KeySpec{{Input: "e", Display: "e"}}, Hint: "edit", Category: "Views", Help: "Edit highlighted custom View"},
+	{ID: ActionBoardViewDelete, Keys: []KeySpec{{Input: "x", Display: "x"}}, Hint: "delete", Category: "Views", Help: "Delete highlighted custom View"},
+	{ID: ActionBoardViewToggleEmpty, Keys: []KeySpec{{Input: "h", Display: "h"}}, Hint: "hide empty", Category: "Views", Help: "Toggle empty columns for highlighted custom View"},
+	{ID: ActionBoardViewClose, Keys: []KeySpec{{Input: "esc", Display: "Esc"}, {Input: "q", Display: "q"}}, Hint: "close", HintKey: "Esc", Category: "Views", Help: "Close View Configurator", HelpKey: "Esc/q"},
+	{Category: "Views", HelpKey: "CLI create", Help: "az view create --file PATH"},
+	{Category: "Views", HelpKey: "CLI edit", Help: "az view update --file PATH"},
+	{Category: "Views", HelpKey: "CLI delete", Help: "az view delete --confirm VIEW"},
 }
 
 func LookupAction(mode types.Mode, input string) (ActionID, bool) {
@@ -310,7 +312,7 @@ func HelpCategories() []Category {
 func helpSpecs() []ActionSpec {
 	specs := append([]ActionSpec(nil), registry...)
 	if opener, ok := actionSpec(ActionOpenBoardViews); ok {
-		opener.Category = "Board Views"
+		opener.Category = "Views"
 		specs = append(specs, opener)
 	}
 	return append(specs, boardViewRegistry...)

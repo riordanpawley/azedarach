@@ -235,6 +235,21 @@ func runAICommand(cfg *config.Config, args []string) error {
 	}
 }
 
+func runInteractionCommand(cfg *config.Config, args []string) error {
+	if len(args) == 0 || isHelpArg(args[0]) {
+		cli.PrintInteractionUsage()
+		return nil
+	}
+	opts, err := cli.ParseInteractionArgs(args)
+	if err != nil {
+		cli.PrintInteractionUsage()
+		return err
+	}
+	return runCommand(cfg, func(deps *cli.Dependencies) error {
+		return cli.InteractionCommand(deps, opts)
+	})
+}
+
 func runTmuxCommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		cli.PrintTmuxUsage()
@@ -291,8 +306,16 @@ type projectScriptsStatusOptions struct {
 	Names      []string
 }
 
+var cleanupProjectAdvisorSessions = func(cfg *config.Config, projectPath string) error {
+	return runCommandAtRepoDir(cfg, projectPath, func(deps *cli.Dependencies) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err := deps.DaemonClient.CleanupProject(ctx, []string{protocol.ProjectCleanupCategoryAdvisorSessions})
+		return err
+	})
+}
+
 func runProjectCommand(cfg *config.Config, args []string) error {
-	_ = cfg
 	if len(args) == 0 || isHelpArg(args[0]) {
 		printProjectUsage()
 		return nil
@@ -304,7 +327,7 @@ func runProjectCommand(cfg *config.Config, args []string) error {
 	case "add":
 		return runProjectAddCommand(args[1:])
 	case "remove":
-		return runProjectRemoveCommand(args[1:])
+		return runProjectRemoveCommand(cfg, args[1:])
 	case "scripts":
 		return runProjectScriptsCommand(cfg, args[1:])
 	default:
@@ -407,7 +430,7 @@ func runProjectAddCommand(args []string) error {
 	return nil
 }
 
-func runProjectRemoveCommand(args []string) error {
+func runProjectRemoveCommand(cfg *config.Config, args []string) error {
 	fs := flag.NewFlagSet("project remove", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	if err := fs.Parse(args); err != nil {
@@ -427,6 +450,19 @@ func runProjectRemoveCommand(args []string) error {
 	registry, err := config.LoadProjectsRegistry()
 	if err != nil {
 		return fmt.Errorf("load projects registry: %w", err)
+	}
+	var projectPath string
+	for _, project := range registry.Projects {
+		if project.Name == name {
+			projectPath = project.Path
+			break
+		}
+	}
+	if strings.TrimSpace(projectPath) == "" {
+		return fmt.Errorf("remove project: %w", config.ErrProjectNotFound)
+	}
+	if err := cleanupProjectAdvisorSessions(cfg, projectPath); err != nil {
+		return fmt.Errorf("clean project advisor sessions: %w", err)
 	}
 	if err := registry.Remove(name); err != nil {
 		return fmt.Errorf("remove project: %w", err)

@@ -23,6 +23,7 @@ type Service struct {
 	mode          Mode
 	filter        *domain.Filter
 	sort          *domain.Sort
+	sortExplicit  bool
 	selectedTasks map[string]bool
 	showPhases    bool // Show dependency phase indicators
 }
@@ -203,22 +204,33 @@ func (s *Service) GetSort() *domain.Sort {
 // SetSort sets the sort settings
 func (s *Service) SetSort(sort *domain.Sort) {
 	s.sort = sort
+	s.sortExplicit = true
 }
 
 // SetSortField sets the sort field
 func (s *Service) SetSortField(field domain.SortField) {
 	s.sort.Field = field
+	s.sortExplicit = true
 }
 
 // SetSortOrder sets the sort order
 func (s *Service) SetSortOrder(order domain.SortOrder) {
 	s.sort.Order = order
+	s.sortExplicit = true
 }
 
 // ToggleSort toggles between fields or direction
 func (s *Service) ToggleSort(field domain.SortField) {
 	s.sort.Toggle(field)
+	s.sortExplicit = true
 }
+
+// MarkSortExplicit records that the user selected the current sort directly.
+func (s *Service) MarkSortExplicit() { s.sortExplicit = true }
+
+// IsSortExplicit reports whether automatic view ordering should yield to an
+// explicit user-selected sort.
+func (s *Service) IsSortExplicit() bool { return s.sortExplicit }
 
 // ApplySort sorts a list of tasks
 func (s *Service) ApplySort(tasks []domain.Task) []domain.Task {

@@ -13,32 +13,43 @@ const (
 )
 
 const (
-	daemonInvariantSessionStartConflict   daemonInvariantID = "session.start_conflict"
-	daemonInvariantSessionAttachTarget    daemonInvariantID = "session.attach_target"
-	daemonInvariantSessionLifecycleTarget daemonInvariantID = "session.lifecycle_target"
-	daemonInvariantSessionStopTargets     daemonInvariantID = "session.stop_targets"
-	daemonInvariantSessionReconcile       daemonInvariantID = "session.reconcile"
+	daemonInvariantSessionStartConflict    daemonInvariantID = "session.start_conflict"
+	daemonInvariantSessionAttachTarget     daemonInvariantID = "session.attach_target"
+	daemonInvariantSessionLifecycleTarget  daemonInvariantID = "session.lifecycle_target"
+	daemonInvariantSessionStopTargets      daemonInvariantID = "session.stop_targets"
+	daemonInvariantSessionReconcile        daemonInvariantID = "session.reconcile"
+	daemonInvariantSessionIssueLifecycle   daemonInvariantID = "session.issue_lifecycle_runtime"
+	daemonInvariantSessionActivityConverge daemonInvariantID = "session.activity_convergence"
+	daemonInvariantAdvisorSingleton        daemonInvariantID = "session.advisor_singleton"
 
-	daemonInvariantTaskListFreshness   daemonInvariantID = "task.list_freshness"
-	daemonInvariantTaskClose           daemonInvariantID = "task.close"
-	daemonInvariantTaskClosePreflight  daemonInvariantID = "task.close_preflight"
-	daemonInvariantTaskDelete          daemonInvariantID = "task.delete"
-	daemonInvariantTaskDeletePreflight daemonInvariantID = "task.delete_preflight"
-	daemonInvariantTaskGraphReadiness  daemonInvariantID = "task.graph_readiness"
-	daemonInvariantTaskCompleteCheck   daemonInvariantID = "task.complete_check"
-	daemonInvariantTaskReviewHandoff   daemonInvariantID = "task.review_handoff"
-	daemonInvariantTaskIntegration     daemonInvariantID = "task.integration_readiness"
-	daemonInvariantTaskContextRisk     daemonInvariantID = "task.context_risk_closeout"
-	daemonInvariantTaskMergeBaseTarget daemonInvariantID = "task.merge_base_target"
-	daemonInvariantTaskFollowOnMerge   daemonInvariantID = "task.follow_on_merge_candidates"
-	daemonInvariantWorkerObservation   daemonInvariantID = "worker.observation_projection"
-	daemonInvariantInteractionWaiting  daemonInvariantID = "interaction.waiting_human"
+	daemonInvariantTaskListFreshness    daemonInvariantID = "task.list_freshness"
+	daemonInvariantTaskClose            daemonInvariantID = "task.close"
+	daemonInvariantTaskClosePreflight   daemonInvariantID = "task.close_preflight"
+	daemonInvariantTaskDelete           daemonInvariantID = "task.delete"
+	daemonInvariantTaskDeletePreflight  daemonInvariantID = "task.delete_preflight"
+	daemonInvariantTaskGraphReadiness   daemonInvariantID = "task.graph_readiness"
+	daemonInvariantTaskCompleteCheck    daemonInvariantID = "task.complete_check"
+	daemonInvariantTaskReviewHandoff    daemonInvariantID = "task.review_handoff"
+	daemonInvariantTaskIntegration      daemonInvariantID = "task.integration_readiness"
+	daemonInvariantTaskContextRisk      daemonInvariantID = "task.context_risk_closeout"
+	daemonInvariantTaskMergeBaseTarget  daemonInvariantID = "task.merge_base_target"
+	daemonInvariantTaskFollowOnMerge    daemonInvariantID = "task.follow_on_merge_candidates"
+	daemonInvariantWorkerObservation    daemonInvariantID = "worker.observation_projection"
+	daemonInvariantInteractionWaiting   daemonInvariantID = "interaction.waiting_human"
+	daemonInvariantInvestigationWaiting daemonInvariantID = "investigation.waiting_human"
+	daemonInvariantInteractionStaleness daemonInvariantID = "interaction.staleness"
 
 	daemonInvariantRuntimeKnownProjectIDs  daemonInvariantID = "runtime.known_project_ids"
+	daemonInvariantCrossProjectViews       daemonInvariantID = "cross_project.view_projection"
 	daemonInvariantIssueResourceLifecycle  daemonInvariantID = "issue_resources.lifecycle"
 	daemonInvariantOrchestrationScope      daemonInvariantID = "orchestration.scope_identity"
 	daemonInvariantOrchestrationSingleton  daemonInvariantID = "orchestration.scope_singleton"
 	daemonInvariantOrchestrationCompletion daemonInvariantID = "orchestration.project_completion"
+	daemonInvariantOrchestrationCandidates daemonInvariantID = "orchestration.project_candidates"
+	daemonInvariantOrchestrationParentWake daemonInvariantID = "orchestration.parent_continuation"
+	daemonInvariantOrchestrationReview     daemonInvariantID = "orchestration.project_review"
+	daemonInvariantOrchestrationClaimStart daemonInvariantID = "orchestration.claim_start"
+	daemonInvariantOrchestrationLoop       daemonInvariantID = "orchestration.project_loop"
 )
 
 var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
@@ -47,6 +58,8 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantSessionLifecycleTarget:  daemonInvariantSourceTmux,
 	daemonInvariantSessionStopTargets:      daemonInvariantSourceTmux,
 	daemonInvariantSessionReconcile:        daemonInvariantSourceHybrid,
+	daemonInvariantSessionIssueLifecycle:   daemonInvariantSourceHybrid,
+	daemonInvariantSessionActivityConverge: daemonInvariantSourceHybrid,
 	daemonInvariantTaskListFreshness:       daemonInvariantSourceProjection,
 	daemonInvariantTaskClose:               daemonInvariantSourceHybrid,
 	daemonInvariantTaskClosePreflight:      daemonInvariantSourceHybrid,
@@ -60,12 +73,21 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantTaskMergeBaseTarget:     daemonInvariantSourceProjection,
 	daemonInvariantTaskFollowOnMerge:       daemonInvariantSourceProjection,
 	daemonInvariantWorkerObservation:       daemonInvariantSourceHybrid,
-	daemonInvariantInteractionWaiting:     daemonInvariantSourceProjection,
 	daemonInvariantRuntimeKnownProjectIDs:  daemonInvariantSourceProjection,
+	daemonInvariantCrossProjectViews:       daemonInvariantSourceProjection,
 	daemonInvariantIssueResourceLifecycle:  daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationScope:      daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationSingleton:  daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationCompletion: daemonInvariantSourceHybrid,
+	daemonInvariantOrchestrationCandidates: daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationParentWake: daemonInvariantSourceHybrid,
+	daemonInvariantInteractionWaiting:      daemonInvariantSourceProjection,
+	daemonInvariantInvestigationWaiting:    daemonInvariantSourceProjection,
+	daemonInvariantAdvisorSingleton:        daemonInvariantSourceHybrid,
+	daemonInvariantInteractionStaleness:    daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationReview:     daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationClaimStart: daemonInvariantSourceHybrid,
+	daemonInvariantOrchestrationLoop:       daemonInvariantSourceProjection,
 }
 
 func sourceForInvariant(id daemonInvariantID) daemonInvariantSource {

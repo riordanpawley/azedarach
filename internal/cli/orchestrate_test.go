@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -52,9 +53,13 @@ func TestParseOrchestrateStatusArgsRejectsSummaryFull(t *testing.T) {
 	}
 }
 
-func TestParseOrchestrateStatusArgs_RequiresRoot(t *testing.T) {
-	if _, err := ParseOrchestrateStatusArgs([]string{"--since", "10"}); err == nil {
-		t.Fatal("expected error for missing --root")
+func TestParseOrchestrateStatusArgs_AllowsResolvedScope(t *testing.T) {
+	opts, err := ParseOrchestrateStatusArgs([]string{"--since", "10"})
+	if err != nil {
+		t.Fatalf("rootless parse: %v", err)
+	}
+	if opts.RootIssueID != "" || opts.SinceSeq != 10 {
+		t.Fatalf("options = %#v", opts)
 	}
 }
 
@@ -365,6 +370,8 @@ func TestBuildOrchestrateWatchFrameIncludesPendingAndCleanupMarkers(t *testing.T
 					return responseWithJSON(req, []protocol.MailEvent{
 						{Seq: 9, ParentIssue: root.String(), IssueID: pending, Type: "session-started"},
 					}), nil
+				case protocol.CommandOrchestrationSnapshot:
+					return responseWithJSON(req, protocol.OrchestrationSnapshot{}), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 				}
@@ -379,6 +386,9 @@ func TestBuildOrchestrateWatchFrameIncludesPendingAndCleanupMarkers(t *testing.T
 	}
 	if len(frame.Pending) != 1 || frame.Pending[0].IssueID != pending.String() || frame.Pending[0].OperationState != string(protocol.OperationStateRunning) {
 		t.Fatalf("pending = %+v", frame.Pending)
+	}
+	if !strings.Contains(frame.PersistenceGuard, "Daemon-enforced") || !strings.Contains(frame.PersistenceGuard, "durable cursor") {
+		t.Fatalf("persistence guard = %q", frame.PersistenceGuard)
 	}
 	if len(frame.ActiveSessions) != 1 || frame.ActiveSessions[0].Status != "cleanup-pending" {
 		t.Fatalf("active_sessions = %+v", frame.ActiveSessions)
@@ -534,7 +544,7 @@ func TestOrchestrateStatusCommandIncludesNestedRoots(t *testing.T) {
 							Type:           string(domain.TypeTask),
 							ChildCount:     2,
 							FallbackPolicy: "start_nested_root",
-							Advice:         "start nested root orchestrator: az session start az-2",
+							Advice:         "start nested root orchestrator: az orchestrator-session start --root az-2",
 						}},
 						Blocked: map[string]string{},
 					}), nil
@@ -564,7 +574,7 @@ func TestOrchestrateStatusCommandIncludesNestedRoots(t *testing.T) {
 		t.Fatalf("nested_roots = %+v, want one nested root", result.NestedRoots)
 	}
 	got := result.NestedRoots[0]
-	if got.IssueID != nested.String() || got.Status != "startable" || got.IssueStatus != string(domain.StatusOpen) || got.ChildCount != 2 || !strings.Contains(got.Advice, "az session start az-2") {
+	if got.IssueID != nested.String() || got.Status != "startable" || got.IssueStatus != string(domain.StatusOpen) || got.ChildCount != 2 || !strings.Contains(got.Advice, "az orchestrator-session start --root az-2") {
 		t.Fatalf("nested root = %+v", got)
 	}
 	if result.Capacity.DirectRunnableCount != 1 || result.Capacity.NestedStartableCount != 1 {
@@ -595,7 +605,7 @@ func TestOrchestrateStatusCommandShowsNestedRoots(t *testing.T) {
 							Type:           string(domain.TypeTask),
 							ChildCount:     1,
 							FallbackPolicy: "start_nested_root",
-							Advice:         "start its orchestrator session with `az session start az-2`",
+							Advice:         "start its orchestrator session with `az orchestrator-session start --root az-2`",
 						}},
 						Blocked: map[string]string{},
 					}), nil
@@ -622,7 +632,7 @@ func TestOrchestrateStatusCommandShowsNestedRoots(t *testing.T) {
 		"nested startable=1 active=0 blocked_start_failed=0 not_counting=0 total_counting=0",
 		"Nested roots:",
 		"- az-2 status=startable issue_status=open type=task children=1 fallback=start_nested_root",
-		"next: start its orchestrator session with `az session start az-2`",
+		"next: start its orchestrator session with `az orchestrator-session start --root az-2`",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
@@ -674,7 +684,7 @@ func TestOrchestrateGroupCommandMovesChildUnderNestedRoot(t *testing.T) {
 							Type:           string(domain.TypeEpic),
 							ChildCount:     childCount,
 							FallbackPolicy: "start_nested_root",
-							Advice:         "start nested root orchestrator: az session start az-2",
+							Advice:         "start nested root orchestrator: az orchestrator-session start --root az-2",
 						}},
 						Blocked: map[string]string{},
 					}), nil
@@ -1367,6 +1377,8 @@ func TestBuildOrchestrateWatchFrameIncludesActiveSessionActivity(t *testing.T) {
 					}), nil
 				case protocol.CommandMailList:
 					return responseWithJSON(req, []protocol.MailEvent{{Seq: 7, ParentIssue: root.String(), IssueID: idle, Type: "worker-progress"}}), nil
+				case protocol.CommandOrchestrationSnapshot:
+					return responseWithJSON(req, protocol.OrchestrationSnapshot{}), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 				}
@@ -2341,7 +2353,7 @@ func TestOrchestrateStartSkipsNestedRootWithSessionStartAdvice(t *testing.T) {
 							Status:     string(domain.StatusOpen),
 							Type:       string(domain.TypeTask),
 							ChildCount: 1,
-							Advice:     "start its orchestrator session with `az session start az-2`",
+							Advice:     "start its orchestrator session with `az orchestrator-session start --root az-2`",
 						}},
 						Blocked: map[string]string{},
 					}), nil
@@ -2372,7 +2384,7 @@ func TestOrchestrateStartSkipsNestedRootWithSessionStartAdvice(t *testing.T) {
 	if !slices.Equal(result.NestedRoots, []string{nested.String()}) {
 		t.Fatalf("nested roots = %+v, want %s", result.NestedRoots, nested.String())
 	}
-	if got := result.Skipped[nested.String()]; !strings.Contains(got, "nested-root-start-orchestrator-session") || !strings.Contains(got, "az session start "+nested.String()) {
+	if got := result.Skipped[nested.String()]; !strings.Contains(got, "nested-root-start-orchestrator-session") || !strings.Contains(got, "az orchestrator-session start --root "+nested.String()) {
 		t.Fatalf("skipped[%s] = %q, want session start advice", nested.String(), got)
 	}
 
@@ -2839,7 +2851,7 @@ func TestOrchestrateIntegrateCommandPrintsGuidance(t *testing.T) {
 	output := captureStdout(t, func() error {
 		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2"})
 	})
-	for _, want := range []string{"Worktree: /repo-az-2", "az branch merge az-2", "az issue close --id az-2"} {
+	for _, want := range []string{"Worktree: /repo-az-2", "az branch merge --source az-2 --target <issue-id|base>", "az ticket close --id az-2"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
@@ -2981,6 +2993,9 @@ func TestOrchestrateIntegrateApplyJSONReportsPreflightDeadlineWithRetry(t *testi
 		ProjectID: protocol.DefaultProjectID,
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+				return protocol.HelloAck{Accepted: true}, nil
+			},
 			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
@@ -3004,6 +3019,7 @@ func TestOrchestrateIntegrateApplyJSONReportsPreflightDeadlineWithRetry(t *testi
 			},
 		}),
 	}
+	deps.DaemonClient.WithReconnectPolicy(reconnect.Policy{MaxAttempts: 1})
 
 	output, err := captureStdoutAllowError(t, func() error {
 		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: child.String(), Apply: true, JSON: true})
@@ -3056,7 +3072,7 @@ func TestOrchestrateIntegrateApplyDaemonIntegrationFailureStopsBeforeAppend(t *t
 		t.Fatal("expected daemon integration failure")
 	}
 	if !strings.Contains(output, "integrate_and_close: failed") ||
-		!strings.Contains(output, "az branch merge --project azedarach az-2") ||
+		!strings.Contains(output, "az branch merge --project azedarach --source az-2 --target <issue-id|base>") ||
 		!strings.Contains(output, "az orchestrate integrate --project azedarach --issue az-2 --apply") {
 		t.Fatalf("output missing daemon integration failure recovery:\n%s", output)
 	}
@@ -3254,7 +3270,7 @@ func TestOrchestrateCloseSessionCommandStopsSession(t *testing.T) {
 	if gotCommand != commandSessionStop {
 		t.Fatalf("command = %q, want %q", gotCommand, commandSessionStop)
 	}
-	if !strings.Contains(output, "az issue close --id az-2") || strings.Contains(output, "--cleanup") {
+	if !strings.Contains(output, "az ticket close --id az-2") || strings.Contains(output, "--cleanup") {
 		t.Fatalf("output = %q, want cleanup-close guidance", output)
 	}
 }

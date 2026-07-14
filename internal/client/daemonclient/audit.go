@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 const (
@@ -22,6 +23,7 @@ const (
 	auditEnvUID          = "AZEDARACH_AUDIT_UID"
 	auditEnvActiveIssue  = "AZEDARACH_AUDIT_ACTIVE_ISSUE"
 	auditEnvIssueID      = "AZEDARACH_ISSUE_ID"
+	auditEnvSessionID    = "AZEDARACH_SESSION_ID"
 )
 
 var (
@@ -68,6 +70,9 @@ func populateClientAuditMetadata(meta *protocol.Metadata) {
 	}
 	if meta.ClientActiveIssue == "" {
 		meta.ClientActiveIssue = strings.TrimSpace(os.Getenv(auditEnvIssueID))
+	}
+	if meta.SessionID == "" {
+		meta.SessionID = naming.SessionID(strings.TrimSpace(os.Getenv(auditEnvSessionID)))
 	}
 	if meta.ClientPID == 0 {
 		meta.ClientPID = auditCurrentPID()
