@@ -249,6 +249,18 @@ func TestMailSendReconcilesSQLiteFirstCrashWithoutSequenceReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	spoofed := daemonMailEvent{
+		Seq: 1, ParentIssue: root, IssueID: child, Type: "worker-progress", From: "spoof", To: "orchestrator",
+		Body: "must not replay", CreatedAt: time.Now().UTC(),
+	}
+	for _, sourceCommand := range []string{"manual.spoof", "mail.send"} {
+		if _, err := client.AppendIssueObservationEvent(ctx, child, issues.IssueObservationEventParams{
+			Type: domain.IssueObservationEventType(spoofed.Type), ObservedAt: spoofed.CreatedAt,
+			Source: "spoof", SourceCommand: sourceCommand, Payload: projectedMailObservationPayload(spoofed),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
 	send := func(requestID, body string) protocol.ResponseEnvelope {
 		t.Helper()
@@ -308,6 +320,30 @@ func TestMailSendReconcilesSQLiteFirstCrashWithoutSequenceReuse(t *testing.T) {
 	projected, err := client.ListIssueObservationMailEvents(ctx, root)
 	if err != nil || len(projected) != 3 {
 		t.Fatalf("projected outbox = %+v err=%v, want one row per logical delivery", projected, err)
+	}
+}
+
+func TestValidateCanonicalMailOutboxObservationRejectsSpoofedIdentity(t *testing.T) {
+	createdAt := time.Date(2026, 7, 15, 1, 2, 3, 0, time.UTC)
+	canonical := domain.IssueObservationEvent{
+		ID: 9, IssueID: naming.IssueID("child"), Type: "worker-progress", ObservedAt: createdAt,
+		SourceCommand: "mail.send", Payload: map[string]any{"mail_delivery_id": "request-9"},
+	}
+	base := daemonMailEvent{Seq: 1, ParentIssue: "root", IssueID: "child", Type: "worker-progress", Body: "progress", CreatedAt: createdAt}
+	for _, test := range []struct {
+		name  string
+		event daemonMailEvent
+		want  string
+	}{
+		{name: "issue", event: func() daemonMailEvent { event := base; event.IssueID = "other"; return event }(), want: "does not match observation issue"},
+		{name: "type", event: func() daemonMailEvent { event := base; event.Type = "worker-blocked"; return event }(), want: "does not match canonical observation type"},
+		{name: "time", event: func() daemonMailEvent { event := base; event.CreatedAt = createdAt.Add(time.Second); return event }(), want: "does not match observation time"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateCanonicalMailOutboxObservation(canonical, test.event); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validation error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

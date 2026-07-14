@@ -15,6 +15,16 @@ import (
 
 const defaultIssueObservationEventLimit = 500
 
+// ReviewEvidencePin identifies the exact durable evidence accepted by a
+// reviewer. Terminal close supports only issue-event evidence so the pin can
+// be revalidated in the same SQLite transaction as the terminal state write.
+type ReviewEvidencePin struct {
+	Source  string `json:"source"`
+	EventID int64  `json:"event_id"`
+	Seq     int64  `json:"seq,omitempty"`
+	Digest  string `json:"digest"`
+}
+
 type IssueObservationEventParams struct {
 	Type          domain.IssueObservationEventType
 	ObservedAt    time.Time
@@ -176,7 +186,14 @@ func (c *Client) ListIssueObservationMailEvents(ctx context.Context, parentIssue
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
 		FROM issue_observation_events
-		WHERE json_extract(payload_json, '$.mail_event.parent_issue') = ?
+		WHERE (
+			(source_command = 'mail.send' AND TRIM(COALESCE(json_extract(payload_json, '$.mail_delivery_id'), '')) <> '')
+			OR source_command = 'mailbox.cutover'
+		  )
+		  AND LOWER(REPLACE(REPLACE(TRIM(event_type), '_', '-'), '.', '-')) IN (
+			'worker-progress', 'worker-blocked', 'worker-integration-ready', 'worker-ready', 'worker-complete'
+		  )
+		  AND json_extract(payload_json, '$.mail_event.parent_issue') = ?
 		  AND CAST(json_extract(payload_json, '$.mail_event.seq') AS INTEGER) > 0
 		ORDER BY CAST(json_extract(payload_json, '$.mail_event.seq') AS INTEGER) ASC, id ASC
 	`, parentIssue)

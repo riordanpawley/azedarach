@@ -309,7 +309,7 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 				result.Failed[issueID] = failure
 				continue
 			}
-			if _, err := a.releaseAndCloseAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, storedPin.SourceOID, &result); err != nil {
+			if _, err := a.releaseAndCloseAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, storedPin, &result); err != nil {
 				result.Failed[issueID] = err.Error()
 			}
 			continue
@@ -706,7 +706,7 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 	if err := a.recordAcceptedReviewOutcome(ctx, projectID, inspection.IssueID, request, pin); err != nil {
 		return false, err
 	}
-	return a.releaseAndCloseAcceptedReview(ctx, projectID, request, inspection.IssueID, integrateBeforeClose, pin.SourceOID, result)
+	return a.releaseAndCloseAcceptedReview(ctx, projectID, request, inspection.IssueID, integrateBeforeClose, pin, result)
 }
 
 func (a daemonOrchestrationAuthority) captureAcceptedReviewPin(ctx context.Context, projectID, repoDir string, inspection protocol.OrchestrationReview, integrateBeforeClose bool) (acceptedReviewPin, error) {
@@ -723,17 +723,14 @@ func (a daemonOrchestrationAuthority) captureAcceptedReviewPin(ctx context.Conte
 		if readiness.EvidencePacket == nil {
 			return pin, fmt.Errorf("capture reviewed evidence identity: current evidence is unavailable")
 		}
-		body, err := json.Marshal(readiness.EvidencePacket)
+		evidencePin, err := reviewEvidencePinFromReadiness(readiness)
 		if err != nil {
-			return pin, fmt.Errorf("encode reviewed evidence identity: %w", err)
+			return pin, fmt.Errorf("capture reviewed evidence identity: %w", err)
 		}
-		pin.EvidenceSource = strings.TrimSpace(readiness.EvidenceSource)
-		if pin.EvidenceSource == "" && readiness.EvidenceEventSeq > 0 {
-			pin.EvidenceSource = "mailbox"
-		}
-		pin.EvidenceEventID = readiness.EvidenceEventID
-		pin.EvidenceSeq = readiness.EvidenceEventSeq
-		pin.EvidenceDigest = fmt.Sprintf("%x", sha256.Sum256(body))
+		pin.EvidenceSource = evidencePin.Source
+		pin.EvidenceEventID = evidencePin.EventID
+		pin.EvidenceSeq = evidencePin.Seq
+		pin.EvidenceDigest = evidencePin.Digest
 	}
 	if integrateBeforeClose {
 		oid, err := a.resolveAcceptedReviewSourceOID(ctx, projectID, inspection.IssueID)
@@ -746,6 +743,24 @@ func (a daemonOrchestrationAuthority) captureAcceptedReviewPin(ctx context.Conte
 		}
 	}
 	return pin, nil
+}
+
+func reviewEvidencePinFromReadiness(readiness taskIntegrationReadinessResult) (issues.ReviewEvidencePin, error) {
+	if readiness.EvidencePacket == nil {
+		return issues.ReviewEvidencePin{}, fmt.Errorf("current evidence is unavailable")
+	}
+	body, err := json.Marshal(readiness.EvidencePacket)
+	if err != nil {
+		return issues.ReviewEvidencePin{}, fmt.Errorf("encode evidence identity: %w", err)
+	}
+	source := strings.TrimSpace(readiness.EvidenceSource)
+	if source == "" && readiness.EvidenceEventSeq > 0 {
+		source = "mailbox"
+	}
+	return issues.ReviewEvidencePin{
+		Source: source, EventID: readiness.EvidenceEventID, Seq: readiness.EvidenceEventSeq,
+		Digest: fmt.Sprintf("%x", sha256.Sum256(body)),
+	}, nil
 }
 
 func (a daemonOrchestrationAuthority) resolveAcceptedReviewSourceOID(ctx context.Context, projectID, issueID string) (string, error) {
@@ -834,7 +849,7 @@ func reviewPayloadInt64(value any) int64 {
 	}
 }
 
-func (a daemonOrchestrationAuthority) releaseAndCloseAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, expectedSourceOID string, result *protocol.OrchestrationIntentResult) (bool, error) {
+func (a daemonOrchestrationAuthority) releaseAndCloseAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, pin acceptedReviewPin, result *protocol.OrchestrationIntentResult) (bool, error) {
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return false, fmt.Errorf("issue store unavailable")
@@ -847,11 +862,17 @@ func (a daemonOrchestrationAuthority) releaseAndCloseAcceptedReview(ctx context.
 			return true, fmt.Errorf("after review lease release: %w", err)
 		}
 	}
-	return true, a.closeAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, expectedSourceOID, result)
+	return true, a.closeAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, pin, result)
 }
 
-func (a daemonOrchestrationAuthority) closeAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, expectedSourceOID string, result *protocol.OrchestrationIntentResult) error {
-	body, err := json.Marshal(taskCloseRequest{TaskID: issueID, IntegrateBeforeClose: integrateBeforeClose, ExpectedSourceOID: strings.TrimSpace(expectedSourceOID)})
+func (a daemonOrchestrationAuthority) closeAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, pin acceptedReviewPin, result *protocol.OrchestrationIntentResult) error {
+	var evidencePin *issues.ReviewEvidencePin
+	if strings.TrimSpace(pin.EvidenceDigest) != "" {
+		evidencePin = &issues.ReviewEvidencePin{Source: pin.EvidenceSource, EventID: pin.EvidenceEventID, Seq: pin.EvidenceSeq, Digest: pin.EvidenceDigest}
+	}
+	body, err := json.Marshal(taskCloseRequest{
+		TaskID: issueID, IntegrateBeforeClose: integrateBeforeClose, ExpectedSourceOID: strings.TrimSpace(pin.SourceOID), ExpectedReviewEvidence: evidencePin,
+	})
 	if err != nil {
 		return err
 	}

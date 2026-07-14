@@ -1134,6 +1134,60 @@ func TestReviewAcceptRetryRejectsBranchMutationAfterDurableAcceptance(t *testing
 	}
 }
 
+func TestReviewAcceptTerminalCloseRejectsEvidenceMutationAfterLeaseRelease(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return "reviewed-source", nil }
+	request := protocol.OrchestrationIntentRequest{
+		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept,
+		IntentKey: "accept-before-evidence-mutation", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
+	}
+	first, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(first.Failed[issueID], "authoritative close") {
+		t.Fatalf("first acceptance = %+v, want accepted-close retry state", first)
+	}
+	mutated := mustWorkerEvidencePayload(t)
+	mutated["summary"] = "new evidence after review acceptance"
+	d.reviewLeaseReleasedBeforeClose = func(hookCtx context.Context, _, releasedIssueID string) error {
+		d.reviewLeaseReleasedBeforeClose = nil
+		_, err := client.AppendIssueObservationEvent(hookCtx, releasedIssueID, issues.IssueObservationEventParams{
+			Type: domain.IssueEventEvidenceSubmitted, Source: "late-worker", Payload: mutated,
+		})
+		return err
+	}
+	retried, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failure := retried.Failed[issueID]; !strings.Contains(failure, "reviewed evidence changed") || !strings.Contains(failure, "authoritative close") {
+		t.Fatalf("post-release evidence mutation = %+v, want terminal close revalidation failure", retried)
+	}
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != domain.StatusInReview {
+		t.Fatalf("task = %+v, want review state preserved", task)
+	}
+	integrationEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(integrationEvents) != 0 {
+		t.Fatalf("integration events = %+v, want no integration before rejected close", integrationEvents)
+	}
+}
+
 func TestReviewAcceptUsesReplayedTicketIntegrationReadyEvidenceIdempotently(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

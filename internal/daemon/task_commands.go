@@ -122,14 +122,15 @@ type taskClosePreflightRequest struct {
 }
 
 type taskCloseRequest struct {
-	TaskID               string `json:"task_id"`
-	ForceWorktree        bool   `json:"force_worktree,omitempty"`
-	IgnoreAhead          bool   `json:"ignore_ahead,omitempty"`
-	IntegrateBeforeClose bool   `json:"integrate_before_close,omitempty"`
-	CloseCleanChildren   bool   `json:"close_clean_children,omitempty"`
-	AllowActiveSession   bool   `json:"allow_active_session,omitempty"`
-	CloseOutcome         string `json:"closed_outcome,omitempty"`
-	ExpectedSourceOID    string `json:"expected_source_oid,omitempty"`
+	TaskID                 string                    `json:"task_id"`
+	ForceWorktree          bool                      `json:"force_worktree,omitempty"`
+	IgnoreAhead            bool                      `json:"ignore_ahead,omitempty"`
+	IntegrateBeforeClose   bool                      `json:"integrate_before_close,omitempty"`
+	CloseCleanChildren     bool                      `json:"close_clean_children,omitempty"`
+	AllowActiveSession     bool                      `json:"allow_active_session,omitempty"`
+	CloseOutcome           string                    `json:"closed_outcome,omitempty"`
+	ExpectedSourceOID      string                    `json:"expected_source_oid,omitempty"`
+	ExpectedReviewEvidence *issues.ReviewEvidencePin `json:"expected_review_evidence,omitempty"`
 }
 
 type taskStatusUpdateOptions struct {
@@ -2047,6 +2048,9 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	if result.ContextRisk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*result.ContextRisk) {
 		return result, fmt.Errorf("context risk is high for issue %s: record root_cause, invariant, regression_validation, or a structured risk note before closeout", taskID)
 	}
+	if err := d.validateTaskCloseReviewEvidence(ctx, projectID, taskID, cmd.ExpectedReviewEvidence); err != nil {
+		return result, fmt.Errorf("reviewed evidence revalidation for issue %s: %w", taskID, err)
+	}
 	recordPhase := func(name string, startedAt time.Time, skipped bool) {
 		result.Phases = append(result.Phases, taskClosePhaseTiming{
 			Name:      name,
@@ -2182,7 +2186,12 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	recordPhase("runtime_projection_repair", phaseStartedAt, false)
 
 	phaseStartedAt = time.Now()
-	task, err := issueClient.CloseWithRuntime(ctx, projectID, taskID, closeStatus)
+	var task domain.Task
+	if cmd.ExpectedReviewEvidence != nil {
+		task, err = issueClient.CloseWithRuntimeReviewEvidence(ctx, projectID, taskID, closeStatus, *cmd.ExpectedReviewEvidence)
+	} else {
+		task, err = issueClient.CloseWithRuntime(ctx, projectID, taskID, closeStatus)
+	}
 	if err != nil {
 		recordPhase("status_write", phaseStartedAt, false)
 		return result, taskClosePostIntegrationPhaseError(taskID, "status_write", integration, err)
@@ -2199,6 +2208,27 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	}
 	d.publishTaskEvent(req, protocol.EventTaskUpdated, rev, taskEventBodyFromTask(projectID, task))
 	return result, nil
+}
+
+func (d *Daemon) validateTaskCloseReviewEvidence(ctx context.Context, projectID, taskID string, expected *issues.ReviewEvidencePin) error {
+	if expected == nil {
+		return nil
+	}
+	if strings.TrimSpace(expected.Source) != "issue_event" || expected.EventID <= 0 || expected.Seq != 0 || strings.TrimSpace(expected.Digest) == "" {
+		return fmt.Errorf("accepted evidence is not an atomically revalidatable issue-event pin; fresh review required")
+	}
+	readiness, err := d.taskIntegrationReadiness(ctx, projectID, taskID, d.cfg.RepoDir)
+	if err != nil {
+		return err
+	}
+	current, err := reviewEvidencePinFromReadiness(readiness)
+	if err != nil {
+		return err
+	}
+	if current != *expected {
+		return fmt.Errorf("reviewed evidence changed; fresh review required")
+	}
+	return nil
 }
 
 func taskCloseIntegrationContext(ctx context.Context) (context.Context, context.CancelFunc, error) {

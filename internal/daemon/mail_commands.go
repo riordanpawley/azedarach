@@ -199,6 +199,9 @@ func (d *Daemon) reconcileProjectedMailboxEvents(ctx context.Context, projectID,
 		if err != nil {
 			return nil, fmt.Errorf("decode projected mail observation %d: %w", observation.ID, err)
 		}
+		if err := validateCanonicalMailOutboxObservation(observation, event); err != nil {
+			return nil, fmt.Errorf("validate projected mail observation %d: %w", observation.ID, err)
+		}
 		if event.ParentIssue != parentIssue {
 			return nil, fmt.Errorf("projected mail observation %d belongs to parent %s, not %s", observation.ID, event.ParentIssue, parentIssue)
 		}
@@ -223,6 +226,34 @@ func (d *Daemon) reconcileProjectedMailboxEvents(ctx context.Context, projectID,
 		lastSequence = event.Seq
 	}
 	return existing, nil
+}
+
+func validateCanonicalMailOutboxObservation(observation domain.IssueObservationEvent, event daemonMailEvent) error {
+	command := strings.TrimSpace(observation.SourceCommand)
+	switch command {
+	case "mail.send":
+		if observationPayloadString(observation.Payload, "mail_delivery_id") == "" {
+			return fmt.Errorf("mail.send outbox row is missing mail_delivery_id")
+		}
+	case "mailbox.cutover":
+	default:
+		return fmt.Errorf("source_command %q is not a canonical mail outbox producer", command)
+	}
+	if !naming.IssueIDsEqual(observation.IssueID.String(), event.IssueID) {
+		return fmt.Errorf("mail_event issue %s does not match observation issue %s", event.IssueID, observation.IssueID)
+	}
+	observationType, observationOK := projectStewardshipEventType(observation.Type)
+	eventType, eventOK := projectStewardshipEventType(domain.IssueObservationEventType(event.Type))
+	if !observationOK || !eventOK || observationType != eventType {
+		return fmt.Errorf("mail_event type %q does not match canonical observation type %q", event.Type, observation.Type)
+	}
+	if event.Seq <= 0 || strings.TrimSpace(event.ParentIssue) == "" {
+		return fmt.Errorf("mail_event parent/sequence identity is incomplete")
+	}
+	if !observation.ObservedAt.Equal(event.CreatedAt) {
+		return fmt.Errorf("mail_event created_at does not match observation time")
+	}
+	return nil
 }
 
 func daemonMailEventFromObservation(observation domain.IssueObservationEvent) (daemonMailEvent, error) {

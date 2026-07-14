@@ -2629,6 +2629,10 @@ func (c *Client) RepairReadyIdleEngagement(ctx context.Context, id string) (bool
 }
 
 func (c *Client) updateLocked(ctx context.Context, id string, status domain.Status, releaseExecutionLease bool) error {
+	return c.updateLockedWithPrecondition(ctx, id, status, releaseExecutionLease, nil)
+}
+
+func (c *Client) updateLockedWithPrecondition(ctx context.Context, id string, status domain.Status, releaseExecutionLease bool, precondition func(context.Context, *sql.Tx) error) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
@@ -2678,6 +2682,11 @@ func (c *Client) updateLocked(ctx context.Context, id string, status domain.Stat
 	}
 	if err := domain.ValidateIssueStateTransition(oldState, nextState); err != nil {
 		return c.wrapError("update", id, err)
+	}
+	if precondition != nil {
+		if err := precondition(ctx, tx); err != nil {
+			return c.wrapError("update", id, err)
+		}
 	}
 	if nextState.Workflow() == domain.IssueWorkflowClosed {
 		openChildCount, err := c.countOpenChildren(ctx, tx, id)
@@ -2780,6 +2789,82 @@ func (c *Client) CloseWithRuntime(ctx context.Context, projectID, id string, sta
 		return domain.Task{}, err
 	}
 	return c.GetWithRuntime(ctx, projectID, id)
+}
+
+// CloseWithRuntimeReviewEvidence revalidates the exact accepted evidence in
+// the same SQLite transaction that releases the execution lease and writes the
+// terminal issue state. A newer or altered evidence event fails closed.
+func (c *Client) CloseWithRuntimeReviewEvidence(ctx context.Context, projectID, id string, status domain.Status, pin ReviewEvidencePin) (domain.Task, error) {
+	nextState, err := issueStateFromStatus(status)
+	if err != nil {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), err)
+	}
+	if nextState.Workflow() != domain.IssueWorkflowClosed {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
+	}
+	if strings.TrimSpace(pin.Source) != "issue_event" || pin.EventID <= 0 || pin.Seq != 0 || strings.TrimSpace(pin.Digest) == "" {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), errors.New("review evidence pin must identify one durable issue event"))
+	}
+	if err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return c.updateLockedWithPrecondition(ctx, id, status, true, func(ctx context.Context, tx *sql.Tx) error {
+				return validateTerminalReviewEvidencePin(ctx, tx, id, pin)
+			})
+		})
+	}); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, id)
+}
+
+func validateTerminalReviewEvidencePin(ctx context.Context, tx *sql.Tx, issueID string, pin ReviewEvidencePin) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM issue_observation_events
+		WHERE issue_id = ?
+		  AND (
+			event_type = ?
+			OR LOWER(REPLACE(REPLACE(TRIM(event_type), '_', '.'), '-', '.')) IN (?, ?, ?, ?)
+		  )
+		ORDER BY observed_at ASC, id ASC
+	`, strings.TrimSpace(issueID),
+		string(domain.IssueEventIssueStatusChanged),
+		string(domain.IssueEventEvidenceSubmitted),
+		"worker.integration.ready",
+		"worker.ready",
+		"worker.complete",
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	events := make([]domain.IssueObservationEvent, 0, 16)
+	for rows.Next() {
+		event, err := scanIssueObservationEvent(rows)
+		if err != nil {
+			return err
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	evidence := domain.ReduceReviewReadyEvidence(events).LatestEvidence
+	if evidence == nil || !evidence.Validation.Complete {
+		return errors.New("reviewed evidence is no longer complete; fresh review required")
+	}
+	if evidence.SourceEvent.ID != pin.EventID {
+		return fmt.Errorf("reviewed evidence changed from event %d to event %d; fresh review required", pin.EventID, evidence.SourceEvent.ID)
+	}
+	body, err := json.Marshal(evidence.Evidence)
+	if err != nil {
+		return fmt.Errorf("encode terminal review evidence: %w", err)
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(body))
+	if digest != strings.TrimSpace(pin.Digest) {
+		return errors.New("reviewed evidence digest changed; fresh review required")
+	}
+	return nil
 }
 
 type OwnershipClaimParams struct {
