@@ -74,16 +74,16 @@ func TestVerifyProjectionSnapshotBindsCanonicalSourceVector(t *testing.T) {
 
 func TestProjectionDeltaProtocolVersionClaimAndCompatibility(t *testing.T) {
 	if ProjectionDeltaProtocolVersion != 48 {
-		t.Fatalf("projection protocol claim=%d, want 48", ProjectionDeltaProtocolVersion)
+		t.Fatalf("projection protocol first version=%d, want 48", ProjectionDeltaProtocolVersion)
 	}
 	if CurrentVersion != 49 {
 		t.Fatalf("current protocol version=%d, want 49", CurrentVersion)
 	}
 	if SupportsProjectionDeltaCommands(47) || !SupportsProjectionDeltaCommands(48) || !SupportsProjectionDeltaCommands(49) || SupportsProjectionDeltaCommands(50) {
-		t.Fatal("projection command support window does not preserve the v48 introduction through v49")
+		t.Fatal("projection command support window does not span v48-v49")
 	}
-	if ack := NegotiateHello(Hello{ProtocolVersion: 47}, "daemon-v49"); !ack.Accepted || ack.DaemonProtocolVersion != 49 {
-		t.Fatalf("v47 compatibility handshake=%+v", ack)
+	if ack := NegotiateHello(Hello{ProtocolVersion: 48}, "daemon-v49"); !ack.Accepted || ack.DaemonProtocolVersion != 49 {
+		t.Fatalf("v48 compatibility handshake=%+v", ack)
 	}
 	if ack := NegotiateHello(Hello{ProtocolVersion: 50}, "daemon-v49"); ack.Accepted || ack.ErrorCode != ErrorCodeIncompatible {
 		t.Fatalf("v50 compatibility handshake=%+v", ack)

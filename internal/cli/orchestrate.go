@@ -302,6 +302,7 @@ func (e *orchestrateStartLaunchError) Error() string {
 }
 
 type orchestrateWatchFrame struct {
+	sourceRevision         uint64
 	RootIssueID            string                               `json:"root_issue_id"`
 	SinceSeq               int64                                `json:"since_seq"`
 	NextSince              int64                                `json:"next_since"`
@@ -1294,7 +1295,10 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	if err != nil {
 		return orchestrateStartResult{}, err
 	}
-	intentKey := fmt.Sprintf("start:%s:%d:%s", opts.RootIssueID, opts.Limit, strings.Join(opts.IssueIDs, ","))
+	intentKey, err := newCLIOrchestrationStartIntentKey()
+	if err != nil {
+		return orchestrateStartResult{}, err
+	}
 	applied, err := deps.DaemonClient.ApplyOrchestrationIntent(ctx, protocol.OrchestrationIntentRequest{Scope: scope, Kind: protocol.OrchestrationIntentStart, IntentKey: intentKey, ActorID: ownerID, IssueIDs: opts.IssueIDs, Limit: opts.Limit, RepoDir: deps.RepoDir, BaseBranch: opts.BaseBranchOverride, OverrideBoardHealth: opts.OverrideBoardHealth})
 	if err != nil {
 		return orchestrateStartResult{}, err
@@ -2023,14 +2027,6 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 		return err
 	}
 	lastSnapshotKey := orchestrateWatchFrameSnapshotKey(frame)
-	readinessCache := newOrchestrateWatchReadinessCache(frame, time.Now(), opts.PollInterval)
-	if deps.Logger != nil {
-		deps.Logger.Debug("orchestrate watch readiness cache initialized",
-			"root_issue_id", opts.RootIssueID,
-			"poll_interval_ms", opts.PollInterval.Milliseconds(),
-			"readiness_refresh_interval_ms", readinessCache.refreshInterval.Milliseconds(),
-		)
-	}
 	if len(frame.Events) > 0 || len(frame.Pending) > 0 || len(frame.SessionStartProgress) > 0 || len(frame.ActiveSessions) > 0 || opts.Once {
 		if err := emitOrchestrateWatchFrame(frame, opts.JSONL, opts.Compact); err != nil {
 			return err
@@ -2042,72 +2038,37 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 	}
 
 	for {
-		if err := sleepWatchPoll(watchCtx, opts.PollInterval); err != nil {
-			return nil
-		}
-		events, err := watchDaemonCommandContext(watchCtx, deps, func(ctx context.Context) ([]protocol.MailEvent, error) {
-			return deps.DaemonClient.MailWatch(ctx, protocol.MailWatchCommandBody{
-				RepoDir:     deps.RepoDir,
-				ParentIssue: opts.RootIssueID,
-				SinceSeq:    lastSeq + 1,
-			})
-		})
+		events, err := deps.DaemonClient.Subscribe(watchCtx, opts.Project, frame.sourceRevision)
 		if err != nil {
 			if isWatchContextDone(watchCtx, err) {
 				return nil
 			}
-			if shouldContinueOrchestrateWatchAfterError(err) {
+			return err
+		}
+		select {
+		case <-watchCtx.Done():
+			return nil
+		case _, ok := <-events:
+			if !ok {
 				continue
+			}
+		}
+		frame, err = buildOrchestrateWatchFrameContext(watchCtx, deps, opts.RootIssueID, lastSeq)
+		if err != nil {
+			if isWatchContextDone(watchCtx, err) {
+				return nil
 			}
 			return err
 		}
-		watchEvents := make([]mailEvent, 0, len(events))
-		for _, event := range events {
-			watchEvents = append(watchEvents, protocolToLocalMailEvent(event))
-		}
-		nextSince := nextMailboxSeq(events, lastSeq)
-		if nextSince > lastSeq {
-			checkpointRootOrchestratorCursor(watchCtx, deps, opts.RootIssueID, nextSince)
-		}
-		now := time.Now()
-		refreshReadiness, refreshReason := readinessCache.shouldRefresh(now, len(events))
-		if deps.Logger != nil {
-			deps.Logger.Debug("orchestrate watch tick",
-				"root_issue_id", opts.RootIssueID,
-				"mailbox_event_count", len(events),
-				"since_seq", lastSeq,
-				"next_since", nextSince,
-				"poll_interval_ms", opts.PollInterval.Milliseconds(),
-				"readiness_cache", readinessCache.decision(refreshReadiness),
-				"readiness_refresh_reason", refreshReason,
-				"readiness_refresh_interval_ms", readinessCache.refreshInterval.Milliseconds(),
-			)
-		}
-		var frame orchestrateWatchFrame
-		if refreshReadiness {
-			ready, err := watchDaemonCommandContext(watchCtx, deps, func(ctx context.Context) (daemonclient.TaskGraphReadiness, error) {
-				return deps.DaemonClient.TaskGraphReadiness(ctx, opts.RootIssueID)
-			})
-			if err != nil {
-				if isWatchContextDone(watchCtx, err) {
-					return nil
-				}
-				return err
-			}
-			frame = orchestrateWatchFrameFromReadiness(ready, watchEvents, lastSeq, nextSince)
-			readinessCache.store(frame, now)
-		} else {
-			frame = readinessCache.cachedReadinessFrame(watchEvents, lastSeq, nextSince)
-		}
 		snapshotKey := orchestrateWatchFrameSnapshotKey(frame)
-		if len(events) == 0 && snapshotKey == lastSnapshotKey {
+		if len(frame.Events) == 0 && snapshotKey == lastSnapshotKey {
 			continue
 		}
 		if err := emitOrchestrateWatchFrame(frame, opts.JSONL, opts.Compact); err != nil {
 			return err
 		}
 		lastSnapshotKey = snapshotKey
-		lastSeq = nextSince
+		lastSeq = frame.NextSince
 	}
 }
 
@@ -2178,6 +2139,7 @@ func (cache orchestrateWatchReadinessCache) cachedReadinessFrame(events []mailEv
 
 func orchestrateWatchFrameFromReadiness(ready daemonclient.TaskGraphReadiness, events []mailEvent, since, nextSince int64) orchestrateWatchFrame {
 	return orchestrateWatchFrame{
+		sourceRevision:         ready.Revision,
 		RootIssueID:            ready.RootIssueID,
 		SinceSeq:               since,
 		NextSince:              nextSince,
@@ -2715,7 +2677,7 @@ func buildOrchestrateWatchFrameContext(ctx context.Context, deps *Dependencies, 
 	events, err := deps.DaemonClient.MailList(ctx, protocol.MailListCommandBody{
 		RepoDir:     deps.RepoDir,
 		ParentIssue: rootIssueID,
-		SinceSeq:    since,
+		SinceSeq:    since + 1,
 		Limit:       200,
 	})
 	if err != nil {

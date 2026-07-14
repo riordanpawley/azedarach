@@ -71,10 +71,6 @@ const (
 var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 var diffStatInsertionsPattern = regexp.MustCompile(`(\d+)\s+insertion`)
 var diffStatDeletionsPattern = regexp.MustCompile(`(\d+)\s+deletion`)
-var executablePath = os.Executable
-var lookupPath = exec.LookPath
-var processArgs = func() []string { return os.Args }
-var workingDir = os.Getwd
 var execProcess = tea.ExecProcess
 var newScopedDaemonClient = func(socketPath, projectID string, readWaitPolicy daemonclient.ReadWaitPolicy) *daemonclient.Client {
 	return daemonclient.New(transport.NewClient(socketPath)).
@@ -2434,9 +2430,6 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		socketPath := config.DaemonSocketPathFor(targetRepoDir)
 		daemonClient := m.daemonClientForSocket(socketPath, projectID)
 		launcher := daemonprocess.NewLauncher(targetRepoDir, socketPath).WithLogger(m.logger)
-		if bin := resolveDaemonBinaryForRepo(targetRepoDir); bin != "" {
-			launcher.BinPath = bin
-		}
 
 		// Avoid unconditional daemon replacement on every reattach attempt.
 		// EnsureAttached will start or replace only when protocol handshake
@@ -2755,93 +2748,6 @@ func daemonProjectRouteIDForPath(path string) (naming.ProjectID, bool) {
 		return "", false
 	}
 	return parsed, true
-}
-
-func resolveDaemonBinaryForRepo(repoDir string) string {
-	if sibling := resolveDaemonBinaryNearInvokedAz(); sibling != "" {
-		return sibling
-	}
-	if sibling := resolveDaemonBinaryNearExecutable(); sibling != "" {
-		return sibling
-	}
-	if cwdBin := resolveDaemonBinaryFromWorkingDir(); cwdBin != "" {
-		return cwdBin
-	}
-	if strings.TrimSpace(repoDir) == "" {
-		return ""
-	}
-	candidates := []string{
-		filepath.Join(repoDir, "bin", "azd"),
-		// Monorepo root launch path: repo contains go-bubbletea implementation subdir.
-		filepath.Join(repoDir, "go-bubbletea", "bin", "azd"),
-	}
-	for _, bin := range candidates {
-		if _, err := os.Stat(bin); err == nil {
-			return bin
-		}
-	}
-	return ""
-}
-
-func resolveDaemonBinaryNearExecutable() string {
-	exe, err := executablePath()
-	if err != nil || strings.TrimSpace(exe) == "" {
-		return ""
-	}
-
-	dir := filepath.Dir(exe)
-	candidate := filepath.Join(dir, "azd")
-	if _, err := os.Stat(candidate); err == nil {
-		return candidate
-	}
-	return ""
-}
-
-func resolveDaemonBinaryNearInvokedAz() string {
-	args := processArgs()
-	candidates := make([]string, 0, 2)
-	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
-		candidates = append(candidates, args[0])
-	}
-	candidates = append(candidates, "az")
-
-	for _, candidate := range candidates {
-		resolved, err := resolveCommandPath(candidate)
-		if err != nil || strings.TrimSpace(resolved) == "" {
-			continue
-		}
-		azd := filepath.Join(filepath.Dir(resolved), "azd")
-		if _, err := os.Stat(azd); err == nil {
-			return azd
-		}
-	}
-
-	return ""
-}
-
-func resolveDaemonBinaryFromWorkingDir() string {
-	cwd, err := workingDir()
-	if err != nil || strings.TrimSpace(cwd) == "" {
-		return ""
-	}
-	candidate := filepath.Join(cwd, "bin", "azd")
-	if _, err := os.Stat(candidate); err == nil {
-		return candidate
-	}
-	return ""
-}
-
-func resolveCommandPath(command string) (string, error) {
-	if command == "" {
-		return "", errors.New("empty command")
-	}
-	if filepath.IsAbs(command) {
-		if _, err := os.Stat(command); err != nil {
-			return "", err
-		}
-		return command, nil
-	}
-	return lookupPath(command)
 }
 
 func resolveInitialProjectName(registry *config.ProjectsRegistry, cwd string) string {

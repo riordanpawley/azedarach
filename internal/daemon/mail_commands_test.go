@@ -33,7 +33,7 @@ func TestMailWatchRecoversReviewReadyResubmissionsExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.AppendIssueObservationEvent(ctx, child, issues.IssueObservationEventParams{Type: "worker-integration-ready", Source: "test"}); err != nil {
+	if _, err := client.AppendIssueObservationEvent(ctx, child, issues.IssueObservationEventParams{Type: "worker-integration-ready", Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.Update(ctx, child, domain.StatusInReview); err != nil {
@@ -56,6 +56,13 @@ func TestMailWatchRecoversReviewReadyResubmissionsExactlyOnce(t *testing.T) {
 	if first[0].Payload["source_event_type"] != "worker-integration-ready" {
 		t.Fatalf("payload = %+v, want normalized alias source diagnostics", first[0].Payload)
 	}
+	if _, validation := domain.ParseWorkerEvidencePacketBody(first[0].Body); !validation.Complete {
+		t.Fatalf("replayed body = %s, validation=%+v, want canonical complete evidence", first[0].Body, validation)
+	}
+	encoded, err := json.Marshal(mailEventToProtocol(first[0]).Payload["worker_evidence_validation"])
+	if err != nil || !bytes.Contains(encoded, []byte(`"storage":"issue_event_payload_json_v1"`)) {
+		t.Fatalf("replay validation = %s err=%v, want source issue-event diagnostics preserved", encoded, err)
+	}
 	restarted := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
 	afterRestart, err := restarted.readMailboxEventsWithReviewReadyRecovery(ctx, req, repoDir, root)
 	if err != nil || len(afterRestart) != 1 {
@@ -65,7 +72,7 @@ func TestMailWatchRecoversReviewReadyResubmissionsExactlyOnce(t *testing.T) {
 	if err := client.Update(ctx, child, domain.StatusInProgress); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.AppendIssueObservationEvent(ctx, child, issues.IssueObservationEventParams{Type: "worker.integration_ready", Source: "test"}); err != nil {
+	if _, err := client.AppendIssueObservationEvent(ctx, child, issues.IssueObservationEventParams{Type: "worker.integration_ready", Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.Update(ctx, child, domain.StatusInReview); err != nil {
@@ -107,6 +114,9 @@ func TestMailWatchRepairsInterruptedAppendBeforeReviewReadyReplay(t *testing.T) 
 	}
 	child, err := client.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInProgress, ParentID: &root})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, child, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.Update(ctx, child, domain.StatusInReview); err != nil {

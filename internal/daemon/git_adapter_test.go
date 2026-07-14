@@ -47,7 +47,15 @@ func (r *recordingGitRunner) Run(ctx context.Context, args ...string) (string, e
 	if r.runFn == nil {
 		return "", nil
 	}
-	return r.runFn(args...)
+	output, err := r.runFn(args...)
+	if recordingGitCommitResolutionCommand(args) && ((err == nil && strings.TrimSpace(output) == "") || (err != nil && strings.Contains(strings.ToLower(err.Error()), "unexpected"))) {
+		return "test-oid-" + strings.TrimSuffix(args[4], "^{commit}"), nil
+	}
+	return output, err
+}
+
+func recordingGitCommitResolutionCommand(args []string) bool {
+	return len(args) >= 5 && args[0] == "-C" && args[2] == "rev-parse" && args[3] == "--verify" && strings.HasSuffix(args[4], "^{commit}")
 }
 
 func (r *recordingGitRunner) RunWithEnv(ctx context.Context, extraEnv []string, args ...string) (string, error) {

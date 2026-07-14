@@ -20,13 +20,15 @@ const (
 )
 
 type terminalFailureProbeState struct {
-	lastProbe      time.Time
-	fingerprint    [sha256.Size]byte
-	detected       bool
-	detectedHookAt time.Time
-	reason         domain.AgentTerminalFailureReason
-	nextProbe      time.Time
-	misses         uint8
+	lastProbe        time.Time
+	fingerprint      [sha256.Size]byte
+	detected         bool
+	detectedHookAt   time.Time
+	idlePrompt       bool
+	idlePromptHookAt time.Time
+	reason           domain.AgentTerminalFailureReason
+	nextProbe        time.Time
+	misses           uint8
 }
 
 // applyTerminalFailureProbes is the daemon-owned fallback for providers that
@@ -89,7 +91,7 @@ func (d *Daemon) observeTerminalFailureProbes(
 			continue
 		}
 		probeKey := projectID + "\x00" + session.ID
-		_, cached, shouldProbe := d.cachedTerminalFailureProbe(probeKey, activity.UpdatedAt, now)
+		_, cached, shouldProbe := d.cachedTerminalFailureProbe(probeKey, activity.UpdatedAt, now, false)
 		if cached || !shouldProbe {
 			continue
 		}
@@ -103,7 +105,7 @@ func (d *Daemon) observeTerminalFailureProbes(
 		reason, detected := domain.ClassifyAgentTerminalOutput(output)
 		fingerprint := sha256.Sum256([]byte(output))
 		if !detected {
-			d.recordTerminalFailureProbe(probeKey, activity.UpdatedAt, now, fingerprint, reason, false)
+			d.recordTerminalFailureProbe(probeKey, activity.UpdatedAt, now, fingerprint, reason, false, domain.ClassifyAgentTerminalIdle(output))
 			continue
 		}
 		count, err := d.materializeTerminalFailureObservation(ctx, projectID, session, activity.UpdatedAt, now, fingerprint, reason)
@@ -127,7 +129,7 @@ func (d *Daemon) materializeTerminalFailureObservation(
 	reason domain.AgentTerminalFailureReason,
 ) (int, error) {
 	probeKey := projectID + "\x00" + session.ID
-	if !d.recordTerminalFailureProbe(probeKey, hookAt, probedAt, fingerprint, reason, true) {
+	if !d.recordTerminalFailureProbe(probeKey, hookAt, probedAt, fingerprint, reason, true, false) {
 		return 0, nil
 	}
 	// Cache-only callers are retained for focused projection rendering tests.
@@ -193,7 +195,7 @@ func (d *Daemon) cachedTerminalFailureProbeReadOnly(key string, hookAt, now time
 	return probe, false, !now.Before(probe.nextProbe)
 }
 
-func (d *Daemon) cachedTerminalFailureProbe(key string, hookAt, now time.Time) (terminalFailureProbeState, bool, bool) {
+func (d *Daemon) cachedTerminalFailureProbe(key string, hookAt, now time.Time, revalidateIdlePrompt bool) (terminalFailureProbeState, bool, bool) {
 	d.terminalFailureProbeMu.Lock()
 	defer d.terminalFailureProbeMu.Unlock()
 	if d.terminalFailureProbes == nil {
@@ -202,6 +204,21 @@ func (d *Daemon) cachedTerminalFailureProbe(key string, hookAt, now time.Time) (
 	probe := d.terminalFailureProbes[key]
 	if probe.detected && !hookAt.After(probe.detectedHookAt) {
 		return probe, true, false
+	}
+	if probe.idlePrompt && hookAt.After(probe.idlePromptHookAt) {
+		probe.idlePrompt = false
+		probe.idlePromptHookAt = time.Time{}
+		probe.misses = 0
+		probe.nextProbe = time.Time{}
+		d.terminalFailureProbes[key] = probe
+	}
+	if revalidateIdlePrompt && probe.idlePrompt && !hookAt.After(probe.idlePromptHookAt) {
+		probe.lastProbe = now
+		probe.nextProbe = now.Add(terminalFailureProbeMinBackoff)
+		probe.idlePrompt = false
+		probe.idlePromptHookAt = time.Time{}
+		d.terminalFailureProbes[key] = probe
+		return probe, false, true
 	}
 	if now.Before(probe.nextProbe) {
 		return probe, false, false
@@ -212,13 +229,19 @@ func (d *Daemon) cachedTerminalFailureProbe(key string, hookAt, now time.Time) (
 	return probe, false, true
 }
 
-func (d *Daemon) recordTerminalFailureProbe(key string, hookAt, now time.Time, fingerprint [sha256.Size]byte, reason domain.AgentTerminalFailureReason, detected bool) bool {
+func (d *Daemon) recordTerminalFailureProbe(key string, hookAt, now time.Time, fingerprint [sha256.Size]byte, reason domain.AgentTerminalFailureReason, detected, idlePrompt bool) bool {
 	d.terminalFailureProbeMu.Lock()
 	defer d.terminalFailureProbeMu.Unlock()
 	probe := d.terminalFailureProbes[key]
 	probe.lastProbe = now
 	if !detected {
 		probe.detected = false
+		probe.idlePrompt = idlePrompt
+		if idlePrompt {
+			probe.idlePromptHookAt = hookAt
+		} else {
+			probe.idlePromptHookAt = time.Time{}
+		}
 		if probe.misses < 4 {
 			probe.misses++
 		}
@@ -240,6 +263,8 @@ func (d *Daemon) recordTerminalFailureProbe(key string, hookAt, now time.Time, f
 		return false
 	}
 	probe.detected = true
+	probe.idlePrompt = false
+	probe.idlePromptHookAt = time.Time{}
 	probe.misses = 0
 	probe.detectedHookAt = hookAt
 	probe.fingerprint = fingerprint

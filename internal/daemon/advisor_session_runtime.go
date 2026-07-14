@@ -82,10 +82,13 @@ func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID stri
 			if buildErr != nil {
 				return buildErr
 			}
-			return d.tmux.NewSessionWithArgs(ctx, advisor.SessionID, workdir, command.Executable, command.Args...)
+			return d.tmux.NewSessionWithArgsAndEnvironment(ctx, advisor.SessionID, workdir, command.Executable, d.sessionManagedEnvironment(), command.Args...)
 		})
 	if err != nil {
 		return advisorSessionRuntimeResult{Session: advisor, Attached: attached}, err
+	}
+	if err := d.setSessionManagedPathEnv(ctx, advisor.SessionID); err != nil {
+		return advisorSessionRuntimeResult{Session: advisor, Attached: attached}, fmt.Errorf("set advisor session PATH: %w", err)
 	}
 	projection := daemonstate.Session{ID: advisor.SessionID, IssueID: advisor.IssueID, Role: daemonstate.SessionRoleAdvisor, ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: advisor.RequestID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "runtime", UpdatedAt: time.Now().UTC()}
 	if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, projection); err != nil {

@@ -231,7 +231,6 @@ func TestOrchestrateWatchCommandExitsWhenParentReparentedBeforePolling(t *testin
 	}
 	watchParentPollInterval = time.Millisecond
 
-	var mailWatchCalls int32
 	deps := &Dependencies{
 		RepoDir: "/repo",
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -244,13 +243,13 @@ func TestOrchestrateWatchCommandExitsWhenParentReparentedBeforePolling(t *testin
 					}), nil
 				case protocol.CommandMailList:
 					return responseWithJSON(req, []protocol.MailEvent{}), nil
-				case protocol.CommandMailWatch:
-					atomic.AddInt32(&mailWatchCalls, 1)
-					return responseWithJSON(req, []protocol.MailEvent{}), nil
 				default:
 					t.Fatalf("unexpected daemon command: %s", req.Command)
 					return protocol.ResponseEnvelope{}, nil
 				}
+			},
+			subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
+				return make(chan protocol.EventEnvelope), nil
 			},
 		}),
 	}
@@ -263,9 +262,6 @@ func TestOrchestrateWatchCommandExitsWhenParentReparentedBeforePolling(t *testin
 	})
 	if err != nil {
 		t.Fatalf("OrchestrateWatchCommand error = %v", err)
-	}
-	if got := atomic.LoadInt32(&mailWatchCalls); got != 0 {
-		t.Fatalf("mail.watch calls after parent disappearance = %d, want 0", got)
 	}
 }
 
@@ -1959,6 +1955,42 @@ func TestOrchestrateStartNormalizesNilMapsForMalformedLaunch(t *testing.T) {
 	var invalid *orchestrateStartLaunchError
 	if !errors.As(err, &invalid) || invalid.Field != "operation_id" {
 		t.Fatalf("wait error = %v, want typed missing operation_id", err)
+	}
+}
+
+func TestOrchestrateStartCreatesFreshIntentForEachOperatorInvocation(t *testing.T) {
+	root := naming.IssueID("az-1")
+	intents := make([]string, 0, 2)
+	deps := &Dependencies{
+		ProjectID: protocol.DefaultProjectID,
+		RepoDir:   "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{passOrchestrationIntent: true, commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandTaskGraphReadiness:
+				return responseWithJSON(req, daemonclient.TaskGraphReadiness{RootIssueID: root.String(), Blocked: map[string]string{}}), nil
+			case protocol.CommandOrchestrationIntent:
+				var body protocol.OrchestrationIntentRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("decode orchestration intent: %v", err)
+				}
+				intents = append(intents, body.IntentKey)
+				return responseWithJSON(req, protocol.OrchestrationIntentResult{IntentKey: body.IntentKey, Requested: []string{}, Skipped: map[string]string{}, Failed: map[string]string{}}), nil
+			case daemonclient.CommandWorktreeList:
+				return responseWithJSON(req, map[string]any{"project_id": protocol.DefaultProjectID, "worktrees": []map[string]string{}}), nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		}}),
+	}
+
+	for range 2 {
+		if _, err := orchestrateStart(deps, OrchestrateStartOptions{RootIssueID: root.String(), Limit: 1}); err != nil {
+			t.Fatalf("orchestrateStart: %v", err)
+		}
+	}
+	if len(intents) != 2 || intents[0] == "" || intents[0] == intents[1] {
+		t.Fatalf("operator intent keys = %q, want two non-empty distinct values", intents)
 	}
 }
 

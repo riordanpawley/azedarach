@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,8 +35,10 @@ type orchestrationAuthority interface {
 }
 
 type daemonOrchestrationAuthority struct {
-	daemon      *Daemon
-	submitStart func(context.Context, protocol.RequestEnvelope) protocol.ResponseEnvelope
+	daemon             *Daemon
+	submitStart        func(context.Context, protocol.RequestEnvelope) protocol.ResponseEnvelope
+	lookupOperation    func(context.Context, string) (protocol.OperationRecord, error)
+	releaseReviewLease func(context.Context, string, string, string) error
 }
 
 type invalidOrchestrationLaunchError struct {
@@ -132,6 +135,7 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 	if snapshot.Cursor == 0 && !found {
 		snapshot.Cursor = int64(snapshotRevision)
 	}
+	finalizeOrchestrationSnapshotSource(&snapshot)
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -159,21 +163,6 @@ func (d *Daemon) loadOrchestrationSnapshot(
 	}
 	if cached, ok := d.orchestrationSnapshotCache[cacheKey]; ok && cached.revision == revision && time.Since(cached.cachedAt) <= orchestrationSnapshotCacheTTL && (cached.semanticExpiresAt.IsZero() || time.Now().Before(cached.semanticExpiresAt)) {
 		d.orchestrationSnapshotMu.Unlock()
-		if request.Scope.Kind == domain.OrchestrationScopeRooted && d.issueClientForProject(projectID) != nil {
-			if _, err := d.taskGraphReadinessForActor(ctx, projectID, request.Scope.RootIssueID.String(), request.ActorID); err != nil {
-				return protocol.OrchestrationSnapshot{}, revision, false, err
-			}
-			if d.currentRevision(projectID) != revision {
-				return protocol.OrchestrationSnapshot{}, d.currentRevision(projectID), false, nil
-			}
-		} else if len(cached.runtimeIssueIDs) > 0 {
-			if err := d.validateTaskGraphRuntime(ctx, projectID, cached.runtimeIssueIDs, revision); err != nil && d.cfg.Logger != nil {
-				d.cfg.Logger.Debug("validate cached orchestration runtime", "project_id", projectID, "scope_kind", request.Scope.Kind, "error", err)
-			}
-			if d.currentRevision(projectID) != revision {
-				return protocol.OrchestrationSnapshot{}, d.currentRevision(projectID), false, nil
-			}
-		}
 		clone, err := cloneOrchestrationSnapshot(cached.snapshot)
 		return clone, revision, err == nil, err
 	}
@@ -393,6 +382,11 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 			RoleGuardrails: []string{"remain in the active orchestration loop", "do not implement worker issue scope", "delegate non-trivial review inspection to fresh read-only ephemeral subagents", "retain orchestrator-only durable review and integration authority", "preserve sessions during review handoff"},
 		},
 	}
+	materializedTasks, source, err := a.daemon.projectReadSnapshot(projectID)
+	if err != nil {
+		return protocol.OrchestrationSnapshot{}, err
+	}
+	snapshot.Source = source
 	if identity.Scope.Kind == domain.OrchestrationScopeRooted {
 		root := identity.Scope.RootIssueID.String()
 		ready, err := a.daemon.taskGraphReadinessForActor(ctx, projectID, root, request.ActorID)
@@ -404,30 +398,16 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		}
 		snapshot.Scope, snapshot.Roots, snapshot.GeneratedAt = identity.Scope, []string{root}, time.Now().UTC()
 		a.enrichStewardshipContext(ctx, projectID, &snapshot)
-		issueClient := a.daemon.issueClientForProject(projectID)
-		if issueClient == nil {
-			return protocol.OrchestrationSnapshot{}, fmt.Errorf("issue store unavailable")
-		}
-		tasks, err := issueClient.ListParentChildSubtreeWithRuntime(ctx, projectID, root)
-		if err != nil {
-			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load rooted review queue: %w", err)
-		}
+		tasks := materializedParentChildClosure(materializedTasks, root)
 		snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, tasks)
 		if err != nil {
 			return protocol.OrchestrationSnapshot{}, err
 		}
+		finalizeOrchestrationSnapshotSource(&snapshot)
 		return snapshot, nil
 	}
 
-	issueClient := a.daemon.issueClientForProject(projectID)
-	if issueClient == nil {
-		return protocol.OrchestrationSnapshot{}, fmt.Errorf("issue store unavailable")
-	}
-	tasks, err := issueClient.ListGraphReadinessWithRuntime(ctx, projectID, "", limit)
-	if err != nil {
-		return protocol.OrchestrationSnapshot{}, fmt.Errorf("load project orchestration projection: %w", err)
-	}
-	tasks = a.daemon.enrichTasksWithSessionState(ctx, projectID, tasks)
+	tasks := materializedTasks
 	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, tasks)
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, err
@@ -441,9 +421,11 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		}
 	}
 	snapshot.Health = orchestrationBoardHealth(tasks, tasksByID, limit, a.openIssueLimit())
-	openIssueCount, err := issueClient.CountOpenOrchestrationIssues(ctx)
-	if err != nil {
-		return protocol.OrchestrationSnapshot{}, fmt.Errorf("count project orchestration issues: %w", err)
+	openIssueCount := 0
+	for _, task := range tasks {
+		if task.State.Visibility == domain.IssueVisibilityLive && (task.Status == domain.StatusOpen || task.Status == domain.StatusInProgress || task.Status == domain.StatusInReview) {
+			openIssueCount++
+		}
 	}
 	snapshot.Health.OpenIssueCount = openIssueCount
 	if openIssueCount > snapshot.Health.OpenIssueLimit {
@@ -491,7 +473,19 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	a.enrichStewardshipContext(ctx, projectID, &snapshot)
 	sortOrchestrationSnapshot(&snapshot, tasksByID)
 	snapshot.Completion = projectOrchestrationCompletion(snapshot)
+	finalizeOrchestrationSnapshotSource(&snapshot)
 	return snapshot, nil
+}
+
+func finalizeOrchestrationSnapshotSource(snapshot *protocol.OrchestrationSnapshot) {
+	if snapshot == nil {
+		return
+	}
+	normalized := *snapshot
+	normalized.GeneratedAt = time.Time{}
+	normalized.Revision = 0
+	normalized.Source.SemanticChecksum = ""
+	snapshot.Source.SemanticChecksum = checksumJSON(normalized)
 }
 
 func projectOrchestrationCompletion(snapshot protocol.OrchestrationSnapshot) protocol.OrchestrationCompletion {
@@ -992,7 +986,7 @@ func (a daemonOrchestrationAuthority) claimAndSubmitStartWithPrompt(ctx context.
 	if issueClient == nil {
 		return protocol.OrchestrationLaunch{}, fmt.Errorf("issue store unavailable")
 	}
-	dedupeKey := "session.start:" + issueID
+	dedupeKey := orchestrationStartDedupeKey(issueID, request.IntentKey)
 	attempt, err := issueClient.BeginOrchestrationStart(ctx, projectID, issueID, request.IntentKey, request.ActorID, dedupeKey)
 	if err != nil {
 		return protocol.OrchestrationLaunch{}, fmt.Errorf("claim orchestration start: %w", err)
@@ -1061,6 +1055,11 @@ func (a daemonOrchestrationAuthority) claimAndSubmitStartWithPrompt(ctx context.
 	}
 	completed = true
 	return protocol.OrchestrationLaunch{IssueID: issueID, SessionID: sessionID, OperationID: submitted.Operation.OperationID.String(), OperationState: string(submitted.Operation.State)}, nil
+}
+
+func orchestrationStartDedupeKey(issueID, intentKey string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(intentKey)))
+	return fmt.Sprintf("session.start:%s:%x", strings.TrimSpace(issueID), digest)
 }
 
 func (a daemonOrchestrationAuthority) compensateStartFailure(ctx context.Context, issueClient *issues.Client, attempt issues.OrchestrationStartAttempt, cause error) error {

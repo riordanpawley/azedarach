@@ -57,11 +57,11 @@ func TestMigrationFailureRollsBackSchemaDataAndMarkers(t *testing.T) {
 	}
 	defer store.Close()
 	var markers int
-	if err = store.db.QueryRow(`SELECT count(*) FROM schema_migrations WHERE id IN ('user_0001_cross_project_projection','user_0002_normalized_projection','user_0003_canonical_issue_state_repair','user_0004_canonical_archive_state_repair')`).Scan(&markers); err != nil {
+	if err = store.db.QueryRow(`SELECT count(*) FROM schema_migrations WHERE id IN ('user_0001_cross_project_projection','user_0002_normalized_projection','user_0003_canonical_issue_state_repair','user_0004_canonical_archive_state_repair','user_0005_project_delta_consumer')`).Scan(&markers); err != nil {
 		t.Fatal(err)
 	}
-	if markers != 4 {
-		t.Fatalf("migration markers after retry=%d want=4", markers)
+	if markers != 5 {
+		t.Fatalf("migration markers after retry=%d want=5", markers)
 	}
 }
 

@@ -14,9 +14,7 @@ import (
 func TestRunManagedSelectsInstrumentNamespace(t *testing.T) {
 	repo := initCommandTestRepo(t)
 	t.Chdir(repo)
-	canonicalRepo, err := filepath.EvalSymlinks(repo)
-	require.NoError(t, err)
-	root := filepath.Join(canonicalRepo, ".azedarach", "go")
+	root := configureCommandTestCacheFamily(t, repo)
 	t.Setenv("AZEDARACH_GO_CACHE_ROOT", root)
 	t.Setenv("AZEDARACH_GOCACHE", "")
 	t.Setenv("AZEDARACH_GO_CACHE_OWNER", "issue-dhc")
@@ -24,7 +22,7 @@ func TestRunManagedSelectsInstrumentNamespace(t *testing.T) {
 	t.Setenv("AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES", "2048")
 	output := filepath.Join(t.TempDir(), "gocache.txt")
 
-	err = runManaged(context.Background(), []string{"--kind", "coverage", "--", "sh", "-c", `printf '%s' "$GOCACHE" > "$1"`, "sh", output})
+	err := runManaged(context.Background(), []string{"--kind", "coverage", "--", "sh", "-c", `printf '%s' "$GOCACHE" > "$1"`, "sh", output})
 	require.NoError(t, err)
 	data, err := os.ReadFile(output)
 	require.NoError(t, err)
@@ -34,12 +32,19 @@ func TestRunManagedSelectsInstrumentNamespace(t *testing.T) {
 func TestRunManagedRejectsUnknownKindAndMissingCommand(t *testing.T) {
 	repo := initCommandTestRepo(t)
 	t.Chdir(repo)
-	canonicalRepo, err := filepath.EvalSymlinks(repo)
-	require.NoError(t, err)
-	t.Setenv("AZEDARACH_GO_CACHE_ROOT", filepath.Join(canonicalRepo, ".azedarach", "go"))
-	t.Setenv("AZEDARACH_GOCACHE", "")
+	configureCommandTestCacheFamily(t, repo)
 	assert.ErrorContains(t, runManaged(context.Background(), []string{"--kind", "instrumented", "--", "true"}), "unsupported")
 	assert.ErrorContains(t, runManaged(context.Background(), []string{"--kind", "normal"}), "requires")
+}
+
+func configureCommandTestCacheFamily(t *testing.T, repo string) string {
+	t.Helper()
+	canonicalRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	root := filepath.Join(canonicalRepo, ".azedarach", "go")
+	t.Setenv("AZEDARACH_GO_CACHE_ROOT", root)
+	t.Setenv("AZEDARACH_GOCACHE", "")
+	return root
 }
 
 func initCommandTestRepo(t *testing.T) string {

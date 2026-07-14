@@ -200,3 +200,113 @@ func TestReconcileStaleBusySessionActivityDoesNotOverwriteNewerBusyHook(t *testi
 		t.Fatalf("session = %+v found=%t err=%v, want newer busy hook", session, found, err)
 	}
 }
+
+func TestReconcileStaleBusySessionActivityRevalidatesCachedIdlePromptAgainstActivePane(t *testing.T) {
+	now := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
+	previousNow := timeNow
+	timeNow = func() time.Time { return now }
+	t.Cleanup(func() { timeNow = previousNow })
+	ctx := context.Background()
+	const projectID, issueID = "project", "dgf"
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	staleAt := now.Add(-time.Minute)
+	if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: staleAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSessionActivityEvidence(ctx, daemonstate.SessionActivityEvidence{
+		ProjectID: projectID, SessionID: sessionID, IssueID: issueID,
+		Activity: "busy", ActivitySource: "hooks", SourceSessionID: sessionID,
+		ObservedAt: staleAt, UpdatedAt: staleAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &terminalFailureProbeRunner{output: "Validation complete.\n› Continue"}
+	d := &Daemon{
+		cfg: Config{Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+	}
+	if _, err := d.observeTerminalFailureProbes(ctx, projectID, []daemonstate.Session{{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning, UpdatedAt: staleAt,
+	}}, projectID, map[string]sessionDisplayActivity{
+		sessionKey(issueID): {Activity: "busy", Source: "hooks", UpdatedAt: staleAt},
+	}); err != nil {
+		t.Fatalf("seed asynchronous idle-prompt observation: %v", err)
+	}
+	runner.mu.Lock()
+	runner.output = "• Working (2s)\nRunning tests"
+	runner.mu.Unlock()
+
+	converged, err := d.reconcileStaleBusySessionActivity(ctx, projectID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converged != 0 || runner.callCount() != 2 {
+		t.Fatalf("converged=%d captures=%d, want cached idle hint revalidated against active pane", converged, runner.callCount())
+	}
+	evidence, found, err := store.GetSessionActivityEvidence(ctx, projectID, sessionID)
+	if err != nil || !found || evidence.Activity != "busy" || evidence.ActivitySource != "hooks" {
+		t.Fatalf("evidence = %+v found=%t err=%v, want active hook-backed busy preserved", evidence, found, err)
+	}
+}
+
+func TestReconcileStaleBusySessionActivityNewHookResetsOlderIdleProbeBackoff(t *testing.T) {
+	now := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
+	previousNow := timeNow
+	timeNow = func() time.Time { return now }
+	t.Cleanup(func() { timeNow = previousNow })
+	ctx := context.Background()
+	const projectID, issueID = "project", "dgf"
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	oldHookAt := now.Add(-time.Minute)
+	if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: oldHookAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSessionActivityEvidence(ctx, daemonstate.SessionActivityEvidence{
+		ProjectID: projectID, SessionID: sessionID, IssueID: issueID,
+		Activity: "busy", ActivitySource: "hooks", SourceSessionID: sessionID,
+		ObservedAt: oldHookAt, UpdatedAt: oldHookAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &terminalFailureProbeRunner{output: "Validation complete.\n› Continue"}
+	d := &Daemon{
+		cfg: Config{Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+	}
+	if _, err := d.observeTerminalFailureProbes(ctx, projectID, []daemonstate.Session{{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning, UpdatedAt: oldHookAt,
+	}}, projectID, map[string]sessionDisplayActivity{
+		sessionKey(issueID): {Activity: "busy", Source: "hooks", UpdatedAt: oldHookAt},
+	}); err != nil {
+		t.Fatalf("seed asynchronous idle-prompt observation: %v", err)
+	}
+	newHookAt := now.Add(time.Second)
+	if err := store.UpsertSessionActivityEvidence(ctx, daemonstate.SessionActivityEvidence{
+		ProjectID: projectID, SessionID: sessionID, IssueID: issueID,
+		Activity: "busy", ActivitySource: "hooks", SourceSessionID: sessionID,
+		ObservedAt: newHookAt, UpdatedAt: newHookAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now = newHookAt.Add(staleBusyPromptProbeAfter)
+
+	converged, err := d.reconcileStaleBusySessionActivity(ctx, projectID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converged != 1 || runner.callCount() != 2 {
+		t.Fatalf("converged=%d captures=%d, want newer hook to reset older idle-probe backoff", converged, runner.callCount())
+	}
+}

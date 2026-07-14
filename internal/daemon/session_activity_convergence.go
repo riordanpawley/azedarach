@@ -63,7 +63,7 @@ func (d *Daemon) reconcileStaleBusySessionActivity(ctx context.Context, projectI
 			continue
 		}
 		probeKey := projectID + "\x00" + session.ID
-		_, terminalFailureCached, shouldProbe := d.cachedTerminalFailureProbe(probeKey, evidence.ObservedAt, now)
+		_, terminalFailureCached, shouldProbe := d.cachedTerminalFailureProbe(probeKey, evidence.ObservedAt, now, true)
 		if terminalFailureCached || !shouldProbe {
 			continue
 		}
@@ -81,7 +81,7 @@ func (d *Daemon) reconcileStaleBusySessionActivity(ctx context.Context, projectI
 			continue
 		}
 		if !domain.ClassifyAgentTerminalIdle(output) {
-			d.recordTerminalFailureProbe(probeKey, evidence.ObservedAt, now, sha256.Sum256([]byte(output)), "", false)
+			d.recordTerminalFailureProbe(probeKey, evidence.ObservedAt, now, sha256.Sum256([]byte(output)), "", false, false)
 			continue
 		}
 		recovered := evidence

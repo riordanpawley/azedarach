@@ -69,6 +69,7 @@ type Config struct {
 	SocketPath                 string
 	LockPath                   string
 	ScopedRuntime              bool
+	ManagedGenerationBinDir    string
 	BaseBranch                 string
 	GitWorkflowMode            string
 	CLITool                    string
@@ -115,6 +116,8 @@ type Daemon struct {
 	userStoreRefreshStopping             bool
 	userStoreRefreshCtx                  context.Context
 	userStoreRefreshCancel               context.CancelFunc
+	userProjectionConsumerMu             sync.Mutex
+	userProjectionConsumers              map[string]*userProjectionConsumerHandle
 	issueClientsMu                       sync.Mutex
 	issueClientsByProject                map[string]*issues.Client
 	issueClientsByRoot                   map[string]*issues.Client
@@ -209,6 +212,11 @@ type Daemon struct {
 	orchestrationSnapshotCache           map[string]orchestrationSnapshotCacheEntry
 	orchestrationSnapshotLoads           map[string]*orchestrationSnapshotLoad
 	orchestrationSnapshotBuild           orchestrationSnapshotBuilder
+	materializersMu                      sync.RWMutex
+	materializersInitMu                  sync.Mutex
+	materializers                        map[string]*projectReadMaterializer
+	materializersStarted                 bool
+	materializersContext                 context.Context
 	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error
 	watchClientsMu                       sync.Mutex
 	watchClients                         map[string]watchClientObservation
@@ -220,6 +228,7 @@ type Daemon struct {
 	reviewReadyRecoveryMu                sync.Mutex
 	reviewReadyRecoveryCursor            map[string]int64
 	reviewReadyRecoveryBeforeLoad        func()
+	deferredCleanupOperationManager      deferredCleanupOperationManager
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -271,6 +280,11 @@ func New(cfg Config) *Daemon {
 	}
 	if cfg.LockPath == "" {
 		cfg.LockPath = appconfig.GlobalDaemonLockPath()
+	}
+	if cfg.ScopedRuntime {
+		cfg.ManagedGenerationBinDir = ""
+	} else if strings.TrimSpace(cfg.ManagedGenerationBinDir) != "" {
+		cfg.ManagedGenerationBinDir = filepath.Clean(cfg.ManagedGenerationBinDir)
 	}
 
 	tmuxRunner := &tmux.ExecRunner{}
@@ -366,10 +380,12 @@ func New(cfg Config) *Daemon {
 		taskGraphRuntimeValidationLoads:    map[string]*taskGraphRuntimeValidationLoad{},
 		orchestrationSnapshotCache:         map[string]orchestrationSnapshotCacheEntry{},
 		orchestrationSnapshotLoads:         map[string]*orchestrationSnapshotLoad{},
+		materializers:                      map[string]*projectReadMaterializer{},
 		revision:                           map[string]uint64{},
 		userStoreRefreshPending:            map[string]bool{},
 		userStoreRefreshDirty:              map[string]bool{},
 		userStoreRefreshActive:             map[string]bool{},
+		userProjectionConsumers:            map[string]*userProjectionConsumerHandle{},
 		shutdownReqCh:                      make(chan struct{}),
 	}
 	if !cfg.ScopedRuntime && strings.TrimSpace(os.Getenv("AZEDARACH_DISABLE_USER_DB")) != "1" {
@@ -543,6 +559,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.cfg.Logger.Info("daemon startup phase", "phase", "lock_acquire", "duration_ms", time.Since(startedAt).Milliseconds())
 	serveCtx, cancelServe := context.WithCancel(context.Background())
 	defer cancelServe()
+	d.startSessionLaunchArtifactCleanup(serveCtx)
 	shutdownDone := make(chan struct{})
 	shutdownStop := make(chan struct{})
 	shutdownReqCh := d.shutdownRequestChannel()
@@ -619,6 +636,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	projectionStartedAt := time.Now()
 	if err := d.openProjectionDeltaStores(ctx); err != nil {
 		return fmt.Errorf("open projection delta stores before IPC serve: %w", err)
+	}
+	if err := d.startProjectReadMaterializers(serveCtx); err != nil {
+		return fmt.Errorf("start project read materializers before IPC serve: %w", err)
 	}
 	d.cfg.Logger.Info("daemon startup phase", "phase", "projection_delta_stores_open", "duration_ms", time.Since(projectionStartedAt).Milliseconds())
 
@@ -794,7 +814,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	defer d.endCommand()
 	if commandMutatesProjectProjection(req.Command) {
 		defer func() {
-			if err == nil && resp.OK {
+			if err == nil && resp.OK && (!commandCoveredByIssueProjectionDelta(req.Command) || !d.hasUserProjectionConsumer(projectID)) {
 				d.enqueueUserProjectionRefresh(projectID)
 			}
 		}()

@@ -32,6 +32,7 @@ const (
 	IssueEventEvidenceSubmitted        IssueObservationEventType = "evidence.submitted"
 	IssueEventReviewCompleted          IssueObservationEventType = "review.completed"
 	IssueEventReviewCloseFailed        IssueObservationEventType = "review.close_failed"
+	IssueEventTaskIntegrationCompleted IssueObservationEventType = "task.integration_completed"
 	IssueEventRiskRecorded             IssueObservationEventType = "risk.recorded"
 	IssueEventBlockerReported          IssueObservationEventType = "blocker.reported"
 	IssueEventHumanInputRequested      IssueObservationEventType = "human.input_requested"
@@ -71,6 +72,7 @@ func IssueObservationEventTypeRequiresAuthority(eventType IssueObservationEventT
 		IssueEventIssueDeleted,
 		IssueEventReviewCompleted,
 		IssueEventReviewCloseFailed,
+		IssueEventTaskIntegrationCompleted,
 		IssueEventOrchestrationRouted:
 		return true
 	default:
