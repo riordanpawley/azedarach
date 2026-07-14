@@ -440,6 +440,13 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 	if journal.Version == integrationJournalVersion && normalizeWorktreeLockKey(journal.TargetWorktree) != normalizeWorktreeLockKey(worktree) {
 		return fmt.Errorf("integration journal target %s does not match recovery target %s", journal.TargetWorktree, worktree)
 	}
+	if strings.TrimSpace(journal.ScratchWorktree) == "" {
+		return fmt.Errorf("integration journal missing scratch worktree identity; journal retained")
+	}
+	provenScratch, err := c.proveIntegrationScratchWorktree(ctx, worktree, journal.ScratchWorktree, desiredHead)
+	if err != nil {
+		return fmt.Errorf("prove integration scratch identity before recovery; journal and scratch retained: %w", err)
+	}
 	targetStatus, err := c.Status(ctx, worktree)
 	if err != nil {
 		return fmt.Errorf("inspect target before integration recovery: %w", err)
@@ -478,12 +485,9 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 			return fmt.Errorf("persist recovered canonical candidate validation receipt: %w", err)
 		}
 	}
-	if scratch := strings.TrimSpace(journal.ScratchWorktree); scratch != "" {
-		if err := c.removeWorktree(ctx, worktree, scratch); err != nil && c.logger != nil {
-			c.logger.Warn("failed to remove scratch integration worktree during recovery", "path", scratch, "error", err)
-		}
-		if err := os.RemoveAll(scratch); err != nil && c.logger != nil {
-			c.logger.Warn("failed to remove scratch integration path during recovery", "path", scratch, "error", err)
+	if provenScratch != "" {
+		if err := c.removeWorktree(ctx, worktree, provenScratch); err != nil {
+			return fmt.Errorf("remove proven scratch integration worktree; journal retained: %w", err)
 		}
 	}
 	if err := removeIntegrationJournalPath(journalPath); err != nil {
@@ -498,6 +502,34 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 		)
 	}
 	return nil
+}
+
+func (c *Client) proveIntegrationScratchWorktree(ctx context.Context, worktree, scratchPath, desiredHead string) (string, error) {
+	scratchPath = normalizeWorktreeLockKey(scratchPath)
+	tempRoot := normalizeWorktreeLockKey(os.TempDir())
+	if filepath.Dir(scratchPath) != tempRoot || !strings.HasPrefix(filepath.Base(scratchPath), "azedarach-integration-") {
+		return "", fmt.Errorf("scratch path %s is outside the managed integration temp namespace", scratchPath)
+	}
+	if scratchPath == normalizeWorktreeLockKey(worktree) {
+		return "", fmt.Errorf("scratch path resolves to target worktree %s", worktree)
+	}
+	output, err := c.runInWorktree(ctx, worktree, "worktree", "list", "--porcelain")
+	if err != nil {
+		return "", fmt.Errorf("list registered worktrees: %w", err)
+	}
+	for _, entry := range parseWorktreeEntries(output) {
+		if normalizeWorktreeLockKey(entry.Path) != scratchPath {
+			continue
+		}
+		if strings.TrimSpace(entry.Head) != strings.TrimSpace(desiredHead) {
+			return "", fmt.Errorf("registered scratch HEAD %s does not match desired HEAD %s", entry.Head, desiredHead)
+		}
+		if !entry.Detached || entry.Branch != "" || entry.Locked || entry.Prunable {
+			return "", fmt.Errorf("registered scratch does not have disposable detached identity")
+		}
+		return scratchPath, nil
+	}
+	return "", fmt.Errorf("scratch path %s is not a registered worktree", scratchPath)
 }
 
 // CanonicalIntegrationValidation returns durable proof only when the exact

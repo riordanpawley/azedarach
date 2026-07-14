@@ -79,18 +79,19 @@ func (e diffStatBackoffError) Error() string {
 
 // GitStatus represents the status of a git repository.
 type GitStatus struct {
-	Modified       []string `json:"modified"`
-	Added          []string `json:"added"`
-	Deleted        []string `json:"deleted"`
-	Untracked      []string `json:"untracked"`
-	Staged         []string `json:"staged"`
-	Conflicted     []string `json:"conflicted,omitempty"`
-	HasChanges     bool     `json:"has_changes"`
-	HasConflicts   bool     `json:"has_conflicts,omitempty"`
-	GitAdditions   int      `json:"git_additions,omitempty"`
-	GitDeletions   int      `json:"git_deletions,omitempty"`
-	GitAheadCount  int      `json:"git_ahead_count,omitempty"`
-	GitBehindCount int      `json:"git_behind_count,omitempty"`
+	Modified          []string `json:"modified"`
+	Added             []string `json:"added"`
+	Deleted           []string `json:"deleted"`
+	Untracked         []string `json:"untracked"`
+	Staged            []string `json:"staged"`
+	Conflicted        []string `json:"conflicted,omitempty"`
+	HasChanges        bool     `json:"has_changes"`
+	HasConflicts      bool     `json:"has_conflicts,omitempty"`
+	GitAdditions      int      `json:"git_additions,omitempty"`
+	GitDeletions      int      `json:"git_deletions,omitempty"`
+	GitAheadCount     int      `json:"git_ahead_count,omitempty"`
+	GitBehindCount    int      `json:"git_behind_count,omitempty"`
+	hasTrackedChanges bool
 }
 
 // EvidenceCommit is an issue-scoped commit found on a branch.
@@ -1521,6 +1522,9 @@ func parseGitStatus(output string) *GitStatus {
 		workTreeStatus := line[1]
 		path := strings.TrimSpace(line[2:])
 		statusCode := line[:2]
+		if statusCode != "??" && statusCode != "!!" {
+			status.hasTrackedChanges = true
+		}
 
 		// Check if file is staged (index status is not space or ?)
 		if indexStatus != ' ' && indexStatus != '?' {
@@ -1542,7 +1546,8 @@ func parseGitStatus(output string) *GitStatus {
 		}
 	}
 
-	status.HasChanges = len(status.Modified) > 0 ||
+	status.HasChanges = status.hasTrackedChanges ||
+		len(status.Modified) > 0 ||
 		len(status.Added) > 0 ||
 		len(status.Deleted) > 0 ||
 		len(status.Untracked) > 0 ||
@@ -1571,7 +1576,8 @@ func gitStatusHasTrackedChanges(status *GitStatus) bool {
 	if status == nil {
 		return false
 	}
-	return status.HasConflicts ||
+	return status.hasTrackedChanges ||
+		status.HasConflicts ||
 		len(status.Modified) > 0 ||
 		len(status.Added) > 0 ||
 		len(status.Deleted) > 0 ||

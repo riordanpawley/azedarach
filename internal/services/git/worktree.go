@@ -485,8 +485,12 @@ func parseWorktreePaths(output string) []string {
 }
 
 type worktreeListEntry struct {
-	Path   string
-	Branch string
+	Path     string
+	Head     string
+	Branch   string
+	Detached bool
+	Locked   bool
+	Prunable bool
 }
 
 func parseWorktreeEntries(output string) []worktreeListEntry {
@@ -509,6 +513,14 @@ func parseWorktreeEntries(output string) []worktreeListEntry {
 		case strings.HasPrefix(line, "branch "):
 			branchRef := strings.TrimSpace(strings.TrimPrefix(line, "branch "))
 			current.Branch = strings.TrimPrefix(branchRef, "refs/heads/")
+		case strings.HasPrefix(line, "HEAD "):
+			current.Head = strings.TrimSpace(strings.TrimPrefix(line, "HEAD "))
+		case line == "detached":
+			current.Detached = true
+		case strings.HasPrefix(line, "locked"):
+			current.Locked = true
+		case strings.HasPrefix(line, "prunable"):
+			current.Prunable = true
 		case line == "":
 			flush()
 		}
