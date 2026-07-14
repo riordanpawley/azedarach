@@ -1,0 +1,15 @@
+ Open (1)            In Progress (1)     In Review (2)       Done (1)
+╭──────────────────╮╭──────────────────╮╭──────────────────╮╭──────────────────╮
+│  P2  gcy  I      ││  P0  gbz  E      ││  P2  ▶gdd PR…    ││  P0  afn  T      │
+│ Identify unexp   ││ Make shared gr   ││ Make 60-day ho   ││ Chefy make red   │
+│ ected watch se   ││ een locally an   ││ urly recipe pr   ││ o                │
+│ ssion owner      ││ d in CI          ││ ojections comp   ││                  │
+│            loc   ││            loc   ││ lete reli… gh    ││            lin   │
+╰──────────────────╯╰──────────────────╯╰──────────────────╯╰──────────────────╯
+                                        ╭──────────────────╮
+                                        │  P2  gdc-long…   │
+                                        │ Restore curren   │
+                                        │ t $/Unit value   │
+                                        │  in recipe spa   │
+                                        │ rk cards   lin   │
+                                        ╰──────────────────╯

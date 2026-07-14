@@ -21,8 +21,9 @@ type Styles struct {
 	TaskTitle    lipgloss.Style
 
 	// Badges
-	PriorityBadge func(priority int) lipgloss.Style
-	TypeBadge     lipgloss.Style
+	PriorityBadge    func(priority int) lipgloss.Style
+	TypeBadge        lipgloss.Style
+	PullRequestBadge lipgloss.Style
 
 	// Status bar
 	StatusBar  lipgloss.Style
@@ -114,6 +115,10 @@ func New() *Styles {
 			Foreground(Subtext0).
 			Background(Surface1).
 			Padding(0, 1),
+
+		PullRequestBadge: lipgloss.NewStyle().
+			Foreground(Mauve).
+			Bold(true),
 
 		StatusBar: lipgloss.NewStyle().
 			Background(Surface0).
