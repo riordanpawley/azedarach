@@ -285,6 +285,95 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if len(tmuxRunner.inputPayloads) != inputsBefore {
 		t.Fatalf("same rooted runtime was re-prompted: inputs=%d, want %d", len(tmuxRunner.inputPayloads), inputsBefore)
 	}
+
+	// restart-all replaces the agent process inside the same tmux session. It
+	// must invalidate the receipt before interrupting so the next rooted start
+	// repairs the replacement process instead of trusting tmux-session identity.
+	d.sessionResumeWait = immediateSessionResumeWait
+	restartRequest := protocol.RequestEnvelope{
+		Command: protocol.CommandSessionRestartAll,
+		Meta:    protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:    marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID)}),
+	}
+	var concurrentAttachCalls int
+	var concurrentAttachErr error
+	tmuxRunner.onSendKeys = func(_ string, payload string) {
+		if concurrentAttachCalls != 0 || !strings.Contains(payload, "codex resume") {
+			return
+		}
+		concurrentAttachCalls++
+		concurrentResponse, concurrentErr := d.handleOrchestratorSession(ctx, request)
+		if concurrentErr != nil {
+			concurrentAttachErr = concurrentErr
+			return
+		}
+		if concurrentResponse.Error != nil {
+			concurrentAttachErr = errors.New(concurrentResponse.Error.Message)
+		}
+	}
+	restartResponse, err := d.handleSessionRestartAll(ctx, restartRequest)
+	tmuxRunner.onSendKeys = nil
+	if err != nil || restartResponse.Error != nil {
+		t.Fatalf("restart rooted agent: response=%+v err=%v", restartResponse.Error, err)
+	}
+	if concurrentAttachCalls != 1 || concurrentAttachErr != nil {
+		t.Fatalf("concurrent rooted attach calls=%d err=%v", concurrentAttachCalls, concurrentAttachErr)
+	}
+	var restartResult protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(restartResponse.Body, &restartResult); err != nil {
+		t.Fatal(err)
+	}
+	if restartResult.Restarted != 1 || restartResult.Failed != 0 {
+		t.Fatalf("restart rooted agent result = %+v", restartResult)
+	}
+	restartedNonce := tmuxRunner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]
+	if restartedNonce == "" || restartedNonce == receipt.RuntimeNonce {
+		t.Fatalf("restart nonce = %q, seeded nonce = %q", restartedNonce, receipt.RuntimeNonce)
+	}
+	inputsBefore = len(tmuxRunner.inputPayloads)
+	handoffsBefore := len(tmuxRunner.handoffPromptContents)
+	response, err = d.handleOrchestratorSession(ctx, request)
+	if err != nil || response.Error != nil {
+		t.Fatalf("repair restarted rooted agent: response=%+v err=%v", response.Error, err)
+	}
+	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || len(tmuxRunner.handoffPromptContents) != handoffsBefore+1 {
+		t.Fatalf("restarted rooted repair delivery inputs=%d handoffs=%d", len(tmuxRunner.inputPayloads)-inputsBefore, len(tmuxRunner.handoffPromptContents)-handoffsBefore)
+	}
+	if repairedPrompt := tmuxRunner.handoffPromptContents[len(tmuxRunner.handoffPromptContents)-1]; !strings.Contains(repairedPrompt, "Role: orchestrator") {
+		t.Fatalf("restarted rooted repair prompt = %q", repairedPrompt)
+	}
+
+	// Cancellation after the interrupt must still leave the old receipt
+	// invalidated, so a later rooted start repairs whichever process survived.
+	var replacementWaits int
+	d.sessionResumeWait = func(context.Context, time.Duration) error {
+		replacementWaits++
+		return context.Canceled
+	}
+	cancelledResponse, err := d.handleSessionRestartAll(ctx, restartRequest)
+	if err != nil || cancelledResponse.Error != nil {
+		t.Fatalf("cancel rooted replacement: response=%+v err=%v", cancelledResponse.Error, err)
+	}
+	var cancelledResult protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(cancelledResponse.Body, &cancelledResult); err != nil {
+		t.Fatal(err)
+	}
+	if replacementWaits != 1 || cancelledResult.Restarted != 0 || cancelledResult.Failed != 1 {
+		t.Fatalf("cancelled rooted replacement result = %+v waits=%d", cancelledResult, replacementWaits)
+	}
+	cancelledNonce := tmuxRunner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]
+	if cancelledNonce == "" || cancelledNonce == restartedNonce {
+		t.Fatalf("cancelled replacement nonce = %q, prior = %q", cancelledNonce, restartedNonce)
+	}
+	d.sessionResumeWait = immediateSessionResumeWait
+	inputsBefore = len(tmuxRunner.inputPayloads)
+	response, err = d.handleOrchestratorSession(ctx, request)
+	if err != nil || response.Error != nil {
+		t.Fatalf("repair cancelled rooted replacement: response=%+v err=%v", response.Error, err)
+	}
+	if len(tmuxRunner.inputPayloads) != inputsBefore+1 {
+		t.Fatalf("cancelled rooted replacement repair inputs=%d, want 1", len(tmuxRunner.inputPayloads)-inputsBefore)
+	}
 	if err := os.Remove(receiptPath); err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +418,7 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	tmuxRunner.sessions[started.SessionID] = true
 	tmuxRunner.launchPromptContents[started.SessionID] = "Role: contributor"
 	inputsBefore = len(tmuxRunner.inputPayloads)
-	handoffsBefore := len(tmuxRunner.handoffPromptContents)
+	handoffsBefore = len(tmuxRunner.handoffPromptContents)
 	response, err = d.handleOrchestratorSession(ctx, request)
 	if err != nil || response.Error != nil {
 		t.Fatalf("repair reused ordinary runtime: response=%+v err=%v", response.Error, err)

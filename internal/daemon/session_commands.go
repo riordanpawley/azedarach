@@ -1763,6 +1763,12 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 			continue
 		}
 
+		if _, err := d.rotateRootedOrchestratorBootstrapIncarnation(ctx, target.SessionID); err != nil {
+			item.Error = err.Error()
+			result.Failed++
+			result.Sessions = append(result.Sessions, item)
+			continue
+		}
 		if err := d.tmux.SendKey(ctx, target.SessionID, "C-c"); err != nil {
 			item.Error = err.Error()
 			result.Failed++
@@ -1783,6 +1789,12 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 		}
 		resumeCommand := d.buildSessionResumeCommand(target.ProjectID, target.IssueID, target.SessionID, body.Yolo, body.ImagePaths)
 		if err := d.tmux.SendKeys(ctx, target.SessionID, resumeCommand); err != nil {
+			item.Error = err.Error()
+			result.Failed++
+			result.Sessions = append(result.Sessions, item)
+			continue
+		}
+		if _, err := d.rotateRootedOrchestratorBootstrapIncarnation(ctx, target.SessionID); err != nil {
 			item.Error = err.Error()
 			result.Failed++
 			result.Sessions = append(result.Sessions, item)

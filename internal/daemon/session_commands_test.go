@@ -931,6 +931,9 @@ func TestSessionRestartAllRestartsBusySessionsByDefault(t *testing.T) {
 		if got := tmuxRunner.env[sessionID]["PATH"]; !strings.HasPrefix(got, managedDir+string(os.PathListSeparator)) {
 			t.Fatalf("restart session %s PATH = %q, want managed prefix", sessionID, got)
 		}
+		if got := tmuxRunner.env[sessionID][rootedOrchestratorBootstrapNonceEnvironment]; got != "" {
+			t.Fatalf("ordinary worker restart session %s gained rooted bootstrap nonce %q", sessionID, got)
+		}
 	}
 	if got := tmuxRunner.sendKeysPayloads[1]; !strings.HasPrefix(got, "export PATH='") || !strings.Contains(got, managedDir) {
 		t.Fatalf("resume command = %q, want managed PATH export before codex", got)

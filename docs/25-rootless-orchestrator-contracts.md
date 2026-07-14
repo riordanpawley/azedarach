@@ -70,11 +70,15 @@ orchestrator-only prompt whose first commands are `az prime`, rooted status,
 and rooted watch, and does not report startup success until the complete
 file-backed prompt has been acknowledged. An atomic worktree-local receipt
 binds that acknowledgement to the exact project, root, session, prompt hash,
-bootstrap contract version, and a cryptographically random nonce installed in
-that live tmux session's environment. Starting an already-live rooted session
-repairs a missing, corrupt, obsolete, or runtime-incarnation-mismatched receipt
-by re-delivering the full prompt before the session is accepted; deterministic
-session ID reuse after stop or runtime loss cannot inherit bootstrap trust. The
+bootstrap contract version, and a cryptographically random agent-incarnation
+nonce installed in that live tmux session's environment. In-place agent
+replacement rotates the nonce before interrupting the old process and again
+after launching its replacement, so a cancelled, concurrent, or completed
+`session restart-all` cannot preserve bootstrap trust.
+Starting an already-live rooted session repairs a missing, corrupt, obsolete,
+or agent-incarnation-mismatched receipt by re-delivering the full prompt before
+the session is accepted; deterministic session ID reuse after stop, runtime
+loss, or process replacement cannot inherit bootstrap trust. The
 rooted session must never receive worker or contributor authority merely because
 the root ticket is not typed as an epic.
 

@@ -121,6 +121,37 @@ func newRootedOrchestratorRuntimeNonce() (string, error) {
 	return hex.EncodeToString(nonce[:]), nil
 }
 
+// rotateRootedOrchestratorBootstrapIncarnation invalidates a rooted bootstrap
+// receipt around an in-place agent replacement. The nonce lives in tmux so it
+// survives pane process replacement; rotating before the interrupt makes a
+// cancelled or partial replacement fail closed, while rotating after launch
+// binds the final nonce to the replacement rather than the interrupted agent.
+// Sessions without rooted bootstrap state are ordinary workers and are left
+// untouched.
+func (d *Daemon) rotateRootedOrchestratorBootstrapIncarnation(ctx context.Context, sessionID string) (bool, error) {
+	_, found, err := d.tmux.EnvironmentValue(ctx, sessionID, rootedOrchestratorBootstrapNonceEnvironment)
+	if err != nil {
+		return false, fmt.Errorf("read rooted orchestrator runtime nonce before replacement: %w", err)
+	}
+	if !found {
+		return false, nil
+	}
+	runtimeNonce, err := newRootedOrchestratorRuntimeNonce()
+	if err != nil {
+		return false, err
+	}
+	// Clear the accepted value before publishing its replacement. If the
+	// second write fails, receipt matching rejects the empty nonce and the next
+	// rooted attach repairs the role instead of trusting the prior process.
+	if err := d.tmux.SetEnvironment(ctx, sessionID, rootedOrchestratorBootstrapNonceEnvironment, ""); err != nil {
+		return false, fmt.Errorf("invalidate rooted orchestrator runtime nonce for replacement: %w", err)
+	}
+	if err := d.tmux.SetEnvironment(ctx, sessionID, rootedOrchestratorBootstrapNonceEnvironment, runtimeNonce); err != nil {
+		return false, fmt.Errorf("publish rooted orchestrator runtime nonce for replacement: %w", err)
+	}
+	return true, nil
+}
+
 func receiptMatchesRootedOrchestratorBootstrap(path string, want rootedOrchestratorBootstrapReceipt) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
