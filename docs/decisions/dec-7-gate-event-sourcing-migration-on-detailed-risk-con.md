@@ -18,3 +18,4 @@ Future implementation child issues should reference the detailed map, satisfy th
 ## Links
 
 - applies-to issue:cro
+- applies-to issue:dgv — Migration design must preserve gates, rollback, parity, recovery, compatibility, and performance controls.

@@ -34,6 +34,7 @@ This directory primarily contains **developer/internal documentation**.
 - [23-sqlite-wal-policy.md](23-sqlite-wal-policy.md)
 - [24-issue-state-model-v2-rollout.md](24-issue-state-model-v2-rollout.md)
 - [25-rootless-orchestrator-contracts.md](25-rootless-orchestrator-contracts.md)
+- [26-team-collaboration-architecture.md](26-team-collaboration-architecture.md)
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 - [adr/2-daemon-owned-async-notices.md](adr/2-daemon-owned-async-notices.md)
 

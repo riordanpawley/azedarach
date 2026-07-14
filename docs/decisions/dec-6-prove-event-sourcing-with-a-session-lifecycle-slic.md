@@ -18,3 +18,4 @@ Implementation should start with event envelope and event-log infrastructure, th
 ## Links
 
 - applies-to issue:cro
+- applies-to issue:dgv — The recommended proof remains a session lifecycle/reconcile vertical slice unless dgv records stronger evidence to revise it.

@@ -19,3 +19,4 @@ Runtime stream events remain client convergence signals rather than durable repl
 ## Links
 
 - applies-to issue:cro
+- informs issue:dgv — Historical runtime-only decision; superseded by dec-5 for whole authority-plane evaluation, but its external-truth and telemetry cautions remain relevant.
