@@ -40,6 +40,7 @@ type LatestIssueObservationEventOptions struct {
 	CommandOutcomePairs     []IssueObservationCommandOutcomePair
 	RequiredPayloadTextKeys []string
 	CurrentReviewEpoch      bool
+	InvalidatedByStatuses   []domain.Status
 }
 
 type IssueObservationCommandOutcomePair struct {
@@ -465,7 +466,26 @@ func (c *Client) ListLatestIssueObservationEventsByIssue(ctx context.Context, op
 		clauses = append(clauses, "json_type(payload_json, ?) = 'text' AND NULLIF(TRIM(CAST(json_extract(payload_json, ?) AS TEXT)), '') IS NOT NULL")
 		args = append(args, path, path)
 	}
+	epochStatuses := make([]string, 0, len(opts.InvalidatedByStatuses)+1)
+	seenEpochStatuses := make(map[string]struct{}, len(opts.InvalidatedByStatuses)+1)
+	addEpochStatus := func(status domain.Status) {
+		value := strings.ToLower(strings.TrimSpace(string(status)))
+		if value == "" {
+			return
+		}
+		if _, exists := seenEpochStatuses[value]; exists {
+			return
+		}
+		seenEpochStatuses[value] = struct{}{}
+		epochStatuses = append(epochStatuses, value)
+	}
 	if opts.CurrentReviewEpoch {
+		addEpochStatus(domain.StatusInReview)
+	}
+	for _, status := range opts.InvalidatedByStatuses {
+		addEpochStatus(status)
+	}
+	if len(epochStatuses) > 0 {
 		clauses = append(clauses, `NOT EXISTS (
 			SELECT 1
 			FROM issue_observation_events AS epoch
@@ -473,9 +493,12 @@ func (c *Client) ListLatestIssueObservationEventsByIssue(ctx context.Context, op
 			  AND epoch.id > events.id
 			  AND epoch.event_type = ?
 			  AND TRIM(epoch.source) = 'issue-store'
-			  AND LOWER(TRIM(CAST(json_extract(epoch.payload_json, '$.to_status') AS TEXT))) = ?
+			  AND LOWER(TRIM(CAST(json_extract(epoch.payload_json, '$.to_status') AS TEXT))) IN (`+strings.TrimSuffix(strings.Repeat("?,", len(epochStatuses)), ",")+`)
 		)`)
-		args = append(args, string(domain.IssueEventIssueStatusChanged), string(domain.StatusInReview))
+		args = append(args, string(domain.IssueEventIssueStatusChanged))
+		for _, status := range epochStatuses {
+			args = append(args, status)
+		}
 	}
 	rows, err := db.QueryContext(ctx, `
 		WITH candidate_issues(issue_id) AS (

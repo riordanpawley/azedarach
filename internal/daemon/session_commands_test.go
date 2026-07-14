@@ -35,6 +35,7 @@ type testTmuxRunner struct {
 	mu                  sync.Mutex
 	sessions            map[string]bool
 	panes               map[string][]string
+	commands            [][]string
 	newSessionCalls     int
 	listSessionsCalls   int
 	listPanesCalls      int
@@ -221,6 +222,7 @@ func (r *testTmuxRunner) Run(_ context.Context, args ...string) (string, error) 
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.commands = append(r.commands, append([]string(nil), args...))
 
 	switch args[0] {
 	case "has-session":
@@ -850,6 +852,8 @@ func immediateSessionResumeWait(context.Context, time.Duration) error { return n
 func TestSessionRestartAllRestartsBusySessionsByDefault(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
+	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
+	t.Setenv("PATH", filepath.Join(repoDir, "bin")+string(os.PathListSeparator)+"/usr/bin:/bin")
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot: %v", err)
@@ -877,7 +881,7 @@ func TestSessionRestartAllRestartsBusySessionsByDefault(t *testing.T) {
 	store := daemonstate.NewStore()
 	var resumeWaits []time.Duration
 	daemon := &Daemon{
-		cfg: Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		cfg: Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", ManagedGenerationBinDir: managedDir, Logger: slog.Default()},
 		sessionResumeWait: func(_ context.Context, delay time.Duration) error {
 			resumeWaits = append(resumeWaits, delay)
 			return nil
@@ -922,6 +926,14 @@ func TestSessionRestartAllRestartsBusySessionsByDefault(t *testing.T) {
 	}
 	if got := tmuxRunner.sendKeysPayloads[1]; !strings.Contains(got, "codex resume") || !strings.Contains(got, "--last") || strings.Contains(got, "Continue your prior task") {
 		t.Fatalf("resume command = %q, want codex resume --last without positional continuation prompt", got)
+	}
+	for _, sessionID := range []string{idleSession, busySession} {
+		if got := tmuxRunner.env[sessionID]["PATH"]; !strings.HasPrefix(got, managedDir+string(os.PathListSeparator)) {
+			t.Fatalf("restart session %s PATH = %q, want managed prefix", sessionID, got)
+		}
+	}
+	if got := tmuxRunner.sendKeysPayloads[1]; !strings.HasPrefix(got, "export PATH='") || !strings.Contains(got, managedDir) {
+		t.Fatalf("resume command = %q, want managed PATH export before codex", got)
 	}
 	if len(result.Sessions) != 2 || result.Sessions[0].ActiveIntent || !result.Sessions[1].ActiveIntent {
 		t.Fatalf("session active intent = %+v, want idle=false busy=true", result.Sessions)
@@ -1390,6 +1402,13 @@ type sessionStartTmuxRunner struct {
 	newSessionErr        error
 	onNewSession         func(string)
 	maxNewSessionCommand int
+	launchScriptPaths    map[string]string
+	launchScriptContents map[string]string
+	launchScriptModes    map[string]os.FileMode
+	launchPromptPaths    map[string]string
+	launchPromptContents map[string]string
+	launchPromptModes    map[string]os.FileMode
+	launchArtifactModes  map[string]os.FileMode
 	sendKeysErr          error
 	sendKeysErrOnCall    int
 	captureOutput        string
@@ -1403,6 +1422,13 @@ func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
 		panes:                map[string][]string{},
 		windows:              map[string]map[string]bool{},
 		env:                  map[string]map[string]string{},
+		launchScriptPaths:    map[string]string{},
+		launchScriptContents: map[string]string{},
+		launchScriptModes:    map[string]os.FileMode{},
+		launchPromptPaths:    map[string]string{},
+		launchPromptContents: map[string]string{},
+		launchPromptModes:    map[string]os.FileMode{},
+		launchArtifactModes:  map[string]os.FileMode{},
 	}
 }
 
@@ -1428,6 +1454,28 @@ func requireNewSessionLaunchCommand(t *testing.T, runner *sessionStartTmuxRunner
 	}
 	t.Fatalf("new-session launch command for %q not found in commands: %+v", sessionID, runner.commands)
 	return ""
+}
+
+func requireNewSessionLaunchScript(t *testing.T, runner *sessionStartTmuxRunner, sessionID string) string {
+	t.Helper()
+	contents, ok := runner.launchScriptContents[sessionID]
+	if !ok {
+		t.Fatalf("new-session launch script for %q not found; paths: %+v", sessionID, runner.launchScriptPaths)
+	}
+	return contents
+}
+
+func tmuxCommandEnvironmentValue(command []string, key string) (string, bool) {
+	for i := 0; i+1 < len(command); i++ {
+		if command[i] != "-e" {
+			continue
+		}
+		name, value, ok := strings.Cut(command[i+1], "=")
+		if ok && name == key {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 func (r *sessionStartTmuxRunner) RunWithInput(_ context.Context, input string, args ...string) (string, error) {
@@ -1457,8 +1505,47 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 		if r.maxNewSessionCommand > 0 && len(args) > 4 && len(args[len(args)-1]) > r.maxNewSessionCommand {
 			return "", errors.New("command too long")
 		}
+		if len(args) > 4 {
+			command := args[len(args)-1]
+			const scriptArg = " -i '"
+			if start := strings.LastIndex(command, scriptArg); strings.HasPrefix(command, "exec ") && start >= 0 && strings.HasSuffix(command, "'") {
+				path := strings.TrimSuffix(command[start+len(scriptArg):], "'")
+				if contents, readErr := os.ReadFile(path); readErr == nil {
+					r.launchScriptPaths[args[3]] = path
+					r.launchScriptContents[args[3]] = string(contents)
+					if info, statErr := os.Stat(path); statErr == nil {
+						r.launchScriptModes[args[3]] = info.Mode()
+					}
+					if info, statErr := os.Stat(filepath.Dir(path)); statErr == nil {
+						r.launchArtifactModes[args[3]] = info.Mode()
+					}
+					promptPath := ""
+					if entries, entriesErr := os.ReadDir(filepath.Dir(path)); entriesErr == nil {
+						for _, entry := range entries {
+							if strings.HasPrefix(entry.Name(), sessionLaunchArtifactPrefix) && strings.HasSuffix(entry.Name(), ".prompt") {
+								promptPath = filepath.Join(filepath.Dir(path), entry.Name())
+								break
+							}
+						}
+					}
+					if promptPath != "" {
+						r.launchPromptPaths[args[3]] = promptPath
+						if prompt, promptErr := os.ReadFile(promptPath); promptErr == nil {
+							r.launchPromptContents[args[3]] = string(prompt)
+						}
+						if info, statErr := os.Stat(promptPath); statErr == nil {
+							r.launchPromptModes[args[3]] = info.Mode()
+						}
+						_ = os.Remove(promptPath)
+					}
+				}
+			}
+		}
 		if r.newSessionErr != nil {
 			return "", r.newSessionErr
+		}
+		if path := r.launchScriptPaths[args[3]]; path != "" {
+			_ = os.Remove(path)
 		}
 		if r.onNewSession != nil {
 			r.onNewSession(args[3])
@@ -2679,11 +2766,12 @@ func TestSessionStartReportsFailedStartCleanupFailures(t *testing.T) {
 					},
 					Logger: slog.Default(),
 				},
-				tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
-				issues:       issuesClient,
-				session:      daemonhandlers.NewSessionHandler(store),
-				sessionStore: store,
-				revision:     map[string]uint64{},
+				tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
+				sessionResumeWait: immediateSessionResumeWait,
+				issues:            issuesClient,
+				session:           daemonhandlers.NewSessionHandler(store),
+				sessionStore:      store,
+				revision:          map[string]uint64{},
 				worktreeManagersByRoot: map[string]*git.WorktreeManager{
 					repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
 				},
@@ -2691,7 +2779,6 @@ func TestSessionStartReportsFailedStartCleanupFailures(t *testing.T) {
 					projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
 				},
 			}
-
 			resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
 				ProtocolVersion: protocol.CurrentVersion,
 				RequestID:       "req-start-cleanup-report",
@@ -2717,6 +2804,13 @@ func TestSessionStartReportsFailedStartCleanupFailures(t *testing.T) {
 			}
 			if tmuxRunner.sessions[naming.CanonicalSessionID(projectID, issueID)] {
 				t.Fatalf("tmux session %q left running after failed start", naming.CanonicalSessionID(projectID, issueID))
+			}
+			task, loadErr := issuesClient.GetWithRuntime(ctx, projectID, issueID)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if task.Status != domain.StatusOpen {
+				t.Fatalf("issue status after failed start = %s, want %s", task.Status, domain.StatusOpen)
 			}
 		})
 	}
@@ -2944,9 +3038,9 @@ func TestSessionStartWaitsForInitReadyMarkerBeforeCompleting(t *testing.T) {
 	if !strings.Contains(payload.Output, "Session init commands finished: 1 command(s)") {
 		t.Fatalf("output = %q, want init command completion line", payload.Output)
 	}
-	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, sessionID)
-	if !strings.Contains(launchCommand, filepath.ToSlash(sessionInitReadyMarkerPath(issueID, sessionID))) {
-		t.Fatalf("launch command = %q, want init marker path", launchCommand)
+	launchScript := requireNewSessionLaunchScript(t, tmuxRunner, sessionID)
+	if !strings.Contains(launchScript, filepath.ToSlash(sessionInitReadyMarkerPath(issueID, sessionID))) {
+		t.Fatalf("launch script = %q, want init marker path", launchScript)
 	}
 }
 
@@ -3092,6 +3186,7 @@ func TestSessionStartDefaultsAgentActivityToBusy(t *testing.T) {
 		branchName:   branch,
 	}
 	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.maxNewSessionCommand = 12 * 1024
 	store := daemonstate.NewStore()
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
@@ -3129,8 +3224,9 @@ func TestSessionStartDefaultsAgentActivityToBusy(t *testing.T) {
 			ProjectID: naming.ProjectID(projectID),
 		},
 		Body: marshalJSON(map[string]any{
-			"project_id": projectID,
-			"session_id": issueID,
+			"project_id":     projectID,
+			"session_id":     issueID,
+			"initial_prompt": strings.Repeat("context-rich worker prompt\n", 100),
 		}),
 	})
 	if err != nil {
@@ -3139,32 +3235,36 @@ func TestSessionStartDefaultsAgentActivityToBusy(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("session start response not OK: %+v", resp)
 	}
-	if tmuxRunner.sendKeysCalls != 0 {
-		t.Fatalf("send-keys calls = %d, want no typed launch command for agent startup", tmuxRunner.sendKeysCalls)
+	sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
+	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, sessionID)
+	launchScript := requireNewSessionLaunchScript(t, tmuxRunner, sessionID)
+	if len(launchCommand) > tmuxRunner.maxNewSessionCommand {
+		t.Fatalf("launch command length = %d, want <= %d", len(launchCommand), tmuxRunner.maxNewSessionCommand)
 	}
-	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID))
-	if !strings.Contains(launchCommand, `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) {
-		t.Fatalf("launch command = %q, want codex launch", launchCommand)
+	if strings.Contains(launchCommand, "context-rich worker prompt") || strings.Contains(launchCommand, initialPromptShellVariable) {
+		t.Fatalf("launch command contains initial prompt payload: %q", launchCommand)
 	}
-	if !strings.Contains(launchCommand, initialPromptShellVariable+`=$(printf`) {
-		t.Fatalf("launch command = %q, want encoded initial prompt assignment", launchCommand)
+	if !strings.Contains(launchScript, `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) || !strings.Contains(launchScript, initialPromptShellVariable) || strings.Contains(launchScript, "context-rich worker prompt") {
+		t.Fatalf("launch script = %q, want bounded file-bootstrap codex launch", launchScript)
 	}
-	if !strings.Contains(launchCommand, `codex -- "$`+initialPromptShellVariable+`"`) {
-		t.Fatalf("launch command = %q, want codex prompt argv", launchCommand)
+	if path := tmuxRunner.launchScriptPaths[sessionID]; path == "" {
+		t.Fatal("missing transient launch script path")
+	} else if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("transient launch script still exists after start: %v", statErr)
 	}
-	for _, mustNotContain := range []string{
-		"Start AI worker",
-		"Start by running",
-	} {
-		if strings.Contains(launchCommand, mustNotContain) {
-			t.Fatalf("launch command = %q, must not contain prompt fragment %q", launchCommand, mustNotContain)
-		}
+	if mode := tmuxRunner.launchScriptModes[sessionID].Perm(); mode != 0o600 {
+		t.Fatalf("transient launch script mode = %o, want 600", mode)
 	}
-	if len(tmuxRunner.inputPayloads) != 0 {
-		t.Fatalf("input payloads = %+v, want no post-launch paste for bounded codex prompt", tmuxRunner.inputPayloads)
+	if got, want := tmuxRunner.launchPromptContents[sessionID], strings.TrimSpace(strings.Repeat("context-rich worker prompt\n", 100)); got != want {
+		t.Fatalf("queued launch prompt = %q, want exact prompt %q", got, want)
+	}
+	if mode := tmuxRunner.launchPromptModes[sessionID].Perm(); mode != 0o600 {
+		t.Fatalf("transient prompt mode = %o, want 600", mode)
+	}
+	if mode := tmuxRunner.launchArtifactModes[sessionID].Perm(); mode != 0o700 {
+		t.Fatalf("launch artifact dir mode = %o, want 700", mode)
 	}
 
-	sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
 	session, found, err := runtimeStateStore.GetSessionState(ctx, projectID, sessionID)
 	if err != nil {
 		t.Fatalf("GetSessionState: %v", err)
@@ -3266,19 +3366,19 @@ func TestSessionStartInjectsIssueImageAttachments(t *testing.T) {
 	if _, err := os.Stat(worktreeImagePath); err != nil {
 		t.Fatalf("expected worktree-local image attachment at %s: %v", worktreeImagePath, err)
 	}
-	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID))
-	if !strings.Contains(launchCommand, `--image "`+worktreeImagePath+`"`) {
-		t.Fatalf("launch command = %q, want worktree-local codex image argument %q", launchCommand, worktreeImagePath)
+	launchScript := requireNewSessionLaunchScript(t, tmuxRunner, naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID))
+	if !strings.Contains(launchScript, `--image "`+worktreeImagePath+`"`) {
+		t.Fatalf("launch script = %q, want worktree-local codex image argument %q", launchScript, worktreeImagePath)
 	}
-	if strings.Contains(launchCommand, attached.Path) {
-		t.Fatalf("launch command = %q, must not use shared attachment store path %q", launchCommand, attached.Path)
+	if strings.Contains(launchScript, attached.Path) {
+		t.Fatalf("launch script = %q, must not use shared attachment store path %q", launchScript, attached.Path)
 	}
-	if !strings.Contains(launchCommand, `codex --image "`) || !strings.Contains(launchCommand, `-- "$`+initialPromptShellVariable+`"`) {
-		t.Fatalf("launch command = %q, want image args before positional prompt", launchCommand)
+	if !strings.Contains(launchScript, `codex --image "`) || !strings.Contains(launchScript, initialPromptShellVariable) {
+		t.Fatalf("launch script = %q, want image args with bounded file bootstrap", launchScript)
 	}
 }
 
-func TestSessionStartLargeCodexPromptUsesPostLaunchPaste(t *testing.T) {
+func TestSessionStartLargeCodexPromptUsesFileBootstrap(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID := "proj-large-codex-prompt"
@@ -3348,22 +3448,21 @@ func TestSessionStartLargeCodexPromptUsesPostLaunchPaste(t *testing.T) {
 		t.Fatalf("session start response not OK: %+v", resp)
 	}
 
-	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID))
+	sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
+	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, sessionID)
 	if strings.Contains(launchCommand, "large prompt line") || strings.Contains(launchCommand, initialPromptShellVariable) {
 		t.Fatalf("launch command contains large prompt payload or prompt variable")
 	}
-	if len(tmuxRunner.inputPayloads) != 1 {
-		t.Fatalf("input payloads = %+v, want one post-launch prompt payload", tmuxRunner.inputPayloads)
+	launchScript := requireNewSessionLaunchScript(t, tmuxRunner, sessionID)
+	if strings.Contains(launchScript, shellPrintfPercentBBytes("large prompt line\n")) || !strings.Contains(launchScript, initialPromptShellVariable) {
+		t.Fatal("launch script contains the encoded large prompt")
 	}
-	if promptPayload := tmuxRunner.inputPayloads[0]; !strings.Contains(promptPayload, "large prompt line") || len(promptPayload) < codexLaunchPromptArgMaxBytes {
-		t.Fatalf("prompt payload length = %d, want large post-launch prompt content", len(promptPayload))
-	}
-	if got := tmuxRunner.sendKeysPayloads[len(tmuxRunner.sendKeysPayloads)-1]; got != "Enter" {
-		t.Fatalf("prompt submit key = %q, want Enter", got)
+	if got := tmuxRunner.launchPromptContents[sessionID]; got != strings.TrimSpace(largePrompt) {
+		t.Fatalf("queued launch prompt bytes = %d, want %d", len(got), len(strings.TrimSpace(largePrompt)))
 	}
 }
 
-func TestSessionStartCodexPromptWithLargeEncodedLaunchUsesPostLaunchPaste(t *testing.T) {
+func TestSessionStartCodexPromptWithLargeEncodedLaunchUsesFileBootstrap(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID := "proj-large-encoded-codex-prompt"
@@ -3453,11 +3552,12 @@ func TestSessionStartCodexPromptWithLargeEncodedLaunchUsesPostLaunchPaste(t *tes
 			t.Fatalf("launch command = %q, must not contain prompt fragment %q", launchCommand, mustNotContain)
 		}
 	}
-	if len(tmuxRunner.inputPayloads) != 1 {
-		t.Fatalf("input payloads = %+v, want one post-launch prompt payload", tmuxRunner.inputPayloads)
+	launchScript := requireNewSessionLaunchScript(t, tmuxRunner, sessionID)
+	if strings.Contains(launchScript, shellPrintfPercentBBytes(promptLine)) || !strings.Contains(launchScript, initialPromptShellVariable) {
+		t.Fatal("launch script contains encoded orchestration prompt")
 	}
-	if got := tmuxRunner.inputPayloads[0]; got != strings.TrimSpace(initialPrompt) {
-		t.Fatalf("post-launch prompt length = %d, want trimmed initial prompt length %d", len(got), len(strings.TrimSpace(initialPrompt)))
+	if got := tmuxRunner.launchPromptContents[sessionID]; got != strings.TrimSpace(initialPrompt) {
+		t.Fatalf("queued orchestration prompt = %q, want exact prompt", got)
 	}
 }
 
@@ -3767,6 +3867,20 @@ func TestSessionStartDoesNotPersistTransitionWhenTmuxCreateFails(t *testing.T) {
 	if len(snapshot.Sessions) != 0 {
 		t.Fatalf("session snapshot = %+v, want empty after failed start", snapshot.Sessions)
 	}
+	sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
+	failedScriptPath := tmuxRunner.launchScriptPaths[sessionID]
+	if failedScriptPath == "" {
+		t.Fatal("failed launch did not create a transient launch script")
+	}
+	if _, statErr := os.Stat(failedScriptPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed launch script still exists: %v", statErr)
+	}
+
+	tmuxRunner.newSessionErr = nil
+	retryResp, retryErr := d.handleSessionStartDirect(ctx, req)
+	if retryErr != nil || !retryResp.OK {
+		t.Fatalf("retry after compensated launch failure: resp=%+v err=%v", retryResp, retryErr)
+	}
 }
 
 func TestSessionStartTmuxCreateFailureIncludesDiagnostics(t *testing.T) {
@@ -3849,7 +3963,7 @@ func TestSessionStartTmuxCreateFailureIncludesDiagnostics(t *testing.T) {
 		"session_id=" + sessionID,
 		"cwd=" + worktreePath,
 		"tmux new-session -d -s " + sessionID + " -c " + worktreePath,
-		"[truncated, bytes=",
+		"session-launch/launch-",
 		"server exited unexpectedly",
 		"Worktree exists but tmux session is not active; retry with `az session start " + issueID + "`",
 		"Diagnostics: az session diagnose " + issueID,
@@ -3858,11 +3972,16 @@ func TestSessionStartTmuxCreateFailureIncludesDiagnostics(t *testing.T) {
 			t.Fatalf("error message = %q, missing %q", message, want)
 		}
 	}
+	if strings.Contains(message, initialPromptShellVariable) {
+		t.Fatalf("error message leaked initial prompt launch content: %q", message)
+	}
 }
 
 func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
+	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
+	t.Setenv("PATH", filepath.Join(repoDir, "bin")+string(os.PathListSeparator)+"/usr/bin:/bin")
 	projectID := "proj"
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
@@ -3884,11 +4003,12 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 	store := daemonstate.NewStore()
 	daemon := &Daemon{
 		cfg: Config{
-			RepoDir:      repoDir,
-			BaseBranch:   "main",
-			CLITool:      "codex",
-			SessionShell: "zsh",
-			Logger:       slog.Default(),
+			RepoDir:                 repoDir,
+			BaseBranch:              "main",
+			CLITool:                 "codex",
+			SessionShell:            "zsh",
+			ManagedGenerationBinDir: managedDir,
+			Logger:                  slog.Default(),
 		},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		issues:       issuesClient,
@@ -3976,6 +4096,20 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 		strings.Contains(launchCommand, initialPromptShellVariable) ||
 		!strings.Contains(launchCommand, "--dangerously-bypass-approvals-and-sandbox") {
 		t.Fatalf("launch command missing bounded codex launch shape or yolo flag: %s", launchCommand)
+	}
+	if !strings.Contains(launchCommand, "export PATH=") || !strings.Contains(launchCommand, managedDir) {
+		t.Fatalf("conflict launch command missing managed PATH export: %s", launchCommand)
+	}
+	if got := tmuxRunner.env[sessionID]["PATH"]; !strings.HasPrefix(got, managedDir+string(os.PathListSeparator)) {
+		t.Fatalf("conflict session PATH = %q, want managed prefix", got)
+	}
+	for _, command := range tmuxRunner.commands {
+		if len(command) == 0 || command[0] != "new-window" {
+			continue
+		}
+		if got, ok := tmuxCommandEnvironmentValue(command, "PATH"); !ok || !strings.HasPrefix(got, managedDir+string(os.PathListSeparator)) {
+			t.Fatalf("conflict window PATH = %q, %t, want managed prefix; command=%v", got, ok, command)
+		}
 	}
 
 	snapshot := store.ReadSnapshot(projectID)
@@ -6531,7 +6665,7 @@ func TestReconcileRecoversRootedOrchestratorThroughOrchestratorAuthority(t *test
 			if err != nil || !found || projection.Role != daemonstate.SessionRoleOrchestrator || projection.ScopeKind != daemonstate.SessionScopeOrchestration || projection.ScopeID != issueID {
 				t.Fatalf("projection=%+v found=%v err=%v", projection, found, err)
 			}
-			contract := requireNewSessionLaunchCommand(t, runner, sessionID) + "\n" + strings.Join(runner.inputPayloads, "\n") + "\n" + strings.Join(runner.sendKeysPayloads, "\n")
+			contract := requireNewSessionLaunchCommand(t, runner, sessionID) + "\n" + requireNewSessionLaunchScript(t, runner, sessionID) + "\n" + runner.launchPromptContents[sessionID] + "\n" + strings.Join(runner.inputPayloads, "\n") + "\n" + strings.Join(runner.sendKeysPayloads, "\n")
 			if !strings.Contains(contract, "Role: orchestrator") || strings.Contains(contract, "Role: worker") {
 				t.Fatalf("rooted orchestrator launch contract=%q", contract)
 			}
@@ -6617,6 +6751,8 @@ func TestManagedRuntimeLifecycleEvaluationConsultsInvariantPolicy(t *testing.T) 
 
 func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	repoDir := t.TempDir()
+	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
+	t.Setenv("PATH", filepath.Join(repoDir, "bin")+string(os.PathListSeparator)+"/usr/bin:/bin")
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot: %v", err)
@@ -6654,9 +6790,10 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	store := daemonstate.NewStore()
 	daemon := &Daemon{
 		cfg: Config{
-			RepoDir: repoDir,
-			CLITool: "claude",
-			Logger:  slog.Default(),
+			RepoDir:                 repoDir,
+			CLITool:                 "claude",
+			ManagedGenerationBinDir: managedDir,
+			Logger:                  slog.Default(),
 		},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		session:      daemonhandlers.NewSessionHandler(store),
@@ -6689,6 +6826,21 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	}
 	if !sessionExists {
 		t.Fatalf("expected tmux session %q to exist after reconcile", sessionID)
+	}
+	var recreatedCommand, launchCommand []string
+	for _, command := range tmuxRunner.commands {
+		switch {
+		case len(command) > 0 && command[0] == "new-session":
+			recreatedCommand = command
+		case len(command) > 3 && command[0] == "send-keys" && command[2] == sessionID:
+			launchCommand = command
+		}
+	}
+	if got, ok := tmuxCommandEnvironmentValue(recreatedCommand, "PATH"); !ok || !strings.HasPrefix(got, managedDir+string(os.PathListSeparator)) {
+		t.Fatalf("recreated session PATH = %q, %t, want managed prefix; command=%v", got, ok, recreatedCommand)
+	}
+	if len(launchCommand) < 4 || !strings.Contains(launchCommand[3], "export PATH='") || !strings.Contains(launchCommand[3], managedDir) {
+		t.Fatalf("reconciled launch command missing managed PATH export: %v", launchCommand)
 	}
 }
 
@@ -8392,6 +8544,121 @@ func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) 
 	}
 }
 
+func TestGlobalSessionLaunchSeedsManagedGenerationPathForAgentAndChildren(t *testing.T) {
+	base := t.TempDir()
+	generationDir := filepath.Join(base, "install", ".azedarach-generations", "generation.fresh")
+	staleBin := filepath.Join(base, "repo", "bin")
+	toolBin := filepath.Join(base, "tools")
+	for _, dir := range []string{generationDir, staleBin, toolBin} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tracePath := filepath.Join(base, "trace")
+	writeExecutable := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExecutable(filepath.Join(generationDir, "az"), `printf 'installed-az|%s|%s\n' "$0" "$*" >> "$TRACE"
+`)
+	writeExecutable(filepath.Join(generationDir, "azd"), `printf 'installed-azd|%s|%s\n' "$0" "$*" >> "$TRACE"
+`)
+	for _, binary := range []string{"az", "azd"} {
+		writeExecutable(filepath.Join(staleBin, binary), `printf 'STALE|%s|%s\n' "$0" "$*" >> "$TRACE"
+`)
+	}
+	writeExecutable(filepath.Join(toolBin, "codex"), `az prime
+az ticket get djm
+azd version
+(az version) &
+wait
+`)
+
+	inheritedPath := strings.Join([]string{staleBin, toolBin, "/usr/bin", "/bin"}, string(os.PathListSeparator))
+	d := &Daemon{cfg: Config{
+		CLITool:                 "codex",
+		SessionShell:            "/bin/sh",
+		SessionSyncInitCommands: []string{"az sync-init"},
+		ManagedGenerationBinDir: generationDir,
+	}}
+	command := d.buildSessionLaunchCommandWithInitReadyPathAndEnv(
+		protocol.DefaultProjectID,
+		"djm",
+		"az-djm",
+		false,
+		nil,
+		"",
+		"",
+		d.sessionLaunchStartupExportCommands(daemonProjectRuntimeConfig{}, issueResourceLifecycleContext{}),
+	)
+	cmd := exec.Command("/bin/sh", "-c", command)
+	cmd.Env = append(os.Environ(), "PATH="+inheritedPath, "TRACE="+tracePath)
+	cmd.Stdin = strings.NewReader("az fallback-shell\nazd fallback-shell\nexit\n")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("managed session launch failed: %v\n%s\ncommand=%s", err, output, command)
+	}
+	traceBytes, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := string(traceBytes)
+	if strings.Contains(trace, "STALE|") {
+		t.Fatalf("trace used stale repository binary:\n%s", trace)
+	}
+	for _, want := range []string{
+		"installed-az|" + filepath.Join(generationDir, "az") + "|prime",
+		"installed-az|" + filepath.Join(generationDir, "az") + "|ticket get djm",
+		"installed-az|" + filepath.Join(generationDir, "az") + "|sync-init",
+		"installed-azd|" + filepath.Join(generationDir, "azd") + "|version",
+		"installed-az|" + filepath.Join(generationDir, "az") + "|version",
+		"installed-az|" + filepath.Join(generationDir, "az") + "|ai hook run --agent=codex session_end",
+		"installed-az|" + filepath.Join(generationDir, "az") + "|fallback-shell",
+		"installed-azd|" + filepath.Join(generationDir, "azd") + "|fallback-shell",
+	} {
+		if !strings.Contains(trace, want) {
+			t.Fatalf("trace missing %q:\n%s", want, trace)
+		}
+	}
+	if exportIndex, toolIndex := strings.Index(command, "export PATH="), strings.Index(command, " codex"); exportIndex < 0 || toolIndex < 0 || exportIndex > toolIndex {
+		t.Fatalf("launch command does not seed PATH before agent: %s", command)
+	}
+}
+
+func TestSessionManagedPathSeedsTmuxEnvironmentButNotScopedRuntime(t *testing.T) {
+	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.test")
+	staleDir := filepath.Join(t.TempDir(), "repo", "bin")
+	t.Setenv("PATH", staleDir+string(os.PathListSeparator)+"/usr/bin:/bin")
+
+	for _, scoped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("scoped=%t", scoped), func(t *testing.T) {
+			runner := newSessionStartTmuxRunner()
+			d := &Daemon{
+				cfg:  Config{ManagedGenerationBinDir: managedDir, ScopedRuntime: scoped},
+				tmux: tmux.NewClient(runner, slog.Default()),
+			}
+			if err := d.setSessionContextEnv(context.Background(), "project", "djm", "az-djm"); err != nil {
+				t.Fatal(err)
+			}
+			gotPath := runner.env["az-djm"]["PATH"]
+			if scoped {
+				if gotPath != "" || d.sessionManagedPathExportCommand() != "" {
+					t.Fatalf("scoped runtime seeded managed PATH: env=%q export=%q", gotPath, d.sessionManagedPathExportCommand())
+				}
+				return
+			}
+			wantPrefix := managedDir + string(os.PathListSeparator)
+			if !strings.HasPrefix(gotPath, wantPrefix) {
+				t.Fatalf("tmux PATH = %q, want prefix %q", gotPath, wantPrefix)
+			}
+			if !strings.HasPrefix(d.sessionManagedPathExportCommand(), "export PATH='") {
+				t.Fatalf("launch export = %q, want managed PATH export", d.sessionManagedPathExportCommand())
+			}
+		})
+	}
+}
+
 func TestBuildSessionLaunchCommandDoesNotSerializeAsyncInitCommandsBeforeToolLaunch(t *testing.T) {
 	d := &Daemon{
 		cfg: Config{
@@ -8641,6 +8908,216 @@ func TestBuildSessionLaunchCommandKeepsLargeCodexPromptOutOfArgv(t *testing.T) {
 	}
 	if !strings.Contains(command, `AZEDARACH_ISSUE_ID="az-42" codex`) {
 		t.Fatalf("command = %q, want codex launch", command)
+	}
+}
+
+func TestSessionLaunchScriptKeepsVeryLargePayloadOutOfChildArgv(t *testing.T) {
+	tempDir := t.TempDir()
+	argvPath := filepath.Join(tempDir, "argv")
+	agentArgvPath := filepath.Join(tempDir, "agent-argv")
+	shellPath := filepath.Join(tempDir, "recording-shell")
+	agentPath := filepath.Join(tempDir, "recording-agent")
+	azPath := filepath.Join(tempDir, "az")
+	shell := "#!/bin/sh\n" +
+		"if [ \"$#\" -eq 0 ]; then exit 0; fi\n" +
+		"printf '%s\\n' \"$@\" > " + singleQuoteForShell(argvPath) + "\n" +
+		"if [ \"$1\" != '-i' ] || [ \"$#\" -ne 2 ]; then exit 64; fi\n" +
+		"exec /bin/sh \"$2\"\n"
+	if err := os.WriteFile(shellPath, []byte(shell), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	agent := "#!/bin/sh\nprintf '%s\\n' \"$#\" \"$@\" > " + singleQuoteForShell(agentArgvPath) + "\n"
+	if err := os.WriteFile(agentPath, []byte(agent), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(azPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	d := &Daemon{cfg: Config{CLITool: agentPath, SessionShell: shellPath}}
+	largeStartup := "__AZ_CONTEXT=1\n" + strings.Repeat("# context\n", 256*1024) + ":"
+	launchShell, launchPayload := d.buildSessionLaunchScriptPayloadWithInitReadyPathAndEnv(protocol.DefaultProjectID, "az-42", "az-42", false, nil, "", []string{largeStartup}, sessionPromptHandoff{})
+	scriptPath, tmuxCommand, err := prepareSessionLaunchScript(tempDir, launchShell, launchPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(scriptPath) })
+	if len(tmuxCommand) > 1024 || strings.Contains(tmuxCommand, "context") || strings.Contains(tmuxCommand, initialPromptShellVariable) {
+		t.Fatalf("tmux command is not bounded: bytes=%d command=%q", len(tmuxCommand), tmuxCommand)
+	}
+
+	output, err := exec.Command("/bin/sh", "-c", tmuxCommand).CombinedOutput()
+	if err != nil {
+		t.Fatalf("execute very large launch payload: %v (%s)", err, output)
+	}
+	argv, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(argv), "-i\n"+scriptPath+"\n"; got != want {
+		t.Fatalf("child argv = %q, want bounded script argv %q", got, want)
+	}
+	agentArgv, err := os.ReadFile(agentArgvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(agentArgv), "0\n"; got != want {
+		t.Fatalf("agent argv = %q, want no prompt/startup payload %q", got, want)
+	}
+}
+
+func TestSessionLaunchAtomicallyBootstrapsSlowAgentsAcrossToolsAndStartModes(t *testing.T) {
+	for _, tool := range []string{"codex", "claude", "opencode", "codex-app-server"} {
+		for _, mode := range []string{"direct", "orchestrated"} {
+			t.Run(tool+"/"+mode, func(t *testing.T) {
+				tempDir := t.TempDir()
+				readPath := filepath.Join(tempDir, "read-prompt")
+				argvPath := filepath.Join(tempDir, "agent-argv")
+				shellPath := filepath.Join(tempDir, "recording-shell")
+				shell := "#!/bin/sh\n" +
+					"if [ \"$#\" -eq 0 ]; then exit 0; fi\n" +
+					"if [ \"$1\" != '-i' ] || [ \"$#\" -ne 2 ]; then exit 64; fi\n" +
+					"exec /bin/sh \"$2\"\n"
+				if err := os.WriteFile(shellPath, []byte(shell), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				agentName := strings.TrimSuffix(tool, "-app-server")
+				agent := "#!/bin/sh\n" +
+					"printf '%s\\n' \"$@\" >> \"$AGENT_ARGV_PATH\"\n" +
+					"if [ \"${1:-} ${2:-} ${3:-}\" = 'app-server daemon start' ]; then sleep 0.75; exit 0; fi\n" +
+					"sleep 0.75\n" +
+					"last=; for arg do last=$arg; done\n" +
+					"prompt_path=${last#* in }; prompt_path=${prompt_path%. Delete*}\n" +
+					"cat \"$prompt_path\" > \"$READ_PATH\" || exit 66\n" +
+					"rm -f -- \"$prompt_path\"\n" +
+					"exit 0\n"
+				if err := os.WriteFile(filepath.Join(tempDir, agentName), []byte(agent), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(tempDir, "az"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+				t.Setenv("READ_PATH", readPath)
+				t.Setenv("AGENT_ARGV_PATH", argvPath)
+
+				prompt := "direct request"
+				if mode == "orchestrated" {
+					prompt = buildStartWorkPrompt("az-42", string(domain.TypeTask), "Slow worker", true, "az-root")
+				}
+				handoff, err := prepareSessionPromptHandoff(tempDir, prompt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(handoff.remove)
+				d := &Daemon{cfg: Config{CLITool: agentName, CodexAppServer: tool == "codex-app-server", SessionShell: shellPath}}
+				launchShell, launchPayload := d.buildSessionLaunchScriptPayloadWithInitReadyPathAndEnv(protocol.DefaultProjectID, "az-42", "az-42", false, nil, "", nil, handoff)
+				scriptPath, tmuxCommand, err := prepareSessionLaunchScript(tempDir, launchShell, launchPayload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Remove(scriptPath) })
+				output, err := exec.Command("/bin/sh", "-c", tmuxCommand).CombinedOutput()
+				if err != nil {
+					t.Fatalf("execute slow %s %s launch: %v (%s)", tool, mode, err, output)
+				}
+				readPrompt, err := os.ReadFile(readPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(readPrompt) != prompt {
+					t.Fatalf("file-backed prompt mismatch: got %d bytes want %d", len(readPrompt), len(prompt))
+				}
+				argv, err := os.ReadFile(argvPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(argv), prompt) || strings.Contains(string(argv), "Slow worker") {
+					t.Fatalf("agent argv contains prompt: %q", argv)
+				}
+				if !strings.Contains(string(argv), handoff.PromptPath) {
+					t.Fatalf("agent argv does not contain bounded prompt-file bootstrap path: %q", argv)
+				}
+				if _, err := os.Stat(handoff.PromptPath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("prompt artifact was not deleted after agent read: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestSessionLaunchArtifactCleanerIsPrivateCancellableAndBatchBounded(t *testing.T) {
+	tempDir := t.TempDir()
+	now := time.Now()
+	old := now.Add(-sessionLaunchArtifactMaxAge - time.Minute)
+	stalePaths := make([]string, sessionLaunchArtifactCleanupLimit*20)
+	for i := range stalePaths {
+		path := filepath.Join(tempDir, fmt.Sprintf("%s%05d.sh", sessionLaunchArtifactPrefix, i))
+		if err := os.WriteFile(path, []byte("secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+		stalePaths[i] = path
+	}
+	recentPath := filepath.Join(tempDir, sessionLaunchArtifactPrefix+"recent.sh")
+	if err := os.WriteFile(recentPath, []byte("active"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cleaner := &sessionLaunchArtifactCleaner{dir: tempDir}
+	t.Cleanup(cleaner.close)
+	inspected, removed, err := cleaner.cleanupBatch(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspected != sessionLaunchArtifactCleanupLimit || removed != sessionLaunchArtifactCleanupLimit {
+		t.Fatalf("cleanup batch inspected/removed = %d/%d, want %d/%d", inspected, removed, sessionLaunchArtifactCleanupLimit, sessionLaunchArtifactCleanupLimit)
+	}
+	totalInspected, totalRemoved := inspected, removed
+	for cleaner.cursor != nil {
+		batchInspected, batchRemoved, batchErr := cleaner.cleanupBatch(context.Background(), now)
+		if batchErr != nil {
+			t.Fatal(batchErr)
+		}
+		if batchInspected > sessionLaunchArtifactCleanupLimit {
+			t.Fatalf("cleanup inspected %d entries in one batch, limit %d", batchInspected, sessionLaunchArtifactCleanupLimit)
+		}
+		totalInspected += batchInspected
+		totalRemoved += batchRemoved
+	}
+	if totalInspected != len(stalePaths)+1 || totalRemoved != len(stalePaths) {
+		t.Fatalf("cursor cleanup totals inspected/removed = %d/%d, want %d/%d", totalInspected, totalRemoved, len(stalePaths)+1, len(stalePaths))
+	}
+	if mode, err := os.Stat(tempDir); err != nil || mode.Mode().Perm() != 0o700 {
+		t.Fatalf("artifact dir mode = %v err=%v, want 0700", mode, err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if inspected, removed, err := cleaner.cleanupBatch(cancelled, now); !errors.Is(err, context.Canceled) || inspected != 0 || removed != 0 {
+		t.Fatalf("cancelled cleanup = inspected %d removed %d err %v", inspected, removed, err)
+	}
+	if _, err := os.Stat(recentPath); err != nil {
+		t.Fatalf("recent launch artifact was removed: %v", err)
+	}
+}
+
+func TestSessionLaunchArtifactCleanerStopsPromptlyOnShutdown(t *testing.T) {
+	dir := t.TempDir()
+	cleaner := &sessionLaunchArtifactCleaner{dir: dir}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		cleaner.run(ctx, time.Hour, nil)
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("artifact cleaner did not stop after cancellation")
 	}
 }
 
@@ -9118,6 +9595,83 @@ func TestRealProcessProfileWorktreeInitCommandsPreserveDirectoryAndEnvironment(t
 	}, "\n")
 	if strings.TrimSpace(string(envData)) != wantEnv {
 		t.Fatalf("init env = %q, want %q", strings.TrimSpace(string(envData)), wantEnv)
+	}
+}
+
+func TestManagedDaemonProcessPathCoversPreSessionInitAndResourceCommands(t *testing.T) {
+	base := t.TempDir()
+	generationDir := filepath.Join(base, "install", ".azedarach-generations", "generation.current")
+	staleDir := filepath.Join(base, "repo", "bin")
+	for _, dir := range []string{generationDir, staleDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tracePath := filepath.Join(base, "trace")
+	writeExecutable := func(path, label string) {
+		t.Helper()
+		body := "#!/bin/sh\nprintf '" + label + "|%s\\n' \"$*\" >> \"$TRACE\"\n"
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, binary := range []string{"az", "azd"} {
+		writeExecutable(filepath.Join(generationDir, binary), "fresh-"+binary)
+		writeExecutable(filepath.Join(staleDir, binary), "STALE-"+binary)
+	}
+	t.Setenv("TRACE", tracePath)
+	t.Setenv("PATH", appconfig.PrependPathEntry(staleDir+string(os.PathListSeparator)+generationDir+string(os.PathListSeparator)+"/usr/bin:/bin", generationDir))
+
+	root, worktree := filepath.Join(base, "root"), filepath.Join(base, "worktree")
+	for _, dir := range []string{root, worktree} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Daemon{cfg: Config{
+		RepoDir:                   root,
+		SessionShell:              "sh",
+		ManagedGenerationBinDir:   generationDir,
+		WorktreeInitCommands:      []string{"az sync-init", "azd sync-init"},
+		WorktreeAsyncInitCommands: []string{"az async-init", "azd async-init"},
+		IssueResources: appconfig.IssueResourcesConfig{
+			PrepareCommands:  []string{"az resource-prepare", "azd resource-prepare"},
+			ReconcileCommand: "az resource-reconcile && azd resource-reconcile",
+			CleanupCommands:  []string{"az resource-cleanup", "azd resource-cleanup"},
+		},
+	}}
+	initCtx := worktreeInitContext{ProjectID: protocol.DefaultProjectID, IssueID: "djm", ProjectRoot: root, WorktreePath: worktree}
+	if err := d.runWorktreeSyncInitCommands(context.Background(), initCtx); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.runWorktreeInitCommandList(context.Background(), initCtx, "async", d.cfg.WorktreeAsyncInitCommands); err != nil {
+		t.Fatal(err)
+	}
+	resourceCtx := issueResourceLifecycleContext{ProjectID: protocol.DefaultProjectID, IssueID: "djm", SessionID: "az-djm", RootPath: root, WorktreePath: worktree}
+	if _, err := d.runIssueResourcePrepareCommands(context.Background(), protocol.DefaultProjectID, resourceCtx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.runIssueResourceReconcileCommand(context.Background(), protocol.DefaultProjectID, resourceCtx, "present"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.runIssueResourceCleanupCommands(context.Background(), protocol.DefaultProjectID, resourceCtx); err != nil {
+		t.Fatal(err)
+	}
+
+	traceBytes, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := string(traceBytes)
+	if strings.Contains(trace, "STALE-") {
+		t.Fatalf("pre-session daemon command used stale binary:\n%s", trace)
+	}
+	for _, phase := range []string{"sync-init", "async-init", "resource-prepare", "resource-reconcile", "resource-cleanup"} {
+		for _, binary := range []string{"az", "azd"} {
+			if !strings.Contains(trace, "fresh-"+binary+"|"+phase) {
+				t.Fatalf("trace missing fresh %s %s invocation:\n%s", binary, phase, trace)
+			}
+		}
 	}
 }
 

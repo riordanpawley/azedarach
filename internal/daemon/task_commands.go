@@ -270,6 +270,11 @@ type taskStaleCloseableCandidate struct {
 	SuggestedCommand string   `json:"suggested_command"`
 }
 
+type taskDurableCompletionEvidence struct {
+	EventID int64
+	Kind    string
+}
+
 type taskContainmentRisk struct {
 	IssueID                string   `json:"issue_id"`
 	ActiveBranch           string   `json:"active_branch,omitempty"`
@@ -1861,13 +1866,17 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task status update requested", "project_id", projectID, "task_id", cmd.TaskID, "status", cmd.Status)
 	}
-	restoreDeferredWorktree := false
-	if cmd.Status != domain.StatusDone {
-		restoreDeferredWorktree = d.cancelDeferredTaskWorktreeCleanup(ctx, projectID, cmd.TaskID, "issue status changed before deferred worktree cleanup completed")
-	}
 	if cmd.Status == domain.StatusInReview {
 		if risk := d.taskContextRiskForCloseout(ctx, projectID, cmd.TaskID, d.cfg.RepoDir); risk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*risk) {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("context risk is high for issue %s: record root_cause, invariant, regression_validation, or a structured risk note before marking in_review", cmd.TaskID)), nil
+		}
+	}
+	var deferredCleanup deferredTaskWorktreeCleanupCancellation
+	if cmd.Status != domain.StatusDone {
+		var err error
+		deferredCleanup, err = d.cancelDeferredTaskWorktreeCleanup(ctx, projectID, cmd.TaskID, "issue status changed before deferred worktree cleanup completed")
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 		}
 	}
 	task, updatedTasks, err := d.updateTaskStatusExcludingClose(ctx, projectID, cmd.TaskID, cmd.Status, taskStatusUpdateOptions{
@@ -1875,9 +1884,12 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 		AllowBusyReviewHandoffTask: reviewHandoffActiveIssue(req.Meta, cmd.TaskID),
 	})
 	if err != nil {
+		if compensationErr := d.compensateDeferredTaskWorktreeCleanup(ctx, projectID, cmd.TaskID, deferredCleanup); compensationErr != nil {
+			err = errors.Join(err, compensationErr)
+		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	if restoreDeferredWorktree {
+	if deferredCleanup.Observed {
 		d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, cmd.TaskID)
 	}
 	resp := d.successResponse(req)
@@ -2055,7 +2067,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		AllowIntegratedWorktreeRetry: cmd.IntegrateBeforeClose,
 	}
 	phaseStartedAt := time.Now()
-	if err := d.repairStaleSessionRuntimeProjections(ctx, projectID, taskID); err != nil {
+	if err := d.refreshTaskCloseSessionRuntime(ctx, projectID, taskID); err != nil {
 		recordPhase("preflight_runtime_projection_repair", phaseStartedAt, false)
 		return result, fmt.Errorf("phase preflight_runtime_projection_repair for issue %s: %w", taskID, err)
 	}
@@ -2253,6 +2265,16 @@ func (d *Daemon) repairStaleSessionRuntimeProjections(ctx context.Context, proje
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func (d *Daemon) refreshTaskCloseSessionRuntime(ctx context.Context, projectID, taskID string) error {
+	if _, err := d.reconcileStaleBusySessionActivity(ctx, projectID, []string{taskID}); err != nil {
+		return fmt.Errorf("converge stale session activity: %w", err)
+	}
+	if err := d.repairStaleSessionRuntimeProjections(ctx, projectID, taskID); err != nil {
+		return fmt.Errorf("repair stale session projections: %w", err)
 	}
 	return nil
 }
@@ -2483,36 +2505,116 @@ func (d *Daemon) deferredTaskWorktreeCleanupShouldSkip(ctx context.Context, proj
 	return true
 }
 
-func (d *Daemon) cancelDeferredTaskWorktreeCleanup(ctx context.Context, projectID, taskID, reason string) bool {
-	if d == nil || d.operationRuntime == nil || d.operationRuntime.manager == nil {
-		return false
+type deferredCleanupOperationManager interface {
+	List(context.Context, daemonops.Query) ([]daemonops.Record, error)
+	Get(context.Context, string) (daemonops.Record, error)
+	Cancel(context.Context, string, string) (daemonops.Record, error)
+}
+
+type deferredTaskWorktreeCleanupCancellation struct {
+	Observed       bool
+	NeedsRequeue   bool
+	FallbackPath   string
+	FallbackBranch string
+}
+
+func (d *Daemon) deferredTaskCleanupOperationManager() deferredCleanupOperationManager {
+	if d == nil {
+		return nil
+	}
+	if d.deferredCleanupOperationManager != nil {
+		return d.deferredCleanupOperationManager
+	}
+	if d.operationRuntime == nil {
+		return nil
+	}
+	return d.operationRuntime.manager
+}
+
+func (d *Daemon) cancelDeferredTaskWorktreeCleanup(ctx context.Context, projectID, taskID, reason string) (deferredTaskWorktreeCleanupCancellation, error) {
+	manager := d.deferredTaskCleanupOperationManager()
+	if manager == nil {
+		return deferredTaskWorktreeCleanupCancellation{}, nil
 	}
 	projectID = normalizedProjectID(projectID)
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
-		return false
+		return deferredTaskWorktreeCleanupCancellation{}, nil
 	}
-	records, err := d.operationRuntime.manager.List(ctx, daemonops.Query{
+	records, err := manager.List(ctx, daemonops.Query{
 		ProjectID: projectID,
 		IssueID:   taskID,
 		Kind:      taskDeferredWorktreeCleanupOperationKind,
 		States:    []daemonops.State{daemonops.StateQueued, daemonops.StateRunning},
 	})
 	if err != nil {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Warn("deferred worktree cleanup cancellation lookup failed", "project_id", projectID, "task_id", taskID, "error", err)
-		}
-		return false
+		return deferredTaskWorktreeCleanupCancellation{}, fmt.Errorf("list deferred worktree cleanup before lifecycle change: %w", err)
 	}
-	cancelled := false
+	cancellation := deferredTaskWorktreeCleanupCancellation{}
 	for _, record := range records {
-		if _, err := d.operationRuntime.manager.Cancel(ctx, record.ID, reason); err != nil && d.cfg.Logger != nil {
-			d.cfg.Logger.Warn("deferred worktree cleanup cancellation failed", "project_id", projectID, "task_id", taskID, "operation_id", record.ID, "error", err)
-			continue
+		cancellation.Observed = true
+		cancellation.captureResourceKeys(record.ResourceKeys)
+		cancelled, err := manager.Cancel(ctx, record.ID, reason)
+		if err != nil {
+			cancelErr := fmt.Errorf("cancel deferred worktree cleanup %s before lifecycle change: %w", record.ID, err)
+			return cancellation, errors.Join(cancelErr, d.compensateDeferredTaskWorktreeCleanup(ctx, projectID, taskID, cancellation))
 		}
-		cancelled = true
+		terminal := cancelled
+		if !isOperationTerminal(terminal.State) {
+			terminal, err = waitForDeferredTaskWorktreeCleanupTerminal(ctx, manager, record.ID)
+			if err != nil {
+				waitErr := fmt.Errorf("wait for deferred worktree cleanup %s cancellation: %w", record.ID, err)
+				return cancellation, errors.Join(waitErr, d.compensateDeferredTaskWorktreeCleanup(ctx, projectID, taskID, cancellation))
+			}
+		}
+		if terminal.State == daemonops.StateCancelled {
+			cancellation.NeedsRequeue = true
+		}
 	}
-	return cancelled
+	return cancellation, nil
+}
+
+func (c *deferredTaskWorktreeCleanupCancellation) captureResourceKeys(keys []string) {
+	for _, key := range keys {
+		switch {
+		case c.FallbackPath == "" && strings.HasPrefix(key, "worktree:"):
+			c.FallbackPath = strings.TrimPrefix(key, "worktree:")
+		case c.FallbackBranch == "" && strings.HasPrefix(key, "branch:"):
+			c.FallbackBranch = strings.TrimPrefix(key, "branch:")
+		}
+	}
+}
+
+func waitForDeferredTaskWorktreeCleanupTerminal(ctx context.Context, manager deferredCleanupOperationManager, operationID string) (daemonops.Record, error) {
+	ticker := time.NewTicker(defaultOperationPollDelay)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return daemonops.Record{}, ctx.Err()
+		case <-ticker.C:
+			record, err := manager.Get(ctx, operationID)
+			if err != nil {
+				return daemonops.Record{}, err
+			}
+			if isOperationTerminal(record.State) {
+				return record, nil
+			}
+		}
+	}
+}
+
+func (d *Daemon) compensateDeferredTaskWorktreeCleanup(ctx context.Context, projectID, taskID string, cancellation deferredTaskWorktreeCleanupCancellation) error {
+	if !cancellation.NeedsRequeue {
+		return nil
+	}
+	compensationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if _, err := d.submitDeferredTaskWorktreeCleanup(compensationCtx, projectID, taskID, cancellation.FallbackPath, cancellation.FallbackBranch); err != nil {
+		d.restoreDeferredCleanupWorktreeProjection(compensationCtx, projectID, taskID)
+		return fmt.Errorf("requeue deferred worktree cleanup after failed lifecycle change: %w", err)
+	}
+	return nil
 }
 
 func (d *Daemon) restoreDeferredCleanupWorktreeProjection(ctx context.Context, projectID, taskID string) {
@@ -3558,6 +3660,11 @@ func (d *Daemon) handleTaskClosePreflight(ctx context.Context, req protocol.Requ
 	var cmd taskClosePreflightRequest
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	if taskID := strings.TrimSpace(cmd.TaskID); taskID != "" {
+		if err := d.refreshTaskCloseSessionRuntime(ctx, projectID, taskID); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("refresh session runtime before close preflight: %v", err)), nil
+		}
 	}
 	result, err := d.validateTaskClosePreflight(ctx, projectID, cmd.TaskID, cmd.taskClosePreflightOptions, req)
 	if err != nil {
@@ -4777,13 +4884,17 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 	if err != nil {
 		return taskCompleteCheckResult{}, err
 	}
-	ready, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	completionEvidence, err := d.taskGraphDurableCompletionEvidence(ctx, projectID, daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children))
+	if err != nil {
+		return taskCompleteCheckResult{}, err
+	}
+	ready, err := daemonTaskGraphReadinessFromIndexesWithCompletionEvidence(rootID, byID, children, completionEvidence)
 	if err != nil {
 		return taskCompleteCheckResult{}, err
 	}
 
 	desc := daemonTaskGraphDescendants(rootID, children)
-	staleCloseable := daemonTaskGraphStaleCloseableCandidates(rootID, byID, children)
+	staleCloseable := daemonTaskGraphStaleCloseableCandidatesWithEvidence(rootID, byID, children, completionEvidence)
 	acceptanceByIssue := make(map[string]domain.InvestigationAcceptance)
 	for _, id := range desc {
 		task := byID[id]
@@ -4944,6 +5055,7 @@ type taskGraphReadinessContext struct {
 	startProgressByIssue   map[string]taskGraphSessionStartProgress
 	failedStartsByIssue    map[string]taskGraphStartFailure
 	containmentRisksByRoot map[string][]taskContainmentRisk
+	completionByIssue      map[string]taskDurableCompletionEvidence
 	issueEventsByIssue     map[string][]domain.IssueObservationEvent
 	stewardshipByIssue     map[string][]domain.IssueObservationEvent
 	mailEventsByRoot       map[string]map[string][]daemonMailEvent
@@ -4979,6 +5091,16 @@ func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID
 		}
 	}
 	captured.containmentRisksByRoot = d.captureTaskGraphContainmentRisks(ctx, projectID, tasks, roots, worktrees, err)
+	completionIssueIDs := make([]naming.IssueID, 0, len(tasks))
+	for _, task := range tasks {
+		if !task.ID.IsZero() {
+			completionIssueIDs = append(completionIssueIDs, task.ID)
+		}
+	}
+	captured.completionByIssue, err = d.taskGraphDurableCompletionEvidence(ctx, projectID, completionIssueIDs)
+	if err != nil {
+		return taskGraphReadinessContext{}, err
+	}
 	if includeMailbox {
 		for _, rootIssueID := range uniqueNonEmpty(roots) {
 			captured.mailEventsByRoot[rootIssueID] = d.workerObservationMailboxEvents(rootIssueID)
@@ -5035,7 +5157,7 @@ func deriveTaskGraphReadinessFromTasksForActor(rootIssueID, actorID string, task
 	if err != nil {
 		return taskGraphReadinessResult{}, err
 	}
-	ready, err := daemonTaskGraphReadinessFromIndexesForActor(rootID, byID, children, actorID, captured.capturedAt)
+	ready, err := daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID, byID, children, actorID, captured.capturedAt, captured.completionByIssue)
 	if err != nil {
 		return taskGraphReadinessResult{}, err
 	}
@@ -5172,10 +5294,18 @@ func daemonTaskGraphIndexes(rootIssueID string, tasks []domain.Task) (naming.Iss
 }
 
 func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) (taskGraphReadinessResult, error) {
-	return daemonTaskGraphReadinessFromIndexesForActor(rootID, byID, children, "", time.Now().UTC())
+	return daemonTaskGraphReadinessFromIndexesWithCompletionEvidence(rootID, byID, children, nil)
 }
 
 func daemonTaskGraphReadinessFromIndexesForActor(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID, actorID string, now time.Time) (taskGraphReadinessResult, error) {
+	return daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID, byID, children, actorID, now, nil)
+}
+
+func daemonTaskGraphReadinessFromIndexesWithCompletionEvidence(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID, completionEvidence map[string]taskDurableCompletionEvidence) (taskGraphReadinessResult, error) {
+	return daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID, byID, children, "", time.Now().UTC(), completionEvidence)
+}
+
+func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID, actorID string, now time.Time, completionEvidence map[string]taskDurableCompletionEvidence) (taskGraphReadinessResult, error) {
 	leafIDs := daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children)
 	leaves := make([]string, 0, len(leafIDs))
 	for _, id := range leafIDs {
@@ -5193,7 +5323,7 @@ func daemonTaskGraphReadinessFromIndexesForActor(rootID naming.IssueID, byID map
 		Active:      make([]string, 0),
 		Blocked:     make(map[string]string),
 	}
-	result.StaleCloseableChildren = daemonTaskGraphStaleCloseableCandidates(rootID, byID, children)
+	result.StaleCloseableChildren = daemonTaskGraphStaleCloseableCandidatesWithEvidence(rootID, byID, children, completionEvidence)
 	for _, idRaw := range leaves {
 		id, parseErr := naming.ParseIssueID(idRaw)
 		if parseErr != nil {
@@ -5216,7 +5346,7 @@ func daemonTaskGraphReadinessFromIndexesForActor(rootID naming.IssueID, byID map
 			result.Blocked[idRaw] = "waiting on " + strings.Join(blockers, ",")
 			continue
 		}
-		if daemonTaskStaleCloseableCandidate(task) {
+		if daemonTaskStaleCloseableCandidate(task, completionEvidence[task.ID.String()]) {
 			continue
 		}
 		result.Runnable = append(result.Runnable, idRaw)
@@ -5267,10 +5397,15 @@ func daemonTaskGraphRunnableCandidates(rootID naming.IssueID, byID map[naming.Is
 }
 
 func daemonTaskGraphStaleCloseableCandidates(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) []taskStaleCloseableCandidate {
+	return daemonTaskGraphStaleCloseableCandidatesWithEvidence(rootID, byID, children, nil)
+}
+
+func daemonTaskGraphStaleCloseableCandidatesWithEvidence(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID, completionEvidence map[string]taskDurableCompletionEvidence) []taskStaleCloseableCandidate {
 	out := make([]taskStaleCloseableCandidate, 0)
 	for _, id := range daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children) {
 		task := byID[id]
-		if !daemonTaskStaleCloseableCandidate(task) {
+		evidence := completionEvidence[task.ID.String()]
+		if !daemonTaskStaleCloseableCandidate(task, evidence) {
 			continue
 		}
 		if len(daemonTaskGraphUnresolvedBlockers(task, byID)) > 0 {
@@ -5279,7 +5414,7 @@ func daemonTaskGraphStaleCloseableCandidates(rootID naming.IssueID, byID map[nam
 		out = append(out, taskStaleCloseableCandidate{
 			IssueID:          task.ID.String(),
 			Status:           string(task.Status),
-			Evidence:         daemonTaskStaleCloseableEvidence(task),
+			Evidence:         daemonTaskStaleCloseableEvidence(task, evidence),
 			SuggestedCommand: fmt.Sprintf("az issue close --id %s --close-clean-children", rootID.String()),
 		})
 	}
@@ -5289,17 +5424,17 @@ func daemonTaskGraphStaleCloseableCandidates(rootID naming.IssueID, byID map[nam
 	return out
 }
 
-func daemonTaskStaleCloseableCandidate(task domain.Task) bool {
+func daemonTaskStaleCloseableCandidate(task domain.Task, evidence taskDurableCompletionEvidence) bool {
 	if task.IssueClosed() {
 		return false
 	}
 	if !daemonCloseGuardCleanChildAutoCloseEligible(task) {
 		return false
 	}
-	return task.Status == domain.StatusInReview || daemonCloseGuardTaskHasWorktree(task)
+	return task.Status == domain.StatusInReview || evidence.EventID > 0
 }
 
-func daemonTaskStaleCloseableEvidence(task domain.Task) []string {
+func daemonTaskStaleCloseableEvidence(task domain.Task, completion taskDurableCompletionEvidence) []string {
 	evidence := []string{
 		"no active session",
 		fmt.Sprintf("status=%s", task.Status),
@@ -5314,9 +5449,57 @@ func daemonTaskStaleCloseableEvidence(task domain.Task) []string {
 		evidence = append(evidence, "no active worktree projection")
 	}
 	if task.Status == domain.StatusInReview {
-		evidence = append(evidence, "in_review status is completion evidence")
+		evidence = append(evidence, "durable completion handoff: status=in_review")
+	}
+	if completion.EventID > 0 {
+		evidence = append(evidence, fmt.Sprintf("durable %s event=%d", completion.Kind, completion.EventID))
 	}
 	return evidence
+}
+
+func (d *Daemon) taskGraphDurableCompletionEvidence(ctx context.Context, projectID string, issueIDs []naming.IssueID) (map[string]taskDurableCompletionEvidence, error) {
+	if len(issueIDs) == 0 {
+		return nil, nil
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil, fmt.Errorf("inspect durable task completion evidence: issue store unavailable")
+	}
+	issueIDStrings := make([]string, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueIDStrings = append(issueIDStrings, issueID.String())
+	}
+	events, err := issueClient.ListLatestIssueObservationEventsByIssue(ctx, issues.LatestIssueObservationEventOptions{
+		IssueIDs:                issueIDStrings,
+		Type:                    domain.IssueEventTaskIntegrationCompleted,
+		Source:                  "daemon-task-close",
+		SourceCommands:          []string{"integrate-before-close"},
+		RequiredPayloadTextKeys: []string{"project_id", "source_branch", "target_branch", "source_oid", "target_oid"},
+		InvalidatedByStatuses:   []domain.Status{domain.StatusOpen, domain.StatusInProgress},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("inspect durable task completion evidence: %w", err)
+	}
+	out := make(map[string]taskDurableCompletionEvidence)
+	for _, issueID := range issueIDs {
+		event, found := events[issueID.String()]
+		if !found {
+			continue
+		}
+		receipt := taskCloseIntegrationReceipt{
+			ProjectID:    observationPayloadString(event.Payload, "project_id"),
+			SourceBranch: observationPayloadString(event.Payload, "source_branch"),
+			TargetBranch: observationPayloadString(event.Payload, "target_branch"),
+			SourceOID:    observationPayloadString(event.Payload, "source_oid"),
+			TargetOID:    observationPayloadString(event.Payload, "target_oid"),
+		}
+		if protocol.NormalizeProjectID(receipt.ProjectID) != protocol.NormalizeProjectID(projectID) ||
+			receipt.SourceBranch == "" || receipt.TargetBranch == "" || receipt.SourceOID == "" || receipt.TargetOID == "" {
+			continue
+		}
+		out[issueID.String()] = taskDurableCompletionEvidence{EventID: event.ID, Kind: string(event.Type)}
+	}
+	return out, nil
 }
 
 func (d *Daemon) captureTaskGraphContainmentRisks(ctx context.Context, projectID string, tasks []domain.Task, roots []string, worktrees []git.Worktree, worktreeListErr error) map[string][]taskContainmentRisk {
@@ -6752,6 +6935,14 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task details update requested", "project_id", projectID, "task_id", cmd.TaskID)
 	}
+	var deferredCleanup deferredTaskWorktreeCleanupCancellation
+	if cmd.Lifecycle != nil {
+		var err error
+		deferredCleanup, err = d.cancelDeferredTaskWorktreeCleanup(ctx, projectID, cmd.TaskID, "issue lifecycle changed before deferred worktree cleanup completed")
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+	}
 	task, err := issueClient.UpdateDetailsWithRuntime(ctx, projectID, cmd.TaskID, issues.UpdateTaskParams{
 		Title:           cmd.Title,
 		Description:     cmd.Description,
@@ -6766,7 +6957,17 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 		Implementations: cmd.Implementations,
 	})
 	if err != nil {
+		if compensationErr := d.compensateDeferredTaskWorktreeCleanup(ctx, projectID, cmd.TaskID, deferredCleanup); compensationErr != nil {
+			err = errors.Join(err, compensationErr)
+		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if deferredCleanup.Observed {
+		d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, cmd.TaskID)
+		task, err = issueClient.GetWithRuntime(ctx, projectID, cmd.TaskID)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)

@@ -127,7 +127,7 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 				workdir := d.resolveRepoDirForProject(projectID)
 				prompt := "You are the project orchestrator for this Azedarach project. Run `az prime`, then remain in the active orchestration loop until project completion."
 				command := d.buildSessionLaunchCommand(projectID, "", acquired.Lease.SessionID, false, nil, prompt)
-				if launchErr := d.tmux.NewSessionWithCommand(ctx, acquired.Lease.SessionID, workdir, command); launchErr != nil {
+				if launchErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, acquired.Lease.SessionID, workdir, command, d.sessionManagedEnvironment()); launchErr != nil {
 					appeared, _ := d.tmux.HasSession(ctx, acquired.Lease.SessionID)
 					if !appeared {
 						pauseOrReleaseLease()
