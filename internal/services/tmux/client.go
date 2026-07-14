@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -48,12 +49,18 @@ func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 // NewSession creates a new tmux session with the given name and working directory
 // Uses: tmux new-session -d -s <name> -c <workdir>
 func (c *Client) NewSession(ctx context.Context, name string, workdir string) error {
+	return c.NewSessionWithEnvironment(ctx, name, workdir, nil)
+}
+
+// NewSessionWithEnvironment installs environment before the initial shell starts.
+func (c *Client) NewSessionWithEnvironment(ctx context.Context, name string, workdir string, environment map[string]string) error {
 	c.logger.Debug("creating tmux session", "name", name, "workdir", workdir)
 
 	args := []string{"new-session", "-d", "-s", name}
 	if workdir != "" {
 		args = append(args, "-c", workdir)
 	}
+	args = appendTmuxEnvironmentArgs(args, environment)
 
 	_, err := c.runner.Run(ctx, args...)
 	if err != nil {
@@ -67,12 +74,18 @@ func (c *Client) NewSession(ctx context.Context, name string, workdir string) er
 // NewSessionWithCommand creates a detached tmux session running command.
 // Uses: tmux new-session -d -s <name> -c <workdir> <command>
 func (c *Client) NewSessionWithCommand(ctx context.Context, name, workdir, command string) error {
+	return c.NewSessionWithCommandAndEnvironment(ctx, name, workdir, command, nil)
+}
+
+// NewSessionWithCommandAndEnvironment installs environment before command starts.
+func (c *Client) NewSessionWithCommandAndEnvironment(ctx context.Context, name, workdir, command string, environment map[string]string) error {
 	c.logger.Debug("creating tmux session with command", "name", name, "workdir", workdir, "command", command)
 
 	args := []string{"new-session", "-d", "-s", name}
 	if workdir != "" {
 		args = append(args, "-c", workdir)
 	}
+	args = appendTmuxEnvironmentArgs(args, environment)
 	if strings.TrimSpace(command) != "" {
 		args = append(args, command)
 	}
@@ -91,6 +104,11 @@ func (c *Client) NewSessionWithCommand(ctx context.Context, name, workdir, comma
 // directly instead of routing a single shell-command string through the
 // configured default shell.
 func (c *Client) NewSessionWithArgs(ctx context.Context, name, workdir, executable string, commandArgs ...string) error {
+	return c.NewSessionWithArgsAndEnvironment(ctx, name, workdir, executable, nil, commandArgs...)
+}
+
+// NewSessionWithArgsAndEnvironment installs environment before directly executing executable.
+func (c *Client) NewSessionWithArgsAndEnvironment(ctx context.Context, name, workdir, executable string, environment map[string]string, commandArgs ...string) error {
 	c.logger.Debug("creating tmux session with argv", "name", name, "workdir", workdir, "executable", executable)
 	if strings.TrimSpace(executable) == "" || len(commandArgs) == 0 {
 		return &domain.TmuxError{Op: "new-session", Session: name, Err: errors.New("direct command requires an executable and at least one argument")}
@@ -100,6 +118,7 @@ func (c *Client) NewSessionWithArgs(ctx context.Context, name, workdir, executab
 	if workdir != "" {
 		args = append(args, "-c", workdir)
 	}
+	args = appendTmuxEnvironmentArgs(args, environment)
 	args = append(args, "--", executable)
 	args = append(args, commandArgs...)
 
@@ -115,17 +134,22 @@ func (c *Client) NewSessionWithArgs(ctx context.Context, name, workdir, executab
 // EnsureWindow creates a named window in an existing session when it is absent.
 // It returns true when the window already existed.
 func (c *Client) EnsureWindow(ctx context.Context, sessionName, windowName, workdir string) (bool, error) {
-	return c.ensureWindow(ctx, sessionName, windowName, workdir, "")
+	return c.ensureWindow(ctx, sessionName, windowName, workdir, "", nil)
 }
 
 // EnsureWindowWithCommand creates a named window running command, or replaces
 // the existing window's panes with command. Passing the command to tmux avoids
 // racing an interactive shell's startup before sending the first line.
 func (c *Client) EnsureWindowWithCommand(ctx context.Context, sessionName, windowName, workdir, command string) (bool, error) {
-	return c.ensureWindow(ctx, sessionName, windowName, workdir, command)
+	return c.EnsureWindowWithCommandAndEnvironment(ctx, sessionName, windowName, workdir, command, nil)
 }
 
-func (c *Client) ensureWindow(ctx context.Context, sessionName, windowName, workdir, command string) (bool, error) {
+// EnsureWindowWithCommandAndEnvironment installs environment before creating or respawning command.
+func (c *Client) EnsureWindowWithCommandAndEnvironment(ctx context.Context, sessionName, windowName, workdir, command string, environment map[string]string) (bool, error) {
+	return c.ensureWindow(ctx, sessionName, windowName, workdir, command, environment)
+}
+
+func (c *Client) ensureWindow(ctx context.Context, sessionName, windowName, workdir, command string, environment map[string]string) (bool, error) {
 	c.logger.Debug("ensuring tmux window", "session", sessionName, "window", windowName, "workdir", workdir)
 
 	out, err := c.runner.Run(ctx, "list-windows", "-t", sessionName, "-F", "#{window_name}")
@@ -139,6 +163,7 @@ func (c *Client) ensureWindow(ctx context.Context, sessionName, windowName, work
 				if workdir != "" {
 					args = append(args, "-c", workdir)
 				}
+				args = appendTmuxEnvironmentArgs(args, environment)
 				args = append(args, command)
 				if _, err := c.runner.Run(ctx, args...); err != nil {
 					return true, &domain.TmuxError{Op: "respawn-window", Session: sessionName, Err: err}
@@ -153,6 +178,7 @@ func (c *Client) ensureWindow(ctx context.Context, sessionName, windowName, work
 	if workdir != "" {
 		args = append(args, "-c", workdir)
 	}
+	args = appendTmuxEnvironmentArgs(args, environment)
 	if strings.TrimSpace(command) != "" {
 		args = append(args, command)
 	}
@@ -162,6 +188,20 @@ func (c *Client) ensureWindow(ctx context.Context, sessionName, windowName, work
 
 	c.logger.Debug("tmux window created", "session", sessionName, "window", windowName)
 	return false, nil
+}
+
+func appendTmuxEnvironmentArgs(args []string, environment map[string]string) []string {
+	keys := make([]string, 0, len(environment))
+	for key := range environment {
+		if key != "" && key == strings.TrimSpace(key) && !strings.Contains(key, "=") {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		args = append(args, "-e", key+"="+environment[key])
+	}
+	return args
 }
 
 // HasSession checks if a tmux session with the given name exists

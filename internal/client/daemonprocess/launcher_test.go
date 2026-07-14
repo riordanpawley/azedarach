@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	"github.com/riordanpawley/azedarach/internal/logging"
 )
@@ -584,6 +585,7 @@ func TestLauncherResolveCommand_GlobalDaemonUsesAzdFromRunningAzGeneration(t *te
 	previousExecutable := currentExecutable
 	currentExecutable = func() (string, error) { return publicAz, nil }
 	t.Cleanup(func() { currentExecutable = previousExecutable })
+	t.Setenv("PATH", filepath.Dir(staleRepoAzd)+string(os.PathListSeparator)+generationDir+string(os.PathListSeparator)+filepath.Dir(staleRepoAzd))
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
 	t.Setenv("AZEDARACH_DAEMON_BIN", "")
 
@@ -598,6 +600,88 @@ func TestLauncherResolveCommand_GlobalDaemonUsesAzdFromRunningAzGeneration(t *te
 	if got.executable != wantAzd {
 		t.Fatalf("resolveCommand().executable = %q, want immutable paired generation %q", got.executable, wantAzd)
 	}
+	joinedEnv := strings.Join(got.env, "\n")
+	wantPath := "PATH=" + config.PrependPathEntry(os.Getenv("PATH"), filepath.Dir(wantAzd))
+	if !strings.Contains(joinedEnv, wantPath) {
+		t.Fatalf("resolveCommand().env missing managed PATH %q:\n%s", wantPath, joinedEnv)
+	}
+	if strings.Count(strings.TrimPrefix(wantPath, "PATH="), filepath.Dir(wantAzd)) != 1 {
+		t.Fatalf("managed PATH was not deduplicated: %q", wantPath)
+	}
+}
+
+func TestLauncherResolveCommand_ExplicitManagedAzdSeedsOnlyGlobalEnvironment(t *testing.T) {
+	installDir := t.TempDir()
+	generationDir := filepath.Join(installDir, ".azedarach-generations", "generation.current")
+	if err := os.MkdirAll(generationDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, binary := range []string{"az", "azd"} {
+		if err := os.WriteFile(filepath.Join(generationDir, binary), []byte("current"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	azd := filepath.Join(generationDir, "azd")
+	resolvedGenerationDir, err := filepath.EvalSymlinks(generationDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleDir := filepath.Join(t.TempDir(), "repo", "bin")
+	t.Setenv("PATH", staleDir+string(os.PathListSeparator)+generationDir)
+	t.Setenv("AZEDARACH_DAEMON_BIN", "")
+
+	global := NewLauncher(t.TempDir(), filepath.Join(t.TempDir(), "global.sock"))
+	global.BinPath = azd
+	got, err := global.resolveCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pathValue := environmentValue(got.env, "PATH"); !strings.HasPrefix(pathValue, resolvedGenerationDir+string(os.PathListSeparator)) || strings.Count(pathValue, resolvedGenerationDir) != 1 {
+		t.Fatalf("global explicit daemon PATH = %q, want one managed prefix", pathValue)
+	}
+
+	scopedRepo := makeScopedDaemonLauncherRepo(t)
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	scoped := NewLauncher(scopedRepo, filepath.Join(t.TempDir(), "scoped.sock"))
+	scoped.BinPath = azd
+	got, err = scoped.resolveCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.env != nil {
+		t.Fatalf("scoped explicit daemon environment = %v, want inherited environment", got.env)
+	}
+}
+
+func environmentValue(environment []string, key string) string {
+	prefix := key + "="
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix)
+		}
+	}
+	return ""
+}
+
+func makeScopedDaemonLauncherRepo(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "worktree")
+	gitDir := filepath.Join(repo, ".git", "worktrees", "worktree")
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module github.com/riordanpawley/azedarach\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return worktree
 }
 
 func TestLauncherResolveCommand_GlobalDaemonRejectsPrimaryRepoBinPair(t *testing.T) {

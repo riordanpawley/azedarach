@@ -266,6 +266,32 @@ func TestManagedGenerationBinDirRequiresCoherentExecutablePair(t *testing.T) {
 	}
 }
 
+func TestPrependPathEntryDeduplicatesManagedGeneration(t *testing.T) {
+	managed := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
+	stale := filepath.Join(t.TempDir(), "repo", "bin")
+	got := PrependPathEntry(strings.Join([]string{stale, managed, stale, managed}, string(os.PathListSeparator)), managed)
+	want := strings.Join([]string{managed, stale, stale}, string(os.PathListSeparator))
+	if got != want {
+		t.Fatalf("PrependPathEntry() = %q, want %q", got, want)
+	}
+}
+
+func TestPrependPathEntryDeduplicatesSymlinkedFilesystemIdentity(t *testing.T) {
+	realDir := filepath.Join(t.TempDir(), "generation.current")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasDir := filepath.Join(t.TempDir(), "generation.alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Fatal(err)
+	}
+	got := PrependPathEntry(aliasDir+string(os.PathListSeparator)+"/usr/bin", realDir)
+	want := realDir + string(os.PathListSeparator) + "/usr/bin"
+	if got != want {
+		t.Fatalf("PrependPathEntry() = %q, want %q", got, want)
+	}
+}
+
 func TestDaemonPathsUseScopedWhenEnabledInAzedarachDevelopmentWorktree(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")

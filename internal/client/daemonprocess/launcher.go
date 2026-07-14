@@ -46,6 +46,7 @@ type daemonCommand struct {
 	executable string
 	args       []string
 	dir        string
+	env        []string
 }
 
 type daemonProcessSpec struct {
@@ -77,6 +78,9 @@ func startExecDaemonProcess(spec daemonProcessSpec) (daemonProcess, error) {
 	cmd := exec.Command(spec.command.executable, spec.args...)
 	if strings.TrimSpace(spec.command.dir) != "" {
 		cmd.Dir = spec.command.dir
+	}
+	if spec.command.env != nil {
+		cmd.Env = spec.command.env
 	}
 	cmd.Stdout = spec.stdout
 	cmd.Stderr = spec.stderr
@@ -485,14 +489,14 @@ func (l *Launcher) waitForSocketUnavailable(ctx context.Context, timeout time.Du
 
 func (l *Launcher) resolveCommand() (daemonCommand, error) {
 	if l.BinPath != "" {
-		return daemonCommand{executable: l.BinPath}, nil
+		return l.commandForExecutable(l.BinPath), nil
 	}
 	if env := os.Getenv("AZEDARACH_DAEMON_BIN"); env != "" {
-		return daemonCommand{executable: env}, nil
+		return l.commandForExecutable(env), nil
 	}
 	if !config.UseScopedDaemonRuntimeFor(l.RepoDir) {
 		if paired := daemonBinaryNearCurrentExecutable(); paired != "" {
-			return daemonCommand{executable: paired}, nil
+			return l.commandForExecutable(paired), nil
 		}
 		return daemonCommand{}, fmt.Errorf("%w: global daemon launch requires the running az to resolve under .azedarach-generations/generation.* with an executable sibling azd; reinstall the managed az/azd pair or set AZEDARACH_DAEMON_BIN explicitly", errPairedDaemonUnavailable)
 	}
@@ -516,6 +520,30 @@ func (l *Launcher) resolveCommand() (daemonCommand, error) {
 		return daemonCommand{executable: "go", args: []string{"run", "./cmd/azd"}, dir: sourceDir}, nil
 	}
 	return daemonCommand{executable: "azd"}, nil
+}
+
+func (l *Launcher) commandForExecutable(executable string) daemonCommand {
+	command := daemonCommand{executable: executable}
+	if config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		return command
+	}
+	if generationDir, ok := config.ManagedGenerationBinDir(executable, "azd"); ok {
+		command.env = environmentWithPathPrefix(os.Environ(), generationDir)
+	}
+	return command
+}
+
+func environmentWithPathPrefix(environment []string, prefix string) []string {
+	out := make([]string, 0, len(environment)+1)
+	pathValue := ""
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, "PATH=") {
+			pathValue = strings.TrimPrefix(entry, "PATH=")
+			continue
+		}
+		out = append(out, entry)
+	}
+	return append(out, "PATH="+config.PrependPathEntry(pathValue, prefix))
 }
 
 func daemonBinaryNearCurrentExecutable() string {

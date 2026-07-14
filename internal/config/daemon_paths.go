@@ -122,6 +122,37 @@ func ManagedGenerationBinDir(executable, expectedBinary string) (string, bool) {
 	return generationDir, true
 }
 
+// PrependPathEntry returns pathValue with entry first and duplicate filesystem
+// entries removed, preserving the remaining order.
+func PrependPathEntry(pathValue, entry string) string {
+	entry = strings.TrimSpace(entry)
+	if entry == "" {
+		return pathValue
+	}
+	entries := []string{entry}
+	for _, candidate := range filepath.SplitList(pathValue) {
+		if strings.TrimSpace(candidate) == "" || samePathEntry(candidate, entry) {
+			continue
+		}
+		entries = append(entries, candidate)
+	}
+	return strings.Join(entries, string(os.PathListSeparator))
+}
+
+func samePathEntry(left, right string) bool {
+	identity := func(path string) string {
+		path = filepath.Clean(path)
+		if absolute, err := filepath.Abs(path); err == nil {
+			path = absolute
+		}
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			path = resolved
+		}
+		return filepath.Clean(path)
+	}
+	return identity(left) == identity(right)
+}
+
 // ScopedDaemonRuntimeDir returns a deterministic runtime directory for a worktree scope.
 func ScopedDaemonRuntimeDir(startPath string) string {
 	scopeRoot, err := ResolveWorktreeRoot(startPath)

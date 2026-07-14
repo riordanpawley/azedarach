@@ -1038,7 +1038,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	}
 	reportSessionStartProgress(ctx, "tmux_launch", "creating tmux session", 70)
 	if cmd.StartWork {
-		if err := d.tmux.NewSessionWithCommand(ctx, cmd.SessionID, worktree.Path, launchCommand); err != nil {
+		if err := d.tmux.NewSessionWithCommandAndEnvironment(ctx, cmd.SessionID, worktree.Path, launchCommand, d.sessionManagedEnvironment()); err != nil {
 			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, sessionStartLaunchFailureMessage("tmux_launch", cmd, worktree.Path, launchCommand, true, err, cleanupNote)), nil
 		}
@@ -1065,7 +1065,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			)
 		}
 	} else {
-		if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
+		if err := d.tmux.NewSessionWithEnvironment(ctx, cmd.SessionID, worktree.Path, d.sessionManagedEnvironment()); err != nil {
 			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, sessionStartLaunchFailureMessage("tmux_launch", cmd, worktree.Path, "", false, err, cleanupNote)), nil
 		}
@@ -1759,6 +1759,12 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 			result.Sessions = append(result.Sessions, item)
 			continue
 		}
+		if err := d.setSessionManagedPathEnv(ctx, target.SessionID); err != nil {
+			item.Error = err.Error()
+			result.Failed++
+			result.Sessions = append(result.Sessions, item)
+			continue
+		}
 		resumeCommand := d.buildSessionResumeCommand(target.ProjectID, target.IssueID, target.SessionID, body.Yolo, body.ImagePaths)
 		if err := d.tmux.SendKeys(ctx, target.SessionID, resumeCommand); err != nil {
 			item.Error = err.Error()
@@ -2035,7 +2041,10 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 	}
 	targetPane := sessionName + ":" + sessionConflictWindowName
 	launchCommand := d.buildSessionLaunchCommand(projectID, issueIDString, canonicalSessionID, body.Yolo, body.ImagePaths, launchPrompt)
-	reusedWindow, err := d.tmux.EnsureWindowWithCommand(ctx, sessionName, sessionConflictWindowName, worktreePath, launchCommand)
+	if err := d.setSessionManagedPathEnv(ctx, sessionName); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set conflict session PATH: %v", err)), nil
+	}
+	reusedWindow, err := d.tmux.EnsureWindowWithCommandAndEnvironment(ctx, sessionName, sessionConflictWindowName, worktreePath, launchCommand, d.sessionManagedEnvironment())
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("launch conflict resolver window: %v", err)), nil
 	}
@@ -2226,7 +2235,7 @@ func (d *Daemon) ensureConflictSession(ctx context.Context, projectID, issueID, 
 	if d.tmux == nil {
 		return "", false, errors.New("tmux service unavailable")
 	}
-	if err := d.tmux.NewSession(ctx, canonicalSessionID, worktreePath); err != nil {
+	if err := d.tmux.NewSessionWithEnvironment(ctx, canonicalSessionID, worktreePath, d.sessionManagedEnvironment()); err != nil {
 		return "", false, err
 	}
 	return canonicalSessionID, false, nil
@@ -3422,7 +3431,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			continue
 		}
 		canonicalSessionID := naming.CanonicalSessionID(namingScope, issueID)
-		if newErr := d.tmux.NewSession(ctx, canonicalSessionID, wt.Path); newErr != nil {
+		if newErr := d.tmux.NewSessionWithEnvironment(ctx, canonicalSessionID, wt.Path, d.sessionManagedEnvironment()); newErr != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("session reconciliation failed to recreate tmux session",
 					"project_id", projectID,
@@ -3430,6 +3439,18 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 					"session_id", canonicalSessionID,
 					"worktree", wt.Path,
 					"error", newErr,
+				)
+			}
+			continue
+		}
+		if envErr := d.setSessionContextEnv(ctx, projectID, issueID, canonicalSessionID); envErr != nil {
+			_ = d.tmux.KillSession(ctx, canonicalSessionID)
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation failed to install session environment",
+					"project_id", projectID,
+					"issue_id", issueID,
+					"session_id", canonicalSessionID,
+					"error", envErr,
 				)
 			}
 			continue
@@ -4470,7 +4491,7 @@ func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string,
 		tool = "claude"
 	}
 	if strings.EqualFold(tool, "claude") {
-		return d.buildClaudeContinueCommand(projectID, issueID, yolo, sessionRestartContinuePrompt)
+		return d.withSessionManagedPathCommand(d.buildClaudeContinueCommand(projectID, issueID, yolo, sessionRestartContinuePrompt))
 	}
 	if !strings.EqualFold(tool, "codex") {
 		return d.buildSessionLaunchCommand(projectID, issueID, sessionID, yolo, imagePaths, sessionRestartContinuePrompt)
@@ -4499,9 +4520,9 @@ func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string,
 	parts = append(parts, "--last")
 	command := strings.Join(parts, " ")
 	if projectCfg.CodexAppServer {
-		return codexAppServerSupervisedCommand(tool, command, command)
+		command = codexAppServerSupervisedCommand(tool, command, command)
 	}
-	return command
+	return d.withSessionManagedPathCommand(command)
 }
 
 func (d *Daemon) sessionRestartNeedsPostLaunchPrompt(projectID string) bool {
@@ -4551,6 +4572,9 @@ func (d *Daemon) buildSessionLaunchCommandWithInitReadyPathAndEnv(projectID, iss
 	projectCfg := d.runtimeConfigForProject(projectID)
 	toolCommand := d.buildCLIToolCommand(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt)
 	commands := make([]string, 0, len(startupEnvCommands)+len(projectCfg.SessionSyncInitCommands)+3)
+	if pathExport := d.sessionManagedPathExportCommand(); pathExport != "" {
+		commands = append(commands, pathExport)
+	}
 	for _, envCommand := range startupEnvCommands {
 		trimmed := strings.TrimSpace(envCommand)
 		if trimmed != "" {
@@ -4780,10 +4804,7 @@ func sessionLaunchContextExportCommand(projectID, issueID, sessionID string) str
 }
 
 func (d *Daemon) sessionLaunchStartupExportCommands(projectCfg daemonProjectRuntimeConfig, resourceCtx issueResourceLifecycleContext) []string {
-	commands := make([]string, 0, 2)
-	if pathExport := d.sessionManagedPathExportCommand(); pathExport != "" {
-		commands = append(commands, pathExport)
-	}
+	commands := make([]string, 0, 1)
 	assignments := issueResourceShellExports(projectCfg.IssueResources, resourceCtx)
 	if len(assignments) > 0 {
 		commands = append(commands, "export "+strings.Join(assignments, " "))
@@ -5129,10 +5150,8 @@ func (d *Daemon) exportSessionContextEnv(ctx context.Context, projectID, issueID
 }
 
 func (d *Daemon) setSessionContextEnv(ctx context.Context, projectID, issueID, sessionID string) error {
-	if managedPath := d.sessionManagedPathValue(); managedPath != "" {
-		if err := d.tmux.SetEnvironment(ctx, sessionID, "PATH", managedPath); err != nil {
-			return err
-		}
+	if err := d.setSessionManagedPathEnv(ctx, sessionID); err != nil {
+		return err
 	}
 	for _, assignment := range sessionLaunchContextEnvAssignments(projectID, issueID, sessionID) {
 		if assignment.Value == "" {
@@ -5143,6 +5162,31 @@ func (d *Daemon) setSessionContextEnv(ctx context.Context, projectID, issueID, s
 		}
 	}
 	return nil
+}
+
+func (d *Daemon) setSessionManagedPathEnv(ctx context.Context, sessionID string) error {
+	if managedPath := d.sessionManagedPathValue(); managedPath != "" {
+		return d.tmux.SetEnvironment(ctx, sessionID, "PATH", managedPath)
+	}
+	return nil
+}
+
+func (d *Daemon) sessionManagedEnvironment() map[string]string {
+	if managedPath := d.sessionManagedPathValue(); managedPath != "" {
+		return map[string]string{"PATH": managedPath}
+	}
+	return nil
+}
+
+func (d *Daemon) withSessionManagedPathCommand(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ""
+	}
+	if pathExport := d.sessionManagedPathExportCommand(); pathExport != "" {
+		return pathExport + "; " + command
+	}
+	return command
 }
 
 func (d *Daemon) sessionManagedPathExportCommand() string {
@@ -5158,14 +5202,7 @@ func (d *Daemon) sessionManagedPathValue() string {
 	if binDir == "" || d.cfg.ScopedRuntime {
 		return ""
 	}
-	entries := []string{binDir}
-	for _, entry := range filepath.SplitList(os.Getenv("PATH")) {
-		if strings.TrimSpace(entry) == "" || filepath.Clean(entry) == filepath.Clean(binDir) {
-			continue
-		}
-		entries = append(entries, entry)
-	}
-	return strings.Join(entries, string(os.PathListSeparator))
+	return appconfig.PrependPathEntry(os.Getenv("PATH"), binDir)
 }
 
 func issueResourcesConfigured(cfg appconfig.IssueResourcesConfig) bool {

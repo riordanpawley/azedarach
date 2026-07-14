@@ -73,6 +73,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
+	if managedGenerationBinDir != "" {
+		if err := os.Setenv("PATH", config.PrependPathEntry(os.Getenv("PATH"), managedGenerationBinDir)); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to seed managed generation PATH: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

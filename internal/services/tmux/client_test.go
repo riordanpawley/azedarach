@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"reflect"
 	"testing"
 	"time"
 
@@ -127,6 +128,39 @@ func TestClient_NewSessionWithArgs(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, [][]string{{"new-session", "-d", "-s", "az", "-c", "/repo", "--", "/usr/bin/env", "-u", "BASH_ENV", "/bin/sh", "-c", "run advisor"}}, runner.commands)
+}
+
+func TestClient_ManagedEnvironmentIsInstalledBeforeSessionAndWindowCommands(t *testing.T) {
+	runner := &recordingOutputRunner{outputs: []string{"", ""}}
+	client := NewClient(runner, slog.Default())
+	environment := map[string]string{"Z_LAST": "z", "PATH": "/managed:/stale"}
+
+	require.NoError(t, client.NewSessionWithCommandAndEnvironment(context.Background(), "az", "/repo", "codex", environment))
+	reused, err := client.EnsureWindowWithCommandAndEnvironment(context.Background(), "az", "resolve", "/repo", "codex resume", environment)
+	require.NoError(t, err)
+	assert.False(t, reused)
+	assert.Equal(t, [][]string{
+		{"new-session", "-d", "-s", "az", "-c", "/repo", "-e", "PATH=/managed:/stale", "-e", "Z_LAST=z", "codex"},
+		{"list-windows", "-t", "az", "-F", "#{window_name}"},
+		{"new-window", "-d", "-t", "az", "-n", "resolve", "-c", "/repo", "-e", "PATH=/managed:/stale", "-e", "Z_LAST=z", "codex resume"},
+	}, runner.commands)
+}
+
+func TestClient_ManagedEnvironmentIsInstalledBeforeRespawnedWindowCommand(t *testing.T) {
+	runner := &recordingOutputRunner{outputs: []string{"resolve\n"}}
+	client := NewClient(runner, slog.Default())
+
+	reused, err := client.EnsureWindowWithCommandAndEnvironment(context.Background(), "worker", "resolve", "/tmp/worktree", "claude prompt", map[string]string{"PATH": "/managed:/usr/bin"})
+	if err != nil {
+		t.Fatalf("ensure reused window: %v", err)
+	}
+	if !reused {
+		t.Fatal("expected existing window to be reused")
+	}
+	want := []string{"respawn-window", "-k", "-t", "worker:resolve", "-c", "/tmp/worktree", "-e", "PATH=/managed:/usr/bin", "claude prompt"}
+	if got := runner.commands[1]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("respawn command = %#v, want %#v", got, want)
+	}
 }
 
 func TestClient_NewSessionWithArgsRejectsSingleShellCommand(t *testing.T) {
