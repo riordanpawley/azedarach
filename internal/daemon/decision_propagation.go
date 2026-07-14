@@ -54,14 +54,36 @@ func (d *Daemon) reconcileDecisionPropagationBestEffort(ctx context.Context, pro
 
 func (d *Daemon) reconcileAllDecisionPropagationOutboxes(ctx context.Context) {
 	d.issueClientsMu.Lock()
-	projectIDs := make(map[string]struct{}, len(d.issueClientsByProject))
-	for projectID := range d.issueClientsByProject {
-		projectIDs[projectID] = struct{}{}
+	openClients := make(map[string]*issues.Client, len(d.issueClientsByProject))
+	for projectID, client := range d.issueClientsByProject {
+		openClients[projectID] = client
 	}
 	d.issueClientsMu.Unlock()
+	openProjectIDs := make([]string, 0, len(openClients))
+	for projectID := range openClients {
+		openProjectIDs = append(openProjectIDs, projectID)
+	}
+	sort.Strings(openProjectIDs)
+	seen := map[*issues.Client]struct{}{}
+	// Clients already opened by an authoritative command are safe to reconcile
+	// directly. They must not become stranded merely because a registry alias
+	// was later renamed or removed.
+	for _, projectID := range openProjectIDs {
+		client := openClients[projectID]
+		if client == nil {
+			continue
+		}
+		if _, duplicate := seen[client]; duplicate {
+			continue
+		}
+		seen[client] = struct{}{}
+		d.reconcileDecisionPropagationBestEffort(ctx, projectID)
+	}
+
 	// A fresh global daemon has only opened its root project's store. Discover
 	// every registered project on each pass so a restart cannot strand another
 	// project's durable outbox until an unrelated command happens to route to it.
+	projectIDs := make(map[string]struct{})
 	if !d.cfg.ScopedRuntime {
 		registry, err := appconfig.LoadProjectsRegistry()
 		if err != nil {
@@ -82,10 +104,12 @@ func (d *Daemon) reconcileAllDecisionPropagationOutboxes(ctx context.Context) {
 		orderedProjectIDs = append(orderedProjectIDs, projectID)
 	}
 	sort.Strings(orderedProjectIDs)
-	seen := map[*issues.Client]struct{}{}
 	for _, projectID := range orderedProjectIDs {
-		client := d.issueClientForProject(projectID)
-		if client == nil {
+		client, err := d.issueClientForExistingProjectStore(projectID)
+		if err != nil || client == nil {
+			if err != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("decision propagation project unavailable", "project_id", projectID, "error", err)
+			}
 			continue
 		}
 		if _, duplicate := seen[client]; duplicate {

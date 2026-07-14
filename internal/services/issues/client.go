@@ -523,6 +523,7 @@ type Client struct {
 	boardViewsMigrationFailureHook     func(stage string) error
 	humanAuthorityMigrationFailureHook func(stage string) error
 	decisionOutboxMigrationFailureHook func(stage string) error
+	requireExistingDB                  bool
 	interactionMu                      sync.RWMutex
 	interactionCache                   map[string]domain.InteractionRequest
 }
@@ -542,6 +543,16 @@ func WithSQLiteBusyPolicy(timeout, retryDelay time.Duration) ClientOption {
 		if retryDelay > 0 {
 			c.sqliteBusyRetryDelay = retryDelay
 		}
+	}
+}
+
+// WithExistingDatabaseOnly prevents lazy client initialization from creating
+// a missing database or its parent directory. It is intended for background
+// discovery of registered project stores, where stale registry entries must
+// remain unavailable rather than being revived as empty projects.
+func WithExistingDatabaseOnly() ClientOption {
+	return func(c *Client) {
+		c.requireExistingDB = true
 	}
 }
 
@@ -695,16 +706,31 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 	}
 
 	dbDir := filepath.Dir(c.dbPath)
-	if dbDir != "" && dbDir != "." {
+	if c.requireExistingDB {
+		info, err := os.Stat(c.dbPath)
+		if err != nil {
+			return nil, c.wrapError("open-db", "", fmt.Errorf("require existing database: %w", err))
+		}
+		if !info.Mode().IsRegular() {
+			return nil, c.wrapError("open-db", "", fmt.Errorf("require existing database: %s is not a regular file", c.dbPath))
+		}
+	} else if dbDir != "" && dbDir != "." {
 		if err := os.MkdirAll(dbDir, 0o755); err != nil {
 			return nil, c.wrapError("open-db", "", fmt.Errorf("create db directory: %w", err))
 		}
 	}
 
 	busyTimeoutMillis := max(min(c.sqliteBusyTimeout, c.sqliteBusyRetryDelay).Milliseconds(), int64(1))
+	mode := ""
+	if c.requireExistingDB {
+		// mode=rw makes the existence contract atomic at SQLite open time if the
+		// file is removed after the stat above.
+		mode = "mode=rw&"
+	}
 	dsn := fmt.Sprintf(
-		"file:%s?_pragma=busy_timeout(%d)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate",
+		"file:%s?%s_pragma=busy_timeout(%d)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate",
 		filepath.ToSlash(c.dbPath),
+		mode,
 		busyTimeoutMillis,
 	)
 	db, err := tracesqlite.Open(dsn)

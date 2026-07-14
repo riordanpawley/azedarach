@@ -366,6 +366,93 @@ func TestDecisionPropagationRestartDiscoversUnopenedRegisteredProject(t *testing
 	}
 }
 
+func TestDecisionPropagationRestartLeavesMissingRegisteredProjectAbsent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AZEDARACH_DISABLE_USER_DB", "1")
+	baseRepo := t.TempDir()
+	missingRepo := filepath.Join(t.TempDir(), "deleted-project")
+	const projectID = "missing-registered-project"
+	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{Projects: []appconfig.Project{{ID: projectID, Name: "Missing", Path: missingRepo}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(missingRepo); !os.IsNotExist(err) {
+		t.Fatalf("missing project unexpectedly exists before reconcile: %v", err)
+	}
+
+	restarted := New(Config{RepoDir: baseRepo, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	t.Cleanup(restarted.closeIssueClients)
+	restarted.reconcileAllDecisionPropagationOutboxes(context.Background())
+	if _, err := os.Stat(missingRepo); !os.IsNotExist(err) {
+		t.Fatalf("background discovery recreated missing project path: %v", err)
+	}
+	if client := restarted.issueClientsByProject[projectID]; client != nil {
+		t.Fatal("background discovery registered a creating client for missing project")
+	}
+	if err, unavailable := restarted.projectIssueStoreHealthError(projectID); !unavailable || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("missing project health err=%v unavailable=%v", err, unavailable)
+	}
+}
+
+func TestDecisionPropagationRestartLeavesMissingRegisteredDatabaseAbsent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AZEDARACH_DISABLE_USER_DB", "1")
+	baseRepo := t.TempDir()
+	missingStoreRepo := t.TempDir()
+	const projectID = "missing-registered-store"
+	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{Projects: []appconfig.Project{{ID: projectID, Name: "Missing Store", Path: missingStoreRepo}}}); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(missingStoreRepo, ".azedarach", "azedarach.db")
+
+	restarted := New(Config{RepoDir: baseRepo, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	t.Cleanup(restarted.closeIssueClients)
+	restarted.reconcileAllDecisionPropagationOutboxes(context.Background())
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Fatalf("background discovery recreated missing project database: %v", err)
+	}
+	if client := restarted.issueClientsByProject[projectID]; client != nil {
+		t.Fatal("background discovery registered a creating client for missing database")
+	}
+	if err, unavailable := restarted.projectIssueStoreHealthError(projectID); !unavailable || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("missing project store health err=%v unavailable=%v", err, unavailable)
+	}
+}
+
+func TestPendingDecisionEnrichmentComposesAndDeduplicatesExistingBlockers(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	worker, err := client.Create(ctx, issues.CreateTaskParams{Title: "blocked worker", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, worker, issues.IssueObservationEventParams{
+		Type: domain.IssueEventDecisionChanged, Source: "daemon-decision", SourceCommand: protocol.CommandDecisionUpdate,
+		Payload: map[string]any{"decision_id": "dec-compose", "revision": int64(48), "material": true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	snapshot := protocol.OrchestrationSnapshot{Blocked: map[string]string{worker: "dependency dep-1 is unresolved; waiting for interaction req-1"}}
+	tasks := []domain.Task{{ID: naming.IssueID(worker), Status: domain.StatusInProgress}}
+	authority := daemonOrchestrationAuthority{daemon: d}
+	for range 2 {
+		if err := authority.enrichPendingDecisions(ctx, "project", client, &snapshot, tasks); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := snapshot.Blocked[worker]
+	for _, want := range []string{"dependency dep-1 is unresolved", "waiting for interaction req-1", "stale material decision dec-compose revision 48"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("composed blocker=%q, want %q", got, want)
+		}
+		if strings.Count(got, want) != 1 {
+			t.Fatalf("composed blocker duplicated %q: %q", want, got)
+		}
+	}
+}
+
 func TestDecisionPropagationReconcileSuppressesSupersededAndReactivatesPredecessorAfterWithdrawal(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

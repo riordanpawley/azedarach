@@ -362,9 +362,32 @@ func (a daemonOrchestrationAuthority) enrichPendingDecisions(ctx context.Context
 		if snapshot.Blocked == nil {
 			snapshot.Blocked = make(map[string]string)
 		}
-		snapshot.Blocked[issueID] = strings.Join(reasons, "; ")
+		snapshot.Blocked[issueID] = mergeOrchestrationBlockerReasons(snapshot.Blocked[issueID], reasons...)
 	}
 	return nil
+}
+
+func mergeOrchestrationBlockerReasons(existing string, additions ...string) string {
+	ordered := make([]string, 0, len(additions)+1)
+	seen := make(map[string]struct{}, len(additions)+1)
+	add := func(raw string) {
+		for _, part := range strings.Split(raw, ";") {
+			reason := strings.TrimSpace(part)
+			if reason == "" {
+				continue
+			}
+			if _, duplicate := seen[reason]; duplicate {
+				continue
+			}
+			seen[reason] = struct{}{}
+			ordered = append(ordered, reason)
+		}
+	}
+	add(existing)
+	for _, addition := range additions {
+		add(addition)
+	}
+	return strings.Join(ordered, "; ")
 }
 
 func projectOrchestrationCompletion(snapshot protocol.OrchestrationSnapshot) protocol.OrchestrationCompletion {
