@@ -475,9 +475,10 @@ type PROptions struct {
 }
 
 type commandProjectRouting struct {
-	ProjectID  string `json:"project_id"`
-	Project    string `json:"project,omitempty"`
-	Repository string `json:"repository"`
+	ProjectID  string         `json:"project_id"`
+	Project    string         `json:"project,omitempty"`
+	Repository string         `json:"repository"`
+	Config     *config.Config `json:"-"`
 }
 
 func ParsePRArgs(args []string) (PROptions, error) {
@@ -1119,7 +1120,13 @@ func resolvePRCommandRouting(deps *Dependencies, explicitProject string) (comman
 		if !ok {
 			return commandProjectRouting{}, unknownExplicitProjectError(explicitProject)
 		}
-		return projectRoutingFromCandidate(candidate), nil
+		routing := projectRoutingFromCandidate(candidate)
+		selectedConfig, err := config.LoadConfig(routing.Repository)
+		if err != nil {
+			return commandProjectRouting{}, fmt.Errorf("load config for explicit --project %q: %w", explicitProject, err)
+		}
+		routing.Config = selectedConfig
+		return routing, nil
 	}
 
 	if candidate, ok := findSessionProjectCandidate(deps, deps.ProjectID); ok {
@@ -1164,7 +1171,13 @@ func applyExplicitProjectOverride(deps *Dependencies, explicitProject string) (f
 	if !ok {
 		return nil, unknownExplicitProjectError(explicitProject)
 	}
-	return applyProjectRouting(deps, projectRoutingFromCandidate(candidate)), nil
+	routing := projectRoutingFromCandidate(candidate)
+	selectedConfig, err := config.LoadConfig(routing.Repository)
+	if err != nil {
+		return nil, fmt.Errorf("load config for explicit --project %q: %w", explicitProject, err)
+	}
+	routing.Config = selectedConfig
+	return applyProjectRouting(deps, routing), nil
 }
 
 // ApplyExplicitProjectOverride scopes a command to a registered explicit project.
@@ -1184,9 +1197,13 @@ func applyProjectRouting(deps *Dependencies, routing commandProjectRouting) func
 	previousProject := deps.ProjectID
 	previousRepoDir := deps.RepoDir
 	previousRuntimeRepoDir := deps.RuntimeRepoDir
+	previousConfig := deps.Config
 	deps.ProjectID = routing.ProjectID
 	deps.RepoDir = routing.Repository
 	deps.RuntimeRepoDir = resolveRuntimeRepoDir(deps.TraceContext, routing.Repository)
+	if routing.Config != nil {
+		deps.Config = routing.Config
+	}
 	if deps.DaemonClient != nil {
 		deps.DaemonClient.WithProjectID(routing.ProjectID)
 	}
@@ -1194,6 +1211,7 @@ func applyProjectRouting(deps *Dependencies, routing commandProjectRouting) func
 		deps.ProjectID = previousProject
 		deps.RepoDir = previousRepoDir
 		deps.RuntimeRepoDir = previousRuntimeRepoDir
+		deps.Config = previousConfig
 		if deps.DaemonClient != nil {
 			deps.DaemonClient.WithProjectID(previousProject)
 		}

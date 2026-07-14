@@ -13,7 +13,9 @@ import (
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 func TestDaemonPRCommandExecutesInSelectedProjectRepository(t *testing.T) {
@@ -99,5 +101,96 @@ func TestDaemonPRCommandExecutesInSelectedProjectRepository(t *testing.T) {
 	}
 	if _, err := os.Stat(pwdFile); !os.IsNotExist(err) {
 		t.Fatalf("fake gh executed for unknown project: stat error=%v", err)
+	}
+}
+
+func TestDaemonPRCreatePersistsExternalRefInSelectedProjectOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AZEDARACH_DISABLE_USER_DB", "1")
+	defaultRepo := filepath.Join(home, "default-repo")
+	selectedRepo := filepath.Join(home, "selected-repo")
+	for _, repoDir := range []string{defaultRepo, selectedRepo} {
+		if err := os.MkdirAll(repoDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defaultID, _ := appconfig.ProjectIDForRoot(defaultRepo)
+	selectedID, _ := appconfig.ProjectIDForRoot(selectedRepo)
+	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{DefaultProject: "Default", Projects: []appconfig.Project{
+		{ID: defaultID, Name: "Default", Path: defaultRepo},
+		{ID: selectedID, Name: "Selected", Path: selectedRepo},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := filepath.Join(home, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ghScript := `#!/bin/sh
+if [ "$2" = "create" ]; then
+  printf 'https://github.com/example/selected/pull/42\n'
+  exit 0
+fi
+printf '{"number":42,"title":"Selected change","url":"https://github.com/example/selected/pull/42","state":"open","isDraft":false,"headRefName":"feature/selected","baseRefName":"release"}'
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte(ghScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	d := New(Config{RepoDir: defaultRepo, Logger: logger})
+	defaultIssues := newMigratedIssueClient(t, defaultRepo, logger)
+	selectedIssues := newMigratedIssueClient(t, selectedRepo, logger)
+	d.issueClientsByProject[defaultID] = defaultIssues
+	d.issueClientsByProject[selectedID] = selectedIssues
+	d.issueClientsByRoot[daemonStoreRootKey(defaultRepo)] = defaultIssues
+	d.issueClientsByRoot[daemonStoreRootKey(selectedRepo)] = selectedIssues
+	d.issues = defaultIssues
+
+	ctx := context.Background()
+	defaultIssueID, err := defaultIssues.Create(ctx, issues.CreateTaskParams{Title: "Default issue", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectedIssueID, err := selectedIssues.Create(ctx, issues.CreateTaskParams{Title: "Selected issue", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultIssueID != selectedIssueID {
+		t.Fatalf("fixture IDs differ: default=%s selected=%s", defaultIssueID, selectedIssueID)
+	}
+
+	body := []byte(`{"title":"Selected change","body":"Body","branch":"feature/selected","base_branch":"release","issue_id":"` + selectedIssueID + `"}`)
+	resp, err := d.command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "pr-create-selected-project",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandPRCreate,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(selectedID)},
+		Body:            body,
+		SentAt:          time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("PR create transport error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("PR create response error: %+v", resp.Error)
+	}
+	defaultRefs, err := defaultIssues.ListExternalIssueRefs(ctx, defaultIssueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectedRefs, err := selectedIssues.ListExternalIssueRefs(ctx, selectedIssueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defaultRefs) != 0 {
+		t.Fatalf("default project refs = %+v, want none", defaultRefs)
+	}
+	if len(selectedRefs) != 1 || selectedRefs[0].Provider != "github" || selectedRefs[0].RemoteKey != "42" {
+		t.Fatalf("selected project refs = %+v", selectedRefs)
 	}
 }

@@ -171,6 +171,16 @@ func TestPRCommandExplicitProjectRoutesEveryVerbToRegisteredRepository(t *testin
 	if err != nil {
 		t.Fatalf("selected project id: %v", err)
 	}
+	defaultConfig := config.DefaultConfig()
+	defaultConfig.Git.BaseBranch = "trunk"
+	if err := config.SaveConfig(defaultConfig, filepath.Join(repoA, ".azedarach", "config.json")); err != nil {
+		t.Fatalf("save default config: %v", err)
+	}
+	selectedConfig := config.DefaultConfig()
+	selectedConfig.Git.BaseBranch = "release"
+	if err := config.SaveConfig(selectedConfig, filepath.Join(repoB, ".azedarach", "config.json")); err != nil {
+		t.Fatalf("save selected config: %v", err)
+	}
 	if err := config.SaveProjectsRegistry(&config.ProjectsRegistry{
 		DefaultProject: "Default",
 		Projects: []config.Project{
@@ -189,12 +199,13 @@ func TestPRCommandExplicitProjectRoutesEveryVerbToRegisteredRepository(t *testin
 		{name: "status", opts: PROptions{Command: "status", Project: "selected-id", Number: 12, JSON: true}},
 		{name: "checks", opts: PROptions{Command: "checks", Project: "selected-repo", Branch: "feature", JSON: true}},
 		{name: "open", opts: PROptions{Command: "open", Project: "Selected", Branch: "feature", JSON: true}},
-		{name: "create", opts: PROptions{Command: "create", Project: projectB, IssueID: "dha", Branch: "feature", Title: "Fix routing", Body: "Body", BaseBranch: "main", JSON: true}},
+		{name: "create", opts: PROptions{Command: "create", Project: projectB, IssueID: "dha", Branch: "feature", Title: "Fix routing", Body: "Body", JSON: true}},
 		{name: "merge", opts: PROptions{Command: "merge", Project: "Selected", Number: 12, Strategy: "squash", Confirm: true, JSON: true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var routedProjects []string
+			var createBaseBranch string
 			transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				routedProjects = append(routedProjects, req.Meta.ProjectID.String())
 				switch req.Command {
@@ -207,6 +218,13 @@ func TestPRCommandExplicitProjectRoutesEveryVerbToRegisteredRepository(t *testin
 				case daemonclient.CommandPROpen:
 					return responseWithJSON(req, map[string]string{"branch": "feature"}), nil
 				case daemonclient.CommandPRCreate:
+					var body struct {
+						BaseBranch string `json:"base_branch"`
+					}
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode PR create: %v", err)
+					}
+					createBaseBranch = body.BaseBranch
 					return responseWithJSON(req, daemonclient.CreatePullRequestResult{IssueID: "dha", PullRequest: prservice.PRInfo{Number: 12, Branch: "feature"}}), nil
 				case daemonclient.CommandPRMerge:
 					return responseWithJSON(req, daemonclient.PullRequestMergeResult{Number: 12, Strategy: "squash"}), nil
@@ -216,7 +234,7 @@ func TestPRCommandExplicitProjectRoutesEveryVerbToRegisteredRepository(t *testin
 				}
 			}}
 			deps := &Dependencies{
-				Config:       config.DefaultConfig(),
+				Config:       defaultConfig,
 				DaemonClient: daemonclient.New(transport).WithProjectID(projectA),
 				Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 				ProjectID:    projectA,
@@ -236,6 +254,12 @@ func TestPRCommandExplicitProjectRoutesEveryVerbToRegisteredRepository(t *testin
 			}
 			if deps.ProjectID != projectA {
 				t.Fatalf("dependency project after command = %q, want restored %q", deps.ProjectID, projectA)
+			}
+			if tt.name == "create" && createBaseBranch != "release" {
+				t.Fatalf("create base branch = %q, want selected project config release", createBaseBranch)
+			}
+			if deps.Config != defaultConfig {
+				t.Fatal("dependency config was not restored")
 			}
 		})
 	}

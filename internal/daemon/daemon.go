@@ -272,7 +272,6 @@ func New(cfg Config) *Daemon {
 		baseBranch:         cfg.BaseBranch,
 		workflowMode:       cfg.GitWorkflowMode,
 	}
-	prWorkflow := pr.NewPRWorkflow(pr.NewExecRunner(cfg.RepoDir), cfg.Logger)
 	devServerManager := devserver.NewManager(devserver.NewPortAllocator(3000), cfg.Logger)
 	sessionStore := daemonstate.NewStore()
 	issuesClient := issues.NewClient(cfg.RepoDir, cfg.Logger)
@@ -377,13 +376,20 @@ func New(cfg Config) *Daemon {
 	d.runtimeProjectionCoalescer = newRuntimeProjectionEventCoalescer(d, defaultRuntimeProjectionCoalesceWindow)
 	d.scheduledScripts = newScheduledScriptManager(d, cfg.Logger, cfg.scheduledScriptRunner)
 	d.issueAutoArchive = newIssueAutoArchiveWorker(d, cfg.Logger)
-	prHandler := daemonhandlers.NewProjectPRHandler(prWorkflow, gitService, func(_ context.Context, projectID string) (daemonhandlers.PRWorkflow, error) {
+	prHandler := daemonhandlers.NewProjectPRHandler(gitService, func(_ context.Context, projectID string) (daemonhandlers.PRProjectResources, error) {
 		repoDir := d.resolveRepoDirForProjectExact(projectID)
 		if repoDir == "" {
-			return nil, fmt.Errorf("unknown project %q for PR command; refusing repository fallback", projectID)
+			return daemonhandlers.PRProjectResources{}, fmt.Errorf("unknown project %q for PR command; refusing repository fallback", projectID)
 		}
-		return pr.NewPRWorkflow(pr.NewExecRunner(repoDir), cfg.Logger), nil
-	}, issuesClient)
+		issueRefs := d.issueClientForProject(projectID)
+		if issueRefs == nil {
+			return daemonhandlers.PRProjectResources{}, fmt.Errorf("project %q has no issue store for PR command; refusing project fallback", projectID)
+		}
+		return daemonhandlers.PRProjectResources{
+			Workflow:  pr.NewPRWorkflow(pr.NewExecRunner(repoDir), cfg.Logger),
+			IssueRefs: issueRefs,
+		}, nil
+	})
 	gitService.runtimeProjectionWriter = d.runtimeProjectionStateWriter()
 	gitService.runtimeStateStoreForProject = func(projectID string) *daemonstate.RuntimeStateStore {
 		return d.worktreeRuntimeStateStore(projectID)
