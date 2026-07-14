@@ -301,7 +301,7 @@ mkdir -p "$fixture/global-bin"
 ln -s "$fixture/bin/az" "$fixture/global-bin/az"
 ln -s "$fixture/bin/azd" "$fixture/global-bin/azd"
 FAKE_GIT_MODE=primary AZ_INSTALL_DIR="$fixture/global-bin" \
-  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
+  PATH="$fixture/global-bin:$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
   >"$fixture/build-install-run-install.stdout" 2>"$fixture/build-install-run-install.stderr"
 grep -q "Installed az -> $fixture/global-bin/az" "$fixture/build-install-run-install.stdout"
 grep -q "Installed azd -> $fixture/global-bin/azd" "$fixture/build-install-run-install.stdout"
@@ -322,14 +322,38 @@ test -x "$first_installed_generation/azd"
 test "$("$first_installed_generation/az" version)" = "dev (default)"
 test "$("$first_installed_generation/azd" version)" = "dev (default)"
 
+FAKE_GIT_MODE=primary FAKE_GO_MARKER=managed-path-default \
+  PATH="$first_installed_generation:$fixture/fake-bin:$PATH" \
+  "$fixture/scripts/build-install-run.sh" --no-run \
+  >"$fixture/managed-path-default.stdout" 2>"$fixture/managed-path-default.stderr"
+grep -q "Caller uses retained managed generation" "$fixture/managed-path-default.stderr"
+test "$("$fixture/global-bin/az" version)" = "dev (managed-path-default)"
+test "$("$fixture/global-bin/azd" version)" = "dev (managed-path-default)"
+test ! -e "$first_installed_generation/.azedarach-generations"
+
+mkdir -p "$fixture/shadow-bin"
+cp -L "$fixture/global-bin/az" "$fixture/shadow-bin/az"
+cp -L "$fixture/global-bin/azd" "$fixture/shadow-bin/azd"
+if FAKE_GIT_MODE=primary FAKE_GO_MARKER=shadow-diagnostic AZ_INSTALL_DIR="$fixture/global-bin" \
+  PATH="$fixture/shadow-bin:$fixture/fake-bin:$fixture/global-bin:$PATH" \
+  "$fixture/scripts/build-install-run.sh" --no-run \
+  >"$fixture/shadow-diagnostic.stdout" 2>"$fixture/shadow-diagnostic.stderr"; then
+  echo "build-install-run unexpectedly reported success for a shadowed caller shell" >&2
+  exit 1
+fi
+grep -q "caller shell remains shadowed" "$fixture/shadow-diagnostic.stderr"
+grep -q "direnv reload" "$fixture/shadow-diagnostic.stderr"
+test "$("$fixture/global-bin/az" version)" = "dev (shadow-diagnostic)"
+test "$("$fixture/global-bin/azd" version)" = "dev (shadow-diagnostic)"
+
 FAKE_GIT_MODE=primary FAKE_GO_MARKER=first FAKE_CP_ASSERT_SERIAL=1 \
   FAKE_CP_GUARD="$fixture/install-critical-section" AZ_INSTALL_DIR="$fixture/global-bin" \
-  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
+  PATH="$fixture/global-bin:$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
   >"$fixture/concurrent-first.stdout" 2>"$fixture/concurrent-first.stderr" &
 first_pid=$!
 FAKE_GIT_MODE=primary FAKE_GO_MARKER=second FAKE_CP_ASSERT_SERIAL=1 \
   FAKE_CP_GUARD="$fixture/install-critical-section" AZ_INSTALL_DIR="$fixture/global-bin" \
-  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
+  PATH="$fixture/global-bin:$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
   >"$fixture/concurrent-second.stdout" 2>"$fixture/concurrent-second.stderr" &
 second_pid=$!
 wait "$first_pid"
