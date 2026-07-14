@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -30,7 +31,18 @@ type orchestrationAuthority interface {
 	Apply(context.Context, string, protocol.OrchestrationIntentRequest) (protocol.OrchestrationIntentResult, error)
 }
 
-type daemonOrchestrationAuthority struct{ daemon *Daemon }
+type daemonOrchestrationAuthority struct {
+	daemon      *Daemon
+	submitStart func(context.Context, protocol.RequestEnvelope) protocol.ResponseEnvelope
+}
+
+type invalidOrchestrationLaunchError struct {
+	Field string
+}
+
+func (e *invalidOrchestrationLaunchError) Error() string {
+	return fmt.Sprintf("invalid orchestration launch result: missing %s", e.Field)
+}
 
 func (d *Daemon) orchestrationAuthority() orchestrationAuthority {
 	return daemonOrchestrationAuthority{daemon: d}
@@ -802,7 +814,7 @@ func (a daemonOrchestrationAuthority) claimAndSubmitStart(ctx context.Context, p
 	return a.claimAndSubmitStartWithPrompt(ctx, projectID, request, issueID, "")
 }
 
-func (a daemonOrchestrationAuthority) claimAndSubmitStartWithPrompt(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID, prompt string) (protocol.OrchestrationLaunch, error) {
+func (a daemonOrchestrationAuthority) claimAndSubmitStartWithPrompt(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID, prompt string) (_ protocol.OrchestrationLaunch, retErr error) {
 	parsed, err := naming.ParseIssueID(issueID)
 	if err != nil {
 		return protocol.OrchestrationLaunch{}, err
@@ -817,36 +829,69 @@ func (a daemonOrchestrationAuthority) claimAndSubmitStartWithPrompt(ctx context.
 	if err != nil {
 		return protocol.OrchestrationLaunch{}, fmt.Errorf("claim orchestration start: %w", err)
 	}
+	completed := false
+	defer func() {
+		if retErr == nil || completed {
+			return
+		}
+		compensationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		retErr = a.compensateStartFailure(compensationCtx, issueClient, attempt, retErr)
+	}()
 	sessionID := parsed.String()
 	if repoDir := strings.TrimSpace(request.RepoDir); repoDir != "" {
 		sessionID = naming.CanonicalSessionIDForIssue(repoDir, parsed).String()
 	}
 	payload, err := json.Marshal(sessionCommandBody{ProjectID: projectID, SessionID: sessionID, BaseBranch: request.BaseBranch, Prompt: strings.TrimSpace(prompt)})
 	if err != nil {
-		return protocol.OrchestrationLaunch{}, a.compensateStartFailure(ctx, issueClient, attempt, fmt.Errorf("marshal session start: %w", err))
+		return protocol.OrchestrationLaunch{}, fmt.Errorf("marshal session start: %w", err)
 	}
 	resources := []string{"issue:" + projectID + ":" + issueID, "worktree:" + issueID, "session:" + sessionID}
 	submitBody, err := json.Marshal(protocol.OperationSubmitRequestBody{ProjectID: naming.ProjectID(projectID), Kind: "session.start", IssueID: parsed, DedupeKey: dedupeKey, ResourceKeys: resources, Payload: payload})
 	if err != nil {
-		return protocol.OrchestrationLaunch{}, a.compensateStartFailure(ctx, issueClient, attempt, fmt.Errorf("marshal operation submit: %w", err))
+		return protocol.OrchestrationLaunch{}, fmt.Errorf("marshal operation submit: %w", err)
 	}
 	submitReq := baseReq
 	submitReq.Command, submitReq.Body = protocol.CommandOperationSubmit, submitBody
-	submitResp := a.daemon.operationRuntime.handleOperationSubmit(ctx, submitReq)
+	var submitResp protocol.ResponseEnvelope
+	if a.submitStart != nil {
+		submitResp = a.submitStart(ctx, submitReq)
+	} else {
+		submitResp = a.daemon.operationRuntime.handleOperationSubmit(ctx, submitReq)
+	}
 	if !submitResp.OK {
 		failure := errors.New("submit session start failed")
 		if submitResp.Error != nil {
 			failure = fmt.Errorf("submit session start: %s", submitResp.Error.Message)
 		}
-		return protocol.OrchestrationLaunch{}, a.compensateStartFailure(ctx, issueClient, attempt, failure)
+		return protocol.OrchestrationLaunch{}, failure
+	}
+	var launchShape struct {
+		Operation *struct {
+			OperationID json.RawMessage `json:"operation_id"`
+		} `json:"operation"`
+	}
+	if err := json.Unmarshal(submitResp.Body, &launchShape); err != nil {
+		return protocol.OrchestrationLaunch{}, fmt.Errorf("decode session start submission shape: %w", err)
+	}
+	if launchShape.Operation == nil {
+		return protocol.OrchestrationLaunch{}, &invalidOrchestrationLaunchError{Field: "operation_id"}
+	}
+	operationIDShape := strings.TrimSpace(string(launchShape.Operation.OperationID))
+	if operationIDShape == "" || operationIDShape == "null" || operationIDShape == `""` {
+		return protocol.OrchestrationLaunch{}, &invalidOrchestrationLaunchError{Field: "operation_id"}
 	}
 	var submitted protocol.OperationSubmitResponseBody
 	if err := json.Unmarshal(submitResp.Body, &submitted); err != nil {
-		return protocol.OrchestrationLaunch{}, err
+		return protocol.OrchestrationLaunch{}, fmt.Errorf("decode session start submission: %w", err)
+	}
+	if strings.TrimSpace(submitted.Operation.OperationID.String()) == "" {
+		return protocol.OrchestrationLaunch{}, &invalidOrchestrationLaunchError{Field: "operation_id"}
 	}
 	if err := issueClient.CompleteOrchestrationStart(ctx, attempt, submitted.Operation.OperationID.String()); err != nil {
 		return protocol.OrchestrationLaunch{}, fmt.Errorf("record submitted orchestration start: %w", err)
 	}
+	completed = true
 	return protocol.OrchestrationLaunch{IssueID: issueID, SessionID: sessionID, OperationID: submitted.Operation.OperationID.String(), OperationState: string(submitted.Operation.State)}, nil
 }
 
@@ -855,6 +900,48 @@ func (a daemonOrchestrationAuthority) compensateStartFailure(ctx context.Context
 		return fmt.Errorf("%v; persist orchestration start compensation: %w", cause, err)
 	}
 	return cause
+}
+
+func (d *Daemon) reconcileOrchestrationStartOperation(ctx context.Context, record daemonops.Record) {
+	if d == nil || record.Kind != "session.start" || (record.State != daemonops.StateFailed && record.State != daemonops.StateCancelled) {
+		return
+	}
+	if d.tmux != nil {
+		sessionID := ""
+		for _, resourceKey := range record.ResourceKeys {
+			if strings.HasPrefix(resourceKey, "session:") {
+				sessionID = strings.TrimSpace(strings.TrimPrefix(resourceKey, "session:"))
+				break
+			}
+		}
+		if sessionID == "" {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("skip orchestration start compensation without session identity", "project_id", record.ProjectID, "issue_id", record.IssueID, "operation_id", record.ID)
+			}
+			return
+		}
+		live, err := d.tmux.HasSession(ctx, sessionID)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("skip orchestration start compensation after tmux probe failure", "project_id", record.ProjectID, "issue_id", record.IssueID, "operation_id", record.ID, "session_id", sessionID, "error", err)
+			}
+			return
+		}
+		if live {
+			return
+		}
+	}
+	issueClient := d.issueClientForProject(record.ProjectID)
+	if issueClient == nil {
+		return
+	}
+	cause := errors.New(strings.TrimSpace(record.ErrorMessage))
+	if strings.TrimSpace(record.ErrorMessage) == "" {
+		cause = fmt.Errorf("session start operation ended in %s", record.State)
+	}
+	if _, err := issueClient.CompensateOrchestrationStartOperation(ctx, d.canonicalProjectID(record.ProjectID), record.DedupeKey, record.ID, cause); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("compensate terminal orchestration start failed", "project_id", record.ProjectID, "issue_id", record.IssueID, "operation_id", record.ID, "state", record.State, "error", err)
+	}
 }
 
 func orchestrationTranscode(in, out any) error {
