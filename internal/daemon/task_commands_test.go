@@ -5002,6 +5002,10 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
 			return filepath.Join(repoDir, ".git"), nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == sourceBranch+"^{commit}":
+			return "source-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "main^{commit}":
+			return "merged-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 			return "target-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
@@ -5230,6 +5234,10 @@ func TestTaskCloseCommandIntegrationIgnoresDuplicateIssueTargetWorktreeFromOther
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
 			return filepath.Join(repoDir, ".git"), nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == sourceBranch+"^{commit}":
+			return "source-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "main^{commit}":
+			return "merged-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 			return "target-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
@@ -5406,6 +5414,13 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
 			return filepath.Join(repoDir, ".git"), nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == sourceBranch+"^{commit}":
+			if branchRemoved {
+				return "", fmt.Errorf("unknown revision %s", sourceBranch)
+			}
+			return "source-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "main^{commit}":
+			return "merged-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 			return "target-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
@@ -5559,6 +5574,15 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 	if task.Status != domain.StatusInReview {
 		t.Fatalf("task status after failed close = %s, want %s", task.Status, domain.StatusInReview)
 	}
+	receipts, err := issuesClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{
+		Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted},
+	})
+	if err != nil {
+		t.Fatalf("list exact integration receipts: %v", err)
+	}
+	if len(receipts) != 1 || observationPayloadString(receipts[0].Payload, "source_oid") != "source-sha" || observationPayloadString(receipts[0].Payload, "target_oid") != "merged-sha" {
+		t.Fatalf("exact integration receipts = %+v, want one source-sha/merged-sha receipt before destructive cleanup", receipts)
+	}
 	if _, err := os.Stat(sourceWorktree); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("source worktree after failed close stat error = %v, want removed path", err)
 	}
@@ -5631,61 +5655,156 @@ func TestTaskClosePostIntegrationPhaseErrorTreatsNoChangesAsIntegratedEvidence(t
 	}
 }
 
-func TestTaskCloseMissingSourceIntegrationResultPreservesUnintegratedDiagnostics(t *testing.T) {
-	result, err := taskCloseMissingSourceIntegrationResult(
-		"az-1",
-		"riordan/az-1/unintegrated",
-		"main",
-		2,
-		nil,
-		true,
-		nil,
-		false,
-		nil,
-	)
-	if err == nil {
-		t.Fatal("missing source with unintegrated commits returned nil error")
+func TestTaskCloseIntegrationReceiptAcceptsConventionalCommitOnRealTarget(t *testing.T) {
+	repoDir := t.TempDir()
+	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repoDir, "config", "user.name", "Azedarach Test")
+	runDaemonTestGit(t, repoDir, "config", "user.email", "azedarach@example.com")
+	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
 	}
-	if !result.Requested || result.NoChanges {
-		t.Fatalf("integration result = %+v, want requested failure", result)
+	runDaemonTestGit(t, repoDir, "add", "tracked.txt")
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "chore: seed")
+	sourceBranch := "riordan/djb/conventional"
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "-b", sourceBranch)
+	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("integrated\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
 	}
-	for _, want := range []string{
-		"source worktree for az-1 is already removed",
-		"branch riordan/az-1/unintegrated still has 2 commit(s) not reachable from main",
-		"restore the worktree or integrate the branch into main",
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error = %q, missing %q", err, want)
-		}
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-am", "fix(djb): tolerate cleanup retry")
+	sourceOID := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "main")
+	runDaemonTestGit(t, repoDir, "merge", "-q", "--ff-only", sourceBranch)
+	targetOID := runDaemonTestGitOutput(t, repoDir, "rev-parse", "main")
+	runDaemonTestGit(t, repoDir, "branch", "-D", sourceBranch)
+
+	receipt := taskCloseIntegrationReceipt{
+		ProjectID:    "proj-real",
+		SourceBranch: sourceBranch,
+		TargetBranch: "main",
+		SourceOID:    sourceOID,
+		TargetOID:    targetOID,
+	}
+	client := git.NewClient(git.NewExecRunner(repoDir), slog.Default())
+	if err := verifyTaskCloseIntegrationReceipt(context.Background(), client, repoDir, receipt, "proj-real", sourceBranch, "main"); err != nil {
+		t.Fatalf("verify exact conventional-commit receipt: %v", err)
 	}
 }
 
-func TestTaskCloseMissingSourceIntegrationResultRejectsMissingBranchWithoutTargetEvidence(t *testing.T) {
-	result, err := taskCloseMissingSourceIntegrationResult(
-		"az-2",
-		"riordan/az-2/unverifiable",
-		"main",
-		0,
-		fmt.Errorf("unknown revision"),
-		false,
-		nil,
-		false,
-		nil,
-	)
-	if err == nil {
-		t.Fatal("missing source without target evidence returned nil error")
+func TestTaskCloseIntegrationReceiptRejectsOlderSubjectEvidenceForDeletedUnintegratedTip(t *testing.T) {
+	repoDir := t.TempDir()
+	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repoDir, "config", "user.name", "Azedarach Test")
+	runDaemonTestGit(t, repoDir, "config", "user.email", "azedarach@example.com")
+	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("write old evidence: %v", err)
 	}
-	if !result.Requested || result.NoChanges {
-		t.Fatalf("integration result = %+v, want requested unverifiable failure", result)
+	runDaemonTestGit(t, repoDir, "add", "tracked.txt")
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "djb: older integrated work")
+	sourceBranch := "riordan/djb/unintegrated"
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "-b", sourceBranch)
+	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("new unintegrated\n"), 0o644); err != nil {
+		t.Fatalf("write unintegrated source: %v", err)
 	}
-	for _, want := range []string{
-		"source worktree and branch for az-2 are already removed",
-		"main has no issue-scoped commit evidence proving integration",
-		"restore the source ref or verify and integrate its commits",
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error = %q, missing %q", err, want)
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-am", "fix(djb): newer unintegrated work")
+	deletedSourceOID := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "main")
+	runDaemonTestGit(t, repoDir, "branch", "-D", sourceBranch)
+
+	client := git.NewClient(git.NewExecRunner(repoDir), slog.Default())
+	older, err := client.IssueEvidenceCommits(context.Background(), repoDir, "main", "djb")
+	if err != nil || len(older) == 0 {
+		t.Fatalf("precondition older issue subject evidence = %+v, err=%v", older, err)
+	}
+	receipt := taskCloseIntegrationReceipt{
+		ProjectID:    "proj-real",
+		SourceBranch: sourceBranch,
+		TargetBranch: "main",
+		SourceOID:    deletedSourceOID,
+		TargetOID:    runDaemonTestGitOutput(t, repoDir, "rev-parse", "main"),
+	}
+	err = verifyTaskCloseIntegrationReceipt(context.Background(), client, repoDir, receipt, "proj-real", sourceBranch, "main")
+	if err == nil || !strings.Contains(err.Error(), "recorded source OID is not reachable from main") {
+		t.Fatalf("verify deleted unintegrated tip error = %v, want exact source reachability refusal", err)
+	}
+}
+
+func TestTaskCloseExactReceiptAcceptsAndRepairsMissingProjectionIdempotentlyInRealRepo(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repoDir, "config", "user.name", "Azedarach Test")
+	runDaemonTestGit(t, repoDir, "config", "user.email", "azedarach@example.com")
+	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	runDaemonTestGit(t, repoDir, "add", "tracked.txt")
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "chore: seed")
+
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := newMigratedIssueClientAtPath(t, dbPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	projectID := "proj-real-repair"
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Repair exact receipt retry", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	sourceBranch := "riordan/" + taskID + "/exact-receipt"
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "-b", sourceBranch)
+	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("integrated\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-am", "fix("+taskID+"): exact receipt")
+	sourceOID := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "main")
+	runDaemonTestGit(t, repoDir, "merge", "-q", "--ff-only", sourceBranch)
+	targetOID := runDaemonTestGitOutput(t, repoDir, "rev-parse", "main")
+	runDaemonTestGit(t, repoDir, "branch", "-D", sourceBranch)
+	missingWorktree := filepath.Join(t.TempDir(), "removed-worktree")
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID, IssueID: taskID, Path: missingWorktree, Branch: sourceBranch, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed stale worktree projection: %v", err)
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close",
+		Payload: map[string]any{"project_id": projectID, "source_branch": sourceBranch, "target_branch": "main", "source_oid": sourceOID, "target_oid": targetOID},
+	}); err != nil {
+		t.Fatalf("seed exact integration receipt: %v", err)
+	}
+
+	runner := git.NewExecRunner(repoDir)
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg:                       Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		git:                       git.NewClient(runner, logger),
+		issueClientsByProject:     map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject:    map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager},
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject:           func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore { return runtimeStore },
+		logger:                      logger,
+	}
+	receipt, found, err := d.latestTaskCloseIntegrationReceipt(ctx, projectID, taskID, sourceBranch, "main")
+	if err != nil || !found {
+		t.Fatalf("load exact integration receipt found=%v err=%v", found, err)
+	}
+	if err := verifyTaskCloseIntegrationReceipt(ctx, d.git, repoDir, receipt, projectID, sourceBranch, "main"); err != nil {
+		t.Fatalf("verify exact integration receipt: %v", err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := d.repairStaleRuntimeProjections(ctx, projectID, taskID); err != nil {
+			t.Fatalf("repair stale projection attempt %d: %v", attempt, err)
 		}
+	}
+	if _, found, err := runtimeStore.GetWorktreeStateByIssueID(ctx, projectID, taskID); err != nil || found {
+		t.Fatalf("worktree projection after idempotent repair found=%v err=%v", found, err)
 	}
 }
 
@@ -6209,6 +6328,62 @@ func TestTaskCloseIntegrationOriginBaseAllowsRemoteAheadWhenSourceContained(t *t
 	}
 }
 
+func TestTaskCloseIntegrationOriginBaseRetryUsesExactReceiptAfterSourceRemoval(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	projectID := "proj-origin-retry"
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Retry removed origin worktree", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	sourceBranch := "riordan/" + taskID + "/origin-retry"
+	receipt := taskCloseIntegrationReceipt{
+		ProjectID: projectID, SourceBranch: sourceBranch, TargetBranch: "origin/preview", SourceOID: "source-oid", TargetOID: "target-oid",
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close",
+		Payload: map[string]any{"project_id": receipt.ProjectID, "source_branch": receipt.SourceBranch, "target_branch": receipt.TargetBranch, "source_oid": receipt.SourceOID, "target_oid": receipt.TargetOID},
+	}); err != nil {
+		t.Fatalf("seed integration receipt: %v", err)
+	}
+
+	fetched := false
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "fetch" && args[3] == "origin":
+			fetched = true
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == sourceBranch+"^{commit}":
+			return "", fmt.Errorf("unknown revision")
+		case len(args) >= 6 && args[0] == "-C" && args[1] == repoDir && args[2] == "merge-base" && args[3] == "--is-ancestor" && (args[4] == receipt.SourceOID || args[4] == receipt.TargetOID) && args[5] == receipt.TargetBranch:
+			return "", nil
+		case len(args) >= 3 && args[0] == "-C" && args[2] == "status":
+			t.Fatalf("origin retry read removed source status: %s", strings.Join(args, " "))
+		default:
+			return "", fmt.Errorf("unexpected git command: %s", strings.Join(args, " "))
+		}
+		return "", nil
+	}}
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "preview", GitWorkflowMode: "origin", Logger: logger},
+		git: git.NewClient(runner, logger), issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+	}
+	result, err := d.integrateTaskBeforeCloseOriginBase(ctx, projectID, taskID, git.Worktree{
+		IssueID: taskID, Path: filepath.Join(repoDir, "removed-worktree"), Branch: sourceBranch,
+	}, repoDir, "preview", true)
+	if err != nil {
+		t.Fatalf("origin retry exact receipt error: %v", err)
+	}
+	if !fetched || !result.NoChanges || result.SourceOID != receipt.SourceOID || result.TargetOID != receipt.TargetOID {
+		t.Fatalf("origin retry result = %+v fetched=%v, want exact receipt no-op", result, fetched)
+	}
+}
+
 func TestTaskCloseIntegrationOriginBaseRefusesLocalMergeWhenRemoteDiffRemains(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -6389,6 +6564,8 @@ func TestTaskCloseCommandKeepsTargetCleanWhenScratchMergeDirties(t *testing.T) {
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		switch {
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "rev-parse" && args[3] == "--verify" && strings.HasSuffix(args[4], "^{commit}"):
+			return "test-oid-" + strings.TrimSuffix(args[4], "^{commit}"), nil
 		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
 			return worktreeListOutput, nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "status":
@@ -9910,7 +10087,8 @@ func TestHandleTaskEventAppendRejectsCallerForgedAuthorityEvents(t *testing.T) {
 	}
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: logger}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
 
-	for _, eventType := range []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged, domain.IssueEventReviewCompleted, domain.IssueEventReviewCloseFailed} {
+	authorityEvents := []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged, domain.IssueEventReviewCompleted, domain.IssueEventReviewCloseFailed, domain.IssueEventTaskIntegrationCompleted}
+	for _, eventType := range authorityEvents {
 		resp, err := d.command(ctx, protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
 			RequestID:       naming.RequestID("task-event-authority-spoof-" + string(eventType)),
@@ -9932,7 +10110,7 @@ func TestHandleTaskEventAppendRejectsCallerForgedAuthorityEvents(t *testing.T) {
 			t.Fatalf("event type %s response = %+v, want authority-only invalid request", eventType, resp)
 		}
 	}
-	events, err := issuesClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged, domain.IssueEventReviewCompleted, domain.IssueEventReviewCloseFailed}})
+	events, err := issuesClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{Types: authorityEvents})
 	if err != nil {
 		t.Fatal(err)
 	}

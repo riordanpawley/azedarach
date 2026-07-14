@@ -1051,22 +1051,21 @@ func (c *Client) RevListCount(ctx context.Context, worktree, revRange string) (i
 	return count, nil
 }
 
-// LocalBranchExists reports whether the exact local branch name exists.
-func (c *Client) LocalBranchExists(ctx context.Context, worktree, branch string) (bool, error) {
-	branch = strings.TrimSpace(branch)
-	if branch == "" {
-		return false, fmt.Errorf("branch is required")
+// ResolveCommit resolves ref to an exact commit object ID.
+func (c *Client) ResolveCommit(ctx context.Context, worktree, ref string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", fmt.Errorf("ref is required")
 	}
-	output, err := c.runInWorktree(ctx, worktree, "branch", "--list", "--format=%(refname:short)", "--", branch)
+	oid, err := c.revParseVerify(ctx, worktree, ref+"^{commit}")
 	if err != nil {
-		return false, fmt.Errorf("list local branch %s: %w", branch, err)
+		return "", fmt.Errorf("resolve commit %s: %w", ref, err)
 	}
-	for _, candidate := range strings.Split(output, "\n") {
-		if strings.TrimSpace(candidate) == branch {
-			return true, nil
-		}
+	oid = strings.TrimSpace(oid)
+	if oid == "" {
+		return "", fmt.Errorf("resolve commit %s returned an empty object ID", ref)
 	}
-	return false, nil
+	return oid, nil
 }
 
 // IssueEvidenceCommits returns commits on ref whose subject starts with
