@@ -5337,34 +5337,39 @@ func (d *Daemon) taskGraphDurableCompletionEvidence(ctx context.Context, project
 	if issueClient == nil {
 		return nil, fmt.Errorf("inspect durable task completion evidence: issue store unavailable")
 	}
+	issueIDStrings := make([]string, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueIDStrings = append(issueIDStrings, issueID.String())
+	}
+	events, err := issueClient.ListLatestIssueObservationEventsByIssue(ctx, issues.LatestIssueObservationEventOptions{
+		IssueIDs:                issueIDStrings,
+		Type:                    domain.IssueEventTaskIntegrationCompleted,
+		Source:                  "daemon-task-close",
+		SourceCommands:          []string{"integrate-before-close"},
+		RequiredPayloadTextKeys: []string{"project_id", "source_branch", "target_branch", "source_oid", "target_oid"},
+		InvalidatedByStatuses:   []domain.Status{domain.StatusOpen, domain.StatusInProgress},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("inspect durable task completion evidence: %w", err)
+	}
 	out := make(map[string]taskDurableCompletionEvidence)
 	for _, issueID := range issueIDs {
-		events, err := issueClient.ListIssueObservationEvents(ctx, issueID.String(), issues.IssueObservationEventListOptions{
-			Types:         []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted},
-			Limit:         20,
-			NewestIDFirst: true,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("inspect durable task completion evidence for %s: %w", issueID, err)
+		event, found := events[issueID.String()]
+		if !found {
+			continue
 		}
-		for _, event := range events {
-			if strings.TrimSpace(event.Source) != "daemon-task-close" || strings.TrimSpace(event.SourceCommand) != "integrate-before-close" {
-				continue
-			}
-			receipt := taskCloseIntegrationReceipt{
-				ProjectID:    observationPayloadString(event.Payload, "project_id"),
-				SourceBranch: observationPayloadString(event.Payload, "source_branch"),
-				TargetBranch: observationPayloadString(event.Payload, "target_branch"),
-				SourceOID:    observationPayloadString(event.Payload, "source_oid"),
-				TargetOID:    observationPayloadString(event.Payload, "target_oid"),
-			}
-			if protocol.NormalizeProjectID(receipt.ProjectID) != protocol.NormalizeProjectID(projectID) ||
-				receipt.SourceBranch == "" || receipt.TargetBranch == "" || receipt.SourceOID == "" || receipt.TargetOID == "" {
-				continue
-			}
-			out[issueID.String()] = taskDurableCompletionEvidence{EventID: event.ID, Kind: string(event.Type)}
-			break
+		receipt := taskCloseIntegrationReceipt{
+			ProjectID:    observationPayloadString(event.Payload, "project_id"),
+			SourceBranch: observationPayloadString(event.Payload, "source_branch"),
+			TargetBranch: observationPayloadString(event.Payload, "target_branch"),
+			SourceOID:    observationPayloadString(event.Payload, "source_oid"),
+			TargetOID:    observationPayloadString(event.Payload, "target_oid"),
 		}
+		if protocol.NormalizeProjectID(receipt.ProjectID) != protocol.NormalizeProjectID(projectID) ||
+			receipt.SourceBranch == "" || receipt.TargetBranch == "" || receipt.SourceOID == "" || receipt.TargetOID == "" {
+			continue
+		}
+		out[issueID.String()] = taskDurableCompletionEvidence{EventID: event.ID, Kind: string(event.Type)}
 	}
 	return out, nil
 }

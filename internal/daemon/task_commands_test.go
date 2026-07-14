@@ -9158,6 +9158,17 @@ func TestTaskGraphReadinessReopensStoppedRootWithPreservedCleanWorktree(t *testi
 	if err != nil {
 		t.Fatalf("create root: %v", err)
 	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, rootID, issues.IssueObservationEventParams{
+		Type:          domain.IssueEventTaskIntegrationCompleted,
+		Source:        "daemon-task-close",
+		SourceCommand: "integrate-before-close",
+		Payload: map[string]any{
+			"project_id": projectID, "source_branch": "riordan/" + rootID + "/preserved", "target_branch": "main",
+			"source_oid": "completed-source", "target_oid": "completed-target",
+		},
+	}); err != nil {
+		t.Fatalf("seed prior trusted integration receipt: %v", err)
+	}
 	if err := issuesClient.Update(ctx, rootID, domain.StatusOpen); err != nil {
 		t.Fatalf("return stopped root to open: %v", err)
 	}
@@ -9208,6 +9219,72 @@ func TestTaskGraphReadinessReopensStoppedRootWithPreservedCleanWorktree(t *testi
 	}
 	if len(ready.StaleCloseableChildren) != 0 {
 		t.Fatalf("stale_closeable_children = %+v, want none after return to open", ready.StaleCloseableChildren)
+	}
+	complete, err := d.taskCompleteCheck(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskCompleteCheck: %v", err)
+	}
+	if len(complete.StaleCloseableChildren) != 0 || !strings.Contains(strings.Join(complete.Reasons, "\n"), "runnable leaves remain: "+rootID) {
+		t.Fatalf("complete check = %+v, want reopened root runnable rather than stale-closeable", complete)
+	}
+}
+
+func TestTaskGraphReadinessKeepsRootReceiptWithoutLaterReopenStaleCloseable(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-integrated-root"
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := newMigratedIssueClientAtPath(t, dbPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Integrated root", Type: domain.TypeBug, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, rootID, issues.IssueObservationEventParams{
+		Type:          domain.IssueEventTaskIntegrationCompleted,
+		Source:        "daemon-task-close",
+		SourceCommand: "integrate-before-close",
+		Payload: map[string]any{
+			"project_id": projectID, "source_branch": "riordan/" + rootID + "/integrated", "target_branch": "main",
+			"source_oid": "completed-source", "target_oid": "completed-target",
+		},
+	}); err != nil {
+		t.Fatalf("seed trusted integration receipt: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID, IssueID: rootID, Path: filepath.Join(t.TempDir(), "integrated-root"), Branch: "riordan/" + rootID + "/integrated", UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed preserved worktree: %v", err)
+	}
+	cleanStatus, err := json.Marshal(git.GitStatus{HasChanges: false, GitAheadCount: 0})
+	if err != nil {
+		t.Fatalf("marshal clean status: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeStateGitStatus(ctx, projectID, rootID, cleanStatus, time.Now().UTC()); err != nil {
+		t.Fatalf("seed clean worktree status: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:                   Config{RepoDir: ".", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByRoot:   map[string]*daemonstate.RuntimeStateStore{".": runtimeStore},
+	}
+	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskGraphReadiness: %v", err)
+	}
+	if len(ready.StaleCloseableChildren) != 1 || ready.StaleCloseableChildren[0].IssueID != rootID || slices.Contains(ready.Runnable, rootID) {
+		t.Fatalf("readiness = %+v, want integrated root stale-closeable", ready)
+	}
+	complete, err := d.taskCompleteCheck(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskCompleteCheck: %v", err)
+	}
+	if len(complete.StaleCloseableChildren) != 1 || complete.StaleCloseableChildren[0].IssueID != rootID {
+		t.Fatalf("complete check = %+v, want integrated root stale-closeable", complete)
 	}
 }
 
@@ -10034,6 +10111,13 @@ func TestTaskCompleteCheckReportsMixedStaleCloseableAndIncompleteChildren(t *tes
 		},
 		revision: map[string]uint64{projectID: 1},
 	}
+	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskGraphReadiness error: %v", err)
+	}
+	if len(ready.StaleCloseableChildren) != 1 || ready.StaleCloseableChildren[0].IssueID != staleID {
+		t.Fatalf("readiness stale_closeable_children = %+v, want trusted receipt child %s", ready.StaleCloseableChildren, staleID)
+	}
 
 	result, err := d.taskCompleteCheck(ctx, projectID, rootID)
 	if err != nil {
@@ -10061,6 +10145,71 @@ func TestTaskCompleteCheckReportsMixedStaleCloseableAndIncompleteChildren(t *tes
 	}
 	if !strings.Contains(advice, "az orchestrate start --root "+rootID+" --issue "+incompleteID+" --json") {
 		t.Fatalf("advice = %+v, missing runnable incomplete child start command", result.Advice)
+	}
+}
+
+func TestTaskCompleteCheckTreatsReceiptBeforeLaterReopenAsIncomplete(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-complete-check-reopened-receipt"
+	repoDir := t.TempDir()
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Reopened child", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, childID, issues.IssueObservationEventParams{
+		Type:          domain.IssueEventTaskIntegrationCompleted,
+		Source:        "daemon-task-close",
+		SourceCommand: "integrate-before-close",
+		Payload: map[string]any{
+			"project_id": projectID, "source_branch": "riordan/" + childID + "/reopened", "target_branch": "main",
+			"source_oid": "completed-source", "target_oid": "completed-target",
+		},
+	}); err != nil {
+		t.Fatalf("seed trusted integration receipt: %v", err)
+	}
+	if err := issuesClient.Update(ctx, childID, domain.StatusInProgress); err != nil {
+		t.Fatalf("start new child lifecycle epoch: %v", err)
+	}
+	if err := issuesClient.Update(ctx, childID, domain.StatusOpen); err != nil {
+		t.Fatalf("return child to open: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID, IssueID: childID, Path: filepath.Join(repoDir, "wt-"+childID), Branch: "riordan/" + childID + "/reopened", UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed preserved worktree: %v", err)
+	}
+	cleanStatus, err := json.Marshal(git.GitStatus{HasChanges: false, GitAheadCount: 0})
+	if err != nil {
+		t.Fatalf("marshal clean status: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeStateGitStatus(ctx, projectID, childID, cleanStatus, time.Now().UTC()); err != nil {
+		t.Fatalf("seed clean worktree status: %v", err)
+	}
+
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: logger}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}}
+	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskGraphReadiness: %v", err)
+	}
+	if !slices.Contains(ready.Runnable, childID) || len(ready.StaleCloseableChildren) != 0 {
+		t.Fatalf("readiness = %+v, want reopened child runnable and not stale", ready)
+	}
+	result, err := d.taskCompleteCheck(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskCompleteCheck: %v", err)
+	}
+	if len(result.StaleCloseableChildren) != 0 || !strings.Contains(strings.Join(result.Reasons, "\n"), "required descendants not closed: "+childID) {
+		t.Fatalf("complete check = %+v, want reopened child incomplete rather than stale-closeable", result)
 	}
 }
 
