@@ -66,6 +66,24 @@ func TestProjectOrchestratorLoopPrioritizesReviewAndPersistsCursor(t *testing.T)
 	}
 }
 
+func TestProjectOrchestratorSnapshotKeepsStartsActionableAlongsideReview(t *testing.T) {
+	snapshot := protocol.OrchestrationSnapshot{
+		Runnable:    []string{"new-work"},
+		ReviewQueue: []protocol.OrchestrationReview{{IssueID: "ready-for-review", Actionable: true}},
+		Health:      protocol.OrchestrationHealth{Healthy: true},
+		Constraints: protocol.OrchestrationConstraints{AgentCapacity: 4},
+	}
+	kind, status := projectOrchestratorNextAction(snapshot)
+	if kind != "start" || status != "idle" {
+		t.Fatalf("next action = %s %s, want start while review is queued", kind, status)
+	}
+	snapshot.Capacity.TotalCountingCapacityCount = 4
+	kind, status = projectOrchestratorNextAction(snapshot)
+	if kind != "review" || status != "pending:ready-for-review" {
+		t.Fatalf("full-capacity next action = %s %s, want queued review", kind, status)
+	}
+}
+
 func TestProjectOrchestratorActionKeyIsRestartStableAndStateSensitive(t *testing.T) {
 	snapshot := protocol.OrchestrationSnapshot{Runnable: []string{"a"}, Capacity: protocol.OrchestrationCapacity{DirectRunnableCount: 1}, Health: protocol.OrchestrationHealth{Healthy: true}}
 	first, err := projectOrchestratorActionKey("project", 7, snapshot)

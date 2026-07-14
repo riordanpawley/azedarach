@@ -8673,6 +8673,9 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "Start this root's direct runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`") {
 		t.Fatalf("prompt = %q, want direct leaf start guidance", prompt)
 	}
+	if !strings.Contains(prompt, "Queued reviews do not block unrelated starts when managed agent capacity remains") {
+		t.Fatalf("prompt = %q, want non-blocking review scheduling guidance", prompt)
+	}
 	if !strings.Contains(prompt, "Nested epic/root rule: if a runnable child is itself an epic/root that should self-orchestrate, start that child's own orchestrator session with `az orchestrator-session start --root <child-root>`") {
 		t.Fatalf("prompt = %q, want nested root session guidance", prompt)
 	}
@@ -8717,13 +8720,18 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "Treat blocked work as graph state from unresolved `blocks` dependencies") {
 		t.Fatalf("prompt = %q, want graph-derived blocked guidance", prompt)
 	}
+	if !strings.Contains(prompt, "Delegate every non-trivial diff inspection to a fresh ephemeral review subagent") ||
+		!strings.Contains(prompt, "Delegates are read-only") ||
+		!strings.Contains(prompt, "keep durable review-return, review-accept, integration, and close authority in this orchestrator") {
+		t.Fatalf("prompt = %q, want ephemeral read-only review delegation guidance", prompt)
+	}
 	if !strings.Contains(prompt, "Treat `in_review` workers as ready for orchestrator validation") {
 		t.Fatalf("prompt = %q, want in-review integration guidance", prompt)
 	}
 	if !strings.Contains(prompt, "close accepted worker issues with `az issue close --id <issue-id>`") {
 		t.Fatalf("prompt = %q, want issue close completion guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Keep orchestration centralized inside each root session; delegate explicit nested epic/root issues to their own orchestrator sessions rather than flattening their children into this session.") {
+	if !strings.Contains(prompt, "Keep orchestration authority centralized inside each root session while delegating read-only review inspection; delegate explicit nested epic/root issues to their own orchestrator sessions rather than flattening their children into this session.") {
 		t.Fatalf("prompt = %q, want per-root centralization guidance", prompt)
 	}
 	if !strings.Contains(prompt, "Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `az issue close --id <child-issue>`") {
@@ -10839,5 +10847,61 @@ func TestEnrichTasksWithSessionStateUsesPaneActivityOverParentContainer(t *testi
 	}
 	if enriched[0].Session.TotalCount != 1 || enriched[0].Session.ActiveCount != 0 || enriched[0].Session.PausedCount != 1 {
 		t.Fatalf("session aggregate counts = total %d active %d paused %d, want 1/0/1", enriched[0].Session.TotalCount, enriched[0].Session.ActiveCount, enriched[0].Session.PausedCount)
+	}
+}
+
+func TestSessionInitAndCreateRollbackCleanCaches(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*Daemon, context.Context, string, *git.WorktreeManager, string, string) string
+	}{
+		{
+			name: "init rollback",
+			run: func(d *Daemon, ctx context.Context, projectID string, manager *git.WorktreeManager, issueID, path string) string {
+				return d.cleanupNewWorktreeAfterInitFailure(ctx, projectID, manager, issueID, path, false)
+			},
+		},
+		{
+			name: "create rollback",
+			run: func(d *Daemon, ctx context.Context, projectID string, manager *git.WorktreeManager, issueID, path string) string {
+				return d.cleanupWorktreeAfterCreateFailure(ctx, projectID, manager, issueID, path)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			repoDir := t.TempDir()
+			issueID := "az-rollback"
+			worktreePath := filepath.Join(repoDir, "wt-"+issueID)
+			runner := &recordingWorktreeCreateRunner{
+				repoDir: repoDir,
+				worktree: map[string]git.Worktree{
+					issueID: {IssueID: issueID, Path: worktreePath, Branch: "tester/" + issueID + "/rollback"},
+				},
+			}
+			manager := git.NewWorktreeManager(runner, repoDir, slog.Default())
+			cacheRoot := filepath.Join(repoDir, ".azedarach", "go")
+			for _, kind := range []string{"normal", "race", "coverage"} {
+				entry := filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+issueID, "entry")
+				if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+					t.Fatalf("seed %s cache: %v", kind, err)
+				}
+				if err := os.WriteFile(entry, []byte("cache"), 0o644); err != nil {
+					t.Fatalf("write %s cache: %v", kind, err)
+				}
+			}
+			d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}}
+
+			note := test.run(d, ctx, protocol.DefaultProjectID, manager, issueID, worktreePath)
+			if !strings.Contains(note, "worktree") {
+				t.Fatalf("rollback note = %q", note)
+			}
+			for _, kind := range []string{"normal", "race", "coverage"} {
+				_, err := os.Stat(filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+issueID))
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("%s cache remains after rollback: %v", kind, err)
+				}
+			}
+		})
 	}
 }

@@ -31,39 +31,49 @@ func (d *Daemon) reconcileOrchestratorLifecycles(ctx context.Context, projectID 
 		return fmt.Errorf("refresh orchestrator lifecycle projection: %w", err)
 	}
 	for _, lease := range leases {
-		explicitlyStopped, err := orchestratorLeaseHasStoppedSessionIntent(ctx, store, lease)
-		if err != nil {
-			return err
-		}
-		if lease.Lifecycle == domain.OrchestratorPaused && explicitlyStopped {
-			continue
-		}
-		facts, latestChange, err := d.orchestratorLifecycleFacts(ctx, lease, projectID)
-		if err != nil {
-			return err
-		}
-		if lease.Lifecycle == domain.OrchestratorPaused {
-			reason := orchestratorWakeReason(facts, latestChange, lease.UpdatedAt)
-			if reason != "" {
-				if _, _, err := authority.Wake(ctx, lease.Identity, now, reason, policy); err != nil {
-					return err
-				}
-			}
-		}
-		evaluated, err := authority.Evaluate(ctx, lease.Identity, lease.SessionID, now, facts, policy)
-		if err != nil {
-			return err
-		}
-		if evaluated.Identity.Scope.Kind == domain.OrchestrationScopeProject && evaluated.Lifecycle == domain.OrchestratorWorking {
-			if _, err := d.runProjectOrchestratorLoopStep(ctx, evaluated, now); err != nil {
-				return fmt.Errorf("run project orchestrator loop: %w", err)
-			}
-		}
-		if err := d.enforceRootedOrchestratorContinuation(ctx, authority, lease, projectID, now, policy); err != nil {
+		if err := store.WithOrchestratorScopeTransition(ctx, lease.Identity, func(scopeCtx context.Context) error {
+			return d.reconcileOrchestratorLifecycleScope(scopeCtx, authority, store, lease.Identity, projectID, now, policy)
+		}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (d *Daemon) reconcileOrchestratorLifecycleScope(ctx context.Context, authority *daemonstate.OrchestratorLeaseAuthority, store *daemonstate.RuntimeStateStore, identity domain.OrchestratorIdentity, projectID string, now time.Time, policy domain.OrchestratorLifecyclePolicy) error {
+	lease, found, err := authority.Get(ctx, identity)
+	if err != nil || !found {
+		return err
+	}
+	explicitlyStopped, err := orchestratorLeaseHasStoppedSessionIntent(ctx, store, lease)
+	if err != nil {
+		return err
+	}
+	if lease.Lifecycle == domain.OrchestratorPaused && explicitlyStopped {
+		return nil
+	}
+	facts, latestChange, err := d.orchestratorLifecycleFacts(ctx, lease, projectID)
+	if err != nil {
+		return err
+	}
+	if lease.Lifecycle == domain.OrchestratorPaused {
+		reason := orchestratorWakeReason(facts, latestChange, lease.UpdatedAt)
+		if reason != "" {
+			if _, _, err := authority.Wake(ctx, lease.Identity, now, reason, policy); err != nil {
+				return err
+			}
+		}
+	}
+	evaluated, err := authority.Evaluate(ctx, lease.Identity, lease.SessionID, now, facts, policy)
+	if err != nil {
+		return err
+	}
+	if evaluated.Identity.Scope.Kind == domain.OrchestrationScopeProject && evaluated.Lifecycle == domain.OrchestratorWorking {
+		if _, err := d.runProjectOrchestratorLoopStep(ctx, evaluated, now); err != nil {
+			return fmt.Errorf("run project orchestrator loop: %w", err)
+		}
+	}
+	return d.enforceRootedOrchestratorContinuation(ctx, authority, evaluated, projectID, now, policy)
 }
 
 func orchestratorLeaseHasStoppedSessionIntent(ctx context.Context, store *daemonstate.RuntimeStateStore, lease daemonstate.OrchestratorScopeLease) (bool, error) {
@@ -149,22 +159,23 @@ func (d *Daemon) wakePausedOrchestratorsForRecovery(ctx context.Context, project
 	}
 	authority := daemonstate.NewOrchestratorLeaseAuthority(store)
 	for _, lease := range leases {
-		// Rooted leases are resumed by the full continuation guard so a durable
-		// wake record is never written without delivering its cursor-bearing prompt.
-		if lease.Identity.Scope.Kind == domain.OrchestrationScopeRooted {
-			continue
-		}
-		if lease.Lifecycle != domain.OrchestratorPaused {
-			continue
-		}
-		explicitlyStopped, err := orchestratorLeaseHasStoppedSessionIntent(ctx, store, lease)
-		if err != nil {
-			return err
-		}
-		if explicitlyStopped {
-			continue
-		}
-		if _, _, err := authority.Wake(ctx, lease.Identity, now, domain.OrchestratorWakeRecovery, policy); err != nil {
+		if err := store.WithOrchestratorScopeTransition(ctx, lease.Identity, func(scopeCtx context.Context) error {
+			current, found, loadErr := authority.Get(scopeCtx, lease.Identity)
+			if loadErr != nil || !found {
+				return loadErr
+			}
+			// Rooted leases are resumed by the full continuation guard so a durable
+			// wake record is never written without delivering its cursor-bearing prompt.
+			if current.Identity.Scope.Kind == domain.OrchestrationScopeRooted || current.Lifecycle != domain.OrchestratorPaused {
+				return nil
+			}
+			explicitlyStopped, stopErr := orchestratorLeaseHasStoppedSessionIntent(scopeCtx, store, current)
+			if stopErr != nil || explicitlyStopped {
+				return stopErr
+			}
+			_, _, wakeErr := authority.Wake(scopeCtx, current.Identity, now, domain.OrchestratorWakeRecovery, policy)
+			return wakeErr
+		}); err != nil {
 			return err
 		}
 	}

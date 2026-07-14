@@ -266,8 +266,8 @@ func issueContextRiskObservationEvidence(event domain.IssueObservationEvent) dom
 	evidence.Invariant = issueContextRiskString(payload, "invariant")
 	evidence.Validation = issueContextRiskString(payload, "regression_validation", "validation")
 	switch event.Type {
-	case domain.IssueEventRiskRecorded, domain.IssueEventValidationFailed, domain.IssueEventReviewCompleted:
-		evidence.RiskNotes = append(evidence.RiskNotes, issueContextRiskString(payload, "summary", "message", "reason", "body"))
+	case domain.IssueEventRiskRecorded, domain.IssueEventValidationFailed, domain.IssueEventReviewCompleted, domain.IssueEventReviewCloseFailed:
+		evidence.RiskNotes = append(evidence.RiskNotes, issueContextRiskString(payload, "summary", "message", "reason", "body", "failure"))
 	}
 	return evidence
 }

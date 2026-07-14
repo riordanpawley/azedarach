@@ -210,7 +210,7 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		Constraints: protocol.OrchestrationConstraints{
 			InspectLimit: limit, StartLimit: a.startLimit(), AgentCapacity: a.agentCapacity(),
 			Commands:       orchestrationScopeCommands(identity.Scope),
-			RoleGuardrails: []string{"remain in the active orchestration loop", "do not implement worker issue scope", "preserve sessions during review handoff"},
+			RoleGuardrails: []string{"remain in the active orchestration loop", "do not implement worker issue scope", "delegate non-trivial review inspection to fresh read-only ephemeral subagents", "retain orchestrator-only durable review and integration authority", "preserve sessions during review handoff"},
 		},
 	}
 	if identity.Scope.Kind == domain.OrchestrationScopeRooted {
@@ -232,7 +232,10 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		if err != nil {
 			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load rooted review queue: %w", err)
 		}
-		snapshot.ReviewQueue = a.reviewQueue(ctx, projectID, request, tasks)
+		snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, tasks)
+		if err != nil {
+			return protocol.OrchestrationSnapshot{}, err
+		}
 		return snapshot, nil
 	}
 
@@ -245,7 +248,10 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("load project orchestration projection: %w", err)
 	}
 	tasks = a.daemon.enrichTasksWithSessionState(ctx, projectID, tasks)
-	snapshot.ReviewQueue = a.reviewQueue(ctx, projectID, request, tasks)
+	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, tasks)
+	if err != nil {
+		return protocol.OrchestrationSnapshot{}, err
+	}
 	roots := make([]domain.Task, 0)
 	tasksByID := make(map[string]domain.Task, len(tasks))
 	for _, task := range tasks {
@@ -521,20 +527,6 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		}
 		if len(result.Routed) > 0 && a.daemon.noticeService != nil {
 			_ = a.daemon.reconcileInteractionNotices(ctx, projectID)
-		}
-		if reviewID := firstActionableReview(snapshot.ReviewQueue); reviewID != "" {
-			for _, issueID := range requested {
-				if _, routed := routedIssues[issueID]; routed {
-					if _, failed := result.Failed[issueID]; failed {
-						result.Skipped[issueID] = "candidate-route-failed"
-					} else {
-						result.Skipped[issueID] = "candidate-routed-" + routeKindForIssue(result.Routed, issueID)
-					}
-					continue
-				}
-				result.Skipped[issueID] = "review-priority:" + reviewID
-			}
-			return result, nil
 		}
 	}
 	limit := request.Limit

@@ -303,6 +303,99 @@ func TestOrchestratorSessionStopPausesPreservesCursorAndIsolatesScopes(t *testin
 	}
 }
 
+func TestConcurrentStopThenStartAcrossDaemonsConvergesToStartWinner(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	dbPath := filepath.Join(repoDir, "runtime.db")
+	const projectID = "project-concurrent-stop-start"
+	firstStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	secondStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		_ = firstStore.Close()
+		_ = secondStore.Close()
+	})
+	runner := newSessionStartTmuxRunner()
+	stopIntentPersisted := make(chan struct{})
+	releaseStop := make(chan struct{})
+	first := &Daemon{
+		cfg:                                  Config{RepoDir: repoDir, Logger: slog.Default()},
+		runtimeStoresByProject:               map[string]*daemonstate.RuntimeStateStore{projectID: firstStore},
+		tmux:                                 tmux.NewClient(runner, slog.Default()),
+		orchestratorStopGracePeriod:          time.Millisecond,
+		orchestratorStopPollInterval:         time.Millisecond,
+		orchestratorStopAfterIntentPersisted: func() { close(stopIntentPersisted); <-releaseStop },
+	}
+	second := &Daemon{
+		cfg:                    Config{RepoDir: repoDir, Logger: slog.Default()},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: secondStore},
+		tmux:                   tmux.NewClient(runner, slog.Default()),
+	}
+	scope := domain.ProjectOrchestrationScope()
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := first.orchestratorSessionID(projectID, scope)
+	runner.sessions[sessionID] = true
+	runner.onSendKeys = func(target, _ string) {
+		delete(runner.sessions, target)
+	}
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(firstStore).Acquire(ctx, identity, sessionID, first.tmux.HasSession); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: projectID}, projectID, scope, sessionID); err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(protocol.OrchestratorSessionRequest{Scope: scope})
+	stopReq := protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStop, Meta: protocol.Metadata{ProjectID: projectID}, Body: body}
+	startReq := stopReq
+	startReq.Command = protocol.CommandOrchestratorSessionStart
+	type commandResult struct {
+		response protocol.ResponseEnvelope
+		err      error
+	}
+	stopDone := make(chan commandResult, 1)
+	go func() {
+		response, commandErr := first.handleOrchestratorSession(ctx, stopReq)
+		stopDone <- commandResult{response: response, err: commandErr}
+	}()
+	<-stopIntentPersisted
+
+	startDone := make(chan commandResult, 1)
+	go func() {
+		response, commandErr := second.handleOrchestratorSession(ctx, startReq)
+		startDone <- commandResult{response: response, err: commandErr}
+	}()
+	select {
+	case result := <-startDone:
+		t.Fatalf("concurrent start bypassed held exact-scope transition: response=%+v err=%v", result.response.Error, result.err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(releaseStop)
+
+	stopResult := <-stopDone
+	if stopResult.err != nil || stopResult.response.Error != nil {
+		t.Fatalf("stop response=%+v err=%v", stopResult.response.Error, stopResult.err)
+	}
+	startResult := <-startDone
+	if startResult.err != nil || startResult.response.Error != nil {
+		t.Fatalf("start response=%+v err=%v", startResult.response.Error, startResult.err)
+	}
+
+	lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(secondStore).Get(ctx, identity)
+	if err != nil || !found || lease.Lifecycle != domain.OrchestratorWorking || lease.SessionID != sessionID {
+		t.Fatalf("final lease = %+v found=%t err=%v", lease, found, err)
+	}
+	projection, found, err := secondStore.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, "project")
+	if err != nil || !found || projection.ID != sessionID || projection.State != daemonstate.SessionStateRunning || projection.ObservedState != daemonstate.SessionStateRunning {
+		t.Fatalf("final desired projection = %+v found=%t err=%v", projection, found, err)
+	}
+	if !runner.sessions[sessionID] {
+		t.Fatalf("final runtime %q is not live", sessionID)
+	}
+}
+
 func TestOrchestratorSessionStatusReportsMissingRuntimeWithoutMutating(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

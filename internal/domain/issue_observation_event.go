@@ -31,6 +31,7 @@ const (
 	IssueEventValidationFailed         IssueObservationEventType = "validation.failed"
 	IssueEventEvidenceSubmitted        IssueObservationEventType = "evidence.submitted"
 	IssueEventReviewCompleted          IssueObservationEventType = "review.completed"
+	IssueEventReviewCloseFailed        IssueObservationEventType = "review.close_failed"
 	IssueEventRiskRecorded             IssueObservationEventType = "risk.recorded"
 	IssueEventBlockerReported          IssueObservationEventType = "blocker.reported"
 	IssueEventHumanInputRequested      IssueObservationEventType = "human.input_requested"
@@ -51,4 +52,28 @@ type IssueObservationEvent struct {
 	SessionID     string                    `json:"session_id,omitempty"`
 	WorktreePath  string                    `json:"worktree_path,omitempty"`
 	Payload       map[string]any            `json:"payload,omitempty"`
+}
+
+// IssueObservationEventTypeRequiresAuthority reports event types that may only
+// be emitted by the store or daemon operation that owns the corresponding
+// durable transition. Generic issue-record appenders must reject them.
+func IssueObservationEventTypeRequiresAuthority(eventType IssueObservationEventType) bool {
+	switch eventType {
+	case IssueEventIssueCreated,
+		IssueEventIssueStatusChanged,
+		IssueEventIssueDetailsChanged,
+		IssueEventIssueNotesAppended,
+		IssueEventIssueDependencyAdded,
+		IssueEventIssueDependencyRemoved,
+		IssueEventIssueOwnershipChanged,
+		IssueEventIssueArchived,
+		IssueEventIssueUnarchived,
+		IssueEventIssueDeleted,
+		IssueEventReviewCompleted,
+		IssueEventReviewCloseFailed,
+		IssueEventOrchestrationRouted:
+		return true
+	default:
+		return false
+	}
 }

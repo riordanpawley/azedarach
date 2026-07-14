@@ -8,11 +8,11 @@ import (
 )
 
 func TestProtocolV42PreservesCombinedOrchestrationViewProjectionAndLearningContracts(t *testing.T) {
-	if CurrentVersion != 45 {
-		t.Fatalf("protocol version = %d, want 45", CurrentVersion)
+	if CurrentVersion != 47 {
+		t.Fatalf("protocol version = %d, want 47", CurrentVersion)
 	}
-	if CommandOrchestratorSessionStart == "" || CommandOrchestratorSessionAttach == "" || CommandOrchestratorSessionStop == "" || CommandOrchestratorSessionStatus == "" || EventOrchestrationLoopUpdated == "" {
-		t.Fatal("combined orchestration session and loop commands must remain registered")
+	if CommandOrchestratorSessionStart == "" || CommandOrchestratorSessionAttach == "" || CommandOrchestratorSessionStop == "" || CommandOrchestratorSessionStatus == "" || EventOrchestrationLoopUpdated == "" || EventBoardViewChanged == "" {
+		t.Fatal("combined orchestration and board-view protocol contracts must remain registered")
 	}
 
 	snapshot := OrchestrationSnapshot{

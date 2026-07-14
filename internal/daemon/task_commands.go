@@ -12,10 +12,8 @@ import (
 	"strings"
 	"time"
 
-	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
-	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -926,12 +924,16 @@ func (d *Daemon) handleTaskEventAppend(ctx context.Context, req protocol.Request
 	if eventType == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "event type is required"), nil
 	}
+	parsedEventType := domain.IssueObservationEventType(eventType)
+	if domain.IssueObservationEventTypeRequiresAuthority(parsedEventType) {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("event type %s is authority-only and cannot be appended through task.event_append", eventType)), nil
+	}
 	source := strings.TrimSpace(cmd.Source)
 	if source == "" {
 		source = "az issue record"
 	}
 	event, err := issueClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
-		Type:          domain.IssueObservationEventType(eventType),
+		Type:          parsedEventType,
 		Source:        source,
 		SourceCommand: strings.TrimSpace(cmd.SourceCommand),
 		OperationID:   strings.TrimSpace(cmd.OperationID),
@@ -2411,6 +2413,9 @@ func (d *Daemon) submitDeferredTaskWorktreeCleanup(ctx context.Context, projectI
 		})
 		if err != nil {
 			if errors.Is(err, git.ErrWorktreeNotFound) {
+				if cleanupErr := finalizeDeletedWorktree(runCtx, projectID, taskID, manager, nil, d.runtimeProjectionStateWriter()); cleanupErr != nil {
+					return nil, cleanupErr
+				}
 				return json.Marshal(deferredTaskWorktreeCleanupResult{
 					ProjectID: projectID,
 					TaskID:    taskID,
@@ -2418,8 +2423,8 @@ func (d *Daemon) submitDeferredTaskWorktreeCleanup(ctx context.Context, projectI
 			}
 			return nil, err
 		}
-		if removedWorktree != nil {
-			_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(removedWorktree.Path))
+		if cleanupErr := finalizeDeletedWorktree(runCtx, projectID, taskID, manager, removedWorktree, d.runtimeProjectionStateWriter()); cleanupErr != nil {
+			return nil, cleanupErr
 		}
 		return json.Marshal(deferredTaskWorktreeCleanupResult{
 			ProjectID: projectID,
@@ -3464,9 +3469,10 @@ func (d *Daemon) investigationAcceptance(ctx context.Context, projectID string, 
 			domain.IssueEventInvestigationDisposition,
 			domain.IssueEventReviewCompleted,
 			domain.IssueEventHumanInputProvided,
+			domain.IssueEventIssueStatusChanged,
 		},
-		Limit:       5000,
-		NewestFirst: true,
+		Limit:         5000,
+		NewestIDFirst: true,
 	})
 	if err != nil {
 		return domain.InvestigationAcceptance{}, fmt.Errorf("read investigation acceptance for %s: %w", task.ID, err)
@@ -4134,6 +4140,9 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 	for i := len(events) - 1; i >= 0; i-- {
 		evt := events[i]
 		if naming.IssueIDsEqual(evt.IssueID, task.ID.String()) && daemonWorkerIntegrationReadyMailType(evt.Type) {
+			if evt.Payload != nil && evt.Payload["publication"] == reviewReadyReplayPublication {
+				continue
+			}
 			packet, validation := domain.ParseWorkerEvidencePacketBody(evt.Body)
 			if validation.Complete {
 				return taskIntegrationReadinessResult{
@@ -5578,7 +5587,7 @@ func daemonWorkerObservationNextActions(rootIssueID string, observation domain.W
 	case domain.WorkerObservationBlocked:
 		return []string{fmt.Sprintf("resolve blockers for %s", issueID)}
 	case domain.WorkerObservationReviewReady:
-		return []string{fmt.Sprintf("validate evidence, then close accepted worker: az issue close --id %s", issueID)}
+		return []string{fmt.Sprintf("validate evidence, then accept and close review: az orchestrate review accept --root %s --issue %s", rootIssueID, issueID)}
 	case domain.WorkerObservationStale:
 		if in.Stale != nil && strings.TrimSpace(in.Stale.SuggestedCommand) != "" {
 			return []string{in.Stale.SuggestedCommand}
@@ -5653,6 +5662,7 @@ func workerObservationIssueEventMeaningful(evt domain.IssueObservationEvent) boo
 		domain.IssueEventValidationFailed,
 		domain.IssueEventEvidenceSubmitted,
 		domain.IssueEventReviewCompleted,
+		domain.IssueEventReviewCloseFailed,
 		domain.IssueEventRiskRecorded,
 		domain.IssueEventBlockerReported,
 		domain.IssueEventHumanInputRequested,
@@ -5680,7 +5690,7 @@ func issueObservationEventSummary(evt domain.IssueObservationEvent) string {
 	if len(evt.Payload) == 0 {
 		return ""
 	}
-	for _, key := range []string{"summary", "message", "body", "reason", "status"} {
+	for _, key := range []string{"summary", "message", "body", "reason", "status", "failure"} {
 		if value, ok := evt.Payload[key]; ok {
 			text := strings.TrimSpace(fmt.Sprint(value))
 			if text != "" {
@@ -5711,6 +5721,7 @@ func workerObservationEvidenceEvents(events []domain.IssueObservationEvent) []do
 			domain.IssueEventValidationPassed,
 			domain.IssueEventValidationFailed,
 			domain.IssueEventReviewCompleted,
+			domain.IssueEventReviewCloseFailed,
 			domain.IssueEventRiskRecorded,
 			domain.IssueEventBlockerReported,
 			domain.IssueEventHumanInputRequested,

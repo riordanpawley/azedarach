@@ -32,6 +32,32 @@ func (d *Daemon) handleOrchestratorSession(ctx context.Context, req protocol.Req
 	if store == nil || d.tmux == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "orchestrator session runtime unavailable"), nil
 	}
+	if orchestratorSessionCommandMutates(req.Command) {
+		var response protocol.ResponseEnvelope
+		var commandErr error
+		lockErr := store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
+			response, commandErr = d.handleOrchestratorSessionLocked(lockCtx, req, body, projectID, identity, store)
+			return nil
+		})
+		if lockErr != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("serialize orchestrator scope transition: %v", lockErr)), nil
+		}
+		return response, commandErr
+	}
+	return d.handleOrchestratorSessionLocked(ctx, req, body, projectID, identity, store)
+}
+
+func orchestratorSessionCommandMutates(command string) bool {
+	switch command {
+	case protocol.CommandOrchestratorSessionStart, protocol.CommandOrchestratorSessionStop, protocol.CommandOrchestratorSessionAttach:
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protocol.RequestEnvelope, body protocol.OrchestratorSessionRequest, projectID string, identity domain.OrchestratorIdentity, store *daemonstate.RuntimeStateStore) (protocol.ResponseEnvelope, error) {
+	var err error
 	authority := daemonstate.NewOrchestratorLeaseAuthority(store)
 	sessionID := d.orchestratorSessionID(projectID, body.Scope)
 	result := protocol.OrchestratorSessionResult{Scope: body.Scope, SessionID: sessionID}
@@ -169,6 +195,9 @@ func (d *Daemon) handleOrchestratorSession(ctx context.Context, req protocol.Req
 		}
 		if err := d.persistStoppedOrchestratorSessionProjection(ctx, req.Meta, projectID, body.Scope, lease.SessionID, observed); err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		if d.orchestratorStopAfterIntentPersisted != nil {
+			d.orchestratorStopAfterIntentPersisted()
 		}
 		if result.Live {
 			result.Forced, err = d.gracefullyStopOrchestratorRuntime(ctx, lease.SessionID)
@@ -352,19 +381,29 @@ func (d *Daemon) pauseEndedOrchestratorSession(ctx context.Context, meta protoco
 	if err != nil {
 		return false, err
 	}
-	lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity)
-	if err != nil || !found || lease.SessionID != sessionID {
-		return false, err
-	}
-	if lease.Lifecycle != domain.OrchestratorPaused {
-		if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).SetLifecycle(ctx, identity, sessionID, domain.OrchestratorPaused); err != nil {
-			return false, err
+	paused := false
+	err = store.WithOrchestratorScopeTransition(ctx, identity, func(scopeCtx context.Context) error {
+		currentProjection, currentFound, loadErr := store.GetSessionState(scopeCtx, projectID, sessionID)
+		if loadErr != nil || !currentFound || currentProjection.Role != daemonstate.SessionRoleOrchestrator || currentProjection.ScopeKind != daemonstate.SessionScopeOrchestration || currentProjection.ScopeID != projection.ScopeID {
+			return loadErr
 		}
-	}
-	if err := d.persistStoppedOrchestratorSessionProjection(ctx, meta, projectID, scope, sessionID, daemonstate.SessionStatePaused); err != nil {
-		return false, err
-	}
-	return true, nil
+		authority := daemonstate.NewOrchestratorLeaseAuthority(store)
+		lease, leaseFound, leaseErr := authority.Get(scopeCtx, identity)
+		if leaseErr != nil || !leaseFound || lease.SessionID != sessionID {
+			return leaseErr
+		}
+		if lease.Lifecycle != domain.OrchestratorPaused {
+			if _, leaseErr = authority.SetLifecycle(scopeCtx, identity, sessionID, domain.OrchestratorPaused); leaseErr != nil {
+				return leaseErr
+			}
+		}
+		if persistErr := d.persistStoppedOrchestratorSessionProjection(scopeCtx, meta, projectID, scope, sessionID, daemonstate.SessionStatePaused); persistErr != nil {
+			return persistErr
+		}
+		paused = true
+		return nil
+	})
+	return paused, err
 }
 
 func (d *Daemon) persistOrchestratorSessionProjection(ctx context.Context, meta protocol.Metadata, projectID string, scope domain.OrchestrationScope, sessionID string) error {
