@@ -64,6 +64,16 @@ func TestMailWatchRecoversReviewReadyResubmissionsExactlyOnce(t *testing.T) {
 	if err != nil || !bytes.Contains(encoded, []byte(`"storage":"issue_event_payload_json_v1"`)) {
 		t.Fatalf("replay validation = %s err=%v, want source issue-event diagnostics preserved", encoded, err)
 	}
+	if err := d.ensureLegacyMailboxObservationProjection(ctx, "project", repoDir); err != nil {
+		t.Fatal(err)
+	}
+	cutover, err := client.MailboxObservationProjectionCutoverState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cutover.State != "complete" || cutover.ImportedCount != 1 {
+		t.Fatalf("cutover = %+v, want derived replay publication imported once", cutover)
+	}
 	restarted := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
 	afterRestart, err := restarted.readMailboxEventsWithReviewReadyRecovery(ctx, req, repoDir, root)
 	if err != nil || len(afterRestart) != 1 {
@@ -101,6 +111,50 @@ func TestMailWatchRecoversReviewReadyResubmissionsExactlyOnce(t *testing.T) {
 	}
 	if len(watched) != 1 || watched[0].Seq != 2 || watched[0].IssueID.String() != child {
 		t.Fatalf("watched = %+v, want watch-only consumer to receive resubmission", watched)
+	}
+}
+
+func TestLegacyMailboxProjectionPreservesTopLevelWorkerEvidence(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	root, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := client.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInReview, ParentID: &root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(mustWorkerEvidencePayload(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appendMailboxEvent(repoDir, daemonMailEvent{
+		Seq: 1, ParentIssue: root, IssueID: child, Type: "worker-integration-ready",
+		From: "worker", Body: string(body), CreatedAt: time.Now().UTC(),
+		Payload: map[string]interface{}{
+			"publication":     reviewReadyReplayPublication,
+			"publication_key": "worker-controlled-payload-must-not-skip",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	if err := d.ensureLegacyMailboxObservationProjection(ctx, "project", repoDir); err != nil {
+		t.Fatal(err)
+	}
+	durableEvents, err := client.ListIssueReviewReadyObservationEvents(ctx, child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durableReplay := domain.ReduceReviewReadyEvidence(durableEvents).LatestEvidence
+	if durableReplay == nil || !durableReplay.Validation.Complete || durableReplay.SourceEvent.SourceCommand != "mailbox.cutover" {
+		t.Fatalf("durable replay = %+v, want cutover event with complete top-level evidence", durableReplay)
+	}
+	if _, ok := durableReplay.SourceEvent.Payload["mail_event"]; !ok {
+		t.Fatalf("durable payload = %+v, want nested mailbox identity", durableReplay.SourceEvent.Payload)
 	}
 }
 

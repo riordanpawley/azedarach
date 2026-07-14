@@ -135,14 +135,13 @@ func (d *Daemon) projectMailEvent(ctx context.Context, projectID, repoDir string
 	if exists {
 		return nil
 	}
-	projected := mailEventToProtocol(event)
 	_, err = issueClient.AppendIssueObservationEvent(ctx, event.IssueID, issues.IssueObservationEventParams{
 		Type:          eventType,
 		ObservedAt:    event.CreatedAt,
 		Source:        strings.TrimSpace(event.From),
 		SourceCommand: "mail.send",
 		WorktreePath:  strings.TrimSpace(repoDir),
-		Payload:       map[string]any{"mail_event": projected},
+		Payload:       projectedMailObservationPayload(event),
 	})
 	if errors.Is(err, domain.ErrNotFound) {
 		if d.cfg.Logger != nil {
@@ -235,7 +234,7 @@ func readLegacyMailboxObservationProjection(repoDir string) ([]issues.LegacyMail
 			observations = append(observations, issues.LegacyMailboxObservation{
 				IssueID: event.IssueID, EventType: domain.IssueObservationEventType(projectedType), ObservedAt: event.CreatedAt,
 				Source: event.From, WorktreePath: repoDir, ParentIssue: event.ParentIssue, Sequence: event.Seq,
-				Payload: map[string]any{"mail_event": mailEventToProtocol(event)},
+				Payload: projectedMailObservationPayload(event),
 			})
 		}
 		scanErr := scanner.Err()
@@ -327,7 +326,10 @@ func (d *Daemon) handleMailWatch(ctx context.Context, req protocol.RequestEnvelo
 	return resp, nil
 }
 
-const reviewReadyReplayPublication = "review_ready_observation_replay.v1"
+const (
+	reviewReadyReplayPublication = "review_ready_observation_replay.v1"
+	reviewReadyReplaySender      = "daemon-observation-replay"
+)
 
 func (d *Daemon) readMailboxEventsWithReviewReadyRecovery(ctx context.Context, req protocol.RequestEnvelope, repoDir, parentIssue string) ([]daemonMailEvent, error) {
 	unlock, err := lockMailbox(repoDir, parentIssue)
@@ -427,13 +429,16 @@ func (d *Daemon) recoverReviewReadyMailboxEvents(ctx context.Context, req protoc
 		for _, publication := range domain.ReduceReviewReadyEvidence(byIssue[issueID]).Publications {
 			source := publication.SourceEvent
 			key := fmt.Sprintf("%s:%d", projectID, source.ID)
+			if lineageKey := reviewReadyReplayLineageKey(source); lineageKey != "" {
+				key = lineageKey
+			}
 			body, marshalErr := json.Marshal(publication.Evidence)
 			if marshalErr != nil {
 				return nil, fmt.Errorf("encode review-ready publication %s: %w", key, marshalErr)
 			}
 			event := daemonMailEvent{
 				ParentIssue: rootIssueID, IssueID: issueID,
-				Type: "worker-integration-ready", From: "daemon-observation-replay",
+				Type: "worker-integration-ready", From: reviewReadyReplaySender,
 				Body: string(body), CreatedAt: source.ObservedAt.UTC(),
 				Payload: map[string]interface{}{
 					"publication":                reviewReadyReplayPublication,
@@ -517,6 +522,14 @@ func lastMailboxSequence(events []daemonMailEvent) int64 {
 	return events[len(events)-1].Seq
 }
 
+func reviewReadyReplayLineageKey(event domain.IssueObservationEvent) string {
+	if event.SourceCommand != "mailbox.cutover" || event.Source != reviewReadyReplaySender || event.Payload["publication"] != reviewReadyReplayPublication {
+		return ""
+	}
+	key, _ := event.Payload["publication_key"].(string)
+	return strings.TrimSpace(key)
+}
+
 func filterMailEvents(events []daemonMailEvent, since int64, limit int) []protocol.MailEvent {
 	filtered := make([]protocol.MailEvent, 0, len(events))
 	for _, evt := range events {
@@ -554,6 +567,19 @@ func mailEventToProtocol(evt daemonMailEvent) protocol.MailEvent {
 		CreatedAt:   evt.CreatedAt.UTC().Format(time.RFC3339Nano),
 		Payload:     payload,
 	}
+}
+
+// projectedMailObservationPayload keeps the indexed mailbox identity alongside
+// the original event payload shape. Review and stewardship consumers therefore
+// see the same worker_evidence fields before and after durable projection.
+func projectedMailObservationPayload(evt daemonMailEvent) map[string]any {
+	projected := mailEventToProtocol(evt)
+	payload := make(map[string]any, len(projected.Payload)+1)
+	for key, value := range projected.Payload {
+		payload[key] = value
+	}
+	payload["mail_event"] = projected
+	return payload
 }
 
 func workerEvidencePayload(body string) map[string]interface{} {

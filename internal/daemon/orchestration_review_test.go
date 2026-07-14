@@ -1114,6 +1114,20 @@ func TestReviewAcceptUsesReplayedTicketIntegrationReadyEvidenceIdempotently(t *t
 	if failure := first.Failed[issueID]; !strings.Contains(failure, "authoritative close") || strings.Contains(failure, "requires complete worker_evidence") {
 		t.Fatalf("first=%+v, want evidence accepted before expected close-adapter failure", first)
 	}
+	afterFirst, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterFirst.Status != domain.StatusInReview {
+		t.Fatalf("status after first close failure = %s, want in_review", afterFirst.Status)
+	}
+	afterFirstSnapshot, err := d.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterFirstSnapshot.ReviewQueue) != 1 || afterFirstSnapshot.ReviewQueue[0].Evidence == nil || !strings.Contains(strings.Join(afterFirstSnapshot.ReviewQueue[0].Reasons, "\n"), "accepted-close-pending") {
+		t.Fatalf("review queue after first close failure = %+v, want accepted retry with preserved evidence", afterFirstSnapshot.ReviewQueue)
+	}
 	second, err := d.orchestrationAuthority().Apply(ctx, "project", request)
 	if err != nil {
 		t.Fatal(err)
