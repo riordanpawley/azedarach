@@ -43,6 +43,7 @@ type operationRuntimeConfig struct {
 	taskBulkCleanup         func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	globalProjectionRebuild func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	onMutationSuccess       func(string)
+	onTerminal              func(context.Context, daemonops.Record)
 	recoverInterrupted      func(context.Context, daemonops.Record) (interruptedOperationRecovery, bool)
 	gitHandler              *daemonhandlers.GitHandler
 	worktreeHandler         *daemonhandlers.WorktreeHandler
@@ -84,6 +85,7 @@ type operationStoreAdapter struct {
 	logger                *slog.Logger
 	canonicalizeProjectID func(string) string
 	noticeService         *daemonnotices.Service
+	onTerminal            func(context.Context, daemonops.Record)
 }
 
 type operationResultEnvelope struct {
@@ -147,6 +149,7 @@ func newOperationRuntime(cfg operationRuntimeConfig) *operationRuntime {
 		logger:                logger,
 		canonicalizeProjectID: canonicalizeProjectID,
 		noticeService:         cfg.noticeService,
+		onTerminal:            cfg.onTerminal,
 	}
 	reconcileInterruptedOperations(context.Background(), adapter, logger, cfg.recoverInterrupted)
 	manager := opmanager.New(adapter, opmanager.Config{Logger: logger})
@@ -1182,6 +1185,9 @@ func (s *operationStoreAdapter) Update(ctx context.Context, params daemonops.Upd
 	}
 	s.publish(out)
 	s.publishOperationNotice(ctx, out)
+	if s.onTerminal != nil && (out.State == daemonops.StateDone || out.State == daemonops.StateFailed || out.State == daemonops.StateCancelled) {
+		s.onTerminal(ctx, out)
+	}
 	return out, nil
 }
 

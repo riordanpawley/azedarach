@@ -425,6 +425,7 @@ func New(cfg Config) *Daemon {
 		taskBulkCleanup:         d.handleTaskBulkCleanup,
 		globalProjectionRebuild: d.handleGlobalProjectionRebuild,
 		onMutationSuccess:       d.enqueueUserProjectionRefresh,
+		onTerminal:              d.reconcileOrchestrationStartOperation,
 		recoverInterrupted:      d.recoverInterruptedOperation,
 		noticeService:           noticeService,
 	})

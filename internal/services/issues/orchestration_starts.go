@@ -113,6 +113,71 @@ func (c *Client) CompensateOrchestrationStart(ctx context.Context, attempt Orche
 	return c.finishOrchestrationStart(ctx, attempt, "compensated", "", message)
 }
 
+// CompensateOrchestrationStartOperation releases a claim acquired for a
+// session-start operation that reached a non-success terminal state. Matching
+// by the durable dedupe key also covers the narrow race where the operation
+// fails before its operation ID has been recorded on the attempt.
+func (c *Client) CompensateOrchestrationStartOperation(ctx context.Context, projectID, dedupeKey, operationID string, cause error) (bool, error) {
+	projectID, dedupeKey, operationID = strings.TrimSpace(projectID), strings.TrimSpace(dedupeKey), strings.TrimSpace(operationID)
+	if projectID == "" || dedupeKey == "" || operationID == "" {
+		return false, errors.New("project, dedupe key, and operation id are required")
+	}
+	message := ""
+	if cause != nil {
+		message = cause.Error()
+	}
+	compensated := false
+	err := c.withMutationLock(ctx, func(ctx context.Context) error {
+		db, err := c.dbHandle()
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		rows, err := tx.QueryContext(ctx, `SELECT project_id, issue_id, intent_key, actor_id, dedupe_key, state, claim_acquired, COALESCE(operation_id,''), COALESCE(last_error,'')
+			FROM orchestration_start_attempts
+			WHERE project_id=? AND dedupe_key=? AND state IN ('claimed','submitted') AND (operation_id=? OR (state='claimed' AND operation_id IS NULL))
+			ORDER BY CASE WHEN operation_id=? THEN 0 ELSE 1 END, updated_at ASC`, projectID, dedupeKey, operationID, operationID)
+		if err != nil {
+			return err
+		}
+		attempts := make([]OrchestrationStartAttempt, 0, 2)
+		for rows.Next() {
+			var current OrchestrationStartAttempt
+			if err := rows.Scan(&current.ProjectID, &current.IssueID, &current.IntentKey, &current.ActorID, &current.DedupeKey, &current.State, &current.ClaimAcquired, &current.OperationID, &current.LastError); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			attempts = append(attempts, current)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, current := range attempts {
+			if current.OperationID != "" && current.OperationID != operationID {
+				return fmt.Errorf("orchestration start references operation %s, not %s", current.OperationID, operationID)
+			}
+			current.OperationID = operationID
+			if err := c.compensateOrchestrationStartTx(ctx, tx, current, message); err != nil {
+				return err
+			}
+			compensated = true
+		}
+		return tx.Commit()
+	})
+	if err != nil {
+		return false, c.wrapError("compensate-orchestration-start-operation", dedupeKey, err)
+	}
+	return compensated, nil
+}
+
 func (c *Client) finishOrchestrationStart(ctx context.Context, attempt OrchestrationStartAttempt, state, operationID, lastError string) error {
 	return c.withMutationLock(ctx, func(ctx context.Context) error {
 		db, err := c.dbHandle()
@@ -137,23 +202,35 @@ func (c *Client) finishOrchestrationStart(ctx context.Context, attempt Orchestra
 		if current.State != "claimed" {
 			return fmt.Errorf("cannot transition orchestration start from %s to %s", current.State, state)
 		}
-		nowRaw := time.Now().UTC().Format(time.RFC3339Nano)
-		if state == "compensated" && current.ClaimAcquired {
-			res, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases WHERE issue_id=? AND purpose=? AND owner_id=?`, current.IssueID, domain.CoordinationLeaseExecution, current.ActorID)
-			if err != nil {
+		if state == "compensated" {
+			if err := c.compensateOrchestrationStartTx(ctx, tx, current, lastError); err != nil {
 				return err
 			}
-			if n, _ := res.RowsAffected(); n > 0 {
-				if err := c.appendIssueObservationEvent(ctx, tx, current.IssueID, domain.IssueEventIssueOwnershipChanged, map[string]any{"action": "released", "released_by": current.ActorID, "purpose": domain.CoordinationLeaseExecution, "orchestration_compensation": true, "orchestration_intent_key": current.IntentKey}); err != nil {
-					return err
-				}
-			}
+			return tx.Commit()
 		}
+		nowRaw := time.Now().UTC().Format(time.RFC3339Nano)
 		if _, err := tx.ExecContext(ctx, `UPDATE orchestration_start_attempts SET state=?, operation_id=NULLIF(?, ''), last_error=NULLIF(?, ''), updated_at=? WHERE project_id=? AND issue_id=? AND intent_key=?`, state, operationID, lastError, nowRaw, current.ProjectID, current.IssueID, current.IntentKey); err != nil {
 			return err
 		}
 		return tx.Commit()
 	})
+}
+
+func (c *Client) compensateOrchestrationStartTx(ctx context.Context, tx *sql.Tx, current OrchestrationStartAttempt, lastError string) error {
+	if current.ClaimAcquired {
+		res, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases WHERE issue_id=? AND purpose=? AND owner_id=?`, current.IssueID, domain.CoordinationLeaseExecution, current.ActorID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			if err := c.appendIssueObservationEvent(ctx, tx, current.IssueID, domain.IssueEventIssueOwnershipChanged, map[string]any{"action": "released", "released_by": current.ActorID, "purpose": domain.CoordinationLeaseExecution, "orchestration_compensation": true, "orchestration_intent_key": current.IntentKey}); err != nil {
+				return err
+			}
+		}
+	}
+	nowRaw := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := tx.ExecContext(ctx, `UPDATE orchestration_start_attempts SET state='compensated', operation_id=NULLIF(?, ''), last_error=NULLIF(?, ''), updated_at=? WHERE project_id=? AND issue_id=? AND intent_key=?`, current.OperationID, lastError, nowRaw, current.ProjectID, current.IssueID, current.IntentKey)
+	return err
 }
 
 func (c *Client) PendingOrchestrationStarts(ctx context.Context, projectID string) ([]OrchestrationStartAttempt, error) {

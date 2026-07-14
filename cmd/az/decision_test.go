@@ -1,9 +1,12 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
 
@@ -185,6 +188,46 @@ func TestParseDecisionSyncArgs(t *testing.T) {
 				t.Fatalf("ProjectDir = %q, want %q", opts.ProjectDir, tc.projectDir)
 			}
 		})
+	}
+}
+
+func TestDecisionRequestRepoDirDefaultsToLinkedWorktreeRootFromNestedDirectory(t *testing.T) {
+	baseRepo, worktree := makeLinkedWorktree(t)
+	nested := filepath.Join(worktree, "internal", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested worktree directory: %v", err)
+	}
+	t.Chdir(nested)
+
+	got, err := decisionRequestRepoDir("")
+	if err != nil {
+		t.Fatalf("decisionRequestRepoDir: %v", err)
+	}
+	want, err := config.ResolveWorktreeRoot(nested)
+	if err != nil {
+		t.Fatalf("resolve expected worktree root: %v", err)
+	}
+	if got != want {
+		t.Fatalf("decisionRequestRepoDir = %q, want linked worktree root %q", got, want)
+	}
+	if got == nested || got == baseRepo || got == filepath.Dir(nested) {
+		t.Fatalf("decision transfer target = %q, want only linked worktree root (nested=%q base=%q)", got, nested, baseRepo)
+	}
+}
+
+func TestDecisionRequestRepoDirPreservesExplicitDirectory(t *testing.T) {
+	root := t.TempDir()
+	explicitDir := filepath.Join(root, "linked-worktree", "nested")
+	got, err := decisionRequestRepoDir(explicitDir)
+	if err != nil {
+		t.Fatalf("decisionRequestRepoDir: %v", err)
+	}
+	want, err := filepath.Abs(explicitDir)
+	if err != nil {
+		t.Fatalf("absolute explicit path: %v", err)
+	}
+	if got != want {
+		t.Fatalf("decisionRequestRepoDir = %q, want explicit directory %q", got, want)
 	}
 }
 
