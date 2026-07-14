@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -21,9 +22,10 @@ func TestTmuxObserverPublishesChangedCurrentProjectionWithProvenance(t *testing.
 	const projectID, issueID, sessionID = "observer-project", "obs", "observer-session"
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
+	estimatedStartedAt := time.Unix(2, 0).UTC()
 	if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
 		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning,
-		ObservedState: daemonstate.SessionStateStopped, UpdatedAt: time.Unix(10, 0).UTC(),
+		ObservedState: daemonstate.SessionStateStopped, StartedAt: &estimatedStartedAt, UpdatedAt: time.Unix(10, 0).UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +68,7 @@ func TestTmuxObserverPublishesChangedCurrentProjectionWithProvenance(t *testing.
 		t.Fatalf("current projection revision = %d, want 1", got)
 	}
 	row, found, err := store.GetSessionState(ctx, projectID, sessionID)
-	if err != nil || !found || row.StartedAt == nil {
+	if err != nil || !found || row.StartedAt == nil || !row.StartedAt.Equal(createdAt) {
 		t.Fatalf("persisted started_at = %+v found=%v err=%v", row.StartedAt, found, err)
 	}
 	if err := d.observeTmuxProject(ctx, projectID, live, domainCurrentTmuxProvenance(observedAt.Add(time.Second))); err != nil {
@@ -74,6 +76,36 @@ func TestTmuxObserverPublishesChangedCurrentProjectionWithProvenance(t *testing.
 	}
 	if got := d.currentRevision(projectID); got != 1 {
 		t.Fatalf("unchanged routine poll advanced projection revision to %d", got)
+	}
+}
+
+func TestTmuxObserverRotatesProjectSweepAfterTimeout(t *testing.T) {
+	d := &Daemon{}
+	projects := []string{"project-a", "project-b", "project-c"}
+	var observed []string
+
+	firstCtx, cancelFirst := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelFirst()
+	d.observeTmuxProjects(firstCtx, projects, func(ctx context.Context, projectID string) {
+		observed = append(observed, projectID)
+		if projectID == "project-a" {
+			<-ctx.Done()
+		}
+	})
+	if got, want := observed, []string{"project-a"}; !slices.Equal(got, want) {
+		t.Fatalf("first timed-out sweep = %v, want %v", got, want)
+	}
+
+	secondCtx, cancelSecond := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelSecond()
+	d.observeTmuxProjects(secondCtx, projects, func(ctx context.Context, projectID string) {
+		observed = append(observed, projectID)
+		if projectID == "project-a" {
+			<-ctx.Done()
+		}
+	})
+	if got, want := observed, []string{"project-a", "project-b", "project-c", "project-a"}; !slices.Equal(got, want) {
+		t.Fatalf("rotated sweep after timeout = %v, want %v", got, want)
 	}
 }
 

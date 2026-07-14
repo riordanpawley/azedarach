@@ -54,6 +54,14 @@ func (d *Daemon) reconcileStaleBusySessionActivity(ctx context.Context, projectI
 		if !ok || daemonstate.NormalizeSessionState(session.ObservedState) == daemonstate.SessionStateStopped {
 			continue
 		}
+		if normalizeSessionActivity(session.Activity) == "error" &&
+			normalizeSessionActivitySource(session.ActivitySource, "") == "terminal" &&
+			!evidence.ObservedAt.After(session.UpdatedAt) {
+			// A persisted terminal failure already supersedes this stale hook.
+			// This also suppresses duplicate pane observations after restart,
+			// when the in-memory probe cache is intentionally empty.
+			continue
+		}
 		probeKey := projectID + "\x00" + session.ID
 		_, terminalFailureCached, shouldProbe := d.cachedTerminalFailureProbe(probeKey, evidence.ObservedAt, now)
 		if terminalFailureCached || !shouldProbe {
@@ -67,7 +75,9 @@ func (d *Daemon) reconcileStaleBusySessionActivity(ctx context.Context, projectI
 			continue
 		}
 		if reason, terminalFailure := domain.ClassifyAgentTerminalOutput(output); terminalFailure {
-			d.recordTerminalFailureProbe(probeKey, evidence.ObservedAt, now, sha256.Sum256([]byte(output)), reason, true)
+			if _, err := d.materializeTerminalFailureObservation(ctx, projectID, session, evidence.ObservedAt, now, sha256.Sum256([]byte(output)), reason); err != nil {
+				return converged, fmt.Errorf("materialize terminal failure for %s: %w", session.ID, err)
+			}
 			continue
 		}
 		if !domain.ClassifyAgentTerminalIdle(output) {

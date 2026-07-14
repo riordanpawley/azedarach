@@ -77,8 +77,9 @@ type PhysicalSessionObservation struct {
 	// observations leave it nil so they cannot erase independently observed
 	// attachment state.
 	TmuxAttachedCount *int
-	// StartedAt is present only when tmux inventory supplies the physical
-	// session creation time. Other observation sources preserve it.
+	// StartedAt is present only when tmux inventory supplies the authoritative
+	// physical session creation time. It replaces any command-time estimate;
+	// other observation sources leave it nil and preserve the tmux value.
 	StartedAt *time.Time
 }
 

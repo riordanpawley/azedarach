@@ -2,17 +2,100 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"log/slog"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
+
+func TestTerminalFailureProbePublishesOneCoalescedCurrentObservation(t *testing.T) {
+	now := time.Date(2026, 7, 10, 1, 0, 0, 0, time.UTC)
+	previousNow := timeNow
+	timeNow = func() time.Time { return now }
+	t.Cleanup(func() { timeNow = previousNow })
+
+	const projectID, issueID = "proj-terminal-watch", "dgs"
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	if err := upsertSessionStateFixture(store, context.Background(), projectID, daemonstate.Session{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks",
+		UpdatedAt: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &terminalFailureProbeRunner{output: "⚠ Selected model is at capacity. Please try a different model."}
+	d := &Daemon{
+		cfg: Config{Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()),
+		hub: publish.NewHub(8, 8, slog.Default()), runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		revision: map[string]uint64{},
+	}
+	d.runtimeProjectionCoalescer = newRuntimeProjectionEventCoalescer(d, time.Hour)
+	t.Cleanup(d.runtimeProjectionCoalescer.Close)
+	events, unsubscribe := d.hub.Subscribe(projectID, 0)
+	defer unsubscribe()
+	sessions, err := store.ListSessionStates(context.Background(), projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activity := sessionDisplayActivityByIssueKeyFromSessions(sessions, projectID)
+	if published, err := d.observeTerminalFailureProbes(context.Background(), projectID, sessions, projectID, activity); err != nil || published != 1 {
+		t.Fatalf("first terminal observation: published=%d err=%v", published, err)
+	}
+	latest, found, err := store.GetSessionState(context.Background(), projectID, sessionID)
+	if err != nil || !found {
+		t.Fatalf("load first terminal projection: found=%v err=%v", found, err)
+	}
+	secondAt := now.Add(time.Second)
+	if published, err := d.materializeTerminalFailureObservation(
+		context.Background(), projectID, latest, activity[sessionKey(issueID)].UpdatedAt, secondAt,
+		sha256.Sum256([]byte("different terminal failure screen")), domain.AgentTerminalFailureModelCapacity,
+	); err != nil || published != 1 {
+		t.Fatalf("second coalesced terminal observation: published=%d err=%v", published, err)
+	}
+	if published, err := d.observeTerminalFailureProbes(context.Background(), projectID, sessions, projectID, activity); err != nil || published != 0 {
+		t.Fatalf("cached terminal observation: published=%d err=%v", published, err)
+	}
+	d.runtimeProjectionCoalescer.Close()
+
+	select {
+	case event := <-events:
+		var body protocol.SessionProjectionEventBody
+		if err := json.Unmarshal(event.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Observation == nil || body.Observation.Disposition != "current" || body.Observation.CanonicalEventAdmitted || body.Observation.SemanticSequenceAdvanced {
+			t.Fatalf("terminal observation provenance = %+v", body.Observation)
+		}
+		if !body.Observation.ObservedAt.Equal(secondAt) {
+			t.Fatalf("coalesced observed_at = %s, want %s", body.Observation.ObservedAt, secondAt)
+		}
+		if body.Runtime == nil || body.Runtime.Projection.Agent.Status != "error" || body.Runtime.Projection.Agent.Source != "terminal" {
+			t.Fatalf("terminal runtime delta = %+v", body.Runtime)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for terminal current-observation delta")
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("unexpected duplicate terminal delta: %+v", event)
+	case <-time.After(30 * time.Millisecond):
+	}
+	if got := d.currentRevision(projectID); got != 1 {
+		t.Fatalf("terminal observation revision = %d, want 1", got)
+	}
+}
 
 type terminalFailureProbeRunner struct {
 	mu     sync.Mutex

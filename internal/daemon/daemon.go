@@ -215,6 +215,8 @@ type Daemon struct {
 	terminalFailureProbeMu               sync.Mutex
 	terminalFailureProbes                map[string]terminalFailureProbeState
 	tmuxObservationWG                    sync.WaitGroup
+	tmuxObservationCursorMu              sync.Mutex
+	tmuxObservationCursor                int
 	reviewReadyRecoveryMu                sync.Mutex
 	reviewReadyRecoveryCursor            map[string]int64
 	reviewReadyRecoveryBeforeLoad        func()

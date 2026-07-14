@@ -4102,7 +4102,10 @@ func applyObservedRuntimeLiveness(session *daemonstate.Session, info tmux.Sessio
 	if infoLive {
 		session.ObservedState = daemonstate.SessionStateRunning
 		session.TmuxAttachedCount = info.AttachedCount
-		if (session.StartedAt == nil || session.StartedAt.IsZero()) && info.CreatedAt != nil && !info.CreatedAt.IsZero() {
+		// tmux CreatedAt is the physical runtime start authority. Session start
+		// commands may seed an estimate before inventory observes the runtime;
+		// replace that estimate whenever tmux supplies its creation timestamp.
+		if info.CreatedAt != nil && !info.CreatedAt.IsZero() {
 			started := info.CreatedAt.UTC()
 			session.StartedAt = &started
 		}
