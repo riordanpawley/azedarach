@@ -15,6 +15,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/observability/tracesqlite"
+	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
@@ -626,6 +627,9 @@ func TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState(t *tes
 	if task.Status != domain.StatusInReview {
 		t.Fatalf("failed integration task = %+v, want review state preserved", task)
 	}
+	if lease := coordinationLease(task, domain.CoordinationLeaseReview); lease != nil {
+		t.Fatalf("failed integration review lease = %+v, want released after durable acceptance", lease)
+	}
 	reviewEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
 	if err != nil {
 		t.Fatal(err)
@@ -653,6 +657,197 @@ func TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState(t *tes
 	}
 	if len(closeFailures) != 1 {
 		t.Fatalf("retry duplicated close failure: %+v", closeFailures)
+	}
+}
+
+func TestReviewAcceptReleasesLeaseBeforeAcceptedInternalReviewClose(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "accepted internal review", Description: "Executable", Acceptance: "validated and reviewed", Type: domain.TypeInvestigation, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []issues.IssueObservationEventParams{
+		{Type: domain.IssueEventInvestigationDisposition, Source: "test", Payload: map[string]any{"disposition": "internal_review"}},
+		{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)},
+	} {
+		if _, err := client.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := &recordingGitRunner{}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.git = git.NewClient(runner, slog.Default())
+	d.worktreeAdapter = &worktreeServiceAdapter{manager: git.NewWorktreeManager(runner, repoDir, slog.Default()), logger: slog.Default()}
+
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-internal-review", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Closed) != 1 || result.Closed[0] != issueID || len(result.Failed) != 0 {
+		t.Fatalf("accept result = %+v, want accepted terminal close", result)
+	}
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != domain.StatusDone || coordinationLease(task, domain.CoordinationLeaseReview) != nil {
+		t.Fatalf("closed task = %+v, want done without review lease", task)
+	}
+	reviewEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewEvents) != 1 || reviewEvents[0].Payload["outcome"] != "accepted" {
+		t.Fatalf("review events = %+v, want accepted without integration_failed", reviewEvents)
+	}
+	allEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted, domain.IssueEventIssueOwnershipChanged, domain.IssueEventIssueStatusChanged}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptedID, releaseID, closeID := int64(0), int64(0), int64(0)
+	for _, event := range allEvents {
+		switch {
+		case event.Type == domain.IssueEventReviewCompleted && event.Payload["outcome"] == "accepted":
+			acceptedID = event.ID
+		case event.Type == domain.IssueEventIssueOwnershipChanged && event.Payload["action"] == "released" && event.Payload["purpose"] == string(domain.CoordinationLeaseReview):
+			releaseID = event.ID
+		case event.Type == domain.IssueEventIssueStatusChanged && event.Payload["to_status"] == string(domain.StatusDone):
+			closeID = event.ID
+		}
+	}
+	if acceptedID == 0 || releaseID <= acceptedID || closeID <= releaseID {
+		t.Fatalf("event order accepted=%d release=%d close=%d, want accepted < review release < close", acceptedID, releaseID, closeID)
+	}
+
+	replayed, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-internal-review", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replayed.Closed) != 1 || replayed.Closed[0] != issueID || len(replayed.Failed) != 0 {
+		t.Fatalf("replayed accept result = %+v, want idempotent closed result", replayed)
+	}
+	reviewEvents, err = client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewEvents) != 1 {
+		t.Fatalf("review events after replay = %+v, want no duplicate outcome", reviewEvents)
+	}
+}
+
+func TestReviewAcceptFenceBlocksSecondDaemonReturnBetweenReleaseAndClose(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	path := filepath.Join(repoDir, "issues.db")
+	acceptClient := newMigratedIssueClientAtPath(t, path, slog.Default())
+	returnClient := newMigratedIssueClientAtPath(t, path, slog.Default())
+	t.Cleanup(func() { _ = acceptClient.CloseDB(); _ = returnClient.CloseDB() })
+	issueID, err := acceptClient.Create(ctx, issues.CreateTaskParams{Title: "cross-daemon accepted review", Description: "Executable", Acceptance: "validated and reviewed", Type: domain.TypeInvestigation, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []issues.IssueObservationEventParams{
+		{Type: domain.IssueEventInvestigationDisposition, Source: "test", Payload: map[string]any{"disposition": "internal_review"}},
+		{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)},
+	} {
+		if _, err := acceptClient.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	acceptDaemon := newOrchestrationReviewTestDaemon(repoDir, acceptClient)
+	returnDaemon := newOrchestrationReviewTestDaemon(repoDir, returnClient)
+	runner := &recordingGitRunner{}
+	acceptDaemon.git = git.NewClient(runner, slog.Default())
+	acceptDaemon.worktreeAdapter = &worktreeServiceAdapter{manager: git.NewWorktreeManager(runner, repoDir, slog.Default()), logger: slog.Default()}
+	var competing protocol.OrchestrationIntentResult
+	acceptDaemon.reviewLeaseReleasedBeforeClose = func(hookCtx context.Context, projectID, releasedIssueID string) error {
+		var hookErr error
+		competing, hookErr = returnDaemon.orchestrationAuthority().Apply(hookCtx, projectID, protocol.OrchestrationIntentRequest{
+			Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn,
+			IntentKey: "second-daemon-return", ActorID: "second-orchestrator", IssueIDs: []string{releasedIssueID}, RepoDir: repoDir,
+			Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "late finding"}},
+		})
+		return hookErr
+	}
+	accepted, err := acceptDaemon.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{
+		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept,
+		IntentKey: "first-daemon-accept", ActorID: "first-orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accepted.Closed) != 1 || accepted.Closed[0] != issueID || len(accepted.Failed) != 0 {
+		t.Fatalf("accepted result = %+v, want authoritative close", accepted)
+	}
+	if got := competing.Skipped[issueID]; !strings.Contains(got, "claim-review") || !strings.Contains(got, "accepted review") {
+		t.Fatalf("competing result = %+v, want durable accepted-epoch claim fence", competing)
+	}
+	events, err := acceptClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Payload["outcome"] != "accepted" {
+		t.Fatalf("review outcomes = %+v, want accepted only", events)
+	}
+	task, err := returnClient.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != domain.StatusDone || coordinationLease(task, domain.CoordinationLeaseReview) != nil {
+		t.Fatalf("final task = %+v, want done without review lease", task)
+	}
+}
+
+func TestReviewAcceptResumesDurablyAcceptedIntentWithoutReacquiringLease(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "resume accepted internal review", Description: "Executable", Acceptance: "validated and reviewed", Type: domain.TypeInvestigation, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "resume-accepted-internal-review", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview}); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []issues.IssueObservationEventParams{
+		{Type: domain.IssueEventInvestigationDisposition, Source: "test", Payload: map[string]any{"disposition": "internal_review"}},
+		{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)},
+		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept), Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request)}},
+	} {
+		if _, err := client.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := &recordingGitRunner{}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.git = git.NewClient(runner, slog.Default())
+	d.worktreeAdapter = &worktreeServiceAdapter{manager: git.NewWorktreeManager(runner, repoDir, slog.Default()), logger: slog.Default()}
+
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Closed) != 1 || result.Closed[0] != issueID || len(result.Failed) != 0 {
+		t.Fatalf("resumed accept result = %+v, want terminal close", result)
+	}
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != domain.StatusDone || coordinationLease(task, domain.CoordinationLeaseReview) != nil {
+		t.Fatalf("resumed accepted task = %+v, want done without review lease", task)
+	}
+	reviewEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewEvents) != 1 || reviewEvents[0].Payload["outcome"] != "accepted" {
+		t.Fatalf("resumed review events = %+v, want original accepted outcome only", reviewEvents)
 	}
 }
 

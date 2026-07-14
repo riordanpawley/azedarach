@@ -61,8 +61,27 @@ func repoRootFromTestFile() (string, error) {
 	if !ok {
 		return "", os.ErrInvalid
 	}
-	// This file lives in internal/tui, so two parents up is the repo root.
-	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..")), nil
+	if filepath.IsAbs(file) {
+		// This file lives in internal/tui, so two parents up is the repo root.
+		return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..")), nil
+	}
+	// -trimpath intentionally replaces the absolute caller path with its import
+	// path. Resolve from the test working directory in that mode.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for candidate := filepath.Clean(cwd); ; candidate = filepath.Dir(candidate) {
+		if _, err := os.Stat(filepath.Join(candidate, "go.mod")); err == nil {
+			return candidate, nil
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(candidate)
+		if parent == candidate {
+			return "", os.ErrNotExist
+		}
+	}
 }
 
 func findDirectGitExecViolations(repoRoot string) ([]string, error) {

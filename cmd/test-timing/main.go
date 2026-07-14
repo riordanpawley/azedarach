@@ -50,6 +50,7 @@ func run() error {
 	outputDir := filepath.Join(*outputRoot, profile.Name+"-"+stamp)
 	measurement, runErr := testtiming.Run(context.Background(), testtiming.RunOptions{Profile: profile, Baseline: baseline, OutputDir: outputDir, WorkingDir: ".", CheckBudgets: *checkBudgets})
 	fmt.Printf("profile=%s wall=%.2fs packages=%d tests=%d failures=%d violations=%d\n", measurement.Profile, measurement.WallSeconds, len(measurement.Packages), len(measurement.Tests), len(measurement.Failures), len(measurement.Comparison.Violations))
+	fmt.Printf("build_cache_namespace=%s before_bytes=%d after_bytes=%d delta_bytes=%d family_bytes=%d decision=%s\n", measurement.BuildCache.Namespace, measurement.BuildCache.Before.Bytes, measurement.BuildCache.After.Bytes, measurement.BuildCache.DeltaBytes, measurement.BuildCache.FamilyBytes, measurement.BuildCache.Decision)
 	fmt.Printf("report=%s\nraw=%s\n", filepath.Join(outputDir, "report.md"), filepath.Join(outputDir, "events.jsonl"))
 	return runErr
 }

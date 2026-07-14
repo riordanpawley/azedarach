@@ -66,6 +66,9 @@ func NewWorktreeManager(runner CommandRunner, repoDir string, logger *slog.Logge
 	}
 }
 
+// RepoDir returns the repository-family root owned by this manager.
+func (w *WorktreeManager) RepoDir() string { return w.repoDir }
+
 func (w *WorktreeManager) CleanStatus(ctx context.Context, worktreePath string) (*WorktreeCleanStatus, error) {
 	path := strings.TrimSpace(worktreePath)
 	if path == "" {

@@ -20,6 +20,15 @@ type InvestigationAcceptance struct {
 	Reason      string
 }
 
+// ReviewOutcome is a trusted daemon review result that changes durable review authority.
+type ReviewOutcome string
+
+const (
+	ReviewOutcomeAccepted          ReviewOutcome = "accepted"
+	ReviewOutcomeReturned          ReviewOutcome = "returned"
+	ReviewOutcomeIntegrationFailed ReviewOutcome = "integration_failed"
+)
+
 // EvaluateInvestigationAcceptance derives the terminal acceptance gate from the
 // append-only issue evidence projection. The newest declaration wins.
 func EvaluateInvestigationAcceptance(task Task, events []IssueObservationEvent) InvestigationAcceptance {
@@ -46,11 +55,11 @@ func EvaluateInvestigationAcceptance(task Task, events []IssueObservationEvent) 
 		}
 		switch disposition {
 		case InvestigationDispositionInternalReview:
-			if trustedInvestigationReviewEvent(event) {
-				switch strings.TrimSpace(stringValue(event.Payload["outcome"])) {
-				case "accepted":
+			if outcome, trusted := TrustedReviewOutcome(event); trusted {
+				switch outcome {
+				case ReviewOutcomeAccepted:
 					accepted = true
-				case "returned", "integration_failed":
+				case ReviewOutcomeReturned, ReviewOutcomeIntegrationFailed:
 					accepted = false
 				}
 			}
@@ -113,14 +122,25 @@ func stringValue(value any) string {
 	return text
 }
 
-func trustedInvestigationReviewEvent(event IssueObservationEvent) bool {
+// TrustedReviewOutcome validates and extracts a daemon-authored review result.
+func TrustedReviewOutcome(event IssueObservationEvent) (ReviewOutcome, bool) {
 	if event.Type != IssueEventReviewCompleted || strings.TrimSpace(event.Source) != "daemon-orchestration" {
-		return false
+		return "", false
 	}
-	switch strings.TrimSpace(event.SourceCommand) {
-	case "review-accept", "review-return":
-		return strings.TrimSpace(stringValue(event.Payload["actor_id"])) != ""
+	command := strings.TrimSpace(event.SourceCommand)
+	if command != "review-accept" && command != "review-return" {
+		return "", false
+	}
+	if strings.TrimSpace(stringValue(event.Payload["actor_id"])) == "" {
+		return "", false
+	}
+	outcome := ReviewOutcome(strings.TrimSpace(stringValue(event.Payload["outcome"])))
+	switch {
+	case command == "review-accept" && (outcome == ReviewOutcomeAccepted || outcome == ReviewOutcomeIntegrationFailed):
+		return outcome, true
+	case command == "review-return" && outcome == ReviewOutcomeReturned:
+		return outcome, true
 	default:
-		return false
+		return "", false
 	}
 }

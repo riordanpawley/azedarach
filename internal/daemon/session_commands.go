@@ -856,7 +856,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		if rollbackIssueLifecycle && (err != nil || !resp.OK) {
 			if worktreeProjectionPersisted && !startedWorktreeReused && startedWorktreePath != "" {
 				d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID)
-				_ = d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, startedWorktreePath, startedWorktreeReused)
+				_ = d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, startedWorktreePath, startedWorktreeReused)
 			}
 			d.rollbackSessionStartIssueLifecycle(ctx, issueClient, cmd.IssueID, originalIssueStatus)
 		}
@@ -878,7 +878,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			reportSessionStartProgress(ctx, "worktree_preflight", fmt.Sprintf("running worktree init commands for %s", initCtx.IssueID), 20)
 		}
 		if err := d.runWorktreeSyncInitCommands(ctx, initCtx); err != nil {
-			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, initCtx.IssueID, initCtx.WorktreePath, false)
+			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, initCtx.ProjectID, worktreeManager, initCtx.IssueID, initCtx.WorktreePath, false)
 			return fmt.Errorf("%w%s", err, cleanupNote)
 		}
 		d.startWorktreeAsyncInitCommands(initCtx)
@@ -905,7 +905,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			reusedWorktree = true
 			worktreeSetupWarning = fmt.Sprintf("Worktree setup warning: worktree already existed for %s; reused existing worktree at %s without running worktree init commands.", cmd.IssueID, worktree.Path)
 		} else if materializedWorktree, recoverErr := worktreeManager.Get(ctx, cmd.IssueID); recoverErr == nil {
-			cleanupNote := d.cleanupWorktreeAfterCreateFailure(ctx, worktreeManager, cmd.IssueID, materializedWorktree.Path)
+			cleanupNote := d.cleanupWorktreeAfterCreateFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, materializedWorktree.Path)
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("git worktree create failed after materializing worktree",
 					"project_id", cmd.ProjectID,
@@ -943,7 +943,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			ParentIssueID:      baseBranchAncestorIssueID,
 			ParentWorktreePath: ensuredAncestors.AncestorWorktreePath,
 		}); err != nil {
-			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree init failed for %s: %v%s", cmd.IssueID, err, cleanupNote)), nil
 		}
 		d.startWorktreeAsyncInitCommands(worktreeInitContext{
@@ -959,18 +959,18 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	resourcePrep, err := d.runIssueResourcePrepareCommands(ctx, cmd.ProjectID, resourceCtx)
 	if err != nil {
 		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
-		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue resource prepare failed for %s: %v%s%s", cmd.IssueID, err, cleanupNote, worktreeCleanupNote)), nil
 	}
 	if _, err := d.runIssueResourceReconcileCommand(ctx, cmd.ProjectID, resourceCtx, "present"); err != nil {
 		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
-		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue resource reconcile present failed for %s: %v%s%s", cmd.IssueID, err, cleanupNote, worktreeCleanupNote)), nil
 	}
 	imagePaths, imageErr := d.prepareSessionStartImagePaths(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, cmd.ImagePaths)
 	if imageErr != nil {
 		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
-		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare session images failed for %s: %v%s%s", cmd.IssueID, imageErr, cleanupNote, worktreeCleanupNote)), nil
 	}
 	cmd.ImagePaths = imagePaths
@@ -997,7 +997,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	projectionWriter := d.runtimeProjectionStateWriter()
 	if err := projectionWriter.PersistWorktreeProjection(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch); err != nil {
 		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
-		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist worktree runtime projection for %s: %v%s%s", cmd.IssueID, err, cleanupNote, worktreeCleanupNote)), nil
 	}
 	worktreeProjectionPersisted = true
@@ -2101,13 +2101,13 @@ func (d *Daemon) ensureConflictWorktree(ctx context.Context, projectID, issueID,
 			return "", "", false, createErr
 		}
 		if materializedWorktree, recoverErr := worktreeManager.Get(ctx, issueID); recoverErr == nil {
-			cleanupNote := d.cleanupWorktreeAfterCreateFailure(ctx, worktreeManager, issueID, materializedWorktree.Path)
+			cleanupNote := d.cleanupWorktreeAfterCreateFailure(ctx, projectID, worktreeManager, issueID, materializedWorktree.Path)
 			return "", "", false, fmt.Errorf("worktree create failed for %s: %w%s", issueID, createErr, cleanupNote)
 		}
 		return "", "", false, createErr
 	}
 	if err := d.ensureSessionStartWorktreeClean(ctx, worktreeManager, issueID, worktree.Path); err != nil {
-		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, issueID, worktree.Path, false)
+		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, projectID, worktreeManager, issueID, worktree.Path, false)
 		return "", "", false, fmt.Errorf("%w%s", err, cleanupNote)
 	}
 	initCtx := worktreeInitContext{
@@ -2116,7 +2116,7 @@ func (d *Daemon) ensureConflictWorktree(ctx context.Context, projectID, issueID,
 		WorktreePath: worktree.Path,
 	}
 	if err := d.runWorktreeSyncInitCommands(ctx, initCtx); err != nil {
-		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, issueID, worktree.Path, false)
+		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, projectID, worktreeManager, issueID, worktree.Path, false)
 		return "", "", false, fmt.Errorf("worktree init failed for %s: %w%s", issueID, err, cleanupNote)
 	}
 	d.startWorktreeAsyncInitCommands(initCtx)
@@ -2150,14 +2150,15 @@ func (d *Daemon) ensureSessionStartWorktreeClean(ctx context.Context, worktreeMa
 	return fmt.Errorf("refusing to start session for issue %s: worktree %s is not clean before init (%s). Inspect with 'git -C %s status --porcelain' and 'git -C %s ls-files -d', then repair the checkout or remove the worktree and retry", issueID, worktreePath, detail, worktreePath, worktreePath)
 }
 
-func (d *Daemon) cleanupNewWorktreeAfterInitFailure(ctx context.Context, worktreeManager *git.WorktreeManager, issueID, worktreePath string, reusedWorktree bool) string {
+func (d *Daemon) cleanupNewWorktreeAfterInitFailure(ctx context.Context, projectID string, worktreeManager *git.WorktreeManager, issueID, worktreePath string, reusedWorktree bool) string {
 	if reusedWorktree || worktreeManager == nil {
 		return ""
 	}
-	if _, err := worktreeManager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
+	removedWorktree, err := worktreeManager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
 		Force:         true,
 		BranchCleanup: git.WorktreeBranchCleanupRequired,
-	}); err != nil {
+	})
+	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("failed to cleanup worktree after init failure",
 				"issue_id", issueID,
@@ -2166,6 +2167,9 @@ func (d *Daemon) cleanupNewWorktreeAfterInitFailure(ctx context.Context, worktre
 			)
 		}
 		return fmt.Sprintf(" (cleanup failed for worktree %s: %v)", worktreePath, err)
+	}
+	if err := finalizeDeletedWorktree(ctx, projectID, issueID, worktreeManager, removedWorktree, d.runtimeProjectionStateWriter()); err != nil {
+		return fmt.Sprintf(" (cleaned up worktree %s; %v)", worktreePath, err)
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("cleaned up worktree after init failure",
@@ -2176,14 +2180,15 @@ func (d *Daemon) cleanupNewWorktreeAfterInitFailure(ctx context.Context, worktre
 	return fmt.Sprintf(" (cleaned up worktree %s)", worktreePath)
 }
 
-func (d *Daemon) cleanupWorktreeAfterCreateFailure(ctx context.Context, worktreeManager *git.WorktreeManager, issueID, worktreePath string) string {
+func (d *Daemon) cleanupWorktreeAfterCreateFailure(ctx context.Context, projectID string, worktreeManager *git.WorktreeManager, issueID, worktreePath string) string {
 	if worktreeManager == nil {
 		return ""
 	}
-	if _, err := worktreeManager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
+	removedWorktree, err := worktreeManager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
 		Force:         true,
 		BranchCleanup: git.WorktreeBranchCleanupRequired,
-	}); err != nil {
+	})
+	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("failed to rollback worktree after create failure",
 				"issue_id", issueID,
@@ -2192,6 +2197,9 @@ func (d *Daemon) cleanupWorktreeAfterCreateFailure(ctx context.Context, worktree
 			)
 		}
 		return fmt.Sprintf(" (rollback failed for worktree %s: %v)", worktreePath, err)
+	}
+	if err := finalizeDeletedWorktree(ctx, projectID, issueID, worktreeManager, removedWorktree, d.runtimeProjectionStateWriter()); err != nil {
+		return fmt.Sprintf(" (rolled back worktree %s; %v)", worktreePath, err)
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("rolled back worktree after create failure",

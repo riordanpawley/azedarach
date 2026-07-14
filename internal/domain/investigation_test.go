@@ -43,3 +43,33 @@ func TestHasInternalReviewArtifactDoesNotGrantAcceptance(t *testing.T) {
 		t.Fatal("superseded internal review artifact remained eligible")
 	}
 }
+
+func TestTrustedReviewOutcomeRequiresCommandOutcomePair(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		outcome string
+		want    bool
+	}{
+		{name: "accepted", command: "review-accept", outcome: "accepted", want: true},
+		{name: "accept integration failed", command: "review-accept", outcome: "integration_failed", want: true},
+		{name: "returned", command: "review-return", outcome: "returned", want: true},
+		{name: "return cannot accept", command: "review-return", outcome: "accepted"},
+		{name: "accept cannot return", command: "review-accept", outcome: "returned"},
+		{name: "return cannot record integration failure", command: "review-return", outcome: "integration_failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := IssueObservationEvent{
+				Type:          IssueEventReviewCompleted,
+				Source:        "daemon-orchestration",
+				SourceCommand: tt.command,
+				Payload:       map[string]any{"outcome": tt.outcome, "actor_id": "reviewer"},
+			}
+			_, got := TrustedReviewOutcome(event)
+			if got != tt.want {
+				t.Fatalf("trusted = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

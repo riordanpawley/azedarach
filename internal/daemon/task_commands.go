@@ -12,10 +12,8 @@ import (
 	"strings"
 	"time"
 
-	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
-	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -926,12 +924,16 @@ func (d *Daemon) handleTaskEventAppend(ctx context.Context, req protocol.Request
 	if eventType == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "event type is required"), nil
 	}
+	parsedEventType := domain.IssueObservationEventType(eventType)
+	if domain.IssueObservationEventTypeRequiresAuthority(parsedEventType) {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("event type %s is authority-only and cannot be appended through task.event_append", eventType)), nil
+	}
 	source := strings.TrimSpace(cmd.Source)
 	if source == "" {
 		source = "az issue record"
 	}
 	event, err := issueClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
-		Type:          domain.IssueObservationEventType(eventType),
+		Type:          parsedEventType,
 		Source:        source,
 		SourceCommand: strings.TrimSpace(cmd.SourceCommand),
 		OperationID:   strings.TrimSpace(cmd.OperationID),
@@ -2411,6 +2413,9 @@ func (d *Daemon) submitDeferredTaskWorktreeCleanup(ctx context.Context, projectI
 		})
 		if err != nil {
 			if errors.Is(err, git.ErrWorktreeNotFound) {
+				if cleanupErr := finalizeDeletedWorktree(runCtx, projectID, taskID, manager, nil, d.runtimeProjectionStateWriter()); cleanupErr != nil {
+					return nil, cleanupErr
+				}
 				return json.Marshal(deferredTaskWorktreeCleanupResult{
 					ProjectID: projectID,
 					TaskID:    taskID,
@@ -2418,8 +2423,8 @@ func (d *Daemon) submitDeferredTaskWorktreeCleanup(ctx context.Context, projectI
 			}
 			return nil, err
 		}
-		if removedWorktree != nil {
-			_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(removedWorktree.Path))
+		if cleanupErr := finalizeDeletedWorktree(runCtx, projectID, taskID, manager, removedWorktree, d.runtimeProjectionStateWriter()); cleanupErr != nil {
+			return nil, cleanupErr
 		}
 		return json.Marshal(deferredTaskWorktreeCleanupResult{
 			ProjectID: projectID,

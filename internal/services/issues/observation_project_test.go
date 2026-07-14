@@ -57,6 +57,7 @@ func TestListLatestIssueObservationEventsByIssueScopesAndRanksCandidates(t *test
 	for _, event := range []IssueObservationEventParams{
 		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"actor_id": "reviewer", "outcome": "accepted"}},
 		{Type: domain.IssueEventReviewCompleted, Source: " daemon-orchestration ", SourceCommand: " review-return ", Payload: map[string]any{"actor_id": "reviewer", "outcome": "returned"}},
+		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"actor_id": "reviewer", "outcome": "accepted"}},
 		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"actor_id": 42, "outcome": "returned"}},
 	} {
 		if _, err := client.AppendIssueObservationEvent(ctx, first, event); err != nil {
@@ -67,16 +68,52 @@ func TestListLatestIssueObservationEventsByIssueScopesAndRanksCandidates(t *test
 		t.Fatal(err)
 	}
 	events, err := client.ListLatestIssueObservationEventsByIssue(ctx, LatestIssueObservationEventOptions{
-		IssueIDs:                []string{first},
-		Type:                    domain.IssueEventReviewCompleted,
-		Source:                  "daemon-orchestration",
-		SourceCommands:          []string{"review-accept", "review-return"},
+		IssueIDs:       []string{first},
+		Type:           domain.IssueEventReviewCompleted,
+		Source:         "daemon-orchestration",
+		SourceCommands: []string{"review-accept", "review-return"},
+		CommandOutcomePairs: []IssueObservationCommandOutcomePair{
+			{SourceCommand: "review-accept", Outcomes: []string{"accepted", "integration_failed"}},
+			{SourceCommand: "review-return", Outcomes: []string{"returned"}},
+		},
 		RequiredPayloadTextKeys: []string{"actor_id"},
+		CurrentReviewEpoch:      true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 1 || events[first].Payload["outcome"] != "returned" {
 		t.Fatalf("latest scoped events = %+v, want newest valid first-issue return only", events)
+	}
+}
+
+func TestListLatestIssueObservationEventsByIssueStopsAtCurrentReviewEpoch(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, CreateTaskParams{Title: "review", Description: "scope", Acceptance: "done", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"actor_id": "reviewer", "outcome": "accepted"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusOpen); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
+	events, err := client.ListLatestIssueObservationEventsByIssue(ctx, LatestIssueObservationEventOptions{
+		IssueIDs: []string{issueID}, Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration",
+		CommandOutcomePairs:     []IssueObservationCommandOutcomePair{{SourceCommand: "review-accept", Outcomes: []string{"accepted"}}},
+		RequiredPayloadTextKeys: []string{"actor_id"}, CurrentReviewEpoch: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("current epoch outcomes = %+v, want none", events)
 	}
 }

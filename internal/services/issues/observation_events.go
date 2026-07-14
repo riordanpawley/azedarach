@@ -26,9 +26,10 @@ type IssueObservationEventParams struct {
 }
 
 type IssueObservationEventListOptions struct {
-	Types       []domain.IssueObservationEventType
-	Limit       int
-	NewestFirst bool
+	Types         []domain.IssueObservationEventType
+	Limit         int
+	NewestFirst   bool
+	NewestIDFirst bool
 }
 
 type LatestIssueObservationEventOptions struct {
@@ -36,7 +37,14 @@ type LatestIssueObservationEventOptions struct {
 	Type                    domain.IssueObservationEventType
 	Source                  string
 	SourceCommands          []string
+	CommandOutcomePairs     []IssueObservationCommandOutcomePair
 	RequiredPayloadTextKeys []string
+	CurrentReviewEpoch      bool
+}
+
+type IssueObservationCommandOutcomePair struct {
+	SourceCommand string
+	Outcomes      []string
 }
 
 // ListProjectIssueObservationEvents returns the durable project event stream
@@ -162,7 +170,9 @@ func (c *Client) ListIssueObservationEvents(ctx context.Context, issueID string,
 	}
 	args = append(args, limit)
 	orderBy := "id ASC"
-	if opts.NewestFirst {
+	if opts.NewestIDFirst {
+		orderBy = "id DESC"
+	} else if opts.NewestFirst {
 		orderBy = "observed_at DESC, id DESC"
 	}
 	rows, err := db.QueryContext(ctx, `
@@ -240,6 +250,27 @@ func (c *Client) ListLatestIssueObservationEventsByIssue(ctx context.Context, op
 			args = append(args, command)
 		}
 	}
+	pairClauses := make([]string, 0, len(opts.CommandOutcomePairs))
+	for _, pair := range opts.CommandOutcomePairs {
+		command := strings.TrimSpace(pair.SourceCommand)
+		outcomes := make([]string, 0, len(pair.Outcomes))
+		for _, outcome := range pair.Outcomes {
+			if outcome = strings.TrimSpace(outcome); outcome != "" {
+				outcomes = append(outcomes, outcome)
+			}
+		}
+		if command == "" || len(outcomes) == 0 {
+			continue
+		}
+		pairClauses = append(pairClauses, "(TRIM(events.source_command) = ? AND TRIM(CAST(json_extract(events.payload_json, '$.outcome') AS TEXT)) IN ("+strings.TrimSuffix(strings.Repeat("?,", len(outcomes)), ",")+"))")
+		args = append(args, command)
+		for _, outcome := range outcomes {
+			args = append(args, outcome)
+		}
+	}
+	if len(pairClauses) > 0 {
+		clauses = append(clauses, "("+strings.Join(pairClauses, " OR ")+")")
+	}
 	for _, key := range opts.RequiredPayloadTextKeys {
 		key = strings.TrimSpace(key)
 		if key == "" {
@@ -249,6 +280,18 @@ func (c *Client) ListLatestIssueObservationEventsByIssue(ctx context.Context, op
 		clauses = append(clauses, "json_type(payload_json, ?) = 'text' AND NULLIF(TRIM(CAST(json_extract(payload_json, ?) AS TEXT)), '') IS NOT NULL")
 		args = append(args, path, path)
 	}
+	if opts.CurrentReviewEpoch {
+		clauses = append(clauses, `NOT EXISTS (
+			SELECT 1
+			FROM issue_observation_events AS epoch
+			WHERE epoch.issue_id = events.issue_id
+			  AND epoch.id > events.id
+			  AND epoch.event_type = ?
+			  AND TRIM(epoch.source) = 'issue-store'
+			  AND LOWER(TRIM(CAST(json_extract(epoch.payload_json, '$.to_status') AS TEXT))) = ?
+		)`)
+		args = append(args, string(domain.IssueEventIssueStatusChanged), string(domain.StatusInReview))
+	}
 	rows, err := db.QueryContext(ctx, `
 		WITH candidate_issues(issue_id) AS (
 			SELECT DISTINCT TRIM(CAST(value AS TEXT))
@@ -256,8 +299,8 @@ func (c *Client) ListLatestIssueObservationEventsByIssue(ctx context.Context, op
 			WHERE type = 'text' AND TRIM(CAST(value AS TEXT)) <> ''
 		), ranked AS (
 			SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json,
-				ROW_NUMBER() OVER (PARTITION BY issue_id ORDER BY observed_at DESC, id DESC) AS event_rank
-			FROM issue_observation_events
+				ROW_NUMBER() OVER (PARTITION BY issue_id ORDER BY id DESC) AS event_rank
+			FROM issue_observation_events AS events
 			JOIN candidate_issues USING (issue_id)
 			WHERE `+strings.Join(clauses, " AND ")+`
 		)
