@@ -70,6 +70,7 @@ This directory primarily contains **developer/internal documentation**.
 - `task.review_handoff`: `projection` (durable issue v2 lifecycle/review projection + session activity projection; active issue self-handoff remains allowed).
 - `task.integration_readiness` and `task.context_risk_closeout`: `projection` (durable issue projection + mailbox/observation evidence).
 - `task.merge_base_target`: `projection` (durable issue graph + worktree projection; explicit root-to-base requests also require issue-scoped `human.input_provided` acceptance evidence).
+- `decision.markdown_transfer_target`: `hybrid` (refreshed durable worktree ownership plus live Git worktree path and HEAD revision).
 - `task.follow_on_merge_candidates`: `projection` (durable issue graph + worktree projection).
 - `issue_resources.lifecycle`: `projection` (durable issue status + runtime attachment projection).
 - `interaction.waiting_human`: `projection` (durable interaction requests refreshed before decision-waiting and pickup evaluation).

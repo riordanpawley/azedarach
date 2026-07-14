@@ -307,6 +307,56 @@ func TestDecisionStore_ConsequencesRoundTrip(t *testing.T) {
 	assert.Equal(t, "Move sessions to remote daemon", updated.Title)
 }
 
+func TestDecisionStore_UpdateDecisionForOwnerRequiresExactActiveOwner(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+	seedIssue(t, client, "local", "Local owner")
+	seedIssue(t, client, "foreign", "Foreign owner")
+	decision, err := client.RecordDecision(ctx, RecordDecisionParams{Title: "Owned decision", Rationale: "original"})
+	require.NoError(t, err)
+	_, err = client.AddDecisionLink(ctx, AddDecisionLinkParams{DecisionID: decision.LocalID, TargetKind: DecisionTargetIssue, TargetID: "foreign", Relation: DecisionRelationAppliesTo})
+	require.NoError(t, err)
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	var auditRowsBefore int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM decision_audit_log WHERE entity_type = ? AND entity_id = ?`, decisionEntityKind, decision.LocalID).Scan(&auditRowsBefore))
+
+	verified, owner, err := client.UpdateDecisionForOwner(ctx, decision.LocalID, "foreign", UpdateDecisionParams{})
+	require.NoError(t, err)
+	assert.Equal(t, "foreign", owner.OwnerIssueID)
+	assert.Equal(t, decision.UpdatedAt, verified.UpdatedAt)
+	var auditRowsAfter int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM decision_audit_log WHERE entity_type = ? AND entity_id = ?`, decisionEntityKind, decision.LocalID).Scan(&auditRowsAfter))
+	assert.Equal(t, auditRowsBefore, auditRowsAfter)
+
+	_, owner, err = client.UpdateDecisionForOwner(ctx, decision.LocalID, "local", UpdateDecisionParams{})
+	require.ErrorIs(t, err, ErrDecisionOwnerMismatch)
+	assert.Equal(t, []string{"foreign"}, owner.IssueIDs)
+	assert.Equal(t, "foreign", owner.OwnerIssueID)
+
+	changed := "must not apply"
+	_, owner, err = client.UpdateDecisionForOwner(ctx, decision.LocalID, "local", UpdateDecisionParams{Rationale: &changed})
+	require.ErrorIs(t, err, ErrDecisionOwnerMismatch)
+	assert.Equal(t, "foreign", owner.OwnerIssueID)
+	unchanged, err := client.GetDecision(ctx, decision.LocalID)
+	require.NoError(t, err)
+	assert.Equal(t, decision.Rationale, unchanged.Rationale)
+
+	updatedRationale := "owner-authorized"
+	updated, owner, err := client.UpdateDecisionForOwner(ctx, decision.LocalID, "foreign", UpdateDecisionParams{Rationale: &updatedRationale})
+	require.NoError(t, err)
+	assert.Equal(t, "foreign", owner.OwnerIssueID)
+	assert.Equal(t, updatedRationale, updated.Rationale)
+
+	_, err = client.AddDecisionLink(ctx, AddDecisionLinkParams{DecisionID: decision.LocalID, TargetKind: DecisionTargetIssue, TargetID: "local", Relation: DecisionRelationAppliesTo})
+	require.NoError(t, err)
+	_, owner, err = client.UpdateDecisionForOwner(ctx, decision.LocalID, "foreign", UpdateDecisionParams{})
+	require.ErrorIs(t, err, ErrDecisionOwnerMismatch)
+	assert.Equal(t, []string{"foreign", "local"}, owner.IssueIDs)
+	assert.Empty(t, owner.OwnerIssueID)
+}
+
 func TestDecisionStore_ValidationErrors(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()

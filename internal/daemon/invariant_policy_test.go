@@ -28,6 +28,7 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantWorkerObservation:       daemonInvariantSourceHybrid,
 		daemonInvariantInteractionWaiting:      daemonInvariantSourceProjection,
 		daemonInvariantInvestigationWaiting:    daemonInvariantSourceProjection,
+		daemonInvariantDecisionMDTransfer:      daemonInvariantSourceHybrid,
 		daemonInvariantRuntimeKnownProjectIDs:  daemonInvariantSourceProjection,
 		daemonInvariantIssueResourceLifecycle:  daemonInvariantSourceProjection,
 		daemonInvariantOrchestrationScope:      daemonInvariantSourceProjection,

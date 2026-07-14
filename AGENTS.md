@@ -188,6 +188,7 @@ fd "filename" -t f internal cmd
    - `interaction.waiting_human` decision-waiting and pickup exclusion gate -> `projection` (durable interaction request projection refreshed before evaluation)
    - `investigation.waiting_human` human-findings authority gate -> `projection` (durable investigation disposition and issue-specific acceptance/review evidence refreshed before evaluation)
    - `interaction.staleness` stale/reminder/disposition/recovery policy -> `projection` (durable interaction request projection refreshed before age evaluation and revision-safe write-through audit)
+   - `decision.markdown_transfer_target` decision Markdown import/export scope -> `hybrid` (refresh durable worktree-to-issue projection, then compare it with the live Git worktree path and HEAD revision; issue worktrees transfer only decisions carrying that issue provenance)
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
    - cross-project configurable views and tmux selector ordering -> `projection` (global-daemon-owned user database refreshed from authoritative project stores; scoped issue/session/worktree/dependency keys and explicit stale/unavailable project health)
    - orchestration scope identity -> `projection` (durable project + typed rooted/project scope)
