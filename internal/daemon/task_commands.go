@@ -6625,6 +6625,10 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task details update requested", "project_id", projectID, "task_id", cmd.TaskID)
 	}
+	restoreDeferredWorktree := false
+	if cmd.Lifecycle != nil {
+		restoreDeferredWorktree = d.cancelDeferredTaskWorktreeCleanup(ctx, projectID, cmd.TaskID, "issue lifecycle changed before deferred worktree cleanup completed")
+	}
 	task, err := issueClient.UpdateDetailsWithRuntime(ctx, projectID, cmd.TaskID, issues.UpdateTaskParams{
 		Title:           cmd.Title,
 		Description:     cmd.Description,
@@ -6640,6 +6644,13 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 	})
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if restoreDeferredWorktree {
+		d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, cmd.TaskID)
+		task, err = issueClient.GetWithRuntime(ctx, projectID, cmd.TaskID)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)

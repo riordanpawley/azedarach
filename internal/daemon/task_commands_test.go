@@ -7616,29 +7616,33 @@ func TestTaskCloseDeferredWorktreeCleanupCancelledWhenIssueReopens(t *testing.T)
 		t.Fatalf("queued operation kind = %s, want %s", queued.Kind, taskDeferredWorktreeCleanupOperationKind)
 	}
 
+	openLifecycle := domain.IssueWorkflowOpen
 	updateBody, err := json.Marshal(map[string]any{
-		"task_id": taskID,
-		"status":  domain.StatusInReview,
+		"task_id":         taskID,
+		"title":           "Reopen before deferred cleanup",
+		"type":            domain.TypeBug,
+		"priority":        domain.P2,
+		"lifecycle_state": openLifecycle,
 	})
 	if err != nil {
 		t.Fatalf("marshal update request: %v", err)
 	}
-	updateResp, err := d.handleTaskUpdateStatus(ctx, protocol.RequestEnvelope{
+	updateResp, err := d.handleTaskUpdateDetails(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-reopen-after-close",
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Command:         "task.update_status",
+		Command:         "task.update_details",
 		Body:            updateBody,
 	})
 	if err != nil {
-		t.Fatalf("handleTaskUpdateStatus error: %v", err)
+		t.Fatalf("handleTaskUpdateDetails error: %v", err)
 	}
 	if !updateResp.OK {
 		if updateResp.Error != nil {
-			t.Fatalf("handleTaskUpdateStatus error = %s", updateResp.Error.Message)
+			t.Fatalf("handleTaskUpdateDetails error = %s", updateResp.Error.Message)
 		}
-		t.Fatalf("handleTaskUpdateStatus response = %+v", updateResp)
+		t.Fatalf("handleTaskUpdateDetails response = %+v", updateResp)
 	}
 	cancelled := waitForRuntimeState(t, d.operationRuntime, closeResult.WorktreeCleanupOperationID, daemonops.StateCancelled)
 	if cancelled.ErrorMessage == "" {
@@ -7650,6 +7654,13 @@ func TestTaskCloseDeferredWorktreeCleanupCancelledWhenIssueReopens(t *testing.T)
 	}
 	if !found || restored.Path != sourceWorktree || restored.Branch != sourceBranch {
 		t.Fatalf("restored projection = %+v found=%v, want %s %s", restored, found, sourceWorktree, sourceBranch)
+	}
+	reopened, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get reopened issue: %v", err)
+	}
+	if reopened.Status != domain.StatusOpen || reopened.State.Workflow() != domain.IssueWorkflowOpen {
+		t.Fatalf("reopened issue status=%s workflow=%s, want open", reopened.Status, reopened.State.Workflow())
 	}
 	if strings.Contains(strings.Join(commands, "\n"), "worktree remove") {
 		t.Fatalf("cleanup should not remove worktree after reopen, commands:\n%s", strings.Join(commands, "\n"))
