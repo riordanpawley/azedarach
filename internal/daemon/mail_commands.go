@@ -75,6 +75,10 @@ func (d *Daemon) handleMailSend(ctx context.Context, req protocol.RequestEnvelop
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
+	existing, err = d.reconcileProjectedMailboxEvents(ctx, d.projectID(req.Meta), repoDir, parentIssue, existing)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("reconcile projected mailbox events: %v", err)), nil
+	}
 	nextSeq := int64(1)
 	if len(existing) > 0 {
 		nextSeq = existing[len(existing)-1].Seq + 1
@@ -90,11 +94,20 @@ func (d *Daemon) handleMailSend(ctx context.Context, req protocol.RequestEnvelop
 		Body:        cmd.Body,
 		CreatedAt:   time.Now().UTC(),
 	}
-	if err := d.projectMailEvent(ctx, d.projectID(req.Meta), repoDir, event); err != nil {
+	projected, replayed, err := d.projectMailEvent(ctx, d.projectID(req.Meta), repoDir, strings.TrimSpace(req.RequestID.String()), event)
+	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("project mailbox event: %v", err)), nil
 	}
-	if err := appendMailboxEvent(repoDir, event); err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	event = projected
+	if !replayed {
+		if hook := d.mailProjectedBeforeAppend; hook != nil {
+			if err := hook(ctx, event); err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("after project mailbox event: %v", err)), nil
+			}
+		}
+		if err := appendMailboxEvent(repoDir, event); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
 	}
 
 	out, err := json.Marshal(mailEventToProtocol(event))
@@ -115,41 +128,141 @@ func (d *Daemon) handleMailSend(ctx context.Context, req protocol.RequestEnvelop
 	return resp, nil
 }
 
-func (d *Daemon) projectMailEvent(ctx context.Context, projectID, repoDir string, event daemonMailEvent) error {
+func (d *Daemon) projectMailEvent(ctx context.Context, projectID, repoDir, deliveryID string, event daemonMailEvent) (daemonMailEvent, bool, error) {
 	if strings.TrimSpace(event.IssueID) == "" {
-		return nil
+		return event, false, nil
 	}
 	projectedType, stewardship := projectStewardshipEventType(domain.IssueObservationEventType(event.Type))
 	if !stewardship {
-		return nil
+		return event, false, nil
 	}
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
-		return nil
+		return event, false, nil
 	}
 	eventType := domain.IssueObservationEventType(projectedType)
-	exists, err := issueClient.IssueObservationMailEventExists(ctx, event.IssueID, eventType, event.ParentIssue, event.Seq)
-	if err != nil && !errors.Is(err, domain.ErrNotFound) {
-		return err
+	payload := projectedMailObservationPayload(event)
+	if deliveryID = strings.TrimSpace(deliveryID); deliveryID != "" {
+		payload["mail_delivery_id"] = deliveryID
 	}
-	if exists {
-		return nil
-	}
-	_, err = issueClient.AppendIssueObservationEvent(ctx, event.IssueID, issues.IssueObservationEventParams{
+	params := issues.IssueObservationEventParams{
 		Type:          eventType,
 		ObservedAt:    event.CreatedAt,
 		Source:        strings.TrimSpace(event.From),
 		SourceCommand: "mail.send",
 		WorktreePath:  strings.TrimSpace(repoDir),
-		Payload:       projectedMailObservationPayload(event),
-	})
+		Payload:       payload,
+	}
+	var durable domain.IssueObservationEvent
+	inserted := true
+	var err error
+	if deliveryID == "" {
+		durable, err = issueClient.AppendIssueObservationEvent(ctx, event.IssueID, params)
+	} else {
+		durable, inserted, err = issueClient.AppendIssueObservationMailDelivery(ctx, deliveryID, event.IssueID, params)
+	}
 	if errors.Is(err, domain.ErrNotFound) {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("mail event issue projection skipped for unknown issue", "project_id", projectID, "parent_issue", event.ParentIssue, "issue_id", event.IssueID, "type", event.Type)
 		}
-		return nil
+		return event, false, nil
 	}
-	return err
+	if err != nil {
+		return event, false, err
+	}
+	stored, err := daemonMailEventFromObservation(durable)
+	if err != nil {
+		return event, false, err
+	}
+	if !sameMailDeliveryCommand(stored, event) {
+		return event, false, fmt.Errorf("mail request ID %s was already used for a different message", deliveryID)
+	}
+	return stored, !inserted, nil
+}
+
+func (d *Daemon) reconcileProjectedMailboxEvents(ctx context.Context, projectID, repoDir, parentIssue string, existing []daemonMailEvent) ([]daemonMailEvent, error) {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return existing, nil
+	}
+	projected, err := issueClient.ListIssueObservationMailEvents(ctx, parentIssue)
+	if err != nil {
+		return nil, err
+	}
+	bySequence := make(map[int64]daemonMailEvent, len(existing))
+	for _, event := range existing {
+		bySequence[event.Seq] = event
+	}
+	lastSequence := lastMailboxSequence(existing)
+	for _, observation := range projected {
+		event, err := daemonMailEventFromObservation(observation)
+		if err != nil {
+			return nil, fmt.Errorf("decode projected mail observation %d: %w", observation.ID, err)
+		}
+		if event.ParentIssue != parentIssue {
+			return nil, fmt.Errorf("projected mail observation %d belongs to parent %s, not %s", observation.ID, event.ParentIssue, parentIssue)
+		}
+		if current, ok := bySequence[event.Seq]; ok {
+			equal, err := sameProjectedMailboxEvent(current, event)
+			if err != nil {
+				return nil, err
+			}
+			if !equal {
+				return nil, fmt.Errorf("mailbox sequence %d conflicts with durable observation %d", event.Seq, observation.ID)
+			}
+			continue
+		}
+		if event.Seq <= lastSequence {
+			return nil, fmt.Errorf("cannot append projected mailbox sequence %d after sequence %d", event.Seq, lastSequence)
+		}
+		if err := appendMailboxEvent(repoDir, event); err != nil {
+			return nil, fmt.Errorf("append projected mailbox sequence %d: %w", event.Seq, err)
+		}
+		existing = append(existing, event)
+		bySequence[event.Seq] = event
+		lastSequence = event.Seq
+	}
+	return existing, nil
+}
+
+func daemonMailEventFromObservation(observation domain.IssueObservationEvent) (daemonMailEvent, error) {
+	raw, ok := observation.Payload["mail_event"]
+	if !ok {
+		return daemonMailEvent{}, fmt.Errorf("mail_event payload is missing")
+	}
+	body, err := json.Marshal(raw)
+	if err != nil {
+		return daemonMailEvent{}, fmt.Errorf("encode mail_event payload: %w", err)
+	}
+	var projected protocol.MailEvent
+	if err := json.Unmarshal(body, &projected); err != nil {
+		return daemonMailEvent{}, fmt.Errorf("decode mail_event payload: %w", err)
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(projected.CreatedAt))
+	if err != nil {
+		return daemonMailEvent{}, fmt.Errorf("decode mail_event created_at: %w", err)
+	}
+	return daemonMailEvent{
+		Seq: projected.Seq, ParentIssue: projected.ParentIssue, IssueID: projected.IssueID.String(), Type: projected.Type,
+		From: projected.From, To: projected.To, Body: projected.Body, CreatedAt: createdAt, Payload: projected.Payload,
+	}, nil
+}
+
+func sameMailDeliveryCommand(left, right daemonMailEvent) bool {
+	return left.ParentIssue == right.ParentIssue && left.IssueID == right.IssueID && left.Type == right.Type &&
+		left.From == right.From && left.To == right.To && left.Body == right.Body
+}
+
+func sameProjectedMailboxEvent(left, right daemonMailEvent) (bool, error) {
+	leftBody, err := json.Marshal(mailEventToProtocol(left))
+	if err != nil {
+		return false, fmt.Errorf("encode filesystem mailbox event %d: %w", left.Seq, err)
+	}
+	rightBody, err := json.Marshal(mailEventToProtocol(right))
+	if err != nil {
+		return false, fmt.Errorf("encode projected mailbox event %d: %w", right.Seq, err)
+	}
+	return bytes.Equal(leftBody, rightBody), nil
 }
 
 func (d *Daemon) ensureLegacyMailboxObservationProjection(ctx context.Context, projectID, repoDir string) error {

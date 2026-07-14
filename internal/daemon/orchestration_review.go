@@ -17,6 +17,14 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
+type acceptedReviewPin struct {
+	SourceOID       string
+	EvidenceSource  string
+	EvidenceEventID int64
+	EvidenceSeq     int64
+	EvidenceDigest  string
+}
+
 func validOrchestrationIntentKind(kind protocol.OrchestrationIntentKind) bool {
 	switch kind {
 	case protocol.OrchestrationIntentStart, protocol.OrchestrationIntentReviewReturn, protocol.OrchestrationIntentReviewAccept:
@@ -284,7 +292,24 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 				continue
 			}
 			integrateBeforeClose := inspection.Evidence != nil || strings.TrimSpace(inspection.WorktreePath) != ""
-			if _, err := a.releaseAndCloseAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, &result); err != nil {
+			storedPin, err := a.acceptedReviewPinForIntent(ctx, projectID, issueID, request, integrateBeforeClose)
+			if err != nil {
+				result.Failed[issueID] = err.Error()
+				continue
+			}
+			currentPin, err := a.captureAcceptedReviewPin(ctx, projectID, request.RepoDir, inspection, integrateBeforeClose)
+			if err != nil || currentPin != storedPin {
+				failure := "reviewed source or evidence changed; fresh review required"
+				if err != nil {
+					failure += ": " + err.Error()
+				}
+				if recordErr := a.recordReviewOutcome(ctx, projectID, issueID, request, string(domain.ReviewOutcomeIntegrationFailed), failure); recordErr != nil {
+					failure += "; record integration failure: " + recordErr.Error()
+				}
+				result.Failed[issueID] = failure
+				continue
+			}
+			if _, err := a.releaseAndCloseAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, storedPin.SourceOID, &result); err != nil {
 				result.Failed[issueID] = err.Error()
 			}
 			continue
@@ -620,7 +645,7 @@ func (a daemonOrchestrationAuthority) reviewIntentTerminalOutcome(ctx context.Co
 			return "returned", nil
 		}
 		if outcome == domain.ReviewOutcomeIntegrationFailed {
-			return "", nil
+			return "superseded", nil
 		}
 		if outcome == domain.ReviewOutcomeAccepted {
 			if task.Status == domain.StatusDone {
@@ -673,14 +698,143 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 	if inspection.ContextRisk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*inspection.ContextRisk) {
 		return false, fmt.Errorf("accepted review requires structured high-context-risk closeout evidence")
 	}
-	if err := a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "accepted", ""); err != nil {
+	integrateBeforeClose := inspection.Evidence != nil || strings.TrimSpace(inspection.WorktreePath) != ""
+	pin, err := a.captureAcceptedReviewPin(ctx, projectID, request.RepoDir, inspection, integrateBeforeClose)
+	if err != nil {
 		return false, err
 	}
-	integrateBeforeClose := inspection.Evidence != nil || strings.TrimSpace(inspection.WorktreePath) != ""
-	return a.releaseAndCloseAcceptedReview(ctx, projectID, request, inspection.IssueID, integrateBeforeClose, result)
+	if err := a.recordAcceptedReviewOutcome(ctx, projectID, inspection.IssueID, request, pin); err != nil {
+		return false, err
+	}
+	return a.releaseAndCloseAcceptedReview(ctx, projectID, request, inspection.IssueID, integrateBeforeClose, pin.SourceOID, result)
 }
 
-func (a daemonOrchestrationAuthority) releaseAndCloseAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, result *protocol.OrchestrationIntentResult) (bool, error) {
+func (a daemonOrchestrationAuthority) captureAcceptedReviewPin(ctx context.Context, projectID, repoDir string, inspection protocol.OrchestrationReview, integrateBeforeClose bool) (acceptedReviewPin, error) {
+	pin := acceptedReviewPin{}
+	if inspection.Evidence != nil {
+		repoDir = strings.TrimSpace(repoDir)
+		if repoDir == "" {
+			repoDir = strings.TrimSpace(a.daemon.cfg.RepoDir)
+		}
+		readiness, err := a.daemon.taskIntegrationReadiness(ctx, projectID, inspection.IssueID, repoDir)
+		if err != nil {
+			return pin, fmt.Errorf("capture reviewed evidence identity: %w", err)
+		}
+		if readiness.EvidencePacket == nil {
+			return pin, fmt.Errorf("capture reviewed evidence identity: current evidence is unavailable")
+		}
+		body, err := json.Marshal(readiness.EvidencePacket)
+		if err != nil {
+			return pin, fmt.Errorf("encode reviewed evidence identity: %w", err)
+		}
+		pin.EvidenceSource = strings.TrimSpace(readiness.EvidenceSource)
+		if pin.EvidenceSource == "" && readiness.EvidenceEventSeq > 0 {
+			pin.EvidenceSource = "mailbox"
+		}
+		pin.EvidenceEventID = readiness.EvidenceEventID
+		pin.EvidenceSeq = readiness.EvidenceEventSeq
+		pin.EvidenceDigest = fmt.Sprintf("%x", sha256.Sum256(body))
+	}
+	if integrateBeforeClose {
+		oid, err := a.resolveAcceptedReviewSourceOID(ctx, projectID, inspection.IssueID)
+		if err != nil {
+			return pin, fmt.Errorf("capture reviewed source commit: %w", err)
+		}
+		pin.SourceOID = strings.TrimSpace(oid)
+		if pin.SourceOID == "" {
+			return pin, fmt.Errorf("capture reviewed source commit: empty object ID")
+		}
+	}
+	return pin, nil
+}
+
+func (a daemonOrchestrationAuthority) resolveAcceptedReviewSourceOID(ctx context.Context, projectID, issueID string) (string, error) {
+	if hook := a.daemon.reviewAcceptedSourceOID; hook != nil {
+		return hook(ctx, projectID, issueID)
+	}
+	if a.daemon.worktreeAdapter == nil || a.daemon.git == nil {
+		return "", fmt.Errorf("worktree or git adapter unavailable")
+	}
+	worktrees, err := a.daemon.worktreeAdapter.List(ctx, projectID)
+	if err != nil {
+		return "", fmt.Errorf("list worktrees: %w", err)
+	}
+	source, ok := daemonWorktreeForIssue(worktrees, issueID)
+	if !ok || strings.TrimSpace(source.Branch) == "" {
+		a.daemon.worktreeAdapter.pollAndPersistWorktrees(ctx, projectID)
+		worktrees, err = a.daemon.worktreeAdapter.List(ctx, projectID)
+		if err != nil {
+			return "", fmt.Errorf("refresh worktrees: %w", err)
+		}
+		source, ok = daemonWorktreeForIssue(worktrees, issueID)
+	}
+	if !ok || strings.TrimSpace(source.Branch) == "" {
+		return "", fmt.Errorf("source branch unavailable for %s", issueID)
+	}
+	worktree := strings.TrimSpace(source.Path)
+	ref := "HEAD"
+	if missing, statErr := taskCloseWorktreePathMissing(worktree); statErr != nil {
+		return "", statErr
+	} else if missing {
+		worktree = strings.TrimSpace(a.daemon.resolveRepoDirForProjectExact(projectID))
+		if worktree == "" {
+			worktree = strings.TrimSpace(a.daemon.resolveRepoDirForProject(projectID))
+		}
+		ref = source.Branch
+	}
+	return a.daemon.git.ResolveCommit(ctx, worktree, ref)
+}
+
+func (a daemonOrchestrationAuthority) acceptedReviewPinForIntent(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, requireSourceOID bool) (acceptedReviewPin, error) {
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return acceptedReviewPin{}, fmt.Errorf("issue store unavailable")
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}, NewestFirst: true})
+	if err != nil {
+		return acceptedReviewPin{}, err
+	}
+	for _, event := range events {
+		outcome, trusted := domain.TrustedReviewOutcome(event)
+		if !trusted || outcome != domain.ReviewOutcomeAccepted || strings.TrimSpace(fmt.Sprint(event.Payload["intent_key"])) != strings.TrimSpace(request.IntentKey) {
+			continue
+		}
+		pin := acceptedReviewPin{
+			SourceOID:       observationPayloadString(event.Payload, "reviewed_source_oid"),
+			EvidenceSource:  observationPayloadString(event.Payload, "reviewed_evidence_source"),
+			EvidenceEventID: reviewPayloadInt64(event.Payload["reviewed_evidence_event_id"]),
+			EvidenceSeq:     reviewPayloadInt64(event.Payload["reviewed_evidence_seq"]),
+			EvidenceDigest:  observationPayloadString(event.Payload, "reviewed_evidence_digest"),
+		}
+		if requireSourceOID && pin.SourceOID == "" {
+			return acceptedReviewPin{}, fmt.Errorf("accepted review is missing an exact reviewed source commit; fresh review required")
+		}
+		return pin, nil
+	}
+	return acceptedReviewPin{}, fmt.Errorf("accepted review pin not found; fresh review required")
+}
+
+func reviewPayloadInt64(value any) int64 {
+	switch typed := value.(type) {
+	case int64:
+		return typed
+	case int:
+		return int64(typed)
+	case float64:
+		return int64(typed)
+	case json.Number:
+		parsed, _ := typed.Int64()
+		return parsed
+	case string:
+		var parsed int64
+		_, _ = fmt.Sscan(strings.TrimSpace(typed), &parsed)
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func (a daemonOrchestrationAuthority) releaseAndCloseAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, expectedSourceOID string, result *protocol.OrchestrationIntentResult) (bool, error) {
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return false, fmt.Errorf("issue store unavailable")
@@ -693,11 +847,11 @@ func (a daemonOrchestrationAuthority) releaseAndCloseAcceptedReview(ctx context.
 			return true, fmt.Errorf("after review lease release: %w", err)
 		}
 	}
-	return true, a.closeAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, result)
+	return true, a.closeAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, expectedSourceOID, result)
 }
 
-func (a daemonOrchestrationAuthority) closeAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, result *protocol.OrchestrationIntentResult) error {
-	body, err := json.Marshal(taskCloseRequest{TaskID: issueID, IntegrateBeforeClose: integrateBeforeClose})
+func (a daemonOrchestrationAuthority) closeAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, expectedSourceOID string, result *protocol.OrchestrationIntentResult) error {
+	body, err := json.Marshal(taskCloseRequest{TaskID: issueID, IntegrateBeforeClose: integrateBeforeClose, ExpectedSourceOID: strings.TrimSpace(expectedSourceOID)})
 	if err != nil {
 		return err
 	}
@@ -745,7 +899,18 @@ func (a daemonOrchestrationAuthority) recordReviewCloseFailure(ctx context.Conte
 }
 
 func (a daemonOrchestrationAuthority) recordReviewOutcome(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, outcome, failure string) error {
-	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, outcome, failure, nil)
+	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, outcome, failure, nil, nil)
+}
+
+func (a daemonOrchestrationAuthority) recordAcceptedReviewOutcome(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, pin acceptedReviewPin) error {
+	metadata := map[string]any{
+		"reviewed_source_oid":        pin.SourceOID,
+		"reviewed_evidence_source":   pin.EvidenceSource,
+		"reviewed_evidence_event_id": pin.EvidenceEventID,
+		"reviewed_evidence_seq":      pin.EvidenceSeq,
+		"reviewed_evidence_digest":   pin.EvidenceDigest,
+	}
+	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, string(domain.ReviewOutcomeAccepted), "", nil, metadata)
 }
 
 func (a daemonOrchestrationAuthority) recordReviewRestartSubmitted(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, launch protocol.OrchestrationLaunch) error {
@@ -758,10 +923,10 @@ func (a daemonOrchestrationAuthority) recordReviewRestartSubmitted(ctx context.C
 		return fmt.Errorf("record restart submission operation %s with non-pending state %q", operationID, state)
 	}
 	restart := &domain.ReviewRestartSubmission{OperationID: operationID, State: domain.ReviewRestartOperationState(state), SessionID: strings.TrimSpace(launch.SessionID), ActorID: strings.TrimSpace(request.ActorID)}
-	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, "restart_submitted", "", restart)
+	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, "restart_submitted", "", restart, nil)
 }
 
-func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, outcome, failure string, restart *domain.ReviewRestartSubmission) error {
+func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, outcome, failure string, restart *domain.ReviewRestartSubmission, metadata map[string]any) error {
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return fmt.Errorf("issue store unavailable")
@@ -783,6 +948,9 @@ func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context
 		if restart != nil {
 			matches = matches && event.OperationID == restart.OperationID.String() && strings.TrimSpace(fmt.Sprint(event.Payload["operation_state"])) == string(restart.State)
 		}
+		for key, value := range metadata {
+			matches = matches && strings.TrimSpace(fmt.Sprint(event.Payload[key])) == strings.TrimSpace(fmt.Sprint(value))
+		}
 		if matches {
 			return nil
 		}
@@ -792,6 +960,9 @@ func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context
 		return err
 	}
 	payload := map[string]any{"outcome": outcome, "actor_id": request.ActorID, "intent_key": request.IntentKey, "request_fingerprint": fingerprint, "findings": request.Findings}
+	for key, value := range metadata {
+		payload[key] = value
+	}
 	if strings.TrimSpace(failure) != "" {
 		payload["failure"] = failure
 	}

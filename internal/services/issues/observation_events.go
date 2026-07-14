@@ -2,6 +2,7 @@ package issues
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -158,6 +159,126 @@ func (c *Client) IssueObservationMailEventExists(ctx context.Context, issueID st
 		return false, c.wrapError("find-mail-observation-event", issueID, err)
 	}
 	return exists, nil
+}
+
+// ListIssueObservationMailEvents returns the durable mailbox outbox for one
+// parent in mailbox sequence order. The nested mail_event is the canonical
+// payload written back to JSONL after a SQLite-first crash.
+func (c *Client) ListIssueObservationMailEvents(ctx context.Context, parentIssue string) ([]domain.IssueObservationEvent, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	parentIssue = strings.TrimSpace(parentIssue)
+	if parentIssue == "" {
+		return nil, c.wrapError("list-mail-observation-events", "", errors.New("parent issue is required"))
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM issue_observation_events
+		WHERE json_extract(payload_json, '$.mail_event.parent_issue') = ?
+		  AND CAST(json_extract(payload_json, '$.mail_event.seq') AS INTEGER) > 0
+		ORDER BY CAST(json_extract(payload_json, '$.mail_event.seq') AS INTEGER) ASC, id ASC
+	`, parentIssue)
+	if err != nil {
+		return nil, c.wrapError("list-mail-observation-events", parentIssue, err)
+	}
+	defer rows.Close()
+	events := make([]domain.IssueObservationEvent, 0, 16)
+	for rows.Next() {
+		event, scanErr := scanIssueObservationEvent(rows)
+		if scanErr != nil {
+			return nil, c.wrapError("list-mail-observation-events", parentIssue, scanErr)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-mail-observation-events", parentIssue, err)
+	}
+	return events, nil
+}
+
+// AppendIssueObservationMailDelivery atomically reserves a daemon request ID
+// and appends its outbox event. The project-wide issue-store write lock makes
+// the identity check safe even when equal request IDs reach different mailbox
+// parent locks in separate daemon processes.
+func (c *Client) AppendIssueObservationMailDelivery(ctx context.Context, deliveryID, issueID string, params IssueObservationEventParams) (domain.IssueObservationEvent, bool, error) {
+	deliveryID = strings.TrimSpace(deliveryID)
+	if deliveryID == "" {
+		return domain.IssueObservationEvent{}, false, c.wrapError("append-mail-observation-delivery", issueID, errors.New("delivery id is required"))
+	}
+	payloadDeliveryID, _ := params.Payload["mail_delivery_id"].(string)
+	if strings.TrimSpace(payloadDeliveryID) != deliveryID {
+		return domain.IssueObservationEvent{}, false, c.wrapError("append-mail-observation-delivery", issueID, errors.New("payload mail_delivery_id does not match delivery id"))
+	}
+	var durable domain.IssueObservationEvent
+	inserted := false
+	err := c.retrySQLiteBusy(ctx, func() error {
+		durable = domain.IssueObservationEvent{}
+		inserted = false
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return c.wrapError("append-mail-observation-delivery", issueID, err)
+			}
+			defer tx.Rollback()
+			existing, found, err := findIssueObservationMailDelivery(ctx, tx, deliveryID)
+			if err != nil {
+				return c.wrapError("append-mail-observation-delivery", issueID, err)
+			}
+			if found {
+				durable = existing
+				inserted = false
+				return nil
+			}
+			if err := c.requireIssueExists(ctx, tx, issueID, "append-mail-observation-delivery"); err != nil {
+				return err
+			}
+			id, err := c.insertIssueObservationEvent(ctx, tx, issueID, params)
+			if err != nil {
+				return c.wrapError("append-mail-observation-delivery", issueID, err)
+			}
+			durable, err = scanIssueObservationEvent(tx.QueryRowContext(ctx, `
+				SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+				FROM issue_observation_events
+				WHERE id = ?
+			`, id))
+			if err != nil {
+				return c.wrapError("append-mail-observation-delivery", issueID, err)
+			}
+			if err := tx.Commit(); err != nil {
+				return c.wrapError("append-mail-observation-delivery", issueID, err)
+			}
+			inserted = true
+			return nil
+		})
+	})
+	if err != nil {
+		return domain.IssueObservationEvent{}, false, err
+	}
+	return durable, inserted, nil
+}
+
+func findIssueObservationMailDelivery(ctx context.Context, queryer sqlIssueQueryer, deliveryID string) (domain.IssueObservationEvent, bool, error) {
+	event, err := scanIssueObservationEvent(queryer.QueryRowContext(ctx, `
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM issue_observation_events
+		WHERE source_command = 'mail.send'
+		  AND json_extract(payload_json, '$.mail_delivery_id') = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, deliveryID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.IssueObservationEvent{}, false, nil
+	}
+	if err != nil {
+		return domain.IssueObservationEvent{}, false, err
+	}
+	return event, true, nil
 }
 
 func (c *Client) ListIssueObservationEvents(ctx context.Context, issueID string, opts IssueObservationEventListOptions) ([]domain.IssueObservationEvent, error) {

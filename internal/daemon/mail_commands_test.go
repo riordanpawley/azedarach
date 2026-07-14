@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -232,6 +233,81 @@ func TestMailSendProjectsStewardshipEventsWithoutProjectMailboxReads(t *testing.
 		if rootedErr != nil || projectErr != nil || !reflect.DeepEqual(projectEvent, rootedEvent) || !reflect.DeepEqual(projectPayload, rootedPayload) {
 			t.Fatalf("event %d mismatch:\nrooted=%+v\nproject=%+v", i, rooted.RecentEvents[i], project.RecentEvents[i])
 		}
+	}
+}
+
+func TestMailSendReconcilesSQLiteFirstCrashWithoutSequenceReuse(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	root, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := client.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInProgress, ParentID: &root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	send := func(requestID, body string) protocol.ResponseEnvelope {
+		t.Helper()
+		resp, handleErr := d.handleMailSend(ctx, protocol.RequestEnvelope{
+			RequestID: naming.RequestID(requestID),
+			Meta:      protocol.Metadata{ProjectID: "project"},
+			Body: mustMarshal(t, protocol.MailSendCommandBody{
+				RepoDir: repoDir, ParentIssue: root, IssueID: naming.IssueID(child), Type: "worker-progress",
+				From: "worker", To: "orchestrator", Body: body,
+			}),
+		})
+		if handleErr != nil {
+			t.Fatal(handleErr)
+		}
+		return resp
+	}
+
+	d.mailProjectedBeforeAppend = func(context.Context, daemonMailEvent) error { return errors.New("injected crash after SQLite commit") }
+	if resp := send("mail-crash-1", "first"); resp.OK || !strings.Contains(resp.Error.Message, "injected crash") {
+		t.Fatalf("first send = %+v, want injected SQLite-first crash", resp)
+	}
+	if events, err := readMailboxEvents(repoDir, root); err != nil || len(events) != 0 {
+		t.Fatalf("mailbox after crash = %+v err=%v, want no JSONL append", events, err)
+	}
+
+	d.mailProjectedBeforeAppend = nil
+	if resp := send("mail-crash-1", "first"); !resp.OK {
+		t.Fatalf("same delivery retry = %+v, want durable outbox replay", resp)
+	}
+	if events, err := readMailboxEvents(repoDir, root); err != nil || len(events) != 1 || events[0].Seq != 1 || events[0].Body != "first" {
+		t.Fatalf("mailbox after retry = %+v err=%v, want original sequence 1", events, err)
+	}
+	if resp := send("mail-crash-1", "changed payload"); resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "different message") {
+		t.Fatalf("request ID payload mismatch = %+v, want canonical identity rejection", resp)
+	}
+
+	d.mailProjectedBeforeAppend = func(context.Context, daemonMailEvent) error { return errors.New("injected second crash") }
+	if resp := send("mail-crash-2", "second"); resp.OK {
+		t.Fatalf("second crash send = %+v, want failure", resp)
+	}
+	d.mailProjectedBeforeAppend = nil
+	if resp := send("mail-after-crash", "third"); !resp.OK {
+		t.Fatalf("distinct send after crash = %+v, want reconciliation", resp)
+	}
+	events, err := readMailboxEvents(repoDir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("mailbox = %+v, want three durable deliveries", events)
+	}
+	for i, wantBody := range []string{"first", "second", "third"} {
+		if events[i].Seq != int64(i+1) || events[i].Body != wantBody {
+			t.Fatalf("mailbox[%d] = %+v, want seq=%d body=%q", i, events[i], i+1, wantBody)
+		}
+	}
+	projected, err := client.ListIssueObservationMailEvents(ctx, root)
+	if err != nil || len(projected) != 3 {
+		t.Fatalf("projected outbox = %+v err=%v, want one row per logical delivery", projected, err)
 	}
 }
 

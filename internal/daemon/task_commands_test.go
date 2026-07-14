@@ -6003,7 +6003,7 @@ func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchVal
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6147,7 +6147,7 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6258,7 +6258,7 @@ func TestTaskCloseIntegrationOriginBaseSkipsLocalMergeWhenRemoteTreeMatches(t *t
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6378,7 +6378,7 @@ func TestTaskCloseIntegrationOriginBaseAllowsRemoteAheadWhenSourceContained(t *t
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6446,7 +6446,7 @@ func TestTaskCloseIntegrationOriginBaseRetryUsesExactReceiptAfterSourceRemoval(t
 	}
 	result, err := d.integrateTaskBeforeCloseOriginBase(ctx, projectID, taskID, git.Worktree{
 		IssueID: taskID, Path: filepath.Join(repoDir, "removed-worktree"), Branch: sourceBranch,
-	}, repoDir, "preview", true)
+	}, repoDir, "preview", true, "")
 	if err != nil {
 		t.Fatalf("origin retry exact receipt error: %v", err)
 	}
@@ -6552,7 +6552,7 @@ func TestTaskCloseIntegrationOriginBaseRefusesLocalMergeWhenRemoteDiffRemains(t 
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
 	if err == nil {
 		t.Fatalf("integrateTaskBeforeClose error = nil, result = %+v; want origin-mode refusal", result)
 	}

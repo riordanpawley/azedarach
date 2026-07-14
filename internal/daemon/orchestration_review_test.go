@@ -1067,6 +1067,73 @@ func TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState(t *tes
 	}
 }
 
+func TestReviewAcceptRetryRejectsBranchMutationAfterDurableAcceptance(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	sourceOID := "reviewed-source-a"
+	d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return sourceOID, nil }
+	request := protocol.OrchestrationIntentRequest{
+		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept,
+		IntentKey: "accept-before-branch-mutation", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
+	}
+
+	first, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(first.Failed[issueID], "authoritative close") {
+		t.Fatalf("first acceptance = %+v, want accepted-close retry state", first)
+	}
+	sourceOID = "unreviewed-source-b"
+	retried, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(retried.Failed[issueID], "fresh review required") || strings.Contains(retried.Failed[issueID], "authoritative close") {
+		t.Fatalf("mutated retry = %+v, want fail-closed before task.close", retried)
+	}
+	events, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var acceptedOID string
+	integrationFailed := false
+	for _, event := range events {
+		switch event.Payload["outcome"] {
+		case "accepted":
+			acceptedOID, _ = event.Payload["reviewed_source_oid"].(string)
+		case "integration_failed":
+			integrationFailed = true
+		}
+	}
+	if acceptedOID != "reviewed-source-a" || !integrationFailed {
+		t.Fatalf("review events = %+v, want pinned accepted OID plus integration_failed", events)
+	}
+
+	superseded, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if superseded.Skipped[issueID] != "review-intent-superseded" {
+		t.Fatalf("same intent after mutation = %+v, want fresh intent requirement", superseded)
+	}
+	request.IntentKey = "fresh-review-after-branch-mutation"
+	fresh, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fresh.Failed[issueID], "authoritative close") {
+		t.Fatalf("fresh review = %+v, want new acceptance to reach close", fresh)
+	}
+}
+
 func TestReviewAcceptUsesReplayedTicketIntegrationReadyEvidenceIdempotently(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -1216,7 +1283,7 @@ func TestReviewAcceptReleasesLeaseBeforeAcceptedInternalReviewClose(t *testing.T
 	}
 	for _, event := range []issues.IssueObservationEventParams{
 		{Type: domain.IssueEventInvestigationDisposition, Source: "test", Payload: map[string]any{"disposition": "internal_review"}},
-		{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)},
+		{Type: domain.IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "accepted", "summary": "parent consumed findings"}},
 	} {
 		if _, err := client.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
 			t.Fatal(err)
@@ -1245,8 +1312,8 @@ func TestReviewAcceptReleasesLeaseBeforeAcceptedInternalReviewClose(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reviewEvents) != 1 || reviewEvents[0].Payload["outcome"] != "accepted" {
-		t.Fatalf("review events = %+v, want accepted without integration_failed", reviewEvents)
+	if len(reviewEvents) != 2 {
+		t.Fatalf("review events = %+v, want internal artifact and accepted outcome without integration_failed", reviewEvents)
 	}
 	allEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted, domain.IssueEventIssueOwnershipChanged, domain.IssueEventIssueStatusChanged}})
 	if err != nil {
@@ -1278,7 +1345,7 @@ func TestReviewAcceptReleasesLeaseBeforeAcceptedInternalReviewClose(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reviewEvents) != 1 {
+	if len(reviewEvents) != 2 {
 		t.Fatalf("review events after replay = %+v, want no duplicate outcome", reviewEvents)
 	}
 }
@@ -1296,7 +1363,7 @@ func TestReviewAcceptFenceBlocksSecondDaemonReturnBetweenReleaseAndClose(t *test
 	}
 	for _, event := range []issues.IssueObservationEventParams{
 		{Type: domain.IssueEventInvestigationDisposition, Source: "test", Payload: map[string]any{"disposition": "internal_review"}},
-		{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)},
+		{Type: domain.IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "accepted", "summary": "parent consumed findings"}},
 	} {
 		if _, err := acceptClient.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
 			t.Fatal(err)
@@ -1334,8 +1401,8 @@ func TestReviewAcceptFenceBlocksSecondDaemonReturnBetweenReleaseAndClose(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Payload["outcome"] != "accepted" {
-		t.Fatalf("review outcomes = %+v, want accepted only", events)
+	if len(events) != 2 {
+		t.Fatalf("review outcomes = %+v, want internal artifact and daemon acceptance only", events)
 	}
 	task, err := returnClient.GetWithRuntime(ctx, "project", issueID)
 	if err != nil {
@@ -1361,7 +1428,7 @@ func TestReviewAcceptResumesDurablyAcceptedIntentWithoutReacquiringLease(t *test
 	}
 	for _, event := range []issues.IssueObservationEventParams{
 		{Type: domain.IssueEventInvestigationDisposition, Source: "test", Payload: map[string]any{"disposition": "internal_review"}},
-		{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)},
+		{Type: domain.IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "accepted", "summary": "parent consumed findings"}},
 		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept), Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request)}},
 	} {
 		if _, err := client.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
@@ -1391,8 +1458,8 @@ func TestReviewAcceptResumesDurablyAcceptedIntentWithoutReacquiringLease(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reviewEvents) != 1 || reviewEvents[0].Payload["outcome"] != "accepted" {
-		t.Fatalf("resumed review events = %+v, want original accepted outcome only", reviewEvents)
+	if len(reviewEvents) != 2 {
+		t.Fatalf("resumed review events = %+v, want original artifact and daemon acceptance only", reviewEvents)
 	}
 }
 
@@ -1404,9 +1471,20 @@ func TestReviewAcceptConvergesStaleBusyHookAtIdlePromptAndReplaysIdempotently(t 
 	t.Cleanup(func() { _ = client.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
 	t.Cleanup(func() { _ = runtimeStore.Close() })
-	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
-	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "stale busy internal review", Description: "review findings", Acceptance: "consumed by parent", Type: domain.TypeInvestigation, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "orchestrator", OwnerKind: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []issues.IssueObservationEventParams{
+		{Type: domain.IssueEventInvestigationDisposition, Source: "test", Payload: map[string]any{"disposition": "internal_review"}},
+		{Type: domain.IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "accepted", "summary": "parent consumed findings"}},
+	} {
+		if _, err := client.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
+			t.Fatal(err)
+		}
 	}
 	sessionID := naming.CanonicalSessionID("project", issueID)
 	staleAt := time.Now().UTC().Add(-time.Minute)
@@ -1471,8 +1549,8 @@ func TestReviewAcceptConvergesStaleBusyHookAtIdlePromptAndReplaysIdempotently(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reviewEvents) != 1 || reviewEvents[0].Payload["outcome"] != "accepted" {
-		t.Fatalf("review events = %+v, want one durable acceptance", reviewEvents)
+	if len(reviewEvents) != 2 {
+		t.Fatalf("review events = %+v, want one artifact and one durable daemon acceptance", reviewEvents)
 	}
 }
 
@@ -1498,6 +1576,9 @@ func newOrchestrationReviewTestDaemon(repoDir string, client *issues.Client) *Da
 		hub:                   publish.NewHub(16, 8, logger),
 		issueClientsByProject: map[string]*issues.Client{"project": client},
 		revision:              map[string]uint64{},
+		reviewAcceptedSourceOID: func(context.Context, string, string) (string, error) {
+			return "reviewed-source-oid", nil
+		},
 	}
 }
 

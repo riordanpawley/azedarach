@@ -129,6 +129,7 @@ type taskCloseRequest struct {
 	CloseCleanChildren   bool   `json:"close_clean_children,omitempty"`
 	AllowActiveSession   bool   `json:"allow_active_session,omitempty"`
 	CloseOutcome         string `json:"closed_outcome,omitempty"`
+	ExpectedSourceOID    string `json:"expected_source_oid,omitempty"`
 }
 
 type taskStatusUpdateOptions struct {
@@ -2104,7 +2105,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		recordPhase("integrate_before_close", phaseStartedAt, false)
 		return result, fmt.Errorf("phase integrate_before_close for issue %s: %w", taskID, integrationBudgetErr)
 	}
-	integration, err := d.integrateTaskBeforeClose(integrationCtx, projectID, taskID, cmd.IntegrateBeforeClose, guard.MissingWorktree)
+	integration, err := d.integrateTaskBeforeClose(integrationCtx, projectID, taskID, cmd.IntegrateBeforeClose, guard.MissingWorktree, cmd.ExpectedSourceOID)
 	cancelIntegration()
 	recordPhase("integrate_before_close", phaseStartedAt, !cmd.IntegrateBeforeClose)
 	recordTaskCloseHookPhases(ctx, &result, d.cfg.Logger, req, projectID, taskID, integration.HookDiagnostics)
@@ -2850,10 +2851,11 @@ func observationPayloadString(payload map[string]any, key string) string {
 	return strings.TrimSpace(value)
 }
 
-func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID string, requested, allowMissingSource bool) (taskCloseIntegrationResult, error) {
+func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID string, requested, allowMissingSource bool, expectedSourceOID string) (taskCloseIntegrationResult, error) {
 	if !requested {
 		return taskCloseIntegrationResult{}, nil
 	}
+	expectedSourceOID = strings.TrimSpace(expectedSourceOID)
 	if d.worktreeAdapter == nil {
 		return taskCloseIntegrationResult{}, fmt.Errorf("worktree adapter unavailable")
 	}
@@ -2872,11 +2874,17 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		}
 	}
 	source, ok := daemonWorktreeForIssue(worktrees, taskID)
-	if !ok || strings.TrimSpace(source.Path) == "" {
+	if !ok {
+		if expectedSourceOID != "" {
+			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("reviewed source commit %s cannot be verified because the source worktree projection is unavailable", expectedSourceOID)
+		}
 		return taskCloseIntegrationResult{}, nil
 	}
 	if strings.TrimSpace(source.Branch) == "" {
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("source branch unavailable for %s", taskID)
+	}
+	if strings.TrimSpace(source.Path) == "" && !(allowMissingSource && expectedSourceOID != "") {
+		return taskCloseIntegrationResult{}, nil
 	}
 
 	target, err := d.taskMergeBaseTarget(ctx, projectID, source.IssueID, d.baseBranchForProject(projectID), false)
@@ -2898,10 +2906,17 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 
 	var integration taskCloseIntegrationResult
 	if daemonCloseIntegrationShouldUseOriginBase(d.workflowModeForProject(projectID), target) {
-		return d.integrateTaskBeforeCloseOriginBase(ctx, projectID, taskID, source, targetWorktree, targetBranch, allowMissingSource)
+		return d.integrateTaskBeforeCloseOriginBase(ctx, projectID, taskID, source, targetWorktree, targetBranch, allowMissingSource, expectedSourceOID)
 	}
 	sourceOID, sourceOIDErr := d.git.ResolveCommit(ctx, targetWorktree, source.Branch)
-	sourceUniqueCommits, containmentErr := d.git.RevListCount(ctx, targetWorktree, targetBranch+".."+source.Branch)
+	if expectedSourceOID != "" && sourceOIDErr == nil && sourceOID != expectedSourceOID {
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("reviewed source commit changed: current=%s reviewed=%s", strings.TrimSpace(sourceOID), expectedSourceOID)
+	}
+	sourceRef := source.Branch
+	if expectedSourceOID != "" {
+		sourceRef = expectedSourceOID
+	}
+	sourceUniqueCommits, containmentErr := d.git.RevListCount(ctx, targetWorktree, targetBranch+".."+sourceRef)
 	if containmentErr == nil && sourceUniqueCommits == 0 && sourceOIDErr == nil {
 		targetOID, targetOIDErr := d.git.ResolveCommit(ctx, targetWorktree, targetBranch)
 		if targetOIDErr != nil {
@@ -2934,6 +2949,9 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		if !found {
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("source worktree and branch for %s are already removed, but no exact integration receipt exists for %s into %s; restore the source ref or verify and integrate its exact commit before retrying close", taskID, source.Branch, targetBranch)
 		}
+		if expectedSourceOID != "" && receipt.SourceOID != expectedSourceOID {
+			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("exact integration receipt source does not match reviewed commit: recorded=%s reviewed=%s", receipt.SourceOID, expectedSourceOID)
+		}
 		if err := verifyTaskCloseIntegrationReceipt(ctx, d.git, targetWorktree, receipt, projectID, source.Branch, targetBranch); err != nil {
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("source worktree and branch for %s are already removed, but the exact integration receipt is not valid: %w", taskID, err)
 		}
@@ -2946,6 +2964,9 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 			TargetOID:    receipt.TargetOID,
 		}, nil
 	}
+	if sourceOIDErr != nil {
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve source commit before close integration: %w", sourceOIDErr)
+	}
 	if containmentErr != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Debug("target-side source containment check failed before close integration", "project_id", projectID, "task_id", taskID, "target_worktree", targetWorktree, "target_branch", targetBranch, "source_branch", source.Branch, "error", containmentErr)
 	}
@@ -2954,9 +2975,6 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		return taskCloseIntegrationResult{Requested: true}, err
 	}
 	if !hasChangesToIntegrate {
-		if sourceOIDErr != nil {
-			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve source commit before no-op close integration: %w", sourceOIDErr)
-		}
 		targetOID, targetOIDErr := d.git.ResolveCommit(ctx, targetWorktree, targetBranch)
 		if targetOIDErr != nil {
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve target commit before no-op close integration: %w", targetOIDErr)
@@ -2970,7 +2988,7 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 			TargetOID:    targetOID,
 		}, nil
 	}
-	preflight, err := d.git.MergePreflight(ctx, source.Path, targetWorktree, targetBranch, source.Branch)
+	preflight, err := d.git.MergePreflight(ctx, source.Path, targetWorktree, targetBranch, sourceRef)
 	if err != nil {
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge preflight failed: %w", err)
 	}
@@ -2988,7 +3006,7 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("checkout target branch before close integration: %w", err)
 		}
 	}
-	merge, err := d.mergeTaskBranchBeforeClose(ctx, projectID, taskID, targetWorktree, targetBranch, source.Branch)
+	merge, err := d.mergeTaskBranchBeforeClose(ctx, projectID, taskID, targetWorktree, targetBranch, sourceRef)
 	if err != nil {
 		return taskCloseIntegrationResult{Requested: true}, err
 	}
@@ -3004,9 +3022,6 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 			details = "merge did not complete successfully"
 		}
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s failed: %s", source.Branch, targetBranch, details)
-	}
-	if sourceOIDErr != nil {
-		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve integrated source commit: %w", sourceOIDErr)
 	}
 	targetOID, targetOIDErr := d.git.ResolveCommit(ctx, targetWorktree, targetBranch)
 	if targetOIDErr != nil {
@@ -3030,7 +3045,7 @@ func daemonCloseIntegrationShouldUseOriginBase(workflowMode string, target taskM
 		strings.TrimSpace(target.WorktreePath) == ""
 }
 
-func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, projectID, taskID string, source git.Worktree, targetWorktree, targetBranch string, allowMissingSource bool) (taskCloseIntegrationResult, error) {
+func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, projectID, taskID string, source git.Worktree, targetWorktree, targetBranch string, allowMissingSource bool, expectedSourceOID string) (taskCloseIntegrationResult, error) {
 	remoteBaseRef := daemonRemoteTrackingBaseRef(targetBranch)
 	result := taskCloseIntegrationResult{
 		Requested:    true,
@@ -3046,6 +3061,10 @@ func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, project
 			return result, fmt.Errorf("fetch origin before origin-mode close integration retry for %s: %w", source.IssueID, err)
 		}
 		sourceOID, sourceErr := d.git.ResolveCommit(ctx, targetWorktree, source.Branch)
+		expectedSourceOID = strings.TrimSpace(expectedSourceOID)
+		if expectedSourceOID != "" && sourceErr == nil && sourceOID != expectedSourceOID {
+			return result, fmt.Errorf("reviewed source commit changed: current=%s reviewed=%s", strings.TrimSpace(sourceOID), expectedSourceOID)
+		}
 		if sourceErr == nil {
 			contained, err := d.git.CommitContainedInRef(ctx, targetWorktree, sourceOID, remoteBaseRef)
 			if err != nil {
@@ -3070,6 +3089,9 @@ func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, project
 		if !found {
 			return result, fmt.Errorf("source worktree and branch for %s are already removed, but no exact integration receipt exists for %s into %s", taskID, source.Branch, remoteBaseRef)
 		}
+		if expectedSourceOID != "" && receipt.SourceOID != expectedSourceOID {
+			return result, fmt.Errorf("exact integration receipt source does not match reviewed commit: recorded=%s reviewed=%s", receipt.SourceOID, expectedSourceOID)
+		}
 		if err := verifyTaskCloseIntegrationReceipt(ctx, d.git, targetWorktree, receipt, projectID, source.Branch, remoteBaseRef); err != nil {
 			return result, fmt.Errorf("source worktree and branch for %s are already removed, but the exact origin-mode integration receipt is not valid: %w", taskID, err)
 		}
@@ -3092,13 +3114,20 @@ func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, project
 	if err != nil {
 		return result, fmt.Errorf("resolve source commit for origin-mode close integration %s: %w", source.IssueID, err)
 	}
+	if expectedSourceOID = strings.TrimSpace(expectedSourceOID); expectedSourceOID != "" && sourceOID != expectedSourceOID {
+		return result, fmt.Errorf("reviewed source commit changed: current=%s reviewed=%s", sourceOID, expectedSourceOID)
+	}
+	sourceRef := source.Branch
+	if expectedSourceOID != "" {
+		sourceRef = expectedSourceOID
+	}
 	targetOID, err := d.git.ResolveCommit(ctx, targetWorktree, remoteBaseRef)
 	if err != nil {
 		return result, fmt.Errorf("resolve %s before origin-mode close integration for %s: %w", remoteBaseRef, source.IssueID, err)
 	}
 	result.SourceOID = sourceOID
 	result.TargetOID = targetOID
-	changedFiles, err := d.git.ChangedFilesBetweenRefTrees(ctx, targetWorktree, remoteBaseRef, source.Branch)
+	changedFiles, err := d.git.ChangedFilesBetweenRefTrees(ctx, targetWorktree, remoteBaseRef, sourceRef)
 	if err != nil {
 		return result, fmt.Errorf("inspect origin-mode close diff for %s against %s: %w", source.IssueID, remoteBaseRef, err)
 	}
@@ -3106,7 +3135,7 @@ func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, project
 		result.NoChanges = true
 		return result, nil
 	}
-	contained, err := d.git.CommitContainedInRef(ctx, targetWorktree, source.Branch, remoteBaseRef)
+	contained, err := d.git.CommitContainedInRef(ctx, targetWorktree, sourceRef, remoteBaseRef)
 	if err != nil {
 		return result, fmt.Errorf("inspect origin-mode close ancestry for %s against %s: %w", source.IssueID, remoteBaseRef, err)
 	}

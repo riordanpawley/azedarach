@@ -204,6 +204,8 @@ type Daemon struct {
 	taskGraphWorktrees                   func(context.Context, string) ([]git.Worktree, error)
 	taskGraphMailboxRead                 func(string, string) ([]daemonMailEvent, error)
 	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error
+	reviewAcceptedSourceOID              func(context.Context, string, string) (string, error)
+	mailProjectedBeforeAppend            func(context.Context, daemonMailEvent) error
 	watchClientsMu                       sync.Mutex
 	watchClients                         map[string]watchClientObservation
 	terminalFailureProbeMu               sync.Mutex
