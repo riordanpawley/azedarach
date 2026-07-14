@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -12,6 +13,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/observability/tracesqlite"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
@@ -47,6 +50,34 @@ func TestProjectReviewQueuePrioritizesReviewAndExcludesForeignOwnedWork(t *testi
 	}
 	if got := candidateClass(snapshot.Candidates, open); got != "runnable" {
 		t.Fatalf("open candidate class = %q, want runnable while review queue remains separately prioritized", got)
+	}
+}
+
+func TestProjectReviewQueueUsesOneObservationQueryForLargeOrdinaryGraph(t *testing.T) {
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	tasks := make([]domain.Task, 1000)
+	for i := range tasks {
+		tasks[i] = domain.Task{ID: naming.IssueID(fmt.Sprintf("ordinary-%04d", i)), Status: domain.StatusOpen}
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	counter := &tracesqlite.QueryCounter{}
+	ctx := tracesqlite.WithQueryCounter(context.Background(), counter)
+	queue, err := (daemonOrchestrationAuthority{daemon: d}).reviewQueue(ctx, "project", protocol.OrchestrationSnapshotRequest{ActorID: "orchestrator", Limit: 10}, tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queue) != 0 {
+		t.Fatalf("review queue = %+v, want no ordinary work", queue)
+	}
+	if got := counter.Count(); got != 1 {
+		t.Fatalf("SQLite query count = %d for %d ordinary tasks, want one bounded latest-outcome query", got, len(tasks))
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (daemonOrchestrationAuthority{daemon: d}).reviewQueue(canceled, "project", protocol.OrchestrationSnapshotRequest{ActorID: "orchestrator", Limit: 10}, tasks); err == nil {
+		t.Fatal("canceled accepted-outcome projection read succeeded, want fail-closed review queue")
 	}
 }
 

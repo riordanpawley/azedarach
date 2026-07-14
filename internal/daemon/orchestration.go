@@ -232,7 +232,10 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		if err != nil {
 			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load rooted review queue: %w", err)
 		}
-		snapshot.ReviewQueue = a.reviewQueue(ctx, projectID, request, tasks)
+		snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, tasks)
+		if err != nil {
+			return protocol.OrchestrationSnapshot{}, err
+		}
 		return snapshot, nil
 	}
 
@@ -245,7 +248,10 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("load project orchestration projection: %w", err)
 	}
 	tasks = a.daemon.enrichTasksWithSessionState(ctx, projectID, tasks)
-	snapshot.ReviewQueue = a.reviewQueue(ctx, projectID, request, tasks)
+	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, tasks)
+	if err != nil {
+		return protocol.OrchestrationSnapshot{}, err
+	}
 	roots := make([]domain.Task, 0)
 	tasksByID := make(map[string]domain.Task, len(tasks))
 	for _, task := range tasks {

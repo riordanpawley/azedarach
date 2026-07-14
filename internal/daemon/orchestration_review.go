@@ -67,24 +67,31 @@ func validateOrchestrationReviewIntent(request protocol.OrchestrationIntentReque
 	}
 }
 
-func (a daemonOrchestrationAuthority) reviewQueue(ctx context.Context, projectID string, request protocol.OrchestrationSnapshotRequest, tasks []domain.Task) []protocol.OrchestrationReview {
+func (a daemonOrchestrationAuthority) reviewQueue(ctx context.Context, projectID string, request protocol.OrchestrationSnapshotRequest, tasks []domain.Task) ([]protocol.OrchestrationReview, error) {
 	if !usesProjectionSource(sourceForInvariant(daemonInvariantOrchestrationReview)) {
-		return nil
+		return nil, nil
+	}
+	acceptedCloseCandidates := make([]string, 0)
+	for _, task := range tasks {
+		if reviewOutcomeLookupCandidate(task) {
+			acceptedCloseCandidates = append(acceptedCloseCandidates, task.ID.String())
+		}
+	}
+	trustedOutcomes, err := a.latestTrustedReviewOutcomes(ctx, projectID, acceptedCloseCandidates)
+	if err != nil {
+		return nil, fmt.Errorf("load accepted review outcomes: %w", err)
 	}
 	reviewTasks := make([]domain.Task, 0)
 	for _, task := range tasks {
-		facts := task.IssueFacts()
-		if task.Status == domain.StatusInReview || facts.ReviewState == domain.IssueReviewRequested || facts.ReviewReadyVisible {
+		if !reviewOutcomeLookupCandidate(task) && task.Status != domain.StatusDone {
 			reviewTasks = append(reviewTasks, task)
 			continue
 		}
 		// A close may fail after the trusted review decision has been recorded.
 		// Keep that non-terminal issue in the queue so the same intent can resume
 		// after repair or a reviewer can explicitly return new findings.
-		if task.Status != domain.StatusDone {
-			if outcome, err := a.latestTrustedReviewOutcome(ctx, projectID, task.ID.String()); err == nil && outcome == "accepted" {
-				reviewTasks = append(reviewTasks, task)
-			}
+		if task.Status != domain.StatusDone && trustedOutcomes[task.ID.String()] == "accepted" {
+			reviewTasks = append(reviewTasks, task)
 		}
 	}
 	sort.SliceStable(reviewTasks, func(i, j int) bool { return orchestrationTaskLess(reviewTasks[i], reviewTasks[j]) })
@@ -112,7 +119,36 @@ func (a daemonOrchestrationAuthority) reviewQueue(ctx context.Context, projectID
 	for _, task := range reviewTasks {
 		out = append(out, a.reviewInspection(ctx, projectID, repoDir, request.ActorID, task, byID, worktrees))
 	}
-	return out
+	return out, nil
+}
+
+func reviewOutcomeLookupCandidate(task domain.Task) bool {
+	facts := task.IssueFacts()
+	return task.Status != domain.StatusDone && task.Status != domain.StatusInReview && facts.ReviewState != domain.IssueReviewRequested && !facts.ReviewReadyVisible
+}
+
+func (a daemonOrchestrationAuthority) latestTrustedReviewOutcomes(ctx context.Context, projectID string, issueIDs []string) (map[string]string, error) {
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil, fmt.Errorf("issue store unavailable")
+	}
+	events, err := issueClient.ListLatestIssueObservationEventsByIssue(ctx, issues.LatestIssueObservationEventOptions{
+		IssueIDs:                issueIDs,
+		Type:                    domain.IssueEventReviewCompleted,
+		Source:                  "daemon-orchestration",
+		SourceCommands:          []string{string(protocol.OrchestrationIntentReviewAccept), string(protocol.OrchestrationIntentReviewReturn)},
+		RequiredPayloadTextKeys: []string{"actor_id"},
+	})
+	if err != nil {
+		return nil, err
+	}
+	outcomes := make(map[string]string, len(events))
+	for issueID, event := range events {
+		if outcome, ok := trustedOrchestrationReviewOutcome(event); ok {
+			outcomes[issueID] = outcome
+		}
+	}
+	return outcomes, nil
 }
 
 func (a daemonOrchestrationAuthority) reviewInspection(ctx context.Context, projectID, repoDir, actorID string, task domain.Task, tasks map[string]domain.Task, worktrees map[string]git.Worktree) protocol.OrchestrationReview {

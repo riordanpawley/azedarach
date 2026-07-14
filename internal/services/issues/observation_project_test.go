@@ -40,3 +40,43 @@ func TestListProjectIssueObservationEventsProvidesDurableCursor(t *testing.T) {
 		t.Fatalf("after cursor %d = %+v", cursor, after)
 	}
 }
+
+func TestListLatestIssueObservationEventsByIssueScopesAndRanksCandidates(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	first, err := client.Create(ctx, CreateTaskParams{Title: "first", Description: "scope", Acceptance: "done", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := client.Create(ctx, CreateTaskParams{Title: "second", Description: "scope", Acceptance: "done", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []IssueObservationEventParams{
+		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"actor_id": "reviewer", "outcome": "accepted"}},
+		{Type: domain.IssueEventReviewCompleted, Source: " daemon-orchestration ", SourceCommand: " review-return ", Payload: map[string]any{"actor_id": "reviewer", "outcome": "returned"}},
+		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"actor_id": 42, "outcome": "returned"}},
+	} {
+		if _, err := client.AppendIssueObservationEvent(ctx, first, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, second, IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"actor_id": "reviewer", "outcome": "accepted"}}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := client.ListLatestIssueObservationEventsByIssue(ctx, LatestIssueObservationEventOptions{
+		IssueIDs:                []string{first},
+		Type:                    domain.IssueEventReviewCompleted,
+		Source:                  "daemon-orchestration",
+		SourceCommands:          []string{"review-accept", "review-return"},
+		RequiredPayloadTextKeys: []string{"actor_id"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[first].Payload["outcome"] != "returned" {
+		t.Fatalf("latest scoped events = %+v, want newest valid first-issue return only", events)
+	}
+}
