@@ -305,6 +305,7 @@ type taskIntegrationReadinessResult struct {
 	EvidenceIncomplete     bool                           `json:"evidence_incomplete,omitempty"`
 	EvidenceMissingFields  []string                       `json:"evidence_missing_fields,omitempty"`
 	EvidenceInvalidReasons []string                       `json:"evidence_invalid_reasons,omitempty"`
+	AggregateValidation    *domain.ValidationRequest      `json:"aggregate_validation,omitempty"`
 }
 
 type taskMergeBaseTargetResult struct {
@@ -4483,6 +4484,31 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 	if issueClient == nil {
 		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue integration readiness: issue store unavailable")
 	}
+	var latestAggregate *domain.ValidationRequest
+	if d.operationRuntime != nil {
+		validationStore, storeErr := d.validationProjectionStore()
+		if storeErr != nil {
+			return taskIntegrationReadinessResult{}, fmt.Errorf("inspect aggregate validation projection: %w", storeErr)
+		}
+		aggregate, aggregateErr := validationStore.LatestAggregateValidation(ctx, projectID, task.ID.String(), time.Now().UTC(), defaultValidationLeaseTTL)
+		if aggregateErr != nil {
+			return taskIntegrationReadinessResult{}, fmt.Errorf("inspect aggregate validation evidence: %w", aggregateErr)
+		}
+		if aggregate != nil && (aggregate.State != domain.ValidationRequestCompleted || !aggregate.Evidence.Present || aggregate.Evidence.OverlapDetected) {
+			reasons := []string{fmt.Sprintf("aggregate validation %s is not valid integration evidence", aggregate.RequestID)}
+			if aggregate.State != domain.ValidationRequestCompleted {
+				reasons = append(reasons, fmt.Sprintf("aggregate validation outcome is %s", aggregate.State))
+			}
+			if !aggregate.Evidence.Present {
+				reasons = append(reasons, "aggregate validation did not record machine-load evidence")
+			}
+			if aggregate.Evidence.OverlapDetected {
+				reasons = append(reasons, fmt.Sprintf("aggregate validation overlapped %d external Go processes", aggregate.Evidence.ExternalGoProcesses))
+			}
+			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: reasons, AggregateValidation: aggregate}, nil
+		}
+		latestAggregate = aggregate
+	}
 	reviewEvents, err := issueClient.ListIssueReviewReadyObservationEvents(ctx, task.ID.String())
 	if err != nil {
 		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue integration evidence: %w", err)
@@ -4490,6 +4516,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 	if evidence := domain.ReduceReviewReadyEvidence(reviewEvents).LatestEvidence; evidence != nil {
 		evt := evidence.SourceEvent
 		packet, validation := evidence.Evidence, evidence.Validation
+		validateWorkerAggregateRequest(&validation, packet, latestAggregate)
 		if validation.Complete {
 			return taskIntegrationReadinessResult{
 				IssueID:         task.ID.String(),
@@ -4546,6 +4573,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 				continue
 			}
 			packet, validation := domain.ParseWorkerEvidencePacketBody(evt.Body)
+			validateWorkerAggregateRequest(&validation, packet, latestAggregate)
 			if validation.Complete {
 				return taskIntegrationReadinessResult{
 					IssueID:          task.ID.String(),
@@ -4586,6 +4614,22 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 			fmt.Sprintf("no worker-integration-ready mailbox event found under parent %s for %s", parentIssueID, task.ID.String()),
 		},
 	}, nil
+}
+
+func validateWorkerAggregateRequest(validation *domain.WorkerEvidenceParseResult, packet domain.WorkerEvidencePacket, latest *domain.ValidationRequest) {
+	if validation == nil || packet.AggregateValidation == nil {
+		return
+	}
+	var problem string
+	if latest == nil {
+		problem = fmt.Sprintf("aggregate_validation request %s is not present in the daemon validation projection", packet.AggregateValidation.RequestID)
+	} else if packet.AggregateValidation.RequestID != latest.RequestID {
+		problem = fmt.Sprintf("aggregate_validation request %s does not match latest daemon request %s", packet.AggregateValidation.RequestID, latest.RequestID)
+	}
+	if problem != "" {
+		validation.Invalid = append(validation.Invalid, problem)
+		validation.Complete = false
+	}
 }
 
 func daemonWorkerIntegrationReadyMailType(eventType string) bool {

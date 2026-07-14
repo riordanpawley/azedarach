@@ -23,11 +23,13 @@ type migration struct {
 var orderedMigrations = []migration{
 	{id: "daemon_operations_0001", path: "migrations/0001_daemon_operations.sql"},
 	{id: "daemon_operations_0002_progress", path: "migrations/0002_daemon_operation_progress.sql"},
+	{id: "daemon_operations_0003_validation_leases", path: "migrations/0003_validation_leases.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "daemon_operations_0001", Path: "migrations/0001_daemon_operations.sql", Checksum: "573eaaeacb02741d90c12f4d0c747120dd7422dad46d65b0ca2e10fa77408321"},
 	{ID: "daemon_operations_0002_progress", Path: "migrations/0002_daemon_operation_progress.sql", Checksum: "57fde6bd6348ea3925a7c027facbf23185bff81ebe659dfb6f5de1f2bb0c009a"},
+	{ID: "daemon_operations_0003_validation_leases", Path: "migrations/0003_validation_leases.sql", Checksum: "eef8c5cbc47a78f94562a0a390c660f8abe3724444eed9ccd145733917c44d65"},
 }
 
 const migrationArtifactAuthority sqlitemigration.Authority = "project.daemon_operations"

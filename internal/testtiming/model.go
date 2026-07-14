@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	ReportSchema   = "azedarach.test_timing_report.v2"
+	ReportSchema   = "azedarach.test_timing_report.v3"
 	BaselineSchema = "azedarach.test_timing_baseline.v1"
 )
 
@@ -35,26 +35,35 @@ type Failure struct {
 }
 
 type Measurement struct {
-	Schema              string            `json:"schema"`
-	Profile             string            `json:"profile"`
-	CacheMode           string            `json:"cache_mode"`
-	TestResultCacheMode string            `json:"test_result_cache_mode"`
-	BuildCache          gocache.Telemetry `json:"build_cache"`
-	ResourceMethod      string            `json:"resource_measurement"`
-	StartedAt           time.Time         `json:"started_at"`
-	WallSeconds         float64           `json:"wall_seconds"`
-	UserCPUSeconds      float64           `json:"user_cpu_seconds"`
-	SystemCPUSeconds    float64           `json:"system_cpu_seconds"`
-	PeakRSSBytes        int64             `json:"peak_rss_bytes"`
-	ExitCode            int               `json:"exit_code"`
-	Packages            []Duration        `json:"packages"`
-	Tests               []Duration        `json:"tests"`
-	Failures            []Failure         `json:"failures"`
-	InvalidEvents       int               `json:"invalid_events"`
-	RawJSONPath         string            `json:"raw_json_path"`
-	StderrPath          string            `json:"stderr_path"`
-	Command             []string          `json:"command"`
-	Comparison          Comparison        `json:"comparison"`
+	Schema              string                  `json:"schema"`
+	Profile             string                  `json:"profile"`
+	CacheMode           string                  `json:"cache_mode"`
+	TestResultCacheMode string                  `json:"test_result_cache_mode"`
+	BuildCache          gocache.Telemetry       `json:"build_cache"`
+	ResourceMethod      string                  `json:"resource_measurement"`
+	StartedAt           time.Time               `json:"started_at"`
+	WallSeconds         float64                 `json:"wall_seconds"`
+	UserCPUSeconds      float64                 `json:"user_cpu_seconds"`
+	SystemCPUSeconds    float64                 `json:"system_cpu_seconds"`
+	PeakRSSBytes        int64                   `json:"peak_rss_bytes"`
+	ProcessLoad         ProcessLoadEvidence     `json:"process_load"`
+	ValidationLease     ValidationLeaseEvidence `json:"validation_lease"`
+	ExitCode            int                     `json:"exit_code"`
+	Packages            []Duration              `json:"packages"`
+	Tests               []Duration              `json:"tests"`
+	Failures            []Failure               `json:"failures"`
+	InvalidEvents       int                     `json:"invalid_events"`
+	RawJSONPath         string                  `json:"raw_json_path"`
+	StderrPath          string                  `json:"stderr_path"`
+	Command             []string                `json:"command"`
+	Comparison          Comparison              `json:"comparison"`
+}
+
+type ValidationLeaseEvidence struct {
+	Held      bool   `json:"held"`
+	RequestID string `json:"request_id,omitempty"`
+	Class     string `json:"class,omitempty"`
+	Profile   string `json:"profile,omitempty"`
 }
 
 type BaselineProfile struct {

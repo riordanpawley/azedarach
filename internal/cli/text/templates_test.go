@@ -49,6 +49,7 @@ func TestRenderRootUsageUsesCanonicalTicketFlags(t *testing.T) {
 		"ticket image add [--project <project-id>] [--ticket-id <ticket-id>]",
 		"ticket dep add [--project <project-id>] --ticket-id <ticket-id>",
 		"ticket fanout drift [--project <project-id>] --ticket <ticket-id>",
+		"validation <subcommand>    Coordinate machine validation",
 		"[--per-ticket-timeout duration]",
 	} {
 		if !strings.Contains(output, want) {
