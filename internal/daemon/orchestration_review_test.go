@@ -444,6 +444,53 @@ func TestReviewAcceptReleasesLeaseBeforeAcceptedInternalReviewClose(t *testing.T
 	}
 }
 
+func TestReviewAcceptResumesDurablyAcceptedIntentWithoutReacquiringLease(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "resume accepted internal review", Description: "Executable", Acceptance: "validated and reviewed", Type: domain.TypeInvestigation, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "resume-accepted-internal-review", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	for _, event := range []issues.IssueObservationEventParams{
+		{Type: domain.IssueEventInvestigationDisposition, Source: "test", Payload: map[string]any{"disposition": "internal_review"}},
+		{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)},
+		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept), Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request)}},
+	} {
+		if _, err := client.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := &recordingGitRunner{}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.git = git.NewClient(runner, slog.Default())
+	d.worktreeAdapter = &worktreeServiceAdapter{manager: git.NewWorktreeManager(runner, repoDir, slog.Default()), logger: slog.Default()}
+
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Closed) != 1 || result.Closed[0] != issueID || len(result.Failed) != 0 {
+		t.Fatalf("resumed accept result = %+v, want terminal close", result)
+	}
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != domain.StatusDone || coordinationLease(task, domain.CoordinationLeaseReview) != nil {
+		t.Fatalf("resumed accepted task = %+v, want done without review lease", task)
+	}
+	reviewEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewEvents) != 1 || reviewEvents[0].Payload["outcome"] != "accepted" {
+		t.Fatalf("resumed review events = %+v, want original accepted outcome only", reviewEvents)
+	}
+}
+
 func createReviewTask(t *testing.T, ctx context.Context, client *issues.Client, priority domain.Priority, owner string) string {
 	t.Helper()
 	id, err := client.Create(ctx, issues.CreateTaskParams{Title: "review " + owner, Description: "Executable", Acceptance: "validated and reviewed", Type: domain.TypeTask, Priority: priority, Status: domain.StatusOpen})

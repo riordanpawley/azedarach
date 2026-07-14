@@ -2678,6 +2678,15 @@ func issueLeaseEligibilityForUpdate(ctx context.Context, tx *sql.Tx, issueID str
 		eligible = eligible && disposition == string(domain.IssueDispositionReady)
 	case domain.CoordinationLeaseReview:
 		eligible = eligible && disposition == string(domain.IssueDispositionReady) && engagement == string(domain.IssueEngagementReviewRequested)
+		if eligible {
+			outcome, err := latestTrustedReviewOutcomeForUpdate(ctx, tx, issueID)
+			if err != nil {
+				return err
+			}
+			if outcome == domain.ReviewOutcomeAccepted {
+				return fmt.Errorf("%w: durable accepted review is awaiting authoritative close", domain.ErrConflict)
+			}
+		}
 	case domain.CoordinationLeaseOrchestration:
 		eligible = eligible && (disposition == string(domain.IssueDispositionBacklog) || disposition == string(domain.IssueDispositionReady))
 	default:
@@ -2687,6 +2696,32 @@ func issueLeaseEligibilityForUpdate(ctx context.Context, tx *sql.Tx, issueID str
 		return fmt.Errorf("%w: issue state is ineligible for %s lease", domain.ErrConflict, purpose)
 	}
 	return nil
+}
+
+func latestTrustedReviewOutcomeForUpdate(ctx context.Context, tx *sql.Tx, issueID string) (domain.ReviewOutcome, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM issue_observation_events
+		WHERE issue_id = ? AND event_type = ? AND source = 'daemon-orchestration'
+		ORDER BY id DESC
+	`, issueID, domain.IssueEventReviewCompleted)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		event, err := scanIssueObservationEvent(rows)
+		if err != nil {
+			return "", err
+		}
+		if outcome, trusted := domain.TrustedReviewOutcome(event); trusted {
+			return outcome, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return "", nil
 }
 
 func (c *Client) releaseOwnership(ctx context.Context, issueID string, params OwnershipClaimParams) error {

@@ -205,6 +205,11 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 		case "closed":
 			result.Closed = append(result.Closed, issueID)
 			continue
+		case "accepted_pending":
+			if err := a.closeAcceptedReview(ctx, projectID, request, issueID, &result); err != nil {
+				result.Failed[issueID] = err.Error()
+			}
+			continue
 		}
 		inspection, ok := queue[issueID]
 		if !ok {
@@ -362,6 +367,9 @@ func (a daemonOrchestrationAuthority) reviewIntentTerminalOutcome(ctx context.Co
 		if outcome == "returned" {
 			return "returned", nil
 		}
+		if outcome == "integration_failed" {
+			return "", nil
+		}
 		if outcome == "accepted" {
 			if closed {
 				return "closed", nil
@@ -373,6 +381,7 @@ func (a daemonOrchestrationAuthority) reviewIntentTerminalOutcome(ctx context.Co
 			if task.Status == domain.StatusDone {
 				return "closed", nil
 			}
+			return "accepted_pending", nil
 		}
 	}
 	return "", nil
@@ -412,23 +421,27 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 	if _, err := issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, inspection.IssueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, Purpose: domain.CoordinationLeaseReview}); err != nil {
 		return false, fmt.Errorf("release review lease before authoritative close: %w", err)
 	}
-	body, err := json.Marshal(taskCloseRequest{TaskID: inspection.IssueID, IntegrateBeforeClose: true})
+	return true, a.closeAcceptedReview(ctx, projectID, request, inspection.IssueID, result)
+}
+
+func (a daemonOrchestrationAuthority) closeAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, result *protocol.OrchestrationIntentResult) error {
+	body, err := json.Marshal(taskCloseRequest{TaskID: issueID, IntegrateBeforeClose: true})
 	if err != nil {
-		return true, err
+		return err
 	}
-	closeReq := protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID("orchestration-review-close-" + request.IntentKey + "-" + inspection.IssueID), Kind: protocol.EnvelopeKindCommand, Command: "task.close", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID), ClientActor: request.ActorID}, Body: body}
+	closeReq := protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID("orchestration-review-close-" + request.IntentKey + "-" + issueID), Kind: protocol.EnvelopeKindCommand, Command: "task.close", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID), ClientActor: request.ActorID}, Body: body}
 	closeResp, err := a.daemon.handleTaskClose(ctx, closeReq)
 	if err != nil {
-		_ = a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "integration_failed", err.Error())
-		return true, fmt.Errorf("authoritative close: %w", err)
+		_ = a.recordReviewOutcome(ctx, projectID, issueID, request, "integration_failed", err.Error())
+		return fmt.Errorf("authoritative close: %w", err)
 	}
 	if !closeResp.OK {
 		failure := responseErrorMessage(closeResp)
-		_ = a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "integration_failed", failure)
-		return true, fmt.Errorf("authoritative close: %s", failure)
+		_ = a.recordReviewOutcome(ctx, projectID, issueID, request, "integration_failed", failure)
+		return fmt.Errorf("authoritative close: %s", failure)
 	}
-	result.Closed = append(result.Closed, inspection.IssueID)
-	return true, nil
+	result.Closed = append(result.Closed, issueID)
+	return nil
 }
 
 func (a daemonOrchestrationAuthority) recordReviewOutcome(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, outcome, failure string) error {
