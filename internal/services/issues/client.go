@@ -37,6 +37,187 @@ type ProjectionExport struct {
 	SchemaFingerprint string
 }
 
+// OrchestrationProjectionExport is a transactionally consistent snapshot of
+// the bounded issue/runtime projection. Checkpoint is read in the same SQLite
+// transaction as Tasks, so callers never label rows with a newer revision.
+type OrchestrationProjectionExport struct {
+	Tasks                    []domain.Task
+	Checkpoint               uint64
+	OpenIssueCount           int
+	UnresolvedInteractionIDs map[string]struct{}
+	Interactions             []domain.InteractionRequest
+	InvestigationAcceptances map[string]domain.InvestigationAcceptance
+}
+
+// ExportOrchestrationProjection reads a bounded project graph plus its durable
+// lifecycle/runtime context at one checkpoint. Candidate count bounds roots;
+// complete root closures and dependency targets preserve readiness semantics.
+func (c *Client) ExportOrchestrationProjection(ctx context.Context, projectID string, limit int) (OrchestrationProjectionExport, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return OrchestrationProjectionExport{}, err
+	}
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return OrchestrationProjectionExport{}, fmt.Errorf("begin orchestration projection export: %w", err)
+	}
+	defer tx.Rollback()
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	checkpoint, err := projectionCompositeCheckpoint(ctx, tx, projectID)
+	if err != nil {
+		return OrchestrationProjectionExport{}, err
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	issueIDs, err := c.projectOrchestrationContextIDs(ctx, tx, limit)
+	if err != nil {
+		return OrchestrationProjectionExport{}, c.wrapError("export-orchestration-projection", projectID, err)
+	}
+	tasks := []domain.Task{}
+	if len(issueIDs) > 0 {
+		tasks, err = c.queryTasksWithRuntimeProjection(ctx, tx, projectID, true, taskDependencyLoadAll, ArchiveExclude, issueIDs...)
+		if err != nil {
+			return OrchestrationProjectionExport{}, c.wrapError("export-orchestration-projection", projectID, err)
+		}
+	}
+	interactions, unresolvedInteractionIDs, err := orchestrationInteractions(ctx, tx, issueIDs)
+	if err != nil {
+		return OrchestrationProjectionExport{}, c.wrapError("export-orchestration-interactions", projectID, err)
+	}
+	investigationAcceptances, err := c.investigationAcceptances(ctx, tx, tasks)
+	if err != nil {
+		return OrchestrationProjectionExport{}, err
+	}
+	var openIssueCount int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM issues INDEXED BY idx_issues_status_deleted_priority_updated
+		WHERE visibility = 'live'
+		  AND status IN ('open', 'in_progress', 'in_review')
+	`).Scan(&openIssueCount); err != nil {
+		return OrchestrationProjectionExport{}, c.wrapError("count-open-orchestration-issues", projectID, err)
+	}
+	divergent, err := runtimeDivergentIssueIDs(ctx, tx)
+	if err != nil {
+		return OrchestrationProjectionExport{}, err
+	}
+	for i := range tasks {
+		if _, quarantined := divergent[tasks[i].ID.String()]; quarantined {
+			tasks[i].Session, tasks[i].HasTmuxSession = nil, false
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return OrchestrationProjectionExport{}, fmt.Errorf("commit orchestration projection export read: %w", err)
+	}
+	return OrchestrationProjectionExport{
+		Tasks: tasks, Checkpoint: checkpoint, OpenIssueCount: openIssueCount,
+		UnresolvedInteractionIDs: unresolvedInteractionIDs,
+		Interactions:             interactions,
+		InvestigationAcceptances: investigationAcceptances,
+	}, nil
+}
+
+func orchestrationInteractions(ctx context.Context, q sqlIssueDBTX, issueIDs []string) ([]domain.InteractionRequest, map[string]struct{}, error) {
+	out := make(map[string]struct{})
+	issueIDs = uniqueIssueIDStrings(issueIDs)
+	if len(issueIDs) == 0 {
+		return []domain.InteractionRequest{}, out, nil
+	}
+	args := make([]any, 0, len(issueIDs)+3)
+	for _, id := range issueIDs {
+		args = append(args, id)
+	}
+	args = append(args, string(domain.InteractionOpen), string(domain.InteractionDiscussing), string(domain.InteractionAnswerProposed))
+	rows, err := q.QueryContext(ctx, `
+		SELECT request_json FROM interaction_requests
+		WHERE issue_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(issueIDs)), ",")+`)
+		  AND state IN (?,?,?)
+		ORDER BY created_at, id
+	`, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	interactions := make([]domain.InteractionRequest, 0)
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, nil, err
+		}
+		request, err := decodeInteractionRequest(raw)
+		if err != nil {
+			return nil, nil, err
+		}
+		interactions = append(interactions, request)
+		if issueID := strings.TrimSpace(request.IssueID); issueID != "" {
+			out[issueID] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return interactions, out, nil
+}
+
+func (c *Client) projectOrchestrationContextIDs(ctx context.Context, q sqlIssueDBTX, limit int) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `
+		WITH candidates(id) AS (
+			SELECT id FROM issues INDEXED BY idx_issues_status_deleted_priority_updated
+			WHERE visibility = 'live'
+			  AND disposition IN ('backlog','ready')
+			ORDER BY priority ASC, updated_at ASC, id ASC
+			LIMIT ?
+		), seed(id) AS (
+			SELECT id FROM candidates
+			UNION SELECT closure.ancestor_id FROM candidates c
+			JOIN issue_graph_closure closure INDEXED BY idx_issue_graph_closure_descendant
+			  ON closure.descendant_id = c.id
+			WHERE closure.project_id = ? AND closure.dependency_type = ?
+		), roots(id) AS (
+			SELECT seed.id FROM seed
+			JOIN issues i ON i.id = seed.id AND i.visibility = 'live'
+			WHERE NOT EXISTS (
+				SELECT 1 FROM issue_dependencies parent
+				JOIN issues parent_issue ON parent_issue.id = parent.depends_on_id
+				  AND parent_issue.visibility = 'live'
+				WHERE parent.issue_id = seed.id
+				  AND parent.dependency_type IN (?, ?)
+				  AND parent.tombstoned_at IS NULL
+			)
+		), graph(id) AS (
+			SELECT id FROM roots
+			UNION SELECT closure.descendant_id FROM roots
+			JOIN issue_graph_closure closure INDEXED BY idx_issue_graph_closure_ancestor
+			  ON closure.ancestor_id = roots.id
+			WHERE closure.project_id = ? AND closure.dependency_type = ?
+		), context(id) AS (
+			SELECT id FROM graph
+			UNION SELECT dep.depends_on_id FROM graph
+			JOIN issue_dependencies dep INDEXED BY idx_dependencies_issue_active_type
+			  ON dep.issue_id = graph.id AND dep.tombstoned_at IS NULL
+		)
+		SELECT id FROM context ORDER BY id
+	`, limit, issueGraphClosureProjectID, string(domain.DependencyParentChild), string(domain.DependencyParentChild), "parent_child", issueGraphClosureProjectID, string(domain.DependencyParentChild))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0, limit*2)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if id = strings.TrimSpace(id); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, rows.Err()
+}
+
 // ExportProjection reads the source contract, composite issue/runtime
 // checkpoint, issues, dependencies, and runtime projections in one SQLite
 // read transaction. A successful export therefore never acknowledges state

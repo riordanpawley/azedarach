@@ -389,6 +389,10 @@ func (c *Client) InvestigationAcceptances(ctx context.Context, tasks []domain.Ta
 	if err != nil {
 		return nil, err
 	}
+	return c.investigationAcceptances(ctx, db, tasks)
+}
+
+func (c *Client) investigationAcceptances(ctx context.Context, q sqlIssueDBTX, tasks []domain.Task) (map[string]domain.InvestigationAcceptance, error) {
 	ids := make([]string, 0, len(tasks))
 	tasksByID := make(map[string]domain.Task)
 	for _, task := range tasks {
@@ -415,7 +419,7 @@ func (c *Client) InvestigationAcceptances(ctx context.Context, tasks []domain.Ta
 		string(domain.IssueEventHumanInputProvided),
 		string(domain.IssueEventIssueStatusChanged),
 	)
-	rows, err := db.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
 		FROM issue_observation_events
 		WHERE issue_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")+`)

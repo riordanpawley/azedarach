@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ const (
 	defaultOrchestrationStartLimit     = 3
 	defaultOrchestrationAgentCapacity  = 12
 	defaultOrchestrationOpenIssueLimit = 100
+	orchestrationSnapshotBuildTimeout  = 15 * time.Second
 )
 
 // orchestrationAuthority is the deliberately small daemon boundary for all
@@ -29,6 +31,15 @@ const (
 type orchestrationAuthority interface {
 	Snapshot(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error)
 	Apply(context.Context, string, protocol.OrchestrationIntentRequest) (protocol.OrchestrationIntentResult, error)
+}
+
+type orchestrationSnapshotBuilder func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error)
+
+type orchestrationSnapshotLoad struct {
+	done     chan struct{}
+	snapshot protocol.OrchestrationSnapshot
+	err      error
+	waiters  int
 }
 
 type daemonOrchestrationAuthority struct {
@@ -90,17 +101,22 @@ func (d *Daemon) handleOrchestrationSnapshot(ctx context.Context, req protocol.R
 		body.ActorID = strings.TrimSpace(req.Meta.ClientActor)
 	}
 	projectID := d.projectID(req.Meta)
+	build := d.orchestrationAuthority().Snapshot
 	var snapshot protocol.OrchestrationSnapshot
 	var snapshotRevision uint64
-	stable := false
-	for attempt := 0; attempt < 3; attempt++ {
+	stable := body.Scope.Kind == domain.OrchestrationScopeProject
+	attempts := 1
+	if !stable {
+		attempts = 3
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
 		before := d.currentRevision(projectID)
-		snapshot, err = d.orchestrationAuthority().Snapshot(ctx, projectID, body)
+		snapshot, err = build(ctx, projectID, body)
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 		}
 		after := d.currentRevision(projectID)
-		if before == after {
+		if stable || before == after {
 			snapshotRevision = after
 			stable = true
 			break
@@ -211,6 +227,75 @@ func (d *Daemon) handleOrchestrationIntent(ctx context.Context, req protocol.Req
 }
 
 func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+	projectID = a.daemon.canonicalProjectID(projectID)
+	if request.Limit <= 0 {
+		request.Limit = a.inspectLimit()
+	}
+	request.RepoDir = a.daemon.canonicalOrchestrationRepoDir(projectID, request.RepoDir)
+	key := orchestrationSnapshotLoadKey(projectID, request)
+	a.daemon.orchestrationSnapshotLoadMu.Lock()
+	if a.daemon.orchestrationSnapshotLoads == nil {
+		a.daemon.orchestrationSnapshotLoads = map[string]*orchestrationSnapshotLoad{}
+	}
+	if load := a.daemon.orchestrationSnapshotLoads[key]; load != nil {
+		load.waiters++
+		a.daemon.orchestrationSnapshotLoadMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return protocol.OrchestrationSnapshot{}, ctx.Err()
+		case <-load.done:
+			return load.snapshot, load.err
+		}
+	}
+	load := &orchestrationSnapshotLoad{done: make(chan struct{})}
+	a.daemon.orchestrationSnapshotLoads[key] = load
+	a.daemon.orchestrationSnapshotLoadMu.Unlock()
+
+	build := a.buildSnapshot
+	if a.daemon.orchestrationSnapshotBuild != nil {
+		build = a.daemon.orchestrationSnapshotBuild
+	}
+	go func() {
+		buildCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), orchestrationSnapshotBuildTimeout)
+		defer cancel()
+		snapshot, err := build(buildCtx, projectID, request)
+		a.daemon.orchestrationSnapshotLoadMu.Lock()
+		load.snapshot, load.err = snapshot, err
+		delete(a.daemon.orchestrationSnapshotLoads, key)
+		close(load.done)
+		a.daemon.orchestrationSnapshotLoadMu.Unlock()
+	}()
+	select {
+	case <-ctx.Done():
+		return protocol.OrchestrationSnapshot{}, ctx.Err()
+	case <-load.done:
+		return load.snapshot, load.err
+	}
+}
+
+func orchestrationSnapshotLoadKey(projectID string, request protocol.OrchestrationSnapshotRequest) string {
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%s", strings.TrimSpace(projectID), request.Scope.Kind, request.Scope.RootIssueID, strings.TrimSpace(request.ActorID), request.Limit, strings.TrimSpace(request.RepoDir))
+}
+
+func (d *Daemon) canonicalOrchestrationRepoDir(projectID, repoDir string) string {
+	repoDir = strings.TrimSpace(repoDir)
+	if repoDir == "" {
+		repoDir = strings.TrimSpace(d.resolveRepoDirForProject(projectID))
+	}
+	if repoDir == "" {
+		return ""
+	}
+	if absolute, err := filepath.Abs(repoDir); err == nil {
+		repoDir = absolute
+	}
+	repoDir = filepath.Clean(repoDir)
+	if resolved, err := filepath.EvalSymlinks(repoDir); err == nil {
+		repoDir = filepath.Clean(resolved)
+	}
+	return repoDir
+}
+
+func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, projectID string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
 	identity, err := domain.NewOrchestratorIdentity(projectID, request.Scope)
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, err
@@ -257,11 +342,24 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	if issueClient == nil {
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("issue store unavailable")
 	}
-	tasks, err := issueClient.ListGraphReadinessWithRuntime(ctx, projectID, "", limit)
+	projection, err := issueClient.ExportOrchestrationProjection(ctx, projectID, limit)
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("load project orchestration projection: %w", err)
 	}
-	tasks = a.daemon.enrichTasksWithSessionState(ctx, projectID, tasks)
+	if ids := taskIDsFromTasks(projection.Tasks); len(ids) > 0 {
+		if err := a.daemon.refreshIssueSessionRuntimeState(ctx, projectID, ids); err != nil && a.daemon.cfg.Logger != nil {
+			a.daemon.cfg.Logger.Debug("refresh project orchestration runtime projection", "project_id", projectID, "task_count", len(ids), "error", err)
+		}
+		projection, err = issueClient.ExportOrchestrationProjection(ctx, projectID, limit)
+		if err != nil {
+			return protocol.OrchestrationSnapshot{}, fmt.Errorf("reload project orchestration projection after runtime refresh: %w", err)
+		}
+	}
+	tasks := projection.Tasks
+	tasks = deriveOrchestrationProjectionFacts(tasks, projection.UnresolvedInteractionIDs, projection.InvestigationAcceptances)
+	snapshot.ProjectionRevision = projection.Checkpoint
+	snapshot.ProjectionAuthority = protocol.OrchestrationProjectionAuthoritySQLite
+	snapshot.Interactions = append(make([]domain.InteractionRequest, 0, len(projection.Interactions)), projection.Interactions...)
 	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, tasks)
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, err
@@ -275,10 +373,7 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		}
 	}
 	snapshot.Health = orchestrationBoardHealth(tasks, tasksByID, limit, a.openIssueLimit())
-	openIssueCount, err := issueClient.CountOpenOrchestrationIssues(ctx)
-	if err != nil {
-		return protocol.OrchestrationSnapshot{}, fmt.Errorf("count project orchestration issues: %w", err)
-	}
+	openIssueCount := projection.OpenIssueCount
 	snapshot.Health.OpenIssueCount = openIssueCount
 	if openIssueCount > snapshot.Health.OpenIssueLimit {
 		snapshot.Health.Diagnostics = append(snapshot.Health.Diagnostics, fmt.Sprintf("open issue count %d exceeds refusal threshold %d", openIssueCount, snapshot.Health.OpenIssueLimit))
@@ -307,7 +402,7 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	for _, rootTask := range roots {
 		root := rootTask.ID.String()
 		snapshot.Roots = append(snapshot.Roots, root)
-		ready, err := a.daemon.taskGraphReadinessForActor(ctx, projectID, root, request.ActorID)
+		ready, err := a.daemon.buildTaskGraphReadinessFromTasksForActor(ctx, projectID, root, request.ActorID, tasks)
 		if err != nil {
 			snapshot.Blocked[root] = err.Error()
 			continue
@@ -326,6 +421,25 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	sortOrchestrationSnapshot(&snapshot, tasksByID)
 	snapshot.Completion = projectOrchestrationCompletion(snapshot)
 	return snapshot, nil
+}
+
+func deriveOrchestrationProjectionFacts(tasks []domain.Task, waiting map[string]struct{}, acceptances map[string]domain.InvestigationAcceptance) []domain.Task {
+	for i := range tasks {
+		_, decisionWaiting := waiting[tasks[i].ID.String()]
+		base := tasks[i].IssueFacts()
+		acceptance, hasAcceptance := acceptances[tasks[i].ID.String()]
+		var acceptancePtr *domain.InvestigationAcceptance
+		if hasAcceptance {
+			acceptancePtr = &acceptance
+		}
+		tasks[i].Facts = domain.DeriveIssueFacts(domain.IssueFactsInput{
+			Status: tasks[i].Status, Priority: tasks[i].Priority, Type: tasks[i].Type, State: tasks[i].State,
+			Session: tasks[i].Session, HasTmuxSession: tasks[i].HasTmuxSession, OperationBlockers: base.OperationBlockers,
+			DecisionWaiting: decisionWaiting, DecisionWaitReason: "unresolved interaction request requires human decision",
+			InvestigationAcceptance: acceptancePtr,
+		})
+	}
+	return tasks
 }
 
 func projectOrchestrationCompletion(snapshot protocol.OrchestrationSnapshot) protocol.OrchestrationCompletion {
@@ -373,8 +487,13 @@ func (a daemonOrchestrationAuthority) enrichStewardshipContext(ctx context.Conte
 			snapshot.OwnershipConflicts = append(snapshot.OwnershipConflicts, candidate)
 		}
 	}
-	if issueClient := a.daemon.issueClientForProject(projectID); issueClient != nil {
-		if interactions, err := issueClient.ListInteractions(ctx); err == nil {
+	if snapshot.Interactions == nil {
+		issueClient := a.daemon.issueClientForProject(projectID)
+		if issueClient != nil {
+			interactions, err := issueClient.ListInteractions(ctx)
+			if err != nil {
+				interactions = nil
+			}
 			for _, interaction := range interactions {
 				if interaction.Unresolved() && orchestrationInteractionInScope(interaction, snapshot.Scope) {
 					snapshot.Interactions = append(snapshot.Interactions, interaction)

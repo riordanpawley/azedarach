@@ -193,6 +193,9 @@ type Daemon struct {
 	taskGraphReadinessMu                 sync.Mutex
 	taskGraphReadinessLoads              map[string]*taskGraphReadinessLoad
 	orchestrationMu                      sync.Mutex
+	orchestrationSnapshotLoadMu          sync.Mutex
+	orchestrationSnapshotLoads           map[string]*orchestrationSnapshotLoad
+	orchestrationSnapshotBuild           orchestrationSnapshotBuilder
 	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error
 	watchClientsMu                       sync.Mutex
 	watchClients                         map[string]watchClientObservation
@@ -343,6 +346,7 @@ func New(cfg Config) *Daemon {
 		taskListSnapshotCache:              map[string]taskListSnapshotCacheEntry{},
 		issueAutoArchiveLastRun:            map[string]time.Time{},
 		taskGraphReadinessLoads:            map[string]*taskGraphReadinessLoad{},
+		orchestrationSnapshotLoads:         map[string]*orchestrationSnapshotLoad{},
 		revision:                           map[string]uint64{},
 		userStoreRefreshPending:            map[string]bool{},
 		userStoreRefreshDirty:              map[string]bool{},

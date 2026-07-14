@@ -6,10 +6,13 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -865,6 +868,279 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessInteractions(t *testin
 	}
 	if got := candidateClass(woken.Candidates, id); got != "runnable" {
 		t.Fatalf("resolved class = %q, want runnable", got)
+	}
+}
+
+func TestProjectOrchestrationSnapshotConvergesDuringContinuousRevisionChurn(t *testing.T) {
+	const projectID = "project"
+	d := &Daemon{revision: map[string]uint64{projectID: 1}}
+	builds := 0
+	d.orchestrationSnapshotBuild = func(_ context.Context, gotProjectID string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		d.nextRevision(gotProjectID)
+		return protocol.OrchestrationSnapshot{Scope: request.Scope, ProjectionRevision: 41, ProjectionAuthority: protocol.OrchestrationProjectionAuthoritySQLite, Blocked: map[string]string{}}, nil
+	}
+	body, err := json.Marshal(protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now()
+	for call := 1; call <= 100; call++ {
+		resp, err := d.handleOrchestrationSnapshot(context.Background(), protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body})
+		if err != nil {
+			t.Fatalf("call %d handler error: %v", call, err)
+		}
+		if !resp.OK || resp.Error != nil {
+			t.Fatalf("call %d response = %+v, want successful project snapshot", call, resp)
+		}
+		var snapshot protocol.OrchestrationSnapshot
+		if err := json.Unmarshal(resp.Body, &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Revision != uint64(call+1) || snapshot.ProjectionRevision != 41 || snapshot.ProjectionAuthority != protocol.OrchestrationProjectionAuthoritySQLite {
+			t.Fatalf("call %d consistency = event %d projection %d authority %q", call, snapshot.Revision, snapshot.ProjectionRevision, snapshot.ProjectionAuthority)
+		}
+	}
+	if builds != 100 {
+		t.Fatalf("snapshot builds = %d, want one per finite call", builds)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 2*time.Second {
+		t.Fatalf("100 continuously churning project snapshots took %s, want <= 2s", elapsed)
+	}
+}
+
+func TestRootedOrchestrationSnapshotRetainsStableRevisionGuard(t *testing.T) {
+	const projectID = "project"
+	d := &Daemon{revision: map[string]uint64{projectID: 1}}
+	builds := 0
+	d.orchestrationSnapshotBuild = func(_ context.Context, gotProjectID string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		d.nextRevision(gotProjectID)
+		return protocol.OrchestrationSnapshot{Scope: request.Scope, Blocked: map[string]string{}}, nil
+	}
+	scope, err := domain.RootedOrchestrationScope("root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(protocol.OrchestrationSnapshotRequest{Scope: scope})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.handleOrchestrationSnapshot(context.Background(), protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeConflict {
+		t.Fatalf("response = %+v, want rooted projection conflict", resp)
+	}
+	if builds != 3 {
+		t.Fatalf("snapshot builds = %d, want three rooted attempts", builds)
+	}
+}
+
+func TestOrchestrationSnapshotSingleflightCoalescesWatchAndFiniteReads(t *testing.T) {
+	d := &Daemon{}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	builds := 0
+	var buildsMu sync.Mutex
+	d.orchestrationSnapshotBuild = func(_ context.Context, _ string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		buildsMu.Lock()
+		builds++
+		if builds == 1 {
+			close(started)
+		}
+		buildsMu.Unlock()
+		<-release
+		return protocol.OrchestrationSnapshot{Scope: request.Scope, ProjectionRevision: 9}, nil
+	}
+	authority := d.orchestrationAuthority()
+	request := protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", Limit: 50}
+	errCh := make(chan error, 2)
+	go func() {
+		defaultLimitRequest := request
+		defaultLimitRequest.Limit = 0
+		_, err := authority.Snapshot(context.Background(), "project", defaultLimitRequest)
+		errCh <- err
+	}()
+	<-started
+	go func() {
+		_, err := authority.Snapshot(context.Background(), "project", request)
+		errCh <- err
+	}()
+	key := orchestrationSnapshotLoadKey("project", request)
+	deadline := time.Now().Add(time.Second)
+	for {
+		d.orchestrationSnapshotLoadMu.Lock()
+		load := d.orchestrationSnapshotLoads[key]
+		joined := load != nil && load.waiters > 0
+		d.orchestrationSnapshotLoadMu.Unlock()
+		if joined {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second snapshot caller did not join shared load")
+		}
+		runtime.Gosched()
+	}
+	close(release)
+	for range 2 {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+	buildsMu.Lock()
+	defer buildsMu.Unlock()
+	if builds != 1 {
+		t.Fatalf("snapshot builds = %d, want one shared build", builds)
+	}
+}
+
+func TestOrchestrationSnapshotSingleflightLeaderCancellationDoesNotPoisonJoiner(t *testing.T) {
+	d := &Daemon{}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	d.orchestrationSnapshotBuild = func(ctx context.Context, _ string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		close(started)
+		select {
+		case <-ctx.Done():
+			return protocol.OrchestrationSnapshot{}, ctx.Err()
+		case <-release:
+			return protocol.OrchestrationSnapshot{Scope: request.Scope, ProjectionRevision: 9}, nil
+		}
+	}
+	authority := d.orchestrationAuthority()
+	request := protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", Limit: 50}
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderErr := make(chan error, 1)
+	go func() {
+		_, err := authority.Snapshot(leaderCtx, "project", request)
+		leaderErr <- err
+	}()
+	<-started
+	joinerResult := make(chan error, 1)
+	go func() {
+		_, err := authority.Snapshot(context.Background(), "project", request)
+		joinerResult <- err
+	}()
+	key := orchestrationSnapshotLoadKey("project", request)
+	deadline := time.Now().Add(time.Second)
+	for {
+		d.orchestrationSnapshotLoadMu.Lock()
+		load := d.orchestrationSnapshotLoads[key]
+		joined := load != nil && load.waiters > 0
+		d.orchestrationSnapshotLoadMu.Unlock()
+		if joined {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("joiner did not attach to leader load")
+		}
+		runtime.Gosched()
+	}
+	cancelLeader()
+	if err := <-leaderErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("leader error = %v, want context canceled", err)
+	}
+	close(release)
+	if err := <-joinerResult; err != nil {
+		t.Fatalf("joiner inherited leader cancellation: %v", err)
+	}
+}
+
+func TestOrchestrationSnapshotSingleflightCanonicalizesEffectiveRepoDir(t *testing.T) {
+	repoDir := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "repo-alias")
+	if err := os.Symlink(repoDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir}}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	builds := 0
+	var buildsMu sync.Mutex
+	d.orchestrationSnapshotBuild = func(_ context.Context, _ string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		buildsMu.Lock()
+		builds++
+		if builds == 1 {
+			close(started)
+		}
+		buildsMu.Unlock()
+		<-release
+		return protocol.OrchestrationSnapshot{Scope: request.Scope}, nil
+	}
+	authority := d.orchestrationAuthority()
+	base := protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator"}
+	errCh := make(chan error, 2)
+	go func() {
+		_, err := authority.Snapshot(context.Background(), "project", base)
+		errCh <- err
+	}()
+	<-started
+	withAlias := base
+	withAlias.RepoDir = alias
+	go func() {
+		_, err := authority.Snapshot(context.Background(), "project", withAlias)
+		errCh <- err
+	}()
+	keyRequest := base
+	keyRequest.Limit = defaultOrchestrationInspectLimit
+	keyRequest.RepoDir = d.canonicalOrchestrationRepoDir("project", repoDir)
+	key := orchestrationSnapshotLoadKey("project", keyRequest)
+	deadline := time.Now().Add(time.Second)
+	for {
+		d.orchestrationSnapshotLoadMu.Lock()
+		load := d.orchestrationSnapshotLoads[key]
+		joined := load != nil && load.waiters > 0
+		d.orchestrationSnapshotLoadMu.Unlock()
+		if joined {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("repo alias request did not join effective repo load")
+		}
+		runtime.Gosched()
+	}
+	close(release)
+	for range 2 {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+	buildsMu.Lock()
+	defer buildsMu.Unlock()
+	if builds != 1 {
+		t.Fatalf("snapshot builds = %d, want one canonical repo build", builds)
+	}
+}
+
+func TestProjectOrchestrationSnapshotDerivesRootsFromSharedProjection(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	for _, root := range []string{"Root A", "Root B"} {
+		rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: root, Description: "Coordinate children", Acceptance: "Children complete", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusOpen})
+		if err != nil {
+			t.Fatal(err)
+		}
+		childID, err := client.Create(ctx, issues.CreateTaskParams{Title: root + " child", Description: "Implement scoped work", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := client.AddDependency(ctx, childID, rootID, string(domain.DependencyParentChild)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	snapshot, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Roots) != 2 || len(snapshot.Runnable) != 2 {
+		t.Fatalf("shared project projection = roots %v runnable %v", snapshot.Roots, snapshot.Runnable)
+	}
+	if snapshot.ProjectionRevision == 0 || snapshot.ProjectionAuthority != protocol.OrchestrationProjectionAuthoritySQLite {
+		t.Fatalf("shared project projection consistency = revision %d authority %q", snapshot.ProjectionRevision, snapshot.ProjectionAuthority)
 	}
 }
 

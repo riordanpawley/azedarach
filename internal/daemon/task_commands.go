@@ -4915,6 +4915,10 @@ func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID,
 	if err != nil {
 		return taskGraphReadinessResult{}, fmt.Errorf("inspect issue graph readiness: %w", err)
 	}
+	return d.buildTaskGraphReadinessFromTasksForActor(ctx, projectID, rootIssueID, actorID, tasks)
+}
+
+func (d *Daemon) buildTaskGraphReadinessFromTasksForActor(ctx context.Context, projectID, rootIssueID, actorID string, tasks []domain.Task) (taskGraphReadinessResult, error) {
 	rootID, byID, children, err := daemonTaskGraphIndexes(rootIssueID, tasks)
 	if err != nil {
 		return taskGraphReadinessResult{}, err

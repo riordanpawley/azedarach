@@ -7,9 +7,9 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-func TestProtocolV42PreservesCombinedOrchestrationViewProjectionAndLearningContracts(t *testing.T) {
-	if CurrentVersion != 47 {
-		t.Fatalf("protocol version = %d, want 47", CurrentVersion)
+func TestProtocolV48PreservesCombinedOrchestrationViewProjectionAndLearningContracts(t *testing.T) {
+	if CurrentVersion != 48 {
+		t.Fatalf("protocol version = %d, want 48", CurrentVersion)
 	}
 	if CommandOrchestratorSessionStart == "" || CommandOrchestratorSessionAttach == "" || CommandOrchestratorSessionStop == "" || CommandOrchestratorSessionStatus == "" || EventOrchestrationLoopUpdated == "" || EventBoardViewChanged == "" {
 		t.Fatal("combined orchestration and board-view protocol contracts must remain registered")
@@ -20,6 +20,8 @@ func TestProtocolV42PreservesCombinedOrchestrationViewProjectionAndLearningContr
 		SessionID:            "az-root",
 		Lifecycle:            domain.OrchestratorWorking,
 		Scope:                domain.ProjectOrchestrationScope(),
+		ProjectionRevision:   41,
+		ProjectionAuthority:  OrchestrationProjectionAuthoritySQLite,
 		Cursor:               17,
 		ContinuationRequired: true,
 		Completion:           OrchestrationCompletion{Pass: false, Reasons: []string{"work remains"}},
@@ -37,7 +39,7 @@ func TestProtocolV42PreservesCombinedOrchestrationViewProjectionAndLearningContr
 	if err := json.Unmarshal(encoded, &shape); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"role", "session_id", "lifecycle", "cursor", "continuation_required", "completion", "review_queue", "candidates"} {
+	for _, key := range []string{"role", "session_id", "lifecycle", "projection_revision", "projection_authority", "cursor", "continuation_required", "completion", "review_queue", "candidates"} {
 		if _, ok := shape[key]; !ok {
 			t.Fatalf("combined snapshot omitted %q: %s", key, encoded)
 		}
