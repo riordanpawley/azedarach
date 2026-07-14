@@ -1382,6 +1382,86 @@ func TestReviewAcceptResumesDurablyAcceptedIntentWithoutReacquiringLease(t *test
 	}
 }
 
+func TestReviewAcceptConvergesStaleBusyHookAtIdlePromptAndReplaysIdempotently(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	dbPath := filepath.Join(repoDir, "issues.db")
+	client := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := naming.CanonicalSessionID("project", issueID)
+	staleAt := time.Now().UTC().Add(-time.Minute)
+	if err := upsertSessionStateFixture(runtimeStore, ctx, "project", daemonstate.Session{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: staleAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtimeStore.UpsertSessionActivityEvidence(ctx, daemonstate.SessionActivityEvidence{
+		ProjectID: "project", SessionID: sessionID, IssueID: issueID,
+		Activity: "busy", ActivitySource: "hooks", SourceSessionID: sessionID,
+		Agent: "codex", Hook: "user_prompt_submit", Event: "user_prompt_submit",
+		ObservedAt: staleAt, UpdatedAt: staleAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	captureCalls := 0
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch args[0] {
+		case "list-sessions":
+			return sessionID, nil
+		case "capture-pane":
+			captureCalls++
+			return "Implementation and validation complete.\n› Continue", nil
+		default:
+			return "", nil
+		}
+	}}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.runtimeStoresByProject = map[string]*daemonstate.RuntimeStateStore{"project": runtimeStore}
+	d.tmux = tmux.NewClient(runner, slog.Default())
+	d.sessionStore = daemonstate.NewStore()
+	if _, err := d.sessionStore.UpsertSession("project", sessionID, issueID, daemonstate.SessionStateRunning); err != nil {
+		t.Fatal(err)
+	}
+	d.git = git.NewClient(runner, slog.Default())
+	d.worktreeAdapter = &worktreeServiceAdapter{manager: git.NewWorktreeManager(runner, repoDir, slog.Default()), logger: slog.Default()}
+	request := protocol.OrchestrationIntentRequest{
+		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept,
+		IntentKey: "accept-stale-busy-idle-prompt", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
+	}
+
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Closed) != 1 || result.Closed[0] != issueID || len(result.Failed) != 0 {
+		t.Fatalf("review accept result = %+v captures=%d, want stale busy activity converged and issue closed", result, captureCalls)
+	}
+	if captureCalls != 2 {
+		t.Fatalf("terminal prompt captures = %d, want one sparse observation and one authoritative revalidation", captureCalls)
+	}
+	replayed, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replayed.Closed) != 1 || replayed.Closed[0] != issueID || len(replayed.Failed) != 0 {
+		t.Fatalf("replayed review accept = %+v, want idempotent closed result", replayed)
+	}
+	reviewEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewEvents) != 1 || reviewEvents[0].Payload["outcome"] != "accepted" {
+		t.Fatalf("review events = %+v, want one durable acceptance", reviewEvents)
+	}
+}
+
 func createReviewTask(t *testing.T, ctx context.Context, client *issues.Client, priority domain.Priority, owner string) string {
 	t.Helper()
 	id, err := client.Create(ctx, issues.CreateTaskParams{Title: "review " + owner, Description: "Executable", Acceptance: "validated and reviewed", Type: domain.TypeTask, Priority: priority, Status: domain.StatusOpen})
