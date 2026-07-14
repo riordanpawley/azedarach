@@ -328,6 +328,143 @@ func TestReviewAcceptRequiresCompleteEvidenceAndLeavesIssueReviewReady(t *testin
 	}
 }
 
+func TestLatestTrustedReviewOutcomeRejectsMissingReviewerProvenance(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted"}}); err != nil {
+		t.Fatal(err)
+	}
+	authority := daemonOrchestrationAuthority{daemon: newOrchestrationReviewTestDaemon(repoDir, client)}
+	outcome, err := authority.latestTrustedReviewOutcome(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != "" {
+		t.Fatalf("missing actor provenance produced trusted outcome %q", outcome)
+	}
+}
+
+func TestReviewAcceptTrustsDecisionOverInternalReviewArtifactWithoutTreatingArtifactAsAcceptance(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "read-only review", Description: "review findings", Acceptance: "consumed by parent", Type: domain.TypeInvestigation, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []issues.IssueObservationEventParams{
+		{Type: domain.IssueEventInvestigationDisposition, Source: "agent", Payload: map[string]any{"disposition": "internal_review"}},
+		{Type: domain.IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "accepted", "summary": "parent consumed findings"}},
+	} {
+		if _, err := client.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if domain.EvaluateInvestigationAcceptance(task, before).Accepted {
+		t.Fatal("agent-authored artifact unexpectedly satisfied acceptance")
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-internal-review", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Failed) != 0 || len(result.Closed) != 1 || result.Closed[0] != issueID {
+		t.Fatalf("result = %+v, want authoritative tracking-only close", result)
+	}
+	after, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err = client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !domain.EvaluateInvestigationAcceptance(task, after).Accepted || task.Status != domain.StatusDone {
+		t.Fatalf("closed investigation = %+v acceptance=%+v", task, domain.EvaluateInvestigationAcceptance(task, after))
+	}
+}
+
+func TestReviewAcceptClosesMultipleInternalReviewsBeforeDependentCompletion(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "dependent synthesis", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, 2)
+	for _, title := range []string{"review A", "review B"} {
+		id, err := client.Create(ctx, issues.CreateTaskParams{Title: title, Description: "read-only findings", Acceptance: "consumed", Type: domain.TypeInvestigation, Priority: domain.P1, Status: domain.StatusInReview, ParentID: &rootID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range []issues.IssueObservationEventParams{
+			{Type: domain.IssueEventInvestigationDisposition, Source: "agent", Payload: map[string]any{"disposition": "internal_review"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "accepted", "consumer": rootID}},
+		} {
+			if _, err := client.AppendIssueObservationEvent(ctx, id, event); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ids = append(ids, id)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-review-batch", ActorID: "orchestrator", IssueIDs: ids, RepoDir: repoDir}
+	authority := daemonOrchestrationAuthority{daemon: d}
+	if err := authority.recordReviewOutcome(ctx, "project", ids[0], request, "accepted", ""); err != nil {
+		t.Fatal(err)
+	}
+	result, err := authority.Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Failed) != 0 || len(result.Skipped) != 0 || len(result.Closed) != 2 {
+		t.Fatalf("batch result = %+v", result)
+	}
+	for _, id := range ids {
+		task, err := client.GetWithRuntime(ctx, "project", id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if task.Status != domain.StatusDone {
+			t.Fatalf("review %s status = %s", id, task.Status)
+		}
+	}
+	reviewEvents, err := client.ListIssueObservationEvents(ctx, ids[0], issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptedCount := 0
+	for _, event := range reviewEvents {
+		if event.Payload["outcome"] == "accepted" && event.Source == "daemon-orchestration" {
+			acceptedCount++
+		}
+	}
+	if acceptedCount != 1 {
+		t.Fatalf("accepted restart replay count = %d, events=%+v", acceptedCount, reviewEvents)
+	}
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.ReviewQueue) != 0 {
+		t.Fatalf("stale review queue after accepted closeout: %+v", snapshot.ReviewQueue)
+	}
+}
+
 func TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -359,6 +496,20 @@ func TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState(t *tes
 	}
 	if len(reviewEvents) != 2 || reviewEvents[0].Payload["outcome"] != "accepted" || reviewEvents[1].Payload["outcome"] != "integration_failed" {
 		t.Fatalf("review events = %+v, want accepted and explicit integration failure", reviewEvents)
+	}
+	retried, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-ready", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(retried.Failed[issueID], "authoritative close") {
+		t.Fatalf("retry result = %+v", retried)
+	}
+	reviewEvents, err = client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewEvents) != 2 {
+		t.Fatalf("retry duplicated durable outcomes: %+v", reviewEvents)
 	}
 }
 

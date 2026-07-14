@@ -5581,7 +5581,7 @@ func daemonWorkerObservationNextActions(rootIssueID string, observation domain.W
 	case domain.WorkerObservationBlocked:
 		return []string{fmt.Sprintf("resolve blockers for %s", issueID)}
 	case domain.WorkerObservationReviewReady:
-		return []string{fmt.Sprintf("validate evidence, then close accepted worker: az issue close --id %s", issueID)}
+		return []string{fmt.Sprintf("validate evidence, then accept and close review: az orchestrate review accept --root %s --issue %s", rootIssueID, issueID)}
 	case domain.WorkerObservationStale:
 		if in.Stale != nil && strings.TrimSpace(in.Stale.SuggestedCommand) != "" {
 			return []string{in.Stale.SuggestedCommand}

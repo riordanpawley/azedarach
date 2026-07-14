@@ -71,6 +71,43 @@ func EvaluateInvestigationAcceptance(task Task, events []IssueObservationEvent) 
 	return InvestigationAcceptance{Disposition: disposition, Reason: "human-facing investigation lacks explicit issue-specific findings acceptance"}
 }
 
+// HasInternalReviewArtifact reports whether the current internal-review
+// disposition has a durable, structured review result available for a trusted
+// reviewer decision. The artifact is evidence to inspect, not acceptance
+// authority; only trustedInvestigationReviewEvent can satisfy terminal close.
+func HasInternalReviewArtifact(task Task, events []IssueObservationEvent) bool {
+	if task.Type != TypeInvestigation {
+		return false
+	}
+	disposition := InvestigationDispositionHumanFindings
+	hasArtifact := false
+	ordered := append([]IssueObservationEvent(nil), events...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].ID != ordered[j].ID {
+			return ordered[i].ID < ordered[j].ID
+		}
+		return ordered[i].ObservedAt.Before(ordered[j].ObservedAt)
+	})
+	for _, event := range ordered {
+		if event.Type == IssueEventInvestigationDisposition {
+			value := InvestigationDisposition(strings.TrimSpace(stringValue(event.Payload["disposition"])))
+			if value == InvestigationDispositionHumanFindings || value == InvestigationDispositionInternalReview {
+				disposition = value
+				hasArtifact = false
+			}
+			continue
+		}
+		if disposition != InvestigationDispositionInternalReview || event.Type != IssueEventReviewCompleted {
+			continue
+		}
+		switch strings.TrimSpace(stringValue(event.Payload["outcome"])) {
+		case "accepted", "ratified":
+			hasArtifact = true
+		}
+	}
+	return disposition == InvestigationDispositionInternalReview && hasArtifact
+}
+
 func stringValue(value any) string {
 	text, _ := value.(string)
 	return text

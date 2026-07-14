@@ -151,8 +151,38 @@ func (a daemonOrchestrationAuthority) reviewInspection(ctx context.Context, proj
 			}
 		}
 	}
+	if outcome, err := a.latestTrustedReviewOutcome(ctx, projectID, task.ID.String()); err != nil {
+		inspection.Reasons = append(inspection.Reasons, "inspect-review-outcome: "+err.Error())
+	} else if outcome == "accepted" {
+		inspection.Actionable = false
+		inspection.Reasons = append(inspection.Reasons, "accepted-close-pending")
+	}
 	inspection.Reasons = uniqueNonEmpty(inspection.Reasons)
 	return inspection
+}
+
+func (a daemonOrchestrationAuthority) latestTrustedReviewOutcome(ctx context.Context, projectID, issueID string) (string, error) {
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return "", fmt.Errorf("issue store unavailable")
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}, NewestFirst: true})
+	if err != nil {
+		return "", err
+	}
+	for _, event := range events {
+		actorID, _ := event.Payload["actor_id"].(string)
+		if strings.TrimSpace(event.Source) != "daemon-orchestration" || strings.TrimSpace(actorID) == "" {
+			continue
+		}
+		switch strings.TrimSpace(event.SourceCommand) {
+		case string(protocol.OrchestrationIntentReviewAccept), string(protocol.OrchestrationIntentReviewReturn):
+		default:
+			continue
+		}
+		return strings.TrimSpace(fmt.Sprint(event.Payload["outcome"])), nil
+	}
+	return "", nil
 }
 
 func coordinationLease(task domain.Task, purpose domain.CoordinationLeasePurpose) *domain.CoordinationLease {
@@ -206,12 +236,13 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 			result.Closed = append(result.Closed, issueID)
 			continue
 		}
+		resumingAcceptedClose := terminal == "accepted"
 		inspection, ok := queue[issueID]
 		if !ok {
 			result.Skipped[issueID] = "not-review-ready"
 			continue
 		}
-		if !inspection.Actionable {
+		if !inspection.Actionable && !resumingAcceptedClose {
 			result.Skipped[issueID] = strings.Join(inspection.Reasons, "; ")
 			continue
 		}
@@ -220,16 +251,18 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 			continue
 		}
 		var actionErr error
+		reviewLeaseReleased := false
 		switch request.Kind {
 		case protocol.OrchestrationIntentReviewReturn:
 			actionErr = a.returnReviewFindings(ctx, projectID, request, inspection, &result)
 		case protocol.OrchestrationIntentReviewAccept:
-			actionErr = a.acceptReview(ctx, projectID, request, inspection, &result)
+			reviewLeaseReleased, actionErr = a.acceptReview(ctx, projectID, request, inspection, &result)
 		}
-		if _, releaseErr := issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, Purpose: domain.CoordinationLeaseReview}); releaseErr != nil {
-			if actionErr == nil {
+		if !reviewLeaseReleased {
+			_, releaseErr := issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, Purpose: domain.CoordinationLeaseReview})
+			if releaseErr != nil && actionErr == nil {
 				actionErr = fmt.Errorf("release review lease: %w", releaseErr)
-			} else {
+			} else if releaseErr != nil {
 				actionErr = fmt.Errorf("%v; release review lease: %w", actionErr, releaseErr)
 			}
 		}
@@ -369,6 +402,7 @@ func (a daemonOrchestrationAuthority) reviewIntentTerminalOutcome(ctx context.Co
 			if task.Status == domain.StatusDone {
 				return "closed", nil
 			}
+			return "accepted", nil
 		}
 	}
 	return "", nil
@@ -391,33 +425,58 @@ func (a daemonOrchestrationAuthority) reviewWorkerRestartAllowed(ctx context.Con
 	return lease != nil && !lease.IsExpired(now) && strings.EqualFold(strings.TrimSpace(lease.OwnerID), strings.TrimSpace(actorID)), nil
 }
 
-func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, inspection protocol.OrchestrationReview, result *protocol.OrchestrationIntentResult) error {
+func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, inspection protocol.OrchestrationReview, result *protocol.OrchestrationIntentResult) (bool, error) {
 	if inspection.Evidence == nil {
-		return fmt.Errorf("accepted review requires complete worker_evidence.v1")
+		issueClient := a.daemon.issueClientForProject(projectID)
+		if issueClient == nil {
+			return false, fmt.Errorf("issue store unavailable")
+		}
+		task, err := issueClient.GetWithRuntime(ctx, projectID, inspection.IssueID)
+		if err != nil {
+			return false, fmt.Errorf("inspect review issue: %w", err)
+		}
+		events, err := issueClient.ListIssueObservationEvents(ctx, inspection.IssueID, issues.IssueObservationEventListOptions{})
+		if err != nil {
+			return false, fmt.Errorf("inspect review evidence: %w", err)
+		}
+		if !domain.HasInternalReviewArtifact(task, events) {
+			return false, fmt.Errorf("accepted review requires complete worker_evidence.v1 or a declared internal_review investigation with a durable accepted/ratified review artifact")
+		}
 	}
 	if inspection.ContextRisk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*inspection.ContextRisk) {
-		return fmt.Errorf("accepted review requires structured high-context-risk closeout evidence")
+		return false, fmt.Errorf("accepted review requires structured high-context-risk closeout evidence")
 	}
 	if err := a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "accepted", ""); err != nil {
-		return err
+		return false, err
 	}
-	body, err := json.Marshal(taskCloseRequest{TaskID: inspection.IssueID, IntegrateBeforeClose: true})
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return false, fmt.Errorf("issue store unavailable")
+	}
+	if _, err := issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, inspection.IssueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, Purpose: domain.CoordinationLeaseReview}); err != nil {
+		return false, fmt.Errorf("release accepted review lease before close: %w", err)
+	}
+	// Worker reviews carry executable evidence and must integrate their branch.
+	// Read-only internal-review investigations may be tracking-only; when no
+	// worktree exists, terminal close must not invent an integration requirement.
+	integrateBeforeClose := inspection.Evidence != nil || strings.TrimSpace(inspection.WorktreePath) != ""
+	body, err := json.Marshal(taskCloseRequest{TaskID: inspection.IssueID, IntegrateBeforeClose: integrateBeforeClose})
 	if err != nil {
-		return err
+		return true, err
 	}
 	closeReq := protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID("orchestration-review-close-" + request.IntentKey + "-" + inspection.IssueID), Kind: protocol.EnvelopeKindCommand, Command: "task.close", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID), ClientActor: request.ActorID}, Body: body}
 	closeResp, err := a.daemon.handleTaskClose(ctx, closeReq)
 	if err != nil {
 		_ = a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "integration_failed", err.Error())
-		return fmt.Errorf("authoritative close: %w", err)
+		return true, fmt.Errorf("authoritative close: %w", err)
 	}
 	if !closeResp.OK {
 		failure := responseErrorMessage(closeResp)
 		_ = a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "integration_failed", failure)
-		return fmt.Errorf("authoritative close: %s", failure)
+		return true, fmt.Errorf("authoritative close: %s", failure)
 	}
 	result.Closed = append(result.Closed, inspection.IssueID)
-	return nil
+	return true, nil
 }
 
 func (a daemonOrchestrationAuthority) recordReviewOutcome(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, outcome, failure string) error {
@@ -425,11 +484,28 @@ func (a daemonOrchestrationAuthority) recordReviewOutcome(ctx context.Context, p
 	if issueClient == nil {
 		return fmt.Errorf("issue store unavailable")
 	}
+	fingerprint := reviewRequestFingerprint(request)
+	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}, NewestFirst: true})
+	if err != nil {
+		return fmt.Errorf("inspect prior review outcome: %w", err)
+	}
+	for _, event := range events {
+		eventFailure := ""
+		if value, ok := event.Payload["failure"]; ok {
+			eventFailure = strings.TrimSpace(fmt.Sprint(value))
+		}
+		if strings.TrimSpace(fmt.Sprint(event.Payload["intent_key"])) == strings.TrimSpace(request.IntentKey) &&
+			strings.TrimSpace(fmt.Sprint(event.Payload["request_fingerprint"])) == fingerprint &&
+			strings.TrimSpace(fmt.Sprint(event.Payload["outcome"])) == strings.TrimSpace(outcome) &&
+			eventFailure == strings.TrimSpace(failure) {
+			return nil
+		}
+	}
 	parsed, err := naming.ParseIssueID(issueID)
 	if err != nil {
 		return err
 	}
-	payload := map[string]any{"outcome": outcome, "actor_id": request.ActorID, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request), "findings": request.Findings}
+	payload := map[string]any{"outcome": outcome, "actor_id": request.ActorID, "intent_key": request.IntentKey, "request_fingerprint": fingerprint, "findings": request.Findings}
 	if strings.TrimSpace(failure) != "" {
 		payload["failure"] = failure
 	}

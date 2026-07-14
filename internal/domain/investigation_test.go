@@ -27,3 +27,19 @@ func TestEvaluateInvestigationAcceptance(t *testing.T) {
 		})
 	}
 }
+
+func TestHasInternalReviewArtifactDoesNotGrantAcceptance(t *testing.T) {
+	task := Task{Type: TypeInvestigation}
+	declaration := IssueObservationEvent{ID: 1, Type: IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}}
+	artifact := IssueObservationEvent{ID: 2, Type: IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "accepted", "summary": "consumed findings"}}
+	events := []IssueObservationEvent{declaration, artifact}
+	if !HasInternalReviewArtifact(task, events) {
+		t.Fatal("structured internal review artifact was not detected")
+	}
+	if EvaluateInvestigationAcceptance(task, events).Accepted {
+		t.Fatal("untrusted review artifact granted terminal acceptance")
+	}
+	if HasInternalReviewArtifact(task, append(events, IssueObservationEvent{ID: 3, Type: IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "human_findings"}})) {
+		t.Fatal("superseded internal review artifact remained eligible")
+	}
+}
