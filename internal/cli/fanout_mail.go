@@ -226,7 +226,10 @@ func ParseIssueFanoutDriftArgs(args []string) (IssueFanoutDriftOptions, error) {
 }
 
 func IssueFanoutCommand(deps *Dependencies, opts IssueFanoutOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -277,7 +280,10 @@ func IssueFanoutCommand(deps *Dependencies, opts IssueFanoutOptions) error {
 }
 
 func IssueFanoutReadyCommand(deps *Dependencies, opts IssueFanoutReadyOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -322,7 +328,10 @@ func IssueFanoutReadyCommand(deps *Dependencies, opts IssueFanoutReadyOptions) e
 }
 
 func IssueFanoutDriftCommand(deps *Dependencies, opts IssueFanoutDriftOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -42,10 +42,11 @@ func TestParseInteractionArgsLocksRevisionAndHumanSignificance(t *testing.T) {
 }
 
 func TestInteractionCommandUsesTypedDaemonAuthorityAndAttachesDiscussion(t *testing.T) {
+	routes := registerCLIProjects(t, "other", "proj-interaction")
 	now := time.Date(2026, time.July, 11, 2, 0, 0, 0, time.UTC)
 	request := interactionCLIRequest(now)
 	transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-		if req.Meta.ProjectID != naming.ProjectID("proj-interaction") {
+		if req.Meta.ProjectID != naming.ProjectID(routes["proj-interaction"]) {
 			t.Fatalf("project id = %q", req.Meta.ProjectID)
 		}
 		if req.Command != protocol.CommandInteractionDiscuss {
@@ -63,14 +64,14 @@ func TestInteractionCommandUsesTypedDaemonAuthorityAndAttachesDiscussion(t *test
 		request.SessionID = "advisor-req-1"
 		return responseWithJSON(req, protocol.InteractionResponseBody{Request: request, SessionAttached: true}), nil
 	}}
-	deps := &Dependencies{DaemonClient: daemonclient.New(transport).WithProjectID("other"), ProjectID: "other"}
+	deps := &Dependencies{DaemonClient: daemonclient.New(transport).WithProjectID(routes["other"]), ProjectID: routes["other"]}
 	out := captureStdout(t, func() error {
 		return InteractionCommand(deps, InteractionOptions{Command: "discuss", Project: "proj-interaction", RequestID: request.ID, Revision: 1})
 	})
 	if !strings.Contains(out, "Discussion: advisor-req-1 (advisor session attached)") {
 		t.Fatalf("output = %q", out)
 	}
-	if deps.ProjectID != "other" {
+	if deps.ProjectID != routes["other"] {
 		t.Fatalf("project override was not restored: %q", deps.ProjectID)
 	}
 }

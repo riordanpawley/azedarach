@@ -474,6 +474,13 @@ type PROptions struct {
 	JSON       bool
 }
 
+type commandProjectRouting struct {
+	ProjectID  string         `json:"project_id"`
+	Project    string         `json:"project,omitempty"`
+	Repository string         `json:"repository"`
+	Config     *config.Config `json:"-"`
+}
+
 func ParsePRArgs(args []string) (PROptions, error) {
 	if len(args) == 0 {
 		return PROptions{}, fmt.Errorf("usage: az pr <list|status|checks|open|create|merge> [arguments]")
@@ -802,7 +809,10 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 
-	restoreExplicitProject := applyExplicitSessionProjectOverride(deps, opts.Project)
+	restoreExplicitProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreExplicitProject()
 
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
@@ -875,6 +885,11 @@ func printPendingSessionStartOperation(record protocol.OperationRecord, issueID 
 func WorktreeCreateCommand(deps *Dependencies, opts WorktreeCreateOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
 	defer cancel()
+	restoreExplicitProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
+	defer restoreExplicitProject()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
@@ -936,6 +951,11 @@ func WorktreeCreateCommand(deps *Dependencies, opts WorktreeCreateOptions) error
 func WorktreeDeleteCommand(deps *Dependencies, opts WorktreeDeleteOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
 	defer cancel()
+	restoreExplicitProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
+	defer restoreExplicitProject()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
@@ -992,12 +1012,14 @@ func WorktreeDeleteCommand(deps *Dependencies, opts WorktreeDeleteOptions) error
 func PRCommand(deps *Dependencies, opts PROptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), prCommandTimeout)
 	defer cancel()
-	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+	routing, err := resolvePRCommandRouting(deps, opts.Project)
+	if err != nil {
 		return err
 	}
-	if project := strings.TrimSpace(opts.Project); project != "" {
-		restoreProject := applyIssueProjectOverride(deps, project)
-		defer restoreProject()
+	restoreProject := applyProjectRouting(deps, routing)
+	defer restoreProject()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
 	}
 
 	switch opts.Command {
@@ -1010,8 +1032,9 @@ func PRCommand(deps *Dependencies, opts PROptions) error {
 			return fmt.Errorf("list pull requests: %w", err)
 		}
 		if opts.JSON {
-			return printJSON(result)
+			return printPRJSON(routing, result)
 		}
+		printPRRouting(routing)
 		printPullRequestList(result)
 		return nil
 	case "status":
@@ -1030,8 +1053,9 @@ func PRCommand(deps *Dependencies, opts PROptions) error {
 				payload["checks_status"] = checks.ChecksStatus
 				payload["checks"] = checks.Checks
 			}
-			return printJSON(payload)
+			return printPRJSON(routing, payload)
 		}
+		printPRRouting(routing)
 		printPullRequestStatus(status, checks.ChecksStatus, checksErr)
 		return nil
 	case "checks":
@@ -1044,8 +1068,9 @@ func PRCommand(deps *Dependencies, opts PROptions) error {
 			return fmt.Errorf("get pull request checks: %w", err)
 		}
 		if opts.JSON {
-			return printJSON(checks)
+			return printPRJSON(routing, checks)
 		}
+		printPRRouting(routing)
 		printPullRequestChecks(checks)
 		return nil
 	case "open":
@@ -1057,12 +1082,13 @@ func PRCommand(deps *Dependencies, opts PROptions) error {
 			return fmt.Errorf("open pull request: %w", err)
 		}
 		if opts.JSON {
-			return printJSON(map[string]string{"ref": ref, "status": "opened"})
+			return printPRJSON(routing, map[string]string{"ref": ref, "status": "opened"})
 		}
+		printPRRouting(routing)
 		fmt.Printf("Opened PR for %s\n", ref)
 		return nil
 	case "create":
-		return prCreateCommand(ctx, deps, opts)
+		return prCreateCommandWithRouting(ctx, deps, opts, &routing)
 	case "merge":
 		if !opts.Confirm {
 			return fmt.Errorf("refusing to merge PR without --confirm")
@@ -1084,8 +1110,9 @@ func PRCommand(deps *Dependencies, opts PROptions) error {
 			return fmt.Errorf("merge pull request: %w", err)
 		}
 		if opts.JSON {
-			return printJSON(result)
+			return printPRJSON(routing, result)
 		}
+		printPRRouting(routing)
 		fmt.Printf("Merged PR #%d with %s\n", result.Number, result.Strategy)
 		return nil
 	default:
@@ -1093,7 +1120,180 @@ func PRCommand(deps *Dependencies, opts PROptions) error {
 	}
 }
 
+func resolvePRCommandRouting(deps *Dependencies, explicitProject string) (commandProjectRouting, error) {
+	if deps == nil {
+		return commandProjectRouting{}, fmt.Errorf("resolve PR project: dependencies are unavailable")
+	}
+	explicitProject = strings.TrimSpace(explicitProject)
+	if explicitProject != "" {
+		candidate, ok, err := resolveExplicitProjectCandidate(deps, explicitProject)
+		if err != nil {
+			return commandProjectRouting{}, err
+		}
+		if !ok {
+			return commandProjectRouting{}, unknownExplicitProjectError(explicitProject)
+		}
+		routing := projectRoutingFromCandidate(candidate)
+		selectedConfig, err := config.LoadConfig(routing.Repository)
+		if err != nil {
+			return commandProjectRouting{}, fmt.Errorf("load config for explicit --project %q: %w", explicitProject, err)
+		}
+		routing.Config = selectedConfig
+		return routing, nil
+	}
+
+	if candidate, ok := findSessionProjectCandidate(deps, deps.ProjectID); ok {
+		return projectRoutingFromCandidate(candidate), nil
+	}
+	if repoDir := strings.TrimSpace(deps.RepoDir); repoDir != "" {
+		projectID := protocol.NormalizeProjectID(deps.ProjectID)
+		if projectID == "" {
+			derivedProjectID, deriveErr := config.ProjectIDForRoot(repoDir)
+			if deriveErr != nil {
+				return commandProjectRouting{}, fmt.Errorf("derive current project ID for PR command: %w", deriveErr)
+			}
+			projectID = derivedProjectID
+		}
+		return commandProjectRouting{ProjectID: projectID, Repository: repoDir}, nil
+	}
+	registry, err := config.LoadProjectsRegistry()
+	if err != nil {
+		return commandProjectRouting{}, fmt.Errorf("load project registry for PR command: %w", err)
+	}
+	if project := registry.GetDefault(); project != nil {
+		candidates := appendSessionProjectCandidate(nil, project.Name, project.ID, project.Path)
+		if len(candidates) > 0 {
+			return projectRoutingFromCandidate(candidates[0]), nil
+		}
+	}
+	return commandProjectRouting{}, fmt.Errorf("%w: no current or default project is available for PR command", config.ErrProjectNotFound)
+}
+
+func applyExplicitProjectOverride(deps *Dependencies, explicitProject string) (func(), error) {
+	if deps == nil {
+		return nil, fmt.Errorf("apply explicit project: dependencies are unavailable")
+	}
+	explicitProject = strings.TrimSpace(explicitProject)
+	if explicitProject == "" {
+		return func() {}, nil
+	}
+	candidate, ok, err := resolveExplicitProjectCandidate(deps, explicitProject)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, unknownExplicitProjectError(explicitProject)
+	}
+	routing := projectRoutingFromCandidate(candidate)
+	selectedConfig, err := config.LoadConfig(routing.Repository)
+	if err != nil {
+		return nil, fmt.Errorf("load config for explicit --project %q: %w", explicitProject, err)
+	}
+	routing.Config = selectedConfig
+	return applyProjectRouting(deps, routing), nil
+}
+
+// ApplyExplicitProjectOverride scopes a command to a registered explicit project.
+// Callers must invoke the returned restore function before returning.
+func ApplyExplicitProjectOverride(deps *Dependencies, explicitProject string) (func(), error) {
+	return applyExplicitProjectOverride(deps, explicitProject)
+}
+
+func unknownExplicitProjectError(explicitProject string) error {
+	return fmt.Errorf("%w: explicit --project %q is not registered; refusing repository fallback (and project fallback)", config.ErrProjectNotFound, explicitProject)
+}
+
+func applyProjectRouting(deps *Dependencies, routing commandProjectRouting) func() {
+	if deps == nil {
+		return func() {}
+	}
+	previousProject := deps.ProjectID
+	previousRepoDir := deps.RepoDir
+	previousRuntimeRepoDir := deps.RuntimeRepoDir
+	previousConfig := deps.Config
+	deps.ProjectID = routing.ProjectID
+	deps.RepoDir = routing.Repository
+	deps.RuntimeRepoDir = resolveRuntimeRepoDir(deps.TraceContext, routing.Repository)
+	if routing.Config != nil {
+		deps.Config = routing.Config
+	}
+	if deps.DaemonClient != nil {
+		deps.DaemonClient.WithProjectID(routing.ProjectID)
+	}
+	return func() {
+		deps.ProjectID = previousProject
+		deps.RepoDir = previousRepoDir
+		deps.RuntimeRepoDir = previousRuntimeRepoDir
+		deps.Config = previousConfig
+		if deps.DaemonClient != nil {
+			deps.DaemonClient.WithProjectID(previousProject)
+		}
+	}
+}
+
+func resolveExplicitProjectCandidate(deps *Dependencies, identifier string) (sessionProjectCandidate, bool, error) {
+	candidates := appendSessionProjectCandidate(nil, "", deps.ProjectID, deps.RepoDir)
+	if candidate, ok := matchProjectCandidate(candidates, identifier); ok {
+		return candidate, true, nil
+	}
+	registry, err := config.LoadProjectsRegistry()
+	if err != nil {
+		return sessionProjectCandidate{}, false, fmt.Errorf("load project registry for explicit --project %q: %w", identifier, err)
+	}
+	for _, project := range registry.Projects {
+		candidates = appendSessionProjectCandidate(candidates, project.Name, project.ID, project.Path)
+	}
+	candidate, ok := matchProjectCandidate(dedupeSessionProjectCandidates(candidates), identifier)
+	return candidate, ok, nil
+}
+
+func matchProjectCandidate(candidates []sessionProjectCandidate, identifier string) (sessionProjectCandidate, bool) {
+	normalized := protocol.NormalizeProjectID(identifier)
+	for _, candidate := range candidates {
+		for _, alias := range candidate.Aliases {
+			if protocol.NormalizeProjectID(alias) == normalized {
+				return candidate, true
+			}
+		}
+	}
+	return sessionProjectCandidate{}, false
+}
+
+func projectRoutingFromCandidate(candidate sessionProjectCandidate) commandProjectRouting {
+	return commandProjectRouting{
+		ProjectID:  candidate.Route,
+		Project:    candidate.Name,
+		Repository: sessionProjectCandidateRepoDir(context.Background(), candidate),
+	}
+}
+
+func printPRRouting(routing commandProjectRouting) {
+	project := firstNonEmptyString(routing.Project, routing.ProjectID)
+	fmt.Printf("Project: %s (%s)\n", project, routing.ProjectID)
+	fmt.Printf("Repository: %s\n", routing.Repository)
+}
+
+func printPRJSON(routing commandProjectRouting, result any) error {
+	payload := map[string]any{"resolved_project": routing}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("marshal PR result: %w", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return fmt.Errorf("normalize PR result: %w", err)
+	}
+	for key, value := range fields {
+		payload[key] = value
+	}
+	return printJSON(payload)
+}
+
 func prCreateCommand(ctx context.Context, deps *Dependencies, opts PROptions) error {
+	return prCreateCommandWithRouting(ctx, deps, opts, nil)
+}
+
+func prCreateCommandWithRouting(ctx context.Context, deps *Dependencies, opts PROptions, routing *commandProjectRouting) error {
 	if opts.Number > 0 {
 		return fmt.Errorf("pr create does not accept pull request number selectors")
 	}
@@ -1135,7 +1335,13 @@ func prCreateCommand(ctx context.Context, deps *Dependencies, opts PROptions) er
 		return fmt.Errorf("create pull request: %w", err)
 	}
 	if opts.JSON {
+		if routing != nil {
+			return printPRJSON(*routing, result)
+		}
 		return printJSON(result)
+	}
+	if routing != nil {
+		printPRRouting(*routing)
 	}
 	fmt.Printf("Created PR #%d: %s\n", result.PullRequest.Number, result.PullRequest.URL)
 	return nil
@@ -1344,12 +1550,16 @@ func SessionCaptureCommand(deps *Dependencies, opts SessionCaptureOptions) error
 func captureSessionPane(deps *Dependencies, opts SessionCaptureOptions, logMessage string) (protocol.SessionCaptureResponseBody, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
+	restoreExplicitProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return protocol.SessionCaptureResponseBody{}, err
+	}
+	defer restoreExplicitProject()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return protocol.SessionCaptureResponseBody{}, err
 	}
 
 	var target sessionIssueTarget
-	var err error
 	if strings.TrimSpace(opts.Project) != "" {
 		target, err = resolveExplicitSessionStatusTarget(deps, opts.IssueID, opts.Project, opts.IssueID)
 	} else {
@@ -1755,7 +1965,7 @@ func knownSessionProjectCandidates(deps *Dependencies) []sessionProjectCandidate
 	}
 	if registry, err := config.LoadProjectsRegistry(); err == nil && registry != nil {
 		for _, project := range registry.Projects {
-			candidates = appendSessionProjectCandidate(candidates, project.Name, "", project.Path)
+			candidates = appendSessionProjectCandidate(candidates, project.Name, project.ID, project.Path)
 		}
 	}
 	return dedupeSessionProjectCandidates(candidates)
@@ -1764,6 +1974,7 @@ func knownSessionProjectCandidates(deps *Dependencies) []sessionProjectCandidate
 func appendSessionProjectCandidate(candidates []sessionProjectCandidate, name, route, path string) []sessionProjectCandidate {
 	name = strings.TrimSpace(name)
 	route = strings.TrimSpace(route)
+	declaredRoute := route
 	path = strings.TrimSpace(path)
 	if path != "" {
 		if hashProjectID, err := config.ProjectIDForRoot(path); err == nil && strings.TrimSpace(hashProjectID) != "" {
@@ -1778,7 +1989,7 @@ func appendSessionProjectCandidate(candidates []sessionProjectCandidate, name, r
 		return candidates
 	}
 
-	aliases := uniqueTrimmedStrings([]string{route, name, filepath.Base(path)})
+	aliases := uniqueTrimmedStrings([]string{route, declaredRoute, name, filepath.Base(path)})
 	scopes := uniqueTrimmedStrings([]string{route, path})
 	return append(candidates, sessionProjectCandidate{
 		Route:   route,
@@ -1928,7 +2139,10 @@ func BranchMergeToBaseCommand(deps *Dependencies, issueID string) error {
 }
 
 func BranchMergeToBaseCommandWithOptions(deps *Dependencies, opts BranchMergeToBaseOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	result, err := runBranchMergeToBase(deps, opts)
@@ -2257,7 +2471,10 @@ func resolveProtectedMergeToBaseTarget(ctx context.Context, deps *Dependencies, 
 }
 
 func BranchAgentMergeCommand(deps *Dependencies, opts BranchAgentMergeOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), branchMergeToBaseTimeout)
@@ -3177,14 +3394,6 @@ func sessionProjectCandidateRepoDir(ctx context.Context, candidate sessionProjec
 		return repoDir
 	}
 	return path
-}
-
-func isDifferentExplicitIssueProject(currentProject, explicitProject string) bool {
-	explicitProject = normalizeIssueProject(explicitProject)
-	if explicitProject == "" {
-		return false
-	}
-	return protocol.NormalizeProjectID(currentProject) != protocol.NormalizeProjectID(explicitProject)
 }
 
 func formatProjectIssueRef(projectID, issueID string) string {
@@ -4962,7 +5171,10 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 	if protocol.NormalizeProjectID(opts.Project) == "global" {
 		return globalIssueListCommand(deps, opts)
 	}
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -4973,7 +5185,6 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 
 	var (
 		snapshot    daemonclient.TaskSnapshot
-		err         error
 		archiveMode protocol.ArchiveMode
 	)
 	archiveMode, err = protocol.NormalizeArchiveMode(opts.Archived)
@@ -5200,7 +5411,10 @@ type issueGetManyResult struct {
 }
 
 func IssueGetManyCommand(deps *Dependencies, opts IssueGetManyOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -5274,7 +5488,10 @@ func IssueGetManyCommand(deps *Dependencies, opts IssueGetManyOptions) error {
 }
 
 func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	startedAt := time.Now()
@@ -5391,7 +5608,10 @@ func IssueReleaseCommand(deps *Dependencies, opts IssueOwnershipOptions) error {
 }
 
 func issueOwnershipCommand(deps *Dependencies, opts IssueOwnershipOptions, claim bool) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ownerID := strings.TrimSpace(opts.OwnerID)
@@ -5416,7 +5636,6 @@ func issueOwnershipCommand(deps *Dependencies, opts IssueOwnershipOptions, claim
 	}
 	var (
 		task domain.Task
-		err  error
 	)
 	if claim {
 		task, err = deps.DaemonClient.ClaimTaskOwnership(ctx, opts.IssueID, req)
@@ -5454,7 +5673,10 @@ func IssueEventsCommand(deps *Dependencies, opts IssueEventsOptions) error {
 		return nil
 	}
 
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -5515,7 +5737,10 @@ func IssueEventsCommand(deps *Dependencies, opts IssueEventsOptions) error {
 }
 
 func IssueRecordCommand(deps *Dependencies, opts IssueRecordOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	issueID := strings.TrimSpace(opts.IssueID)
@@ -5688,7 +5913,10 @@ func printIssueEventsJQHelp(w io.Writer) {
 }
 
 func IssueContextRiskCommand(deps *Dependencies, opts IssueContextRiskOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -6036,7 +6264,10 @@ func ProjectScriptsStatusCommand(deps *Dependencies, opts ProjectScriptsStatusOp
 }
 
 func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(commandTraceContext(deps), daemonCommandTimeout)
@@ -6276,11 +6507,21 @@ func issueDoctorRuntimeDiagnostics(ctx context.Context, deps *Dependencies, task
 }
 
 func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
-	if isDifferentExplicitIssueProject(deps.ProjectID, opts.Project) && !opts.ExplicitParent {
+	originalProjectID := deps.ProjectID
+	if normalizeIssueProject(opts.Project) != "" {
+		opts.ProjectQualifiedOutput = true
+	}
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
+	defer restoreProject()
+	differentExplicitProject := normalizeIssueProject(opts.Project) != "" && protocol.NormalizeProjectID(originalProjectID) != protocol.NormalizeProjectID(deps.ProjectID)
+	if differentExplicitProject && !opts.ExplicitParent {
 		opts.AutoParentFromIssueID = nil
 		opts.AutoCreatedFromIssueID = nil
 	}
-	if !isDifferentExplicitIssueProject(deps.ProjectID, opts.Project) {
+	if !differentExplicitProject {
 		if !opts.Deferred && opts.AutoParentFromIssueID == nil {
 			if issueID, ok := activeIssueIDFromTmuxPaneIfKnown(context.Background(), deps); ok {
 				opts.AutoParentFromIssueID = &issueID
@@ -6293,12 +6534,6 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 			}
 		}
 	}
-	if normalizeIssueProject(opts.Project) != "" {
-		opts.ProjectQualifiedOutput = true
-	}
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
-	defer restoreProject()
-
 	result, err := createIssue(context.Background(), deps, opts)
 	if err != nil {
 		var partial issueCreatePartialError
@@ -6462,7 +6697,10 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 }
 
 func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), issueCloseCleanupTimeout)
@@ -6529,7 +6767,10 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 }
 
 func IssueCleanupCommand(deps *Dependencies, opts IssueCleanupOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 	startupCtx, startupCancel := context.WithTimeout(context.Background(), issueCloseCleanupTimeout)
 	if err := ensureDaemon(startupCtx, deps, "cli"); err != nil {
@@ -6655,7 +6896,10 @@ func printTaskClosePhases(phases []daemonclient.TaskClosePhaseTiming) {
 }
 
 func IssueDeleteCommand(deps *Dependencies, opts IssueDeleteOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -6672,7 +6916,10 @@ func IssueDeleteCommand(deps *Dependencies, opts IssueDeleteOptions) error {
 }
 
 func IssueUnarchiveCommand(deps *Dependencies, opts IssueUnarchiveOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -6756,7 +7003,10 @@ func printIssueDeleteResult(opts IssueDeleteOptions, cleanup issueDeleteCleanupR
 }
 
 func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -6876,7 +7126,10 @@ func cleanupCloseTaskStatusOptions(forceWorktree bool, closeCleanChildren ...boo
 }
 
 func IssueDependencyAddCommand(deps *Dependencies, opts IssueDependencyAddOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -6928,7 +7181,10 @@ func parentChangeGuidance(opts IssueDependencyAddOptions) string {
 }
 
 func IssueDependencyRemoveCommand(deps *Dependencies, opts IssueDependencyRemoveOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -7008,7 +7264,10 @@ type dependencyBulkResult struct {
 }
 
 func IssueDependencyBulkApplyCommand(deps *Dependencies, opts IssueDependencyBulkApplyOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -7101,7 +7360,10 @@ func IssueDependencyBulkApplyCommand(deps *Dependencies, opts IssueDependencyBul
 }
 
 func IssueImageAddCommand(deps *Dependencies, opts IssueImageAddOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -7151,7 +7413,10 @@ func IssueImageAddCommand(deps *Dependencies, opts IssueImageAddOptions) error {
 }
 
 func IssueImageRemoveCommand(deps *Dependencies, opts IssueImageRemoveOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -7189,7 +7454,10 @@ func IssueImageRemoveCommand(deps *Dependencies, opts IssueImageRemoveOptions) e
 }
 
 func IssueDocumentAddCommand(deps *Dependencies, opts IssueDocumentAddOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -7239,7 +7507,10 @@ func IssueDocumentAddCommand(deps *Dependencies, opts IssueDocumentAddOptions) e
 }
 
 func IssueDocumentListCommand(deps *Dependencies, opts IssueDocumentListOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -7293,7 +7564,10 @@ func IssueDocumentListCommand(deps *Dependencies, opts IssueDocumentListOptions)
 }
 
 func IssueDocumentRemoveCommand(deps *Dependencies, opts IssueDocumentRemoveOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -7352,7 +7626,10 @@ func formatIssueAttachmentNoteLine(att *attachment.Attachment) string {
 }
 
 func IssueBulkCreateCommand(deps *Dependencies, opts IssueBulkCreateOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -7485,7 +7762,10 @@ func parseBulkCreateParentID(value *string) (*naming.IssueID, error) {
 }
 
 func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

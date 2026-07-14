@@ -36,7 +36,10 @@ func ParseOrchestratorSessionArgs(command string, args []string) (OrchestratorSe
 }
 
 func OrchestratorSessionCommand(deps *Dependencies, command string, opts OrchestratorSessionOptions) error {
-	restore := applyOrchestrationProjectOverride(deps, opts.Project)
+	restore, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restore()
 	scope, err := resolveCLIOrchestrationScope(opts.RootIssueID)
 	if err != nil {

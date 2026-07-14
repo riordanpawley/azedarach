@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -225,6 +227,104 @@ func TestPRHandlerCreateAndBranchBehind(t *testing.T) {
 	})
 }
 
+func TestPRHandlerResolvesWorkflowFromRequestProject(t *testing.T) {
+	workflow := &fakePRWorkflow{}
+	var resolvedProject string
+	handler := NewProjectPRHandler(nil, func(_ context.Context, projectID string) (PRProjectResources, error) {
+		resolvedProject = projectID
+		if projectID == "missing-store" {
+			return PRProjectResources{Workflow: workflow}, nil
+		}
+		if projectID != "selected-project" {
+			return PRProjectResources{}, fmt.Errorf("unknown project %q", projectID)
+		}
+		return PRProjectResources{Workflow: workflow, IssueRefs: &fakePRIssueRefStore{}}, nil
+	})
+	body, _ := json.Marshal(prListCommandBody{State: "all", Limit: 20})
+	resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-project-routing",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         CommandPRList,
+		Meta:            protocol.Metadata{ProjectID: "selected-project"},
+		Body:            body,
+	})
+	if !resp.OK {
+		t.Fatalf("response error: %+v", resp.Error)
+	}
+	if resolvedProject != "selected-project" {
+		t.Fatalf("resolved project = %q", resolvedProject)
+	}
+
+	resp = handler.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-invalid-project",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         CommandPRList,
+		Meta:            protocol.Metadata{ProjectID: "other-project"},
+		Body:            body,
+	})
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest || !strings.Contains(resp.Error.Message, "unknown project") {
+		t.Fatalf("invalid project response = %+v", resp)
+	}
+
+	request := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-missing-store",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         CommandPRList,
+		Meta:            protocol.Metadata{ProjectID: "missing-store"},
+		Body:            body,
+	}
+	resp = handler.Handle(context.Background(), request)
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest || !strings.Contains(resp.Error.Message, "missing repository workflow or issue store") {
+		t.Fatalf("missing-store response = %+v", resp)
+	}
+}
+
+func TestPRHandlerCreatePersistsExternalRefInRequestProjectOnly(t *testing.T) {
+	workflows := map[string]*fakePRWorkflow{
+		"startup-project":  {},
+		"selected-project": {},
+	}
+	stores := map[string]*fakePRIssueRefStore{
+		"startup-project":  {},
+		"selected-project": {},
+	}
+	handler := NewProjectPRHandler(nil, func(_ context.Context, projectID string) (PRProjectResources, error) {
+		workflow, workflowOK := workflows[projectID]
+		store, storeOK := stores[projectID]
+		if !workflowOK || !storeOK {
+			return PRProjectResources{}, fmt.Errorf("unknown project %q", projectID)
+		}
+		return PRProjectResources{Workflow: workflow, IssueRefs: store}, nil
+	})
+	body, _ := json.Marshal(prCreateCommandBody{
+		Title: "Selected change", Body: "Body", Branch: "feature/selected",
+		BaseBranch: "release", IssueID: "az-selected",
+	})
+	resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-selected-create",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         CommandPRCreate,
+		Meta:            protocol.Metadata{ProjectID: "selected-project"},
+		Body:            body,
+	})
+	if !resp.OK {
+		t.Fatalf("create response error: %+v", resp.Error)
+	}
+	if len(stores["startup-project"].params) != 0 {
+		t.Fatalf("startup project external refs = %+v, want none", stores["startup-project"].params)
+	}
+	if len(stores["selected-project"].params) != 1 || stores["selected-project"].params[0].IssueID != "az-selected" {
+		t.Fatalf("selected project external refs = %+v", stores["selected-project"].params)
+	}
+	if workflows["startup-project"].lastParams.IssueID != "" || workflows["selected-project"].lastParams.IssueID != "az-selected" {
+		t.Fatalf("workflow create projects startup=%+v selected=%+v", workflows["startup-project"].lastParams, workflows["selected-project"].lastParams)
+	}
+}
+
 func TestPRHandlerCreatePersistsGitHubExternalRef(t *testing.T) {
 	workflow := &fakePRWorkflow{}
 	refs := &fakePRIssueRefStore{}
@@ -257,6 +357,26 @@ func TestPRHandlerCreatePersistsGitHubExternalRef(t *testing.T) {
 	}
 	if got.Metadata["state"] != "open" || got.Metadata["draft"] != "true" {
 		t.Fatalf("external ref metadata = %+v", got.Metadata)
+	}
+}
+
+func TestPRHandlerCreateReportsExternalRefPersistenceFailure(t *testing.T) {
+	workflow := &fakePRWorkflow{}
+	refs := &fakePRIssueRefStore{err: errors.New("write failed")}
+	handler := NewPRHandler(workflow, nil, refs)
+	body, _ := json.Marshal(prCreateCommandBody{Title: "Add feature", Body: "Body", Branch: "feature/add", BaseBranch: "main", IssueID: "az-1"})
+	resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-pr-ref-failure",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         CommandPRCreate,
+		Body:            body,
+	})
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInternal || !strings.Contains(resp.Error.Message, "persist GitHub pull request reference") {
+		t.Fatalf("persistence failure response = %+v", resp)
+	}
+	if workflow.lastParams.IssueID != "az-1" || len(refs.params) != 1 {
+		t.Fatalf("create/persistence calls workflow=%+v refs=%+v", workflow.lastParams, refs.params)
 	}
 }
 
