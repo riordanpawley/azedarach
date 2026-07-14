@@ -11451,6 +11451,23 @@ func TestDaemonEventRevisionReducer(t *testing.T) {
 	}
 }
 
+func TestBoardViewChangedEventRefreshesBoardSnapshot(t *testing.T) {
+	m := newTestModel()
+	m.daemonRevision = 4
+
+	result := m.applyDaemonStreamEvent(protocol.EventEnvelope{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		Revision:  5,
+		Event:     protocol.EventBoardViewChanged,
+	}, false)
+	if result.key != daemonStreamCommandIssuesRefresh {
+		t.Fatalf("command key = %q, want %q", result.key, daemonStreamCommandIssuesRefresh)
+	}
+	if m.daemonRevision != 5 {
+		t.Fatalf("daemon revision = %d, want 5", m.daemonRevision)
+	}
+}
+
 func TestOrchestrationLoopEventRefreshesVisibleOverview(t *testing.T) {
 	m := newTestModel()
 	m.daemonRevision = 4
