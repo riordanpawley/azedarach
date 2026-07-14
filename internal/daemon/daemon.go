@@ -190,6 +190,7 @@ type Daemon struct {
 	taskGraphReadinessMu               sync.Mutex
 	taskGraphReadinessLoads            map[string]*taskGraphReadinessLoad
 	orchestrationMu                    sync.Mutex
+	reviewLeaseReleasedBeforeClose     func(context.Context, string, string) error
 	watchClientsMu                     sync.Mutex
 	watchClients                       map[string]watchClientObservation
 	terminalFailureProbeMu             sync.Mutex

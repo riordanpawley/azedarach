@@ -35,3 +35,28 @@ func TestOpenSmoke(t *testing.T) {
 		t.Fatalf("ExecContext() error = %v", err)
 	}
 }
+
+func TestQueryCounterCountsExecutedQueries(t *testing.T) {
+	t.Parallel()
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	counter := &QueryCounter{}
+	ctx := WithQueryCounter(context.Background(), counter)
+	var one int
+	if err := db.QueryRowContext(ctx, `SELECT 1`).Scan(&one); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.QueryContext(ctx, `SELECT 2`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := counter.Count(); got != 2 {
+		t.Fatalf("query count = %d, want 2", got)
+	}
+}
