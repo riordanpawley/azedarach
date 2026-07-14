@@ -703,6 +703,7 @@ type Client struct {
 	stateModelV2MigrationFailureHook   func(stage string) error
 	boardViewsMigrationFailureHook     func(stage string) error
 	humanAuthorityMigrationFailureHook func(stage string) error
+	mailboxProjectionFailureHook       func(stage string) error
 	interactionMu                      sync.RWMutex
 	interactionCache                   map[string]domain.InteractionRequest
 }

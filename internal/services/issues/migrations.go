@@ -81,6 +81,7 @@ var orderedMigrations = []migration{
 	{id: "0045_issue_state_runtime_constraints", path: "migrations/0045_issue_state_runtime_constraints.sql", apply: applyIssueStateRuntimeConstraintsMigration},
 	{id: "0046_repair_issue_state_runtime_constraints", path: "migrations/0046_repair_issue_state_runtime_constraints.manifest.sql", apply: applyIssueStateRuntimeConstraintsRepairMigration},
 	{id: humanAuthorityProjectionMigrationID, path: "migrations/0047_human_authority_projection_revision.sql"},
+	{id: mailboxObservationProjectionCutoverMigrationID, path: "migrations/0048_mailbox_observation_projection_cutover.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -135,6 +136,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "0045_issue_state_runtime_constraints", Path: "migrations/0045_issue_state_runtime_constraints.sql", Checksum: "67a11506f5d49059280d6406cbf1e66155549e4e573978f78f3e43b5ea944f23"},
 	{ID: "0046_repair_issue_state_runtime_constraints", Path: "migrations/0046_repair_issue_state_runtime_constraints.manifest.sql", Checksum: "6420b559de666287450e274b283b2e481c1472e3b02914f3023019975216e20d"},
 	{ID: humanAuthorityProjectionMigrationID, Path: "migrations/0047_human_authority_projection_revision.sql", Checksum: "ac3a48512b2e6e9c018d58a68db24a2465e9d172139d22f8378f69677073a0ab"},
+	{ID: mailboxObservationProjectionCutoverMigrationID, Path: "migrations/0048_mailbox_observation_projection_cutover.sql", Checksum: "990941df000ed1814efbff5261f79c4cf4fb0761b0d7ec60891d7817d292f403"},
 }
 
 func validateMigrationRegistry() error {
@@ -422,15 +424,17 @@ func migrateIssueSessionLogicalIdentity(ctx context.Context, tx *sql.Tx) error {
 }
 
 const (
-	migrationArtifactAuthority          sqlitemigration.Authority = "project.issues"
-	issueStateModelV2MigrationID                                  = "0029_issue_state_model_v2"
-	issueStateModelVersionMetaKey                                 = "issue:state_model_version"
-	issueStateModelV2CutoverMarkerKey                             = "issue:state_model_v2_cutover"
-	issueStateModelV2Version                                      = "2"
-	boardViewsMigrationID                                         = "0031_board_views"
-	humanAuthorityProjectionMigrationID                           = "0047_human_authority_projection_revision"
-	contextualLearningMigrationID                                 = "0039_contextual_learning_activation"
-	legacyContextualLearningMigration                             = "0038_contextual_learning_activation"
+	migrationArtifactAuthority                     sqlitemigration.Authority = "project.issues"
+	issueStateModelV2MigrationID                                             = "0029_issue_state_model_v2"
+	issueStateModelVersionMetaKey                                            = "issue:state_model_version"
+	issueStateModelV2CutoverMarkerKey                                        = "issue:state_model_v2_cutover"
+	issueStateModelV2Version                                                 = "2"
+	boardViewsMigrationID                                                    = "0031_board_views"
+	humanAuthorityProjectionMigrationID                                      = "0047_human_authority_projection_revision"
+	mailboxObservationProjectionCutoverMigrationID                           = "0048_mailbox_observation_projection_cutover"
+	mailboxObservationProjectionCutoverMetaKey                               = "issue:mailbox_observation_projection_cutover"
+	contextualLearningMigrationID                                            = "0039_contextual_learning_activation"
+	legacyContextualLearningMigration                                        = "0038_contextual_learning_activation"
 )
 
 type issueStateModelV2CutoverMarker struct {
@@ -539,6 +543,9 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := validateHumanAuthorityProjectionRevisionTriggers(ctx, db); err != nil {
 		return err
 	}
+	if err := validateMailboxObservationProjectionCutover(ctx, db); err != nil {
+		return err
+	}
 
 	canonicalApplied, err := isMigrationApplied(ctx, db, "0045_issue_state_runtime_constraints")
 	if err != nil {
@@ -564,6 +571,24 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("seed built-in board views: %w", err)
 	}
 	return sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts)
+}
+
+func validateMailboxObservationProjectionCutover(ctx context.Context, db *sql.DB) error {
+	var raw string
+	if err := db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, mailboxObservationProjectionCutoverMetaKey).Scan(&raw); err != nil {
+		return fmt.Errorf("applied migration %s is missing its cutover marker: %w", mailboxObservationProjectionCutoverMigrationID, err)
+	}
+	var marker struct {
+		State   string `json:"state"`
+		Version int    `json:"version"`
+	}
+	if err := json.Unmarshal([]byte(raw), &marker); err != nil {
+		return fmt.Errorf("applied migration %s has invalid cutover marker: %w", mailboxObservationProjectionCutoverMigrationID, err)
+	}
+	if marker.Version != 1 || marker.State != "pending" && marker.State != "complete" {
+		return fmt.Errorf("applied migration %s has unsupported cutover marker state=%q version=%d", mailboxObservationProjectionCutoverMigrationID, marker.State, marker.Version)
+	}
+	return nil
 }
 
 func repairIssueIDAllocationSchema(ctx context.Context, db *sql.DB) error {

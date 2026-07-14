@@ -181,6 +181,99 @@ func TestMailSendProjectsStewardshipEventsWithoutProjectMailboxReads(t *testing.
 	}
 }
 
+func TestProjectSnapshotBackfillsPreUpgradeMailboxOnceWithRootedShape(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	root, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := client.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInProgress, ParentID: &root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 7, 14, 3, 0, 0, 0, time.UTC)
+	legacy := []daemonMailEvent{
+		{Seq: 1, ParentIssue: root, IssueID: child, Type: "worker-progress", From: "worker", To: "orchestrator", Body: "legacy progress", CreatedAt: created},
+		{Seq: 2, ParentIssue: root, IssueID: child, Type: "worker-blocked", From: "worker", To: "orchestrator", Body: "legacy blocker", CreatedAt: created.Add(time.Second), Payload: map[string]any{"reason": "dependency"}},
+	}
+	for _, event := range legacy {
+		if err := appendMailboxEvent(repoDir, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	rootedScope, err := domain.RootedOrchestrationScope(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rooted, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: rootedScope, ActorID: "orchestrator", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(project.RecentEvents, rooted.RecentEvents) || len(project.RecentEvents) != 2 {
+		t.Fatalf("rooted=%+v project=%+v, want exact pre-upgrade event shape and ordering", rooted.RecentEvents, project.RecentEvents)
+	}
+
+	mailboxDir := filepath.Join(repoDir, ".azedarach", "mailbox")
+	if err := os.RemoveAll(mailboxDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mailboxDir, []byte("cutover complete; reads must not recur"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restarted := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	afterRestart, err := (daemonOrchestrationAuthority{daemon: restarted}).Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", Limit: 10})
+	if err != nil {
+		t.Fatalf("completed cutover re-read filesystem mailbox: %v", err)
+	}
+	if !reflect.DeepEqual(afterRestart.RecentEvents, project.RecentEvents) {
+		t.Fatalf("after restart=%+v project=%+v, want stable no-duplicate durable events", afterRestart.RecentEvents, project.RecentEvents)
+	}
+	events, err := client.ListIssueObservationEvents(ctx, child, issues.IssueObservationEventListOptions{Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stewardshipCount := 0
+	for _, event := range events {
+		if _, visible := projectStewardshipEventType(event.Type); visible {
+			stewardshipCount++
+		}
+	}
+	if stewardshipCount != 2 {
+		t.Fatalf("durable events = %+v, want exactly two stewardship rows without retry duplicates", events)
+	}
+}
+
+func TestLegacyMailboxProjectionRefusesOversizedFileWithoutCompleting(t *testing.T) {
+	repoDir := t.TempDir()
+	mailboxDir := filepath.Join(repoDir, ".azedarach", "mailbox")
+	if err := os.MkdirAll(mailboxDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(mailboxDir, "root.jsonl")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(legacyMailboxCutoverMaxFileBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readLegacyMailboxObservationProjection(repoDir); err == nil || !strings.Contains(err.Error(), "bounded file limit") {
+		t.Fatalf("oversized legacy mailbox error = %v, want bounded refusal", err)
+	}
+}
+
 func TestMailWatchRepairsInterruptedAppendBeforeReviewReadyReplay(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

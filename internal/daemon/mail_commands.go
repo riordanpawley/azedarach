@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -31,6 +32,12 @@ type daemonMailEvent struct {
 	CreatedAt   time.Time              `json:"created_at"`
 	Payload     map[string]interface{} `json:"payload,omitempty"`
 }
+
+const (
+	legacyMailboxCutoverMaxEntries   = 2000
+	legacyMailboxCutoverMaxEvents    = 50000
+	legacyMailboxCutoverMaxFileBytes = 8 << 20
+)
 
 func (d *Daemon) handleMailSend(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	var cmd protocol.MailSendCommandBody
@@ -144,6 +151,103 @@ func (d *Daemon) projectMailEvent(ctx context.Context, projectID, repoDir string
 		return nil
 	}
 	return err
+}
+
+func (d *Daemon) ensureLegacyMailboxObservationProjection(ctx context.Context, projectID, repoDir string) error {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil
+	}
+	marker, err := issueClient.MailboxObservationProjectionCutoverState(ctx)
+	if err != nil {
+		return err
+	}
+	if marker.State == "complete" {
+		return nil
+	}
+	observations, err := readLegacyMailboxObservationProjection(repoDir)
+	if err != nil {
+		return err
+	}
+	imported, err := issueClient.CompleteMailboxObservationProjectionCutover(ctx, observations)
+	if err != nil {
+		return err
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("legacy mailbox observation projection completed", "project_id", projectID, "mailbox_events", len(observations), "imported_events", imported)
+	}
+	return nil
+}
+
+func readLegacyMailboxObservationProjection(repoDir string) ([]issues.LegacyMailboxObservation, error) {
+	dirPath := filepath.Join(strings.TrimSpace(repoDir), ".azedarach", "mailbox")
+	dir, err := os.Open(dirPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("open legacy mailbox projection directory: %w", err)
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(legacyMailboxCutoverMaxEntries + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("scan legacy mailbox projection directory: %w", err)
+	}
+	if len(entries) > legacyMailboxCutoverMaxEntries {
+		return nil, fmt.Errorf("legacy mailbox projection exceeds bounded entry limit %d", legacyMailboxCutoverMaxEntries)
+	}
+	observations := make([]issues.LegacyMailboxObservation, 0, min(len(entries)*8, legacyMailboxCutoverMaxEvents))
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink != 0 || entry.IsDir() || filepath.Ext(entry.Name()) != ".jsonl" {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, fmt.Errorf("inspect legacy mailbox %s: %w", entry.Name(), err)
+		}
+		if !info.Mode().IsRegular() || info.Size() > legacyMailboxCutoverMaxFileBytes {
+			return nil, fmt.Errorf("legacy mailbox %s exceeds bounded file limit %d", entry.Name(), legacyMailboxCutoverMaxFileBytes)
+		}
+		file, err := os.Open(filepath.Join(dirPath, entry.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("open legacy mailbox %s: %w", entry.Name(), err)
+		}
+		scanner := bufio.NewScanner(io.LimitReader(file, legacyMailboxCutoverMaxFileBytes+1))
+		scanner.Buffer(make([]byte, 64*1024), legacyMailboxCutoverMaxFileBytes)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			var event daemonMailEvent
+			if err := json.Unmarshal([]byte(line), &event); err != nil {
+				_ = file.Close()
+				return nil, fmt.Errorf("decode legacy mailbox %s: %w", entry.Name(), err)
+			}
+			projectedType, stewardship := projectStewardshipEventType(domain.IssueObservationEventType(event.Type))
+			if !stewardship || strings.TrimSpace(event.IssueID) == "" {
+				continue
+			}
+			if len(observations) >= legacyMailboxCutoverMaxEvents {
+				_ = file.Close()
+				return nil, fmt.Errorf("legacy mailbox projection exceeds bounded event limit %d", legacyMailboxCutoverMaxEvents)
+			}
+			observations = append(observations, issues.LegacyMailboxObservation{
+				IssueID: event.IssueID, EventType: domain.IssueObservationEventType(projectedType), ObservedAt: event.CreatedAt,
+				Source: event.From, WorktreePath: repoDir, ParentIssue: event.ParentIssue, Sequence: event.Seq,
+				Payload: map[string]any{"mail_event": mailEventToProtocol(event)},
+			})
+		}
+		scanErr := scanner.Err()
+		closeErr := file.Close()
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan legacy mailbox %s: %w", entry.Name(), scanErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close legacy mailbox %s: %w", entry.Name(), closeErr)
+		}
+	}
+	return observations, nil
 }
 
 func (d *Daemon) handleMailList(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

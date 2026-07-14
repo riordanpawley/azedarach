@@ -1029,7 +1029,7 @@ func TestContainmentCaptureSurfacesIncompleteBoundedRefGraph(t *testing.T) {
 	risks := d.captureTaskGraphContainmentRisks(context.Background(), "project", tasks, []string{root.String()}, []gitservice.Worktree{
 		{IssueID: root.String(), Path: "/repo", Branch: "root"},
 		{IssueID: active.String(), Path: "/repo", Branch: "short-active"},
-	})[root.String()]
+	}, nil)[root.String()]
 	if len(risks) != 1 || risks[0].Classification != "containment_evidence_incomplete" || risks[0].IssueID != active.String() {
 		t.Fatalf("risks = %+v, want explicit incomplete containment risk", risks)
 	}
@@ -1037,9 +1037,48 @@ func TestContainmentCaptureSurfacesIncompleteBoundedRefGraph(t *testing.T) {
 	risks = d.captureTaskGraphContainmentRisks(context.Background(), "project", tasks, []string{root.String()}, []gitservice.Worktree{
 		{IssueID: root.String(), Path: "/repo", Branch: "root"},
 		{IssueID: active.String(), Path: "/repo", Branch: "short-active"},
-	})[root.String()]
+	}, nil)[root.String()]
 	if len(risks) != 1 || risks[0].Classification != "containment_evidence_incomplete" || !strings.Contains(risks[0].Message, "graph capture failed") {
 		t.Fatalf("capture failure risks = %+v, want explicit unknown result", risks)
+	}
+}
+
+func TestContainmentCaptureSurfacesWorktreeProjectionFailure(t *testing.T) {
+	root, closed, active := naming.IssueID("root"), naming.IssueID("closed"), naming.IssueID("active")
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusOpen, HasWorktree: true},
+		{ID: closed, ParentID: &root, Type: domain.TypeTask, Status: domain.StatusDone},
+		{ID: active, ParentID: &root, Type: domain.TypeTask, Status: domain.StatusInProgress, HasWorktree: true},
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}}
+
+	risks := d.captureTaskGraphContainmentRisks(context.Background(), "project", tasks, []string{root.String()}, nil, errors.New("transient worktree list failure"))[root.String()]
+	if len(risks) != 1 || risks[0].Classification != "containment_evidence_incomplete" || risks[0].IssueID != active.String() || !strings.Contains(risks[0].Message, "capture failed") {
+		t.Fatalf("list failure risks = %+v, want explicit incomplete active-branch risk", risks)
+	}
+}
+
+func TestContainmentCaptureSurfacesProjectedButMissingWorktrees(t *testing.T) {
+	root, closed, active := naming.IssueID("root"), naming.IssueID("closed"), naming.IssueID("active")
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusOpen, HasWorktree: true},
+		{ID: closed, ParentID: &root, Type: domain.TypeTask, Status: domain.StatusDone},
+		{ID: active, ParentID: &root, Type: domain.TypeTask, Status: domain.StatusInProgress, HasWorktree: true},
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}}
+
+	risks := d.captureTaskGraphContainmentRisks(context.Background(), "project", tasks, []string{root.String()}, []gitservice.Worktree{
+		{IssueID: root.String(), Path: "/repo", Branch: "root"},
+	}, nil)[root.String()]
+	if len(risks) != 1 || risks[0].IssueID != active.String() || !strings.Contains(risks[0].Message, "active worktree projection is missing") {
+		t.Fatalf("missing active projection risks = %+v, want explicit incomplete result", risks)
+	}
+
+	risks = d.captureTaskGraphContainmentRisks(context.Background(), "project", tasks, []string{root.String()}, []gitservice.Worktree{
+		{IssueID: active.String(), Path: "/repo", Branch: "active"},
+	}, nil)[root.String()]
+	if len(risks) != 1 || risks[0].IssueID != active.String() || !strings.Contains(risks[0].Message, "root worktree projection is missing") {
+		t.Fatalf("missing root projection risks = %+v, want explicit incomplete result", risks)
 	}
 }
 
