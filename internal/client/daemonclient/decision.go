@@ -30,6 +30,7 @@ const (
 	DecisionRelationAppliesTo DecisionRelation = "applies-to"
 	DecisionRelationRevises   DecisionRelation = "revises"
 	DecisionRelationInforms   DecisionRelation = "informs"
+	DecisionRelationGoverns   DecisionRelation = "governs"
 )
 
 // Decision is the daemonclient-side projection of a decision record.

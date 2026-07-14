@@ -326,6 +326,9 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 		if err := a.daemon.ensureLegacyMailboxObservationProjection(ctx, projectID, repoDir); err != nil {
 			return protocol.OrchestrationSnapshot{}, fmt.Errorf("prepare project legacy mailbox observation projection: %w", err)
 		}
+		if err := a.daemon.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
+			return protocol.OrchestrationSnapshot{}, fmt.Errorf("prepare project decision propagation projection: %w", err)
+		}
 		var snapshot protocol.OrchestrationSnapshot
 		err = issueClient.WithProjectionSnapshotFence(ctx, func(fenceCtx context.Context) error {
 			fenceCtx = context.WithValue(fenceCtx, orchestrationProjectionSnapshotFenceKey{}, true)
@@ -398,6 +401,9 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 		if err != nil {
 			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load rooted review queue: %w", err)
 		}
+		if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, tasks); err != nil {
+			return protocol.OrchestrationSnapshot{}, err
+		}
 		snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, tasks)
 		if err != nil {
 			return protocol.OrchestrationSnapshot{}, err
@@ -430,6 +436,9 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 	snapshot.ProjectionRevision = projection.Checkpoint
 	snapshot.ProjectionAuthority = protocol.OrchestrationProjectionAuthoritySQLite
 	snapshot.Interactions = append(make([]domain.InteractionRequest, 0, len(projection.Interactions)), projection.Interactions...)
+	if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, tasks); err != nil {
+		return protocol.OrchestrationSnapshot{}, err
+	}
 	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, tasks)
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, err
@@ -648,6 +657,63 @@ func deriveOrchestrationProjectionFacts(tasks []domain.Task, waiting map[string]
 		})
 	}
 	return tasks
+}
+
+func (a daemonOrchestrationAuthority) enrichPendingDecisions(ctx context.Context, projectID string, issueClient *issues.Client, snapshot *protocol.OrchestrationSnapshot, tasks []domain.Task) error {
+	if !orchestrationProjectionSnapshotFenceHeld(ctx) {
+		if err := a.daemon.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
+			return fmt.Errorf("reconcile pending decisions: %w", err)
+		}
+	}
+	issueIDs := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		if task.Status != domain.StatusDone {
+			issueIDs = append(issueIDs, task.ID.String())
+		}
+	}
+	eventsByIssue, err := issueClient.ListIssueDecisionObservationEventsByIssue(ctx, issueIDs)
+	if err != nil {
+		return fmt.Errorf("load pending decisions: %w", err)
+	}
+	for _, issueID := range issueIDs {
+		pending := domain.ReducePendingDecisionChanges(eventsByIssue[issueID])
+		if len(pending) == 0 {
+			continue
+		}
+		if snapshot.PendingDecisions == nil {
+			snapshot.PendingDecisions = make(map[string][]domain.PendingDecisionChange)
+		}
+		snapshot.PendingDecisions[issueID] = pending
+		reasons := pendingDecisionReadinessReasons(pending)
+		if snapshot.Blocked == nil {
+			snapshot.Blocked = make(map[string]string)
+		}
+		snapshot.Blocked[issueID] = mergeOrchestrationBlockerReasons(snapshot.Blocked[issueID], reasons...)
+	}
+	return nil
+}
+
+func mergeOrchestrationBlockerReasons(existing string, additions ...string) string {
+	ordered := make([]string, 0, len(additions)+1)
+	seen := make(map[string]struct{}, len(additions)+1)
+	add := func(raw string) {
+		for _, part := range strings.Split(raw, ";") {
+			reason := strings.TrimSpace(part)
+			if reason == "" {
+				continue
+			}
+			if _, duplicate := seen[reason]; duplicate {
+				continue
+			}
+			seen[reason] = struct{}{}
+			ordered = append(ordered, reason)
+		}
+	}
+	add(existing)
+	for _, addition := range additions {
+		add(addition)
+	}
+	return strings.Join(ordered, "; ")
 }
 
 func projectOrchestrationCompletion(snapshot protocol.OrchestrationSnapshot) protocol.OrchestrationCompletion {

@@ -178,6 +178,18 @@ func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 	}
 }
 
+// HeadRevision returns the exact commit currently checked out in worktree.
+func (c *Client) HeadRevision(ctx context.Context, worktree string) (string, error) {
+	output, err := c.runInWorktree(ctx, worktree, "rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("resolve HEAD revision: %w", err)
+	}
+	if revision := strings.TrimSpace(output); revision != "" {
+		return revision, nil
+	}
+	return "", errors.New("resolve HEAD revision: empty output")
+}
+
 // Status returns the git status of the repository.
 // It parses the output of 'git status --porcelain' to provide structured information.
 func (c *Client) Status(ctx context.Context, worktree string) (*GitStatus, error) {

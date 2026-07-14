@@ -7,16 +7,17 @@ import (
 )
 
 const (
-	CommandDecisionList       = "decision.list"
-	CommandDecisionGet        = "decision.get"
-	CommandDecisionRecord     = "decision.record"
-	CommandDecisionUpdate     = "decision.update"
-	CommandDecisionDelete     = "decision.delete"
-	CommandDecisionLinkList   = "decision.link.list"
-	CommandDecisionLinkAdd    = "decision.link.add"
-	CommandDecisionLinkRemove = "decision.link.remove"
-	CommandDecisionSyncMD     = "decision.sync_md"
-	CommandDecisionImportMD   = "decision.import_md"
+	CommandDecisionList        = "decision.list"
+	CommandDecisionGet         = "decision.get"
+	CommandDecisionRecord      = "decision.record"
+	CommandDecisionUpdate      = "decision.update"
+	CommandDecisionDelete      = "decision.delete"
+	CommandDecisionLinkList    = "decision.link.list"
+	CommandDecisionLinkAdd     = "decision.link.add"
+	CommandDecisionLinkRemove  = "decision.link.remove"
+	CommandDecisionAcknowledge = "decision.acknowledge"
+	CommandDecisionSyncMD      = "decision.sync_md"
+	CommandDecisionImportMD    = "decision.import_md"
 )
 
 // DecisionTargetKind enumerates the things a decision link can point at.
@@ -45,11 +46,15 @@ const (
 	DecisionRelationAppliesTo DecisionRelation = "applies-to"
 	DecisionRelationRevises   DecisionRelation = "revises"
 	DecisionRelationInforms   DecisionRelation = "informs"
+	// DecisionRelationGoverns marks a decision as integration-affecting for the
+	// linked issue/requirement scope. It is the propagation opt-in; ordinary
+	// applies-to and informs links remain non-interrupting.
+	DecisionRelationGoverns DecisionRelation = "governs"
 )
 
 func (r DecisionRelation) Valid() bool {
 	switch r {
-	case DecisionRelationAppliesTo, DecisionRelationRevises, DecisionRelationInforms:
+	case DecisionRelationAppliesTo, DecisionRelationRevises, DecisionRelationInforms, DecisionRelationGoverns:
 		return true
 	}
 	return false
@@ -171,34 +176,67 @@ type DecisionLinkRemoveResponseBody struct {
 	Removed    bool               `json:"removed" msgpack:"removed"`
 }
 
+type DecisionAcknowledgeRequestBody struct {
+	IssueID     naming.IssueID `json:"issue_id" msgpack:"issue_id"`
+	DecisionID  string         `json:"decision_id" msgpack:"decision_id"`
+	Revision    int64          `json:"revision" msgpack:"revision"`
+	Disposition string         `json:"disposition" msgpack:"disposition"`
+	Note        string         `json:"note,omitempty" msgpack:"note,omitempty"`
+}
+
+type DecisionAcknowledgeResponseBody struct {
+	IssueID     naming.IssueID `json:"issue_id" msgpack:"issue_id"`
+	DecisionID  string         `json:"decision_id" msgpack:"decision_id"`
+	Revision    int64          `json:"revision" msgpack:"revision"`
+	Disposition string         `json:"disposition" msgpack:"disposition"`
+	EventID     int64          `json:"event_id" msgpack:"event_id"`
+}
+
 // DecisionSyncMDRequestBody asks the daemon to reconcile decision records to
 // markdown files under docs/decisions/, including obsolete rename and deletion
-// artifacts. RepoDir optionally overrides the project root as the explicit
-// markdown target while retaining the durable daemon store. When Check is true
-// the daemon computes what would change without writing anything.
+// artifacts within the target issue provenance. RepoDir selects the exact Git
+// worktree. FullProject is an explicit root-checkout-only escape hatch. When
+// Check is true the daemon computes what would change without writing anything.
 type DecisionSyncMDRequestBody struct {
-	Check   bool   `json:"check,omitempty" msgpack:"check,omitempty"`
-	RepoDir string `json:"repo_dir,omitempty" msgpack:"repo_dir,omitempty"`
+	Check       bool   `json:"check,omitempty" msgpack:"check,omitempty"`
+	RepoDir     string `json:"repo_dir,omitempty" msgpack:"repo_dir,omitempty"`
+	FullProject bool   `json:"full_project,omitempty" msgpack:"full_project,omitempty"`
+}
+
+type DecisionMDFileResult struct {
+	Path         string   `json:"path" msgpack:"path"`
+	DecisionID   string   `json:"decision_id,omitempty" msgpack:"decision_id,omitempty"`
+	IssueIDs     []string `json:"issue_ids,omitempty" msgpack:"issue_ids,omitempty"`
+	OwnerIssueID string   `json:"owner_issue_id,omitempty" msgpack:"owner_issue_id,omitempty"`
+	Action       string   `json:"action,omitempty" msgpack:"action,omitempty"`
+	Applied      bool     `json:"applied,omitempty" msgpack:"applied,omitempty"`
+	Skipped      bool     `json:"skipped,omitempty" msgpack:"skipped,omitempty"`
+	SkipReason   string   `json:"skip_reason,omitempty" msgpack:"skip_reason,omitempty"`
 }
 
 // DecisionSyncMDResponseBody reports the outcome of the sync. Files is the
 // list of paths that were written or removed (or would change in --check mode).
 type DecisionSyncMDResponseBody struct {
-	Check   bool     `json:"check" msgpack:"check"`
-	Changed bool     `json:"changed" msgpack:"changed"`
-	Files   []string `json:"files,omitempty" msgpack:"files,omitempty"`
+	Check          bool                   `json:"check" msgpack:"check"`
+	Changed        bool                   `json:"changed" msgpack:"changed"`
+	Files          []string               `json:"files,omitempty" msgpack:"files,omitempty"`
+	TargetRepoDir  string                 `json:"target_repo_dir,omitempty" msgpack:"target_repo_dir,omitempty"`
+	TargetRevision string                 `json:"target_revision,omitempty" msgpack:"target_revision,omitempty"`
+	TargetIssueID  string                 `json:"target_issue_id,omitempty" msgpack:"target_issue_id,omitempty"`
+	FullProject    bool                   `json:"full_project,omitempty" msgpack:"full_project,omitempty"`
+	Results        []DecisionMDFileResult `json:"results,omitempty" msgpack:"results,omitempty"`
 }
 
 // DecisionImportMDRequestBody asks the daemon to read decision markdown files
-// from docs/decisions/ and merge them into the SQLite store. RepoDir optionally
-// overrides the project root as the markdown source, which lets hooks import
-// from the active worktree while retaining the durable daemon store. With
-// Check=true, no rows are mutated; the response describes the plan. Force=true
-// overrides per-field conflicts (markdown wins).
+// from docs/decisions/ and merge the target issue's provenance-bearing files
+// into the SQLite store. FullProject explicitly selects root-level transfer.
+// With Check=true, no rows are mutated; Force=true overrides field conflicts
+// but never the issue/worktree scope boundary.
 type DecisionImportMDRequestBody struct {
-	Check   bool   `json:"check,omitempty" msgpack:"check,omitempty"`
-	Force   bool   `json:"force,omitempty" msgpack:"force,omitempty"`
-	RepoDir string `json:"repo_dir,omitempty" msgpack:"repo_dir,omitempty"`
+	Check       bool   `json:"check,omitempty" msgpack:"check,omitempty"`
+	Force       bool   `json:"force,omitempty" msgpack:"force,omitempty"`
+	RepoDir     string `json:"repo_dir,omitempty" msgpack:"repo_dir,omitempty"`
+	FullProject bool   `json:"full_project,omitempty" msgpack:"full_project,omitempty"`
 }
 
 // DecisionImportMDFieldChange describes one field that would change.
@@ -218,22 +256,29 @@ type DecisionImportMDFieldConflict struct {
 
 // DecisionImportMDFileResult is the per-file outcome of an import pass.
 type DecisionImportMDFileResult struct {
-	Path       string                          `json:"path" msgpack:"path"`
-	DecisionID string                          `json:"decision_id,omitempty" msgpack:"decision_id,omitempty"`
-	ParseError string                          `json:"parse_error,omitempty" msgpack:"parse_error,omitempty"`
-	NewRecord  bool                            `json:"new_record,omitempty" msgpack:"new_record,omitempty"`
-	Changes    []DecisionImportMDFieldChange   `json:"changes,omitempty" msgpack:"changes,omitempty"`
-	Conflicts  []DecisionImportMDFieldConflict `json:"conflicts,omitempty" msgpack:"conflicts,omitempty"`
-	Imported   bool                            `json:"imported,omitempty" msgpack:"imported,omitempty"`
-	Skipped    bool                            `json:"skipped,omitempty" msgpack:"skipped,omitempty"`
-	ApplyError string                          `json:"apply_error,omitempty" msgpack:"apply_error,omitempty"`
+	Path         string                          `json:"path" msgpack:"path"`
+	DecisionID   string                          `json:"decision_id,omitempty" msgpack:"decision_id,omitempty"`
+	ParseError   string                          `json:"parse_error,omitempty" msgpack:"parse_error,omitempty"`
+	NewRecord    bool                            `json:"new_record,omitempty" msgpack:"new_record,omitempty"`
+	Changes      []DecisionImportMDFieldChange   `json:"changes,omitempty" msgpack:"changes,omitempty"`
+	Conflicts    []DecisionImportMDFieldConflict `json:"conflicts,omitempty" msgpack:"conflicts,omitempty"`
+	Imported     bool                            `json:"imported,omitempty" msgpack:"imported,omitempty"`
+	Skipped      bool                            `json:"skipped,omitempty" msgpack:"skipped,omitempty"`
+	ApplyError   string                          `json:"apply_error,omitempty" msgpack:"apply_error,omitempty"`
+	IssueIDs     []string                        `json:"issue_ids,omitempty" msgpack:"issue_ids,omitempty"`
+	OwnerIssueID string                          `json:"owner_issue_id,omitempty" msgpack:"owner_issue_id,omitempty"`
+	SkipReason   string                          `json:"skip_reason,omitempty" msgpack:"skip_reason,omitempty"`
 }
 
 // DecisionImportMDResponseBody is the import plan + outcome.
 type DecisionImportMDResponseBody struct {
-	Check     bool                         `json:"check" msgpack:"check"`
-	Force     bool                         `json:"force" msgpack:"force"`
-	Imported  int                          `json:"imported" msgpack:"imported"`
-	Conflicts int                          `json:"conflicts" msgpack:"conflicts"`
-	Files     []DecisionImportMDFileResult `json:"files,omitempty" msgpack:"files,omitempty"`
+	Check          bool                         `json:"check" msgpack:"check"`
+	Force          bool                         `json:"force" msgpack:"force"`
+	Imported       int                          `json:"imported" msgpack:"imported"`
+	Conflicts      int                          `json:"conflicts" msgpack:"conflicts"`
+	Files          []DecisionImportMDFileResult `json:"files,omitempty" msgpack:"files,omitempty"`
+	TargetRepoDir  string                       `json:"target_repo_dir,omitempty" msgpack:"target_repo_dir,omitempty"`
+	TargetRevision string                       `json:"target_revision,omitempty" msgpack:"target_revision,omitempty"`
+	TargetIssueID  string                       `json:"target_issue_id,omitempty" msgpack:"target_issue_id,omitempty"`
+	FullProject    bool                         `json:"full_project,omitempty" msgpack:"full_project,omitempty"`
 }

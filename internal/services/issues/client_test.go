@@ -58,6 +58,25 @@ func TestClientSQLiteBusyPolicyDefaultsAndOverrides(t *testing.T) {
 	assert.Equal(t, 2, configuredBusyTimeout)
 }
 
+func TestClientExistingDatabaseOnly(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "nested", "issues.db")
+	missing := NewClientAtPath(dbPath, nil, WithExistingDatabaseOnly())
+	_, err := missing.dbHandle()
+	require.ErrorContains(t, err, "require existing database")
+	_, statErr := os.Stat(dbPath)
+	require.True(t, os.IsNotExist(statErr), "existing-only open created database: %v", statErr)
+
+	creating := NewClientAtPath(dbPath, nil)
+	_, err = creating.dbHandle()
+	require.NoError(t, err)
+	require.NoError(t, creating.CloseDB())
+
+	existing := NewClientAtPath(dbPath, nil, WithExistingDatabaseOnly())
+	t.Cleanup(func() { require.NoError(t, existing.CloseDB()) })
+	_, err = existing.dbHandle()
+	require.NoError(t, err)
+}
+
 func TestClient_CRUDLifecycle(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()
@@ -2160,6 +2179,57 @@ func TestClient_GetRuntimeWorktreeIssueContextScopesToRequestedIssuesAndAncestor
 	assert.Equal(t, rootIssueID, *byID[parentIssueID].ParentID)
 }
 
+func TestClient_GetRuntimeWorktreeIssueContextIncludesArchivedRequestedIssue(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:  "Archived worktree owner",
+		Type:   domain.TypeTask,
+		Status: domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Archive(ctx, issueID))
+
+	tasks, err := client.GetRuntimeWorktreeIssueContext(ctx, "proj-runtime-context", []string{issueID})
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, naming.IssueID(issueID), tasks[0].ID)
+	assert.True(t, tasks[0].State.IsArchived())
+}
+
+func TestClient_OrdinaryMetadataRuntimeReadsExcludeArchivedIssues(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-runtime-context"
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:  "Archived ordinary metadata owner",
+		Type:   domain.TypeTask,
+		Status: domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Archive(ctx, issueID))
+
+	metadata, err := client.GetManyMetadataWithRuntime(ctx, projectID, []string{issueID})
+	require.NoError(t, err)
+	assert.Empty(t, metadata)
+
+	metadataWithAncestors, err := client.GetManyMetadataWithAncestorContextRuntime(ctx, projectID, []string{issueID})
+	require.NoError(t, err)
+	assert.Empty(t, metadataWithAncestors)
+
+	archived, err := client.GetWithRuntimeArchiveMode(ctx, projectID, issueID, ArchiveOnly)
+	require.NoError(t, err)
+	archived.Origin = "cached-archived"
+	hydrated, err := client.HydrateRuntime(ctx, projectID, []domain.Task{archived})
+	require.NoError(t, err)
+	require.Len(t, hydrated, 1)
+	assert.Equal(t, "cached-archived", hydrated[0].Origin)
+}
+
 func TestSQLiteHotQueryPlansUseExpectedIndexes(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()
@@ -2219,7 +2289,7 @@ func TestSQLiteHotQueryPlansUseExpectedIndexes(t *testing.T) {
 			name: "metadata runtime projection",
 			build: func(t *testing.T) (string, []any) {
 				t.Helper()
-				return taskMetadataRuntimeProjectionQuery("project", "second", "third")
+				return taskMetadataRuntimeProjectionQuery("project", ArchiveExclude, "second", "third")
 			},
 			want: []string{
 				"idx_daemon_session_projections_project_issue_updated",
@@ -4327,6 +4397,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0045_issue_state_runtime_constraints",
 		"0046_repair_issue_state_runtime_constraints",
 		"0047_human_authority_projection_revision",
+		"0048_decision_propagation_outbox",
 		"0048_mailbox_observation_projection_cutover",
 	}, got)
 }

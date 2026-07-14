@@ -307,6 +307,7 @@ type taskIntegrationReadinessResult struct {
 	EvidenceIncomplete     bool                           `json:"evidence_incomplete,omitempty"`
 	EvidenceMissingFields  []string                       `json:"evidence_missing_fields,omitempty"`
 	EvidenceInvalidReasons []string                       `json:"evidence_invalid_reasons,omitempty"`
+	PendingDecisions       []domain.PendingDecisionChange `json:"pending_decisions,omitempty"`
 }
 
 type taskMergeBaseTargetResult struct {
@@ -1494,7 +1495,7 @@ func runtimeWorktreeIssueEligible(issueID string, taskByIssue map[string]domain.
 	if !ok {
 		return true
 	}
-	if task.IssueClosed() {
+	if task.IssueClosed() || task.State.IsArchived() {
 		return false
 	}
 	seen := map[string]struct{}{strings.ToLower(issueID): {}}
@@ -1508,7 +1509,7 @@ func runtimeWorktreeIssueEligible(issueID string, taskByIssue map[string]domain.
 		if !ok {
 			return true
 		}
-		if parent.IssueClosed() {
+		if parent.IssueClosed() || parent.State.IsArchived() {
 			return false
 		}
 		parentID = domain.TaskParentIssueID(parent)
@@ -3563,6 +3564,9 @@ func (d *Daemon) updateTaskStatusExcludingClose(ctx context.Context, projectID, 
 	}
 	var cascaded []domain.Task
 	if status == domain.StatusInReview {
+		if err := d.validateTaskDecisionAcknowledgementsForReview(ctx, projectID, taskID); err != nil {
+			return domain.Task{}, nil, err
+		}
 		if err := d.validateTaskActivityForReview(ctx, projectID, taskID, reviewHandoffAllowsBusy(opts, taskID)); err != nil {
 			return domain.Task{}, nil, err
 		}
@@ -3577,6 +3581,28 @@ func (d *Daemon) updateTaskStatusExcludingClose(ctx context.Context, projectID, 
 		return domain.Task{}, nil, err
 	}
 	return task, cascaded, nil
+}
+
+func (d *Daemon) validateTaskDecisionAcknowledgementsForReview(ctx context.Context, projectID, taskID string) error {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return fmt.Errorf("issue store unavailable")
+	}
+	if !usesProjectionSource(d.sourceForTaskInvariant(taskInvariantReviewHandoff)) {
+		return fmt.Errorf("unsupported review handoff invariant source: %s", d.sourceForTaskInvariant(taskInvariantReviewHandoff))
+	}
+	if err := d.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
+		return fmt.Errorf("reconcile material decisions before moving %s to in_review: %w", taskID, err)
+	}
+	events, err := issueClient.ListIssueDecisionObservationEvents(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("inspect material decisions before moving %s to in_review: %w", taskID, err)
+	}
+	pending := domain.ReducePendingDecisionChanges(events)
+	if len(pending) == 0 {
+		return nil
+	}
+	return fmt.Errorf("cannot move issue %s to in_review: %s", taskID, strings.Join(pendingDecisionReadinessReasons(pending), "; "))
 }
 
 func reviewHandoffActiveIssue(meta protocol.Metadata, taskID string) string {
@@ -3665,6 +3691,9 @@ func (d *Daemon) validateOrCascadeChildrenForReview(ctx context.Context, project
 	}
 	updated := make([]domain.Task, 0)
 	for _, childID := range daemonReviewGuardChildIDsToCascade(task.ID, tasks) {
+		if err := d.validateTaskDecisionAcknowledgementsForReview(ctx, projectID, childID.String()); err != nil {
+			return nil, fmt.Errorf("cascade child %s to in_review before moving %s: %w", childID.String(), taskID, err)
+		}
 		if err := d.validateTaskActivityForReview(ctx, projectID, childID.String(), reviewHandoffAllowsBusy(opts, childID.String())); err != nil {
 			return nil, fmt.Errorf("cascade child %s to in_review before moving %s: %w", childID.String(), taskID, err)
 		}
@@ -4556,6 +4585,15 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 	if issueClient == nil {
 		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue integration readiness: issue store unavailable")
 	}
+	if err := d.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
+		return taskIntegrationReadinessResult{}, fmt.Errorf("reconcile issue decision propagation: %w", err)
+	}
+	decisionEvents, err := issueClient.ListIssueDecisionObservationEvents(ctx, task.ID.String())
+	if err != nil {
+		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue decision acknowledgements: %w", err)
+	}
+	pendingDecisions := domain.ReducePendingDecisionChanges(decisionEvents)
+	decisionReasons := pendingDecisionReadinessReasons(pendingDecisions)
 	reviewEvents, err := issueClient.ListIssueReviewReadyObservationEvents(ctx, task.ID.String())
 	if err != nil {
 		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue integration evidence: %w", err)
@@ -4565,16 +4603,18 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 		packet, validation := evidence.Evidence, evidence.Validation
 		if validation.Complete {
 			return taskIntegrationReadinessResult{
-				IssueID:         task.ID.String(),
-				ParentIssueID:   parentIssueID,
-				Ready:           true,
-				ContextRisk:     contextRisk,
-				EvidenceEventID: evt.ID,
-				EvidenceSource:  "issue_event",
-				EvidencePacket:  &packet,
+				IssueID:          task.ID.String(),
+				ParentIssueID:    parentIssueID,
+				Ready:            len(pendingDecisions) == 0,
+				ContextRisk:      contextRisk,
+				Reasons:          decisionReasons,
+				PendingDecisions: pendingDecisions,
+				EvidenceEventID:  evt.ID,
+				EvidenceSource:   "issue_event",
+				EvidencePacket:   &packet,
 			}, nil
 		}
-		reasons := []string{fmt.Sprintf("issue %s is not closed", task.ID.String())}
+		reasons := append([]string{fmt.Sprintf("issue %s is not closed", task.ID.String())}, decisionReasons...)
 		if validation.Found {
 			reasons = append(reasons, fmt.Sprintf("worker evidence packet in issue event %d is incomplete", evt.ID))
 		} else {
@@ -4592,6 +4632,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 			EvidenceIncomplete:     true,
 			EvidenceMissingFields:  validation.Missing,
 			EvidenceInvalidReasons: validation.Invalid,
+			PendingDecisions:       pendingDecisions,
 		}, nil
 	}
 
@@ -4602,10 +4643,11 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 			ParentIssueID: parentIssueID,
 			Ready:         false,
 			ContextRisk:   contextRisk,
-			Reasons: []string{
+			Reasons: append([]string{
 				fmt.Sprintf("issue %s is not closed", task.ID.String()),
 				"repo_dir is required to inspect worker-integration-ready mailbox evidence when no issue evidence.submitted record exists",
-			},
+			}, decisionReasons...),
+			PendingDecisions: pendingDecisions,
 		}, nil
 	}
 	events, err := readMailboxEvents(repoDir, parentIssueID)
@@ -4623,13 +4665,15 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 				return taskIntegrationReadinessResult{
 					IssueID:          task.ID.String(),
 					ParentIssueID:    parentIssueID,
-					Ready:            true,
+					Ready:            len(pendingDecisions) == 0,
 					ContextRisk:      contextRisk,
+					Reasons:          decisionReasons,
+					PendingDecisions: pendingDecisions,
 					EvidenceEventSeq: evt.Seq,
 					EvidencePacket:   &packet,
 				}, nil
 			}
-			reasons := []string{fmt.Sprintf("issue %s is not closed", task.ID.String())}
+			reasons := append([]string{fmt.Sprintf("issue %s is not closed", task.ID.String())}, decisionReasons...)
 			if validation.Found {
 				reasons = append(reasons, fmt.Sprintf("worker evidence packet in mailbox event seq %d is incomplete", evt.Seq))
 			} else {
@@ -4646,6 +4690,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 				EvidenceIncomplete:     true,
 				EvidenceMissingFields:  validation.Missing,
 				EvidenceInvalidReasons: validation.Invalid,
+				PendingDecisions:       pendingDecisions,
 			}, nil
 		}
 	}
@@ -4654,11 +4699,20 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 		ParentIssueID: parentIssueID,
 		Ready:         false,
 		ContextRisk:   contextRisk,
-		Reasons: []string{
+		Reasons: append([]string{
 			fmt.Sprintf("issue %s is not closed", task.ID.String()),
 			fmt.Sprintf("no worker-integration-ready mailbox event found under parent %s for %s", parentIssueID, task.ID.String()),
-		},
+		}, decisionReasons...),
+		PendingDecisions: pendingDecisions,
 	}, nil
+}
+
+func pendingDecisionReadinessReasons(pending []domain.PendingDecisionChange) []string {
+	reasons := make([]string, 0, len(pending))
+	for _, change := range pending {
+		reasons = append(reasons, fmt.Sprintf("stale material decision %s revision %d is unacknowledged; %s", change.DecisionID, change.Revision, change.RequiredAction))
+	}
+	return reasons
 }
 
 func daemonWorkerIntegrationReadyMailType(eventType string) bool {
