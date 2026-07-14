@@ -268,10 +268,13 @@ If any are missing, keep issue state `in_progress` or `open`.
     linked worktrees. Installed command links must resolve only inside the stable
     install directory and never back into any Git worktree.
 12. Repository direnv setup must not prepend primary- or linked-worktree
-    `bin/` directories. It must prefer one installed sibling `az`/`azd` pair;
-    global daemon launch/replacement resolves `azd` beside the running `az`'s
-    immutable generation, while repo-local binary/source fallback is reserved
-    for explicit worktree-scoped development.
+    `bin/` directories. It must prefer one version-identical installed sibling
+    `az`/`azd` pair. Global daemon launch/replacement resolves `azd` beside the
+    running `az`'s immutable generation and fails closed when unavailable; bare
+    PATH, repo-local binary, and source fallback are reserved for explicit
+    worktree-scoped development. Successful install generations remain retained
+    until an explicit lifetime-aware maintenance contract can prove they are no
+    longer needed by long-lived clients.
 
 ## Environment Rules
 

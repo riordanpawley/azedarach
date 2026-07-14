@@ -23,6 +23,9 @@ This repository now ships the Go implementation as the canonical `az` CLI.
    - The two version strings must match. In an Azedarach repository shell,
      `command -v az` and `command -v azd` must resolve from the same stable
      install directory rather than the repository's preserved `bin/` assets.
+   - Successful immutable generations are retained across later installs so
+     long-lived clients keep access to their paired daemon. Do not manually
+     remove generation directories while clients from them may still run.
 3. If an older worktree-targeting symlink exists, migrate it to the stable,
    paired generation layout with the local helper:
    - `just build-install-run --no-run`

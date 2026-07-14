@@ -84,15 +84,18 @@ func TestEnvrcPrefersInstalledPairAcrossMainAndLinkedWorktrees(t *testing.T) {
 	linkedCheckout := filepath.Join(testRoot, "linked")
 	installBin := filepath.Join(testRoot, "installed", "bin")
 	unpairedBin := filepath.Join(testRoot, "unpaired", "bin")
+	mismatchedBin := filepath.Join(testRoot, "mismatched", "bin")
 	require.NoError(t, os.MkdirAll(filepath.Join(mainCheckout, "scripts"), 0o755))
 	require.NoError(t, os.MkdirAll(installBin, 0o755))
 	require.NoError(t, os.MkdirAll(unpairedBin, 0o755))
+	require.NoError(t, os.MkdirAll(mismatchedBin, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(mainCheckout, ".envrc"), envrc, 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(mainCheckout, "scripts", "go-cache-env.sh"), cacheEnv, 0o755))
-	for _, binary := range []string{"az", "azd"} {
-		require.NoError(t, os.WriteFile(filepath.Join(installBin, binary), []byte("#!/bin/sh\n"), 0o755))
-	}
-	require.NoError(t, os.WriteFile(filepath.Join(unpairedBin, "az"), []byte("#!/bin/sh\n"), 0o755))
+	writeVersionFixture(t, filepath.Join(installBin, "az"), "dev (installed)")
+	writeVersionFixture(t, filepath.Join(installBin, "azd"), "dev (installed)")
+	writeVersionFixture(t, filepath.Join(unpairedBin, "az"), "dev (unpaired)")
+	writeVersionFixture(t, filepath.Join(mismatchedBin, "az"), "dev (stale-client)")
+	writeVersionFixture(t, filepath.Join(mismatchedBin, "azd"), "dev (stale-daemon)")
 	runGit(t, mainCheckout, "init")
 	runGit(t, mainCheckout, "add", ".envrc", "scripts/go-cache-env.sh")
 	runGit(t, mainCheckout, "-c", "user.name=Azedarach Test", "-c", "user.email=test@example.invalid", "commit", "-m", "test fixture")
@@ -132,7 +135,7 @@ command -v azd >"$AZD_RESULT"
 `
 			azResult := filepath.Join(t.TempDir(), "az-result")
 			azdResult := filepath.Join(t.TempDir(), "azd-result")
-			initialPath := filepath.Join(mainCheckout, "bin") + ":" + unpairedBin + ":" + installBin + ":/usr/bin:/bin:/usr/sbin:/sbin"
+			initialPath := filepath.Join(mainCheckout, "bin") + ":" + unpairedBin + ":" + mismatchedBin + ":" + installBin + ":/usr/bin:/bin:/usr/sbin:/sbin"
 			if checkout == linkedCheckout {
 				initialPath = filepath.Join(linkedCheckout, "bin") + ":" + initialPath
 			}
@@ -156,6 +159,12 @@ command -v azd >"$AZD_RESULT"
 			assert.Equal(t, filepath.Join(installBin, "azd"), strings.TrimSpace(string(gotAzd)))
 		})
 	}
+}
+
+func writeVersionFixture(t *testing.T, path, version string) {
+	t.Helper()
+	content := "#!/bin/sh\nprintf '%s\\n' '" + version + "'\n"
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o755))
 }
 
 func TestEnvrcDirenvLayoutFallsBackToHomeCache(t *testing.T) {

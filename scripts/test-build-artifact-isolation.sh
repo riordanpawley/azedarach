@@ -315,6 +315,12 @@ grep -q "scratch build" "$fixture/global-bin/az"
 grep -q "scratch build" "$fixture/global-bin/azd"
 cmp "$fixture/az.before" "$fixture/bin/az"
 cmp "$fixture/azd.before" "$fixture/bin/azd"
+first_installed_target="$(readlink "$fixture/global-bin/.azedarach-current")"
+first_installed_generation="$fixture/global-bin/$first_installed_target"
+test -x "$first_installed_generation/az"
+test -x "$first_installed_generation/azd"
+test "$("$first_installed_generation/az" version)" = "dev (default)"
+test "$("$first_installed_generation/azd" version)" = "dev (default)"
 
 FAKE_GIT_MODE=primary FAKE_GO_MARKER=first FAKE_CP_ASSERT_SERIAL=1 \
   FAKE_CP_GUARD="$fixture/install-critical-section" AZ_INSTALL_DIR="$fixture/global-bin" \
@@ -332,8 +338,12 @@ az_marker="$(sed -n 's/^scratch build //p' "$fixture/global-bin/az")"
 azd_marker="$(sed -n 's/^scratch build //p' "$fixture/global-bin/azd")"
 test -n "$az_marker"
 test "$az_marker" = "$azd_marker"
+test -x "$first_installed_generation/az"
+test -x "$first_installed_generation/azd"
+test "$("$first_installed_generation/az" version)" = "dev (default)"
+test "$("$first_installed_generation/azd" version)" = "dev (default)"
 generation_count="$(find "$fixture/global-bin/.azedarach-generations" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
-test "$generation_count" -le 2
+test "$generation_count" -ge 4
 
 just --justfile "$fixture/justfile" --working-directory "$fixture" clean
 test ! -e "$fixture/.tmp/az-install"
