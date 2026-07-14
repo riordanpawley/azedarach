@@ -5,7 +5,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/jaeger-local.sh"
 
-tmp="$(mktemp -d)"
+test_tmp_parent="${TMPDIR:-/tmp}"
+tmp="$(mktemp -d "$test_tmp_parent/azedarach jaeger.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 calls="$tmp/calls"
 now="$(date +%s)"
@@ -138,6 +139,12 @@ grep -q 'localhost:34318/v1/traces' <<<"$output"
 grep -qx 'localhost:34318' "$AZEDARACH_JAEGER_ENDPOINT_FILE"
 [[ "$(sed -n '2p' "$AZEDARACH_JAEGER_ENDPOINT_FILE")" -gt "$now" ]]
 
+# A process that dies while holding the endpoint lock cannot permanently block
+# future publication; the next writer replaces only the stale lock identity.
+printf '%s\n%s\n' 99999999 stale-start >"${AZEDARACH_JAEGER_ENDPOINT_FILE}.state-lock"
+stale_lock_record="$(jaeger_write_endpoint_state localhost:34318 "$((now + 3600))" stale-lock-recovery)"
+[[ -e "$stale_lock_record" && ! -e "${AZEDARACH_JAEGER_ENDPOINT_FILE}.state-lock" ]]
+
 # Expiry removes the matching running fallback and invalidates only its
 # immutable endpoint generation.
 : >"$calls"
@@ -246,6 +253,50 @@ grep -q '^rm -f azedarach-jaeger-fallback ' "$calls"
 [[ ! -e "$worker_record" && ! -e "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]
 unset FAKE_FALLBACK
 
+# Endpoint mutation is serialized across the full adoption decision. If a
+# primary publication wins after fallback adoption observes its owner, the
+# fallback cannot relink its deleted record or overwrite the primary endpoint.
+: >"$calls"
+export FAKE_FALLBACK=1 FAKE_EXPIRES_AT="$(( $(date +%s) + 60 ))"
+JAEGER_PUBLISHED_EXPIRES_AT="$FAKE_EXPIRES_AT"
+JAEGER_PUBLISHED_ENDPOINT_RECORD="$(jaeger_write_endpoint_state localhost:34318 "$JAEGER_PUBLISHED_EXPIRES_AT" race-fallback)"
+jaeger_schedule_published_expiry "$fake_engine_executable" azedarach-jaeger-fallback
+race_ready_file="$(find "${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers" -name ready -type f -print -quit)"
+race_slot="$(dirname "$race_ready_file")"
+race_pid="$(sed -n '1p' "$race_ready_file")"
+race_record="$JAEGER_PUBLISHED_ENDPOINT_RECORD"
+export AZEDARACH_JAEGER_TEST_ADOPT_OBSERVED_FILE="$tmp/adopt observed"
+export AZEDARACH_JAEGER_TEST_ADOPT_CONTINUE_FILE="$tmp/adopt continue"
+(
+  set +e
+  jaeger_start_fallback "$fake_engine_executable" azedarach-jaeger >"$tmp/adopt output" 2>&1
+  printf '%s\n' "$?" >"$tmp/adopt status"
+) &
+adopt_pid=$!
+for attempt in {1..200}; do
+  [[ -e "$AZEDARACH_JAEGER_TEST_ADOPT_OBSERVED_FILE" ]] && break
+  sleep 0.05
+done
+[[ -e "$AZEDARACH_JAEGER_TEST_ADOPT_OBSERVED_FILE" ]]
+primary_record="$(jaeger_write_endpoint_state localhost:4318 0 race-primary)"
+: >"$AZEDARACH_JAEGER_TEST_ADOPT_CONTINUE_FILE"
+wait "$adopt_pid"
+[[ "$(sed -n '1p' "$tmp/adopt status")" == "0" ]]
+[[ "$(readlink "$AZEDARACH_JAEGER_ENDPOINT_FILE")" == "$primary_record" ]]
+[[ -e "$primary_record" && ! -e "$race_record" ]]
+grep -q 'refusing to replace a newer managed Jaeger endpoint' "$tmp/adopt output"
+grep -q 'newer managed Jaeger endpoint won fallback publication' "$tmp/adopt output"
+if grep -Eq '^(rm -f|run) ' "$calls"; then
+  echo "losing fallback publisher replaced the primary winner" >&2
+  exit 1
+fi
+unset AZEDARACH_JAEGER_TEST_ADOPT_OBSERVED_FILE AZEDARACH_JAEGER_TEST_ADOPT_CONTINUE_FILE
+kill "$race_pid" 2>/dev/null || true
+wait "$race_pid" 2>/dev/null || true
+sleep 0.1
+jaeger_clear_worker_slot "$race_slot" || true
+unset FAKE_FALLBACK
+
 # A required generation handoff disarms the established owner before stopping
 # it. If the successor cannot initialize, the new endpoint and collector are
 # removed rather than leaving an unowned fallback.
@@ -254,7 +305,8 @@ export FAKE_EXPIRES_AT="$(( $(date +%s) + 60 ))"
 JAEGER_PUBLISHED_EXPIRES_AT="$FAKE_EXPIRES_AT"
 JAEGER_PUBLISHED_ENDPOINT_RECORD="$(jaeger_write_endpoint_state localhost:34318 "$JAEGER_PUBLISHED_EXPIRES_AT" first-generation)"
 jaeger_schedule_published_expiry "$fake_engine_executable" azedarach-jaeger-fallback
-handoff_slot="$(find "${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers" -name ready -type f | xargs dirname)"
+handoff_ready_file="$(find "${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers" -name ready -type f -print -quit)"
+handoff_slot="$(dirname "$handoff_ready_file")"
 handoff_pid="$(sed -n '1p' "$handoff_slot/ready")"
 JAEGER_PUBLISHED_ENDPOINT_RECORD="$(jaeger_write_endpoint_state localhost:34318 "$JAEGER_PUBLISHED_EXPIRES_AT" successor-generation)"
 export AZEDARACH_JAEGER_EXPIRY_WORKER_FAIL_INIT=1
