@@ -67,6 +67,8 @@ func (m Model) projectOrchestratorActionCmd(project projectOrchestratorSnapshot,
 					return client.StartOrchestratorSession(ctx, request)
 				case "attach":
 					return client.AttachOrchestratorSession(ctx, request)
+				case "stop":
+					return client.StopOrchestratorSession(ctx, request)
 				default:
 					return protocol.OrchestratorSessionResult{}, fmt.Errorf("unsupported project orchestrator action %q", action)
 				}

@@ -482,10 +482,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case KillResultMsg:
 		if msg.Err != nil {
 			m.err = msg.Err
-			m.status = fmt.Sprintf("kill %s failed", msg.SessionID)
+			m.status = fmt.Sprintf("stop %s failed", msg.SessionID)
 			return m, nil
 		}
-		m.status = fmt.Sprintf("killed %s, refreshing", msg.SessionID)
+		m.status = fmt.Sprintf("stopped %s, refreshing", msg.SessionID)
 		m.loading = true
 		m.err = nil
 		return m, m.loadCmd()
@@ -663,7 +663,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !ok {
 				return m, nil
 			}
-			m.status = fmt.Sprintf("killing %s...", killTargetLabel(entry))
+			m.status = fmt.Sprintf("stopping %s...", killTargetLabel(entry))
 			return m, m.killCmd(entry)
 		}
 	}
@@ -941,7 +941,7 @@ func (m Model) renderFooter() string {
 		{Key: "h/j/k/l", Description: "move"},
 		{Key: "Pg", Description: "page"},
 		{Key: "q/Esc", Description: "close"},
-		{Key: "x", Description: "kill"},
+		{Key: "x", Description: "stop"},
 		{Key: "/", Description: "search"},
 		{Key: "gw", Description: "labels"},
 		{Key: "Enter", Description: "drill"},
@@ -1735,7 +1735,7 @@ func (m Model) persistSelectorTabCmd(tab selectorTab) tea.Cmd {
 func (m Model) loadGlobalViewsCmd() tea.Cmd {
 	store := m.globalViewStore
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		resp, err := store.ListGlobalViews(ctx)
 		return globalViewsLoadedMsg{views: resp.GlobalViews, selected: resp.Selections[protocol.GlobalViewConsumerTmuxSelector], err: err}

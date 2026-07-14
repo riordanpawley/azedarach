@@ -42,7 +42,7 @@ const (
 
 type SessionProjection struct {
 	SessionID naming.SessionID      `json:"session_id" msgpack:"session_id"`
-	IssueID   naming.IssueID        `json:"issue_id" msgpack:"issue_id"`
+	IssueID   naming.IssueID        `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
 	Role      SessionRole           `json:"role,omitempty" msgpack:"role,omitempty"`
 	ScopeKind SessionScopeKind      `json:"scope_kind,omitempty" msgpack:"scope_kind,omitempty"`
 	ScopeID   string                `json:"scope_id,omitempty" msgpack:"scope_id,omitempty"`

@@ -8428,6 +8428,23 @@ func TestLoadProjectOrchestratorSnapshotCmd(t *testing.T) {
 	}
 }
 
+func TestProjectOrchestratorStopActionUsesProjectTarget(t *testing.T) {
+	m := newTestModel()
+	var gotAction string
+	m.projectOrchestratorActionRunner = func(_ context.Context, target projectOrchestratorTarget, action string, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+		gotAction = action
+		if target.ProjectID != "project-stop" || request.Scope.Kind != domain.OrchestrationScopeProject {
+			t.Fatalf("target=%+v request=%+v", target, request)
+		}
+		return protocol.OrchestratorSessionResult{Scope: request.Scope, Disposition: "stopped", Lifecycle: domain.OrchestratorPaused}, nil
+	}
+	cmd := m.projectOrchestratorActionCmd(projectOrchestratorSnapshot{ProjectID: "project-stop", Path: t.TempDir()}, "stop")
+	msg, ok := cmd().(projectOrchestratorActionMsg)
+	if !ok || msg.err != nil || msg.result.Disposition != "stopped" || gotAction != "stop" {
+		t.Fatalf("message=%+v action=%q", msg, gotAction)
+	}
+}
+
 func TestProjectOrchestratorRefreshFailurePreservesLastKnownSnapshot(t *testing.T) {
 	m := newTestModel()
 	known := projectOrchestratorSnapshot{ProjectID: m.daemonProjectID(), Snapshot: &protocol.OrchestrationSnapshot{Lifecycle: domain.OrchestratorWorking}}

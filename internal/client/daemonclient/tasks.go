@@ -1223,6 +1223,10 @@ func (c *Client) AttachOrchestratorSession(ctx context.Context, request protocol
 	return c.orchestratorSession(ctx, protocol.CommandOrchestratorSessionAttach, request)
 }
 
+func (c *Client) StopOrchestratorSession(ctx context.Context, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+	return c.orchestratorSession(ctx, protocol.CommandOrchestratorSessionStop, request)
+}
+
 func (c *Client) OrchestratorSessionStatus(ctx context.Context, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
 	return c.orchestratorSession(ctx, protocol.CommandOrchestratorSessionStatus, request)
 }
