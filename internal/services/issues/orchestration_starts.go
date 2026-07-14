@@ -137,25 +137,39 @@ func (c *Client) CompensateOrchestrationStartOperation(ctx context.Context, proj
 			return err
 		}
 		defer func() { _ = tx.Rollback() }()
-		var current OrchestrationStartAttempt
-		err = tx.QueryRowContext(ctx, `SELECT project_id, issue_id, intent_key, actor_id, dedupe_key, state, claim_acquired, COALESCE(operation_id,''), COALESCE(last_error,'')
+		rows, err := tx.QueryContext(ctx, `SELECT project_id, issue_id, intent_key, actor_id, dedupe_key, state, claim_acquired, COALESCE(operation_id,''), COALESCE(last_error,'')
 			FROM orchestration_start_attempts
 			WHERE project_id=? AND dedupe_key=? AND state IN ('claimed','submitted') AND (operation_id=? OR (state='claimed' AND operation_id IS NULL))
-			ORDER BY CASE WHEN operation_id=? THEN 0 ELSE 1 END, updated_at ASC LIMIT 1`, projectID, dedupeKey, operationID, operationID).Scan(&current.ProjectID, &current.IssueID, &current.IntentKey, &current.ActorID, &current.DedupeKey, &current.State, &current.ClaimAcquired, &current.OperationID, &current.LastError)
-		if errors.Is(err, sql.ErrNoRows) {
-			return tx.Commit()
-		}
+			ORDER BY CASE WHEN operation_id=? THEN 0 ELSE 1 END, updated_at ASC`, projectID, dedupeKey, operationID, operationID)
 		if err != nil {
 			return err
 		}
-		if current.OperationID != "" && current.OperationID != operationID {
-			return fmt.Errorf("orchestration start references operation %s, not %s", current.OperationID, operationID)
+		attempts := make([]OrchestrationStartAttempt, 0, 2)
+		for rows.Next() {
+			var current OrchestrationStartAttempt
+			if err := rows.Scan(&current.ProjectID, &current.IssueID, &current.IntentKey, &current.ActorID, &current.DedupeKey, &current.State, &current.ClaimAcquired, &current.OperationID, &current.LastError); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			attempts = append(attempts, current)
 		}
-		current.OperationID = operationID
-		if err := c.compensateOrchestrationStartTx(ctx, tx, current, message); err != nil {
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
 			return err
 		}
-		compensated = true
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, current := range attempts {
+			if current.OperationID != "" && current.OperationID != operationID {
+				return fmt.Errorf("orchestration start references operation %s, not %s", current.OperationID, operationID)
+			}
+			current.OperationID = operationID
+			if err := c.compensateOrchestrationStartTx(ctx, tx, current, message); err != nil {
+				return err
+			}
+			compensated = true
+		}
 		return tx.Commit()
 	})
 	if err != nil {
