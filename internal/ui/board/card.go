@@ -151,6 +151,11 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 	visibleRuntimeSignals := runtimeSignalsForHeader(displaySession, runtimeSignals)
 	runtimeRow := renderRuntimeSignals(visibleRuntimeSignals, s)
 	runtimeCompact := renderRuntimeSignalsCompact(visibleRuntimeSignals, s)
+	essentialRuntimeSignals, supplementalRuntimeSignals := splitRuntimeSignalsForHeader(visibleRuntimeSignals)
+	essentialRuntimeRow := renderRuntimeSignals(essentialRuntimeSignals, s)
+	essentialRuntimeCompact := renderRuntimeSignalsCompact(essentialRuntimeSignals, s)
+	supplementalRuntimeRow := renderRuntimeSignals(supplementalRuntimeSignals, s)
+	supplementalRuntimeCompact := renderRuntimeSignalsCompact(supplementalRuntimeSignals, s)
 	typeBadge := renderTaskTypeBadge(task.Type, s)
 	headerTitle := strings.Join(headerParts, " ")
 	headerTokens := []headerToken{
@@ -166,37 +171,38 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 		if hiddenSessionAge != "" {
 			headerTokens = []headerToken{
 				{full: sessionRow, compact: sessionCompact},
-				{full: runtimeRow, compact: runtimeCompact},
 				{full: hiddenSessionAge, compact: hiddenSessionAge},
+				{full: essentialRuntimeRow, compact: essentialRuntimeCompact},
+				{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s)},
+				{full: supplementalRuntimeRow, compact: supplementalRuntimeCompact},
 				{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
 				{full: typeBadge, compact: typeBadge},
-				{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s)},
 			}
 		} else {
 			headerTokens = []headerToken{
 				{full: sessionRow, compact: sessionCompact},
+				{full: essentialRuntimeRow, compact: essentialRuntimeCompact},
+				{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s)},
 				{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
 				{full: typeBadge, compact: typeBadge},
-				{full: runtimeRow, compact: runtimeCompact},
-				{full: renderPullRequestBadge(task.PullRequest, s), compact: renderPullRequestBadgeCompact(task.PullRequest, s)},
+				{full: supplementalRuntimeRow, compact: supplementalRuntimeCompact},
 			}
 		}
 	}
 	headerLines := []string{headerTitle}
-	allowHeaderOverflow := shouldExpandCardHeader(maxLineLen)
 	for _, token := range headerTokens {
 		if preferCompact {
-			appendHeaderTokenOrOverflow(&headerLines, maxLineLen, token.full, token.compact, true, allowHeaderOverflow)
+			appendHeaderToken(headerLines, maxLineLen, token.full, token.compact, true)
 			continue
 		}
-		if appendHeaderTokenOrOverflow(&headerLines, maxLineLen, token.full, token.full, false, allowHeaderOverflow) {
+		if appendHeaderToken(headerLines, maxLineLen, token.full, token.full, false) {
 			continue
 		}
-		appendHeaderTokenOrOverflow(&headerLines, maxLineLen, token.full, token.compact, preferCompact, allowHeaderOverflow)
+		appendHeaderToken(headerLines, maxLineLen, token.full, token.compact, preferCompact)
 	}
 
 	cardHeight := CardContentHeight
-	if allowHeaderOverflow {
+	if shouldExpandCardHeader(maxLineLen) {
 		cardHeight += narrowCardExtraLines
 	}
 
@@ -315,7 +321,7 @@ func renderPullRequestBadge(pr *domain.PullRequest, s *styles.Styles) string {
 	if status := pullRequestBadgeStatus(pr); status != "" {
 		label += "/" + status
 	}
-	return s.Card.Foreground(styles.Mauve).Bold(true).Render(label)
+	return s.PullRequestBadge.Render(label)
 }
 
 func renderPullRequestBadgeCompact(pr *domain.PullRequest, s *styles.Styles) string {
@@ -323,7 +329,7 @@ func renderPullRequestBadgeCompact(pr *domain.PullRequest, s *styles.Styles) str
 		return ""
 	}
 	label := "PR" + pullRequestCompactStatusIcon(pr)
-	return s.Card.Foreground(styles.Mauve).Bold(true).Render(label)
+	return s.PullRequestBadge.Render(label)
 }
 
 func pullRequestBadgeStatus(pr *domain.PullRequest) string {
@@ -438,6 +444,10 @@ func compactPullRequestState(state string) string {
 	}
 }
 
+func shouldExpandCardHeader(maxLineLen int) bool {
+	return ansi.StringWidth(expandedHeaderWorstCase) > maxLineLen
+}
+
 // renderMergeCandidateBadge paints a single-character badge in the card
 // header indicating that this task is an eligible merge target while the
 // in-board merge picker is active. Using a header badge (rather than the
@@ -474,10 +484,6 @@ func renderJumpLabel(label string, s *styles.Styles) string {
 			Bold(true)
 	}
 	return labelStyle.Render(label)
-}
-
-func shouldExpandCardHeader(maxLineLen int) bool {
-	return ansi.StringWidth(expandedHeaderWorstCase) > maxLineLen
 }
 
 func appendHeaderToken(headerLines []string, maxLineLen int, full string, compact string, preferCompact bool) bool {
@@ -553,17 +559,6 @@ func headerTokensFit(headerTitle string, tokens []headerToken, maxLineLen int) b
 	return true
 }
 
-func appendHeaderTokenOrOverflow(headerLines *[]string, maxLineLen int, full string, compact string, preferCompact bool, allowOverflow bool) bool {
-	if appendHeaderToken(*headerLines, maxLineLen, full, compact, preferCompact) {
-		return true
-	}
-	if !allowOverflow || len(*headerLines) >= 2 {
-		return false
-	}
-	*headerLines = append(*headerLines, "")
-	return appendHeaderToken(*headerLines, maxLineLen, full, compact, preferCompact)
-}
-
 func runtimeSignalsForHeader(session *domain.Session, signals *RuntimeSignals) *RuntimeSignals {
 	if signals == nil {
 		return nil
@@ -575,6 +570,32 @@ func runtimeSignalsForHeader(session *domain.Session, signals *RuntimeSignals) *
 		normalized.HasDescendantTmuxSession = false
 	}
 	return &normalized
+}
+
+func splitRuntimeSignalsForHeader(signals *RuntimeSignals) (*RuntimeSignals, *RuntimeSignals) {
+	if signals == nil {
+		return nil, nil
+	}
+	essential := &RuntimeSignals{
+		HasTmuxSession:           signals.HasTmuxSession,
+		HasDescendantTmuxSession: signals.HasDescendantTmuxSession,
+		TmuxAttached:             signals.TmuxAttached,
+		TmuxAttachedCount:        signals.TmuxAttachedCount,
+		HasConflicts:             signals.HasConflicts,
+		ConflictFiles:            signals.ConflictFiles,
+		PendingOperationState:    signals.PendingOperationState,
+		PendingOperationID:       signals.PendingOperationID,
+		PendingOperationPercent:  signals.PendingOperationPercent,
+	}
+	supplemental := &RuntimeSignals{
+		HasWorktree:           signals.HasWorktree,
+		GitAheadCount:         signals.GitAheadCount,
+		GitBehindCount:        signals.GitBehindCount,
+		HasUncommittedChanges: signals.HasUncommittedChanges,
+		GitAdditions:          signals.GitAdditions,
+		GitDeletions:          signals.GitDeletions,
+	}
+	return essential, supplemental
 }
 
 func renderTaskTypeBadge(taskType domain.TaskType, s *styles.Styles) string {
