@@ -1029,11 +1029,11 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			launchPrompt = ""
 			postLaunchPrompt = initialPrompt
 		}
-		launchCommand = d.buildSessionLaunchCommandWithInitReadyPathAndEnv(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, launchPrompt, sessionInitMarker.RelativePath, sessionLaunchStartupExportCommands(d.runtimeConfigForProject(cmd.ProjectID), resourceCtx))
+		launchCommand = d.buildSessionLaunchCommandWithInitReadyPathAndEnv(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, launchPrompt, sessionInitMarker.RelativePath, d.sessionLaunchStartupExportCommands(d.runtimeConfigForProject(cmd.ProjectID), resourceCtx))
 		if launchPrompt != "" && d.sessionLaunchCommandNeedsPostLaunchPrompt(cmd.ProjectID, launchCommand) {
 			launchPrompt = ""
 			postLaunchPrompt = initialPrompt
-			launchCommand = d.buildSessionLaunchCommandWithInitReadyPathAndEnv(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, launchPrompt, sessionInitMarker.RelativePath, sessionLaunchStartupExportCommands(d.runtimeConfigForProject(cmd.ProjectID), resourceCtx))
+			launchCommand = d.buildSessionLaunchCommandWithInitReadyPathAndEnv(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, launchPrompt, sessionInitMarker.RelativePath, d.sessionLaunchStartupExportCommands(d.runtimeConfigForProject(cmd.ProjectID), resourceCtx))
 		}
 	}
 	reportSessionStartProgress(ctx, "tmux_launch", "creating tmux session", 70)
@@ -4779,12 +4779,16 @@ func sessionLaunchContextExportCommand(projectID, issueID, sessionID string) str
 	return "export " + strings.Join(assignments, " ")
 }
 
-func sessionLaunchStartupExportCommands(projectCfg daemonProjectRuntimeConfig, resourceCtx issueResourceLifecycleContext) []string {
-	assignments := issueResourceShellExports(projectCfg.IssueResources, resourceCtx)
-	if len(assignments) == 0 {
-		return nil
+func (d *Daemon) sessionLaunchStartupExportCommands(projectCfg daemonProjectRuntimeConfig, resourceCtx issueResourceLifecycleContext) []string {
+	commands := make([]string, 0, 2)
+	if pathExport := d.sessionManagedPathExportCommand(); pathExport != "" {
+		commands = append(commands, pathExport)
 	}
-	return []string{"export " + strings.Join(assignments, " ")}
+	assignments := issueResourceShellExports(projectCfg.IssueResources, resourceCtx)
+	if len(assignments) > 0 {
+		commands = append(commands, "export "+strings.Join(assignments, " "))
+	}
+	return commands
 }
 
 func buildSessionAsyncInitCommands(asyncInitCommands []string, issueID, sessionID string) []string {
@@ -5109,8 +5113,15 @@ func (d *Daemon) exportSessionContextEnv(ctx context.Context, projectID, issueID
 	if err := d.setSessionContextEnv(ctx, projectID, issueID, sessionID); err != nil {
 		return err
 	}
-	if exportCommand := sessionLaunchContextExportCommand(projectID, issueID, sessionID); exportCommand != "" {
-		if err := d.tmux.SendKeys(ctx, sessionID, exportCommand); err != nil {
+	exportCommands := make([]string, 0, 2)
+	if pathExport := d.sessionManagedPathExportCommand(); pathExport != "" {
+		exportCommands = append(exportCommands, pathExport)
+	}
+	if contextExport := sessionLaunchContextExportCommand(projectID, issueID, sessionID); contextExport != "" {
+		exportCommands = append(exportCommands, contextExport)
+	}
+	if len(exportCommands) > 0 {
+		if err := d.tmux.SendKeys(ctx, sessionID, strings.Join(exportCommands, "; ")); err != nil {
 			return err
 		}
 	}
@@ -5118,6 +5129,11 @@ func (d *Daemon) exportSessionContextEnv(ctx context.Context, projectID, issueID
 }
 
 func (d *Daemon) setSessionContextEnv(ctx context.Context, projectID, issueID, sessionID string) error {
+	if managedPath := d.sessionManagedPathValue(); managedPath != "" {
+		if err := d.tmux.SetEnvironment(ctx, sessionID, "PATH", managedPath); err != nil {
+			return err
+		}
+	}
 	for _, assignment := range sessionLaunchContextEnvAssignments(projectID, issueID, sessionID) {
 		if assignment.Value == "" {
 			continue
@@ -5127,6 +5143,29 @@ func (d *Daemon) setSessionContextEnv(ctx context.Context, projectID, issueID, s
 		}
 	}
 	return nil
+}
+
+func (d *Daemon) sessionManagedPathExportCommand() string {
+	binDir := strings.TrimSpace(d.cfg.ManagedGenerationBinDir)
+	if binDir == "" || d.cfg.ScopedRuntime {
+		return ""
+	}
+	return "export PATH=" + singleQuoteForShell(binDir) + ":\"$PATH\""
+}
+
+func (d *Daemon) sessionManagedPathValue() string {
+	binDir := strings.TrimSpace(d.cfg.ManagedGenerationBinDir)
+	if binDir == "" || d.cfg.ScopedRuntime {
+		return ""
+	}
+	entries := []string{binDir}
+	for _, entry := range filepath.SplitList(os.Getenv("PATH")) {
+		if strings.TrimSpace(entry) == "" || filepath.Clean(entry) == filepath.Clean(binDir) {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	return strings.Join(entries, string(os.PathListSeparator))
 }
 
 func issueResourcesConfigured(cfg appconfig.IssueResourcesConfig) bool {

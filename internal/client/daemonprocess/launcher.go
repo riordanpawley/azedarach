@@ -523,29 +523,15 @@ func daemonBinaryNearCurrentExecutable() string {
 	if err != nil || strings.TrimSpace(executable) == "" {
 		return ""
 	}
-	if resolved, resolveErr := filepath.EvalSymlinks(executable); resolveErr == nil && strings.TrimSpace(resolved) != "" {
-		executable = resolved
-	}
-	if !isManagedGenerationClient(executable) {
+	generationDir, ok := config.ManagedGenerationBinDir(executable, "az")
+	if !ok {
 		return ""
 	}
-	candidate := filepath.Join(filepath.Dir(executable), "azd")
+	candidate := filepath.Join(generationDir, "azd")
 	if executableFile(candidate) {
 		return candidate
 	}
 	return ""
-}
-
-func isManagedGenerationClient(executable string) bool {
-	clean := filepath.Clean(executable)
-	if filepath.Base(clean) != "az" {
-		return false
-	}
-	generationDir := filepath.Dir(clean)
-	generationName := filepath.Base(generationDir)
-	return strings.HasPrefix(generationName, "generation.") &&
-		len(generationName) > len("generation.") &&
-		filepath.Base(filepath.Dir(generationDir)) == ".azedarach-generations"
 }
 
 func executableFile(path string) bool {

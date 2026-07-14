@@ -8392,6 +8392,121 @@ func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) 
 	}
 }
 
+func TestGlobalSessionLaunchSeedsManagedGenerationPathForAgentAndChildren(t *testing.T) {
+	base := t.TempDir()
+	generationDir := filepath.Join(base, "install", ".azedarach-generations", "generation.fresh")
+	staleBin := filepath.Join(base, "repo", "bin")
+	toolBin := filepath.Join(base, "tools")
+	for _, dir := range []string{generationDir, staleBin, toolBin} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tracePath := filepath.Join(base, "trace")
+	writeExecutable := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExecutable(filepath.Join(generationDir, "az"), `printf 'installed-az|%s|%s\n' "$0" "$*" >> "$TRACE"
+`)
+	writeExecutable(filepath.Join(generationDir, "azd"), `printf 'installed-azd|%s|%s\n' "$0" "$*" >> "$TRACE"
+`)
+	for _, binary := range []string{"az", "azd"} {
+		writeExecutable(filepath.Join(staleBin, binary), `printf 'STALE|%s|%s\n' "$0" "$*" >> "$TRACE"
+`)
+	}
+	writeExecutable(filepath.Join(toolBin, "codex"), `az prime
+az ticket get djm
+azd version
+(az version) &
+wait
+`)
+
+	inheritedPath := strings.Join([]string{staleBin, toolBin, "/usr/bin", "/bin"}, string(os.PathListSeparator))
+	d := &Daemon{cfg: Config{
+		CLITool:                 "codex",
+		SessionShell:            "/bin/sh",
+		SessionSyncInitCommands: []string{"az sync-init"},
+		ManagedGenerationBinDir: generationDir,
+	}}
+	command := d.buildSessionLaunchCommandWithInitReadyPathAndEnv(
+		protocol.DefaultProjectID,
+		"djm",
+		"az-djm",
+		false,
+		nil,
+		"",
+		"",
+		d.sessionLaunchStartupExportCommands(daemonProjectRuntimeConfig{}, issueResourceLifecycleContext{}),
+	)
+	cmd := exec.Command("/bin/sh", "-c", command)
+	cmd.Env = append(os.Environ(), "PATH="+inheritedPath, "TRACE="+tracePath)
+	cmd.Stdin = strings.NewReader("az fallback-shell\nazd fallback-shell\nexit\n")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("managed session launch failed: %v\n%s\ncommand=%s", err, output, command)
+	}
+	traceBytes, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := string(traceBytes)
+	if strings.Contains(trace, "STALE|") {
+		t.Fatalf("trace used stale repository binary:\n%s", trace)
+	}
+	for _, want := range []string{
+		"installed-az|" + filepath.Join(generationDir, "az") + "|prime",
+		"installed-az|" + filepath.Join(generationDir, "az") + "|ticket get djm",
+		"installed-az|" + filepath.Join(generationDir, "az") + "|sync-init",
+		"installed-azd|" + filepath.Join(generationDir, "azd") + "|version",
+		"installed-az|" + filepath.Join(generationDir, "az") + "|version",
+		"installed-az|" + filepath.Join(generationDir, "az") + "|ai hook run --agent=codex session_end",
+		"installed-az|" + filepath.Join(generationDir, "az") + "|fallback-shell",
+		"installed-azd|" + filepath.Join(generationDir, "azd") + "|fallback-shell",
+	} {
+		if !strings.Contains(trace, want) {
+			t.Fatalf("trace missing %q:\n%s", want, trace)
+		}
+	}
+	if exportIndex, toolIndex := strings.Index(command, "export PATH="), strings.Index(command, " codex"); exportIndex < 0 || toolIndex < 0 || exportIndex > toolIndex {
+		t.Fatalf("launch command does not seed PATH before agent: %s", command)
+	}
+}
+
+func TestSessionManagedPathSeedsTmuxEnvironmentButNotScopedRuntime(t *testing.T) {
+	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.test")
+	staleDir := filepath.Join(t.TempDir(), "repo", "bin")
+	t.Setenv("PATH", staleDir+string(os.PathListSeparator)+"/usr/bin:/bin")
+
+	for _, scoped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("scoped=%t", scoped), func(t *testing.T) {
+			runner := newSessionStartTmuxRunner()
+			d := &Daemon{
+				cfg:  Config{ManagedGenerationBinDir: managedDir, ScopedRuntime: scoped},
+				tmux: tmux.NewClient(runner, slog.Default()),
+			}
+			if err := d.setSessionContextEnv(context.Background(), "project", "djm", "az-djm"); err != nil {
+				t.Fatal(err)
+			}
+			gotPath := runner.env["az-djm"]["PATH"]
+			if scoped {
+				if gotPath != "" || d.sessionManagedPathExportCommand() != "" {
+					t.Fatalf("scoped runtime seeded managed PATH: env=%q export=%q", gotPath, d.sessionManagedPathExportCommand())
+				}
+				return
+			}
+			wantPrefix := managedDir + string(os.PathListSeparator)
+			if !strings.HasPrefix(gotPath, wantPrefix) {
+				t.Fatalf("tmux PATH = %q, want prefix %q", gotPath, wantPrefix)
+			}
+			if !strings.HasPrefix(d.sessionManagedPathExportCommand(), "export PATH='") {
+				t.Fatalf("launch export = %q, want managed PATH export", d.sessionManagedPathExportCommand())
+			}
+		})
+	}
+}
+
 func TestBuildSessionLaunchCommandDoesNotSerializeAsyncInitCommandsBeforeToolLaunch(t *testing.T) {
 	d := &Daemon{
 		cfg: Config{

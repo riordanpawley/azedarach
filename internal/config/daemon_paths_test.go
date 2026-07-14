@@ -232,6 +232,40 @@ func TestValidateSharedDaemonExecutableAllowsScopedSocket(t *testing.T) {
 	}
 }
 
+func TestManagedGenerationBinDirRequiresCoherentExecutablePair(t *testing.T) {
+	installDir := t.TempDir()
+	generationDir := filepath.Join(installDir, ".azedarach-generations", "generation.current")
+	if err := os.MkdirAll(generationDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, binary := range []string{"az", "azd"} {
+		if err := os.WriteFile(filepath.Join(generationDir, binary), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publicAzd := filepath.Join(installDir, "azd")
+	if err := os.Symlink(filepath.Join(".azedarach-generations", "generation.current", "azd"), publicAzd); err != nil {
+		t.Fatal(err)
+	}
+
+	resolvedGenerationDir, err := filepath.EvalSymlinks(generationDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := ManagedGenerationBinDir(publicAzd, "azd"); !ok || got != resolvedGenerationDir {
+		t.Fatalf("ManagedGenerationBinDir() = %q, %t, want %q, true", got, ok, resolvedGenerationDir)
+	}
+	if err := os.Chmod(filepath.Join(generationDir, "az"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := ManagedGenerationBinDir(publicAzd, "azd"); ok || got != "" {
+		t.Fatalf("ManagedGenerationBinDir() with partial pair = %q, %t, want empty, false", got, ok)
+	}
+	if got, ok := ManagedGenerationBinDir(filepath.Join(installDir, "bin", "azd"), "azd"); ok || got != "" {
+		t.Fatalf("ManagedGenerationBinDir() with unmanaged path = %q, %t, want empty, false", got, ok)
+	}
+}
+
 func TestDaemonPathsUseScopedWhenEnabledInAzedarachDevelopmentWorktree(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")

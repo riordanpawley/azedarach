@@ -67,6 +67,7 @@ type Config struct {
 	SocketPath                 string
 	LockPath                   string
 	ScopedRuntime              bool
+	ManagedGenerationBinDir    string
 	BaseBranch                 string
 	GitWorkflowMode            string
 	CLITool                    string
@@ -252,6 +253,11 @@ func New(cfg Config) *Daemon {
 	}
 	if cfg.LockPath == "" {
 		cfg.LockPath = appconfig.GlobalDaemonLockPath()
+	}
+	if cfg.ScopedRuntime {
+		cfg.ManagedGenerationBinDir = ""
+	} else if strings.TrimSpace(cfg.ManagedGenerationBinDir) != "" {
+		cfg.ManagedGenerationBinDir = filepath.Clean(cfg.ManagedGenerationBinDir)
 	}
 
 	tmuxRunner := &tmux.ExecRunner{}
