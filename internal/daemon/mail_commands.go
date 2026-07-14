@@ -94,7 +94,20 @@ func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope)
 	resp.Body = out
 	// Mailbox evidence participates in graph readiness and orchestration
 	// snapshots, so advance the projection revision after the durable append.
-	resp.Revision = d.nextRevision(d.projectID(req.Meta))
+	projectID := d.projectID(req.Meta)
+	resp.Revision = d.nextRevision(projectID)
+	if d.hub != nil {
+		d.hub.Publish(protocol.EventEnvelope{
+			ProtocolVersion: req.ProtocolVersion,
+			ProjectID:       naming.ProjectID(projectID),
+			Meta:            req.Meta,
+			Revision:        resp.Revision,
+			Event:           "mail.appended",
+			Kind:            protocol.EnvelopeKindEvent,
+			EmittedAt:       event.CreatedAt,
+			Body:            out,
+		})
+	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon mail send completed",
 			"repo_dir", repoDir,

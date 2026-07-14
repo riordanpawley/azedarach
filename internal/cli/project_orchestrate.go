@@ -220,8 +220,23 @@ func projectOrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOpt
 		if opts.Once {
 			return nil
 		}
-		if err := sleepWatchPoll(watchCtx, projectOrchestrationWatchPollInterval(opts.PollInterval)); err != nil {
+		events, err := deps.DaemonClient.Subscribe(watchCtx, opts.Project, snapshot.Revision)
+		if err != nil {
+			if isWatchContextDone(watchCtx, err) {
+				return nil
+			}
+			return err
+		}
+		select {
+		case <-watchCtx.Done():
 			return nil
+		case event, ok := <-events:
+			if !ok {
+				continue
+			}
+			if int64(event.Revision) > cursor {
+				cursor = int64(event.Revision)
+			}
 		}
 	}
 }
