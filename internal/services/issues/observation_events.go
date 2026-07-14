@@ -40,6 +40,7 @@ type LatestIssueObservationEventOptions struct {
 	CommandOutcomePairs     []IssueObservationCommandOutcomePair
 	RequiredPayloadTextKeys []string
 	CurrentReviewEpoch      bool
+	InvalidatedByStatuses   []domain.Status
 }
 
 type IssueObservationCommandOutcomePair struct {
@@ -200,6 +201,60 @@ func (c *Client) ListIssueObservationEvents(ctx context.Context, issueID string,
 	return events, nil
 }
 
+// ListIssueReviewReadyObservationEvents returns the complete typed event set
+// used to reduce review-ready publications and acceptance evidence. It is
+// intentionally uncapped: callers require one authoritative decision across
+// the issue's full durable history.
+func (c *Client) ListIssueReviewReadyObservationEvents(ctx context.Context, issueID string) ([]domain.IssueObservationEvent, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return nil, c.wrapError("list-review-ready-observation-events", "", errors.New("issue id is required"))
+	}
+	exists, err := c.issueIDExistsIncludingDeleted(ctx, db, issueID)
+	if err != nil {
+		return nil, c.wrapError("list-review-ready-observation-events", issueID, err)
+	}
+	if !exists {
+		return nil, c.wrapError("list-review-ready-observation-events", issueID, domain.ErrNotFound)
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM issue_observation_events
+		WHERE issue_id = ?
+		  AND (
+			event_type = ?
+			OR LOWER(REPLACE(REPLACE(TRIM(event_type), '_', '.'), '-', '.')) IN (?, ?, ?, ?)
+		  )
+		ORDER BY observed_at ASC, id ASC
+	`, issueID,
+		string(domain.IssueEventIssueStatusChanged),
+		string(domain.IssueEventEvidenceSubmitted),
+		"worker.integration.ready",
+		"worker.ready",
+		"worker.complete",
+	)
+	if err != nil {
+		return nil, c.wrapError("list-review-ready-observation-events", issueID, err)
+	}
+	defer rows.Close()
+	events := make([]domain.IssueObservationEvent, 0, 16)
+	for rows.Next() {
+		event, scanErr := scanIssueObservationEvent(rows)
+		if scanErr != nil {
+			return nil, c.wrapError("list-review-ready-observation-events", issueID, scanErr)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-review-ready-observation-events", issueID, err)
+	}
+	return events, nil
+}
+
 // ListLatestIssueObservationEventsByIssue returns at most one matching event
 // per issue in one SQLite query. Callers retain authority for interpreting the
 // candidate; filters only keep the persistent read bounded and indexable.
@@ -280,7 +335,26 @@ func (c *Client) ListLatestIssueObservationEventsByIssue(ctx context.Context, op
 		clauses = append(clauses, "json_type(payload_json, ?) = 'text' AND NULLIF(TRIM(CAST(json_extract(payload_json, ?) AS TEXT)), '') IS NOT NULL")
 		args = append(args, path, path)
 	}
+	epochStatuses := make([]string, 0, len(opts.InvalidatedByStatuses)+1)
+	seenEpochStatuses := make(map[string]struct{}, len(opts.InvalidatedByStatuses)+1)
+	addEpochStatus := func(status domain.Status) {
+		value := strings.ToLower(strings.TrimSpace(string(status)))
+		if value == "" {
+			return
+		}
+		if _, exists := seenEpochStatuses[value]; exists {
+			return
+		}
+		seenEpochStatuses[value] = struct{}{}
+		epochStatuses = append(epochStatuses, value)
+	}
 	if opts.CurrentReviewEpoch {
+		addEpochStatus(domain.StatusInReview)
+	}
+	for _, status := range opts.InvalidatedByStatuses {
+		addEpochStatus(status)
+	}
+	if len(epochStatuses) > 0 {
 		clauses = append(clauses, `NOT EXISTS (
 			SELECT 1
 			FROM issue_observation_events AS epoch
@@ -288,9 +362,12 @@ func (c *Client) ListLatestIssueObservationEventsByIssue(ctx context.Context, op
 			  AND epoch.id > events.id
 			  AND epoch.event_type = ?
 			  AND TRIM(epoch.source) = 'issue-store'
-			  AND LOWER(TRIM(CAST(json_extract(epoch.payload_json, '$.to_status') AS TEXT))) = ?
+			  AND LOWER(TRIM(CAST(json_extract(epoch.payload_json, '$.to_status') AS TEXT))) IN (`+strings.TrimSuffix(strings.Repeat("?,", len(epochStatuses)), ",")+`)
 		)`)
-		args = append(args, string(domain.IssueEventIssueStatusChanged), string(domain.StatusInReview))
+		args = append(args, string(domain.IssueEventIssueStatusChanged))
+		for _, status := range epochStatuses {
+			args = append(args, status)
+		}
 	}
 	rows, err := db.QueryContext(ctx, `
 		WITH candidate_issues(issue_id) AS (

@@ -10,6 +10,16 @@ import (
 // resubmission starts a new one and therefore receives a new source event ID.
 type ReviewReadyPublication struct {
 	SourceEvent IssueObservationEvent
+	Evidence    WorkerEvidencePacket
+	Validation  WorkerEvidenceParseResult
+}
+
+// ReviewReadyEvidenceReduction is the authoritative reduction of one issue's
+// review-status and worker-evidence observations. Publications and acceptance
+// consume the same latest-evidence ordering decision.
+type ReviewReadyEvidenceReduction struct {
+	Publications   []ReviewReadyPublication
+	LatestEvidence *ReviewReadyPublication
 }
 
 // DeriveReviewReadyPublications reduces an issue's ordered observation stream
@@ -18,24 +28,42 @@ type ReviewReadyPublication struct {
 // source; evidence immediately after the transition is part of the same
 // episode and cannot create a duplicate publication.
 func DeriveReviewReadyPublications(events []IssueObservationEvent) []ReviewReadyPublication {
+	return ReduceReviewReadyEvidence(events).Publications
+}
+
+// ReduceReviewReadyEvidence orders observations by their durable authority
+// time, with the database ID breaking timestamp ties, then derives both replay
+// publications and the latest packet inspected by review acceptance.
+func ReduceReviewReadyEvidence(events []IssueObservationEvent) ReviewReadyEvidenceReduction {
 	ordered := append([]IssueObservationEvent(nil), events...)
-	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].ObservedAt.Equal(ordered[j].ObservedAt) {
+			return ordered[i].ID < ordered[j].ID
+		}
+		return ordered[i].ObservedAt.Before(ordered[j].ObservedAt)
+	})
 
 	inReview := false
 	episodePublished := false
 	var pendingEvidence *IssueObservationEvent
 	publications := make([]ReviewReadyPublication, 0)
+	var latestEvidence *ReviewReadyPublication
 	for i := range ordered {
 		event := ordered[i]
-		if IsReviewReadyEvidenceEvent(event) {
+		packet, validation := ParseWorkerEvidenceIssueEvent(event)
+		if IsWorkerEvidenceEventType(event.Type) {
+			candidate := ReviewReadyPublication{SourceEvent: event, Evidence: packet, Validation: validation}
+			latestEvidence = &candidate
 			if inReview {
-				if !episodePublished {
-					publications = append(publications, ReviewReadyPublication{SourceEvent: event})
+				if validation.Complete && !episodePublished {
+					publications = append(publications, candidate)
 					episodePublished = true
 				}
-			} else {
+			} else if validation.Complete {
 				copy := event
 				pendingEvidence = &copy
+			} else {
+				pendingEvidence = nil
 			}
 			continue
 		}
@@ -44,12 +72,12 @@ func DeriveReviewReadyPublications(events []IssueObservationEvent) []ReviewReady
 				continue
 			}
 			inReview = true
-			episodePublished = true
-			source := event
+			episodePublished = false
 			if pendingEvidence != nil {
-				source = *pendingEvidence
+				packet, validation := ParseWorkerEvidenceIssueEvent(*pendingEvidence)
+				publications = append(publications, ReviewReadyPublication{SourceEvent: *pendingEvidence, Evidence: packet, Validation: validation})
+				episodePublished = true
 			}
-			publications = append(publications, ReviewReadyPublication{SourceEvent: source})
 			pendingEvidence = nil
 			continue
 		}
@@ -62,7 +90,7 @@ func DeriveReviewReadyPublications(events []IssueObservationEvent) []ReviewReady
 		}
 		pendingEvidence = nil
 	}
-	return publications
+	return ReviewReadyEvidenceReduction{Publications: publications, LatestEvidence: latestEvidence}
 }
 
 // IsReviewRequestTransition reports whether an observation starts a durable
@@ -78,15 +106,8 @@ func IsReviewRequestTransition(event IssueObservationEvent) bool {
 // IsReviewReadyEvidenceEvent accepts the durable event spellings emitted by
 // workers over time and structured evidence packets used by current clients.
 func IsReviewReadyEvidenceEvent(event IssueObservationEvent) bool {
-	normalized := strings.NewReplacer("_", ".", "-", ".").Replace(strings.ToLower(strings.TrimSpace(string(event.Type))))
-	switch normalized {
-	case "worker.integration.ready", "worker.ready", "worker.complete":
-		return true
-	case string(IssueEventEvidenceSubmitted):
-		return strings.EqualFold(strings.TrimSpace(payloadString(event.Payload, "schema")), WorkerEvidenceSchemaV1)
-	default:
-		return false
-	}
+	_, validation := ParseWorkerEvidenceIssueEvent(event)
+	return validation.Complete
 }
 
 func payloadString(payload map[string]any, key string) string {

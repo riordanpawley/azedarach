@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"go.opentelemetry.io/otel"
@@ -32,6 +36,47 @@ func TestEnabledEnvOverridesConfigDefault(t *testing.T) {
 	t.Setenv(EnvVar, "on")
 	if !Enabled(false) {
 		t.Fatal("Enabled(false) = false, want true from env override")
+	}
+}
+
+func TestManagedOTLPEndpoint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jaeger-endpoint")
+	t.Setenv(managedEndpointFileEnv, path)
+
+	tests := []struct {
+		name    string
+		content string
+		want    string
+		ok      bool
+	}{
+		{name: "primary", content: "localhost:4318\n0\n", want: "localhost:4318", ok: true},
+		{name: "live fallback", content: "127.0.0.1:34318\n" + fmt.Sprint(time.Now().Add(time.Hour).Unix()) + "\n", want: "127.0.0.1:34318", ok: true},
+		{name: "expired fallback", content: "localhost:34318\n1\n"},
+		{name: "remote host rejected", content: "collector.example.com:4318\n0\n"},
+		{name: "invalid port rejected", content: "localhost:0\n0\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(tt.content), 0o600); err != nil {
+				t.Fatalf("write endpoint state: %v", err)
+			}
+			got, ok := managedOTLPEndpoint()
+			if ok != tt.ok || got != tt.want {
+				t.Fatalf("managedOTLPEndpoint() = %q, %v; want %q, %v", got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+func TestConfiguredEndpointPrefersExplicitEnvironment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jaeger-endpoint")
+	if err := os.WriteFile(path, []byte("localhost:34318\n0\n"), 0o600); err != nil {
+		t.Fatalf("write endpoint state: %v", err)
+	}
+	t.Setenv(managedEndpointFileEnv, path)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:54318")
+	if got := configuredEndpointSummary(); got != "http://localhost:54318" {
+		t.Fatalf("configuredEndpointSummary() = %q", got)
 	}
 }
 

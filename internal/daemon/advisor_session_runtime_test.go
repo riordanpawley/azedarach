@@ -35,7 +35,9 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 		t.Fatal(err)
 	}
 	runner := newSessionStartTmuxRunner()
-	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore()}
+	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
+	t.Setenv("PATH", filepath.Join(repoDir, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	d := &Daemon{cfg: Config{RepoDir: repoDir, ManagedGenerationBinDir: managedDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore()}
 	service := issueInteractionService{daemon: d}
 
 	first, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: request.ID, ExpectedRevision: 1, Actor: "human"})
@@ -54,6 +56,14 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 	}
 	if !strings.Contains(launch, "--permission-mode plan") || !strings.Contains(launch, `--tools "Read,Glob,Grep"`) || strings.Contains(launch, "exec zsh") {
 		t.Fatalf("advisor launch command is not read-only = %s", launch)
+	}
+	for _, command := range runner.commands {
+		if len(command) == 0 || command[0] != "new-session" {
+			continue
+		}
+		if got, ok := tmuxCommandEnvironmentValue(command, "PATH"); !ok || !strings.HasPrefix(got, managedDir+string(os.PathListSeparator)) {
+			t.Fatalf("advisor tmux PATH = %q, %t, want managed prefix; command=%v", got, ok, command)
+		}
 	}
 	if err := d.persistTmuxSessionRuntimeState(ctx, protocol.DefaultProjectID, []tmux.SessionInfo{{Name: first.Request.SessionID}}, nil); err != nil {
 		t.Fatal(err)

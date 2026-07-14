@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -86,9 +88,13 @@ func projectOrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOpt
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
+	intentKey, err := newCLIOrchestrationStartIntentKey()
+	if err != nil {
+		return err
+	}
 	request := protocol.OrchestrationIntentRequest{
 		Scope: scope, Kind: protocol.OrchestrationIntentStart,
-		IntentKey: fmt.Sprintf("cli:%d", time.Now().UTC().UnixNano()), ActorID: orchestrateOwnerID(),
+		IntentKey: intentKey, ActorID: orchestrateOwnerID(),
 		IssueIDs: opts.IssueIDs, Limit: opts.Limit, RepoDir: deps.RepoDir,
 		BaseBranch: opts.BaseBranchOverride, OverrideBoardHealth: opts.OverrideBoardHealth,
 	}
@@ -117,6 +123,14 @@ func projectOrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOpt
 		return fmt.Errorf("orchestrate start completed with failures")
 	}
 	return nil
+}
+
+func newCLIOrchestrationStartIntentKey() (string, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", fmt.Errorf("generate orchestration start intent: %w", err)
+	}
+	return "cli-start:" + hex.EncodeToString(nonce[:]), nil
 }
 
 func OrchestrateReviewCommand(deps *Dependencies, opts OrchestrateReviewOptions) error {

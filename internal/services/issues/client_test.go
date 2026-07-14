@@ -2393,6 +2393,94 @@ func TestClientCloseWithRuntimeAtomicallyReleasesExecutionLeaseBeforeTerminalWri
 	assert.Less(t, releaseEventID, statusEventID, "lease release event must precede terminal status event")
 }
 
+func TestClientUpdateDetailsReopensAtomicallyAndIdempotently(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-reopen-runtime"
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Reopen terminal issue",
+		Type:     domain.TypeBug,
+		Priority: domain.P1,
+		Status:   domain.StatusInReview,
+	})
+	require.NoError(t, err)
+	_, err = client.ClaimOwnershipWithRuntime(ctx, projectID, taskID, OwnershipClaimParams{
+		OwnerID:   "worker-a",
+		OwnerKind: "agent",
+		Purpose:   domain.CoordinationLeaseExecution,
+	})
+	require.NoError(t, err)
+	closed, err := client.CloseWithRuntime(ctx, projectID, taskID, domain.StatusDone)
+	require.NoError(t, err)
+	assert.Nil(t, closed.Ownership)
+	assert.Empty(t, closed.CoordinationLeases)
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	var closedAt sql.NullString
+	var closedOutcome, visibility string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT closed_at, closed_outcome, visibility FROM issues WHERE id = ?`, taskID).Scan(&closedAt, &closedOutcome, &visibility))
+	require.True(t, closedAt.Valid)
+	assert.Equal(t, string(domain.IssueCloseCompleted), closedOutcome)
+	assert.Equal(t, string(domain.IssueVisibilityLive), visibility)
+
+	_, err = db.ExecContext(ctx, `CREATE TRIGGER fail_reopen
+		BEFORE INSERT ON issue_observation_events
+		WHEN NEW.event_type = 'issue.status_changed'
+			AND json_extract(NEW.payload_json, '$.from_status') = 'closed'
+			AND json_extract(NEW.payload_json, '$.to_status') = 'open'
+		BEGIN
+			SELECT RAISE(ABORT, 'injected reopen failure');
+		END`)
+	require.NoError(t, err)
+	openLifecycle := domain.IssueWorkflowOpen
+	update := UpdateTaskParams{
+		Title:     "Reopen terminal issue",
+		Type:      domain.TypeBug,
+		Priority:  domain.P1,
+		Lifecycle: &openLifecycle,
+	}
+	require.ErrorContains(t, client.UpdateDetails(ctx, taskID, update), "injected reopen failure")
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT closed_at, closed_outcome FROM issues WHERE id = ?`, taskID).Scan(&closedAt, &closedOutcome))
+	require.True(t, closedAt.Valid, "failed reopen must preserve terminal timestamp")
+	assert.Equal(t, string(domain.IssueCloseCompleted), closedOutcome)
+	var reopenEvents int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_observation_events
+		WHERE issue_id = ? AND event_type = ?
+		AND json_extract(payload_json, '$.from_status') = ?
+		AND json_extract(payload_json, '$.to_status') = ?`,
+		taskID, domain.IssueEventIssueStatusChanged, domain.StatusDone, domain.StatusOpen).Scan(&reopenEvents))
+	assert.Zero(t, reopenEvents, "failed reopen must roll back lifecycle history")
+
+	_, err = db.ExecContext(ctx, `DROP TRIGGER fail_reopen`)
+	require.NoError(t, err)
+	reopened, err := client.UpdateDetailsWithRuntime(ctx, projectID, taskID, update)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusOpen, reopened.Status)
+	assert.Equal(t, domain.IssueWorkflowOpen, reopened.State.Workflow())
+	assert.Nil(t, reopened.Ownership, "reopen must not recreate terminally released ownership")
+	assert.Empty(t, reopened.CoordinationLeases)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT closed_at, closed_outcome FROM issues WHERE id = ?`, taskID).Scan(&closedAt, &closedOutcome))
+	assert.False(t, closedAt.Valid)
+	assert.Equal(t, string(domain.IssueCloseNone), closedOutcome)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_observation_events
+		WHERE issue_id = ? AND event_type = ?
+		AND json_extract(payload_json, '$.from_status') = ?
+		AND json_extract(payload_json, '$.to_status') = ?`,
+		taskID, domain.IssueEventIssueStatusChanged, domain.StatusDone, domain.StatusOpen).Scan(&reopenEvents))
+	assert.Equal(t, 1, reopenEvents)
+
+	require.NoError(t, client.UpdateDetails(ctx, taskID, update), "idempotent reopen retry must succeed")
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_observation_events
+		WHERE issue_id = ? AND event_type = ?
+		AND json_extract(payload_json, '$.from_status') = ?
+		AND json_extract(payload_json, '$.to_status') = ?`,
+		taskID, domain.IssueEventIssueStatusChanged, domain.StatusDone, domain.StatusOpen).Scan(&reopenEvents))
+	assert.Equal(t, 1, reopenEvents, "idempotent retry must not duplicate lifecycle history")
+}
+
 func TestClient_AppendNotes(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()

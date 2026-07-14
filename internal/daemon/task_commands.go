@@ -123,13 +123,14 @@ type taskGraphRuntimeValidationLoad struct {
 }
 
 type taskClosePreflightOptions struct {
-	AllowTargetSession  bool `json:"allow_target_session,omitempty"`
-	AllowActiveSession  bool `json:"allow_active_session,omitempty"`
-	AllowTargetWorktree bool `json:"allow_target_worktree,omitempty"`
-	ForceWorktree       bool `json:"force_worktree,omitempty"`
-	IgnoreAhead         bool `json:"ignore_ahead,omitempty"`
-	CloseCleanChildren  bool `json:"close_clean_children,omitempty"`
-	SkipStatusRepairs   bool `json:"-"`
+	AllowTargetSession           bool `json:"allow_target_session,omitempty"`
+	AllowActiveSession           bool `json:"allow_active_session,omitempty"`
+	AllowTargetWorktree          bool `json:"allow_target_worktree,omitempty"`
+	ForceWorktree                bool `json:"force_worktree,omitempty"`
+	IgnoreAhead                  bool `json:"ignore_ahead,omitempty"`
+	CloseCleanChildren           bool `json:"close_clean_children,omitempty"`
+	SkipStatusRepairs            bool `json:"-"`
+	AllowIntegratedWorktreeRetry bool `json:"-"`
 }
 
 type taskClosePreflightRequest struct {
@@ -186,9 +187,10 @@ type taskDeleteResult struct {
 }
 
 type taskClosePreflightResult struct {
-	Task     domain.Task   `json:"task"`
-	Worktree string        `json:"worktree,omitempty"`
-	Status   git.GitStatus `json:"status,omitempty"`
+	Task            domain.Task   `json:"task"`
+	Worktree        string        `json:"worktree,omitempty"`
+	Status          git.GitStatus `json:"status,omitempty"`
+	MissingWorktree bool          `json:"-"`
 }
 
 type taskDeletePreflightResult struct {
@@ -287,6 +289,11 @@ type taskStaleCloseableCandidate struct {
 	Status           string   `json:"status"`
 	Evidence         []string `json:"evidence"`
 	SuggestedCommand string   `json:"suggested_command"`
+}
+
+type taskDurableCompletionEvidence struct {
+	EventID int64
+	Kind    string
 }
 
 type taskContainmentRisk struct {
@@ -1003,6 +1010,23 @@ func (d *Daemon) handleTaskEventAppend(ctx context.Context, req protocol.Request
 	parsedEventType := domain.IssueObservationEventType(eventType)
 	if domain.IssueObservationEventTypeRequiresAuthority(parsedEventType) {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("event type %s is authority-only and cannot be appended through task.event_append", eventType)), nil
+	}
+	if domain.IsWorkerEvidenceEventType(parsedEventType) {
+		packet, validation := domain.ParseWorkerEvidenceIssueEvent(domain.IssueObservationEvent{Type: parsedEventType, Payload: cmd.Payload})
+		if !validation.Complete {
+			problems := workerEvidenceProblemSummary(validation)
+			if !validation.Found {
+				problems = "event payload does not contain a structured worker_evidence.v1 packet"
+			} else if strings.TrimSpace(problems) == "" {
+				problems = "packet is incomplete"
+			}
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid worker_evidence.v1 packet: "+problems), nil
+		}
+		canonicalPayload, payloadErr := domain.WorkerEvidencePacketPayload(packet)
+		if payloadErr != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, payloadErr.Error()), nil
+		}
+		cmd.Payload = canonicalPayload
 	}
 	source := strings.TrimSpace(cmd.Source)
 	if source == "" {
@@ -1918,13 +1942,17 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task status update requested", "project_id", projectID, "task_id", cmd.TaskID, "status", cmd.Status)
 	}
-	restoreDeferredWorktree := false
-	if cmd.Status != domain.StatusDone {
-		restoreDeferredWorktree = d.cancelDeferredTaskWorktreeCleanup(ctx, projectID, cmd.TaskID, "issue status changed before deferred worktree cleanup completed")
-	}
 	if cmd.Status == domain.StatusInReview {
 		if risk := d.taskContextRiskForCloseout(ctx, projectID, cmd.TaskID, d.cfg.RepoDir); risk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*risk) {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("context risk is high for issue %s: record root_cause, invariant, regression_validation, or a structured risk note before marking in_review", cmd.TaskID)), nil
+		}
+	}
+	var deferredCleanup deferredTaskWorktreeCleanupCancellation
+	if cmd.Status != domain.StatusDone {
+		var err error
+		deferredCleanup, err = d.cancelDeferredTaskWorktreeCleanup(ctx, projectID, cmd.TaskID, "issue status changed before deferred worktree cleanup completed")
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 		}
 	}
 	task, updatedTasks, err := d.updateTaskStatusExcludingClose(ctx, projectID, cmd.TaskID, cmd.Status, taskStatusUpdateOptions{
@@ -1932,9 +1960,12 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 		AllowBusyReviewHandoffTask: reviewHandoffActiveIssue(req.Meta, cmd.TaskID),
 	})
 	if err != nil {
+		if compensationErr := d.compensateDeferredTaskWorktreeCleanup(ctx, projectID, cmd.TaskID, deferredCleanup); compensationErr != nil {
+			err = errors.Join(err, compensationErr)
+		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	if restoreDeferredWorktree {
+	if deferredCleanup.Observed {
 		d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, cmd.TaskID)
 	}
 	resp := d.successResponse(req)
@@ -2102,16 +2133,17 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	var deferredCleanupPlan deferredTaskWorktreeCleanupPlan
 
 	preflightOptions := taskClosePreflightOptions{
-		AllowTargetSession:  true,
-		AllowActiveSession:  cmd.AllowActiveSession,
-		AllowTargetWorktree: true,
-		ForceWorktree:       cmd.ForceWorktree,
-		IgnoreAhead:         cmd.IgnoreAhead || cmd.IntegrateBeforeClose,
-		CloseCleanChildren:  cmd.CloseCleanChildren,
-		SkipStatusRepairs:   true,
+		AllowTargetSession:           true,
+		AllowActiveSession:           cmd.AllowActiveSession,
+		AllowTargetWorktree:          true,
+		ForceWorktree:                cmd.ForceWorktree,
+		IgnoreAhead:                  cmd.IgnoreAhead || cmd.IntegrateBeforeClose,
+		CloseCleanChildren:           cmd.CloseCleanChildren,
+		SkipStatusRepairs:            true,
+		AllowIntegratedWorktreeRetry: cmd.IntegrateBeforeClose,
 	}
 	phaseStartedAt := time.Now()
-	if err := d.repairStaleSessionRuntimeProjections(ctx, projectID, taskID); err != nil {
+	if err := d.refreshTaskCloseSessionRuntime(ctx, projectID, taskID); err != nil {
 		recordPhase("preflight_runtime_projection_repair", phaseStartedAt, false)
 		return result, fmt.Errorf("phase preflight_runtime_projection_repair for issue %s: %w", taskID, err)
 	}
@@ -2148,7 +2180,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		recordPhase("integrate_before_close", phaseStartedAt, false)
 		return result, fmt.Errorf("phase integrate_before_close for issue %s: %w", taskID, integrationBudgetErr)
 	}
-	integration, err := d.integrateTaskBeforeClose(integrationCtx, projectID, taskID, cmd.IntegrateBeforeClose)
+	integration, err := d.integrateTaskBeforeClose(integrationCtx, projectID, taskID, cmd.IntegrateBeforeClose, guard.MissingWorktree)
 	cancelIntegration()
 	recordPhase("integrate_before_close", phaseStartedAt, !cmd.IntegrateBeforeClose)
 	recordTaskCloseHookPhases(ctx, &result, d.cfg.Logger, req, projectID, taskID, integration.HookDiagnostics)
@@ -2159,6 +2191,15 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	result.Integrated = integration.Integrated
 	result.IntegratedSourceBranch = integration.SourceBranch
 	result.IntegratedTargetBranch = integration.TargetBranch
+
+	phaseStartedAt = time.Now()
+	if integration.Requested && (integration.Integrated || integration.NoChanges) {
+		if err := d.persistTaskCloseIntegrationReceipt(ctx, projectID, taskID, guard.Worktree, integration); err != nil {
+			recordPhase("integration_receipt", phaseStartedAt, false)
+			return result, fmt.Errorf("phase integration_receipt for issue %s: %w", taskID, err)
+		}
+	}
+	recordPhase("integration_receipt", phaseStartedAt, !integration.Requested || (!integration.Integrated && !integration.NoChanges))
 
 	deferWorktreeCleanup := daemonShouldDeferWorktreeCleanupForClose(cmd, integration, guard)
 
@@ -2300,6 +2341,16 @@ func (d *Daemon) repairStaleSessionRuntimeProjections(ctx context.Context, proje
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func (d *Daemon) refreshTaskCloseSessionRuntime(ctx context.Context, projectID, taskID string) error {
+	if _, err := d.reconcileStaleBusySessionActivity(ctx, projectID, []string{taskID}); err != nil {
+		return fmt.Errorf("converge stale session activity: %w", err)
+	}
+	if err := d.repairStaleSessionRuntimeProjections(ctx, projectID, taskID); err != nil {
+		return fmt.Errorf("repair stale session projections: %w", err)
 	}
 	return nil
 }
@@ -2530,36 +2581,116 @@ func (d *Daemon) deferredTaskWorktreeCleanupShouldSkip(ctx context.Context, proj
 	return true
 }
 
-func (d *Daemon) cancelDeferredTaskWorktreeCleanup(ctx context.Context, projectID, taskID, reason string) bool {
-	if d == nil || d.operationRuntime == nil || d.operationRuntime.manager == nil {
-		return false
+type deferredCleanupOperationManager interface {
+	List(context.Context, daemonops.Query) ([]daemonops.Record, error)
+	Get(context.Context, string) (daemonops.Record, error)
+	Cancel(context.Context, string, string) (daemonops.Record, error)
+}
+
+type deferredTaskWorktreeCleanupCancellation struct {
+	Observed       bool
+	NeedsRequeue   bool
+	FallbackPath   string
+	FallbackBranch string
+}
+
+func (d *Daemon) deferredTaskCleanupOperationManager() deferredCleanupOperationManager {
+	if d == nil {
+		return nil
+	}
+	if d.deferredCleanupOperationManager != nil {
+		return d.deferredCleanupOperationManager
+	}
+	if d.operationRuntime == nil {
+		return nil
+	}
+	return d.operationRuntime.manager
+}
+
+func (d *Daemon) cancelDeferredTaskWorktreeCleanup(ctx context.Context, projectID, taskID, reason string) (deferredTaskWorktreeCleanupCancellation, error) {
+	manager := d.deferredTaskCleanupOperationManager()
+	if manager == nil {
+		return deferredTaskWorktreeCleanupCancellation{}, nil
 	}
 	projectID = normalizedProjectID(projectID)
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
-		return false
+		return deferredTaskWorktreeCleanupCancellation{}, nil
 	}
-	records, err := d.operationRuntime.manager.List(ctx, daemonops.Query{
+	records, err := manager.List(ctx, daemonops.Query{
 		ProjectID: projectID,
 		IssueID:   taskID,
 		Kind:      taskDeferredWorktreeCleanupOperationKind,
 		States:    []daemonops.State{daemonops.StateQueued, daemonops.StateRunning},
 	})
 	if err != nil {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Warn("deferred worktree cleanup cancellation lookup failed", "project_id", projectID, "task_id", taskID, "error", err)
-		}
-		return false
+		return deferredTaskWorktreeCleanupCancellation{}, fmt.Errorf("list deferred worktree cleanup before lifecycle change: %w", err)
 	}
-	cancelled := false
+	cancellation := deferredTaskWorktreeCleanupCancellation{}
 	for _, record := range records {
-		if _, err := d.operationRuntime.manager.Cancel(ctx, record.ID, reason); err != nil && d.cfg.Logger != nil {
-			d.cfg.Logger.Warn("deferred worktree cleanup cancellation failed", "project_id", projectID, "task_id", taskID, "operation_id", record.ID, "error", err)
-			continue
+		cancellation.Observed = true
+		cancellation.captureResourceKeys(record.ResourceKeys)
+		cancelled, err := manager.Cancel(ctx, record.ID, reason)
+		if err != nil {
+			cancelErr := fmt.Errorf("cancel deferred worktree cleanup %s before lifecycle change: %w", record.ID, err)
+			return cancellation, errors.Join(cancelErr, d.compensateDeferredTaskWorktreeCleanup(ctx, projectID, taskID, cancellation))
 		}
-		cancelled = true
+		terminal := cancelled
+		if !isOperationTerminal(terminal.State) {
+			terminal, err = waitForDeferredTaskWorktreeCleanupTerminal(ctx, manager, record.ID)
+			if err != nil {
+				waitErr := fmt.Errorf("wait for deferred worktree cleanup %s cancellation: %w", record.ID, err)
+				return cancellation, errors.Join(waitErr, d.compensateDeferredTaskWorktreeCleanup(ctx, projectID, taskID, cancellation))
+			}
+		}
+		if terminal.State == daemonops.StateCancelled {
+			cancellation.NeedsRequeue = true
+		}
 	}
-	return cancelled
+	return cancellation, nil
+}
+
+func (c *deferredTaskWorktreeCleanupCancellation) captureResourceKeys(keys []string) {
+	for _, key := range keys {
+		switch {
+		case c.FallbackPath == "" && strings.HasPrefix(key, "worktree:"):
+			c.FallbackPath = strings.TrimPrefix(key, "worktree:")
+		case c.FallbackBranch == "" && strings.HasPrefix(key, "branch:"):
+			c.FallbackBranch = strings.TrimPrefix(key, "branch:")
+		}
+	}
+}
+
+func waitForDeferredTaskWorktreeCleanupTerminal(ctx context.Context, manager deferredCleanupOperationManager, operationID string) (daemonops.Record, error) {
+	ticker := time.NewTicker(defaultOperationPollDelay)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return daemonops.Record{}, ctx.Err()
+		case <-ticker.C:
+			record, err := manager.Get(ctx, operationID)
+			if err != nil {
+				return daemonops.Record{}, err
+			}
+			if isOperationTerminal(record.State) {
+				return record, nil
+			}
+		}
+	}
+}
+
+func (d *Daemon) compensateDeferredTaskWorktreeCleanup(ctx context.Context, projectID, taskID string, cancellation deferredTaskWorktreeCleanupCancellation) error {
+	if !cancellation.NeedsRequeue {
+		return nil
+	}
+	compensationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if _, err := d.submitDeferredTaskWorktreeCleanup(compensationCtx, projectID, taskID, cancellation.FallbackPath, cancellation.FallbackBranch); err != nil {
+		d.restoreDeferredCleanupWorktreeProjection(compensationCtx, projectID, taskID)
+		return fmt.Errorf("requeue deferred worktree cleanup after failed lifecycle change: %w", err)
+	}
+	return nil
 }
 
 func (d *Daemon) restoreDeferredCleanupWorktreeProjection(ctx context.Context, projectID, taskID string) {
@@ -2673,12 +2804,129 @@ type taskCloseIntegrationResult struct {
 	NoChanges       bool
 	SourceBranch    string
 	TargetBranch    string
+	SourceOID       string
+	TargetOID       string
 	HookDiagnostics []git.GitHookDiagnostic
+}
+
+type taskCloseIntegrationReceipt struct {
+	ProjectID    string
+	SourceBranch string
+	TargetBranch string
+	SourceOID    string
+	TargetOID    string
 }
 
 const taskCloseSlowGitHookThreshold = 1 * time.Second
 
-func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID string, requested bool) (taskCloseIntegrationResult, error) {
+func verifyTaskCloseIntegrationReceipt(ctx context.Context, gitClient *git.Client, targetWorktree string, receipt taskCloseIntegrationReceipt, projectID, sourceBranch, targetBranch string) error {
+	if gitClient == nil {
+		return fmt.Errorf("git adapter unavailable")
+	}
+	if protocol.NormalizeProjectID(receipt.ProjectID) != protocol.NormalizeProjectID(projectID) {
+		return fmt.Errorf("integration receipt project %s does not match %s", receipt.ProjectID, projectID)
+	}
+	if strings.TrimSpace(receipt.SourceBranch) != strings.TrimSpace(sourceBranch) {
+		return fmt.Errorf("integration receipt source branch %s does not match %s", receipt.SourceBranch, sourceBranch)
+	}
+	if strings.TrimSpace(receipt.TargetBranch) != strings.TrimSpace(targetBranch) {
+		return fmt.Errorf("integration receipt target branch %s does not match %s", receipt.TargetBranch, targetBranch)
+	}
+	if strings.TrimSpace(receipt.SourceOID) == "" || strings.TrimSpace(receipt.TargetOID) == "" {
+		return fmt.Errorf("integration receipt is missing exact source or target OID")
+	}
+	sourceReachable, err := gitClient.CommitContainedInRef(ctx, targetWorktree, receipt.SourceOID, targetBranch)
+	if err != nil {
+		return fmt.Errorf("verify recorded source OID %s against %s: %w", receipt.SourceOID, targetBranch, err)
+	}
+	if !sourceReachable {
+		return fmt.Errorf("recorded source OID is not reachable from %s: %s", targetBranch, receipt.SourceOID)
+	}
+	targetReachable, err := gitClient.CommitContainedInRef(ctx, targetWorktree, receipt.TargetOID, targetBranch)
+	if err != nil {
+		return fmt.Errorf("verify recorded target OID %s against %s: %w", receipt.TargetOID, targetBranch, err)
+	}
+	if !targetReachable {
+		return fmt.Errorf("recorded target OID is not reachable from %s: %s", targetBranch, receipt.TargetOID)
+	}
+	return nil
+}
+
+func (d *Daemon) persistTaskCloseIntegrationReceipt(ctx context.Context, projectID, taskID, worktreePath string, integration taskCloseIntegrationResult) error {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return fmt.Errorf("issue store unavailable")
+	}
+	receipt := taskCloseIntegrationReceipt{
+		ProjectID:    protocol.NormalizeProjectID(projectID),
+		SourceBranch: strings.TrimSpace(integration.SourceBranch),
+		TargetBranch: strings.TrimSpace(integration.TargetBranch),
+		SourceOID:    strings.TrimSpace(integration.SourceOID),
+		TargetOID:    strings.TrimSpace(integration.TargetOID),
+	}
+	if receipt.SourceBranch == "" || receipt.TargetBranch == "" || receipt.SourceOID == "" || receipt.TargetOID == "" {
+		return fmt.Errorf("integration result is missing exact source/target branch or OID")
+	}
+	_, err := issueClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+		Type:          domain.IssueEventTaskIntegrationCompleted,
+		Source:        "daemon-task-close",
+		SourceCommand: "integrate-before-close",
+		WorktreePath:  strings.TrimSpace(worktreePath),
+		Payload: map[string]any{
+			"project_id":    receipt.ProjectID,
+			"source_branch": receipt.SourceBranch,
+			"target_branch": receipt.TargetBranch,
+			"source_oid":    receipt.SourceOID,
+			"target_oid":    receipt.TargetOID,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("persist exact integration receipt: %w", err)
+	}
+	return nil
+}
+
+func (d *Daemon) latestTaskCloseIntegrationReceipt(ctx context.Context, projectID, taskID, sourceBranch, targetBranch string) (taskCloseIntegrationReceipt, bool, error) {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return taskCloseIntegrationReceipt{}, false, fmt.Errorf("issue store unavailable")
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{
+		Types:         []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted},
+		Limit:         20,
+		NewestIDFirst: true,
+	})
+	if err != nil {
+		return taskCloseIntegrationReceipt{}, false, fmt.Errorf("read exact integration receipts: %w", err)
+	}
+	projectID = protocol.NormalizeProjectID(projectID)
+	sourceBranch = strings.TrimSpace(sourceBranch)
+	targetBranch = strings.TrimSpace(targetBranch)
+	for _, event := range events {
+		receipt := taskCloseIntegrationReceipt{
+			ProjectID:    observationPayloadString(event.Payload, "project_id"),
+			SourceBranch: observationPayloadString(event.Payload, "source_branch"),
+			TargetBranch: observationPayloadString(event.Payload, "target_branch"),
+			SourceOID:    observationPayloadString(event.Payload, "source_oid"),
+			TargetOID:    observationPayloadString(event.Payload, "target_oid"),
+		}
+		if protocol.NormalizeProjectID(receipt.ProjectID) != projectID || receipt.SourceBranch != sourceBranch || receipt.TargetBranch != targetBranch {
+			continue
+		}
+		if receipt.SourceOID == "" || receipt.TargetOID == "" {
+			return taskCloseIntegrationReceipt{}, false, fmt.Errorf("exact integration receipt %d is missing source_oid or target_oid", event.ID)
+		}
+		return receipt, true, nil
+	}
+	return taskCloseIntegrationReceipt{}, false, nil
+}
+
+func observationPayloadString(payload map[string]any, key string) string {
+	value, _ := payload[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID string, requested, allowMissingSource bool) (taskCloseIntegrationResult, error) {
 	if !requested {
 		return taskCloseIntegrationResult{}, nil
 	}
@@ -2726,30 +2974,76 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 
 	var integration taskCloseIntegrationResult
 	if daemonCloseIntegrationShouldUseOriginBase(d.workflowModeForProject(projectID), target) {
-		return d.integrateTaskBeforeCloseOriginBase(ctx, source, targetWorktree, targetBranch)
+		return d.integrateTaskBeforeCloseOriginBase(ctx, projectID, taskID, source, targetWorktree, targetBranch, allowMissingSource)
 	}
-	sourceUniqueCommits, err := d.git.RevListCount(ctx, targetWorktree, targetBranch+".."+source.Branch)
-	if err == nil && sourceUniqueCommits == 0 {
+	sourceOID, sourceOIDErr := d.git.ResolveCommit(ctx, targetWorktree, source.Branch)
+	sourceUniqueCommits, containmentErr := d.git.RevListCount(ctx, targetWorktree, targetBranch+".."+source.Branch)
+	if containmentErr == nil && sourceUniqueCommits == 0 && sourceOIDErr == nil {
+		targetOID, targetOIDErr := d.git.ResolveCommit(ctx, targetWorktree, targetBranch)
+		if targetOIDErr != nil {
+			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve target commit before no-op close integration: %w", targetOIDErr)
+		}
 		return taskCloseIntegrationResult{
 			Requested:    true,
 			NoChanges:    true,
 			SourceBranch: source.Branch,
 			TargetBranch: targetBranch,
+			SourceOID:    sourceOID,
+			TargetOID:    targetOID,
 		}, nil
 	}
-	if err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("target-side source containment check failed before close integration", "project_id", projectID, "task_id", taskID, "target_worktree", targetWorktree, "target_branch", targetBranch, "source_branch", source.Branch, "error", err)
+	sourcePathMissing, statErr := taskCloseWorktreePathMissing(source.Path)
+	if statErr != nil {
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("inspect source worktree path %s before close integration: %w", source.Path, statErr)
+	}
+	if sourcePathMissing && allowMissingSource {
+		if sourceOIDErr == nil {
+			if containmentErr == nil {
+				return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("source worktree for %s is already removed, but branch %s at %s still has %d commit(s) not reachable from %s; restore the worktree or integrate the branch into %s before retrying close", taskID, source.Branch, sourceOID, sourceUniqueCommits, targetBranch, targetBranch)
+			}
+			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("source worktree for %s is already removed and integration of current branch %s at %s into %s could not be verified: %w", taskID, source.Branch, sourceOID, targetBranch, containmentErr)
+		}
+		receipt, found, receiptErr := d.latestTaskCloseIntegrationReceipt(ctx, projectID, taskID, source.Branch, targetBranch)
+		if receiptErr != nil {
+			return taskCloseIntegrationResult{Requested: true}, receiptErr
+		}
+		if !found {
+			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("source worktree and branch for %s are already removed, but no exact integration receipt exists for %s into %s; restore the source ref or verify and integrate its exact commit before retrying close", taskID, source.Branch, targetBranch)
+		}
+		if err := verifyTaskCloseIntegrationReceipt(ctx, d.git, targetWorktree, receipt, projectID, source.Branch, targetBranch); err != nil {
+			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("source worktree and branch for %s are already removed, but the exact integration receipt is not valid: %w", taskID, err)
+		}
+		return taskCloseIntegrationResult{
+			Requested:    true,
+			NoChanges:    true,
+			SourceBranch: source.Branch,
+			TargetBranch: targetBranch,
+			SourceOID:    receipt.SourceOID,
+			TargetOID:    receipt.TargetOID,
+		}, nil
+	}
+	if containmentErr != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("target-side source containment check failed before close integration", "project_id", projectID, "task_id", taskID, "target_worktree", targetWorktree, "target_branch", targetBranch, "source_branch", source.Branch, "error", containmentErr)
 	}
 	hasChangesToIntegrate, err := d.ensureMergeToBaseClean(ctx, source, targetWorktree, targetBranch)
 	if err != nil {
 		return taskCloseIntegrationResult{Requested: true}, err
 	}
 	if !hasChangesToIntegrate {
+		if sourceOIDErr != nil {
+			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve source commit before no-op close integration: %w", sourceOIDErr)
+		}
+		targetOID, targetOIDErr := d.git.ResolveCommit(ctx, targetWorktree, targetBranch)
+		if targetOIDErr != nil {
+			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve target commit before no-op close integration: %w", targetOIDErr)
+		}
 		return taskCloseIntegrationResult{
 			Requested:    true,
 			NoChanges:    true,
 			SourceBranch: source.Branch,
 			TargetBranch: targetBranch,
+			SourceOID:    sourceOID,
+			TargetOID:    targetOID,
 		}, nil
 	}
 	preflight, err := d.git.MergePreflight(ctx, source.Path, targetWorktree, targetBranch, source.Branch)
@@ -2787,11 +3081,20 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		}
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s failed: %s", source.Branch, targetBranch, details)
 	}
+	if sourceOIDErr != nil {
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve integrated source commit: %w", sourceOIDErr)
+	}
+	targetOID, targetOIDErr := d.git.ResolveCommit(ctx, targetWorktree, targetBranch)
+	if targetOIDErr != nil {
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve resulting target commit after close integration: %w", targetOIDErr)
+	}
 	integration = taskCloseIntegrationResult{
 		Requested:       true,
 		Integrated:      true,
 		SourceBranch:    source.Branch,
 		TargetBranch:    targetBranch,
+		SourceOID:       sourceOID,
+		TargetOID:       targetOID,
 		HookDiagnostics: append([]git.GitHookDiagnostic(nil), merge.HookDiagnostics...),
 	}
 	return integration, nil
@@ -2803,12 +3106,53 @@ func daemonCloseIntegrationShouldUseOriginBase(workflowMode string, target taskM
 		strings.TrimSpace(target.WorktreePath) == ""
 }
 
-func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, source git.Worktree, targetWorktree, targetBranch string) (taskCloseIntegrationResult, error) {
+func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, projectID, taskID string, source git.Worktree, targetWorktree, targetBranch string, allowMissingSource bool) (taskCloseIntegrationResult, error) {
 	remoteBaseRef := daemonRemoteTrackingBaseRef(targetBranch)
 	result := taskCloseIntegrationResult{
 		Requested:    true,
 		SourceBranch: source.Branch,
 		TargetBranch: remoteBaseRef,
+	}
+	sourcePathMissing, statErr := taskCloseWorktreePathMissing(source.Path)
+	if statErr != nil {
+		return result, fmt.Errorf("inspect source worktree path %s before origin-mode close integration: %w", source.Path, statErr)
+	}
+	if sourcePathMissing && allowMissingSource {
+		if err := d.git.Fetch(ctx, targetWorktree, "origin"); err != nil {
+			return result, fmt.Errorf("fetch origin before origin-mode close integration retry for %s: %w", source.IssueID, err)
+		}
+		sourceOID, sourceErr := d.git.ResolveCommit(ctx, targetWorktree, source.Branch)
+		if sourceErr == nil {
+			contained, err := d.git.CommitContainedInRef(ctx, targetWorktree, sourceOID, remoteBaseRef)
+			if err != nil {
+				return result, fmt.Errorf("verify origin-mode source commit %s against %s: %w", sourceOID, remoteBaseRef, err)
+			}
+			if !contained {
+				return result, fmt.Errorf("source worktree for %s is already removed, but branch %s at %s is not reachable from %s", taskID, source.Branch, sourceOID, remoteBaseRef)
+			}
+			targetOID, err := d.git.ResolveCommit(ctx, targetWorktree, remoteBaseRef)
+			if err != nil {
+				return result, fmt.Errorf("resolve %s during origin-mode close integration retry for %s: %w", remoteBaseRef, source.IssueID, err)
+			}
+			result.NoChanges = true
+			result.SourceOID = sourceOID
+			result.TargetOID = targetOID
+			return result, nil
+		}
+		receipt, found, err := d.latestTaskCloseIntegrationReceipt(ctx, projectID, taskID, source.Branch, remoteBaseRef)
+		if err != nil {
+			return result, err
+		}
+		if !found {
+			return result, fmt.Errorf("source worktree and branch for %s are already removed, but no exact integration receipt exists for %s into %s", taskID, source.Branch, remoteBaseRef)
+		}
+		if err := verifyTaskCloseIntegrationReceipt(ctx, d.git, targetWorktree, receipt, projectID, source.Branch, remoteBaseRef); err != nil {
+			return result, fmt.Errorf("source worktree and branch for %s are already removed, but the exact origin-mode integration receipt is not valid: %w", taskID, err)
+		}
+		result.NoChanges = true
+		result.SourceOID = receipt.SourceOID
+		result.TargetOID = receipt.TargetOID
+		return result, nil
 	}
 	sourceStatus, err := d.git.Status(ctx, source.Path)
 	if err != nil {
@@ -2820,6 +3164,16 @@ func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, source 
 	if err := d.git.Fetch(ctx, targetWorktree, "origin"); err != nil {
 		return result, fmt.Errorf("fetch origin before origin-mode close integration for %s: %w", source.IssueID, err)
 	}
+	sourceOID, err := d.git.ResolveCommit(ctx, targetWorktree, source.Branch)
+	if err != nil {
+		return result, fmt.Errorf("resolve source commit for origin-mode close integration %s: %w", source.IssueID, err)
+	}
+	targetOID, err := d.git.ResolveCommit(ctx, targetWorktree, remoteBaseRef)
+	if err != nil {
+		return result, fmt.Errorf("resolve %s before origin-mode close integration for %s: %w", remoteBaseRef, source.IssueID, err)
+	}
+	result.SourceOID = sourceOID
+	result.TargetOID = targetOID
 	changedFiles, err := d.git.ChangedFilesBetweenRefTrees(ctx, targetWorktree, remoteBaseRef, source.Branch)
 	if err != nil {
 		return result, fmt.Errorf("inspect origin-mode close diff for %s against %s: %w", source.IssueID, remoteBaseRef, err)
@@ -3383,6 +3737,11 @@ func (d *Daemon) handleTaskClosePreflight(ctx context.Context, req protocol.Requ
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
+	if taskID := strings.TrimSpace(cmd.TaskID); taskID != "" {
+		if err := d.refreshTaskCloseSessionRuntime(ctx, projectID, taskID); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("refresh session runtime before close preflight: %v", err)), nil
+		}
+	}
 	result, err := d.validateTaskClosePreflight(ctx, projectID, cmd.TaskID, cmd.taskClosePreflightOptions, req)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -3451,8 +3810,23 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 	if opts.ForceWorktree {
 		return taskClosePreflightResult{Task: task, Worktree: worktreePath}, nil
 	}
+	if opts.AllowIntegratedWorktreeRetry && d.git != nil {
+		missing, statErr := taskCloseWorktreePathMissing(worktreePath)
+		if statErr != nil {
+			return taskClosePreflightResult{}, fmt.Errorf("inspect worktree path before closing %s: %w", taskID, statErr)
+		}
+		if missing {
+			if _, probeErr := d.git.Status(ctx, worktreePath); probeErr != nil {
+				return taskClosePreflightResult{Task: task, Worktree: worktreePath, MissingWorktree: true}, nil
+			}
+		}
+	}
 	status, err := d.refreshTaskCloseGitStatus(ctx, projectID, worktreePath)
 	if err != nil {
+		missing, statErr := taskCloseWorktreePathMissing(worktreePath)
+		if opts.AllowIntegratedWorktreeRetry && statErr == nil && missing {
+			return taskClosePreflightResult{Task: task, Worktree: worktreePath, MissingWorktree: true}, nil
+		}
 		return taskClosePreflightResult{}, fmt.Errorf("inspect git status before closing %s: %w", taskID, err)
 	}
 	if reasons := daemonCloseGuardGitBlockers(*status, opts); len(reasons) > 0 {
@@ -3466,6 +3840,17 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 		return taskClosePreflightResult{}, fmt.Errorf("%s", daemonCloseGuardFailureMessage(taskID, reasons, repairs))
 	}
 	return taskClosePreflightResult{Task: task, Worktree: worktreePath, Status: *status}, nil
+}
+
+func taskCloseWorktreePathMissing(path string) (bool, error) {
+	_, err := os.Stat(strings.TrimSpace(path))
+	if err == nil {
+		return false, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	return false, err
 }
 
 func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectID, taskID string, cmd taskCloseRequest, req protocol.RequestEnvelope) ([]string, error) {
@@ -3744,6 +4129,15 @@ func (d *Daemon) resolveTaskCloseWorktreePath(ctx context.Context, projectID, ta
 	worktree, err := manager.Get(ctx, taskID)
 	if err != nil {
 		if errors.Is(err, git.ErrWorktreeNotFound) {
+			if opts.AllowIntegratedWorktreeRetry && d.worktreeAdapter != nil {
+				projected, found, projectionErr := d.worktreeAdapter.projectedWorktreeForIssue(ctx, projectID, taskID)
+				if projectionErr != nil {
+					return "", fmt.Errorf("inspect projected worktree before closing %s: %w", taskID, projectionErr)
+				}
+				if found && strings.TrimSpace(projected.Path) != "" {
+					return strings.TrimSpace(projected.Path), nil
+				}
+			}
 			return "", fmt.Errorf("cannot close issue %s: worktree is projected but path is unavailable. Next: run `az issue close --id %s --force-worktree` after confirming the worktree is gone, then retry", taskID, taskID)
 		}
 		return "", fmt.Errorf("inspect worktree before closing %s: %w", taskID, err)
@@ -4163,9 +4557,17 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 		}, nil
 	}
 
-	issueEvents := d.workerObservationIssueEvents(ctx, projectID, task.ID.String())
-	if evt := latestWorkerEvidenceIssueEvent(issueEvents); evt != nil {
-		packet, validation := workerEvidencePacketFromIssueEvent(*evt)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue integration readiness: issue store unavailable")
+	}
+	reviewEvents, err := issueClient.ListIssueReviewReadyObservationEvents(ctx, task.ID.String())
+	if err != nil {
+		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue integration evidence: %w", err)
+	}
+	if evidence := domain.ReduceReviewReadyEvidence(reviewEvents).LatestEvidence; evidence != nil {
+		evt := evidence.SourceEvent
+		packet, validation := evidence.Evidence, evidence.Validation
 		if validation.Complete {
 			return taskIntegrationReadinessResult{
 				IssueID:         task.ID.String(),
@@ -4560,13 +4962,17 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 	if err != nil {
 		return taskCompleteCheckResult{}, err
 	}
-	ready, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	completionEvidence, err := d.taskGraphDurableCompletionEvidence(ctx, projectID, daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children))
+	if err != nil {
+		return taskCompleteCheckResult{}, err
+	}
+	ready, err := daemonTaskGraphReadinessFromIndexesWithCompletionEvidence(rootID, byID, children, completionEvidence)
 	if err != nil {
 		return taskCompleteCheckResult{}, err
 	}
 
 	desc := daemonTaskGraphDescendants(rootID, children)
-	staleCloseable := daemonTaskGraphStaleCloseableCandidates(rootID, byID, children)
+	staleCloseable := daemonTaskGraphStaleCloseableCandidatesWithEvidence(rootID, byID, children, completionEvidence)
 	acceptanceByIssue := make(map[string]domain.InvestigationAcceptance)
 	for _, id := range desc {
 		task := byID[id]
@@ -4800,8 +5206,12 @@ func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID,
 	if err != nil {
 		return taskGraphReadinessResult{}, err
 	}
+	completionEvidence, err := d.taskGraphDurableCompletionEvidence(ctx, projectID, daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children))
+	if err != nil {
+		return taskGraphReadinessResult{}, err
+	}
 	now := time.Now().UTC()
-	ready, err := daemonTaskGraphReadinessFromIndexesForActor(rootID, byID, children, actorID, now)
+	ready, err := daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID, byID, children, actorID, now, completionEvidence)
 	if err != nil {
 		return taskGraphReadinessResult{}, err
 	}
@@ -4962,10 +5372,18 @@ func daemonTaskGraphIndexes(rootIssueID string, tasks []domain.Task) (naming.Iss
 }
 
 func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) (taskGraphReadinessResult, error) {
-	return daemonTaskGraphReadinessFromIndexesForActor(rootID, byID, children, "", time.Now().UTC())
+	return daemonTaskGraphReadinessFromIndexesWithCompletionEvidence(rootID, byID, children, nil)
 }
 
 func daemonTaskGraphReadinessFromIndexesForActor(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID, actorID string, now time.Time) (taskGraphReadinessResult, error) {
+	return daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID, byID, children, actorID, now, nil)
+}
+
+func daemonTaskGraphReadinessFromIndexesWithCompletionEvidence(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID, completionEvidence map[string]taskDurableCompletionEvidence) (taskGraphReadinessResult, error) {
+	return daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID, byID, children, "", time.Now().UTC(), completionEvidence)
+}
+
+func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID, actorID string, now time.Time, completionEvidence map[string]taskDurableCompletionEvidence) (taskGraphReadinessResult, error) {
 	leafIDs := daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children)
 	leaves := make([]string, 0, len(leafIDs))
 	for _, id := range leafIDs {
@@ -4983,7 +5401,7 @@ func daemonTaskGraphReadinessFromIndexesForActor(rootID naming.IssueID, byID map
 		Active:      make([]string, 0),
 		Blocked:     make(map[string]string),
 	}
-	result.StaleCloseableChildren = daemonTaskGraphStaleCloseableCandidates(rootID, byID, children)
+	result.StaleCloseableChildren = daemonTaskGraphStaleCloseableCandidatesWithEvidence(rootID, byID, children, completionEvidence)
 	for _, idRaw := range leaves {
 		id, parseErr := naming.ParseIssueID(idRaw)
 		if parseErr != nil {
@@ -5006,7 +5424,7 @@ func daemonTaskGraphReadinessFromIndexesForActor(rootID naming.IssueID, byID map
 			result.Blocked[idRaw] = "waiting on " + strings.Join(blockers, ",")
 			continue
 		}
-		if daemonTaskStaleCloseableCandidate(task) {
+		if daemonTaskStaleCloseableCandidate(task, completionEvidence[task.ID.String()]) {
 			continue
 		}
 		result.Runnable = append(result.Runnable, idRaw)
@@ -5057,10 +5475,15 @@ func daemonTaskGraphRunnableCandidates(rootID naming.IssueID, byID map[naming.Is
 }
 
 func daemonTaskGraphStaleCloseableCandidates(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) []taskStaleCloseableCandidate {
+	return daemonTaskGraphStaleCloseableCandidatesWithEvidence(rootID, byID, children, nil)
+}
+
+func daemonTaskGraphStaleCloseableCandidatesWithEvidence(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID, completionEvidence map[string]taskDurableCompletionEvidence) []taskStaleCloseableCandidate {
 	out := make([]taskStaleCloseableCandidate, 0)
 	for _, id := range daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children) {
 		task := byID[id]
-		if !daemonTaskStaleCloseableCandidate(task) {
+		evidence := completionEvidence[task.ID.String()]
+		if !daemonTaskStaleCloseableCandidate(task, evidence) {
 			continue
 		}
 		if len(daemonTaskGraphUnresolvedBlockers(task, byID)) > 0 {
@@ -5069,7 +5492,7 @@ func daemonTaskGraphStaleCloseableCandidates(rootID naming.IssueID, byID map[nam
 		out = append(out, taskStaleCloseableCandidate{
 			IssueID:          task.ID.String(),
 			Status:           string(task.Status),
-			Evidence:         daemonTaskStaleCloseableEvidence(task),
+			Evidence:         daemonTaskStaleCloseableEvidence(task, evidence),
 			SuggestedCommand: fmt.Sprintf("az issue close --id %s --close-clean-children", rootID.String()),
 		})
 	}
@@ -5079,17 +5502,17 @@ func daemonTaskGraphStaleCloseableCandidates(rootID naming.IssueID, byID map[nam
 	return out
 }
 
-func daemonTaskStaleCloseableCandidate(task domain.Task) bool {
+func daemonTaskStaleCloseableCandidate(task domain.Task, evidence taskDurableCompletionEvidence) bool {
 	if task.IssueClosed() {
 		return false
 	}
 	if !daemonCloseGuardCleanChildAutoCloseEligible(task) {
 		return false
 	}
-	return task.Status == domain.StatusInReview || daemonCloseGuardTaskHasWorktree(task)
+	return task.Status == domain.StatusInReview || evidence.EventID > 0
 }
 
-func daemonTaskStaleCloseableEvidence(task domain.Task) []string {
+func daemonTaskStaleCloseableEvidence(task domain.Task, completion taskDurableCompletionEvidence) []string {
 	evidence := []string{
 		"no active session",
 		fmt.Sprintf("status=%s", task.Status),
@@ -5104,9 +5527,57 @@ func daemonTaskStaleCloseableEvidence(task domain.Task) []string {
 		evidence = append(evidence, "no active worktree projection")
 	}
 	if task.Status == domain.StatusInReview {
-		evidence = append(evidence, "in_review status is completion evidence")
+		evidence = append(evidence, "durable completion handoff: status=in_review")
+	}
+	if completion.EventID > 0 {
+		evidence = append(evidence, fmt.Sprintf("durable %s event=%d", completion.Kind, completion.EventID))
 	}
 	return evidence
+}
+
+func (d *Daemon) taskGraphDurableCompletionEvidence(ctx context.Context, projectID string, issueIDs []naming.IssueID) (map[string]taskDurableCompletionEvidence, error) {
+	if len(issueIDs) == 0 {
+		return nil, nil
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil, fmt.Errorf("inspect durable task completion evidence: issue store unavailable")
+	}
+	issueIDStrings := make([]string, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueIDStrings = append(issueIDStrings, issueID.String())
+	}
+	events, err := issueClient.ListLatestIssueObservationEventsByIssue(ctx, issues.LatestIssueObservationEventOptions{
+		IssueIDs:                issueIDStrings,
+		Type:                    domain.IssueEventTaskIntegrationCompleted,
+		Source:                  "daemon-task-close",
+		SourceCommands:          []string{"integrate-before-close"},
+		RequiredPayloadTextKeys: []string{"project_id", "source_branch", "target_branch", "source_oid", "target_oid"},
+		InvalidatedByStatuses:   []domain.Status{domain.StatusOpen, domain.StatusInProgress},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("inspect durable task completion evidence: %w", err)
+	}
+	out := make(map[string]taskDurableCompletionEvidence)
+	for _, issueID := range issueIDs {
+		event, found := events[issueID.String()]
+		if !found {
+			continue
+		}
+		receipt := taskCloseIntegrationReceipt{
+			ProjectID:    observationPayloadString(event.Payload, "project_id"),
+			SourceBranch: observationPayloadString(event.Payload, "source_branch"),
+			TargetBranch: observationPayloadString(event.Payload, "target_branch"),
+			SourceOID:    observationPayloadString(event.Payload, "source_oid"),
+			TargetOID:    observationPayloadString(event.Payload, "target_oid"),
+		}
+		if protocol.NormalizeProjectID(receipt.ProjectID) != protocol.NormalizeProjectID(projectID) ||
+			receipt.SourceBranch == "" || receipt.TargetBranch == "" || receipt.SourceOID == "" || receipt.TargetOID == "" {
+			continue
+		}
+		out[issueID.String()] = taskDurableCompletionEvidence{EventID: event.ID, Kind: string(event.Type)}
+	}
+	return out, nil
 }
 
 func (d *Daemon) daemonTaskGraphContainmentRisks(
@@ -5973,35 +6444,6 @@ func workerObservationEvidenceEvents(events []domain.IssueObservationEvent) []do
 	return out
 }
 
-func latestWorkerEvidenceIssueEvent(events []domain.IssueObservationEvent) *domain.IssueObservationEvent {
-	var latest *domain.IssueObservationEvent
-	for i := range events {
-		if events[i].Type != domain.IssueEventEvidenceSubmitted {
-			continue
-		}
-		if latest == nil ||
-			(!events[i].ObservedAt.IsZero() && events[i].ObservedAt.After(latest.ObservedAt)) ||
-			(events[i].ObservedAt.Equal(latest.ObservedAt) && events[i].ID > latest.ID) {
-			latest = &events[i]
-		}
-	}
-	return latest
-}
-
-func workerEvidencePacketFromIssueEvent(evt domain.IssueObservationEvent) (domain.WorkerEvidencePacket, domain.WorkerEvidenceParseResult) {
-	if len(evt.Payload) == 0 {
-		return domain.WorkerEvidencePacket{}, domain.WorkerEvidenceParseResult{}
-	}
-	body, err := json.Marshal(evt.Payload)
-	if err != nil {
-		return domain.WorkerEvidencePacket{}, domain.WorkerEvidenceParseResult{
-			Found:   true,
-			Invalid: []string{fmt.Sprintf("marshal issue event payload: %v", err)},
-		}
-	}
-	return domain.ParseWorkerEvidencePacketBody(string(body))
-}
-
 func truncateObservationSummary(value string) string {
 	value = strings.Join(strings.Fields(value), " ")
 	const max = 160
@@ -6590,6 +7032,14 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task details update requested", "project_id", projectID, "task_id", cmd.TaskID)
 	}
+	var deferredCleanup deferredTaskWorktreeCleanupCancellation
+	if cmd.Lifecycle != nil {
+		var err error
+		deferredCleanup, err = d.cancelDeferredTaskWorktreeCleanup(ctx, projectID, cmd.TaskID, "issue lifecycle changed before deferred worktree cleanup completed")
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+	}
 	task, err := issueClient.UpdateDetailsWithRuntime(ctx, projectID, cmd.TaskID, issues.UpdateTaskParams{
 		Title:           cmd.Title,
 		Description:     cmd.Description,
@@ -6604,7 +7054,17 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 		Implementations: cmd.Implementations,
 	})
 	if err != nil {
+		if compensationErr := d.compensateDeferredTaskWorktreeCleanup(ctx, projectID, cmd.TaskID, deferredCleanup); compensationErr != nil {
+			err = errors.Join(err, compensationErr)
+		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if deferredCleanup.Observed {
+		d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, cmd.TaskID)
+		task, err = issueClient.GetWithRuntime(ctx, projectID, cmd.TaskID)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)

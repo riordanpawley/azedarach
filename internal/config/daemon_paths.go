@@ -90,6 +90,69 @@ func ValidateSharedDaemonExecutable(socketPath, executable string) error {
 	return fmt.Errorf("refusing to use the shared production daemon from Azedarach development worktree binary %s; run the canonical production az binary or set AZEDARACH_DAEMON_SCOPE=worktree when intentionally testing this worktree", resolvedExecutable)
 }
 
+// ManagedGenerationBinDir returns the immutable managed install generation
+// containing executable. Both az and azd must be executable siblings so callers
+// never seed a partial or incoherent generation into a long-lived process.
+func ManagedGenerationBinDir(executable, expectedBinary string) (string, bool) {
+	executable = strings.TrimSpace(executable)
+	expectedBinary = strings.TrimSpace(expectedBinary)
+	if executable == "" || expectedBinary == "" {
+		return "", false
+	}
+	absExecutable, err := filepath.Abs(executable)
+	if err != nil {
+		return "", false
+	}
+	resolvedExecutable := resolveSymlinkBestEffort(absExecutable)
+	if filepath.Base(resolvedExecutable) != expectedBinary {
+		return "", false
+	}
+	generationDir := filepath.Dir(resolvedExecutable)
+	generationName := filepath.Base(generationDir)
+	if !strings.HasPrefix(generationName, "generation.") ||
+		len(generationName) <= len("generation.") ||
+		filepath.Base(filepath.Dir(generationDir)) != ".azedarach-generations" {
+		return "", false
+	}
+	for _, binary := range []string{"az", "azd"} {
+		if !executableRegularFile(filepath.Join(generationDir, binary)) {
+			return "", false
+		}
+	}
+	return generationDir, true
+}
+
+// PrependPathEntry returns pathValue with entry first and duplicate filesystem
+// entries removed, preserving the remaining order.
+func PrependPathEntry(pathValue, entry string) string {
+	entry = strings.TrimSpace(entry)
+	if entry == "" {
+		return pathValue
+	}
+	entries := []string{entry}
+	for _, candidate := range filepath.SplitList(pathValue) {
+		if strings.TrimSpace(candidate) == "" || samePathEntry(candidate, entry) {
+			continue
+		}
+		entries = append(entries, candidate)
+	}
+	return strings.Join(entries, string(os.PathListSeparator))
+}
+
+func samePathEntry(left, right string) bool {
+	identity := func(path string) string {
+		path = filepath.Clean(path)
+		if absolute, err := filepath.Abs(path); err == nil {
+			path = absolute
+		}
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			path = resolved
+		}
+		return filepath.Clean(path)
+	}
+	return identity(left) == identity(right)
+}
+
 // ScopedDaemonRuntimeDir returns a deterministic runtime directory for a worktree scope.
 func ScopedDaemonRuntimeDir(startPath string) string {
 	scopeRoot, err := ResolveWorktreeRoot(startPath)
@@ -174,6 +237,11 @@ func resolveSymlinkBestEffort(path string) string {
 		return filepath.Clean(path)
 	}
 	return filepath.Clean(resolved)
+}
+
+func executableRegularFile(path string) bool {
+	stat, err := os.Stat(path)
+	return err == nil && stat.Mode().IsRegular() && stat.Mode().Perm()&0o111 != 0
 }
 
 func daemonRuntimeDirWritable(dir string) bool {

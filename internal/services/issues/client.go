@@ -4493,17 +4493,27 @@ func (c *Client) updateDetailsLocked(ctx context.Context, id string, params Upda
 			status = ?,
 			lifecycle_state = ?,
 			closed_outcome = ?,
+			closed_at = CASE WHEN ? = 'closed' THEN closed_at ELSE NULL END,
 			review_state = ?,
 			implementations_json = CASE WHEN ? = 1 THEN ? ELSE implementations_json END,
 			updated_at = ?
 		WHERE id = ? AND visibility = 'live'
-	`, params.Title, nullableString(params.Description), designSet, nullableString(designValue), noteSet, nullableString(noteValue), acceptanceSet, nullableString(acceptanceValue), estimateSet, estimateValue, string(params.Type), int(params.Priority), writeState.Disposition, writeState.Engagement, writeState.Visibility, writeState.LegacyStatus, writeState.Lifecycle, writeState.ClosedOutcome, writeState.Review, implSet, implementationsJSON, now, id)
+	`, params.Title, nullableString(params.Description), designSet, nullableString(designValue), noteSet, nullableString(noteValue), acceptanceSet, nullableString(acceptanceValue), estimateSet, estimateValue, string(params.Type), int(params.Priority), writeState.Disposition, writeState.Engagement, writeState.Visibility, writeState.LegacyStatus, writeState.Lifecycle, writeState.ClosedOutcome, writeState.Lifecycle, writeState.Review, implSet, implementationsJSON, now, id)
 	if err != nil {
 		return c.wrapError("update-details", id, err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
 		return c.wrapError("update-details", id, domain.ErrNotFound)
+	}
+	oldLegacyStatus := legacyStatusFromIssueState(oldState)
+	if oldLegacyStatus != domain.Status(writeState.LegacyStatus) {
+		if err := c.appendIssueObservationEvent(ctx, tx, id, domain.IssueEventIssueStatusChanged, map[string]any{
+			"from_status": string(oldLegacyStatus),
+			"to_status":   writeState.LegacyStatus,
+		}); err != nil {
+			return c.wrapError("update-details", id, err)
+		}
 	}
 	changedFields := make([]string, 0, 6)
 	if oldTitle != params.Title {

@@ -17,13 +17,15 @@ const (
 )
 
 type terminalFailureProbeState struct {
-	lastProbe      time.Time
-	fingerprint    [sha256.Size]byte
-	detected       bool
-	detectedHookAt time.Time
-	reason         domain.AgentTerminalFailureReason
-	nextProbe      time.Time
-	misses         uint8
+	lastProbe        time.Time
+	fingerprint      [sha256.Size]byte
+	detected         bool
+	detectedHookAt   time.Time
+	idlePrompt       bool
+	idlePromptHookAt time.Time
+	reason           domain.AgentTerminalFailureReason
+	nextProbe        time.Time
+	misses           uint8
 }
 
 // applyTerminalFailureProbes is the daemon-owned fallback for providers that
@@ -51,7 +53,7 @@ func (d *Daemon) applyTerminalFailureProbes(
 			continue
 		}
 		probeKey := projectID + "\x00" + session.ID
-		cached, useCached, shouldProbe := d.cachedTerminalFailureProbe(probeKey, activity.UpdatedAt, now)
+		cached, useCached, shouldProbe := d.cachedTerminalFailureProbe(probeKey, activity.UpdatedAt, now, false)
 		if useCached {
 			activityByKey[issueKey] = sessionDisplayActivity{Activity: "error", Source: "terminal", UpdatedAt: cached.lastProbe}
 			continue
@@ -69,7 +71,7 @@ func (d *Daemon) applyTerminalFailureProbes(
 		}
 		reason, detected := domain.ClassifyAgentTerminalOutput(output)
 		fingerprint := sha256.Sum256([]byte(output))
-		if d.recordTerminalFailureProbe(probeKey, activity.UpdatedAt, now, fingerprint, reason, detected) {
+		if d.recordTerminalFailureProbe(probeKey, activity.UpdatedAt, now, fingerprint, reason, detected, domain.ClassifyAgentTerminalIdle(output)) {
 			activityByKey[issueKey] = sessionDisplayActivity{Activity: "error", Source: "terminal", UpdatedAt: now}
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("agent terminal failure detected from sparse pane probe", "project_id", projectID, "session_id", session.ID, "reason", reason)
@@ -79,7 +81,7 @@ func (d *Daemon) applyTerminalFailureProbes(
 	return activityByKey
 }
 
-func (d *Daemon) cachedTerminalFailureProbe(key string, hookAt, now time.Time) (terminalFailureProbeState, bool, bool) {
+func (d *Daemon) cachedTerminalFailureProbe(key string, hookAt, now time.Time, revalidateIdlePrompt bool) (terminalFailureProbeState, bool, bool) {
 	d.terminalFailureProbeMu.Lock()
 	defer d.terminalFailureProbeMu.Unlock()
 	if d.terminalFailureProbes == nil {
@@ -88,6 +90,21 @@ func (d *Daemon) cachedTerminalFailureProbe(key string, hookAt, now time.Time) (
 	probe := d.terminalFailureProbes[key]
 	if probe.detected && !hookAt.After(probe.detectedHookAt) {
 		return probe, true, false
+	}
+	if probe.idlePrompt && hookAt.After(probe.idlePromptHookAt) {
+		probe.idlePrompt = false
+		probe.idlePromptHookAt = time.Time{}
+		probe.misses = 0
+		probe.nextProbe = time.Time{}
+		d.terminalFailureProbes[key] = probe
+	}
+	if revalidateIdlePrompt && probe.idlePrompt && !hookAt.After(probe.idlePromptHookAt) {
+		probe.lastProbe = now
+		probe.nextProbe = now.Add(terminalFailureProbeMinBackoff)
+		probe.idlePrompt = false
+		probe.idlePromptHookAt = time.Time{}
+		d.terminalFailureProbes[key] = probe
+		return probe, false, true
 	}
 	if now.Before(probe.nextProbe) {
 		return probe, false, false
@@ -98,13 +115,19 @@ func (d *Daemon) cachedTerminalFailureProbe(key string, hookAt, now time.Time) (
 	return probe, false, true
 }
 
-func (d *Daemon) recordTerminalFailureProbe(key string, hookAt, now time.Time, fingerprint [sha256.Size]byte, reason domain.AgentTerminalFailureReason, detected bool) bool {
+func (d *Daemon) recordTerminalFailureProbe(key string, hookAt, now time.Time, fingerprint [sha256.Size]byte, reason domain.AgentTerminalFailureReason, detected, idlePrompt bool) bool {
 	d.terminalFailureProbeMu.Lock()
 	defer d.terminalFailureProbeMu.Unlock()
 	probe := d.terminalFailureProbes[key]
 	probe.lastProbe = now
 	if !detected {
 		probe.detected = false
+		probe.idlePrompt = idlePrompt
+		if idlePrompt {
+			probe.idlePromptHookAt = hookAt
+		} else {
+			probe.idlePromptHookAt = time.Time{}
+		}
 		if probe.misses < 4 {
 			probe.misses++
 		}
@@ -126,6 +149,8 @@ func (d *Daemon) recordTerminalFailureProbe(key string, hookAt, now time.Time, f
 		return false
 	}
 	probe.detected = true
+	probe.idlePrompt = false
+	probe.idlePromptHookAt = time.Time{}
 	probe.misses = 0
 	probe.detectedHookAt = hookAt
 	probe.fingerprint = fingerprint

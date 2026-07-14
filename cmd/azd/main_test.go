@@ -186,3 +186,51 @@ func TestValidateDaemonLaunchFenceAllowsScopedSocket(t *testing.T) {
 		t.Fatalf("validateDaemonLaunchFence() error = %v", err)
 	}
 }
+
+func TestManagedDaemonGenerationBinDirFailsClosedOutsideManagedInstall(t *testing.T) {
+	unmanaged := filepath.Join(t.TempDir(), "bin", "azd")
+	if err := os.MkdirAll(filepath.Dir(unmanaged), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unmanaged, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	previousExecutable := daemonExecutable
+	daemonExecutable = func() (string, error) { return unmanaged, nil }
+	t.Cleanup(func() { daemonExecutable = previousExecutable })
+
+	if got, err := managedDaemonGenerationBinDir(false); err == nil || got != "" {
+		t.Fatalf("managedDaemonGenerationBinDir(global) = %q, %v, want empty error", got, err)
+	}
+	if got, err := managedDaemonGenerationBinDir(true); err != nil || got != "" {
+		t.Fatalf("managedDaemonGenerationBinDir(scoped) = %q, %v, want empty nil", got, err)
+	}
+}
+
+func TestManagedDaemonGenerationBinDirResolvesInstalledPair(t *testing.T) {
+	installDir := t.TempDir()
+	generationDir := filepath.Join(installDir, ".azedarach-generations", "generation.current")
+	if err := os.MkdirAll(generationDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, binary := range []string{"az", "azd"} {
+		if err := os.WriteFile(filepath.Join(generationDir, binary), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publicAzd := filepath.Join(installDir, "azd")
+	if err := os.Symlink(filepath.Join(".azedarach-generations", "generation.current", "azd"), publicAzd); err != nil {
+		t.Fatal(err)
+	}
+	previousExecutable := daemonExecutable
+	daemonExecutable = func() (string, error) { return publicAzd, nil }
+	t.Cleanup(func() { daemonExecutable = previousExecutable })
+
+	want, err := filepath.EvalSymlinks(generationDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := managedDaemonGenerationBinDir(false); err != nil || got != want {
+		t.Fatalf("managedDaemonGenerationBinDir(global) = %q, %v, want %q, nil", got, err, want)
+	}
+}
