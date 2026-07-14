@@ -8495,7 +8495,7 @@ func StartDaemonCommand(deps *Dependencies) error {
 	if err := launcher.Start(ctx); err != nil {
 		return fmt.Errorf("start daemon: %w", err)
 	}
-	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+	if err := ensureDaemonStableAttach(ctx, deps, "cli"); err != nil {
 		return fmt.Errorf("daemon health check after start failed: %w", err)
 	}
 
@@ -8515,7 +8515,7 @@ func RestartDaemonCommand(deps *Dependencies) error {
 	if err := launcher.Replace(ctx); err != nil {
 		return fmt.Errorf("restart daemon: %w", err)
 	}
-	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+	if err := ensureDaemonStableAttach(ctx, deps, "cli"); err != nil {
 		return fmt.Errorf("daemon health check after restart failed: %w", err)
 	}
 
@@ -10075,6 +10075,35 @@ func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) er
 		return fmt.Errorf("daemon handshake rejected: %s", ack.Reason)
 	}
 	latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "daemon_attach", startedAt, "client_name", clientName, "accepted", true, "daemon_version", ack.DaemonVersion)
+	return nil
+}
+
+const daemonStableAttachWindow = 250 * time.Millisecond
+
+func ensureDaemonStableAttach(ctx context.Context, deps *Dependencies, clientName string) error {
+	if err := ensureDaemon(ctx, deps, clientName); err != nil {
+		return err
+	}
+	timer := time.NewTimer(daemonStableAttachWindow)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("wait for stable daemon attach: %w", ctx.Err())
+	case <-timer.C:
+	}
+
+	ack, err := autoclient.NewDaemonHandshaker(deps.DaemonClient).Handshake(ctx, protocol.Hello{
+		ProtocolVersion: protocol.CurrentVersion,
+		ClientName:      clientName,
+		ClientVersion:   buildinfo.VersionString(),
+		Capabilities:    []string{"snapshot", "subscribe"},
+	})
+	if err != nil {
+		return fmt.Errorf("stable daemon attach failed: %w", err)
+	}
+	if !ack.Accepted {
+		return fmt.Errorf("stable daemon attach rejected: %s", ack.Reason)
+	}
 	return nil
 }
 

@@ -2178,6 +2178,57 @@ func TestClient_GetRuntimeWorktreeIssueContextScopesToRequestedIssuesAndAncestor
 	assert.Equal(t, rootIssueID, *byID[parentIssueID].ParentID)
 }
 
+func TestClient_GetRuntimeWorktreeIssueContextIncludesArchivedRequestedIssue(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:  "Archived worktree owner",
+		Type:   domain.TypeTask,
+		Status: domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Archive(ctx, issueID))
+
+	tasks, err := client.GetRuntimeWorktreeIssueContext(ctx, "proj-runtime-context", []string{issueID})
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, naming.IssueID(issueID), tasks[0].ID)
+	assert.True(t, tasks[0].State.IsArchived())
+}
+
+func TestClient_OrdinaryMetadataRuntimeReadsExcludeArchivedIssues(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-runtime-context"
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:  "Archived ordinary metadata owner",
+		Type:   domain.TypeTask,
+		Status: domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Archive(ctx, issueID))
+
+	metadata, err := client.GetManyMetadataWithRuntime(ctx, projectID, []string{issueID})
+	require.NoError(t, err)
+	assert.Empty(t, metadata)
+
+	metadataWithAncestors, err := client.GetManyMetadataWithAncestorContextRuntime(ctx, projectID, []string{issueID})
+	require.NoError(t, err)
+	assert.Empty(t, metadataWithAncestors)
+
+	archived, err := client.GetWithRuntimeArchiveMode(ctx, projectID, issueID, ArchiveOnly)
+	require.NoError(t, err)
+	archived.Origin = "cached-archived"
+	hydrated, err := client.HydrateRuntime(ctx, projectID, []domain.Task{archived})
+	require.NoError(t, err)
+	require.Len(t, hydrated, 1)
+	assert.Equal(t, "cached-archived", hydrated[0].Origin)
+}
+
 func TestSQLiteHotQueryPlansUseExpectedIndexes(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()
@@ -2237,7 +2288,7 @@ func TestSQLiteHotQueryPlansUseExpectedIndexes(t *testing.T) {
 			name: "metadata runtime projection",
 			build: func(t *testing.T) (string, []any) {
 				t.Helper()
-				return taskMetadataRuntimeProjectionQuery("project", "second", "third")
+				return taskMetadataRuntimeProjectionQuery("project", ArchiveExclude, "second", "third")
 			},
 			want: []string{
 				"idx_daemon_session_projections_project_issue_updated",
