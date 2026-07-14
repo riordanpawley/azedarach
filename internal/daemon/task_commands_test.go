@@ -5259,7 +5259,7 @@ func TestTaskCloseCommandIntegrationIgnoresDuplicateIssueTargetWorktreeFromOther
 	}
 }
 
-func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *testing.T) {
+func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	projectID := "proj-close-integrate-cleanup-fail-retry"
@@ -5289,6 +5289,11 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 		t.Fatalf("open projection db: %v", err)
 	}
 	defer projectionDB.Close()
+	lockConn, err := projectionDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("open cleanup lock connection: %v", err)
+	}
+	defer lockConn.Close()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := projectionDB.ExecContext(ctx, `
 		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at)
@@ -5308,15 +5313,20 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 	var scratchWorktree string
 	sourceUniqueReads := 0
 	removeAttempts := 0
+	branchRemoved := false
+	cleanupLocked := false
+	var cancelFirst context.CancelFunc
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		joined := strings.Join(args, " ")
 		switch {
 		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
-			if removeAttempts >= 2 {
+			if removeAttempts >= 1 {
 				return fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\n", repoDir), nil
 			}
 			return fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\nworktree %s\nbranch refs/heads/%s\n\n", repoDir, sourceWorktree, sourceBranch), nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "status" && removeAttempts > 0:
+			return "", fmt.Errorf("cannot change to %s: no such file or directory", sourceWorktree)
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
@@ -5336,7 +5346,14 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 			if sourceUniqueReads == 1 {
 				return "1", nil
 			}
-			return "0", nil
+			return "", fmt.Errorf("fatal: ambiguous argument %s: unknown revision", sourceBranch)
+		case len(args) >= 6 && args[0] == "-C" && args[1] == repoDir && args[2] == "branch" && args[3] == "--list":
+			if branchRemoved {
+				return "", nil
+			}
+			return sourceBranch, nil
+		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "log":
+			return "merged-sha\x00" + taskID + ": integrated cleanup retry\n", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "rev-list":
 			return "0", nil
 		case len(args) >= 6 && args[0] == "-C" && args[2] == "merge-tree":
@@ -5361,9 +5378,6 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 				return "", fmt.Errorf("unexpected worktree remove path: %s", removedPath)
 			}
 			removeAttempts++
-			if removeAttempts == 1 {
-				return "fatal: '" + sourceWorktree + "' contains modified or untracked files, use --force to delete it", fmt.Errorf("worktree remove blocked by local changes")
-			}
 			if err := os.RemoveAll(sourceWorktree); err != nil {
 				return "", err
 			}
@@ -5374,14 +5388,22 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 				return "", fmt.Errorf("unexpected worktree remove path: %s", removedPath)
 			}
 			removeAttempts++
-			if removeAttempts == 1 {
-				return "fatal: '" + sourceWorktree + "' contains modified or untracked files, use --force to delete it", fmt.Errorf("worktree remove blocked by local changes")
-			}
 			if err := os.RemoveAll(sourceWorktree); err != nil {
 				return "", err
 			}
 			return "", nil
 		case len(args) >= 3 && args[0] == "branch" && args[1] == "-D":
+			if branchRemoved {
+				return "", nil
+			}
+			branchRemoved = true
+			if _, err := lockConn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+				return "", fmt.Errorf("lock projection cleanup: %w", err)
+			}
+			cleanupLocked = true
+			if cancelFirst != nil {
+				cancelFirst()
+			}
 			return "", nil
 		default:
 			return "", fmt.Errorf("unexpected git args: %s", joined)
@@ -5433,7 +5455,10 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 	if err != nil {
 		t.Fatalf("marshal task close request: %v", err)
 	}
-	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+	firstCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
+	cancelFirst = cancel
+	defer cancelFirst()
+	resp, err := d.handleTaskClose(firstCtx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-close-integrated-cleanup-fail",
 		Kind:            protocol.EnvelopeKindCommand,
@@ -5447,7 +5472,7 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 	if resp.OK || resp.Error == nil {
 		t.Fatalf("first handleTaskClose response = %+v, want cleanup failure", resp)
 	}
-	for _, want := range []string{"Integration already completed", sourceBranch, "landed on main", "cleanup/status remains", "Next:"} {
+	for _, want := range []string{"phase runtime_projection_repair", "Integration already completed", sourceBranch, "landed on main", "cleanup/status remains", "Next:"} {
 		if !strings.Contains(resp.Error.Message, want) {
 			t.Fatalf("first close error = %q, missing %q", resp.Error.Message, want)
 		}
@@ -5459,6 +5484,19 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 	if task.Status != domain.StatusInReview {
 		t.Fatalf("task status after failed close = %s, want %s", task.Status, domain.StatusInReview)
 	}
+	if _, err := os.Stat(sourceWorktree); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source worktree after failed close stat error = %v, want removed path", err)
+	}
+	if !cleanupLocked {
+		t.Fatal("first close did not hold the projection cleanup lock")
+	}
+	if _, err := lockConn.ExecContext(ctx, `ROLLBACK`); err != nil {
+		t.Fatalf("release projection cleanup lock: %v", err)
+	}
+	if err := lockConn.Close(); err != nil {
+		t.Fatalf("close projection cleanup lock connection: %v", err)
+	}
+	cleanupLocked = false
 
 	resp, err = d.handleTaskClose(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -5498,8 +5536,8 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 	if sourceUniqueReads != 2 {
 		t.Fatalf("main..source containment reads = %d, want first merge check plus retry no-op check", sourceUniqueReads)
 	}
-	if removeAttempts != 2 {
-		t.Fatalf("worktree remove attempts = %d, want failed first cleanup and successful retry", removeAttempts)
+	if removeAttempts != 1 {
+		t.Fatalf("worktree remove attempts = %d, want physical cleanup only on the first close", removeAttempts)
 	}
 }
 
@@ -5514,6 +5552,64 @@ func TestTaskClosePostIntegrationPhaseErrorTreatsNoChangesAsIntegratedEvidence(t
 	for _, want := range []string{"Integration already completed", "riordan/az-1/already-landed", "landed on main", "retry close"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, missing %q", err.Error(), want)
+		}
+	}
+}
+
+func TestTaskCloseMissingSourceIntegrationResultPreservesUnintegratedDiagnostics(t *testing.T) {
+	result, err := taskCloseMissingSourceIntegrationResult(
+		"az-1",
+		"riordan/az-1/unintegrated",
+		"main",
+		2,
+		nil,
+		true,
+		nil,
+		false,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("missing source with unintegrated commits returned nil error")
+	}
+	if !result.Requested || result.NoChanges {
+		t.Fatalf("integration result = %+v, want requested failure", result)
+	}
+	for _, want := range []string{
+		"source worktree for az-1 is already removed",
+		"branch riordan/az-1/unintegrated still has 2 commit(s) not reachable from main",
+		"restore the worktree or integrate the branch into main",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, missing %q", err, want)
+		}
+	}
+}
+
+func TestTaskCloseMissingSourceIntegrationResultRejectsMissingBranchWithoutTargetEvidence(t *testing.T) {
+	result, err := taskCloseMissingSourceIntegrationResult(
+		"az-2",
+		"riordan/az-2/unverifiable",
+		"main",
+		0,
+		fmt.Errorf("unknown revision"),
+		false,
+		nil,
+		false,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("missing source without target evidence returned nil error")
+	}
+	if !result.Requested || result.NoChanges {
+		t.Fatalf("integration result = %+v, want requested unverifiable failure", result)
+	}
+	for _, want := range []string{
+		"source worktree and branch for az-2 are already removed",
+		"main has no issue-scoped commit evidence proving integration",
+		"restore the source ref or verify and integrate its commits",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, missing %q", err, want)
 		}
 	}
 }
@@ -5642,7 +5738,7 @@ func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchVal
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -5786,7 +5882,7 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -5897,7 +5993,7 @@ func TestTaskCloseIntegrationOriginBaseSkipsLocalMergeWhenRemoteTreeMatches(t *t
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6017,7 +6113,7 @@ func TestTaskCloseIntegrationOriginBaseAllowsRemoteAheadWhenSourceContained(t *t
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6135,7 +6231,7 @@ func TestTaskCloseIntegrationOriginBaseRefusesLocalMergeWhenRemoteDiffRemains(t 
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
 	if err == nil {
 		t.Fatalf("integrateTaskBeforeClose error = nil, result = %+v; want origin-mode refusal", result)
 	}

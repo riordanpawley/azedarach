@@ -106,13 +106,14 @@ type taskGraphReadinessLoad struct {
 }
 
 type taskClosePreflightOptions struct {
-	AllowTargetSession  bool `json:"allow_target_session,omitempty"`
-	AllowActiveSession  bool `json:"allow_active_session,omitempty"`
-	AllowTargetWorktree bool `json:"allow_target_worktree,omitempty"`
-	ForceWorktree       bool `json:"force_worktree,omitempty"`
-	IgnoreAhead         bool `json:"ignore_ahead,omitempty"`
-	CloseCleanChildren  bool `json:"close_clean_children,omitempty"`
-	SkipStatusRepairs   bool `json:"-"`
+	AllowTargetSession           bool `json:"allow_target_session,omitempty"`
+	AllowActiveSession           bool `json:"allow_active_session,omitempty"`
+	AllowTargetWorktree          bool `json:"allow_target_worktree,omitempty"`
+	ForceWorktree                bool `json:"force_worktree,omitempty"`
+	IgnoreAhead                  bool `json:"ignore_ahead,omitempty"`
+	CloseCleanChildren           bool `json:"close_clean_children,omitempty"`
+	SkipStatusRepairs            bool `json:"-"`
+	AllowIntegratedWorktreeRetry bool `json:"-"`
 }
 
 type taskClosePreflightRequest struct {
@@ -169,9 +170,10 @@ type taskDeleteResult struct {
 }
 
 type taskClosePreflightResult struct {
-	Task     domain.Task   `json:"task"`
-	Worktree string        `json:"worktree,omitempty"`
-	Status   git.GitStatus `json:"status,omitempty"`
+	Task            domain.Task   `json:"task"`
+	Worktree        string        `json:"worktree,omitempty"`
+	Status          git.GitStatus `json:"status,omitempty"`
+	MissingWorktree bool          `json:"-"`
 }
 
 type taskDeletePreflightResult struct {
@@ -2026,13 +2028,14 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	var deferredCleanupPlan deferredTaskWorktreeCleanupPlan
 
 	preflightOptions := taskClosePreflightOptions{
-		AllowTargetSession:  true,
-		AllowActiveSession:  cmd.AllowActiveSession,
-		AllowTargetWorktree: true,
-		ForceWorktree:       cmd.ForceWorktree,
-		IgnoreAhead:         cmd.IgnoreAhead || cmd.IntegrateBeforeClose,
-		CloseCleanChildren:  cmd.CloseCleanChildren,
-		SkipStatusRepairs:   true,
+		AllowTargetSession:           true,
+		AllowActiveSession:           cmd.AllowActiveSession,
+		AllowTargetWorktree:          true,
+		ForceWorktree:                cmd.ForceWorktree,
+		IgnoreAhead:                  cmd.IgnoreAhead || cmd.IntegrateBeforeClose,
+		CloseCleanChildren:           cmd.CloseCleanChildren,
+		SkipStatusRepairs:            true,
+		AllowIntegratedWorktreeRetry: cmd.IntegrateBeforeClose,
 	}
 	phaseStartedAt := time.Now()
 	if err := d.repairStaleSessionRuntimeProjections(ctx, projectID, taskID); err != nil {
@@ -2072,7 +2075,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		recordPhase("integrate_before_close", phaseStartedAt, false)
 		return result, fmt.Errorf("phase integrate_before_close for issue %s: %w", taskID, integrationBudgetErr)
 	}
-	integration, err := d.integrateTaskBeforeClose(integrationCtx, projectID, taskID, cmd.IntegrateBeforeClose)
+	integration, err := d.integrateTaskBeforeClose(integrationCtx, projectID, taskID, cmd.IntegrateBeforeClose, guard.MissingWorktree)
 	cancelIntegration()
 	recordPhase("integrate_before_close", phaseStartedAt, !cmd.IntegrateBeforeClose)
 	recordTaskCloseHookPhases(ctx, &result, d.cfg.Logger, req, projectID, taskID, integration.HookDiagnostics)
@@ -2602,7 +2605,7 @@ type taskCloseIntegrationResult struct {
 
 const taskCloseSlowGitHookThreshold = 1 * time.Second
 
-func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID string, requested bool) (taskCloseIntegrationResult, error) {
+func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID string, requested, allowMissingSource bool) (taskCloseIntegrationResult, error) {
 	if !requested {
 		return taskCloseIntegrationResult{}, nil
 	}
@@ -2660,6 +2663,25 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 			SourceBranch: source.Branch,
 			TargetBranch: targetBranch,
 		}, nil
+	}
+	sourcePathMissing, statErr := taskCloseWorktreePathMissing(source.Path)
+	if statErr != nil {
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("inspect source worktree path %s before close integration: %w", source.Path, statErr)
+	}
+	if sourcePathMissing && allowMissingSource {
+		branchExists := true
+		var branchErr error
+		targetHasIssueEvidence := false
+		var evidenceErr error
+		if err != nil {
+			branchExists, branchErr = d.git.LocalBranchExists(ctx, targetWorktree, source.Branch)
+			if branchErr == nil && !branchExists {
+				var evidence []git.EvidenceCommit
+				evidence, evidenceErr = d.git.IssueEvidenceCommits(ctx, targetWorktree, targetBranch, taskID)
+				targetHasIssueEvidence = len(evidence) > 0
+			}
+		}
+		return taskCloseMissingSourceIntegrationResult(taskID, source.Branch, targetBranch, sourceUniqueCommits, err, branchExists, branchErr, targetHasIssueEvidence, evidenceErr)
 	}
 	if err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Debug("target-side source containment check failed before close integration", "project_id", projectID, "task_id", taskID, "target_worktree", targetWorktree, "target_branch", targetBranch, "source_branch", source.Branch, "error", err)
@@ -2719,6 +2741,29 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		HookDiagnostics: append([]git.GitHookDiagnostic(nil), merge.HookDiagnostics...),
 	}
 	return integration, nil
+}
+
+func taskCloseMissingSourceIntegrationResult(taskID, sourceBranch, targetBranch string, sourceUniqueCommits int, containmentErr error, branchExists bool, branchErr error, targetHasIssueEvidence bool, evidenceErr error) (taskCloseIntegrationResult, error) {
+	result := taskCloseIntegrationResult{Requested: true}
+	if containmentErr == nil {
+		return result, fmt.Errorf("source worktree for %s is already removed, but branch %s still has %d commit(s) not reachable from %s; restore the worktree or integrate the branch into %s before retrying close", taskID, sourceBranch, sourceUniqueCommits, targetBranch, targetBranch)
+	}
+	if branchErr != nil {
+		return result, fmt.Errorf("source worktree for %s is already removed and integration could not be verified: containment check failed (%v); inspect source branch %s: %w", taskID, containmentErr, sourceBranch, branchErr)
+	}
+	if !branchExists {
+		if evidenceErr != nil {
+			return result, fmt.Errorf("source worktree and branch for %s are already removed, but integration into %s could not be verified from issue commit evidence: %w", taskID, targetBranch, evidenceErr)
+		}
+		if !targetHasIssueEvidence {
+			return result, fmt.Errorf("source worktree and branch for %s are already removed, but %s has no issue-scoped commit evidence proving integration; restore the source ref or verify and integrate its commits before retrying close", taskID, targetBranch)
+		}
+		result.NoChanges = true
+		result.SourceBranch = sourceBranch
+		result.TargetBranch = targetBranch
+		return result, nil
+	}
+	return result, fmt.Errorf("source worktree for %s is already removed and integration of branch %s into %s could not be verified: %w", taskID, sourceBranch, targetBranch, containmentErr)
 }
 
 func daemonCloseIntegrationShouldUseOriginBase(workflowMode string, target taskMergeBaseTargetResult) bool {
@@ -3375,8 +3420,23 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 	if opts.ForceWorktree {
 		return taskClosePreflightResult{Task: task, Worktree: worktreePath}, nil
 	}
+	if opts.AllowIntegratedWorktreeRetry && d.git != nil {
+		missing, statErr := taskCloseWorktreePathMissing(worktreePath)
+		if statErr != nil {
+			return taskClosePreflightResult{}, fmt.Errorf("inspect worktree path before closing %s: %w", taskID, statErr)
+		}
+		if missing {
+			if _, probeErr := d.git.Status(ctx, worktreePath); probeErr != nil {
+				return taskClosePreflightResult{Task: task, Worktree: worktreePath, MissingWorktree: true}, nil
+			}
+		}
+	}
 	status, err := d.refreshTaskCloseGitStatus(ctx, projectID, worktreePath)
 	if err != nil {
+		missing, statErr := taskCloseWorktreePathMissing(worktreePath)
+		if opts.AllowIntegratedWorktreeRetry && statErr == nil && missing {
+			return taskClosePreflightResult{Task: task, Worktree: worktreePath, MissingWorktree: true}, nil
+		}
 		return taskClosePreflightResult{}, fmt.Errorf("inspect git status before closing %s: %w", taskID, err)
 	}
 	if reasons := daemonCloseGuardGitBlockers(*status, opts); len(reasons) > 0 {
@@ -3390,6 +3450,17 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 		return taskClosePreflightResult{}, fmt.Errorf("%s", daemonCloseGuardFailureMessage(taskID, reasons, repairs))
 	}
 	return taskClosePreflightResult{Task: task, Worktree: worktreePath, Status: *status}, nil
+}
+
+func taskCloseWorktreePathMissing(path string) (bool, error) {
+	_, err := os.Stat(strings.TrimSpace(path))
+	if err == nil {
+		return false, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	return false, err
 }
 
 func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectID, taskID string, cmd taskCloseRequest, req protocol.RequestEnvelope) ([]string, error) {
@@ -3668,6 +3739,15 @@ func (d *Daemon) resolveTaskCloseWorktreePath(ctx context.Context, projectID, ta
 	worktree, err := manager.Get(ctx, taskID)
 	if err != nil {
 		if errors.Is(err, git.ErrWorktreeNotFound) {
+			if opts.AllowIntegratedWorktreeRetry && d.worktreeAdapter != nil {
+				projected, found, projectionErr := d.worktreeAdapter.projectedWorktreeForIssue(ctx, projectID, taskID)
+				if projectionErr != nil {
+					return "", fmt.Errorf("inspect projected worktree before closing %s: %w", taskID, projectionErr)
+				}
+				if found && strings.TrimSpace(projected.Path) != "" {
+					return strings.TrimSpace(projected.Path), nil
+				}
+			}
 			return "", fmt.Errorf("cannot close issue %s: worktree is projected but path is unavailable. Next: run `az issue close --id %s --force-worktree` after confirming the worktree is gone, then retry", taskID, taskID)
 		}
 		return "", fmt.Errorf("inspect worktree before closing %s: %w", taskID, err)

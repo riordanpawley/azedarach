@@ -1051,6 +1051,24 @@ func (c *Client) RevListCount(ctx context.Context, worktree, revRange string) (i
 	return count, nil
 }
 
+// LocalBranchExists reports whether the exact local branch name exists.
+func (c *Client) LocalBranchExists(ctx context.Context, worktree, branch string) (bool, error) {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return false, fmt.Errorf("branch is required")
+	}
+	output, err := c.runInWorktree(ctx, worktree, "branch", "--list", "--format=%(refname:short)", "--", branch)
+	if err != nil {
+		return false, fmt.Errorf("list local branch %s: %w", branch, err)
+	}
+	for _, candidate := range strings.Split(output, "\n") {
+		if strings.TrimSpace(candidate) == branch {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // IssueEvidenceCommits returns commits on ref whose subject starts with
 // "<issueID>:". Az close/integration commits use that convention as durable
 // code evidence for closed child issues.

@@ -1043,6 +1043,25 @@ func TestMergeCleanlyTransactionalRecoversDirtyFinalApplyAndRemovesJournal(t *te
 	}
 }
 
+func TestLocalBranchExistsMatchesExactBranchName(t *testing.T) {
+	repo := t.TempDir()
+	runner := &rawMockRunner{runFunc: func(_ context.Context, args ...string) (string, error) {
+		if !clientTestArgsForWorktree(args, repo, "branch", "--list", "--format=%(refname:short)", "--", "riordan/az-1/fix") {
+			return "", fmt.Errorf("unexpected git args: %v", args)
+		}
+		return "riordan/az-1/fix-extra\nriordan/az-1/fix\n", nil
+	}}
+	client := NewClient(runner, slog.Default())
+
+	exists, err := client.LocalBranchExists(context.Background(), repo, "riordan/az-1/fix")
+	if err != nil {
+		t.Fatalf("LocalBranchExists() error = %v", err)
+	}
+	if !exists {
+		t.Fatal("LocalBranchExists() = false, want exact branch match")
+	}
+}
+
 func TestMergeCleanlyTransactionalAllowsConcurrentScratchValidationAndRejectsStaleFinalApply(t *testing.T) {
 	repo := t.TempDir()
 	gitDir := filepath.Join(repo, ".git")
