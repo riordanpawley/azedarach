@@ -139,11 +139,43 @@ grep -q 'localhost:34318/v1/traces' <<<"$output"
 grep -qx 'localhost:34318' "$AZEDARACH_JAEGER_ENDPOINT_FILE"
 [[ "$(sed -n '2p' "$AZEDARACH_JAEGER_ENDPOINT_FILE")" -gt "$now" ]]
 
-# A process that dies while holding the endpoint lock cannot permanently block
-# future publication; the next writer replaces only the stale lock identity.
+# The persistent lock file carries no ownership by itself. With no advisory
+# holder, legacy contents cannot block the next publication.
 printf '%s\n%s\n' 99999999 stale-start >"${AZEDARACH_JAEGER_ENDPOINT_FILE}.state-lock"
 stale_lock_record="$(jaeger_write_endpoint_state localhost:34318 "$((now + 3600))" stale-lock-recovery)"
-[[ -e "$stale_lock_record" && ! -e "${AZEDARACH_JAEGER_ENDPOINT_FILE}.state-lock" ]]
+[[ -e "$stale_lock_record" && -f "${AZEDARACH_JAEGER_ENDPOINT_FILE}.state-lock" ]]
+
+# Rewriting stale-looking file contents cannot steal a live advisory lock or
+# admit another writer into the critical section.
+jaeger_endpoint_lock_acquire
+(
+  jaeger_write_endpoint_state localhost:34318 "$((now + 3600))" blocked-writer >"$tmp/blocked record"
+  : >"$tmp/blocked done"
+) &
+blocked_pid=$!
+sleep 0.2
+[[ ! -e "$tmp/blocked done" ]]
+printf '%s\n%s\n' 88888888 replacement-looking >"${AZEDARACH_JAEGER_ENDPOINT_FILE}.state-lock"
+sleep 0.1
+[[ ! -e "$tmp/blocked done" ]]
+jaeger_endpoint_lock_release
+wait "$blocked_pid"
+[[ -e "$(sed -n '1p' "$tmp/blocked record")" ]]
+
+# Clearing the active generation removes both its immutable record and the
+# public symlink, rather than leaving a dangling endpoint path.
+active_record="$(jaeger_write_endpoint_state localhost:34318 "$((now + 3600))" active-clear)"
+[[ -L "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]
+jaeger_clear_endpoint_record "$active_record"
+[[ ! -e "$active_record" && ! -L "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]
+
+# Clearing an older generation cannot disturb a newer public target.
+stale_record="$(jaeger_write_endpoint_state localhost:34318 "$((now + 3600))" stale-clear)"
+newer_record="$(jaeger_write_endpoint_state localhost:4318 0 newer-clear)"
+printf '%s\n%s\n' localhost:34318 "$((now + 3600))" >"$stale_record"
+jaeger_clear_endpoint_record "$stale_record"
+[[ ! -e "$stale_record" && -e "$newer_record" ]]
+[[ "$(readlink "$AZEDARACH_JAEGER_ENDPOINT_FILE")" == "$newer_record" ]]
 
 # Expiry removes the matching running fallback and invalidates only its
 # immutable endpoint generation.
@@ -152,7 +184,7 @@ expired="$((now - 1))"
 old_record="$(jaeger_write_endpoint_state localhost:34318 "$expired")"
 FAKE_EXPIRES_AT="$expired" jaeger_expire_fallback fake_engine azedarach-jaeger-fallback "$expired" "$old_record"
 grep -q '^rm -f azedarach-jaeger-fallback ' "$calls"
-if [[ -e "$old_record" || -e "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]; then
+if [[ -e "$old_record" || -e "$AZEDARACH_JAEGER_ENDPOINT_FILE" || -L "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]; then
   echo "expired fallback endpoint remained readable" >&2
   exit 1
 fi

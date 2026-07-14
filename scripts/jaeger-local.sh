@@ -84,58 +84,67 @@ jaeger_endpoint_file() {
   fi
 }
 
-jaeger_process_start_identity() {
-  ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
-}
-
 jaeger_endpoint_lock_acquire() {
-  local target lock claim owner stale pid start actual attempt owner_pid="${BASHPID:-$$}"
+  local target lock control ready release helper attempt owner_pid="${BASHPID:-$$}"
   target="$(jaeger_endpoint_file)" || return 1
   mkdir -p "$(dirname "$target")" || return 1
   lock="${target}.state-lock"
-  claim="${lock}.claim.${owner_pid}.${RANDOM}"
-  start="$(jaeger_process_start_identity "$owner_pid" || true)"
-  [[ -n "$start" ]] || return 1
+  control="${lock}.control.${owner_pid}.${RANDOM}"
+  ready="${control}/ready"
+  release="${control}/release"
+  command -v perl >/dev/null 2>&1 || return 1
   umask 077
-  printf '%s\n%s\n' "$owner_pid" "$start" >"$claim" || return 1
+  mkdir "$control" || return 1
+  perl -MFcntl=:flock -e '
+    use strict;
+    use warnings;
+    my ($lock, $ready, $release, $parent) = @ARGV;
+    open my $fh, ">>", $lock or exit 2;
+    flock($fh, LOCK_EX) or exit 3;
+    open my $signal, ">", $ready or exit 4;
+    close $signal;
+    while (!-e $release) {
+      exit 5 unless kill 0, $parent;
+      select undef, undef, undef, 0.05;
+    }
+  ' "$lock" "$ready" "$release" "$owner_pid" &
+  helper=$!
   for attempt in {1..200}; do
-    if ln "$claim" "$lock" 2>/dev/null; then
-      rm -f "$claim"
+    if [[ -e "$ready" ]] && kill -0 "$helper" 2>/dev/null; then
       JAEGER_ENDPOINT_LOCK="$lock"
-      JAEGER_ENDPOINT_LOCK_PID="$owner_pid"
-      JAEGER_ENDPOINT_LOCK_START="$start"
+      JAEGER_ENDPOINT_LOCK_CONTROL="$control"
+      JAEGER_ENDPOINT_LOCK_HELPER="$helper"
       return 0
     fi
-    pid="$(sed -n '1p' "$lock" 2>/dev/null || true)"
-    owner="$(sed -n '2p' "$lock" 2>/dev/null || true)"
-    actual=""
-    if [[ "$pid" =~ ^[0-9]+$ ]]; then
-      actual="$(jaeger_process_start_identity "$pid" || true)"
-    fi
-    if [[ -z "$actual" || "$actual" != "$owner" ]]; then
-      stale="${lock}.stale.${owner_pid}.${RANDOM}"
-      if mv "$lock" "$stale" 2>/dev/null; then
-        rm -f "$stale"
-      fi
-      continue
-    fi
+    kill -0 "$helper" 2>/dev/null || break
     sleep 0.05
   done
-  rm -f "$claim"
+  kill "$helper" 2>/dev/null || true
+  wait "$helper" 2>/dev/null || true
+  rm -f "$ready" "$release"
+  rmdir "$control" 2>/dev/null || true
   return 1
 }
 
 jaeger_endpoint_lock_release() {
-  local lock="${JAEGER_ENDPOINT_LOCK:-}" pid start
-  [[ -n "$lock" && -f "$lock" ]] || return 0
-  pid="$(sed -n '1p' "$lock" 2>/dev/null || true)"
-  start="$(sed -n '2p' "$lock" 2>/dev/null || true)"
-  if [[ "$pid" == "${JAEGER_ENDPOINT_LOCK_PID:-}" && "$start" == "${JAEGER_ENDPOINT_LOCK_START:-}" ]]; then
-    rm -f "$lock" || return 1
+  local control="${JAEGER_ENDPOINT_LOCK_CONTROL:-}" helper="${JAEGER_ENDPOINT_LOCK_HELPER:-}"
+  local status=0
+  [[ -n "$control" && -n "$helper" ]] || return 0
+  if kill -0 "$helper" 2>/dev/null; then
+    if ! : >"$control/release"; then
+      status=1
+      kill "$helper" 2>/dev/null || true
+    fi
+  else
+    status=1
   fi
+  wait "$helper" 2>/dev/null || status=1
+  rm -f "$control/ready" "$control/release" || status=1
+  rmdir "$control" 2>/dev/null || status=1
   JAEGER_ENDPOINT_LOCK=""
-  JAEGER_ENDPOINT_LOCK_PID=""
-  JAEGER_ENDPOINT_LOCK_START=""
+  JAEGER_ENDPOINT_LOCK_CONTROL=""
+  JAEGER_ENDPOINT_LOCK_HELPER=""
+  return "$status"
 }
 
 jaeger_write_endpoint_state() {
@@ -182,7 +191,7 @@ jaeger_clear_endpoint_record() {
 }
 
 jaeger_clear_endpoint_record_locked() {
-  local record="$1" target record_dir suffix
+  local record="$1" target record_dir suffix current
   [[ -n "$record" ]] || return 0
   target="$(jaeger_endpoint_file)" || return 1
   record_dir="${target}.d/"
@@ -190,7 +199,11 @@ jaeger_clear_endpoint_record_locked() {
   case "$record" in
     "$record_dir"*)
       [[ -n "$suffix" && "$suffix" != */* ]] || return 1
-      rm -f "$record"
+      current="$(readlink "$target" 2>/dev/null || true)"
+      if [[ "$current" == "$record" ]]; then
+        rm -f "$target" || return 1
+      fi
+      rm -f "$record" || return 1
       ;;
     *) echo "Warning: refusing to clear endpoint record outside $record_dir" >&2; return 1 ;;
   esac
