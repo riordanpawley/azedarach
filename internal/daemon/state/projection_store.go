@@ -515,10 +515,8 @@ func (s *RuntimeStateStore) Close() error {
 }
 
 func (s *RuntimeStateStore) UpsertSessionState(ctx context.Context, projectID string, session Session) error {
-	return s.withWriteLock(ctx, func() error {
-		return retrySQLiteWrite(ctx, runtimeSQLiteRetryBudget, runtimeSQLiteRetryDelay, waitSQLiteWriteRetry, func() error {
-			return s.upsertSessionStateLocked(ctx, projectID, session)
-		})
+	return s.withRetryingWriteLock(ctx, func() error {
+		return s.upsertSessionStateLocked(ctx, projectID, session)
 	})
 }
 
@@ -1653,10 +1651,8 @@ func (s *RuntimeStateStore) ListProjectIDs(ctx context.Context) ([]string, error
 }
 
 func (s *RuntimeStateStore) UpsertWorktreeState(ctx context.Context, worktreeState WorktreeState) error {
-	return s.withWriteLock(ctx, func() error {
-		return retrySQLiteWrite(ctx, runtimeSQLiteRetryBudget, runtimeSQLiteRetryDelay, waitSQLiteWriteRetry, func() error {
-			return s.upsertWorktreeStateLocked(ctx, worktreeState)
-		})
+	return s.withRetryingWriteLock(ctx, func() error {
+		return s.upsertWorktreeStateLocked(ctx, worktreeState)
 	})
 }
 
@@ -1988,7 +1984,7 @@ func (s *RuntimeStateStore) GetWorktreeStateByIssueID(ctx context.Context, proje
 }
 
 func (s *RuntimeStateStore) UpsertWorktreeStateGitStatus(ctx context.Context, projectID, issueID string, statusRaw json.RawMessage, updatedAt time.Time) error {
-	return s.withWriteLock(ctx, func() error {
+	return s.withRetryingWriteLock(ctx, func() error {
 		return s.upsertWorktreeStateGitStatusLocked(ctx, projectID, issueID, statusRaw, updatedAt)
 	})
 }
@@ -2113,6 +2109,12 @@ func (s *RuntimeStateStore) withWriteLock(ctx context.Context, fn func() error) 
 	}
 	return sqliteutil.WithWriteLockContext(ctx, s.dbPath, func(context.Context) error {
 		return fn()
+	})
+}
+
+func (s *RuntimeStateStore) withRetryingWriteLock(ctx context.Context, fn func() error) error {
+	return s.withWriteLock(ctx, func() error {
+		return retrySQLiteWrite(ctx, runtimeSQLiteRetryBudget, runtimeSQLiteRetryDelay, waitSQLiteWriteRetry, fn)
 	})
 }
 
