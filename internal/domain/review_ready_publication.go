@@ -68,7 +68,7 @@ func DeriveReviewReadyPublications(events []IssueObservationEvent) []ReviewReady
 // IsReviewRequestTransition reports whether an observation starts a durable
 // review-request epoch.
 func IsReviewRequestTransition(event IssueObservationEvent) bool {
-	if event.Type != IssueEventIssueStatusChanged {
+	if event.Type != IssueEventIssueStatusChanged || strings.TrimSpace(event.Source) != "issue-store" {
 		return false
 	}
 	toStatus := strings.ToLower(strings.TrimSpace(payloadString(event.Payload, "to_status")))

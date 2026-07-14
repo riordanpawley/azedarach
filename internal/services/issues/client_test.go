@@ -2584,6 +2584,16 @@ func TestClient_ReviewLeaseFenceIsScopedToCurrentReviewRequestEpochAcrossClients
 	_, err = competitor.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-b", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview})
 	require.ErrorIs(t, err, domain.ErrConflict)
 	assert.Contains(t, err.Error(), "durable accepted review is awaiting authoritative close")
+	_, err = reviewer.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
+		Type:          domain.IssueEventIssueStatusChanged,
+		Source:        "az issue record",
+		SourceCommand: "az issue record",
+		Payload:       map[string]any{"to_status": "in_review"},
+	})
+	require.NoError(t, err)
+	_, err = competitor.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-b", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview})
+	require.ErrorIs(t, err, domain.ErrConflict)
+	assert.Contains(t, err.Error(), "durable accepted review is awaiting authoritative close")
 
 	require.NoError(t, reviewer.Update(ctx, issueID, domain.StatusDone))
 	require.NoError(t, reviewer.Update(ctx, issueID, domain.StatusOpen))

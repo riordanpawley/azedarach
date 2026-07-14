@@ -52,3 +52,26 @@ type IssueObservationEvent struct {
 	WorktreePath  string                    `json:"worktree_path,omitempty"`
 	Payload       map[string]any            `json:"payload,omitempty"`
 }
+
+// IssueObservationEventTypeRequiresAuthority reports event types that may only
+// be emitted by the store or daemon operation that owns the corresponding
+// durable transition. Generic issue-record appenders must reject them.
+func IssueObservationEventTypeRequiresAuthority(eventType IssueObservationEventType) bool {
+	switch eventType {
+	case IssueEventIssueCreated,
+		IssueEventIssueStatusChanged,
+		IssueEventIssueDetailsChanged,
+		IssueEventIssueNotesAppended,
+		IssueEventIssueDependencyAdded,
+		IssueEventIssueDependencyRemoved,
+		IssueEventIssueOwnershipChanged,
+		IssueEventIssueArchived,
+		IssueEventIssueUnarchived,
+		IssueEventIssueDeleted,
+		IssueEventReviewCompleted,
+		IssueEventOrchestrationRouted:
+		return true
+	default:
+		return false
+	}
+}

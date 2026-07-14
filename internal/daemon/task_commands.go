@@ -926,12 +926,16 @@ func (d *Daemon) handleTaskEventAppend(ctx context.Context, req protocol.Request
 	if eventType == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "event type is required"), nil
 	}
+	parsedEventType := domain.IssueObservationEventType(eventType)
+	if domain.IssueObservationEventTypeRequiresAuthority(parsedEventType) {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("event type %s is authority-only and cannot be appended through task.event_append", eventType)), nil
+	}
 	source := strings.TrimSpace(cmd.Source)
 	if source == "" {
 		source = "az issue record"
 	}
 	event, err := issueClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
-		Type:          domain.IssueObservationEventType(eventType),
+		Type:          parsedEventType,
 		Source:        source,
 		SourceCommand: strings.TrimSpace(cmd.SourceCommand),
 		OperationID:   strings.TrimSpace(cmd.OperationID),
