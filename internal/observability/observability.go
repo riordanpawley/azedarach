@@ -4,10 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -20,9 +24,10 @@ import (
 )
 
 const (
-	EnvVar              = "AZEDARACH_OTEL"
-	DefaultOTLPEndpoint = "localhost:4318"
-	defaultOTLPURL      = "http://" + DefaultOTLPEndpoint + "/v1/traces"
+	EnvVar                 = "AZEDARACH_OTEL"
+	managedEndpointFileEnv = "AZEDARACH_JAEGER_ENDPOINT_FILE"
+	DefaultOTLPEndpoint    = "localhost:4318"
+	defaultOTLPURL         = "http://" + DefaultOTLPEndpoint + "/v1/traces"
 )
 
 var errorMessageURLPattern = regexp.MustCompile(`https?://[^\s"]+`)
@@ -171,6 +176,9 @@ func configuredEndpointSummary() string {
 	if endpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")); endpoint != "" {
 		return endpoint
 	}
+	if endpoint, ok := managedOTLPEndpoint(); ok {
+		return "http://" + endpoint + "/v1/traces"
+	}
 	return defaultOTLPURL
 }
 
@@ -179,8 +187,53 @@ func exporterOptions() []otlptracehttp.Option {
 		strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) != "" {
 		return nil
 	}
+	if endpoint, ok := managedOTLPEndpoint(); ok {
+		return []otlptracehttp.Option{
+			otlptracehttp.WithEndpoint(endpoint),
+			otlptracehttp.WithInsecure(),
+		}
+	}
 	return []otlptracehttp.Option{
 		otlptracehttp.WithEndpoint(DefaultOTLPEndpoint),
 		otlptracehttp.WithInsecure(),
 	}
+}
+
+func managedOTLPEndpoint() (string, bool) {
+	path := strings.TrimSpace(os.Getenv(managedEndpointFileEnv))
+	if path == "" {
+		stateHome := strings.TrimSpace(os.Getenv("XDG_STATE_HOME"))
+		if stateHome == "" {
+			home, err := os.UserHomeDir()
+			if err != nil || strings.TrimSpace(home) == "" {
+				return "", false
+			}
+			stateHome = filepath.Join(home, ".local", "state")
+		}
+		path = filepath.Join(stateHome, "azedarach", "jaeger-otlp-endpoint")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) > 1024 {
+		return "", false
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		return "", false
+	}
+	host, port, err := net.SplitHostPort(strings.TrimSpace(lines[0]))
+	if err != nil || (host != "localhost" && host != "127.0.0.1" && host != "::1") {
+		return "", false
+	}
+	portNumber, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || portNumber == 0 {
+		return "", false
+	}
+	expires, err := strconv.ParseInt(strings.TrimSpace(lines[1]), 10, 64)
+	if err != nil || expires < 0 {
+		return "", false
+	}
+	if expires != 0 && time.Now().Unix() >= expires {
+		return "", false
+	}
+	return net.JoinHostPort(host, port), true
 }

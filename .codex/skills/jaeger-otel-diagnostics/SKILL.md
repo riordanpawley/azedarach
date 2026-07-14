@@ -19,13 +19,17 @@ echo "$AZEDARACH_LATENCY_TRACE"
 az config set diagnostics.latencyTrace true
 ```
 
-2. Start Jaeger with the collector endpoint exposed:
+2. Start the repository-managed pinned Jaeger v2 collector:
 
 ```bash
-docker run --rm --name azedarach-jaeger \
-  -p 16686:16686 -p 4318:4318 \
-  jaegertracing/all-in-one:latest
+just build-install-run
 ```
+
+The lifecycle script publishes the actual OTLP endpoint to the launched
+daemon/TUI, including when a bounded ephemeral fallback must use dynamic ports.
+Use `just jaeger-inventory` before `just jaeger-cleanup --confirm` to inspect
+inactive legacy fallback stores. Cleanup preserves the selected primary store
+and every volume still attached to a container.
 
 3. Reproduce the slow path with low-noise commands:
 
@@ -34,7 +38,12 @@ AZEDARACH_OTEL=true go run ./cmd/az issue get cxk
 AZEDARACH_OTEL=true go run ./cmd/az prime
 ```
 
-4. Open `http://localhost:16686`, select `az` or `azd`, then filter by operation/span names such as `cli.command`, `cli.daemonclient.command`, `cli.transport.command`, `daemon.ipc.command`, `daemon.command`, `daemon.command.dispatcher_handle`, `daemon.operation.run`, `dependency.git`, `dependency.tmux`, `dependency.http`, and `dependency.sqlite.issue.runtime_projection`.
+4. Open the UI URL printed by startup, select `az` or `azd`, use a 15-minute
+   lookback and a limit of 10, then filter by operation/span names such as
+   `cli.command`, `cli.daemonclient.command`, `cli.transport.command`,
+   `daemon.ipc.command`, `daemon.command`, `daemon.command.dispatcher_handle`,
+   `daemon.operation.run`, `dependency.git`, `dependency.tmux`,
+   `dependency.http`, and `dependency.sqlite.issue.runtime_projection`.
 
 ## Investigation Workflow
 
@@ -69,6 +78,12 @@ Do not add high-cardinality span names. Put dynamic values in bounded attributes
 Do not record raw prompt bodies, issue descriptions, tokens, cookies, Authorization headers, full argv values, or SQL with values.
 
 Before calling a regression fixed, run the same command shape at least twice and compare the same span names. The first run may include cache and daemon warmup cost.
+
+Keep query windows and result limits small even with a container memory limit.
+Jaeger's result limit counts traces, not spans inside each trace, so a single
+very large trace can still be expensive. Export evidence by trace ID before
+widening a search, and widen either the lookback or result count, never both at
+once.
 
 ## Troubleshooting
 

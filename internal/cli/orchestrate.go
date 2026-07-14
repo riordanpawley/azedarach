@@ -1294,7 +1294,10 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	if err != nil {
 		return orchestrateStartResult{}, err
 	}
-	intentKey := fmt.Sprintf("start:%s:%d:%s", opts.RootIssueID, opts.Limit, strings.Join(opts.IssueIDs, ","))
+	intentKey, err := newCLIOrchestrationStartIntentKey()
+	if err != nil {
+		return orchestrateStartResult{}, err
+	}
 	applied, err := deps.DaemonClient.ApplyOrchestrationIntent(ctx, protocol.OrchestrationIntentRequest{Scope: scope, Kind: protocol.OrchestrationIntentStart, IntentKey: intentKey, ActorID: ownerID, IssueIDs: opts.IssueIDs, Limit: opts.Limit, RepoDir: deps.RepoDir, BaseBranch: opts.BaseBranchOverride, OverrideBoardHealth: opts.OverrideBoardHealth})
 	if err != nil {
 		return orchestrateStartResult{}, err
