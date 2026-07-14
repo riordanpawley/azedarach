@@ -242,6 +242,8 @@ func (l *GlobalInventoryLoader) configuredProjectDirs() []string {
 func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmux.SessionInfo, projections map[string]projectedInventory, enriching bool) Snapshot {
 	entries := make([]InventoryEntry, 0, len(live))
 	seen := make(map[string]struct{}, len(live))
+	projectDirs := l.projectDirs
+	registry, _ := config.LoadProjectsRegistry()
 	for _, info := range live {
 		sessionName := strings.TrimSpace(info.Name)
 		if sessionName == "" {
@@ -280,15 +282,22 @@ func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmu
 			entry.IssueID = parsed.IssueID.String()
 			entry.TaskTitle = parsed.IssueID.String()
 		}
+		if entry.IssueID == "orchestrator-project" {
+			entry.IssueID = ""
+			entry.SessionRole = string(protocol.SessionRoleOrchestrator)
+			entry.SessionScopeKind = string(protocol.SessionScopeOrchestration)
+			entry.SessionScopeID = "project"
+		}
 		if projection, ok := projections[sessionName]; ok {
 			entry = mergeProjectedInventory(entry, projection)
 		}
 		if entry.ProjectPath == "" && entry.Worktree != "" {
-			entry.ProjectPath = inferProjectPath(entry.Worktree, l.projectDirs)
+			entry.ProjectPath = inferProjectPath(entry.Worktree, projectDirs)
 		}
 		if entry.ProjectPath == "" {
-			entry.ProjectPath = projectPathForSessionPrefix(entry, l.projectDirs)
+			entry.ProjectPath = projectPathForSessionPrefix(entry, projectDirs)
 		}
+		entry = withProjectDisplayIdentity(entry, registry)
 		entries = append(entries, entry)
 	}
 	snapshot := l.snapshotFromEntries(entries, enriching)
@@ -298,6 +307,7 @@ func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmu
 
 func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map[string]projectedInventory, tasks projectTaskIndex, projectDirs []string) Snapshot {
 	entries := make([]InventoryEntry, 0, len(snapshot.Entries))
+	registry, _ := config.LoadProjectsRegistry()
 	for _, entry := range snapshot.Entries {
 		if projection, ok := projections[entry.SessionID]; ok {
 			entry = mergeProjectedInventory(entry, projection)
@@ -308,12 +318,45 @@ func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map
 		if entry.ProjectPath == "" {
 			entry.ProjectPath = projectPathForSessionPrefix(entry, projectDirs)
 		}
+		entry = withProjectDisplayIdentity(entry, registry)
 		entries = append(entries, entry)
 	}
 	enriched := l.snapshotFromEntries(entries, false)
 	enriched.CurrentSessionID = snapshot.CurrentSessionID
 	enriched.TreeTasks = ancestorTasksForEntries(entries, tasks)
 	return enriched
+}
+
+func withProjectDisplayIdentity(entry InventoryEntry, registry *config.ProjectsRegistry) InventoryEntry {
+	if registry != nil && strings.TrimSpace(entry.ProjectPath) == "" {
+		var matchedProject config.Project
+		matched := false
+		ambiguous := false
+		for _, project := range registry.Projects {
+			if naming.ProjectSessionPrefix(project.Path) != strings.TrimSpace(entry.ProjectID) {
+				continue
+			}
+			if matched {
+				ambiguous = true
+				break
+			}
+			matchedProject = project
+			matched = true
+		}
+		if matched && !ambiguous {
+			entry.ProjectPath = matchedProject.Path
+			if projectID := config.RegisteredProjectID(matchedProject); projectID != "" {
+				entry.ProjectID = projectID
+			}
+		}
+	}
+	if strings.TrimSpace(entry.ProjectID) != "" || strings.TrimSpace(entry.ProjectPath) != "" {
+		entry.ProjectName = config.ProjectDisplayName(registry, entry.ProjectID, entry.ProjectPath)
+	}
+	if entry.SessionRole == string(protocol.SessionRoleOrchestrator) && entry.SessionScopeID == "project" {
+		entry.TaskTitle = entry.ProjectName + " project orchestrator"
+	}
+	return entry
 }
 
 func (l *GlobalInventoryLoader) snapshotFromEntries(entries []InventoryEntry, enriching bool) Snapshot {
@@ -418,6 +461,9 @@ type projectedInventory struct {
 	activitySrc string
 	startedAt   *time.Time
 	worktree    string
+	role        string
+	scopeKind   string
+	scopeID     string
 	task        domain.Task
 }
 
@@ -578,6 +624,9 @@ func (l *GlobalInventoryLoader) loadProjectionsForEntries(ctx context.Context, p
 				projection.activitySrc = task.Session.ActivitySource
 				projection.startedAt = task.Session.StartedAt
 				projection.worktree = task.Session.Worktree
+				projection.role = task.Session.Role
+				projection.scopeKind = task.Session.ScopeKind
+				projection.scopeID = task.Session.ScopeID
 			}
 			if projection.worktree == "" {
 				projection.worktree = taskWorktree(task)
@@ -985,6 +1034,15 @@ func mergeProjectedInventory(entry InventoryEntry, projection projectedInventory
 	if projection.activitySrc != "" {
 		entry.ActivitySource = projection.activitySrc
 	}
+	if projection.role != "" {
+		entry.SessionRole = projection.role
+	}
+	if projection.scopeKind != "" {
+		entry.SessionScopeKind = projection.scopeKind
+	}
+	if projection.scopeID != "" {
+		entry.SessionScopeID = projection.scopeID
+	}
 	if projection.task.ID.String() != "" {
 		entry.Task = projection.task
 		entry.TaskTitle = projection.task.Title
@@ -1011,6 +1069,9 @@ func mergeProjectedInventory(entry InventoryEntry, projection projectedInventory
 
 func taskFromInventoryEntry(entry InventoryEntry) domain.Task {
 	issueID := naming.IssueID(entry.IssueID)
+	if issueID.IsZero() && entry.SessionRole == string(protocol.SessionRoleOrchestrator) {
+		issueID = naming.IssueID(entry.SessionID)
+	}
 	return domain.Task{
 		ID:               issueID,
 		Title:            entry.TaskTitle,
@@ -1022,6 +1083,9 @@ func taskFromInventoryEntry(entry InventoryEntry) domain.Task {
 		HasWorktree:      entry.HasWorktree,
 		Session: &domain.Session{
 			IssueID:        issueID,
+			Role:           entry.SessionRole,
+			ScopeKind:      entry.SessionScopeKind,
+			ScopeID:        entry.SessionScopeID,
 			State:          entry.State,
 			Activity:       entry.Activity,
 			ActivitySource: entry.ActivitySource,

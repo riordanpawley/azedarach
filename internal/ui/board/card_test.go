@@ -1,10 +1,12 @@
 package board
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -160,12 +162,125 @@ func TestRenderCard_CompactPullRequestSummary(t *testing.T) {
 		},
 	}
 
-	stripped := stripANSI(RenderCard(task, false, false, 35, s))
+	stripped := stripANSI(RenderCard(task, false, false, 20, s))
 	if !strings.Contains(stripped, "PR…") {
 		t.Fatalf("compact card should contain PR status icon, got: %s", stripped)
 	}
 	if strings.Contains(stripped, "PR#42") || strings.Contains(stripped, "pend") {
 		t.Fatalf("compact card should omit PR number and text status, got: %s", stripped)
+	}
+}
+
+func TestRenderPullRequestBadgesAreSingleLineHeaderTokens(t *testing.T) {
+	s := styles.New()
+	tests := []struct {
+		name   string
+		render func(*domain.PullRequest, *styles.Styles) string
+		pr     domain.PullRequest
+	}{
+		{
+			name:   "full badge with unicode display key",
+			render: renderPullRequestBadge,
+			pr: domain.PullRequest{
+				DisplayKey:   "#12345✓",
+				State:        "open",
+				ChecksStatus: "pending",
+			},
+		},
+		{
+			name:   "compact draft badge",
+			render: renderPullRequestBadgeCompact,
+			pr: domain.PullRequest{
+				Number:       12345,
+				Draft:        true,
+				ChecksStatus: "passing",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			badge := tt.render(&tt.pr, s)
+			if got := lipgloss.Height(badge); got != 1 {
+				t.Fatalf("badge height = %d, want 1; rendered badge:\n%s", got, stripANSI(badge))
+			}
+			if strings.ContainsAny(stripANSI(badge), "\r\n") {
+				t.Fatalf("badge must be an atomic header token, got %q", stripANSI(badge))
+			}
+		})
+	}
+}
+
+func TestRenderCard_PullRequestDoesNotMoveTitleBaseline(t *testing.T) {
+	s := styles.New()
+	task := domain.Task{
+		ID:       "gdd",
+		Title:    "Make projections complete reliably",
+		Status:   domain.StatusInReview,
+		Priority: domain.P2,
+		Type:     domain.TypeBug,
+		Origin:   "github",
+	}
+	withPullRequest := task
+	withPullRequest.PullRequest = &domain.PullRequest{
+		Number:       523,
+		DisplayKey:   "#523",
+		State:        "open",
+		ChecksStatus: "pending",
+	}
+
+	titleLine := func(rendered string) int {
+		t.Helper()
+		for i, line := range strings.Split(stripANSI(rendered), "\n") {
+			if strings.Contains(line, "Make") {
+				return i
+			}
+		}
+		return -1
+	}
+
+	for _, width := range []int{72, 45, 38, 30, 20, 19} {
+		t.Run(fmt.Sprintf("width_%d", width), func(t *testing.T) {
+			withoutPR := RenderCard(task, false, false, width, s)
+			withPR := RenderCard(withPullRequest, false, false, width, s)
+			withoutLine := titleLine(withoutPR)
+			withLine := titleLine(withPR)
+			if withoutLine < 0 || withLine < 0 {
+				t.Fatalf("title missing at width %d: without PR=%d with PR=%d", width, withoutLine, withLine)
+			}
+			if withLine != withoutLine {
+				t.Fatalf("title baseline at width %d moved from line %d to %d when PR metadata was added\nwithout PR:\n%s\nwith PR:\n%s", width, withoutLine, withLine, stripANSI(withoutPR), stripANSI(withPR))
+			}
+		})
+	}
+}
+
+func TestRenderCard_EssentialRuntimeStatePrecedesPullRequestAtMinimumWidth(t *testing.T) {
+	s := styles.New()
+	task := domain.Task{
+		ID:       "gdd",
+		Title:    "Runtime priority",
+		Status:   domain.StatusInReview,
+		Priority: domain.P2,
+		Type:     domain.TypeBug,
+		PullRequest: &domain.PullRequest{
+			Number:       523,
+			ChecksStatus: "pending",
+		},
+	}
+	rendered := stripANSI(RenderCardWithRuntimeSignals(task, &RuntimeSignals{HasTmuxSession: true}, false, false, 17, s))
+	header := ""
+	for _, line := range strings.Split(rendered, "\n") {
+		if strings.Contains(line, "gdd") {
+			header = line
+			break
+		}
+	}
+	if !strings.Contains(header, " T") {
+		t.Fatalf("minimum-width header must preserve essential runtime state, got %q\n%s", header, rendered)
+	}
+	if strings.Contains(header, "PR") {
+		t.Fatalf("minimum-width header must omit PR before essential runtime state, got %q\n%s", header, rendered)
 	}
 }
 
@@ -910,7 +1025,7 @@ func TestRenderCard_MetadataOnFirstLine(t *testing.T) {
 	}
 }
 
-func TestRenderCard_NarrowWidthCompactsHeaderBeforeUsingSecondRow(t *testing.T) {
+func TestRenderCard_NarrowWidthCompactsHeaderOnSingleRow(t *testing.T) {
 	s := styles.New()
 	startedAt := time.Now().Add(-90 * time.Minute)
 	task := domain.Task{
@@ -1062,7 +1177,7 @@ func TestRenderCard_InReviewIdleSessionShowsAge(t *testing.T) {
 	}
 }
 
-func TestRenderCard_NarrowWidthAddsOneCardRowAndOneHeaderRow(t *testing.T) {
+func TestRenderCard_NarrowWidthAddsBodyCapacityWithoutMovingTitleBaseline(t *testing.T) {
 	s := styles.New()
 	startedAt := time.Now().Add(-80 * time.Minute)
 	task := domain.Task{
@@ -1094,20 +1209,23 @@ func TestRenderCard_NarrowWidthAddsOneCardRowAndOneHeaderRow(t *testing.T) {
 		t.Fatalf("narrow card height = %d, want wide+1 (%d)", len(narrowLines), len(wideLines)+1)
 	}
 
-	wideHeader, wideTitle := wideLines[0], wideLines[1]
-	narrowHeader1, narrowHeader2, narrowTitle := narrowLines[0], narrowLines[1], narrowLines[2]
-	if strings.TrimSpace(narrowHeader1) == "" || strings.TrimSpace(narrowHeader2) == "" {
-		t.Fatalf("expected two non-empty header rows for narrow card, got: %q / %q", narrowHeader1, narrowHeader2)
+	wideHeader, wideTitle := wideLines[1], wideLines[2]
+	narrowHeader, narrowTitle := narrowLines[1], narrowLines[2]
+	if strings.TrimSpace(narrowHeader) == "" {
+		t.Fatalf("expected non-empty narrow header row, got: %q", narrowHeader)
 	}
 	if strings.TrimSpace(narrowTitle) == "" || strings.TrimSpace(wideTitle) == "" {
 		t.Fatalf("expected non-empty title rows, got narrow=%q wide=%q", narrowTitle, wideTitle)
 	}
-	if strings.TrimSpace(wideHeader) == strings.TrimSpace(narrowHeader2) {
-		t.Fatalf("expected additional narrow header row content, got wideHeader=%q narrowHeader2=%q", wideHeader, narrowHeader2)
+	if !strings.Contains(narrowTitle, "narrow-height") {
+		t.Fatalf("narrow title must immediately follow its single header row, got header=%q title=%q", narrowHeader, narrowTitle)
+	}
+	if strings.TrimSpace(wideHeader) == "" {
+		t.Fatalf("expected non-empty wide header row, got %q", wideHeader)
 	}
 }
 
-func TestRenderCard_NarrowWidthKeepsCompactHeaderTokensAcrossTwoRows(t *testing.T) {
+func TestRenderCard_NarrowWidthKeepsCoreTokensOnSingleHeaderRow(t *testing.T) {
 	s := styles.New()
 	startedAt := time.Now().Add(-75 * time.Minute)
 	task := domain.Task{
@@ -1139,20 +1257,23 @@ func TestRenderCard_NarrowWidthKeepsCompactHeaderTokensAcrossTwoRows(t *testing.
 		}
 	}
 	if firstIdx < 0 || firstIdx+1 >= len(lines) {
-		t.Fatalf("expected at least two header rows and title row, got: %q", narrow)
+		t.Fatalf("expected header row and title row, got: %q", narrow)
 	}
-	header := lines[firstIdx] + " " + lines[firstIdx+1]
-	for _, token := range []string{"◐", "1h", "✓G*", " T "} {
+	header := lines[firstIdx]
+	for _, token := range []string{"P2", "CHE-4012", "◐", "1h"} {
 		if !strings.Contains(header, token) {
-			t.Fatalf("expected token %q to be preserved in narrow two-row header, got: %q", token, header)
+			t.Fatalf("expected core token %q to be preserved in narrow header, got: %q", token, header)
 		}
 	}
-	if strings.Contains(header, "wait") || strings.Contains(header, "+12/-3") {
-		t.Fatalf("narrow compact header should omit verbose session/git text, got: %q", header)
+	if strings.Contains(header, "wait") || strings.Contains(header, "+12/-3") || strings.Contains(header, "✓G*") {
+		t.Fatalf("narrow compact header should omit supplemental session/git text, got: %q", header)
+	}
+	if !strings.Contains(lines[firstIdx+1], "narrow-verbose") {
+		t.Fatalf("title must immediately follow the single header row, got: %q", narrow)
 	}
 }
 
-func TestRenderCard_HeaderOverflowAddsExtraRows(t *testing.T) {
+func TestRenderCard_HeaderOverflowOmitsSupplementalTokens(t *testing.T) {
 	s := styles.New()
 	startedAt := time.Now().Add(-70 * time.Minute)
 	task := domain.Task{
@@ -1183,8 +1304,11 @@ func TestRenderCard_HeaderOverflowAddsExtraRows(t *testing.T) {
 	if len(narrowLines) != len(wideLines)+1 {
 		t.Fatalf("narrow card height = %d, want wide+1 (%d)", len(narrowLines), len(wideLines)+1)
 	}
-	if strings.TrimSpace(narrowLines[1]) == "" {
-		t.Fatalf("expected second header row when header overflows, got empty row in %q", narrow)
+	if !strings.Contains(narrowLines[2], "header-overflow") {
+		t.Fatalf("title must immediately follow the single header row, got %q", narrow)
+	}
+	if strings.Contains(narrowLines[1], "+12/-4") || strings.Contains(narrowLines[1], "[1/8]") {
+		t.Fatalf("overflowing supplemental tokens should be omitted from the header, got %q", narrowLines[1])
 	}
 }
 
