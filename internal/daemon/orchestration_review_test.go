@@ -1517,6 +1517,53 @@ func TestReviewAcceptResumesDurablyAcceptedIntentWithoutReacquiringLease(t *test
 	}
 }
 
+func TestReviewAcceptResumesDurableEvidenceFenceAfterCloseCrash(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
+	event, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	readiness, err := d.taskIntegrationReadiness(ctx, "project", issueID, repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidencePin, err := reviewEvidencePinFromReadiness(readiness)
+	if err != nil || evidencePin.EventID != event.ID {
+		t.Fatalf("evidence pin = %+v err=%v", evidencePin, err)
+	}
+	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "resume-evidence-fence", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
+		Payload: map[string]any{
+			"outcome": "accepted", "actor_id": request.ActorID, "intent_key": request.IntentKey,
+			"request_fingerprint": reviewRequestFingerprint(request), "reviewed_source_oid": "reviewed-source-oid",
+			"reviewed_evidence_source": evidencePin.Source, "reviewed_evidence_event_id": evidencePin.EventID,
+			"reviewed_evidence_digest": evidencePin.Digest,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.BeginReviewEvidenceClose(ctx, issueID, evidencePin); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure := result.Failed[issueID]
+	if !strings.Contains(failure, "authoritative close") || strings.Contains(failure, "release review lease") {
+		t.Fatalf("resumed fenced accept = %+v, want replay to enter authoritative close", result)
+	}
+}
+
 func TestReviewAcceptConvergesStaleBusyHookAtIdlePromptAndReplaysIdempotently(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

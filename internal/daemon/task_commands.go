@@ -2051,6 +2051,20 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	if err := d.validateTaskCloseReviewEvidence(ctx, projectID, taskID, cmd.ExpectedReviewEvidence); err != nil {
 		return result, fmt.Errorf("reviewed evidence revalidation for issue %s: %w", taskID, err)
 	}
+	reviewEvidenceFence := ""
+	if cmd.ExpectedReviewEvidence != nil {
+		reviewEvidenceFence, err = issueClient.BeginReviewEvidenceClose(ctx, taskID, *cmd.ExpectedReviewEvidence)
+		if err != nil {
+			return result, fmt.Errorf("reviewed evidence close fence for issue %s: %w", taskID, err)
+		}
+		defer func() {
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if releaseErr := issueClient.ReleaseReviewEvidenceClose(releaseCtx, taskID, reviewEvidenceFence); releaseErr != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Error("release review evidence close fence", "project_id", projectID, "task_id", taskID, "error", releaseErr)
+			}
+		}()
+	}
 	recordPhase := func(name string, startedAt time.Time, skipped bool) {
 		result.Phases = append(result.Phases, taskClosePhaseTiming{
 			Name:      name,
@@ -2188,7 +2202,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	phaseStartedAt = time.Now()
 	var task domain.Task
 	if cmd.ExpectedReviewEvidence != nil {
-		task, err = issueClient.CloseWithRuntimeReviewEvidence(ctx, projectID, taskID, closeStatus, *cmd.ExpectedReviewEvidence)
+		task, err = issueClient.CloseWithRuntimeReviewEvidenceFence(ctx, projectID, taskID, closeStatus, *cmd.ExpectedReviewEvidence, reviewEvidenceFence)
 	} else {
 		task, err = issueClient.CloseWithRuntime(ctx, projectID, taskID, closeStatus)
 	}
@@ -5164,7 +5178,7 @@ func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID
 		for _, rootIssueID := range uniqueNonEmpty(roots) {
 			captured.mailEventsByRoot[rootIssueID] = d.workerObservationMailboxEvents(rootIssueID)
 		}
-	} else if d.taskGraphObservationEvents == nil {
+	} else if d.taskGraphObservationEvents == nil && !orchestrationProjectionSnapshotFenceHeld(ctx) {
 		repoDir := strings.TrimSpace(d.resolveRepoDirForProject(projectID))
 		if err := d.ensureLegacyMailboxObservationProjection(ctx, projectID, repoDir); err != nil {
 			return taskGraphReadinessContext{}, fmt.Errorf("project legacy mailbox observation projection: %w", err)

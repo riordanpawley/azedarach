@@ -15,6 +15,8 @@ import (
 
 const defaultIssueObservationEventLimit = 500
 
+const reviewEvidenceCloseFenceOwnerKind = "review-evidence-close-fence"
+
 // ReviewEvidencePin identifies the exact durable evidence accepted by a
 // reviewer. Terminal close supports only issue-event evidence so the pin can
 // be revalidated in the same SQLite transaction as the terminal state write.
@@ -23,6 +25,91 @@ type ReviewEvidencePin struct {
 	EventID int64  `json:"event_id"`
 	Seq     int64  `json:"seq,omitempty"`
 	Digest  string `json:"digest"`
+}
+
+func reviewEvidenceCloseFenceToken(pin ReviewEvidencePin) string {
+	return fmt.Sprintf("review-evidence:%d:%s", pin.EventID, strings.TrimSpace(pin.Digest))
+}
+
+// ReviewEvidenceCloseFenceMatches reports whether lease is the durable fence
+// for this exact accepted evidence epoch. Accepted-intent replay uses it to
+// resume a close after a daemon crash without dropping the write fence.
+func ReviewEvidenceCloseFenceMatches(lease *domain.CoordinationLease, pin ReviewEvidencePin) bool {
+	return lease != nil && lease.Purpose == domain.CoordinationLeaseReview &&
+		lease.OwnerKind == reviewEvidenceCloseFenceOwnerKind && lease.OwnerID == reviewEvidenceCloseFenceToken(pin)
+}
+
+// BeginReviewEvidenceClose installs a durable, cross-process write fence for
+// one accepted evidence epoch. Evidence producers cannot supersede the pin
+// while external integration and resource cleanup are in flight.
+func (c *Client) BeginReviewEvidenceClose(ctx context.Context, issueID string, pin ReviewEvidencePin) (string, error) {
+	issueID = strings.TrimSpace(issueID)
+	token := reviewEvidenceCloseFenceToken(pin)
+	if strings.TrimSpace(pin.Source) != "issue_event" || pin.EventID <= 0 || pin.Seq != 0 || strings.TrimSpace(pin.Digest) == "" {
+		return "", c.wrapError("begin-review-evidence-close", issueID, errors.New("review evidence pin must identify one durable issue event"))
+	}
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return c.wrapError("begin-review-evidence-close", issueID, err)
+			}
+			defer tx.Rollback()
+			if err := validateTerminalReviewEvidencePin(ctx, tx, issueID, pin); err != nil {
+				return c.wrapError("begin-review-evidence-close", issueID, err)
+			}
+			lease, err := coordinationLeaseForUpdate(ctx, tx, issueID, domain.CoordinationLeaseReview)
+			if err != nil {
+				return c.wrapError("begin-review-evidence-close", issueID, err)
+			}
+			if lease != nil && (lease.OwnerKind != reviewEvidenceCloseFenceOwnerKind || lease.OwnerID != token) {
+				return c.wrapError("begin-review-evidence-close", issueID, fmt.Errorf("%w: review lease owned by %s", domain.ErrConflict, lease.OwnerID))
+			}
+			if lease == nil {
+				now := time.Now().UTC().Format(time.RFC3339Nano)
+				if _, err := tx.ExecContext(ctx, `INSERT INTO issue_coordination_leases
+					(issue_id,purpose,owner_id,owner_kind,claimed_at,expires_at)
+					VALUES(?,?,?,?,?,NULL)`, issueID, domain.CoordinationLeaseReview, token, reviewEvidenceCloseFenceOwnerKind, now); err != nil {
+					return c.wrapError("begin-review-evidence-close", issueID, err)
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				return c.wrapError("begin-review-evidence-close", issueID, err)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// ReleaseReviewEvidenceClose removes a matching fence after a failed close.
+// A successful fenced terminal write consumes the fence atomically instead.
+func (c *Client) ReleaseReviewEvidenceClose(ctx context.Context, issueID, token string) error {
+	issueID, token = strings.TrimSpace(issueID), strings.TrimSpace(token)
+	if issueID == "" || token == "" {
+		return nil
+	}
+	return c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			_, err = db.ExecContext(ctx, `DELETE FROM issue_coordination_leases
+				WHERE issue_id=? AND purpose=? AND owner_id=? AND owner_kind=?`, issueID, domain.CoordinationLeaseReview, token, reviewEvidenceCloseFenceOwnerKind)
+			if err != nil {
+				return c.wrapError("release-review-evidence-close", issueID, err)
+			}
+			return nil
+		})
+	})
 }
 
 type IssueObservationEventParams struct {
@@ -767,7 +854,7 @@ func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssu
 	if err != nil {
 		return 0, err
 	}
-	result, err := execer.ExecContext(ctx, `
+	insertSQL := `
 		INSERT INTO issue_observation_events (
 			issue_id,
 			event_type,
@@ -779,16 +866,49 @@ func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssu
 			worktree_path,
 			payload_json
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, issueID, eventType, observedAt.UTC().Format(time.RFC3339Nano), strings.TrimSpace(params.Source), strings.TrimSpace(params.SourceCommand), strings.TrimSpace(params.OperationID), strings.TrimSpace(params.SessionID), strings.TrimSpace(params.WorktreePath), payloadJSON)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	args := []any{issueID, eventType, observedAt.UTC().Format(time.RFC3339Nano), strings.TrimSpace(params.Source), strings.TrimSpace(params.SourceCommand), strings.TrimSpace(params.OperationID), strings.TrimSpace(params.SessionID), strings.TrimSpace(params.WorktreePath), payloadJSON}
+	if isReviewEvidenceEventType(params.Type) {
+		insertSQL = `
+			INSERT INTO issue_observation_events (
+				issue_id,event_type,observed_at,source,source_command,operation_id,session_id,worktree_path,payload_json
+			)
+			SELECT ?,?,?,?,?,?,?,?,?
+			WHERE NOT EXISTS (
+				SELECT 1 FROM issue_coordination_leases
+				WHERE issue_id=? AND purpose=? AND owner_kind=?
+			)`
+		args = append(args, issueID, domain.CoordinationLeaseReview, reviewEvidenceCloseFenceOwnerKind)
+	}
+	result, err := execer.ExecContext(ctx, insertSQL, args...)
 	if err != nil {
 		return 0, err
+	}
+	if isReviewEvidenceEventType(params.Type) {
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		if affected == 0 {
+			return 0, fmt.Errorf("%w: accepted review evidence is fenced for authoritative close", domain.ErrConflict)
+		}
 	}
 	id, err := result.LastInsertId()
 	if err != nil {
 		return 0, fmt.Errorf("read observation event id: %w", err)
 	}
 	return id, nil
+}
+
+func isReviewEvidenceEventType(eventType domain.IssueObservationEventType) bool {
+	normalized := strings.ToLower(strings.TrimSpace(string(eventType)))
+	normalized = strings.NewReplacer("_", ".", "-", ".").Replace(normalized)
+	switch normalized {
+	case string(domain.IssueEventEvidenceSubmitted), "worker.integration.ready", "worker.ready", "worker.complete":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *Client) getIssueObservationEventByID(ctx context.Context, id int64) (domain.IssueObservationEvent, error) {

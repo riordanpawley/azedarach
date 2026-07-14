@@ -854,8 +854,20 @@ func (a daemonOrchestrationAuthority) releaseAndCloseAcceptedReview(ctx context.
 	if issueClient == nil {
 		return false, fmt.Errorf("issue store unavailable")
 	}
-	if _, err := issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, Purpose: domain.CoordinationLeaseReview}); err != nil {
-		return false, fmt.Errorf("release review lease before authoritative close: %w", err)
+	var evidencePin *issues.ReviewEvidencePin
+	if strings.TrimSpace(pin.EvidenceDigest) != "" {
+		evidencePin = &issues.ReviewEvidencePin{Source: pin.EvidenceSource, EventID: pin.EvidenceEventID, Seq: pin.EvidenceSeq, Digest: pin.EvidenceDigest}
+	}
+	task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
+	if err != nil {
+		return false, fmt.Errorf("inspect review lease before authoritative close: %w", err)
+	}
+	reviewLease := coordinationLease(task, domain.CoordinationLeaseReview)
+	resumingEvidenceFence := evidencePin != nil && issues.ReviewEvidenceCloseFenceMatches(reviewLease, *evidencePin)
+	if reviewLease != nil && !resumingEvidenceFence {
+		if _, err := issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, Purpose: domain.CoordinationLeaseReview}); err != nil {
+			return false, fmt.Errorf("release review lease before authoritative close: %w", err)
+		}
 	}
 	if hook := a.daemon.reviewLeaseReleasedBeforeClose; hook != nil {
 		if err := hook(ctx, projectID, issueID); err != nil {

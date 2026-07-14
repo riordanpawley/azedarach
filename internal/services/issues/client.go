@@ -783,6 +783,28 @@ func (c *Client) WithMutationLock(ctx context.Context, fn func(context.Context) 
 	return fn(context.WithValue(ctx, issueMutationLockKey{}, true))
 }
 
+// WithProjectionSnapshotFence holds SQLite's write reservation while fn reads
+// a projection through ordinary store queries. This prevents another daemon
+// from committing projection-source changes between an export and its bounded
+// auxiliary reads without forcing those reads onto one long-lived sql.Tx.
+func (c *Client) WithProjectionSnapshotFence(ctx context.Context, fn func(context.Context) error) error {
+	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		db, err := c.dbHandle()
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(lockCtx, nil)
+		if err != nil {
+			return fmt.Errorf("begin projection snapshot fence: %w", err)
+		}
+		defer tx.Rollback()
+		if _, err := tx.ExecContext(lockCtx, `UPDATE projection_source_revision SET revision=revision WHERE singleton=1`); err != nil {
+			return fmt.Errorf("acquire projection snapshot fence: %w", err)
+		}
+		return fn(lockCtx)
+	})
+}
+
 func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) error) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -2809,6 +2831,47 @@ func (c *Client) CloseWithRuntimeReviewEvidence(ctx context.Context, projectID, 
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
 			return c.updateLockedWithPrecondition(ctx, id, status, true, func(ctx context.Context, tx *sql.Tx) error {
 				return validateTerminalReviewEvidencePin(ctx, tx, id, pin)
+			})
+		})
+	}); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, id)
+}
+
+// CloseWithRuntimeReviewEvidenceFence consumes the matching durable evidence
+// fence in the same transaction as final pin validation and terminal state.
+func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projectID, id string, status domain.Status, pin ReviewEvidencePin, fenceToken string) (domain.Task, error) {
+	nextState, err := issueStateFromStatus(status)
+	if err != nil {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), err)
+	}
+	if nextState.Workflow() != domain.IssueWorkflowClosed {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
+	}
+	fenceToken = strings.TrimSpace(fenceToken)
+	if strings.TrimSpace(pin.Source) != "issue_event" || pin.EventID <= 0 || pin.Seq != 0 || strings.TrimSpace(pin.Digest) == "" || fenceToken == "" {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), errors.New("review evidence close requires one durable issue-event pin and fence"))
+	}
+	if err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return c.updateLockedWithPrecondition(ctx, id, status, true, func(ctx context.Context, tx *sql.Tx) error {
+				if err := validateTerminalReviewEvidencePin(ctx, tx, id, pin); err != nil {
+					return err
+				}
+				result, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases
+					WHERE issue_id=? AND purpose=? AND owner_id=? AND owner_kind=?`, strings.TrimSpace(id), domain.CoordinationLeaseReview, fenceToken, reviewEvidenceCloseFenceOwnerKind)
+				if err != nil {
+					return err
+				}
+				removed, err := result.RowsAffected()
+				if err != nil {
+					return err
+				}
+				if removed != 1 {
+					return fmt.Errorf("%w: accepted review evidence close fence is missing or changed", domain.ErrConflict)
+				}
+				return nil
 			})
 		})
 	}); err != nil {

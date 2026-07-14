@@ -980,7 +980,7 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessInteractions(t *testin
 	}
 }
 
-func TestProjectOrchestrationSnapshotKeepsExportedInteractionDecisionAcrossPostExportResolution(t *testing.T) {
+func TestProjectOrchestrationSnapshotRetriesAcrossPostExportInteractionResolution(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
@@ -1012,20 +1012,68 @@ func TestProjectOrchestrationSnapshotKeepsExportedInteractionDecisionAcrossPostE
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := candidateClass(snapshot.Candidates, issueID); got != string(domain.OrchestrationCandidateDecisionWaiting) {
-		t.Fatalf("candidate class = %q, want decision-waiting from exported checkpoint", got)
+	if got := candidateClass(snapshot.Candidates, issueID); got != "runnable" {
+		t.Fatalf("candidate class = %q, want runnable from retried checkpoint", got)
 	}
-	if reason := snapshot.Blocked[issueID]; !strings.Contains(reason, "unresolved interaction") {
-		t.Fatalf("blocked reason = %q, want exported interaction blocker", reason)
+	if reason := snapshot.Blocked[issueID]; strings.Contains(reason, "unresolved interaction") {
+		t.Fatalf("blocked reason = %q, must not retain superseded interaction", reason)
 	}
-	if slices.Contains(snapshot.Runnable, issueID) {
-		t.Fatalf("runnable = %v, must not contradict exported interaction", snapshot.Runnable)
+	if !slices.Contains(snapshot.Runnable, issueID) {
+		t.Fatalf("runnable = %v, want issue from retried checkpoint", snapshot.Runnable)
 	}
-	if len(snapshot.Interactions) != 1 || snapshot.Interactions[0].ID != request.ID || snapshot.Interactions[0].State != domain.InteractionOpen {
-		t.Fatalf("interactions = %+v, want one open request from exported checkpoint", snapshot.Interactions)
+	if len(snapshot.Interactions) != 0 {
+		t.Fatalf("interactions = %+v, want resolved request absent after whole-snapshot retry", snapshot.Interactions)
 	}
-	if snapshot.ProjectionRevision == 0 {
-		t.Fatal("projection revision must identify the exported checkpoint")
+	checkpoint, err := reader.ProjectionSourceCheckpoint(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ProjectionRevision != checkpoint {
+		t.Fatalf("projection revision = %d, want retried checkpoint %d", snapshot.ProjectionRevision, checkpoint)
+	}
+}
+
+func TestProjectOrchestrationSnapshotRetriesPostExportReviewEvidenceMutation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
+	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
+	issueID, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Review candidate", Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
+	var appended domain.IssueObservationEvent
+	d.orchestrationProjectionExported = func() {
+		d.orchestrationProjectionExported = nil
+		appended, err = writer.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+			Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := reader.ProjectionSourceCheckpoint(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ProjectionRevision != checkpoint || appended.ID == 0 {
+		t.Fatalf("snapshot revision=%d checkpoint=%d appended=%d, want one retried authoritative checkpoint", snapshot.ProjectionRevision, checkpoint, appended.ID)
+	}
+	if len(snapshot.ReviewQueue) != 1 || snapshot.ReviewQueue[0].IssueID != issueID || snapshot.ReviewQueue[0].Evidence == nil {
+		t.Fatalf("review queue = %+v, want post-export evidence from retried snapshot", snapshot.ReviewQueue)
+	}
+	foundRecent := false
+	for _, event := range snapshot.RecentEvents {
+		foundRecent = foundRecent || event.Seq == appended.ID
+	}
+	if !foundRecent {
+		t.Fatalf("recent events = %+v, want post-export event %d", snapshot.RecentEvents, appended.ID)
 	}
 }
 

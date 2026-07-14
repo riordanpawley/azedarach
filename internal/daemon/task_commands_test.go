@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -7168,6 +7169,21 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
+	evidenceEvent, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t),
+	})
+	if err != nil {
+		t.Fatalf("append reviewed evidence: %v", err)
+	}
+	evidence := domain.ReduceReviewReadyEvidence([]domain.IssueObservationEvent{evidenceEvent}).LatestEvidence
+	if evidence == nil || !evidence.Validation.Complete {
+		t.Fatalf("reviewed evidence = %+v, want complete", evidence)
+	}
+	evidenceBody, err := json.Marshal(evidence.Evidence)
+	if err != nil {
+		t.Fatalf("marshal reviewed evidence: %v", err)
+	}
+	evidencePin := &issues.ReviewEvidencePin{Source: "issue_event", EventID: evidenceEvent.ID, Digest: fmt.Sprintf("%x", sha256.Sum256(evidenceBody))}
 	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
 	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
 		t.Fatalf("mkdir source worktree: %v", err)
@@ -7185,9 +7201,17 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 
 	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
 	commands := make([]string, 0, 12)
+	var lateEvidenceErr error
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		joined := strings.Join(args, " ")
+		if lateEvidenceErr == nil && len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-list" {
+			mutated := mustWorkerEvidencePayload(t)
+			mutated["summary"] = "late evidence from git runner hook"
+			_, lateEvidenceErr = issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+				Type: domain.IssueEventEvidenceSubmitted, Source: "late-worker", Payload: mutated,
+			})
+		}
 		switch {
 		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
 			return worktreeListOutput, nil
@@ -7263,8 +7287,7 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	})
 
 	body, err := json.Marshal(taskCloseRequest{
-		TaskID:               taskID,
-		IntegrateBeforeClose: true,
+		TaskID: taskID, IntegrateBeforeClose: true, ExpectedReviewEvidence: evidencePin,
 	})
 	if err != nil {
 		t.Fatalf("marshal task close request: %v", err)
@@ -7292,6 +7315,9 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	}
 	if !result.IntegrationRequested || result.Integrated {
 		t.Fatalf("close integration result = %+v, want requested no-op integration", result)
+	}
+	if lateEvidenceErr == nil || !strings.Contains(lateEvidenceErr.Error(), "accepted review evidence is fenced") {
+		t.Fatalf("late git-runner evidence error = %v, want durable close-fence conflict", lateEvidenceErr)
 	}
 	if !result.WorktreeRemoved {
 		t.Fatalf("close integration result = %+v, want worktree cleanup", result)
