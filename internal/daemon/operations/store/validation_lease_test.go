@@ -209,6 +209,8 @@ func TestValidationLeaseRejectsHeartbeatAndFinishWithWrongFencingToken(t *testin
 	now := time.Now().UTC()
 	_, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "aggregate", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: time.Minute}, now)
 	require.NoError(t, err)
+	_, err = store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "aggregate", LeaseToken: "wrong", ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: time.Minute}, now)
+	require.ErrorContains(t, err, "lease token rejected")
 	_, err = store.HeartbeatValidation(ctx, "aggregate", "wrong", now.Add(time.Second), time.Minute)
 	require.ErrorContains(t, err, "lease token rejected")
 	_, err = store.FinishValidation(ctx, "aggregate", "wrong", domain.ValidationRequestCancelled, "stolen", domain.ValidationEvidence{}, now.Add(time.Second), time.Minute)
