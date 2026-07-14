@@ -599,7 +599,10 @@ jaeger_start_fallback() {
   fi
   "$engine" rm -f "$fallback" >/dev/null 2>&1 || true
   echo "Warning: starting ephemeral Jaeger fallback with dynamic ports; traces are not persisted" >&2
-  jaeger_start "$engine" "$fallback" 0 memory || return 1
+  if ! jaeger_start "$engine" "$fallback" 0 memory; then
+    "$engine" rm -f "$fallback" >/dev/null 2>&1 || true
+    return 1
+  fi
   jaeger_publish_env "$engine" "$fallback" || {
     "$engine" rm -f "$fallback" >/dev/null 2>&1 || true
     return 1

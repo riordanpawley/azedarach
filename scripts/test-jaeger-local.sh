@@ -87,6 +87,22 @@ grep -q 'chosen-store:/badger' "$calls"
 [[ "$(grep -c 'chosen-store:/badger' "$calls")" == "1" ]]
 grep -q 'jaeger-badger.yaml' "$calls"
 
+# A successful container run followed by failed readiness is failure-atomic:
+# the just-created fallback is removed before returning, and publication never
+# creates endpoint or expiry-worker state.
+: >"$calls"
+if FAKE_RUNNING=false jaeger_start_fallback fake_engine azedarach-jaeger; then
+  echo "fallback startup unexpectedly survived failed readiness" >&2
+  exit 1
+fi
+awk '
+  $1 == "run" { ran = 1 }
+  ran && $1 == "rm" && $2 == "-f" && $3 == "azedarach-jaeger-fallback" { cleaned = 1 }
+  END { exit !cleaned }
+' "$calls"
+[[ ! -e "$AZEDARACH_JAEGER_ENDPOINT_FILE" && ! -L "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]
+[[ ! -e "${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers" ]]
+
 : >"$calls"
 FAKE_FALLBACK=1 jaeger_start_fallback fake_engine azedarach-jaeger
 if grep -q '^run ' "$calls"; then
