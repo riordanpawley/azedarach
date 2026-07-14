@@ -45,7 +45,8 @@ func TestEnvrcSharesExternalDirenvLayoutAcrossWorktrees(t *testing.T) {
 	cacheEnv, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "go-cache-env.sh"))
 	require.NoError(t, err)
 
-	testRoot := t.TempDir()
+	testRoot, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	mainCheckout := filepath.Join(testRoot, "main checkout")
 	linkedCheckout := filepath.Join(testRoot, "linked checkout")
 	cacheRoot := filepath.Join(testRoot, "cache")
@@ -69,6 +70,94 @@ func TestEnvrcSharesExternalDirenvLayoutAcrossWorktrees(t *testing.T) {
 	assert.NoDirExists(t, filepath.Join(linkedCheckout, ".azedarach"))
 }
 
+func TestEnvrcPrefersInstalledPairAcrossMainAndLinkedWorktrees(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	require.NoError(t, err)
+	envrc, err := os.ReadFile(filepath.Join(repoRoot, ".envrc"))
+	require.NoError(t, err)
+	cacheEnv, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "go-cache-env.sh"))
+	require.NoError(t, err)
+
+	testRoot, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	mainCheckout := filepath.Join(testRoot, "main")
+	linkedCheckout := filepath.Join(testRoot, "linked")
+	installBin := filepath.Join(testRoot, "installed", "bin")
+	unpairedBin := filepath.Join(testRoot, "unpaired", "bin")
+	require.NoError(t, os.MkdirAll(filepath.Join(mainCheckout, "scripts"), 0o755))
+	require.NoError(t, os.MkdirAll(installBin, 0o755))
+	require.NoError(t, os.MkdirAll(unpairedBin, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(mainCheckout, ".envrc"), envrc, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(mainCheckout, "scripts", "go-cache-env.sh"), cacheEnv, 0o755))
+	for _, binary := range []string{"az", "azd"} {
+		require.NoError(t, os.WriteFile(filepath.Join(installBin, binary), []byte("#!/bin/sh\n"), 0o755))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(unpairedBin, "az"), []byte("#!/bin/sh\n"), 0o755))
+	runGit(t, mainCheckout, "init")
+	runGit(t, mainCheckout, "add", ".envrc", "scripts/go-cache-env.sh")
+	runGit(t, mainCheckout, "-c", "user.name=Azedarach Test", "-c", "user.email=test@example.invalid", "commit", "-m", "test fixture")
+	runGit(t, mainCheckout, "worktree", "add", "--detach", linkedCheckout, "HEAD")
+	for _, checkout := range []string{mainCheckout, linkedCheckout} {
+		require.NoError(t, os.MkdirAll(filepath.Join(checkout, "bin"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(checkout, "bin", "az"), []byte("#!/bin/sh\n"), 0o755))
+	}
+
+	for _, checkout := range []string{mainCheckout, linkedCheckout} {
+		t.Run(filepath.Base(checkout), func(t *testing.T) {
+			const script = `
+set -eu
+nix() { :; }
+use() { :; }
+PATH_add() { PATH="$1:$PATH"; export PATH; }
+PATH_rm() {
+  local remove="$1" entry next=""
+  local old_ifs="$IFS"
+  IFS=:
+  for entry in $PATH; do
+    if [ "$entry" != "$remove" ]; then
+      next="${next:+$next:}$entry"
+    fi
+  done
+  IFS="$old_ifs"
+  PATH="$next"
+  export PATH
+}
+watch_file() { :; }
+dotenv() { :; }
+source_env_if_exists() { :; }
+cd "$CHECKOUT"
+. ./.envrc >/dev/null
+command -v az >"$AZ_RESULT"
+command -v azd >"$AZD_RESULT"
+`
+			azResult := filepath.Join(t.TempDir(), "az-result")
+			azdResult := filepath.Join(t.TempDir(), "azd-result")
+			initialPath := filepath.Join(mainCheckout, "bin") + ":" + unpairedBin + ":" + installBin + ":/usr/bin:/bin:/usr/sbin:/sbin"
+			if checkout == linkedCheckout {
+				initialPath = filepath.Join(linkedCheckout, "bin") + ":" + initialPath
+			}
+			cmd := exec.Command("bash", "-c", script)
+			cmd.Env = append(envWithout("AZEDARACH_GO_CACHE_ROOT", "AZEDARACH_GOCACHE", "GOCACHE"),
+				"CHECKOUT="+checkout,
+				"AZ_RESULT="+azResult,
+				"AZD_RESULT="+azdResult,
+				"HOME="+t.TempDir(),
+				"ISSUE_BACKEND=none",
+				"AZEDARACH_DIRENV_MANUAL_NIX_RELOAD=0",
+				"PATH="+initialPath,
+			)
+			output, runErr := cmd.CombinedOutput()
+			require.NoErrorf(t, runErr, "evaluate .envrc pair routing: %s", output)
+			gotAz, err := os.ReadFile(azResult)
+			require.NoError(t, err)
+			gotAzd, err := os.ReadFile(azdResult)
+			require.NoError(t, err)
+			assert.Equal(t, filepath.Join(installBin, "az"), strings.TrimSpace(string(gotAz)))
+			assert.Equal(t, filepath.Join(installBin, "azd"), strings.TrimSpace(string(gotAzd)))
+		})
+	}
+}
+
 func TestEnvrcDirenvLayoutFallsBackToHomeCache(t *testing.T) {
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	require.NoError(t, err)
@@ -77,6 +166,7 @@ func TestEnvrcDirenvLayoutFallsBackToHomeCache(t *testing.T) {
 	const script = `
 set -eu
 PATH_add() { :; }
+PATH_rm() { :; }
 watch_file() { :; }
 dotenv() { :; }
 source_env_if_exists() { :; }
@@ -123,6 +213,7 @@ set -eu
 nix() { :; }
 use() { :; }
 PATH_add() { :; }
+PATH_rm() { :; }
 watch_file() { :; }
 dotenv() { set -a; . "$1"; set +a; }
 source_env_if_exists() { if [ -f "$1" ]; then . "$1"; fi; }
@@ -156,6 +247,7 @@ use() {
   direnv_layout_dir >"$LAYOUT_RESULT"
 }
 PATH_add() { :; }
+PATH_rm() { :; }
 watch_file() { :; }
 dotenv() { :; }
 source_env_if_exists() { :; }

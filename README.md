@@ -310,6 +310,11 @@ directory, Homebrew's bin, or `~/.local/bin`). The public command links resolve
 only within that stable install directory, never back into a Git worktree, and
 linked worktrees are rejected before building. `just install` is intentionally
 disabled because an az-only install can create a protocol-incompatible pair.
+Repository direnv setup removes primary- and linked-worktree `bin` directories
+from `PATH`, then keeps the discovered installed `az`/`azd` sibling directory
+first. In global-daemon mode, `az` resolves the daemon beside its own immutable
+installed generation; repo-local daemon binaries and source fallback are used
+only for explicitly worktree-scoped development.
 
 Direct Go entrypoint examples:
 

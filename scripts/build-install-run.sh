@@ -37,6 +37,12 @@ sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 ldflags="-X github.com/riordanpawley/azedarach/internal/buildinfo.Version=dev -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=${sha}"
 go build -ldflags "$ldflags" -o "$build_dir/az" ./cmd/az
 go build -ldflags "$ldflags" -o "$build_dir/azd" ./cmd/azd
+az_version="$("$build_dir/az" version)"
+azd_version="$("$build_dir/azd" version)"
+if [[ -z "$az_version" || "$az_version" != "$azd_version" ]]; then
+  echo "Refusing incoherent az/azd install: version mismatch (az=$az_version, azd=$azd_version)" >&2
+  exit 1
+fi
 atomic_replace_bin="${AZEDARACH_ATOMIC_REPLACE_BIN:-}"
 if [[ -z "$atomic_replace_bin" ]]; then
   atomic_replace_bin="$build_dir/atomic-replace"

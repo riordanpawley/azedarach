@@ -36,7 +36,23 @@ if [[ "${FAKE_GO_FAIL_AZD:-0}" == "1" && "$args" == *"./cmd/azd"* ]]; then
   exit 1
 fi
 mkdir -p "$(dirname "$output")"
-printf 'scratch build %s\n' "${FAKE_GO_MARKER:-default}" >"$output"
+marker="${FAKE_GO_MARKER:-default}"
+if [[ "$args" == *"./cmd/azd"* ]]; then
+  marker="${FAKE_GO_AZD_MARKER:-$marker}"
+else
+  marker="${FAKE_GO_AZ_MARKER:-$marker}"
+fi
+cat >"$output" <<EOF_SCRIPT
+#!/bin/sh
+if [ "\${1:-}" = "version" ] || [ "\${1:-}" = "--version" ] || [ "\${1:-}" = "-v" ]; then
+  printf 'dev (%s)\\n' '$marker'
+fi
+exit 0
+: <<'AZEDARACH_BUILD_METADATA'
+scratch build $marker
+AZEDARACH_BUILD_METADATA
+EOF_SCRIPT
+chmod +x "$output"
 EOF
 chmod +x "$fixture/fake-bin/go"
 
@@ -146,6 +162,19 @@ fi
 grep -q "requested azd build failure" "$fixture/build-failure.stderr"
 cmp "$fixture/failure-az.before" "$fixture/failure-bin/az"
 cmp "$fixture/failure-azd.before" "$fixture/failure-bin/azd"
+
+mkdir -p "$fixture/mismatch-bin"
+if FAKE_GIT_MODE=primary FAKE_GO_AZ_MARKER=az-version FAKE_GO_AZD_MARKER=azd-version \
+  AZ_INSTALL_DIR="$fixture/mismatch-bin" PATH="$fixture/fake-bin:$PATH" \
+  "$fixture/scripts/build-install-run.sh" --no-run \
+  >"$fixture/mismatch.stdout" 2>"$fixture/mismatch.stderr"; then
+  echo "build-install-run unexpectedly installed a mismatched az/azd pair" >&2
+  exit 1
+fi
+grep -q "Refusing incoherent az/azd install: version mismatch" "$fixture/mismatch.stderr"
+test ! -e "$fixture/mismatch-bin/az"
+test ! -e "$fixture/mismatch-bin/azd"
+test ! -e "$fixture/mismatch-bin/.azedarach-current"
 test ! -e "$fixture/failure-bin/.azedarach-current"
 test ! -L "$fixture/failure-bin/.azedarach-current"
 

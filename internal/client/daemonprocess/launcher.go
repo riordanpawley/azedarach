@@ -70,6 +70,8 @@ type execDaemonProcess struct {
 
 var errSpawnedDaemonExited = errors.New("spawned daemon process exited before readiness")
 
+var currentExecutable = os.Executable
+
 func startExecDaemonProcess(spec daemonProcessSpec) (daemonProcess, error) {
 	cmd := exec.Command(spec.command.executable, spec.args...)
 	if strings.TrimSpace(spec.command.dir) != "" {
@@ -484,6 +486,12 @@ func (l *Launcher) resolveCommand() daemonCommand {
 	if env := os.Getenv("AZEDARACH_DAEMON_BIN"); env != "" {
 		return daemonCommand{executable: env}
 	}
+	if !config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		if paired := daemonBinaryNearCurrentExecutable(); paired != "" {
+			return daemonCommand{executable: paired}
+		}
+		return daemonCommand{executable: "azd"}
+	}
 	candidates := []string{}
 	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
 		// Prefer the caller's worktree-local build when present so daemon behavior
@@ -504,6 +512,21 @@ func (l *Launcher) resolveCommand() daemonCommand {
 		return daemonCommand{executable: "go", args: []string{"run", "./cmd/azd"}, dir: sourceDir}
 	}
 	return daemonCommand{executable: "azd"}
+}
+
+func daemonBinaryNearCurrentExecutable() string {
+	executable, err := currentExecutable()
+	if err != nil || strings.TrimSpace(executable) == "" {
+		return ""
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(executable); resolveErr == nil && strings.TrimSpace(resolved) != "" {
+		executable = resolved
+	}
+	candidate := filepath.Join(filepath.Dir(executable), "azd")
+	if stat, statErr := os.Stat(candidate); statErr == nil && stat.Mode().IsRegular() && stat.Mode().Perm()&0o111 != 0 {
+		return candidate
+	}
+	return ""
 }
 
 func (l *Launcher) resolveBinary() string {
