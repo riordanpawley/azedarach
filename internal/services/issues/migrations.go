@@ -573,6 +573,10 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 }
 
 func applyProjectionDeltaAuthorityMigration(ctx context.Context, db *sql.DB, id string) error {
+	return applyProjectionDeltaAuthorityMigrationWithValidator(ctx, db, id, validateProjectionDeltaAuthoritySchema)
+}
+
+func applyProjectionDeltaAuthorityMigrationWithValidator(ctx context.Context, db *sql.DB, id string, validate func(context.Context, projectionDeltaSchemaReader) error) error {
 	sqlText, err := loadMigrationSQL("migrations/0047_projection_delta_authority.sql")
 	if err != nil {
 		return fmt.Errorf("load migration %s: %w", id, err)
@@ -584,6 +588,9 @@ func applyProjectionDeltaAuthorityMigration(ctx context.Context, db *sql.DB, id 
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
 		return fmt.Errorf("apply migration %s: %w", id, err)
+	}
+	if err := validate(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s before ledger stamp: %w", id, err)
 	}
 	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)

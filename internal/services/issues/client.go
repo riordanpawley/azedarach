@@ -978,7 +978,36 @@ func (c *Client) configureSQLite(db *sql.DB) error {
 }
 
 func (c *Client) normalizeDependencyEnumRows(db *sql.DB) error {
-	res, err := db.Exec(`
+	ctx := context.Background()
+	rows, err := db.QueryContext(ctx, `
+		SELECT DISTINCT issue_id FROM issue_dependencies
+		WHERE dependency_type IN ('parent_child','blocked_by','related_to','discovered_from')
+		ORDER BY issue_id
+	`)
+	if err != nil {
+		return fmt.Errorf("normalize dependency enum rows: list affected issues: %w", err)
+	}
+	var issueIDs []string
+	for rows.Next() {
+		var issueID string
+		if err := rows.Scan(&issueID); err != nil {
+			rows.Close()
+			return err
+		}
+		issueIDs = append(issueIDs, issueID)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(issueIDs) == 0 {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("normalize dependency enum rows: begin: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `
 		UPDATE issue_dependencies
 		SET dependency_type = CASE
 			WHEN dependency_type = 'parent_child' THEN 'parent-child'
@@ -997,9 +1026,17 @@ func (c *Client) normalizeDependencyEnumRows(db *sql.DB) error {
 	}
 	affected, _ := res.RowsAffected()
 	if affected > 0 {
-		if err := c.rebuildIssueGraphClosure(context.Background(), db); err != nil {
+		if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
 			return fmt.Errorf("rebuild graph closure after dependency enum normalization: %w", err)
 		}
+		for _, issueID := range issueIDs {
+			if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueDetailsChanged, map[string]any{"reason": "dependency_enum_normalization"}); err != nil {
+				return fmt.Errorf("emit dependency enum normalization for %s: %w", issueID, err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("normalize dependency enum rows: commit: %w", err)
 	}
 	return nil
 }
@@ -1226,6 +1263,18 @@ func (c *Client) migrateProviderDisplayKeyIssueID(ctx context.Context, tx *sql.T
 		)
 	`, migration.NewID, migration.Provider, migration.ProviderScope, migration.RemoteKey, migration.DisplayKey, metadataJSON, now, now, migration.Provider, migration.ProviderScope, migration.RemoteKey); err != nil {
 		return fmt.Errorf("record external ref for provider display-key issue %s: %w", migration.OldID, err)
+	}
+	if err := c.appendIssueObservationEvent(ctx, tx, migration.NewID, domain.IssueEventIssueDetailsChanged, map[string]any{
+		"reason":            "provider_display_key_id_normalization",
+		"previous_issue_id": migration.OldID,
+	}); err != nil {
+		return fmt.Errorf("emit provider display-key issue projection %s: %w", migration.NewID, err)
+	}
+	if err := c.appendIssueObservationEvent(ctx, tx, migration.OldID, domain.IssueEventIssueDeleted, map[string]any{
+		"reason":       "provider_display_key_id_normalization",
+		"new_issue_id": migration.NewID,
+	}); err != nil {
+		return fmt.Errorf("emit provider display-key issue tombstone %s: %w", migration.OldID, err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM issues WHERE id = ?`, migration.OldID); err != nil {
@@ -3407,14 +3456,14 @@ func (c *Client) activeParents(ctx context.Context, db *sql.DB, issueID string) 
 	return parentIDs, nil
 }
 
-func (c *Client) reopenClosedParentForActiveChild(ctx context.Context, execer sqlIssueExecer, childID, parentID string) error {
+func (c *Client) reopenClosedParentForActiveChild(ctx context.Context, execer sqlIssueDBTX, childID, parentID string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	activeState, err := issueStateFromStatus(domain.StatusInProgress)
 	if err != nil {
 		return err
 	}
 	writeState := issueStateWriteValuesFromState(activeState, nil)
-	if _, err := execer.ExecContext(ctx, `
+	res, err := execer.ExecContext(ctx, `
 		UPDATE issues
 		SET
 			disposition = ?,
@@ -3440,8 +3489,22 @@ func (c *Client) reopenClosedParentForActiveChild(ctx context.Context, execer sq
 					AND child.visibility = 'live'
 					AND child.disposition NOT IN ('completed','cancelled')
 			)
-	`, writeState.Disposition, writeState.Engagement, writeState.Visibility, writeState.LegacyStatus, writeState.Lifecycle, writeState.ClosedOutcome, writeState.Review, writeState.ArchivedAt, writeState.ArchivedAt, now, parentID, childID); err != nil {
+	`, writeState.Disposition, writeState.Engagement, writeState.Visibility, writeState.LegacyStatus, writeState.Lifecycle, writeState.ClosedOutcome, writeState.Review, writeState.ArchivedAt, writeState.ArchivedAt, now, parentID, childID)
+	if err != nil {
 		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 1 {
+		if err := c.appendIssueObservationEvent(ctx, execer, parentID, domain.IssueEventIssueStatusChanged, map[string]any{
+			"to_status": domain.StatusInProgress,
+			"reason":    "active_child_added",
+			"child_id":  childID,
+		}); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -4380,7 +4443,7 @@ func (c *Client) UpdateDetailsWithRuntime(ctx context.Context, projectID, id str
 	return c.GetWithRuntime(ctx, projectID, id)
 }
 
-func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args ...any) ([]domain.Task, error) {
+func (c *Client) queryTasks(ctx context.Context, db sqlIssueDBTX, query string, args ...any) ([]domain.Task, error) {
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err

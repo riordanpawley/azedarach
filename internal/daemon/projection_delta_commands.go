@@ -55,6 +55,7 @@ func (d *Daemon) handleProjectionSnapshot(ctx context.Context, req protocol.Requ
 		return d.projectionDeltaErrorResponse(req, err), nil
 	}
 	snapshot.ProjectID = naming.ProjectID(projectID)
+	protocol.FinalizeProjectionSnapshot(&snapshot)
 	return d.marshalBoardResponse(req, snapshot)
 }
 
@@ -67,7 +68,5 @@ func (d *Daemon) projectionDeltaErrorResponse(req protocol.RequestEnvelope, err 
 
 func remapProjectionDeltaBatch(batch *protocol.ProjectionDeltaBatch, projectID string) {
 	batch.ProjectID = naming.ProjectID(projectID)
-	for index := range batch.Deltas {
-		batch.Deltas[index].ProjectID = naming.ProjectID(projectID)
-	}
+	protocol.FinalizeProjectionDeltaBatch(batch)
 }

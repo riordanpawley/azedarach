@@ -939,6 +939,15 @@ func TestClient_NormalizeProviderDisplayKeyIssueIDsMigratesDurableRefs(t *testin
 	var nextIndex string
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, nextAlphaIssueIndexMetaKey).Scan(&nextIndex))
 	assert.Equal(t, "2", nextIndex)
+	deltas, _, err := client.ListProjectionDeltas(ctx, "default", 0, 100)
+	require.NoError(t, err)
+	var sawNew, sawOldTombstone bool
+	for _, delta := range deltas {
+		sawNew = sawNew || (delta.Key == "b" && delta.Operation == domain.ProjectionDeltaUpsert)
+		sawOldTombstone = sawOldTombstone || (delta.Key == "CHE-02091" && delta.Operation == domain.ProjectionDeltaDelete)
+	}
+	require.True(t, sawNew, "renumbered issue must emit its complete-value projection")
+	require.True(t, sawOldTombstone, "legacy display key must emit a projection tombstone")
 }
 
 func intPtr(value int) *int {
@@ -3937,6 +3946,15 @@ func TestClient_GraphClosureMigrationBackfillsParentChildEdges(t *testing.T) {
 	ancestors, err := client.ListGraphAncestorIDs(ctx, "grandchild", string(domain.DependencyParentChild))
 	require.NoError(t, err)
 	assert.Equal(t, []string{"child", "root"}, ancestors)
+	deltas, _, err := client.ListProjectionDeltas(ctx, "default", 0, 100)
+	require.NoError(t, err)
+	require.NotEmpty(t, deltas)
+	var payload domain.IssueProjectionDeltaPayload
+	require.NoError(t, json.Unmarshal(deltas[len(deltas)-1].Payload, &payload))
+	require.NotNil(t, payload.Issue)
+	require.Equal(t, naming.IssueID("child"), payload.Issue.ID)
+	require.NotNil(t, payload.Issue.ParentID)
+	require.Equal(t, naming.IssueID("root"), *payload.Issue.ParentID)
 }
 
 func TestClient_MigratesLegacySchemaShape(t *testing.T) {

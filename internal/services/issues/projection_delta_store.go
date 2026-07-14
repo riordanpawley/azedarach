@@ -30,6 +30,59 @@ type ProjectionDeltaParams struct {
 	CommittedAt    time.Time
 }
 
+type ProjectionSourceAdvance struct {
+	ProjectID       string
+	SourceAuthority string
+	SourcePosition  string
+	SourceHash      string
+	IdempotencyKey  string
+	CommittedAt     time.Time
+}
+
+// CommitProjectionEmptyAdvance records source progress with zero keyed
+// materialization changes. The resulting row is a transitional delivery marker
+// and is filtered from public delta values and snapshots.
+func (c *Client) CommitProjectionEmptyAdvance(ctx context.Context, advance ProjectionSourceAdvance) (domain.ProjectionDelta, error) {
+	var committed domain.ProjectionDelta
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return sqliteutil.WithWriteLock(c.dbPath, func() error {
+				db, err := c.dbHandle()
+				if err != nil {
+					return err
+				}
+				tx, err := db.BeginTx(ctx, nil)
+				if err != nil {
+					return err
+				}
+				defer tx.Rollback()
+				committed, err = appendProjectionEmptyAdvance(ctx, tx, advance)
+				if err != nil {
+					return err
+				}
+				return tx.Commit()
+			})
+		})
+	})
+	return committed, err
+}
+
+func appendProjectionEmptyAdvance(ctx context.Context, tx sqlIssueDBTX, advance ProjectionSourceAdvance) (domain.ProjectionDelta, error) {
+	authority, position := strings.TrimSpace(advance.SourceAuthority), strings.TrimSpace(advance.SourcePosition)
+	if authority == "" || position == "" {
+		return domain.ProjectionDelta{}, errors.New("projection source authority and position are required")
+	}
+	payload, err := json.Marshal(map[string]string{"authority": authority, "position": position, "source_hash": strings.TrimSpace(advance.SourceHash)})
+	if err != nil {
+		return domain.ProjectionDelta{}, err
+	}
+	key := strings.TrimSpace(advance.IdempotencyKey)
+	if key == "" {
+		key = "source-advance:" + authority + ":" + position
+	}
+	return appendProjectionDelta(ctx, tx, ProjectionDeltaParams{ProjectID: advance.ProjectID, Kind: domain.ProjectionKindSourceAdvance, Key: authority, Operation: domain.ProjectionDeltaUpsert, IdempotencyKey: key, Payload: payload, CommittedAt: advance.CommittedAt})
+}
+
 // ProjectionMutation is the transaction boundary offered to authoritative
 // stores. Writes made through it commit atomically with their projection delta.
 type ProjectionMutation interface {
@@ -129,7 +182,9 @@ func appendProjectionDelta(ctx context.Context, tx sqlIssueDBTX, params Projecti
 		params.ProjectID, cursor, params.Kind, params.Key, params.Operation, params.IdempotencyKey, string(payload), now.Format(time.RFC3339Nano)); err != nil {
 		return domain.ProjectionDelta{}, fmt.Errorf("append projection delta: %w", err)
 	}
-	return domain.ProjectionDelta{ProjectID: params.ProjectID, Cursor: cursor, Kind: params.Kind, Key: params.Key, Operation: params.Operation, IdempotencyKey: params.IdempotencyKey, Payload: payload, CommittedAt: now}, nil
+	delta := domain.ProjectionDelta{ProjectID: params.ProjectID, Cursor: cursor, Kind: params.Kind, Key: params.Key, Operation: params.Operation, IdempotencyKey: params.IdempotencyKey, Payload: payload, CommittedAt: now}
+	delta.Source = domain.ProjectionSourceForDelta(delta)
+	return delta, nil
 }
 
 func (c *Client) ListProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
@@ -283,8 +338,8 @@ func (c *Client) ProjectionSnapshotAt(ctx context.Context, projectID string, cur
 	}
 	rows, err := tx.QueryContext(ctx, `WITH ranked AS (
 		SELECT kind,key,operation,payload_json,ROW_NUMBER() OVER (PARTITION BY kind,key ORDER BY cursor DESC) AS rank
-		FROM projection_deltas WHERE project_id=? AND cursor<=?
-	) SELECT kind,key,payload_json FROM ranked WHERE rank=1 AND operation='upsert' ORDER BY kind,key`, projectID, cursor)
+		FROM projection_deltas WHERE project_id=? AND cursor<=? AND kind<>?
+	) SELECT kind,key,payload_json FROM ranked WHERE rank=1 AND operation='upsert' ORDER BY kind,key`, projectID, cursor, domain.ProjectionKindSourceAdvance)
 	if err != nil {
 		return domain.ProjectionSnapshot{}, projectionReadError("read projection snapshot", err)
 	}
@@ -302,10 +357,29 @@ func (c *Client) ProjectionSnapshotAt(ctx context.Context, projectID string, cur
 	if err := rows.Err(); err != nil {
 		return domain.ProjectionSnapshot{}, projectionReadError("iterate projection snapshot", err)
 	}
+	if err := rows.Close(); err != nil {
+		return domain.ProjectionSnapshot{}, projectionReadError("close projection snapshot values", err)
+	}
+	sourceRows, err := tx.QueryContext(ctx, `SELECT project_id,cursor,kind,key,operation,idempotency_key,payload_json,committed_at FROM projection_deltas WHERE project_id=? AND cursor<=? ORDER BY cursor`, projectID, cursor)
+	if err != nil {
+		return domain.ProjectionSnapshot{}, projectionReadError("read projection snapshot sources", err)
+	}
+	var sourceDeltas []domain.ProjectionDelta
+	for sourceRows.Next() {
+		delta, err := scanProjectionDelta(sourceRows)
+		if err != nil {
+			sourceRows.Close()
+			return domain.ProjectionSnapshot{}, projectionReadError("scan projection snapshot source", err)
+		}
+		sourceDeltas = append(sourceDeltas, delta)
+	}
+	if err := sourceRows.Close(); err != nil {
+		return domain.ProjectionSnapshot{}, projectionReadError("close projection snapshot sources", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return domain.ProjectionSnapshot{}, projectionReadError("commit projection snapshot read", err)
 	}
-	return domain.ProjectionSnapshot{ProjectID: projectID, Cursor: cursor, Head: head, Values: values}, nil
+	return domain.ProjectionSnapshot{ProjectID: projectID, Cursor: cursor, Head: head, Values: values, Sources: domain.MergeProjectionSourceRanges(sourceDeltas)}, nil
 }
 
 func (c *Client) ProjectionConsumerCursor(ctx context.Context, projectID, consumer string) (uint64, error) {
@@ -460,6 +534,7 @@ func scanProjectionDelta(scanner projectionDeltaScanner) (domain.ProjectionDelta
 	delta.Operation = domain.ProjectionDeltaOperation(operation)
 	delta.CommittedAt = parseTimestamp(committedAt)
 	delta.Payload = json.RawMessage(payload)
+	delta.Source = domain.ProjectionSourceForDelta(delta)
 	return delta, nil
 }
 

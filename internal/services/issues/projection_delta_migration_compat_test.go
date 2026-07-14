@@ -116,6 +116,44 @@ func TestProjectionDeltaChecksumCompatibilityCurrentMainHumanFirst(t *testing.T)
 	require.NoError(t, db.Close())
 }
 
+func TestProjectionDeltaMigrationValidationFailureRollsBackSchemaAndLedger(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	db := openProjectionMigrationFixture(t, path)
+	_, err := db.Exec(`
+		CREATE TABLE schema_migrations (
+			id TEXT PRIMARY KEY,
+			applied_at TEXT NOT NULL,
+			artifact_checksum TEXT
+		);
+		CREATE TABLE legacy_authority (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+		INSERT INTO legacy_authority(id,value) VALUES ('kept','original');
+	`)
+	require.NoError(t, err)
+
+	err = applyProjectionDeltaAuthorityMigrationWithValidator(ctx, db, projectionDeltaAuthorityMigrationID, func(ctx context.Context, reader projectionDeltaSchemaReader) error {
+		require.NoError(t, validateProjectionDeltaAuthoritySchema(ctx, reader), "migration schema must be complete before the injected failure")
+		return errors.New("injected in-transaction projection schema validation failure")
+	})
+	require.ErrorContains(t, err, "injected in-transaction projection schema validation failure")
+
+	for _, object := range []string{"projection_streams", "projection_deltas", "projection_consumer_cursors", "idx_projection_deltas_key_history"} {
+		var exists bool
+		require.NoError(t, db.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name=?)`, object).Scan(&exists))
+		require.False(t, exists, object+" must roll back")
+	}
+	var ledgerExists bool
+	require.NoError(t, db.QueryRow(`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id=?)`, projectionDeltaAuthorityMigrationID).Scan(&ledgerExists))
+	require.False(t, ledgerExists)
+	var legacyValue string
+	require.NoError(t, db.QueryRow(`SELECT value FROM legacy_authority WHERE id='kept'`).Scan(&legacyValue))
+	require.Equal(t, "original", legacyValue)
+
+	require.NoError(t, applyProjectionDeltaAuthorityMigration(ctx, db, projectionDeltaAuthorityMigrationID))
+	require.NoError(t, validateProjectionDeltaAuthoritySchema(ctx, db))
+	require.NoError(t, db.Close())
+}
+
 func TestProjectionDeltaChecksumCompatibilityRejectsStructuralDrift(t *testing.T) {
 	mutations := map[string]string{
 		"index_direction":     `DROP INDEX idx_projection_deltas_key_history; CREATE INDEX idx_projection_deltas_key_history ON projection_deltas(project_id,kind,key,cursor ASC);`,

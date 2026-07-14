@@ -12,6 +12,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 // ExternalRef records the durable mapping between a local issue and an issue in
@@ -59,9 +60,13 @@ type ExternalSyncState struct {
 func (c *Client) UpsertSyncedTask(ctx context.Context, task domain.Task) (bool, error) {
 	var changed bool
 	err := c.retrySQLiteBusy(ctx, func() error {
-		var err error
-		changed, err = c.upsertSyncedTaskOnce(ctx, task)
-		return err
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return sqliteutil.WithWriteLock(c.dbPath, func() error {
+				var err error
+				changed, err = c.upsertSyncedTaskOnce(ctx, task)
+				return err
+			})
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -114,13 +119,18 @@ func (c *Client) upsertSyncedTaskOnce(ctx context.Context, task domain.Task) (bo
 		return false, c.wrapError("sync-upsert", issueID, err)
 	}
 	writeState := issueStateWriteValuesFromState(state, nil)
-	res, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, c.wrapError("sync-upsert", issueID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `
 		INSERT INTO issues (
 			id, title, description, status, disposition, engagement, visibility, lifecycle_state, closed_outcome, review_state, archived_at, priority, issue_type,
 			created_at, updated_at, closed_at, assignee, labels_json,
 			implementations_json, design, notes, acceptance, estimate, deleted_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
 		ON CONFLICT(id) DO UPDATE SET
 			title = excluded.title,
 			description = excluded.description,
@@ -144,8 +154,49 @@ func (c *Client) upsertSyncedTaskOnce(ctx context.Context, task domain.Task) (bo
 	if err != nil {
 		return false, c.wrapError("sync-upsert", issueID, err)
 	}
+	payload, err := c.issueProjectionDeltaPayload(ctx, tx, issueID, domain.ProjectionDeltaUpsert)
+	if err != nil {
+		return false, c.wrapError("sync-upsert", issueID, err)
+	}
+	idempotencyHash, err := syncedTaskAuthorityHash(task, writeState)
+	if err != nil {
+		return false, c.wrapError("sync-upsert", issueID, err)
+	}
+	if _, err := appendProjectionDelta(ctx, tx, ProjectionDeltaParams{
+		ProjectID:      "default",
+		Kind:           domain.ProjectionKindIssue,
+		Key:            issueID,
+		Operation:      domain.ProjectionDeltaUpsert,
+		IdempotencyKey: "sync-upsert:" + issueID + ":" + idempotencyHash,
+		Payload:        payload,
+		CommittedAt:    task.UpdatedAt.UTC(),
+	}); err != nil {
+		return false, c.wrapError("sync-upsert", issueID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, c.wrapError("sync-upsert", issueID, err)
+	}
 	affected, _ := res.RowsAffected()
 	return affected > 0, nil
+}
+
+func syncedTaskAuthorityHash(task domain.Task, state issueStateWriteValues) (string, error) {
+	raw, err := json.Marshal(map[string]any{
+		"title": task.Title, "description": task.Description, "design": task.Design,
+		"notes": task.Notes, "acceptance": task.Acceptance, "assignee": task.Assignee,
+		"labels": task.Labels, "implementations": task.Implementations, "estimate": task.Estimate,
+		"priority": task.Priority, "type": task.Type,
+		"created_at": task.CreatedAt.UTC().Format(time.RFC3339Nano),
+		"updated_at": task.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		"status":     state.LegacyStatus, "disposition": state.Disposition, "engagement": state.Engagement,
+		"visibility": state.Visibility, "lifecycle": state.Lifecycle, "closed_outcome": state.ClosedOutcome,
+		"review": state.Review, "archived_at": state.ArchivedAt,
+	})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func (c *Client) UpsertExternalRef(ctx context.Context, ref ExternalRef) error {

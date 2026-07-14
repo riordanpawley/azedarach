@@ -31,6 +31,104 @@ func TestProjectionDeltaActiveIssueMutationEmits(t *testing.T) {
 	require.Equal(t, id, deltas[0].Key)
 	require.Equal(t, domain.ProjectionKindIssue, deltas[0].Kind)
 	require.Equal(t, "issue-observation:1", deltas[0].IdempotencyKey)
+	assertLatestIssueDeltaMatchesStore(t, client, id)
+}
+
+func TestProjectionDeltaObservationWithoutIssueChangeEmitsEmptyAdvance(t *testing.T) {
+	ctx := context.Background()
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	id, err := client.Create(ctx, CreateTaskParams{Title: "observed", Type: domain.TypeTask})
+	require.NoError(t, err)
+	_, err = client.AppendIssueObservationEvent(ctx, id, IssueObservationEventParams{Type: domain.IssueEventValidationPassed, Source: "test", Payload: map[string]any{"command": "go test"}})
+	require.NoError(t, err)
+	deltas, head, err := client.ListProjectionDeltas(ctx, "default", 1, 10)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), head)
+	require.Len(t, deltas, 1)
+	require.Equal(t, domain.ProjectionKindSourceAdvance, deltas[0].Kind)
+	require.Equal(t, "legacy_issue_observation", deltas[0].Source.Authority)
+	require.Equal(t, "2", deltas[0].Source.SourceFrom)
+}
+
+func TestProjectionDeltaSemanticPayloadMatchesAuthoritativeMutationMatrix(t *testing.T) {
+	ctx := context.Background()
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	t.Cleanup(func() { _ = client.CloseDB() })
+
+	parent, err := client.Create(ctx, CreateTaskParams{Title: "parent", Type: domain.TypeEpic})
+	require.NoError(t, err)
+	child, err := client.Create(ctx, CreateTaskParams{Title: "child", Description: "initial", Type: domain.TypeTask})
+	require.NoError(t, err)
+	assertLatestIssueDeltaMatchesStore(t, client, child)
+
+	task, err := client.GetWithRuntime(ctx, "default", child)
+	require.NoError(t, err)
+	design := "semantic design"
+	require.NoError(t, client.UpdateDetails(ctx, child, UpdateTaskParams{
+		Title: task.Title, Description: "changed", Design: &design, Type: domain.TypeFeature,
+		Priority: domain.Priority(1), Implementations: task.Implementations,
+	}))
+	assertLatestIssueDeltaMatchesStore(t, client, child)
+
+	require.NoError(t, client.Update(ctx, child, domain.StatusInProgress))
+	assertLatestIssueDeltaMatchesStore(t, client, child)
+	require.NoError(t, client.AppendNotes(ctx, child, "semantic note"))
+	assertLatestIssueDeltaMatchesStore(t, client, child)
+	require.NoError(t, client.Update(ctx, parent, domain.StatusDone))
+	require.NoError(t, client.AddDependency(ctx, child, parent, string(domain.DependencyParentChild)))
+	assertLatestIssueDeltaMatchesStore(t, client, child)
+	assertLatestIssueDeltaMatchesStore(t, client, parent)
+	confirmedCtx := WithParentChildOrphanConfirmation(WithDependencyRemovalConfirmation(ctx))
+	require.NoError(t, client.RemoveDependency(confirmedCtx, child, parent, string(domain.DependencyParentChild)))
+	assertLatestIssueDeltaMatchesStore(t, client, child)
+	task, err = client.GetWithRuntime(ctx, "default", child)
+	require.NoError(t, err)
+	task.Title = "synced semantic title"
+	task.UpdatedAt = task.UpdatedAt.Add(time.Second)
+	_, err = client.UpsertSyncedTask(ctx, task)
+	require.NoError(t, err)
+	assertLatestIssueDeltaMatchesStore(t, client, child)
+	_, beforeReplay, err := client.ListProjectionDeltas(ctx, "default", 0, 1000)
+	require.NoError(t, err)
+	_, err = client.UpsertSyncedTask(ctx, task)
+	require.NoError(t, err)
+	_, afterReplay, err := client.ListProjectionDeltas(ctx, "default", 0, 1000)
+	require.NoError(t, err)
+	require.Equal(t, beforeReplay, afterReplay, "identical sync replay must not allocate a cursor")
+	require.NoError(t, client.Archive(ctx, child))
+	assertLatestIssueDeltaMatchesStore(t, client, child)
+	require.NoError(t, client.Unarchive(ctx, child))
+	assertLatestIssueDeltaMatchesStore(t, client, child)
+}
+
+func assertLatestIssueDeltaMatchesStore(t *testing.T, client *Client, issueID string) {
+	t.Helper()
+	deltas, head, err := client.ListProjectionDeltas(context.Background(), "default", 0, 1000)
+	require.NoError(t, err)
+	require.NotZero(t, head)
+	var latest *domain.ProjectionDelta
+	for i := range deltas {
+		if deltas[i].Kind == domain.ProjectionKindIssue && deltas[i].Key == issueID {
+			latest = &deltas[i]
+		}
+	}
+	require.NotNil(t, latest)
+	require.Equal(t, domain.ProjectionDeltaUpsert, latest.Operation)
+	var payload domain.IssueProjectionDeltaPayload
+	require.NoError(t, json.Unmarshal(latest.Payload, &payload))
+	require.Equal(t, domain.IssueProjectionDeltaSchemaVersion, payload.SchemaVersion)
+	require.Equal(t, issueID, payload.IssueID)
+	require.False(t, payload.Deleted)
+	require.NotNil(t, payload.Issue)
+	want, err := client.GetWithRuntimeArchiveMode(context.Background(), "default", issueID, ArchiveInclude)
+	require.NoError(t, err)
+	want = domain.CanonicalIssueProjectionTask(want)
+	wantJSON, err := json.Marshal(want)
+	require.NoError(t, err)
+	gotJSON, err := json.Marshal(payload.Issue)
+	require.NoError(t, err)
+	require.JSONEq(t, string(wantJSON), string(gotJSON))
 }
 
 func TestProjectionDeltaFirstReadIsPureAndRequiresExplicitOpen(t *testing.T) {
