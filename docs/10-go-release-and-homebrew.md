@@ -22,7 +22,7 @@ This repository now ships the Go implementation as the canonical `az` CLI.
    - `azd --version`
 3. If an older worktree-targeting symlink exists, migrate it to the stable,
    paired generation layout with the local helper:
-   - `just build-link-run -- --no-run`
+   - `just build-install-run --no-run`
 
 ## Release Commands
 
