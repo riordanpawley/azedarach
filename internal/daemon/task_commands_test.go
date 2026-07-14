@@ -7458,6 +7458,100 @@ func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T
 	}
 }
 
+type fakeDeferredCleanupOperationManager struct {
+	listFn   func(context.Context, daemonops.Query) ([]daemonops.Record, error)
+	getFn    func(context.Context, string) (daemonops.Record, error)
+	cancelFn func(context.Context, string, string) (daemonops.Record, error)
+}
+
+func (f fakeDeferredCleanupOperationManager) List(ctx context.Context, query daemonops.Query) ([]daemonops.Record, error) {
+	return f.listFn(ctx, query)
+}
+
+func (f fakeDeferredCleanupOperationManager) Get(ctx context.Context, id string) (daemonops.Record, error) {
+	if f.getFn == nil {
+		return daemonops.Record{}, daemonops.ErrNotFound
+	}
+	return f.getFn(ctx, id)
+}
+
+func (f fakeDeferredCleanupOperationManager) Cancel(ctx context.Context, id, reason string) (daemonops.Record, error) {
+	if f.cancelFn == nil {
+		return daemonops.Record{}, daemonops.ErrNotFound
+	}
+	return f.cancelFn(ctx, id, reason)
+}
+
+func TestTaskUpdateDetailsFailsClosedWhenDeferredCleanupBarrierFails(t *testing.T) {
+	tests := []struct {
+		name    string
+		manager fakeDeferredCleanupOperationManager
+		wantErr string
+	}{
+		{
+			name: "list failure",
+			manager: fakeDeferredCleanupOperationManager{listFn: func(context.Context, daemonops.Query) ([]daemonops.Record, error) {
+				return nil, errors.New("injected cleanup list failure")
+			}},
+			wantErr: "list deferred worktree cleanup before lifecycle change: injected cleanup list failure",
+		},
+		{
+			name: "cancel failure",
+			manager: fakeDeferredCleanupOperationManager{
+				listFn: func(context.Context, daemonops.Query) ([]daemonops.Record, error) {
+					return []daemonops.Record{{ID: "cleanup-1", State: daemonops.StateQueued, ResourceKeys: []string{"issue:project:a", "worktree:/tmp/a", "branch:issue/a"}}}, nil
+				},
+				cancelFn: func(context.Context, string, string) (daemonops.Record, error) {
+					return daemonops.Record{}, errors.New("injected cleanup cancel failure")
+				},
+			},
+			wantErr: "cancel deferred worktree cleanup cleanup-1 before lifecycle change: injected cleanup cancel failure",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			projectID := "project"
+			issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+			t.Cleanup(func() { _ = issuesClient.CloseDB() })
+			taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+				Title: "closed issue", Type: domain.TypeBug, Priority: domain.P2, Status: domain.StatusDone,
+			})
+			if err != nil {
+				t.Fatalf("create closed issue: %v", err)
+			}
+			d := &Daemon{
+				cfg:                             Config{Logger: slog.Default()},
+				issueClientsByProject:           map[string]*issues.Client{projectID: issuesClient},
+				deferredCleanupOperationManager: tt.manager,
+			}
+			openLifecycle := domain.IssueWorkflowOpen
+			body, err := json.Marshal(map[string]any{
+				"task_id": taskID, "title": "closed issue", "type": domain.TypeBug, "priority": domain.P2, "lifecycle_state": openLifecycle,
+			})
+			if err != nil {
+				t.Fatalf("marshal update: %v", err)
+			}
+			resp, err := d.handleTaskUpdateDetails(ctx, protocol.RequestEnvelope{
+				Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body,
+			})
+			if err != nil {
+				t.Fatalf("handle update: %v", err)
+			}
+			if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, tt.wantErr) {
+				t.Fatalf("response = %+v, want error containing %q", resp, tt.wantErr)
+			}
+			task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+			if err != nil {
+				t.Fatalf("get closed issue: %v", err)
+			}
+			if task.Status != domain.StatusDone || task.State.Workflow() != domain.IssueWorkflowClosed {
+				t.Fatalf("issue status=%s workflow=%s, want closed", task.Status, task.State.Workflow())
+			}
+		})
+	}
+}
+
 func TestTaskCloseDeferredWorktreeCleanupCancelledWhenIssueReopens(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -7615,41 +7709,104 @@ func TestTaskCloseDeferredWorktreeCleanupCancelledWhenIssueReopens(t *testing.T)
 	if queued.Kind != taskDeferredWorktreeCleanupOperationKind {
 		t.Fatalf("queued operation kind = %s, want %s", queued.Kind, taskDeferredWorktreeCleanupOperationKind)
 	}
+	db, err := sql.Open("sqlite", filepath.Join(repoDir, ".azedarach", "azedarach.db"))
+	if err != nil {
+		t.Fatalf("open issue database: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, `CREATE TRIGGER fail_reopen_history
+		BEFORE INSERT ON issue_observation_events
+		WHEN NEW.event_type = 'issue.status_changed'
+			AND json_extract(NEW.payload_json, '$.from_status') = 'closed'
+			AND json_extract(NEW.payload_json, '$.to_status') = 'open'
+		BEGIN
+			SELECT RAISE(ABORT, 'injected reopen history failure');
+		END`); err != nil {
+		t.Fatalf("create reopen failure trigger: %v", err)
+	}
 
+	openLifecycle := domain.IssueWorkflowOpen
 	updateBody, err := json.Marshal(map[string]any{
-		"task_id": taskID,
-		"status":  domain.StatusInReview,
+		"task_id":         taskID,
+		"title":           "Reopen before deferred cleanup",
+		"type":            domain.TypeBug,
+		"priority":        domain.P2,
+		"lifecycle_state": openLifecycle,
 	})
 	if err != nil {
 		t.Fatalf("marshal update request: %v", err)
 	}
-	updateResp, err := d.handleTaskUpdateStatus(ctx, protocol.RequestEnvelope{
+	updateResp, err := d.handleTaskUpdateDetails(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-reopen-after-close",
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Command:         "task.update_status",
+		Command:         "task.update_details",
 		Body:            updateBody,
 	})
 	if err != nil {
-		t.Fatalf("handleTaskUpdateStatus error: %v", err)
+		t.Fatalf("handleTaskUpdateDetails error: %v", err)
 	}
-	if !updateResp.OK {
-		if updateResp.Error != nil {
-			t.Fatalf("handleTaskUpdateStatus error = %s", updateResp.Error.Message)
-		}
-		t.Fatalf("handleTaskUpdateStatus response = %+v", updateResp)
+	if updateResp.OK || updateResp.Error == nil || !strings.Contains(updateResp.Error.Message, "injected reopen history failure") {
+		t.Fatalf("failed reopen response = %+v, want injected history failure", updateResp)
+	}
+	failedReopen, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get issue after failed reopen: %v", err)
+	}
+	if failedReopen.Status != domain.StatusDone {
+		t.Fatalf("issue status after failed reopen = %s, want closed", failedReopen.Status)
 	}
 	cancelled := waitForRuntimeState(t, d.operationRuntime, closeResult.WorktreeCleanupOperationID, daemonops.StateCancelled)
 	if cancelled.ErrorMessage == "" {
 		t.Fatalf("cancelled cleanup error message empty")
 	}
+	activeCleanup, err := d.operationRuntime.manager.List(ctx, daemonops.Query{
+		ProjectID: normalizedProjectID(projectID), IssueID: taskID, Kind: taskDeferredWorktreeCleanupOperationKind,
+		States: []daemonops.State{daemonops.StateQueued, daemonops.StateRunning},
+	})
+	if err != nil {
+		t.Fatalf("list compensated cleanup: %v", err)
+	}
+	if len(activeCleanup) != 1 || activeCleanup[0].ID == closeResult.WorktreeCleanupOperationID {
+		t.Fatalf("compensated cleanup = %+v, want one requeued operation", activeCleanup)
+	}
+	compensatedCleanupID := activeCleanup[0].ID
+	if _, err := db.ExecContext(ctx, `DROP TRIGGER fail_reopen_history`); err != nil {
+		t.Fatalf("drop reopen failure trigger: %v", err)
+	}
+
+	updateResp, err = d.handleTaskUpdateDetails(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-reopen-after-close-retry",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.update_details",
+		Body:            updateBody,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskUpdateDetails retry error: %v", err)
+	}
+	if !updateResp.OK {
+		if updateResp.Error != nil {
+			t.Fatalf("handleTaskUpdateDetails error = %s", updateResp.Error.Message)
+		}
+		t.Fatalf("handleTaskUpdateDetails response = %+v", updateResp)
+	}
+	_ = waitForRuntimeState(t, d.operationRuntime, compensatedCleanupID, daemonops.StateCancelled)
 	restored, found, err := runtimeStore.GetWorktreeStateByIssueID(ctx, projectID, taskID)
 	if err != nil {
 		t.Fatalf("read restored worktree projection: %v", err)
 	}
 	if !found || restored.Path != sourceWorktree || restored.Branch != sourceBranch {
 		t.Fatalf("restored projection = %+v found=%v, want %s %s", restored, found, sourceWorktree, sourceBranch)
+	}
+	reopened, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get reopened issue: %v", err)
+	}
+	if reopened.Status != domain.StatusOpen || reopened.State.Workflow() != domain.IssueWorkflowOpen {
+		t.Fatalf("reopened issue status=%s workflow=%s, want open", reopened.Status, reopened.State.Workflow())
 	}
 	if strings.Contains(strings.Join(commands, "\n"), "worktree remove") {
 		t.Fatalf("cleanup should not remove worktree after reopen, commands:\n%s", strings.Join(commands, "\n"))

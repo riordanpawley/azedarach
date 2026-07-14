@@ -6,7 +6,10 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,8 +30,11 @@ func TestProjectOrchestratorSessionStartAttachesExactScopeSingleton(t *testing.T
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
 	runner := newSessionStartTmuxRunner()
+	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
+	staleDir := filepath.Join(repoDir, "bin")
+	t.Setenv("PATH", staleDir+string(os.PathListSeparator)+"/usr/bin:/bin")
 	d := &Daemon{
-		cfg:                    Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		cfg:                    Config{RepoDir: repoDir, ManagedGenerationBinDir: managedDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
 		tmux:                   tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil))),
 	}
@@ -61,6 +67,20 @@ func TestProjectOrchestratorSessionStartAttachesExactScopeSingleton(t *testing.T
 	}
 	if first.Disposition != string(daemonstate.OrchestratorLeaseAcquired) || !first.Live {
 		t.Fatalf("first result = %+v", first)
+	}
+	launchCommand := requireNewSessionLaunchCommand(t, runner, first.SessionID)
+	if !strings.Contains(launchCommand, "export PATH=") || !strings.Contains(launchCommand, managedDir) {
+		t.Fatalf("project orchestrator launch lacks managed PATH before prompt command: %s", launchCommand)
+	}
+	for _, command := range runner.commands {
+		if len(command) == 0 || command[0] != "new-session" {
+			continue
+		}
+		pathValue, ok := tmuxCommandEnvironmentValue(command, "PATH")
+		if !ok || !strings.HasPrefix(pathValue, managedDir+string(os.PathListSeparator)) {
+			t.Fatalf("project orchestrator tmux PATH = %q, %t, want managed prefix; command=%v", pathValue, ok, command)
+		}
+		break
 	}
 	staleProjection, found, err := store.GetSessionState(ctx, projectID, first.SessionID)
 	if err != nil || !found {
@@ -152,6 +172,74 @@ func TestProjectOrchestratorSessionStartAttachesExactScopeSingleton(t *testing.T
 	}
 	if projection.State != daemonstate.SessionStateRunning || projection.ObservedState != daemonstate.SessionStateRunning {
 		t.Fatalf("projection lifecycle = %+v", projection)
+	}
+}
+
+func TestProjectOrchestratorLaunchUsesManagedAzForInitialHookAndBackgroundCommands(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	repoDir := filepath.Join(base, "repo")
+	managedDir := filepath.Join(base, "install", ".azedarach-generations", "generation.current")
+	staleDir := filepath.Join(repoDir, "bin")
+	toolDir := filepath.Join(base, "tools")
+	for _, dir := range []string{repoDir, managedDir, staleDir, toolDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tracePath := filepath.Join(base, "trace")
+	writeExecutable := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, binary := range []string{"az", "azd"} {
+		writeExecutable(filepath.Join(managedDir, binary), "printf 'fresh-"+binary+"|%s\\n' \"$*\" >> \"$TRACE\"\n")
+		writeExecutable(filepath.Join(staleDir, binary), "printf 'STALE-"+binary+"|%s\\n' \"$*\" >> \"$TRACE\"\n")
+	}
+	writeExecutable(filepath.Join(toolDir, "codex"), "az prime\n(az background-child) &\nwait\n")
+
+	projectID := "project-managed-path"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(base, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	d := &Daemon{
+		cfg:                    Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "/bin/sh", ManagedGenerationBinDir: managedDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		tmux:                   tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
+	body, err := json.Marshal(protocol.OrchestratorSessionRequest{Scope: domain.ProjectOrchestrationScope()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.handleOrchestratorSession(ctx, protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body})
+	if err != nil || resp.Error != nil {
+		t.Fatalf("start project orchestrator: response=%+v err=%v", resp.Error, err)
+	}
+	var result protocol.OrchestratorSessionResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatal(err)
+	}
+	launchCommand := requireNewSessionLaunchCommand(t, runner, result.SessionID)
+	cmd := exec.Command("/bin/sh", "-c", launchCommand)
+	cmd.Env = append(os.Environ(), "PATH="+staleDir+string(os.PathListSeparator)+toolDir+":/usr/bin:/bin", "TRACE="+tracePath)
+	cmd.Stdin = strings.NewReader("exit\n")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("execute project orchestrator launch: %v\n%s\n%s", err, output, launchCommand)
+	}
+	traceBytes, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := string(traceBytes)
+	if strings.Contains(trace, "STALE-") {
+		t.Fatalf("project orchestrator used stale binary:\n%s", trace)
+	}
+	for _, want := range []string{"fresh-az|prime", "fresh-az|background-child", "fresh-az|ai hook run --agent=codex session_end"} {
+		if !strings.Contains(trace, want) {
+			t.Fatalf("project orchestrator trace missing %q:\n%s", want, trace)
+		}
 	}
 }
 

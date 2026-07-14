@@ -67,6 +67,7 @@ type Config struct {
 	SocketPath                 string
 	LockPath                   string
 	ScopedRuntime              bool
+	ManagedGenerationBinDir    string
 	BaseBranch                 string
 	GitWorkflowMode            string
 	CLITool                    string
@@ -201,6 +202,7 @@ type Daemon struct {
 	reviewReadyRecoveryMu                sync.Mutex
 	reviewReadyRecoveryCursor            map[string]int64
 	reviewReadyRecoveryBeforeLoad        func()
+	deferredCleanupOperationManager      deferredCleanupOperationManager
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -252,6 +254,11 @@ func New(cfg Config) *Daemon {
 	}
 	if cfg.LockPath == "" {
 		cfg.LockPath = appconfig.GlobalDaemonLockPath()
+	}
+	if cfg.ScopedRuntime {
+		cfg.ManagedGenerationBinDir = ""
+	} else if strings.TrimSpace(cfg.ManagedGenerationBinDir) != "" {
+		cfg.ManagedGenerationBinDir = filepath.Clean(cfg.ManagedGenerationBinDir)
 	}
 
 	tmuxRunner := &tmux.ExecRunner{}
@@ -519,6 +526,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.cfg.Logger.Info("daemon startup phase", "phase", "lock_acquire", "duration_ms", time.Since(startedAt).Milliseconds())
 	serveCtx, cancelServe := context.WithCancel(context.Background())
 	defer cancelServe()
+	d.startSessionLaunchArtifactCleanup(serveCtx)
 	shutdownDone := make(chan struct{})
 	shutdownStop := make(chan struct{})
 	shutdownReqCh := d.shutdownRequestChannel()

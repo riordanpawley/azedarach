@@ -68,6 +68,17 @@ func main() {
 		os.Exit(1)
 	}
 	scopedRuntime := config.UseScopedDaemonRuntimeFor(repoDir)
+	managedGenerationBinDir, err := managedDaemonGenerationBinDir(scopedRuntime)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	if managedGenerationBinDir != "" {
+		if err := os.Setenv("PATH", config.PrependPathEntry(os.Getenv("PATH"), managedGenerationBinDir)); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to seed managed generation PATH: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -90,6 +101,7 @@ func main() {
 		SocketPath:                 socketPath,
 		LockPath:                   lockPath,
 		ScopedRuntime:              scopedRuntime,
+		ManagedGenerationBinDir:    managedGenerationBinDir,
 		BaseBranch:                 cfg.Git.BaseBranch,
 		GitWorkflowMode:            cfg.Git.WorkflowMode,
 		CLITool:                    cfg.CLITool,
@@ -199,6 +211,21 @@ func validateDaemonLaunchFence(socketPath string) error {
 		return nil
 	}
 	return config.ValidateSharedDaemonExecutable(socketPath, executable)
+}
+
+func managedDaemonGenerationBinDir(scopedRuntime bool) (string, error) {
+	if scopedRuntime {
+		return "", nil
+	}
+	executable, err := daemonExecutable()
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve global daemon executable: %w", err)
+	}
+	binDir, ok := config.ManagedGenerationBinDir(executable, "azd")
+	if !ok {
+		return "", fmt.Errorf("global daemon executable %s is not a coherent managed az/azd generation; reinstall the managed pair or use AZEDARACH_DAEMON_SCOPE=worktree for explicit development", executable)
+	}
+	return binDir, nil
 }
 
 func resolveScopedWorktreeWatchPath(repoDir string) string {
