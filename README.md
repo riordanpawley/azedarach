@@ -292,7 +292,7 @@ flowchart TD
 This list is intentionally non-exhaustive. Run `just --list` for all available tasks.
 
 ```bash
-just build         # build bin/az + bin/azd
+just build         # build isolated .tmp/az-test/az + azd validation binaries
 just run           # restart daemon + run az
 just test          # go test -v ./...
 just type-check    # go build ./...
@@ -301,6 +301,15 @@ just git-config-lock
 just git-config-unlock
 just git-config-status
 ```
+
+Ordinary `build` and `clean` recipes preserve `bin/az` and `bin/azd`. The
+explicit `just build-link-run` workflow builds a private paired generation,
+serializes installers, and commits both commands through one atomic generation
+switch in the selected stable user bin directory (an existing global command
+directory, Homebrew's bin, or `~/.local/bin`). The public command links resolve
+only within that stable install directory, never back into a Git worktree, and
+linked worktrees are rejected before building. `just install` is intentionally
+disabled because an az-only install can create a protocol-incompatible pair.
 
 Direct Go entrypoint examples:
 

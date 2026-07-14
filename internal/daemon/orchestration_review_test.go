@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -491,7 +492,8 @@ func TestReviewAcceptRejectsInternalReviewArtifactFromPriorEpoch(t *testing.T) {
 func TestReviewAcceptSameIntentRecoversAfterCloseFailure(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	issuesDBPath := filepath.Join(repoDir, "issues.db")
+	client := newMigratedIssueClientAtPath(t, issuesDBPath, slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "owned read-only review", Description: "review findings", Acceptance: "consumed by parent", Type: domain.TypeInvestigation, Priority: domain.P1, Status: domain.StatusInReview})
 	if err != nil {
@@ -508,6 +510,19 @@ func TestReviewAcceptSameIntentRecoversAfterCloseFailure(t *testing.T) {
 	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "worker", OwnerKind: "agent"}); err != nil {
 		t.Fatal(err)
 	}
+	db, err := sql.Open("sqlite", issuesDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.ExecContext(ctx, `CREATE TRIGGER fail_terminal_close
+		BEFORE UPDATE ON issues
+		WHEN NEW.lifecycle_state = 'closed'
+		BEGIN
+			SELECT RAISE(ABORT, 'injected terminal status write failure');
+		END`); err != nil {
+		t.Fatal(err)
+	}
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
 	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-owned-review", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
 	failed, err := d.orchestrationAuthority().Apply(ctx, "project", request)
@@ -515,7 +530,7 @@ func TestReviewAcceptSameIntentRecoversAfterCloseFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(failed.Failed[issueID], "authoritative close") {
-		t.Fatalf("first close = %+v, want ownership-backed close failure", failed)
+		t.Fatalf("first close = %+v, want injected authoritative close failure", failed)
 	}
 	task, err := client.GetWithRuntime(ctx, "project", issueID)
 	if err != nil {
@@ -528,7 +543,10 @@ func TestReviewAcceptSameIntentRecoversAfterCloseFailure(t *testing.T) {
 	if !domain.EvaluateInvestigationAcceptance(task, events).Accepted {
 		t.Fatal("operational close failure revoked semantic reviewer acceptance")
 	}
-	if _, err := client.ReleaseOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "worker"}); err != nil {
+	if task.Ownership == nil || task.Ownership.OwnerID != "worker" {
+		t.Fatalf("failed terminal transaction ownership = %+v, want rolled-back execution lease", task.Ownership)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TRIGGER fail_terminal_close`); err != nil {
 		t.Fatal(err)
 	}
 	retried, err := d.orchestrationAuthority().Apply(ctx, "project", request)

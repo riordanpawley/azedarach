@@ -3438,6 +3438,71 @@ func TestTaskCloseCommandUpdatesStatusThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestTaskCloseCommandReleasesExecutionLeaseBeforeTerminalStatusWrite(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-close-execution-lease"
+	repoDir := t.TempDir()
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Close leased issue",
+		Type:     domain.TypeBug,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{
+		OwnerID:   "worker-a",
+		OwnerKind: "agent",
+		Purpose:   domain.CoordinationLeaseExecution,
+	}); err != nil {
+		t.Fatalf("claim execution lease: %v", err)
+	}
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		hub: publish.NewHub(16, 8, slog.Default()),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		revision: map[string]uint64{},
+	}
+	body, err := json.Marshal(taskCloseRequest{TaskID: taskID})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-execution-lease",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.close",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("handleTaskClose response = %+v, want success without manual lease release", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get closed task: %v", err)
+	}
+	if task.Status != domain.StatusDone {
+		t.Fatalf("task status = %s, want %s", task.Status, domain.StatusDone)
+	}
+	if task.Ownership != nil || len(task.CoordinationLeases) != 0 {
+		t.Fatalf("closed task leases = %+v ownership = %+v, want none", task.CoordinationLeases, task.Ownership)
+	}
+}
+
 func TestTaskCloseCommandCancelledSkipsIntegrationAndWritesOutcome(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -4894,7 +4959,7 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
-	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
 
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -4905,6 +4970,13 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
+	}
+	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{
+		OwnerID:   "worker-a",
+		OwnerKind: "agent",
+		Purpose:   domain.CoordinationLeaseExecution,
+	}); err != nil {
+		t.Fatalf("claim execution lease: %v", err)
 	}
 	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
 	sourceBranch := "riordan/" + taskID + "/integrate"
@@ -5054,7 +5126,7 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 		t.Fatalf("handleTaskClose error: %v", err)
 	}
 	if !resp.OK {
-		t.Fatalf("handleTaskClose response = %+v", resp)
+		t.Fatalf("handleTaskClose response = %+v error=%q", resp, responseErrorMessage(resp))
 	}
 	if mergeBudget < domain.IntegrationMergeTimeout-time.Second || mergeBudget > domain.IntegrationMergeTimeout {
 		t.Fatalf("daemon close merge budget = %v, want close to %v with cleanup reserve retained", mergeBudget, domain.IntegrationMergeTimeout)
@@ -5063,7 +5135,7 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		t.Fatalf("unmarshal close result: %v", err)
 	}
-	if !result.IntegrationRequested || !result.Integrated || result.IntegratedSourceBranch != sourceBranch || result.IntegratedTargetBranch != "main" {
+	if !result.IntegrationRequested || !result.Integrated || !result.WorktreeRemoved || result.IntegratedSourceBranch != sourceBranch || result.IntegratedTargetBranch != "main" {
 		t.Fatalf("close integration result = %+v", result)
 	}
 	hookPhase, ok := taskClosePhaseByName(result.Phases, "githook.commit-msg")
@@ -5082,6 +5154,9 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	}
 	if closed.Status != domain.StatusDone {
 		t.Fatalf("task status = %s, want %s", closed.Status, domain.StatusDone)
+	}
+	if closed.Ownership != nil || len(closed.CoordinationLeases) != 0 {
+		t.Fatalf("closed task leases = %+v ownership = %+v, want none", closed.CoordinationLeases, closed.Ownership)
 	}
 	joined := strings.Join(commands, "\n")
 	for _, want := range []string{
