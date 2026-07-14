@@ -10837,3 +10837,59 @@ func TestEnrichTasksWithSessionStateUsesPaneActivityOverParentContainer(t *testi
 		t.Fatalf("session aggregate counts = total %d active %d paused %d, want 1/0/1", enriched[0].Session.TotalCount, enriched[0].Session.ActiveCount, enriched[0].Session.PausedCount)
 	}
 }
+
+func TestSessionInitAndCreateRollbackCleanCaches(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*Daemon, context.Context, string, *git.WorktreeManager, string, string) string
+	}{
+		{
+			name: "init rollback",
+			run: func(d *Daemon, ctx context.Context, projectID string, manager *git.WorktreeManager, issueID, path string) string {
+				return d.cleanupNewWorktreeAfterInitFailure(ctx, projectID, manager, issueID, path, false)
+			},
+		},
+		{
+			name: "create rollback",
+			run: func(d *Daemon, ctx context.Context, projectID string, manager *git.WorktreeManager, issueID, path string) string {
+				return d.cleanupWorktreeAfterCreateFailure(ctx, projectID, manager, issueID, path)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			repoDir := t.TempDir()
+			issueID := "az-rollback"
+			worktreePath := filepath.Join(repoDir, "wt-"+issueID)
+			runner := &recordingWorktreeCreateRunner{
+				repoDir: repoDir,
+				worktree: map[string]git.Worktree{
+					issueID: {IssueID: issueID, Path: worktreePath, Branch: "tester/" + issueID + "/rollback"},
+				},
+			}
+			manager := git.NewWorktreeManager(runner, repoDir, slog.Default())
+			cacheRoot := filepath.Join(repoDir, ".azedarach", "go")
+			for _, kind := range []string{"normal", "race", "coverage"} {
+				entry := filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+issueID, "entry")
+				if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+					t.Fatalf("seed %s cache: %v", kind, err)
+				}
+				if err := os.WriteFile(entry, []byte("cache"), 0o644); err != nil {
+					t.Fatalf("write %s cache: %v", kind, err)
+				}
+			}
+			d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}}
+
+			note := test.run(d, ctx, protocol.DefaultProjectID, manager, issueID, worktreePath)
+			if !strings.Contains(note, "worktree") {
+				t.Fatalf("rollback note = %q", note)
+			}
+			for _, kind := range []string{"normal", "race", "coverage"} {
+				_, err := os.Stat(filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+issueID))
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("%s cache remains after rollback: %v", kind, err)
+				}
+			}
+		})
+	}
+}

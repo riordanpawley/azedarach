@@ -31,7 +31,7 @@ func Run(ctx context.Context, opts RunOptions) (Measurement, error) {
 	if opts.OutputDir == "" {
 		return Measurement{}, fmt.Errorf("output directory is required")
 	}
-	cacheConfig, err := gocache.FromEnvironment(gocache.KindForProfile(opts.Profile.Name))
+	cacheConfig, err := gocache.FromEnvironmentForRepository(ctx, gocache.KindForProfile(opts.Profile.Name), opts.WorkingDir)
 	if err != nil {
 		return Measurement{}, fmt.Errorf("resolve Go build-cache protocol: %w", err)
 	}

@@ -49,7 +49,6 @@ func TestEnvrcSharesExternalDirenvLayoutAcrossWorktrees(t *testing.T) {
 	mainCheckout := filepath.Join(testRoot, "main checkout")
 	linkedCheckout := filepath.Join(testRoot, "linked checkout")
 	cacheRoot := filepath.Join(testRoot, "cache")
-	goCacheRoot := filepath.Join(testRoot, "go-cache")
 	require.NoError(t, os.Mkdir(mainCheckout, 0o755))
 	require.NoError(t, os.Mkdir(filepath.Join(mainCheckout, "scripts"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(mainCheckout, ".envrc"), envrc, 0o644))
@@ -59,8 +58,8 @@ func TestEnvrcSharesExternalDirenvLayoutAcrossWorktrees(t *testing.T) {
 	runGit(t, mainCheckout, "-c", "user.name=Azedarach Test", "-c", "user.email=test@example.invalid", "commit", "-m", "test fixture")
 	runGit(t, mainCheckout, "worktree", "add", "--detach", linkedCheckout, "HEAD")
 
-	mainLayout := evaluateEnvrcLayout(t, mainCheckout, cacheRoot, goCacheRoot)
-	linkedLayout := evaluateEnvrcLayout(t, linkedCheckout, cacheRoot, goCacheRoot)
+	mainLayout := evaluateEnvrcLayout(t, mainCheckout, cacheRoot)
+	linkedLayout := evaluateEnvrcLayout(t, linkedCheckout, cacheRoot)
 
 	assert.Equal(t, mainLayout, linkedLayout)
 	assert.True(t, strings.HasPrefix(mainLayout, cacheRoot+string(os.PathSeparator)))
@@ -90,7 +89,6 @@ direnv_layout_dir >"$LAYOUT_RESULT"
 		"CHECKOUT="+repoRoot,
 		"LAYOUT_RESULT="+resultPath,
 		"HOME="+home,
-		"AZEDARACH_GO_CACHE_ROOT="+filepath.Join(t.TempDir(), "go-cache"),
 		"ISSUE_BACKEND=none",
 		"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
 	)
@@ -101,7 +99,7 @@ direnv_layout_dir >"$LAYOUT_RESULT"
 	assert.True(t, strings.HasPrefix(strings.TrimSpace(string(layout)), filepath.Join(home, ".cache", "direnv", "layouts")+string(os.PathSeparator)))
 }
 
-func evaluateEnvrcLayout(t *testing.T, checkout, cacheRoot, goCacheRoot string) string {
+func evaluateEnvrcLayout(t *testing.T, checkout, cacheRoot string) string {
 	t.Helper()
 	const script = `
 set -eu
@@ -119,11 +117,10 @@ cd "$CHECKOUT"
 `
 	resultPath := filepath.Join(t.TempDir(), "layout")
 	cmd := exec.Command("bash", "-c", script)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(envWithout("AZEDARACH_GO_CACHE_ROOT", "AZEDARACH_GOCACHE"),
 		"CHECKOUT="+checkout,
 		"LAYOUT_RESULT="+resultPath,
 		"XDG_CACHE_HOME="+cacheRoot,
-		"AZEDARACH_GO_CACHE_ROOT="+goCacheRoot,
 		"ISSUE_BACKEND=none",
 	)
 	output, err := cmd.CombinedOutput()

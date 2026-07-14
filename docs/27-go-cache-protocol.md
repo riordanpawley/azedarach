@@ -17,9 +17,10 @@ The layout is central and lifecycle-scoped. Removing a checkout-local directory
 cannot orphan ownership metadata, and race or coverage instrumentation cannot
 contaminate ordinary development objects.
 
-`AZEDARACH_GOCACHE` cannot redirect a shell outside this layout; when set, it
-must exactly match the derived namespace. This keeps shell use, validation
-telemetry, and daemon lifecycle cleanup on the same owned bytes.
+`AZEDARACH_GO_CACHE_ROOT` and `AZEDARACH_GOCACHE` cannot redirect a shell
+outside this layout; when set, they must exactly match the derived project root
+and namespace. This keeps shell use, validation telemetry, and daemon lifecycle
+cleanup on the same owned bytes.
 
 ## Validation and limits
 

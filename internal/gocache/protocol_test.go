@@ -17,7 +17,7 @@ import (
 )
 
 func TestFromEnvironmentSelectsDistinctInstrumentNamespacesAndThresholds(t *testing.T) {
-	root := t.TempDir()
+	root := RootForRepository(context.Background(), ".")
 	t.Setenv("AZEDARACH_GO_CACHE_ROOT", root)
 	t.Setenv("AZEDARACH_GO_CACHE_OWNER", "issue-DHC")
 	t.Setenv("AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES", "100")
@@ -158,6 +158,34 @@ func TestCleanupInactiveOwnerRefusesAncestorSymlink(t *testing.T) {
 	assert.Equal(t, "user-data", string(data))
 }
 
+func TestCleanupInactiveOwnerRejectsRootAncestorSwap(t *testing.T) {
+	base := t.TempDir()
+	ancestor := filepath.Join(base, "family")
+	root := filepath.Join(ancestor, "go")
+	namespace := filepath.Join(root, "caches", "v1", "normal", "issue-dhc")
+	require.NoError(t, os.MkdirAll(namespace, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(namespace, "cache"), []byte("owned"), 0o644))
+
+	external := t.TempDir()
+	externalNamespace := filepath.Join(external, "go", "caches", "v1", "normal", "issue-dhc")
+	require.NoError(t, os.MkdirAll(externalNamespace, 0o755))
+	keep := filepath.Join(externalNamespace, "keep")
+	require.NoError(t, os.WriteFile(keep, []byte("outside"), 0o644))
+
+	openCacheRootAfterCanonicalizeHook = func(string) {
+		require.NoError(t, os.Rename(ancestor, ancestor+".moved"))
+		require.NoError(t, os.Symlink(external, ancestor))
+		openCacheRootAfterCanonicalizeHook = nil
+	}
+	t.Cleanup(func() { openCacheRootAfterCanonicalizeHook = nil })
+
+	err := CleanupInactiveOwner(context.Background(), root, "dhc")
+	require.ErrorContains(t, err, "symlink namespace")
+	data, readErr := os.ReadFile(keep)
+	require.NoError(t, readErr)
+	assert.Equal(t, "outside", string(data))
+}
+
 func TestCleanupInactiveOwnerDetectsNamespaceSwap(t *testing.T) {
 	root := t.TempDir()
 	target := t.TempDir()
@@ -246,7 +274,7 @@ func TestShellProtocolUsesMainAndIssueNamespacesWithSharedGOPATHAndTrimpath(t *t
 	runGit(t, repo, "worktree", "add", "-b", "tester/dhc/cache-protocol", worktree, "HEAD")
 	script, err := filepath.Abs(filepath.Join("..", "..", "scripts", "go-cache-env.sh"))
 	require.NoError(t, err)
-	cacheRoot := filepath.Join(t.TempDir(), "family-cache")
+	cacheRoot := RootForRepository(context.Background(), repo)
 
 	mainOutput := runShellProtocol(t, repo, script, cacheRoot)
 	issueOutput := runShellProtocol(t, worktree, script, cacheRoot)
@@ -264,12 +292,12 @@ func TestShellProtocolUsesMainNamespaceForAnonymousDetachedWorktree(t *testing.T
 	runGit(t, repo, "worktree", "add", "--detach", worktree, "HEAD")
 	script, err := filepath.Abs(filepath.Join("..", "..", "scripts", "go-cache-env.sh"))
 	require.NoError(t, err)
-	output := runShellProtocol(t, worktree, script, filepath.Join(t.TempDir(), "family-cache"))
+	output := runShellProtocol(t, worktree, script, RootForRepository(context.Background(), repo))
 	assert.Contains(t, output, "AZEDARACH_GO_CACHE_NAMESPACE=normal/main")
 }
 
 func TestFromEnvironmentRejectsOutOfLayoutOverride(t *testing.T) {
-	root := t.TempDir()
+	root := RootForRepository(context.Background(), ".")
 	t.Setenv("AZEDARACH_GO_CACHE_ROOT", root)
 	t.Setenv("AZEDARACH_GO_CACHE_OWNER", "issue-dhc")
 	t.Setenv("AZEDARACH_GOCACHE", filepath.Join(t.TempDir(), "unmanaged"))
@@ -278,11 +306,17 @@ func TestFromEnvironmentRejectsOutOfLayoutOverride(t *testing.T) {
 	require.ErrorContains(t, err, "must equal managed namespace")
 }
 
+func TestFromEnvironmentRejectsCacheRootOverride(t *testing.T) {
+	t.Setenv("AZEDARACH_GO_CACHE_ROOT", t.TempDir())
+	_, err := FromEnvironmentForRepository(context.Background(), KindNormal, ".")
+	require.ErrorContains(t, err, "must equal daemon-authoritative project root")
+}
+
 func TestShellProtocolRejectsOutOfLayoutOverride(t *testing.T) {
 	repo := initTestRepo(t)
 	script, err := filepath.Abs(filepath.Join("..", "..", "scripts", "go-cache-env.sh"))
 	require.NoError(t, err)
-	cacheRoot := filepath.Join(t.TempDir(), "family-cache")
+	cacheRoot := RootForRepository(context.Background(), repo)
 	cmd := exec.Command("bash", script, "--print")
 	cmd.Dir = repo
 	cmd.Env = append(filteredEnvironment("AZEDARACH_GOCACHE"),
@@ -292,6 +326,18 @@ func TestShellProtocolRejectsOutOfLayoutOverride(t *testing.T) {
 	output, runErr := cmd.CombinedOutput()
 	require.Error(t, runErr)
 	assert.Contains(t, string(output), "must equal managed namespace")
+}
+
+func TestShellProtocolRejectsCacheRootOverride(t *testing.T) {
+	repo := initTestRepo(t)
+	script, err := filepath.Abs(filepath.Join("..", "..", "scripts", "go-cache-env.sh"))
+	require.NoError(t, err)
+	cmd := exec.Command("bash", script, "--print")
+	cmd.Dir = repo
+	cmd.Env = append(filteredEnvironment("AZEDARACH_GO_CACHE_ROOT"), "AZEDARACH_GO_CACHE_ROOT="+t.TempDir())
+	output, runErr := cmd.CombinedOutput()
+	require.Error(t, runErr)
+	assert.Contains(t, string(output), "must equal daemon-authoritative project root")
 }
 
 func TestTrimpathProducesEquivalentBinariesAcrossWorktreesAtSameCommit(t *testing.T) {

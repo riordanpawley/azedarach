@@ -1502,7 +1502,7 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 		ensured, err := ensureAncestorWorktrees(ctx, projectID, task, baseBranch, manager, taskLookupFromMap(taskByIssue), a.runtimeProjectionWriter, func(ctx context.Context, initCtx worktreeInitContext) error {
 			if a.runWorktreeSyncInit != nil {
 				if err := a.runWorktreeSyncInit(ctx, initCtx); err != nil {
-					cleanupNote := cleanupWorktreeAfterInitFailure(ctx, manager, initCtx.IssueID, initCtx.WorktreePath, a.logger)
+					cleanupNote := cleanupWorktreeAfterInitFailure(ctx, initCtx.ProjectID, manager, initCtx.IssueID, initCtx.WorktreePath, a.runtimeProjectionWriter, a.logger)
 					return fmt.Errorf("%w%s", err, cleanupNote)
 				}
 			}
@@ -1532,7 +1532,7 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 		}
 		if a.runWorktreeSyncInit != nil {
 			if err := a.runWorktreeSyncInit(ctx, initCtx); err != nil {
-				cleanupNote := cleanupWorktreeAfterInitFailure(ctx, manager, initCtx.IssueID, initCtx.WorktreePath, a.logger)
+				cleanupNote := cleanupWorktreeAfterInitFailure(ctx, initCtx.ProjectID, manager, initCtx.IssueID, initCtx.WorktreePath, a.runtimeProjectionWriter, a.logger)
 				return nil, "", fmt.Errorf("%w%s", err, cleanupNote)
 			}
 		}
@@ -1552,14 +1552,15 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 	return worktree, baseBranch, nil
 }
 
-func cleanupWorktreeAfterInitFailure(ctx context.Context, manager *git.WorktreeManager, issueID, worktreePath string, logger *slog.Logger) string {
+func cleanupWorktreeAfterInitFailure(ctx context.Context, projectID string, manager *git.WorktreeManager, issueID, worktreePath string, writer runtimeProjectionWriter, logger *slog.Logger) string {
 	if manager == nil {
 		return ""
 	}
-	if _, err := manager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
+	removedWorktree, err := manager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
 		Force:         true,
 		BranchCleanup: git.WorktreeBranchCleanupRequired,
-	}); err != nil {
+	})
+	if err != nil {
 		if logger != nil {
 			logger.Warn("failed to cleanup worktree after init failure",
 				"issue_id", issueID,
@@ -1568,6 +1569,16 @@ func cleanupWorktreeAfterInitFailure(ctx context.Context, manager *git.WorktreeM
 			)
 		}
 		return fmt.Sprintf(" (cleanup failed for worktree %s: %v)", worktreePath, err)
+	}
+	if err := finalizeDeletedWorktree(ctx, projectID, issueID, manager, removedWorktree, writer); err != nil {
+		if logger != nil {
+			logger.Warn("Go cache cleanup pending after init rollback",
+				"issue_id", issueID,
+				"worktree", worktreePath,
+				"error", err,
+			)
+		}
+		return fmt.Sprintf(" (removed failed worktree %s; %v)", worktreePath, err)
 	}
 	return fmt.Sprintf(" (removed failed worktree %s)", worktreePath)
 }

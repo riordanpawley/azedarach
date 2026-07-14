@@ -60,28 +60,26 @@ type Telemetry struct {
 }
 
 func FromEnvironment(kind Kind) (Config, error) {
-	root := strings.TrimSpace(os.Getenv("AZEDARACH_GO_CACHE_ROOT"))
-	if root == "" {
-		cache := strings.TrimSpace(os.Getenv("GOCACHE"))
-		for _, directory := range []string{"caches", "build-cache"} {
-			marker := string(filepath.Separator) + directory + string(filepath.Separator)
-			if idx := strings.Index(cache, marker); idx >= 0 {
-				root = cache[:idx]
-				break
-			}
+	return FromEnvironmentForRepository(context.Background(), kind, ".")
+}
+
+// FromEnvironmentForRepository resolves the only daemon-recoverable cache
+// root for repoDir. Repository-family root redirection is rejected because the
+// global daemon cannot authoritatively recover a shell-local custom location.
+func FromEnvironmentForRepository(ctx context.Context, kind Kind, repoDir string) (Config, error) {
+	root := RootForRepository(ctx, repoDir)
+	if override := strings.TrimSpace(os.Getenv("AZEDARACH_GO_CACHE_ROOT")); override != "" {
+		overrideAbs, err := filepath.Abs(filepath.Clean(override))
+		if err != nil {
+			return Config{}, fmt.Errorf("resolve AZEDARACH_GO_CACHE_ROOT: %w", err)
 		}
-	}
-	if root == "" {
-		cmd := exec.Command("git", "rev-parse", "--path-format=absolute", "--git-common-dir")
-		if output, err := cmd.Output(); err == nil {
-			commonDir := strings.TrimSpace(string(output))
-			if filepath.Base(commonDir) == ".git" {
-				root = filepath.Join(filepath.Dir(commonDir), ".azedarach", "go")
-			}
+		rootAbs, err := filepath.Abs(filepath.Clean(root))
+		if err != nil {
+			return Config{}, fmt.Errorf("resolve repository Go cache root: %w", err)
 		}
-	}
-	if root == "" {
-		return Config{}, errors.New("AZEDARACH_GO_CACHE_ROOT is required outside a Git repository")
+		if overrideAbs != rootAbs {
+			return Config{}, fmt.Errorf("AZEDARACH_GO_CACHE_ROOT must equal daemon-authoritative project root %s (got %s)", rootAbs, overrideAbs)
+		}
 	}
 	owner := sanitizeOwner(os.Getenv("AZEDARACH_GO_CACHE_OWNER"))
 	if owner == "" {

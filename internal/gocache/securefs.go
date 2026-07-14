@@ -14,6 +14,7 @@ import (
 const secureOpenFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW
 
 var cleanupOwnerBeforeRemoveHook func(string)
+var openCacheRootAfterCanonicalizeHook func(string)
 
 // openCacheRoot resolves only the already-existing prefix, then creates and
 // opens every cache-root component relative to a held directory descriptor.
@@ -55,14 +56,12 @@ func openCacheRoot(path string, create bool) (*os.File, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("canonicalize Go cache root parent %s: %w", existing, err)
 	}
-	fd, err := unix.Open(canonical, secureOpenFlags, 0)
-	if err != nil {
-		return nil, "", fmt.Errorf("open canonical Go cache root parent %s: %w", canonical, err)
+	if openCacheRootAfterCanonicalizeHook != nil {
+		openCacheRootAfterCanonicalizeHook(canonical)
 	}
-	current := os.NewFile(uintptr(fd), canonical)
-	if current == nil {
-		_ = unix.Close(fd)
-		return nil, "", fmt.Errorf("wrap Go cache root descriptor %s", canonical)
+	current, err := openAbsoluteDirNoFollow(canonical)
+	if err != nil {
+		return nil, "", err
 	}
 	for index := len(missing) - 1; index >= 0; index-- {
 		next, openErr := openChildDir(current, missing[index], true)
@@ -75,6 +74,35 @@ func openCacheRoot(path string, create bool) (*os.File, string, error) {
 		canonical = filepath.Join(canonical, missing[index])
 	}
 	return current, canonical, nil
+}
+
+func openAbsoluteDirNoFollow(path string) (*os.File, error) {
+	fd, err := unix.Open(string(filepath.Separator), secureOpenFlags, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open filesystem root for Go cache: %w", err)
+	}
+	current := os.NewFile(uintptr(fd), string(filepath.Separator))
+	if current == nil {
+		_ = unix.Close(fd)
+		return nil, errors.New("wrap filesystem root descriptor for Go cache")
+	}
+	relative, err := filepath.Rel(string(filepath.Separator), path)
+	if err != nil {
+		_ = current.Close()
+		return nil, fmt.Errorf("split canonical Go cache root %s: %w", path, err)
+	}
+	if relative == "." {
+		return current, nil
+	}
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		next, openErr := openChildDir(current, component, false)
+		_ = current.Close()
+		if openErr != nil {
+			return nil, fmt.Errorf("open canonical Go cache root component %s: %w", component, openErr)
+		}
+		current = next
+	}
+	return current, nil
 }
 
 func openChildDir(parent *os.File, name string, create bool) (*os.File, error) {

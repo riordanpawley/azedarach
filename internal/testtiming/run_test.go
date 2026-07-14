@@ -104,14 +104,16 @@ func TestEnvironment(t *testing.T) {
 
 func configureTestCacheFamily(t *testing.T) {
 	t.Helper()
-	t.Setenv("AZEDARACH_GO_CACHE_ROOT", t.TempDir())
 	t.Setenv("AZEDARACH_GO_CACHE_OWNER", "issue-test")
 	t.Setenv("AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES", "104857600")
 	t.Setenv("AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES", "209715200")
 }
 
 func TestRunWritesMachineReadableArtifactsWhenBuildCacheHardLimitRefuses(t *testing.T) {
-	cacheRoot := t.TempDir()
+	module := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(module, "go.mod"), []byte("module example.test/refusal\n\ngo 1.24.2\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(module, "refusal_test.go"), []byte("package refusal\nimport \"testing\"\nfunc TestMustNotRun(t *testing.T) { t.Fatal(\"command ran\") }\n"), 0o644))
+	cacheRoot := filepath.Join(module, ".azedarach", "go")
 	t.Setenv("AZEDARACH_GO_CACHE_ROOT", cacheRoot)
 	t.Setenv("AZEDARACH_GO_CACHE_OWNER", "issue-dhc")
 	t.Setenv("AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES", "4")
@@ -120,9 +122,6 @@ func TestRunWritesMachineReadableArtifactsWhenBuildCacheHardLimitRefuses(t *test
 	require.NoError(t, os.MkdirAll(cachePath, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(cachePath, "oversized"), []byte("0123456789"), 0o644))
 
-	module := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(module, "go.mod"), []byte("module example.test/refusal\n\ngo 1.24.2\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(module, "refusal_test.go"), []byte("package refusal\nimport \"testing\"\nfunc TestMustNotRun(t *testing.T) { t.Fatal(\"command ran\") }\n"), 0o644))
 	output := filepath.Join(t.TempDir(), "artifacts")
 	baseline := Baseline{RecordedAt: "2026-07-13"}
 	profile := Profile{Name: "fixture", Packages: []string{"./..."}, GoTestArgs: []string{"-json", "-count=1"}}

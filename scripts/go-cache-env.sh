@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Source this file from direnv to select the repository-family Go cache namespace.
 
-_az_go_cache_root="${AZEDARACH_GO_CACHE_ROOT:-}"
-if [[ -z "$_az_go_cache_root" ]]; then
-  _az_common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
-  if [[ -n "$_az_common_dir" && "$(basename "$_az_common_dir")" == ".git" ]]; then
-    _az_go_cache_root="$(dirname "$_az_common_dir")/.azedarach/go"
-  else
-    _az_go_cache_root="$(pwd -P)/.azedarach/go"
-  fi
+_az_common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+if [[ -n "$_az_common_dir" && "$(basename "$_az_common_dir")" == ".git" ]]; then
+  _az_go_cache_root="$(dirname "$_az_common_dir")/.azedarach/go"
+else
+  _az_go_cache_root="$(pwd -P)/.azedarach/go"
+fi
+if [[ -n "${AZEDARACH_GO_CACHE_ROOT:-}" && "$AZEDARACH_GO_CACHE_ROOT" != "$_az_go_cache_root" ]]; then
+  echo "AZEDARACH_GO_CACHE_ROOT must equal daemon-authoritative project root $_az_go_cache_root (got $AZEDARACH_GO_CACHE_ROOT)" >&2
+  return 1 2>/dev/null || exit 1
 fi
 
 _az_git_dir="$(git rev-parse --path-format=absolute --git-dir 2>/dev/null || true)"
