@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -5708,6 +5709,147 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 	}
 	if removeAttempts != 1 {
 		t.Fatalf("worktree remove attempts = %d, want physical cleanup only on the first close", removeAttempts)
+	}
+}
+
+type codedSQLiteDaemonTestError struct{ code int }
+
+func (e codedSQLiteDaemonTestError) Error() string { return "injected sqlite contention" }
+func (e codedSQLiteDaemonTestError) Code() int     { return e.code }
+
+func TestTaskCloseSameCallRetriesBusySnapshotWithoutRepeatingIntegrationOrCleanup(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-same-call-busy-snapshot"
+	repoDir := t.TempDir()
+	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repoDir, "config", "user.name", "Azedarach Test")
+	runDaemonTestGit(t, repoDir, "config", "user.email", "azedarach@example.com")
+	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repoDir, "add", "tracked.txt")
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "chore: seed")
+
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := newMigratedIssueClientAtPath(t, dbPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Same-call projection retry", Type: domain.TypeBug, Priority: domain.P1,
+		Status: domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceBranch := "riordan/" + taskID + "/same-call-projection-retry"
+	sourceWorktree := filepath.Join(t.TempDir(), "wt-"+taskID)
+	runDaemonTestGit(t, repoDir, "worktree", "add", "-q", "-b", sourceBranch, sourceWorktree)
+	if err := os.WriteFile(filepath.Join(sourceWorktree, "tracked.txt"), []byte("integrated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, sourceWorktree, "commit", "-q", "-am", "fix("+taskID+"): exercise same-call retry")
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID, IssueID: taskID, Path: sourceWorktree, Branch: sourceBranch,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var commandsMu sync.Mutex
+	commands := make([]string, 0, 64)
+	execRunner := git.NewExecRunner(repoDir)
+	runner := &recordingGitRunner{runWithContextFn: func(runCtx context.Context, args ...string) (string, error) {
+		commandsMu.Lock()
+		commands = append(commands, strings.Join(args, " "))
+		commandsMu.Unlock()
+		return execRunner.Run(runCtx, args...)
+	}}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg:                       Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		issueClientsByProject:     map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject:    map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager},
+		git:                       git.NewClient(runner, logger), revision: map[string]uint64{projectID: 1},
+		hub: publish.NewHub(16, 8, logger),
+	}
+	d.gitStatusAdapter = &gitServiceAdapter{
+		client: git.NewClient(runner, logger), runtimeStateStore: runtimeStore,
+		logger: logger, baseBranch: "main",
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject:           func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore { return runtimeStore },
+		runtimeProjectionWriter:     d.runtimeProjectionStateWriter(), logger: logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	var projectionAttempts atomic.Int32
+	closeCtx := daemonstate.WithSQLiteWriteAttemptHookForTest(ctx, func(operation string, attempt int) error {
+		if operation != "delete_worktree_state" {
+			return nil
+		}
+		projectionAttempts.Store(int32(attempt))
+		if attempt <= 2 {
+			return codedSQLiteDaemonTestError{code: 517}
+		}
+		return nil
+	})
+	body, err := json.Marshal(taskCloseRequest{TaskID: taskID, IntegrateBeforeClose: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.handleTaskClose(closeCtx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion, RequestID: "req-close-same-call-busy-snapshot",
+		Kind: protocol.EnvelopeKindCommand, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command: "task.close", Body: body,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.close response = %+v", resp)
+	}
+	if got := projectionAttempts.Load(); got != 3 {
+		t.Fatalf("delete projection attempts = %d, want 3", got)
+	}
+	closed, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil || closed.Status != domain.StatusDone {
+		t.Fatalf("closed task status=%s err=%v", closed.Status, err)
+	}
+	if _, err := os.Stat(sourceWorktree); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source worktree still present: %v", err)
+	}
+	receipts, err := issuesClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{
+		Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted},
+	})
+	if err != nil || len(receipts) != 1 {
+		t.Fatalf("integration receipts=%+v err=%v, want exactly one", receipts, err)
+	}
+	commandsMu.Lock()
+	commandsSnapshot := append([]string(nil), commands...)
+	commandsMu.Unlock()
+	joined := strings.Join(commandsSnapshot, "\n")
+	if got := strings.Count(joined, "merge --no-edit "+sourceBranch); got != 1 {
+		t.Fatalf("merge count = %d, want 1:\n%s", got, joined)
+	}
+	cleanupCount := 0
+	for _, command := range commandsSnapshot {
+		fields := strings.Fields(command)
+		if len(fields) >= 3 && strings.Contains(command, "worktree remove") && filepath.Base(fields[len(fields)-1]) == filepath.Base(sourceWorktree) {
+			cleanupCount++
+		}
+	}
+	if cleanupCount != 1 {
+		t.Fatalf("source cleanup count = %d, want 1:\n%s", cleanupCount, joined)
 	}
 }
 

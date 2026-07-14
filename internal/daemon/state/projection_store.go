@@ -413,6 +413,19 @@ type RuntimeStateStore struct {
 	db *sql.DB
 }
 
+type sqliteWriteAttemptHookKey struct{}
+
+// WithSQLiteWriteAttemptHookForTest returns a context that injects failures
+// immediately before named runtime projection write attempts. It exists only
+// for deterministic active-path contention tests; production callers must not
+// use it to alter persistence behavior.
+func WithSQLiteWriteAttemptHookForTest(ctx context.Context, hook func(operation string, attempt int) error) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, sqliteWriteAttemptHookKey{}, hook)
+}
+
 // SessionStateReader loads persisted session state rows for a project.
 type SessionStateReader interface {
 	ListSessionStates(context.Context, string) ([]Session, error)
@@ -2148,6 +2161,11 @@ func (s *RuntimeStateStore) withWriteOperation(ctx context.Context, operation st
 			return waitSQLiteWriteRetry(waitCtx, delay)
 		}, func(attemptCtx context.Context) error {
 			attempts++
+			if hook, _ := attemptCtx.Value(sqliteWriteAttemptHookKey{}).(func(string, int) error); hook != nil {
+				if err := hook(operation, attempts); err != nil {
+					return err
+				}
+			}
 			return fn(attemptCtx)
 		})
 		if err != nil && isSQLiteWriteContention(err) {
@@ -2176,27 +2194,19 @@ func retrySQLiteWrite(
 	}
 	retryCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	var lastErr error
 	for {
 		if retryCtx.Err() != nil {
-			if lastErr != nil {
-				return lastErr
-			}
 			return retryCtx.Err()
 		}
 		err := fn(retryCtx)
 		if err == nil {
 			return nil
 		}
-		if retryCtx.Err() != nil && lastErr != nil {
-			return lastErr
-		}
 		if !isSQLiteWriteContention(err) {
 			return err
 		}
-		lastErr = err
 		if err := wait(retryCtx, delay); err != nil {
-			return lastErr
+			return err
 		}
 	}
 }
