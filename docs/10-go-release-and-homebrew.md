@@ -23,6 +23,9 @@ This repository now ships the Go implementation as the canonical `az` CLI.
    - The two version strings must match. In an Azedarach repository shell,
      `command -v az` and `command -v azd` must resolve from the same stable
      install directory rather than the repository's preserved `bin/` assets.
+     Global daemon pairing trusts only a client whose resolved executable is
+     inside `.azedarach-generations/generation.*`; primary-repo `bin/` binaries
+     remain development artifacts.
    - Successful immutable generations are retained across later installs so
      long-lived clients keep access to their paired daemon. Do not manually
      remove generation directories while clients from them may still run.

@@ -600,6 +600,38 @@ func TestLauncherResolveCommand_GlobalDaemonUsesAzdFromRunningAzGeneration(t *te
 	}
 }
 
+func TestLauncherResolveCommand_GlobalDaemonRejectsPrimaryRepoBinPair(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo .git): %v", err)
+	}
+	repoBin := filepath.Join(repoDir, "bin")
+	if err := os.MkdirAll(repoBin, 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo bin): %v", err)
+	}
+	az := filepath.Join(repoBin, "az")
+	azd := filepath.Join(repoBin, "azd")
+	for _, path := range []string{az, azd} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+	previousExecutable := currentExecutable
+	currentExecutable = func() (string, error) { return az, nil }
+	t.Cleanup(func() { currentExecutable = previousExecutable })
+	t.Setenv("PATH", repoBin)
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_BIN", "")
+
+	got, err := NewLauncher(repoDir, filepath.Join(t.TempDir(), "daemon.sock")).resolveCommand()
+	if !errors.Is(err, errPairedDaemonUnavailable) {
+		t.Fatalf("resolveCommand() error = %v, want %v", err, errPairedDaemonUnavailable)
+	}
+	if got.executable != "" {
+		t.Fatalf("resolveCommand().executable = %q, want fail-closed empty command", got.executable)
+	}
+}
+
 func TestLauncherResolveCommand_GlobalDaemonRejectsNonExecutableSibling(t *testing.T) {
 	execDir := t.TempDir()
 	az := filepath.Join(execDir, "az")

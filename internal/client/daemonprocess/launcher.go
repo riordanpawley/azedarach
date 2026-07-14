@@ -494,7 +494,7 @@ func (l *Launcher) resolveCommand() (daemonCommand, error) {
 		if paired := daemonBinaryNearCurrentExecutable(); paired != "" {
 			return daemonCommand{executable: paired}, nil
 		}
-		return daemonCommand{}, fmt.Errorf("%w: global daemon launch requires an executable azd beside the running az generation; reinstall the managed az/azd pair or set AZEDARACH_DAEMON_BIN explicitly", errPairedDaemonUnavailable)
+		return daemonCommand{}, fmt.Errorf("%w: global daemon launch requires the running az to resolve under .azedarach-generations/generation.* with an executable sibling azd; reinstall the managed az/azd pair or set AZEDARACH_DAEMON_BIN explicitly", errPairedDaemonUnavailable)
 	}
 	candidates := []string{}
 	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
@@ -526,11 +526,26 @@ func daemonBinaryNearCurrentExecutable() string {
 	if resolved, resolveErr := filepath.EvalSymlinks(executable); resolveErr == nil && strings.TrimSpace(resolved) != "" {
 		executable = resolved
 	}
+	if !isManagedGenerationClient(executable) {
+		return ""
+	}
 	candidate := filepath.Join(filepath.Dir(executable), "azd")
 	if executableFile(candidate) {
 		return candidate
 	}
 	return ""
+}
+
+func isManagedGenerationClient(executable string) bool {
+	clean := filepath.Clean(executable)
+	if filepath.Base(clean) != "az" {
+		return false
+	}
+	generationDir := filepath.Dir(clean)
+	generationName := filepath.Base(generationDir)
+	return strings.HasPrefix(generationName, "generation.") &&
+		len(generationName) > len("generation.") &&
+		filepath.Base(filepath.Dir(generationDir)) == ".azedarach-generations"
 }
 
 func executableFile(path string) bool {
