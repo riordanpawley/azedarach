@@ -137,15 +137,18 @@ func TestReconcileStaleBusySessionActivityDoesNotOverwriteNewerBusyHook(t *testi
 	ctx := context.Background()
 	const projectID, issueID = "project", "dgf"
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	store := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
+	otherDaemonStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = otherDaemonStore.Close() })
 	if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: now.Add(-time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.UpsertSessionActivityEvidence(ctx, daemonstate.SessionActivityEvidence{ProjectID: projectID, SessionID: sessionID, IssueID: issueID, Activity: "busy", ActivitySource: "hooks", SourceSessionID: sessionID, ObservedAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
-	runner := &activityRaceRunner{store: store, projectID: projectID, sessionID: sessionID, issueID: issueID, newerAt: now.Add(time.Second)}
+	runner := &activityRaceRunner{store: otherDaemonStore, projectID: projectID, sessionID: sessionID, issueID: issueID, newerAt: now.Add(time.Second)}
 	d := &Daemon{cfg: Config{Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}}
 
 	converged, err := d.reconcileStaleBusySessionActivity(ctx, projectID, nil)

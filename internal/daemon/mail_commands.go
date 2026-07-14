@@ -188,12 +188,12 @@ func (d *Daemon) readMailboxEventsWithReviewReadyRecovery(ctx context.Context, r
 	if err != nil {
 		return nil, fmt.Errorf("lock mailbox for review-ready recovery: %w", err)
 	}
-	defer unlock()
-
 	if err := repairTrailingMailboxFragment(repoDir, parentIssue); err != nil {
+		unlock()
 		return nil, err
 	}
 	events, err := readMailboxEvents(repoDir, parentIssue)
+	unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +207,7 @@ func (d *Daemon) readMailboxEventsWithReviewReadyRecovery(ctx context.Context, r
 				"error", err,
 			)
 		}
-		return nil, err
+		return events, nil
 	}
 	return recovered, nil
 }
@@ -223,6 +223,9 @@ func (d *Daemon) recoverReviewReadyMailboxEvents(ctx context.Context, req protoc
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return existing, nil
+	}
+	if d.reviewReadyRecoveryBeforeLoad != nil {
+		d.reviewReadyRecoveryBeforeLoad()
 	}
 	recoveryKey := projectID + "\x00" + repoDir + "\x00" + rootIssueID
 	d.reviewReadyRecoveryMu.Lock()
@@ -270,24 +273,12 @@ func (d *Daemon) recoverReviewReadyMailboxEvents(ctx context.Context, req protoc
 		}
 	}
 
-	published := make(map[string]struct{}, len(existing))
-	for _, event := range existing {
-		if event.Payload == nil || event.Payload["publication"] != reviewReadyReplayPublication {
-			continue
-		}
-		if key, _ := event.Payload["publication_key"].(string); strings.TrimSpace(key) != "" {
-			published[key] = struct{}{}
-		}
-	}
-	nextSeq := lastMailboxSequence(existing) + 1
+	candidates := make([]daemonMailEvent, 0)
 	for _, task := range tasks {
 		issueID := task.ID.String()
 		for _, publication := range domain.DeriveReviewReadyPublications(byIssue[issueID]) {
 			source := publication.SourceEvent
 			key := fmt.Sprintf("%s:%d", projectID, source.ID)
-			if _, ok := published[key]; ok {
-				continue
-			}
 			body, marshalErr := json.Marshal(map[string]any{
 				"summary":           "issue is review-ready",
 				"source_event_id":   source.ID,
@@ -297,7 +288,7 @@ func (d *Daemon) recoverReviewReadyMailboxEvents(ctx context.Context, req protoc
 				return nil, fmt.Errorf("encode review-ready publication %s: %w", key, marshalErr)
 			}
 			event := daemonMailEvent{
-				Seq: nextSeq, ParentIssue: rootIssueID, IssueID: issueID,
+				ParentIssue: rootIssueID, IssueID: issueID,
 				Type: "worker-integration-ready", From: "daemon-observation-replay",
 				Body: string(body), CreatedAt: source.ObservedAt.UTC(),
 				Payload: map[string]interface{}{
@@ -310,22 +301,56 @@ func (d *Daemon) recoverReviewReadyMailboxEvents(ctx context.Context, req protoc
 			if event.CreatedAt.IsZero() {
 				event.CreatedAt = time.Now().UTC()
 			}
-			if err := appendMailboxEvent(repoDir, event); err != nil {
-				return nil, fmt.Errorf("append recovered review-ready publication %s: %w", key, err)
-			}
-			existing = append(existing, event)
+			candidates = append(candidates, event)
+		}
+	}
+
+	// Observation loading can involve a full durable-stream scan. Keep it outside
+	// the mailbox critical section, then reread publication keys under the lock so
+	// concurrent sends and concurrent replay attempts retain one monotonic cursor.
+	unlock, err := lockMailbox(repoDir, rootIssueID)
+	if err != nil {
+		return nil, fmt.Errorf("lock mailbox to publish review-ready recovery: %w", err)
+	}
+	defer unlock()
+	if err := repairTrailingMailboxFragment(repoDir, rootIssueID); err != nil {
+		return nil, err
+	}
+	existing, err = readMailboxEvents(repoDir, rootIssueID)
+	if err != nil {
+		return nil, err
+	}
+	published := make(map[string]struct{}, len(existing))
+	for _, event := range existing {
+		if event.Payload == nil || event.Payload["publication"] != reviewReadyReplayPublication {
+			continue
+		}
+		if key, _ := event.Payload["publication_key"].(string); strings.TrimSpace(key) != "" {
 			published[key] = struct{}{}
-			nextSeq++
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Info("rooted review-ready publication recovered",
-					"project_id", projectID,
-					"root_issue_id", rootIssueID,
-					"issue_id", issueID,
-					"source_event_id", source.ID,
-					"source_event_type", source.Type,
-					"mailbox_seq", event.Seq,
-				)
-			}
+		}
+	}
+	nextSeq := lastMailboxSequence(existing) + 1
+	for _, event := range candidates {
+		key, _ := event.Payload["publication_key"].(string)
+		if _, ok := published[key]; ok {
+			continue
+		}
+		event.Seq = nextSeq
+		if err := appendMailboxEvent(repoDir, event); err != nil {
+			return nil, fmt.Errorf("append recovered review-ready publication %s: %w", key, err)
+		}
+		existing = append(existing, event)
+		published[key] = struct{}{}
+		nextSeq++
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Info("rooted review-ready publication recovered",
+				"project_id", projectID,
+				"root_issue_id", rootIssueID,
+				"issue_id", event.IssueID,
+				"source_event_id", event.Payload["source_event_id"],
+				"source_event_type", event.Payload["source_event_type"],
+				"mailbox_seq", event.Seq,
+			)
 		}
 	}
 	d.reviewReadyRecoveryMu.Lock()

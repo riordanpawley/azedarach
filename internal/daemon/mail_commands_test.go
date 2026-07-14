@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -131,6 +133,87 @@ func TestMailWatchRepairsInterruptedAppendBeforeReviewReadyReplay(t *testing.T) 
 	}
 	if !bytes.HasSuffix(data, []byte("\n")) {
 		t.Fatalf("mailbox = %q, want committed newline", data)
+	}
+}
+
+func TestMailWatchRecoveryFailureReturnsDurableMailboxEvents(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	root, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appendMailboxEvent(repoDir, daemonMailEvent{Seq: 1, ParentIssue: root, IssueID: "child", Type: "worker-progress", Body: "durable", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	events, err := d.readMailboxEventsWithReviewReadyRecovery(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: "project"}}, repoDir, root)
+	if err != nil {
+		t.Fatalf("recovery failure must not fail mailbox read: %v", err)
+	}
+	if len(events) != 1 || events[0].Seq != 1 || events[0].Body != "durable" {
+		t.Fatalf("events = %+v, want already-durable mailbox event", events)
+	}
+}
+
+func TestMailConcurrentSendDoesNotWaitForReviewReadyReplayLoad(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	root, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadStarted := make(chan struct{})
+	releaseLoad := make(chan struct{})
+	var once, releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseLoad) })
+	d := &Daemon{
+		cfg:                   Config{RepoDir: repoDir, Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{"project": client},
+		reviewReadyRecoveryBeforeLoad: func() {
+			once.Do(func() { close(loadStarted) })
+			<-releaseLoad
+		},
+	}
+	readDone := make(chan error, 1)
+	go func() {
+		_, readErr := d.readMailboxEventsWithReviewReadyRecovery(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: "project"}}, repoDir, root)
+		readDone <- readErr
+	}()
+	select {
+	case <-loadStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for review-ready replay load")
+	}
+
+	sendBody := mustMarshal(t, protocol.MailSendCommandBody{
+		RepoDir: repoDir, ParentIssue: root, IssueID: "child", Type: "worker-progress", Body: "concurrent",
+	})
+	sendDone := make(chan protocol.ResponseEnvelope, 1)
+	go func() {
+		resp, _ := d.handleMailSend(ctx, protocol.RequestEnvelope{Body: sendBody})
+		sendDone <- resp
+	}()
+	select {
+	case resp := <-sendDone:
+		if !resp.OK {
+			t.Fatalf("concurrent send failed: %+v", resp.Error)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("concurrent mail.send blocked on slow observation replay")
+	}
+	releaseOnce.Do(func() { close(releaseLoad) })
+	if err := <-readDone; err != nil {
+		t.Fatal(err)
+	}
+	events, err := readMailboxEvents(repoDir, root)
+	if err != nil || len(events) != 1 || events[0].Body != "concurrent" {
+		t.Fatalf("events = %+v err=%v, want concurrent send retained", events, err)
 	}
 }
 

@@ -27,6 +27,10 @@ func (d *Daemon) reconcileStaleBusySessionActivity(ctx context.Context, projectI
 	if store == nil {
 		return 0, nil
 	}
+	source := sourceForInvariant(daemonInvariantSessionActivityConverge)
+	if !usesProjectionSource(source) || !usesTmuxSource(source) {
+		return 0, fmt.Errorf("unsupported session activity convergence invariant source: %s", source)
+	}
 	evidenceRows, err := store.ListSessionActivityEvidence(ctx, projectID, issueIDs)
 	if err != nil {
 		return 0, fmt.Errorf("list activity evidence for terminal prompt convergence: %w", err)
