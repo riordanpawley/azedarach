@@ -102,8 +102,9 @@ packages on high-core hosts while retaining package-level parallel execution.
 3. `just test-build-contract` executes the real `build` and `clean` recipes in
    an isolated fixture and verifies they preserve existing `bin/az` and
    `bin/azd` link targets. It also verifies `build-link-run` rejects linked
-   worktrees before mutation and atomically installs standalone global binaries
-   instead of links into the repository.
+   worktrees before mutation, rolls back a failed link migration, serializes
+   concurrent installers, and commits `az` plus `azd` through one atomic
+   generation switch. The stable public links never target the repository.
 4. `just check-boundaries` runs static dependency/drift checks and the small
    boundary profile. It no longer reruns all CLI, TUI, daemon, and client tests
    after the cold suite.

@@ -89,10 +89,11 @@ type-check:
     go build ./...
 
 clean:
-    rm -rf .tmp/az-test/ .tmp/az-install/ coverage.out coverage.html
+    rm -rf .tmp/az-test/ .tmp/cli-smoke/ coverage.out coverage.html
 
 install:
-    go install ./cmd/az
+    @echo "Refusing unpaired install: run 'just build-link-run -- --no-run' from the primary worktree" >&2
+    @exit 1
 
 lint:
     golangci-lint run ./...

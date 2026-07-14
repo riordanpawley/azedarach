@@ -18,8 +18,21 @@ if [[ "$git_dir" != "$git_common_dir" ]]; then
   exit 1
 fi
 
-build_dir="$repo_root/.tmp/az-install"
-mkdir -p "$build_dir"
+build_dir="$(mktemp -d "${TMPDIR:-/tmp}/azedarach-install.XXXXXX")"
+lock_dir=""
+lock_owned=0
+new_generation=""
+cleanup_install() {
+  rm -rf "$build_dir"
+  if [[ -n "$new_generation" && -d "$new_generation" ]]; then
+    rm -rf "$new_generation"
+  fi
+  if [[ "$lock_owned" -eq 1 && -n "$lock_dir" && -d "$lock_dir" &&
+        "$(cat "$lock_dir/pid" 2>/dev/null || true)" == "$$" ]]; then
+    rm -rf "$lock_dir"
+  fi
+}
+trap cleanup_install EXIT
 sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 ldflags="-X github.com/riordanpawley/azedarach/internal/buildinfo.Version=dev -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=${sha}"
 go build -ldflags "$ldflags" -o "$build_dir/az" ./cmd/az
@@ -63,20 +76,115 @@ choose_install_dir() {
 }
 
 install_dir="$(choose_install_dir)"
-install_binary() {
-  local src="$1"
-  local dst="$2"
-  local tmp
+lock_dir="$install_dir/.azedarach-install.lock"
+acquire_install_lock() {
+  local attempts=0
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    attempts=$((attempts + 1))
+    if ((attempts >= 600)); then
+      echo "Timed out waiting for paired az/azd install lock: $lock_dir" >&2
+      echo "If no installer is running, remove that stale lock directory and retry." >&2
+      return 1
+    fi
+    sleep 0.05
+  done
+  printf '%s\n' "$$" >"$lock_dir/pid"
+  lock_owned=1
+}
 
-  tmp="$(mktemp "${dst}.tmp.XXXXXX")"
-  if ! cp "$src" "$tmp" || ! chmod 0755 "$tmp" || ! mv -f "$tmp" "$dst"; then
-    rm -f "$tmp"
+atomic_symlink() {
+  local target="$1"
+  local destination="$2"
+  local temporary
+  local -a mv_args
+  temporary="$(mktemp "${destination}.tmp.XXXXXX")"
+  rm -f "$temporary"
+  ln -s "$target" "$temporary"
+  # GNU mv needs -T and BSD mv needs -h to replace a symlink-to-directory
+  # instead of moving the temporary link through it.
+  if mv --help 2>&1 | grep -q -- '--no-target-directory'; then
+    mv_args=(-fT)
+  else
+    mv_args=(-fh)
+  fi
+  if ! mv "${mv_args[@]}" "$temporary" "$destination"; then
+    rm -f "$temporary"
     return 1
   fi
 }
 
-install_binary "$build_dir/az" "$install_dir/az"
-install_binary "$build_dir/azd" "$install_dir/azd"
+public_links_are_managed() {
+  [[ -L "$install_dir/az" ]] &&
+    [[ "$(readlink "$install_dir/az")" == ".azedarach-current/az" ]] &&
+    [[ -L "$install_dir/azd" ]] &&
+    [[ "$(readlink "$install_dir/azd")" == ".azedarach-current/azd" ]] &&
+    [[ -L "$install_dir/.azedarach-current" ]]
+}
+
+migrate_public_links() {
+  local generations_dir="$1"
+  local previous_generation rollback_dir
+  previous_generation="$(mktemp -d "$generations_dir/generation.previous.XXXXXX")"
+  rollback_dir="$(mktemp -d "$install_dir/.azedarach-rollback.XXXXXX")"
+
+  for binary in az azd; do
+    if [[ -e "$install_dir/$binary" || -L "$install_dir/$binary" ]]; then
+      cp -L "$install_dir/$binary" "$previous_generation/$binary"
+      chmod 0755 "$previous_generation/$binary"
+      cp -P "$install_dir/$binary" "$rollback_dir/$binary"
+    fi
+  done
+
+  atomic_symlink ".azedarach-generations/$(basename "$previous_generation")" \
+    "$install_dir/.azedarach-current"
+
+  if ! atomic_symlink ".azedarach-current/az" "$install_dir/az" ||
+    ! atomic_symlink ".azedarach-current/azd" "$install_dir/azd"; then
+    for binary in az azd; do
+      rm -f "$install_dir/$binary"
+      if [[ -e "$rollback_dir/$binary" || -L "$rollback_dir/$binary" ]]; then
+        mv -f "$rollback_dir/$binary" "$install_dir/$binary"
+      fi
+    done
+    rm -rf "$rollback_dir" "$previous_generation"
+    return 1
+  fi
+  rm -rf "$rollback_dir"
+}
+
+acquire_install_lock
+generations_dir="$install_dir/.azedarach-generations"
+mkdir -p "$generations_dir"
+new_generation="$(mktemp -d "$generations_dir/generation.XXXXXX")"
+cp "$build_dir/az" "$new_generation/az"
+cp "$build_dir/azd" "$new_generation/azd"
+chmod 0755 "$new_generation/az" "$new_generation/azd"
+
+if ! public_links_are_managed; then
+  migrate_public_links "$generations_dir"
+fi
+
+candidate_generation="$new_generation"
+new_generation=""
+previous_active_target="$(readlink "$install_dir/.azedarach-current" 2>/dev/null || true)"
+if ! atomic_symlink ".azedarach-generations/$(basename "$candidate_generation")" \
+  "$install_dir/.azedarach-current"; then
+  rm -rf "$candidate_generation"
+  exit 1
+fi
+active_generation="$candidate_generation"
+previous_active_generation="$install_dir/$previous_active_target"
+for generation in "$generations_dir"/generation.*; do
+  if [[ -d "$generation" && "$generation" != "$active_generation" &&
+        "$generation" != "$previous_active_generation" ]]; then
+    rm -rf "$generation"
+  fi
+done
+if [[ "$(cat "$lock_dir/pid" 2>/dev/null || true)" == "$$" ]]; then
+  rm -rf "$lock_dir"
+fi
+lock_owned=0
+lock_dir=""
 
 choose_container_engine() {
   if command -v docker >/dev/null 2>&1; then

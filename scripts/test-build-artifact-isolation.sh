@@ -36,9 +36,43 @@ if [[ "${FAKE_GO_FAIL_AZD:-0}" == "1" && "$args" == *"./cmd/azd"* ]]; then
   exit 1
 fi
 mkdir -p "$(dirname "$output")"
-printf 'scratch build\n' >"$output"
+printf 'scratch build %s\n' "${FAKE_GO_MARKER:-default}" >"$output"
 EOF
 chmod +x "$fixture/fake-bin/go"
+
+cat >"$fixture/fake-bin/mv" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+destination="${*: -1}"
+if [[ "${FAKE_MV_FAIL_AZD_LINK:-0}" == "1" && "$destination" == */azd &&
+      ! -e "${FAKE_MV_FAIL_ONCE_FILE:?}" ]]; then
+  : >"$FAKE_MV_FAIL_ONCE_FILE"
+  echo "stub mv: requested azd link install failure" >&2
+  exit 1
+fi
+exec /bin/mv "$@"
+EOF
+chmod +x "$fixture/fake-bin/mv"
+
+cat >"$fixture/fake-bin/cp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+destination="${*: -1}"
+if [[ "${FAKE_CP_ASSERT_SERIAL:-0}" == "1" &&
+      "$destination" == */.azedarach-generations/generation.*/az ]]; then
+  guard="${FAKE_CP_GUARD:?}"
+  if ! mkdir "$guard" 2>/dev/null; then
+    echo "stub cp: concurrent installers entered the critical section" >&2
+    exit 1
+  fi
+  trap 'rmdir "$guard"' EXIT
+  sleep 0.1
+fi
+/bin/cp "$@"
+EOF
+chmod +x "$fixture/fake-bin/cp"
 
 cat >"$fixture/fake-bin/git" <<'EOF'
 #!/usr/bin/env bash
@@ -102,6 +136,18 @@ grep -q "requested azd build failure" "$fixture/build-failure.stderr"
 cmp "$fixture/failure-az.before" "$fixture/failure-bin/az"
 cmp "$fixture/failure-azd.before" "$fixture/failure-bin/azd"
 
+if FAKE_GIT_MODE=primary FAKE_MV_FAIL_AZD_LINK=1 \
+  FAKE_MV_FAIL_ONCE_FILE="$fixture/azd-link-failed" \
+  AZ_INSTALL_DIR="$fixture/failure-bin" PATH="$fixture/fake-bin:$PATH" \
+  "$fixture/scripts/build-link-run.sh" --no-run \
+  >"$fixture/install-failure.stdout" 2>"$fixture/install-failure.stderr"; then
+  echo "build-link-run unexpectedly succeeded after an azd link install failure" >&2
+  exit 1
+fi
+grep -q "requested azd link install failure" "$fixture/install-failure.stderr"
+cmp "$fixture/failure-az.before" "$fixture/failure-bin/az"
+cmp "$fixture/failure-azd.before" "$fixture/failure-bin/azd"
+
 mkdir -p "$fixture/global-bin"
 ln -s "$fixture/bin/az" "$fixture/global-bin/az"
 ln -s "$fixture/bin/azd" "$fixture/global-bin/azd"
@@ -112,16 +158,52 @@ grep -q "Installed az -> $fixture/global-bin/az" "$fixture/build-link-run-instal
 grep -q "Installed azd -> $fixture/global-bin/azd" "$fixture/build-link-run-install.stdout"
 test -x "$fixture/global-bin/az"
 test -x "$fixture/global-bin/azd"
-test ! -L "$fixture/global-bin/az"
-test ! -L "$fixture/global-bin/azd"
+test -L "$fixture/global-bin/az"
+test -L "$fixture/global-bin/azd"
+test "$(readlink "$fixture/global-bin/az")" = ".azedarach-current/az"
+test "$(readlink "$fixture/global-bin/azd")" = ".azedarach-current/azd"
 grep -q "scratch build" "$fixture/global-bin/az"
 grep -q "scratch build" "$fixture/global-bin/azd"
 cmp "$fixture/az.before" "$fixture/bin/az"
 cmp "$fixture/azd.before" "$fixture/bin/azd"
 
+FAKE_GIT_MODE=primary FAKE_GO_MARKER=first FAKE_CP_ASSERT_SERIAL=1 \
+  FAKE_CP_GUARD="$fixture/install-critical-section" AZ_INSTALL_DIR="$fixture/global-bin" \
+  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-link-run.sh" --no-run \
+  >"$fixture/concurrent-first.stdout" 2>"$fixture/concurrent-first.stderr" &
+first_pid=$!
+FAKE_GIT_MODE=primary FAKE_GO_MARKER=second FAKE_CP_ASSERT_SERIAL=1 \
+  FAKE_CP_GUARD="$fixture/install-critical-section" AZ_INSTALL_DIR="$fixture/global-bin" \
+  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-link-run.sh" --no-run \
+  >"$fixture/concurrent-second.stdout" 2>"$fixture/concurrent-second.stderr" &
+second_pid=$!
+wait "$first_pid"
+wait "$second_pid"
+az_marker="$(sed -n 's/^scratch build //p' "$fixture/global-bin/az")"
+azd_marker="$(sed -n 's/^scratch build //p' "$fixture/global-bin/azd")"
+test -n "$az_marker"
+test "$az_marker" = "$azd_marker"
+generation_count="$(find "$fixture/global-bin/.azedarach-generations" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+test "$generation_count" -le 2
+
 just --justfile "$fixture/justfile" --working-directory "$fixture" clean
 test ! -e "$fixture/.tmp/az-install"
 test -x "$fixture/global-bin/az"
 test -x "$fixture/global-bin/azd"
+
+if just --justfile "$fixture/justfile" --working-directory "$fixture" install \
+  >"$fixture/just-install.stdout" 2>"$fixture/just-install.stderr"; then
+  echo "just install unexpectedly provided an independent mutation path" >&2
+  exit 1
+fi
+grep -q "Refusing unpaired install" "$fixture/just-install.stderr"
+
+forbidden_mutator='go install[[:space:]]+\./cmd/az|go build.*-o[[:space:]]+[^[:space:]]*bin/az|(^|[;&|[:space:]])(cp|mv|ln|rm)([[:space:]]|.*).*bin/(az|azd)'
+if git -C "$repo_root" grep -nE "$forbidden_mutator" -- \
+  justfile 'scripts/*.sh' '.github/workflows/*.yml' \
+  ':!scripts/test-build-artifact-isolation.sh'; then
+  echo "repository still contains an alternative production az/azd mutator" >&2
+  exit 1
+fi
 
 echo "build artifact isolation contract: PASS"
