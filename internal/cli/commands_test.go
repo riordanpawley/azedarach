@@ -345,6 +345,49 @@ func TestApplyExplicitProjectOverrideUnknownProjectFailsWithoutMutation(t *testi
 	}
 }
 
+func TestExplicitProjectEntryPointsRejectUnknownProjectBeforeDaemon(t *testing.T) {
+	routes := registerCLIProjects(t, "Default")
+	for _, tc := range []struct {
+		name string
+		call func(*Dependencies) error
+	}{
+		{name: "session start", call: func(d *Dependencies) error {
+			return StartCommandWithOptions(d, "issue-1", SessionCommandOptions{Project: "missing"})
+		}},
+		{name: "worktree create", call: func(d *Dependencies) error {
+			return WorktreeCreateCommand(d, WorktreeCreateOptions{IssueID: "issue-1", Project: "missing"})
+		}},
+		{name: "worktree delete", call: func(d *Dependencies) error {
+			return WorktreeDeleteCommand(d, WorktreeDeleteOptions{IssueID: "issue-1", Project: "missing"})
+		}},
+		{name: "session capture", call: func(d *Dependencies) error {
+			return SessionCaptureCommand(d, SessionCaptureOptions{IssueID: "issue-1", Project: "missing"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			deps := &Dependencies{
+				Config: config.DefaultConfig(), ProjectID: routes["Default"], RepoDir: "/default", RuntimeRepoDir: "/runtime/default",
+				DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					requests++
+					return protocol.ResponseEnvelope{}, nil
+				}}).WithProjectID(routes["Default"]),
+				Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			}
+			err := tc.call(deps)
+			if !errors.Is(err, config.ErrProjectNotFound) {
+				t.Fatalf("error = %v, want project-not-found", err)
+			}
+			if requests != 0 {
+				t.Fatalf("daemon requests = %d, want zero", requests)
+			}
+			if deps.ProjectID != routes["Default"] || deps.RepoDir != "/default" || deps.RuntimeRepoDir != "/runtime/default" {
+				t.Fatalf("dependencies mutated: project=%q repo=%q runtime=%q", deps.ProjectID, deps.RepoDir, deps.RuntimeRepoDir)
+			}
+		})
+	}
+}
+
 func TestPRCommandProjectPrecedenceWithoutExplicitSelection(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

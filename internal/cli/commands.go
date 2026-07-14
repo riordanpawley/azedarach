@@ -809,7 +809,10 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 
-	restoreExplicitProject := applyExplicitSessionProjectOverride(deps, opts.Project)
+	restoreExplicitProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreExplicitProject()
 
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
@@ -882,6 +885,11 @@ func printPendingSessionStartOperation(record protocol.OperationRecord, issueID 
 func WorktreeCreateCommand(deps *Dependencies, opts WorktreeCreateOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
 	defer cancel()
+	restoreExplicitProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
+	defer restoreExplicitProject()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
@@ -943,6 +951,11 @@ func WorktreeCreateCommand(deps *Dependencies, opts WorktreeCreateOptions) error
 func WorktreeDeleteCommand(deps *Dependencies, opts WorktreeDeleteOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
 	defer cancel()
+	restoreExplicitProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
+	defer restoreExplicitProject()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
@@ -1537,12 +1550,16 @@ func SessionCaptureCommand(deps *Dependencies, opts SessionCaptureOptions) error
 func captureSessionPane(deps *Dependencies, opts SessionCaptureOptions, logMessage string) (protocol.SessionCaptureResponseBody, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
+	restoreExplicitProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return protocol.SessionCaptureResponseBody{}, err
+	}
+	defer restoreExplicitProject()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return protocol.SessionCaptureResponseBody{}, err
 	}
 
 	var target sessionIssueTarget
-	var err error
 	if strings.TrimSpace(opts.Project) != "" {
 		target, err = resolveExplicitSessionStatusTarget(deps, opts.IssueID, opts.Project, opts.IssueID)
 	} else {
