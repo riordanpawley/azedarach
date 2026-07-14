@@ -20,12 +20,21 @@ const decisionPropagationMutationMaxAttempts = 8
 
 func retryDecisionPropagationMutation[T any](ctx context.Context, service issueDecisionService, client *issues.Client, decisionID, command string, derive func() (issues.DecisionPropagationIntent, error), mutate func(issues.DecisionPropagationIntent) (T, error)) (T, error) {
 	var zero T
+	var priorIntents []issues.DecisionPropagationIntent
 	for attempt := 1; attempt <= decisionPropagationMutationMaxAttempts; attempt++ {
 		before, err := client.DecisionRevision(ctx, decisionID)
 		if err != nil {
 			return zero, err
 		}
 		beforeObservation, err := client.IssueObservationRevision(ctx)
+		if err != nil {
+			return zero, err
+		}
+		beforeDecisionAudit, err := client.DecisionAuditRevision(ctx)
+		if err != nil {
+			return zero, err
+		}
+		beforeSpecAudit, err := client.SpecAuditRevision(ctx)
 		if err != nil {
 			return zero, err
 		}
@@ -37,25 +46,65 @@ func retryDecisionPropagationMutation[T any](ctx context.Context, service issueD
 		if err != nil {
 			return zero, err
 		}
+		afterDecisionAudit, err := client.DecisionAuditRevision(ctx)
+		if err != nil {
+			return zero, err
+		}
+		afterSpecAudit, err := client.SpecAuditRevision(ctx)
+		if err != nil {
+			return zero, err
+		}
 		afterObservation, err := client.IssueObservationRevision(ctx)
 		if err != nil {
 			return zero, err
 		}
-		if before != after || beforeObservation != afterObservation {
+		if before != after || beforeDecisionAudit != afterDecisionAudit || beforeSpecAudit != afterSpecAudit || beforeObservation != afterObservation {
+			priorIntents = append(priorIntents, intent)
 			continue
 		}
+		intent = reconcileRetriedDecisionPropagationIntent(intent, priorIntents)
 		intent.ExpectedRevision = after
+		intent.ExpectedDecisionAuditRevision = afterDecisionAudit
+		intent.ExpectedSpecAuditRevision = afterSpecAudit
 		intent.ExpectedObservationRevision = afterObservation
 		if service.beforeDecisionPropagationMutation != nil {
 			service.beforeDecisionPropagationMutation(command)
 		}
 		result, err := mutate(intent)
 		if errors.Is(err, issues.ErrDecisionPropagationRevisionChanged) {
+			priorIntents = append(priorIntents, intent)
 			continue
 		}
 		return result, err
 	}
 	return zero, fmt.Errorf("%w after %d attempts for decision %s", issues.ErrDecisionPropagationRevisionChanged, decisionPropagationMutationMaxAttempts, decisionID)
+}
+
+func reconcileRetriedDecisionPropagationIntent(current issues.DecisionPropagationIntent, prior []issues.DecisionPropagationIntent) issues.DecisionPropagationIntent {
+	withdrawalCandidates := append([]string(nil), current.WithdrawnIssueIDs...)
+	for _, stale := range prior {
+		withdrawalCandidates = append(withdrawalCandidates, stale.WithdrawnIssueIDs...)
+		withdrawalCandidates = append(withdrawalCandidates, stale.ChangedIssueIDs...)
+	}
+	current.WithdrawnIssueIDs = normalizeDecisionIssueIDs(decisionIssueDifference(withdrawalCandidates, current.ChangedIssueIDs))
+	return current
+}
+
+func normalizeDecisionIssueIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	result := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result
 }
 
 func (s issueDecisionService) client(ctx context.Context) (*issues.Client, error) {

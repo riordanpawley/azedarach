@@ -265,6 +265,224 @@ func TestDecisionPropagationRetriesCrossDaemonScopeChangesBeforeUpdateReadiness(
 	}
 }
 
+func TestDecisionPropagationRetriesCrossDaemonSpecLinkAddRemoveRaces(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	dbPath := filepath.Join(repoDir, "issues.db")
+	clientA := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
+	t.Cleanup(func() { _ = clientA.CloseDB() })
+	clientB := issues.NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = clientB.CloseDB() })
+	issueA, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "spec scope a", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueB, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "spec scope b", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirement, err := clientA.CreateRequirement(ctx, issues.CreateRequirementParams{LocalID: "REQ-SPEC-RACE", Title: "shared requirement"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clientA.AddSpecLink(ctx, issues.AddSpecLinkParams{IssueID: issueA, RequirementID: requirement.LocalID, Role: issues.LinkRoleImplements}); err != nil {
+		t.Fatal(err)
+	}
+	decision, err := clientA.RecordDecision(ctx, issues.RecordDecisionParams{Title: "requirement contract", Rationale: "initial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemonA := newOrchestrationReviewTestDaemon(repoDir, clientA)
+	serviceA := issueDecisionService{daemon: daemonA}
+	serviceCtx := withDaemonProjectIDContext(ctx, "project")
+	governsRequirement := protocol.DecisionLinkAddRequestBody{
+		DecisionID: decision.LocalID, TargetKind: protocol.DecisionTargetRequirement,
+		TargetID: requirement.LocalID, Relation: protocol.DecisionRelationGoverns,
+	}
+	if _, err := serviceA.AddDecisionLink(serviceCtx, governsRequirement); err != nil {
+		t.Fatal(err)
+	}
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, issueA, decision.LocalID)
+
+	runPausedDecisionMutation(t, &serviceA, protocol.CommandDecisionUpdate, func() error {
+		rationale := "update after spec-link add"
+		_, err := serviceA.UpdateDecision(serviceCtx, protocol.DecisionUpdateRequestBody{ID: decision.LocalID, Rationale: &rationale})
+		return err
+	}, func() {
+		if _, err := clientB.AddSpecLink(ctx, issues.AddSpecLinkParams{IssueID: issueB, RequirementID: requirement.LocalID, Role: issues.LinkRoleVerifies}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	assertPendingDecisionCount(t, ctx, clientA, issueA, 1)
+	assertPendingDecisionCount(t, ctx, clientB, issueB, 1)
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, issueA, decision.LocalID)
+	ackPendingDecision(t, ctx, serviceA, clientB, serviceCtx, issueB, decision.LocalID)
+
+	runPausedDecisionMutation(t, &serviceA, protocol.CommandDecisionLinkAdd, func() error {
+		request := governsRequirement
+		request.Note = "update after spec-link remove"
+		_, err := serviceA.AddDecisionLink(serviceCtx, request)
+		return err
+	}, func() {
+		if err := clientB.RemoveSpecLink(ctx, issueB, requirement.LocalID); err != nil {
+			t.Fatal(err)
+		}
+	})
+	assertPendingDecisionCount(t, ctx, clientA, issueA, 1)
+	assertPendingDecisionCount(t, ctx, clientB, issueB, 0)
+}
+
+func TestDecisionPropagationRetriesCrossDaemonRequirementAssignmentRaces(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	dbPath := filepath.Join(repoDir, "issues.db")
+	clientA := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
+	t.Cleanup(func() { _ = clientA.CloseDB() })
+	clientB := issues.NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = clientB.CloseDB() })
+	issueA, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "requirement owner a", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueB, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "requirement owner b", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirement, err := clientA.CreateRequirement(ctx, issues.CreateRequirementParams{LocalID: "REQ-OWNER-RACE", Title: "owned requirement"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := clientA.RecordDecision(ctx, issues.RecordDecisionParams{Title: "ownership contract", Rationale: "initial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemonA := newOrchestrationReviewTestDaemon(repoDir, clientA)
+	serviceA := issueDecisionService{daemon: daemonA}
+	serviceCtx := withDaemonProjectIDContext(ctx, "project")
+	governsRequirement := protocol.DecisionLinkAddRequestBody{
+		DecisionID: decision.LocalID, TargetKind: protocol.DecisionTargetRequirement,
+		TargetID: requirement.LocalID, Relation: protocol.DecisionRelationGoverns,
+	}
+	if _, err := serviceA.AddDecisionLink(serviceCtx, governsRequirement); err != nil {
+		t.Fatal(err)
+	}
+
+	runPausedDecisionMutation(t, &serviceA, protocol.CommandDecisionUpdate, func() error {
+		rationale := "update after requirement assignment"
+		_, err := serviceA.UpdateDecision(serviceCtx, protocol.DecisionUpdateRequestBody{ID: decision.LocalID, Rationale: &rationale})
+		return err
+	}, func() {
+		if _, err := clientB.UpdateRequirement(ctx, requirement.LocalID, issues.UpdateRequirementParams{IssueID: &issueA}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	assertPendingDecisionCount(t, ctx, clientA, issueA, 1)
+	ackPendingDecision(t, ctx, serviceA, clientA, serviceCtx, issueA, decision.LocalID)
+
+	runPausedDecisionMutation(t, &serviceA, protocol.CommandDecisionLinkAdd, func() error {
+		request := governsRequirement
+		request.Note = "update after requirement assignment removal"
+		_, err := serviceA.AddDecisionLink(serviceCtx, request)
+		return err
+	}, func() {
+		empty := ""
+		if _, err := clientB.UpdateRequirement(ctx, requirement.LocalID, issues.UpdateRequirementParams{IssueID: &empty}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	assertPendingDecisionCount(t, ctx, clientA, issueA, 0)
+
+	if _, err := clientB.UpdateRequirement(ctx, requirement.LocalID, issues.UpdateRequirementParams{IssueID: &issueA}); err != nil {
+		t.Fatal(err)
+	}
+	runPausedDecisionMutation(t, &serviceA, protocol.CommandDecisionLinkRemove, func() error {
+		_, err := serviceA.RemoveDecisionLink(serviceCtx, protocol.DecisionLinkRemoveRequestBody{
+			DecisionID: decision.LocalID, TargetKind: protocol.DecisionTargetRequirement, TargetID: requirement.LocalID,
+		})
+		return err
+	}, func() {
+		if _, err := clientB.UpdateRequirement(ctx, requirement.LocalID, issues.UpdateRequirementParams{IssueID: &issueB}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	assertDecisionWithdrawnByCommand(t, ctx, clientA, issueA, decision.LocalID, protocol.CommandDecisionLinkRemove)
+	assertDecisionWithdrawnByCommand(t, ctx, clientB, issueB, decision.LocalID, protocol.CommandDecisionLinkRemove)
+}
+
+func TestReconcileRetriedDecisionPropagationIntentPreservesFinalChangedScope(t *testing.T) {
+	intent := reconcileRetriedDecisionPropagationIntent(issues.DecisionPropagationIntent{
+		ChangedIssueIDs:   []string{"issue-a"},
+		WithdrawnIssueIDs: []string{"issue-c"},
+	}, []issues.DecisionPropagationIntent{
+		{ChangedIssueIDs: []string{"issue-b"}, WithdrawnIssueIDs: []string{"issue-a"}},
+	})
+	if got, want := strings.Join(intent.ChangedIssueIDs, ","), "issue-a"; got != want {
+		t.Fatalf("changed = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(intent.WithdrawnIssueIDs, ","), "issue-c,issue-b"; got != want {
+		t.Fatalf("withdrawn = %q, want %q", got, want)
+	}
+}
+
+func runPausedDecisionMutation(t *testing.T, service *issueDecisionService, command string, mutation func() error, concurrent func()) {
+	t.Helper()
+	captured := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	service.beforeDecisionPropagationMutation = func(got string) {
+		if got != command {
+			return
+		}
+		once.Do(func() {
+			close(captured)
+			<-release
+		})
+	}
+	t.Cleanup(func() { service.beforeDecisionPropagationMutation = nil })
+	result := make(chan error, 1)
+	go func() { result <- mutation() }()
+	<-captured
+	concurrent()
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	service.beforeDecisionPropagationMutation = nil
+}
+
+func ackPendingDecision(t *testing.T, ctx context.Context, service issueDecisionService, client *issues.Client, serviceCtx context.Context, issueID, decisionID string) {
+	t.Helper()
+	events, err := client.ListIssueDecisionObservationEvents(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := domain.ReducePendingDecisionChanges(events)
+	if len(pending) != 1 || pending[0].DecisionID != decisionID {
+		t.Fatalf("pending for %s = %+v, want decision %s", issueID, pending, decisionID)
+	}
+	if _, err := service.AcknowledgeDecision(serviceCtx, protocol.DecisionAcknowledgeRequestBody{
+		IssueID: naming.IssueID(issueID), DecisionID: decisionID, Revision: pending[0].Revision,
+		Disposition: domain.DecisionAcknowledgementReconciled,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertDecisionWithdrawnByCommand(t *testing.T, ctx context.Context, client *issues.Client, issueID, decisionID, command string) {
+	t.Helper()
+	events, err := client.ListIssueDecisionObservationEvents(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		event := events[i]
+		if event.Type == domain.IssueEventDecisionChanged && event.SourceCommand == command && strings.TrimSpace(fmt.Sprint(event.Payload["decision_id"])) == decisionID && event.Payload["withdrawn"] == true {
+			return
+		}
+	}
+	t.Fatalf("events for %s = %+v, want withdrawn %s from %s", issueID, events, decisionID, command)
+}
+
 func mustRootedDecisionScope(t *testing.T, root string) domain.OrchestrationScope {
 	t.Helper()
 	scope, err := domain.RootedOrchestrationScope(root)

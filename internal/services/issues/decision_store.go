@@ -554,10 +554,7 @@ func (c *Client) updateDecisionLocked(ctx context.Context, selector string, para
 	if err != nil {
 		return Decision{}, c.wrapError("update-decision", selector, err)
 	}
-	if err := c.validateDecisionPropagationRevision(ctx, tx, before.LocalID, intent.ExpectedRevision); err != nil {
-		return Decision{}, c.wrapError("update-decision", before.LocalID, err)
-	}
-	if err := c.validateDecisionPropagationObservationRevision(ctx, tx, before.LocalID, intent); err != nil {
+	if err := c.validateDecisionPropagationAuthority(ctx, tx, before.LocalID, intent); err != nil {
 		return Decision{}, c.wrapError("update-decision", before.LocalID, err)
 	}
 	after, revision, err := c.applyDecisionUpdateTxWithRevision(ctx, tx, before, params)
@@ -633,10 +630,7 @@ func (c *Client) deleteDecisionLocked(ctx context.Context, selector string, inte
 	if err != nil {
 		return c.wrapError("delete-decision", selector, err)
 	}
-	if err := c.validateDecisionPropagationRevision(ctx, tx, decision.LocalID, intent.ExpectedRevision); err != nil {
-		return c.wrapError("delete-decision", decision.LocalID, err)
-	}
-	if err := c.validateDecisionPropagationObservationRevision(ctx, tx, decision.LocalID, intent); err != nil {
+	if err := c.validateDecisionPropagationAuthority(ctx, tx, decision.LocalID, intent); err != nil {
 		return c.wrapError("delete-decision", decision.LocalID, err)
 	}
 	links, err := c.listDecisionLinksForDecisionRow(ctx, tx, decision.rowID, false)
@@ -723,10 +717,7 @@ func (c *Client) addDecisionLinkLocked(ctx context.Context, params AddDecisionLi
 	if err != nil {
 		return DecisionLink{}, c.wrapError("add-decision-link", normalized.DecisionID, err)
 	}
-	if err := c.validateDecisionPropagationRevision(ctx, tx, decision.LocalID, intent.ExpectedRevision); err != nil {
-		return DecisionLink{}, c.wrapError("add-decision-link", decision.LocalID, err)
-	}
-	if err := c.validateDecisionPropagationObservationRevision(ctx, tx, decision.LocalID, intent); err != nil {
+	if err := c.validateDecisionPropagationAuthority(ctx, tx, decision.LocalID, intent); err != nil {
 		return DecisionLink{}, c.wrapError("add-decision-link", decision.LocalID, err)
 	}
 	if err := ensureDecisionLinkTargetExists(ctx, tx, normalized.TargetKind, normalized.TargetID); err != nil {
@@ -836,10 +827,7 @@ func (c *Client) removeDecisionLinkLocked(ctx context.Context, decisionSelector 
 	if err != nil {
 		return c.wrapError("remove-decision-link", decisionSelector, err)
 	}
-	if err := c.validateDecisionPropagationRevision(ctx, tx, decision.LocalID, intent.ExpectedRevision); err != nil {
-		return c.wrapError("remove-decision-link", decision.LocalID, err)
-	}
-	if err := c.validateDecisionPropagationObservationRevision(ctx, tx, decision.LocalID, intent); err != nil {
+	if err := c.validateDecisionPropagationAuthority(ctx, tx, decision.LocalID, intent); err != nil {
 		return c.wrapError("remove-decision-link", decision.LocalID, err)
 	}
 	link, err := c.lookupDecisionLink(ctx, tx, decision.rowID, targetKind, targetID, false)
@@ -956,6 +944,46 @@ func (c *Client) IssueObservationRevision(ctx context.Context) (int64, error) {
 	return issueObservationRevision(ctx, db)
 }
 
+// DecisionAuditRevision covers every decision and decision-link mutation.
+// Fanout can recursively inherit scope through revises links, so validating
+// only the directly mutated decision cannot prove that derived scope is fresh.
+func (c *Client) DecisionAuditRevision(ctx context.Context) (int64, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return 0, err
+	}
+	return decisionAuditRevision(ctx, db)
+}
+
+// SpecAuditRevision covers requirement ownership and spec-link mutations,
+// both of which contribute issues to a requirement-targeted decision scope.
+func (c *Client) SpecAuditRevision(ctx context.Context) (int64, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return 0, err
+	}
+	return specAuditRevision(ctx, db)
+}
+
+func decisionAuditRevision(ctx context.Context, queryer sqlRequirementQueryer) (int64, error) {
+	return maxAuditRevision(ctx, queryer, `SELECT MAX(id) FROM decision_audit_log`)
+}
+
+func specAuditRevision(ctx context.Context, queryer sqlRequirementQueryer) (int64, error) {
+	return maxAuditRevision(ctx, queryer, `SELECT MAX(id) FROM spec_audit_log`)
+}
+
+func maxAuditRevision(ctx context.Context, queryer sqlRequirementQueryer, query string) (int64, error) {
+	var revision sql.NullInt64
+	if err := queryer.QueryRowContext(ctx, query).Scan(&revision); err != nil {
+		return 0, err
+	}
+	if !revision.Valid {
+		return 0, nil
+	}
+	return revision.Int64, nil
+}
+
 func issueObservationRevision(ctx context.Context, queryer sqlRequirementQueryer) (int64, error) {
 	var revision sql.NullInt64
 	if err := queryer.QueryRowContext(ctx, `SELECT MAX(id) FROM issue_observation_events`).Scan(&revision); err != nil {
@@ -1009,16 +1037,30 @@ func (c *Client) validateDecisionPropagationRevision(ctx context.Context, querye
 	return nil
 }
 
-func (c *Client) validateDecisionPropagationObservationRevision(ctx context.Context, queryer sqlRequirementQueryer, decisionID string, intent DecisionPropagationIntent) error {
+func (c *Client) validateDecisionPropagationAuthority(ctx context.Context, queryer sqlRequirementQueryer, decisionID string, intent DecisionPropagationIntent) error {
 	if intent.ExpectedRevision <= 0 {
 		return nil
 	}
-	current, err := issueObservationRevision(ctx, queryer)
-	if err != nil {
+	if err := c.validateDecisionPropagationRevision(ctx, queryer, decisionID, intent.ExpectedRevision); err != nil {
 		return err
 	}
-	if current != intent.ExpectedObservationRevision {
-		return fmt.Errorf("%w: decision %s expected issue observation revision %d, current revision %d", ErrDecisionPropagationRevisionChanged, decisionID, intent.ExpectedObservationRevision, current)
+	checks := []struct {
+		name     string
+		expected int64
+		read     func(context.Context, sqlRequirementQueryer) (int64, error)
+	}{
+		{name: "decision audit", expected: intent.ExpectedDecisionAuditRevision, read: decisionAuditRevision},
+		{name: "spec audit", expected: intent.ExpectedSpecAuditRevision, read: specAuditRevision},
+		{name: "issue observation", expected: intent.ExpectedObservationRevision, read: issueObservationRevision},
+	}
+	for _, check := range checks {
+		current, err := check.read(ctx, queryer)
+		if err != nil {
+			return err
+		}
+		if current != check.expected {
+			return fmt.Errorf("%w: decision %s expected %s revision %d, current revision %d", ErrDecisionPropagationRevisionChanged, decisionID, check.name, check.expected, current)
+		}
 	}
 	return nil
 }

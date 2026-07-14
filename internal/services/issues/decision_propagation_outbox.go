@@ -19,16 +19,19 @@ const (
 
 var ErrDecisionPropagationRevisionChanged = errors.New("decision propagation revision changed")
 
-// DecisionPropagationIntent is captured in the same transaction as the
-// decision audit revision. The daemon may crash at any later point without
-// losing the exact issue fanout it must reconcile.
+// DecisionPropagationIntent carries the derived fanout plus every durable
+// source revision used to derive it. The decision mutation validates those
+// revisions under its authoritative transaction, then persists the fanout in
+// the same transaction as the new decision audit revision.
 type DecisionPropagationIntent struct {
-	ChangedIssueIDs             []string
-	WithdrawnIssueIDs           []string
-	SourceCommand               string
-	Payload                     map[string]any
-	ExpectedRevision            int64
-	ExpectedObservationRevision int64
+	ChangedIssueIDs               []string
+	WithdrawnIssueIDs             []string
+	SourceCommand                 string
+	Payload                       map[string]any
+	ExpectedRevision              int64
+	ExpectedDecisionAuditRevision int64
+	ExpectedSpecAuditRevision     int64
+	ExpectedObservationRevision   int64
 }
 
 type DecisionPropagationOutboxEntry struct {
