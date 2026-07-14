@@ -3013,6 +3013,76 @@ func TestTaskClosePreflightBlocksDirtyWorktreeInDaemonPolicy(t *testing.T) {
 	}
 }
 
+func TestTaskClosePreflightConvergesStaleBusyHookAtIdlePrompt(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	const projectID = "proj-close-preflight-stale-hook"
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := newMigratedIssueClientAtPath(t, dbPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Preflight after missed idle hook", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := naming.CanonicalSessionID(projectID, taskID)
+	staleAt := time.Now().UTC().Add(-time.Minute)
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
+		ID: sessionID, IssueID: taskID, State: daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: staleAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtimeStore.UpsertSessionActivityEvidence(ctx, daemonstate.SessionActivityEvidence{
+		ProjectID: projectID, SessionID: sessionID, IssueID: taskID,
+		Activity: "busy", ActivitySource: "hooks", SourceSessionID: sessionID,
+		ObservedAt: staleAt, UpdatedAt: staleAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	captures := 0
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch args[0] {
+		case "list-sessions":
+			return sessionID, nil
+		case "capture-pane":
+			captures++
+			return "Validation complete.\n› Continue", nil
+		default:
+			return "", nil
+		}
+	}}
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: logger}, tmux: tmux.NewClient(runner, logger),
+		issueClientsByProject:  map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		revision:               map[string]uint64{projectID: 1},
+		hub:                    publish.NewHub(16, 8, logger),
+	}
+	body, err := json.Marshal(map[string]any{"task_id": taskID, "allow_target_session": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.handleTaskClosePreflight(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion, RequestID: "req-close-preflight-stale-hook",
+		Kind: protocol.EnvelopeKindCommand, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command: "task.close_preflight", Body: body,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK || captures != 1 {
+		t.Fatalf("close preflight response=%+v captures=%d, want one idle convergence and success", resp, captures)
+	}
+	evidence, found, err := runtimeStore.GetSessionActivityEvidence(ctx, projectID, sessionID)
+	if err != nil || !found || evidence.Activity != "idle" || evidence.ActivitySource != "terminal" {
+		t.Fatalf("activity evidence=%+v found=%t err=%v, want materialized terminal idle", evidence, found, err)
+	}
+}
+
 func TestTaskClosePreflightEnforcesInvestigationDispositionAcceptance(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

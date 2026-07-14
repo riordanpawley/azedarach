@@ -2062,7 +2062,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		AllowIntegratedWorktreeRetry: cmd.IntegrateBeforeClose,
 	}
 	phaseStartedAt := time.Now()
-	if err := d.repairStaleSessionRuntimeProjections(ctx, projectID, taskID); err != nil {
+	if err := d.refreshTaskCloseSessionRuntime(ctx, projectID, taskID); err != nil {
 		recordPhase("preflight_runtime_projection_repair", phaseStartedAt, false)
 		return result, fmt.Errorf("phase preflight_runtime_projection_repair for issue %s: %w", taskID, err)
 	}
@@ -2260,6 +2260,16 @@ func (d *Daemon) repairStaleSessionRuntimeProjections(ctx context.Context, proje
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func (d *Daemon) refreshTaskCloseSessionRuntime(ctx context.Context, projectID, taskID string) error {
+	if _, err := d.reconcileStaleBusySessionActivity(ctx, projectID, []string{taskID}); err != nil {
+		return fmt.Errorf("converge stale session activity: %w", err)
+	}
+	if err := d.repairStaleSessionRuntimeProjections(ctx, projectID, taskID); err != nil {
+		return fmt.Errorf("repair stale session projections: %w", err)
 	}
 	return nil
 }
@@ -3645,6 +3655,11 @@ func (d *Daemon) handleTaskClosePreflight(ctx context.Context, req protocol.Requ
 	var cmd taskClosePreflightRequest
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	if taskID := strings.TrimSpace(cmd.TaskID); taskID != "" {
+		if err := d.refreshTaskCloseSessionRuntime(ctx, projectID, taskID); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("refresh session runtime before close preflight: %v", err)), nil
+		}
 	}
 	result, err := d.validateTaskClosePreflight(ctx, projectID, cmd.TaskID, cmd.taskClosePreflightOptions, req)
 	if err != nil {
