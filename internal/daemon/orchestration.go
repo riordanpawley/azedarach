@@ -258,6 +258,9 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		if err != nil {
 			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load rooted review queue: %w", err)
 		}
+		if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, tasks); err != nil {
+			return protocol.OrchestrationSnapshot{}, err
+		}
 		snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, tasks)
 		if err != nil {
 			return protocol.OrchestrationSnapshot{}, err
@@ -274,6 +277,9 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("load project orchestration projection: %w", err)
 	}
 	tasks = a.daemon.enrichTasksWithSessionState(ctx, projectID, tasks)
+	if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, tasks); err != nil {
+		return protocol.OrchestrationSnapshot{}, err
+	}
 	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, tasks)
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, err
@@ -338,6 +344,61 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	sortOrchestrationSnapshot(&snapshot, tasksByID)
 	snapshot.Completion = projectOrchestrationCompletion(snapshot)
 	return snapshot, nil
+}
+
+func (a daemonOrchestrationAuthority) enrichPendingDecisions(ctx context.Context, projectID string, issueClient *issues.Client, snapshot *protocol.OrchestrationSnapshot, tasks []domain.Task) error {
+	if err := a.daemon.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
+		return fmt.Errorf("reconcile pending decisions: %w", err)
+	}
+	issueIDs := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		if task.Status != domain.StatusDone {
+			issueIDs = append(issueIDs, task.ID.String())
+		}
+	}
+	eventsByIssue, err := issueClient.ListIssueDecisionObservationEventsByIssue(ctx, issueIDs)
+	if err != nil {
+		return fmt.Errorf("load pending decisions: %w", err)
+	}
+	for _, issueID := range issueIDs {
+		pending := domain.ReducePendingDecisionChanges(eventsByIssue[issueID])
+		if len(pending) == 0 {
+			continue
+		}
+		if snapshot.PendingDecisions == nil {
+			snapshot.PendingDecisions = make(map[string][]domain.PendingDecisionChange)
+		}
+		snapshot.PendingDecisions[issueID] = pending
+		reasons := pendingDecisionReadinessReasons(pending)
+		if snapshot.Blocked == nil {
+			snapshot.Blocked = make(map[string]string)
+		}
+		snapshot.Blocked[issueID] = mergeOrchestrationBlockerReasons(snapshot.Blocked[issueID], reasons...)
+	}
+	return nil
+}
+
+func mergeOrchestrationBlockerReasons(existing string, additions ...string) string {
+	ordered := make([]string, 0, len(additions)+1)
+	seen := make(map[string]struct{}, len(additions)+1)
+	add := func(raw string) {
+		for _, part := range strings.Split(raw, ";") {
+			reason := strings.TrimSpace(part)
+			if reason == "" {
+				continue
+			}
+			if _, duplicate := seen[reason]; duplicate {
+				continue
+			}
+			seen[reason] = struct{}{}
+			ordered = append(ordered, reason)
+		}
+	}
+	add(existing)
+	for _, addition := range additions {
+		add(addition)
+	}
+	return strings.Join(ordered, "; ")
 }
 
 func projectOrchestrationCompletion(snapshot protocol.OrchestrationSnapshot) protocol.OrchestrationCompletion {

@@ -57,6 +57,25 @@ func TestClientSQLiteBusyPolicyDefaultsAndOverrides(t *testing.T) {
 	assert.Equal(t, 2, configuredBusyTimeout)
 }
 
+func TestClientExistingDatabaseOnly(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "nested", "issues.db")
+	missing := NewClientAtPath(dbPath, nil, WithExistingDatabaseOnly())
+	_, err := missing.dbHandle()
+	require.ErrorContains(t, err, "require existing database")
+	_, statErr := os.Stat(dbPath)
+	require.True(t, os.IsNotExist(statErr), "existing-only open created database: %v", statErr)
+
+	creating := NewClientAtPath(dbPath, nil)
+	_, err = creating.dbHandle()
+	require.NoError(t, err)
+	require.NoError(t, creating.CloseDB())
+
+	existing := NewClientAtPath(dbPath, nil, WithExistingDatabaseOnly())
+	t.Cleanup(func() { require.NoError(t, existing.CloseDB()) })
+	_, err = existing.dbHandle()
+	require.NoError(t, err)
+}
+
 func TestClient_CRUDLifecycle(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()
@@ -4275,6 +4294,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0045_issue_state_runtime_constraints",
 		"0046_repair_issue_state_runtime_constraints",
 		"0047_human_authority_projection_revision",
+		"0048_decision_propagation_outbox",
 	}, got)
 }
 

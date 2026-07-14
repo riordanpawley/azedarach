@@ -188,6 +188,7 @@ func (a daemonOrchestrationAuthority) reviewInspection(ctx context.Context, proj
 			inspection.EvidenceSource = "mailbox"
 		}
 		inspection.ContextRisk = readiness.ContextRisk
+		inspection.PendingDecisions = readiness.PendingDecisions
 		inspection.Reasons = append(inspection.Reasons, readiness.Reasons...)
 	}
 	if worktree, ok := worktrees[task.ID.String()]; ok {
@@ -653,6 +654,9 @@ func (a daemonOrchestrationAuthority) reviewWorkerRestartAllowed(ctx context.Con
 }
 
 func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, inspection protocol.OrchestrationReview, result *protocol.OrchestrationIntentResult) (bool, error) {
+	if len(inspection.PendingDecisions) > 0 {
+		return false, fmt.Errorf("accepted review rejected by stale material decisions: %s", strings.Join(pendingDecisionReadinessReasons(inspection.PendingDecisions), "; "))
+	}
 	if inspection.Evidence == nil {
 		issueClient := a.daemon.issueClientForProject(projectID)
 		if issueClient == nil {

@@ -51,38 +51,39 @@ type OrchestrationSnapshotRequest struct {
 }
 
 type OrchestrationSnapshot struct {
-	Role                   string                       `json:"role,omitempty"`
-	SessionID              string                       `json:"session_id,omitempty"`
-	Lifecycle              domain.OrchestratorLifecycle `json:"lifecycle,omitempty"`
-	Scope                  domain.OrchestrationScope    `json:"scope"`
-	Revision               uint64                       `json:"revision"`
-	GeneratedAt            time.Time                    `json:"generated_at"`
-	Roots                  []string                     `json:"roots,omitempty"`
-	Capacity               OrchestrationCapacity        `json:"capacity"`
+	Role                   string                                    `json:"role,omitempty"`
+	SessionID              string                                    `json:"session_id,omitempty"`
+	Lifecycle              domain.OrchestratorLifecycle              `json:"lifecycle,omitempty"`
+	Scope                  domain.OrchestrationScope                 `json:"scope"`
+	Revision               uint64                                    `json:"revision"`
+	GeneratedAt            time.Time                                 `json:"generated_at"`
+	Roots                  []string                                  `json:"roots,omitempty"`
+	Capacity               OrchestrationCapacity                     `json:"capacity"`
 	ValidationCapacity     *domain.ValidationSnapshot   `json:"validation_capacity,omitempty"`
-	Runnable               []string                     `json:"runnable"`
-	NestedRoots            []OrchestrationNestedRoot    `json:"nested_roots,omitempty"`
-	Pending                []OrchestrationPending       `json:"pending,omitempty"`
-	Active                 []string                     `json:"active,omitempty"`
-	ActiveSessions         []OrchestrationSession       `json:"active_sessions,omitempty"`
-	SessionStartProgress   []OrchestrationProgress      `json:"session_start_progress,omitempty"`
-	StaleCloseableChildren []OrchestrationCloseable     `json:"stale_closeable_children,omitempty"`
-	ContainmentRisks       []OrchestrationRisk          `json:"containment_risks,omitempty"`
-	WorkerObservations     []domain.WorkerObservation   `json:"worker_observations,omitempty"`
-	Blocked                map[string]string            `json:"blocked"`
-	Candidates             []OrchestrationCandidate     `json:"candidates,omitempty"`
-	Reviews                []OrchestrationCandidate     `json:"reviews,omitempty"`
-	OwnershipConflicts     []OrchestrationCandidate     `json:"ownership_conflicts,omitempty"`
-	Interactions           []domain.InteractionRequest  `json:"interactions,omitempty"`
-	RecentEvents           []MailEvent                  `json:"recent_events,omitempty"`
-	Cursor                 int64                        `json:"cursor,omitempty"`
-	ContinuationRequired   bool                         `json:"continuation_required,omitempty"`
-	ContinuationReason     string                       `json:"continuation_reason,omitempty"`
-	ContinuationContract   string                       `json:"continuation_contract,omitempty"`
-	Constraints            OrchestrationConstraints     `json:"constraints"`
-	ReviewQueue            []OrchestrationReview        `json:"review_queue,omitempty"`
-	Health                 OrchestrationHealth          `json:"health"`
-	Completion             OrchestrationCompletion      `json:"completion"`
+	Runnable               []string                                  `json:"runnable"`
+	NestedRoots            []OrchestrationNestedRoot                 `json:"nested_roots,omitempty"`
+	Pending                []OrchestrationPending                    `json:"pending,omitempty"`
+	Active                 []string                                  `json:"active,omitempty"`
+	ActiveSessions         []OrchestrationSession                    `json:"active_sessions,omitempty"`
+	SessionStartProgress   []OrchestrationProgress                   `json:"session_start_progress,omitempty"`
+	StaleCloseableChildren []OrchestrationCloseable                  `json:"stale_closeable_children,omitempty"`
+	ContainmentRisks       []OrchestrationRisk                       `json:"containment_risks,omitempty"`
+	WorkerObservations     []domain.WorkerObservation                `json:"worker_observations,omitempty"`
+	Blocked                map[string]string                         `json:"blocked"`
+	Candidates             []OrchestrationCandidate                  `json:"candidates,omitempty"`
+	Reviews                []OrchestrationCandidate                  `json:"reviews,omitempty"`
+	OwnershipConflicts     []OrchestrationCandidate                  `json:"ownership_conflicts,omitempty"`
+	Interactions           []domain.InteractionRequest               `json:"interactions,omitempty"`
+	RecentEvents           []MailEvent                               `json:"recent_events,omitempty"`
+	Cursor                 int64                                     `json:"cursor,omitempty"`
+	ContinuationRequired   bool                                      `json:"continuation_required,omitempty"`
+	ContinuationReason     string                                    `json:"continuation_reason,omitempty"`
+	ContinuationContract   string                                    `json:"continuation_contract,omitempty"`
+	Constraints            OrchestrationConstraints                  `json:"constraints"`
+	ReviewQueue            []OrchestrationReview                     `json:"review_queue,omitempty"`
+	PendingDecisions       map[string][]domain.PendingDecisionChange `json:"pending_decisions,omitempty"`
+	Health                 OrchestrationHealth                       `json:"health"`
+	Completion             OrchestrationCompletion                   `json:"completion"`
 }
 
 type OrchestrationCompletion struct {
@@ -118,6 +119,7 @@ type OrchestrationReview struct {
 	ExecutionOwner     string                         `json:"execution_owner,omitempty"`
 	OrchestrationOwner string                         `json:"orchestration_owner,omitempty"`
 	ReviewOwner        string                         `json:"review_owner,omitempty"`
+	PendingDecisions   []domain.PendingDecisionChange `json:"pending_decisions,omitempty"`
 }
 
 type OrchestrationCandidate struct {

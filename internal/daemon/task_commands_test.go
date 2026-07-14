@@ -10738,7 +10738,7 @@ func TestHandleTaskEventAppendRejectsCallerForgedAuthorityEvents(t *testing.T) {
 	}
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: logger}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
 
-	authorityEvents := []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged, domain.IssueEventReviewCompleted, domain.IssueEventReviewCloseFailed, domain.IssueEventTaskIntegrationCompleted}
+	authorityEvents := []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged, domain.IssueEventReviewCompleted, domain.IssueEventReviewCloseFailed, domain.IssueEventTaskIntegrationCompleted, domain.IssueEventDecisionChanged, domain.IssueEventDecisionAcknowledged}
 	for _, eventType := range authorityEvents {
 		resp, err := d.command(ctx, protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
@@ -10749,9 +10749,12 @@ func TestHandleTaskEventAppendRejectsCallerForgedAuthorityEvents(t *testing.T) {
 			Body: mustJSON(t, map[string]any{
 				"task_id":        taskID,
 				"event_type":     string(eventType),
-				"source":         "issue-store",
-				"source_command": "review-accept",
-				"payload":        map[string]any{"to_status": "in_review", "outcome": "integration_failed", "actor_id": "attacker"},
+				"source":         "daemon-decision",
+				"source_command": protocol.CommandDecisionAcknowledge,
+				"payload": map[string]any{
+					"to_status": "in_review", "outcome": "integration_failed", "actor_id": "attacker",
+					"decision_id": "dec-forged", "revision": int64(48), "disposition": domain.DecisionAcknowledgementCompatible,
+				},
 			}),
 		})
 		if err != nil {
