@@ -131,6 +131,84 @@ func TestDecisionSyncIssueWorktreeDoesNotExportForeignDecisionAcrossRestart(t *t
 	assertDecisionWorktreeClean(t, worktreeB)
 }
 
+func TestDecisionSyncCheckResolvesDeletedOwnerAcrossWorktreesAndRestart(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	runDecisionGit(t, repoDir, "init")
+	runDecisionGit(t, repoDir, "config", "user.name", "Decision Test")
+	runDecisionGit(t, repoDir, "config", "user.email", "decision@example.com")
+	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte(".azedarach/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDecisionGit(t, repoDir, "add", ".gitignore", "README.md")
+	runDecisionGit(t, repoDir, "commit", "-m", "seed")
+
+	issueA, err := client.Create(ctx, issues.CreateTaskParams{Title: "Issue A", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueB, err := client.Create(ctx, issues.CreateTaskParams{Title: "Issue B", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := client.RecordDecision(ctx, issues.RecordDecisionParams{Title: "Deleted after branching", Rationale: "Preserve historical owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AddDecisionLink(ctx, issues.AddDecisionLinkParams{DecisionID: decision.LocalID, TargetKind: issues.DecisionTargetIssue, TargetID: issueA, Relation: issues.DecisionRelationAppliesTo}); err != nil {
+		t.Fatal(err)
+	}
+
+	service := newTestIssueDecisionService(client, repoDir)
+	service.daemon.git = gitservice.NewClient(gitservice.NewExecRunner(repoDir), nil)
+	if _, err := service.SyncMD(ctx, protocol.DecisionSyncMDRequestBody{RepoDir: repoDir, FullProject: true}); err != nil {
+		t.Fatal(err)
+	}
+	runDecisionGit(t, repoDir, "add", "docs/decisions")
+	runDecisionGit(t, repoDir, "commit", "-m", "seed decision")
+
+	worktreeA := filepath.Join(t.TempDir(), "worktree-a")
+	worktreeB := filepath.Join(t.TempDir(), "worktree-b")
+	runDecisionGit(t, repoDir, "worktree", "add", "-b", "tester/"+issueA+"/decision-a", worktreeA)
+	runDecisionGit(t, repoDir, "worktree", "add", "-b", "tester/"+issueB+"/decision-b", worktreeB)
+	if err := client.DeleteDecision(ctx, decision.LocalID); err != nil {
+		t.Fatal(err)
+	}
+
+	restartedClient := issues.NewClient(repoDir, nil)
+	t.Cleanup(func() { _ = restartedClient.CloseDB() })
+	restarted := newTestIssueDecisionService(restartedClient, repoDir)
+	restarted.daemon.git = gitservice.NewClient(gitservice.NewExecRunner(repoDir), nil)
+
+	foreign, err := restarted.SyncMD(ctx, protocol.DecisionSyncMDRequestBody{RepoDir: worktreeB, Check: true})
+	if err != nil {
+		t.Fatalf("foreign worktree check: %v", err)
+	}
+	if foreign.Changed || !hasSkippedDecisionResult(foreign.Results, decision.LocalID) {
+		t.Fatalf("foreign worktree result = %+v, want preserved deleted artifact", foreign)
+	}
+	owner, err := restarted.SyncMD(ctx, protocol.DecisionSyncMDRequestBody{RepoDir: worktreeA, Check: true})
+	if err != nil {
+		t.Fatalf("owner worktree check: %v", err)
+	}
+	if !owner.Changed || len(owner.Results) != 1 || owner.Results[0].Action != "remove" || owner.Results[0].OwnerIssueID != issueA || owner.Results[0].Applied {
+		t.Fatalf("owner worktree result = %+v, want planned owner-scoped removal", owner)
+	}
+	full, err := restarted.SyncMD(ctx, protocol.DecisionSyncMDRequestBody{RepoDir: repoDir, FullProject: true, Check: true})
+	if err != nil {
+		t.Fatalf("full-project check: %v", err)
+	}
+	if !full.Changed || len(full.Results) != 1 || full.Results[0].Action != "remove" || full.Results[0].Applied {
+		t.Fatalf("full-project result = %+v, want planned removal", full)
+	}
+	for _, checkout := range []string{repoDir, worktreeA, worktreeB} {
+		assertDecisionWorktreeClean(t, checkout)
+	}
+}
+
 func TestDecisionSyncRejectsCheckoutBeforeFinalRevalidation(t *testing.T) {
 	ctx, client, service, _, worktree, issueID, decision := newDecisionTransferBarrierFixture(t)
 	service.daemon.decisionTransferBeforeRevalidation = func(operation string, _ decisionMDTransferTarget) {
