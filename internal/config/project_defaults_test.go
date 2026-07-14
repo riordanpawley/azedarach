@@ -83,19 +83,37 @@ func TestEnvrcPrefersInstalledPairAcrossMainAndLinkedWorktrees(t *testing.T) {
 	mainCheckout := filepath.Join(testRoot, "main")
 	linkedCheckout := filepath.Join(testRoot, "linked")
 	installBin := filepath.Join(testRoot, "installed", "bin")
-	unpairedBin := filepath.Join(testRoot, "unpaired", "bin")
+	activeGeneration := filepath.Join(installBin, ".azedarach-generations", "generation.active")
+	staleGeneration := filepath.Join(installBin, ".azedarach-generations", "generation.stale")
+	scratchBin := filepath.Join(testRoot, "scratch", "bin")
+	aliasedStaleBin := filepath.Join(testRoot, "aliased-stale", "bin")
 	mismatchedBin := filepath.Join(testRoot, "mismatched", "bin")
 	require.NoError(t, os.MkdirAll(filepath.Join(mainCheckout, "scripts"), 0o755))
-	require.NoError(t, os.MkdirAll(installBin, 0o755))
-	require.NoError(t, os.MkdirAll(unpairedBin, 0o755))
+	require.NoError(t, os.MkdirAll(activeGeneration, 0o755))
+	require.NoError(t, os.MkdirAll(staleGeneration, 0o755))
+	require.NoError(t, os.MkdirAll(scratchBin, 0o755))
+	require.NoError(t, os.MkdirAll(aliasedStaleBin, 0o755))
 	require.NoError(t, os.MkdirAll(mismatchedBin, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(mainCheckout, ".envrc"), envrc, 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(mainCheckout, "scripts", "go-cache-env.sh"), cacheEnv, 0o755))
-	writeVersionFixture(t, filepath.Join(installBin, "az"), "dev (installed)")
-	writeVersionFixture(t, filepath.Join(installBin, "azd"), "dev (installed)")
-	writeVersionFixture(t, filepath.Join(unpairedBin, "az"), "dev (unpaired)")
+	writeVersionFixture(t, filepath.Join(activeGeneration, "az"), "dev (installed)")
+	writeVersionFixture(t, filepath.Join(activeGeneration, "azd"), "dev (installed)")
+	writeVersionFixture(t, filepath.Join(staleGeneration, "az"), "dev (stale-installed)")
+	writeVersionFixture(t, filepath.Join(staleGeneration, "azd"), "dev (stale-installed)")
+	writeVersionFixture(t, filepath.Join(scratchBin, "az"), "dev (installed)")
+	writeVersionFixture(t, filepath.Join(scratchBin, "azd"), "dev (installed)")
 	writeVersionFixture(t, filepath.Join(mismatchedBin, "az"), "dev (stale-client)")
 	writeVersionFixture(t, filepath.Join(mismatchedBin, "azd"), "dev (stale-daemon)")
+	require.NoError(t, os.Symlink(filepath.Join(".azedarach-generations", "generation.active"), filepath.Join(installBin, ".azedarach-current")))
+	require.NoError(t, os.Symlink(filepath.Join(".azedarach-current", "az"), filepath.Join(installBin, "az")))
+	require.NoError(t, os.Symlink(filepath.Join(".azedarach-current", "azd"), filepath.Join(installBin, "azd")))
+	for _, tool := range []string{"git", "sed", "wc", "shasum", "brew"} {
+		writeCommandFixture(t, filepath.Join(installBin, tool))
+	}
+	writeCommandFixture(t, filepath.Join(scratchBin, "scratch-helper"))
+	require.NoError(t, os.Symlink(staleGeneration, filepath.Join(aliasedStaleBin, ".azedarach-current")))
+	require.NoError(t, os.Symlink(filepath.Join(".azedarach-current", "az"), filepath.Join(aliasedStaleBin, "az")))
+	require.NoError(t, os.Symlink(filepath.Join(".azedarach-current", "azd"), filepath.Join(aliasedStaleBin, "azd")))
 	runGit(t, mainCheckout, "init")
 	runGit(t, mainCheckout, "add", ".envrc", "scripts/go-cache-env.sh")
 	runGit(t, mainCheckout, "-c", "user.name=Azedarach Test", "-c", "user.email=test@example.invalid", "commit", "-m", "test fixture")
@@ -103,11 +121,17 @@ func TestEnvrcPrefersInstalledPairAcrossMainAndLinkedWorktrees(t *testing.T) {
 	for _, checkout := range []string{mainCheckout, linkedCheckout} {
 		require.NoError(t, os.MkdirAll(filepath.Join(checkout, "bin"), 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(checkout, "bin", "az"), []byte("#!/bin/sh\n"), 0o755))
+		writeCommandFixture(t, filepath.Join(checkout, "bin", "checkout-helper"))
 	}
+	writeCommandFixture(t, filepath.Join(mainCheckout, "bin", "repo-helper"))
 
 	for _, checkout := range []string{mainCheckout, linkedCheckout} {
-		t.Run(filepath.Base(checkout), func(t *testing.T) {
-			const script = `
+		for managedPathName, managedPath := range map[string]string{
+			"public-control":          installBin,
+			"active-generation-first": activeGeneration + ":" + installBin,
+		} {
+			t.Run(filepath.Base(checkout)+"/"+managedPathName, func(t *testing.T) {
+				const script = `
 set -eu
 nix() { :; }
 use() { :; }
@@ -132,32 +156,70 @@ cd "$CHECKOUT"
 . ./.envrc >/dev/null
 command -v az >"$AZ_RESULT"
 command -v azd >"$AZD_RESULT"
+sh -c 'command -v az; command -v azd' >"$CHILD_RESULT"
+(sh -c 'command -v az; command -v azd' >"$BACKGROUND_RESULT") &
+for tool in git sed wc shasum brew repo-helper scratch-helper checkout-helper; do command -v "$tool"; done >"$TOOLS_RESULT"
+sh -c 'for tool in git sed wc shasum brew repo-helper scratch-helper checkout-helper; do command -v "$tool"; done' >"$CHILD_TOOLS_RESULT"
+(sh -c 'for tool in git sed wc shasum brew repo-helper scratch-helper checkout-helper; do command -v "$tool"; done' >"$BACKGROUND_TOOLS_RESULT") &
+wait
 `
-			azResult := filepath.Join(t.TempDir(), "az-result")
-			azdResult := filepath.Join(t.TempDir(), "azd-result")
-			initialPath := filepath.Join(mainCheckout, "bin") + ":" + unpairedBin + ":" + mismatchedBin + ":" + installBin + ":/usr/bin:/bin:/usr/sbin:/sbin"
-			if checkout == linkedCheckout {
-				initialPath = filepath.Join(linkedCheckout, "bin") + ":" + initialPath
-			}
-			cmd := exec.Command("bash", "-c", script)
-			cmd.Env = append(envWithout("AZEDARACH_GO_CACHE_ROOT", "AZEDARACH_GOCACHE", "GOCACHE"),
-				"CHECKOUT="+checkout,
-				"AZ_RESULT="+azResult,
-				"AZD_RESULT="+azdResult,
-				"HOME="+t.TempDir(),
-				"ISSUE_BACKEND=none",
-				"AZEDARACH_DIRENV_MANUAL_NIX_RELOAD=0",
-				"PATH="+initialPath,
-			)
-			output, runErr := cmd.CombinedOutput()
-			require.NoErrorf(t, runErr, "evaluate .envrc pair routing: %s", output)
-			gotAz, err := os.ReadFile(azResult)
-			require.NoError(t, err)
-			gotAzd, err := os.ReadFile(azdResult)
-			require.NoError(t, err)
-			assert.Equal(t, filepath.Join(installBin, "az"), strings.TrimSpace(string(gotAz)))
-			assert.Equal(t, filepath.Join(installBin, "azd"), strings.TrimSpace(string(gotAzd)))
-		})
+				azResult := filepath.Join(t.TempDir(), "az-result")
+				azdResult := filepath.Join(t.TempDir(), "azd-result")
+				childResult := filepath.Join(t.TempDir(), "child-result")
+				backgroundResult := filepath.Join(t.TempDir(), "background-result")
+				toolsResult := filepath.Join(t.TempDir(), "tools-result")
+				childToolsResult := filepath.Join(t.TempDir(), "child-tools-result")
+				backgroundToolsResult := filepath.Join(t.TempDir(), "background-tools-result")
+				initialPath := filepath.Join(mainCheckout, "bin") + ":" + staleGeneration + ":" + aliasedStaleBin + ":" + scratchBin + ":" + mismatchedBin + ":" + managedPath + ":/usr/bin:/bin:/usr/sbin:/sbin"
+				if checkout == linkedCheckout {
+					initialPath = filepath.Join(linkedCheckout, "bin") + ":" + initialPath
+				}
+				cmd := exec.Command("bash", "-c", script)
+				cmd.Env = append(envWithout("AZEDARACH_GO_CACHE_ROOT", "AZEDARACH_GOCACHE", "GOCACHE"),
+					"CHECKOUT="+checkout,
+					"AZ_RESULT="+azResult,
+					"AZD_RESULT="+azdResult,
+					"CHILD_RESULT="+childResult,
+					"BACKGROUND_RESULT="+backgroundResult,
+					"TOOLS_RESULT="+toolsResult,
+					"CHILD_TOOLS_RESULT="+childToolsResult,
+					"BACKGROUND_TOOLS_RESULT="+backgroundToolsResult,
+					"HOME="+t.TempDir(),
+					"ISSUE_BACKEND=none",
+					"AZEDARACH_DIRENV_MANUAL_NIX_RELOAD=0",
+					"PATH="+initialPath,
+				)
+				output, runErr := cmd.CombinedOutput()
+				require.NoErrorf(t, runErr, "evaluate .envrc pair routing: %s", output)
+				gotAz, err := os.ReadFile(azResult)
+				require.NoError(t, err)
+				gotAzd, err := os.ReadFile(azdResult)
+				require.NoError(t, err)
+				assert.Equal(t, filepath.Join(activeGeneration, "az"), strings.TrimSpace(string(gotAz)))
+				assert.Equal(t, filepath.Join(activeGeneration, "azd"), strings.TrimSpace(string(gotAzd)))
+				wantChildren := filepath.Join(activeGeneration, "az") + "\n" + filepath.Join(activeGeneration, "azd")
+				for _, result := range []string{childResult, backgroundResult} {
+					got, readErr := os.ReadFile(result)
+					require.NoError(t, readErr)
+					assert.Equal(t, wantChildren, strings.TrimSpace(string(got)))
+				}
+				wantTools := strings.Join([]string{
+					filepath.Join(installBin, "git"),
+					filepath.Join(installBin, "sed"),
+					filepath.Join(installBin, "wc"),
+					filepath.Join(installBin, "shasum"),
+					filepath.Join(installBin, "brew"),
+					filepath.Join(mainCheckout, "bin", "repo-helper"),
+					filepath.Join(scratchBin, "scratch-helper"),
+					filepath.Join(checkout, "bin", "checkout-helper"),
+				}, "\n")
+				for _, result := range []string{toolsResult, childToolsResult, backgroundToolsResult} {
+					got, readErr := os.ReadFile(result)
+					require.NoError(t, readErr)
+					assert.Equal(t, wantTools, strings.TrimSpace(string(got)))
+				}
+			})
+		}
 	}
 }
 
@@ -165,6 +227,11 @@ func writeVersionFixture(t *testing.T, path, version string) {
 	t.Helper()
 	content := "#!/bin/sh\nprintf '%s\\n' '" + version + "'\n"
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o755))
+}
+
+func writeCommandFixture(t *testing.T, path string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755))
 }
 
 func TestEnvrcDirenvLayoutFallsBackToHomeCache(t *testing.T) {

@@ -67,9 +67,11 @@ This directory primarily contains **developer/internal documentation**.
 - `orchestration.claim_start`: `hybrid` (durable ownership/start-attempt projection plus daemon session-start operation/runtime compensation).
 - `orchestration.project_loop`: `projection` (durable issue-observation cursor and loop checkpoint refreshed before deterministic non-blocking start/review action replay; queued reviews remain visible without globally stalling unrelated starts).
 - `projection.delta_stream`: `projection` (durable project delta ledger and version history; cursor replay and snapshot reads never reconcile or poll tmux).
-- `task.review_handoff`: `projection` (durable issue v2 lifecycle/review projection + session activity projection; active issue self-handoff remains allowed).
+- `task.review_handoff`: `projection` (durable issue v2 lifecycle/review projection + revisioned material decision change/acknowledgement observations + session activity projection; active issue self-handoff remains allowed only after material decisions are current).
+- `decision.propagation_delivery`: `hybrid` (atomic decision audit/outbox and per-issue materialization checkpoints reconciled with live tmux delivery until an authoritative exact-revision acknowledgement; superseded and withdrawn revisions are not delivered).
 - `task.integration_readiness` and `task.context_risk_closeout`: `projection` (durable issue projection + mailbox/observation evidence).
 - `task.merge_base_target`: `projection` (durable issue graph + worktree projection; explicit root-to-base requests also require issue-scoped `human.input_provided` acceptance evidence).
+- `decision.markdown_transfer_target`: `hybrid` (refreshed durable worktree ownership plus live Git worktree path and HEAD revision).
 - `task.follow_on_merge_candidates`: `projection` (durable issue graph + worktree projection).
 - `issue_resources.lifecycle`: `projection` (durable issue status + runtime attachment projection).
 - `interaction.waiting_human`: `projection` (durable interaction requests refreshed before decision-waiting and pickup evaluation).

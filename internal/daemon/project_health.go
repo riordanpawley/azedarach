@@ -44,6 +44,13 @@ func (d *Daemon) recordProjectIssueStoreFailure(projectID string, err error) err
 	if err == nil || !isDeterministicProjectIssueStoreOpenFailure(err) {
 		return err
 	}
+	return d.recordProjectIssueStoreUnavailable(projectID, err)
+}
+
+func (d *Daemon) recordProjectIssueStoreUnavailable(projectID string, err error) error {
+	if err == nil {
+		return nil
+	}
 	projectID = d.canonicalProjectID(projectID)
 	now := timeNow().UTC()
 

@@ -17,8 +17,11 @@ import (
 // ImportMD reads docs/decisions/*.md, parses each file, computes a per-field
 // diff against the SQLite store, and either reports the plan (Check=true) or
 // applies it. Per-field conflicts (md and SQLite both non-empty and differ)
-// cause that file to be skipped unless Force=true is set. Links are NOT
-// reconciled in this pass — use az decision link add/remove for that.
+// cause that file to be skipped unless Force=true is set. Issue links are
+// imported as transfer provenance for new records and explicit full-project
+// transfers. During issue-scoped transfer, existing records retain their
+// durable issue links and are owner-gated atomically; requirement/decision
+// links remain explicit az decision link operations.
 func (s issueDecisionService) ImportMD(ctx context.Context, req protocol.DecisionImportMDRequestBody) (protocol.DecisionImportMDResponseBody, error) {
 	c, err := s.client(ctx)
 	if err != nil {
@@ -27,45 +30,51 @@ func (s issueDecisionService) ImportMD(ctx context.Context, req protocol.Decisio
 	if s.daemon == nil {
 		return protocol.DecisionImportMDResponseBody{}, errors.New("decision import_md unavailable: daemon nil")
 	}
-	repoDir, err := decisionMDRepoDir(s.daemon.resolveRepoDirForProject(daemonProjectIDFromContext(ctx)), req.RepoDir)
+	var resp protocol.DecisionImportMDResponseBody
+	_, err = s.withDecisionMDTransferAuthority(ctx, c, req.RepoDir, req.FullProject, func(lockCtx context.Context, target decisionMDTransferTarget) error {
+		s.beforeDecisionMDTransferRevalidation("import_md", target)
+		if err := s.revalidateDecisionMDTransferTarget(lockCtx, target); err != nil {
+			return fmt.Errorf("revalidate decision import_md target: %w", err)
+		}
+		resp = protocol.DecisionImportMDResponseBody{Check: req.Check, Force: req.Force, TargetRepoDir: target.RepoDir, TargetRevision: target.Revision, TargetIssueID: target.IssueID, FullProject: target.FullProject}
+		sourceDir := filepath.Join(target.RepoDir, decisionMDSubdir)
+		entries, err := os.ReadDir(sourceDir)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("read %s: %w", sourceDir, err)
+		}
+
+		paths := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+				continue
+			}
+			paths = append(paths, filepath.Join(sourceDir, entry.Name()))
+		}
+		sort.Strings(paths)
+
+		for _, path := range paths {
+			fileResult := s.importOneDecisionFile(lockCtx, c, target, path, req)
+			resp.Files = append(resp.Files, fileResult)
+			if fileResult.Imported {
+				resp.Imported++
+			}
+			if len(fileResult.Conflicts) > 0 {
+				resp.Conflicts++
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return protocol.DecisionImportMDResponseBody{}, errors.New("decision import_md unavailable: repo dir not resolved")
-	}
-
-	sourceDir := filepath.Join(repoDir, decisionMDSubdir)
-	entries, err := os.ReadDir(sourceDir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return protocol.DecisionImportMDResponseBody{Check: req.Check, Force: req.Force}, nil
-		}
-		return protocol.DecisionImportMDResponseBody{}, fmt.Errorf("read %s: %w", sourceDir, err)
-	}
-
-	paths := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
-			continue
-		}
-		paths = append(paths, filepath.Join(sourceDir, entry.Name()))
-	}
-	sort.Strings(paths)
-
-	resp := protocol.DecisionImportMDResponseBody{Check: req.Check, Force: req.Force}
-	for _, path := range paths {
-		fileResult := s.importOneDecisionFile(ctx, c, repoDir, path, req)
-		resp.Files = append(resp.Files, fileResult)
-		if fileResult.Imported {
-			resp.Imported++
-		}
-		if len(fileResult.Conflicts) > 0 {
-			resp.Conflicts++
-		}
+		return protocol.DecisionImportMDResponseBody{}, fmt.Errorf("decision import_md target: %w", err)
 	}
 	return resp, nil
 }
 
-func (s issueDecisionService) importOneDecisionFile(ctx context.Context, c *issues.Client, repoDir, path string, req protocol.DecisionImportMDRequestBody) protocol.DecisionImportMDFileResult {
-	rel, _ := filepath.Rel(repoDir, path)
+func (s issueDecisionService) importOneDecisionFile(ctx context.Context, c *issues.Client, target decisionMDTransferTarget, path string, req protocol.DecisionImportMDRequestBody) protocol.DecisionImportMDFileResult {
+	rel, _ := filepath.Rel(target.RepoDir, path)
 	if rel == "" {
 		rel = path
 	}
@@ -82,6 +91,8 @@ func (s issueDecisionService) importOneDecisionFile(ctx context.Context, c *issu
 		return result
 	}
 	result.DecisionID = parsed.LocalID
+	result.IssueIDs = parsedDecisionIssueIDs(parsed)
+	result.OwnerIssueID = decisionOwnerIssueID(result.IssueIDs)
 
 	existing, err := c.GetDecision(ctx, parsed.LocalID)
 	isNew := errors.Is(err, domain.ErrNotFound)
@@ -94,6 +105,28 @@ func (s issueDecisionService) importOneDecisionFile(ctx context.Context, c *issu
 	result.Changes = changes
 	result.Conflicts = conflicts
 	result.NewRecord = isNew
+	if !target.FullProject {
+		if isNew {
+			if result.OwnerIssueID != target.IssueID {
+				result.Skipped = true
+				result.SkipReason = "foreign, unowned, or ambiguously owned decision artifact"
+				return result
+			}
+		} else {
+			_, owner, ownerErr := c.UpdateDecisionForOwner(ctx, parsed.LocalID, target.IssueID, issues.UpdateDecisionParams{})
+			result.IssueIDs = owner.IssueIDs
+			result.OwnerIssueID = owner.OwnerIssueID
+			if ownerErr != nil {
+				if errors.Is(ownerErr, issues.ErrDecisionOwnerMismatch) {
+					result.Skipped = true
+					result.SkipReason = "durable decision owner does not match target worktree"
+					return result
+				}
+				result.ApplyError = ownerErr.Error()
+				return result
+			}
+		}
+	}
 
 	if len(conflicts) > 0 && !req.Force {
 		result.Skipped = true
@@ -113,7 +146,21 @@ func (s issueDecisionService) importOneDecisionFile(ctx context.Context, c *issu
 		}
 	}
 	if len(changes) == 0 {
-		// Nothing to do; not even a no-op write.
+		if isNew || target.FullProject {
+			if err := s.revalidateDecisionImportApply(ctx, target, parsed.LocalID); err != nil {
+				result.ApplyError = err.Error()
+				return result
+			}
+			if imported, linkErr := importDecisionIssueProvenance(ctx, c, parsed); linkErr != nil {
+				result.ApplyError = linkErr.Error()
+			} else {
+				result.Imported = imported
+			}
+		}
+		return result
+	}
+	if err := s.revalidateDecisionImportApply(ctx, target, parsed.LocalID); err != nil {
+		result.ApplyError = err.Error()
 		return result
 	}
 
@@ -131,13 +178,95 @@ func (s issueDecisionService) importOneDecisionFile(ctx context.Context, c *issu
 		}
 	} else {
 		params := updateParamsFromChanges(changes, parsed)
-		if _, err := c.UpdateDecision(ctx, parsed.LocalID, params); err != nil {
-			result.ApplyError = err.Error()
+		var updateErr error
+		if target.FullProject {
+			_, updateErr = c.UpdateDecision(ctx, parsed.LocalID, params)
+		} else {
+			_, owner, err := c.UpdateDecisionForOwner(ctx, parsed.LocalID, target.IssueID, params)
+			result.IssueIDs = owner.IssueIDs
+			result.OwnerIssueID = owner.OwnerIssueID
+			updateErr = err
+		}
+		if updateErr != nil {
+			if errors.Is(updateErr, issues.ErrDecisionOwnerMismatch) {
+				result.Skipped = true
+				result.SkipReason = "durable decision owner changed before import"
+				return result
+			}
+			result.ApplyError = updateErr.Error()
+			return result
+		}
+	}
+	if isNew || target.FullProject {
+		if _, linkErr := importDecisionIssueProvenance(ctx, c, parsed); linkErr != nil {
+			result.ApplyError = linkErr.Error()
 			return result
 		}
 	}
 	result.Imported = true
 	return result
+}
+
+func (s issueDecisionService) revalidateDecisionImportApply(ctx context.Context, target decisionMDTransferTarget, decisionID string) error {
+	if s.daemon == nil || s.daemon.git == nil {
+		return nil
+	}
+	s.beforeDecisionMDTransferRevalidation("import_md_apply", target)
+	if err := s.revalidateDecisionMDTransferTarget(ctx, target); err != nil {
+		return fmt.Errorf("revalidate decision import target before applying %s: %w", decisionID, err)
+	}
+	return nil
+}
+
+func importDecisionIssueProvenance(ctx context.Context, c *issues.Client, parsed parsedDecisionMD) (bool, error) {
+	imported := false
+	existing, err := c.ListDecisionLinks(ctx, issues.DecisionLinkFilter{DecisionID: parsed.LocalID, TargetKind: issues.DecisionTargetIssue})
+	if err != nil {
+		return false, fmt.Errorf("list issue provenance for %s: %w", parsed.LocalID, err)
+	}
+	existingTargets := make(map[string]struct{}, len(existing))
+	for _, link := range existing {
+		existingTargets[strings.TrimSpace(link.TargetID)] = struct{}{}
+	}
+	for _, link := range parsed.Links {
+		if link.TargetKind != string(issues.DecisionTargetIssue) {
+			continue
+		}
+		if _, found := existingTargets[strings.TrimSpace(link.TargetID)]; found {
+			continue
+		}
+		var note *string
+		if trimmed := strings.TrimSpace(link.Note); trimmed != "" {
+			note = &trimmed
+		}
+		if _, err := c.AddDecisionLink(ctx, issues.AddDecisionLinkParams{
+			DecisionID: parsed.LocalID,
+			TargetKind: issues.DecisionTargetIssue,
+			TargetID:   link.TargetID,
+			Relation:   issues.DecisionRelation(link.Relation),
+			Note:       note,
+		}); err != nil {
+			return imported, fmt.Errorf("import issue provenance %s -> %s: %w", parsed.LocalID, link.TargetID, err)
+		}
+		imported = true
+		existingTargets[strings.TrimSpace(link.TargetID)] = struct{}{}
+	}
+	return imported, nil
+}
+
+func parsedDecisionIssueIDs(parsed parsedDecisionMD) []string {
+	seen := map[string]struct{}{}
+	for _, link := range parsed.Links {
+		if link.TargetKind == string(issues.DecisionTargetIssue) && strings.TrimSpace(link.TargetID) != "" {
+			seen[strings.TrimSpace(link.TargetID)] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // planDecisionImport walks each field, returning the list of changes that

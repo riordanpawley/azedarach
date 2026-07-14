@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14037,6 +14038,51 @@ func TestStartDaemonCommandStartFailure(t *testing.T) {
 	err := StartDaemonCommand(deps)
 	if err == nil || !strings.Contains(err.Error(), "start daemon: boom") {
 		t.Fatalf("error = %v, want start daemon boom", err)
+	}
+}
+
+func TestDaemonStartAndRestartRejectDaemonThatDoesNotRemainAttachable(t *testing.T) {
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+
+	tests := []struct {
+		name string
+		run  func(*Dependencies) error
+	}{
+		{name: "start", run: StartDaemonCommand},
+		{name: "restart", run: RestartDaemonCommand},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeLauncher{}
+			newLauncher = func(_, _ string) daemonStarter { return fake }
+
+			handshakes := 0
+			deps := &Dependencies{
+				Config: config.DefaultConfig(),
+				DaemonClient: daemonclient.New(&fakeDaemonTransport{
+					handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+						handshakes++
+						if handshakes == 1 {
+							return protocol.HelloAck{Accepted: true}, nil
+						}
+						return protocol.HelloAck{}, &net.OpError{Op: "dial", Net: "unix", Err: os.ErrNotExist}
+					},
+				}),
+				Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+				ProjectID: "proj",
+				RepoDir:   t.TempDir(),
+			}
+			deps.AutostartRetryPolicy = &autoclient.AutostartRetryPolicy{}
+
+			err := tt.run(deps)
+			if err == nil || !strings.Contains(err.Error(), "stable") {
+				t.Fatalf("daemon %s error = %v, want stable attach failure", tt.name, err)
+			}
+			if handshakes < 2 {
+				t.Fatalf("handshakes = %d, want at least 2", handshakes)
+			}
+		})
 	}
 }
 

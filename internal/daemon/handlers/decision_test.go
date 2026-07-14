@@ -17,6 +17,7 @@ type fakeDecisionService struct {
 	listLinksFn  func(context.Context, protocol.DecisionLinkListRequestBody) (protocol.DecisionLinkListResponseBody, error)
 	addLinkFn    func(context.Context, protocol.DecisionLinkAddRequestBody) (protocol.DecisionLinkAddResponseBody, error)
 	removeLinkFn func(context.Context, protocol.DecisionLinkRemoveRequestBody) (protocol.DecisionLinkRemoveResponseBody, error)
+	ackFn        func(context.Context, protocol.DecisionAcknowledgeRequestBody) (protocol.DecisionAcknowledgeResponseBody, error)
 	syncMDFn     func(context.Context, protocol.DecisionSyncMDRequestBody) (protocol.DecisionSyncMDResponseBody, error)
 	importMDFn   func(context.Context, protocol.DecisionImportMDRequestBody) (protocol.DecisionImportMDResponseBody, error)
 }
@@ -68,6 +69,12 @@ func (f *fakeDecisionService) RemoveDecisionLink(ctx context.Context, req protoc
 		return f.removeLinkFn(ctx, req)
 	}
 	return protocol.DecisionLinkRemoveResponseBody{}, nil
+}
+func (f *fakeDecisionService) AcknowledgeDecision(ctx context.Context, req protocol.DecisionAcknowledgeRequestBody) (protocol.DecisionAcknowledgeResponseBody, error) {
+	if f.ackFn != nil {
+		return f.ackFn(ctx, req)
+	}
+	return protocol.DecisionAcknowledgeResponseBody{IssueID: req.IssueID, DecisionID: req.DecisionID, Revision: req.Revision, Disposition: req.Disposition}, nil
 }
 func (f *fakeDecisionService) SyncMD(ctx context.Context, req protocol.DecisionSyncMDRequestBody) (protocol.DecisionSyncMDResponseBody, error) {
 	if f.syncMDFn != nil {
@@ -167,6 +174,27 @@ func TestDecisionHandler_DeleteRequiresConfirm(t *testing.T) {
 	})
 	if !resp.OK {
 		t.Fatalf("expected delete with confirm to succeed, got %+v", resp.Error)
+	}
+}
+
+func TestDecisionHandler_AcknowledgeValidation(t *testing.T) {
+	handler := NewDecisionHandler(&fakeDecisionService{})
+	for _, tc := range []struct {
+		name string
+		body protocol.DecisionAcknowledgeRequestBody
+		ok   bool
+	}{
+		{name: "valid", body: protocol.DecisionAcknowledgeRequestBody{IssueID: "worker", DecisionID: "dec-1", Revision: 4, Disposition: "compatible"}, ok: true},
+		{name: "missing revision", body: protocol.DecisionAcknowledgeRequestBody{IssueID: "worker", DecisionID: "dec-1", Disposition: "compatible"}},
+		{name: "invalid disposition", body: protocol.DecisionAcknowledgeRequestBody{IssueID: "worker", DecisionID: "dec-1", Revision: 4, Disposition: "seen"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, _ := json.Marshal(tc.body)
+			resp := handler.Handle(context.Background(), protocol.RequestEnvelope{Command: protocol.CommandDecisionAcknowledge, Body: payload})
+			if got := resp.OK && resp.Error == nil; got != tc.ok {
+				t.Fatalf("ok=%v want=%v response=%+v", got, tc.ok, resp)
+			}
+		})
 	}
 }
 

@@ -129,8 +129,9 @@ func TestProjectOrchestrationWatchPollIntervalIsBounded(t *testing.T) {
 
 func TestOrchestratorSessionAttachIsDeclarativeCLICommand(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	t.Setenv("HOME", t.TempDir())
 	var gotCommand string
-	deps := &Dependencies{DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	deps := &Dependencies{ProjectID: "0123456789ab-azedarach", RepoDir: "/work/azedarach", DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 		gotCommand = req.Command
 		var body protocol.OrchestratorSessionRequest
 		if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -145,7 +146,7 @@ func TestOrchestratorSessionAttachIsDeclarativeCLICommand(t *testing.T) {
 	if gotCommand != protocol.CommandOrchestratorSessionAttach {
 		t.Fatalf("command = %q", gotCommand)
 	}
-	for _, want := range []string{"Orchestrator session: az-orchestrator-project", "Disposition: attached", "Live: true"} {
+	for _, want := range []string{"Project: azedarach (0123456789ab-azedarach)", "Orchestrator session: az-orchestrator-project", "Disposition: attached", "Live: true"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q: %s", want, output)
 		}
