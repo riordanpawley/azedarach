@@ -109,6 +109,84 @@ func TestExclusiveLockSerializesManagedValidation(t *testing.T) {
 	assert.Equal(t, []string{"first", "second"}, order)
 }
 
+func TestSharedLockAllowsConcurrentValidators(t *testing.T) {
+	cfg := Config{Root: t.TempDir(), Owner: "issue-dhc", Kind: KindNormal}
+	require.NoError(t, WithSharedLock(context.Background(), cfg, func() error { return nil }))
+	release := make(chan struct{})
+	entered := make(chan struct{}, 2)
+	done := make(chan error, 2)
+	for range 2 {
+		go func() {
+			done <- WithSharedLock(context.Background(), cfg, func() error {
+				entered <- struct{}{}
+				<-release
+				return nil
+			})
+		}()
+	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("shared validator did not enter concurrently")
+		}
+	}
+	close(release)
+	require.NoError(t, <-done)
+	require.NoError(t, <-done)
+}
+
+func TestSharedLockConcurrentInitializesCacheRoot(t *testing.T) {
+	cfg := Config{Root: filepath.Join(t.TempDir(), "new-root"), Owner: "issue-dhc", Kind: KindNormal}
+	start := make(chan struct{})
+	done := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			done <- WithSharedLock(context.Background(), cfg, func() error { return nil })
+		}()
+	}
+	close(start)
+	require.NoError(t, <-done)
+	require.NoError(t, <-done)
+}
+
+func TestValidationLockUsesExclusiveModeForAutoMaintenance(t *testing.T) {
+	cfg := Config{Root: t.TempDir(), Owner: "issue-dhc", Kind: KindNormal, SoftLimitBytes: 100, HardLimitBytes: 200}
+	sharedEntered := make(chan struct{})
+	releaseShared := make(chan struct{})
+	sharedDone := make(chan error, 1)
+	go func() {
+		sharedDone <- WithSharedLock(context.Background(), cfg, func() error {
+			close(sharedEntered)
+			<-releaseShared
+			return nil
+		})
+	}()
+	<-sharedEntered
+	autoEntered := make(chan struct{})
+	autoDone := make(chan error, 1)
+	go func() {
+		autoDone <- WithValidationLock(context.Background(), cfg, true, func(_ Telemetry, err error) error {
+			close(autoEntered)
+			return err
+		})
+	}()
+	select {
+	case <-autoEntered:
+		t.Fatal("auto-maintaining validator entered while shared validator held cache lock")
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(releaseShared)
+	require.NoError(t, <-sharedDone)
+	select {
+	case <-autoEntered:
+	case <-time.After(time.Second):
+		t.Fatal("auto-maintaining validator did not enter after shared validator released")
+	}
+	require.NoError(t, <-autoDone)
+}
+
 func TestCleanupInactiveOwnerRemovesOnlySelectedVariants(t *testing.T) {
 	root := t.TempDir()
 	for _, kind := range []Kind{KindNormal, KindRace, KindCoverage} {

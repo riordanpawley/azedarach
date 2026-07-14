@@ -9,6 +9,7 @@ mkdir -p "$fixture/bin" "$fixture/fake-bin" "$fixture/real-bin"
 cp "$repo_root/justfile" "$fixture/justfile"
 mkdir -p "$fixture/scripts"
 cp "$repo_root/scripts/build-install-run.sh" "$fixture/scripts/build-install-run.sh"
+cp "$repo_root/scripts/with-machine-validation-lease" "$fixture/scripts/with-machine-validation-lease"
 printf 'production az sentinel\n' >"$fixture/bin/az"
 printf 'production azd sentinel\n' >"$fixture/bin/azd"
 cp "$fixture/bin/az" "$fixture/az.before"
@@ -55,6 +56,68 @@ EOF_SCRIPT
 chmod +x "$output"
 EOF
 chmod +x "$fixture/fake-bin/go"
+
+cat >"$fixture/fake-bin/az" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "validation" && "${2:-}" == "acquire" ]]; then
+  request=""
+  while (($# > 0)); do
+    if [[ "$1" == "--request" ]]; then
+      request="$2"
+      break
+    fi
+    shift
+  done
+  token="${AZEDARACH_VALIDATION_LEASE_TOKEN:-}"
+  if [[ -n "$token" && "$request" == *"${token:0:12}"* ]]; then
+    echo "stub az: public request id leaked lease-token material" >&2
+    exit 1
+  fi
+  state=active
+  if [[ -n "${FAKE_AZ_QUEUE_ONCE_FILE:-}" && ! -e "$FAKE_AZ_QUEUE_ONCE_FILE" ]]; then
+    : >"$FAKE_AZ_QUEUE_ONCE_FILE"
+    state=queued
+  fi
+  printf '{"request":{"request_id":"%s","state":"%s"}}\n' "$request" "$state"
+  exit 0
+fi
+if [[ "${1:-}" == "validation" && "${2:-}" == "status" ]]; then
+  printf '{"active":[{"request_id":"%s","class":"%s","profile":"%s"}],"queued":[],"revision":1}\n' \
+    "${AZEDARACH_VALIDATION_REQUEST_ID:-fixture}" "${AZEDARACH_VALIDATION_CLASS:-shared}" "${AZEDARACH_VALIDATION_PROFILE:-fixture}"
+  exit 0
+fi
+if [[ "${1:-}" == "validation" && ( "${2:-}" == "heartbeat" || "${2:-}" == "finish" ) ]]; then
+  exit 0
+fi
+echo "stub az: unsupported arguments: $*" >&2
+exit 1
+EOF
+chmod +x "$fixture/fake-bin/az"
+
+AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_TICKET_ID=fixture \
+  FAKE_AZ_QUEUE_ONCE_FILE="$fixture/queued-once" \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile token-isolation -- \
+  sh -c 'test -z "${AZEDARACH_VALIDATION_LEASE_TOKEN:-}"'
+test -e "$fixture/queued-once"
+
+AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_VALIDATION_REQUEST_ID=outer-shared \
+  AZEDARACH_VALIDATION_CLASS=shared \
+  AZEDARACH_VALIDATION_PROFILE=fixture \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile nested -- true
+if AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_VALIDATION_REQUEST_ID=outer-shared \
+  AZEDARACH_VALIDATION_CLASS=shared \
+  AZEDARACH_VALIDATION_PROFILE=fixture \
+  "$fixture/scripts/with-machine-validation-lease" --class aggregate --profile nested -- true \
+  >"$fixture/nested-upgrade.stdout" 2>"$fixture/nested-upgrade.stderr"; then
+  echo "nested aggregate unexpectedly joined a shared validation request" >&2
+  exit 1
+fi
+grep -q "nested aggregate validation cannot join active shared request" "$fixture/nested-upgrade.stderr"
 
 (
   cd "$repo_root"
@@ -111,22 +174,25 @@ if [[ "${1:-}" == "rev-parse" && "${2:-}" == "HEAD" ]]; then
 fi
 if [[ "${1:-}" == "rev-parse" && "${2:-}" == "--git-dir" ]]; then
   if [[ "${FAKE_GIT_MODE:-linked}" == "primary" ]]; then
-    printf '/fixture/repo/.git\n'
+    printf '%s/.git\n' "${FAKE_GIT_COMMON_ROOT:?}"
   else
-    printf '/fixture/repo/.git/worktrees/test\n'
+    printf '%s/.git/worktrees/test\n' "${FAKE_GIT_COMMON_ROOT:?}"
   fi
   exit 0
 fi
-if [[ "${1:-}" == "rev-parse" && "${2:-}" == "--git-common-dir" ]]; then
-  printf '/fixture/repo/.git\n'
+if [[ "${1:-}" == "rev-parse" && ( "${2:-}" == "--git-common-dir" || "${3:-}" == "--git-common-dir" ) ]]; then
+  printf '%s/.git\n' "${FAKE_GIT_COMMON_ROOT:?}"
   exit 0
 fi
 echo "stub git: unsupported arguments: $*" >&2
 exit 1
 EOF
 chmod +x "$fixture/fake-bin/git"
+export FAKE_GIT_COMMON_ROOT="$fixture"
 
-PATH="$fixture/fake-bin:$PATH" just --justfile "$fixture/justfile" --working-directory "$fixture" build
+AZEDARACH_GO_CACHE_ROOT= AZEDARACH_VALIDATION_LEASE_ID= AZEDARACH_VALIDATION_LEASE_ROOT= \
+  PATH="$fixture/fake-bin:$PATH" \
+  just --justfile "$fixture/justfile" --working-directory "$fixture" build
 
 cmp "$fixture/az.before" "$fixture/bin/az"
 cmp "$fixture/azd.before" "$fixture/bin/azd"

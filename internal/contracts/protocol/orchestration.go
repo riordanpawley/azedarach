@@ -59,6 +59,7 @@ type OrchestrationSnapshot struct {
 	GeneratedAt            time.Time                                 `json:"generated_at"`
 	Roots                  []string                                  `json:"roots,omitempty"`
 	Capacity               OrchestrationCapacity                     `json:"capacity"`
+	ValidationCapacity     *domain.ValidationSnapshot   `json:"validation_capacity,omitempty"`
 	Runnable               []string                                  `json:"runnable"`
 	NestedRoots            []OrchestrationNestedRoot                 `json:"nested_roots,omitempty"`
 	Pending                []OrchestrationPending                    `json:"pending,omitempty"`

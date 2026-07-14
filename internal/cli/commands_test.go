@@ -54,8 +54,9 @@ func TestRenderPrimeOrchestrationSectionExplainsRuntimeContinuationGuard(t *test
 		Scope: scope, Cursor: 17, ContinuationRequired: true,
 		ContinuationReason:   "direct nested root active",
 		ContinuationContract: "consume the durable cursor and continue",
+		ValidationCapacity:   &domain.ValidationSnapshot{Revision: 4, Active: []domain.ValidationRequest{{RequestID: "gate"}}, Queued: []domain.ValidationRequest{{RequestID: "waiter"}}},
 	})
-	for _, want := range []string{"Runtime persistence guard: wake-required", "direct nested root active", "consume the durable cursor and continue", "cursor=17"} {
+	for _, want := range []string{"Runtime persistence guard: wake-required", "direct nested root active", "consume the durable cursor and continue", "cursor=17", "Validation capacity: active=1 queued=1 revision=4"} {
 		if !strings.Contains(section, want) {
 			t.Fatalf("prime orchestration section missing %q:\n%s", want, section)
 		}
