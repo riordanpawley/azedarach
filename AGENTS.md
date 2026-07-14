@@ -183,7 +183,7 @@ fd "filename" -t f internal cmd
    - `orchestration.project_candidates` bounded project candidate classification -> `projection` (durable issue graph/lifecycle, ownership, session activity, and interaction projections)
    - `orchestration.project_review` review queue, reviewer lease, structured evidence, and outcome gate -> `projection` (durable issue/review/ownership, mailbox/observation evidence, and worktree projections; accepted close delegates to the existing hybrid `task.close` invariant)
    - `orchestration.claim_start` bounded worker-wave claim/start and compensation -> `hybrid` (durable ownership/start-attempt projection + daemon session-start operation/runtime)
-   - `orchestration.project_loop` durable watch cursor, deterministic action replay, and review-first scheduling -> `projection` (durable issue observation stream + orchestration checkpoint refreshed before each loop decision)
+   - `orchestration.project_loop` durable watch cursor, deterministic action replay, and non-blocking start/review scheduling -> `projection` (durable issue observation stream + orchestration checkpoint refreshed before each loop decision; queued review stays visible without globally suppressing unrelated starts)
    - `issue_resources.lifecycle` issue resource desired-state gate -> `projection` (durable issue status + runtime attachment projection)
    - `interaction.waiting_human` decision-waiting and pickup exclusion gate -> `projection` (durable interaction request projection refreshed before evaluation)
    - `investigation.waiting_human` human-findings authority gate -> `projection` (durable investigation disposition and issue-specific acceptance/review evidence refreshed before evaluation)

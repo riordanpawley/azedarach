@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
@@ -50,44 +52,41 @@ func TestProjectReviewQueuePrioritizesReviewAndExcludesForeignOwnedWork(t *testi
 	}
 }
 
-func TestProjectStartIntentCannotBypassActionableReview(t *testing.T) {
+func TestProjectStartIntentDoesNotGloballyBlockOnActionableReview(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	dbPath := filepath.Join(repoDir, "issues.db")
+	client := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
-	reviewID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	reviewID := createReviewTask(t, ctx, client, domain.P1, "worker")
 	openID, err := client.Create(ctx, issues.CreateTaskParams{Title: "new work", Description: "Executable", Acceptance: "done", Type: domain.TypeTask, Priority: domain.P0, Status: domain.StatusOpen})
 	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	if err := upsertSessionStateFixture(runtimeStore, ctx, "project", daemonstate.Session{ID: reviewID, IssueID: reviewID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.cfg.Orchestration.AgentCapacity = 1
+	d.runtimeStoresByProject = map[string]*daemonstate.RuntimeStateStore{"project": runtimeStore}
 
-	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "start-blocked-by-review", ActorID: "orchestrator", IssueIDs: []string{openID}, RepoDir: repoDir})
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "start-alongside-review", ActorID: "orchestrator", IssueIDs: []string{openID}, RepoDir: repoDir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := result.Skipped[openID]; got != "review-priority:"+reviewID {
-		t.Fatalf("result = %+v, want review priority skip", result)
-	}
-	openTask, err := client.GetWithRuntime(ctx, "project", openID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if openTask.Ownership != nil || openTask.Status != domain.StatusOpen {
-		t.Fatalf("open task mutated despite review priority = %+v", openTask)
+	if got := result.Skipped[openID]; got != "global-agent-capacity-reached" {
+		t.Fatalf("result = %+v, want capacity gate rather than review-priority:%s", result, reviewID)
 	}
 }
 
-func TestProjectStartIntentRoutesPrematureWorkBeforePrioritizingReview(t *testing.T) {
+func TestProjectStartIntentRoutesPrematureWorkWhileReviewRemainsQueued(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	reviewID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
-	openID, err := client.Create(ctx, issues.CreateTaskParams{Title: "new work", Description: "Executable", Acceptance: "done", Type: domain.TypeTask, Priority: domain.P0, Status: domain.StatusOpen})
-	if err != nil {
-		t.Fatal(err)
-	}
 	prematureID, err := client.Create(ctx, issues.CreateTaskParams{Title: "thin work", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
@@ -97,15 +96,16 @@ func TestProjectStartIntentRoutesPrematureWorkBeforePrioritizingReview(t *testin
 	}
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
 
-	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "route-before-review", ActorID: "orchestrator", IssueIDs: []string{openID, prematureID}, RepoDir: repoDir})
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "route-alongside-review", ActorID: "orchestrator", IssueIDs: []string{prematureID}, RepoDir: repoDir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Started) != 0 || result.Skipped[openID] != "review-priority:"+reviewID {
-		t.Fatalf("result = %+v, want review to suppress runnable start", result)
-	}
 	if len(result.Routed) != 1 || result.Routed[0].IssueID != prematureID || result.Skipped[prematureID] != "candidate-routed-backlog" {
-		t.Fatalf("result = %+v, want premature candidate routed before review return", result)
+		t.Fatalf("result = %+v, want premature candidate routed while review stays queued", result)
+	}
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir})
+	if err != nil || len(snapshot.ReviewQueue) != 1 || snapshot.ReviewQueue[0].IssueID != reviewID {
+		t.Fatalf("review queue = %+v err=%v, want %s preserved", snapshot.ReviewQueue, err, reviewID)
 	}
 	premature, err := client.GetWithRuntime(ctx, "project", prematureID)
 	if err != nil {

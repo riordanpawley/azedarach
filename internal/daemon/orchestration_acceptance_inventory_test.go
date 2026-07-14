@@ -22,6 +22,8 @@ func TestProjectOrchestrationEndToEndAcceptanceInventory(t *testing.T) {
 	}{
 		{"singleton-start-attach-recovery", TestProjectOrchestratorSessionStartAttachesExactScopeSingleton},
 		{"project-scheduling-cursor", TestProjectOrchestratorLoopPrioritizesReviewAndPersistsCursor},
+		{"review-does-not-stall-starts", TestProjectOrchestratorSnapshotKeepsStartsActionableAlongsideReview},
+		{"start-intent-does-not-stall-on-review", TestProjectStartIntentDoesNotGloballyBlockOnActionableReview},
 		{"cross-process-ownership", TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership},
 		{"human-advisor-discussion", TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle},
 		{"human-answer-resolution", TestInteractionStructuredProposalCanBeHumanEditedAndAtomicallyResolved},

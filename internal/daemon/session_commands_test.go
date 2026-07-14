@@ -8669,6 +8669,9 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "Start this root's direct runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`") {
 		t.Fatalf("prompt = %q, want direct leaf start guidance", prompt)
 	}
+	if !strings.Contains(prompt, "Queued reviews do not block unrelated starts when managed agent capacity remains") {
+		t.Fatalf("prompt = %q, want non-blocking review scheduling guidance", prompt)
+	}
 	if !strings.Contains(prompt, "Nested epic/root rule: if a runnable child is itself an epic/root that should self-orchestrate, start that child's own orchestrator session with `az orchestrator-session start --root <child-root>`") {
 		t.Fatalf("prompt = %q, want nested root session guidance", prompt)
 	}
@@ -8713,13 +8716,18 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "Treat blocked work as graph state from unresolved `blocks` dependencies") {
 		t.Fatalf("prompt = %q, want graph-derived blocked guidance", prompt)
 	}
+	if !strings.Contains(prompt, "Delegate every non-trivial diff inspection to a fresh ephemeral review subagent") ||
+		!strings.Contains(prompt, "Delegates are read-only") ||
+		!strings.Contains(prompt, "keep durable review-return, review-accept, integration, and close authority in this orchestrator") {
+		t.Fatalf("prompt = %q, want ephemeral read-only review delegation guidance", prompt)
+	}
 	if !strings.Contains(prompt, "Treat `in_review` workers as ready for orchestrator validation") {
 		t.Fatalf("prompt = %q, want in-review integration guidance", prompt)
 	}
 	if !strings.Contains(prompt, "close accepted worker issues with `az issue close --id <issue-id>`") {
 		t.Fatalf("prompt = %q, want issue close completion guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Keep orchestration centralized inside each root session; delegate explicit nested epic/root issues to their own orchestrator sessions rather than flattening their children into this session.") {
+	if !strings.Contains(prompt, "Keep orchestration authority centralized inside each root session while delegating read-only review inspection; delegate explicit nested epic/root issues to their own orchestrator sessions rather than flattening their children into this session.") {
 		t.Fatalf("prompt = %q, want per-root centralization guidance", prompt)
 	}
 	if !strings.Contains(prompt, "Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `az issue close --id <child-issue>`") {

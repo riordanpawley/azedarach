@@ -210,7 +210,7 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		Constraints: protocol.OrchestrationConstraints{
 			InspectLimit: limit, StartLimit: a.startLimit(), AgentCapacity: a.agentCapacity(),
 			Commands:       orchestrationScopeCommands(identity.Scope),
-			RoleGuardrails: []string{"remain in the active orchestration loop", "do not implement worker issue scope", "preserve sessions during review handoff"},
+			RoleGuardrails: []string{"remain in the active orchestration loop", "do not implement worker issue scope", "delegate non-trivial review inspection to fresh read-only ephemeral subagents", "retain orchestrator-only durable review and integration authority", "preserve sessions during review handoff"},
 		},
 	}
 	if identity.Scope.Kind == domain.OrchestrationScopeRooted {
@@ -521,20 +521,6 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		}
 		if len(result.Routed) > 0 && a.daemon.noticeService != nil {
 			_ = a.daemon.reconcileInteractionNotices(ctx, projectID)
-		}
-		if reviewID := firstActionableReview(snapshot.ReviewQueue); reviewID != "" {
-			for _, issueID := range requested {
-				if _, routed := routedIssues[issueID]; routed {
-					if _, failed := result.Failed[issueID]; failed {
-						result.Skipped[issueID] = "candidate-route-failed"
-					} else {
-						result.Skipped[issueID] = "candidate-routed-" + routeKindForIssue(result.Routed, issueID)
-					}
-					continue
-				}
-				result.Skipped[issueID] = "review-priority:" + reviewID
-			}
-			return result, nil
 		}
 	}
 	limit := request.Limit
