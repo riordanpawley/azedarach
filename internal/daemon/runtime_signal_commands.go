@@ -220,9 +220,21 @@ func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.Req
 	if sessionID == "" && cmd.IssueID != "" {
 		sessionID = naming.CanonicalSessionID(projectID, cmd.IssueID)
 	}
-	if sessionID == "" || cmd.IssueID == "" {
-		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: false, Message: "missing issue_id or session_id"})
+	if sessionID == "" {
+		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: false, Message: "missing session_id"})
 		return
+	}
+	if cmd.IssueID == "" {
+		store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+		if store == nil {
+			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: false, Message: "session runtime store unavailable"})
+			return
+		}
+		projection, found, loadErr := store.GetSessionState(ctx, projectID, sessionID)
+		if loadErr != nil || !found || projection.Role != daemonstate.SessionRoleOrchestrator {
+			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: false, Message: "missing issue_id for non-orchestrator session"})
+			return
+		}
 	}
 	command, activity, ok := runtimeSignalAgentLifecycle(cmd)
 	if !ok {
@@ -244,6 +256,7 @@ func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.Req
 	}
 	rev := lastRevision(revisions)
 	out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: true, Revision: rev})
+	orchestratorEnded := false
 	if parentSessionID, _, ok := agentScopedSessionParentAndPane(sessionID); ok {
 		canonicalRev, err := d.recordAgentHookActivityEvidenceAndMaterialize(ctx, req.Meta, projectID, parentSessionID, sessionID, cmd.IssueID, activity, cmd)
 		if err != nil {
@@ -254,7 +267,20 @@ func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.Req
 		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity_evidence", OK: true})
 		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity_canonical", OK: true, Revision: canonicalRev})
 	}
-	if orchestratorActivityWakeRequired(activity) {
+	if strings.TrimSpace(cmd.Event) == "session_end" {
+		orchestratorSessionID := sessionID
+		if parentSessionID, _, ok := agentScopedSessionParentAndPane(sessionID); ok {
+			orchestratorSessionID = parentSessionID
+		}
+		paused, pauseErr := d.pauseEndedOrchestratorSession(ctx, req.Meta, projectID, orchestratorSessionID)
+		if pauseErr != nil {
+			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "orchestrator_session_end", OK: false, Message: pauseErr.Error()})
+		} else if paused {
+			orchestratorEnded = true
+			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "orchestrator_session_end", OK: true})
+		}
+	}
+	if !orchestratorEnded && orchestratorActivityWakeRequired(activity) {
 		if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC()); err != nil {
 			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "orchestrator_continuation", OK: false, Message: err.Error()})
 		} else {

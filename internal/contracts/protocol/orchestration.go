@@ -11,6 +11,7 @@ const (
 	CommandOrchestrationIntent       = "orchestration.intent"
 	CommandOrchestratorSessionStart  = "orchestration.session.start"
 	CommandOrchestratorSessionAttach = "orchestration.session.attach"
+	CommandOrchestratorSessionStop   = "orchestration.session.stop"
 	CommandOrchestratorSessionStatus = "orchestration.session.status"
 	EventOrchestrationLoopUpdated    = "orchestration.loop.updated"
 )
@@ -25,7 +26,8 @@ type OrchestrationLoopEventBody struct {
 }
 
 type OrchestratorSessionRequest struct {
-	Scope domain.OrchestrationScope `json:"scope"`
+	Scope             domain.OrchestrationScope `json:"scope"`
+	ExpectedSessionID string                    `json:"expected_session_id,omitempty"`
 }
 
 type OrchestratorSessionResult struct {
@@ -34,6 +36,7 @@ type OrchestratorSessionResult struct {
 	Disposition string                       `json:"disposition,omitempty"`
 	Lifecycle   domain.OrchestratorLifecycle `json:"lifecycle,omitempty"`
 	Live        bool                         `json:"live"`
+	Forced      bool                         `json:"forced,omitempty"`
 }
 
 type OrchestrationSnapshotRequest struct {
