@@ -545,6 +545,10 @@ func TestMergeGateBudgetLeavesFinalizationReserve(t *testing.T) {
 	if !strings.Contains(string(gate), wantWall) {
 		t.Fatalf("merge gate does not enforce shared wall validation budget %q", wantWall)
 	}
+	if strings.Contains(string(gate), "canonical=true status=passed") ||
+		!strings.Contains(string(gate), "canonical=false status=passed awaiting_exact_apply=true") {
+		t.Fatal("standalone gate must publish a passed candidate as noncanonical until exact target apply")
+	}
 	body, err := os.ReadFile(filepath.Join(scriptsDir, "git-merge-rebase-gate-body.sh"))
 	if err != nil {
 		t.Fatalf("read merge gate body: %v", err)
@@ -1001,7 +1005,15 @@ func TestRealProcessProfileMergeCleanlyTransactionalUsesTargetGateAuthority(t *t
 	t.Setenv("AZEDARACH_TEST_GATE_EVIDENCE", evidence)
 
 	client := NewClient(NewExecRunner(repo), slog.Default())
-	result, err := client.MergeCleanlyTransactional(context.Background(), repo, "feature")
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	relativeRepo, err := filepath.Rel(cwd, repo)
+	if err != nil || filepath.IsAbs(relativeRepo) {
+		t.Fatalf("relative target path = %q, %v", relativeRepo, err)
+	}
+	result, err := client.MergeCleanlyTransactional(context.Background(), relativeRepo, "feature")
 	if err != nil {
 		t.Fatalf("MergeCleanlyTransactional() error = %v", err)
 	}
@@ -1073,15 +1085,18 @@ func TestRealProcessProfileRecoverIntegrationJournalCompletesInterruptedFinalRes
 		TargetWorktree: repo,
 		TargetHead:     targetHead,
 		DesiredHead:    desiredHead,
-		StartedAt:      time.Now().UTC(),
+		Validation: CandidateValidationAttempt{
+			CandidateHead: desiredHead,
+			Status:        CandidateValidationPassed,
+			Canonical:     false,
+		},
+		StartedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("writeIntegrationJournal() error = %v", err)
 	}
-	runClientTestGit(t, repo, "reset", "--soft", desiredHead)
-	if status, err := client.Status(ctx, repo); err != nil {
-		t.Fatalf("Status() before recovery error = %v", err)
-	} else if !status.HasChanges {
-		t.Fatalf("status before recovery = %+v, want simulated interrupted reset to look dirty", status)
+	runClientTestGit(t, repo, "reset", "--hard", desiredHead)
+	if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != desiredHead {
+		t.Fatalf("HEAD before recovery = %s, want interrupted apply at %s", head, desiredHead)
 	}
 
 	if err := client.RecoverIntegrationJournal(ctx, repo); err != nil {
@@ -1103,6 +1118,54 @@ func TestRealProcessProfileRecoverIntegrationJournalCompletesInterruptedFinalRes
 	}
 	if _, err := os.Stat(journalPath); !os.IsNotExist(err) {
 		t.Fatalf("journal stat err = %v, want removed", err)
+	}
+	attempt, found, err := client.CanonicalIntegrationValidation(ctx, repo, desiredHead)
+	if err != nil {
+		t.Fatalf("CanonicalIntegrationValidation() error = %v", err)
+	}
+	if !found || attempt.CandidateHead != desiredHead || attempt.Status != CandidateValidationPassed || !attempt.Canonical {
+		t.Fatalf("canonical validation = (%+v, %t), want exact recovered candidate %s", attempt, found, desiredHead)
+	}
+	if attempt, found, err := client.CanonicalIntegrationValidation(ctx, repo, targetHead); err != nil || found {
+		t.Fatalf("validation for noncandidate target = (%+v, %t, %v), want no mismatched receipt", attempt, found, err)
+	}
+}
+
+func TestRealProcessProfileMergeCleanlyTransactionalWithoutGateCreatesNoCanonicalReceipt(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	result, err := client.MergeCleanlyTransactional(context.Background(), repo, "feature")
+	if err != nil || result == nil || !result.Success {
+		t.Fatalf("MergeCleanlyTransactional() = (%+v, %v), want success", result, err)
+	}
+	candidateHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	if attempt, found, err := client.CanonicalIntegrationValidation(context.Background(), repo, candidateHead); err != nil || found {
+		t.Fatalf("canonical validation = (%+v, %t, %v), want no receipt without a configured gate", attempt, found, err)
+	}
+}
+
+func TestRealProcessProfileRecoverIntegrationJournalRollsBackDesiredHeadWithoutValidationProof(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	ctx := context.Background()
+	targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	tree := runClientTestGitOutput(t, repo, "merge-tree", "--write-tree", targetHead, "feature")
+	desiredHead := runClientTestGitOutput(t, repo, "commit-tree", tree, "-p", targetHead, "-p", "feature", "-m", "unproved merge")
+	if err := client.writeIntegrationJournal(ctx, repo, integrationJournal{
+		Version: integrationJournalVersion, TargetWorktree: repo, TargetHead: targetHead,
+		DesiredHead: desiredHead, StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("writeIntegrationJournal() error = %v", err)
+	}
+	runClientTestGit(t, repo, "reset", "--hard", desiredHead)
+	if err := client.RecoverIntegrationJournal(ctx, repo); err != nil {
+		t.Fatalf("RecoverIntegrationJournal() error = %v", err)
+	}
+	if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != targetHead {
+		t.Fatalf("HEAD = %s, want rollback to unvalidated target %s", head, targetHead)
+	}
+	if attempt, found, err := client.CanonicalIntegrationValidation(ctx, repo, desiredHead); err != nil || found {
+		t.Fatalf("canonical validation = (%+v, %t, %v), want no proof", attempt, found, err)
 	}
 }
 
@@ -1159,6 +1222,8 @@ func TestMergeCleanlyTransactionalRecoversDirtyFinalApplyAndRemovesJournal(t *te
 		case scratchWorktree != "" && clientTestArgsForWorktree(args, scratchWorktree, "rev-parse", "--verify", "HEAD"):
 			return "desired-sha", nil
 		case clientTestArgsForWorktree(args, repo, "reset", "--hard", "desired-sha"):
+			return "", nil
+		case clientTestArgsForWorktree(args, repo, "reset", "--hard", "target-sha"):
 			return "", nil
 		case scratchWorktree != "" && clientTestArgsForWorktree(args, repo, "worktree", "remove", "--force", scratchWorktree):
 			return "", nil

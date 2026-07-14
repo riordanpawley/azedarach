@@ -75,7 +75,7 @@ if [ "$status" -eq 0 ]; then
 		echo "[gate] candidate_head=$candidate_head canonical=false reason=dirty-after-validation" >&2
 		exit 1
 	fi
-	echo "[gate] candidate_head=$candidate_head canonical=true status=passed"
+	echo "[gate] candidate_head=$candidate_head canonical=false status=passed awaiting_exact_apply=true"
 else
 	echo "[gate] candidate_head=$candidate_head canonical=false status=failed exit_status=$status" >&2
 fi

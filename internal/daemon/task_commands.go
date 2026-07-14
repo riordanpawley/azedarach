@@ -2911,14 +2911,7 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		if targetOIDErr != nil {
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve target commit before no-op close integration: %w", targetOIDErr)
 		}
-		return taskCloseIntegrationResult{
-			Requested:    true,
-			NoChanges:    true,
-			SourceBranch: source.Branch,
-			TargetBranch: targetBranch,
-			SourceOID:    sourceOID,
-			TargetOID:    targetOID,
-		}, nil
+		return d.taskCloseNoChangesIntegrationResult(ctx, targetWorktree, source.Branch, targetBranch, sourceOID, targetOID)
 	}
 	sourcePathMissing, statErr := taskCloseWorktreePathMissing(source.Path)
 	if statErr != nil {
@@ -2965,14 +2958,7 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		if targetOIDErr != nil {
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve target commit before no-op close integration: %w", targetOIDErr)
 		}
-		return taskCloseIntegrationResult{
-			Requested:    true,
-			NoChanges:    true,
-			SourceBranch: source.Branch,
-			TargetBranch: targetBranch,
-			SourceOID:    sourceOID,
-			TargetOID:    targetOID,
-		}, nil
+		return d.taskCloseNoChangesIntegrationResult(ctx, targetWorktree, source.Branch, targetBranch, sourceOID, targetOID)
 	}
 	preflight, err := d.git.MergePreflight(ctx, source.Path, targetWorktree, targetBranch, source.Branch)
 	if err != nil {
@@ -3027,6 +3013,33 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		ValidationAttempts: append([]domain.IntegrationCandidateValidationAttempt(nil), merge.ValidationAttempts...),
 	}
 	return integration, nil
+}
+
+func (d *Daemon) canonicalIntegrationValidationAttempts(ctx context.Context, targetWorktree, targetOID string) ([]domain.IntegrationCandidateValidationAttempt, error) {
+	attempt, found, err := d.git.CanonicalIntegrationValidation(ctx, targetWorktree, targetOID)
+	if err != nil {
+		return nil, fmt.Errorf("read canonical integration validation for target %s: %w", targetOID, err)
+	}
+	if !found {
+		return nil, nil
+	}
+	return []domain.IntegrationCandidateValidationAttempt{attempt}, nil
+}
+
+func (d *Daemon) taskCloseNoChangesIntegrationResult(ctx context.Context, targetWorktree, sourceBranch, targetBranch, sourceOID, targetOID string) (taskCloseIntegrationResult, error) {
+	validationAttempts, err := d.canonicalIntegrationValidationAttempts(ctx, targetWorktree, targetOID)
+	if err != nil {
+		return taskCloseIntegrationResult{Requested: true}, err
+	}
+	return taskCloseIntegrationResult{
+		Requested:          true,
+		NoChanges:          true,
+		SourceBranch:       sourceBranch,
+		TargetBranch:       targetBranch,
+		SourceOID:          sourceOID,
+		TargetOID:          targetOID,
+		ValidationAttempts: validationAttempts,
+	}, nil
 }
 
 func daemonCloseIntegrationShouldUseOriginBase(workflowMode string, target taskMergeBaseTargetResult) bool {

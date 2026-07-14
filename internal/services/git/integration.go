@@ -13,15 +13,27 @@ import (
 	"time"
 )
 
-const integrationJournalVersion = 1
+const (
+	integrationJournalVersion = 2
+	integrationReceiptVersion = 1
+)
 
 type integrationJournal struct {
-	Version         int       `json:"version"`
-	TargetWorktree  string    `json:"target_worktree"`
-	TargetHead      string    `json:"target_head"`
-	DesiredHead     string    `json:"desired_head"`
-	ScratchWorktree string    `json:"scratch_worktree,omitempty"`
-	StartedAt       time.Time `json:"started_at"`
+	Version         int                        `json:"version"`
+	TargetWorktree  string                     `json:"target_worktree"`
+	TargetHead      string                     `json:"target_head"`
+	DesiredHead     string                     `json:"desired_head"`
+	ScratchWorktree string                     `json:"scratch_worktree,omitempty"`
+	Validation      CandidateValidationAttempt `json:"validation"`
+	StartedAt       time.Time                  `json:"started_at"`
+}
+
+type integrationValidationReceipt struct {
+	Version        int                        `json:"version"`
+	TargetWorktree string                     `json:"target_worktree"`
+	CandidateHead  string                     `json:"candidate_head"`
+	Validation     CandidateValidationAttempt `json:"validation"`
+	AppliedAt      time.Time                  `json:"applied_at"`
 }
 
 // MergeCleanlyTransactional performs the merge in a disposable worktree and only
@@ -37,6 +49,18 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 	}
 	if branch == "" {
 		return nil, fmt.Errorf("source branch is required")
+	}
+	absoluteWorktree, err := filepath.Abs(worktree)
+	if err != nil {
+		return nil, fmt.Errorf("resolve absolute target worktree: %w", err)
+	}
+	worktree = filepath.Clean(absoluteWorktree)
+	info, err := os.Stat(worktree)
+	if err != nil {
+		return nil, fmt.Errorf("inspect canonical target worktree: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("canonical target worktree is not a directory: %s", worktree)
 	}
 	var targetHead string
 	var earlyResult *MergeResult
@@ -139,6 +163,10 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 }
 
 func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scratchPath, candidateHead string) (CandidateValidationAttempt, bool, error) {
+	if !filepath.IsAbs(gateRoot) {
+		return CandidateValidationAttempt{}, false, fmt.Errorf("target gate authority path must be absolute: %s", gateRoot)
+	}
+	gateRoot = filepath.Clean(gateRoot)
 	gatePath := filepath.Join(gateRoot, "scripts", "git-merge-rebase-gate.sh")
 	attempt := CandidateValidationAttempt{
 		CandidateHead: candidateHead,
@@ -309,6 +337,13 @@ func (c *Client) applyValidatedScratchMerge(ctx context.Context, worktree, scrat
 			ScratchWorktree: scratchPath,
 			StartedAt:       time.Now().UTC(),
 		}
+		for i := len(result.ValidationAttempts) - 1; i >= 0; i-- {
+			attempt := result.ValidationAttempts[i]
+			if attempt.CandidateHead == desiredHead && attempt.Status == CandidateValidationPassed && !attempt.Canonical {
+				journal.Validation = attempt
+				break
+			}
+		}
 		if err := c.writeIntegrationJournal(ctx, worktree, journal); err != nil {
 			setCandidateValidationDisposition(ctx, result, desiredHead, CandidateValidationFailed, false, "candidate apply journal failed; evidence is noncanonical")
 			return fmt.Errorf("write transactional merge journal: %w", err)
@@ -340,6 +375,11 @@ func (c *Client) applyValidatedScratchMerge(ctx context.Context, worktree, scrat
 				out.ValidationAttempts = append([]CandidateValidationAttempt(nil), result.ValidationAttempts...)
 			}
 			return recoverErr
+		}
+		if journalHasExactValidation(journal) {
+			if err := c.writeCanonicalIntegrationReceipt(ctx, worktree, journal); err != nil {
+				return fmt.Errorf("persist canonical candidate validation receipt: %w", err)
+			}
 		}
 		if err := c.removeIntegrationJournal(ctx, worktree); err != nil && c.logger != nil {
 			c.logger.Warn("failed to remove transactional merge journal", "worktree", worktree, "error", err)
@@ -383,13 +423,13 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 	if err != nil || !found {
 		return err
 	}
-	if journal.Version != integrationJournalVersion {
-		return fmt.Errorf("unsupported integration journal version %d", journal.Version)
-	}
 	targetHead := strings.TrimSpace(journal.TargetHead)
 	desiredHead := strings.TrimSpace(journal.DesiredHead)
 	if targetHead == "" || desiredHead == "" {
 		return fmt.Errorf("integration journal missing target or desired head")
+	}
+	if journal.Version == integrationJournalVersion && normalizeWorktreeLockKey(journal.TargetWorktree) != normalizeWorktreeLockKey(worktree) {
+		return fmt.Errorf("integration journal target %s does not match recovery target %s", journal.TargetWorktree, worktree)
 	}
 
 	currentHead, err := c.revParseVerify(ctx, worktree, "HEAD")
@@ -397,13 +437,30 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 		return fmt.Errorf("resolve current HEAD for integration recovery: %w", err)
 	}
 	recoverHead := targetHead
-	if currentHead == desiredHead {
+	validatedDesired := journalHasExactValidation(journal)
+	if currentHead == desiredHead && validatedDesired {
 		recoverHead = desiredHead
 	} else if currentHead != targetHead {
-		return fmt.Errorf("integration journal found but current HEAD %s is neither target %s nor desired %s", currentHead, targetHead, desiredHead)
+		if currentHead != desiredHead {
+			return fmt.Errorf("integration journal found but current HEAD %s is neither target %s nor desired %s", currentHead, targetHead, desiredHead)
+		}
 	}
 	if err := c.resetHard(ctx, worktree, recoverHead); err != nil {
 		return fmt.Errorf("reset target during integration recovery: %w", err)
+	}
+	if recoverHead == desiredHead {
+		status, err := c.Status(ctx, worktree)
+		if err != nil {
+			return fmt.Errorf("inspect recovered candidate before canonical publication: %w", err)
+		}
+		if gitStatusDirty(status) {
+			recoverHead = targetHead
+			if err := c.resetHard(ctx, worktree, targetHead); err != nil {
+				return fmt.Errorf("rollback dirty recovered candidate: %w", err)
+			}
+		} else if err := c.writeCanonicalIntegrationReceipt(ctx, worktree, journal); err != nil {
+			return fmt.Errorf("persist recovered canonical candidate validation receipt: %w", err)
+		}
 	}
 	if scratch := strings.TrimSpace(journal.ScratchWorktree); scratch != "" {
 		if err := c.removeWorktree(ctx, worktree, scratch); err != nil && c.logger != nil {
@@ -425,6 +482,71 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 		)
 	}
 	return nil
+}
+
+// CanonicalIntegrationValidation returns durable proof only when the exact
+// candidate OID was validated and successfully applied to the target.
+func (c *Client) CanonicalIntegrationValidation(ctx context.Context, worktree, candidateHead string) (CandidateValidationAttempt, bool, error) {
+	path, found, err := c.existingIntegrationReceiptPath(worktree)
+	if err != nil {
+		return CandidateValidationAttempt{}, false, err
+	}
+	if !found {
+		return CandidateValidationAttempt{}, false, nil
+	}
+	payload, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return CandidateValidationAttempt{}, false, nil
+	}
+	if err != nil {
+		return CandidateValidationAttempt{}, false, err
+	}
+	var receipt integrationValidationReceipt
+	if err := json.Unmarshal(payload, &receipt); err != nil {
+		return CandidateValidationAttempt{}, false, fmt.Errorf("decode integration validation receipt: %w", err)
+	}
+	candidateHead = strings.TrimSpace(candidateHead)
+	if receipt.Version != integrationReceiptVersion ||
+		normalizeWorktreeLockKey(receipt.TargetWorktree) != normalizeWorktreeLockKey(worktree) ||
+		receipt.CandidateHead != candidateHead ||
+		receipt.Validation.CandidateHead != candidateHead || receipt.Validation.Status != CandidateValidationPassed || !receipt.Validation.Canonical {
+		return CandidateValidationAttempt{}, false, nil
+	}
+	return receipt.Validation, true, nil
+}
+
+func (c *Client) writeCanonicalIntegrationReceipt(ctx context.Context, worktree string, journal integrationJournal) error {
+	if !journalHasExactValidation(journal) {
+		return fmt.Errorf("journal does not contain exact noncanonical validation for %s", journal.DesiredHead)
+	}
+	attempt := journal.Validation
+	attempt.Status = CandidateValidationPassed
+	attempt.Canonical = true
+	attempt.Message = "candidate validation passed and the exact candidate was applied"
+	receipt := integrationValidationReceipt{
+		Version:        integrationReceiptVersion,
+		TargetWorktree: worktree,
+		CandidateHead:  journal.DesiredHead,
+		Validation:     attempt,
+		AppliedAt:      time.Now().UTC(),
+	}
+	path, err := c.integrationReceiptPath(ctx, worktree)
+	if err != nil {
+		return err
+	}
+	payload, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(path, append(payload, '\n'), 0o644)
+}
+
+func journalHasExactValidation(journal integrationJournal) bool {
+	desiredHead := strings.TrimSpace(journal.DesiredHead)
+	return journal.Version == integrationJournalVersion && desiredHead != "" &&
+		journal.Validation.CandidateHead == desiredHead &&
+		journal.Validation.Status == CandidateValidationPassed &&
+		!journal.Validation.Canonical
 }
 
 func (c *Client) addDetachedWorktree(ctx context.Context, worktree, scratchPath, ref string) error {
@@ -465,15 +587,48 @@ func (c *Client) writeIntegrationJournal(ctx context.Context, worktree string, j
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	payload, err := json.MarshalIndent(journal, "", "  ")
 	if err != nil {
 		return err
 	}
 	payload = append(payload, '\n')
-	return os.WriteFile(path, payload, 0o644)
+	return writeFileAtomic(path, payload, 0o644)
+}
+
+func writeFileAtomic(path string, payload []byte, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+"-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(payload); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func (c *Client) readIntegrationJournal(_ context.Context, worktree string) (integrationJournal, string, bool, error) {
@@ -519,6 +674,34 @@ func (c *Client) integrationJournalPath(ctx context.Context, worktree string) (s
 		return "", err
 	}
 	return filepath.Join(commonDir, "azedarach", integrationJournalName(worktree)), nil
+}
+
+func (c *Client) integrationReceiptPath(ctx context.Context, worktree string) (string, error) {
+	commonDir, err := c.gitCommonDir(ctx, worktree)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(commonDir, "azedarach", integrationReceiptName(worktree)), nil
+}
+
+func (c *Client) existingIntegrationReceiptPath(worktree string) (string, bool, error) {
+	for _, commonDir := range integrationJournalCandidateCommonDirs(worktree) {
+		path := filepath.Join(commonDir, "azedarach", integrationReceiptName(worktree))
+		_, err := os.Stat(path)
+		switch {
+		case err == nil:
+			return path, true, nil
+		case os.IsNotExist(err):
+			continue
+		default:
+			return "", false, err
+		}
+	}
+	return "", false, nil
+}
+
+func integrationReceiptName(worktree string) string {
+	return "validation-" + integrationJournalName(worktree)
 }
 
 func (c *Client) existingIntegrationJournalPath(worktree string) (string, bool, error) {

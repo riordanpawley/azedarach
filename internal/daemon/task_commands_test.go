@@ -7102,6 +7102,58 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 	}
 }
 
+func TestTaskCloseNoChangesIntegrationResultCarriesRecoveredCanonicalValidation(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	runDaemonTestGit(t, repo, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repo, "config", "user.email", "test@example.com")
+	runDaemonTestGit(t, repo, "config", "user.name", "Test User")
+	if err := os.MkdirAll(filepath.Join(repo, "scripts"), 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	gatePath := filepath.Join(repo, "scripts", "git-merge-rebase-gate.sh")
+	if err := os.WriteFile(gatePath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write gate: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	runDaemonTestGit(t, repo, "add", ".")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "base")
+	runDaemonTestGit(t, repo, "checkout", "-q", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatalf("write feature: %v", err)
+	}
+	runDaemonTestGit(t, repo, "add", "feature.txt")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "feature")
+	sourceOID := runDaemonTestGitOutput(t, repo, "rev-parse", "HEAD")
+	runDaemonTestGit(t, repo, "checkout", "-q", "main")
+	if err := os.WriteFile(filepath.Join(repo, "main.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatalf("write main: %v", err)
+	}
+	runDaemonTestGit(t, repo, "add", "main.txt")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "main")
+
+	client := git.NewClient(git.NewExecRunner(repo), slog.Default())
+	merge, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil || merge == nil || !merge.Success {
+		t.Fatalf("MergeCleanlyTransactional() = (%+v, %v), want success", merge, err)
+	}
+	targetOID := runDaemonTestGitOutput(t, repo, "rev-parse", "HEAD")
+	d := &Daemon{git: client}
+	result, err := d.taskCloseNoChangesIntegrationResult(ctx, repo, "feature", "main", sourceOID, targetOID)
+	if err != nil {
+		t.Fatalf("taskCloseNoChangesIntegrationResult() error = %v", err)
+	}
+	if !result.NoChanges || len(result.ValidationAttempts) != 1 {
+		t.Fatalf("no-change result = %+v, want one durable validation attempt", result)
+	}
+	attempt := result.ValidationAttempts[0]
+	if attempt.CandidateHead != targetOID || attempt.Status != domain.IntegrationCandidateValidationPassed || !attempt.Canonical {
+		t.Fatalf("validation attempt = %+v, want canonical exact target %s", attempt, targetOID)
+	}
+}
+
 func TestTaskCloseCommandDirtyChildTargetNamesPathsAndRecovery(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
