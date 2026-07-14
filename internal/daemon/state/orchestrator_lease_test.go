@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"path/filepath"
@@ -154,6 +155,92 @@ func TestOrchestratorScopeLeaseDuplicateAcquireAcrossStoresHasSingleWinner(t *te
 	}
 	if winners != 1 || conflicts != 1 {
 		t.Fatalf("winners/conflicts = %d/%d, want 1/1", winners, conflicts)
+	}
+}
+
+func TestOrchestratorScopeLeaseAcquireRetriesConcurrentRuntimeWriter(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	identity := mustRootedOrchestratorIdentity(t, "proj-a", "root-a")
+	if _, err := store.AcquireOrchestratorScopeLease(ctx, identity, "stale-session", func(context.Context, string) (bool, error) { return true, nil }); err != nil {
+		t.Fatalf("seed lease: %v", err)
+	}
+
+	storeDB, err := store.dbHandle()
+	if err != nil {
+		t.Fatalf("open runtime store: %v", err)
+	}
+	storeDB.SetMaxOpenConns(1)
+	storeDB.SetMaxIdleConns(1)
+	if _, err := storeDB.ExecContext(ctx, `PRAGMA busy_timeout=1`); err != nil {
+		t.Fatalf("shorten runtime store busy timeout: %v", err)
+	}
+
+	probeStarted := make(chan struct{})
+	releaseProbe := make(chan struct{})
+	var probeOnce sync.Once
+	leaseResult := make(chan error, 1)
+	go func() {
+		_, acquireErr := store.AcquireOrchestratorScopeLease(ctx, identity, "replacement-session", func(probeCtx context.Context, _ string) (bool, error) {
+			probeOnce.Do(func() {
+				close(probeStarted)
+				select {
+				case <-releaseProbe:
+				case <-probeCtx.Done():
+				}
+			})
+			return false, nil
+		})
+		leaseResult <- acquireErr
+	}()
+
+	select {
+	case <-probeStarted:
+	case <-ctx.Done():
+		t.Fatal("lease acquisition did not reach runtime probe")
+	}
+	concurrentDB, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(1)")
+	if err != nil {
+		t.Fatalf("open concurrent runtime writer: %v", err)
+	}
+	t.Cleanup(func() { _ = concurrentDB.Close() })
+	if _, err := concurrentDB.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatalf("begin concurrent runtime write: %v", err)
+	}
+	t.Cleanup(func() { _, _ = concurrentDB.ExecContext(context.Background(), `ROLLBACK`) })
+
+	worktreeResult := make(chan error, 1)
+	go func() {
+		worktreeResult <- store.UpsertWorktreeState(ctx, WorktreeState{
+			ProjectID: "proj-a",
+			IssueID:   "root-a",
+			Path:      "/tmp/root-a",
+			Branch:    "test/root-a",
+			UpdatedAt: time.Now().UTC(),
+		})
+	}()
+	close(releaseProbe)
+	time.Sleep(25 * time.Millisecond)
+	if _, err := concurrentDB.ExecContext(ctx, `COMMIT`); err != nil {
+		t.Fatalf("commit concurrent runtime write: %v", err)
+	}
+
+	if err := <-leaseResult; err != nil {
+		t.Fatalf("acquire lease after transient contention: %v", err)
+	}
+	if err := <-worktreeResult; err != nil {
+		t.Fatalf("refresh worktree after transient contention: %v", err)
+	}
+	lease, found, err := store.GetOrchestratorScopeLease(ctx, identity)
+	if err != nil || !found || lease.SessionID != "replacement-session" {
+		t.Fatalf("persisted lease = %+v, found=%t, err=%v", lease, found, err)
+	}
+	worktree, found, err := store.GetWorktreeStateByIssueID(ctx, "proj-a", "root-a")
+	if err != nil || !found || worktree.Path != "/tmp/root-a" {
+		t.Fatalf("persisted worktree = %+v, found=%t, err=%v", worktree, found, err)
 	}
 }
 

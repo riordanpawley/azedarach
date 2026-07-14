@@ -20,9 +20,14 @@ This repository now ships the Go implementation as the canonical `az` CLI.
 2. Verify installed binaries:
    - `az --version`
    - `azd --version`
-   - The two version strings must match. In an Azedarach repository shell,
-     `command -v az` and `command -v azd` must resolve from the same stable
-     install directory rather than the repository's preserved `bin/` assets.
+   - The two version strings must match. After `direnv reload` in an Azedarach
+     repository or linked worktree, `command -v az` and `command -v azd` must
+     resolve inside the same active immutable `.azedarach-generations/generation.*`
+     directory rather than the repository's preserved `bin/`, a scratch pair,
+     or an older generation. Environment activation identifies the installer-owned
+     `.azedarach-current` control links and prepends their immutable generation.
+     It preserves inherited package-manager, repository, and scratch directories
+     so unrelated tools in those directories remain available.
      Global daemon pairing trusts only a client whose resolved executable is
      inside `.azedarach-generations/generation.*`; primary-repo `bin/` binaries
      remain development artifacts.
@@ -32,6 +37,14 @@ This repository now ships the Go implementation as the canonical `az` CLI.
 3. If an older worktree-targeting symlink exists, migrate it to the stable,
    paired generation layout with the local helper:
    - `just build-install-run --no-run`
+   - If the helper publishes the pair but reports that the caller remains
+     shadowed, reload direnv, verify both `command -v` results, and rerun it. The
+     non-success result is intentional: daemon replacement is withheld until
+     the invoking shell resolves the newly published coherent generation.
+   - A caller already running from a retained managed generation is safe but
+     may become older than the newly published generation. The helper reports
+     that distinction and asks for a reload without misclassifying it as an
+     unmanaged shadowing failure.
 
 ## Release Commands
 

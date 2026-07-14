@@ -38,6 +38,8 @@ const (
 	daemonInvariantInteractionWaiting   daemonInvariantID = "interaction.waiting_human"
 	daemonInvariantInvestigationWaiting daemonInvariantID = "investigation.waiting_human"
 	daemonInvariantInteractionStaleness daemonInvariantID = "interaction.staleness"
+	daemonInvariantDecisionMDTransfer   daemonInvariantID = "decision.markdown_transfer_target"
+	daemonInvariantDecisionPropagation  daemonInvariantID = "decision.propagation_delivery"
 
 	daemonInvariantRuntimeKnownProjectIDs  daemonInvariantID = "runtime.known_project_ids"
 	daemonInvariantCrossProjectViews       daemonInvariantID = "cross_project.view_projection"
@@ -85,6 +87,8 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantInvestigationWaiting:    daemonInvariantSourceProjection,
 	daemonInvariantAdvisorSingleton:        daemonInvariantSourceHybrid,
 	daemonInvariantInteractionStaleness:    daemonInvariantSourceProjection,
+	daemonInvariantDecisionMDTransfer:      daemonInvariantSourceHybrid,
+	daemonInvariantDecisionPropagation:     daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationReview:     daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationClaimStart: daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationLoop:       daemonInvariantSourceProjection,

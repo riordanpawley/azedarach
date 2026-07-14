@@ -118,6 +118,58 @@ func TestListLatestIssueObservationEventsByIssueStopsAtCurrentReviewEpoch(t *tes
 	}
 }
 
+func TestListLatestIssueObservationEventsByIssueInvalidatesCompletionAtTrustedLifecycleTransition(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, CreateTaskParams{Title: "integrated", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
+		Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close",
+		Payload: map[string]any{"project_id": "project", "source_branch": "issue", "target_branch": "main", "source_oid": "source", "target_oid": "target"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	opts := LatestIssueObservationEventOptions{
+		IssueIDs: []string{issueID}, Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close",
+		SourceCommands:          []string{"integrate-before-close"},
+		RequiredPayloadTextKeys: []string{"project_id", "source_branch", "target_branch", "source_oid", "target_oid"},
+		InvalidatedByStatuses:   []domain.Status{domain.StatusOpen, domain.StatusInProgress},
+	}
+	events, err := client.ListLatestIssueObservationEventsByIssue(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("completion events = %+v, want receipt before any later lifecycle transition", events)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
+		Type: domain.IssueEventIssueStatusChanged, Source: "agent", Payload: map[string]any{"to_status": string(domain.StatusInProgress)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events, err = client.ListLatestIssueObservationEventsByIssue(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("completion events after untrusted status claim = %+v, want receipt retained", events)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInProgress); err != nil {
+		t.Fatal(err)
+	}
+	events, err = client.ListLatestIssueObservationEventsByIssue(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("completion events after trusted new-work transition = %+v, want receipt revoked", events)
+	}
+}
+
 func TestInvestigationAcceptancesScopeAuthorityToCurrentReviewEpoch(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()

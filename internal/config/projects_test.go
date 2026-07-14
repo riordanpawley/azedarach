@@ -459,6 +459,25 @@ func TestLoadSaveProjectsRegistry(t *testing.T) {
 	}
 }
 
+func TestProjectDisplayNamePrefersRegisteredIdentity(t *testing.T) {
+	alphaPath := filepath.Join(t.TempDir(), "checkout-alpha")
+	alphaID, err := ProjectIDForRoot(alphaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := &ProjectsRegistry{Projects: []Project{{ID: alphaID, Name: "Alpha Product", Path: alphaPath}}}
+
+	if got := ProjectDisplayName(registry, alphaID, ""); got != "Alpha Product" {
+		t.Fatalf("display name by ID = %q", got)
+	}
+	if got := ProjectDisplayName(registry, "", filepath.Join(alphaPath, "worktrees", "abc")); got != "Alpha Product" {
+		t.Fatalf("display name by worktree = %q", got)
+	}
+	if got := ProjectDisplayName(nil, "0123456789ab-fallback-name", ""); got != "fallback-name" {
+		t.Fatalf("route fallback = %q", got)
+	}
+}
+
 func TestDetectProjectFromCwd(t *testing.T) {
 	// Create a temporary git repo
 	gitRepo := createTempGitRepo(t)

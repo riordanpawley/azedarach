@@ -110,6 +110,7 @@ type Daemon struct {
 	issueClientsMu                       sync.Mutex
 	issueClientsByProject                map[string]*issues.Client
 	issueClientsByRoot                   map[string]*issues.Client
+	decisionPropagationMu                sync.Mutex
 	projectIssueStoreHealthMu            sync.Mutex
 	projectIssueStoreHealthByProject     map[string]projectIssueStoreHealthState
 	projectConfigMu                      sync.Mutex
@@ -202,6 +203,7 @@ type Daemon struct {
 	reviewReadyRecoveryMu                sync.Mutex
 	reviewReadyRecoveryCursor            map[string]int64
 	reviewReadyRecoveryBeforeLoad        func()
+	decisionTransferBeforeRevalidation   func(string, decisionMDTransferTarget)
 	deferredCleanupOperationManager      deferredCleanupOperationManager
 
 	revMu    sync.Mutex
@@ -667,7 +669,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 		waitForShutdown()
 		return nil
 	}
+	d.reconcileAllDecisionPropagationOutboxes(ctx)
 	d.startRuntimeReconcileWorker(serveCtx)
+	d.startDecisionPropagationReconcileWorker(serveCtx)
 	d.startLinearSyncWorker(serveCtx)
 	d.startScheduledScriptWorker(serveCtx)
 	d.startIssueAutoArchiveWorker(serveCtx)

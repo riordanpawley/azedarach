@@ -120,6 +120,78 @@ func TestRender(t *testing.T) {
 	}
 }
 
+func TestRenderPullRequestHeaderGoldens(t *testing.T) {
+	tests := []struct {
+		name   string
+		width  int
+		height int
+	}{
+		{name: "pull_request_headers_four_column", width: 160, height: 28},
+		{name: "pull_request_headers_narrow", width: 80, height: 22},
+	}
+	columns := []Column{
+		{
+			Title: "Open",
+			Tasks: []domain.Task{{
+				ID: "gcy", Title: "Identify unexpected watch session owner", Status: domain.StatusOpen,
+				Priority: domain.P2, Type: domain.TypeInvestigation, Origin: "local",
+			}},
+		},
+		{
+			Title: "In Progress",
+			Tasks: []domain.Task{{
+				ID: "gbz", Title: "Make shared green locally and in CI", Status: domain.StatusInProgress,
+				Priority: domain.P0, Type: domain.TypeEpic, Origin: "local",
+			}},
+		},
+		{
+			Title: "In Review",
+			Tasks: []domain.Task{
+				{
+					ID: "gdd", Title: "Make 60-day hourly recipe projections complete reliably", Status: domain.StatusInReview,
+					Priority: domain.P2, Type: domain.TypeBug, Origin: "github",
+					PullRequest: &domain.PullRequest{Number: 523, DisplayKey: "#523", State: "open", ChecksStatus: "pending"},
+				},
+				{
+					ID: "gdc-long-ticket", Title: "Restore current $/Unit value in recipe spark cards", Status: domain.StatusInReview,
+					Priority: domain.P2, Type: domain.TypeBug, Origin: "linear",
+					PullRequest: &domain.PullRequest{Number: 921, DisplayKey: "#921✓", State: "open", Draft: true, ChecksStatus: "passing"},
+				},
+			},
+		},
+		{
+			Title: "Done",
+			Tasks: []domain.Task{{
+				ID: "afn", Title: "Chefy make redo", Status: domain.StatusDone,
+				Priority: domain.P0, Type: domain.TypeTask, Origin: "linear",
+			}},
+		},
+	}
+	runtimeSignals := map[string]RuntimeSignals{
+		"gdd":             {HasWorktree: true, GitAheadCount: 1, GitBehindCount: 22, GitAdditions: 1000, GitDeletions: 86},
+		"gdc-long-ticket": {HasWorktree: true, GitAheadCount: 15, GitBehindCount: 4, GitAdditions: 3000, GitDeletions: 2000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Render(columns, Cursor{Column: 2, Task: 0}, map[string]bool{"gdc-long-ticket": true}, runtimeSignals, nil, nil, false, nil, 0, styles.New(), tt.width, tt.height)
+			goldenFile := filepath.Join("testdata", tt.name+".golden")
+			if *update {
+				if err := os.WriteFile(goldenFile, []byte(normalizeBoardOutput(got)+"\n"), 0644); err != nil {
+					t.Fatalf("update golden: %v", err)
+				}
+			}
+			want, err := os.ReadFile(goldenFile)
+			if err != nil {
+				t.Fatalf("read golden: %v; run with -update", err)
+			}
+			if normalizeBoardOutput(got) != normalizeBoardOutput(string(want)) {
+				t.Fatalf("Render() output mismatch\nGot:\n%s\n\nWant:\n%s", got, string(want))
+			}
+		})
+	}
+}
+
 func TestRenderCard(t *testing.T) {
 	tests := []struct {
 		name       string

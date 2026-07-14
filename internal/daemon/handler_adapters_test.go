@@ -1587,7 +1587,7 @@ branch refs/heads/main
 	t.Fatal("timed out waiting for poller to reconcile stale worktree projection")
 }
 
-func TestWorktreeServiceAdapterSnapshotSkipsClosedIssueWorktrees(t *testing.T) {
+func TestWorktreeServiceAdapterSnapshotSkipsClosedAndArchivedIssueWorktrees(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	dir, err := os.MkdirTemp("", "azedarach-worktree-closed-*")
 	if err != nil {
@@ -1601,6 +1601,14 @@ func TestWorktreeServiceAdapterSnapshotSkipsClosedIssueWorktrees(t *testing.T) {
 
 	projectID := "proj"
 	closedID := naming.IssueID("az-closed")
+	archivedID := naming.IssueID("az-archived")
+	archivedState, err := domain.NewIssueState(domain.IssueStateParts{
+		Workflow: domain.IssueWorkflowOpen,
+		Archive:  domain.IssueArchiveArchived,
+	})
+	if err != nil {
+		t.Fatalf("create archived issue state: %v", err)
+	}
 	adapter := &worktreeServiceAdapter{
 		runtimeStateStore: store,
 		logger:            logger,
@@ -1611,13 +1619,20 @@ func TestWorktreeServiceAdapterSnapshotSkipsClosedIssueWorktrees(t *testing.T) {
 					Status: domain.StatusDone,
 					Type:   domain.TypeTask,
 				},
+				archivedID.String(): {
+					ID:     archivedID,
+					Status: domain.StatusOpen,
+					State:  archivedState,
+					Type:   domain.TypeTask,
+				},
 			}
 		},
 	}
 
-	taskByIssue := adapter.runtimeIssueTaskSnapshot(context.Background(), projectID, []string{closedID.String()})
+	taskByIssue := adapter.runtimeIssueTaskSnapshot(context.Background(), projectID, []string{closedID.String(), archivedID.String()})
 	adapter.writeWorktreeProjectionSnapshot(context.Background(), projectID, []git.Worktree{
 		{IssueID: closedID.String(), Path: "/tmp/repo-az-closed", Branch: "az/az-closed"},
+		{IssueID: archivedID.String(), Path: "/tmp/repo-az-archived", Branch: "az/az-archived"},
 	}, taskByIssue)
 
 	worktrees, err := store.ListWorktreeStates(context.Background(), projectID)
@@ -1625,6 +1640,6 @@ func TestWorktreeServiceAdapterSnapshotSkipsClosedIssueWorktrees(t *testing.T) {
 		t.Fatalf("ListWorktreeStates returned error: %v", err)
 	}
 	if len(worktrees) != 0 {
-		t.Fatalf("worktrees = %+v, want none for closed issue", worktrees)
+		t.Fatalf("worktrees = %+v, want none for closed or archived issues", worktrees)
 	}
 }

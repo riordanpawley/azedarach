@@ -522,6 +522,8 @@ type Client struct {
 	stateModelV2MigrationFailureHook   func(stage string) error
 	boardViewsMigrationFailureHook     func(stage string) error
 	humanAuthorityMigrationFailureHook func(stage string) error
+	decisionOutboxMigrationFailureHook func(stage string) error
+	requireExistingDB                  bool
 	interactionMu                      sync.RWMutex
 	interactionCache                   map[string]domain.InteractionRequest
 }
@@ -541,6 +543,16 @@ func WithSQLiteBusyPolicy(timeout, retryDelay time.Duration) ClientOption {
 		if retryDelay > 0 {
 			c.sqliteBusyRetryDelay = retryDelay
 		}
+	}
+}
+
+// WithExistingDatabaseOnly prevents lazy client initialization from creating
+// a missing database or its parent directory. It is intended for background
+// discovery of registered project stores, where stale registry entries must
+// remain unavailable rather than being revived as empty projects.
+func WithExistingDatabaseOnly() ClientOption {
+	return func(c *Client) {
+		c.requireExistingDB = true
 	}
 }
 
@@ -694,16 +706,31 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 	}
 
 	dbDir := filepath.Dir(c.dbPath)
-	if dbDir != "" && dbDir != "." {
+	if c.requireExistingDB {
+		info, err := os.Stat(c.dbPath)
+		if err != nil {
+			return nil, c.wrapError("open-db", "", fmt.Errorf("require existing database: %w", err))
+		}
+		if !info.Mode().IsRegular() {
+			return nil, c.wrapError("open-db", "", fmt.Errorf("require existing database: %s is not a regular file", c.dbPath))
+		}
+	} else if dbDir != "" && dbDir != "." {
 		if err := os.MkdirAll(dbDir, 0o755); err != nil {
 			return nil, c.wrapError("open-db", "", fmt.Errorf("create db directory: %w", err))
 		}
 	}
 
 	busyTimeoutMillis := max(min(c.sqliteBusyTimeout, c.sqliteBusyRetryDelay).Milliseconds(), int64(1))
+	mode := ""
+	if c.requireExistingDB {
+		// mode=rw makes the existence contract atomic at SQLite open time if the
+		// file is removed after the stat above.
+		mode = "mode=rw&"
+	}
 	dsn := fmt.Sprintf(
-		"file:%s?_pragma=busy_timeout(%d)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate",
+		"file:%s?%s_pragma=busy_timeout(%d)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate",
 		filepath.ToSlash(c.dbPath),
+		mode,
 		busyTimeoutMillis,
 	)
 	db, err := tracesqlite.Open(dsn)
@@ -2059,12 +2086,12 @@ func parentChildSubtreeIDsQuery(rootID string) (string, []any) {
 
 // GetManyMetadataWithRuntime fetches lightweight issue metadata plus stored runtime projection fields.
 func (c *Client) GetManyMetadataWithRuntime(ctx context.Context, projectID string, ids []string) ([]domain.Task, error) {
-	return c.getManyMetadataWithRuntime(ctx, projectID, ids, false)
+	return c.getManyMetadataWithRuntime(ctx, projectID, ids, false, ArchiveExclude)
 }
 
 // GetManyMetadataWithAncestorContextRuntime fetches lightweight issue metadata plus parent ancestor context.
 func (c *Client) GetManyMetadataWithAncestorContextRuntime(ctx context.Context, projectID string, ids []string) ([]domain.Task, error) {
-	return c.getManyMetadataWithRuntime(ctx, projectID, ids, true)
+	return c.getManyMetadataWithRuntime(ctx, projectID, ids, true, ArchiveExclude)
 }
 
 // GetRuntimeWorktreeIssueContext fetches only the requested issues and their
@@ -2075,10 +2102,10 @@ func (c *Client) GetRuntimeWorktreeIssueContext(ctx context.Context, projectID s
 	if len(uniqueIssueIDStrings(ids)) == 0 {
 		return []domain.Task{}, nil
 	}
-	return c.getManyMetadataWithRuntime(ctx, projectID, ids, true)
+	return c.getManyMetadataWithRuntime(ctx, projectID, ids, true, ArchiveInclude)
 }
 
-func (c *Client) getManyMetadataWithRuntime(ctx context.Context, projectID string, ids []string, includeAncestors bool) ([]domain.Task, error) {
+func (c *Client) getManyMetadataWithRuntime(ctx context.Context, projectID string, ids []string, includeAncestors bool, archiveMode ArchiveMode) ([]domain.Task, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return nil, err
@@ -2099,7 +2126,7 @@ func (c *Client) getManyMetadataWithRuntime(ctx context.Context, projectID strin
 		}
 		contextIDs = uniqueIssueIDStrings(append(contextIDs, ancestorIDs...))
 	}
-	tasks, err := c.queryTaskMetadataWithRuntime(ctx, db, projectID, contextIDs...)
+	tasks, err := c.queryTaskMetadataWithRuntimeArchiveMode(ctx, db, projectID, archiveMode, contextIDs...)
 	if err != nil {
 		return nil, c.wrapError("get-many-metadata-runtime", strings.Join(issueIDs, ","), err)
 	}
@@ -4609,12 +4636,16 @@ func (c *Client) queryTasksWithRuntimeArchiveMode(ctx context.Context, db sqlIss
 }
 
 func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, projectID string, issueIDs ...string) ([]domain.Task, error) {
+	return c.queryTaskMetadataWithRuntimeArchiveMode(ctx, db, projectID, ArchiveExclude, issueIDs...)
+}
+
+func (c *Client) queryTaskMetadataWithRuntimeArchiveMode(ctx context.Context, db *sql.DB, projectID string, archiveMode ArchiveMode, issueIDs ...string) ([]domain.Task, error) {
 	ids := uniqueIssueIDStrings(issueIDs)
 	if len(ids) == 0 {
 		return []domain.Task{}, nil
 	}
 	startedAt := time.Now()
-	query, args := taskMetadataRuntimeProjectionQuery(projectID, ids...)
+	query, args := taskMetadataRuntimeProjectionQuery(projectID, archiveMode, ids...)
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -4784,7 +4815,7 @@ func (c *Client) loadCoordinationLeasesForTasks(ctx context.Context, db sqlIssue
 	return rows.Err()
 }
 
-func taskMetadataRuntimeProjectionQuery(projectID string, issueIDs ...string) (string, []any) {
+func taskMetadataRuntimeProjectionQuery(projectID string, archiveMode ArchiveMode, issueIDs ...string) (string, []any) {
 	ids := uniqueIssueIDStrings(issueIDs)
 	if len(ids) == 0 {
 		return "", nil
@@ -4858,9 +4889,9 @@ func taskMetadataRuntimeProjectionQuery(projectID string, issueIDs ...string) (s
 			ON parent.issue_id = i.id
 			AND parent.tombstoned_at IS NULL
 			AND parent.dependency_type IN (?, ?)
-		WHERE i.visibility = 'live' AND i.id IN (%s)
+		WHERE %s AND i.id IN (%s)
 		ORDER BY i.updated_at DESC
-	`, runtimeSessionProjectionUnionSQL, placeholders, placeholders)
+	`, runtimeSessionProjectionUnionSQL, placeholders, archiveWhere("i", archiveMode), placeholders)
 	args := make([]any, 0, len(ids)*2+4)
 	args = append(args, projectID)
 	for _, id := range ids {

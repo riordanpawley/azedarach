@@ -176,7 +176,8 @@ fd "filename" -t f internal cmd
    - `session.issue_lifecycle_runtime` live managed-session lifecycle gate -> `hybrid` (refresh durable factored issue disposition/engagement/visibility projection, then compare with live tmux; repair ready+idle to working, reject backlog/terminal/archived divergence without destroying runtime)
    - `session.activity_convergence` stale busy/hooks recovery -> `hybrid` (refresh durable session activity and runtime projections, then compare with a bounded live tmux pane probe; newer durable hook evidence wins races)
    - `task.close`/`task.close_preflight`/`task.delete`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle, investigation disposition/acceptance, and orchestration checks -> `hybrid` (read v2 issue lifecycle and evidence projection first, then compare with live runtime)
-   - `task.review_handoff` external busy-equivalent session activity gate before moving to `in_review` -> `projection` (durable issue v2 lifecycle/review projection + session activity projection; active issue self-handoff remains allowed)
+   - `task.review_handoff` material-decision acknowledgement and external busy-equivalent session activity gates before moving to `in_review` -> `projection` (durable issue v2 lifecycle/review projection + revisioned decision change/acknowledgement observations + session activity projection; active issue self-handoff remains allowed only after material decisions are current)
+   - `decision.propagation_delivery` integration-affecting decision fanout and worker wake retry -> `hybrid` (atomic durable decision audit/outbox + per-issue materialization checkpoint and authoritative exact-revision acknowledgement projection, reconciled with live tmux delivery until acknowledged; superseded and withdrawn revisions remain silent)
    - `task.integration_readiness` worker evidence gate and `task.context_risk_closeout` repeated-local-failure gate -> `projection` (durable issue projection + mailbox/observation evidence)
    - `task.merge_base_target` branch integration target gate -> `projection` (durable issue graph + worktree projection; explicit root-to-base requests also require issue-scoped `human.input_provided` acceptance evidence)
    - `task.follow_on_merge_candidates` follow-on merge source gate -> `projection` (durable issue graph + worktree projection)
@@ -188,6 +189,7 @@ fd "filename" -t f internal cmd
    - `interaction.waiting_human` decision-waiting and pickup exclusion gate -> `projection` (durable interaction request projection refreshed before evaluation)
    - `investigation.waiting_human` human-findings authority gate -> `projection` (durable investigation disposition and issue-specific acceptance/review evidence refreshed before evaluation)
    - `interaction.staleness` stale/reminder/disposition/recovery policy -> `projection` (durable interaction request projection refreshed before age evaluation and revision-safe write-through audit)
+   - `decision.markdown_transfer_target` decision Markdown import/export scope -> `hybrid` (refresh durable worktree-to-issue projection, then compare it with the live Git worktree path and HEAD revision; issue worktrees transfer only decisions carrying that issue provenance)
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
    - cross-project configurable views and tmux selector ordering -> `projection` (global-daemon-owned user database refreshed from authoritative project stores; scoped issue/session/worktree/dependency keys and explicit stale/unavailable project health)
    - orchestration scope identity -> `projection` (durable project + typed rooted/project scope)
@@ -267,9 +269,12 @@ If any are missing, keep issue state `in_progress` or `open`.
     installs a serialized, atomically switched `az`/`azd` generation and rejects
     linked worktrees. Installed command links must resolve only inside the stable
     install directory and never back into any Git worktree.
-12. Repository direnv setup must not prepend primary- or linked-worktree
-    `bin/` directories. It must prefer one version-identical installed sibling
-    `az`/`azd` pair. Global daemon launch/replacement resolves `azd` beside the
+12. Repository direnv setup must not prioritize primary- or linked-worktree
+    `bin/` directories. It must preserve inherited multipurpose PATH entries,
+    select the installer-owned active control links, and prepend their
+    symlink-resolved immutable generation so stale `az`/`azd` cannot win without
+    hiding unrelated tools; matching version text alone is not trusted. Global
+    daemon launch/replacement resolves `azd` beside the
     running `az` only when its resolved identity is
     `.azedarach-generations/generation.*/az`, and fails closed when managed
     identity or its sibling is unavailable. Canonical primary-repo `bin/`

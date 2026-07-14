@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -43,7 +44,7 @@ func TestRetrySQLiteWriteRetriesBusyAndLocked(t *testing.T) {
 					waits++
 					return nil
 				},
-				func() error {
+				func(context.Context) error {
 					attempts++
 					if attempts == 1 {
 						return fmt.Errorf("wrapped: %w", codedSQLiteTestError{code: tt.code})
@@ -72,7 +73,7 @@ func TestRetrySQLiteWriteDoesNotRetryPermanentFailure(t *testing.T) {
 			t.Fatal("wait called for permanent failure")
 			return nil
 		},
-		func() error {
+		func(context.Context) error {
 			attempts++
 			return want
 		},
@@ -85,8 +86,7 @@ func TestRetrySQLiteWriteDoesNotRetryPermanentFailure(t *testing.T) {
 	}
 }
 
-func TestRetrySQLiteWriteReturnsContentionAfterBudgetExhaustion(t *testing.T) {
-	want := codedSQLiteTestError{code: 517}
+func TestRetrySQLiteWriteReturnsCurrentWaitFailureAfterContention(t *testing.T) {
 	attempts := 0
 	err := retrySQLiteWrite(
 		context.Background(),
@@ -95,16 +95,357 @@ func TestRetrySQLiteWriteReturnsContentionAfterBudgetExhaustion(t *testing.T) {
 		func(context.Context, time.Duration) error {
 			return context.DeadlineExceeded
 		},
-		func() error {
+		func(context.Context) error {
 			attempts++
-			return want
+			return codedSQLiteTestError{code: 517}
 		},
 	)
-	if !errors.Is(err, want) {
-		t.Fatalf("retrySQLiteWrite error = %v, want last contention %v", err, want)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("retrySQLiteWrite error = %v, want current wait failure", err)
 	}
 	if attempts != 1 {
 		t.Fatalf("attempts = %d, want 1 before injected exhaustion", attempts)
+	}
+}
+
+func TestRetrySQLiteWritePreservesExternalCancellationAfterContention(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	attempts := 0
+	err := retrySQLiteWrite(
+		ctx,
+		time.Second,
+		time.Millisecond,
+		waitSQLiteWriteRetry,
+		func(context.Context) error {
+			attempts++
+			if attempts == 1 {
+				return codedSQLiteTestError{code: 517}
+			}
+			cancel()
+			return context.Canceled
+		},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("retrySQLiteWrite error = %v, want external cancellation", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestRetrySQLiteWriteBoundsEachAttempt(t *testing.T) {
+	startedAt := time.Now()
+	err := retrySQLiteWrite(
+		context.Background(),
+		10*time.Millisecond,
+		time.Millisecond,
+		waitSQLiteWriteRetry,
+		func(attemptCtx context.Context) error {
+			<-attemptCtx.Done()
+			return attemptCtx.Err()
+		},
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("retrySQLiteWrite error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("attempt ignored retry budget: %s", elapsed)
+	}
+}
+
+func TestRetrySQLiteWritePreservesCurrentErrorAfterContention(t *testing.T) {
+	permanent := errors.New("projection invariant failed")
+	tests := []struct {
+		name    string
+		budget  time.Duration
+		current func(context.Context) error
+		want    error
+	}{
+		{
+			name:   "returned cancellation",
+			budget: time.Second,
+			current: func(context.Context) error {
+				return context.Canceled
+			},
+			want: context.Canceled,
+		},
+		{
+			name:   "retry deadline",
+			budget: 20 * time.Millisecond,
+			current: func(attemptCtx context.Context) error {
+				<-attemptCtx.Done()
+				return attemptCtx.Err()
+			},
+			want: context.DeadlineExceeded,
+		},
+		{
+			name:   "permanent failure",
+			budget: time.Second,
+			current: func(context.Context) error {
+				return permanent
+			},
+			want: permanent,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			attempts := 0
+			err := retrySQLiteWrite(
+				context.Background(),
+				tt.budget,
+				time.Millisecond,
+				waitSQLiteWriteRetry,
+				func(attemptCtx context.Context) error {
+					attempts++
+					if attempts == 1 {
+						return codedSQLiteTestError{code: 517}
+					}
+					return tt.current(attemptCtx)
+				},
+			)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("retrySQLiteWrite error = %v, want current error %v", err, tt.want)
+			}
+			if attempts != 2 {
+				t.Fatalf("attempts = %d, want 2", attempts)
+			}
+		})
+	}
+}
+
+func TestRuntimeStateStoreTerminalProjectionWritesRestartAfterBusySnapshot(t *testing.T) {
+	operations := []string{
+		"upsert_session_state",
+		"delete_worktree_state",
+		"apply_physical_session_observation",
+	}
+	for _, operation := range operations {
+		t.Run(operation, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+			store := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+			t.Cleanup(func() { _ = store.Close() })
+			if _, err := store.dbHandle(); err != nil {
+				t.Fatal(err)
+			}
+
+			reader, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(100)&_pragma=journal_mode(WAL)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = reader.Close() })
+			writer, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(100)&_pragma=journal_mode(WAL)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = writer.Close() })
+			if _, err := writer.Exec(`CREATE TABLE projection_conflict_test (id INTEGER PRIMARY KEY, source TEXT NOT NULL)`); err != nil {
+				t.Fatal(err)
+			}
+
+			attempts := 0
+			err = store.withRetryingWriteLock(context.Background(), operation, func(context.Context) error {
+				attempts++
+				if attempts > 2 {
+					_, err := writer.Exec(`INSERT INTO projection_conflict_test(source) VALUES('terminal')`)
+					return err
+				}
+				tx, err := reader.Begin()
+				if err != nil {
+					return err
+				}
+				defer func() { _ = tx.Rollback() }()
+				var count int
+				if err := tx.QueryRow(`SELECT COUNT(*) FROM projection_conflict_test`).Scan(&count); err != nil {
+					return err
+				}
+				if _, err := writer.Exec(`INSERT INTO projection_conflict_test(source) VALUES('snapshot-writer')`); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(`INSERT INTO projection_conflict_test(source) VALUES('stale-reader')`); err == nil {
+					return errors.New("stale snapshot write unexpectedly succeeded")
+				} else if !isSQLiteWriteContention(err) {
+					return fmt.Errorf("stale snapshot write returned non-contention error: %w", err)
+				} else {
+					return fmt.Errorf("%s projection conflict: %w", operation, err)
+				}
+			})
+			if err != nil {
+				t.Fatalf("terminal projection write: %v", err)
+			}
+			if attempts != 3 {
+				t.Fatalf("attempts = %d, want 3", attempts)
+			}
+			var terminalRows int
+			if err := writer.QueryRow(`SELECT COUNT(*) FROM projection_conflict_test WHERE source='terminal'`).Scan(&terminalRows); err != nil {
+				t.Fatal(err)
+			}
+			if terminalRows != 1 {
+				t.Fatalf("terminal rows = %d, want exactly one", terminalRows)
+			}
+		})
+	}
+}
+
+func TestRuntimeStateStoreMethodsRecoverFromInjectedBusySnapshot(t *testing.T) {
+	newStore := func(t *testing.T) *RuntimeStateStore {
+		t.Helper()
+		store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+		t.Cleanup(func() { _ = store.Close() })
+		return store
+	}
+	retryingContext := func(operation string, attempts *int) context.Context {
+		return WithSQLiteWriteAttemptHookForTest(context.Background(), func(gotOperation string, attempt int) error {
+			if gotOperation != operation {
+				return fmt.Errorf("unexpected projection operation %s, want %s", gotOperation, operation)
+			}
+			*attempts = attempt
+			if attempt <= 2 {
+				return codedSQLiteTestError{code: 517}
+			}
+			return nil
+		})
+	}
+
+	t.Run("UpsertSessionState", func(t *testing.T) {
+		store := newStore(t)
+		attempts := 0
+		ctx := retryingContext("upsert_session_state", &attempts)
+		want := Session{
+			ID: "az-issue", IssueID: "issue", Role: SessionRoleWorker,
+			ScopeKind: SessionScopeIssue, ScopeID: "issue",
+			State: SessionStateStopped, ObservedState: SessionStateStopped,
+			UpdatedAt: time.Now().UTC(),
+		}
+		if err := store.UpsertSessionState(ctx, "p", want); err != nil {
+			t.Fatal(err)
+		}
+		got, found, err := store.GetSessionState(context.Background(), "p", want.ID)
+		if err != nil || !found || got.State != SessionStateStopped {
+			t.Fatalf("session=%+v found=%v err=%v", got, found, err)
+		}
+		if attempts != 3 {
+			t.Fatalf("attempts = %d, want 3", attempts)
+		}
+	})
+
+	t.Run("DeleteWorktreeState", func(t *testing.T) {
+		store := newStore(t)
+		if err := store.UpsertWorktreeState(context.Background(), WorktreeState{
+			ProjectID: "p", IssueID: "issue", Path: "/tmp/issue", Branch: "issue",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		attempts := 0
+		ctx := retryingContext("delete_worktree_state", &attempts)
+		if err := store.DeleteWorktreeState(ctx, "p", "issue"); err != nil {
+			t.Fatal(err)
+		}
+		if _, found, err := store.GetWorktreeStateByIssueID(context.Background(), "p", "issue"); err != nil || found {
+			t.Fatalf("deleted worktree found=%v err=%v", found, err)
+		}
+		if attempts != 3 {
+			t.Fatalf("attempts = %d, want 3", attempts)
+		}
+	})
+
+	t.Run("ApplyPhysicalSessionObservation", func(t *testing.T) {
+		store := newStore(t)
+		seed := Session{
+			ID: "az-issue", IssueID: "issue", Role: SessionRoleWorker,
+			ScopeKind: SessionScopeIssue, ScopeID: "issue",
+			State: SessionStateStopped, ObservedState: SessionStateStopped,
+			UpdatedAt: time.Now().UTC().Add(-time.Second),
+		}
+		if err := store.UpsertSessionState(context.Background(), "p", seed); err != nil {
+			t.Fatal(err)
+		}
+		attempts := 0
+		ctx := retryingContext("apply_physical_session_observation", &attempts)
+		changed, applied, err := store.ApplyPhysicalSessionObservation(ctx, PhysicalSessionObservation{
+			ProjectID: "p", SessionID: seed.ID, ObservedState: SessionStateRunning,
+			Activity: "busy", ActivitySource: "hooks", UpdatedAt: time.Now().UTC(),
+		})
+		if err != nil || !applied || len(changed) != 1 {
+			t.Fatalf("changed=%+v applied=%v err=%v", changed, applied, err)
+		}
+		got, found, err := store.GetPhysicalSessionObservation(context.Background(), "p", seed.ID)
+		if err != nil || !found || got.ObservedState != SessionStateRunning {
+			t.Fatalf("observation=%+v found=%v err=%v", got, found, err)
+		}
+		if attempts != 3 {
+			t.Fatalf("attempts = %d, want 3", attempts)
+		}
+	})
+}
+
+func TestRuntimeStateStoreTerminalRetryKeepsWriterSlot(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.dbHandle(); err != nil {
+		t.Fatal(err)
+	}
+	firstAttempt := make(chan struct{})
+	backgroundDone := make(chan error, 1)
+	terminalDone := make(chan error, 1)
+	attempts := 0
+	go func() {
+		terminalDone <- store.withRetryingWriteLock(context.Background(), "delete_worktree_state", func(context.Context) error {
+			attempts++
+			if attempts == 1 {
+				close(firstAttempt)
+				return codedSQLiteTestError{code: 517}
+			}
+			return nil
+		})
+	}()
+	select {
+	case <-firstAttempt:
+	case err := <-terminalDone:
+		t.Fatalf("terminal write failed before first attempt: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("terminal write did not start")
+	}
+	go func() {
+		backgroundDone <- store.UpsertWorktreeState(context.Background(), WorktreeState{
+			ProjectID: "p", IssueID: "background", Path: "/tmp/background", Branch: "background",
+		})
+	}()
+	select {
+	case err := <-backgroundDone:
+		t.Fatalf("background writer bypassed terminal retry slot: %v", err)
+	case err := <-terminalDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case err := <-backgroundDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("background writer did not resume after terminal retry")
+	}
+}
+
+func TestRuntimeStateStoreContentionDiagnosticNamesOperation(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), logger)
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.dbHandle(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err := store.withRetryingWriteLock(ctx, "delete_worktree_state", func(context.Context) error {
+		return codedSQLiteTestError{code: 517}
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "runtime projection write delete_worktree_state failed on attempt 1") {
+		t.Fatalf("diagnostic error = %v", err)
+	}
+	if got := logs.String(); !strings.Contains(got, `"operation":"delete_worktree_state"`) || !strings.Contains(got, `"attempt":1`) {
+		t.Fatalf("contention log missing operation diagnostics: %s", got)
 	}
 }
 

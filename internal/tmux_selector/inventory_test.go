@@ -43,6 +43,75 @@ func TestSnapshotFromEntriesPrioritizesDurableHumanAttention(t *testing.T) {
 	}
 }
 
+func TestLiveProjectOrchestratorsKeepExactRoutingAndDistinctRegisteredNames(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	azPath := filepath.Join(home, "src", "azedarach")
+	chPath := filepath.Join(home, "src", "chefy")
+	registry := &config.ProjectsRegistry{Projects: []config.Project{
+		{Name: "Azedarach", Path: azPath},
+		{Name: "Chefy", Path: chPath},
+	}}
+	if err := config.SaveProjectsRegistry(registry); err != nil {
+		t.Fatal(err)
+	}
+	providerCalls := 0
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{infos: []tmux.SessionInfo{{Name: "az-orchestrator-project"}, {Name: "ch-orchestrator-project"}}},
+		nil,
+		WithProjectDirsProvider(func() []string {
+			providerCalls++
+			return []string{azPath, chPath}
+		}),
+	)
+
+	snapshot, err := loader.ListLiveSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if providerCalls != 0 {
+		t.Fatalf("project provider calls = %d, want deferred", providerCalls)
+	}
+	if len(snapshot.Entries) != 2 {
+		t.Fatalf("entries = %d", len(snapshot.Entries))
+	}
+	azProjectID, err := config.ProjectIDForRoot(azPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chProjectID, err := config.ProjectIDForRoot(chPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []struct{ sessionID, projectID, projectName, title string }{
+		{"az-orchestrator-project", azProjectID, "Azedarach", "Azedarach project orchestrator"},
+		{"ch-orchestrator-project", chProjectID, "Chefy", "Chefy project orchestrator"},
+	} {
+		entry := snapshot.Entries[i]
+		if entry.SessionID != want.sessionID || entry.ProjectID != want.projectID || entry.ProjectName != want.projectName || entry.TaskTitle != want.title {
+			t.Fatalf("entry %d = %#v", i, entry)
+		}
+		if entryIssueID(entry) != "" || entry.SessionRole != string(protocol.SessionRoleOrchestrator) || entry.SessionScopeID != "project" {
+			t.Fatalf("entry %d identity/routing metadata = %#v", i, entry)
+		}
+	}
+}
+
+func TestLiveUnscopedTmuxSessionDoesNotGainSyntheticProjectIdentity(t *testing.T) {
+	loader := NewGlobalInventoryLoader(fakeSessionInventory{infos: []tmux.SessionInfo{{Name: "plain-tmux"}}}, nil)
+	snapshot, err := loader.ListLiveSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Entries) != 1 {
+		t.Fatalf("entries = %d", len(snapshot.Entries))
+	}
+	entry := snapshot.Entries[0]
+	if entry.ProjectName != "" || entry.ProjectID != "" || entry.ProjectPath != "" {
+		t.Fatalf("unscoped entry gained project identity: %#v", entry)
+	}
+}
+
 func (f fakeSessionInventory) ListSessionInfos(context.Context) ([]tmux.SessionInfo, error) {
 	return f.infos, f.err
 }

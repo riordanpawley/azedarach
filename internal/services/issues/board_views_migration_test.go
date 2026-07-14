@@ -183,7 +183,7 @@ func seedBoardViewsPreMigrationDB(t *testing.T, dbPath string, includeCustomBoar
 	require.NoError(t, err)
 
 	for _, migration := range orderedMigrations {
-		if migration.id == "0019_issue_observation_events" || migration.id == boardViewsMigrationID || migration.id == "0035_interaction_requests" || migration.id == "0045_issue_state_runtime_constraints" || migration.id == humanAuthorityProjectionMigrationID {
+		if migration.id == "0019_issue_observation_events" || migration.id == boardViewsMigrationID || migration.id == "0035_interaction_requests" || migration.id == "0045_issue_state_runtime_constraints" || migration.id == humanAuthorityProjectionMigrationID || migration.id == decisionPropagationOutboxMigrationID {
 			continue
 		}
 		_, err := db.Exec(`INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, migration.id, now)

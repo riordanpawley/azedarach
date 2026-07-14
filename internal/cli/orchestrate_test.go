@@ -2012,6 +2012,42 @@ func TestOrchestrateStartNormalizesNilMapsForMalformedLaunch(t *testing.T) {
 	}
 }
 
+func TestOrchestrateStartCreatesFreshIntentForEachOperatorInvocation(t *testing.T) {
+	root := naming.IssueID("az-1")
+	intents := make([]string, 0, 2)
+	deps := &Dependencies{
+		ProjectID: protocol.DefaultProjectID,
+		RepoDir:   "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{passOrchestrationIntent: true, commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandTaskGraphReadiness:
+				return responseWithJSON(req, daemonclient.TaskGraphReadiness{RootIssueID: root.String(), Blocked: map[string]string{}}), nil
+			case protocol.CommandOrchestrationIntent:
+				var body protocol.OrchestrationIntentRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("decode orchestration intent: %v", err)
+				}
+				intents = append(intents, body.IntentKey)
+				return responseWithJSON(req, protocol.OrchestrationIntentResult{IntentKey: body.IntentKey, Requested: []string{}, Skipped: map[string]string{}, Failed: map[string]string{}}), nil
+			case daemonclient.CommandWorktreeList:
+				return responseWithJSON(req, map[string]any{"project_id": protocol.DefaultProjectID, "worktrees": []map[string]string{}}), nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		}}),
+	}
+
+	for range 2 {
+		if _, err := orchestrateStart(deps, OrchestrateStartOptions{RootIssueID: root.String(), Limit: 1}); err != nil {
+			t.Fatalf("orchestrateStart: %v", err)
+		}
+	}
+	if len(intents) != 2 || intents[0] == "" || intents[0] == intents[1] {
+		t.Fatalf("operator intent keys = %q, want two non-empty distinct values", intents)
+	}
+}
+
 func TestOrchestrateStartSkipsForeignOwnedIssue(t *testing.T) {
 	root := naming.IssueID("az-1")
 	child := naming.IssueID("az-2")
