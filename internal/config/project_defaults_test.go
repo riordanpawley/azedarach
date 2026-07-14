@@ -85,7 +85,7 @@ cd "$CHECKOUT"
 direnv_layout_dir >"$LAYOUT_RESULT"
 `
 	cmd := exec.Command("bash", "-c", script)
-	cmd.Env = append(envWithout("XDG_CACHE_HOME"),
+	cmd.Env = append(envWithout("XDG_CACHE_HOME", "AZEDARACH_GO_CACHE_ROOT", "AZEDARACH_GOCACHE", "GOCACHE"),
 		"CHECKOUT="+repoRoot,
 		"LAYOUT_RESULT="+resultPath,
 		"HOME="+home,
@@ -97,6 +97,53 @@ direnv_layout_dir >"$LAYOUT_RESULT"
 	layout, err := os.ReadFile(resultPath)
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(strings.TrimSpace(string(layout)), filepath.Join(home, ".cache", "direnv", "layouts")+string(os.PathSeparator)))
+}
+
+func TestEnvrcRejectsCacheRedirectsFromBothLocalLoaders(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	require.NoError(t, err)
+	envrc, err := os.ReadFile(filepath.Join(repoRoot, ".envrc"))
+	require.NoError(t, err)
+	cacheEnv, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "go-cache-env.sh"))
+	require.NoError(t, err)
+
+	for _, loader := range []string{".env.local", ".envrc.local"} {
+		for _, variable := range []string{"AZEDARACH_GO_CACHE_ROOT", "AZEDARACH_GOCACHE", "GOCACHE"} {
+			t.Run(loader+"/"+variable, func(t *testing.T) {
+				checkout := t.TempDir()
+				require.NoError(t, os.Mkdir(filepath.Join(checkout, "scripts"), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(checkout, ".envrc"), envrc, 0o644))
+				require.NoError(t, os.WriteFile(filepath.Join(checkout, "scripts", "go-cache-env.sh"), cacheEnv, 0o755))
+				runGit(t, checkout, "init")
+				redirect := filepath.Join(t.TempDir(), "redirect")
+				require.NoError(t, os.WriteFile(filepath.Join(checkout, loader), []byte(variable+"="+redirect+"\n"), 0o644))
+
+				const script = `
+set -eu
+nix() { :; }
+use() { :; }
+PATH_add() { :; }
+watch_file() { :; }
+dotenv() { set -a; . "$1"; set +a; }
+source_env_if_exists() { if [ -f "$1" ]; then . "$1"; fi; }
+cd "$CHECKOUT"
+. ./.envrc
+`
+				cmd := exec.Command("bash", "-c", script)
+				cmd.Env = append(envWithout("AZEDARACH_GO_CACHE_ROOT", "AZEDARACH_GOCACHE", "GOCACHE"),
+					"CHECKOUT="+checkout,
+					"HOME="+t.TempDir(),
+					"ISSUE_BACKEND=none",
+					"AZEDARACH_DIRENV_MANUAL_NIX_RELOAD=0",
+					"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+				)
+				output, runErr := cmd.CombinedOutput()
+				require.Error(t, runErr, "evaluation unexpectedly accepted redirect: %s", output)
+				assert.Contains(t, string(output), variable+" must equal")
+				assert.NoDirExists(t, redirect)
+			})
+		}
+	}
 }
 
 func evaluateEnvrcLayout(t *testing.T, checkout, cacheRoot string) string {
@@ -117,7 +164,7 @@ cd "$CHECKOUT"
 `
 	resultPath := filepath.Join(t.TempDir(), "layout")
 	cmd := exec.Command("bash", "-c", script)
-	cmd.Env = append(envWithout("AZEDARACH_GO_CACHE_ROOT", "AZEDARACH_GOCACHE"),
+	cmd.Env = append(envWithout("AZEDARACH_GO_CACHE_ROOT", "AZEDARACH_GOCACHE", "GOCACHE"),
 		"CHECKOUT="+checkout,
 		"LAYOUT_RESULT="+resultPath,
 		"XDG_CACHE_HOME="+cacheRoot,

@@ -373,7 +373,7 @@ func runShellProtocol(t *testing.T, dir, script, cacheRoot string) string {
 	t.Helper()
 	cmd := exec.Command("bash", script, "--print")
 	cmd.Dir = dir
-	cmd.Env = append(filteredEnvironment("AZEDARACH_TICKET_ID", "AZEDARACH_ISSUE_ID", "AZEDARACH_GOCACHE", "AZEDARACH_GOPATH", "GOFLAGS"), "AZEDARACH_GO_CACHE_ROOT="+cacheRoot)
+	cmd.Env = append(filteredEnvironment("AZEDARACH_TICKET_ID", "AZEDARACH_ISSUE_ID", "AZEDARACH_GOCACHE", "AZEDARACH_GOPATH", "GOCACHE", "GOFLAGS"), "AZEDARACH_GO_CACHE_ROOT="+cacheRoot)
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "%s", output)
 	return string(output)

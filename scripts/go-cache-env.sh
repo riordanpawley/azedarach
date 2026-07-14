@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Source this file from direnv to select the repository-family Go cache namespace.
 
+_az_finalize=0
+if [[ "${1:-}" == "--finalize" ]]; then
+  _az_finalize=1
+fi
+
 _az_common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
 if [[ -n "$_az_common_dir" && "$(basename "$_az_common_dir")" == ".git" ]]; then
   _az_go_cache_root="$(dirname "$_az_common_dir")/.azedarach/go"
@@ -45,6 +50,10 @@ if [[ -n "${AZEDARACH_GOCACHE:-}" && "$AZEDARACH_GOCACHE" != "$_az_managed_gocac
   echo "AZEDARACH_GOCACHE must equal managed namespace $_az_managed_gocache (got $AZEDARACH_GOCACHE)" >&2
   return 1 2>/dev/null || exit 1
 fi
+if [[ "$_az_finalize" == "1" && -n "${GOCACHE:-}" && "$GOCACHE" != "$_az_managed_gocache" ]]; then
+  echo "GOCACHE must equal managed namespace $_az_managed_gocache (got $GOCACHE)" >&2
+  return 1 2>/dev/null || exit 1
+fi
 export GOCACHE="$_az_managed_gocache"
 export GOPATH="${AZEDARACH_GOPATH:-$_az_go_cache_root/path}"
 case " ${GOFLAGS:-} " in
@@ -58,4 +67,4 @@ if [[ "${1:-}" == "--print" ]]; then
     "$AZEDARACH_GO_CACHE_ROOT" "$AZEDARACH_GO_CACHE_OWNER" "$AZEDARACH_GO_CACHE_NAMESPACE" "$GOCACHE" "$GOPATH" "$GOFLAGS"
 fi
 
-unset _az_go_cache_root _az_common_dir _az_git_dir _az_owner _az_issue _az_branch _az_kind _az_managed_gocache
+unset _az_finalize _az_go_cache_root _az_common_dir _az_git_dir _az_owner _az_issue _az_branch _az_kind _az_managed_gocache
