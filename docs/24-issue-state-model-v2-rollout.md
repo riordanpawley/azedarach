@@ -105,9 +105,10 @@ changes the durable projection fields those invariants must read:
   `task.delete_preflight`, `task.graph_readiness`, and `task.complete_check`
   remain `hybrid`: refresh durable issue graph/state projection first, then
   compare it with live tmux/runtime attachment state.
-- `task.review_handoff` remains `projection`: refresh durable issue state and
-  session activity projections, then allow review only when active issue
-  self-handoff rules and external busy-equivalent gates pass.
+- `task.review_handoff` remains `projection`: refresh durable issue state,
+  revisioned material-decision change/acknowledgement observations, and session
+  activity projections, then allow review only when decision revisions are
+  current and active-issue self-handoff/external busy-equivalent gates pass.
 - `task.integration_readiness`, `task.context_risk_closeout`,
   `task.merge_base_target`, `task.follow_on_merge_candidates`,
   `issue_resources.lifecycle`, and task-list freshness remain `projection`.

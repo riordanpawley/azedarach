@@ -229,7 +229,7 @@ func (c *Client) ListIssueReviewReadyObservationEvents(ctx context.Context, issu
 			event_type = ?
 			OR LOWER(REPLACE(REPLACE(TRIM(event_type), '_', '.'), '-', '.')) IN (?, ?, ?, ?)
 		  )
-		ORDER BY observed_at ASC, id ASC
+		ORDER BY id ASC
 	`, issueID,
 		string(domain.IssueEventIssueStatusChanged),
 		string(domain.IssueEventEvidenceSubmitted),
@@ -253,6 +253,84 @@ func (c *Client) ListIssueReviewReadyObservationEvents(ctx context.Context, issu
 		return nil, c.wrapError("list-review-ready-observation-events", issueID, err)
 	}
 	return events, nil
+}
+
+// ListIssueDecisionObservationEvents returns the complete replay authority for
+// material decision changes and exact-revision acknowledgements on one issue.
+func (c *Client) ListIssueDecisionObservationEvents(ctx context.Context, issueID string) ([]domain.IssueObservationEvent, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return nil, c.wrapError("list-decision-observation-events", "", errors.New("issue id is required"))
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM issue_observation_events
+		WHERE issue_id = ? AND event_type IN (?, ?)
+		ORDER BY observed_at ASC, id ASC
+	`, issueID, string(domain.IssueEventDecisionChanged), string(domain.IssueEventDecisionAcknowledged))
+	if err != nil {
+		return nil, c.wrapError("list-decision-observation-events", issueID, err)
+	}
+	defer rows.Close()
+	events := make([]domain.IssueObservationEvent, 0, 8)
+	for rows.Next() {
+		event, scanErr := scanIssueObservationEvent(rows)
+		if scanErr != nil {
+			return nil, c.wrapError("list-decision-observation-events", issueID, scanErr)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-decision-observation-events", issueID, err)
+	}
+	return events, nil
+}
+
+// ListIssueDecisionObservationEventsByIssue batches orchestration snapshot
+// replay for many issues so decision visibility does not add one query per
+// candidate on large boards.
+func (c *Client) ListIssueDecisionObservationEventsByIssue(ctx context.Context, issueIDs []string) (map[string][]domain.IssueObservationEvent, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	issueIDs = normalizeOrderedIDs(issueIDs)
+	out := make(map[string][]domain.IssueObservationEvent, len(issueIDs))
+	if len(issueIDs) == 0 {
+		return out, nil
+	}
+	encoded, err := json.Marshal(issueIDs)
+	if err != nil {
+		return nil, c.wrapError("list-decision-observation-events-batch", "", err)
+	}
+	rows, err := db.QueryContext(ctx, `
+		WITH requested(issue_id) AS (SELECT value FROM json_each(?))
+		SELECT e.id, e.issue_id, e.event_type, e.observed_at, e.source, e.source_command, e.operation_id, e.session_id, e.worktree_path, e.payload_json
+		FROM issue_observation_events e
+		JOIN requested r ON r.issue_id = e.issue_id
+		WHERE e.event_type IN (?, ?)
+		ORDER BY e.issue_id, e.id ASC
+	`, string(encoded), string(domain.IssueEventDecisionChanged), string(domain.IssueEventDecisionAcknowledged))
+	if err != nil {
+		return nil, c.wrapError("list-decision-observation-events-batch", "", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		event, scanErr := scanIssueObservationEvent(rows)
+		if scanErr != nil {
+			return nil, c.wrapError("list-decision-observation-events-batch", "", scanErr)
+		}
+		issueID := event.IssueID.String()
+		out[issueID] = append(out[issueID], event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-decision-observation-events-batch", "", err)
+	}
+	return out, nil
 }
 
 // ListLatestIssueObservationEventsByIssue returns at most one matching event

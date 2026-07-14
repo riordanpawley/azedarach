@@ -49,11 +49,12 @@ const (
 	DecisionRelationAppliesTo DecisionRelation = "applies-to"
 	DecisionRelationRevises   DecisionRelation = "revises"
 	DecisionRelationInforms   DecisionRelation = "informs"
+	DecisionRelationGoverns   DecisionRelation = "governs"
 )
 
 func ValidDecisionRelation(r DecisionRelation) bool {
 	switch r {
-	case DecisionRelationAppliesTo, DecisionRelationRevises, DecisionRelationInforms:
+	case DecisionRelationAppliesTo, DecisionRelationRevises, DecisionRelationInforms, DecisionRelationGoverns:
 		return true
 	}
 	return false
@@ -865,6 +866,41 @@ func (c *Client) ListDecisionLinks(ctx context.Context, filter DecisionLinkFilte
 		return nil, c.wrapError("list-decision-links", "", err)
 	}
 	return out, nil
+}
+
+// DecisionRevision returns the monotonic audit-log revision covering both the
+// decision row and any of its links. The audit ID is durable across daemon
+// restarts and advances for every semantic mutation without a second counter.
+func (c *Client) DecisionRevision(ctx context.Context, decisionID string) (int64, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return 0, err
+	}
+	decisionID = strings.TrimSpace(decisionID)
+	if decisionID == "" {
+		return 0, c.wrapError("decision-revision", "", errors.New("decision id is required"))
+	}
+	var revision sql.NullInt64
+	err = db.QueryRowContext(ctx, `
+		SELECT MAX(id)
+		FROM decision_audit_log
+		WHERE (entity_type = ? AND entity_id = ?)
+		   OR (
+			entity_type = ? AND (entity_id = ? OR entity_id LIKE ?)
+			AND (
+				json_extract(after_json, '$.relation') IN (?, ?)
+				OR json_extract(before_json, '$.relation') IN (?, ?)
+			)
+		   )
+	`, decisionEntityKind, decisionID, decisionLinkEntityKind, decisionID, decisionID+":%",
+		string(DecisionRelationGoverns), string(DecisionRelationRevises), string(DecisionRelationGoverns), string(DecisionRelationRevises)).Scan(&revision)
+	if err != nil {
+		return 0, c.wrapError("decision-revision", decisionID, err)
+	}
+	if !revision.Valid || revision.Int64 <= 0 {
+		return 0, c.wrapError("decision-revision", decisionID, domain.ErrNotFound)
+	}
+	return revision.Int64, nil
 }
 
 func (c *Client) lookupDecisionByLocalID(ctx context.Context, queryer sqlRequirementQueryer, selector string, includeDeleted bool) (decisionRecord, error) {

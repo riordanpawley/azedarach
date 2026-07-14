@@ -20,6 +20,7 @@ type DecisionService interface {
 	ListDecisionLinks(context.Context, protocol.DecisionLinkListRequestBody) (protocol.DecisionLinkListResponseBody, error)
 	AddDecisionLink(context.Context, protocol.DecisionLinkAddRequestBody) (protocol.DecisionLinkAddResponseBody, error)
 	RemoveDecisionLink(context.Context, protocol.DecisionLinkRemoveRequestBody) (protocol.DecisionLinkRemoveResponseBody, error)
+	AcknowledgeDecision(context.Context, protocol.DecisionAcknowledgeRequestBody) (protocol.DecisionAcknowledgeResponseBody, error)
 	SyncMD(context.Context, protocol.DecisionSyncMDRequestBody) (protocol.DecisionSyncMDResponseBody, error)
 	ImportMD(context.Context, protocol.DecisionImportMDRequestBody) (protocol.DecisionImportMDResponseBody, error)
 }
@@ -151,7 +152,7 @@ func (h *DecisionHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 			cmd.Relation = protocol.DecisionRelationAppliesTo
 		}
 		if !cmd.Relation.Valid() {
-			return specInvalidRequest(resp, "invalid relation: expected applies-to|revises|informs")
+			return specInvalidRequest(resp, "invalid relation: expected applies-to|revises|informs|governs")
 		}
 		return specJSONResponse(ctx, resp, h.service.AddDecisionLink, cmd)
 
@@ -183,6 +184,22 @@ func (h *DecisionHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 			return specInvalidRequest(resp, "invalid target kind: expected issue|requirement|decision")
 		}
 		return specJSONResponse(ctx, resp, h.service.RemoveDecisionLink, cmd)
+
+	case protocol.CommandDecisionAcknowledge:
+		var cmd protocol.DecisionAcknowledgeRequestBody
+		if !decodeSpecRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.DecisionID = strings.TrimSpace(cmd.DecisionID)
+		cmd.Disposition = strings.ToLower(strings.TrimSpace(cmd.Disposition))
+		cmd.Note = strings.TrimSpace(cmd.Note)
+		if cmd.IssueID == "" || cmd.DecisionID == "" || cmd.Revision <= 0 {
+			return specInvalidRequest(resp, "missing required fields: issue_id/decision_id/revision")
+		}
+		if cmd.Disposition != "reconciled" && cmd.Disposition != "compatible" {
+			return specInvalidRequest(resp, "invalid disposition: expected reconciled|compatible")
+		}
+		return specJSONResponse(ctx, resp, h.service.AcknowledgeDecision, cmd)
 
 	default:
 		resp.Error = &protocol.ErrorEnvelope{

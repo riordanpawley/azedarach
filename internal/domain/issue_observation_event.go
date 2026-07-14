@@ -39,6 +39,8 @@ const (
 	IssueEventHumanInputProvided       IssueObservationEventType = "human.input_provided"
 	IssueEventInvestigationDisposition IssueObservationEventType = "investigation.disposition_declared"
 	IssueEventOrchestrationRouted      IssueObservationEventType = "orchestration.candidate_routed"
+	IssueEventDecisionChanged          IssueObservationEventType = "decision.changed"
+	IssueEventDecisionAcknowledged     IssueObservationEventType = "decision.acknowledged"
 )
 
 // IssueObservationEvent is an append-only fact associated with one issue.
@@ -73,7 +75,8 @@ func IssueObservationEventTypeRequiresAuthority(eventType IssueObservationEventT
 		IssueEventReviewCompleted,
 		IssueEventReviewCloseFailed,
 		IssueEventTaskIntegrationCompleted,
-		IssueEventOrchestrationRouted:
+		IssueEventOrchestrationRouted,
+		IssueEventDecisionChanged:
 		return true
 	default:
 		return false

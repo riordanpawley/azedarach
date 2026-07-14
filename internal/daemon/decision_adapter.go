@@ -3,8 +3,11 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
@@ -103,6 +106,9 @@ func (s issueDecisionService) UpdateDecision(ctx context.Context, req protocol.D
 	if err != nil {
 		return protocol.DecisionUpdateResponseBody{}, err
 	}
+	if err := s.daemon.propagateDecisionChange(ctx, daemonProjectIDFromContext(ctx), decision.LocalID, protocol.CommandDecisionUpdate); err != nil {
+		return protocol.DecisionUpdateResponseBody{}, err
+	}
 	return protocol.DecisionUpdateResponseBody{Decision: mapDecisionToProtocol(decision)}, nil
 }
 
@@ -111,7 +117,15 @@ func (s issueDecisionService) DeleteDecision(ctx context.Context, req protocol.D
 	if err != nil {
 		return protocol.DecisionDeleteResponseBody{}, err
 	}
+	projectID := daemonProjectIDFromContext(ctx)
+	affected, err := s.daemon.decisionAffectedIssues(ctx, projectID, req.ID)
+	if err != nil {
+		return protocol.DecisionDeleteResponseBody{}, err
+	}
 	if err := c.DeleteDecision(ctx, req.ID); err != nil {
+		return protocol.DecisionDeleteResponseBody{}, err
+	}
+	if err := s.daemon.propagateDecisionWithdrawal(ctx, projectID, req.ID, protocol.CommandDecisionDelete, affected); err != nil {
 		return protocol.DecisionDeleteResponseBody{}, err
 	}
 	return protocol.DecisionDeleteResponseBody{ID: req.ID, Deleted: true}, nil
@@ -179,7 +193,67 @@ func (s issueDecisionService) AddDecisionLink(ctx context.Context, req protocol.
 	if err != nil {
 		return protocol.DecisionLinkAddResponseBody{}, err
 	}
+	if err := s.daemon.propagateDecisionChange(ctx, daemonProjectIDFromContext(ctx), link.DecisionID, protocol.CommandDecisionLinkAdd); err != nil {
+		return protocol.DecisionLinkAddResponseBody{}, err
+	}
 	return protocol.DecisionLinkAddResponseBody{Link: mapDecisionLinkToProtocol(link)}, nil
+}
+
+func (s issueDecisionService) AcknowledgeDecision(ctx context.Context, req protocol.DecisionAcknowledgeRequestBody) (protocol.DecisionAcknowledgeResponseBody, error) {
+	c, err := s.client(ctx)
+	if err != nil {
+		return protocol.DecisionAcknowledgeResponseBody{}, err
+	}
+	issueID := strings.TrimSpace(req.IssueID.String())
+	decisionID := strings.TrimSpace(req.DecisionID)
+	disposition := strings.ToLower(strings.TrimSpace(req.Disposition))
+	if disposition == domain.DecisionAcknowledgementCompatible && strings.TrimSpace(req.Note) == "" {
+		return protocol.DecisionAcknowledgeResponseBody{}, fmt.Errorf("compatible acknowledgement requires --note evidence")
+	}
+	events, err := c.ListIssueDecisionObservationEvents(ctx, issueID)
+	if err != nil {
+		return protocol.DecisionAcknowledgeResponseBody{}, err
+	}
+	var latestRevision int64
+	for _, event := range events {
+		if event.Type != domain.IssueEventDecisionChanged || strings.TrimSpace(fmt.Sprint(event.Payload["decision_id"])) != decisionID {
+			continue
+		}
+		if revision := observationPayloadInt64(event.Payload["revision"]); revision > latestRevision {
+			latestRevision = revision
+		}
+	}
+	if latestRevision == 0 {
+		return protocol.DecisionAcknowledgeResponseBody{}, fmt.Errorf("no material decision change %s is recorded for issue %s", decisionID, issueID)
+	}
+	if latestRevision != req.Revision {
+		return protocol.DecisionAcknowledgeResponseBody{}, fmt.Errorf("stale decision acknowledgement: %s revision %d requested, latest is %d", decisionID, req.Revision, latestRevision)
+	}
+	for _, event := range events {
+		if event.Type == domain.IssueEventDecisionAcknowledged && strings.TrimSpace(fmt.Sprint(event.Payload["decision_id"])) == decisionID && observationPayloadInt64(event.Payload["revision"]) == req.Revision && domain.ValidDecisionAcknowledgementDisposition(strings.TrimSpace(fmt.Sprint(event.Payload["disposition"]))) {
+			return protocol.DecisionAcknowledgeResponseBody{IssueID: req.IssueID, DecisionID: decisionID, Revision: req.Revision, Disposition: strings.TrimSpace(fmt.Sprint(event.Payload["disposition"])), EventID: event.ID}, nil
+		}
+	}
+	pending := domain.ReducePendingDecisionChanges(events)
+	pendingExact := false
+	for _, change := range pending {
+		if change.DecisionID == decisionID && change.Revision == req.Revision {
+			pendingExact = true
+			break
+		}
+	}
+	if !pendingExact {
+		return protocol.DecisionAcknowledgeResponseBody{}, fmt.Errorf("decision %s revision %d is not pending for issue %s", decisionID, req.Revision, issueID)
+	}
+	event, err := c.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventDecisionAcknowledged, Source: "worker-decision",
+		SourceCommand: protocol.CommandDecisionAcknowledge,
+		Payload:       map[string]any{"decision_id": decisionID, "revision": req.Revision, "disposition": disposition, "note": strings.TrimSpace(req.Note)},
+	})
+	if err != nil {
+		return protocol.DecisionAcknowledgeResponseBody{}, err
+	}
+	return protocol.DecisionAcknowledgeResponseBody{IssueID: req.IssueID, DecisionID: decisionID, Revision: req.Revision, Disposition: disposition, EventID: event.ID}, nil
 }
 
 func (s issueDecisionService) RemoveDecisionLink(ctx context.Context, req protocol.DecisionLinkRemoveRequestBody) (protocol.DecisionLinkRemoveResponseBody, error) {
@@ -187,7 +261,22 @@ func (s issueDecisionService) RemoveDecisionLink(ctx context.Context, req protoc
 	if err != nil {
 		return protocol.DecisionLinkRemoveResponseBody{}, err
 	}
+	projectID := daemonProjectIDFromContext(ctx)
+	before, err := s.daemon.decisionAffectedIssues(ctx, projectID, req.DecisionID)
+	if err != nil {
+		return protocol.DecisionLinkRemoveResponseBody{}, err
+	}
 	if err := c.RemoveDecisionLink(ctx, req.DecisionID, issues.DecisionTargetKind(req.TargetKind), req.TargetID); err != nil {
+		return protocol.DecisionLinkRemoveResponseBody{}, err
+	}
+	after, err := s.daemon.decisionAffectedIssues(ctx, projectID, req.DecisionID)
+	if err != nil {
+		return protocol.DecisionLinkRemoveResponseBody{}, err
+	}
+	if err := s.daemon.propagateDecisionChange(ctx, projectID, req.DecisionID, protocol.CommandDecisionLinkRemove); err != nil {
+		return protocol.DecisionLinkRemoveResponseBody{}, err
+	}
+	if err := s.daemon.propagateDecisionWithdrawal(ctx, projectID, req.DecisionID, protocol.CommandDecisionLinkRemove, decisionIssueDifference(before, after)); err != nil {
 		return protocol.DecisionLinkRemoveResponseBody{}, err
 	}
 	return protocol.DecisionLinkRemoveResponseBody{

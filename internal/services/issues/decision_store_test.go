@@ -141,6 +141,33 @@ func TestDecisionStore_RecordAndLinks(t *testing.T) {
 	require.ErrorIs(t, err, domain.ErrNotFound)
 }
 
+func TestDecisionRevisionAdvancesOnlyForMaterialSemantics(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	issueID, err := client.Create(ctx, CreateTaskParams{Title: "scope", Type: domain.TypeTask, Status: domain.StatusOpen})
+	require.NoError(t, err)
+	decision, err := client.RecordDecision(ctx, RecordDecisionParams{Title: "contract", Rationale: "initial"})
+	require.NoError(t, err)
+	createdRevision, err := client.DecisionRevision(ctx, decision.LocalID)
+	require.NoError(t, err)
+	_, err = client.AddDecisionLink(ctx, AddDecisionLinkParams{DecisionID: decision.LocalID, TargetKind: DecisionTargetIssue, TargetID: issueID, Relation: DecisionRelationInforms})
+	require.NoError(t, err)
+	benignRevision, err := client.DecisionRevision(ctx, decision.LocalID)
+	require.NoError(t, err)
+	assert.Equal(t, createdRevision, benignRevision, "benign link must not force worker reconciliation")
+	_, err = client.AddDecisionLink(ctx, AddDecisionLinkParams{DecisionID: decision.LocalID, TargetKind: DecisionTargetIssue, TargetID: issueID, Relation: DecisionRelationGoverns})
+	require.NoError(t, err)
+	materialRevision, err := client.DecisionRevision(ctx, decision.LocalID)
+	require.NoError(t, err)
+	assert.Greater(t, materialRevision, benignRevision)
+	newRationale := "amended"
+	_, err = client.UpdateDecision(ctx, decision.LocalID, UpdateDecisionParams{Rationale: &newRationale})
+	require.NoError(t, err)
+	updatedRevision, err := client.DecisionRevision(ctx, decision.LocalID)
+	require.NoError(t, err)
+	assert.Greater(t, updatedRevision, materialRevision)
+}
+
 func TestDecisionStore_QuerySearchUsesFTSAndCoversDecisionFields(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()

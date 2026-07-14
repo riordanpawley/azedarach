@@ -24,7 +24,7 @@ func TestParseDecisionRecordArgs(t *testing.T) {
 		},
 		{
 			name: "with linked issues and reqs",
-			args: []string{"--title", "x", "--rationale", "y", "--issue", "az-1", "--issue", "az-2", "--req", "req-1"},
+			args: []string{"--title", "x", "--rationale", "y", "--integration-affecting", "--issue", "az-1", "--issue", "az-2", "--req", "req-1"},
 			ok:   true,
 		},
 		{
@@ -70,6 +70,7 @@ func TestParseDecisionLinkAddArgs(t *testing.T) {
 		{name: "valid w/ issue", args: []string{"--id", "dec-1", "--issue", "az-1"}, ok: true},
 		{name: "valid w/ req + relation", args: []string{"--id", "dec-1", "--req", "r1", "--relation", "applies-to"}, ok: true},
 		{name: "valid w/ other decision + revises", args: []string{"--id", "dec-2", "--decision", "dec-1", "--relation", "revises"}, ok: true},
+		{name: "valid governing issue", args: []string{"--id", "dec-2", "--issue", "az-1", "--relation", "governs"}, ok: true},
 		{name: "invalid relation", args: []string{"--id", "dec-1", "--req", "r1", "--relation", "garbage"}, ok: false, errFrag: "invalid relation"},
 	}
 	for _, tc := range cases {
@@ -88,6 +89,21 @@ func TestParseDecisionLinkAddArgs(t *testing.T) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tc.errFrag)
 			}
 		})
+	}
+}
+
+func TestParseDecisionAcknowledgeArgs(t *testing.T) {
+	valid, err := parseDecisionAcknowledgeArgs([]string{"--issue", "az-1", "--id", "dec-2", "--revision", "7", "--disposition", "compatible", "--note", "wire format unchanged"})
+	if err != nil || valid.Revision != 7 || valid.Disposition != "compatible" {
+		t.Fatalf("valid=%+v err=%v", valid, err)
+	}
+	for _, args := range [][]string{
+		{"--issue", "az-1", "--id", "dec-2", "--disposition", "compatible"},
+		{"--issue", "az-1", "--id", "dec-2", "--revision", "7", "--disposition", "seen"},
+	} {
+		if _, err := parseDecisionAcknowledgeArgs(args); err == nil {
+			t.Fatalf("args %v accepted, want error", args)
+		}
 	}
 }
 

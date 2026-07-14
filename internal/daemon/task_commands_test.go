@@ -10672,7 +10672,7 @@ func TestHandleTaskEventAppendRejectsCallerForgedAuthorityEvents(t *testing.T) {
 	}
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: logger}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
 
-	authorityEvents := []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged, domain.IssueEventReviewCompleted, domain.IssueEventReviewCloseFailed, domain.IssueEventTaskIntegrationCompleted}
+	authorityEvents := []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged, domain.IssueEventReviewCompleted, domain.IssueEventReviewCloseFailed, domain.IssueEventTaskIntegrationCompleted, domain.IssueEventDecisionChanged}
 	for _, eventType := range authorityEvents {
 		resp, err := d.command(ctx, protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,

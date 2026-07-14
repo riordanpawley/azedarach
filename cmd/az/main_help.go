@@ -165,13 +165,15 @@ func printHelpForPath(path []string) bool {
 	case "decision get":
 		fmt.Println("Usage: az decision get --id <id> [--with-links] [--json]")
 	case "decision record":
-		fmt.Println("Usage: az decision record --title <text> --rationale <text> [--context <text>] [--consequences <text>] [--issue <id> ...] [--req <id> ...] [--json]")
+		fmt.Println("Usage: az decision record --title <text> --rationale <text> [--integration-affecting] [--context <text>] [--consequences <text>] [--issue <id> ...] [--req <id> ...] [--json]")
 	case "decision update":
 		fmt.Println("Usage: az decision update --id <id> [--title <text>] [--rationale <text>] [--context <text>] [--consequences <text>] [--json]")
 	case "decision delete":
 		fmt.Println("Usage: az decision delete --id <id> --confirm [--json]")
 	case "decision revisit":
 		fmt.Println("Usage: az decision revisit --id <old-id> (--new <existing-id> | --title <text> --rationale <text>) [--context <text>] [--note <text>] [--json]")
+	case "decision acknowledge":
+		fmt.Println("Usage: az decision acknowledge --issue <id> --id <decision-id> --revision <n> --disposition reconciled|compatible [--note <text>] [--json]")
 	case "decision sync":
 		fmt.Println("Usage: az decision sync [--check] [--all] [--project-dir <dir>] [--json]")
 		fmt.Println("Explicitly reconcile the target worktree's docs/decisions with the shared store, removing obsolete rename/delete artifacts.")
@@ -183,7 +185,7 @@ func printHelpForPath(path []string) bool {
 	case "decision link list":
 		fmt.Println("Usage: az decision link list [--json] [--id <decision-id>] [--kind <issue|requirement|decision>] [--target <id>]")
 	case "decision link add":
-		fmt.Println("Usage: az decision link add --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--relation <applies-to|revises|informs>] [--note <text>] [--json]")
+		fmt.Println("Usage: az decision link add --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--relation <applies-to|revises|informs|governs>] [--note <text>] [--json]")
 	case "decision link remove":
 		fmt.Println("Usage: az decision link remove --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--json]")
 	case "learn":

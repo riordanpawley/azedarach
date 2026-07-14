@@ -7,16 +7,17 @@ import (
 )
 
 const (
-	CommandDecisionList       = "decision.list"
-	CommandDecisionGet        = "decision.get"
-	CommandDecisionRecord     = "decision.record"
-	CommandDecisionUpdate     = "decision.update"
-	CommandDecisionDelete     = "decision.delete"
-	CommandDecisionLinkList   = "decision.link.list"
-	CommandDecisionLinkAdd    = "decision.link.add"
-	CommandDecisionLinkRemove = "decision.link.remove"
-	CommandDecisionSyncMD     = "decision.sync_md"
-	CommandDecisionImportMD   = "decision.import_md"
+	CommandDecisionList        = "decision.list"
+	CommandDecisionGet         = "decision.get"
+	CommandDecisionRecord      = "decision.record"
+	CommandDecisionUpdate      = "decision.update"
+	CommandDecisionDelete      = "decision.delete"
+	CommandDecisionLinkList    = "decision.link.list"
+	CommandDecisionLinkAdd     = "decision.link.add"
+	CommandDecisionLinkRemove  = "decision.link.remove"
+	CommandDecisionAcknowledge = "decision.acknowledge"
+	CommandDecisionSyncMD      = "decision.sync_md"
+	CommandDecisionImportMD    = "decision.import_md"
 )
 
 // DecisionTargetKind enumerates the things a decision link can point at.
@@ -45,11 +46,15 @@ const (
 	DecisionRelationAppliesTo DecisionRelation = "applies-to"
 	DecisionRelationRevises   DecisionRelation = "revises"
 	DecisionRelationInforms   DecisionRelation = "informs"
+	// DecisionRelationGoverns marks a decision as integration-affecting for the
+	// linked issue/requirement scope. It is the propagation opt-in; ordinary
+	// applies-to and informs links remain non-interrupting.
+	DecisionRelationGoverns DecisionRelation = "governs"
 )
 
 func (r DecisionRelation) Valid() bool {
 	switch r {
-	case DecisionRelationAppliesTo, DecisionRelationRevises, DecisionRelationInforms:
+	case DecisionRelationAppliesTo, DecisionRelationRevises, DecisionRelationInforms, DecisionRelationGoverns:
 		return true
 	}
 	return false
@@ -169,6 +174,22 @@ type DecisionLinkRemoveResponseBody struct {
 	TargetKind DecisionTargetKind `json:"target_kind" msgpack:"target_kind"`
 	TargetID   string             `json:"target_id" msgpack:"target_id"`
 	Removed    bool               `json:"removed" msgpack:"removed"`
+}
+
+type DecisionAcknowledgeRequestBody struct {
+	IssueID     naming.IssueID `json:"issue_id" msgpack:"issue_id"`
+	DecisionID  string         `json:"decision_id" msgpack:"decision_id"`
+	Revision    int64          `json:"revision" msgpack:"revision"`
+	Disposition string         `json:"disposition" msgpack:"disposition"`
+	Note        string         `json:"note,omitempty" msgpack:"note,omitempty"`
+}
+
+type DecisionAcknowledgeResponseBody struct {
+	IssueID     naming.IssueID `json:"issue_id" msgpack:"issue_id"`
+	DecisionID  string         `json:"decision_id" msgpack:"decision_id"`
+	Revision    int64          `json:"revision" msgpack:"revision"`
+	Disposition string         `json:"disposition" msgpack:"disposition"`
+	EventID     int64          `json:"event_id" msgpack:"event_id"`
 }
 
 // DecisionSyncMDRequestBody asks the daemon to reconcile decision records to
