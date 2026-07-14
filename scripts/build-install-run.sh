@@ -37,6 +37,12 @@ sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 ldflags="-X github.com/riordanpawley/azedarach/internal/buildinfo.Version=dev -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=${sha}"
 go build -ldflags "$ldflags" -o "$build_dir/az" ./cmd/az
 go build -ldflags "$ldflags" -o "$build_dir/azd" ./cmd/azd
+az_version="$("$build_dir/az" version)"
+azd_version="$("$build_dir/azd" version)"
+if [[ -z "$az_version" || "$az_version" != "$azd_version" ]]; then
+  echo "Refusing incoherent az/azd install: version mismatch (az=$az_version, azd=$azd_version)" >&2
+  exit 1
+fi
 atomic_replace_bin="${AZEDARACH_ATOMIC_REPLACE_BIN:-}"
 if [[ -z "$atomic_replace_bin" ]]; then
   atomic_replace_bin="$build_dir/atomic-replace"
@@ -175,20 +181,15 @@ fi
 
 candidate_generation="$new_generation"
 new_generation=""
-previous_active_target="$(readlink "$install_dir/.azedarach-current" 2>/dev/null || true)"
 if ! atomic_symlink ".azedarach-generations/$(basename "$candidate_generation")" \
   "$install_dir/.azedarach-current"; then
   rm -rf "$candidate_generation"
   exit 1
 fi
-active_generation="$candidate_generation"
-previous_active_generation="$install_dir/$previous_active_target"
-for generation in "$generations_dir"/generation.*; do
-  if [[ -d "$generation" && "$generation" != "$active_generation" &&
-        "$generation" != "$previous_active_generation" ]]; then
-    rm -rf "$generation"
-  fi
-done
+# Successful immutable generations are retained. A long-lived az/watch process
+# may need to launch the sibling azd from its own generation after any number
+# of later installs. Lifetime-aware cleanup must therefore be an explicit
+# maintenance operation, not automatic installer garbage collection.
 if [[ "$(cat "$lock_dir/pid" 2>/dev/null || true)" == "$$" ]]; then
   rm -rf "$lock_dir"
 fi

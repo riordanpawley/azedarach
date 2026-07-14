@@ -345,7 +345,8 @@ func TestNewLauncherKeepsMainWorktreeAtBaseRepoRoot(t *testing.T) {
 }
 
 func TestLauncherResolveBinary_UsesMonorepoGoBubbleteaBin(t *testing.T) {
-	repoDir := t.TempDir()
+	repoDir := newLauncherTestWorktree(t)
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
 	nestedBin := filepath.Join(repoDir, "go-bubbletea", "bin")
 	if err := os.MkdirAll(nestedBin, 0o755); err != nil {
@@ -363,7 +364,8 @@ func TestLauncherResolveBinary_UsesMonorepoGoBubbleteaBin(t *testing.T) {
 }
 
 func TestLauncherResolveBinary_UsesWorkingDirBinFallback(t *testing.T) {
-	repoDir := t.TempDir()
+	repoDir := newLauncherTestWorktree(t)
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
 	cwd := t.TempDir()
 	t.Chdir(cwd)
@@ -384,7 +386,8 @@ func TestLauncherResolveBinary_UsesWorkingDirBinFallback(t *testing.T) {
 }
 
 func TestLauncherResolveBinary_PrefersWorkingDirBinOverRepoBin(t *testing.T) {
-	repoDir := t.TempDir()
+	repoDir := newLauncherTestWorktree(t)
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
 	cwd := t.TempDir()
 	t.Chdir(cwd)
@@ -413,6 +416,26 @@ func TestLauncherResolveBinary_PrefersWorkingDirBinOverRepoBin(t *testing.T) {
 	}
 }
 
+func newLauncherTestWorktree(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module github.com/riordanpawley/azedarach\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(go.mod): %v", err)
+	}
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+	return worktree
+}
+
 func TestLauncherResolveCommand_UsesLocalGoRunForScopedWorktreeWithoutBinary(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
@@ -436,7 +459,10 @@ func TestLauncherResolveCommand_UsesLocalGoRunForScopedWorktreeWithoutBinary(t *
 	t.Setenv("AZEDARACH_DAEMON_BIN", "")
 	launcher := NewLauncher(filepath.Join(worktree, "nested"), filepath.Join(base, "daemon.sock"))
 
-	got := launcher.resolveCommand()
+	got, err := launcher.resolveCommand()
+	if err != nil {
+		t.Fatalf("resolveCommand() error = %v", err)
+	}
 	if got.executable != "go" {
 		t.Fatalf("resolveCommand().executable = %q, want go", got.executable)
 	}
@@ -469,7 +495,10 @@ func TestLauncherResolveCommand_DaemonBinOverrideWinsOverScopedGoRun(t *testing.
 	t.Setenv("AZEDARACH_DAEMON_BIN", override)
 	launcher := NewLauncher(worktree, filepath.Join(base, "daemon.sock"))
 
-	got := launcher.resolveCommand()
+	got, err := launcher.resolveCommand()
+	if err != nil {
+		t.Fatalf("resolveCommand() error = %v", err)
+	}
 	if got.executable != override {
 		t.Fatalf("resolveCommand().executable = %q, want %q", got.executable, override)
 	}
@@ -478,7 +507,7 @@ func TestLauncherResolveCommand_DaemonBinOverrideWinsOverScopedGoRun(t *testing.
 	}
 }
 
-func TestLauncherResolveCommand_MainRepoStillFallsBackToPathAzd(t *testing.T) {
+func TestLauncherResolveCommand_GlobalDaemonFailsClosedBeforeStalePathAzd(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
 	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
@@ -487,19 +516,143 @@ func TestLauncherResolveCommand_MainRepoStillFallsBackToPathAzd(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repoDir, "cmd", "azd"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(repo cmd/azd): %v", err)
 	}
-	t.Chdir(t.TempDir())
+	staleBin := filepath.Join(repoDir, "bin")
+	if err := os.MkdirAll(staleBin, 0o755); err != nil {
+		t.Fatalf("MkdirAll(stale bin): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staleBin, "azd"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(stale azd): %v", err)
+	}
+	clientDir := t.TempDir()
+	clientPath := filepath.Join(clientDir, "az")
+	if err := os.WriteFile(clientPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(client az): %v", err)
+	}
+	previousExecutable := currentExecutable
+	currentExecutable = func() (string, error) { return clientPath, nil }
+	t.Cleanup(func() { currentExecutable = previousExecutable })
 
-	t.Setenv("PATH", "")
+	t.Setenv("PATH", staleBin)
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
 	t.Setenv("AZEDARACH_DAEMON_BIN", "")
 	launcher := NewLauncher(repoDir, socketPath)
 
-	got := launcher.resolveCommand()
-	if got.executable != "azd" {
-		t.Fatalf("resolveCommand().executable = %q, want azd", got.executable)
+	got, err := launcher.resolveCommand()
+	if !errors.Is(err, errPairedDaemonUnavailable) {
+		t.Fatalf("resolveCommand() error = %v, want %v", err, errPairedDaemonUnavailable)
 	}
-	if len(got.args) != 0 || got.dir != "" {
-		t.Fatalf("resolveCommand() args=%v dir=%q, want PATH azd fallback", got.args, got.dir)
+	if got.executable != "" {
+		t.Fatalf("resolveCommand().executable = %q, want fail-closed empty command", got.executable)
+	}
+	launcher.waitForReady = func(context.Context, string) error { return context.DeadlineExceeded }
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		t.Fatal("Start() invoked process starter despite missing paired daemon")
+		return nil, nil
+	}
+	if startErr := launcher.Start(context.Background()); !errors.Is(startErr, errPairedDaemonUnavailable) {
+		t.Fatalf("Start() error = %v, want %v", startErr, errPairedDaemonUnavailable)
+	}
+}
+
+func TestLauncherResolveCommand_GlobalDaemonUsesAzdFromRunningAzGeneration(t *testing.T) {
+	repoDir := t.TempDir()
+	staleRepoAzd := filepath.Join(repoDir, "bin", "azd")
+	if err := os.MkdirAll(filepath.Dir(staleRepoAzd), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo bin): %v", err)
+	}
+	if err := os.WriteFile(staleRepoAzd, []byte("stale"), 0o755); err != nil {
+		t.Fatalf("WriteFile(stale repo azd): %v", err)
+	}
+
+	installDir := t.TempDir()
+	generationDir := filepath.Join(installDir, ".azedarach-generations", "generation.current")
+	if err := os.MkdirAll(generationDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(generation): %v", err)
+	}
+	az := filepath.Join(generationDir, "az")
+	azd := filepath.Join(generationDir, "azd")
+	for _, path := range []string{az, azd} {
+		if err := os.WriteFile(path, []byte("current"), 0o755); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+	publicAz := filepath.Join(installDir, "az")
+	if err := os.Symlink(filepath.Join(".azedarach-generations", "generation.current", "az"), publicAz); err != nil {
+		t.Fatalf("Symlink(public az): %v", err)
+	}
+
+	previousExecutable := currentExecutable
+	currentExecutable = func() (string, error) { return publicAz, nil }
+	t.Cleanup(func() { currentExecutable = previousExecutable })
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_BIN", "")
+
+	got, err := NewLauncher(repoDir, filepath.Join(t.TempDir(), "daemon.sock")).resolveCommand()
+	if err != nil {
+		t.Fatalf("resolveCommand() error = %v", err)
+	}
+	wantAzd, err := filepath.EvalSymlinks(azd)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(azd): %v", err)
+	}
+	if got.executable != wantAzd {
+		t.Fatalf("resolveCommand().executable = %q, want immutable paired generation %q", got.executable, wantAzd)
+	}
+}
+
+func TestLauncherResolveCommand_GlobalDaemonRejectsPrimaryRepoBinPair(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo .git): %v", err)
+	}
+	repoBin := filepath.Join(repoDir, "bin")
+	if err := os.MkdirAll(repoBin, 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo bin): %v", err)
+	}
+	az := filepath.Join(repoBin, "az")
+	azd := filepath.Join(repoBin, "azd")
+	for _, path := range []string{az, azd} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+	previousExecutable := currentExecutable
+	currentExecutable = func() (string, error) { return az, nil }
+	t.Cleanup(func() { currentExecutable = previousExecutable })
+	t.Setenv("PATH", repoBin)
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_BIN", "")
+
+	got, err := NewLauncher(repoDir, filepath.Join(t.TempDir(), "daemon.sock")).resolveCommand()
+	if !errors.Is(err, errPairedDaemonUnavailable) {
+		t.Fatalf("resolveCommand() error = %v, want %v", err, errPairedDaemonUnavailable)
+	}
+	if got.executable != "" {
+		t.Fatalf("resolveCommand().executable = %q, want fail-closed empty command", got.executable)
+	}
+}
+
+func TestLauncherResolveCommand_GlobalDaemonRejectsNonExecutableSibling(t *testing.T) {
+	execDir := t.TempDir()
+	az := filepath.Join(execDir, "az")
+	if err := os.WriteFile(az, []byte("current"), 0o755); err != nil {
+		t.Fatalf("WriteFile(az): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(execDir, "azd"), []byte("not executable"), 0o644); err != nil {
+		t.Fatalf("WriteFile(azd): %v", err)
+	}
+	previousExecutable := currentExecutable
+	currentExecutable = func() (string, error) { return az, nil }
+	t.Cleanup(func() { currentExecutable = previousExecutable })
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_BIN", "")
+
+	got, err := NewLauncher(t.TempDir(), filepath.Join(t.TempDir(), "daemon.sock")).resolveCommand()
+	if !errors.Is(err, errPairedDaemonUnavailable) {
+		t.Fatalf("resolveCommand() error = %v, want %v", err, errPairedDaemonUnavailable)
+	}
+	if got.executable != "" {
+		t.Fatalf("resolveCommand().executable = %q, want fail-closed empty command", got.executable)
 	}
 }
 
@@ -674,6 +827,62 @@ func TestLauncherReplaceGracefullyStopsSocketBeforeStart(t *testing.T) {
 	}
 	if !tracker.closed.Load() {
 		t.Fatal("daemon log file was not closed after replacement Start() returned")
+	}
+}
+
+func TestLauncherReplaceStartsDaemonFromRunningAzGeneration(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	tracker := &trackingWriteCloser{}
+	generationDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
+	if err := os.MkdirAll(generationDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(generation): %v", err)
+	}
+	az := filepath.Join(generationDir, "az")
+	azd := filepath.Join(generationDir, "azd")
+	for _, path := range []string{az, azd} {
+		if err := os.WriteFile(path, []byte("current"), 0o755); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+	previousExecutable := currentExecutable
+	currentExecutable = func() (string, error) { return az, nil }
+	t.Cleanup(func() { currentExecutable = previousExecutable })
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_BIN", "")
+
+	launcher := NewLauncher(repoDir, socketPath)
+	starter := useRecordingDaemonStarter(launcher)
+	launcher.sleepFn = func(time.Duration) {}
+	socketUp := true
+	spawned := false
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		socketUp = false
+		return nil
+	}
+	launcher.waitForReady = func(context.Context, string) error {
+		if socketUp || spawned {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) {
+		spawned = true
+		return tracker, nil
+	}
+
+	if err := launcher.Replace(context.Background()); err != nil {
+		t.Fatalf("Replace() error = %v", err)
+	}
+	if len(starter.specs) != 1 {
+		t.Fatalf("replacement starts = %d, want 1", len(starter.specs))
+	}
+	wantAzd, err := filepath.EvalSymlinks(azd)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(azd): %v", err)
+	}
+	if got := starter.specs[0].command.executable; got != wantAzd {
+		t.Fatalf("replacement executable = %q, want paired generation %q", got, wantAzd)
 	}
 }
 

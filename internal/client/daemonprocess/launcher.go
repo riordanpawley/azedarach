@@ -69,6 +69,9 @@ type execDaemonProcess struct {
 }
 
 var errSpawnedDaemonExited = errors.New("spawned daemon process exited before readiness")
+var errPairedDaemonUnavailable = errors.New("paired daemon executable unavailable")
+
+var currentExecutable = os.Executable
 
 func startExecDaemonProcess(spec daemonProcessSpec) (daemonProcess, error) {
 	cmd := exec.Command(spec.command.executable, spec.args...)
@@ -234,7 +237,10 @@ func (l *Launcher) Start(ctx context.Context) error {
 		return nil
 	}
 
-	daemonCmd := l.resolveCommand()
+	daemonCmd, err := l.resolveCommand()
+	if err != nil {
+		return err
+	}
 	releaseStartLock, lockAcquired, err := l.acquireStartLock(ctx)
 	if err != nil {
 		if (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) && l.waitForSocketReadyWithin(300*time.Millisecond) == nil {
@@ -477,12 +483,18 @@ func (l *Launcher) waitForSocketUnavailable(ctx context.Context, timeout time.Du
 	}
 }
 
-func (l *Launcher) resolveCommand() daemonCommand {
+func (l *Launcher) resolveCommand() (daemonCommand, error) {
 	if l.BinPath != "" {
-		return daemonCommand{executable: l.BinPath}
+		return daemonCommand{executable: l.BinPath}, nil
 	}
 	if env := os.Getenv("AZEDARACH_DAEMON_BIN"); env != "" {
-		return daemonCommand{executable: env}
+		return daemonCommand{executable: env}, nil
+	}
+	if !config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		if paired := daemonBinaryNearCurrentExecutable(); paired != "" {
+			return daemonCommand{executable: paired}, nil
+		}
+		return daemonCommand{}, fmt.Errorf("%w: global daemon launch requires the running az to resolve under .azedarach-generations/generation.* with an executable sibling azd; reinstall the managed az/azd pair or set AZEDARACH_DAEMON_BIN explicitly", errPairedDaemonUnavailable)
 	}
 	candidates := []string{}
 	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
@@ -496,18 +508,54 @@ func (l *Launcher) resolveCommand() daemonCommand {
 		filepath.Join(l.RepoDir, "go-bubbletea", "bin", "azd"),
 	)
 	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); err == nil {
-			return daemonCommand{executable: candidate}
+		if executableFile(candidate) {
+			return daemonCommand{executable: candidate}, nil
 		}
 	}
 	if sourceDir := l.localScopedDaemonSourceDir(); sourceDir != "" {
-		return daemonCommand{executable: "go", args: []string{"run", "./cmd/azd"}, dir: sourceDir}
+		return daemonCommand{executable: "go", args: []string{"run", "./cmd/azd"}, dir: sourceDir}, nil
 	}
-	return daemonCommand{executable: "azd"}
+	return daemonCommand{executable: "azd"}, nil
+}
+
+func daemonBinaryNearCurrentExecutable() string {
+	executable, err := currentExecutable()
+	if err != nil || strings.TrimSpace(executable) == "" {
+		return ""
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(executable); resolveErr == nil && strings.TrimSpace(resolved) != "" {
+		executable = resolved
+	}
+	if !isManagedGenerationClient(executable) {
+		return ""
+	}
+	candidate := filepath.Join(filepath.Dir(executable), "azd")
+	if executableFile(candidate) {
+		return candidate
+	}
+	return ""
+}
+
+func isManagedGenerationClient(executable string) bool {
+	clean := filepath.Clean(executable)
+	if filepath.Base(clean) != "az" {
+		return false
+	}
+	generationDir := filepath.Dir(clean)
+	generationName := filepath.Base(generationDir)
+	return strings.HasPrefix(generationName, "generation.") &&
+		len(generationName) > len("generation.") &&
+		filepath.Base(filepath.Dir(generationDir)) == ".azedarach-generations"
+}
+
+func executableFile(path string) bool {
+	stat, err := os.Stat(path)
+	return err == nil && stat.Mode().IsRegular() && stat.Mode().Perm()&0o111 != 0
 }
 
 func (l *Launcher) resolveBinary() string {
-	return l.resolveCommand().executable
+	command, _ := l.resolveCommand()
+	return command.executable
 }
 
 func (l *Launcher) localScopedDaemonSourceDir() string {

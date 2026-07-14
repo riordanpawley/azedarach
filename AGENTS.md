@@ -267,6 +267,17 @@ If any are missing, keep issue state `in_progress` or `open`.
     installs a serialized, atomically switched `az`/`azd` generation and rejects
     linked worktrees. Installed command links must resolve only inside the stable
     install directory and never back into any Git worktree.
+12. Repository direnv setup must not prepend primary- or linked-worktree
+    `bin/` directories. It must prefer one version-identical installed sibling
+    `az`/`azd` pair. Global daemon launch/replacement resolves `azd` beside the
+    running `az` only when its resolved identity is
+    `.azedarach-generations/generation.*/az`, and fails closed when managed
+    identity or its sibling is unavailable. Canonical primary-repo `bin/`
+    binaries are not trusted production assets; bare PATH, repo-local binary,
+    and source fallback are reserved for explicit worktree-scoped development.
+    Successful install generations remain retained until an explicit
+    lifetime-aware maintenance contract can prove they are no longer needed by
+    long-lived clients.
 
 ## Environment Rules
 
