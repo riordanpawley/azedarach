@@ -32,8 +32,10 @@ type orchestrationAuthority interface {
 }
 
 type daemonOrchestrationAuthority struct {
-	daemon      *Daemon
-	submitStart func(context.Context, protocol.RequestEnvelope) protocol.ResponseEnvelope
+	daemon             *Daemon
+	submitStart        func(context.Context, protocol.RequestEnvelope) protocol.ResponseEnvelope
+	lookupOperation    func(context.Context, string) (protocol.OperationRecord, error)
+	releaseReviewLease func(context.Context, string, string, string) error
 }
 
 type invalidOrchestrationLaunchError struct {

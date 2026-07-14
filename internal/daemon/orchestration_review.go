@@ -265,7 +265,7 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 		}
 		switch terminal {
 		case "returned":
-			if err := a.ensureReviewReturnedStatus(ctx, projectID, issueID); err != nil {
+			if err := a.convergeReturnedReview(ctx, projectID, issueID, request.ActorID); err != nil {
 				result.Failed[issueID] = "converge returned review status: " + err.Error()
 				continue
 			}
@@ -285,6 +285,17 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 			}
 			integrateBeforeClose := inspection.Evidence != nil || strings.TrimSpace(inspection.WorktreePath) != ""
 			if _, err := a.releaseAndCloseAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, &result); err != nil {
+				result.Failed[issueID] = err.Error()
+			}
+			continue
+		}
+		restart, found, err := a.reviewRestartSubmission(ctx, issueClient, issueID, request)
+		if err != nil {
+			result.Failed[issueID] = "inspect prior review restart: " + err.Error()
+			continue
+		}
+		if found {
+			if err := a.reconcileReviewRestart(ctx, projectID, issueID, request, restart, &result); err != nil {
 				result.Failed[issueID] = err.Error()
 			}
 			continue
@@ -311,16 +322,6 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 		case protocol.OrchestrationIntentReviewAccept:
 			reviewLeaseReleased, actionErr = a.acceptReview(ctx, projectID, request, inspection, &result)
 		}
-		if !reviewLeaseReleased {
-			_, releaseErr := issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, Purpose: domain.CoordinationLeaseReview})
-			if releaseErr != nil {
-				if actionErr == nil {
-					actionErr = fmt.Errorf("release review lease: %w", releaseErr)
-				} else {
-					actionErr = fmt.Errorf("%v; release review lease: %w", actionErr, releaseErr)
-				}
-			}
-		}
 		restartPending := false
 		for _, pending := range result.Pending {
 			if pending.IssueID == issueID {
@@ -328,11 +329,23 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 				break
 			}
 		}
+		returnedConvergenceAttempted := false
 		if actionErr == nil && request.Kind == protocol.OrchestrationIntentReviewReturn && !restartPending {
-			if err := a.ensureReviewReturnedStatus(ctx, projectID, issueID); err != nil {
-				actionErr = fmt.Errorf("converge returned review status: %w", err)
+			returnedConvergenceAttempted = true
+			if err := a.convergeReturnedReview(ctx, projectID, issueID, request.ActorID); err != nil {
+				actionErr = fmt.Errorf("converge returned review: %w", err)
 			} else {
 				result.Returned = append(result.Returned, issueID)
+			}
+		}
+		if !reviewLeaseReleased && !returnedConvergenceAttempted {
+			releaseErr := a.releaseMatchingReviewLease(ctx, projectID, issueID, request.ActorID)
+			if releaseErr != nil {
+				if actionErr == nil {
+					actionErr = fmt.Errorf("release review lease: %w", releaseErr)
+				} else {
+					actionErr = fmt.Errorf("%v; release review lease: %w", actionErr, releaseErr)
+				}
 			}
 		}
 		if actionErr != nil {
@@ -391,7 +404,7 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 		switch protocol.OperationState(launch.OperationState) {
 		case protocol.OperationStateQueued, protocol.OperationStateRunning:
 			result.Pending = append(result.Pending, protocol.OrchestrationPending{IssueID: inspection.IssueID, OperationID: launch.OperationID, OperationState: launch.OperationState})
-			if err := a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "restart_submitted", ""); err != nil {
+			if err := a.recordReviewRestartSubmitted(ctx, projectID, inspection.IssueID, request, launch); err != nil {
 				return err
 			}
 			return nil
@@ -417,7 +430,10 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 	return nil
 }
 
-func (a daemonOrchestrationAuthority) ensureReviewReturnedStatus(ctx context.Context, projectID, issueID string) error {
+func (a daemonOrchestrationAuthority) convergeReturnedReview(ctx context.Context, projectID, issueID, actorID string) error {
+	if err := a.releaseMatchingReviewLease(ctx, projectID, issueID, actorID); err != nil {
+		return fmt.Errorf("release review lease: %w", err)
+	}
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return fmt.Errorf("issue store unavailable")
@@ -432,6 +448,29 @@ func (a daemonOrchestrationAuthority) ensureReviewReturnedStatus(ctx context.Con
 	default:
 		return nil
 	}
+}
+
+func (a daemonOrchestrationAuthority) releaseMatchingReviewLease(ctx context.Context, projectID, issueID, actorID string) error {
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return fmt.Errorf("issue store unavailable")
+	}
+	task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
+	if err != nil {
+		return err
+	}
+	lease := coordinationLease(task, domain.CoordinationLeaseReview)
+	if lease == nil {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(lease.OwnerID), strings.TrimSpace(actorID)) {
+		return fmt.Errorf("review lease owned by %s, not %s", lease.OwnerID, actorID)
+	}
+	if a.releaseReviewLease != nil {
+		return a.releaseReviewLease(ctx, projectID, issueID, actorID)
+	}
+	_, err = issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: actorID, Purpose: domain.CoordinationLeaseReview})
+	return err
 }
 
 func reviewFindingMailExists(repoDir, parentIssueID, issueID string, request protocol.OrchestrationIntentRequest) (bool, error) {
@@ -456,6 +495,91 @@ func reviewFindingMailExists(repoDir, parentIssueID, issueID string, request pro
 		}
 	}
 	return false, nil
+}
+
+func (a daemonOrchestrationAuthority) reviewRestartSubmission(ctx context.Context, issueClient *issues.Client, issueID string, request protocol.OrchestrationIntentRequest) (domain.ReviewRestartSubmission, bool, error) {
+	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted, domain.IssueEventIssueStatusChanged}, NewestIDFirst: true})
+	if err != nil {
+		return domain.ReviewRestartSubmission{}, false, err
+	}
+	fingerprint := reviewRequestFingerprint(request)
+	for _, event := range events {
+		if domain.IsReviewRequestTransition(event) {
+			break
+		}
+		submission, trusted, err := domain.TrustedReviewRestartSubmission(event)
+		if err != nil {
+			return domain.ReviewRestartSubmission{}, false, err
+		}
+		if !trusted {
+			continue
+		}
+		if strings.TrimSpace(fmt.Sprint(event.Payload["intent_key"])) != strings.TrimSpace(request.IntentKey) {
+			continue
+		}
+		if stored := strings.TrimSpace(fmt.Sprint(event.Payload["request_fingerprint"])); stored != "" && stored != fingerprint {
+			return domain.ReviewRestartSubmission{}, false, fmt.Errorf("intent_key %s was already used with a different review request", request.IntentKey)
+		}
+		if !strings.EqualFold(strings.TrimSpace(submission.ActorID), strings.TrimSpace(request.ActorID)) {
+			return domain.ReviewRestartSubmission{}, false, fmt.Errorf("restart_submitted intent actor is %s, not %s", submission.ActorID, request.ActorID)
+		}
+		return submission, true, nil
+	}
+	return domain.ReviewRestartSubmission{}, false, nil
+}
+
+func (a daemonOrchestrationAuthority) reconcileReviewRestart(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, submission domain.ReviewRestartSubmission, result *protocol.OrchestrationIntentResult) error {
+	operation, err := a.lookupReviewRestartOperation(ctx, submission.OperationID.String())
+	if err != nil {
+		return fmt.Errorf("inspect restart operation %s: %w", submission.OperationID, err)
+	}
+	if operation.OperationID != submission.OperationID || operation.Kind != "session.start" || !naming.IssueIDsEqual(operation.IssueID.String(), issueID) {
+		return fmt.Errorf("restart operation relation mismatch: operation=%s kind=%s issue=%s", operation.OperationID, operation.Kind, operation.IssueID)
+	}
+	if operation.ProjectID.String() != "" && a.daemon.canonicalProjectID(operation.ProjectID.String()) != a.daemon.canonicalProjectID(projectID) {
+		return fmt.Errorf("restart operation %s belongs to project %s, not %s", operation.OperationID, operation.ProjectID, projectID)
+	}
+	launch := protocol.OrchestrationLaunch{IssueID: issueID, SessionID: submission.SessionID, OperationID: operation.OperationID.String(), OperationState: string(operation.State)}
+	result.Launched = append(result.Launched, launch)
+	switch operation.State {
+	case protocol.OperationStateQueued, protocol.OperationStateRunning:
+		result.Pending = append(result.Pending, protocol.OrchestrationPending{IssueID: issueID, OperationID: operation.OperationID.String(), OperationState: string(operation.State)})
+		return nil
+	case protocol.OperationStateDone:
+		if err := a.recordReviewOutcome(ctx, projectID, issueID, request, "returned", ""); err != nil {
+			return err
+		}
+		if err := a.convergeReturnedReview(ctx, projectID, issueID, request.ActorID); err != nil {
+			return fmt.Errorf("converge returned review: %w", err)
+		}
+		result.Returned = append(result.Returned, issueID)
+		return nil
+	case protocol.OperationStateFailed, protocol.OperationStateCancelled:
+		failure := fmt.Sprintf("restart operation %s reached terminal %s", operation.OperationID, operation.State)
+		if operation.Error != nil && strings.TrimSpace(operation.Error.Message) != "" {
+			failure += ": " + strings.TrimSpace(operation.Error.Message)
+		}
+		if err := a.recordReviewOutcome(ctx, projectID, issueID, request, "delivery_failed", failure); err != nil {
+			return fmt.Errorf("%s; record failure: %w", failure, err)
+		}
+		return fmt.Errorf("review findings recorded but %s", failure)
+	default:
+		return fmt.Errorf("restart operation %s returned invalid state %q", operation.OperationID, operation.State)
+	}
+}
+
+func (a daemonOrchestrationAuthority) lookupReviewRestartOperation(ctx context.Context, operationID string) (protocol.OperationRecord, error) {
+	if a.lookupOperation != nil {
+		return a.lookupOperation(ctx, operationID)
+	}
+	if a.daemon == nil || a.daemon.operationRuntime == nil || a.daemon.operationRuntime.manager == nil {
+		return protocol.OperationRecord{}, fmt.Errorf("operation runtime unavailable")
+	}
+	record, err := a.daemon.operationRuntime.manager.Get(ctx, operationID)
+	if err != nil {
+		return protocol.OperationRecord{}, err
+	}
+	return a.daemon.operationRuntime.toProtocolRecord(record), nil
 }
 
 func (a daemonOrchestrationAuthority) reviewIntentTerminalOutcome(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest) (string, error) {
@@ -621,6 +745,23 @@ func (a daemonOrchestrationAuthority) recordReviewCloseFailure(ctx context.Conte
 }
 
 func (a daemonOrchestrationAuthority) recordReviewOutcome(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, outcome, failure string) error {
+	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, outcome, failure, nil)
+}
+
+func (a daemonOrchestrationAuthority) recordReviewRestartSubmitted(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, launch protocol.OrchestrationLaunch) error {
+	operationID, err := naming.ParseOperationID(launch.OperationID)
+	if err != nil {
+		return fmt.Errorf("record restart submission operation: %w", err)
+	}
+	state := protocol.OperationState(launch.OperationState)
+	if state != protocol.OperationStateQueued && state != protocol.OperationStateRunning {
+		return fmt.Errorf("record restart submission operation %s with non-pending state %q", operationID, state)
+	}
+	restart := &domain.ReviewRestartSubmission{OperationID: operationID, State: domain.ReviewRestartOperationState(state), SessionID: strings.TrimSpace(launch.SessionID), ActorID: strings.TrimSpace(request.ActorID)}
+	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, "restart_submitted", "", restart)
+}
+
+func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, outcome, failure string, restart *domain.ReviewRestartSubmission) error {
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return fmt.Errorf("issue store unavailable")
@@ -635,10 +776,14 @@ func (a daemonOrchestrationAuthority) recordReviewOutcome(ctx context.Context, p
 		if value, ok := event.Payload["failure"]; ok {
 			eventFailure = strings.TrimSpace(fmt.Sprint(value))
 		}
-		if strings.TrimSpace(fmt.Sprint(event.Payload["intent_key"])) == strings.TrimSpace(request.IntentKey) &&
+		matches := strings.TrimSpace(fmt.Sprint(event.Payload["intent_key"])) == strings.TrimSpace(request.IntentKey) &&
 			strings.TrimSpace(fmt.Sprint(event.Payload["request_fingerprint"])) == fingerprint &&
 			strings.TrimSpace(fmt.Sprint(event.Payload["outcome"])) == strings.TrimSpace(outcome) &&
-			eventFailure == strings.TrimSpace(failure) {
+			eventFailure == strings.TrimSpace(failure)
+		if restart != nil {
+			matches = matches && event.OperationID == restart.OperationID.String() && strings.TrimSpace(fmt.Sprint(event.Payload["operation_state"])) == string(restart.State)
+		}
+		if matches {
 			return nil
 		}
 	}
@@ -650,7 +795,14 @@ func (a daemonOrchestrationAuthority) recordReviewOutcome(ctx context.Context, p
 	if strings.TrimSpace(failure) != "" {
 		payload["failure"] = failure
 	}
-	_, err = issueClient.AppendIssueObservationEvent(ctx, parsed.String(), issues.IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(request.Kind), Payload: payload})
+	params := issues.IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(request.Kind), Payload: payload}
+	if restart != nil {
+		params.OperationID = restart.OperationID.String()
+		params.SessionID = restart.SessionID
+		payload["operation_id"] = restart.OperationID.String()
+		payload["operation_state"] = string(restart.State)
+	}
+	_, err = issueClient.AppendIssueObservationEvent(ctx, parsed.String(), params)
 	if err != nil {
 		return fmt.Errorf("record review outcome: %w", err)
 	}
