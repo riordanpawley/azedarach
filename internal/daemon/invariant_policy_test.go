@@ -11,6 +11,7 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantSessionStopTargets:      daemonInvariantSourceTmux,
 		daemonInvariantSessionReconcile:        daemonInvariantSourceHybrid,
 		daemonInvariantSessionIssueLifecycle:   daemonInvariantSourceHybrid,
+		daemonInvariantSessionActivityConverge: daemonInvariantSourceHybrid,
 		daemonInvariantAdvisorSingleton:        daemonInvariantSourceHybrid,
 		daemonInvariantTaskListFreshness:       daemonInvariantSourceProjection,
 		daemonInvariantTaskClose:               daemonInvariantSourceHybrid,

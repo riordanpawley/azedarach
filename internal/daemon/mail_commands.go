@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -59,6 +60,9 @@ func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope)
 	}
 	defer unlock()
 
+	if err := repairTrailingMailboxFragment(repoDir, parentIssue); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
 	existing, err := readMailboxEvents(repoDir, parentIssue)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -100,7 +104,7 @@ func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope)
 	return resp, nil
 }
 
-func (d *Daemon) handleMailList(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+func (d *Daemon) handleMailList(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	var cmd protocol.MailListCommandBody
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -118,7 +122,7 @@ func (d *Daemon) handleMailList(_ context.Context, req protocol.RequestEnvelope)
 			"limit", cmd.Limit,
 		)
 	}
-	events, err := readMailboxEvents(repoDir, parentIssue)
+	events, err := d.readMailboxEventsWithReviewReadyRecovery(ctx, req, repoDir, parentIssue)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -139,7 +143,7 @@ func (d *Daemon) handleMailList(_ context.Context, req protocol.RequestEnvelope)
 	return resp, nil
 }
 
-func (d *Daemon) handleMailWatch(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+func (d *Daemon) handleMailWatch(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	var cmd protocol.MailWatchCommandBody
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -156,7 +160,7 @@ func (d *Daemon) handleMailWatch(_ context.Context, req protocol.RequestEnvelope
 			"since_seq", cmd.SinceSeq,
 		)
 	}
-	events, err := readMailboxEvents(repoDir, parentIssue)
+	events, err := d.readMailboxEventsWithReviewReadyRecovery(ctx, req, repoDir, parentIssue)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -175,6 +179,196 @@ func (d *Daemon) handleMailWatch(_ context.Context, req protocol.RequestEnvelope
 		)
 	}
 	return resp, nil
+}
+
+const reviewReadyReplayPublication = "review_ready_observation_replay.v1"
+
+func (d *Daemon) readMailboxEventsWithReviewReadyRecovery(ctx context.Context, req protocol.RequestEnvelope, repoDir, parentIssue string) ([]daemonMailEvent, error) {
+	unlock, err := lockMailbox(repoDir, parentIssue)
+	if err != nil {
+		return nil, fmt.Errorf("lock mailbox for review-ready recovery: %w", err)
+	}
+	if err := repairTrailingMailboxFragment(repoDir, parentIssue); err != nil {
+		unlock()
+		return nil, err
+	}
+	events, err := readMailboxEvents(repoDir, parentIssue)
+	unlock()
+	if err != nil {
+		return nil, err
+	}
+	recovered, err := d.recoverReviewReadyMailboxEvents(ctx, req, repoDir, parentIssue, events)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("rooted review-ready publication recovery failed",
+				"project_id", d.projectID(req.Meta),
+				"root_issue_id", parentIssue,
+				"mailbox_cursor", lastMailboxSequence(events),
+				"error", err,
+			)
+		}
+		return events, nil
+	}
+	return recovered, nil
+}
+
+func (d *Daemon) recoverReviewReadyMailboxEvents(ctx context.Context, req protocol.RequestEnvelope, repoDir, rootIssueID string, existing []daemonMailEvent) ([]daemonMailEvent, error) {
+	projectID := d.projectID(req.Meta)
+	d.issueClientsMu.Lock()
+	hasConfiguredIssueStore := d.issues != nil || len(d.issueClientsByProject) > 0 || len(d.issueClientsByRoot) > 0
+	d.issueClientsMu.Unlock()
+	if !hasConfiguredIssueStore {
+		return existing, nil
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return existing, nil
+	}
+	if d.reviewReadyRecoveryBeforeLoad != nil {
+		d.reviewReadyRecoveryBeforeLoad()
+	}
+	recoveryKey := projectID + "\x00" + repoDir + "\x00" + rootIssueID
+	d.reviewReadyRecoveryMu.Lock()
+	previousCursor := d.reviewReadyRecoveryCursor[recoveryKey]
+	d.reviewReadyRecoveryMu.Unlock()
+	if previousCursor > 0 {
+		advanced, listErr := issueClient.ListProjectIssueObservationEvents(ctx, previousCursor, 1)
+		if listErr != nil {
+			return nil, fmt.Errorf("check rooted observation replay cursor %d: %w", previousCursor, listErr)
+		}
+		if len(advanced) == 0 {
+			return existing, nil
+		}
+	}
+	tasks, err := issueClient.ListParentChildSubtreeWithRuntime(ctx, projectID, rootIssueID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return existing, nil
+		}
+		return nil, fmt.Errorf("load rooted issue scope: %w", err)
+	}
+	inScope := make(map[string]struct{}, len(tasks))
+	for _, task := range tasks {
+		inScope[task.ID.String()] = struct{}{}
+	}
+
+	byIssue := make(map[string][]domain.IssueObservationEvent, len(inScope))
+	afterID := int64(0)
+	for {
+		batch, listErr := issueClient.ListProjectIssueObservationEvents(ctx, afterID, 5000)
+		if listErr != nil {
+			return nil, fmt.Errorf("replay issue observation stream after %d: %w", afterID, listErr)
+		}
+		if len(batch) == 0 {
+			break
+		}
+		for _, event := range batch {
+			if _, ok := inScope[event.IssueID.String()]; ok {
+				byIssue[event.IssueID.String()] = append(byIssue[event.IssueID.String()], event)
+			}
+		}
+		afterID = batch[len(batch)-1].ID
+		if len(batch) < 5000 {
+			break
+		}
+	}
+
+	candidates := make([]daemonMailEvent, 0)
+	for _, task := range tasks {
+		issueID := task.ID.String()
+		for _, publication := range domain.DeriveReviewReadyPublications(byIssue[issueID]) {
+			source := publication.SourceEvent
+			key := fmt.Sprintf("%s:%d", projectID, source.ID)
+			body, marshalErr := json.Marshal(map[string]any{
+				"summary":           "issue is review-ready",
+				"source_event_id":   source.ID,
+				"source_event_type": source.Type,
+			})
+			if marshalErr != nil {
+				return nil, fmt.Errorf("encode review-ready publication %s: %w", key, marshalErr)
+			}
+			event := daemonMailEvent{
+				ParentIssue: rootIssueID, IssueID: issueID,
+				Type: "worker-integration-ready", From: "daemon-observation-replay",
+				Body: string(body), CreatedAt: source.ObservedAt.UTC(),
+				Payload: map[string]interface{}{
+					"publication":       reviewReadyReplayPublication,
+					"publication_key":   key,
+					"source_event_id":   source.ID,
+					"source_event_type": string(source.Type),
+				},
+			}
+			if event.CreatedAt.IsZero() {
+				event.CreatedAt = time.Now().UTC()
+			}
+			candidates = append(candidates, event)
+		}
+	}
+
+	// Observation loading can involve a full durable-stream scan. Keep it outside
+	// the mailbox critical section, then reread publication keys under the lock so
+	// concurrent sends and concurrent replay attempts retain one monotonic cursor.
+	unlock, err := lockMailbox(repoDir, rootIssueID)
+	if err != nil {
+		return nil, fmt.Errorf("lock mailbox to publish review-ready recovery: %w", err)
+	}
+	defer unlock()
+	if err := repairTrailingMailboxFragment(repoDir, rootIssueID); err != nil {
+		return nil, err
+	}
+	existing, err = readMailboxEvents(repoDir, rootIssueID)
+	if err != nil {
+		return nil, err
+	}
+	published := make(map[string]struct{}, len(existing))
+	for _, event := range existing {
+		if event.Payload == nil || event.Payload["publication"] != reviewReadyReplayPublication {
+			continue
+		}
+		if key, _ := event.Payload["publication_key"].(string); strings.TrimSpace(key) != "" {
+			published[key] = struct{}{}
+		}
+	}
+	nextSeq := lastMailboxSequence(existing) + 1
+	for _, event := range candidates {
+		key, _ := event.Payload["publication_key"].(string)
+		if _, ok := published[key]; ok {
+			continue
+		}
+		event.Seq = nextSeq
+		if err := appendMailboxEvent(repoDir, event); err != nil {
+			return nil, fmt.Errorf("append recovered review-ready publication %s: %w", key, err)
+		}
+		existing = append(existing, event)
+		published[key] = struct{}{}
+		nextSeq++
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Info("rooted review-ready publication recovered",
+				"project_id", projectID,
+				"root_issue_id", rootIssueID,
+				"issue_id", event.IssueID,
+				"source_event_id", event.Payload["source_event_id"],
+				"source_event_type", event.Payload["source_event_type"],
+				"mailbox_seq", event.Seq,
+			)
+		}
+	}
+	d.reviewReadyRecoveryMu.Lock()
+	if d.reviewReadyRecoveryCursor == nil {
+		d.reviewReadyRecoveryCursor = make(map[string]int64)
+	}
+	if afterID > d.reviewReadyRecoveryCursor[recoveryKey] {
+		d.reviewReadyRecoveryCursor[recoveryKey] = afterID
+	}
+	d.reviewReadyRecoveryMu.Unlock()
+	return existing, nil
+}
+
+func lastMailboxSequence(events []daemonMailEvent) int64 {
+	if len(events) == 0 {
+		return 0
+	}
+	return events[len(events)-1].Seq
 }
 
 func filterMailEvents(events []daemonMailEvent, since int64, limit int) []protocol.MailEvent {
@@ -355,6 +549,33 @@ func appendMailboxEvent(repoDir string, evt daemonMailEvent) error {
 	}
 	if _, err := file.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("write mailbox event: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync mailbox event: %w", err)
+	}
+	return nil
+}
+
+// repairTrailingMailboxFragment removes only bytes after the last committed
+// newline. appendMailboxEvent writes one JSON record plus its newline in a
+// single write, so a missing final newline is an interrupted append; every
+// earlier record remains immutable.
+func repairTrailingMailboxFragment(repoDir, parentIssue string) error {
+	path := mailboxPath(repoDir, parentIssue)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read mailbox for trailing-fragment repair: %w", err)
+	}
+	if len(data) == 0 || data[len(data)-1] == '\n' {
+		return nil
+	}
+	lastNewline := bytes.LastIndexByte(data, '\n')
+	truncateAt := int64(lastNewline + 1)
+	if err := os.Truncate(path, truncateAt); err != nil {
+		return fmt.Errorf("truncate interrupted mailbox append: %w", err)
 	}
 	return nil
 }

@@ -4134,6 +4134,9 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 	for i := len(events) - 1; i >= 0; i-- {
 		evt := events[i]
 		if naming.IssueIDsEqual(evt.IssueID, task.ID.String()) && daemonWorkerIntegrationReadyMailType(evt.Type) {
+			if evt.Payload != nil && evt.Payload["publication"] == reviewReadyReplayPublication {
+				continue
+			}
 			packet, validation := domain.ParseWorkerEvidencePacketBody(evt.Body)
 			if validation.Complete {
 				return taskIntegrationReadinessResult{

@@ -55,6 +55,35 @@ func ClassifyAgentTerminalOutput(output string) (AgentTerminalFailureReason, boo
 	return "", false
 }
 
+// ClassifyAgentTerminalIdle recognizes the stable input affordance rendered by
+// supported interactive agents after a turn completes. It deliberately
+// requires a prompt glyph near the bounded pane tail so ordinary transcript
+// prose and shell prompts do not override hook-backed busy evidence.
+func ClassifyAgentTerminalIdle(output string) bool {
+	if len(output) > maxAgentTerminalOutputBytes {
+		output = output[len(output)-maxAgentTerminalOutputBytes:]
+	}
+	output = agentTerminalANSIOSCSequence.ReplaceAllString(output, "")
+	output = agentTerminalANSIControlSequence.ReplaceAllString(output, "")
+	normalized := strings.ToLower(strings.Join(strings.Fields(output), " "))
+	if strings.Contains(normalized, "esc to interrupt") || strings.Contains(normalized, "• working (") {
+		return false
+	}
+	lines := strings.Split(output, "\n")
+	seen := 0
+	for i := len(lines) - 1; i >= 0 && seen < 4; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		seen++
+		if line == "›" || strings.HasPrefix(line, "› ") || line == "❯" || strings.HasPrefix(line, "❯ ") {
+			return true
+		}
+	}
+	return false
+}
+
 func ClassifyAgentTerminalFailure(event string, payload map[string]any) (AgentTerminalFailureReason, bool) {
 	if strings.TrimSpace(event) != "idle_prompt" || len(payload) == 0 {
 		return "", false

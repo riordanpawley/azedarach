@@ -9519,6 +9519,45 @@ func TestTaskIntegrationReadinessRequiresCompleteWorkerEvidencePacket(t *testing
 	}
 }
 
+func TestTaskIntegrationReadinessSkipsReviewReadyReplayNotification(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-worker-evidence-replay"
+	repoDir := t.TempDir()
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusInReview, ParentID: &parentID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []daemonMailEvent{
+		{
+			Seq: 1, ParentIssue: parentID, IssueID: childID, Type: "worker-integration-ready", CreatedAt: time.Now().UTC(),
+			Body: `{"schema":"worker_evidence.v1","summary":"Ready","commands_run":["go test ./internal/daemon"],"key_assertions":["replay notification cannot mask evidence"],"files_changed":["internal/daemon/task_commands.go"],"review":{"status":"clean","findings":[]},"risks":["none"]}`,
+		},
+		{
+			Seq: 2, ParentIssue: parentID, IssueID: childID, Type: "worker-integration-ready", From: "daemon-observation-replay", Body: `{"summary":"issue is review-ready"}`, CreatedAt: time.Now().UTC(),
+			Payload: map[string]interface{}{"publication": reviewReadyReplayPublication, "publication_key": "project:42"},
+		},
+	}
+	for _, event := range events {
+		if err := appendMailboxEvent(repoDir, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
+	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Ready || result.EvidenceEventSeq != 1 || result.EvidencePacket == nil {
+		t.Fatalf("result = %+v, want earlier structured evidence selected", result)
+	}
+}
+
 func TestTaskIntegrationReadinessAcceptsIssueRecordWorkerEvidence(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-worker-issue-evidence-ready"

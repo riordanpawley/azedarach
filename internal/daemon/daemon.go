@@ -194,6 +194,9 @@ type Daemon struct {
 	watchClients                       map[string]watchClientObservation
 	terminalFailureProbeMu             sync.Mutex
 	terminalFailureProbes              map[string]terminalFailureProbeState
+	reviewReadyRecoveryMu              sync.Mutex
+	reviewReadyRecoveryCursor          map[string]int64
+	reviewReadyRecoveryBeforeLoad      func()
 
 	revMu    sync.Mutex
 	revision map[string]uint64
