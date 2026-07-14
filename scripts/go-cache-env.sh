@@ -39,7 +39,12 @@ esac
 export AZEDARACH_GO_CACHE_ROOT="$_az_go_cache_root"
 export AZEDARACH_GO_CACHE_OWNER="$_az_owner"
 export AZEDARACH_GO_CACHE_NAMESPACE="${_az_kind}/${_az_owner}"
-export GOCACHE="${AZEDARACH_GOCACHE:-$_az_go_cache_root/caches/v1/$_az_kind/$_az_owner}"
+_az_managed_gocache="$_az_go_cache_root/caches/v1/$_az_kind/$_az_owner"
+if [[ -n "${AZEDARACH_GOCACHE:-}" && "$AZEDARACH_GOCACHE" != "$_az_managed_gocache" ]]; then
+  echo "AZEDARACH_GOCACHE must equal managed namespace $_az_managed_gocache (got $AZEDARACH_GOCACHE)" >&2
+  return 1 2>/dev/null || exit 1
+fi
+export GOCACHE="$_az_managed_gocache"
 export GOPATH="${AZEDARACH_GOPATH:-$_az_go_cache_root/path}"
 case " ${GOFLAGS:-} " in
   *" -trimpath "*) ;;
@@ -52,4 +57,4 @@ if [[ "${1:-}" == "--print" ]]; then
     "$AZEDARACH_GO_CACHE_ROOT" "$AZEDARACH_GO_CACHE_OWNER" "$AZEDARACH_GO_CACHE_NAMESPACE" "$GOCACHE" "$GOPATH" "$GOFLAGS"
 fi
 
-unset _az_go_cache_root _az_common_dir _az_git_dir _az_owner _az_issue _az_branch _az_kind
+unset _az_go_cache_root _az_common_dir _az_git_dir _az_owner _az_issue _az_branch _az_kind _az_managed_gocache

@@ -143,6 +143,44 @@ func TestCleanupInactiveOwnerRefusesSymlinkNamespace(t *testing.T) {
 	assert.Equal(t, "user-data", string(data))
 }
 
+func TestCleanupInactiveOwnerRefusesAncestorSymlink(t *testing.T) {
+	root := t.TempDir()
+	target := t.TempDir()
+	entry := filepath.Join(target, "v1", "normal", "issue-dhc", "keep")
+	require.NoError(t, os.MkdirAll(filepath.Dir(entry), 0o755))
+	require.NoError(t, os.WriteFile(entry, []byte("user-data"), 0o644))
+	require.NoError(t, os.Symlink(target, filepath.Join(root, "caches")))
+
+	err := CleanupInactiveOwner(context.Background(), root, "dhc")
+	require.ErrorContains(t, err, "symlink namespace")
+	data, readErr := os.ReadFile(entry)
+	require.NoError(t, readErr)
+	assert.Equal(t, "user-data", string(data))
+}
+
+func TestCleanupInactiveOwnerDetectsNamespaceSwap(t *testing.T) {
+	root := t.TempDir()
+	target := t.TempDir()
+	keep := filepath.Join(target, "keep")
+	require.NoError(t, os.WriteFile(keep, []byte("outside"), 0o644))
+	namespace := filepath.Join(root, "caches", "v1", "normal", "issue-dhc")
+	require.NoError(t, os.MkdirAll(namespace, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(namespace, "entry"), []byte("cache"), 0o644))
+
+	cleanupOwnerBeforeRemoveHook = func(path string) {
+		require.Equal(t, namespace, path)
+		require.NoError(t, os.Rename(namespace, namespace+".moved"))
+		require.NoError(t, os.Symlink(target, namespace))
+	}
+	t.Cleanup(func() { cleanupOwnerBeforeRemoveHook = nil })
+
+	err := CleanupInactiveOwner(context.Background(), root, "dhc")
+	require.ErrorContains(t, err, "changed during cleanup")
+	data, readErr := os.ReadFile(keep)
+	require.NoError(t, readErr)
+	assert.Equal(t, "outside", string(data))
+}
+
 func TestCleanupOwnerRefusesLiveWorktree(t *testing.T) {
 	repo := initTestRepo(t)
 	worktree := filepath.Join(t.TempDir(), "repo-dhc")
@@ -228,6 +266,32 @@ func TestShellProtocolUsesMainNamespaceForAnonymousDetachedWorktree(t *testing.T
 	require.NoError(t, err)
 	output := runShellProtocol(t, worktree, script, filepath.Join(t.TempDir(), "family-cache"))
 	assert.Contains(t, output, "AZEDARACH_GO_CACHE_NAMESPACE=normal/main")
+}
+
+func TestFromEnvironmentRejectsOutOfLayoutOverride(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("AZEDARACH_GO_CACHE_ROOT", root)
+	t.Setenv("AZEDARACH_GO_CACHE_OWNER", "issue-dhc")
+	t.Setenv("AZEDARACH_GOCACHE", filepath.Join(t.TempDir(), "unmanaged"))
+
+	_, err := FromEnvironment(KindNormal)
+	require.ErrorContains(t, err, "must equal managed namespace")
+}
+
+func TestShellProtocolRejectsOutOfLayoutOverride(t *testing.T) {
+	repo := initTestRepo(t)
+	script, err := filepath.Abs(filepath.Join("..", "..", "scripts", "go-cache-env.sh"))
+	require.NoError(t, err)
+	cacheRoot := filepath.Join(t.TempDir(), "family-cache")
+	cmd := exec.Command("bash", script, "--print")
+	cmd.Dir = repo
+	cmd.Env = append(filteredEnvironment("AZEDARACH_GOCACHE"),
+		"AZEDARACH_GO_CACHE_ROOT="+cacheRoot,
+		"AZEDARACH_GOCACHE="+filepath.Join(t.TempDir(), "unmanaged"),
+	)
+	output, runErr := cmd.CombinedOutput()
+	require.Error(t, runErr)
+	assert.Contains(t, string(output), "must equal managed namespace")
 }
 
 func TestTrimpathProducesEquivalentBinariesAcrossWorktreesAtSameCommit(t *testing.T) {

@@ -6925,6 +6925,16 @@ func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T
 	}); err != nil {
 		t.Fatalf("seed worktree projection: %v", err)
 	}
+	cacheRoot := filepath.Join(repoDir, ".azedarach", "go")
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		entry := filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+taskID, "entry")
+		if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+			t.Fatalf("seed %s cache: %v", kind, err)
+		}
+		if err := os.WriteFile(entry, []byte("cache"), 0o644); err != nil {
+			t.Fatalf("write %s cache: %v", kind, err)
+		}
+	}
 
 	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
 	commands := make([]string, 0, 12)
@@ -7075,6 +7085,12 @@ func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T
 	record := waitForRuntimeState(t, d.operationRuntime, result.WorktreeCleanupOperationID, daemonops.StateDone)
 	if record.Kind != taskDeferredWorktreeCleanupOperationKind {
 		t.Fatalf("cleanup operation kind = %s, want %s", record.Kind, taskDeferredWorktreeCleanupOperationKind)
+	}
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		_, err := os.Stat(filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+taskID))
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s cache remains after deferred close cleanup: %v", kind, err)
+		}
 	}
 }
 
@@ -7303,6 +7319,16 @@ func TestRecoverInterruptedDeferredWorktreeCleanupRemovesClosedIssueWorktree(t *
 		t.Fatalf("mkdir source worktree: %v", err)
 	}
 	sourceBranch := "riordan/" + taskID + "/recover-deferred-cleanup"
+	cacheRoot := filepath.Join(repoDir, ".azedarach", "go")
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		entry := filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+taskID, "entry")
+		if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+			t.Fatalf("seed %s cache: %v", kind, err)
+		}
+		if err := os.WriteFile(entry, []byte("cache"), 0o644); err != nil {
+			t.Fatalf("write %s cache: %v", kind, err)
+		}
+	}
 	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
 	commands := make([]string, 0, 8)
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
@@ -7353,6 +7379,12 @@ func TestRecoverInterruptedDeferredWorktreeCleanupRemovesClosedIssueWorktree(t *
 	}
 	if !strings.Contains(joined, "branch -D "+sourceBranch) {
 		t.Fatalf("commands missing branch cleanup:\n%s", joined)
+	}
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		_, err := os.Stat(filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+taskID))
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s cache remains after interrupted recovery cleanup: %v", kind, err)
+		}
 	}
 }
 

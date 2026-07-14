@@ -17,6 +17,10 @@ The layout is central and lifecycle-scoped. Removing a checkout-local directory
 cannot orphan ownership metadata, and race or coverage instrumentation cannot
 contaminate ordinary development objects.
 
+`AZEDARACH_GOCACHE` cannot redirect a shell outside this layout; when set, it
+must exactly match the derived namespace. This keeps shell use, validation
+telemetry, and daemon lifecycle cleanup on the same owned bytes.
+
 ## Validation and limits
 
 `cmd/test-timing` and `cmd/go-cache run` take the repository-family exclusive
@@ -39,12 +43,16 @@ coverage namespace. Other canonical profiles use normal build objects.
 
 ## Lifecycle and explicit maintenance
 
-After daemon-authoritative session/worktree cleanup succeeds, Azedarach
-rechecks live Git worktrees and tmux sessions, then cleans only that inactive
-issue owner's normal, race, and coverage namespaces. It uses
-`GOCACHE=<namespace> go clean -cache` under the shared lock, then removes the
-now-unowned namespace directory. The standalone owner cleanup command checks
-`git worktree list` and refuses a live owner.
+After daemon-authoritative worktree deletion succeeds, Azedarach finalizes the
+lock and durable worktree projection, then cleans that inactive issue owner's
+normal, race, and coverage namespaces. The standalone owner cleanup command
+checks live Git worktrees and tmux sessions and refuses a live owner.
+
+Maintenance opens the root, layout, kind, and owner component-by-component
+without following symlinks. It passes the already-open namespace descriptor to
+`go clean -cache`, accounts through descriptors, and removes entries with
+descriptor-relative operations. Ancestor symlinks and namespace swaps are
+therefore rejected without redirecting deletion outside the owned root.
 
 Use:
 

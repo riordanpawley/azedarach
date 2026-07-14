@@ -1193,6 +1193,46 @@ branch refs/heads/` + branchName + `
 	}
 }
 
+func TestWorktreeServiceAdapterDeleteFinalizesProjectionWhenCacheCleanupFails(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	repoDir := t.TempDir()
+	worktreePath := filepath.Join(t.TempDir(), "repo-bvx")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach", "go"), 0o755); err != nil {
+		t.Fatalf("mkdir cache root: %v", err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(repoDir, ".azedarach", "go", "caches")); err != nil {
+		t.Fatalf("symlink cache layout: %v", err)
+	}
+	runner := &staticWorktreeListRunner{
+		output: `worktree ` + repoDir + `
+HEAD abc123
+branch refs/heads/main
+
+worktree ` + worktreePath + `
+HEAD def456
+branch refs/heads/riordan/bvx/worktree-delete
+`,
+	}
+	writer := &recordingRuntimeProjectionWriter{}
+	adapter := &worktreeServiceAdapter{
+		manager:                 git.NewWorktreeManager(runner, repoDir, logger),
+		runtimeProjectionWriter: writer,
+		logger:                  logger,
+	}
+
+	removed, _, err := adapter.Delete(ctx, "proj", "bvx", daemonhandlers.WorktreeRemoveOptions{})
+	if removed == nil {
+		t.Fatal("Delete removed worktree = nil")
+	}
+	if err == nil || !strings.Contains(err.Error(), "worktree deleted; Go cache cleanup remains pending") {
+		t.Fatalf("Delete error = %v, want pending cache cleanup", err)
+	}
+	if got := writer.snapshot(); strings.Join(got, "\n") != "worktree.delete+publish" {
+		t.Fatalf("projection writer calls = %v, want worktree.delete+publish", got)
+	}
+}
+
 func TestWorktreeServiceAdapterDeleteCleansProjectedBranchWhenWorktreeAlreadyGone(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

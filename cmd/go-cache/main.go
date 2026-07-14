@@ -122,12 +122,24 @@ func printInventory(cfg gocache.Config) error {
 	paths := append([]string{cfg.LayoutRoot()}, gocache.LegacyPaths(cfg.Root)...)
 	items := make([]inventoryItem, 0, len(paths))
 	for index, path := range paths {
-		_, err := os.Stat(path)
-		exists := err == nil
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+		var stats gocache.Stats
+		var exists bool
+		var err error
+		if index == 0 {
+			exists, err = gocache.ManagedLayoutExists(cfg)
+			if err == nil {
+				stats, err = gocache.StatsManaged(cfg)
+			}
+		} else {
+			_, err = os.Stat(path)
+			exists = err == nil
+			if errors.Is(err, os.ErrNotExist) {
+				err = nil
+			}
+			if err == nil {
+				stats, err = gocache.StatsFor(path)
+			}
 		}
-		stats, err := gocache.StatsFor(path)
 		if err != nil {
 			return err
 		}
@@ -147,7 +159,7 @@ func printInventory(cfg gocache.Config) error {
 
 func maintain(ctx context.Context, cfg gocache.Config) error {
 	return gocache.WithExclusiveLock(ctx, cfg, func() error {
-		stats, err := gocache.StatsFor(cfg.LayoutRoot())
+		stats, err := gocache.StatsManaged(cfg)
 		if err != nil {
 			return err
 		}
@@ -157,10 +169,10 @@ func maintain(ctx context.Context, cfg gocache.Config) error {
 		}
 		// Explicit maintenance cleans the caller's selected namespace through Go's
 		// supported operation. Lifecycle cleanup removes inactive issue namespaces.
-		if err := gocache.CleanPath(ctx, cfg.CachePath()); err != nil {
+		if err := gocache.CleanManaged(ctx, cfg); err != nil {
 			return err
 		}
-		after, err := gocache.StatsFor(cfg.LayoutRoot())
+		after, err := gocache.StatsManaged(cfg)
 		if err != nil {
 			return err
 		}

@@ -104,7 +104,11 @@ func FromEnvironment(kind Kind) (Config, error) {
 	if soft <= 0 || hard <= soft {
 		return Config{}, fmt.Errorf("Go cache thresholds require 0 < soft (%d) < hard (%d)", soft, hard)
 	}
-	return Config{Root: filepath.Clean(root), Owner: owner, Kind: kind, SoftLimitBytes: soft, HardLimitBytes: hard}, nil
+	cfg := Config{Root: filepath.Clean(root), Owner: owner, Kind: kind, SoftLimitBytes: soft, HardLimitBytes: hard}
+	if override := strings.TrimSpace(os.Getenv("AZEDARACH_GOCACHE")); override != "" && filepath.Clean(override) != cfg.CachePath() {
+		return Config{}, fmt.Errorf("AZEDARACH_GOCACHE must equal managed namespace %s (got %s)", cfg.CachePath(), override)
+	}
+	return cfg, nil
 }
 
 func ownerFromGit() string {
@@ -181,14 +185,39 @@ func StatsFor(path string) (Stats, error) {
 	return out, err
 }
 
+// StatsManaged measures the full managed v1 family without following cache
+// hierarchy symlinks.
+func StatsManaged(cfg Config) (Stats, error) {
+	return managedStats(cfg, false)
+}
+
+func ManagedLayoutExists(cfg Config) (bool, error) {
+	dir, err := openManagedDir(cfg, []string{"caches", LayoutVersion}, false)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ENOENT) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	_ = dir.Close()
+	return true, nil
+}
+
 // WithExclusiveLock serializes managed validation and supported cache maintenance.
 func WithExclusiveLock(ctx context.Context, cfg Config, fn func() error) error {
-	if err := os.MkdirAll(filepath.Dir(cfg.LockPath()), 0o755); err != nil {
-		return fmt.Errorf("create Go cache lock directory: %w", err)
+	lockDir, err := openManagedDir(cfg, []string{"caches"}, true)
+	if err != nil {
+		return fmt.Errorf("open Go cache lock directory: %w", err)
 	}
-	file, err := os.OpenFile(cfg.LockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	defer lockDir.Close()
+	fd, err := unix.Openat(int(lockDir.Fd()), ".maintenance.lock", unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return fmt.Errorf("open Go cache maintenance lock: %w", err)
+	}
+	file := os.NewFile(uintptr(fd), cfg.LockPath())
+	if file == nil {
+		_ = unix.Close(fd)
+		return errors.New("wrap Go cache maintenance lock descriptor")
 	}
 	defer file.Close()
 	for {
@@ -212,11 +241,11 @@ func WithExclusiveLock(ctx context.Context, cfg Config, fn func() error) error {
 // `go clean -cache`; otherwise the command is refused with an explicit remedy.
 func Prepare(ctx context.Context, cfg Config, autoMaintain bool) (Telemetry, error) {
 	telemetry := Telemetry{Namespace: cfg.Namespace(), Kind: cfg.Kind, Path: cfg.CachePath(), Policy: "retained-build-cache", SoftLimitBytes: cfg.SoftLimitBytes, HardLimitBytes: cfg.HardLimitBytes, Decision: "within-limits"}
-	before, err := StatsFor(cfg.CachePath())
+	before, err := managedStats(cfg, true)
 	if err != nil {
 		return telemetry, fmt.Errorf("measure selected Go cache: %w", err)
 	}
-	family, err := StatsFor(cfg.LayoutRoot())
+	family, err := managedStats(cfg, false)
 	if err != nil {
 		return telemetry, fmt.Errorf("measure Go cache family: %w", err)
 	}
@@ -226,11 +255,11 @@ func Prepare(ctx context.Context, cfg Config, autoMaintain bool) (Telemetry, err
 			telemetry.Decision = "refused-hard-limit"
 			return telemetry, fmt.Errorf("Go build-cache family uses %d bytes, above hard limit %d; run `just go-cache-maintain` or set AZEDARACH_GO_CACHE_AUTO_MAINTAIN=1", family.Bytes, cfg.HardLimitBytes)
 		}
-		if err := CleanPath(ctx, cfg.CachePath()); err != nil {
+		if err := CleanManaged(ctx, cfg); err != nil {
 			telemetry.Decision = "maintenance-failed"
 			return telemetry, err
 		}
-		maintainedFamily, measureErr := StatsFor(cfg.LayoutRoot())
+		maintainedFamily, measureErr := managedStats(cfg, false)
 		if measureErr != nil {
 			telemetry.Decision = "maintenance-measurement-failed"
 			return telemetry, measureErr
@@ -248,11 +277,11 @@ func Prepare(ctx context.Context, cfg Config, autoMaintain bool) (Telemetry, err
 }
 
 func Finish(cfg Config, telemetry Telemetry) (Telemetry, error) {
-	after, err := StatsFor(cfg.CachePath())
+	after, err := managedStats(cfg, true)
 	if err != nil {
 		return telemetry, err
 	}
-	family, err := StatsFor(cfg.LayoutRoot())
+	family, err := managedStats(cfg, false)
 	if err != nil {
 		return telemetry, err
 	}
@@ -272,18 +301,41 @@ func CleanPath(ctx context.Context, path string) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("Go cache path is required")
 	}
-	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing supported Go cache cleanup through symlink namespace %s", path)
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect Go cache namespace %s: %w", path, err)
+	dir, _, err := openCacheRoot(path, true)
+	if err != nil {
+		return err
 	}
-	if err := os.MkdirAll(path, 0o755); err != nil {
-		return fmt.Errorf("create Go cache namespace: %w", err)
+	defer dir.Close()
+	return cleanDir(ctx, dir, path)
+}
+
+// CleanManaged invokes Go's supported cleanup against a namespace opened
+// component-by-component beneath the configured root without following links.
+func CleanManaged(ctx context.Context, cfg Config) error {
+	dir, err := openManagedDir(cfg, []string{"caches", LayoutVersion, string(cfg.Kind), cfg.Owner}, true)
+	if err != nil {
+		return err
 	}
+	defer dir.Close()
+	return cleanDir(ctx, dir, cfg.CachePath())
+}
+
+func cleanDir(ctx context.Context, dir *os.File, displayPath string) error {
+	dupFD, err := unix.Openat(int(dir.Fd()), ".", secureOpenFlags, 0)
+	if err != nil {
+		return fmt.Errorf("duplicate Go cache namespace descriptor: %w", err)
+	}
+	childDir := os.NewFile(uintptr(dupFD), "go-cache")
+	if childDir == nil {
+		_ = unix.Close(dupFD)
+		return errors.New("wrap Go cache namespace descriptor")
+	}
+	defer childDir.Close()
 	cmd := exec.CommandContext(ctx, "go", "clean", "-cache")
-	cmd.Env = replaceEnv(os.Environ(), "GOCACHE", path)
+	cmd.ExtraFiles = []*os.File{childDir}
+	cmd.Env = replaceEnv(os.Environ(), "GOCACHE", "/dev/fd/3")
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("supported Go cache cleanup for %s: %w: %s", path, err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("supported Go cache cleanup for %s: %w: %s", displayPath, err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
@@ -328,27 +380,76 @@ func CleanupInactiveOwner(ctx context.Context, root, issueID string) error {
 	}
 	return WithExclusiveLock(ctx, cfg, func() error {
 		for _, kind := range []Kind{KindNormal, KindRace, KindCoverage} {
-			path := filepath.Join(cfg.LayoutRoot(), string(kind), owner)
-			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			if err := CleanPath(ctx, path); err != nil {
+			cfg.Kind = kind
+			if err := cleanupManagedNamespace(ctx, cfg); err != nil {
 				return err
-			}
-			if err := os.RemoveAll(path); err != nil {
-				return fmt.Errorf("remove cleaned Go cache namespace %s: %w", path, err)
 			}
 		}
 		return nil
 	})
 }
 
+func cleanupManagedNamespace(ctx context.Context, cfg Config) error {
+	kindDir, err := openManagedDir(cfg, []string{"caches", LayoutVersion, string(cfg.Kind)}, false)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer kindDir.Close()
+	ownerDir, err := openChildDir(kindDir, cfg.Owner, false)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer ownerDir.Close()
+	var opened unix.Stat_t
+	if err := unix.Fstat(int(ownerDir.Fd()), &opened); err != nil {
+		return fmt.Errorf("inspect opened Go cache namespace %s: %w", cfg.CachePath(), err)
+	}
+	if err := cleanDir(ctx, ownerDir, cfg.CachePath()); err != nil {
+		return err
+	}
+	if cleanupOwnerBeforeRemoveHook != nil {
+		cleanupOwnerBeforeRemoveHook(cfg.CachePath())
+	}
+	if err := verifyDirEntry(kindDir, cfg.Owner, &opened); err != nil {
+		return err
+	}
+	if err := removeDirContents(ownerDir); err != nil {
+		return fmt.Errorf("remove cleaned Go cache namespace contents %s: %w", cfg.CachePath(), err)
+	}
+	if err := verifyDirEntry(kindDir, cfg.Owner, &opened); err != nil {
+		return err
+	}
+	if err := unix.Unlinkat(int(kindDir.Fd()), cfg.Owner, unix.AT_REMOVEDIR); err != nil {
+		return fmt.Errorf("remove cleaned Go cache namespace %s: %w", cfg.CachePath(), err)
+	}
+	return nil
+}
+
+func verifyDirEntry(parent *os.File, name string, opened *unix.Stat_t) error {
+	var current unix.Stat_t
+	if err := unix.Fstatat(int(parent.Fd()), name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fmt.Errorf("verify Go cache namespace %s during cleanup: %w", name, err)
+	}
+	if !sameFileIdentity(opened, &current) {
+		return fmt.Errorf("Go cache namespace changed during cleanup at %s", name)
+	}
+	return nil
+}
+
 func ownerCacheExists(root, owner string) (bool, error) {
-	layoutRoot := filepath.Join(filepath.Clean(root), "caches", LayoutVersion)
 	for _, kind := range []Kind{KindNormal, KindRace, KindCoverage} {
-		if _, err := os.Stat(filepath.Join(layoutRoot, string(kind), owner)); err == nil {
+		cfg := Config{Root: filepath.Clean(root), Owner: owner, Kind: kind}
+		dir, err := openManagedDir(cfg, []string{"caches", LayoutVersion, string(kind), owner}, false)
+		if err == nil {
+			_ = dir.Close()
 			return true, nil
-		} else if !errors.Is(err, os.ErrNotExist) {
+		} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, unix.ENOENT) {
 			return false, fmt.Errorf("inspect Go cache namespace for owner %s: %w", owner, err)
 		}
 	}
