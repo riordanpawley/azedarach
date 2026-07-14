@@ -1145,27 +1145,91 @@ func TestRealProcessProfileMergeCleanlyTransactionalWithoutGateCreatesNoCanonica
 }
 
 func TestRealProcessProfileRecoverIntegrationJournalRollsBackDesiredHeadWithoutValidationProof(t *testing.T) {
-	repo := initDivergedRepo(t)
-	client := NewClient(NewExecRunner(repo), slog.Default())
+	for _, version := range []int{integrationJournalVersionV1, integrationJournalVersion} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			repo := initDivergedRepo(t)
+			client := NewClient(NewExecRunner(repo), slog.Default())
+			ctx := context.Background()
+			targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+			tree := runClientTestGitOutput(t, repo, "merge-tree", "--write-tree", targetHead, "feature")
+			desiredHead := runClientTestGitOutput(t, repo, "commit-tree", tree, "-p", targetHead, "-p", "feature", "-m", "unproved merge")
+			if err := client.writeIntegrationJournal(ctx, repo, integrationJournal{
+				Version: version, TargetWorktree: repo, TargetHead: targetHead,
+				DesiredHead: desiredHead, StartedAt: time.Now().UTC(),
+			}); err != nil {
+				t.Fatalf("writeIntegrationJournal() error = %v", err)
+			}
+			runClientTestGit(t, repo, "reset", "--hard", desiredHead)
+			if err := client.RecoverIntegrationJournal(ctx, repo); err != nil {
+				t.Fatalf("RecoverIntegrationJournal() error = %v", err)
+			}
+			if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != targetHead {
+				t.Fatalf("HEAD = %s, want rollback to unvalidated target %s", head, targetHead)
+			}
+			if attempt, found, err := client.CanonicalIntegrationValidation(ctx, repo, desiredHead); err != nil || found {
+				t.Fatalf("canonical validation = (%+v, %t, %v), want no proof", attempt, found, err)
+			}
+		})
+	}
+}
+
+func TestRecoverIntegrationJournalRejectsUnknownVersionWithoutMutation(t *testing.T) {
+	repo := t.TempDir()
+	gitDir := filepath.Join(repo, ".git")
+	if err := os.Mkdir(gitDir, 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	scratch := filepath.Join(t.TempDir(), "scratch-must-remain")
+	if err := os.Mkdir(scratch, 0o755); err != nil {
+		t.Fatalf("mkdir scratch: %v", err)
+	}
+
+	var commands []string
+	runner := &rawMockRunner{runFunc: func(_ context.Context, args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		if clientTestArgsForWorktree(args, repo, "rev-parse", "--git-common-dir") {
+			return gitDir, nil
+		}
+		return "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
+	}}
+	client := NewClient(runner, slog.Default())
 	ctx := context.Background()
-	targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
-	tree := runClientTestGitOutput(t, repo, "merge-tree", "--write-tree", targetHead, "feature")
-	desiredHead := runClientTestGitOutput(t, repo, "commit-tree", tree, "-p", targetHead, "-p", "feature", "-m", "unproved merge")
 	if err := client.writeIntegrationJournal(ctx, repo, integrationJournal{
-		Version: integrationJournalVersion, TargetWorktree: repo, TargetHead: targetHead,
-		DesiredHead: desiredHead, StartedAt: time.Now().UTC(),
+		Version:         integrationJournalVersionV2 + 1,
+		TargetWorktree:  repo,
+		TargetHead:      "target-sha",
+		DesiredHead:     "future-sha",
+		ScratchWorktree: scratch,
+		StartedAt:       time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("writeIntegrationJournal() error = %v", err)
 	}
-	runClientTestGit(t, repo, "reset", "--hard", desiredHead)
-	if err := client.RecoverIntegrationJournal(ctx, repo); err != nil {
-		t.Fatalf("RecoverIntegrationJournal() error = %v", err)
+	journalPath, err := client.integrationJournalPath(ctx, repo)
+	if err != nil {
+		t.Fatalf("integrationJournalPath() error = %v", err)
 	}
-	if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != targetHead {
-		t.Fatalf("HEAD = %s, want rollback to unvalidated target %s", head, targetHead)
+	journalBefore, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatalf("read journal before recovery: %v", err)
 	}
-	if attempt, found, err := client.CanonicalIntegrationValidation(ctx, repo, desiredHead); err != nil || found {
-		t.Fatalf("canonical validation = (%+v, %t, %v), want no proof", attempt, found, err)
+	commands = nil
+
+	err = client.RecoverIntegrationJournal(ctx, repo)
+	if err == nil || !strings.Contains(err.Error(), "unsupported integration journal version 3") {
+		t.Fatalf("RecoverIntegrationJournal() error = %v, want unsupported version", err)
+	}
+	if len(commands) != 0 {
+		t.Fatalf("recovery commands = %v, want no Git mutation or inspection", commands)
+	}
+	journalAfter, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatalf("journal was deleted: %v", err)
+	}
+	if !bytes.Equal(journalAfter, journalBefore) {
+		t.Fatal("journal contents changed during rejected recovery")
+	}
+	if _, err := os.Stat(scratch); err != nil {
+		t.Fatalf("scratch worktree was changed or deleted: %v", err)
 	}
 }
 

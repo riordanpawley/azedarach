@@ -14,8 +14,10 @@ import (
 )
 
 const (
-	integrationJournalVersion = 2
-	integrationReceiptVersion = 1
+	integrationJournalVersionV1 = 1
+	integrationJournalVersionV2 = 2
+	integrationJournalVersion   = integrationJournalVersionV2
+	integrationReceiptVersion   = 1
 )
 
 type integrationJournal struct {
@@ -422,6 +424,13 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 	journal, journalPath, found, err := c.readIntegrationJournal(ctx, worktree)
 	if err != nil || !found {
 		return err
+	}
+	switch journal.Version {
+	case integrationJournalVersionV1, integrationJournalVersionV2:
+		// Supported. Version 1 has no durable validation proof and therefore
+		// always follows the rollback path below.
+	default:
+		return fmt.Errorf("unsupported integration journal version %d", journal.Version)
 	}
 	targetHead := strings.TrimSpace(journal.TargetHead)
 	desiredHead := strings.TrimSpace(journal.DesiredHead)
