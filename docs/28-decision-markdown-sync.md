@@ -41,10 +41,12 @@ az decision sync
 git add docs/decisions
 ```
 
-Without `--project-dir`, both commands use the caller's current working
-directory as the Markdown source or target. From a linked worktree they operate
-on that worktree, not the registered root checkout. `--project-dir` selects a
-different worktree explicitly.
+Without `--project-dir`, both commands resolve the nearest Git worktree root
+from the caller's current directory and use that root as the Markdown source or
+target. Invoking either command from a nested directory in a linked worktree
+therefore operates on that linked worktree, not the nested directory or the
+registered root checkout. `--project-dir` selects that exact directory
+explicitly; it is made absolute but is not promoted to a Git root.
 
 `az decision sync` is a full reconciliation. It writes the canonical
 `<decision-id>-<title-slug>.md` file for every live decision, removes old paths

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
 
@@ -190,47 +191,43 @@ func TestParseDecisionSyncArgs(t *testing.T) {
 	}
 }
 
-func TestDecisionRequestRepoDirDefaultsToCallerWorktree(t *testing.T) {
-	worktree := t.TempDir()
-	previous, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("get working directory: %v", err)
+func TestDecisionRequestRepoDirDefaultsToLinkedWorktreeRootFromNestedDirectory(t *testing.T) {
+	baseRepo, worktree := makeLinkedWorktree(t)
+	nested := filepath.Join(worktree, "internal", "feature")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested worktree directory: %v", err)
 	}
-	if err := os.Chdir(worktree); err != nil {
-		t.Fatalf("change working directory: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(previous); err != nil {
-			t.Errorf("restore working directory: %v", err)
-		}
-	})
+	t.Chdir(nested)
 
 	got, err := decisionRequestRepoDir("")
 	if err != nil {
 		t.Fatalf("decisionRequestRepoDir: %v", err)
 	}
-	want, err := os.Getwd()
+	want, err := config.ResolveWorktreeRoot(nested)
 	if err != nil {
-		t.Fatalf("current worktree path: %v", err)
+		t.Fatalf("resolve expected worktree root: %v", err)
 	}
 	if got != want {
-		t.Fatalf("decisionRequestRepoDir = %q, want caller worktree %q", got, want)
+		t.Fatalf("decisionRequestRepoDir = %q, want linked worktree root %q", got, want)
+	}
+	if got == nested || got == baseRepo || got == filepath.Dir(nested) {
+		t.Fatalf("decision transfer target = %q, want only linked worktree root (nested=%q base=%q)", got, nested, baseRepo)
 	}
 }
 
-func TestDecisionRequestRepoDirUsesExplicitWorktree(t *testing.T) {
+func TestDecisionRequestRepoDirPreservesExplicitDirectory(t *testing.T) {
 	root := t.TempDir()
-	worktree := filepath.Join(root, "linked-worktree")
-	got, err := decisionRequestRepoDir(worktree)
+	explicitDir := filepath.Join(root, "linked-worktree", "nested")
+	got, err := decisionRequestRepoDir(explicitDir)
 	if err != nil {
 		t.Fatalf("decisionRequestRepoDir: %v", err)
 	}
-	want, err := filepath.Abs(worktree)
+	want, err := filepath.Abs(explicitDir)
 	if err != nil {
-		t.Fatalf("absolute worktree path: %v", err)
+		t.Fatalf("absolute explicit path: %v", err)
 	}
 	if got != want {
-		t.Fatalf("decisionRequestRepoDir = %q, want explicit worktree %q", got, want)
+		t.Fatalf("decisionRequestRepoDir = %q, want explicit directory %q", got, want)
 	}
 }
 
