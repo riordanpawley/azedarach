@@ -1176,6 +1176,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"worktree_create_error", worktreeCreateError,
 		)
 	}
+	d.reconcileDecisionPropagationBestEffort(ctx, cmd.ProjectID)
 	return d.commandOutput(req, output), nil
 }
 

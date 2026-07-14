@@ -46,6 +46,9 @@ func ReducePendingDecisionChanges(events []IssueObservationEvent) []PendingDecis
 				continue
 			}
 			if decisionPayloadBool(event.Payload, "withdrawn") {
+				if current, exists := latest[decisionID]; exists && current.Revision > revision {
+					continue
+				}
 				delete(latest, decisionID)
 				continue
 			}
@@ -65,6 +68,9 @@ func ReducePendingDecisionChanges(events []IssueObservationEvent) []PendingDecis
 			}
 			latest[decisionID] = change
 		case IssueEventDecisionAcknowledged:
+			if strings.TrimSpace(event.Source) != "daemon-decision" || strings.TrimSpace(event.SourceCommand) != "decision.acknowledge" {
+				continue
+			}
 			decisionID := decisionPayloadString(event.Payload, "decision_id")
 			revision := decisionPayloadInt64(event.Payload, "revision")
 			disposition := decisionPayloadString(event.Payload, "disposition")

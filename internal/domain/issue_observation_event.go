@@ -76,7 +76,8 @@ func IssueObservationEventTypeRequiresAuthority(eventType IssueObservationEventT
 		IssueEventReviewCloseFailed,
 		IssueEventTaskIntegrationCompleted,
 		IssueEventOrchestrationRouted,
-		IssueEventDecisionChanged:
+		IssueEventDecisionChanged,
+		IssueEventDecisionAcknowledged:
 		return true
 	default:
 		return false

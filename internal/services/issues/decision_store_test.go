@@ -168,6 +168,43 @@ func TestDecisionRevisionAdvancesOnlyForMaterialSemantics(t *testing.T) {
 	assert.Greater(t, updatedRevision, materialRevision)
 }
 
+func TestDecisionPropagationOutboxFailureRollsBackDecisionMutationAndAudit(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	seedIssue(t, client, "outbox-worker", "Outbox worker")
+	issueID := "outbox-worker"
+	decision, err := client.RecordDecision(ctx, RecordDecisionParams{Title: "before", Rationale: "stable"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRevision, err := client.DecisionRevision(ctx, decision.LocalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterTitle := "must roll back"
+	_, err = client.UpdateDecisionWithPropagation(ctx, decision.LocalID, UpdateDecisionParams{Title: &afterTitle}, DecisionPropagationIntent{
+		ChangedIssueIDs: []string{issueID},
+		Payload:         map[string]any{"invalid": make(chan struct{})},
+	})
+	if err == nil || !strings.Contains(err.Error(), "marshal decision propagation payload") {
+		t.Fatalf("update error=%v, want atomic outbox serialization failure", err)
+	}
+	after, err := client.GetDecision(ctx, decision.LocalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Title != decision.Title {
+		t.Fatalf("title=%q, want rolled back %q", after.Title, decision.Title)
+	}
+	afterRevision, err := client.DecisionRevision(ctx, decision.LocalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterRevision != beforeRevision {
+		t.Fatalf("revision=%d, want rolled back %d", afterRevision, beforeRevision)
+	}
+}
+
 func TestDecisionStore_QuerySearchUsesFTSAndCoversDecisionFields(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()

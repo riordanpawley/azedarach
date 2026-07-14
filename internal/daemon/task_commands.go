@@ -3518,6 +3518,9 @@ func (d *Daemon) validateTaskDecisionAcknowledgementsForReview(ctx context.Conte
 	if !usesProjectionSource(d.sourceForTaskInvariant(taskInvariantReviewHandoff)) {
 		return fmt.Errorf("unsupported review handoff invariant source: %s", d.sourceForTaskInvariant(taskInvariantReviewHandoff))
 	}
+	if err := d.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
+		return fmt.Errorf("reconcile material decisions before moving %s to in_review: %w", taskID, err)
+	}
 	events, err := issueClient.ListIssueDecisionObservationEvents(ctx, taskID)
 	if err != nil {
 		return fmt.Errorf("inspect material decisions before moving %s to in_review: %w", taskID, err)
@@ -4508,6 +4511,9 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue integration readiness: issue store unavailable")
+	}
+	if err := d.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
+		return taskIntegrationReadinessResult{}, fmt.Errorf("reconcile issue decision propagation: %w", err)
 	}
 	decisionEvents, err := issueClient.ListIssueDecisionObservationEvents(ctx, task.ID.String())
 	if err != nil {

@@ -81,6 +81,7 @@ var orderedMigrations = []migration{
 	{id: "0045_issue_state_runtime_constraints", path: "migrations/0045_issue_state_runtime_constraints.sql", apply: applyIssueStateRuntimeConstraintsMigration},
 	{id: "0046_repair_issue_state_runtime_constraints", path: "migrations/0046_repair_issue_state_runtime_constraints.manifest.sql", apply: applyIssueStateRuntimeConstraintsRepairMigration},
 	{id: humanAuthorityProjectionMigrationID, path: "migrations/0047_human_authority_projection_revision.sql"},
+	{id: "0048_decision_propagation_outbox", path: "migrations/0048_decision_propagation_outbox.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -135,6 +136,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "0045_issue_state_runtime_constraints", Path: "migrations/0045_issue_state_runtime_constraints.sql", Checksum: "67a11506f5d49059280d6406cbf1e66155549e4e573978f78f3e43b5ea944f23"},
 	{ID: "0046_repair_issue_state_runtime_constraints", Path: "migrations/0046_repair_issue_state_runtime_constraints.manifest.sql", Checksum: "6420b559de666287450e274b283b2e481c1472e3b02914f3023019975216e20d"},
 	{ID: humanAuthorityProjectionMigrationID, Path: "migrations/0047_human_authority_projection_revision.sql", Checksum: "ac3a48512b2e6e9c018d58a68db24a2465e9d172139d22f8378f69677073a0ab"},
+	{ID: "0048_decision_propagation_outbox", Path: "migrations/0048_decision_propagation_outbox.sql", Checksum: "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d"},
 }
 
 func validateMigrationRegistry() error {
@@ -422,15 +424,16 @@ func migrateIssueSessionLogicalIdentity(ctx context.Context, tx *sql.Tx) error {
 }
 
 const (
-	migrationArtifactAuthority          sqlitemigration.Authority = "project.issues"
-	issueStateModelV2MigrationID                                  = "0029_issue_state_model_v2"
-	issueStateModelVersionMetaKey                                 = "issue:state_model_version"
-	issueStateModelV2CutoverMarkerKey                             = "issue:state_model_v2_cutover"
-	issueStateModelV2Version                                      = "2"
-	boardViewsMigrationID                                         = "0031_board_views"
-	humanAuthorityProjectionMigrationID                           = "0047_human_authority_projection_revision"
-	contextualLearningMigrationID                                 = "0039_contextual_learning_activation"
-	legacyContextualLearningMigration                             = "0038_contextual_learning_activation"
+	migrationArtifactAuthority           sqlitemigration.Authority = "project.issues"
+	issueStateModelV2MigrationID                                   = "0029_issue_state_model_v2"
+	issueStateModelVersionMetaKey                                  = "issue:state_model_version"
+	issueStateModelV2CutoverMarkerKey                              = "issue:state_model_v2_cutover"
+	issueStateModelV2Version                                       = "2"
+	boardViewsMigrationID                                          = "0031_board_views"
+	humanAuthorityProjectionMigrationID                            = "0047_human_authority_projection_revision"
+	decisionPropagationOutboxMigrationID                           = "0048_decision_propagation_outbox"
+	contextualLearningMigrationID                                  = "0039_contextual_learning_activation"
+	legacyContextualLearningMigration                              = "0038_contextual_learning_activation"
 )
 
 type issueStateModelV2CutoverMarker struct {
@@ -516,6 +519,12 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 				}
 				continue
 			}
+			if m.id == decisionPropagationOutboxMigrationID {
+				if err := c.applyDecisionPropagationOutboxMigration(ctx, db, m.id); err != nil {
+					return err
+				}
+				continue
+			}
 			if m.apply != nil {
 				if err := m.apply(ctx, db, m.id); err != nil {
 					return err
@@ -537,6 +546,9 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	if err := validateHumanAuthorityProjectionRevisionTriggers(ctx, db); err != nil {
+		return err
+	}
+	if err := validateDecisionPropagationOutboxSchema(ctx, db); err != nil {
 		return err
 	}
 
@@ -1072,6 +1084,104 @@ func (c *Client) runHumanAuthorityMigrationFailureHook(stage string) error {
 	}
 	if err := c.humanAuthorityMigrationFailureHook(stage); err != nil {
 		return fmt.Errorf("injected human authority migration failure at %s: %w", stage, err)
+	}
+	return nil
+}
+
+func (c *Client) applyDecisionPropagationOutboxMigration(ctx context.Context, db *sql.DB, id string) error {
+	sqlText, err := loadMigrationSQL("migrations/0048_decision_propagation_outbox.sql")
+	if err != nil {
+		return fmt.Errorf("load migration %s: %w", id, err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+		return fmt.Errorf("apply migration %s: %w", id, err)
+	}
+	if c.decisionOutboxMigrationFailureHook != nil {
+		if err := c.decisionOutboxMigrationFailureHook("after_schema"); err != nil {
+			return fmt.Errorf("migration %s rolled back: %w", id, err)
+		}
+	}
+	if err := validateDecisionPropagationOutboxSchema(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s: %w", id, err)
+	}
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	return nil
+}
+
+func validateDecisionPropagationOutboxSchema(ctx context.Context, q sqlIssueQueryer) error {
+	var tableSQL string
+	if err := q.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='decision_propagation_outbox'`).Scan(&tableSQL); err != nil {
+		return fmt.Errorf("inspect decision propagation outbox table: %w", err)
+	}
+	normalizedSQL := strings.ToLower(strings.Join(strings.Fields(tableSQL), " "))
+	for _, fragment := range []string{
+		"id integer primary key autoincrement",
+		"decision_id text not null",
+		"revision integer not null check (revision > 0)",
+		"issue_id text not null",
+		"event_kind text not null check (event_kind in ('changed', 'withdrawn'))",
+		"source_command text not null default ''",
+		"payload_json text not null check (json_valid(payload_json))",
+		"created_at text not null",
+		"unique (decision_id, revision, issue_id, event_kind)",
+		"foreign key (revision) references decision_audit_log(id)",
+	} {
+		if !strings.Contains(normalizedSQL, fragment) {
+			return fmt.Errorf("decision propagation outbox missing constraint %s", fragment)
+		}
+	}
+	required := map[string]bool{
+		"id": false, "decision_id": false, "revision": false, "issue_id": false,
+		"event_kind": false, "source_command": false, "payload_json": false,
+		"created_at": false, "materialized_event_id": false, "retired_at": false,
+	}
+	rows, err := q.QueryContext(ctx, `PRAGMA table_info('decision_propagation_outbox')`)
+	if err != nil {
+		return fmt.Errorf("inspect decision propagation outbox columns: %w", err)
+	}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if _, ok := required[name]; ok {
+			required[name] = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for name, found := range required {
+		if !found {
+			return fmt.Errorf("decision propagation outbox missing column %s", name)
+		}
+	}
+	expectedIndexes := map[string]string{
+		"idx_decision_propagation_outbox_active":         "create index idx_decision_propagation_outbox_active on decision_propagation_outbox(id) where retired_at is null",
+		"idx_decision_propagation_outbox_issue_revision": "create index idx_decision_propagation_outbox_issue_revision on decision_propagation_outbox(issue_id, decision_id, revision)",
+	}
+	for index, expectedSQL := range expectedIndexes {
+		var indexSQL string
+		if err := q.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name=?`, index).Scan(&indexSQL); err != nil {
+			return fmt.Errorf("inspect decision propagation outbox index %s: %w", index, err)
+		}
+		normalizedIndexSQL := strings.ToLower(strings.Join(strings.Fields(indexSQL), " "))
+		if normalizedIndexSQL != expectedSQL {
+			return fmt.Errorf("decision propagation outbox index %s drifted: got %q", index, normalizedIndexSQL)
+		}
 	}
 	return nil
 }

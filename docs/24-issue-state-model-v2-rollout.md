@@ -109,6 +109,11 @@ changes the durable projection fields those invariants must read:
   revisioned material-decision change/acknowledgement observations, and session
   activity projections, then allow review only when decision revisions are
   current and active-issue self-handoff/external busy-equivalent gates pass.
+- `decision.propagation_delivery` is `hybrid`: decision mutation and intended
+  issue fanout commit atomically to the project outbox; reconciliation
+  materializes each authority event exactly once, retries live tmux delivery
+  until daemon-authoritative exact-revision acknowledgement, and suppresses
+  superseded or withdrawn revisions.
 - `task.integration_readiness`, `task.context_risk_closeout`,
   `task.merge_base_target`, `task.follow_on_merge_candidates`,
   `issue_resources.lifecycle`, and task-list freshness remain `projection`.

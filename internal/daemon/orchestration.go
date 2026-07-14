@@ -247,7 +247,7 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		if err != nil {
 			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load rooted review queue: %w", err)
 		}
-		if err := a.enrichPendingDecisions(ctx, issueClient, &snapshot, tasks); err != nil {
+		if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, tasks); err != nil {
 			return protocol.OrchestrationSnapshot{}, err
 		}
 		snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, tasks)
@@ -266,7 +266,7 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("load project orchestration projection: %w", err)
 	}
 	tasks = a.daemon.enrichTasksWithSessionState(ctx, projectID, tasks)
-	if err := a.enrichPendingDecisions(ctx, issueClient, &snapshot, tasks); err != nil {
+	if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, tasks); err != nil {
 		return protocol.OrchestrationSnapshot{}, err
 	}
 	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, tasks)
@@ -335,7 +335,10 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	return snapshot, nil
 }
 
-func (a daemonOrchestrationAuthority) enrichPendingDecisions(ctx context.Context, issueClient *issues.Client, snapshot *protocol.OrchestrationSnapshot, tasks []domain.Task) error {
+func (a daemonOrchestrationAuthority) enrichPendingDecisions(ctx context.Context, projectID string, issueClient *issues.Client, snapshot *protocol.OrchestrationSnapshot, tasks []domain.Task) error {
+	if err := a.daemon.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
+		return fmt.Errorf("reconcile pending decisions: %w", err)
+	}
 	issueIDs := make([]string, 0, len(tasks))
 	for _, task := range tasks {
 		if task.Status != domain.StatusDone {

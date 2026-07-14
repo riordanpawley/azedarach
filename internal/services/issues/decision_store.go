@@ -428,10 +428,14 @@ func decisionListQuery(filter DecisionFilter) (string, []any, bool) {
 }
 
 func (c *Client) UpdateDecision(ctx context.Context, selector string, params UpdateDecisionParams) (Decision, error) {
+	return c.UpdateDecisionWithPropagation(ctx, selector, params, DecisionPropagationIntent{})
+}
+
+func (c *Client) UpdateDecisionWithPropagation(ctx context.Context, selector string, params UpdateDecisionParams, intent DecisionPropagationIntent) (Decision, error) {
 	var out Decision
 	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
 		var err error
-		out, err = c.updateDecisionLocked(lockCtx, selector, params)
+		out, err = c.updateDecisionLocked(lockCtx, selector, params, intent)
 		return err
 	})
 	return out, err
@@ -526,7 +530,7 @@ func decisionUpdateParamsEmpty(params UpdateDecisionParams) bool {
 	return params.Title == nil && params.Rationale == nil && params.Context == nil && params.Consequences == nil
 }
 
-func (c *Client) updateDecisionLocked(ctx context.Context, selector string, params UpdateDecisionParams) (Decision, error) {
+func (c *Client) updateDecisionLocked(ctx context.Context, selector string, params UpdateDecisionParams, intent DecisionPropagationIntent) (Decision, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return Decision{}, err
@@ -550,8 +554,17 @@ func (c *Client) updateDecisionLocked(ctx context.Context, selector string, para
 	if err != nil {
 		return Decision{}, c.wrapError("update-decision", selector, err)
 	}
-	after, err := c.applyDecisionUpdateTx(ctx, tx, before, params)
+	if err := c.validateDecisionPropagationRevision(ctx, tx, before.LocalID, intent.ExpectedRevision); err != nil {
+		return Decision{}, c.wrapError("update-decision", before.LocalID, err)
+	}
+	if err := c.validateDecisionPropagationObservationRevision(ctx, tx, before.LocalID, intent); err != nil {
+		return Decision{}, c.wrapError("update-decision", before.LocalID, err)
+	}
+	after, revision, err := c.applyDecisionUpdateTxWithRevision(ctx, tx, before, params)
 	if err != nil {
+		return Decision{}, c.wrapError("update-decision", before.LocalID, err)
+	}
+	if err := c.insertDecisionPropagationOutbox(ctx, tx, before.LocalID, revision, intent); err != nil {
 		return Decision{}, c.wrapError("update-decision", before.LocalID, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -562,9 +575,14 @@ func (c *Client) updateDecisionLocked(ctx context.Context, selector string, para
 }
 
 func (c *Client) applyDecisionUpdateTx(ctx context.Context, tx *sql.Tx, before decisionRecord, params UpdateDecisionParams) (Decision, error) {
+	after, _, err := c.applyDecisionUpdateTxWithRevision(ctx, tx, before, params)
+	return after, err
+}
+
+func (c *Client) applyDecisionUpdateTxWithRevision(ctx context.Context, tx *sql.Tx, before decisionRecord, params UpdateDecisionParams) (Decision, int64, error) {
 	after, err := applyDecisionUpdate(before.Decision, params)
 	if err != nil {
-		return Decision{}, err
+		return Decision{}, 0, err
 	}
 	after.UpdatedAt = time.Now().UTC()
 	if _, err := tx.ExecContext(ctx, `
@@ -572,21 +590,26 @@ func (c *Client) applyDecisionUpdateTx(ctx context.Context, tx *sql.Tx, before d
 		SET title = ?, rationale = ?, context = ?, consequences = ?, updated_at = ?
 		WHERE id = ?
 	`, after.Title, nullableString(after.Rationale), nullableString(after.Context), nullableString(after.Consequences), formatTimestamp(after.UpdatedAt), before.rowID); err != nil {
-		return Decision{}, classifySQLiteConstraint(err)
+		return Decision{}, 0, classifySQLiteConstraint(err)
 	}
-	if err := c.insertDecisionAuditRow(ctx, tx, decisionEntityKind, before.LocalID, decisionOpUpdate, before.Decision, after); err != nil {
-		return Decision{}, err
+	revision, err := c.insertDecisionAuditRowID(ctx, tx, decisionEntityKind, before.LocalID, decisionOpUpdate, before.Decision, after)
+	if err != nil {
+		return Decision{}, 0, err
 	}
-	return after, nil
+	return after, revision, nil
 }
 
 func (c *Client) DeleteDecision(ctx context.Context, selector string) error {
+	return c.DeleteDecisionWithPropagation(ctx, selector, DecisionPropagationIntent{})
+}
+
+func (c *Client) DeleteDecisionWithPropagation(ctx context.Context, selector string, intent DecisionPropagationIntent) error {
 	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
-		return c.deleteDecisionLocked(lockCtx, selector)
+		return c.deleteDecisionLocked(lockCtx, selector, intent)
 	})
 }
 
-func (c *Client) deleteDecisionLocked(ctx context.Context, selector string) error {
+func (c *Client) deleteDecisionLocked(ctx context.Context, selector string, intent DecisionPropagationIntent) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
@@ -641,7 +664,11 @@ func (c *Client) deleteDecisionLocked(ctx context.Context, selector string) erro
 	`, formatTimestamp(now), formatTimestamp(now), decision.rowID); err != nil {
 		return c.wrapError("delete-decision", decision.LocalID, err)
 	}
-	if err := c.insertDecisionAuditRow(ctx, tx, decisionEntityKind, decision.LocalID, decisionOpDelete, decision.Decision, afterDecision); err != nil {
+	revision, err := c.insertDecisionAuditRowID(ctx, tx, decisionEntityKind, decision.LocalID, decisionOpDelete, decision.Decision, afterDecision)
+	if err != nil {
+		return c.wrapError("delete-decision", decision.LocalID, err)
+	}
+	if err := c.insertDecisionPropagationOutbox(ctx, tx, decision.LocalID, revision, intent); err != nil {
 		return c.wrapError("delete-decision", decision.LocalID, err)
 	}
 
@@ -653,16 +680,20 @@ func (c *Client) deleteDecisionLocked(ctx context.Context, selector string) erro
 }
 
 func (c *Client) AddDecisionLink(ctx context.Context, params AddDecisionLinkParams) (DecisionLink, error) {
+	return c.AddDecisionLinkWithPropagation(ctx, params, DecisionPropagationIntent{})
+}
+
+func (c *Client) AddDecisionLinkWithPropagation(ctx context.Context, params AddDecisionLinkParams, intent DecisionPropagationIntent) (DecisionLink, error) {
 	var out DecisionLink
 	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
 		var err error
-		out, err = c.addDecisionLinkLocked(lockCtx, params)
+		out, err = c.addDecisionLinkLocked(lockCtx, params, intent)
 		return err
 	})
 	return out, err
 }
 
-func (c *Client) addDecisionLinkLocked(ctx context.Context, params AddDecisionLinkParams) (DecisionLink, error) {
+func (c *Client) addDecisionLinkLocked(ctx context.Context, params AddDecisionLinkParams, intent DecisionPropagationIntent) (DecisionLink, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return DecisionLink{}, err
@@ -741,7 +772,11 @@ func (c *Client) addDecisionLinkLocked(ctx context.Context, params AddDecisionLi
 		}
 	}
 
-	if err := c.insertDecisionAuditRow(ctx, tx, decisionLinkEntityKind, link.ID, operation, before, link); err != nil {
+	revision, err := c.insertDecisionAuditRowID(ctx, tx, decisionLinkEntityKind, link.ID, operation, before, link)
+	if err != nil {
+		return DecisionLink{}, c.wrapError("add-decision-link", normalized.DecisionID, err)
+	}
+	if err := c.insertDecisionPropagationOutbox(ctx, tx, decision.LocalID, revision, intent); err != nil {
 		return DecisionLink{}, c.wrapError("add-decision-link", normalized.DecisionID, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -752,12 +787,16 @@ func (c *Client) addDecisionLinkLocked(ctx context.Context, params AddDecisionLi
 }
 
 func (c *Client) RemoveDecisionLink(ctx context.Context, decisionSelector string, targetKind DecisionTargetKind, targetID string) error {
+	return c.RemoveDecisionLinkWithPropagation(ctx, decisionSelector, targetKind, targetID, DecisionPropagationIntent{})
+}
+
+func (c *Client) RemoveDecisionLinkWithPropagation(ctx context.Context, decisionSelector string, targetKind DecisionTargetKind, targetID string, intent DecisionPropagationIntent) error {
 	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
-		return c.removeDecisionLinkLocked(lockCtx, decisionSelector, targetKind, targetID)
+		return c.removeDecisionLinkLocked(lockCtx, decisionSelector, targetKind, targetID, intent)
 	})
 }
 
-func (c *Client) removeDecisionLinkLocked(ctx context.Context, decisionSelector string, targetKind DecisionTargetKind, targetID string) error {
+func (c *Client) removeDecisionLinkLocked(ctx context.Context, decisionSelector string, targetKind DecisionTargetKind, targetID string, intent DecisionPropagationIntent) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
@@ -800,7 +839,11 @@ func (c *Client) removeDecisionLinkLocked(ctx context.Context, decisionSelector 
 	`, formatTimestamp(now), formatTimestamp(now), link.rowID); err != nil {
 		return c.wrapError("remove-decision-link", decisionSelector, err)
 	}
-	if err := c.insertDecisionAuditRow(ctx, tx, decisionLinkEntityKind, link.DecisionLink.ID, decisionOpDelete, link.DecisionLink, after); err != nil {
+	revision, err := c.insertDecisionAuditRowID(ctx, tx, decisionLinkEntityKind, link.DecisionLink.ID, decisionOpDelete, link.DecisionLink, after)
+	if err != nil {
+		return c.wrapError("remove-decision-link", decisionSelector, err)
+	}
+	if err := c.insertDecisionPropagationOutbox(ctx, tx, decision.LocalID, revision, intent); err != nil {
 		return c.wrapError("remove-decision-link", decisionSelector, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -1228,19 +1271,27 @@ func decisionLinkID(decisionLocalID string, kind DecisionTargetKind, targetID st
 }
 
 func (c *Client) insertDecisionAuditRow(ctx context.Context, execer sqlRequirementExecer, entityType, entityID, operation string, before, after any) error {
+	_, err := c.insertDecisionAuditRowID(ctx, execer, entityType, entityID, operation, before, after)
+	return err
+}
+
+func (c *Client) insertDecisionAuditRowID(ctx context.Context, execer sqlRequirementExecer, entityType, entityID, operation string, before, after any) (int64, error) {
 	beforeJSON, err := marshalAuditSnapshot(before)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	afterJSON, err := marshalAuditSnapshot(after)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	_, err = execer.ExecContext(ctx, `
+	result, err := execer.ExecContext(ctx, `
 		INSERT INTO decision_audit_log (
 			entity_type, entity_id, operation, actor_source,
 			before_json, after_json, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?)
 	`, entityType, entityID, operation, specAuditActorSource(ctx), string(beforeJSON), string(afterJSON), formatTimestamp(time.Now().UTC()))
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
 }
