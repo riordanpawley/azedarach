@@ -168,11 +168,13 @@ func TestParseDecisionSyncArgs(t *testing.T) {
 		args       []string
 		ok         bool
 		projectDir string
+		all        bool
 	}{
 		{name: "no flags", args: nil, ok: true},
 		{name: "with --check", args: []string{"--check"}, ok: true},
 		{name: "with --json --check", args: []string{"--json", "--check"}, ok: true},
 		{name: "with --project-dir", args: []string{"--project-dir", "/repo/worktree"}, ok: true, projectDir: "/repo/worktree"},
+		{name: "with --all", args: []string{"--all"}, ok: true, all: true},
 		{name: "positional rejected", args: []string{"--check", "extra"}, ok: false},
 	}
 	for _, tc := range cases {
@@ -186,6 +188,9 @@ func TestParseDecisionSyncArgs(t *testing.T) {
 			}
 			if opts.ProjectDir != tc.projectDir {
 				t.Fatalf("ProjectDir = %q, want %q", opts.ProjectDir, tc.projectDir)
+			}
+			if opts.All != tc.all {
+				t.Fatalf("All = %v, want %v", opts.All, tc.all)
 			}
 		})
 	}
@@ -237,12 +242,14 @@ func TestParseDecisionImportArgs(t *testing.T) {
 		args       []string
 		ok         bool
 		projectDir string
+		all        bool
 	}{
 		{name: "no flags", args: nil, ok: true},
 		{name: "with --check", args: []string{"--check"}, ok: true},
 		{name: "with --force", args: []string{"--force"}, ok: true},
 		{name: "with all flags", args: []string{"--check", "--force", "--json"}, ok: true},
 		{name: "with --project-dir", args: []string{"--project-dir", "/repo/worktree"}, ok: true, projectDir: "/repo/worktree"},
+		{name: "with --all", args: []string{"--all"}, ok: true, all: true},
 		{name: "positional rejected", args: []string{"--check", "extra"}, ok: false},
 	}
 	for _, tc := range cases {
@@ -256,6 +263,9 @@ func TestParseDecisionImportArgs(t *testing.T) {
 			}
 			if opts.ProjectDir != tc.projectDir {
 				t.Fatalf("ProjectDir = %q, want %q", opts.ProjectDir, tc.projectDir)
+			}
+			if opts.All != tc.all {
+				t.Fatalf("All = %v, want %v", opts.All, tc.all)
 			}
 		})
 	}

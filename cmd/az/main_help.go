@@ -173,10 +173,10 @@ func printHelpForPath(path []string) bool {
 	case "decision revisit":
 		fmt.Println("Usage: az decision revisit --id <old-id> (--new <existing-id> | --title <text> --rationale <text>) [--context <text>] [--note <text>] [--json]")
 	case "decision sync":
-		fmt.Println("Usage: az decision sync [--check] [--project-dir <dir>] [--json]")
+		fmt.Println("Usage: az decision sync [--check] [--all] [--project-dir <dir>] [--json]")
 		fmt.Println("Explicitly reconcile the target worktree's docs/decisions with the shared store, removing obsolete rename/delete artifacts.")
 	case "decision import":
-		fmt.Println("Usage: az decision import [--check] [--force] [--project-dir <dir>] [--json]")
+		fmt.Println("Usage: az decision import [--check] [--force] [--all] [--project-dir <dir>] [--json]")
 		fmt.Println("Import clean Markdown changes; conflicting non-empty fields are reported and skipped unless --force is explicit.")
 	case "decision link":
 		printDecisionLinkUsage()

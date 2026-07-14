@@ -72,6 +72,7 @@ type decisionRevisitOpts struct {
 type decisionSyncOpts struct {
 	JSON       bool
 	Check      bool
+	All        bool
 	ProjectDir string
 }
 
@@ -79,6 +80,7 @@ type decisionImportOpts struct {
 	JSON       bool
 	Check      bool
 	Force      bool
+	All        bool
 	ProjectDir string
 }
 
@@ -382,13 +384,30 @@ func runDecisionSyncRPC(cfg *config.Config, opts decisionSyncOpts) error {
 	if err != nil {
 		return err
 	}
-	req := protocol.DecisionSyncMDRequestBody{Check: opts.Check, RepoDir: repoDir}
+	req := protocol.DecisionSyncMDRequestBody{Check: opts.Check, RepoDir: repoDir, FullProject: opts.All}
 	var out protocol.DecisionSyncMDResponseBody
 	if err := runDecisionRPC(cfg, opts.ProjectDir, protocol.CommandDecisionSyncMD, req, &out); err != nil {
 		return err
 	}
 	if opts.JSON {
 		return printJSON(out)
+	}
+	if out.TargetIssueID != "" {
+		fmt.Printf("Target: %s at %s (issue %s)\n", out.TargetRepoDir, out.TargetRevision, out.TargetIssueID)
+	} else if out.FullProject {
+		fmt.Printf("Target: %s at %s (full project)\n", out.TargetRepoDir, out.TargetRevision)
+	}
+	for _, result := range out.Results {
+		if result.Skipped {
+			fmt.Printf("Preserved %s [%s]: %s", result.Path, result.DecisionID, result.SkipReason)
+			if result.OwnerIssueID != "" {
+				fmt.Printf(" (owner: %s)", result.OwnerIssueID)
+			}
+			if len(result.IssueIDs) > 0 {
+				fmt.Printf(" (issues: %s)", strings.Join(result.IssueIDs, ", "))
+			}
+			fmt.Println()
+		}
 	}
 	switch {
 	case opts.Check && out.Changed:
@@ -415,12 +434,13 @@ func parseDecisionSyncArgs(args []string) (decisionSyncOpts, error) {
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.JSON, "json", false, "json output")
 	fs.BoolVar(&opts.Check, "check", false, "report drift without writing files")
+	fs.BoolVar(&opts.All, "all", false, "reconcile the full project store (root checkout only)")
 	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project/worktree directory for markdown files")
 	if err := fs.Parse(args); err != nil {
 		return decisionSyncOpts{}, err
 	}
 	if fs.NArg() != 0 {
-		return decisionSyncOpts{}, fmt.Errorf("usage: az decision sync [--check] [--project-dir <dir>] [--json]")
+		return decisionSyncOpts{}, fmt.Errorf("usage: az decision sync [--check] [--all] [--project-dir <dir>] [--json]")
 	}
 	return opts, nil
 }
@@ -430,13 +450,18 @@ func runDecisionImportRPC(cfg *config.Config, opts decisionImportOpts) error {
 	if err != nil {
 		return err
 	}
-	req := protocol.DecisionImportMDRequestBody{Check: opts.Check, Force: opts.Force, RepoDir: repoDir}
+	req := protocol.DecisionImportMDRequestBody{Check: opts.Check, Force: opts.Force, RepoDir: repoDir, FullProject: opts.All}
 	var out protocol.DecisionImportMDResponseBody
 	if err := runDecisionRPC(cfg, opts.ProjectDir, protocol.CommandDecisionImportMD, req, &out); err != nil {
 		return err
 	}
 	if opts.JSON {
 		return printJSON(out)
+	}
+	if out.TargetIssueID != "" {
+		fmt.Printf("Target: %s at %s (issue %s)\n", out.TargetRepoDir, out.TargetRevision, out.TargetIssueID)
+	} else if out.FullProject {
+		fmt.Printf("Target: %s at %s (full project)\n", out.TargetRepoDir, out.TargetRevision)
 	}
 	if len(out.Files) == 0 {
 		fmt.Println("No decision markdown files found.")
@@ -464,7 +489,18 @@ func runDecisionImportRPC(cfg *config.Config, opts decisionImportOpts) error {
 		case file.ApplyError != "":
 			fmt.Printf("  ✗ apply failed: %s\n", file.ApplyError)
 		case file.Skipped:
-			fmt.Printf("  skipped (use --force to override)\n")
+			if file.SkipReason != "" {
+				fmt.Printf("  preserved: %s", file.SkipReason)
+				if file.OwnerIssueID != "" {
+					fmt.Printf(" (owner: %s)", file.OwnerIssueID)
+				}
+				if len(file.IssueIDs) > 0 {
+					fmt.Printf(" (issues: %s)", strings.Join(file.IssueIDs, ", "))
+				}
+				fmt.Println()
+			} else {
+				fmt.Printf("  skipped (use --force to override)\n")
+			}
 		case file.Imported:
 			fmt.Printf("  imported\n")
 		case len(file.Changes) == 0 && len(file.Conflicts) == 0:
@@ -489,12 +525,13 @@ func parseDecisionImportArgs(args []string) (decisionImportOpts, error) {
 	fs.BoolVar(&opts.JSON, "json", false, "json output")
 	fs.BoolVar(&opts.Check, "check", false, "report plan without applying")
 	fs.BoolVar(&opts.Force, "force", false, "apply even when fields conflict (markdown wins)")
+	fs.BoolVar(&opts.All, "all", false, "import the full project transfer set (root checkout only)")
 	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project/worktree directory for markdown files")
 	if err := fs.Parse(args); err != nil {
 		return decisionImportOpts{}, err
 	}
 	if fs.NArg() != 0 {
-		return decisionImportOpts{}, fmt.Errorf("usage: az decision import [--check] [--force] [--project-dir <dir>] [--json]")
+		return decisionImportOpts{}, fmt.Errorf("usage: az decision import [--check] [--force] [--all] [--project-dir <dir>] [--json]")
 	}
 	return opts, nil
 }
@@ -929,8 +966,8 @@ func printDecisionUsage() {
 	fmt.Println("  az decision update --id <id> [--title ...] [--rationale ...] [--context ...] [--consequences ...] [--json]")
 	fmt.Println("  az decision delete --id <id> --confirm [--json]")
 	fmt.Println("  az decision revisit --id <old-id> (--new <existing-id> | --title <text> --rationale <text>) [--context ...] [--note ...] [--json]")
-	fmt.Println("  az decision sync [--check] [--project-dir <dir>] [--json]")
-	fmt.Println("  az decision import [--check] [--force] [--project-dir <dir>] [--json]")
+	fmt.Println("  az decision sync [--check] [--all] [--project-dir <dir>] [--json]")
+	fmt.Println("  az decision import [--check] [--force] [--all] [--project-dir <dir>] [--json]")
 	fmt.Println("  az decision link list|add|remove ...")
 	fmt.Println("")
 	fmt.Println("Examples:")

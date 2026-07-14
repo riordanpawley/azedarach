@@ -30,21 +30,31 @@ func (s issueDecisionService) SyncMD(ctx context.Context, req protocol.DecisionS
 	if s.daemon == nil {
 		return protocol.DecisionSyncMDResponseBody{}, errors.New("decision sync_md unavailable: daemon nil")
 	}
-	repoDir, err := decisionMDRepoDir(s.daemon.resolveRepoDirForProject(daemonProjectIDFromContext(ctx)), req.RepoDir)
+	target, err := s.resolveDecisionMDTransferTarget(ctx, req.RepoDir, req.FullProject)
 	if err != nil {
-		return protocol.DecisionSyncMDResponseBody{}, errors.New("decision sync_md unavailable: repo dir not resolved")
+		return protocol.DecisionSyncMDResponseBody{}, fmt.Errorf("decision sync_md target: %w", err)
 	}
 
-	decisions, err := c.ListDecisions(ctx, issues.DecisionFilter{})
+	decisions, err := c.ListDecisions(ctx, issues.DecisionFilter{IncludeDeleted: true})
 	if err != nil {
 		return protocol.DecisionSyncMDResponseBody{}, err
 	}
 
 	exports := make([]decisionMDExport, 0, len(decisions))
+	provenance := make(map[string][]string, len(decisions))
+	owners := make(map[string]string, len(decisions))
+	authorized := make(map[string]struct{}, len(decisions))
 	for _, decision := range decisions {
 		links, err := c.ListDecisionLinks(ctx, issues.DecisionLinkFilter{DecisionID: decision.LocalID})
 		if err != nil {
 			return protocol.DecisionSyncMDResponseBody{}, err
+		}
+		provenanceLinks := links
+		if decision.DeletedAt != nil {
+			provenanceLinks, err = c.ListDecisionLinks(ctx, issues.DecisionLinkFilter{DecisionID: decision.LocalID, IncludeDeleted: true})
+			if err != nil {
+				return protocol.DecisionSyncMDResponseBody{}, err
+			}
 		}
 		incoming, err := c.ListDecisionLinks(ctx, issues.DecisionLinkFilter{
 			TargetKind: issues.DecisionTargetDecision,
@@ -53,19 +63,33 @@ func (s issueDecisionService) SyncMD(ctx context.Context, req protocol.DecisionS
 		if err != nil {
 			return protocol.DecisionSyncMDResponseBody{}, err
 		}
-		body := renderDecisionMarkdown(decision, links, incoming)
-		exports = append(exports, decisionMDExport{Decision: decision, Body: body})
+		issueIDs := decisionIssueIDsAtDecisionState(decision, provenanceLinks)
+		provenance[decision.LocalID] = issueIDs
+		owners[decision.LocalID] = decisionOwnerIssueID(issueIDs)
+		if target.FullProject || owners[decision.LocalID] == target.IssueID {
+			authorized[decision.LocalID] = struct{}{}
+			if decision.DeletedAt == nil {
+				body := renderDecisionMarkdown(decision, links, incoming)
+				exports = append(exports, decisionMDExport{Decision: decision, Body: body})
+			}
+		}
 	}
 
-	changedFiles, err := reconcileDecisionMarkdown(repoDir, exports, req.Check)
+	results, err := reconcileDecisionMarkdownScoped(target.RepoDir, exports, authorized, provenance, owners, target.FullProject, req.Check)
 	if err != nil {
 		return protocol.DecisionSyncMDResponseBody{}, err
 	}
+	changedFiles := make([]string, 0, len(results))
+	for _, result := range results {
+		if !result.Skipped {
+			changedFiles = append(changedFiles, result.Path)
+		}
+	}
 
 	return protocol.DecisionSyncMDResponseBody{
-		Check:   req.Check,
-		Changed: len(changedFiles) > 0,
-		Files:   changedFiles,
+		Check: req.Check, Changed: len(changedFiles) > 0, Files: changedFiles,
+		TargetRepoDir: target.RepoDir, TargetRevision: target.Revision,
+		TargetIssueID: target.IssueID, FullProject: target.FullProject, Results: results,
 	}, nil
 }
 
@@ -80,6 +104,24 @@ type decisionMDExport struct {
 // live decision. Reserved decision filenames and parseable decision exports are
 // reconciled; unrelated Markdown is left alone.
 func reconcileDecisionMarkdown(repoDir string, exports []decisionMDExport, check bool) ([]string, error) {
+	authorized := make(map[string]struct{}, len(exports))
+	for _, export := range exports {
+		authorized[export.Decision.LocalID] = struct{}{}
+	}
+	results, err := reconcileDecisionMarkdownScoped(repoDir, exports, authorized, nil, nil, true, check)
+	if err != nil {
+		return nil, err
+	}
+	changed := make([]string, 0, len(results))
+	for _, result := range results {
+		if !result.Skipped {
+			changed = append(changed, result.Path)
+		}
+	}
+	return changed, nil
+}
+
+func reconcileDecisionMarkdownScoped(repoDir string, exports []decisionMDExport, authorized map[string]struct{}, provenance map[string][]string, owners map[string]string, fullProject, check bool) ([]protocol.DecisionMDFileResult, error) {
 	targetDir := filepath.Join(repoDir, decisionMDSubdir)
 	if !check {
 		if err := os.MkdirAll(targetDir, 0o755); err != nil {
@@ -88,7 +130,7 @@ func reconcileDecisionMarkdown(repoDir string, exports []decisionMDExport, check
 	}
 
 	desiredPaths := make(map[string]struct{}, len(exports))
-	changedPaths := make(map[string]struct{}, len(exports))
+	resultsByPath := make(map[string]protocol.DecisionMDFileResult, len(exports))
 	for _, export := range exports {
 		path := filepath.Join(targetDir, decisionMDFilename(export.Decision))
 		desiredPaths[path] = struct{}{}
@@ -97,7 +139,7 @@ func reconcileDecisionMarkdown(repoDir string, exports []decisionMDExport, check
 			return nil, fmt.Errorf("read %s: %w", path, readErr)
 		}
 		if errors.Is(readErr, os.ErrNotExist) || !bytes.Equal(existing, export.Body) {
-			changedPaths[path] = struct{}{}
+			resultsByPath[path] = protocol.DecisionMDFileResult{Path: path, DecisionID: export.Decision.LocalID, IssueIDs: provenance[export.Decision.LocalID], OwnerIssueID: owners[export.Decision.LocalID], Action: "write", Applied: !check}
 			if !check {
 				if err := os.WriteFile(path, export.Body, 0o644); err != nil {
 					return nil, fmt.Errorf("write %s: %w", path, err)
@@ -109,7 +151,7 @@ func reconcileDecisionMarkdown(repoDir string, exports []decisionMDExport, check
 	entries, err := os.ReadDir(targetDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return sortedDecisionMDChanges(repoDir, changedPaths), nil
+			return sortedDecisionMDResults(repoDir, resultsByPath), nil
 		}
 		return nil, fmt.Errorf("read %s: %w", targetDir, err)
 	}
@@ -125,19 +167,96 @@ func reconcileDecisionMarkdown(repoDir string, exports []decisionMDExport, check
 		if readErr != nil {
 			return nil, fmt.Errorf("read %s: %w", path, readErr)
 		}
-		if !isDecisionMDFilename(entry.Name()) {
+		decisionID := decisionMDID(entry.Name(), content)
+		if decisionID == "" {
 			if _, parseErr := parseDecisionMarkdown(content); parseErr != nil {
 				continue
 			}
 		}
-		changedPaths[path] = struct{}{}
+		if !fullProject {
+			if _, ok := authorized[decisionID]; !ok {
+				resultsByPath[path] = protocol.DecisionMDFileResult{Path: path, DecisionID: decisionID, IssueIDs: provenance[decisionID], OwnerIssueID: owners[decisionID], Action: "preserve", Skipped: true, SkipReason: "foreign, unowned, or ambiguously owned decision artifact"}
+				continue
+			}
+		}
+		resultsByPath[path] = protocol.DecisionMDFileResult{Path: path, DecisionID: decisionID, IssueIDs: provenance[decisionID], OwnerIssueID: owners[decisionID], Action: "remove", Applied: !check}
 		if !check {
 			if err := os.Remove(path); err != nil {
 				return nil, fmt.Errorf("remove obsolete decision markdown %s: %w", path, err)
 			}
 		}
 	}
-	return sortedDecisionMDChanges(repoDir, changedPaths), nil
+	return sortedDecisionMDResults(repoDir, resultsByPath), nil
+}
+
+func decisionIssueIDs(links []issues.DecisionLink) []string {
+	seen := map[string]struct{}{}
+	for _, link := range links {
+		if link.TargetKind == issues.DecisionTargetIssue && strings.TrimSpace(link.TargetID) != "" {
+			seen[strings.TrimSpace(link.TargetID)] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func decisionIssueIDsAtDecisionState(decision issues.Decision, links []issues.DecisionLink) []string {
+	if decision.DeletedAt == nil {
+		return decisionIssueIDs(links)
+	}
+	atDeletion := make([]issues.DecisionLink, 0, len(links))
+	for _, link := range links {
+		if link.DeletedAt != nil && link.DeletedAt.Equal(*decision.DeletedAt) {
+			atDeletion = append(atDeletion, link)
+		}
+	}
+	return decisionIssueIDs(atDeletion)
+}
+
+func decisionOwnerIssueID(issueIDs []string) string {
+	if len(issueIDs) == 1 {
+		return issueIDs[0]
+	}
+	return ""
+}
+
+func decisionMDID(name string, content []byte) string {
+	if parsed, err := parseDecisionMarkdown(content); err == nil {
+		return parsed.LocalID
+	}
+	stem := strings.TrimSuffix(name, ".md")
+	if !isDecisionMDFilename(name) {
+		return ""
+	}
+	if i := strings.IndexByte(stem, '-'); i >= 0 {
+		rest := stem[i+1:]
+		if j := strings.IndexByte(rest, '-'); j >= 0 {
+			rest = rest[:j]
+		}
+		return "dec-" + rest
+	}
+	return ""
+}
+
+func sortedDecisionMDResults(repoDir string, results map[string]protocol.DecisionMDFileResult) []protocol.DecisionMDFileResult {
+	paths := make([]string, 0, len(results))
+	for path := range results {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	out := make([]protocol.DecisionMDFileResult, 0, len(paths))
+	for _, path := range paths {
+		result := results[path]
+		if rel, err := filepath.Rel(repoDir, path); err == nil && rel != "" {
+			result.Path = rel
+		}
+		out = append(out, result)
+	}
+	return out
 }
 
 func isDecisionMDFilename(name string) bool {
