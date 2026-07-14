@@ -474,6 +474,12 @@ type PROptions struct {
 	JSON       bool
 }
 
+type prCommandRouting struct {
+	ProjectID  string `json:"project_id"`
+	Project    string `json:"project,omitempty"`
+	Repository string `json:"repository"`
+}
+
 func ParsePRArgs(args []string) (PROptions, error) {
 	if len(args) == 0 {
 		return PROptions{}, fmt.Errorf("usage: az pr <list|status|checks|open|create|merge> [arguments]")
@@ -992,12 +998,14 @@ func WorktreeDeleteCommand(deps *Dependencies, opts WorktreeDeleteOptions) error
 func PRCommand(deps *Dependencies, opts PROptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), prCommandTimeout)
 	defer cancel()
-	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+	routing, err := resolvePRCommandRouting(deps, opts.Project)
+	if err != nil {
 		return err
 	}
-	if project := strings.TrimSpace(opts.Project); project != "" {
-		restoreProject := applyIssueProjectOverride(deps, project)
-		defer restoreProject()
+	restoreProject := applyPRCommandRouting(deps, routing)
+	defer restoreProject()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
 	}
 
 	switch opts.Command {
@@ -1010,8 +1018,9 @@ func PRCommand(deps *Dependencies, opts PROptions) error {
 			return fmt.Errorf("list pull requests: %w", err)
 		}
 		if opts.JSON {
-			return printJSON(result)
+			return printPRJSON(routing, result)
 		}
+		printPRRouting(routing)
 		printPullRequestList(result)
 		return nil
 	case "status":
@@ -1030,8 +1039,9 @@ func PRCommand(deps *Dependencies, opts PROptions) error {
 				payload["checks_status"] = checks.ChecksStatus
 				payload["checks"] = checks.Checks
 			}
-			return printJSON(payload)
+			return printPRJSON(routing, payload)
 		}
+		printPRRouting(routing)
 		printPullRequestStatus(status, checks.ChecksStatus, checksErr)
 		return nil
 	case "checks":
@@ -1044,8 +1054,9 @@ func PRCommand(deps *Dependencies, opts PROptions) error {
 			return fmt.Errorf("get pull request checks: %w", err)
 		}
 		if opts.JSON {
-			return printJSON(checks)
+			return printPRJSON(routing, checks)
 		}
+		printPRRouting(routing)
 		printPullRequestChecks(checks)
 		return nil
 	case "open":
@@ -1057,12 +1068,13 @@ func PRCommand(deps *Dependencies, opts PROptions) error {
 			return fmt.Errorf("open pull request: %w", err)
 		}
 		if opts.JSON {
-			return printJSON(map[string]string{"ref": ref, "status": "opened"})
+			return printPRJSON(routing, map[string]string{"ref": ref, "status": "opened"})
 		}
+		printPRRouting(routing)
 		fmt.Printf("Opened PR for %s\n", ref)
 		return nil
 	case "create":
-		return prCreateCommand(ctx, deps, opts)
+		return prCreateCommandWithRouting(ctx, deps, opts, &routing)
 	case "merge":
 		if !opts.Confirm {
 			return fmt.Errorf("refusing to merge PR without --confirm")
@@ -1084,8 +1096,9 @@ func PRCommand(deps *Dependencies, opts PROptions) error {
 			return fmt.Errorf("merge pull request: %w", err)
 		}
 		if opts.JSON {
-			return printJSON(result)
+			return printPRJSON(routing, result)
 		}
+		printPRRouting(routing)
 		fmt.Printf("Merged PR #%d with %s\n", result.Number, result.Strategy)
 		return nil
 	default:
@@ -1093,7 +1106,135 @@ func PRCommand(deps *Dependencies, opts PROptions) error {
 	}
 }
 
+func resolvePRCommandRouting(deps *Dependencies, explicitProject string) (prCommandRouting, error) {
+	if deps == nil {
+		return prCommandRouting{}, fmt.Errorf("resolve PR project: dependencies are unavailable")
+	}
+	explicitProject = strings.TrimSpace(explicitProject)
+	if explicitProject != "" {
+		candidate, ok, err := resolveExplicitPRProjectCandidate(deps, explicitProject)
+		if err != nil {
+			return prCommandRouting{}, err
+		}
+		if !ok {
+			return prCommandRouting{}, fmt.Errorf("%w: explicit --project %q is not registered; refusing repository fallback", config.ErrProjectNotFound, explicitProject)
+		}
+		return prRoutingFromCandidate(candidate), nil
+	}
+
+	if candidate, ok := findSessionProjectCandidate(deps, deps.ProjectID); ok {
+		return prRoutingFromCandidate(candidate), nil
+	}
+	if repoDir := strings.TrimSpace(deps.RepoDir); repoDir != "" {
+		projectID := protocol.NormalizeProjectID(deps.ProjectID)
+		if projectID == "" {
+			derivedProjectID, deriveErr := config.ProjectIDForRoot(repoDir)
+			if deriveErr != nil {
+				return prCommandRouting{}, fmt.Errorf("derive current project ID for PR command: %w", deriveErr)
+			}
+			projectID = derivedProjectID
+		}
+		return prCommandRouting{ProjectID: projectID, Repository: repoDir}, nil
+	}
+	registry, err := config.LoadProjectsRegistry()
+	if err != nil {
+		return prCommandRouting{}, fmt.Errorf("load project registry for PR command: %w", err)
+	}
+	if project := registry.GetDefault(); project != nil {
+		candidates := appendSessionProjectCandidate(nil, project.Name, project.ID, project.Path)
+		if len(candidates) > 0 {
+			return prRoutingFromCandidate(candidates[0]), nil
+		}
+	}
+	return prCommandRouting{}, fmt.Errorf("%w: no current or default project is available for PR command", config.ErrProjectNotFound)
+}
+
+func applyPRCommandRouting(deps *Dependencies, routing prCommandRouting) func() {
+	if deps == nil {
+		return func() {}
+	}
+	previousProject := deps.ProjectID
+	previousRepoDir := deps.RepoDir
+	previousRuntimeRepoDir := deps.RuntimeRepoDir
+	deps.ProjectID = routing.ProjectID
+	deps.RepoDir = routing.Repository
+	deps.RuntimeRepoDir = resolveRuntimeRepoDir(deps.TraceContext, routing.Repository)
+	if deps.DaemonClient != nil {
+		deps.DaemonClient.WithProjectID(routing.ProjectID)
+	}
+	return func() {
+		deps.ProjectID = previousProject
+		deps.RepoDir = previousRepoDir
+		deps.RuntimeRepoDir = previousRuntimeRepoDir
+		if deps.DaemonClient != nil {
+			deps.DaemonClient.WithProjectID(previousProject)
+		}
+	}
+}
+
+func resolveExplicitPRProjectCandidate(deps *Dependencies, identifier string) (sessionProjectCandidate, bool, error) {
+	candidates := appendSessionProjectCandidate(nil, "", deps.ProjectID, deps.RepoDir)
+	if candidate, ok := matchProjectCandidate(candidates, identifier); ok {
+		return candidate, true, nil
+	}
+	registry, err := config.LoadProjectsRegistry()
+	if err != nil {
+		return sessionProjectCandidate{}, false, fmt.Errorf("load project registry for explicit --project %q: %w", identifier, err)
+	}
+	for _, project := range registry.Projects {
+		candidates = appendSessionProjectCandidate(candidates, project.Name, project.ID, project.Path)
+	}
+	candidate, ok := matchProjectCandidate(dedupeSessionProjectCandidates(candidates), identifier)
+	return candidate, ok, nil
+}
+
+func matchProjectCandidate(candidates []sessionProjectCandidate, identifier string) (sessionProjectCandidate, bool) {
+	normalized := protocol.NormalizeProjectID(identifier)
+	for _, candidate := range candidates {
+		for _, alias := range candidate.Aliases {
+			if protocol.NormalizeProjectID(alias) == normalized {
+				return candidate, true
+			}
+		}
+	}
+	return sessionProjectCandidate{}, false
+}
+
+func prRoutingFromCandidate(candidate sessionProjectCandidate) prCommandRouting {
+	return prCommandRouting{
+		ProjectID:  candidate.Route,
+		Project:    candidate.Name,
+		Repository: sessionProjectCandidateRepoDir(context.Background(), candidate),
+	}
+}
+
+func printPRRouting(routing prCommandRouting) {
+	project := firstNonEmptyString(routing.Project, routing.ProjectID)
+	fmt.Printf("Project: %s (%s)\n", project, routing.ProjectID)
+	fmt.Printf("Repository: %s\n", routing.Repository)
+}
+
+func printPRJSON(routing prCommandRouting, result any) error {
+	payload := map[string]any{"resolved_project": routing}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("marshal PR result: %w", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return fmt.Errorf("normalize PR result: %w", err)
+	}
+	for key, value := range fields {
+		payload[key] = value
+	}
+	return printJSON(payload)
+}
+
 func prCreateCommand(ctx context.Context, deps *Dependencies, opts PROptions) error {
+	return prCreateCommandWithRouting(ctx, deps, opts, nil)
+}
+
+func prCreateCommandWithRouting(ctx context.Context, deps *Dependencies, opts PROptions, routing *prCommandRouting) error {
 	if opts.Number > 0 {
 		return fmt.Errorf("pr create does not accept pull request number selectors")
 	}
@@ -1135,7 +1276,13 @@ func prCreateCommand(ctx context.Context, deps *Dependencies, opts PROptions) er
 		return fmt.Errorf("create pull request: %w", err)
 	}
 	if opts.JSON {
+		if routing != nil {
+			return printPRJSON(*routing, result)
+		}
 		return printJSON(result)
+	}
+	if routing != nil {
+		printPRRouting(*routing)
 	}
 	fmt.Printf("Created PR #%d: %s\n", result.PullRequest.Number, result.PullRequest.URL)
 	return nil
@@ -1755,7 +1902,7 @@ func knownSessionProjectCandidates(deps *Dependencies) []sessionProjectCandidate
 	}
 	if registry, err := config.LoadProjectsRegistry(); err == nil && registry != nil {
 		for _, project := range registry.Projects {
-			candidates = appendSessionProjectCandidate(candidates, project.Name, "", project.Path)
+			candidates = appendSessionProjectCandidate(candidates, project.Name, project.ID, project.Path)
 		}
 	}
 	return dedupeSessionProjectCandidates(candidates)
@@ -1764,6 +1911,7 @@ func knownSessionProjectCandidates(deps *Dependencies) []sessionProjectCandidate
 func appendSessionProjectCandidate(candidates []sessionProjectCandidate, name, route, path string) []sessionProjectCandidate {
 	name = strings.TrimSpace(name)
 	route = strings.TrimSpace(route)
+	declaredRoute := route
 	path = strings.TrimSpace(path)
 	if path != "" {
 		if hashProjectID, err := config.ProjectIDForRoot(path); err == nil && strings.TrimSpace(hashProjectID) != "" {
@@ -1778,7 +1926,7 @@ func appendSessionProjectCandidate(candidates []sessionProjectCandidate, name, r
 		return candidates
 	}
 
-	aliases := uniqueTrimmedStrings([]string{route, name, filepath.Base(path)})
+	aliases := uniqueTrimmedStrings([]string{route, declaredRoute, name, filepath.Base(path)})
 	scopes := uniqueTrimmedStrings([]string{route, path})
 	return append(candidates, sessionProjectCandidate{
 		Route:   route,

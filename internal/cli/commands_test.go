@@ -134,6 +134,169 @@ func TestParsePRArgsListRejectsTargetSelectors(t *testing.T) {
 	}
 }
 
+func TestPRCommandExplicitProjectRoutesEveryVerbToRegisteredRepository(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoA := filepath.Join(home, "default-repo")
+	repoB := filepath.Join(home, "selected-repo")
+	projectA, err := config.ProjectIDForRoot(repoA)
+	if err != nil {
+		t.Fatalf("default project id: %v", err)
+	}
+	projectB, err := config.ProjectIDForRoot(repoB)
+	if err != nil {
+		t.Fatalf("selected project id: %v", err)
+	}
+	if err := config.SaveProjectsRegistry(&config.ProjectsRegistry{
+		DefaultProject: "Default",
+		Projects: []config.Project{
+			{ID: projectA, Name: "Default", Path: repoA},
+			{ID: "selected-id", Name: "Selected", Path: repoB},
+		},
+	}); err != nil {
+		t.Fatalf("save projects registry: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		opts PROptions
+	}{
+		{name: "list", opts: PROptions{Command: "list", Project: "Selected", State: "all", Limit: 20, JSON: true}},
+		{name: "status", opts: PROptions{Command: "status", Project: "selected-id", Number: 12, JSON: true}},
+		{name: "checks", opts: PROptions{Command: "checks", Project: "selected-repo", Branch: "feature", JSON: true}},
+		{name: "open", opts: PROptions{Command: "open", Project: "Selected", Branch: "feature", JSON: true}},
+		{name: "create", opts: PROptions{Command: "create", Project: projectB, IssueID: "dha", Branch: "feature", Title: "Fix routing", Body: "Body", BaseBranch: "main", JSON: true}},
+		{name: "merge", opts: PROptions{Command: "merge", Project: "Selected", Number: 12, Strategy: "squash", Confirm: true, JSON: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var routedProjects []string
+			transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				routedProjects = append(routedProjects, req.Meta.ProjectID.String())
+				switch req.Command {
+				case daemonclient.CommandPRList:
+					return responseWithJSON(req, daemonclient.PullRequestListResult{State: "all"}), nil
+				case daemonclient.CommandPRGet:
+					return responseWithJSON(req, daemonclient.PullRequestGetResult{PullRequest: prservice.PRInfo{Number: 12, Branch: "feature", BaseRef: "main"}}), nil
+				case daemonclient.CommandPRChecks:
+					return responseWithJSON(req, daemonclient.PullRequestChecksResult{Ref: "feature", ChecksStatus: "passing"}), nil
+				case daemonclient.CommandPROpen:
+					return responseWithJSON(req, map[string]string{"branch": "feature"}), nil
+				case daemonclient.CommandPRCreate:
+					return responseWithJSON(req, daemonclient.CreatePullRequestResult{IssueID: "dha", PullRequest: prservice.PRInfo{Number: 12, Branch: "feature"}}), nil
+				case daemonclient.CommandPRMerge:
+					return responseWithJSON(req, daemonclient.PullRequestMergeResult{Number: 12, Strategy: "squash"}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			}}
+			deps := &Dependencies{
+				Config:       config.DefaultConfig(),
+				DaemonClient: daemonclient.New(transport).WithProjectID(projectA),
+				Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+				ProjectID:    projectA,
+				RepoDir:      repoA,
+			}
+			output := captureStdout(t, func() error { return PRCommand(deps, tt.opts) })
+			if len(routedProjects) == 0 {
+				t.Fatal("PR command sent no daemon requests")
+			}
+			for _, got := range routedProjects {
+				if got != projectB {
+					t.Fatalf("routed project = %q, want %q (all routes: %v)", got, projectB, routedProjects)
+				}
+			}
+			if !strings.Contains(output, `"project_id": "`+projectB+`"`) || !strings.Contains(output, `"repository": "`+repoB+`"`) {
+				t.Fatalf("JSON output missing resolved routing:\n%s", output)
+			}
+			if deps.ProjectID != projectA {
+				t.Fatalf("dependency project after command = %q, want restored %q", deps.ProjectID, projectA)
+			}
+		})
+	}
+}
+
+func TestPRCommandInvalidExplicitProjectFailsClosed(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var commands int
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			commands++
+			return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected PR request: %s", req.Command)
+		}}).WithProjectID("default-project"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "default-project",
+		RepoDir:   "/default/repo",
+	}
+	err := PRCommand(deps, PROptions{Command: "merge", Project: "missing", Number: 12, Confirm: true})
+	if !errors.Is(err, config.ErrProjectNotFound) {
+		t.Fatalf("error = %v, want project-not-found type", err)
+	}
+	if !strings.Contains(err.Error(), "refusing repository fallback") {
+		t.Fatalf("error = %q, want actionable fallback refusal", err)
+	}
+	if commands != 0 {
+		t.Fatalf("daemon commands = %d, want zero", commands)
+	}
+}
+
+func TestPRCommandProjectPrecedenceWithoutExplicitSelection(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	currentRepo := filepath.Join(home, "current")
+	defaultRepo := filepath.Join(home, "configured-default")
+	currentID, _ := config.ProjectIDForRoot(currentRepo)
+	defaultID, _ := config.ProjectIDForRoot(defaultRepo)
+	if err := config.SaveProjectsRegistry(&config.ProjectsRegistry{
+		DefaultProject: "Default",
+		Projects: []config.Project{
+			{ID: currentID, Name: "Current", Path: currentRepo},
+			{ID: defaultID, Name: "Default", Path: defaultRepo},
+		},
+	}); err != nil {
+		t.Fatalf("save projects registry: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		projectID string
+		repoDir   string
+		wantID    string
+		wantRepo  string
+	}{
+		{name: "current project beats configured default", projectID: currentID, repoDir: currentRepo, wantID: currentID, wantRepo: currentRepo},
+		{name: "configured default used without current context", wantID: defaultID, wantRepo: defaultRepo},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var routedProject string
+			deps := &Dependencies{
+				Config: config.DefaultConfig(),
+				DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					routedProject = req.Meta.ProjectID.String()
+					return responseWithJSON(req, daemonclient.PullRequestListResult{State: "open"}), nil
+				}}).WithProjectID(tt.projectID),
+				Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+				ProjectID: tt.projectID,
+				RepoDir:   tt.repoDir,
+			}
+			output := captureStdout(t, func() error {
+				return PRCommand(deps, PROptions{Command: "list", State: "open", Limit: 20})
+			})
+			if routedProject != tt.wantID {
+				t.Fatalf("routed project = %q, want %q", routedProject, tt.wantID)
+			}
+			for _, want := range []string{"Project:", tt.wantID, "Repository: " + tt.wantRepo} {
+				if !strings.Contains(output, want) {
+					t.Fatalf("human output missing %q:\n%s", want, output)
+				}
+			}
+		})
+	}
+}
+
 func TestPRCommandStatusUsesPullRequestNumber(t *testing.T) {
 	var refs []string
 	deps := &Dependencies{

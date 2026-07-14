@@ -26,12 +26,13 @@ const (
 
 // PRHandler routes daemon commands for PR creation and branch-behind checks.
 type PRHandler struct {
-	prWorkflow prWorkflow
-	gitClient  branchBehindService
-	issueRefs  prIssueRefStore
+	prWorkflow      PRWorkflow
+	workflowResolve func(context.Context, string) (PRWorkflow, error)
+	gitClient       branchBehindService
+	issueRefs       prIssueRefStore
 }
 
-type prWorkflow interface {
+type PRWorkflow interface {
 	Create(context.Context, pr.CreatePRParams) (*pr.PRInfo, error)
 	Get(context.Context, string) (*pr.PRInfo, error)
 	List(context.Context, pr.ListPRParams) ([]pr.PRInfo, error)
@@ -124,7 +125,7 @@ type branchBehindResultBody struct {
 }
 
 // NewPRHandler returns a daemon handler for PR creation and branch-behind checks.
-func NewPRHandler(prWorkflow prWorkflow, gitClient branchBehindService, issueRefs ...prIssueRefStore) *PRHandler {
+func NewPRHandler(prWorkflow PRWorkflow, gitClient branchBehindService, issueRefs ...prIssueRefStore) *PRHandler {
 	var refs prIssueRefStore
 	if len(issueRefs) > 0 {
 		refs = issueRefs[0]
@@ -134,6 +135,31 @@ func NewPRHandler(prWorkflow prWorkflow, gitClient branchBehindService, issueRef
 		gitClient:  gitClient,
 		issueRefs:  refs,
 	}
+}
+
+// NewProjectPRHandler scopes PR operations to the repository selected by the
+// request project ID.
+func NewProjectPRHandler(prWorkflow PRWorkflow, gitClient branchBehindService, resolve func(context.Context, string) (PRWorkflow, error), issueRefs ...prIssueRefStore) *PRHandler {
+	handler := NewPRHandler(prWorkflow, gitClient, issueRefs...)
+	handler.workflowResolve = resolve
+	return handler
+}
+
+func (h *PRHandler) workflow(ctx context.Context, req protocol.RequestEnvelope) (PRWorkflow, *protocol.ErrorEnvelope) {
+	if h != nil && h.workflowResolve != nil {
+		workflow, err := h.workflowResolve(ctx, req.Meta.ProjectID.String())
+		if err != nil {
+			return nil, &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInvalidRequest, Message: err.Error(), Retryable: false}
+		}
+		if workflow == nil {
+			return nil, &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInvalidRequest, Message: "resolved PR project has no repository workflow; refusing repository fallback", Retryable: false}
+		}
+		return workflow, nil
+	}
+	if h != nil && h.prWorkflow != nil {
+		return h.prWorkflow, nil
+	}
+	return nil, prWorkflowUnavailableError()
 }
 
 // Handle executes one PR or branch-behind command from a daemon request envelope.
@@ -172,8 +198,9 @@ func (h *PRHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) pr
 }
 
 func (h *PRHandler) handleList(ctx context.Context, resp protocol.ResponseEnvelope, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
-	if h.prWorkflow == nil {
-		resp.Error = prWorkflowUnavailableError()
+	workflow, resolveErr := h.workflow(ctx, req)
+	if resolveErr != nil {
+		resp.Error = resolveErr
 		return resp
 	}
 	var cmd prListCommandBody
@@ -187,7 +214,7 @@ func (h *PRHandler) handleList(ctx context.Context, resp protocol.ResponseEnvelo
 	if cmd.State == "" {
 		cmd.State = "open"
 	}
-	prs, err := h.prWorkflow.List(ctx, pr.ListPRParams{State: cmd.State, Limit: cmd.Limit})
+	prs, err := workflow.List(ctx, pr.ListPRParams{State: cmd.State, Limit: cmd.Limit})
 	if err != nil {
 		resp.Error = mapPRGitError(err)
 		return resp
@@ -196,8 +223,9 @@ func (h *PRHandler) handleList(ctx context.Context, resp protocol.ResponseEnvelo
 }
 
 func (h *PRHandler) handleGet(ctx context.Context, resp protocol.ResponseEnvelope, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
-	if h.prWorkflow == nil {
-		resp.Error = prWorkflowUnavailableError()
+	workflow, resolveErr := h.workflow(ctx, req)
+	if resolveErr != nil {
+		resp.Error = resolveErr
 		return resp
 	}
 	var cmd prBranchCommandBody
@@ -210,7 +238,7 @@ func (h *PRHandler) handleGet(ctx context.Context, resp protocol.ResponseEnvelop
 		resp.Error = missingPRFieldsError("missing required fields: branch")
 		return resp
 	}
-	info, err := h.prWorkflow.Get(ctx, cmd.Branch)
+	info, err := workflow.Get(ctx, cmd.Branch)
 	if err != nil {
 		resp.Error = mapPRGitError(err)
 		return resp
@@ -223,8 +251,9 @@ func (h *PRHandler) handleGet(ctx context.Context, resp protocol.ResponseEnvelop
 }
 
 func (h *PRHandler) handleChecks(ctx context.Context, resp protocol.ResponseEnvelope, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
-	if h.prWorkflow == nil {
-		resp.Error = prWorkflowUnavailableError()
+	workflow, resolveErr := h.workflow(ctx, req)
+	if resolveErr != nil {
+		resp.Error = resolveErr
 		return resp
 	}
 	var cmd prChecksCommandBody
@@ -237,7 +266,7 @@ func (h *PRHandler) handleChecks(ctx context.Context, resp protocol.ResponseEnve
 		resp.Error = missingPRFieldsError("missing required fields: ref")
 		return resp
 	}
-	checks, err := h.prWorkflow.Checks(ctx, cmd.Ref)
+	checks, err := workflow.Checks(ctx, cmd.Ref)
 	if err != nil {
 		resp.Error = mapPRGitError(err)
 		return resp
@@ -246,8 +275,9 @@ func (h *PRHandler) handleChecks(ctx context.Context, resp protocol.ResponseEnve
 }
 
 func (h *PRHandler) handleOpen(ctx context.Context, resp protocol.ResponseEnvelope, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
-	if h.prWorkflow == nil {
-		resp.Error = prWorkflowUnavailableError()
+	workflow, resolveErr := h.workflow(ctx, req)
+	if resolveErr != nil {
+		resp.Error = resolveErr
 		return resp
 	}
 	var cmd prBranchCommandBody
@@ -260,7 +290,7 @@ func (h *PRHandler) handleOpen(ctx context.Context, resp protocol.ResponseEnvelo
 		resp.Error = missingPRFieldsError("missing required fields: branch")
 		return resp
 	}
-	if err := h.prWorkflow.Open(ctx, cmd.Branch); err != nil {
+	if err := workflow.Open(ctx, cmd.Branch); err != nil {
 		resp.Error = mapPRGitError(err)
 		return resp
 	}
@@ -268,8 +298,9 @@ func (h *PRHandler) handleOpen(ctx context.Context, resp protocol.ResponseEnvelo
 }
 
 func (h *PRHandler) handleMerge(ctx context.Context, resp protocol.ResponseEnvelope, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
-	if h.prWorkflow == nil {
-		resp.Error = prWorkflowUnavailableError()
+	workflow, resolveErr := h.workflow(ctx, req)
+	if resolveErr != nil {
+		resp.Error = resolveErr
 		return resp
 	}
 	var cmd prMergeCommandBody
@@ -288,7 +319,7 @@ func (h *PRHandler) handleMerge(ctx context.Context, resp protocol.ResponseEnvel
 			resp.Error = missingPRFieldsError("missing required fields: number or branch")
 			return resp
 		}
-		info, err := h.prWorkflow.Get(ctx, cmd.Branch)
+		info, err := workflow.Get(ctx, cmd.Branch)
 		if err != nil {
 			resp.Error = mapPRGitError(err)
 			return resp
@@ -299,7 +330,7 @@ func (h *PRHandler) handleMerge(ctx context.Context, resp protocol.ResponseEnvel
 		}
 		number = info.Number
 	}
-	if err := h.prWorkflow.Merge(ctx, number, cmd.Strategy); err != nil {
+	if err := workflow.Merge(ctx, number, cmd.Strategy); err != nil {
 		resp.Error = mapPRGitError(err)
 		return resp
 	}
@@ -307,8 +338,9 @@ func (h *PRHandler) handleMerge(ctx context.Context, resp protocol.ResponseEnvel
 }
 
 func (h *PRHandler) handleCreate(ctx context.Context, resp protocol.ResponseEnvelope, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
-	if h.prWorkflow == nil {
-		resp.Error = prWorkflowUnavailableError()
+	workflow, resolveErr := h.workflow(ctx, req)
+	if resolveErr != nil {
+		resp.Error = resolveErr
 		return resp
 	}
 
@@ -323,7 +355,7 @@ func (h *PRHandler) handleCreate(ctx context.Context, resp protocol.ResponseEnve
 		return resp
 	}
 
-	info, err := h.prWorkflow.Create(ctx, pr.CreatePRParams{
+	info, err := workflow.Create(ctx, pr.CreatePRParams{
 		Title:      cmd.Title,
 		Body:       cmd.Body,
 		Branch:     cmd.Branch,

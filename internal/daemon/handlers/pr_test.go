@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -223,6 +225,45 @@ func TestPRHandlerCreateAndBranchBehind(t *testing.T) {
 			t.Fatalf("branch behind call = %+v, want main/origin defaults", call)
 		}
 	})
+}
+
+func TestPRHandlerResolvesWorkflowFromRequestProject(t *testing.T) {
+	workflow := &fakePRWorkflow{}
+	var resolvedProject string
+	handler := NewProjectPRHandler(nil, nil, func(_ context.Context, projectID string) (PRWorkflow, error) {
+		resolvedProject = projectID
+		if projectID != "selected-project" {
+			return nil, fmt.Errorf("unknown project %q", projectID)
+		}
+		return workflow, nil
+	})
+	body, _ := json.Marshal(prListCommandBody{State: "all", Limit: 20})
+	resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-project-routing",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         CommandPRList,
+		Meta:            protocol.Metadata{ProjectID: "selected-project"},
+		Body:            body,
+	})
+	if !resp.OK {
+		t.Fatalf("response error: %+v", resp.Error)
+	}
+	if resolvedProject != "selected-project" {
+		t.Fatalf("resolved project = %q", resolvedProject)
+	}
+
+	resp = handler.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-invalid-project",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         CommandPRList,
+		Meta:            protocol.Metadata{ProjectID: "other-project"},
+		Body:            body,
+	})
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest || !strings.Contains(resp.Error.Message, "unknown project") {
+		t.Fatalf("invalid project response = %+v", resp)
+	}
 }
 
 func TestPRHandlerCreatePersistsGitHubExternalRef(t *testing.T) {
