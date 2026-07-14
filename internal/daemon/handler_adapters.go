@@ -21,6 +21,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/gocache"
 	"github.com/riordanpawley/azedarach/internal/naming"
 
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -1501,7 +1502,7 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 		ensured, err := ensureAncestorWorktrees(ctx, projectID, task, baseBranch, manager, taskLookupFromMap(taskByIssue), a.runtimeProjectionWriter, func(ctx context.Context, initCtx worktreeInitContext) error {
 			if a.runWorktreeSyncInit != nil {
 				if err := a.runWorktreeSyncInit(ctx, initCtx); err != nil {
-					cleanupNote := cleanupWorktreeAfterInitFailure(ctx, manager, initCtx.IssueID, initCtx.WorktreePath, a.logger)
+					cleanupNote := cleanupWorktreeAfterInitFailure(ctx, initCtx.ProjectID, manager, initCtx.IssueID, initCtx.WorktreePath, a.runtimeProjectionWriter, a.logger)
 					return fmt.Errorf("%w%s", err, cleanupNote)
 				}
 			}
@@ -1531,7 +1532,7 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 		}
 		if a.runWorktreeSyncInit != nil {
 			if err := a.runWorktreeSyncInit(ctx, initCtx); err != nil {
-				cleanupNote := cleanupWorktreeAfterInitFailure(ctx, manager, initCtx.IssueID, initCtx.WorktreePath, a.logger)
+				cleanupNote := cleanupWorktreeAfterInitFailure(ctx, initCtx.ProjectID, manager, initCtx.IssueID, initCtx.WorktreePath, a.runtimeProjectionWriter, a.logger)
 				return nil, "", fmt.Errorf("%w%s", err, cleanupNote)
 			}
 		}
@@ -1551,14 +1552,15 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 	return worktree, baseBranch, nil
 }
 
-func cleanupWorktreeAfterInitFailure(ctx context.Context, manager *git.WorktreeManager, issueID, worktreePath string, logger *slog.Logger) string {
+func cleanupWorktreeAfterInitFailure(ctx context.Context, projectID string, manager *git.WorktreeManager, issueID, worktreePath string, writer runtimeProjectionWriter, logger *slog.Logger) string {
 	if manager == nil {
 		return ""
 	}
-	if _, err := manager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
+	removedWorktree, err := manager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
 		Force:         true,
 		BranchCleanup: git.WorktreeBranchCleanupRequired,
-	}); err != nil {
+	})
+	if err != nil {
 		if logger != nil {
 			logger.Warn("failed to cleanup worktree after init failure",
 				"issue_id", issueID,
@@ -1567,6 +1569,16 @@ func cleanupWorktreeAfterInitFailure(ctx context.Context, manager *git.WorktreeM
 			)
 		}
 		return fmt.Sprintf(" (cleanup failed for worktree %s: %v)", worktreePath, err)
+	}
+	if err := finalizeDeletedWorktree(ctx, projectID, issueID, manager, removedWorktree, writer); err != nil {
+		if logger != nil {
+			logger.Warn("Go cache cleanup pending after init rollback",
+				"issue_id", issueID,
+				"worktree", worktreePath,
+				"error", err,
+			)
+		}
+		return fmt.Sprintf(" (removed failed worktree %s; %v)", worktreePath, err)
 	}
 	return fmt.Sprintf(" (removed failed worktree %s)", worktreePath)
 }
@@ -1595,21 +1607,35 @@ func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, i
 	removedWorktree, err := manager.DeleteWithOptions(ctx, issueID, opts)
 	if err != nil {
 		if errors.Is(err, git.ErrWorktreeNotFound) {
-			if a.runtimeProjectionWriter != nil {
-				a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
-			}
-			return nil, false, nil
+			return nil, false, finalizeDeletedWorktree(ctx, projectID, issueID, manager, nil, a.runtimeProjectionWriter)
 		}
 		return nil, false, err
 	}
+	branchDeleted := removeOpts.DeleteBranch && removedWorktree != nil && strings.TrimSpace(removedWorktree.Branch) != ""
+	if err := finalizeDeletedWorktree(ctx, projectID, issueID, manager, removedWorktree, a.runtimeProjectionWriter); err != nil {
+		return removedWorktree, branchDeleted, err
+	}
+	return removedWorktree, branchDeleted, nil
+}
+
+// finalizeDeletedWorktree is the single post-delete lifecycle path. Runtime
+// state is finalized before cache maintenance so a resumable cache failure can
+// never make an already-deleted checkout appear retained.
+func finalizeDeletedWorktree(ctx context.Context, projectID, issueID string, manager *git.WorktreeManager, removedWorktree *git.Worktree, writer runtimeProjectionWriter) error {
 	if removedWorktree != nil && strings.TrimSpace(removedWorktree.Path) != "" {
 		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(removedWorktree.Path))
 	}
-	if a.runtimeProjectionWriter != nil {
-		a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
+	if writer != nil {
+		writer.DeleteWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), issueID)
 	}
-	branchDeleted := removeOpts.DeleteBranch && removedWorktree != nil && strings.TrimSpace(removedWorktree.Branch) != ""
-	return removedWorktree, branchDeleted, nil
+	if manager == nil {
+		return errors.New("worktree manager unavailable for post-delete cache cleanup")
+	}
+	cacheRoot := gocache.RootForRepository(ctx, manager.RepoDir())
+	if err := gocache.CleanupInactiveOwner(ctx, cacheRoot, issueID); err != nil {
+		return fmt.Errorf("worktree deleted; Go cache cleanup remains pending for owner %s: %w", issueID, err)
+	}
+	return nil
 }
 
 func (a *worktreeServiceAdapter) projectedWorktreeForIssue(ctx context.Context, projectID, issueID string) (daemonstate.WorktreeState, bool, error) {
@@ -1642,19 +1668,23 @@ func (a *worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID 
 	result := &daemonhandlers.CleanupOrphanedResult{
 		ProjectID: projectID,
 	}
+	var cleanupErrors []error
 	for _, wt := range worktrees {
 		if err := manager.Delete(ctx, wt.IssueID); err != nil {
 			result.Skipped = append(result.Skipped, wt)
 			continue
 		}
-		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(wt.Path))
 		result.Removed = append(result.Removed, wt)
-		if a.runtimeProjectionWriter != nil {
-			a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), wt.IssueID)
+		if err := finalizeDeletedWorktree(ctx, projectID, wt.IssueID, manager, &wt, a.runtimeProjectionWriter); err != nil {
+			if a.logger != nil {
+				a.logger.Warn("Go cache cleanup pending after orphaned worktree deletion", "project_id", projectID, "issue_id", wt.IssueID, "error", err)
+			}
+			cleanupErrors = append(cleanupErrors, err)
+			continue
 		}
 	}
 
-	return result, nil
+	return result, errors.Join(cleanupErrors...)
 }
 
 func (a *worktreeServiceAdapter) ensureBackgroundPoller(projectID string) {

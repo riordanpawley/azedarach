@@ -57,8 +57,12 @@ replayed package/test durations are reported but excluded from current pathology
 budgets; the cached profile's current wall time remains budgeted. The raw stream
 remains authoritative.
 
-Every report also records `cache_mode` as `cleared-and-bypassed`, `bypassed`, or
-`permitted`, so a zero-cache-hit run still states its selected cache policy.
+Every v2 report records `test_result_cache_mode` as `cleared-and-bypassed`,
+`bypassed`, or `permitted`. The compatibility `cache_mode` field has the same
+test-result meaning. Neither field describes compiled build objects. The
+`build_cache` object separately records its namespace and retention policy,
+bytes/files before and after, deltas, family bytes, thresholds, and the selected
+warning/refusal/maintenance decision.
 
 The runner writes all artifacts before returning the test command's exit status
 or a budget failure. Do not replace it with a shell pipeline that loses earlier
@@ -66,15 +70,15 @@ failures or reports only the last failing package.
 
 ## Profile semantics
 
-| Profile | Cache | Scope | Purpose |
-|---|---|---|---|
-| `cold` | cleared, plus `-count=1` | `./...` with `-p=4` | Canonical complete before/after measurement and all-failures run with bounded package concurrency. |
-| `cached` | explicitly permitted | `./...` | Measures normal repeat developer feedback; cached packages remain visible in the JSON stream. |
-| `focused` | bypassed with `-count=1` | defaults to `./internal/testtiming`; override with repeated `--package` | Fast development checks without pretending to be complete coverage. |
-| `integration` | bypassed with `-count=1` | daemon, daemon-process, Git, and tmux tests named `RealProcessProfile…` | Real subprocess and lifecycle contracts only. |
-| `migration-clone` | bypassed with `-count=1` | issue, user-store, runtime-state, and daemon migration/repair tests | Fresh, historical-upgrade, rollback, drift, repair, reopen, and clone-isolation execution paths. |
-| `race` | bypassed with `-count=1` | selected SQLite-clone, daemon-process, and concurrent Git contracts under `-race` | Focused shared-state validation that remains useful on ordinary developer hosts. |
-| `boundary` | bypassed with `-count=1` | CLI/TUI executable boundary guards | Thin-client, transport-shim, and session-projection regressions; static graph checks remain in `just check-boundaries`. |
+| Profile | Test-result cache | Build-cache namespace | Scope | Purpose |
+|---|---|---|---|---|
+| `cold` | cleared, plus `-count=1` | normal / lifecycle owner | `./...` with `-p=4` | Canonical complete before/after measurement and all-failures run with bounded package concurrency. |
+| `cached` | explicitly permitted | normal / lifecycle owner | `./...` | Measures normal repeat developer feedback; cached packages remain visible in the JSON stream. |
+| `focused` | bypassed with `-count=1` | normal / lifecycle owner | defaults to `./internal/testtiming`; override with repeated `--package` | Fast development checks without pretending to be complete coverage. |
+| `integration` | bypassed with `-count=1` | normal / lifecycle owner | daemon, daemon-process, Git, and tmux tests named `RealProcessProfile…` | Real subprocess and lifecycle contracts only. |
+| `migration-clone` | bypassed with `-count=1` | normal / lifecycle owner | issue, user-store, runtime-state, and daemon migration/repair tests | Fresh, historical-upgrade, rollback, drift, repair, reopen, and clone-isolation execution paths. |
+| `race` | bypassed with `-count=1` | race / lifecycle owner | selected SQLite-clone, daemon-process, and concurrent Git contracts under `-race` | Focused shared-state validation that remains useful on ordinary developer hosts. |
+| `boundary` | bypassed with `-count=1` | normal / lifecycle owner | CLI/TUI executable boundary guards | Thin-client, transport-shim, and session-projection regressions; static graph checks remain in `just check-boundaries`. |
 
 Use `--check-budgets=false` only for exploratory measurement; it never suppresses
 test failures. `--output` and `--baseline` may select alternative artifact roots
@@ -130,6 +134,13 @@ contracts; this documents the limiting contract instead of silently weakening
 the default 60s pathology threshold. Tighten the committed baseline and budgets
 after a reviewed same-machine cold measurement; do not loosen them merely to
 make a regression pass.
+
+During worker iteration, prefer focused/package gates. Run one complete cold
+failure-batch after the implementation stabilizes, classify and repair its full
+failure set, and avoid starting overlapping broad matrices. Review runs only
+the change-sensitive integration, migration-clone, race, or boundary profiles.
+The final root/integration merge gate remains the one canonical full semantic
+gate after accepted issue branches have been assembled.
 
 The 1.60 package factor is based on repeated final-gate evidence: the TUI
 package varied up to 33.79s while complete-suite wall remained 77.87–97.59s and

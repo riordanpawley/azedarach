@@ -2,10 +2,14 @@
 // runner and its baseline/budget comparisons.
 package testtiming
 
-import "time"
+import (
+	"time"
+
+	"github.com/riordanpawley/azedarach/internal/gocache"
+)
 
 const (
-	ReportSchema   = "azedarach.test_timing_report.v1"
+	ReportSchema   = "azedarach.test_timing_report.v2"
 	BaselineSchema = "azedarach.test_timing_baseline.v1"
 )
 
@@ -31,24 +35,26 @@ type Failure struct {
 }
 
 type Measurement struct {
-	Schema           string     `json:"schema"`
-	Profile          string     `json:"profile"`
-	CacheMode        string     `json:"cache_mode"`
-	ResourceMethod   string     `json:"resource_measurement"`
-	StartedAt        time.Time  `json:"started_at"`
-	WallSeconds      float64    `json:"wall_seconds"`
-	UserCPUSeconds   float64    `json:"user_cpu_seconds"`
-	SystemCPUSeconds float64    `json:"system_cpu_seconds"`
-	PeakRSSBytes     int64      `json:"peak_rss_bytes"`
-	ExitCode         int        `json:"exit_code"`
-	Packages         []Duration `json:"packages"`
-	Tests            []Duration `json:"tests"`
-	Failures         []Failure  `json:"failures"`
-	InvalidEvents    int        `json:"invalid_events"`
-	RawJSONPath      string     `json:"raw_json_path"`
-	StderrPath       string     `json:"stderr_path"`
-	Command          []string   `json:"command"`
-	Comparison       Comparison `json:"comparison"`
+	Schema              string            `json:"schema"`
+	Profile             string            `json:"profile"`
+	CacheMode           string            `json:"cache_mode"`
+	TestResultCacheMode string            `json:"test_result_cache_mode"`
+	BuildCache          gocache.Telemetry `json:"build_cache"`
+	ResourceMethod      string            `json:"resource_measurement"`
+	StartedAt           time.Time         `json:"started_at"`
+	WallSeconds         float64           `json:"wall_seconds"`
+	UserCPUSeconds      float64           `json:"user_cpu_seconds"`
+	SystemCPUSeconds    float64           `json:"system_cpu_seconds"`
+	PeakRSSBytes        int64             `json:"peak_rss_bytes"`
+	ExitCode            int               `json:"exit_code"`
+	Packages            []Duration        `json:"packages"`
+	Tests               []Duration        `json:"tests"`
+	Failures            []Failure         `json:"failures"`
+	InvalidEvents       int               `json:"invalid_events"`
+	RawJSONPath         string            `json:"raw_json_path"`
+	StderrPath          string            `json:"stderr_path"`
+	Command             []string          `json:"command"`
+	Comparison          Comparison        `json:"comparison"`
 }
 
 type BaselineProfile struct {

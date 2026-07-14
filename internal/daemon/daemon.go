@@ -1368,8 +1368,11 @@ func (d *Daemon) recoverInterruptedDeferredWorktreeCleanup(ctx context.Context, 
 			ErrorMessage: err.Error(),
 		}, true
 	}
-	if removedWorktree != nil {
-		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(removedWorktree.Path))
+	if cleanupErr := finalizeDeletedWorktree(cleanupCtx, projectID, taskID, manager, removedWorktree, d.runtimeProjectionStateWriter()); cleanupErr != nil {
+		return interruptedOperationRecovery{
+			State:        daemonops.StateFailed,
+			ErrorMessage: cleanupErr.Error(),
+		}, true
 	}
 	payload, _ := json.Marshal(deferredTaskWorktreeCleanupResult{
 		ProjectID: projectID,
