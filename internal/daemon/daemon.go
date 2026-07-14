@@ -196,6 +196,9 @@ type Daemon struct {
 	orchestrationSnapshotLoadMu          sync.Mutex
 	orchestrationSnapshotLoads           map[string]*orchestrationSnapshotLoad
 	orchestrationSnapshotBuild           orchestrationSnapshotBuilder
+	orchestrationProjectionExported      func()
+	taskGraphOperationList               func(context.Context, daemonops.Query) ([]daemonops.Record, error)
+	taskGraphUnresolvedInteractionIDs    func(context.Context, string) (map[string]struct{}, error)
 	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error
 	watchClientsMu                       sync.Mutex
 	watchClients                         map[string]watchClientObservation

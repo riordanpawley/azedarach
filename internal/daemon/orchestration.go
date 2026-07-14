@@ -355,6 +355,9 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 			return protocol.OrchestrationSnapshot{}, fmt.Errorf("reload project orchestration projection after runtime refresh: %w", err)
 		}
 	}
+	if a.daemon.orchestrationProjectionExported != nil {
+		a.daemon.orchestrationProjectionExported()
+	}
 	tasks := projection.Tasks
 	tasks = deriveOrchestrationProjectionFacts(tasks, projection.UnresolvedInteractionIDs, projection.InvestigationAcceptances)
 	snapshot.ProjectionRevision = projection.Checkpoint
@@ -399,10 +402,18 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 	if len(roots) > limit {
 		roots = roots[:limit]
 	}
+	rootIDs := make([]string, 0, len(roots))
+	for _, rootTask := range roots {
+		rootIDs = append(rootIDs, rootTask.ID.String())
+	}
+	readinessContext, err := a.daemon.captureTaskGraphReadinessContext(ctx, projectID, tasks, rootIDs, projection.UnresolvedInteractionIDs)
+	if err != nil {
+		return protocol.OrchestrationSnapshot{}, fmt.Errorf("capture project readiness context: %w", err)
+	}
 	for _, rootTask := range roots {
 		root := rootTask.ID.String()
 		snapshot.Roots = append(snapshot.Roots, root)
-		ready, err := a.daemon.buildTaskGraphReadinessFromTasksForActor(ctx, projectID, root, request.ActorID, tasks)
+		ready, err := deriveTaskGraphReadinessFromTasksForActor(root, request.ActorID, tasks, readinessContext)
 		if err != nil {
 			snapshot.Blocked[root] = err.Error()
 			continue

@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -868,6 +870,151 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessInteractions(t *testin
 	}
 	if got := candidateClass(woken.Candidates, id); got != "runnable" {
 		t.Fatalf("resolved class = %q, want runnable", got)
+	}
+}
+
+func TestProjectOrchestrationSnapshotKeepsExportedInteractionDecisionAcrossPostExportResolution(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
+	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
+	issueID, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	request := domain.InteractionRequest{ID: "barrier-resolution", IssueID: issueID, DecisionKey: "policy", OrchestrationScope: "project", Question: "Which policy?", Why: "Human choice required", RequiredDecisions: []string{"select policy"}, Significance: domain.InteractionSignificanceMaterial, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose policy"}, State: domain.InteractionOpen, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := reader.CreateInteraction(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
+	d.orchestrationProjectionExported = func() {
+		resolvedAt := now.Add(time.Second)
+		request.FinalAnswer = &domain.InteractionAnswerAudit{Answer: domain.InteractionAnswerPayload{SelectedOption: "safe", Rationale: "preserve constraints", SignificanceRecommendation: domain.InteractionSignificanceMaterial, Revision: request.Revision}, Actor: "human", CreatedAt: resolvedAt}
+		resolved, transitionErr := request.Transition(domain.InteractionResolved, 1, resolvedAt)
+		if transitionErr != nil {
+			t.Fatal(transitionErr)
+		}
+		if updateErr := writer.UpdateInteraction(ctx, resolved, 1); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+		d.orchestrationProjectionExported = nil
+	}
+	snapshot, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := candidateClass(snapshot.Candidates, issueID); got != string(domain.OrchestrationCandidateDecisionWaiting) {
+		t.Fatalf("candidate class = %q, want decision-waiting from exported checkpoint", got)
+	}
+	if reason := snapshot.Blocked[issueID]; !strings.Contains(reason, "unresolved interaction") {
+		t.Fatalf("blocked reason = %q, want exported interaction blocker", reason)
+	}
+	if slices.Contains(snapshot.Runnable, issueID) {
+		t.Fatalf("runnable = %v, must not contradict exported interaction", snapshot.Runnable)
+	}
+	if len(snapshot.Interactions) != 1 || snapshot.Interactions[0].ID != request.ID || snapshot.Interactions[0].State != domain.InteractionOpen {
+		t.Fatalf("interactions = %+v, want one open request from exported checkpoint", snapshot.Interactions)
+	}
+	if snapshot.ProjectionRevision == 0 {
+		t.Fatal("projection revision must identify the exported checkpoint")
+	}
+}
+
+func TestProjectOrchestrationSnapshotCapturesAuxiliaryReadinessInputsOnce(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	for i := range 50 {
+		if _, err := client.Create(ctx, issues.CreateTaskParams{Title: fmt.Sprintf("Root %02d", i), Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	operationReads := 0
+	interactionReads := 0
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	d.taskGraphOperationList = func(context.Context, daemonops.Query) ([]daemonops.Record, error) {
+		operationReads++
+		return nil, nil
+	}
+	d.taskGraphUnresolvedInteractionIDs = func(context.Context, string) (map[string]struct{}, error) {
+		interactionReads++
+		return nil, nil
+	}
+	for _, limit := range []int{1, 50} {
+		operationReads, interactionReads = 0, 0
+		snapshot, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: limit})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.Roots) != limit {
+			t.Fatalf("limit %d roots = %d", limit, len(snapshot.Roots))
+		}
+		if operationReads != 3 {
+			t.Fatalf("limit %d operation reads = %d, want three snapshot-wide maps", limit, operationReads)
+		}
+		if interactionReads != 0 {
+			t.Fatalf("limit %d auxiliary interaction reads = %d, want exported interaction map only", limit, interactionReads)
+		}
+	}
+}
+
+func TestProjectOrchestrationRealBuilderRemainsCoherentDuringProjectionChurn(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
+	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
+	guardedID, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Guarded", Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	request := domain.InteractionRequest{ID: "churn-guard", IssueID: guardedID, DecisionKey: "policy", OrchestrationScope: "project", Question: "Which policy?", Why: "Human choice required", RequiredDecisions: []string{"select policy"}, Significance: domain.InteractionSignificanceMaterial, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose policy"}, State: domain.InteractionOpen, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := reader.CreateInteraction(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
+	stop := make(chan struct{})
+	writerErr := make(chan error, 1)
+	go func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				writerErr <- nil
+				return
+			default:
+			}
+			_, createErr := writer.Create(ctx, issues.CreateTaskParams{Title: fmt.Sprintf("Churn %d", i), Description: "Revision churn", Acceptance: "Recorded", Type: domain.TypeTask, Priority: domain.P4, Status: domain.StatusOpen})
+			if createErr != nil {
+				writerErr <- createErr
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	for i := range 25 {
+		snapshot, snapshotErr := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+		if snapshotErr != nil {
+			close(stop)
+			<-writerErr
+			t.Fatalf("snapshot %d: %v", i, snapshotErr)
+		}
+		if got := candidateClass(snapshot.Candidates, guardedID); got != string(domain.OrchestrationCandidateDecisionWaiting) {
+			close(stop)
+			<-writerErr
+			t.Fatalf("snapshot %d candidate class = %q", i, got)
+		}
+		if slices.Contains(snapshot.Runnable, guardedID) || !strings.Contains(snapshot.Blocked[guardedID], "unresolved interaction") {
+			close(stop)
+			<-writerErr
+			t.Fatalf("snapshot %d readiness contradiction: runnable=%v blocked=%q", i, snapshot.Runnable, snapshot.Blocked[guardedID])
+		}
+	}
+	close(stop)
+	if err := <-writerErr; err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -8247,7 +8247,7 @@ func TestTaskGraphReadinessStopsAtNestedRoots(t *testing.T) {
 	if slices.Contains(result.Runnable, grandchild.String()) {
 		t.Fatalf("runnable = %v, must not flatten nested root descendant %s", result.Runnable, grandchild.String())
 	}
-	observations := (&Daemon{}).daemonTaskGraphWorkerObservations(context.Background(), "proj", rootID, byID, children, result)
+	observations := daemonTaskGraphWorkerObservations(rootID, byID, children, result, taskGraphReadinessContext{})
 	observedDirect := false
 	for _, observation := range observations {
 		if observation.IssueID == direct.String() {

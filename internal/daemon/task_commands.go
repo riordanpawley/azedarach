@@ -4915,26 +4915,116 @@ func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID,
 	if err != nil {
 		return taskGraphReadinessResult{}, fmt.Errorf("inspect issue graph readiness: %w", err)
 	}
-	return d.buildTaskGraphReadinessFromTasksForActor(ctx, projectID, rootIssueID, actorID, tasks)
+	waitingIssues, err := d.taskGraphUnresolvedInteractions(ctx, projectID)
+	if err != nil {
+		return taskGraphReadinessResult{}, fmt.Errorf("refresh interaction readiness projection: %w", err)
+	}
+	readinessContext, err := d.captureTaskGraphReadinessContext(ctx, projectID, tasks, []string{rootIssueID}, waitingIssues)
+	if err != nil {
+		return taskGraphReadinessResult{}, err
+	}
+	return deriveTaskGraphReadinessFromTasksForActor(rootIssueID, actorID, tasks, readinessContext)
 }
 
-func (d *Daemon) buildTaskGraphReadinessFromTasksForActor(ctx context.Context, projectID, rootIssueID, actorID string, tasks []domain.Task) (taskGraphReadinessResult, error) {
+func (d *Daemon) taskGraphUnresolvedInteractions(ctx context.Context, projectID string) (map[string]struct{}, error) {
+	if d.taskGraphUnresolvedInteractionIDs != nil {
+		return d.taskGraphUnresolvedInteractionIDs(ctx, d.canonicalProjectID(projectID))
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil, fmt.Errorf("issue store unavailable")
+	}
+	return issueClient.UnresolvedInteractionIssueIDs(ctx)
+}
+
+type taskGraphReadinessContext struct {
+	capturedAt             time.Time
+	waitingIssues          map[string]struct{}
+	pendingStarts          map[string]taskGraphPendingStart
+	startProgressByIssue   map[string]taskGraphSessionStartProgress
+	failedStartsByIssue    map[string]taskGraphStartFailure
+	containmentRisksByRoot map[string][]taskContainmentRisk
+	issueEventsByIssue     map[string][]domain.IssueObservationEvent
+	mailEventsByRoot       map[string]map[string][]daemonMailEvent
+	initCommandsConfigured bool
+}
+
+func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID string, tasks []domain.Task, roots []string, waitingIssues map[string]struct{}) (taskGraphReadinessContext, error) {
+	var err error
+	captured := taskGraphReadinessContext{
+		capturedAt:             time.Now().UTC(),
+		waitingIssues:          cloneStringStructMap(waitingIssues),
+		containmentRisksByRoot: make(map[string][]taskContainmentRisk, len(roots)),
+		issueEventsByIssue:     make(map[string][]domain.IssueObservationEvent, len(tasks)),
+		mailEventsByRoot:       make(map[string]map[string][]daemonMailEvent, len(roots)),
+		initCommandsConfigured: len(d.runtimeConfigForProject(projectID).SessionSyncInitCommands) > 0,
+	}
+	captured.pendingStarts, err = d.taskGraphPendingSessionStarts(ctx, projectID)
+	if err != nil {
+		return taskGraphReadinessContext{}, err
+	}
+	captured.startProgressByIssue = d.sessionStartProgressByIssueAt(ctx, projectID, captured.capturedAt)
+	captured.failedStartsByIssue = d.failedSessionStartByIssue(ctx, projectID)
+	var worktrees []git.Worktree
+	if d != nil && d.worktreeAdapter != nil {
+		worktrees, err = d.worktreeAdapter.List(ctx, projectID)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("readiness context worktree list failed", "project_id", projectID, "error", err)
+			}
+			worktrees = nil
+		}
+	}
+	for _, rootIssueID := range uniqueNonEmpty(roots) {
+		rootID, byID, children, indexErr := daemonTaskGraphIndexes(rootIssueID, tasks)
+		if indexErr != nil {
+			continue
+		}
+		captured.containmentRisksByRoot[rootIssueID] = d.daemonTaskGraphContainmentRisks(ctx, projectID, rootID, byID, children, worktrees)
+		captured.mailEventsByRoot[rootIssueID] = d.workerObservationMailboxEvents(rootIssueID)
+	}
+	for _, task := range tasks {
+		issueID := task.ID.String()
+		captured.issueEventsByIssue[issueID] = d.workerObservationIssueEvents(ctx, projectID, issueID)
+	}
+	return captured, nil
+}
+
+func (d *Daemon) listTaskGraphOperations(ctx context.Context, query daemonops.Query) ([]daemonops.Record, error) {
+	query.ProjectID = d.canonicalProjectID(query.ProjectID)
+	if d.taskGraphOperationList != nil {
+		return d.taskGraphOperationList(ctx, query)
+	}
+	if d == nil || d.operationRuntime == nil || d.operationRuntime.manager == nil {
+		return nil, nil
+	}
+	return d.operationRuntime.manager.List(ctx, query)
+}
+
+func cloneStringStructMap(in map[string]struct{}) map[string]struct{} {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(in))
+	for key := range in {
+		out[key] = struct{}{}
+	}
+	return out
+}
+
+func deriveTaskGraphReadinessFromTasksForActor(rootIssueID, actorID string, tasks []domain.Task, captured taskGraphReadinessContext) (taskGraphReadinessResult, error) {
 	rootID, byID, children, err := daemonTaskGraphIndexes(rootIssueID, tasks)
 	if err != nil {
 		return taskGraphReadinessResult{}, err
 	}
-	ready, err := daemonTaskGraphReadinessFromIndexesForActor(rootID, byID, children, actorID, time.Now().UTC())
+	ready, err := daemonTaskGraphReadinessFromIndexesForActor(rootID, byID, children, actorID, captured.capturedAt)
 	if err != nil {
 		return taskGraphReadinessResult{}, err
 	}
-	waitingIssues, err := d.issueClientForProject(projectID).UnresolvedInteractionIssueIDs(ctx)
-	if err != nil {
-		return taskGraphReadinessResult{}, fmt.Errorf("refresh interaction readiness projection: %w", err)
-	}
-	if len(waitingIssues) > 0 {
+	if len(captured.waitingIssues) > 0 {
 		runnable := ready.Runnable[:0]
 		for _, issueID := range ready.Runnable {
-			if _, waiting := waitingIssues[issueID]; waiting {
+			if _, waiting := captured.waitingIssues[issueID]; waiting {
 				ready.Blocked[issueID] = "unresolved interaction request requires human decision"
 				continue
 			}
@@ -4942,22 +5032,16 @@ func (d *Daemon) buildTaskGraphReadinessFromTasksForActor(ctx context.Context, p
 		}
 		ready.Runnable = runnable
 	}
-	pendingStarts, err := d.taskGraphPendingSessionStarts(ctx, projectID)
-	if err != nil {
-		return taskGraphReadinessResult{}, err
+	if len(captured.pendingStarts) > 0 {
+		ready = daemonTaskGraphApplyPendingStarts(ready, captured.pendingStarts)
 	}
-	if len(pendingStarts) > 0 {
-		ready = daemonTaskGraphApplyPendingStarts(ready, pendingStarts)
-	}
-	startProgressByIssue := d.sessionStartProgressByIssue(ctx, projectID)
-	failedStartsByIssue := d.failedSessionStartByIssue(ctx, projectID)
-	ready.applySessionStartProgress(startProgressByIssue)
-	ready.NestedRoots = d.daemonTaskGraphNestedRoots(ctx, projectID, ready.NestedRoots, byID, startProgressByIssue, failedStartsByIssue)
-	ready.ActiveSessions = d.daemonTaskGraphActiveSessions(ctx, projectID, ready.Active, byID, startProgressByIssue)
+	ready.applySessionStartProgress(captured.startProgressByIssue)
+	ready.NestedRoots = daemonTaskGraphNestedRoots(ready.NestedRoots, byID, captured.startProgressByIssue, captured.failedStartsByIssue, captured)
+	ready.ActiveSessions = daemonTaskGraphActiveSessions(ready.Active, byID, captured.startProgressByIssue, captured)
 	ready.ActiveSessions = append(ready.ActiveSessions, daemonTaskGraphCleanupPendingSessions(rootID, byID, children)...)
-	ready.SessionStartProgress = daemonTaskGraphSessionStartProgressList(rootID, children, startProgressByIssue)
-	ready.ContainmentRisks = d.daemonTaskGraphContainmentRisks(ctx, projectID, rootID, byID, children)
-	ready.WorkerObservations = d.daemonTaskGraphWorkerObservations(ctx, projectID, rootID, byID, children, ready)
+	ready.SessionStartProgress = daemonTaskGraphSessionStartProgressList(rootID, children, captured.startProgressByIssue)
+	ready.ContainmentRisks = append([]taskContainmentRisk(nil), captured.containmentRisksByRoot[rootIssueID]...)
+	ready.WorkerObservations = daemonTaskGraphWorkerObservations(rootID, byID, children, ready, captured)
 	ready.Capacity = daemonTaskGraphCapacitySummary(ready)
 	return ready, nil
 }
@@ -5223,15 +5307,9 @@ func (d *Daemon) daemonTaskGraphContainmentRisks(
 	rootID naming.IssueID,
 	byID map[naming.IssueID]domain.Task,
 	children map[naming.IssueID][]naming.IssueID,
+	worktrees []git.Worktree,
 ) []taskContainmentRisk {
-	if d == nil || d.git == nil || d.worktreeAdapter == nil {
-		return nil
-	}
-	worktrees, err := d.worktreeAdapter.List(ctx, projectID)
-	if err != nil {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("containment risk worktree list failed", "project_id", projectID, "root_issue_id", rootID.String(), "error", err)
-		}
+	if d == nil || d.git == nil || len(worktrees) == 0 {
 		return nil
 	}
 	rootWorktree, ok := daemonWorktreeForIssue(worktrees, rootID.String())
@@ -5414,13 +5492,12 @@ func shortCommitHash(hash string) string {
 	return hash
 }
 
-func (d *Daemon) daemonTaskGraphNestedRoots(
-	ctx context.Context,
-	projectID string,
+func daemonTaskGraphNestedRoots(
 	nested []taskGraphNestedRoot,
 	byID map[naming.IssueID]domain.Task,
 	startProgressByIssue map[string]taskGraphSessionStartProgress,
 	failedStartsByIssue map[string]taskGraphStartFailure,
+	captured taskGraphReadinessContext,
 ) []taskGraphNestedRoot {
 	if len(nested) == 0 {
 		return nil
@@ -5433,7 +5510,7 @@ func (d *Daemon) daemonTaskGraphNestedRoots(
 			activeIDs = append(activeIDs, item.IssueID)
 		}
 	}
-	activeByIssue := daemonTaskGraphActiveSessionsByIssue(d.daemonTaskGraphActiveSessions(ctx, projectID, activeIDs, byID, startProgressByIssue))
+	activeByIssue := daemonTaskGraphActiveSessionsByIssue(daemonTaskGraphActiveSessions(activeIDs, byID, startProgressByIssue, captured))
 	out := make([]taskGraphNestedRoot, 0, len(nested))
 	for _, item := range nested {
 		taskID, parseErr := naming.ParseIssueID(item.IssueID)
@@ -5477,10 +5554,12 @@ func (d *Daemon) daemonTaskGraphNestedRoots(
 
 func (d *Daemon) failedSessionStartByIssue(ctx context.Context, projectID string) map[string]taskGraphStartFailure {
 	if d == nil || d.operationRuntime == nil || d.operationRuntime.manager == nil {
-		return nil
+		if d == nil || d.taskGraphOperationList == nil {
+			return nil
+		}
 	}
 	projectID = d.canonicalProjectID(projectID)
-	records, err := d.operationRuntime.manager.List(ctx, daemonops.Query{
+	records, err := d.listTaskGraphOperations(ctx, daemonops.Query{
 		ProjectID: projectID,
 		Kind:      daemonhandlers.CommandSessionStart,
 		States:    []daemonops.State{daemonops.StateDone, daemonops.StateFailed, daemonops.StateCancelled},
@@ -5635,13 +5714,12 @@ func hasTaskGraphSessionStartProgress(issueID string, progressByIssue map[string
 	return ok
 }
 
-func (d *Daemon) daemonTaskGraphWorkerObservations(
-	ctx context.Context,
-	projectID string,
+func daemonTaskGraphWorkerObservations(
 	rootID naming.IssueID,
 	byID map[naming.IssueID]domain.Task,
 	children map[naming.IssueID][]naming.IssueID,
 	ready taskGraphReadinessResult,
+	captured taskGraphReadinessContext,
 ) []domain.WorkerObservation {
 	leafIDs := daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children)
 	if len(leafIDs) == 0 {
@@ -5652,7 +5730,7 @@ func (d *Daemon) daemonTaskGraphWorkerObservations(
 	startProgressByIssue := daemonTaskGraphStartProgressByIssue(ready.SessionStartProgress)
 	staleByIssue := daemonTaskGraphStaleCloseableByIssue(ready.StaleCloseableChildren)
 	runnable := stringSet(ready.Runnable)
-	mailByIssue := d.workerObservationMailboxEvents(rootID.String())
+	mailByIssue := captured.mailEventsByRoot[rootID.String()]
 
 	out := make([]domain.WorkerObservation, 0, len(leafIDs))
 	for _, id := range leafIDs {
@@ -5661,7 +5739,7 @@ func (d *Daemon) daemonTaskGraphWorkerObservations(
 			continue
 		}
 		issueID := task.ID.String()
-		issueEvents := d.workerObservationIssueEvents(ctx, projectID, issueID)
+		issueEvents := captured.issueEventsByIssue[issueID]
 		observation := daemonWorkerObservationFromInputs(workerObservationInputs{
 			RootIssueID:     rootID.String(),
 			Task:            task,
@@ -6151,10 +6229,12 @@ func (d *Daemon) workerObservationIssueEvents(ctx context.Context, projectID, is
 
 func (d *Daemon) taskGraphPendingSessionStarts(ctx context.Context, projectID string) (map[string]taskGraphPendingStart, error) {
 	if d == nil || d.operationRuntime == nil || d.operationRuntime.manager == nil {
-		return nil, nil
+		if d == nil || d.taskGraphOperationList == nil {
+			return nil, nil
+		}
 	}
 	projectID = d.canonicalProjectID(projectID)
-	records, err := d.operationRuntime.manager.List(ctx, daemonops.Query{
+	records, err := d.listTaskGraphOperations(ctx, daemonops.Query{
 		ProjectID: projectID,
 		Kind:      daemonhandlers.CommandSessionStart,
 		States:    []daemonops.State{daemonops.StateQueued, daemonops.StateRunning},
@@ -6379,7 +6459,7 @@ func daemonTaskGraphUnresolvedBlockers(task domain.Task, byID map[naming.IssueID
 	return out
 }
 
-func (d *Daemon) daemonTaskGraphActiveSessions(ctx context.Context, projectID string, activeIDs []string, byID map[naming.IssueID]domain.Task, progressByIssue map[string]taskGraphSessionStartProgress) []taskGraphActiveSession {
+func daemonTaskGraphActiveSessions(activeIDs []string, byID map[naming.IssueID]domain.Task, progressByIssue map[string]taskGraphSessionStartProgress, captured taskGraphReadinessContext) []taskGraphActiveSession {
 	if len(activeIDs) == 0 {
 		return nil
 	}
@@ -6408,7 +6488,7 @@ func (d *Daemon) daemonTaskGraphActiveSessions(ctx context.Context, projectID st
 			}
 			if progress, found := progressByIssue[sessionKey(issueID)]; found {
 				active.StartProgress = &progress
-			} else if progress, found := d.sessionInitCommandProgress(ctx, projectID, task); found {
+			} else if progress, found := sessionInitCommandProgress(task, captured.initCommandsConfigured, captured.capturedAt); found {
 				active.StartProgress = &progress
 			}
 		}
@@ -6451,11 +6531,17 @@ func daemonTaskGraphCleanupPendingSessions(rootID naming.IssueID, byID map[namin
 }
 
 func (d *Daemon) sessionStartProgressByIssue(ctx context.Context, projectID string) map[string]taskGraphSessionStartProgress {
+	return d.sessionStartProgressByIssueAt(ctx, projectID, time.Now().UTC())
+}
+
+func (d *Daemon) sessionStartProgressByIssueAt(ctx context.Context, projectID string, now time.Time) map[string]taskGraphSessionStartProgress {
 	if d == nil || d.operationRuntime == nil || d.operationRuntime.manager == nil {
-		return nil
+		if d == nil || d.taskGraphOperationList == nil {
+			return nil
+		}
 	}
 	projectID = d.canonicalProjectID(projectID)
-	records, err := d.operationRuntime.manager.List(ctx, daemonops.Query{
+	records, err := d.listTaskGraphOperations(ctx, daemonops.Query{
 		ProjectID: projectID,
 		Kind:      daemonhandlers.CommandSessionStart,
 		States:    []daemonops.State{daemonops.StateQueued, daemonops.StateRunning},
@@ -6467,7 +6553,6 @@ func (d *Daemon) sessionStartProgressByIssue(ctx context.Context, projectID stri
 		}
 		return nil
 	}
-	now := time.Now().UTC()
 	out := make(map[string]taskGraphSessionStartProgress, len(records))
 	for _, record := range records {
 		issueID := strings.TrimSpace(record.IssueID)
@@ -6508,7 +6593,11 @@ func taskGraphSessionStartProgressFromOperation(record daemonops.Record, now tim
 }
 
 func (d *Daemon) sessionInitCommandProgress(_ context.Context, projectID string, task domain.Task) (taskGraphSessionStartProgress, bool) {
-	if task.Session == nil || len(d.runtimeConfigForProject(projectID).SessionSyncInitCommands) == 0 {
+	return sessionInitCommandProgress(task, len(d.runtimeConfigForProject(projectID).SessionSyncInitCommands) > 0, time.Now().UTC())
+}
+
+func sessionInitCommandProgress(task domain.Task, initCommandsConfigured bool, now time.Time) (taskGraphSessionStartProgress, bool) {
+	if task.Session == nil || !initCommandsConfigured {
 		return taskGraphSessionStartProgress{}, false
 	}
 	if strings.TrimSpace(task.Session.Activity) != "busy" || strings.TrimSpace(task.Session.ActivitySource) != "session" {
@@ -6516,7 +6605,7 @@ func (d *Daemon) sessionInitCommandProgress(_ context.Context, projectID string,
 	}
 	elapsedMS := int64(0)
 	if task.Session.StartedAt != nil && !task.Session.StartedAt.IsZero() {
-		elapsedMS = time.Since(task.Session.StartedAt.UTC()).Milliseconds()
+		elapsedMS = now.Sub(task.Session.StartedAt.UTC()).Milliseconds()
 		if elapsedMS < 0 {
 			elapsedMS = 0
 		}
