@@ -24,7 +24,8 @@ fake_engine() {
         *State.Running*)
           case "${4:-}" in azedarach-jaeger-444) echo false ;; *) echo "${FAKE_RUNNING:-true}" ;; esac
           ;;
-        *expires_at*) echo "$((now + 3600))" ;;
+        *expires_at*) echo "${FAKE_EXPIRES_AT:-$((now + 3600))}" ;;
+        *azedarach.jaeger.fallback*) echo true ;;
         *Config.Labels*)
           echo "azedarach.jaeger.managed = true"
           echo "azedarach.jaeger.storage = ${AZEDARACH_JAEGER_STORAGE:-memory}"
@@ -56,6 +57,7 @@ fake_engine() {
 export AZEDARACH_CONTAINER_ENGINE=fake_engine
 export AZEDARACH_JAEGER_ENDPOINT_FILE="$tmp/endpoint"
 export AZEDARACH_JAEGER_STARTUP_GRACE_SECONDS=0
+export AZEDARACH_JAEGER_DISABLE_EXPIRY_WORKER=1
 
 : >"$calls"
 jaeger_start fake_engine azedarach-jaeger-fallback 0 memory
@@ -126,5 +128,52 @@ grep -q 'localhost:31686' <<<"$output"
 grep -q 'localhost:34318/v1/traces' <<<"$output"
 grep -qx 'localhost:34318' "$AZEDARACH_JAEGER_ENDPOINT_FILE"
 [[ "$(sed -n '2p' "$AZEDARACH_JAEGER_ENDPOINT_FILE")" -gt "$now" ]]
+
+# Expiry removes the matching running fallback and invalidates only its
+# immutable endpoint generation.
+: >"$calls"
+expired="$((now - 1))"
+old_record="$(jaeger_write_endpoint_state localhost:34318 "$expired")"
+FAKE_EXPIRES_AT="$expired" jaeger_expire_fallback fake_engine azedarach-jaeger-fallback "$expired" "$old_record"
+grep -q '^rm -f azedarach-jaeger-fallback ' "$calls"
+if [[ -e "$old_record" || -e "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]; then
+  echo "expired fallback endpoint remained readable" >&2
+  exit 1
+fi
+
+# A newer primary publication is a different immutable generation and cannot
+# be cleared by the older fallback worker.
+fallback_record="$(jaeger_write_endpoint_state localhost:34318 "$expired")"
+primary_record="$(jaeger_write_endpoint_state localhost:4318 0)"
+FAKE_EXPIRES_AT="$expired" jaeger_expire_fallback fake_engine azedarach-jaeger-fallback "$expired" "$fallback_record"
+[[ ! -e "$fallback_record" ]]
+[[ -e "$primary_record" ]]
+grep -qx 'localhost:4318' "$AZEDARACH_JAEGER_ENDPOINT_FILE"
+
+# Re-publishing one fallback generation keeps one durable expiry owner.
+export AZEDARACH_JAEGER_DISABLE_EXPIRY_WORKER=0
+JAEGER_PUBLISHED_EXPIRES_AT="$((now + 60))"
+JAEGER_PUBLISHED_ENDPOINT_RECORD="$(jaeger_write_endpoint_state localhost:34318 "$JAEGER_PUBLISHED_EXPIRES_AT" azedarach-jaeger-fallback)"
+jaeger_schedule_published_expiry fake_engine azedarach-jaeger-fallback
+worker_pid_file="$(find "${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers" -name pid -type f)"
+worker_pid="$(sed -n '1p' "$worker_pid_file")"
+jaeger_schedule_published_expiry fake_engine azedarach-jaeger-fallback
+[[ "$(find "${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers" -name pid -type f | wc -l | tr -d ' ')" == "1" ]]
+[[ "$(sed -n '1p' "$worker_pid_file")" == "$worker_pid" ]]
+kill "$worker_pid" 2>/dev/null || true
+wait "$worker_pid" 2>/dev/null || true
+jaeger_clear_worker_slot "$(dirname "$worker_pid_file")"
+
+# An abandoned pre-PID slot is reclaimed instead of suppressing expiry.
+worker_key="$(printf '%s' "fake_engine:azedarach-jaeger-fallback:${JAEGER_PUBLISHED_EXPIRES_AT}" | cksum | awk '{print $1}')"
+abandoned_slot="${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers/${worker_key}"
+mkdir "$abandoned_slot"
+jaeger_schedule_published_expiry fake_engine azedarach-jaeger-fallback
+[[ -f "$abandoned_slot/pid" ]]
+worker_pid="$(sed -n '1p' "$abandoned_slot/pid")"
+kill "$worker_pid" 2>/dev/null || true
+wait "$worker_pid" 2>/dev/null || true
+jaeger_clear_worker_slot "$abandoned_slot"
+export AZEDARACH_JAEGER_DISABLE_EXPIRY_WORKER=1
 
 echo "jaeger local lifecycle tests passed"

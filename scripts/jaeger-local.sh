@@ -28,7 +28,7 @@ jaeger_host_port() {
 }
 
 jaeger_publish_env() {
-  local engine="$1" name="$2" ui_port otlp_port expires
+  local engine="$1" name="$2" ui_port otlp_port expires endpoint_record
   ui_port="$(jaeger_host_port "$engine" "$name" 16686)" || {
     echo "Warning: Jaeger container $name has no published UI port" >&2
     return 1
@@ -41,9 +41,12 @@ jaeger_publish_env() {
   export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="http://localhost:${otlp_port}/v1/traces"
   expires="$("$engine" inspect -f '{{index .Config.Labels "azedarach.jaeger.expires_at"}}' "$name" 2>/dev/null || true)"
   [[ "$expires" =~ ^[0-9]+$ ]] || expires=0
-  if ! jaeger_write_endpoint_state "localhost:${otlp_port}" "$expires"; then
+  if ! endpoint_record="$(jaeger_write_endpoint_state "localhost:${otlp_port}" "$expires" "$name")"; then
     echo "Warning: could not persist the managed Jaeger endpoint for later commands" >&2
+    endpoint_record=""
   fi
+  JAEGER_PUBLISHED_ENDPOINT_RECORD="$endpoint_record"
+  JAEGER_PUBLISHED_EXPIRES_AT="$expires"
   echo "Jaeger ready: http://localhost:${ui_port} (OTLP ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT})"
 }
 
@@ -57,15 +60,122 @@ jaeger_endpoint_file() {
 }
 
 jaeger_write_endpoint_state() {
-  local endpoint="$1" expires="$2" target dir tmp
+  local endpoint="$1" expires="$2" generation="${3:-$$.$RANDOM}"
+  local target dir record_dir record tmp link_tmp previous generation_key
   target="$(jaeger_endpoint_file)" || return 1
   dir="$(dirname "$target")"
-  mkdir -p "$dir"
+  mkdir -p "$dir" || return 1
   chmod 0700 "$dir" 2>/dev/null || true
-  tmp="${target}.tmp.$$"
+  record_dir="${target}.d"
+  mkdir -p "$record_dir" || return 1
+  chmod 0700 "$record_dir" 2>/dev/null || true
+  generation_key="$(printf '%s' "${generation}:${expires}" | cksum | awk '{print $1}')" || return 1
+  record="${record_dir}/${expires}.${generation_key}"
+  tmp="${record}.tmp"
+  link_tmp="${target}.link.$$.$RANDOM"
   umask 077
-  printf '%s\n%s\n' "$endpoint" "$expires" >"$tmp"
-  mv -f "$tmp" "$target"
+  printf '%s\n%s\n' "$endpoint" "$expires" >"$tmp" || return 1
+  mv -f "$tmp" "$record" || { rm -f "$tmp"; return 1; }
+  previous="$(readlink "$target" 2>/dev/null || true)"
+  ln -s "$record" "$link_tmp" || { rm -f "$record"; return 1; }
+  mv -f "$link_tmp" "$target" || { rm -f "$link_tmp" "$record"; return 1; }
+  if [[ -n "$previous" && "$previous" != "$record" ]]; then
+    jaeger_clear_endpoint_record "$previous" || true
+  fi
+  echo "$record"
+}
+
+jaeger_clear_endpoint_record() {
+  local record="$1" target record_dir suffix
+  [[ -n "$record" ]] || return 0
+  target="$(jaeger_endpoint_file)" || return 1
+  record_dir="${target}.d/"
+  suffix="${record#"$record_dir"}"
+  case "$record" in
+    "$record_dir"*)
+      [[ -n "$suffix" && "$suffix" != */* ]] || return 1
+      rm -f "$record"
+      ;;
+    *) echo "Warning: refusing to clear endpoint record outside $record_dir" >&2; return 1 ;;
+  esac
+}
+
+jaeger_schedule_published_expiry() {
+  local engine="$1" name="$2" expires="${JAEGER_PUBLISHED_EXPIRES_AT:-0}"
+  local record="${JAEGER_PUBLISHED_ENDPOINT_RECORD:-}" target worker_dir worker_key slot pid
+  [[ "$expires" =~ ^[0-9]+$ ]] && (( expires > 0 )) || return 0
+  [[ "${AZEDARACH_JAEGER_DISABLE_EXPIRY_WORKER:-0}" != "1" ]] || return 0
+  target="$(jaeger_endpoint_file)" || return 1
+  worker_dir="${target}.workers"
+  mkdir -p "$worker_dir" || return 1
+  chmod 0700 "$worker_dir" 2>/dev/null || true
+  worker_key="$(printf '%s' "${engine}:${name}:${expires}" | cksum | awk '{print $1}')" || return 1
+  slot="${worker_dir}/${worker_key}"
+  if [[ -d "$slot" && ! -f "$slot/pid" ]]; then
+    # Give a concurrent publisher a bounded window to finish claiming its slot.
+    sleep 0.1
+  fi
+  if [[ -f "$slot/pid" ]]; then
+    pid="$(sed -n '1p' "$slot/pid" 2>/dev/null || true)"
+    if jaeger_expiry_worker_alive "$pid" "$name" "$expires"; then
+      return 0
+    fi
+    rm -f "$slot/pid"
+    rmdir "$slot" 2>/dev/null || return 1
+  elif [[ -d "$slot" ]]; then
+    rmdir "$slot" 2>/dev/null || return 1
+  fi
+  if ! mkdir "$slot" 2>/dev/null; then
+    # A concurrent publisher owns worker creation for this generation.
+    return 0
+  fi
+  nohup bash "$jaeger_script_dir/jaeger-local.sh" expire \
+    "$engine" "$name" "$expires" "$record" "$slot" </dev/null >/dev/null 2>&1 &
+  pid=$!
+  printf '%s\n' "$pid" >"$slot/pid" || {
+    kill "$pid" 2>/dev/null || true
+    rmdir "$slot" 2>/dev/null || true
+    return 1
+  }
+}
+
+jaeger_expiry_worker_alive() {
+  local pid="$1" name="$2" expires="$3" command
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
+  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  [[ "$command" == *"jaeger-local.sh expire"* &&
+    "$command" == *" $name $expires "* ]]
+}
+
+jaeger_expire_fallback() {
+  local engine="$1" name="$2" expires="$3" record="$4" slot="${5:-}" now delay
+  now="$(date +%s)"
+  delay=$((expires - now))
+  if (( delay > 0 )); then
+    sleep "$delay"
+  fi
+  if [[ "$("$engine" inspect -f '{{index .Config.Labels "azedarach.jaeger.fallback"}}' "$name" 2>/dev/null || true)" == "true" ]] &&
+    [[ "$("$engine" inspect -f '{{index .Config.Labels "azedarach.jaeger.expires_at"}}' "$name" 2>/dev/null || true)" == "$expires" ]]; then
+    "$engine" rm -f "$name" >/dev/null 2>&1 || true
+  fi
+  jaeger_clear_endpoint_record "$record" || true
+  jaeger_clear_worker_slot "$slot" || true
+}
+
+jaeger_clear_worker_slot() {
+  local slot="$1" target worker_dir suffix
+  [[ -n "$slot" ]] || return 0
+  target="$(jaeger_endpoint_file)" || return 1
+  worker_dir="${target}.workers/"
+  suffix="${slot#"$worker_dir"}"
+  case "$slot" in
+    "$worker_dir"*)
+      [[ -n "$suffix" && "$suffix" != */* ]] || return 1
+      rm -f "$slot/pid"
+      rmdir "$slot" 2>/dev/null || true
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 jaeger_storage_type() {
@@ -175,6 +285,7 @@ jaeger_reuse_fallback() {
     expires="$("$engine" inspect -f '{{index .Config.Labels "azedarach.jaeger.expires_at"}}' "$id" 2>/dev/null || true)"
     if jaeger_running "$engine" "$id" && [[ "$expires" =~ ^[0-9]+$ ]] && (( expires > now )); then
       jaeger_publish_env "$engine" "$id"
+      jaeger_schedule_published_expiry "$engine" "$id"
       return 0
     fi
   done < <(jaeger_matching_fallbacks "$engine" "$primary")
@@ -193,6 +304,7 @@ jaeger_start_fallback() {
   echo "Warning: starting ephemeral Jaeger fallback with dynamic ports; traces are not persisted" >&2
   jaeger_start "$engine" "$fallback" 0 memory || return 1
   jaeger_publish_env "$engine" "$fallback"
+  jaeger_schedule_published_expiry "$engine" "$fallback"
 }
 
 jaeger_activate_primary() {
@@ -308,6 +420,10 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
       jaeger_cleanup "$engine"
       ;;
     ensure) jaeger_ensure ;;
+    expire)
+      [[ "$#" == "6" ]] || { echo "Usage: $0 expire <engine> <name> <expires-at> <endpoint-record> <worker-slot>" >&2; exit 2; }
+      jaeger_expire_fallback "$2" "$3" "$4" "$5" "$6"
+      ;;
     *) echo "Usage: $0 {ensure|inventory|cleanup --confirm}" >&2; exit 2 ;;
   esac
 fi

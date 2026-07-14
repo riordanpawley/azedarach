@@ -19,9 +19,11 @@ command -v ruby >/dev/null 2>&1 || {
 }
 
 name="azedarach-jaeger-workload-$$"
+expiry_name="${name}-expiry"
 tmp="$(mktemp -d)"
 cleanup() {
   "$engine" rm -f "$name" >/dev/null 2>&1 || true
+  "$engine" rm -f "$expiry_name" >/dev/null 2>&1 || true
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -96,5 +98,26 @@ jaeger_oom_killed "$engine" "$name" && {
   echo "Jaeger was OOM-killed during the high-span query" >&2
   exit 1
 }
+
+# Exercise the real detached TTL owner and endpoint-generation invalidation.
+"$engine" rm -f "$name" >/dev/null 2>&1 || true
+export AZEDARACH_JAEGER_FALLBACK_TTL_SECONDS=2
+jaeger_start "$engine" "$expiry_name" 0 memory
+jaeger_publish_env "$engine" "$expiry_name" >/dev/null
+jaeger_schedule_published_expiry "$engine" "$expiry_name"
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if ! "$engine" inspect "$expiry_name" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+if "$engine" inspect "$expiry_name" >/dev/null 2>&1; then
+  echo "expired Jaeger fallback was not removed" >&2
+  exit 1
+fi
+if [[ -e "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]; then
+  echo "expired Jaeger fallback endpoint remained readable" >&2
+  exit 1
+fi
 
 echo "Jaeger high-span workload passed under the 1 GiB container limit"

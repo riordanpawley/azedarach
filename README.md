@@ -32,7 +32,9 @@ This also starts or reuses pinned Jaeger v2.19.0 in a local container named
 `azedarach-jaeger`. It prefers OTLP on `localhost:4318` and the UI on
 `localhost:16686`. If those ports or the primary store are unavailable, one
 four-hour, in-memory fallback uses dynamic localhost ports; subsequent runs
-reuse it instead of creating more stores. The discovered OTLP endpoint is
+reuse it instead of creating more stores. A detached expiry worker removes the
+fallback at its TTL and invalidates only that fallback's immutable endpoint
+record, so a concurrently recovered primary endpoint is preserved. The discovered OTLP endpoint is
 exported to the launched daemon and TUI. Set `AZEDARACH_SKIP_JAEGER=1` to skip
 startup.
 
