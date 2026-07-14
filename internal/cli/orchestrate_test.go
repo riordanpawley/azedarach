@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -395,6 +396,55 @@ func TestBuildOrchestrateWatchFrameIncludesPendingAndCleanupMarkers(t *testing.T
 	}
 	if frame.NextSince != 9 {
 		t.Fatalf("next since = %d, want 9", frame.NextSince)
+	}
+}
+
+func TestOrchestrateProjectStatusHonorsExplicitRegisteredProject(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	routes := registerCLIProjects(t, "Default", "Selected")
+	var routedProject string
+	deps := &Dependencies{
+		ProjectID: routes["Default"],
+		RepoDir:   filepath.Join(os.Getenv("HOME"), "Default"),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			routedProject = req.Meta.ProjectID.String()
+			if req.Command != protocol.CommandOrchestrationSnapshot {
+				t.Fatalf("command = %q, want orchestration snapshot", req.Command)
+			}
+			return responseWithJSON(req, protocol.OrchestrationSnapshot{Scope: domain.ProjectOrchestrationScope()}), nil
+		}}).WithProjectID(routes["Default"]),
+	}
+
+	if err := OrchestrateStatusCommand(deps, OrchestrateStatusOptions{Project: "Selected", JSON: true}); err != nil {
+		t.Fatalf("orchestrate status: %v", err)
+	}
+	if routedProject != routes["Selected"] {
+		t.Fatalf("orchestration project = %q, want %q", routedProject, routes["Selected"])
+	}
+	if deps.ProjectID != routes["Default"] {
+		t.Fatalf("project override was not restored: %q", deps.ProjectID)
+	}
+}
+
+func TestOrchestrateStartUnknownExplicitProjectFailsBeforeDaemonCommand(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	routes := registerCLIProjects(t, "Default")
+	commands := 0
+	deps := &Dependencies{
+		ProjectID: routes["Default"],
+		RepoDir:   filepath.Join(os.Getenv("HOME"), "Default"),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			commands++
+			return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command %s", req.Command)
+		}}).WithProjectID(routes["Default"]),
+	}
+
+	err := OrchestrateStartCommand(deps, OrchestrateStartOptions{Project: "missing"})
+	if !errors.Is(err, config.ErrProjectNotFound) {
+		t.Fatalf("error = %v, want project-not-found type", err)
+	}
+	if commands != 0 {
+		t.Fatalf("daemon commands = %d, want zero", commands)
 	}
 }
 
@@ -3064,7 +3114,8 @@ func TestOrchestrateIntegrateApplyRequiresCompletionEvidence(t *testing.T) {
 }
 
 func TestOrchestrateIntegrateApplyDaemonIntegrationFailureStopsBeforeAppend(t *testing.T) {
-	deps, commands, _ := orchestrateIntegrateApplyDeps(t, "merge_project")
+	routes := registerCLIProjects(t, "azedarach")
+	deps, commands, _ := orchestrateIntegrateApplyDeps(t, "merge_project", routes["azedarach"])
 	output, err := captureStdoutAllowError(t, func() error {
 		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{Project: "azedarach", IssueID: "az-2", Apply: true})
 	})
@@ -3121,12 +3172,16 @@ func TestOrchestrateIntegrateApplyReportsDaemonCloseFailure(t *testing.T) {
 	}
 }
 
-func orchestrateIntegrateApplyDeps(t *testing.T, failStep string) (*Dependencies, *[]string, *[]time.Duration) {
+func orchestrateIntegrateApplyDeps(t *testing.T, failStep string, expectedProjects ...string) (*Dependencies, *[]string, *[]time.Duration) {
 	t.Helper()
 	child := naming.IssueID("az-2")
 	parent := naming.IssueID("az-1")
 	commands := make([]string, 0, 16)
 	closeBudgets := make([]time.Duration, 0, 1)
+	expectedProject := "azedarach"
+	if len(expectedProjects) > 0 {
+		expectedProject = expectedProjects[0]
+	}
 	deps := &Dependencies{
 		RepoDir:   "/repo-parent",
 		ProjectID: protocol.DefaultProjectID,
@@ -3206,8 +3261,8 @@ func orchestrateIntegrateApplyDeps(t *testing.T, failStep string) (*Dependencies
 						Result:   gitservice.MergeResult{Success: true},
 					}), nil
 				case daemonclient.CommandTaskClose:
-					if failStep == "merge_project" && req.Meta.ProjectID.String() != "azedarach" {
-						t.Fatalf("task.close project = %q, want azedarach", req.Meta.ProjectID)
+					if failStep == "merge_project" && req.Meta.ProjectID.String() != expectedProject {
+						t.Fatalf("task.close project = %q, want %s", req.Meta.ProjectID, expectedProject)
 					}
 					if deadline, ok := ctx.Deadline(); ok {
 						closeBudgets = append(closeBudgets, time.Until(deadline))

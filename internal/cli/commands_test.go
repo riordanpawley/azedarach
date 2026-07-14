@@ -71,6 +71,30 @@ func openSQLiteDB(t *testing.T, dbPath string) *sql.DB {
 	return db
 }
 
+func registerCLIProjects(t *testing.T, names ...string) map[string]string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	registry := &config.ProjectsRegistry{}
+	routes := make(map[string]string, len(names))
+	for _, name := range names {
+		path := filepath.Join(home, name)
+		route, err := config.ProjectIDForRoot(path)
+		if err != nil {
+			t.Fatalf("derive project ID for %s: %v", name, err)
+		}
+		registry.Projects = append(registry.Projects, config.Project{ID: route, Name: name, Path: path})
+		routes[name] = route
+	}
+	if len(names) > 0 {
+		registry.DefaultProject = names[0]
+	}
+	if err := config.SaveProjectsRegistry(registry); err != nil {
+		t.Fatalf("save project registry: %v", err)
+	}
+	return routes
+}
+
 func ptrToString(v string) *string {
 	return &v
 }
@@ -239,6 +263,60 @@ func TestPRCommandInvalidExplicitProjectFailsClosed(t *testing.T) {
 	}
 	if commands != 0 {
 		t.Fatalf("daemon commands = %d, want zero", commands)
+	}
+}
+
+func TestApplyExplicitProjectOverrideCanonicalizesAndRestoresCommandContext(t *testing.T) {
+	routes := registerCLIProjects(t, "Default", "Selected")
+	selectedRepo := filepath.Join(os.Getenv("HOME"), "Selected")
+	var routedProject string
+	transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		routedProject = req.Meta.ProjectID.String()
+		return responseWithJSON(req, map[string]any{}), nil
+	}}
+	deps := &Dependencies{
+		ProjectID:      routes["Default"],
+		RepoDir:        filepath.Join(os.Getenv("HOME"), "Default"),
+		RuntimeRepoDir: "/runtime/default",
+		DaemonClient:   daemonclient.New(transport).WithProjectID(routes["Default"]),
+	}
+
+	restore, err := applyExplicitProjectOverride(deps, "Selected")
+	if err != nil {
+		t.Fatalf("apply explicit project: %v", err)
+	}
+	if deps.ProjectID != routes["Selected"] || deps.RepoDir != selectedRepo {
+		t.Fatalf("routed dependencies = project %q repo %q, want %q %q", deps.ProjectID, deps.RepoDir, routes["Selected"], selectedRepo)
+	}
+	_, err = deps.DaemonClient.Command(context.Background(), protocol.RequestEnvelope{Command: daemonclient.CommandTaskList})
+	if err != nil {
+		t.Fatalf("send routed command: %v", err)
+	}
+	if routedProject != routes["Selected"] {
+		t.Fatalf("daemon metadata project = %q, want %q", routedProject, routes["Selected"])
+	}
+
+	restore()
+	if deps.ProjectID != routes["Default"] || deps.RepoDir != filepath.Join(os.Getenv("HOME"), "Default") || deps.RuntimeRepoDir != "/runtime/default" {
+		t.Fatalf("restored dependencies = project %q repo %q runtime %q", deps.ProjectID, deps.RepoDir, deps.RuntimeRepoDir)
+	}
+}
+
+func TestApplyExplicitProjectOverrideUnknownProjectFailsWithoutMutation(t *testing.T) {
+	routes := registerCLIProjects(t, "Default")
+	deps := &Dependencies{ProjectID: routes["Default"], RepoDir: "/default", RuntimeRepoDir: "/runtime/default"}
+	restore, err := applyExplicitProjectOverride(deps, "missing")
+	if !errors.Is(err, config.ErrProjectNotFound) {
+		t.Fatalf("error = %v, want project-not-found type", err)
+	}
+	if restore != nil {
+		t.Fatal("restore function returned for rejected project")
+	}
+	if deps.ProjectID != routes["Default"] || deps.RepoDir != "/default" || deps.RuntimeRepoDir != "/runtime/default" {
+		t.Fatalf("dependencies mutated on failure: %+v", deps)
+	}
+	if _, err := applyExplicitProjectOverride(nil, "Default"); err == nil {
+		t.Fatal("nil dependencies accepted")
 	}
 }
 
@@ -9398,6 +9476,7 @@ func TestIssueCreateCommandDeferredIgnoresAutoParentFromIssueID(t *testing.T) {
 }
 
 func TestIssueCreateCommandCrossProjectSkipsImplicitAutoParentAndCreatedFrom(t *testing.T) {
+	routes := registerCLIProjects(t, "chefy", "azedarach")
 	var requests []protocol.RequestEnvelope
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
@@ -9438,9 +9517,9 @@ func TestIssueCreateCommandCrossProjectSkipsImplicitAutoParentAndCreatedFrom(t *
 					Body:            payload,
 				}, nil
 			},
-		}).WithProjectID("chefy"),
+		}).WithProjectID(routes["chefy"]),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
-		ProjectID: "chefy",
+		ProjectID: routes["chefy"],
 	}
 
 	output := captureStdout(t, func() error {
@@ -9465,8 +9544,8 @@ func TestIssueCreateCommandCrossProjectSkipsImplicitAutoParentAndCreatedFrom(t *
 	if requests[1].Command != daemonclient.CommandTaskCreate {
 		t.Fatalf("requests[1].Command = %q, want %q", requests[1].Command, daemonclient.CommandTaskCreate)
 	}
-	if requests[1].Meta.ProjectID.String() != "azedarach" {
-		t.Fatalf("request project = %q, want azedarach", requests[1].Meta.ProjectID)
+	if requests[1].Meta.ProjectID.String() != routes["azedarach"] {
+		t.Fatalf("request project = %q, want %s", requests[1].Meta.ProjectID, routes["azedarach"])
 	}
 	var createReq daemonclient.TaskCreateParams
 	if err := json.Unmarshal(requests[1].Body, &createReq); err != nil {
@@ -9475,7 +9554,7 @@ func TestIssueCreateCommandCrossProjectSkipsImplicitAutoParentAndCreatedFrom(t *
 	if createReq.ParentID != nil {
 		t.Fatalf("create parent = %+v, want nil", createReq.ParentID)
 	}
-	if !strings.Contains(output, "Created issue: azedarach:cnd") {
+	if !strings.Contains(output, "Created issue: "+routes["azedarach"]+":cnd") {
 		t.Fatalf("output missing project-qualified created issue: %q", output)
 	}
 	if strings.Contains(output, "created-from") || strings.Contains(output, "parent:") {
@@ -9484,6 +9563,7 @@ func TestIssueCreateCommandCrossProjectSkipsImplicitAutoParentAndCreatedFrom(t *
 }
 
 func TestIssueCreateCommandCrossProjectKeepsExplicitParent(t *testing.T) {
+	routes := registerCLIProjects(t, "chefy", "azedarach")
 	var requests []protocol.RequestEnvelope
 	var createReq daemonclient.TaskCreateParams
 	deps := &Dependencies{
@@ -9531,9 +9611,9 @@ func TestIssueCreateCommandCrossProjectKeepsExplicitParent(t *testing.T) {
 					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
 				}
 			},
-		}).WithProjectID("chefy"),
+		}).WithProjectID(routes["chefy"]),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
-		ProjectID: "chefy",
+		ProjectID: routes["chefy"],
 	}
 
 	parentID := "az-parent"
@@ -9552,13 +9632,13 @@ func TestIssueCreateCommandCrossProjectKeepsExplicitParent(t *testing.T) {
 	if len(requests) != 4 {
 		t.Fatalf("request count = %d, want 4", len(requests))
 	}
-	if requests[0].Meta.ProjectID.String() != "azedarach" || requests[2].Meta.ProjectID.String() != "azedarach" {
-		t.Fatalf("request projects = %q, %q; want azedarach", requests[0].Meta.ProjectID, requests[2].Meta.ProjectID)
+	if requests[0].Meta.ProjectID.String() != routes["azedarach"] || requests[2].Meta.ProjectID.String() != routes["azedarach"] {
+		t.Fatalf("request projects = %q, %q; want %s", requests[0].Meta.ProjectID, requests[2].Meta.ProjectID, routes["azedarach"])
 	}
 	if createReq.ParentID == nil || *createReq.ParentID != "az-parent" {
 		t.Fatalf("create parent = %+v, want az-parent", createReq.ParentID)
 	}
-	if !strings.Contains(output, "Created issue: azedarach:az-child (parent: az-parent, explicit --parent) [created-from: az-parent]") {
+	if !strings.Contains(output, "Created issue: "+routes["azedarach"]+":az-child (parent: az-parent, explicit --parent) [created-from: az-parent]") {
 		t.Fatalf("output missing explicit parent message: %q", output)
 	}
 }
@@ -11827,6 +11907,7 @@ func TestIssueDependencyCommandsUseDaemonTaskCommands(t *testing.T) {
 }
 
 func TestIssueDependencyAddCommandCarriesProjectQualifiedEndpointMetadata(t *testing.T) {
+	routes := registerCLIProjects(t, "chefy")
 	var gotReq protocol.RequestEnvelope
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
@@ -11855,8 +11936,8 @@ func TestIssueDependencyAddCommandCarriesProjectQualifiedEndpointMetadata(t *tes
 		return IssueDependencyAddCommand(deps, opts)
 	})
 
-	if gotReq.Meta.ProjectID.String() != "chefy" {
-		t.Fatalf("request project = %q, want chefy", gotReq.Meta.ProjectID)
+	if gotReq.Meta.ProjectID.String() != routes["chefy"] {
+		t.Fatalf("request project = %q, want %s", gotReq.Meta.ProjectID, routes["chefy"])
 	}
 	var body daemonclient.TaskDependencyParams
 	if err := json.Unmarshal(gotReq.Body, &body); err != nil {

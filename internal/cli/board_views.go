@@ -94,8 +94,17 @@ func BoardViewCommand(deps *Dependencies, opts BoardViewOptions) error {
 		return fmt.Errorf("daemon client unavailable")
 	}
 	client := deps.DaemonClient
-	if project := strings.TrimSpace(opts.Project); project != "" {
-		client = client.ScopedProjectID(project)
+	project := strings.TrimSpace(opts.Project)
+	globalProject := protocol.NormalizeProjectID(project) == "global"
+	if project != "" && !globalProject {
+		restoreProject, err := applyExplicitProjectOverride(deps, project)
+		if err != nil {
+			return err
+		}
+		defer restoreProject()
+		client = deps.DaemonClient
+	} else if globalProject {
+		client = client.ScopedProjectID("global")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
@@ -126,7 +135,7 @@ func BoardViewCommand(deps *Dependencies, opts BoardViewOptions) error {
 	case "select":
 		var resp protocol.BoardViewSelectResponseBody
 		var err error
-		if strings.TrimSpace(opts.Project) == "global" {
+		if globalProject {
 			consumer := protocol.GlobalViewConsumer(strings.TrimSpace(opts.Consumer))
 			if !consumer.Valid() {
 				return fmt.Errorf("invalid global view consumer %q (want global_board, tmux_selector, search, or review)", opts.Consumer)
@@ -149,7 +158,7 @@ func BoardViewCommand(deps *Dependencies, opts BoardViewOptions) error {
 			return err
 		}
 		var resp protocol.BoardViewResponseBody
-		if strings.TrimSpace(opts.Project) == "global" {
+		if globalProject {
 			var scope protocol.GlobalViewScope
 			var scopeErr error
 			if strings.TrimSpace(opts.Scope) != "" || strings.TrimSpace(opts.ScopeProjects) != "" {
@@ -168,7 +177,7 @@ func BoardViewCommand(deps *Dependencies, opts BoardViewOptions) error {
 		var selected *protocol.BoardViewSelectResponseBody
 		if opts.Select {
 			var selectResp protocol.BoardViewSelectResponseBody
-			if strings.TrimSpace(opts.Project) == "global" {
+			if globalProject {
 				consumer := protocol.GlobalViewConsumer(strings.TrimSpace(opts.Consumer))
 				if consumer == "" {
 					consumer = protocol.GlobalViewConsumerBoard

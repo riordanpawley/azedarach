@@ -94,7 +94,10 @@ func ParseIssueSplitArgs(args []string) (IssueSplitOptions, error) {
 }
 
 func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	parentIssueID := strings.TrimSpace(opts.ParentIssueID)
