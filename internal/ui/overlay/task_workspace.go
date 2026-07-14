@@ -361,6 +361,31 @@ func (w *TaskWorkspaceOverlay) TaskID() string {
 	return w.detail.task.ID.String()
 }
 
+// TaskByID returns a task from the workspace's detail snapshot without requiring
+// it to be present in the active board projection.
+func (w *TaskWorkspaceOverlay) TaskByID(taskID string) (domain.Task, bool) {
+	if w == nil || w.detail == nil {
+		return domain.Task{}, false
+	}
+	if w.detail.task.ID.String() == taskID {
+		return w.detail.task, true
+	}
+	for _, task := range w.detail.relatedTasks {
+		if task.ID.String() == taskID {
+			return task, true
+		}
+	}
+	return domain.Task{}, false
+}
+
+// ContextTasks returns the task graph snapshot currently held by the workspace.
+func (w *TaskWorkspaceOverlay) ContextTasks() []domain.Task {
+	if w == nil || w.detail == nil {
+		return nil
+	}
+	return append([]domain.Task(nil), w.detail.relatedTasks...)
+}
+
 // SyncSnapshotFreshness updates the detail panel freshness metadata from the latest daemon snapshot.
 func (w *TaskWorkspaceOverlay) SyncSnapshotFreshness(checkedAt time.Time, freshness protocol.TaskListFreshness) {
 	w.detail.checkedAt = checkedAt

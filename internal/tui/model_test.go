@@ -4206,6 +4206,86 @@ func TestTaskWorkspaceGraphNavigationOpensRelatedTask(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspaceGraphNavigationOpensAndRefreshesOffBoardRelatedTask(t *testing.T) {
+	m := newTestModel()
+	currentID := naming.IssueID("az-current")
+	relatedID := naming.IssueID("az-related")
+	current := domain.Task{
+		ID:     currentID,
+		Title:  "Current task",
+		Status: domain.StatusOpen,
+		Dependencies: []domain.Dependency{
+			{ID: relatedID, Type: domain.DependencyRelatedTo},
+		},
+	}
+	related := domain.Task{ID: relatedID, Title: "Related off-board task", Status: domain.StatusInProgress}
+	m.tasks = []domain.Task{current}
+	m.nav.SelectTask(currentID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(current, []domain.Task{current, related}, nil, 120, 30))
+
+	updated, _ := m.handleSelection(overlay.SelectionMsg{
+		Key:   "task_workspace_open_task",
+		Value: relatedID.String(),
+	})
+	next := updated.(Model)
+	workspace, ok := next.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace to remain open, got %T", next.overlayStack.Current())
+	}
+	if got := workspace.TaskID(); got != relatedID.String() {
+		t.Fatalf("workspace task ID = %q, want off-board relation %q", got, relatedID)
+	}
+	if view := workspace.View(); !strings.Contains(view, "Related off-board task") || !strings.Contains(view, "Current task") {
+		t.Fatalf("workspace lost off-board task or graph context during navigation, got %q", view)
+	}
+
+	refreshedRelated := related
+	refreshedRelated.Title = "Related off-board task refreshed"
+	refreshedRelated.Description = "Full off-board details"
+	updated, _ = next.Update(refreshTaskWorkspaceResultMsg{
+		taskID:  relatedID.String(),
+		hasTask: true,
+		task:    refreshedRelated,
+		tasks:   []domain.Task{refreshedRelated, current},
+	})
+	next = updated.(Model)
+	workspace = next.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	view := workspace.View()
+	if !strings.Contains(view, "Related off-board task refreshed") || !strings.Contains(view, "Full off-board details") {
+		t.Fatalf("workspace did not apply full refresh for off-board relation, got %q", view)
+	}
+	if len(next.tasks) != 1 || next.tasks[0].ID != currentID {
+		t.Fatalf("off-board navigation changed board projection state: %+v", next.tasks)
+	}
+}
+
+func TestTaskWorkspaceRefreshPreservesDeeperBoardGraphContext(t *testing.T) {
+	m := newTestModel()
+	rootID := naming.IssueID("az-root")
+	childID := naming.IssueID("az-child")
+	grandchildID := naming.IssueID("az-grandchild")
+	root := domain.Task{ID: rootID, Title: "Root", Status: domain.StatusOpen}
+	child := domain.Task{ID: childID, Title: "Child", Status: domain.StatusOpen, ParentID: &rootID}
+	grandchild := domain.Task{ID: grandchildID, Title: "Grandchild", Status: domain.StatusOpen, ParentID: &childID}
+	m.tasks = []domain.Task{root, child, grandchild}
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(root, m.tasks, nil, 120, 30))
+
+	refreshedRoot := root
+	refreshedRoot.Title = "Root refreshed"
+	updated, _ := m.Update(refreshTaskWorkspaceResultMsg{
+		taskID:  rootID.String(),
+		hasTask: true,
+		task:    refreshedRoot,
+		tasks:   []domain.Task{refreshedRoot, child},
+	})
+	next := updated.(Model)
+	workspace := next.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	view := workspace.View()
+	if !strings.Contains(view, "Root refreshed") || !strings.Contains(view, "Grandchild") {
+		t.Fatalf("workspace refresh discarded deeper graph context already loaded by the board: %q", view)
+	}
+}
+
 func TestTaskWorkspaceGraphNavigationRefreshPreservesGraphFocus(t *testing.T) {
 	m := newTestModel()
 	parentID := naming.IssueID("az-parent")
@@ -4244,6 +4324,7 @@ func TestTaskWorkspaceGraphNavigationRefreshPreservesGraphFocus(t *testing.T) {
 		taskID:  childID.String(),
 		hasTask: true,
 		task:    refreshedChild,
+		tasks:   next.tasks,
 	})
 	next = updated.(Model)
 
