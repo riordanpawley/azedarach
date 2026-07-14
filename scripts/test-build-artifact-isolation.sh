@@ -157,9 +157,9 @@ if [[ "${1:-}" == "rev-parse" && "${2:-}" == "HEAD" ]]; then
 fi
 if [[ "${1:-}" == "rev-parse" && "${2:-}" == "--git-dir" ]]; then
   if [[ "${FAKE_GIT_MODE:-linked}" == "primary" ]]; then
-    printf '/fixture/repo/.git\n'
+    printf '%s/.git\n' "${FAKE_GIT_COMMON_ROOT:?}"
   else
-    printf '/fixture/repo/.git/worktrees/test\n'
+    printf '%s/.git/worktrees/test\n' "${FAKE_GIT_COMMON_ROOT:?}"
   fi
   exit 0
 fi
@@ -171,9 +171,10 @@ echo "stub git: unsupported arguments: $*" >&2
 exit 1
 EOF
 chmod +x "$fixture/fake-bin/git"
+export FAKE_GIT_COMMON_ROOT="$fixture"
 
 AZEDARACH_GO_CACHE_ROOT= AZEDARACH_VALIDATION_LEASE_ID= AZEDARACH_VALIDATION_LEASE_ROOT= \
-  FAKE_GIT_COMMON_ROOT="$fixture" PATH="$fixture/fake-bin:$PATH" \
+  PATH="$fixture/fake-bin:$PATH" \
   just --justfile "$fixture/justfile" --working-directory "$fixture" build
 
 cmp "$fixture/az.before" "$fixture/bin/az"
