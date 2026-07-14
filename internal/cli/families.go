@@ -374,15 +374,13 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 		return finishGitHookCommand(reconcileDir, deps, hookName, hookCommand, startedAt, runErr, opts.Verbose)
 	}
 
-	// Built-in decision imports fire before user-configured commands. They are
-	// best-effort and silent unless --verbose: the daemon may not be running on
-	// a fresh clone, and a missing decision feature must not block Git updates.
-	// Export is deliberately explicit because the SQLite store is shared by
-	// linked worktrees; exporting from pre-commit can stage another worktree's
-	// decisions in the commit currently being created.
-	allCommands := []string{}
-	allCommands = append(allCommands, builtInDecisionCommandsForHook(hookName, projectDir)...)
-	allCommands = append(allCommands, configuredCommandsForHook(cfg, hookName)...)
+	// Decision Markdown transfer is deliberately explicit in both directions.
+	// Git hooks run for ordinary linked worktrees and disposable integration
+	// worktrees alike, while every worktree shares one SQLite decision store.
+	// Importing from a hook would therefore let whichever revision Git happened
+	// to check out last overwrite durable project authority. User-configured hook
+	// commands remain supported, but Azedarach does not inject decision commands.
+	allCommands := configuredCommandsForHook(cfg, hookName)
 
 	for _, command := range allCommands {
 		if opts.Verbose {
@@ -464,27 +462,6 @@ func loadConfigForHook(projectDir string, deps *Dependencies) (*config.Config, e
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 	return cfg, nil
-}
-
-// builtInDecisionCommandsForHook returns the auto-injected decision import
-// commands for Git update hooks. Export remains an explicit user action so a
-// shared SQLite store cannot leak one linked worktree's changes into another
-// worktree's commit.
-//
-// post-merge / post-checkout / post-rewrite: read docs/decisions/*.md back
-// into SQLite so a freshly pulled branch sees teammates' decisions without a
-// manual import. The import is clean-changes-only; conflicts are reported
-// but neither side is overwritten (use az decision import --force for that).
-func builtInDecisionCommandsForHook(hookName, projectDir string) []string {
-	projectDirFlag := ""
-	if strings.TrimSpace(projectDir) != "" {
-		projectDirFlag = " --project-dir " + shellSingleQuote(projectDir)
-	}
-	switch hookName {
-	case "post-merge", "post-checkout", "post-rewrite":
-		return []string{"az decision import" + projectDirFlag}
-	}
-	return nil
 }
 
 func configuredCommandsForHook(cfg *config.Config, hookName string) []string {

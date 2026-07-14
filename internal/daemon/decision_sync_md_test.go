@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -148,6 +149,53 @@ func TestReconcileDecisionMarkdownFullSyncRenamesAndDeletes(t *testing.T) {
 	}
 	if len(unchanged) != 0 {
 		t.Fatalf("idempotent changes = %v, want none", unchanged)
+	}
+}
+
+func TestReconcileDecisionMarkdownEquivalentWorktreesProduceIdenticalRenames(t *testing.T) {
+	now := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
+	oldDecision := issues.Decision{LocalID: "dec-13", Title: "One signed semantic event sequence and derived views", CreatedAt: now, UpdatedAt: now}
+	newDecision := issues.Decision{LocalID: "dec-13", Title: "One signed semantic event sequence per authority", CreatedAt: now, UpdatedAt: now}
+	exports := []decisionMDExport{{
+		Decision: newDecision,
+		Body:     renderDecisionMarkdown(newDecision, nil, nil),
+	}}
+
+	reconcile := func(repoDir string) ([]string, []byte) {
+		t.Helper()
+		targetDir := filepath.Join(repoDir, decisionMDSubdir)
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
+			t.Fatalf("mkdir decisions: %v", err)
+		}
+		oldPath := filepath.Join(targetDir, decisionMDFilename(oldDecision))
+		if err := os.WriteFile(oldPath, renderDecisionMarkdown(oldDecision, nil, nil), 0o644); err != nil {
+			t.Fatalf("write old decision: %v", err)
+		}
+		changed, err := reconcileDecisionMarkdown(repoDir, exports, false)
+		if err != nil {
+			t.Fatalf("reconcile decision markdown: %v", err)
+		}
+		body, err := os.ReadFile(filepath.Join(targetDir, decisionMDFilename(newDecision)))
+		if err != nil {
+			t.Fatalf("read canonical decision: %v", err)
+		}
+		return changed, body
+	}
+
+	changesA, bodyA := reconcile(t.TempDir())
+	changesB, bodyB := reconcile(t.TempDir())
+	if !reflect.DeepEqual(changesA, changesB) {
+		t.Fatalf("equivalent worktree changes differ: A=%v B=%v", changesA, changesB)
+	}
+	if !bytes.Equal(bodyA, bodyB) {
+		t.Fatalf("equivalent worktree exports differ:\nA:\n%s\nB:\n%s", bodyA, bodyB)
+	}
+	wantChanges := []string{
+		"docs/decisions/dec-13-one-signed-semantic-event-sequence-and-derived-vie.md",
+		"docs/decisions/dec-13-one-signed-semantic-event-sequence-per-authority.md",
+	}
+	if !reflect.DeepEqual(changesA, wantChanges) {
+		t.Fatalf("rename set = %v, want %v", changesA, wantChanges)
 	}
 }
 

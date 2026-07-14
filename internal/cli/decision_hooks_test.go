@@ -10,34 +10,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 )
 
-func TestBuiltInDecisionCommandsForHook(t *testing.T) {
-	cases := []struct {
-		hook     string
-		expected []string
-	}{
-		{hook: "pre-commit", expected: nil},
-		{hook: "post-merge", expected: []string{"az decision import"}},
-		{hook: "post-checkout", expected: []string{"az decision import"}},
-		{hook: "post-rewrite", expected: []string{"az decision import"}},
-		{hook: "post-commit", expected: nil},
-		{hook: "unknown-hook", expected: nil},
-		{hook: "", expected: nil},
-	}
-	for _, tc := range cases {
-		t.Run(tc.hook, func(t *testing.T) {
-			got := builtInDecisionCommandsForHook(tc.hook, "/repo path")
-			if tc.expected != nil {
-				for i := range tc.expected {
-					tc.expected[i] += " --project-dir '/repo path'"
-				}
-			}
-			if !equalStringSlice(got, tc.expected) {
-				t.Errorf("builtInDecisionCommandsForHook(%q) = %v, want %v", tc.hook, got, tc.expected)
-			}
-		})
-	}
-}
-
 func TestGitHooksPreCommitDoesNotAlterConcurrentWorktreeCommit(t *testing.T) {
 	isolateNestedGitEnvironment(t)
 	baseDir := t.TempDir()
@@ -116,26 +88,57 @@ func TestGitHooksPreCommitDoesNotAlterConcurrentWorktreeCommit(t *testing.T) {
 	}
 }
 
-func TestGitHooksHookCommandRunsConflictSafeImportHooks(t *testing.T) {
+func TestGitHooksDoNotImplicitlyTransferDecisionsFromAnyRevision(t *testing.T) {
 	isolateNestedGitEnvironment(t)
-	projectDir := t.TempDir()
-	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
+	baseDir := t.TempDir()
+	if err := runGitCommandIsolated(baseDir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
+	}
+	if err := runGitCommandIsolated(baseDir, "config", "user.name", "Test User"); err != nil {
+		t.Fatalf("git config user.name: %v", err)
+	}
+	if err := runGitCommandIsolated(baseDir, "config", "user.email", "test@example.com"); err != nil {
+		t.Fatalf("git config user.email: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "README.md"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	if err := runGitCommandIsolated(baseDir, "add", "README.md"); err != nil {
+		t.Fatalf("git add seed: %v", err)
+	}
+	if err := runGitCommandIsolated(baseDir, "commit", "-m", "seed"); err != nil {
+		t.Fatalf("git commit seed: %v", err)
+	}
+
+	worktreeA := filepath.Join(t.TempDir(), "worktree-a")
+	worktreeB := filepath.Join(t.TempDir(), "worktree-b")
+	if err := runGitCommandIsolated(baseDir, "worktree", "add", worktreeA, "-b", "revision-a"); err != nil {
+		t.Fatalf("git worktree add A: %v", err)
+	}
+	if err := runGitCommandIsolated(baseDir, "worktree", "add", worktreeB, "-b", "revision-b"); err != nil {
+		t.Fatalf("git worktree add B: %v", err)
 	}
 
 	fakeBin := t.TempDir()
 	fakeAz := filepath.Join(fakeBin, "az")
-	if err := os.WriteFile(fakeAz, []byte("#!/bin/sh\nif [ \"$1\" = decision ] && [ \"$2\" = import ]; then printf imported > .decision-import-ran; fi\n"), 0o755); err != nil {
+	callLog := filepath.Join(t.TempDir(), "az-calls")
+	if err := os.WriteFile(fakeAz, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AZ_CALL_LOG\"\n"), 0o755); err != nil {
 		t.Fatalf("write fake az: %v", err)
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	cfg := config.DefaultConfig()
-	if err := GitHooksHookCommand(&Dependencies{RepoDir: projectDir, Config: cfg}, GitHooksHookOptions{ProjectDir: projectDir, Hook: "post-merge"}); err != nil {
-		t.Fatalf("GitHooksHookCommand error: %v", err)
+	t.Setenv("AZ_CALL_LOG", callLog)
+
+	for _, worktree := range []string{worktreeA, worktreeB} {
+		for _, hook := range []string{"pre-commit", "post-checkout", "post-merge", "post-rewrite"} {
+			if err := GitHooksHookCommand(&Dependencies{RepoDir: worktree, Config: config.DefaultConfig()}, GitHooksHookOptions{ProjectDir: worktree, Hook: hook}); err != nil {
+				t.Fatalf("GitHooksHookCommand(%s, %s): %v", worktree, hook, err)
+			}
+		}
 	}
 
-	if _, err := os.Stat(filepath.Join(projectDir, ".decision-import-ran")); err != nil {
-		t.Fatalf("decision import hook did not run: %v", err)
+	if _, err := os.Stat(callLog); !os.IsNotExist(err) {
+		data, _ := os.ReadFile(callLog)
+		t.Fatalf("Git hooks invoked implicit az commands: %q (stat err=%v)", strings.TrimSpace(string(data)), err)
 	}
 }
 

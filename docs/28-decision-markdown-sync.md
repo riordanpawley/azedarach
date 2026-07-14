@@ -12,10 +12,16 @@ every worktree and could stage them in an unrelated commit. Pre-commit hooks do
 not run `az decision sync` and do not implicitly restage `docs/decisions/`.
 Configured hook commands and configured restage paths still behave normally.
 
-Post-merge, post-checkout, and post-rewrite hooks continue to run
-`az decision import`. Import is conflict-safe: divergent non-empty Markdown and
-SQLite fields are reported and skipped. Only an explicit
-`az decision import --force` makes Markdown win those conflicts.
+Post-merge, post-checkout, and post-rewrite hooks do not import decision
+Markdown. Those hooks also run in linked worktrees and disposable integration
+worktrees, whose checked-out revisions may differ while sharing one SQLite
+store. Letting any such revision mutate the store would make hook order, rather
+than an explicit user action, decide durable project state. User-configured
+hook commands are unaffected.
+
+Explicit import is conflict-safe: divergent non-empty Markdown and SQLite
+fields are reported and skipped. Only an explicit `az decision import --force`
+makes Markdown win those conflicts.
 
 ## Explicit Exchange Workflow
 
@@ -34,6 +40,11 @@ az decision sync --check
 az decision sync
 git add docs/decisions
 ```
+
+Without `--project-dir`, both commands use the caller's current working
+directory as the Markdown source or target. From a linked worktree they operate
+on that worktree, not the registered root checkout. `--project-dir` selects a
+different worktree explicitly.
 
 `az decision sync` is a full reconciliation. It writes the canonical
 `<decision-id>-<title-slug>.md` file for every live decision, removes old paths

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -185,6 +187,50 @@ func TestParseDecisionSyncArgs(t *testing.T) {
 				t.Fatalf("ProjectDir = %q, want %q", opts.ProjectDir, tc.projectDir)
 			}
 		})
+	}
+}
+
+func TestDecisionRequestRepoDirDefaultsToCallerWorktree(t *testing.T) {
+	worktree := t.TempDir()
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+	if err := os.Chdir(worktree); err != nil {
+		t.Fatalf("change working directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previous); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	got, err := decisionRequestRepoDir("")
+	if err != nil {
+		t.Fatalf("decisionRequestRepoDir: %v", err)
+	}
+	want, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("current worktree path: %v", err)
+	}
+	if got != want {
+		t.Fatalf("decisionRequestRepoDir = %q, want caller worktree %q", got, want)
+	}
+}
+
+func TestDecisionRequestRepoDirUsesExplicitWorktree(t *testing.T) {
+	root := t.TempDir()
+	worktree := filepath.Join(root, "linked-worktree")
+	got, err := decisionRequestRepoDir(worktree)
+	if err != nil {
+		t.Fatalf("decisionRequestRepoDir: %v", err)
+	}
+	want, err := filepath.Abs(worktree)
+	if err != nil {
+		t.Fatalf("absolute worktree path: %v", err)
+	}
+	if got != want {
+		t.Fatalf("decisionRequestRepoDir = %q, want explicit worktree %q", got, want)
 	}
 }
 

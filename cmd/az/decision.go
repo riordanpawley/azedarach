@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -638,7 +639,11 @@ func runDecisionRPC(cfg *config.Config, projectDir, command string, body any, ou
 func decisionRequestRepoDir(projectDir string) (string, error) {
 	projectDir = strings.TrimSpace(projectDir)
 	if projectDir == "" {
-		return "", nil
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("resolve decision markdown working directory: %w", err)
+		}
+		projectDir = cwd
 	}
 	abs, err := filepath.Abs(projectDir)
 	if err != nil {
