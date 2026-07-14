@@ -288,6 +288,19 @@ type orchestrateStartAdvice struct {
 	WatchInstruction string `json:"watch_instruction,omitempty"`
 }
 
+type orchestrateStartLaunchError struct {
+	IssueID string
+	Field   string
+}
+
+func (e *orchestrateStartLaunchError) Error() string {
+	issueID := strings.TrimSpace(e.IssueID)
+	if issueID == "" {
+		issueID = "<unknown>"
+	}
+	return fmt.Sprintf("invalid orchestration launch for %s: missing %s", issueID, e.Field)
+}
+
 type orchestrateWatchFrame struct {
 	RootIssueID            string                               `json:"root_issue_id"`
 	SinceSeq               int64                                `json:"since_seq"`
@@ -1298,8 +1311,8 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		NestedRoots: nestedRootIDs,
 		Started:     make([]string, 0, len(applied.Launched)),
 		Launched:    make([]orchestrateStartLaunch, 0, len(applied.Launched)),
-		Skipped:     applied.Skipped,
-		Failed:      applied.Failed,
+		Skipped:     cloneOrchestrateStartDetails(applied.Skipped),
+		Failed:      cloneOrchestrateStartDetails(applied.Failed),
 		Warnings:    orchestrateStartWarnings(ctx, deps, ready, len(applied.Launched)),
 		Advice: orchestrateStartAdvice{
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", opts.RootIssueID),
@@ -1312,6 +1325,9 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		launch := orchestrateStartLaunch{IssueID: daemonLaunch.IssueID, SessionID: daemonLaunch.SessionID, OperationID: daemonLaunch.OperationID, OperationState: daemonLaunch.OperationState}
 		emitOrchestrateStartProgressWithLaunch(opts, "submitted", launch)
 		issueID := launch.IssueID
+		if strings.TrimSpace(issueID) == "" {
+			return orchestrateStartResult{}, &orchestrateStartLaunchError{Field: "issue_id"}
+		}
 		launch, pending, err := waitForOrchestrateStartLaunch(deps, opts, launch)
 		if err != nil {
 			result.Failed[issueID] = err.Error()
@@ -1333,6 +1349,14 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	return result, nil
 }
 
+func cloneOrchestrateStartDetails(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
 func orchestrateOwnerID() string {
 	if ownerID := defaultIssueOwnerID(); ownerID != "" {
 		return ownerID
@@ -1343,7 +1367,7 @@ func orchestrateOwnerID() string {
 func waitForOrchestrateStartLaunch(deps *Dependencies, opts OrchestrateStartOptions, launch orchestrateStartLaunch) (orchestrateStartLaunch, *orchestrateStartPending, error) {
 	operationID := strings.TrimSpace(launch.OperationID)
 	if operationID == "" {
-		return launch, nil, nil
+		return launch, nil, &orchestrateStartLaunchError{IssueID: launch.IssueID, Field: "operation_id"}
 	}
 
 	timeout := orchestrateStartWaitTimeout

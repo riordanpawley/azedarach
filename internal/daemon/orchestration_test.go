@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -323,6 +325,105 @@ func TestOrchestrationIntentRejectsInvalidShapeBeforeMutation(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("invalid intent unexpectedly succeeded")
+	}
+}
+
+func TestClaimAndSubmitStartCompensatesInvalidLaunchResult(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Worker", Status: domain.StatusOpen, Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(protocol.OperationSubmitResponseBody{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := daemonOrchestrationAuthority{
+		daemon: &Daemon{issueClientsByProject: map[string]*issues.Client{"project": client}},
+		submitStart: func(_ context.Context, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+			return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, OK: true, Body: body}
+		},
+	}
+	scope, err := domain.RootedOrchestrationScope("root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = authority.claimAndSubmitStart(ctx, "project", protocol.OrchestrationIntentRequest{Scope: scope, IntentKey: "start-invalid", ActorID: "orchestrator", RepoDir: t.TempDir()}, issueID)
+	var invalid *invalidOrchestrationLaunchError
+	if !errors.As(err, &invalid) || invalid.Field != "operation_id" {
+		t.Fatalf("claimAndSubmitStart error = %v, want typed missing operation_id", err)
+	}
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != domain.StatusOpen || task.Ownership != nil || task.HasTmuxSession {
+		t.Fatalf("failed launch left partial claim/session state: %+v", task)
+	}
+	pending, err := client.PendingOrchestrationStarts(ctx, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("failed launch left pending start attempts: %+v", pending)
+	}
+}
+
+func TestTerminalSessionStartFailureCompensatesOrchestrationClaim(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Worker", Status: domain.StatusOpen, Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := client.BeginOrchestrationStart(ctx, "project", issueID, "start-failure", "orchestrator", "session.start:"+issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CompleteOrchestrationStart(ctx, attempt, "op-failure"); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	d.reconcileOrchestrationStartOperation(ctx, daemonops.Record{ID: "op-failure", ProjectID: "project", IssueID: issueID, Kind: "session.start", DedupeKey: attempt.DedupeKey, State: daemonops.StateFailed, ErrorMessage: "tmux launch failed"})
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != domain.StatusOpen || task.Ownership != nil || task.HasTmuxSession {
+		t.Fatalf("terminal failure left partial claim/session state: %+v", task)
+	}
+}
+
+func TestTerminalSessionStartFailurePreservesClaimForLiveRuntime(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Worker", Status: domain.StatusOpen, Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := client.BeginOrchestrationStart(ctx, "project", issueID, "start-live", "orchestrator", "session.start:"+issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CompleteOrchestrationStart(ctx, attempt, "op-live"); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{"project": client},
+		tmux:                  tmux.NewClient(&sessionStartCompensationTmuxRunner{live: true}, slog.Default()),
+	}
+	d.reconcileOrchestrationStartOperation(ctx, daemonops.Record{ID: "op-live", ProjectID: "project", IssueID: issueID, Kind: "session.start", DedupeKey: attempt.DedupeKey, ResourceKeys: []string{"session:worker-session"}, State: daemonops.StateFailed, ErrorMessage: "cleanup failed"})
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Ownership == nil || task.Ownership.OwnerID != "orchestrator" {
+		t.Fatalf("live runtime lost orchestration claim: %+v", task.Ownership)
 	}
 }
 

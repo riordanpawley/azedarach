@@ -79,6 +79,9 @@ func TestCompensateOrchestrationStartDurablyReleasesOnlyAcquiredClaim(t *testing
 	if err := client.CompensateOrchestrationStart(ctx, attempt, errors.New("submit failed")); err != nil {
 		t.Fatal(err)
 	}
+	if err := client.CompensateOrchestrationStart(ctx, attempt, errors.New("same compensation retried")); err != nil {
+		t.Fatalf("idempotent compensation retry: %v", err)
+	}
 	task, err := client.GetWithRuntime(ctx, "project", issueID)
 	if err != nil {
 		t.Fatal(err)
@@ -137,6 +140,133 @@ func TestCompleteOrchestrationStartIsIdempotent(t *testing.T) {
 	}
 	if pending, err := client.PendingOrchestrationStarts(ctx, "project"); err != nil || len(pending) != 0 {
 		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+}
+
+func TestCompensateOrchestrationStartOperationHandlesSubmitRaceAndRetry(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, CreateTaskParams{Title: "worker", Status: domain.StatusOpen, Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := client.BeginOrchestrationStart(ctx, "project", issueID, "intent", "orchestrator", "session.start:"+issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compensated, err := client.CompensateOrchestrationStartOperation(ctx, "project", attempt.DedupeKey, "op-fast-failure", errors.New("launch failed"))
+	if err != nil || !compensated {
+		t.Fatalf("compensate claimed attempt = %t, %v", compensated, err)
+	}
+	compensated, err = client.CompensateOrchestrationStartOperation(ctx, "project", attempt.DedupeKey, "op-fast-failure", errors.New("launch failed"))
+	if err != nil || compensated {
+		t.Fatalf("idempotent terminal retry = %t, %v", compensated, err)
+	}
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != domain.StatusOpen || task.Ownership != nil {
+		t.Fatalf("terminal compensation left partial state: %+v", task)
+	}
+	if pending, err := client.PendingOrchestrationStarts(ctx, "project"); err != nil || len(pending) != 0 {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+}
+
+func TestCompensateSubmittedOrchestrationStartOperation(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, CreateTaskParams{Title: "worker", Status: domain.StatusOpen, Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := client.BeginOrchestrationStart(ctx, "project", issueID, "intent", "orchestrator", "session.start:"+issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CompleteOrchestrationStart(ctx, attempt, "op-failed"); err != nil {
+		t.Fatal(err)
+	}
+	compensated, err := client.CompensateOrchestrationStartOperation(ctx, "project", attempt.DedupeKey, "op-failed", errors.New("launch failed"))
+	if err != nil || !compensated {
+		t.Fatalf("compensate submitted attempt = %t, %v", compensated, err)
+	}
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Ownership != nil {
+		t.Fatalf("submitted failure retained ownership: %+v", task.Ownership)
+	}
+}
+
+func TestCompensateOrchestrationStartOperationClearsAllDedupedAttempts(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, CreateTaskParams{Title: "worker", Status: domain.StatusOpen, Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dedupeKey := "session.start:" + issueID
+	first, err := client.BeginOrchestrationStart(ctx, "project", issueID, "intent-1", "orchestrator", dedupeKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CompleteOrchestrationStart(ctx, first, "op-shared"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := client.BeginOrchestrationStart(ctx, "project", issueID, "intent-2", "orchestrator", dedupeKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ClaimAcquired {
+		t.Fatal("second deduped attempt must preserve the first attempt's claim")
+	}
+	if err := client.CompleteOrchestrationStart(ctx, second, "op-shared"); err != nil {
+		t.Fatal(err)
+	}
+
+	compensated, err := client.CompensateOrchestrationStartOperation(ctx, "project", dedupeKey, "op-shared", errors.New("launch failed"))
+	if err != nil || !compensated {
+		t.Fatalf("compensate shared operation = %t, %v", compensated, err)
+	}
+	db, err := client.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var residue int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM orchestration_start_attempts WHERE project_id=? AND dedupe_key=? AND state IN ('claimed','submitted')`, "project", dedupeKey).Scan(&residue); err != nil {
+		t.Fatal(err)
+	}
+	if residue != 0 {
+		t.Fatalf("nonterminal attempt residue = %d, want 0", residue)
+	}
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Ownership != nil {
+		t.Fatalf("shared failed operation retained ownership: %+v", task.Ownership)
+	}
+	compensated, err = client.CompensateOrchestrationStartOperation(ctx, "project", dedupeKey, "op-shared", errors.New("same failure retried"))
+	if err != nil || compensated {
+		t.Fatalf("idempotent shared-operation retry = %t, %v", compensated, err)
+	}
+	if _, err := client.BeginOrchestrationStart(ctx, "project", issueID, "intent-1", "orchestrator", dedupeKey); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("same-intent retry error = %v, want compensated conflict", err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM orchestration_start_attempts WHERE project_id=? AND dedupe_key=? AND state IN ('claimed','submitted')`, "project", dedupeKey).Scan(&residue); err != nil {
+		t.Fatal(err)
+	}
+	if residue != 0 {
+		t.Fatalf("same-intent retry recreated residue = %d", residue)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -171,6 +172,45 @@ func TestOperationRuntimeSubmitGetListPublishesLifecycleEvents(t *testing.T) {
 		if body.Operation.OperationID != submitBody.Operation.OperationID {
 			t.Fatalf("event operation id = %s, want %s", body.Operation.OperationID, submitBody.Operation.OperationID)
 		}
+	}
+}
+
+func TestOperationRuntimeReportsTerminalSessionStartFailure(t *testing.T) {
+	terminal := make(chan daemonops.Record, 1)
+	runtime := newOperationRuntime(operationRuntimeConfig{
+		repoDir:      t.TempDir(),
+		nextRevision: sequentialRevision(),
+		onTerminal: func(_ context.Context, record daemonops.Record) {
+			terminal <- record
+		},
+	})
+	runtime.sessionStart = func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, OK: false, Error: &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInternal, Message: "tmux launch failed"}}, nil
+	}
+
+	resp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID:    "proj-1",
+		Kind:         "session.start",
+		IssueID:      naming.IssueID("AZ-1"),
+		DedupeKey:    "session.start:AZ-1",
+		ResourceKeys: []string{"session:AZ-1"},
+		Payload:      mustJSON(t, map[string]string{"project_id": "proj-1", "session_id": "AZ-1"}),
+	}))
+	if !resp.OK {
+		t.Fatalf("submit response = %+v", resp)
+	}
+	var submitted protocol.OperationSubmitResponseBody
+	if err := json.Unmarshal(resp.Body, &submitted); err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForRuntimeState(t, runtime, submitted.Operation.OperationID.String(), daemonops.StateFailed)
+	select {
+	case record := <-terminal:
+		if record.ID != submitted.Operation.OperationID.String() || record.State != daemonops.StateFailed || record.DedupeKey != "session.start:AZ-1" || !slices.Contains(record.ResourceKeys, "session:AZ-1") {
+			t.Fatalf("terminal callback record = %+v", record)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("terminal callback not invoked")
 	}
 }
 
