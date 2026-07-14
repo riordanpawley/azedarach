@@ -8,8 +8,9 @@ import (
 	"strings"
 )
 
-// ProjectIDForRoot returns a deterministic project route ID derived from the
-// absolute project root path.
+// ProjectIDForRoot is the dependency-light local resolver for CLI/config
+// project identity. It returns a deterministic project route ID derived from
+// the absolute project root path.
 func ProjectIDForRoot(projectRoot string) (string, error) {
 	trimmed := strings.TrimSpace(projectRoot)
 	if trimmed == "" {
