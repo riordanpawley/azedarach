@@ -103,6 +103,32 @@ awk '
 [[ ! -e "$AZEDARACH_JAEGER_ENDPOINT_FILE" && ! -L "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]
 [[ ! -e "${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers" ]]
 
+# Publication remains failure-atomic when the record and public link are
+# installed but releasing the advisory lock reports failure. The exact emitted
+# generation is rolled back before fallback cleanup returns.
+: >"$calls"
+rollback_endpoint="$tmp/rollback endpoint"
+rollback_release="$tmp/fail release once"
+: >"$rollback_release"
+if AZEDARACH_JAEGER_ENDPOINT_FILE="$rollback_endpoint" \
+  AZEDARACH_JAEGER_TEST_FAIL_LOCK_RELEASE_FILE="$rollback_release" \
+  jaeger_start_fallback fake_engine azedarach-jaeger; then
+  echo "fallback startup unexpectedly survived endpoint release failure" >&2
+  exit 1
+fi
+awk '
+  $1 == "run" { ran = 1 }
+  ran && $1 == "rm" && $2 == "-f" && $3 == "azedarach-jaeger-fallback" { cleaned = 1 }
+  END { exit !cleaned }
+' "$calls"
+[[ ! -e "$rollback_endpoint" && ! -L "$rollback_endpoint" ]]
+if [[ -d "${rollback_endpoint}.d" ]] &&
+  find "${rollback_endpoint}.d" -type f -print -quit | grep -q .; then
+  echo "failed endpoint publication left an immutable record" >&2
+  exit 1
+fi
+[[ ! -e "${rollback_endpoint}.workers" ]]
+
 : >"$calls"
 FAKE_FALLBACK=1 jaeger_start_fallback fake_engine azedarach-jaeger
 if grep -q '^run ' "$calls"; then

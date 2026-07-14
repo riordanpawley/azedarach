@@ -53,7 +53,10 @@ jaeger_publish_env() {
   fi
   if (( adopt_status != 0 )) && ! endpoint_record="$(jaeger_write_endpoint_state "localhost:${otlp_port}" "$expires" "$name")"; then
     echo "Warning: could not persist the managed Jaeger endpoint for later commands" >&2
-    endpoint_record=""
+    if [[ -n "$endpoint_record" ]]; then
+      jaeger_clear_endpoint_record "$endpoint_record" || true
+    fi
+    return 1
   fi
   JAEGER_PUBLISHED_ENDPOINT_RECORD="$endpoint_record"
   JAEGER_PUBLISHED_EXPIRES_AT="$expires"
@@ -158,15 +161,36 @@ jaeger_endpoint_lock_release() {
   JAEGER_ENDPOINT_LOCK=""
   JAEGER_ENDPOINT_LOCK_CONTROL=""
   JAEGER_ENDPOINT_LOCK_HELPER=""
+  if (( status == 0 )) && [[ -n "${AZEDARACH_JAEGER_TEST_FAIL_LOCK_RELEASE_FILE:-}" ]] &&
+    [[ -e "$AZEDARACH_JAEGER_TEST_FAIL_LOCK_RELEASE_FILE" ]]; then
+    rm -f "$AZEDARACH_JAEGER_TEST_FAIL_LOCK_RELEASE_FILE"
+    status=1
+  fi
   return "$status"
 }
 
 jaeger_write_endpoint_state() {
-  local status=0
+  local status=0 record
+  JAEGER_ENDPOINT_RECORD_RESULT=""
   jaeger_endpoint_lock_acquire || return 1
   jaeger_write_endpoint_state_locked "$@" || status=$?
-  jaeger_endpoint_lock_release || status=1
-  return "$status"
+  record="$JAEGER_ENDPOINT_RECORD_RESULT"
+  if (( status != 0 )) && [[ -n "$record" ]]; then
+    jaeger_clear_endpoint_record_locked "$record" || true
+  fi
+  if ! jaeger_endpoint_lock_release; then
+    status=1
+  fi
+  if (( status != 0 )); then
+    if [[ -n "$record" ]]; then
+      if ! jaeger_clear_endpoint_record "$record"; then
+        # Preserve the exact failed generation for the caller's final cleanup.
+        echo "$record"
+      fi
+    fi
+    return "$status"
+  fi
+  echo "$record"
 }
 
 jaeger_write_endpoint_state_locked() {
@@ -181,6 +205,7 @@ jaeger_write_endpoint_state_locked() {
   chmod 0700 "$record_dir" 2>/dev/null || true
   generation_key="$(printf '%s' "${generation}:${expires}" | cksum | awk '{print $1}')" || return 1
   record="${record_dir}/${expires}.${generation_key}"
+  JAEGER_ENDPOINT_RECORD_RESULT="$record"
   tmp="${record}.tmp"
   link_tmp="${target}.link.$$.$RANDOM"
   umask 077
@@ -192,7 +217,6 @@ jaeger_write_endpoint_state_locked() {
   if [[ -n "$previous" && "$previous" != "$record" ]]; then
     jaeger_clear_endpoint_record_locked "$previous" || true
   fi
-  echo "$record"
 }
 
 jaeger_clear_endpoint_record() {
