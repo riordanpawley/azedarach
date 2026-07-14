@@ -32,7 +32,7 @@ func commandMutatesProjectProjection(command string) bool {
 		protocol.CommandInteractionResolve, protocol.CommandInteractionWithdraw,
 		protocol.CommandInteractionSupersede, protocol.CommandInteractionRecover,
 		protocol.CommandOrchestrationIntent, protocol.CommandOrchestratorSessionStart,
-		protocol.CommandOrchestratorSessionAttach,
+		protocol.CommandOrchestratorSessionAttach, protocol.CommandOrchestratorSessionStop,
 		daemonhandlers.CommandWorktreeCreate, daemonhandlers.CommandWorktreeRemove,
 		daemonhandlers.CommandWorktreeCleanupOrphaned,
 		daemonhandlers.CommandGitFetch, daemonhandlers.CommandGitPullBase,

@@ -1393,6 +1393,7 @@ type sessionStartTmuxRunner struct {
 	sendKeysErr          error
 	sendKeysErrOnCall    int
 	captureOutput        string
+	onSendKeys           func(string, string)
 }
 
 func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
@@ -1500,6 +1501,9 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 		if len(args) >= 4 {
 			r.sendKeysTargets = append(r.sendKeysTargets, args[2])
 			r.sendKeysPayloads = append(r.sendKeysPayloads, args[3])
+			if r.onSendKeys != nil {
+				r.onSendKeys(args[2], args[3])
+			}
 		}
 		if r.sendKeysErr != nil && (r.sendKeysErrOnCall == 0 || r.sendKeysCalls == r.sendKeysErrOnCall) {
 			return "", r.sendKeysErr
@@ -2263,6 +2267,123 @@ func TestSessionStartReactivatesClosedIssueBeforeRuntimeProjection(t *testing.T)
 	}
 	if sessionProjection.State == daemonstate.SessionStateStopped {
 		t.Fatalf("session projection = %+v, want active", sessionProjection)
+	}
+}
+
+func TestSessionStartRetriesTransientWorktreeProjectionWriterContention(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Transient projection contention should retry",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	worktreeRunner := &worktreeCreateRunner{
+		worktreePath: worktreePath,
+		branchName:   "testuser/" + issueID + "/transient-projection-retry",
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	sessionStore := daemonstate.NewStore()
+	runtimeDBPath := filepath.Join(t.TempDir(), "runtime.db")
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(runtimeDBPath, slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	if _, err := runtimeStateStore.ListWorktreeStates(ctx, projectID); err != nil {
+		t.Fatalf("warm runtime projection store: %v", err)
+	}
+
+	lockDB, err := sql.Open("sqlite", "file:"+runtimeDBPath)
+	if err != nil {
+		t.Fatalf("open concurrent runtime writer: %v", err)
+	}
+	t.Cleanup(func() { _ = lockDB.Close() })
+	if _, err := lockDB.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatalf("begin concurrent runtime write: %v", err)
+	}
+	lockReleaseResult := make(chan error, 1)
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		_, releaseErr := lockDB.ExecContext(context.Background(), `COMMIT`)
+		lockReleaseResult <- releaseErr
+	}()
+	t.Cleanup(func() {
+		_, _ = lockDB.ExecContext(context.Background(), `ROLLBACK`)
+	})
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(sessionStore),
+		sessionStore: sessionStore,
+		revision:     map[string]uint64{},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-projection-contention",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionStart,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: marshalJSON(map[string]any{
+			"project_id": projectID,
+			"session_id": issueID,
+			"start_work": false,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("session start response = %+v, want success after transient contention", resp)
+	}
+	if err := <-lockReleaseResult; err != nil {
+		t.Fatalf("commit concurrent runtime write: %v", err)
+	}
+	if worktreeRunner.worktreeRemoved {
+		t.Fatal("worktree cleanup ran despite successful projection retry")
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, issueID)
+	if err != nil {
+		t.Fatalf("get issue after successful projection retry: %v", err)
+	}
+	if task.Status != domain.StatusInProgress {
+		t.Fatalf("issue status = %s, want %s after coherent start", task.Status, domain.StatusInProgress)
+	}
+	if _, found, err := runtimeStateStore.GetWorktreeStateByIssueID(ctx, projectID, issueID); err != nil || !found {
+		t.Fatalf("worktree projection found=%t err=%v, want coherent persisted projection", found, err)
+	}
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	if projection, found, err := runtimeStateStore.GetSessionState(ctx, projectID, sessionID); err != nil || !found || projection.State == daemonstate.SessionStateStopped {
+		t.Fatalf("session projection found=%t err=%v projection=%+v, want active persisted projection", found, err, projection)
+	}
+	if !tmuxRunner.sessions[sessionID] {
+		t.Fatalf("tmux session %q missing after successful projection retry", sessionID)
 	}
 }
 

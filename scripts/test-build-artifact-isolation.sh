@@ -8,7 +8,7 @@ trap 'rm -rf "$fixture"' EXIT
 mkdir -p "$fixture/bin" "$fixture/fake-bin" "$fixture/real-bin"
 cp "$repo_root/justfile" "$fixture/justfile"
 mkdir -p "$fixture/scripts"
-cp "$repo_root/scripts/build-link-run.sh" "$fixture/scripts/build-link-run.sh"
+cp "$repo_root/scripts/build-install-run.sh" "$fixture/scripts/build-install-run.sh"
 printf 'production az sentinel\n' >"$fixture/bin/az"
 printf 'production azd sentinel\n' >"$fixture/bin/azd"
 cp "$fixture/bin/az" "$fixture/az.before"
@@ -123,12 +123,12 @@ cmp "$fixture/az.before" "$fixture/bin/az"
 cmp "$fixture/azd.before" "$fixture/bin/azd"
 test ! -e "$fixture/.tmp/az-test"
 
-if PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-link-run.sh" --no-run \
-  >"$fixture/build-link-run.stdout" 2>"$fixture/build-link-run.stderr"; then
-  echo "build-link-run unexpectedly accepted a linked worktree" >&2
+if PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
+  >"$fixture/build-install-run.stdout" 2>"$fixture/build-install-run.stderr"; then
+  echo "build-install-run unexpectedly accepted a linked worktree" >&2
   exit 1
 fi
-grep -q "Refusing build-link-run from a linked worktree" "$fixture/build-link-run.stderr"
+grep -q "Refusing build-install-run from a linked worktree" "$fixture/build-install-run.stderr"
 cmp "$fixture/az.before" "$fixture/bin/az"
 cmp "$fixture/azd.before" "$fixture/bin/azd"
 
@@ -138,9 +138,9 @@ printf 'installed azd before failed build\n' >"$fixture/failure-bin/azd"
 cp "$fixture/failure-bin/az" "$fixture/failure-az.before"
 cp "$fixture/failure-bin/azd" "$fixture/failure-azd.before"
 if FAKE_GIT_MODE=primary FAKE_GO_FAIL_AZD=1 AZ_INSTALL_DIR="$fixture/failure-bin" \
-  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-link-run.sh" --no-run \
+  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
   >"$fixture/build-failure.stdout" 2>"$fixture/build-failure.stderr"; then
-  echo "build-link-run unexpectedly installed after an azd build failure" >&2
+  echo "build-install-run unexpectedly installed after an azd build failure" >&2
   exit 1
 fi
 grep -q "requested azd build failure" "$fixture/build-failure.stderr"
@@ -156,9 +156,9 @@ printf 'not a symlink\n' >"$fixture/invalid-control-bin/.azedarach-current"
 cp "$fixture/invalid-control-bin/az" "$fixture/invalid-control-az.before"
 cp "$fixture/invalid-control-bin/azd" "$fixture/invalid-control-azd.before"
 if FAKE_GIT_MODE=primary AZ_INSTALL_DIR="$fixture/invalid-control-bin" \
-  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-link-run.sh" --no-run \
+  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
   >"$fixture/invalid-control.stdout" 2>"$fixture/invalid-control.stderr"; then
-  echo "build-link-run unexpectedly replaced a non-symlink control path" >&2
+  echo "build-install-run unexpectedly replaced a non-symlink control path" >&2
   exit 1
 fi
 grep -q "Refusing to replace non-symlink install control path" "$fixture/invalid-control.stderr"
@@ -181,7 +181,7 @@ FAKE_GIT_MODE=primary FAKE_REPLACE_FAIL_AZD_LINK=1 FAKE_REPLACE_DELAY_FAILURE=1 
   FAKE_REPLACE_FAIL_ONCE_FILE="$fixture/partial-azd-link-failed" \
   FAKE_REPLACE_FAILURE_MARKER="$fixture/partial-rollback-started" \
   AZ_INSTALL_DIR="$fixture/partial-bin" PATH="$fixture/fake-bin:$PATH" \
-  "$fixture/scripts/build-link-run.sh" --no-run \
+  "$fixture/scripts/build-install-run.sh" --no-run \
   >"$fixture/partial-failure.stdout" 2>"$fixture/partial-failure.stderr" &
 partial_installer_pid=$!
 while [[ ! -e "$fixture/partial-rollback-started" ]] &&
@@ -205,7 +205,7 @@ while kill -0 "$partial_installer_pid" 2>/dev/null; do
   fi
 done
 if wait "$partial_installer_pid"; then
-  echo "build-link-run unexpectedly succeeded from a partially managed state" >&2
+  echo "build-install-run unexpectedly succeeded from a partially managed state" >&2
   exit 1
 fi
 test "$partial_observer_failed" -eq 0
@@ -239,9 +239,9 @@ cp "$fixture/interrupted-bin/azd" "$fixture/interrupted-azd.before"
 if FAKE_GIT_MODE=primary FAKE_REPLACE_FAIL_AZD_LINK=1 \
   FAKE_REPLACE_FAIL_ONCE_FILE="$fixture/interrupted-azd-link-failed" \
   AZ_INSTALL_DIR="$fixture/interrupted-bin" PATH="$fixture/fake-bin:$PATH" \
-  "$fixture/scripts/build-link-run.sh" --no-run \
+  "$fixture/scripts/build-install-run.sh" --no-run \
   >"$fixture/interrupted-failure.stdout" 2>"$fixture/interrupted-failure.stderr"; then
-  echo "build-link-run unexpectedly succeeded from an interrupted control-link state" >&2
+  echo "build-install-run unexpectedly succeeded from an interrupted control-link state" >&2
   exit 1
 fi
 grep -q "requested azd link install failure" "$fixture/interrupted-failure.stderr"
@@ -256,9 +256,9 @@ test -x "$fixture/interrupted-bin/.azedarach-current/azd"
 if FAKE_GIT_MODE=primary FAKE_REPLACE_FAIL_AZD_LINK=1 \
   FAKE_REPLACE_FAIL_ONCE_FILE="$fixture/azd-link-failed" \
   AZ_INSTALL_DIR="$fixture/failure-bin" PATH="$fixture/fake-bin:$PATH" \
-  "$fixture/scripts/build-link-run.sh" --no-run \
+  "$fixture/scripts/build-install-run.sh" --no-run \
   >"$fixture/install-failure.stdout" 2>"$fixture/install-failure.stderr"; then
-  echo "build-link-run unexpectedly succeeded after an azd link install failure" >&2
+  echo "build-install-run unexpectedly succeeded after an azd link install failure" >&2
   exit 1
 fi
 grep -q "requested azd link install failure" "$fixture/install-failure.stderr"
@@ -272,10 +272,10 @@ mkdir -p "$fixture/global-bin"
 ln -s "$fixture/bin/az" "$fixture/global-bin/az"
 ln -s "$fixture/bin/azd" "$fixture/global-bin/azd"
 FAKE_GIT_MODE=primary AZ_INSTALL_DIR="$fixture/global-bin" \
-  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-link-run.sh" --no-run \
-  >"$fixture/build-link-run-install.stdout" 2>"$fixture/build-link-run-install.stderr"
-grep -q "Installed az -> $fixture/global-bin/az" "$fixture/build-link-run-install.stdout"
-grep -q "Installed azd -> $fixture/global-bin/azd" "$fixture/build-link-run-install.stdout"
+  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
+  >"$fixture/build-install-run-install.stdout" 2>"$fixture/build-install-run-install.stderr"
+grep -q "Installed az -> $fixture/global-bin/az" "$fixture/build-install-run-install.stdout"
+grep -q "Installed azd -> $fixture/global-bin/azd" "$fixture/build-install-run-install.stdout"
 test -x "$fixture/global-bin/az"
 test -x "$fixture/global-bin/azd"
 test -L "$fixture/global-bin/az"
@@ -289,12 +289,12 @@ cmp "$fixture/azd.before" "$fixture/bin/azd"
 
 FAKE_GIT_MODE=primary FAKE_GO_MARKER=first FAKE_CP_ASSERT_SERIAL=1 \
   FAKE_CP_GUARD="$fixture/install-critical-section" AZ_INSTALL_DIR="$fixture/global-bin" \
-  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-link-run.sh" --no-run \
+  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
   >"$fixture/concurrent-first.stdout" 2>"$fixture/concurrent-first.stderr" &
 first_pid=$!
 FAKE_GIT_MODE=primary FAKE_GO_MARKER=second FAKE_CP_ASSERT_SERIAL=1 \
   FAKE_CP_GUARD="$fixture/install-critical-section" AZ_INSTALL_DIR="$fixture/global-bin" \
-  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-link-run.sh" --no-run \
+  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
   >"$fixture/concurrent-second.stdout" 2>"$fixture/concurrent-second.stderr" &
 second_pid=$!
 wait "$first_pid"

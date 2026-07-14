@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/config"
@@ -8618,14 +8619,15 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected TaskWorkspaceOverlay after refresh, got %T", next.overlayStack.Current())
 	}
-	if !strings.Contains(refreshed.View(), "Task fresh") {
-		t.Fatalf("workspace should refresh from daemon snapshot, got %q", refreshed.View())
+	refreshedView := ansi.Strip(refreshed.View())
+	if !strings.Contains(refreshedView, "Task fresh") {
+		t.Fatalf("workspace should refresh from daemon snapshot, got %q", refreshedView)
 	}
-	if !strings.Contains(refreshed.View(), "persisted description") {
-		t.Fatalf("workspace should render full task details after refresh, got %q", refreshed.View())
+	if !strings.Contains(refreshedView, "persisted description") {
+		t.Fatalf("workspace should render full task details after refresh, got %q", refreshedView)
 	}
-	if !strings.Contains(refreshed.View(), "Related off-board task") {
-		t.Fatalf("workspace should render graph context omitted from the board projection, got %q", refreshed.View())
+	if !strings.Contains(refreshedView, "Related off-board task") {
+		t.Fatalf("workspace should render graph context omitted from the board projection, got %q", refreshedView)
 	}
 	if len(next.tasks) != 2 || next.tasks[0].Title != "Task fresh" || next.tasks[0].Description != "persisted description" || next.tasks[0].Status != domain.StatusDone {
 		t.Fatalf("board task after workspace refresh = %+v, want fresh task plus preserved unrelated task", next.tasks)
@@ -8734,11 +8736,12 @@ func TestTaskWorkspaceRKeyRefreshesCurrentIssue(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected TaskWorkspaceOverlay after refresh, got %T", refreshed.overlayStack.Current())
 	}
-	if !strings.Contains(workspace.View(), "Task fresh from r") {
-		t.Fatalf("workspace should refresh current issue on r, got %q", workspace.View())
+	workspaceView := ansi.Strip(workspace.View())
+	if !strings.Contains(workspaceView, "Task fresh from r") {
+		t.Fatalf("workspace should refresh current issue on r, got %q", workspaceView)
 	}
-	if !strings.Contains(workspace.View(), "refreshed description") {
-		t.Fatalf("workspace should render full task details after r refresh, got %q", workspace.View())
+	if !strings.Contains(workspaceView, "refreshed description") {
+		t.Fatalf("workspace should render full task details after r refresh, got %q", workspaceView)
 	}
 	if len(refreshed.tasks) != 1 || refreshed.tasks[0].Title != "Task fresh from r" || refreshed.tasks[0].Description != "refreshed description" || refreshed.tasks[0].Status != domain.StatusInReview {
 		t.Fatalf("board task after r refresh = %+v", refreshed.tasks)
