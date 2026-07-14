@@ -10074,6 +10074,59 @@ func TestHandleTaskEventAppendPublishesTaskUpdate(t *testing.T) {
 	}
 }
 
+func TestHandleTaskEventAppendCanonicalizesIntegrationReadyEvidence(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-event-worker-evidence"
+	repoDir := t.TempDir()
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	taskID, err := client.Create(ctx, issues.CreateTaskParams{Title: "worker", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := mustWorkerEvidencePayload(t)
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, hub: publish.NewHub(16, 8, slog.Default()), issueClientsByProject: map[string]*issues.Client{projectID: client}, revision: map[string]uint64{projectID: 1}}
+	resp, err := d.handleTaskEventAppend(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: mustJSON(t, map[string]any{
+		"task_id": taskID, "event_type": "worker-integration-ready", "payload": map[string]any{"worker_evidence": packet},
+	})})
+	if err != nil || !resp.OK {
+		t.Fatalf("response=%+v err=%v", resp, err)
+	}
+	events, err := client.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{"worker-integration-ready"}})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+	if _, nested := events[0].Payload["worker_evidence"]; nested {
+		t.Fatalf("payload=%+v, want canonical direct storage", events[0].Payload)
+	}
+	if parsed, validation := domain.ParseWorkerEvidenceIssueEvent(events[0]); !validation.Complete || parsed.Schema != domain.WorkerEvidenceSchemaV1 {
+		t.Fatalf("parsed=%+v validation=%+v", parsed, validation)
+	}
+}
+
+func TestHandleTaskEventAppendRejectsIncompleteIntegrationReadyEvidence(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-event-worker-evidence-invalid"
+	repoDir := t.TempDir()
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	taskID, err := client.Create(ctx, issues.CreateTaskParams{Title: "worker", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: client}}
+	resp, err := d.handleTaskEventAppend(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: mustJSON(t, map[string]any{
+		"task_id": taskID, "event_type": "worker-integration-ready", "payload": map[string]any{"schema": domain.WorkerEvidenceSchemaV1, "summary": "not complete"},
+	})})
+	if err != nil || resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "commands_run") {
+		t.Fatalf("response=%+v err=%v, want packet diagnostics", resp, err)
+	}
+	events, err := client.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{"worker-integration-ready"}})
+	if err != nil || len(events) != 0 {
+		t.Fatalf("events=%+v err=%v, want invalid readiness rejected before storage", events, err)
+	}
+}
+
 func TestHandleTaskEventAppendRejectsCallerForgedAuthorityEvents(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-task-event-authority-spoof"

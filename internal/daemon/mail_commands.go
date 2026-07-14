@@ -279,11 +279,7 @@ func (d *Daemon) recoverReviewReadyMailboxEvents(ctx context.Context, req protoc
 		for _, publication := range domain.DeriveReviewReadyPublications(byIssue[issueID]) {
 			source := publication.SourceEvent
 			key := fmt.Sprintf("%s:%d", projectID, source.ID)
-			body, marshalErr := json.Marshal(map[string]any{
-				"summary":           "issue is review-ready",
-				"source_event_id":   source.ID,
-				"source_event_type": source.Type,
-			})
+			body, marshalErr := json.Marshal(publication.Evidence)
 			if marshalErr != nil {
 				return nil, fmt.Errorf("encode review-ready publication %s: %w", key, marshalErr)
 			}
@@ -292,10 +288,12 @@ func (d *Daemon) recoverReviewReadyMailboxEvents(ctx context.Context, req protoc
 				Type: "worker-integration-ready", From: "daemon-observation-replay",
 				Body: string(body), CreatedAt: source.ObservedAt.UTC(),
 				Payload: map[string]interface{}{
-					"publication":       reviewReadyReplayPublication,
-					"publication_key":   key,
-					"source_event_id":   source.ID,
-					"source_event_type": string(source.Type),
+					"publication":                reviewReadyReplayPublication,
+					"publication_key":            key,
+					"source_event_id":            source.ID,
+					"source_event_type":          string(source.Type),
+					"worker_evidence":            publication.Evidence,
+					"worker_evidence_validation": publication.Validation,
 				},
 			}
 			if event.CreatedAt.IsZero() {
@@ -392,7 +390,9 @@ func mailEventToProtocol(evt daemonMailEvent) protocol.MailEvent {
 			payload[key] = value
 		}
 		for key, value := range parsed {
-			payload[key] = value
+			if _, exists := payload[key]; !exists {
+				payload[key] = value
+			}
 		}
 	}
 	return protocol.MailEvent{

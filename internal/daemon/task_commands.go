@@ -930,6 +930,23 @@ func (d *Daemon) handleTaskEventAppend(ctx context.Context, req protocol.Request
 	if domain.IssueObservationEventTypeRequiresAuthority(parsedEventType) {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("event type %s is authority-only and cannot be appended through task.event_append", eventType)), nil
 	}
+	if domain.IsWorkerEvidenceEventType(parsedEventType) {
+		packet, validation := domain.ParseWorkerEvidenceIssueEvent(domain.IssueObservationEvent{Type: parsedEventType, Payload: cmd.Payload})
+		if !validation.Complete {
+			problems := workerEvidenceProblemSummary(validation)
+			if !validation.Found {
+				problems = "event payload does not contain a structured worker_evidence.v1 packet"
+			} else if strings.TrimSpace(problems) == "" {
+				problems = "packet is incomplete"
+			}
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid worker_evidence.v1 packet: "+problems), nil
+		}
+		canonicalPayload, payloadErr := domain.WorkerEvidencePacketPayload(packet)
+		if payloadErr != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, payloadErr.Error()), nil
+		}
+		cmd.Payload = canonicalPayload
+	}
 	source := strings.TrimSpace(cmd.Source)
 	if source == "" {
 		source = "az issue record"
@@ -6015,7 +6032,7 @@ func workerObservationEvidenceEvents(events []domain.IssueObservationEvent) []do
 func latestWorkerEvidenceIssueEvent(events []domain.IssueObservationEvent) *domain.IssueObservationEvent {
 	var latest *domain.IssueObservationEvent
 	for i := range events {
-		if events[i].Type != domain.IssueEventEvidenceSubmitted {
+		if !domain.IsWorkerEvidenceEventType(events[i].Type) {
 			continue
 		}
 		if latest == nil ||
@@ -6028,17 +6045,7 @@ func latestWorkerEvidenceIssueEvent(events []domain.IssueObservationEvent) *doma
 }
 
 func workerEvidencePacketFromIssueEvent(evt domain.IssueObservationEvent) (domain.WorkerEvidencePacket, domain.WorkerEvidenceParseResult) {
-	if len(evt.Payload) == 0 {
-		return domain.WorkerEvidencePacket{}, domain.WorkerEvidenceParseResult{}
-	}
-	body, err := json.Marshal(evt.Payload)
-	if err != nil {
-		return domain.WorkerEvidencePacket{}, domain.WorkerEvidenceParseResult{
-			Found:   true,
-			Invalid: []string{fmt.Sprintf("marshal issue event payload: %v", err)},
-		}
-	}
-	return domain.ParseWorkerEvidencePacketBody(string(body))
+	return domain.ParseWorkerEvidenceIssueEvent(evt)
 }
 
 func truncateObservationSummary(value string) string {

@@ -1067,6 +1067,62 @@ func TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState(t *tes
 	}
 }
 
+func TestReviewAcceptUsesReplayedTicketIntegrationReadyEvidenceIdempotently(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "worker", Description: "Executable", Acceptance: "validated", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "worker", OwnerKind: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: "worker-integration-ready", Source: "az issue record", Payload: map[string]any{"worker_evidence": mustWorkerEvidencePayload(t)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	mail, err := d.readMailboxEventsWithReviewReadyRecovery(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: "project"}}, repoDir, rootID)
+	if err != nil || len(mail) != 1 {
+		t.Fatalf("replay=%+v err=%v", mail, err)
+	}
+	if _, validation := domain.ParseWorkerEvidencePacketBody(mail[0].Body); !validation.Complete {
+		t.Fatalf("replayed body=%s validation=%+v", mail[0].Body, validation)
+	}
+	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-replayed-ticket-evidence", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	first, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failure := first.Failed[issueID]; !strings.Contains(failure, "authoritative close") || strings.Contains(failure, "requires complete worker_evidence") {
+		t.Fatalf("first=%+v, want evidence accepted before expected close-adapter failure", first)
+	}
+	second, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(second.Failed[issueID], "authoritative close") {
+		t.Fatalf("second=%+v, want idempotent accepted-close retry", second)
+	}
+	events, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Payload["outcome"] != "accepted" {
+		t.Fatalf("review events=%+v, want one durable acceptance", events)
+	}
+}
+
 func TestReviewAcceptReleasesLeaseBeforeAcceptedInternalReviewClose(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
